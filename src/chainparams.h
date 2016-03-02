@@ -6,6 +6,7 @@
 #ifndef SYSCOIN_CHAINPARAMS_H
 #define SYSCOIN_CHAINPARAMS_H
 
+#include <stdio.h>
 #include "chainparamsbase.h"
 #include "consensus/params.h"
 #include "primitives/block.h"
