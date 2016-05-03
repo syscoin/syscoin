@@ -3194,7 +3194,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchOffer = vchFromValue(params[0]);
 	string offer = stringFromVch(vchOffer);
 	map<string, string> banList;
-	getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN);
+	if(!getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN))
+		throw runtime_error("failed to read SYS_BAN alias");
 	map<string,string>::iterator banIt;
 	banIt = banList.find(offer);
 	if (banIt != banList.end())
@@ -3984,7 +3985,8 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	if (!pofferdb->ScanOffers(vchOffer, GetOfferExpirationDepth(), offerScan))
 		throw runtime_error("scan failed");
 	map<string, string> banList;
-	getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN);
+	if(!getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN))
+		throw runtime_error("failed to read SYS_BAN alias");
     // regexp
     using namespace boost::xpressive;
     smatch offerparts;

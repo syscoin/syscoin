@@ -356,7 +356,7 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 	return "";
 
 }
-string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>& banList, int type)
+bool getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>& banList, int type)
 {
 	// check for alias existence in DB
 	vector<CAliasIndex> vtxPos;
@@ -364,14 +364,14 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 	{
 		if(fDebug)
 			LogPrintf("getBanList() Could not find %s alias\n", stringFromVch(vchBanAlias).c_str());
-		return "1";
+		return false;
 	}
 	
 	if (vtxPos.size() < 1)
 	{
 		if(fDebug)
 			LogPrintf("getBanList() Could not find %s alias (vtxPos.size() == 0)\n", stringFromVch(vchBanAlias).c_str());
-		return "1";
+		return false;
 	}
 	CAliasIndex foundAlias = vtxPos.back();
 
@@ -383,62 +383,70 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 	if (read)
 	{
 		UniValue outerObj = outerValue.get_obj();
-		if(type == OFFER_BAN || type == ALL_BAN)
+		UniValue urlValue = find_value(outerObj, "URL");
+		if(urlValue.isStr())
 		{
-			UniValue objValue = find_value(outerObj, "offers");
-			if (objValue.isArray())
+			return false;
+		}
+		else
+		{
+			if(type == OFFER_BAN || type == ALL_BAN)
 			{
-				UniValue codes = objValue.get_array();
-				for (unsigned int idx = 0; idx < codes.size(); idx++) {
-					const UniValue& code = codes[idx];					
-					UniValue codeObj = code.get_obj();					
-					UniValue idValue = find_value(codeObj, "id");
-					UniValue severityValue = find_value(codeObj, "severity");
-					if (idValue.isStr() && severityValue.isStr())
-					{		
-						string idStr = idValue.get_str();
-						string severityStr = severityValue.get_str();
-						banList.insert(make_pair(idStr, severityStr));
+				UniValue objValue = find_value(outerObj, "offers");
+				if (objValue.isArray())
+				{
+					UniValue codes = objValue.get_array();
+					for (unsigned int idx = 0; idx < codes.size(); idx++) {
+						const UniValue& code = codes[idx];					
+						UniValue codeObj = code.get_obj();					
+						UniValue idValue = find_value(codeObj, "id");
+						UniValue severityValue = find_value(codeObj, "severity");
+						if (idValue.isStr() && severityValue.isStr())
+						{		
+							string idStr = idValue.get_str();
+							string severityStr = severityValue.get_str();
+							banList.insert(make_pair(idStr, severityStr));
+						}
 					}
 				}
 			}
-		}
-		else if(type == CERT_BAN || type == ALL_BAN)
-		{
-			UniValue objValue = find_value(outerObj, "certs");
-			if (objValue.isArray())
+			else if(type == CERT_BAN || type == ALL_BAN)
 			{
-				UniValue codes = objValue.get_array();
-				for (unsigned int idx = 0; idx < codes.size(); idx++) {
-					const UniValue& code = codes[idx];					
-					UniValue codeObj = code.get_obj();					
-					UniValue idValue = find_value(codeObj, "id");
-					UniValue severityValue = find_value(codeObj, "severity");
-					if (idValue.isStr() && severityValue.isStr())
-					{		
-						string idStr = idValue.get_str();
-						string severityStr = severityValue.get_str();
-						banList.insert(make_pair(idStr, severityStr));
+				UniValue objValue = find_value(outerObj, "certs");
+				if (objValue.isArray())
+				{
+					UniValue codes = objValue.get_array();
+					for (unsigned int idx = 0; idx < codes.size(); idx++) {
+						const UniValue& code = codes[idx];					
+						UniValue codeObj = code.get_obj();					
+						UniValue idValue = find_value(codeObj, "id");
+						UniValue severityValue = find_value(codeObj, "severity");
+						if (idValue.isStr() && severityValue.isStr())
+						{		
+							string idStr = idValue.get_str();
+							string severityStr = severityValue.get_str();
+							banList.insert(make_pair(idStr, severityStr));
+						}
 					}
-				}
-			}	
-		}
-		else if(type == ALIAS_BAN || type == ALL_BAN)
-		{
-			UniValue objValue = find_value(outerObj, "aliases");
-			if (objValue.isArray())
+				}	
+			}
+			else if(type == ALIAS_BAN || type == ALL_BAN)
 			{
-				UniValue codes = objValue.get_array();
-				for (unsigned int idx = 0; idx < codes.size(); idx++) {
-					const UniValue& code = codes[idx];					
-					UniValue codeObj = code.get_obj();					
-					UniValue idValue = find_value(codeObj, "id");
-					UniValue severityValue = find_value(codeObj, "severity");
-					if (idValue.isStr() && severityValue.isStr())
-					{		
-						string idStr = idValue.get_str();
-						string severityStr = severityValue.get_str();
-						banList.insert(make_pair(idStr, severityStr));
+				UniValue objValue = find_value(outerObj, "aliases");
+				if (objValue.isArray())
+				{
+					UniValue codes = objValue.get_array();
+					for (unsigned int idx = 0; idx < codes.size(); idx++) {
+						const UniValue& code = codes[idx];					
+						UniValue codeObj = code.get_obj();					
+						UniValue idValue = find_value(codeObj, "id");
+						UniValue severityValue = find_value(codeObj, "severity");
+						if (idValue.isStr() && severityValue.isStr())
+						{		
+							string idStr = idValue.get_str();
+							string severityStr = severityValue.get_str();
+							banList.insert(make_pair(idStr, severityStr));
+						}
 					}
 				}
 			}
@@ -448,9 +456,9 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 	{
 		if(fDebug)
 			LogPrintf("getBanList() Failed to get value from alias\n");
-		return "1";
+		return false;
 	}
-	return "";
+	return true;
 
 }
 void PutToAliasList(std::vector<CAliasIndex> &aliasList, CAliasIndex& index) {
