@@ -3936,15 +3936,14 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 6)
+	if (fHelp || params.size() > 5)
 		throw runtime_error(
-				"offerfilter [[[[[regexp] maxage=36000] from=0] nb=0] stat safesearch]\n"
+				"offerfilter [[[[[regexp] maxage=36000] from=0] nb=0] safesearch]\n"
 						"scan and filter offeres\n"
 						"[regexp] : apply [regexp] on offeres, empty means all offeres\n"
 						"[maxage] : look in last [maxage] blocks\n"
 						"[from] : show results from number [from]\n"
 						"[nb] : show [nb] results, 0 means all\n"
-						"[stats] : show some stats instead of results\n"
 						"[safesearch] : shows all offers that are safe to display (not on the ban list)\n"
 						"offerfilter \"\" 5 # list offeres updated in last 5 blocks\n"
 						"offerfilter \"^offer\" # list all offeres starting with \"offer\"\n"
@@ -3954,7 +3953,6 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	int nFrom = 0;
 	int nNb = 0;
 	int nMaxAge = GetOfferExpirationDepth();
-	bool fStat = false;
 	bool safeSearch = true;
 	int nCountFrom = 0;
 	int nCountNb = 0;
@@ -3970,9 +3968,6 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 
 	if (params.size() > 3)
 		nNb = params[3].get_int();
-
-	if (params.size() > 4)
-		fStat = (params[4].get_str() == "stat" ? true : false);
 
 	if (params.size() > 5)
 		safeSearch = params[5].get_bool();
