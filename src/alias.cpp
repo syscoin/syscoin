@@ -358,9 +358,9 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 }
 bool getBanListFromValue(int type, map<string, string>& banList, const UniValue& outerValue)
 {
+	UniValue outerObj = outerValue.get_obj();
 	if(type == OFFER_BAN || type == ALL_BAN)
 	{
-		UniValue outerObj = outerValue.get_obj();
 		UniValue objValue = find_value(outerObj, "offers");
 		if (objValue.isArray())
 		{
