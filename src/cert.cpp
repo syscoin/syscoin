@@ -1020,7 +1020,8 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
     //CCertDB dbCert("r");
     UniValue oRes(UniValue::VARR);
 	map<string, string> banList;
-	getBanList(vchFromString("SYS_BAN"), banList, CERT_BAN);
+	if(!getBanList(vchFromString("SYS_BAN"), banList, CERT_BAN))
+		throw runtime_error("failed to read SYS_BAN alias");
     vector<unsigned char> vchCert;
     vector<pair<vector<unsigned char>, CCert> > certScan;
     if (!pcertdb->ScanCerts(vchCert, GetCertExpirationDepth(), certScan))
