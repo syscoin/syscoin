@@ -357,7 +357,7 @@ void OfferListPage::on_searchOffer_clicked()
 		num.setInt(0);
 		params.push_back(num);
 		params.push_back(ui->comboBox->currentText().toInt());
-		params.push_back(ui->safeSearch->checkState() == Qt::Checked? "true": "false");
+		params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
         try {
             result = tableRPC.execute(strMethod, params);
         }
