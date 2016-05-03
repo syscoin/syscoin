@@ -373,18 +373,7 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 			LogPrintf("getBanList() Could not find %s alias (vtxPos.size() == 0)\n", stringFromVch(vchBanAlias).c_str());
 		return "1";
 	}
-	CAliasIndex foundAlias;
-	for(unsigned int i=0;i<vtxPos.size();i++) {
-        CAliasIndex a = vtxPos[i];
-        if(a.nHeight <= nHeightToFind) {
-            foundAlias = a;
-        }
-		else
-			break;
-    }
-	if(foundAlias.IsNull())
-		foundAlias = vtxPos.back();
-
+	CAliasIndex foundAlias = vtxPos.back();
 
 	bool found = false;
 	string value = stringFromVch(foundAlias.vchPublicValue);
@@ -409,7 +398,7 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 					{		
 						string idStr = idNameValue.get_str();
 						string severityStr = severityValue.get_str();
-						banList.insert(make_pair(idStr, severityStr))));
+						banList.insert(make_pair(idStr, severityStr));
 					}
 				}
 			}
@@ -429,7 +418,7 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 					{		
 						string idStr = idNameValue.get_str();
 						string severityStr = severityValue.get_str();
-						banList.insert(make_pair(idStr, severityStr))));
+						banList.insert(make_pair(idStr, severityStr));
 					}
 				}
 			}	
@@ -447,9 +436,9 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 					UniValue severityValue = find_value(codeObj, "severity");
 					if (idValue.isStr() && severityValue.isStr())
 					{		
-						string idStr = idNameValue.get_str();
+						string idStr = idValue.get_str();
 						string severityStr = severityValue.get_str();
-						banList.insert(make_pair(idStr, severityStr))));
+						banList.insert(make_pair(idStr, severityStr));
 					}
 				}
 			}
