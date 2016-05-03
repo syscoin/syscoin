@@ -3199,7 +3199,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	banIt = banList.find(offer);
 	if (banIt != banList.end())
 	{
-		if(banIt->second != "0")
+		if(banIt->second != "0" || banIt->second != "1")
 			throw runtime_error("offer has been banned");
 	}
 	vector<COffer> vtxPos;
