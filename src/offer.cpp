@@ -3969,8 +3969,8 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	if (params.size() > 3)
 		nNb = params[3].get_int();
 
-	if (params.size() > 5)
-		safeSearch = params[5].get_bool();
+	if (params.size() > 4)
+		safeSearch = params[4].get_bool();
 
 	//COfferDB dbOffer("r");
 	UniValue oRes(UniValue::VARR);
