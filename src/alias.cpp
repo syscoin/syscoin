@@ -429,7 +429,6 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 					{		
 						string idStr = idNameValue.get_str();
 						string severityStr = severityValue.get_str();
-						SysBan sysBan(idStr, severityStr);
 						banList.insert(make_pair(idStr, severityStr))));
 					}
 				}
@@ -450,7 +449,6 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 					{		
 						string idStr = idNameValue.get_str();
 						string severityStr = severityValue.get_str();
-						SysBan sysBan(idStr, severityStr);
 						banList.insert(make_pair(idStr, severityStr))));
 					}
 				}
