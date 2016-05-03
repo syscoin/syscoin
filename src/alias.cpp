@@ -356,7 +356,7 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 	return "";
 
 }
-bool getBanListFromValue(int type, const UniValue& outerValue)
+bool getBanListFromValue(int type, map<string, string>& banList, const UniValue& outerValue)
 {
 	if(type == OFFER_BAN || type == ALL_BAN)
 	{
