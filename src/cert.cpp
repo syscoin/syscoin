@@ -1019,7 +1019,8 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 
     //CCertDB dbCert("r");
     UniValue oRes(UniValue::VARR);
-
+	map<string, string> banList;
+	getBanList(vchFromString("SYS_BAN"), banList, CERT_BAN);
     vector<unsigned char> vchCert;
     vector<pair<vector<unsigned char>, CCert> > certScan;
     if (!pcertdb->ScanCerts(vchCert, GetCertExpirationDepth(), certScan))
@@ -1033,7 +1034,10 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 	BOOST_FOREACH(pairScan, certScan) {
 		const CCert &txCert = pairScan.second;
 		const string &cert = stringFromVch(pairScan.first);
-	
+		map<string,string>::iterator banIt;
+		banIt = banList.find(cert);
+		if (banIt != banList.end())
+			continue;	
 		string title = stringFromVch(txCert.vchTitle);
 		boost::algorithm::to_lower(title);
         if (strRegexp != "" && !regex_search(title, certparts, cregex) && strRegexp != cert)
@@ -1099,13 +1103,7 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
             break;
     }
 
-    if (fStat) {
-        UniValue oStat(UniValue::VOBJ);
-        oStat.push_back(Pair("blocks", (int) chainActive.Tip()->nHeight));
-        oStat.push_back(Pair("count", (int) oRes.size()));
-        //oStat.push_back(Pair("sha256sum", SHA256(oRes), true));
-        return oStat;
-    }
+    oRes.push_back(Pair("count", (int) oRes.size()));
 
     return oRes;
 }

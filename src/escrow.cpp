@@ -1999,13 +1999,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
             break;
     }
 
-    if (fStat) {
-        UniValue oStat(UniValue::VOBJ);
-        oStat.push_back(Pair("blocks", (int) chainActive.Tip()->nHeight));
-        oStat.push_back(Pair("count", (int) oRes.size()));
-        //oStat.push_back(Pair("sha256sum", SHA256(oRes), true));
-        return oStat;
-    }
+    oRes.push_back(Pair("count", (int) oRes.size()));
 
     return oRes;
 }

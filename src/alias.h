@@ -22,6 +22,10 @@ static const unsigned int MAX_VALUE_LENGTH = 1023;
 static const unsigned int MAX_ID_LENGTH = 20;
 static const unsigned int MAX_ENCRYPTED_VALUE_LENGTH = 1108;
 
+static const unsigned int OFFER_BAN = 0;
+static const unsigned int CERT_BAN = 1;
+static const unsigned int ALIAS_BAN = 2;
+static const unsigned int ALL_BAN = 3;
 class CAliasIndex {
 public:
     uint256 txHash;
@@ -129,7 +133,7 @@ void CreateFeeRecipient(const CScript& scriptPubKey, const std::vector<unsigned 
 bool IsSyscoinTxMine(const CTransaction& tx,const std::string &type);
 bool IsAliasOp(int op);
 
-
+string getBanList(const std::vector<unsigned char> &vchBanAlias, std::map<std::string, std::string>&, int type);
 bool GetTxOfAlias(const std::vector<unsigned char> &vchName, CAliasIndex& alias, CTransaction& tx);
 int IndexOfAliasOutput(const CTransaction& tx);
 bool GetAliasOfTx(const CTransaction& tx, std::vector<unsigned char>& name);

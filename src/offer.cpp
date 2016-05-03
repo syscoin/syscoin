@@ -3193,7 +3193,15 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	UniValue oLastOffer(UniValue::VOBJ);
 	vector<unsigned char> vchOffer = vchFromValue(params[0]);
 	string offer = stringFromVch(vchOffer);
-	
+	map<string, string> banList;
+	getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN);
+	map<string,string>::iterator banIt;
+	banIt = banList.find(offer);
+	if (banIt != banList.end())
+	{
+		if(banIt->second != "0")
+			throw runtime_error("offer has been banned");
+	}
 	vector<COffer> vtxPos;
 	if (!pofferdb->ReadOffer(vchOffer, vtxPos))
 		throw runtime_error("failed to read from offer DB");
@@ -3927,15 +3935,16 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 5)
+	if (fHelp || params.size() > 6)
 		throw runtime_error(
-				"offerfilter [[[[[regexp] maxage=36000] from=0] nb=0] stat]\n"
+				"offerfilter [[[[[regexp] maxage=36000] from=0] nb=0] stat safesearch]\n"
 						"scan and filter offeres\n"
 						"[regexp] : apply [regexp] on offeres, empty means all offeres\n"
 						"[maxage] : look in last [maxage] blocks\n"
 						"[from] : show results from number [from]\n"
 						"[nb] : show [nb] results, 0 means all\n"
 						"[stats] : show some stats instead of results\n"
+						"[safesearch] : shows all offers that are safe to display (not on the ban list)\n"
 						"offerfilter \"\" 5 # list offeres updated in last 5 blocks\n"
 						"offerfilter \"^offer\" # list all offeres starting with \"offer\"\n"
 						"offerfilter 36000 0 0 stat # display stats (number of offers) on active offeres\n");
@@ -3945,6 +3954,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	int nNb = 0;
 	int nMaxAge = GetOfferExpirationDepth();
 	bool fStat = false;
+	bool safeSearch = true;
 	int nCountFrom = 0;
 	int nCountNb = 0;
 
@@ -3963,6 +3973,9 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	if (params.size() > 4)
 		fStat = (params[4].get_str() == "stat" ? true : false);
 
+	if (params.size() > 5)
+		safeSearch = (params[5].get_str() == "true" ? true : false);
+
 	//COfferDB dbOffer("r");
 	UniValue oRes(UniValue::VARR);
 
@@ -3970,7 +3983,8 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	vector<pair<vector<unsigned char>, COffer> > offerScan;
 	if (!pofferdb->ScanOffers(vchOffer, GetOfferExpirationDepth(), offerScan))
 		throw runtime_error("scan failed");
-
+	map<string, string> banList;
+	getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN);
     // regexp
     using namespace boost::xpressive;
     smatch offerparts;
@@ -3983,6 +3997,15 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	BOOST_FOREACH(pairScan, offerScan) {
 		const COffer &txOffer = pairScan.second;
 		const string &offer = stringFromVch(pairScan.first);
+		map<string,string>::iterator banIt;
+		banIt = banList.find(offer);
+		if (banIt != banList.end())
+		{
+			if(!safeSearch)
+				continue;
+			if(banIt->second != "0")
+				continue;
+		}
 		string title = stringFromVch(txOffer.sTitle);
 		boost::algorithm::to_lower(title);
 		string description = stringFromVch(txOffer.sDescription);
@@ -4063,13 +4086,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 			break;
 	}
 
-	if (fStat) {
-		UniValue oStat(UniValue::VOBJ);
-		oStat.push_back(Pair("blocks", (int) chainActive.Tip()->nHeight));
-		oStat.push_back(Pair("count", (int) oRes.size()));
-		//oStat.push_back(Pair("sha256sum", SHA256(oRes), true));
-		return oStat;
-	}
+	oRes.push_back(Pair("count", (int) oRes.size()));
 
 	return oRes;
 }

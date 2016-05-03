@@ -356,6 +356,116 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 	return "";
 
 }
+string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>& banList, int type)
+{
+	// check for alias existence in DB
+	vector<CAliasIndex> vtxPos;
+	if (!paliasdb->ReadAlias(vchBanAlias, vtxPos) || vtxPos.empty())
+	{
+		if(fDebug)
+			LogPrintf("getBanList() Could not find %s alias\n", stringFromVch(vchBanAlias).c_str());
+		return "1";
+	}
+	
+	if (vtxPos.size() < 1)
+	{
+		if(fDebug)
+			LogPrintf("getBanList() Could not find %s alias (vtxPos.size() == 0)\n", stringFromVch(vchBanAlias).c_str());
+		return "1";
+	}
+	CAliasIndex foundAlias;
+	for(unsigned int i=0;i<vtxPos.size();i++) {
+        CAliasIndex a = vtxPos[i];
+        if(a.nHeight <= nHeightToFind) {
+            foundAlias = a;
+        }
+		else
+			break;
+    }
+	if(foundAlias.IsNull())
+		foundAlias = vtxPos.back();
+
+
+	bool found = false;
+	string value = stringFromVch(foundAlias.vchPublicValue);
+	
+	UniValue outerValue(UniValue::VSTR);
+	bool read = outerValue.read(value);
+	if (read)
+	{
+		UniValue outerObj = outerValue.get_obj();
+		if(type == OFFER_BAN || type == ALL_BAN)
+		{
+			UniValue objValue = find_value(outerObj, "offers");
+			if (objValue.isArray())
+			{
+				UniValue codes = objValue.get_array();
+				for (unsigned int idx = 0; idx < codes.size(); idx++) {
+					const UniValue& code = codes[idx];					
+					UniValue codeObj = code.get_obj();					
+					UniValue idValue = find_value(codeObj, "id");
+					UniValue severityValue = find_value(codeObj, "severity");
+					if (idValue.isStr() && severityValue.isStr())
+					{		
+						string idStr = idNameValue.get_str();
+						string severityStr = severityValue.get_str();
+						banList.insert(make_pair(idStr, severityStr))));
+					}
+				}
+			}
+		}
+		else if(type == CERT_BAN || type == ALL_BAN)
+		{
+			UniValue objValue = find_value(outerObj, "certs");
+			if (objValue.isArray())
+			{
+				UniValue codes = objValue.get_array();
+				for (unsigned int idx = 0; idx < codes.size(); idx++) {
+					const UniValue& code = codes[idx];					
+					UniValue codeObj = code.get_obj();					
+					UniValue idValue = find_value(codeObj, "id");
+					UniValue severityValue = find_value(codeObj, "severity");
+					if (idValue.isStr() && severityValue.isStr())
+					{		
+						string idStr = idNameValue.get_str();
+						string severityStr = severityValue.get_str();
+						SysBan sysBan(idStr, severityStr);
+						banList.insert(make_pair(idStr, severityStr))));
+					}
+				}
+			}	
+		}
+		else if(type == ALIAS_BAN || type == ALL_BAN)
+		{
+			UniValue objValue = find_value(outerObj, "aliases");
+			if (objValue.isArray())
+			{
+				UniValue codes = objValue.get_array();
+				for (unsigned int idx = 0; idx < codes.size(); idx++) {
+					const UniValue& code = codes[idx];					
+					UniValue codeObj = code.get_obj();					
+					UniValue idValue = find_value(codeObj, "id");
+					UniValue severityValue = find_value(codeObj, "severity");
+					if (idValue.isStr() && severityValue.isStr())
+					{		
+						string idStr = idNameValue.get_str();
+						string severityStr = severityValue.get_str();
+						SysBan sysBan(idStr, severityStr);
+						banList.insert(make_pair(idStr, severityStr))));
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		if(fDebug)
+			LogPrintf("getBanList() Failed to get value from alias\n");
+		return "1";
+	}
+	return "";
+
+}
 void PutToAliasList(std::vector<CAliasIndex> &aliasList, CAliasIndex& index) {
 	int i = aliasList.size() - 1;
 	BOOST_REVERSE_FOREACH(CAliasIndex &o, aliasList) {
@@ -505,7 +615,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	// we need to check for cert update specially because an alias update without data is sent along with offers linked with the alias
 	if (theAlias.IsNull() && op != OP_ALIAS_UPDATE)
 		return error("CheckAliasInputs() : null alias");
-	if(theAlias.vchPublicValue.size() > MAX_VALUE_LENGTH)
+	if(theAlias.vchPublicValue.size() > MAX_VALUE_LENGTH && (vvchArgs[0] != vchFromString("SYS_BAN") || vvchArgs[0] != vchFromString("SYS_RATES")))
 	{
 		return error("alias pub value too big");
 	}
@@ -1026,7 +1136,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	vchPublicValue = vchFromString(strPublicValue);
 	string strPrivateValue = params.size()>=3?params[2].get_str():"";
 	vchPrivateValue = vchFromString(strPrivateValue);
-	if (vchPublicValue.size() > MAX_VALUE_LENGTH)
+	if (vchPublicValue.size() > MAX_VALUE_LENGTH && (vchName != vchFromString("SYS_BAN") || vchName != vchFromString("SYS_RATES")))
 		throw runtime_error("alias public value cannot exceed 1023 bytes!");
 	if (vchPrivateValue.size() > MAX_VALUE_LENGTH)
 		throw runtime_error("alias public value cannot exceed 1023 bytes!");
@@ -1512,6 +1622,8 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	vector<pair<vector<unsigned char>, CAliasIndex> > nameScan;
 	if (!paliasdb->ScanNames(vchName, GetAliasExpirationDepth(), nameScan))
 		throw runtime_error("scan failed");
+	map<string, string> banList;
+	getBanList(vchFromString("SYS_BAN"), banList, ALIAS_BAN);
 	// regexp
 	using namespace boost::xpressive;
 	smatch nameparts;
@@ -1524,6 +1636,10 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		CPubKey PubKey(alias.vchPubKey);
 		CSyscoinAddress address(PubKey.GetID());
 		string name = stringFromVch(pairScan.first);
+		map<string,string>::iterator banIt;
+		banIt = banList.find(name);
+		if (banIt != banList.end())
+			continue;
 		boost::algorithm::to_lower(name);
 		if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != address.ToString())
 			continue;
@@ -1583,12 +1699,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 			break;
 	}
 
-	if (fStat) {
-		UniValue oStat(UniValue::VOBJ);
-		oStat.push_back(Pair("blocks", (int) chainActive.Tip()->nHeight));
-		oStat.push_back(Pair("count", (int) oRes.size()));
-		return oStat;
-	}
+	oRes.push_back(Pair("count", (int) oRes.size()));
 
 	return oRes;
 }
