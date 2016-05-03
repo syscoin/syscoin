@@ -396,7 +396,7 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 					UniValue severityValue = find_value(codeObj, "severity");
 					if (idValue.isStr() && severityValue.isStr())
 					{		
-						string idStr = idNameValue.get_str();
+						string idStr = idValue.get_str();
 						string severityStr = severityValue.get_str();
 						banList.insert(make_pair(idStr, severityStr));
 					}
@@ -416,7 +416,7 @@ string getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>&
 					UniValue severityValue = find_value(codeObj, "severity");
 					if (idValue.isStr() && severityValue.isStr())
 					{		
-						string idStr = idNameValue.get_str();
+						string idStr = idValue.get_str();
 						string severityStr = severityValue.get_str();
 						banList.insert(make_pair(idStr, severityStr));
 					}
