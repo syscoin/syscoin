@@ -447,7 +447,7 @@ bool getBanList(const vector<unsigned char> &vchBanAlias, map<string, string>& b
 		{
 			return false/*fetchBanListFromURL(type, urlValue.get_str(), banList)*/;
 		}
-		return getBanListFromValue(type, outerValue);
+		return getBanListFromValue(type, banList, outerValue);
 	}
 	else
 	{
