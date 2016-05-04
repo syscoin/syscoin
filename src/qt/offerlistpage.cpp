@@ -406,7 +406,7 @@ void OfferListPage::on_searchOffer_clicked(QString GUID)
 			  ui->nextButton->setEnabled(true);
 
 		  QModelIndex idx;
-		  QVariant cellBottomData = model->data(model->index(model->rowCount(), 0, idx), 0);
+		  QVariant cellBottomData = model->data(model->index(model->rowCount(idx), 0, idx), 0);
 		  string bottomOffer = cellBottomData.toString();
 		  QVariant cellTopData = model->data(model->index(0, 0, idx), 0);
 		  string topOffer = cellTopData.toString();
