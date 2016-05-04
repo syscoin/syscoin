@@ -429,7 +429,6 @@ static const CRPCCommand vRPCCommands[] =
   { "wallet", "escrowlist",              &escrowlist,          false },
   { "wallet", "escrowinfo",              &escrowinfo,          false },
   { "wallet", "escrowhistory",     &escrowhistory, false },
-  { "wallet", "escrowscan",        &escrowscan,    false },
   { "wallet", "escrowfilter",      &escrowfilter,  false },
 
   // use the blockchain for encrypted messaging
