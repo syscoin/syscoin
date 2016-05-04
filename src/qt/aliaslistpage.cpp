@@ -286,6 +286,7 @@ void AliasListPage::on_searchAlias_clicked()
 			
 			  const UniValue &arr = result.get_array();
 			  int count = 0;
+			  const UniValue& count_value = find_value(arr, "count");
 			  if (count_value.type() == UniValue::VNUM)
 					count = count_value.get_int();
 			  ui->labelResults->setText(tr("<b>%1</b> results found.").arg(count));	
