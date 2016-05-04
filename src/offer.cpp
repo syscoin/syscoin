@@ -3973,7 +3973,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		strRegexp = params[0].get_str();
 
 	if (params.size() > 1)
-		vchOffer = params[1].get_int();
+		vchOffer = vchFromValue(params[1]);
 
 	if (params.size() > 2)
 		nNb = params[2].get_int();
