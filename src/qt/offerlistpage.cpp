@@ -407,9 +407,9 @@ void OfferListPage::on_searchOffer_clicked(QString GUID)
 
 		  QModelIndex idx;
 		  QVariant cellBottomData = model->data(model->index(model->rowCount(idx), 0, idx), 0);
-		  string bottomOffer = cellBottomData.toString();
+		  string bottomOffer = cellBottomData.toStdString();
 		  QVariant cellTopData = model->data(model->index(0, 0, idx), 0);
-		  string topOffer = cellTopData.toString();
+		  string topOffer = cellTopData.toStdString();
 		  pageMap[currentPage] = make_pair(topOffer, bottomOffer);
 		  const UniValue &arr = result.get_array();
 	      for (unsigned int idx = 0; idx < arr.size(); idx++) {
