@@ -301,15 +301,7 @@ void CertListPage::on_searchCert_clicked()
 					const UniValue& expires_in_value = find_value(o, "expires_in");
 					if (expires_in_value.type() == UniValue::VNUM)
 						expires_in = expires_in_value.get_int();
-					const UniValue& expired_value = find_value(o, "expired");
-					if (expired_value.type() == UniValue::VNUM)
-						expired = expired_value.get_int();
-				if(expired == 1)
-				{
-					expired_str = "Expired";
-				}
-				else
-				{
+	
 					expired_str = "Valid";
 					expires_in_str = strprintf("%d Blocks", expires_in);
 					expires_on_str = strprintf("Block %d", expires_on);

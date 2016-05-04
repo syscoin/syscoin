@@ -981,15 +981,14 @@ UniValue certhistory(const UniValue& params, bool fHelp) {
 }
 
 UniValue certfilter(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() > 5)
+    if (fHelp || params.size() > 4)
         throw runtime_error(
-                "certfilter [[[[[regexp] maxage=36000] from=0] nb=0] stat]\n"
+                "certfilter [[[[[regexp] maxage=36000] from=0] nb=0]]\n"
                         "scan and filter certes\n"
                         "[regexp] : apply [regexp] on certes, empty means all certes\n"
                         "[maxage] : look in last [maxage] blocks\n"
                         "[from] : show results from number [from]\n"
                         "[nb] : show [nb] results, 0 means all\n"
-                        "[stats] : show some stats instead of results\n"
                         "certfilter \"\" 5 # list certes updated in last 5 blocks\n"
                         "certfilter \"^cert\" # list all certes starting with \"cert\"\n"
                         "certfilter 36000 0 0 stat # display stats (number of certs) on active certes\n");
@@ -998,7 +997,6 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
     int nFrom = 0;
     int nNb = 0;
     int nMaxAge = GetCertExpirationDepth();
-    bool fStat = false;
     int nCountFrom = 0;
     int nCountNb = 0;
 
@@ -1014,8 +1012,6 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
     if (params.size() > 3)
         nNb = params[3].get_int();
 
-    if (params.size() > 4)
-        fStat = (params[4].get_str() == "stat" ? true : false);
 
     //CCertDB dbCert("r");
     UniValue oRes(UniValue::VARR);
@@ -1103,8 +1099,6 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
         if (nNb > 0 && nCountNb >= nNb)
             break;
     }
-
-    oRes.push_back(Pair("count", (int) oRes.size()));
 
     return oRes;
 }

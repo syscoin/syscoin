@@ -226,10 +226,9 @@ const vector<unsigned char> COffer::Serialize() {
     return vchData;
 
 }
-//TODO implement
 bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, unsigned int nMax,
 		std::vector<std::pair<std::vector<unsigned char>, COffer> >& offerScan) {
-
+	int nMaxAge  = GetOfferExpirationDepth();
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("offeri"), vchOffer));
     while (pcursor->Valid()) {
@@ -241,8 +240,18 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, unsigned i
                 vector<COffer> vtxPos;
 				pcursor->GetValue(vtxPos);
                 COffer txPos;
-                if (!vtxPos.empty())
-                    txPos = vtxPos.back();
+				txPos = vtxPos.back();
+				if (!vtxPos.empty()){
+					pcursor->Next();
+					continue;
+				}
+  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+					pcursor->Next();
+					continue;
+				}     
+				// dont return sold out offers
+				if(txPos.nQty <= 0 && txPos.nQty != -1)
+					continue;
                 offerScan.push_back(make_pair(vchOffer, txPos));
             }
             if (offerScan.size() >= nMax)
@@ -3936,13 +3945,12 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 5)
+	if (fHelp || params.size() > 4)
 		throw runtime_error(
-				"offerfilter [[[[[regexp] maxage=36000] from=0] nb=0] safesearch]\n"
+				"offerfilter [[[[[regexp]] from=0] nb=0] safesearch]\n"
 						"scan and filter offeres\n"
 						"[regexp] : apply [regexp] on offeres, empty means all offeres\n"
-						"[maxage] : look in last [maxage] blocks\n"
-						"[from] : show results from number [from]\n"
+						"[from] : show results from this GUID [from], 0 means first.\n"
 						"[nb] : show [nb] results, 0 means all\n"
 						"[safesearch] : shows all offers that are safe to display (not on the ban list)\n"
 						"offerfilter \"\" 5 # list offeres updated in last 5 blocks\n"
@@ -3952,7 +3960,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	string strRegexp;
 	int nFrom = 0;
 	int nNb = 0;
-	int nMaxAge = GetOfferExpirationDepth();
+	vector<unsigned char> vchOffer;
 	bool safeSearch = true;
 	int nCountFrom = 0;
 	int nCountNb = 0;
@@ -3961,23 +3969,20 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		strRegexp = params[0].get_str();
 
 	if (params.size() > 1)
-		nMaxAge = params[1].get_int();
+		vchOffer = params[1].get_int();
 
 	if (params.size() > 2)
-		nFrom = params[2].get_int();
+		nNb = params[2].get_int();
 
 	if (params.size() > 3)
-		nNb = params[3].get_int();
-
-	if (params.size() > 4)
-		safeSearch = params[4].get_bool();
+		safeSearch = params[3].get_bool();
 
 	//COfferDB dbOffer("r");
 	UniValue oRes(UniValue::VARR);
 
-	vector<unsigned char> vchOffer;
+	
 	vector<pair<vector<unsigned char>, COffer> > offerScan;
-	if (!pofferdb->ScanOffers(vchOffer, GetOfferExpirationDepth(), offerScan))
+	if (!pofferdb->ScanOffers(vchOffer, nNb, offerScan))
 		throw runtime_error("scan failed");
 	map<string, string> banList;
 	if(!getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN))
@@ -4024,21 +4029,6 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		int expires_in = 0;
 		int expired_block = 0;		
 		int nHeight = txOffer.nHeight;
-
-		// max age
-		if (nMaxAge != 0 && chainActive.Tip()->nHeight - nHeight >= nMaxAge)
-			continue;
-
-		// from limits
-		nCountFrom++;
-		if (nCountFrom < nFrom + 1)
-			continue;
-        CTransaction tx;
-		if (!GetSyscoinTransaction(txOffer.nHeight, txOffer.txHash, tx, Params().GetConsensus()))
-			continue;
-		// dont return sold out offers
-		if(txOffer.nQty <= 0 && txOffer.nQty != -1)
-			continue;
 		UniValue oOffer(UniValue::VOBJ);
 		oOffer.push_back(Pair("offer", offer));
 			vector<unsigned char> vchCert;
@@ -4061,11 +4051,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		oOffer.push_back(Pair("exclusive_resell", txOffer.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 		oOffer.push_back(Pair("btconly", txOffer.bOnlyAcceptBTC ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias_peg", stringFromVch(txOffer.vchAliasPeg)));
-		expired_block = nHeight + GetOfferExpirationDepth();
-		if(nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight <= 0)
-		{
-			expired = 1;
-		}  
+		expired_block = nHeight + GetOfferExpirationDepth(); 
 		if(expired == 0)
 		{
 			expires_in = nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight;
@@ -4074,82 +4060,13 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		oOffer.push_back(Pair("alias", selleraddy.aliasName));
 		oOffer.push_back(Pair("expires_in", expires_in));
 		oOffer.push_back(Pair("expires_on", expired_block));
-		oOffer.push_back(Pair("expired", expired));
 		oRes.push_back(oOffer);
-
-		nCountNb++;
-		// nb limits
-		if (nNb > 0 && nCountNb >= nNb)
-			break;
 	}
 
-	oRes.push_back(Pair("count", (int) oRes.size()));
 
 	return oRes;
 }
 
-UniValue offerscan(const UniValue& params, bool fHelp) {
-	if (fHelp || 2 > params.size())
-		throw runtime_error(
-				"offerscan [<start-offer>] [<max-returned>]\n"
-						"scan all offers, starting at start-offer and returning a maximum number of entries (default 500)\n");
-
-	vector<unsigned char> vchOffer;
-	int nMax = 500;
-	if (params.size() > 0) {
-		vchOffer = vchFromValue(params[0]);
-	}
-
-	if (params.size() > 1) {
-		nMax = params[1].get_int();
-	}
-
-	//COfferDB dbOffer("r");
-	UniValue oRes(UniValue::VARR);
-
-	vector<pair<vector<unsigned char>, COffer> > offerScan;
-	if (!pofferdb->ScanOffers(vchOffer, nMax, offerScan))
-		throw runtime_error("scan failed");
-
-	pair<vector<unsigned char>, COffer> pairScan;
-	BOOST_FOREACH(pairScan, offerScan) {
-		int expired = 0;
-		int expires_in = 0;
-		int expired_block = 0;
-		UniValue oOffer(UniValue::VOBJ);
-		string offer = stringFromVch(pairScan.first);
-		oOffer.push_back(Pair("offer", offer));
-		CTransaction tx;
-		COffer txOffer = pairScan.second;
-		// dont return sold out offers
-		if(txOffer.nQty <= 0 && txOffer.nQty != -1)
-			continue;
-		if(txOffer.bPrivate)
-			continue;
-		uint256 blockHash;
-
-		int nHeight = txOffer.nHeight;
-		expired_block = nHeight + GetOfferExpirationDepth();
-		if(nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight <= 0)
-		{
-			expired = 1;
-		}  
-		if(expired == 0)
-		{
-			expires_in = nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight;
-		}
-		CPubKey SellerPubKey(txOffer.vchPubKey);
-		CSyscoinAddress selleraddy(SellerPubKey.GetID());
-		selleraddy = CSyscoinAddress(selleraddy.ToString());
-		oOffer.push_back(Pair("alias", selleraddy.aliasName));
-		oOffer.push_back(Pair("expires_in", expires_in));
-		oOffer.push_back(Pair("expires_on", expired_block));
-		oOffer.push_back(Pair("expired", expired));
-		oRes.push_back(oOffer);
-	}
-
-	return oRes;
-}
 bool GetAcceptByHash(std::vector<COffer> &offerList, COfferAccept &ca) {
 	if(offerList.empty())
 		return false;

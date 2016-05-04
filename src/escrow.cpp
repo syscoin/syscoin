@@ -1667,7 +1667,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
     oEscrow.push_back(Pair("height", sHeight));
 	string strMessage = string("");
 	if(!DecryptMessage(ca.vchSellerKey, ca.vchPaymentMessage, strMessage))
-		strMessage = string("Encrypted for owner of offer");
+		strMessage = stringFromVch(ca.vchPaymentMessage);
 	oEscrow.push_back(Pair("pay_message", strMessage));
 
 	

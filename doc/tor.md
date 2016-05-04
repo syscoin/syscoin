@@ -42,11 +42,11 @@ reachable from the Tor network. Add these lines to your /etc/tor/torrc (or equiv
 config file):
 
 	HiddenServiceDir /var/lib/tor/syscoin-service/
-	HiddenServicePort 8333 127.0.0.1:8333
-	HiddenServicePort 18333 127.0.0.1:18333
+	HiddenServicePort 8369 127.0.0.1:8369
+	HiddenServicePort 18369 127.0.0.1:18369
 
 The directory can be different of course, but (both) port numbers should be equal to
-your syscoind's P2P listen port (8333 by default).
+your syscoind's P2P listen port (8369 by default).
 
 	-externalip=X   You can tell syscoin about its publicly reachable address using
 	                this option, and this can be a .onion address. Given the above
@@ -81,12 +81,12 @@ as well, use `discover` instead:
 
 	./syscoind ... -discover
 
-and open port 8333 on your firewall (or use -upnp).
+and open port 8369 on your firewall (or use -upnp).
 
 If you only want to use Tor to reach onion addresses, but not use it as a proxy
 for normal IPv4/IPv6 communication, use:
 
-	./syscoin -onion=127.0.0.1:9050 -externalip=57qr3yd1nyntf5k.onion -discover
+	./syscoin -onion=127.0.0.1:9050 -externalip=kqzpejdsmhktuwcw.onion -discover
 
 3. Automatically listen on Tor
 --------------------------------

@@ -1571,15 +1571,14 @@ UniValue generatepublickey(const UniValue& params, bool fHelp) {
  * @return        [description]
  */
 UniValue aliasfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 5)
+	if (fHelp || params.size() > 4)
 		throw runtime_error(
-				"aliasfilter [[[[[regexp] maxage=36000] from=0] nb=0] stat]\n"
+				"aliasfilter [[[[[regexp] maxage=36000] from=0] nb=0]]\n"
 						"scan and filter aliases\n"
 						"[regexp] : apply [regexp] on aliases, empty means all aliases\n"
 						"[maxage] : look in last [maxage] blocks\n"
 						"[from] : show results from number [from]\n"
 						"[nb] : show [nb] results, 0 means all\n"
-						"[stat] : show some stats instead of results\n"
 						"aliasfilter \"\" 5 # list aliases updated in last 5 blocks\n"
 						"aliasfilter \"^name\" # list all aliases starting with \"name\"\n"
 						"aliasfilter 36000 0 0 stat # display stats (number of names) on active aliases\n");
@@ -1588,7 +1587,6 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	int nFrom = 0;
 	int nNb = 0;
 	int nMaxAge = GetAliasExpirationDepth();
-	bool fStat = false;
 	int nCountFrom = 0;
 	int nCountNb = 0;
 	/* when changing this to match help, review bitcoinrpc.cpp RPCConvertValues() */
@@ -1604,8 +1602,6 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	if (params.size() > 3)
 		nNb = params[3].get_int();
 
-	if (params.size() > 4)
-		fStat = (params[4].get_str() == "stat" ? true : false);
 
 	UniValue oRes(UniValue::VARR);
 
@@ -1692,7 +1688,6 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 			break;
 	}
 
-	oRes.push_back(Pair("count", (int) oRes.size()));
 
 	return oRes;
 }

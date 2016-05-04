@@ -169,6 +169,26 @@
        </property>
       </widget>
      </item>
+     <item>
+      <widget class="QPushButton" name="prevButton">
+       <property name="enabled">
+        <bool>false</bool>
+       </property>
+       <property name="text">
+        <string>&lt;&lt; Previous</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="nextButton">
+       <property name="enabled">
+        <bool>false</bool>
+       </property>
+       <property name="text">
+        <string>Next &gt;&gt;</string>
+       </property>
+      </widget>
+     </item>
     </layout>
    </item>
   </layout>
