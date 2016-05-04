@@ -246,12 +246,16 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, unsigned i
 					continue;
 				}
   				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+				{
 					pcursor->Next();
 					continue;
 				}     
 				// dont return sold out offers
 				if(txPos.nQty <= 0 && txPos.nQty != -1)
+				{
+					pcursor->Next();
 					continue;
+				}
                 offerScan.push_back(make_pair(vchOffer, txPos));
             }
             if (offerScan.size() >= nMax)
