@@ -215,127 +215,125 @@ void CertListPage::selectNewCert(const QModelIndex &parent, int begin, int /*end
 void CertListPage::on_searchCert_clicked()
 {
     if(!walletModel) return;
-        UniValue params(UniValue::VARR);
-        UniValue valError;
-        UniValue valResult;
-        UniValue valId;
-        UniValue result ;
-        string strReply;
-        string strError;
-        string strMethod = string("certfilter");
-		string name_str;
-		string value_str;
-		string data_str;
-		string expires_in_str;
-		string expires_on_str;
-		string alias_str;
-		string expired_str;
-		string private_str;
-		int expired = 0;
-		int expires_in = 0;
-		int expires_on = 0; 
-        params.push_back(ui->lineEditCertSearch->text().toStdString());
-        params.push_back(GetCertExpirationDepth());
-		UniValue num;
-		num.setInt(0);
-		params.push_back(num);
-		params.push_back(ui->comboBox->currentText().toInt());
+    UniValue params(UniValue::VARR);
+    UniValue valError;
+    UniValue valResult;
+    UniValue valId;
+    UniValue result ;
+    string strReply;
+    string strError;
+    string strMethod = string("certfilter");
+	string name_str;
+	string value_str;
+	string data_str;
+	string expires_in_str;
+	string expires_on_str;
+	string alias_str;
+	string expired_str;
+	string private_str;
+	int expired = 0;
+	int expires_in = 0;
+	int expires_on = 0; 
+    params.push_back(ui->lineEditCertSearch->text().toStdString());
+    params.push_back(GetCertExpirationDepth());
+	UniValue num;
+	num.setInt(0);
+	params.push_back(num);
+	params.push_back(ui->comboBox->currentText().toInt());
 
-        try {
-            result = tableRPC.execute(strMethod, params);
-        }
-        catch (UniValue& objError)
-        {
-            strError = find_value(objError, "message").get_str();
-            QMessageBox::critical(this, windowTitle(),
-            tr("Error searching Certificate: \"%1\"").arg(QString::fromStdString(strError)),
-                QMessageBox::Ok, QMessageBox::Ok);
-            return;
-        }
-        catch(std::exception& e)
-        {
-            QMessageBox::critical(this, windowTitle(),
-                tr("General exception when searching certficiates"),
-                QMessageBox::Ok, QMessageBox::Ok);
-            return;
-        }
-		if (result.type() == UniValue::VARR)
-			{
-				this->model->clear();
+    try {
+        result = tableRPC.execute(strMethod, params);
+    }
+    catch (UniValue& objError)
+    {
+        strError = find_value(objError, "message").get_str();
+        QMessageBox::critical(this, windowTitle(),
+        tr("Error searching Certificate: \"%1\"").arg(QString::fromStdString(strError)),
+            QMessageBox::Ok, QMessageBox::Ok);
+        return;
+    }
+    catch(std::exception& e)
+    {
+        QMessageBox::critical(this, windowTitle(),
+            tr("General exception when searching certficiates"),
+            QMessageBox::Ok, QMessageBox::Ok);
+        return;
+    }
+	if (result.type() == UniValue::VARR)
+		{
+			this->model->clear();
+		
+		  const UniValue &arr = result.get_array();
+		  for (unsigned int idx = 0; idx < arr.size(); idx++) {
+			    const UniValue& input = arr[idx];
+			if (input.type() != UniValue::VOBJ)
+				continue;
+			const UniValue & o = input.get_obj();
+			name_str = "";
+			value_str = "";
+			data_str = "";
+			expires_in_str = "";
+			expires_on_str = "";
+			alias_str = "";
+			private_str = "";
+			expired = 0;
+			expires_in = 0;
+			expires_on = 0;
+
+			const UniValue& name_value = find_value(o, "cert");
+			if (name_value.type() == UniValue::VSTR)
+				name_str = name_value.get_str();
+			const UniValue& value_value = find_value(o, "title");
+			if (value_value.type() == UniValue::VSTR)
+				value_str = value_value.get_str();
+			const UniValue& data_value = find_value(o, "data");
+			if (data_value.type() == UniValue::VSTR)
+				data_str = data_value.get_str();
+			const UniValue& private_value = find_value(o, "private");
+			if (private_value.type() == UniValue::VSTR)
+				private_str = private_value.get_str();
+			const UniValue& alias_value = find_value(o, "alias");
+			if (alias_value.type() == UniValue::VSTR)
+				alias_str = alias_value.get_str();
+			const UniValue& expires_on_value = find_value(o, "expires_on");
+			if (expires_on_value.type() == UniValue::VNUM)
+				expires_on = expires_on_value.get_int();
+			const UniValue& expires_in_value = find_value(o, "expires_in");
+			if (expires_in_value.type() == UniValue::VNUM)
+				expires_in = expires_in_value.get_int();
+
+			expired_str = "Valid";
+			expires_in_str = strprintf("%d Blocks", expires_in);
+			expires_on_str = strprintf("Block %d", expires_on);
+		  }
+
 			
-			  const UniValue &arr = result.get_array();
-			  for (unsigned int idx = 0; idx < arr.size(); idx++) {
-				    const UniValue& input = arr[idx];
-				if (input.type() != UniValue::VOBJ)
-					continue;
-				const UniValue & o = input.get_obj();
-				name_str = "";
-				value_str = "";
-				data_str = "";
-				expires_in_str = "";
-				expires_on_str = "";
-				alias_str = "";
-				private_str = "";
-				expired = 0;
-				expires_in = 0;
-				expires_on = 0;
+			
+		   model->addRow(CertTableModel::Cert,
+					QString::fromStdString(name_str),
+					QString::fromStdString(value_str),
+					QString::fromStdString(data_str),
+					QString::fromStdString(expires_on_str),
+					QString::fromStdString(expires_in_str),
+					QString::fromStdString(expired_str),
+					QString::fromStdString(private_str),
+					QString::fromStdString(alias_str));
+		   this->model->updateEntry(QString::fromStdString(name_str),
+					QString::fromStdString(value_str),
+					QString::fromStdString(data_str),
+					QString::fromStdString(expires_on_str),
+					QString::fromStdString(expires_in_str),
+					QString::fromStdString(expired_str), 
+					QString::fromStdString(private_str), 
+					QString::fromStdString(alias_str), AllCert, CT_NEW);	
 
-					const UniValue& name_value = find_value(o, "cert");
-					if (name_value.type() == UniValue::VSTR)
-						name_str = name_value.get_str();
-					const UniValue& value_value = find_value(o, "title");
-					if (value_value.type() == UniValue::VSTR)
-						value_str = value_value.get_str();
-					const UniValue& data_value = find_value(o, "data");
-					if (data_value.type() == UniValue::VSTR)
-						data_str = data_value.get_str();
-					const UniValue& private_value = find_value(o, "private");
-					if (private_value.type() == UniValue::VSTR)
-						private_str = private_value.get_str();
-					const UniValue& alias_value = find_value(o, "alias");
-					if (alias_value.type() == UniValue::VSTR)
-						alias_str = alias_value.get_str();
-					const UniValue& expires_on_value = find_value(o, "expires_on");
-					if (expires_on_value.type() == UniValue::VNUM)
-						expires_on = expires_on_value.get_int();
-					const UniValue& expires_in_value = find_value(o, "expires_in");
-					if (expires_in_value.type() == UniValue::VNUM)
-						expires_in = expires_in_value.get_int();
-	
-					expired_str = "Valid";
-					expires_in_str = strprintf("%d Blocks", expires_in);
-					expires_on_str = strprintf("Block %d", expires_on);
-				}
-
-				
-				
-				model->addRow(CertTableModel::Cert,
-						QString::fromStdString(name_str),
-						QString::fromStdString(value_str),
-						QString::fromStdString(data_str),
-						QString::fromStdString(expires_on_str),
-						QString::fromStdString(expires_in_str),
-						QString::fromStdString(expired_str),
-						QString::fromStdString(private_str),
-						QString::fromStdString(alias_str));
-					this->model->updateEntry(QString::fromStdString(name_str),
-						QString::fromStdString(value_str),
-						QString::fromStdString(data_str),
-						QString::fromStdString(expires_on_str),
-						QString::fromStdString(expires_in_str),
-						QString::fromStdString(expired_str), 
-						QString::fromStdString(private_str), 
-						QString::fromStdString(alias_str), AllCert, CT_NEW);	
-			  }
-
-            
-         }   
-        else
-        {
-            QMessageBox::critical(this, windowTitle(),
-                tr("Error: Invalid response from certfilter command"),
-                QMessageBox::Ok, QMessageBox::Ok);
-            return;
-        }
+	} 
+    else
+    {
+        QMessageBox::critical(this, windowTitle(),
+            tr("Error: Invalid response from certfilter command"),
+            QMessageBox::Ok, QMessageBox::Ok);
+        return;
+    }
 
 }
