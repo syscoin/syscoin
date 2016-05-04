@@ -53,7 +53,7 @@ private:
 	int currentPage;
 private Q_SLOTS:
 	void on_resellButton_clicked();
-    void on_searchOffer_clicked(QString offer="");
+	void on_searchOffer_clicked(std::string offer="");
 	void on_prevButton_clicked();
 	void on_nextButton_clicked();
 	void on_purchaseButton_clicked();

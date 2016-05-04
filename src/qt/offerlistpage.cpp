@@ -344,7 +344,7 @@ void OfferListPage::on_nextButton_clicked()
 	currentPage++;
 	ui->prevButton->setEnabled(true);
 }
-void OfferListPage::on_searchOffer_clicked(QString GUID)
+void OfferListPage::on_searchOffer_clicked(string GUID)
 {
     if(!walletModel ) 
 	{
@@ -402,14 +402,11 @@ void OfferListPage::on_searchOffer_clicked(QString GUID)
 	if (result.type() == UniValue::VARR)
 		{
 		  this->model->clear();
+		  const UniValue &arr = result.get_array();
 		  if(arr.size() >= ui->comboBox->currentText().toInt())
 			  ui->nextButton->setEnabled(true);
 
-		  QModelIndex idx;
-		  QVariant cellBottomData = model->data(model->index(model->rowCount(idx), 0, idx), 0);
-		  QVariant cellTopData = model->data(model->index(0, 0, idx), 0);
-		  pageMap[currentPage] = make_pair(cellTopData.toString().toStdString(), cellBottomData.toString().toStdString());
-		  const UniValue &arr = result.get_array();
+		  
 	      for (unsigned int idx = 0; idx < arr.size(); idx++) {
 		    const UniValue& input = arr[idx];
 			if (input.type() != UniValue::VOBJ)
@@ -512,7 +509,10 @@ void OfferListPage::on_searchOffer_clicked(QString GUID)
 					QString::fromStdString(alias_peg_str), AllOffer, CT_NEW);	
 		  }
 
-        
+		  QModelIndex idx;
+		  QVariant cellBottomData = model->data(model->index(model->rowCount(idx), 0, idx), 0);
+		  QVariant cellTopData = model->data(model->index(0, 0, idx), 0);
+		  pageMap[currentPage] = make_pair(cellTopData.toString().toStdString(), cellBottomData.toString().toStdString());        
      }   
     else
     {
