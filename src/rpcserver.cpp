@@ -385,7 +385,6 @@ static const CRPCCommand vRPCCommands[] =
     { "wallet", "aliasinfo",         &aliasinfo,         false },
     { "wallet", "aliashistory",      &aliashistory,      false },
     { "wallet", "aliasfilter",       &aliasfilter,       false },
-    { "wallet", "aliasscan",         &aliasscan,         false },
 	{ "wallet", "generatepublickey", &generatepublickey, false },
 
     // use the blockchain as a distributed marketplace
@@ -401,7 +400,6 @@ static const CRPCCommand vRPCCommands[] =
 	{ "wallet", "offeracceptlist",      &offeracceptlist,      false },
     { "wallet", "offerinfo",            &offerinfo,            false },
     { "wallet", "offerhistory",         &offerhistory,         false },
-    { "wallet", "offerscan",            &offerscan,            false },
     { "wallet", "offerfilter",          &offerfilter,          false },
 
 // SYSCOIN
@@ -419,7 +417,6 @@ static const CRPCCommand vRPCCommands[] =
   { "wallet", "certlist",              &certlist,          false },
   { "wallet", "certinfo",              &certinfo,          false },
   { "wallet", "certhistory",     &certhistory, false },
-  { "wallet", "certscan",        &certscan,    false },
   { "wallet", "certfilter",      &certfilter,  false },
 
   // use the blockchain for escrow linked to offers
