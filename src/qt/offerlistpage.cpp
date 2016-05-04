@@ -31,6 +31,7 @@ OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *pare
     ui(new Ui::OfferListPage),
     model(0),
     optionsModel(0),
+	currentPage(0),
 	offerView(parent)
 {
     ui->setupUi(this);
@@ -320,181 +321,209 @@ void OfferListPage::selectNewOffer(const QModelIndex &parent, int begin, int /*e
         newOfferToSelect.clear();
     }
 }
-
-void OfferListPage::on_searchOffer_clicked()
+void OfferListPage::on_prevButton_clicked()
 {
-    if(!walletModel) 
+	if(currentPage <= 0)
+	{
+		ui->prevButton->setEnabled(false);
+		return;
+	}
+	currentPage--;
+	const pair<string, string> &offerPair = pageMap[currentPage];
+	on_searchOffer_clicked(offerPair.first);
+}
+void OfferListPage::on_nextButton_clicked()
+{
+	if(pageMap.empty())
+	{
+		ui->nextButton->setEnabled(false);
+		return;
+	}
+	const pair<string, string> &offerPair = pageMap[currentPage];
+	on_searchOffer_clicked(offerPair.second);
+	currentPage++;
+	ui->prevButton->setEnabled(true);
+}
+void OfferListPage::on_searchOffer_clicked(QString GUID)
+{
+    if(!walletModel ) 
 	{
 		selectionChanged();
 		return;
 	}
-        UniValue params(UniValue::VARR);
-        UniValue valError;
-        UniValue valResult;
-        UniValue valId;
-        UniValue result ;
-        string strReply;
-        string strError;
-        string strMethod = string("offerfilter");
-		string name_str;
-		string cert_str;
-		string value_str;
-		string desc_str;
-		string category_str;
-		string price_str;
-		string currency_str;
-		string qty_str;
-		string expired_str;
-		string exclusive_resell_str;
-		string private_str;
-		string acceptBTCOnly_str;
-		string alias_peg_str;
-		string alias_str;
-		int expired = 0;
-        params.push_back(ui->lineEditOfferSearch->text().toStdString());
-        params.push_back(GetOfferExpirationDepth());
-		UniValue num;
-		num.setInt(0);
-		params.push_back(num);
-		params.push_back(ui->comboBox->currentText().toInt());
-		params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
-        try {
-            result = tableRPC.execute(strMethod, params);
-        }
-        catch (UniValue& objError)
-        {
-            strError = find_value(objError, "message").get_str();
-            QMessageBox::critical(this, windowTitle(),
-            tr("Error searching Offer: \"%1\"").arg(QString::fromStdString(strError)),
-                QMessageBox::Ok, QMessageBox::Ok);
-			selectionChanged();
-            return;
-        }
-        catch(std::exception& e)
-        {
-            QMessageBox::critical(this, windowTitle(),
-                tr("General exception when searching offer"),
-                QMessageBox::Ok, QMessageBox::Ok);
-			selectionChanged();
-            return;
-        }
-		if (result.type() == UniValue::VARR)
-			{
-				this->model->clear();
-			
-			  const UniValue &arr = result.get_array();
-		      for (unsigned int idx = 0; idx < arr.size(); idx++) {
-			    const UniValue& input = arr[idx];
-				if (input.type() != UniValue::VOBJ)
-					continue;
-				const UniValue& o = input.get_obj();
-				name_str = "";
-				cert_str = "";
-				value_str = "";
-				desc_str = "";
-				private_str = "";
-				exclusive_resell_str = "";
-				alias_str = "";
-				acceptBTCOnly_str = "";
-				alias_peg_str = "";
-				expired = 0;
-
-
-				const UniValue& name_value = find_value(o, "offer");
-				if (name_value.type() == UniValue::VSTR)
-					name_str = name_value.get_str();
-				const UniValue& cert_value = find_value(o, "cert");
-				if (cert_value.type() == UniValue::VSTR)
-					cert_str = cert_value.get_str();
-				const UniValue& value_value = find_value(o, "title");
-				if (value_value.type() == UniValue::VSTR)
-					value_str = value_value.get_str();
-				const UniValue& desc_value = find_value(o, "description");
-				if (desc_value.type() == UniValue::VSTR)
-					desc_str = desc_value.get_str();
-				const UniValue& category_value = find_value(o, "category");
-				if (category_value.type() == UniValue::VSTR)
-					category_str = category_value.get_str();
-				const UniValue& price_value = find_value(o, "price");
-				if (price_value.type() == UniValue::VSTR)
-					price_str = price_value.get_str();
-				const UniValue& currency_value = find_value(o, "currency");
-				if (currency_value.type() == UniValue::VSTR)
-					currency_str = currency_value.get_str();
-				const UniValue& qty_value = find_value(o, "quantity");
-				if (qty_value.type() == UniValue::VSTR)
-					qty_str = qty_value.get_str();
-				const UniValue& exclusive_resell_value = find_value(o, "exclusive_resell");
-				if (exclusive_resell_value.type() == UniValue::VSTR)
-					exclusive_resell_str = exclusive_resell_value.get_str();		
-				const UniValue& private_value = find_value(o, "private");
-				if (private_value.type() == UniValue::VSTR)
-					private_str = private_value.get_str();	
-				const UniValue& alias_value = find_value(o, "alias");
-				if (alias_value.type() == UniValue::VSTR)
-					alias_str = alias_value.get_str();
-				const UniValue& btconly_value = find_value(o, "btconly");
-				if (btconly_value.type() == UniValue::VSTR)
-					acceptBTCOnly_str = btconly_value.get_str();
-				const UniValue& alias_peg_value = find_value(o, "alias_peg");
-				if (alias_peg_value.type() == UniValue::VSTR)
-					alias_peg_str = alias_peg_value.get_str();
-				const UniValue& expired_value = find_value(o, "expired");
-				if (expired_value.type() == UniValue::VNUM)
-					expired = expired_value.get_int();
-
-				if(expired == 1)
-				{
-					expired_str = "Expired";
-				}
-				else
-				{
-					expired_str = "Valid";
-				}
-
-				
-				
-				model->addRow(OfferTableModel::Offer,
-						QString::fromStdString(name_str),
-						QString::fromStdString(cert_str),
-						QString::fromStdString(value_str),
-						QString::fromStdString(desc_str),
-						QString::fromStdString(category_str),
-						QString::fromStdString(price_str),
-						QString::fromStdString(currency_str),
-						QString::fromStdString(qty_str),
-						QString::fromStdString(expired_str), 
-						QString::fromStdString(exclusive_resell_str),
-						QString::fromStdString(private_str),
-						QString::fromStdString(alias_str),
-						QString::fromStdString(acceptBTCOnly_str),
-						QString::fromStdString(alias_peg_str));
-					this->model->updateEntry(QString::fromStdString(name_str),
-						QString::fromStdString(cert_str),
-						QString::fromStdString(value_str),
-						QString::fromStdString(desc_str),
-						QString::fromStdString(category_str),
-						QString::fromStdString(price_str),
-						QString::fromStdString(currency_str),
-						QString::fromStdString(qty_str),
-						QString::fromStdString(expired_str),
-						QString::fromStdString(exclusive_resell_str),
-						QString::fromStdString(private_str), 
-						QString::fromStdString(alias_str), 
-						QString::fromStdString(acceptBTCOnly_str),
-						QString::fromStdString(alias_peg_str), AllOffer, CT_NEW);	
-			  }
-
-            
-         }   
-        else
-        {
-            QMessageBox::critical(this, windowTitle(),
-                tr("Error: Invalid response from offerfilter command"),
-                QMessageBox::Ok, QMessageBox::Ok);
-			selectionChanged();
-            return;
-        }
+	
+    UniValue params(UniValue::VARR);
+    UniValue valError;
+    UniValue valResult;
+    UniValue valId;
+    UniValue result ;
+    string strReply;
+    string strError;
+    string strMethod = string("offerfilter");
+	string name_str;
+	string cert_str;
+	string value_str;
+	string desc_str;
+	string category_str;
+	string price_str;
+	string currency_str;
+	string qty_str;
+	string expired_str;
+	string exclusive_resell_str;
+	string private_str;
+	string acceptBTCOnly_str;
+	string alias_peg_str;
+	string alias_str;
+	int expired = 0;
+    params.push_back(ui->lineEditOfferSearch->text().toStdString());
+	params.push_back(GUID.toStdString());
+	params.push_back(ui->comboBox->currentText().toInt());
+	params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
+    try {
+        result = tableRPC.execute(strMethod, params);
+    }
+    catch (UniValue& objError)
+    {
+        strError = find_value(objError, "message").get_str();
+        QMessageBox::critical(this, windowTitle(),
+        tr("Error searching Offer: \"%1\"").arg(QString::fromStdString(strError)),
+            QMessageBox::Ok, QMessageBox::Ok);
 		selectionChanged();
+        return;
+    }
+    catch(std::exception& e)
+    {
+        QMessageBox::critical(this, windowTitle(),
+            tr("General exception when searching offer"),
+            QMessageBox::Ok, QMessageBox::Ok);
+		selectionChanged();
+        return;
+    }
+	if (result.type() == UniValue::VARR)
+		{
+		  this->model->clear();
+		  if(arr.size() >= ui->comboBox->currentText().toInt())
+			  ui->nextButton->setEnabled(true);
+
+		  QModelIndex idx;
+		  QVariant cellBottomData = model->data(model->index(model->rowCount(), 0, idx), 0);
+		  bottomOffer = cellBottomData.toString();
+		  QVariant cellTopData = model->data(model->index(0, 0, idx), 0);
+		  topOffer = cellTopData.toString();
+		  pageMap[currentPage] = make_pair(topOffer, bottomOffer);
+		  const UniValue &arr = result.get_array();
+	      for (unsigned int idx = 0; idx < arr.size(); idx++) {
+		    const UniValue& input = arr[idx];
+			if (input.type() != UniValue::VOBJ)
+				continue;
+			const UniValue& o = input.get_obj();
+			name_str = "";
+			cert_str = "";
+			value_str = "";
+			desc_str = "";
+			private_str = "";
+			exclusive_resell_str = "";
+			alias_str = "";
+			acceptBTCOnly_str = "";
+			alias_peg_str = "";
+			expired = 0;
+
+
+			const UniValue& name_value = find_value(o, "offer");
+			if (name_value.type() == UniValue::VSTR)
+				name_str = name_value.get_str();
+			const UniValue& cert_value = find_value(o, "cert");
+			if (cert_value.type() == UniValue::VSTR)
+				cert_str = cert_value.get_str();
+			const UniValue& value_value = find_value(o, "title");
+			if (value_value.type() == UniValue::VSTR)
+				value_str = value_value.get_str();
+			const UniValue& desc_value = find_value(o, "description");
+			if (desc_value.type() == UniValue::VSTR)
+				desc_str = desc_value.get_str();
+			const UniValue& category_value = find_value(o, "category");
+			if (category_value.type() == UniValue::VSTR)
+				category_str = category_value.get_str();
+			const UniValue& price_value = find_value(o, "price");
+			if (price_value.type() == UniValue::VSTR)
+				price_str = price_value.get_str();
+			const UniValue& currency_value = find_value(o, "currency");
+			if (currency_value.type() == UniValue::VSTR)
+				currency_str = currency_value.get_str();
+			const UniValue& qty_value = find_value(o, "quantity");
+			if (qty_value.type() == UniValue::VSTR)
+				qty_str = qty_value.get_str();
+			const UniValue& exclusive_resell_value = find_value(o, "exclusive_resell");
+			if (exclusive_resell_value.type() == UniValue::VSTR)
+				exclusive_resell_str = exclusive_resell_value.get_str();		
+			const UniValue& private_value = find_value(o, "private");
+			if (private_value.type() == UniValue::VSTR)
+				private_str = private_value.get_str();	
+			const UniValue& alias_value = find_value(o, "alias");
+			if (alias_value.type() == UniValue::VSTR)
+				alias_str = alias_value.get_str();
+			const UniValue& btconly_value = find_value(o, "btconly");
+			if (btconly_value.type() == UniValue::VSTR)
+				acceptBTCOnly_str = btconly_value.get_str();
+			const UniValue& alias_peg_value = find_value(o, "alias_peg");
+			if (alias_peg_value.type() == UniValue::VSTR)
+				alias_peg_str = alias_peg_value.get_str();
+			const UniValue& expired_value = find_value(o, "expired");
+			if (expired_value.type() == UniValue::VNUM)
+				expired = expired_value.get_int();
+
+			if(expired == 1)
+			{
+				expired_str = "Expired";
+			}
+			else
+			{
+				expired_str = "Valid";
+			}
+
+			
+			
+			model->addRow(OfferTableModel::Offer,
+					QString::fromStdString(name_str),
+					QString::fromStdString(cert_str),
+					QString::fromStdString(value_str),
+					QString::fromStdString(desc_str),
+					QString::fromStdString(category_str),
+					QString::fromStdString(price_str),
+					QString::fromStdString(currency_str),
+					QString::fromStdString(qty_str),
+					QString::fromStdString(expired_str), 
+					QString::fromStdString(exclusive_resell_str),
+					QString::fromStdString(private_str),
+					QString::fromStdString(alias_str),
+					QString::fromStdString(acceptBTCOnly_str),
+					QString::fromStdString(alias_peg_str));
+				this->model->updateEntry(QString::fromStdString(name_str),
+					QString::fromStdString(cert_str),
+					QString::fromStdString(value_str),
+					QString::fromStdString(desc_str),
+					QString::fromStdString(category_str),
+					QString::fromStdString(price_str),
+					QString::fromStdString(currency_str),
+					QString::fromStdString(qty_str),
+					QString::fromStdString(expired_str),
+					QString::fromStdString(exclusive_resell_str),
+					QString::fromStdString(private_str), 
+					QString::fromStdString(alias_str), 
+					QString::fromStdString(acceptBTCOnly_str),
+					QString::fromStdString(alias_peg_str), AllOffer, CT_NEW);	
+		  }
+
+        
+     }   
+    else
+    {
+        QMessageBox::critical(this, windowTitle(),
+            tr("Error: Invalid response from offerfilter command"),
+            QMessageBox::Ok, QMessageBox::Ok);
+		selectionChanged();
+        return;
+    }
+	selectionChanged();
 
 }
