@@ -54,8 +54,8 @@ private:
 private Q_SLOTS:
 	void on_resellButton_clicked();
     void on_searchOffer_clicked(QString offer="");
-	void on_prevButton_clicked()
-	void on_nextButton_clicked()
+	void on_prevButton_clicked();
+	void on_nextButton_clicked();
 	void on_purchaseButton_clicked();
 	void on_messageButton_clicked();
     /** Create a new Offer for receiving coins and / or add a new Offer book entry */
