@@ -383,11 +383,6 @@ void OfferListPage::on_searchOffer_clicked()
 				this->model->clear();
 			
 			  const UniValue &arr = result.get_array();
-			  const UniValue& count_value = find_value(arr, "count");
-			  int count = 0;
-			  if (count_value.type() == UniValue::VNUM)
-					count = count_value.get_int();
-			  ui->labelResults->setText(tr("<b>%1</b> results found.").arg(count));	
 		      for (unsigned int idx = 0; idx < arr.size(); idx++) {
 			    const UniValue& input = arr[idx];
 				if (input.type() != UniValue::VOBJ)
