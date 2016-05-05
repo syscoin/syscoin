@@ -1628,7 +1628,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	boost::algorithm::to_lower(strRegexpLower);
 	sregex cregex = sregex::compile(strRegexpLower);
 	pair<vector<unsigned char>, CAliasIndex> pairScan;
-	BOOST_FOREACH(pairScan, offerScan) {
+	BOOST_FOREACH(pairScan, nameScan) {
 		const CAliasIndex &alias = pairScan.second;
 		CPubKey PubKey(alias.vchPubKey);
 		CSyscoinAddress address(PubKey.GetID());
