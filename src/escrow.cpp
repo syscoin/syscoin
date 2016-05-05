@@ -1664,7 +1664,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	oEscrow.push_back(Pair("systotal", ValueFromAmount(ca.nPricePerUnit * ca.nQty)));
 	int64_t nEscrowFee = GetEscrowArbiterFee(ca.nPricePerUnit * ca.nQty);
 	oEscrow.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
-	string sTotal = strprintf("%llu SYS", ValueFromAmount((nEscrowFee+ca.nPricePerUnit)*ca.nQty));
+	string sTotal = strprintf("%llu SYS", ((nEscrowFee+ca.nPricePerUnit)*ca.nQty)/COIN);
 	oEscrow.push_back(Pair("total", sTotal));
     oEscrow.push_back(Pair("txid", ca.txHash.GetHex()));
     oEscrow.push_back(Pair("height", sHeight));
