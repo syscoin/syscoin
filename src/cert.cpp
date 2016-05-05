@@ -1062,7 +1062,7 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 	boost::algorithm::to_lower(strRegexp);
     sregex cregex = sregex::compile(strRegexp);
     pair<vector<unsigned char>, CCert> pairScan;
-	BOOST_FOREACH(pairScan, offerScan) {
+	BOOST_FOREACH(pairScan, certScan) {
 		const CCert &txCert = pairScan.second;
 		const string &cert = stringFromVch(pairScan.first);
 		map<string,string>::iterator banIt;
