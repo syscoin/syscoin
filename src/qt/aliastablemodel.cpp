@@ -34,7 +34,21 @@ struct AliasTableEntry
         type(type), alias(alias), value(value), expires_on(expires_on), expires_in(expires_in), expired(expired) {}
 };
 
-
+struct AliasTableEntryLessThan
+{
+    bool operator()(const AliasTableEntry &a, const AliasTableEntry &b) const
+    {
+        return a.alias < b.alias;
+    }
+    bool operator()(const AliasTableEntry &a, const QString &b) const
+    {
+        return a.alias < b;
+    }
+    bool operator()(const QString &a, const AliasTableEntry &b) const
+    {
+        return a < b.alias;
+    }
+};
 
 // Private implementation
 class AliasTablePriv
@@ -153,9 +167,9 @@ public:
 		}
         // Find alias / value in model
         QList<AliasTableEntry>::iterator lower = qLowerBound(
-            cachedAliasTable.begin(), cachedAliasTable.end(), alias);
+            cachedAliasTable.begin(), cachedAliasTable.end(), alias, AliasTableEntryLessThan());
         QList<AliasTableEntry>::iterator upper = qUpperBound(
-            cachedAliasTable.begin(), cachedAliasTable.end(), alias);
+            cachedAliasTable.begin(), cachedAliasTable.end(), alias, AliasTableEntryLessThan());
         int lowerIndex = (lower - cachedAliasTable.begin());
         int upperIndex = (upper - cachedAliasTable.begin());
         bool inModel = (lower != upper);

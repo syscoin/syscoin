@@ -35,6 +35,22 @@ struct CertTableEntry
         type(type), title(title), cert(cert), data(data), expires_on(expires_on), expires_in(expires_in), expired(expired),privatecert(privatecert), alias(alias) {}
 };
 
+struct CertTableEntryLessThan
+{
+    bool operator()(const CertTableEntry &a, const CertTableEntry &b) const
+    {
+        return a.cert < b.cert;
+    }
+    bool operator()(const CertTableEntry &a, const QString &b) const
+    {
+        return a.cert < b;
+    }
+    bool operator()(const QString &a, const CertTableEntry &b) const
+    {
+        return a < b.cert;
+    }
+};
+
 
 // Private implementation
 class CertTablePriv
@@ -170,9 +186,9 @@ public:
 		}
         // Find cert / value in model
         QList<CertTableEntry>::iterator lower = qLowerBound(
-            cachedCertTable.begin(), cachedCertTable.end(), cert);
+            cachedCertTable.begin(), cachedCertTable.end(), cert, CertTableEntryLessThan());
         QList<CertTableEntry>::iterator upper = qUpperBound(
-            cachedCertTable.begin(), cachedCertTable.end(), cert);
+            cachedCertTable.begin(), cachedCertTable.end(), cert, CertTableEntryLessThan());
         int lowerIndex = (lower - cachedCertTable.begin());
         int upperIndex = (upper - cachedCertTable.begin());
         bool inModel = (lower != upper);

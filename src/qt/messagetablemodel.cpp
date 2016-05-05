@@ -30,6 +30,21 @@ struct MessageTableEntry
         guid(guid), time(time), from(from), to(to), subject(subject), message(message) {}
 };
 
+struct MessageTableEntryLessThan
+{
+    bool operator()(const MessageTableEntry &a, const MessageTableEntry &b) const
+    {
+        return a.time < b.time;
+    }
+    bool operator()(const MessageTableEntry &a, const QString &b) const
+    {
+        return a.time < b;
+    }
+    bool operator()(const QString &a, const MessageTableEntry &b) const
+    {
+        return a < b.time;
+    }
+};
 
 // Private implementation
 class MessageTablePriv
@@ -135,9 +150,9 @@ public:
 		}
         // Find message / value in model
         QList<MessageTableEntry>::iterator lower = qLowerBound(
-            cachedMessageTable.begin(), cachedMessageTable.end(), guid);
+            cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageTableEntryLessThan());
         QList<MessageTableEntry>::iterator upper = qUpperBound(
-            cachedMessageTable.begin(), cachedMessageTable.end(), guid);
+            cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageTableEntryLessThan());
         int lowerIndex = (lower - cachedMessageTable.begin());
         int upperIndex = (upper - cachedMessageTable.begin());
         bool inModel = (lower != upper);
