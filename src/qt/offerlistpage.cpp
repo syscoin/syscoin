@@ -113,9 +113,6 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
     proxyModel->setSourceModel(model);
     proxyModel->setDynamicSortFilter(true);
     proxyModel->setSortCaseSensitivity(Qt::CaseInsensitive);
-    proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    proxyModel->setFilterRole(OfferTableModel::TypeRole);
-    proxyModel->setFilterFixedString(OfferTableModel::Offer);
     ui->tableView->setModel(proxyModel);
 
     // Set column widths
