@@ -371,7 +371,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	string cert_str;
 	string value_str;
 	string desc_str;
-	string firstOffe= "";
+	string firstOffer = "";
 	string lastOffer = "";
 	string category_str;
 	string price_str;
