@@ -3998,7 +3998,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		banIt = banList.find(offer);
 		if (banIt != banList.end())
 		{
-			if(!safeSearch)
+			if(safeSearch)
 				continue;
 			if(banIt->second != "0")
 				continue;

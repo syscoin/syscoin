@@ -351,6 +351,13 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 		selectionChanged();
 		return;
 	}
+	if(GUID == "")
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		pageMap.clear();
+		currentPage = 0;
+	}
 	
     UniValue params(UniValue::VARR);
     UniValue valError;
@@ -364,6 +371,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	string cert_str;
 	string value_str;
 	string desc_str;
+	string firstOffe= "";
+	string lastOffer = "";
 	string category_str;
 	string price_str;
 	string currency_str;
@@ -426,6 +435,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			const UniValue& name_value = find_value(o, "offer");
 			if (name_value.type() == UniValue::VSTR)
 				name_str = name_value.get_str();
+			if(firstOffer == "")
+				firstOffer = name_str;
+			lastOffer = name_str;
 			const UniValue& cert_value = find_value(o, "cert");
 			if (cert_value.type() == UniValue::VSTR)
 				cert_str = cert_value.get_str();
@@ -508,13 +520,14 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_peg_str), AllOffer, CT_NEW);	
 		  }
 
-		  QModelIndex idx;
-		  QVariant cellBottomData = model->data(model->index(model->rowCount(idx), 0, idx), 0);
-		  QVariant cellTopData = model->data(model->index(0, 0, idx), 0);
-		  pageMap[currentPage] = make_pair(cellTopData.toString().toStdString(), cellBottomData.toString().toStdString());        
+		  pageMap[currentPage] = make_pair(firstOffer.toStdString(), lastOffer.toStdString());        
      }   
     else
     {
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		pageMap.clear();
+		currentPage = 0;
         QMessageBox::critical(this, windowTitle(),
             tr("Error: Invalid response from offerfilter command"),
             QMessageBox::Ok, QMessageBox::Ok);
