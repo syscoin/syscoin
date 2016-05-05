@@ -13,7 +13,6 @@
 #include "guiutil.h"
 #include "platformstyle.h"
 #include "ui_interface.h"
-#include <QSortFilterProxyModel>
 #include <QClipboard>
 #include <QMessageBox>
 #include <QKeyEvent>
@@ -109,9 +108,6 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-    proxyModel = new QSortFilterProxyModel(this);
-    proxyModel->setSourceModel(model);
-    ui->tableView->setModel(proxyModel);
 	ui->tableView->setSortingEnabled(false);
 
     // Set column widths
@@ -275,7 +271,7 @@ void OfferListPage::on_exportButton_clicked()
     CSVModelWriter writer(filename);
 
     // name, column, role
-    writer.setModel(proxyModel);
+    writer.setModel(model);
     writer.addColumn("Offer", OfferTableModel::Name, Qt::EditRole);
 	writer.addColumn("Cert", OfferTableModel::Cert, Qt::EditRole);
     writer.addColumn("Title", OfferTableModel::Title, Qt::EditRole);
@@ -306,7 +302,7 @@ void OfferListPage::contextualMenu(const QPoint &point)
 
 void OfferListPage::selectNewOffer(const QModelIndex &parent, int begin, int /*end*/)
 {
-    QModelIndex idx = proxyModel->mapFromSource(model->index(begin, OfferTableModel::Name, parent));
+    QModelIndex idx = model->index(begin, OfferTableModel::Name, parent);
     if(idx.isValid() && (idx.data(Qt::EditRole).toString() == newOfferToSelect))
     {
         // Select row of newly created offer, once
