@@ -138,7 +138,7 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int 
 					pcursor->Next();
 					continue;
 				}     
-                certScan.push_back(make_pair(vchOffer, txPos));
+                certScan.push_back(make_pair(vchCert, txPos));
             }
             if (certScan.size() >= nMax)
                 break;
