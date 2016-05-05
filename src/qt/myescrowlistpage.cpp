@@ -14,7 +14,7 @@
 #include "syscoingui.h"
 #include "csvmodelwriter.h"
 #include "guiutil.h"
-#include "platformstyle.h"
+
 #include <QSortFilterProxyModel>
 #include <QClipboard>
 #include <QMessageBox>
@@ -23,7 +23,7 @@
 using namespace std;
 
 extern const CRPCTable tableRPC;
-MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *parent) :
+MyEscrowListPage::MyEscrowListPage(PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),
     ui(new Ui::MyEscrowListPage),
     model(0),
