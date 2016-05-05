@@ -25,7 +25,6 @@ using namespace std;
 
 extern const CRPCTable tableRPC;
 
-extern int GetOfferExpirationDepth();
 OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *parent) :
     QDialog(0),
     ui(new Ui::OfferListPage),

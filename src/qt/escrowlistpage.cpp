@@ -24,7 +24,6 @@ using namespace std;
 
 extern const CRPCTable tableRPC;
 
-extern int GetEscrowExpirationDepth();
 EscrowListPage::EscrowListPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),
     ui(new Ui::EscrowListPage),
@@ -234,11 +233,7 @@ void EscrowListPage::on_searchEscrow_clicked()
 		int unixTime;
 		QDateTime dateTime;
         params.push_back(ui->lineEditEscrowSearch->text().toStdString());
-        params.push_back(GetEscrowExpirationDepth());
-		UniValue num;
-		num.setInt(0);
-		params.push_back(num);
-		params.push_back(ui->comboBox->currentText().toInt());
+
 
         try {
             result = tableRPC.execute(strMethod, params);

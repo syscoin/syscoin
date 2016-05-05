@@ -25,12 +25,12 @@ using namespace std;
 
 extern const CRPCTable tableRPC;
 
-extern int GetAliasExpirationDepth();
 AliasListPage::AliasListPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),
     ui(new Ui::AliasListPage),
     model(0),
-    optionsModel(0)
+    optionsModel(0),
+	currentPage(0)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  

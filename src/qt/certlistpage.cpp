@@ -18,10 +18,6 @@
 #include "rpcserver.h"
 using namespace std;
 
-
-
-
-extern int GetCertExpirationDepth();
 CertListPage::CertListPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),
     ui(new Ui::CertListPage),
@@ -235,11 +231,7 @@ void CertListPage::on_searchCert_clicked()
 	int expires_in = 0;
 	int expires_on = 0; 
     params.push_back(ui->lineEditCertSearch->text().toStdString());
-    params.push_back(GetCertExpirationDepth());
-	UniValue num;
-	num.setInt(0);
-	params.push_back(num);
-	params.push_back(ui->comboBox->currentText().toInt());
+
 
     try {
         result = tableRPC.execute(strMethod, params);
