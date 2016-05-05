@@ -1921,7 +1921,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
     vector<pair<vector<unsigned char>, CEscrow> > escrowScan;
     if (!pescrowdb->ScanEscrows(vchEscrow, nNb, escrowScan))
         throw runtime_error("scan failed");
-	string strSearchLower = strSearch;
+	string strSearchLower = strRegexp;
 	boost::algorithm::to_lower(strSearchLower);
     pair<vector<unsigned char>, CEscrow> pairScan;
     BOOST_FOREACH(pairScan, escrowScan) {
