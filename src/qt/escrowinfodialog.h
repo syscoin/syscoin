@@ -23,6 +23,7 @@ private:
 private Q_SLOTS:
 	void on_okButton_clicked();
 private:
+	const PlatformStyle *platformStyle;
 	QDataWidgetMapper *mapper;
     Ui::EscrowInfoDialog *ui;
 	QString GUID;

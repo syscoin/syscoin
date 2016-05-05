@@ -27,7 +27,8 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
     QDialog(parent),
     ui(new Ui::MyEscrowListPage),
     model(0),
-    optionsModel(0)
+    optionsModel(0),
+	platformStyle(platformStyle)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
