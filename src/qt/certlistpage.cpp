@@ -28,13 +28,11 @@ CertListPage::CertListPage(const PlatformStyle *platformStyle, QWidget *parent) 
 	QString theme = GUIUtil::getThemeName();  
 	if (!platformStyle->getImagesOnButtons())
 	{
-		ui->exportButton->setIcon(QIcon());
 		ui->copyCert->setIcon(QIcon());
 		ui->searchCert->setIcon(QIcon());
 	}
 	else
 	{
-		ui->exportButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/export"));
 		ui->copyCert->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->searchCert->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/search"));
 	}

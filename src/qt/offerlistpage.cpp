@@ -37,7 +37,6 @@ OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *pare
 	if (!platformStyle->getImagesOnButtons())
 	{
 		ui->copyOffer->setIcon(QIcon());
-		ui->exportButton->setIcon(QIcon());
 		ui->resellButton->setIcon(QIcon());
 		ui->purchaseButton->setIcon(QIcon());
 		ui->messageButton->setIcon(QIcon());
@@ -46,7 +45,6 @@ OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *pare
 	else
 	{
 		ui->copyOffer->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
-		ui->exportButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/export"));
 		ui->resellButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/cart"));
 		ui->purchaseButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/send"));
 		ui->messageButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/outmail"));

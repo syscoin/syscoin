@@ -34,13 +34,11 @@ EscrowListPage::EscrowListPage(const PlatformStyle *platformStyle, QWidget *pare
 	QString theme = GUIUtil::getThemeName();  
 	if (!platformStyle->getImagesOnButtons())
 	{
-		ui->exportButton->setIcon(QIcon());
 		ui->copyEscrow->setIcon(QIcon());
 		ui->searchEscrow->setIcon(QIcon());
 	}
 	else
 	{
-		ui->exportButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/export"));
 		ui->copyEscrow->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->searchEscrow->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/search"));
 	}

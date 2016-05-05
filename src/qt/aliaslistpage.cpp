@@ -36,14 +36,12 @@ AliasListPage::AliasListPage(const PlatformStyle *platformStyle, QWidget *parent
 	QString theme = GUIUtil::getThemeName();  
 	if (!platformStyle->getImagesOnButtons())
 	{
-		ui->exportButton->setIcon(QIcon());
 		ui->messageButton->setIcon(QIcon());
 		ui->copyAlias->setIcon(QIcon());
 		ui->searchAlias->setIcon(QIcon());
 	}
 	else
 	{
-		ui->exportButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/export"));
 		ui->messageButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/outmail"));
 		ui->copyAlias->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->searchAlias->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/search"));
