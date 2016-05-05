@@ -151,36 +151,6 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int 
     return true;
 }
 
-//TODO implement
-bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int nMax,
-        std::vector<std::pair<std::vector<unsigned char>, CCert> >& certScan) {
-
-    boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
-    pcursor->Seek(make_pair(string("certi"), vchCert));
-    while (pcursor->Valid()) {
-        boost::this_thread::interruption_point();
-		pair<string, vector<unsigned char> > key;
-        try {
-            if (pcursor->GetKey(key) && key.first == "certi") {
-                vector<unsigned char> vchCert = key.second;
-                vector<CCert> vtxPos;
-                if(pcursor->GetValue(vtxPos) && !vtxPos.empty())
-				{
-					CCert txPos;
-					txPos = vtxPos.back();
-					certScan.push_back(make_pair(vchCert, txPos));
-				}
-            }
-            if (certScan.size() >= nMax)
-                break;
-
-            pcursor->Next();
-        } catch (std::exception &e) {
-            return error("%s() : deserialize error", __PRETTY_FUNCTION__);
-        }
-    }
-    return true;
-}
 int IndexOfCertOutput(const CTransaction& tx) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
