@@ -82,8 +82,10 @@ void CertListPage::setModel(WalletModel* walletModel, CertTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-    ui->tableView->setSortingEnabled(false);
-
+    proxyModel = new QSortFilterProxyModel(this);
+    proxyModel->setSourceModel(model);
+    ui->tableView->setModel(proxyModel);
+	ui->tableView->setSortingEnabled(false);
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //cert
     ui->tableView->setColumnWidth(1, 300); //title
