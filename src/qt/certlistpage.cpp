@@ -39,7 +39,7 @@ CertListPage::CertListPage(const PlatformStyle *platformStyle, QWidget *parent) 
 		ui->copyCert->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->searchCert->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/search"));
 	}
-    ui->labelExplanation->setText(tr("Search for Syscoin Certificates. Select the number of results desired from the dropdown box and click Search."));
+    ui->labelExplanation->setText(tr("Search for Syscoin Certificates. Select Safe Search if you wish to omit potentially offensive Certificates."));
 	
     // Context menu actions
     QAction *copyCertAction = new QAction(ui->copyCert->text(), this);

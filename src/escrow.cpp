@@ -1883,9 +1883,9 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
     return oRes;
 }
 UniValue escrowfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 3)
+	if (fHelp || params.size() > 2)
 		throw runtime_error(
-				"escrowfilter [[[[[regexp]] from=0]] safesearch]\n"
+				"escrowfilter [[[[[regexp]] from=0]]]\n"
 						"scan and filter escrows\n"
 						"[regexp] : apply [regexp] on escrows, empty means all escrows\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
@@ -1904,9 +1904,6 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 
 	if (params.size() > 1)
 		vchEscrow = vchFromValue(params[1]);
-
-	if (params.size() > 2)
-		safeSearch = params[2].get_bool();
 
 	UniValue oRes(UniValue::VARR);
 

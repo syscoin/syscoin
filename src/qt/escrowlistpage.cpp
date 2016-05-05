@@ -45,7 +45,7 @@ EscrowListPage::EscrowListPage(const PlatformStyle *platformStyle, QWidget *pare
 		ui->copyEscrow->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->searchEscrow->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/search"));
 	}
-    ui->labelExplanation->setText(tr("Search for Syscoin Escrows. Select the number of results desired from the dropdown box and click Search."));
+    ui->labelExplanation->setText(tr("Search for Syscoin Escrows."));
 	
     // Context menu actions
     QAction *copyEscrowAction = new QAction(ui->copyEscrow->text(), this);
@@ -268,7 +268,6 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 		QDateTime dateTime;
         params.push_back(ui->lineEditEscrowSearch->text().toStdString());
 		params.push_back(GUID);
-		params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
 
         try {
             result = tableRPC.execute(strMethod, params);

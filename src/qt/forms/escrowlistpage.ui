@@ -30,16 +30,6 @@
       <widget class="QLineEdit" name="lineEditEscrowSearch"/>
      </item>
      <item>
-      <widget class="QCheckBox" name="safeSearch">
-       <property name="text">
-        <string>Safe Search</string>
-       </property>
-       <property name="checked">
-        <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
       <widget class="QPushButton" name="searchEscrow">
        <property name="maximumSize">
         <size>
