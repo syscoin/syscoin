@@ -7,6 +7,7 @@
 #include "newmessagedialog.h"
 #include "manageescrowdialog.h"
 #include "escrowinfodialog.h"
+#include "escrowciphertool.h"
 #include "clientmodel.h"
 #include "platformstyle.h"
 #include "optionsmodel.h"
