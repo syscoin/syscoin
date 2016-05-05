@@ -161,7 +161,7 @@ void EscrowListPage::contextualMenu(const QPoint &point)
 
 void EscrowListPage::selectNewEscrow(const QModelIndex &parent, int begin, int /*end*/)
 {
-    QModelIndex idx = proxyModel->mapFromSource(model->index(begin, EscrowTableModel::Escrow, parent));
+    QModelIndex idx = model->index(begin, EscrowTableModel::Escrow, parent);
     if(idx.isValid() && (idx.data(Qt::EditRole).toString() == newEscrowToSelect))
     {
         // Select row of newly created escrow, once
