@@ -340,8 +340,8 @@ void OfferListPage::on_nextButton_clicked()
 		return;
 	}
 	const pair<string, string> &offerPair = pageMap[currentPage];
-	on_searchOffer_clicked(offerPair.second);
 	currentPage++;
+	on_searchOffer_clicked(offerPair.second);
 	ui->prevButton->setEnabled(true);
 }
 void OfferListPage::on_searchOffer_clicked(string GUID)
@@ -413,6 +413,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 		  const UniValue &arr = result.get_array();
 		  if(arr.size() >= 25)
 			  ui->nextButton->setEnabled(true);
+		  else
+			  ui->nextButton->setEnabled(false);
+
 
 		  
 	      for (unsigned int idx = 0; idx < arr.size(); idx++) {
