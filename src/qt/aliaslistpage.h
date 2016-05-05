@@ -46,9 +46,12 @@ private:
     QMenu *contextMenu;
     QAction *deleteAction; // to be able to explicitly disable it
     QString newAliasToSelect;
-
+	std::map<int, std::pair<std::string, std::string> > pageMap;
+	int currentPage;
 private Q_SLOTS:
-    void on_searchAlias_clicked();
+	void on_searchAlias_clicked(std::string offer="");
+	void on_prevButton_clicked();
+	void on_nextButton_clicked();
     /** Create a new alias for receiving coins and / or add a new alias book entry */
     /** Copy alias of currently selected alias entry to clipboard */
     void on_copyAlias_clicked();

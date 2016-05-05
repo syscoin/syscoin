@@ -235,10 +235,39 @@ void AliasListPage::selectNewAlias(const QModelIndex &parent, int begin, int /*e
         newAliasToSelect.clear();
     }
 }
-
-void AliasListPage::on_searchAlias_clicked()
+void AliasListPage::on_prevButton_clicked()
+{
+	if(currentPage <= 0)
+	{
+		ui->prevButton->setEnabled(false);
+		return;
+	}
+	currentPage--;
+	const pair<string, string> &aliasPair = pageMap[currentPage];
+	on_searchAlias_clicked(aliasPair.first);
+}
+void AliasListPage::on_nextButton_clicked()
+{
+	if(pageMap.empty())
+	{
+		ui->nextButton->setEnabled(false);
+		return;
+	}
+	const pair<string, string> &aliasPair = pageMap[currentPage];
+	currentPage++;
+	on_searchAlias_clicked(aliasPair.second);
+	ui->prevButton->setEnabled(true);
+}
+void AliasListPage::on_searchAlias_clicked(string GUID)
 {
     if(!walletModel) return;
+	if(GUID == "")
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		pageMap.clear();
+		currentPage = 0;
+	}
         UniValue params(UniValue::VARR);
         UniValue valError;
         UniValue valResult;
@@ -247,6 +276,8 @@ void AliasListPage::on_searchAlias_clicked()
         string strReply;
         string strError;
         string strMethod = string("aliasfilter");
+		string firstAlias = "";
+		string lastAlias = "";
 		string name_str;
 		string value_str;
 		string expires_in_str;
@@ -256,11 +287,8 @@ void AliasListPage::on_searchAlias_clicked()
 		int expires_in = 0;
 		int expires_on = 0;  
         params.push_back(ui->lineEditAliasSearch->text().toStdString());
-        params.push_back(GetAliasExpirationDepth());
-		UniValue num;
-		num.setInt(0);
-		params.push_back(num);
-		params.push_back(ui->comboBox->currentText().toInt());
+		params.push_back(GUID);
+		params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
 
         try {
             result = tableRPC.execute(strMethod, params);
@@ -285,6 +313,10 @@ void AliasListPage::on_searchAlias_clicked()
 			  this->model->clear();
 			
 			  const UniValue &arr = result.get_array();
+			  if(arr.size() >= 25)
+				  ui->nextButton->setEnabled(true);
+			  else
+				  ui->nextButton->setEnabled(false);
 			  for (unsigned int idx = 0; idx < arr.size(); idx++) {
 				const UniValue& input = arr[idx];
 				if (input.type() != UniValue::VOBJ)
@@ -301,6 +333,9 @@ void AliasListPage::on_searchAlias_clicked()
 					const UniValue& name_value = find_value(o, "name");
 					if (name_value.type() == UniValue::VSTR)
 						name_str = name_value.get_str();
+					if(firstAlias == "")
+						firstAlias = name_str;
+					lastAlias = name_str;
 					const UniValue& value_value = find_value(o, "value");
 					if (value_value.type() == UniValue::VSTR)
 						value_str = value_value.get_str();
@@ -337,11 +372,16 @@ void AliasListPage::on_searchAlias_clicked()
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str), AllAlias, CT_NEW);	
 			  }
-
+			  pageMap[currentPage] = make_pair(firstAlias, lastAlias);  
+			  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));
             
          }   
         else
         {
+			ui->nextButton->setEnabled(false);
+			ui->prevButton->setEnabled(false);
+			pageMap.clear();
+			currentPage = 0;
             QMessageBox::critical(this, windowTitle(),
                 tr("Error: Invalid response from aliasfilter command"),
                 QMessageBox::Ok, QMessageBox::Ok);

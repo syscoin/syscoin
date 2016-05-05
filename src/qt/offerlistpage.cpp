@@ -523,7 +523,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_peg_str), AllOffer, CT_NEW);	
 		  }
 
-		  pageMap[currentPage] = make_pair(firstOffer, lastOffer);        
+		  pageMap[currentPage] = make_pair(firstOffer, lastOffer);  
+		  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));
      }   
     else
     {
