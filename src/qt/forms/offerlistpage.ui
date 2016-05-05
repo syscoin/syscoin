@@ -30,25 +30,6 @@
       <widget class="QLineEdit" name="lineEditOfferSearch"/>
      </item>
      <item>
-      <widget class="QComboBox" name="comboBox">
-       <item>
-        <property name="text">
-         <string>25</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>50</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>100</string>
-        </property>
-       </item>
-      </widget>
-     </item>
-     <item>
       <widget class="QCheckBox" name="safeSearch">
        <property name="toolTip">
         <string>Filters out provocative material from the search listing.</string>

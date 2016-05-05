@@ -3949,25 +3949,20 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 4)
+	if (fHelp || params.size() > 3)
 		throw runtime_error(
-				"offerfilter [[[[[regexp]] from=0] nb=0] safesearch]\n"
+				"offerfilter [[[[[regexp]] from=0]] safesearch]\n"
 						"scan and filter offers\n"
 						"[regexp] : apply [regexp] on offers, empty means all offers\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
-						"[nb] : show [nb] results, 0 means all\n"
 						"[safesearch] : shows all offers that are safe to display (not on the ban list)\n"
 						"offerfilter \"\" 5 # list offers updated in last 5 blocks\n"
 						"offerfilter \"^offer\" # list all offers starting with \"offer\"\n"
 						"offerfilter 36000 0 0 stat # display stats (number of offers) on active offers\n");
 
 	string strRegexp;
-	int nFrom = 0;
-	int nNb = 0;
 	vector<unsigned char> vchOffer;
 	bool safeSearch = true;
-	int nCountFrom = 0;
-	int nCountNb = 0;
 
 	if (params.size() > 0)
 		strRegexp = params[0].get_str();
@@ -3976,17 +3971,13 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		vchOffer = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		nNb = params[2].get_int();
+		safeSearch = params[2].get_bool();
 
-	if (params.size() > 3)
-		safeSearch = params[3].get_bool();
-
-	//COfferDB dbOffer("r");
 	UniValue oRes(UniValue::VARR);
 
 	
 	vector<pair<vector<unsigned char>, COffer> > offerScan;
-	if (!pofferdb->ScanOffers(vchOffer, nNb, offerScan))
+	if (!pofferdb->ScanOffers(vchOffer, 25, offerScan))
 		throw runtime_error("scan failed");
 	map<string, string> banList;
 	if(!getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN))

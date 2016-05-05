@@ -986,13 +986,12 @@ UniValue certhistory(const UniValue& params, bool fHelp) {
     return oRes;
 }
 UniValue certfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 4)
+	if (fHelp || params.size() > 3)
 		throw runtime_error(
-				"certfilter [[[[[regexp]] from=0] nb=0] safesearch]\n"
+				"certfilter [[[[[regexp]] from=0]] safesearch]\n"
 						"scan and filter certs\n"
 						"[regexp] : apply [regexp] on certs, empty means all certs\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
-						"[nb] : show [nb] results, 0 means all\n"
 						"[certfilter] : shows all certs that are safe to display (not on the ban list)\n"
 						"certfilter \"\" 5 # list certs updated in last 5 blocks\n"
 						"certfilter \"^cert\" # list all certs starting with \"cert\"\n"
@@ -1000,11 +999,9 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 
 	vector<unsigned char> vchCert;
 	string strRegexp;
-	int nFrom = 0;
-	int nNb = 0;
+
 	bool safeSearch = true;
-	int nCountFrom = 0;
-	int nCountNb = 0;
+
 
 	if (params.size() > 0)
 		strRegexp = params[0].get_str();
@@ -1013,10 +1010,7 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 		vchCert = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		nNb = params[2].get_int();
-
-	if (params.size() > 3)
-		safeSearch = params[3].get_bool();
+		safeSearch = params[2].get_bool();
 
     UniValue oRes(UniValue::VARR);
 	map<string, string> banList;
@@ -1024,7 +1018,7 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 		throw runtime_error("failed to read SYS_BAN alias");
     
     vector<pair<vector<unsigned char>, CCert> > certScan;
-    if (!pcertdb->ScanCerts(vchCert, nNb, certScan))
+    if (!pcertdb->ScanCerts(vchCert, 25, certScan))
         throw runtime_error("scan failed");
     // regexp
     using namespace boost::xpressive;

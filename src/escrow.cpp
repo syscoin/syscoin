@@ -1883,13 +1883,12 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
     return oRes;
 }
 UniValue escrowfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 4)
+	if (fHelp || params.size() > 3)
 		throw runtime_error(
-				"escrowfilter [[[[[regexp]] from=0] nb=0] safesearch]\n"
+				"escrowfilter [[[[[regexp]] from=0]] safesearch]\n"
 						"scan and filter escrows\n"
 						"[regexp] : apply [regexp] on escrows, empty means all escrows\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
-						"[nb] : show [nb] results, 0 means all\n"
 						"[escrowfilter] : shows all escrows that are safe to display (not on the ban list)\n"
 						"escrowfilter \"\" 5 # list escrows updated in last 5 blocks\n"
 						"escrowfilter \"^excrow\" # list all excrows starting with \"escrow\"\n"
@@ -1897,11 +1896,8 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 
 	vector<unsigned char> vchEscrow;
 	string strRegexp;
-	int nFrom = 0;
-	int nNb = 0;
+
 	bool safeSearch = true;
-	int nCountFrom = 0;
-	int nCountNb = 0;
 
 	if (params.size() > 0)
 		strRegexp = params[0].get_str();
@@ -1910,16 +1906,13 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		vchEscrow = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		nNb = params[2].get_int();
-
-	if (params.size() > 3)
-		safeSearch = params[3].get_bool();
+		safeSearch = params[2].get_bool();
 
 	UniValue oRes(UniValue::VARR);
 
    
     vector<pair<vector<unsigned char>, CEscrow> > escrowScan;
-    if (!pescrowdb->ScanEscrows(vchEscrow, nNb, escrowScan))
+    if (!pescrowdb->ScanEscrows(vchEscrow, 25, escrowScan))
         throw runtime_error("scan failed");
 	string strSearchLower = strRegexp;
 	boost::algorithm::to_lower(strSearchLower);
