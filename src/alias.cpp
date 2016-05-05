@@ -1430,6 +1430,16 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		throw runtime_error("aliasinfo <aliasname>\n"
 				"Show values of an alias.\n");
 	vector<unsigned char> vchName = vchFromValue(params[0]);
+	map<string, string> banList;
+	if(!getBanList(vchFromString("SYS_BAN"), banList, ALIAS_BAN))
+		throw runtime_error("failed to read SYS_BAN alias");
+	map<string,string>::iterator banIt;
+	banIt = banList.find(stringFromVch(vchName));
+	if (banIt != banList.end())
+	{
+		if(banIt->second != "0" || banIt->second != "1")
+			throw runtime_error("alias has been banned");
+	}
 	CTransaction tx;
 	UniValue oShowResult(UniValue::VOBJ);
 

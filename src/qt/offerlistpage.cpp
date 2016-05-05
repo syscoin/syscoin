@@ -377,7 +377,6 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	int expired = 0;
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
-	params.push_back(ui->comboBox->currentText().toInt());
 	params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
     try {
         result = tableRPC.execute(strMethod, params);
@@ -403,7 +402,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 		{
 		  this->model->clear();
 		  const UniValue &arr = result.get_array();
-		  if(arr.size() >= ui->comboBox->currentText().toInt())
+		  if(arr.size() >= 25)
 			  ui->nextButton->setEnabled(true);
 
 		  
