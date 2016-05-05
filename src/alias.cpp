@@ -788,7 +788,7 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName,
 				pcursor->GetValue(vtxPos);
                 CAliasIndex txPos;
 				txPos = vtxPos.back();
-				if (!vtxPos.empty()){
+				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
 				}

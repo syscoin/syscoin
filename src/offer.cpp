@@ -241,7 +241,7 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, unsigned i
 				pcursor->GetValue(vtxPos);
                 COffer txPos;
 				txPos = vtxPos.back();
-				if (!vtxPos.empty()){
+				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
 				}

@@ -129,7 +129,7 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int 
 				pcursor->GetValue(vtxPos);
                 CCert txPos;
 				txPos = vtxPos.back();
-				if (!vtxPos.empty()){
+				if (txPos.empty()){
 					pcursor->Next();
 					continue;
 				}

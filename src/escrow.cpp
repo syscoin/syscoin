@@ -115,7 +115,7 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, unsigne
 				pcursor->GetValue(vtxPos);
                 CEscrow txPos;
 				txPos = vtxPos.back();
-				if (!vtxPos.empty()){
+				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
 				}
