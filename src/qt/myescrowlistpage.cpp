@@ -23,7 +23,7 @@
 using namespace std;
 
 extern const CRPCTable tableRPC;
-MyEscrowListPage::MyEscrowListPage(PlatformStyle *platformStyle, QWidget *parent) :
+MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),
     ui(new Ui::MyEscrowListPage),
     model(0),

@@ -27,7 +27,7 @@ class MyEscrowListPage : public QDialog
 public:
 
 
-    explicit MyEscrowListPage(PlatformStyle *platformStyle, QWidget *parent = 0);
+    explicit MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *parent = 0);
     ~MyEscrowListPage();
 
     void setModel(WalletModel*, EscrowTableModel *model);
@@ -44,7 +44,7 @@ private:
     QSortFilterProxyModel *proxyModel;
     QMenu *contextMenu;
     QString newEscrowToSelect;
-	PlatformStyle *platformStyle;
+	const PlatformStyle *platformStyle;
 private Q_SLOTS:
     void on_copyEscrow_clicked();
 	void on_copyOffer_clicked();
