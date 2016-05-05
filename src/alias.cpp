@@ -775,31 +775,39 @@ const vector<unsigned char> CAliasIndex::Serialize() {
 bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName,
 		unsigned int nMax,
 		vector<pair<vector<unsigned char>, CAliasIndex> >& nameScan) {
-
+	int nMaxAge  = GetAliasExpirationDepth();
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("namei"), vchName));
-	while (pcursor->Valid()) {
-		boost::this_thread::interruption_point();
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
 		pair<string, vector<unsigned char> > key;
-		try {
+        try {
 			if (pcursor->GetKey(key) && key.first == "namei") {
-				vector<unsigned char> vchName = key.second;
-				vector<CAliasIndex> vtxPos;
+            	vector<unsigned char> vchName = key.second;
+                vector<CAliasIndex> vtxPos;
 				pcursor->GetValue(vtxPos);
-				CAliasIndex txPos;
-				if (!vtxPos.empty())
-					txPos = vtxPos.back();
-				nameScan.push_back(make_pair(vchName, txPos));
-			}
-			if (nameScan.size() >= nMax)
-				break;
+                CAliasIndex txPos;
+				txPos = vtxPos.back();
+				if (!vtxPos.empty()){
+					pcursor->Next();
+					continue;
+				}
+  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+				{
+					pcursor->Next();
+					continue;
+				}     
+                nameScan.push_back(make_pair(vchName, txPos));
+            }
+            if (nameScan.size() >= nMax)
+                break;
 
-			pcursor->Next();
-		} catch (std::exception &e) {
-			return error("%s() : deserialize error", __PRETTY_FUNCTION__);
-		}
-	}
-	return true;
+            pcursor->Next();
+        } catch (std::exception &e) {
+            return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+        }
+    }
+    return true;
 }
 
 int GetAliasExpirationDepth() {
@@ -1573,41 +1581,41 @@ UniValue generatepublickey(const UniValue& params, bool fHelp) {
 UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	if (fHelp || params.size() > 4)
 		throw runtime_error(
-				"aliasfilter [[[[[regexp] maxage=36000] from=0] nb=0]]\n"
+				"aliasfilter [[[[[regexp]] from=0] nb=0] safesearch]\n"
 						"scan and filter aliases\n"
 						"[regexp] : apply [regexp] on aliases, empty means all aliases\n"
-						"[maxage] : look in last [maxage] blocks\n"
-						"[from] : show results from number [from]\n"
+						"[from] : show results from this GUID [from], 0 means first.\n"
 						"[nb] : show [nb] results, 0 means all\n"
+						"[aliasfilter] : shows all aliases that are safe to display (not on the ban list)\n"
 						"aliasfilter \"\" 5 # list aliases updated in last 5 blocks\n"
-						"aliasfilter \"^name\" # list all aliases starting with \"name\"\n"
-						"aliasfilter 36000 0 0 stat # display stats (number of names) on active aliases\n");
+						"aliasfilter \"^alias\" # list all aliases starting with \"alias\"\n"
+						"aliasfilter 36000 0 0 stat # display stats (number of aliases) on active aliases\n");
 
+	vector<unsigned char> vchName;
 	string strRegexp;
 	int nFrom = 0;
 	int nNb = 0;
-	int nMaxAge = GetAliasExpirationDepth();
+	bool safeSearch = true;
 	int nCountFrom = 0;
 	int nCountNb = 0;
-	/* when changing this to match help, review bitcoinrpc.cpp RPCConvertValues() */
+
 	if (params.size() > 0)
 		strRegexp = params[0].get_str();
 
 	if (params.size() > 1)
-		nMaxAge = params[1].get_int();
+		vchName = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		nFrom = params[2].get_int();
+		nNb = params[2].get_int();
 
 	if (params.size() > 3)
-		nNb = params[3].get_int();
-
+		safeSearch = params[3].get_bool();
 
 	UniValue oRes(UniValue::VARR);
 
-	vector<unsigned char> vchName;
+	
 	vector<pair<vector<unsigned char>, CAliasIndex> > nameScan;
-	if (!paliasdb->ScanNames(vchName, GetAliasExpirationDepth(), nameScan))
+	if (!paliasdb->ScanNames(vchName, nNb, nameScan))
 		throw runtime_error("scan failed");
 	map<string, string> banList;
 	if(!getBanList(vchFromString("SYS_BAN"), banList, ALIAS_BAN))
@@ -1620,7 +1628,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	boost::algorithm::to_lower(strRegexpLower);
 	sregex cregex = sregex::compile(strRegexpLower);
 	pair<vector<unsigned char>, CAliasIndex> pairScan;
-	BOOST_FOREACH(pairScan, nameScan) {
+	BOOST_FOREACH(pairScan, offerScan) {
 		const CAliasIndex &alias = pairScan.second;
 		CPubKey PubKey(alias.vchPubKey);
 		CSyscoinAddress address(PubKey.GetID());
@@ -1628,7 +1636,12 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		map<string,string>::iterator banIt;
 		banIt = banList.find(name);
 		if (banIt != banList.end())
-			continue;
+		{
+			if(!safeSearch)
+				continue;
+			if(banIt->second != "0")
+				continue;
+		}
 		boost::algorithm::to_lower(name);
 		if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != address.ToString())
 			continue;
@@ -1636,26 +1649,11 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		CAliasIndex txName = pairScan.second;
 		int nHeight = txName.nHeight;
 
-		// max age
-		if (nMaxAge != 0 && chainActive.Tip()->nHeight - nHeight >= nMaxAge)
-			continue;
-
-		// from limits
-		nCountFrom++;
-		if (nCountFrom < nFrom + 1)
-			continue;
-
-
 		int expired = 0;
 		int expires_in = 0;
 		int expired_block = 0;
 		UniValue oName(UniValue::VOBJ);
 		oName.push_back(Pair("name", stringFromVch(pairScan.first)));
-		CTransaction tx;
-		uint256 txHash = txName.txHash;
-		if (!GetSyscoinTransaction(txName.nHeight, txHash, tx, Params().GetConsensus()))
-			continue;
-
 		oName.push_back(Pair("value", stringFromVch(txName.vchPublicValue)));
 		string strPrivateValue = "";
 		if(alias.vchPrivateValue.size() > 0)
@@ -1664,7 +1662,6 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		if(DecryptMessage(txName.vchPubKey, alias.vchPrivateValue, strDecrypted))
 			strPrivateValue = strDecrypted;		
 		oName.push_back(Pair("privatevalue", strPrivateValue));
-		oName.push_back(Pair("txid", txHash.GetHex()));
         oName.push_back(Pair("lastupdate_height", nHeight));
 		expired_block = nHeight + GetAliasExpirationDepth();
         if(nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight <= 0)
@@ -1681,83 +1678,8 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 
 		
 		oRes.push_back(oName);
-
-		nCountNb++;
-		// nb limits
-		if (nNb > 0 && nCountNb >= nNb)
-			break;
 	}
 
-
-	return oRes;
-}
-
-/**
- * [aliasscan description]
- * @param  params [description]
- * @param  fHelp  [description]
- * @return        [description]
- */
-UniValue aliasscan(const UniValue& params, bool fHelp) {
-	if (fHelp || 2 > params.size())
-		throw runtime_error(
-				"aliasscan [<start-name>] [<max-returned>]\n"
-						"scan all aliases, starting at start-name and returning a maximum number of entries (default 500)\n");
-
-	vector<unsigned char> vchName;
-	int nMax = 500;
-	if (params.size() > 0)
-		vchName = vchFromValue(params[0]);
-	if (params.size() > 1) {
-		nMax = params[1].get_int();
-	}
-
-	UniValue oRes(UniValue::VARR);
-
-	vector<pair<vector<unsigned char>, CAliasIndex> > nameScan;
-	if (!paliasdb->ScanNames(vchName, nMax, nameScan))
-		throw runtime_error("scan failed");
-
-	pair<vector<unsigned char>, CAliasIndex> pairScan;
-	BOOST_FOREACH(pairScan, nameScan) {
-		UniValue oName(UniValue::VOBJ);
-		string name = stringFromVch(pairScan.first);
-		oName.push_back(Pair("name", name));
-		CTransaction tx;
-		CAliasIndex txName = pairScan.second;
-		uint256 blockHash;
-		int expired = 0;
-		int expires_in = 0;
-		int expired_block = 0;
-		int nHeight = txName.nHeight;
-		if (!GetSyscoinTransaction(nHeight, txName.txHash, tx, Params().GetConsensus()))
-			continue;
-
-		oName.push_back(Pair("txid", txName.txHash.GetHex()));
-		oName.push_back(Pair("value", stringFromVch(txName.vchPublicValue)));
-		string strPrivateValue = "";
-		if(txName.vchPrivateValue.size() > 0)
-			strPrivateValue = "Encrypted for alias owner";
-		string strDecrypted = "";
-		if(DecryptMessage(txName.vchPubKey, txName.vchPrivateValue, strDecrypted))
-			strPrivateValue = strDecrypted;		
-		oName.push_back(Pair("privatevalue", strPrivateValue));
-        oName.push_back(Pair("lastupdate_height", nHeight));
-		expired_block = nHeight + GetAliasExpirationDepth();
-		if(nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight <= 0)
-		{
-			expired = 1;
-		}  
-		if(expired == 0)
-		{
-			expires_in = nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight;
-		}
-		oName.push_back(Pair("expires_in", expires_in));
-		oName.push_back(Pair("expires_on", expired_block));
-		oName.push_back(Pair("expired", expired));
-		
-		oRes.push_back(oName);
-	}
 
 	return oRes;
 }

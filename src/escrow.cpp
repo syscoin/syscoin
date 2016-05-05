@@ -48,8 +48,6 @@ int64_t GetEscrowArbiterFee(int64_t escrowValue) {
 		nFee = DEFAULT_MIN_RELAY_TX_FEE;
 	return nFee;
 }
-// Increase expiration to 36000 gradually starting at block 24000.
-// Use for validation purposes and pass the chain height.
 int GetEscrowExpirationDepth() {
 	#ifdef ENABLE_DEBUGRPC
     return 100;
@@ -102,23 +100,30 @@ const vector<unsigned char> CEscrow::Serialize() {
     return vchData;
 
 }
-//TODO implement
 bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, unsigned int nMax,
         std::vector<std::pair<std::vector<unsigned char>, CEscrow> >& escrowScan) {
-
-	 boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
+	int nMaxAge  = GetEscrowExpirationDepth();
+	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("escrowi"), vchEscrow));
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
 		pair<string, vector<unsigned char> > key;
-        try {        
-            if (pcursor->GetKey(key) && key.first == "escrowi") {
-                vector<unsigned char> vchEscrow = key.second;
+        try {
+			if (pcursor->GetKey(key) && key.first == "escrowi") {
+            	vector<unsigned char> vchEscrow = key.second;
                 vector<CEscrow> vtxPos;
 				pcursor->GetValue(vtxPos);
                 CEscrow txPos;
-                if (!vtxPos.empty())
-                    txPos = vtxPos.back();
+				txPos = vtxPos.back();
+				if (!vtxPos.empty()){
+					pcursor->Next();
+					continue;
+				}
+  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+				{
+					pcursor->Next();
+					continue;
+				}     
                 escrowScan.push_back(make_pair(vchEscrow, txPos));
             }
             if (escrowScan.size() >= nMax)
@@ -131,8 +136,6 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, unsigne
     }
     return true;
 }
-
-
 int IndexOfEscrowOutput(const CTransaction& tx) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
@@ -1879,48 +1882,44 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
     }
     return oRes;
 }
-
 UniValue escrowfilter(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() > 5)
-        throw runtime_error(
-                "escrowfilter [[[[[search string] maxage=36000] from=0] nb=0] stat]\n"
-                        "scan and filter escrows\n"
-                        "[search string] : Find arbiter or seller via alias name or an escrow GUID, empty means all escrows\n"
-                        "[maxage] : look in last [maxage] blocks\n"
-                        "[from] : show results from number [from]\n"
-                        "[nb] : show [nb] results, 0 means all\n"
-                        "[stats] : show some stats instead of results\n"
-                        "escrowfilter \"\" 5 # list Escrows updated in last 5 blocks\n");
+	if (fHelp || params.size() > 4)
+		throw runtime_error(
+				"escrowfilter [[[[[regexp]] from=0] nb=0] safesearch]\n"
+						"scan and filter escrows\n"
+						"[regexp] : apply [regexp] on escrows, empty means all escrows\n"
+						"[from] : show results from this GUID [from], 0 means first.\n"
+						"[nb] : show [nb] results, 0 means all\n"
+						"[escrowfilter] : shows all escrows that are safe to display (not on the ban list)\n"
+						"escrowfilter \"\" 5 # list escrows updated in last 5 blocks\n"
+						"escrowfilter \"^excrow\" # list all excrows starting with \"escrow\"\n"
+						"escrowfilter 36000 0 0 stat # display stats (number of escrows) on active escrows\n");
 
-    string strSearch;
-    int nFrom = 0;
-    int nNb = 0;
-    int nMaxAge = GetEscrowExpirationDepth();
-    bool fStat = false;
-    int nCountFrom = 0;
-    int nCountNb = 0;
+	vector<unsigned char> vchEscrow;
+	string strRegexp;
+	int nFrom = 0;
+	int nNb = 0;
+	bool safeSearch = true;
+	int nCountFrom = 0;
+	int nCountNb = 0;
 
-    if (params.size() > 0)
-        strSearch = params[0].get_str();
+	if (params.size() > 0)
+		strRegexp = params[0].get_str();
 
-    if (params.size() > 1)
-        nMaxAge = params[1].get_int();
+	if (params.size() > 1)
+		vchEscrow = vchFromValue(params[1]);
 
-    if (params.size() > 2)
-        nFrom = params[2].get_int();
+	if (params.size() > 2)
+		nNb = params[2].get_int();
 
-    if (params.size() > 3)
-        nNb = params[3].get_int();
+	if (params.size() > 3)
+		safeSearch = params[3].get_bool();
 
-    if (params.size() > 4)
-        fStat = (params[4].get_str() == "stat" ? true : false);
+	UniValue oRes(UniValue::VARR);
 
-    //CEscrowDB dbEscrow("r");
-    UniValue oRes(UniValue::VARR);
-
-    vector<unsigned char> vchEscrow;
+   
     vector<pair<vector<unsigned char>, CEscrow> > escrowScan;
-    if (!pescrowdb->ScanEscrows(vchEscrow, GetEscrowExpirationDepth(), escrowScan))
+    if (!pescrowdb->ScanEscrows(vchEscrow, nNb, escrowScan))
         throw runtime_error("scan failed");
 	string strSearchLower = strSearch;
 	boost::algorithm::to_lower(strSearchLower);
@@ -1952,21 +1951,9 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 
         
         int nHeight = txEscrow.nHeight;
-
-        // max age
-        if (nMaxAge != 0 && chainActive.Tip()->nHeight - nHeight >= nMaxAge)
-            continue;
-        // from limits
-        nCountFrom++;
-        if (nCountFrom < nFrom + 1)
-            continue;
-        CTransaction tx;
-		if (!GetSyscoinTransaction(txEscrow.nHeight, txEscrow.txHash, tx, Params().GetConsensus()))
-			continue;
+ 
 		COffer offer;
-		CTransaction offertx;
-		if (!GetTxOfOffer(txEscrow.vchOffer, offer, offertx))
-			continue;
+
 		int expired = 0;
 
         UniValue oEscrow(UniValue::VOBJ);
@@ -1992,16 +1979,8 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		string sTotal = strprintf("%llu SYS", (txEscrow.nPricePerUnit/COIN)*txEscrow.nQty);
 		oEscrow.push_back(Pair("total", sTotal));
         oRes.push_back(oEscrow);
-
-        nCountNb++;
-        // nb limits
-        if (nNb > 0 && nCountNb >= nNb)
-            break;
     }
 
-    oRes.push_back(Pair("count", (int) oRes.size()));
 
-    return oRes;
+	return oRes;
 }
-
-

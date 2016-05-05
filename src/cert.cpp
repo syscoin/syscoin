@@ -114,6 +114,42 @@ const vector<unsigned char> CCert::Serialize() {
     return vchData;
 
 }
+bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int nMax,
+        std::vector<std::pair<std::vector<unsigned char>, CCert> >& certScan) {
+	int nMaxAge  = GetCertExpirationDepth();
+	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
+	pcursor->Seek(make_pair(string("certi"), vchCert));
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
+		pair<string, vector<unsigned char> > key;
+        try {
+			if (pcursor->GetKey(key) && key.first == "certi") {
+            	vector<unsigned char> vchCert = key.second;
+                vector<CCert> vtxPos;
+				pcursor->GetValue(vtxPos);
+                CCert txPos;
+				txPos = vtxPos.back();
+				if (!vtxPos.empty()){
+					pcursor->Next();
+					continue;
+				}
+  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+				{
+					pcursor->Next();
+					continue;
+				}     
+                certScan.push_back(make_pair(vchOffer, txPos));
+            }
+            if (certScan.size() >= nMax)
+                break;
+
+            pcursor->Next();
+        } catch (std::exception &e) {
+            return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+        }
+    }
+    return true;
+}
 
 //TODO implement
 bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int nMax,
@@ -979,48 +1015,46 @@ UniValue certhistory(const UniValue& params, bool fHelp) {
     }
     return oRes;
 }
-
 UniValue certfilter(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() > 4)
-        throw runtime_error(
-                "certfilter [[[[[regexp] maxage=36000] from=0] nb=0]]\n"
-                        "scan and filter certes\n"
-                        "[regexp] : apply [regexp] on certes, empty means all certes\n"
-                        "[maxage] : look in last [maxage] blocks\n"
-                        "[from] : show results from number [from]\n"
-                        "[nb] : show [nb] results, 0 means all\n"
-                        "certfilter \"\" 5 # list certes updated in last 5 blocks\n"
-                        "certfilter \"^cert\" # list all certes starting with \"cert\"\n"
-                        "certfilter 36000 0 0 stat # display stats (number of certs) on active certes\n");
+	if (fHelp || params.size() > 4)
+		throw runtime_error(
+				"certfilter [[[[[regexp]] from=0] nb=0] safesearch]\n"
+						"scan and filter certs\n"
+						"[regexp] : apply [regexp] on certs, empty means all certs\n"
+						"[from] : show results from this GUID [from], 0 means first.\n"
+						"[nb] : show [nb] results, 0 means all\n"
+						"[certfilter] : shows all certs that are safe to display (not on the ban list)\n"
+						"certfilter \"\" 5 # list certs updated in last 5 blocks\n"
+						"certfilter \"^cert\" # list all certs starting with \"cert\"\n"
+						"certfilter 36000 0 0 stat # display stats (number of certs) on active certs\n");
 
-    string strRegexp;
-    int nFrom = 0;
-    int nNb = 0;
-    int nMaxAge = GetCertExpirationDepth();
-    int nCountFrom = 0;
-    int nCountNb = 0;
+	vector<unsigned char> vchCert;
+	string strRegexp;
+	int nFrom = 0;
+	int nNb = 0;
+	bool safeSearch = true;
+	int nCountFrom = 0;
+	int nCountNb = 0;
 
-    if (params.size() > 0)
-        strRegexp = params[0].get_str();
+	if (params.size() > 0)
+		strRegexp = params[0].get_str();
 
-    if (params.size() > 1)
-        nMaxAge = params[1].get_int();
+	if (params.size() > 1)
+		vchCert = vchFromValue(params[1]);
 
-    if (params.size() > 2)
-        nFrom = params[2].get_int();
+	if (params.size() > 2)
+		nNb = params[2].get_int();
 
-    if (params.size() > 3)
-        nNb = params[3].get_int();
+	if (params.size() > 3)
+		safeSearch = params[3].get_bool();
 
-
-    //CCertDB dbCert("r");
     UniValue oRes(UniValue::VARR);
 	map<string, string> banList;
 	if(!getBanList(vchFromString("SYS_BAN"), banList, CERT_BAN))
 		throw runtime_error("failed to read SYS_BAN alias");
-    vector<unsigned char> vchCert;
+    
     vector<pair<vector<unsigned char>, CCert> > certScan;
-    if (!pcertdb->ScanCerts(vchCert, GetCertExpirationDepth(), certScan))
+    if (!pcertdb->ScanCerts(vchCert, nNb, certScan))
         throw runtime_error("scan failed");
     // regexp
     using namespace boost::xpressive;
@@ -1028,31 +1062,24 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 	boost::algorithm::to_lower(strRegexp);
     sregex cregex = sregex::compile(strRegexp);
     pair<vector<unsigned char>, CCert> pairScan;
-	BOOST_FOREACH(pairScan, certScan) {
+	BOOST_FOREACH(pairScan, offerScan) {
 		const CCert &txCert = pairScan.second;
 		const string &cert = stringFromVch(pairScan.first);
 		map<string,string>::iterator banIt;
 		banIt = banList.find(cert);
 		if (banIt != banList.end())
-			continue;	
+		{
+			if(!safeSearch)
+				continue;
+			if(banIt->second != "0")
+				continue;
+		}
 		string title = stringFromVch(txCert.vchTitle);
 		boost::algorithm::to_lower(title);
         if (strRegexp != "" && !regex_search(title, certparts, cregex) && strRegexp != cert)
             continue;
 
-        
-        int nHeight = txCert.nHeight;
-
-        // max age
-        if (nMaxAge != 0 && chainActive.Tip()->nHeight - nHeight >= nMaxAge)
-            continue;
-        // from limits
-        nCountFrom++;
-        if (nCountFrom < nFrom + 1)
-            continue;
-        CTransaction tx;
-		if (!GetSyscoinTransaction(txCert.nHeight, txCert.txHash, tx, Params().GetConsensus()))
-			continue;
+       int nHeight = txCert.nHeight;
 
 		int expired = 0;
 		int expires_in = 0;
@@ -1093,73 +1120,10 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 		oCert.push_back(Pair("address", address.ToString()));
 		oCert.push_back(Pair("alias", address.aliasName));
         oRes.push_back(oCert);
+	}
 
-        nCountNb++;
-        // nb limits
-        if (nNb > 0 && nCountNb >= nNb)
-            break;
-    }
 
-    return oRes;
-}
-
-UniValue certscan(const UniValue& params, bool fHelp) {
-    if (fHelp || 2 > params.size())
-        throw runtime_error(
-                "certscan [<start-cert>] [<max-returned>]\n"
-                        "scan all certs, starting at start-cert and returning a maximum number of entries (default 500)\n");
-
-    vector<unsigned char> vchCert;
-    int nMax = 500;
-    if (params.size() > 0) {
-        vchCert = vchFromValue(params[0]);
-    }
-
-    if (params.size() > 1) {
-        nMax = params[1].get_int();
-    }
-
-    //CCertDB dbCert("r");
-    UniValue oRes(UniValue::VARR);
-
-    vector<pair<vector<unsigned char>, CCert> > certScan;
-    if (!pcertdb->ScanCerts(vchCert, nMax, certScan))
-        throw runtime_error("scan failed");
-
-    pair<vector<unsigned char>, CCert> pairScan;
-    BOOST_FOREACH(pairScan, certScan) {
-        UniValue oCert(UniValue::VOBJ);
-        string cert = stringFromVch(pairScan.first);
-        oCert.push_back(Pair("cert", cert));
-        CTransaction tx;
-        CCert txCert = pairScan.second;
-		int expired = 0;
-		int expires_in = 0;
-		int expired_block = 0;
-        int nHeight = txCert.nHeight;
-        vector<unsigned char> vchValue = txCert.vchTitle;
-        string value = stringFromVch(vchValue);
-		if (!GetSyscoinTransaction(nHeight, txCert.txHash, tx, Params().GetConsensus()))
-			continue;
-
-        oCert.push_back(Pair("value", value));
-		expired_block = nHeight + GetCertExpirationDepth();
-		if(nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight <= 0)
-		{
-			expired = 1;
-		}  
-		if(expired == 0)
-		{
-			expires_in = nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight;
-		}
-		oCert.push_back(Pair("expires_in", expires_in));
-		oCert.push_back(Pair("expires_on", expired_block));
-		oCert.push_back(Pair("expired", expired));
-			
-		oRes.push_back(oCert);
-    }
-
-    return oRes;
+	return oRes;
 }
 
 
