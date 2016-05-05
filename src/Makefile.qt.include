@@ -120,6 +120,7 @@ QT_FORMS_UI = \
   qt/forms/acceptandpayofferlistpage.ui \
   qt/forms/offeracceptinfodialog.ui \
   qt/forms/escrowinfodialog.ui \
+  qt/forms/escrowciphertool.ui \
   qt/forms/offerpaydialog.ui \
   qt/forms/offerescrowdialog.ui \
   qt/forms/offeracceptdialog.ui \
@@ -194,6 +195,7 @@ QT_MOC_CPP = \
   qt/moc_offeraccepttablemodel.cpp \
   qt/moc_offeracceptinfodialog.cpp \
   qt/moc_escrowinfodialog.cpp \
+  qt/moc_escrowciphertool.cpp \
   qt/moc_editofferdialog.cpp \
   qt/moc_newwhitelistdialog.cpp \
   qt/moc_resellofferdialog.cpp \
@@ -309,6 +311,7 @@ SYSCOIN_QT_H = \
   qt/offeraccepttablemodel.h \
   qt/offeracceptinfodialog.h \
   qt/escrowinfodialog.h \
+  qt/escrowciphertool.h \
   qt/editofferdialog.h \
   qt/newwhitelistdialog.h \
   qt/resellofferdialog.h \
@@ -470,6 +473,7 @@ SYSCOIN_QT_CPP += \
   qt/offeraccepttablemodel.cpp \
   qt/offeracceptinfodialog.cpp \
   qt/escrowinfodialog.cpp \
+  qt/escrowciphertool.cpp \
   qt/editofferdialog.cpp \
   qt/newwhitelistdialog.cpp \
   qt/resellofferdialog.cpp \

@@ -1670,13 +1670,39 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
     oEscrow.push_back(Pair("height", sHeight));
 	string strMessage = string("");
 	if(!DecryptMessage(ca.vchSellerKey, ca.vchPaymentMessage, strMessage))
-		strMessage = stringFromVch(ca.vchPaymentMessage);
+		strMessage = string("Encrypted for owner of offer");
 	oEscrow.push_back(Pair("pay_message", strMessage));
+	oEscrow.push_back(Pair("rawpay_message", stringFromVch(ca.vchPaymentMessage)));
 
 	
     return oEscrow;
 }
 
+UniValue escrowcipher(const UniValue& params, bool fHelp) {
+    if (fHelp || 2 < params.size())
+        throw runtime_error("escrowlist <alias> <message>\n"
+                "calculate a cipher based on an alias and a message");
+	vector<unsigned char> vchName = vchFromString(params[0].get_str());
+	vector<unsigned char> vchMessage = vchFromString(params[1].get_str());
+	EnsureWalletIsUnlocked();
+	CTransaction tx;
+	CAliasIndex theAlias;
+	if (!GetTxOfAlias(vchName, theAlias, tx))
+		throw runtime_error("could not find an alias with this name");
+	string strCipherText;
+	
+	// encrypt using alias pub key
+	if(!EncryptMessage(theAlias.vchPubKey, vchMessage, strCipherText))
+	{
+		throw runtime_error("Could not encrypt message!");
+	}
+	if (strCipherText.size() > MAX_ENCRYPTED_VALUE_LENGTH)
+		throw runtime_error("data length cannot exceed 1023 bytes!");
+
+	UniValue res(UniValue::VARR);
+	res.push_back(strCipherText);
+	return res;
+}
 UniValue escrowlist(const UniValue& params, bool fHelp) {
     if (fHelp || 1 < params.size())
         throw runtime_error("escrowlist [<escrow>]\n"

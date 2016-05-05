@@ -42,10 +42,12 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 		ui->copyEscrow->setIcon(QIcon());
 		ui->refreshButton->setIcon(QIcon());
 		ui->detailButton->setIcon(QIcon());
+		ui->cipherToolButton->setIcon(QIcon());
 
 	}
 	else
 	{
+		ui->cipherToolButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/verify"));
 		ui->exportButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/export"));
 		ui->arbiterMessageButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/outmail"));
 		ui->sellerMessageButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/outmail"));
@@ -70,6 +72,7 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
     QAction *buyerMessageAction = new QAction(tr("Send Msg To Buyer"), this);
 	QAction *sellerMessageAction = new QAction(tr("Send Msg To Seller"), this);
 	QAction *arbiterMessageAction = new QAction(tr("Send Msg To Arbiter"), this);
+	QAction *cipherToolAction = new QAction(tr("Cipher Tool"), this);
 
     // Build context menu
     contextMenu = new QMenu();
@@ -81,11 +84,12 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
     contextMenu->addSeparator();
 	contextMenu->addAction(detailsAction);
 	contextMenu->addAction(manageAction);
+	contextMenu->addAction(cipherToolAction);
     // Connect signals for context menu actions
     connect(copyEscrowAction, SIGNAL(triggered()), this, SLOT(on_copyEscrow_clicked()));
 	connect(copyOfferAction, SIGNAL(triggered()), this, SLOT(on_copyOffer_clicked()));
 	connect(manageAction, SIGNAL(triggered()), this, SLOT(on_manageButton_clicked()));
-
+	connect(cipherToolAction, SIGNAL(triggered()), this, SLOT(on_cipherToolButton_clicked()));
 	connect(buyerMessageAction, SIGNAL(triggered()), this, SLOT(on_buyerMessageButton_clicked()));
 	connect(sellerMessageAction, SIGNAL(triggered()), this, SLOT(on_sellerMessageButton_clicked()));
 	connect(arbiterMessageAction, SIGNAL(triggered()), this, SLOT(on_arbiterMessageButton_clicked()));
@@ -267,7 +271,17 @@ void MyEscrowListPage::on_detailButton_clicked()
         dlg.exec();
     }
 }
-
+void MyEscrowListPage::on_cipherToolButton_clicked()
+{
+    if(!ui->tableView->selectionModel())
+        return;
+    QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
+    if(!selection.isEmpty())
+    {
+        EscrowCipherTool dlg(platformStyle, selection.at(0));
+        dlg.exec();
+    }
+}
 void MyEscrowListPage::contextualMenu(const QPoint &point)
 {
     QModelIndex index = ui->tableView->indexAt(point);

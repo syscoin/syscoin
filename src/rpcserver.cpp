@@ -427,6 +427,7 @@ static const CRPCCommand vRPCCommands[] =
   { "wallet", "escrowrefund",          &escrowrefund,      false },
   { "wallet", "escrowclaimrefund",          &escrowclaimrefund,      false },
   { "wallet", "escrowlist",              &escrowlist,          false },
+  { "wallet", "escrowcipher",              &escrowcipher,          false },
   { "wallet", "escrowinfo",              &escrowinfo,          false },
   { "wallet", "escrowhistory",     &escrowhistory, false },
   { "wallet", "escrowfilter",      &escrowfilter,  false },
