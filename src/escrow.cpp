@@ -1946,7 +1946,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		boost::algorithm::to_lower(sellerAliasLower);
 		boost::algorithm::to_lower(arbiterAliasLower);
 
-        if (strSearch != "" && strSearch != escrow && strSearchLower != buyerAliasLower && strSearchLower != sellerAliasLower && strSearchLower != arbiterAliasLower)
+        if (strRegexp != "" && strRegexp != escrow && strSearchLower != buyerAliasLower && strSearchLower != sellerAliasLower && strSearchLower != arbiterAliasLower)
             continue;
 
         
