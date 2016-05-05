@@ -520,7 +520,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_peg_str), AllOffer, CT_NEW);	
 		  }
 
-		  pageMap[currentPage] = make_pair(firstOffer.toStdString(), lastOffer.toStdString());        
+		  pageMap[currentPage] = make_pair(firstOffer, lastOffer);        
      }   
     else
     {
