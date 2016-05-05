@@ -109,12 +109,7 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-    proxyModel = new QSortFilterProxyModel(this);
-    proxyModel->setSourceModel(model);
-    proxyModel->setDynamicSortFilter(true);
-    proxyModel->setSortCaseSensitivity(Qt::CaseInsensitive);
-    ui->tableView->setModel(proxyModel);
-
+    
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //offer
     ui->tableView->setColumnWidth(1, 75); //cert
@@ -129,7 +124,7 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
     ui->tableView->setColumnWidth(10, 50); //private
     ui->tableView->setColumnWidth(11, 100); //seller alias
     ui->tableView->setColumnWidth(12, 0); //btc only
-
+	ui->tableView->setSortingEnabled(false);
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
     connect(ui->tableView->selectionModel(), SIGNAL(selectionChanged(QItemSelection,QItemSelection)),

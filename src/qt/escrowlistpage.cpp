@@ -82,14 +82,7 @@ void EscrowListPage::setModel(WalletModel* walletModel, EscrowTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-    proxyModel = new QSortFilterProxyModel(this);
-    proxyModel->setSourceModel(model);
-    proxyModel->setDynamicSortFilter(true);
-    proxyModel->setSortCaseSensitivity(Qt::CaseInsensitive);
-    proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    proxyModel->setFilterRole(EscrowTableModel::TypeRole);
-    ui->tableView->setModel(proxyModel);
-    ui->tableView->sortByColumn(1, Qt::DescendingOrder);
+    ui->tableView->setSortingEnabled(false);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 50); //escrow id

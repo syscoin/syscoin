@@ -95,14 +95,7 @@ void AliasListPage::setModel(WalletModel* walletModel, AliasTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-    proxyModel = new QSortFilterProxyModel(this);
-    proxyModel->setSourceModel(model);
-    proxyModel->setDynamicSortFilter(true);
-    proxyModel->setSortCaseSensitivity(Qt::CaseInsensitive);
-    proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    proxyModel->setFilterRole(AliasTableModel::TypeRole);
-    proxyModel->setFilterFixedString(AliasTableModel::Alias);
-    ui->tableView->setModel(proxyModel);
+    ui->tableView->setSortingEnabled(false);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 500); //alias name
