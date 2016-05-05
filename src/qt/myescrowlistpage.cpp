@@ -116,7 +116,6 @@ void MyEscrowListPage::setModel(WalletModel *walletModel, EscrowTableModel *mode
 	proxyModel->setFilterRole(EscrowTableModel::TypeRole);
 
 	ui->tableView->setModel(proxyModel);
-	ui->tableView->sortByColumn(0, Qt::AscendingOrder);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setSelectionMode(QAbstractItemView::SingleSelection);
 

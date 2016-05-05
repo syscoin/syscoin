@@ -85,7 +85,6 @@ void MyWhitelistOfferDialog::setModel(WalletModel *walletModel)
     proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
 	ui->tableView->setModel(proxyModel);
-	ui->tableView->sortByColumn(0, Qt::AscendingOrder);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setSelectionMode(QAbstractItemView::SingleSelection);
     // Set column widths

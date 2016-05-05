@@ -46,9 +46,12 @@ private:
     QMenu *contextMenu;
     QAction *deleteAction; // to be able to explicitly disable it
     QString newCertToSelect;
-
+	std::map<int, std::pair<std::string, std::string> > pageMap;
+	int currentPage;
 private Q_SLOTS:
-    void on_searchCert_clicked();
+	void on_searchCert_clicked(std::string offer="");
+	void on_prevButton_clicked();
+	void on_nextButton_clicked();
     /** Create a new Cert for receiving coins and / or add a new Cert book entry */
     /** Copy Cert of currently selected Cert entry to clipboard */
     void on_copyCert_clicked();

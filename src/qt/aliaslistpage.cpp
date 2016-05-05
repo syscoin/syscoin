@@ -103,7 +103,6 @@ void AliasListPage::setModel(WalletModel* walletModel, AliasTableModel *model)
     proxyModel->setFilterRole(AliasTableModel::TypeRole);
     proxyModel->setFilterFixedString(AliasTableModel::Alias);
     ui->tableView->setModel(proxyModel);
-    ui->tableView->sortByColumn(0, Qt::AscendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 500); //alias name

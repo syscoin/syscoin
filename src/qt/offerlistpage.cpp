@@ -117,7 +117,6 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
     proxyModel->setFilterRole(OfferTableModel::TypeRole);
     proxyModel->setFilterFixedString(OfferTableModel::Offer);
     ui->tableView->setModel(proxyModel);
-    ui->tableView->sortByColumn(0, Qt::AscendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //offer

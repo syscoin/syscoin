@@ -28,7 +28,8 @@ EscrowListPage::EscrowListPage(const PlatformStyle *platformStyle, QWidget *pare
     QDialog(parent),
     ui(new Ui::EscrowListPage),
     model(0),
-    optionsModel(0)
+    optionsModel(0),
+	currentPage(0)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
@@ -208,10 +209,41 @@ void EscrowListPage::selectNewEscrow(const QModelIndex &parent, int begin, int /
         newEscrowToSelect.clear();
     }
 }
-
-void EscrowListPage::on_searchEscrow_clicked()
+void EscrowListPage::on_prevButton_clicked()
+{
+	if(pageMap.empty())
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		return;
+	}
+	currentPage--;
+	const pair<string, string> &escrowPair = pageMap[currentPage];
+	on_searchEscrow_clicked(escrowPair.first);
+}
+void EscrowListPage::on_nextButton_clicked()
+{
+	if(pageMap.empty())
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		return;
+	}
+	const pair<string, string> &escrowPair = pageMap[currentPage];
+	currentPage++;
+	on_searchEscrow_clicked(escrowPair.second);
+	ui->prevButton->setEnabled(true);
+}
+void EscrowListPage::on_searchEscrow_clicked(string GUID)
 {
     if(!walletModel) return;
+	if(GUID == "")
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		pageMap.clear();
+		currentPage = 0;
+	}
        UniValue params(UniValue::VARR);
         UniValue valError;
         UniValue valResult;
@@ -220,6 +252,8 @@ void EscrowListPage::on_searchEscrow_clicked()
         string strReply;
         string strError;
         string strMethod = string("escrowfilter");
+		string firstEscrow = "";
+		string lastEscrow = "";
 		string name_str;
 		string time_str;
 		string seller_str;
@@ -233,7 +267,8 @@ void EscrowListPage::on_searchEscrow_clicked()
 		int unixTime;
 		QDateTime dateTime;
         params.push_back(ui->lineEditEscrowSearch->text().toStdString());
-
+		params.push_back(GUID);
+		params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
 
         try {
             result = tableRPC.execute(strMethod, params);
@@ -258,6 +293,14 @@ void EscrowListPage::on_searchEscrow_clicked()
 				this->model->clear();
 			
 			  const UniValue &arr = result.get_array();
+			  if(arr.size() >= 25)
+				  ui->nextButton->setEnabled(true);
+			  else
+				  ui->nextButton->setEnabled(false);
+			  if(currentPage <= 0)
+				  ui->prevButton->setEnabled(false);
+			  else
+				  ui->prevButton->setEnabled(true);
 		      for (unsigned int idx = 0; idx < arr.size(); idx++) {
 			    const UniValue& input = arr[idx];
 				if (input.type() != UniValue::VOBJ)
@@ -277,6 +320,9 @@ void EscrowListPage::on_searchEscrow_clicked()
 				const UniValue& name_value = find_value(o, "escrow");
 				if (name_value.type() == UniValue::VSTR)
 					name_str = name_value.get_str();
+				if(firstEscrow == "")
+					firstEscrow = name_str;
+				lastEscrow = name_str;
 				const UniValue& time_value = find_value(o, "time");
 				if (time_value.type() == UniValue::VSTR)
 					time_str = time_value.get_str();
@@ -330,7 +376,8 @@ void EscrowListPage::on_searchEscrow_clicked()
 						QString::fromStdString(buyer_str), AllEscrow, CT_NEW);	
 			  }
 
-            
+  		  pageMap[currentPage] = make_pair(firstEscrow, lastEscrow);  
+		  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));          
          }   
         else
         {

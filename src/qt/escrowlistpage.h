@@ -47,9 +47,12 @@ private:
     QMenu *contextMenu;
     QAction *deleteAction; // to be able to explicitly disable it
     QString newEscrowToSelect;
-
+	std::map<int, std::pair<std::string, std::string> > pageMap;
+	int currentPage;
 private Q_SLOTS:
-    void on_searchEscrow_clicked();
+	void on_searchEscrow_clicked(std::string offer="");
+	void on_prevButton_clicked();
+	void on_nextButton_clicked();
     /** Create a new escrow for receiving coins and / or add a new escrow book entry */
     /** Copy escrow of currently selected escrow entry to clipboard */
     void on_copyEscrow_clicked();

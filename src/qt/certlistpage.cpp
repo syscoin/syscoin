@@ -22,7 +22,8 @@ CertListPage::CertListPage(const PlatformStyle *platformStyle, QWidget *parent) 
     QDialog(parent),
     ui(new Ui::CertListPage),
     model(0),
-    optionsModel(0)
+    optionsModel(0),
+	currentPage(0)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
@@ -89,7 +90,6 @@ void CertListPage::setModel(WalletModel* walletModel, CertTableModel *model)
     proxyModel->setFilterRole(CertTableModel::TypeRole);
     proxyModel->setFilterFixedString(CertTableModel::Cert);
     ui->tableView->setModel(proxyModel);
-    ui->tableView->sortByColumn(0, Qt::AscendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //cert
@@ -207,10 +207,41 @@ void CertListPage::selectNewCert(const QModelIndex &parent, int begin, int /*end
         newCertToSelect.clear();
     }
 }
-
-void CertListPage::on_searchCert_clicked()
+void CertListPage::on_prevButton_clicked()
+{
+	if(pageMap.empty())
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		return;
+	}
+	currentPage--;
+	const pair<string, string> &certPair = pageMap[currentPage];
+	on_searchCert_clicked(certPair.first);
+}
+void CertListPage::on_nextButton_clicked()
+{
+	if(pageMap.empty())
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		return;
+	}
+	const pair<string, string> &certPair = pageMap[currentPage];
+	currentPage++;
+	on_searchCert_clicked(certPair.second);
+	ui->prevButton->setEnabled(true);
+}
+void CertListPage::on_searchCert_clicked(string GUID)
 {
     if(!walletModel) return;
+	if(GUID == "")
+	{
+		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
+		pageMap.clear();
+		currentPage = 0;
+	}
     UniValue params(UniValue::VARR);
     UniValue valError;
     UniValue valResult;
@@ -219,6 +250,8 @@ void CertListPage::on_searchCert_clicked()
     string strReply;
     string strError;
     string strMethod = string("certfilter");
+	string firstCert = "";
+	string lastCert = "";
 	string name_str;
 	string value_str;
 	string data_str;
@@ -231,6 +264,8 @@ void CertListPage::on_searchCert_clicked()
 	int expires_in = 0;
 	int expires_on = 0; 
     params.push_back(ui->lineEditCertSearch->text().toStdString());
+	params.push_back(GUID);
+	params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
 
 
     try {
@@ -256,6 +291,14 @@ void CertListPage::on_searchCert_clicked()
 			this->model->clear();
 		
 		  const UniValue &arr = result.get_array();
+		  if(arr.size() >= 25)
+			  ui->nextButton->setEnabled(true);
+		  else
+			  ui->nextButton->setEnabled(false);
+		  if(currentPage <= 0)
+			  ui->prevButton->setEnabled(false);
+		  else
+			  ui->prevButton->setEnabled(true);
 		  for (unsigned int idx = 0; idx < arr.size(); idx++) {
 			    const UniValue& input = arr[idx];
 			if (input.type() != UniValue::VOBJ)
@@ -275,6 +318,9 @@ void CertListPage::on_searchCert_clicked()
 			const UniValue& name_value = find_value(o, "cert");
 			if (name_value.type() == UniValue::VSTR)
 				name_str = name_value.get_str();
+			if(firstCert == "")
+				firstCert = name_str;
+			lastCert = name_str;
 			const UniValue& value_value = find_value(o, "title");
 			if (value_value.type() == UniValue::VSTR)
 				value_str = value_value.get_str();
@@ -297,10 +343,7 @@ void CertListPage::on_searchCert_clicked()
 			expired_str = "Valid";
 			expires_in_str = strprintf("%d Blocks", expires_in);
 			expires_on_str = strprintf("Block %d", expires_on);
-		  }
-
-			
-			
+		  
 		   model->addRow(CertTableModel::Cert,
 					QString::fromStdString(name_str),
 					QString::fromStdString(value_str),
@@ -318,7 +361,9 @@ void CertListPage::on_searchCert_clicked()
 					QString::fromStdString(expired_str), 
 					QString::fromStdString(private_str), 
 					QString::fromStdString(alias_str), AllCert, CT_NEW);	
-
+		  }
+		  pageMap[currentPage] = make_pair(firstCert, lastCert);  
+		  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));
 	} 
     else
     {

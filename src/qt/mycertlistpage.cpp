@@ -130,7 +130,6 @@ void MyCertListPage::setModel(WalletModel *walletModel, CertTableModel *model)
 
 
     ui->tableView->setModel(proxyModel);
-    ui->tableView->sortByColumn(0, Qt::AscendingOrder);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setSelectionMode(QAbstractItemView::SingleSelection);
 
