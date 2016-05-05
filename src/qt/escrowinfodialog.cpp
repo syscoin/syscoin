@@ -5,6 +5,7 @@
 #include "offer.h"
 #include "guiutil.h"
 #include "syscoingui.h"
+#include "escrowtablemodel.h"
 #include "platformstyle.h"
 #include <QMessageBox>
 #include <QModelIndex>
@@ -23,7 +24,7 @@ EscrowInfoDialog::EscrowInfoDialog(const PlatformStyle *platformStyle, const QMo
 
     mapper = new QDataWidgetMapper(this);
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
-	GUID = idx.data(EscrowTableModel::NameRole).toString();
+	GUID = idx.data(EscrowTableModel::EscrowRole).toString();
 
 
 	QString theme = GUIUtil::getThemeName();  
