@@ -743,7 +743,7 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 	banIt = banList.find(stringFromVch(vchCert));
 	if (banIt != banList.end())
 	{
-		if(banIt->second != "0" || banIt->second != "1")
+		if(banIt->second != "0" && banIt->second != "1")
 			throw runtime_error("cert has been banned");
 	}
     // look for a transaction with this key, also returns

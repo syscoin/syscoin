@@ -1437,7 +1437,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 	banIt = banList.find(stringFromVch(vchName));
 	if (banIt != banList.end())
 	{
-		if(banIt->second != "0" || banIt->second != "1")
+		if(banIt->second != "0" && banIt->second != "1")
 			throw runtime_error("alias has been banned");
 	}
 	CTransaction tx;
