@@ -237,8 +237,9 @@ void AliasListPage::selectNewAlias(const QModelIndex &parent, int begin, int /*e
 }
 void AliasListPage::on_prevButton_clicked()
 {
-	if(currentPage <= 0)
+	if(pageMap.empty())
 	{
+		ui->nextButton->setEnabled(false);
 		ui->prevButton->setEnabled(false);
 		return;
 	}
@@ -251,6 +252,7 @@ void AliasListPage::on_nextButton_clicked()
 	if(pageMap.empty())
 	{
 		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
 		return;
 	}
 	const pair<string, string> &aliasPair = pageMap[currentPage];
@@ -317,6 +319,10 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 				  ui->nextButton->setEnabled(true);
 			  else
 				  ui->nextButton->setEnabled(false);
+			  if(currentPage <= 0)
+				  ui->prevButton->setEnabled(false);
+			  else
+				  ui->prevButton->setEnabled(true);
 			  for (unsigned int idx = 0; idx < arr.size(); idx++) {
 				const UniValue& input = arr[idx];
 				if (input.type() != UniValue::VOBJ)

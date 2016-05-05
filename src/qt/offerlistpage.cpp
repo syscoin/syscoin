@@ -322,8 +322,9 @@ void OfferListPage::selectNewOffer(const QModelIndex &parent, int begin, int /*e
 }
 void OfferListPage::on_prevButton_clicked()
 {
-	if(currentPage <= 0)
+	if(pageMap.empty())
 	{
+		ui->nextButton->setEnabled(false);
 		ui->prevButton->setEnabled(false);
 		return;
 	}
@@ -336,6 +337,7 @@ void OfferListPage::on_nextButton_clicked()
 	if(pageMap.empty())
 	{
 		ui->nextButton->setEnabled(false);
+		ui->prevButton->setEnabled(false);
 		return;
 	}
 	const pair<string, string> &offerPair = pageMap[currentPage];
@@ -414,6 +416,10 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			  ui->nextButton->setEnabled(true);
 		  else
 			  ui->nextButton->setEnabled(false);
+		  if(currentPage <= 0)
+			  ui->prevButton->setEnabled(false);
+		  else
+			  ui->prevButton->setEnabled(true);
 
 
 		  
