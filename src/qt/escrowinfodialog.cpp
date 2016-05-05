@@ -69,8 +69,8 @@ bool EscrowInfoDialog::lookup()
 			ui->titleEdit->setText(QString::fromStdString(find_value(result.get_obj(), "offertitle").get_str()));
 			ui->heightEdit->setText(QString::fromStdString(find_value(result.get_obj(), "height").get_str()));
 			ui->timeEdit->setText(QString::fromStdString(find_value(result.get_obj(), "time").get_str()));
-			ui->priceEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "systotal")))));
-			ui->feeEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "sysfee")))));
+			ui->priceEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "systotal"))));
+			ui->feeEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "sysfee"))));
 			ui->totalEdit->setText(QString::fromStdString(find_value(result.get_obj(), "total").get_str()));
 			ui->paymessageEdit->setText(QString::fromStdString(find_value(result.get_obj(), "pay_message").get_str()));
 			return true;
