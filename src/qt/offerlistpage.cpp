@@ -108,6 +108,7 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
+    ui->tableView->setModel(model);
 	ui->tableView->setSortingEnabled(false);
 
     // Set column widths
