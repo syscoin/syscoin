@@ -37,22 +37,6 @@ struct EscrowTableEntry
         type(type), escrow(escrow), time(time), seller(seller), arbiter(arbiter), offer(offer), offertitle(offertitle), offeraccept(offeraccept), total(total), status(status), buyer(buyer){}
 };
 
-struct EscrowTableEntryLessThan
-{
-    bool operator()(const EscrowTableEntry &a, const EscrowTableEntry &b) const
-    {
-        return a.escrow < b.escrow;
-    }
-    bool operator()(const EscrowTableEntry &a, const QString &b) const
-    {
-        return a.escrow < b;
-    }
-    bool operator()(const QString &a, const EscrowTableEntry &b) const
-    {
-        return a < b.escrow;
-    }
-};
-
 
 // Private implementation
 class EscrowTablePriv
@@ -163,8 +147,7 @@ public:
 				return;
 			}           
          }
-        // qLowerBound() and qUpperBound() require our cachedEscrowTable list to be sorted in asc order
-        qSort(cachedEscrowTable.begin(), cachedEscrowTable.end(), EscrowTableEntryLessThan());
+
     }
 
     void updateEntry(const QString &escrow, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer, EscrowModelType type, int statusi)
@@ -175,9 +158,9 @@ public:
 		}
         // Find escrow / value in model
         QList<EscrowTableEntry>::iterator lower = qLowerBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowTableEntryLessThan());
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow);
         QList<EscrowTableEntry>::iterator upper = qUpperBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowTableEntryLessThan());
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow);
         int lowerIndex = (lower - cachedEscrowTable.begin());
         int upperIndex = (upper - cachedEscrowTable.begin());
         bool inModel = (lower != upper);

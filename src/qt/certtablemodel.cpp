@@ -35,22 +35,6 @@ struct CertTableEntry
         type(type), title(title), cert(cert), data(data), expires_on(expires_on), expires_in(expires_in), expired(expired),privatecert(privatecert), alias(alias) {}
 };
 
-struct CertTableEntryLessThan
-{
-    bool operator()(const CertTableEntry &a, const CertTableEntry &b) const
-    {
-        return a.cert < b.cert;
-    }
-    bool operator()(const CertTableEntry &a, const QString &b) const
-    {
-        return a.cert < b;
-    }
-    bool operator()(const QString &a, const CertTableEntry &b) const
-    {
-        return a < b.cert;
-    }
-};
-
 
 // Private implementation
 class CertTablePriv
@@ -175,8 +159,7 @@ public:
 			}
          }
         
-        // qLowerBound() and qUpperBound() require our cachedCertTable list to be sorted in asc order
-        qSort(cachedCertTable.begin(), cachedCertTable.end(), CertTableEntryLessThan());
+
     }
 
     void updateEntry(const QString &cert, const QString &title, const QString &data, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &privatecert, const QString &alias, CertModelType type, int status)
@@ -187,9 +170,9 @@ public:
 		}
         // Find cert / value in model
         QList<CertTableEntry>::iterator lower = qLowerBound(
-            cachedCertTable.begin(), cachedCertTable.end(), cert, CertTableEntryLessThan());
+            cachedCertTable.begin(), cachedCertTable.end(), cert);
         QList<CertTableEntry>::iterator upper = qUpperBound(
-            cachedCertTable.begin(), cachedCertTable.end(), cert, CertTableEntryLessThan());
+            cachedCertTable.begin(), cachedCertTable.end(), cert);
         int lowerIndex = (lower - cachedCertTable.begin());
         int upperIndex = (upper - cachedCertTable.begin());
         bool inModel = (lower != upper);

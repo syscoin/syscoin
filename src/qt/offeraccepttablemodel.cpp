@@ -39,22 +39,6 @@ struct OfferAcceptTableEntry
         type(type), guid(guid), offer(offer), title(title), height(height),price(price), currency(currency),qty(qty), total(total), status(status), alias(alias), buyer(buyer) {}
 };
 
-struct OfferAcceptTableEntryLessThan
-{
-    bool operator()(const OfferAcceptTableEntry &a, const OfferAcceptTableEntry &b) const
-    {
-        return a.offer < b.offer;
-    }
-    bool operator()(const OfferAcceptTableEntry &a, const QString &b) const
-    {
-        return a.offer < b;
-    }
-    bool operator()(const QString &a, const OfferAcceptTableEntry &b) const
-    {
-        return a < b.offer;
-    }
-};
-
 
 // Private implementation
 class OfferAcceptTablePriv
@@ -153,8 +137,6 @@ public:
 			}         
          }
         
-        // qLowerBound() and qUpperBound() require our cachedOfferTable list to be sorted in asc order
-        qSort(cachedOfferTable.begin(), cachedOfferTable.end(), OfferAcceptTableEntryLessThan());
     }
 
     void updateEntry(const QString &offer, const QString &guid, const QString &title, const QString &height,const QString &price, const QString &currency,const QString &qty,const QString &total, const QString &alias, const QString &status,  const QString &buyer, OfferAcceptModelType type, int statusi)
@@ -165,9 +147,9 @@ public:
 		}
         // Find offer / value in model
         QList<OfferAcceptTableEntry>::iterator lower = qLowerBound(
-            cachedOfferTable.begin(), cachedOfferTable.end(), guid, OfferAcceptTableEntryLessThan());
+            cachedOfferTable.begin(), cachedOfferTable.end(), guid);
         QList<OfferAcceptTableEntry>::iterator upper = qUpperBound(
-            cachedOfferTable.begin(), cachedOfferTable.end(), guid, OfferAcceptTableEntryLessThan());
+            cachedOfferTable.begin(), cachedOfferTable.end(), guid);
         int lowerIndex = (lower - cachedOfferTable.begin());
         int upperIndex = (upper - cachedOfferTable.begin());
         bool inModel = (lower != upper);

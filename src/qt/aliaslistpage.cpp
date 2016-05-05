@@ -95,9 +95,7 @@ void AliasListPage::setModel(WalletModel* walletModel, AliasTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-    proxyModel = new QSortFilterProxyModel(this);
-    proxyModel->setSourceModel(model);
-    ui->tableView->setModel(proxyModel);
+    ui->tableView->setModel(model);
 	ui->tableView->setSortingEnabled(false);
 
     // Set column widths
@@ -183,31 +181,6 @@ void AliasListPage::keyPressEvent(QKeyEvent * event)
   else
     QDialog::keyPressEvent( event );
 }
-void AliasListPage::on_exportButton_clicked()
-{
-    // CSV is currently the only supported format
-    QString filename = GUIUtil::getSaveFileName(
-            this,
-            tr("Export Alias Data"), QString(),
-            tr("Comma separated file (*.csv)"), NULL);
-
-    if (filename.isNull()) return;
-
-    CSVModelWriter writer(filename);
-
-    // name, column, role
-    writer.setModel(proxyModel);
-    writer.addColumn("Alias", AliasTableModel::Name, Qt::EditRole);
-    writer.addColumn("Value", AliasTableModel::Value, Qt::EditRole);
-	writer.addColumn("Expires On", AliasTableModel::ExpiresOn, Qt::EditRole);
-	writer.addColumn("Expires In", AliasTableModel::ExpiresIn, Qt::EditRole);
-	writer.addColumn("Expired", AliasTableModel::Expired, Qt::EditRole);
-    if(!writer.write())
-    {
-        QMessageBox::critical(this, tr("Error exporting"), tr("Could not write to file %1.").arg(filename),
-                              QMessageBox::Abort, QMessageBox::Abort);
-    }
-}
 
 
 
@@ -221,7 +194,7 @@ void AliasListPage::contextualMenu(const QPoint &point)
 
 void AliasListPage::selectNewAlias(const QModelIndex &parent, int begin, int /*end*/)
 {
-    QModelIndex idx = proxyModel->mapFromSource(model->index(begin, AliasTableModel::Name, parent));
+    QModelIndex idx = model->index(begin, AliasTableModel::Name, parent);
     if(idx.isValid() && (idx.data(Qt::EditRole).toString() == newAliasToSelect))
     {
         // Select row of newly created alias, once

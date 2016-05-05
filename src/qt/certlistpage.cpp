@@ -9,7 +9,6 @@
 #include "csvmodelwriter.h"
 #include "guiutil.h"
 #include "ui_interface.h"
-#include <QSortFilterProxyModel>
 #include <QClipboard>
 #include <QMessageBox>
 #include <QKeyEvent>
@@ -82,9 +81,7 @@ void CertListPage::setModel(WalletModel* walletModel, CertTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-    proxyModel = new QSortFilterProxyModel(this);
-    proxyModel->setSourceModel(model);
-    ui->tableView->setModel(proxyModel);
+    ui->tableView->setModel(model);
 	ui->tableView->setSortingEnabled(false);
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //cert
@@ -152,36 +149,6 @@ void CertListPage::keyPressEvent(QKeyEvent * event)
   else
     QDialog::keyPressEvent( event );
 }
-void CertListPage::on_exportButton_clicked()
-{
-    // CSV is currently the only supported format
-    QString filename = GUIUtil::getSaveFileName(
-            this,
-            tr("Export Certificate Data"), QString(),
-            tr("Comma separated file (*.csv)"), NULL);
-
-    if (filename.isNull()) return;
-
-    CSVModelWriter writer(filename);
-
-    // name, column, role
-    writer.setModel(proxyModel);
-    writer.addColumn("Certificate", CertTableModel::Name, Qt::EditRole);
-    writer.addColumn("Title", CertTableModel::Title, Qt::EditRole);
-	writer.addColumn("Data", CertTableModel::Data, Qt::EditRole);
-	writer.addColumn("Private", CertTableModel::Private, Qt::EditRole);
-	writer.addColumn("Expires On", CertTableModel::ExpiresOn, Qt::EditRole);
-	writer.addColumn("Expires In", CertTableModel::ExpiresIn, Qt::EditRole);
-	writer.addColumn("Expired", CertTableModel::Expired, Qt::EditRole);
-	writer.addColumn("Alias", CertTableModel::Alias, Qt::EditRole);
-    if(!writer.write())
-    {
-        QMessageBox::critical(this, tr("Error exporting"), tr("Could not write to file %1.").arg(filename),
-                              QMessageBox::Abort, QMessageBox::Abort);
-    }
-}
-
-
 
 void CertListPage::contextualMenu(const QPoint &point)
 {
@@ -193,7 +160,7 @@ void CertListPage::contextualMenu(const QPoint &point)
 
 void CertListPage::selectNewCert(const QModelIndex &parent, int begin, int /*end*/)
 {
-    QModelIndex idx = proxyModel->mapFromSource(model->index(begin, CertTableModel::Name, parent));
+    QModelIndex idx = model->index(begin, CertTableModel::Name, parent);
     if(idx.isValid() && (idx.data(Qt::EditRole).toString() == newCertToSelect))
     {
         // Select row of newly created cert, once

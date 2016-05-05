@@ -11,7 +11,6 @@
 #include "guiutil.h"
 #include "ui_interface.h"
 #include "platformstyle.h"
-#include <QSortFilterProxyModel>
 #include <QClipboard>
 #include <QMessageBox>
 #include <QKeyEvent>
@@ -82,9 +81,7 @@ void EscrowListPage::setModel(WalletModel* walletModel, EscrowTableModel *model)
 	this->walletModel = walletModel;
     if(!model) return;
 
-	proxyModel = new QSortFilterProxyModel(this);
-    proxyModel->setSourceModel(model);
-    ui->tableView->setModel(proxyModel);
+    ui->tableView->setModel(model);
 	ui->tableView->setSortingEnabled(false);
     // Set column widths
     ui->tableView->setColumnWidth(0, 50); //escrow id
@@ -153,37 +150,6 @@ void EscrowListPage::keyPressEvent(QKeyEvent * event)
   else
     QDialog::keyPressEvent( event );
 }
-void EscrowListPage::on_exportButton_clicked()
-{
-    // CSV is currently the only supported format
-    QString filename = GUIUtil::getSaveFileName(
-            this,
-            tr("Export Escrow Data"), QString(),
-            tr("Comma separated file (*.csv)"), NULL);
-
-    if (filename.isNull()) return;
-
-    CSVModelWriter writer(filename);
-
-    // name, column, role
-    writer.setModel(proxyModel);
-    writer.addColumn("Escrow", EscrowTableModel::Escrow, Qt::EditRole);
-	writer.addColumn("Time", EscrowTableModel::Time, Qt::EditRole);
-    writer.addColumn("Arbiter", EscrowTableModel::Arbiter, Qt::EditRole);
-	writer.addColumn("Seller", EscrowTableModel::Seller, Qt::EditRole);
-	writer.addColumn("Offer", EscrowTableModel::Offer, Qt::EditRole);
-	writer.addColumn("OfferTitle", EscrowTableModel::OfferTitle, Qt::EditRole);
-	writer.addColumn("Confirmation", EscrowTableModel::OfferAccept, Qt::EditRole);
-	writer.addColumn("Total", EscrowTableModel::Total, Qt::EditRole);
-	writer.addColumn("Status", EscrowTableModel::Status, Qt::EditRole);
-    if(!writer.write())
-    {
-        QMessageBox::critical(this, tr("Error exporting"), tr("Could not write to file %1.").arg(filename),
-                              QMessageBox::Abort, QMessageBox::Abort);
-    }
-}
-
-
 
 void EscrowListPage::contextualMenu(const QPoint &point)
 {

@@ -259,39 +259,6 @@ void OfferListPage::keyPressEvent(QKeyEvent * event)
   else
     QDialog::keyPressEvent( event );
 }
-void OfferListPage::on_exportButton_clicked()
-{
-    // CSV is currently the only supported format
-    QString filename = GUIUtil::getSaveFileName(
-            this,
-            tr("Export Offer Data"), QString(),
-            tr("Comma separated file (*.csv)"), NULL);
-
-    if (filename.isNull()) return;
-
-    CSVModelWriter writer(filename);
-
-    // name, column, role
-    writer.setModel(model);
-    writer.addColumn("Offer", OfferTableModel::Name, Qt::EditRole);
-	writer.addColumn("Cert", OfferTableModel::Cert, Qt::EditRole);
-    writer.addColumn("Title", OfferTableModel::Title, Qt::EditRole);
-	writer.addColumn("Description", OfferTableModel::Title, Qt::EditRole);
-	writer.addColumn("Category", OfferTableModel::Category, Qt::EditRole);
-	writer.addColumn("Price", OfferTableModel::Price, Qt::EditRole);
-	writer.addColumn("Currency", OfferTableModel::Currency, Qt::EditRole);
-	writer.addColumn("Qty", OfferTableModel::Qty, Qt::EditRole);
-	writer.addColumn("Exclusive Resell", OfferTableModel::ExclusiveResell, Qt::EditRole);
-	writer.addColumn("Private", OfferTableModel::Private, Qt::EditRole);
-	writer.addColumn("Expired", OfferTableModel::Expired, Qt::EditRole);
-    if(!writer.write())
-    {
-        QMessageBox::critical(this, tr("Error exporting"), tr("Could not write to file %1.").arg(filename),
-                              QMessageBox::Abort, QMessageBox::Abort);
-    }
-}
-
-
 
 void OfferListPage::contextualMenu(const QPoint &point)
 {

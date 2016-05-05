@@ -12,7 +12,6 @@ class WalletModel;
 QT_BEGIN_NAMESPACE
 class QTableView;
 class QItemSelection;
-class QSortFilterProxyModel;
 class QMenu;
 class QModelIndex;
 class QKeyEvent;
@@ -42,7 +41,6 @@ private:
     OptionsModel *optionsModel;
 	WalletModel* walletModel;
     QString returnValue;
-    QSortFilterProxyModel *proxyModel;
     QMenu *contextMenu;
     QAction *deleteAction; // to be able to explicitly disable it
     QString newAliasToSelect;
@@ -58,8 +56,6 @@ private Q_SLOTS:
     /** Copy value of currently selected alias entry to clipboard (no button) */
     void onCopyAliasValueAction();
 	void on_messageButton_clicked();
-    /** Export button clicked */
-    void on_exportButton_clicked();
 
     /** Set button states based on selected tab and selection */
     void selectionChanged();
