@@ -6,6 +6,7 @@
 #include "escrowtablemodel.h"
 #include "newmessagedialog.h"
 #include "manageescrowdialog.h"
+#include "escrowinfodialog.h"
 #include "clientmodel.h"
 #include "platformstyle.h"
 #include "optionsmodel.h"
@@ -39,6 +40,7 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 		ui->manageButton->setIcon(QIcon());
 		ui->copyEscrow->setIcon(QIcon());
 		ui->refreshButton->setIcon(QIcon());
+		ui->detailButton->setIcon(QIcon());
 
 	}
 	else
@@ -50,6 +52,7 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 		ui->manageButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/escrow1"));
 		ui->copyEscrow->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->refreshButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/refresh"));
+		ui->detailButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/details"));
 		
 	}
 
@@ -57,12 +60,12 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 
     ui->labelExplanation->setText(tr("These are your registered Syscoin Escrows. Escrow operations (create, release, refund, complete) take 2-5 minutes to become active."));
 	
-	
+	connect(ui->tableView, SIGNAL(doubleClicked(QModelIndex)), this, SLOT(on_detailButton_clicked()));
     // Context menu actions
     QAction *copyEscrowAction = new QAction(ui->copyEscrow->text(), this);
 	QAction *copyOfferAction = new QAction(tr("&Copy Offer ID"), this);
     QAction *manageAction = new QAction(tr("Manage Escrow"), this);
-
+	QAction *detailsAction = new QAction(tr("&Details"), this);
     QAction *buyerMessageAction = new QAction(tr("Send Msg To Buyer"), this);
 	QAction *sellerMessageAction = new QAction(tr("Send Msg To Seller"), this);
 	QAction *arbiterMessageAction = new QAction(tr("Send Msg To Arbiter"), this);
@@ -75,6 +78,7 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 	contextMenu->addAction(sellerMessageAction);
 	contextMenu->addAction(arbiterMessageAction);
     contextMenu->addSeparator();
+	contextMenu->addAction(detailsAction);
 	contextMenu->addAction(manageAction);
     // Connect signals for context menu actions
     connect(copyEscrowAction, SIGNAL(triggered()), this, SLOT(on_copyEscrow_clicked()));
@@ -84,6 +88,7 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 	connect(buyerMessageAction, SIGNAL(triggered()), this, SLOT(on_buyerMessageButton_clicked()));
 	connect(sellerMessageAction, SIGNAL(triggered()), this, SLOT(on_sellerMessageButton_clicked()));
 	connect(arbiterMessageAction, SIGNAL(triggered()), this, SLOT(on_arbiterMessageButton_clicked()));
+	connect(detailsAction, SIGNAL(triggered()), this, SLOT(on_detailButton_clicked()));
 
     connect(ui->tableView, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
 
@@ -250,7 +255,17 @@ void MyEscrowListPage::on_exportButton_clicked()
     }
 }
 
-
+void MyEscrowListPage::on_detailButton_clicked()
+{
+    if(!ui->tableView->selectionModel())
+        return;
+    QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
+    if(!selection.isEmpty())
+    {
+        EscrowInfoDialog dlg(platformStyle, selection.at(0));
+        dlg.exec();
+    }
+}
 
 void MyEscrowListPage::contextualMenu(const QPoint &point)
 {

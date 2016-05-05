@@ -54,6 +54,7 @@ private Q_SLOTS:
 	void on_sellerMessageButton_clicked();
 	void on_arbiterMessageButton_clicked();
 	void on_manageButton_clicked();
+	void on_detailButton_clicked();
     /** Spawn contextual menu (right mouse menu) for cert book entry */
     void contextualMenu(const QPoint &point);
     /** New entry/entries were added to cert table */

@@ -65,6 +65,13 @@
       </widget>
      </item>
      <item>
+      <widget class="QPushButton" name="detailButton">
+       <property name="text">
+        <string>Details</string>
+       </property>
+      </widget>
+     </item>
+     <item>
       <widget class="QPushButton" name="manageButton">
        <property name="toolTip">
         <string>Release selected escrow to merchant</string>
