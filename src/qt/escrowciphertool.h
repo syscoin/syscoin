@@ -21,7 +21,7 @@ public:
 private:
 	bool lookup();
 private Q_SLOTS:
-	void textChangedSlot(const QString &str);
+	void textChangedSlot();
 	void on_okButton_clicked();
 private:
 	QDataWidgetMapper *mapper;
