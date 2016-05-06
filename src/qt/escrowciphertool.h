@@ -21,7 +21,7 @@ public:
 private:
 	bool lookup();
 private Q_SLOTS:
-	void on_calculuateButton_clicked();
+	void on_calculateButton_clicked();
 	void on_okButton_clicked();
 private:
 	QDataWidgetMapper *mapper;
