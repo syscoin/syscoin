@@ -58,7 +58,7 @@ void EscrowCipherTool::textChangedSlot(const QString&)
 	UniValue params(UniValue::VARR);
 	UniValue result;
 	params.push_back(ui->labelAlias->text().toStdString());
-	params.push_back(ui->messageEdit->text().toStdString());
+	params.push_back(ui->messageEdit->toPlainText().toStdString());
 
     try {
         result = tableRPC.execute(strMethod, params);
