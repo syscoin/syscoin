@@ -70,10 +70,10 @@ void EscrowCipherTool::textChangedSlot(const QString&)
 			ui->labelCipher->setText(QString::fromStdString(strResult));
 			if(ui->labelCipher->text() == ui->labelEscrowCipher->text())
 			{
-				ui->labelResult->setText("<font color='green'>Payment message is correct. Calculated Cipher and Payment Message Cipher's match!</font>");
+				ui->labelResult->setText("<font color='green'>Payment message is <b>correct</b>. Calculated and Payment Message Cipher's match!</font>");
 			}
 			{
-				ui->labelResult->setText("<font color='green'>Payment message is incorrect. Calculated Cipher and Payment Message Cipher's do not match!</font>");
+				ui->labelResult->setText("<font color='red'>Payment message is <b>incorrect</b>. Calculated and Payment Message Cipher's do not match!</font>");
 			}
 		}	 
 	}
