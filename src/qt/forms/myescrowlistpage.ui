@@ -118,13 +118,6 @@
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="cipherToolButton">
-       <property name="text">
-        <string>Cipher Tool</string>
-       </property>
-      </widget>
-     </item>
-     <item>
       <widget class="QPushButton" name="refreshButton">
        <property name="maximumSize">
         <size>
