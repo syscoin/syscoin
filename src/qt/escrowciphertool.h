@@ -21,7 +21,7 @@ public:
 private:
 	bool lookup();
 Q_SIGNALS:
-    void textChanged(const QString &str);
+    void textChangedSlot(const QString &str);
 private Q_SLOTS:
 	
 	void on_okButton_clicked();
