@@ -31,15 +31,15 @@ EscrowCipherTool::EscrowCipherTool(const PlatformStyle *platformStyle, const QMo
 	if (!platformStyle->getImagesOnButtons())
 	{
 		ui->okButton->setIcon(QIcon());
+		ui->calculateButton->setIcon(QIcon());
 
 	}
 	else
 	{
 		ui->okButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/synced"));
+		ui->calculateButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/verify"));
 	}
-	connect(ui->messageEdit,SIGNAL(textChanged(QString)),this,SLOT(textChangedSlot()));
 	ui->cipherInfo->setText(tr("This is a tool designed to verify that the payment message that the seller provides to an arbiter is correct. Please enter the payment message sent to the seller by the buyer in the Message section. The calculated cipher should match the Payment Message Cipher. If it doesn't then the payment message is incorrect."));
-	ui->labelResult->setText("Waiting for user to enter message");
 	lookup();
 }
 
@@ -52,9 +52,8 @@ void EscrowCipherTool::on_okButton_clicked()
     mapper->submit();
     accept();
 }
-void EscrowCipherTool::textChangedSlot()
+void EscrowCipherTool::on_calculuateButton_clicked()
 {
-	ui->labelResult->setText("Creating cipher...");
 	string strError;
 	string strMethod = string("escrowcipher");
 	UniValue params(UniValue::VARR);
