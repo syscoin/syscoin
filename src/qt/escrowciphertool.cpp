@@ -39,6 +39,7 @@ EscrowCipherTool::EscrowCipherTool(const PlatformStyle *platformStyle, const QMo
 	}
 	connect(ui->messageEdit,SIGNAL(textChanged(const QString&)),this,SLOT(textChangedSlot(const QString&)));
 	ui->cipherInfo->setText(tr("This is a tool designed to verify that the payment message that the seller provides to an arbiter is correct. Please enter the payment message sent to the seller by the buyer in the Message section. The calculated cipher should match the Payment Message Cipher. If it doesn't then the payment message is incorrect."));
+	ui->labelResult->setText("");
 	lookup();
 }
 
@@ -53,6 +54,7 @@ void EscrowCipherTool::on_okButton_clicked()
 }
 void EscrowCipherTool::textChangedSlot(const QString&)
 {
+	ui->labelResult->setText("");
 	string strError;
 	string strMethod = string("escrowcipher");
 	UniValue params(UniValue::VARR);
