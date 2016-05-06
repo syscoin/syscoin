@@ -52,7 +52,7 @@ void EscrowCipherTool::on_okButton_clicked()
     mapper->submit();
     accept();
 }
-void EscrowCipherTool::on_calculuateButton_clicked()
+void EscrowCipherTool::on_calculateButton_clicked()
 {
 	string strError;
 	string strMethod = string("escrowcipher");
