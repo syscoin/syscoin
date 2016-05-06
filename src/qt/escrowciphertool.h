@@ -20,10 +20,8 @@ public:
     ~EscrowCipherTool();
 private:
 	bool lookup();
-Q_SIGNALS:
-    void textChangedSlot(const QString &str);
 private Q_SLOTS:
-	
+	void textChangedSlot(const QString &str);
 	void on_okButton_clicked();
 private:
 	QDataWidgetMapper *mapper;
