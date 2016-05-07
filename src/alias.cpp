@@ -359,10 +359,10 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, unsigned char>>& banCertList,  map<string, unsigned char>>& banOfferList,const UniValue& outerValue)
 {
 	UniValue outerObj = outerValue.get_obj();
-	UniValue objValue = find_value(outerObj, "offers");
-	if (objValue.isArray())
+	UniValue objOfferValue = find_value(outerObj, "offers");
+	if (objOfferValue.isArray())
 	{
-		UniValue codes = objValue.get_array();
+		UniValue codes = objOfferValue.get_array();
 		for (unsigned int idx = 0; idx < codes.size(); idx++) {
 			const UniValue& code = codes[idx];					
 			UniValue codeObj = code.get_obj();					
@@ -377,10 +377,10 @@ bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, 
 		}
 	}
 
-	UniValue objValue = find_value(outerObj, "certs");
-	if (objValue.isArray())
+	UniValue objCertValue = find_value(outerObj, "certs");
+	if (objCertValue.isArray())
 	{
-		UniValue codes = objValue.get_array();
+		UniValue codes = objCertValue.get_array();
 		for (unsigned int idx = 0; idx < codes.size(); idx++) {
 			const UniValue& code = codes[idx];					
 			UniValue codeObj = code.get_obj();					
@@ -396,10 +396,10 @@ bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, 
 		
 	
 
-	UniValue objValue = find_value(outerObj, "aliases");
-	if (objValue.isArray())
+	UniValue objAliasValue = find_value(outerObj, "aliases");
+	if (objAliasValue.isArray())
 	{
-		UniValue codes = objValue.get_array();
+		UniValue codes = objAliasValue.get_array();
 		for (unsigned int idx = 0; idx < codes.size(); idx++) {
 			const UniValue& code = codes[idx];					
 			UniValue codeObj = code.get_obj();					
