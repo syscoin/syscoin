@@ -356,7 +356,7 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 	return "";
 
 }
-bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, unsigned char>>& banCertList,  map<string, unsigned char>>& banOfferList,const UniValue& outerValue)
+bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, unsigned char>& banCertList,  map<string, unsigned char>& banOfferList,const UniValue& outerValue)
 {
 	UniValue outerObj = outerValue.get_obj();
 	UniValue objOfferValue = find_value(outerObj, "offers");
