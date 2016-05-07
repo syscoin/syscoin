@@ -885,6 +885,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						theOffer.sDescription = dbOffer.sDescription;
 					if(serializedOffer.vchAliasPeg.empty())
 						theOffer.vchAliasPeg = dbOffer.vchAliasPeg;
+					// user can't update safety level after creation
+					theOffer.safetyLevel = dbOffer.safetyLevel;
 				}
 			}
 			if(!theOffer.vchCert.empty())						

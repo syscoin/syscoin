@@ -706,6 +706,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					theAlias.vchPublicValue = dbAlias.vchPublicValue;	
 				if(theAlias.vchPrivateValue.empty())
 					theAlias.vchPrivateValue = dbAlias.vchPrivateValue;	
+				// user can't update safety level after creation
 				theAlias.safetyLevel = dbAlias.safetyLevel;
 			}
 			// if transfer

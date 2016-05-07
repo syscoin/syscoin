@@ -372,6 +372,9 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 					theCert.vchData = dbCert.vchData;
 				if(theCert.vchTitle.empty())
 					theCert.vchTitle = dbCert.vchTitle;
+				// user can't update safety level after creation
+				theCert.safetyLevel = dbCert.safetyLevel;
+
 			}
 		}
 
