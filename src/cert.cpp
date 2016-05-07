@@ -736,7 +736,6 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
                 "Show stored values of a single certificate and its .\n");
 
     vector<unsigned char> vchCert = vchFromValue(params[0]);
-	map<string, string> banList;
 
     // look for a transaction with this key, also returns
     // an cert object if it is found
