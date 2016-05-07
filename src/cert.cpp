@@ -755,7 +755,7 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 	if (!pcertdb->ReadCert(vchCert, vtxPos) || vtxPos.empty())
 		throw runtime_error("failed to read from cert DB");
 	CCert ca = vtxPos.back();
-	if(alias.safetyLevel >= SAFETY_LEVEL2)
+	if(ca.safetyLevel >= SAFETY_LEVEL2)
 		throw runtime_error("cert has been banned");
 	if (!GetSyscoinTransaction(ca.nHeight, ca.txHash, tx, Params().GetConsensus()))
 		throw runtime_error("failed to read transaction from disk");   
