@@ -590,10 +590,10 @@ void updateBans(const vector<unsigned char> &banData)
 			unsigned char severity = (*it).second;
 			if(pofferdb->ExistsOffer(vchGUID))
 			{
-				vector<CCert> vtxOfferPos;
+				vector<COffer> vtxOfferPos;
 				if (pofferdb->ReadOffer(vchGUID, vtxOfferPos) && !vtxOfferPos.empty())
 				{
-					CCert offerBan = vtxOfferPos.back();
+					COffer offerBan = vtxOfferPos.back();
 					offerBan.severityLevel = severity;
 					PutToOfferList(vtxOfferPos, offerBan);
 					pofferdb->WriteOffer(vchGUID, vtxOfferPos);
@@ -602,7 +602,6 @@ void updateBans(const vector<unsigned char> &banData)
 			}
 		}
 	}
-}
 }
 bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vector<unsigned char> > &vvchArgs, const CCoinsViewCache &inputs, bool fJustCheck, int nHeight, const CBlock* block) {
 	
