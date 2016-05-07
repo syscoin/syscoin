@@ -424,7 +424,7 @@ bool getBanList(const vector<unsigned char>& banData, map<string, unsigned char>
 	bool read = outerValue.read(value);
 	if (read)
 	{
-		return getBanListFromValue(banALiasList, banCertList, banOfferList, outerValue);
+		return getBanListFromValue(banAliasList, banCertList, banOfferList, outerValue);
 	}
 	else
 	{

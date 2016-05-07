@@ -121,5 +121,5 @@ public:
 };
 bool GetTxOfCert(const std::vector<unsigned char> &vchCert,
         CCert& txPos, CTransaction& tx);
-
+void PutToCertList(std::vector<CCert> &certList, CCert& index);
 #endif // CERT_H
