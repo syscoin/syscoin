@@ -22,10 +22,9 @@ static const unsigned int MAX_VALUE_LENGTH = 1023;
 static const unsigned int MAX_ID_LENGTH = 20;
 static const unsigned int MAX_ENCRYPTED_VALUE_LENGTH = 1108;
 
-static const unsigned int OFFER_BAN = 0;
-static const unsigned int CERT_BAN = 1;
-static const unsigned int ALIAS_BAN = 2;
-static const unsigned int ALL_BAN = 3;
+static const unsigned int SAFETY_LEVEL1 = 1;
+static const unsigned int SAFETY_LEVEL2 = 2;
+
 class CAliasIndex {
 public:
     uint256 txHash;
@@ -33,6 +32,7 @@ public:
     std::vector<unsigned char> vchPublicValue;
 	std::vector<unsigned char> vchPrivateValue;
 	std::vector<unsigned char> vchPubKey;
+	unsigned char safetyLevel;
     CAliasIndex() { 
         SetNull();
     }
@@ -53,10 +53,11 @@ public:
     	READWRITE(vchPublicValue);
 		READWRITE(vchPrivateValue);
 		READWRITE(vchPubKey);
+		READWRITE(safetyLevel);
 	}
 
     friend bool operator==(const CAliasIndex &a, const CAliasIndex &b) {
-		return (a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
+		return (a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
     }
 
     friend bool operator!=(const CAliasIndex &a, const CAliasIndex &b) {
@@ -68,10 +69,11 @@ public:
         vchPublicValue = b.vchPublicValue;
         vchPrivateValue = b.vchPrivateValue;
         vchPubKey = b.vchPubKey;
+		safetyLevel = b.safetyLevel;
         return *this;
     }   
-    void SetNull() { txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
-    bool IsNull() const { return (nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
+    void SetNull() { safetyLevel = 0; txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
+    bool IsNull() const { return (safetyLevel == 0 && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
 	bool UnserializeFromTx(const CTransaction &tx);
 	const std::vector<unsigned char> Serialize();
 };

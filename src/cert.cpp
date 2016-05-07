@@ -737,15 +737,7 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 
     vector<unsigned char> vchCert = vchFromValue(params[0]);
 	map<string, string> banList;
-	if(!getBanList(vchFromString("SYS_BAN"), banList, CERT_BAN))
-		throw runtime_error("failed to read SYS_BAN alias");
-	map<string,string>::iterator banIt;
-	banIt = banList.find(stringFromVch(vchCert));
-	if (banIt != banList.end())
-	{
-		if(banIt->second != "0" && banIt->second != "1")
-			throw runtime_error("cert has been banned");
-	}
+
     // look for a transaction with this key, also returns
     // an cert object if it is found
     CTransaction tx;
@@ -761,6 +753,8 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 	if (!pcertdb->ReadCert(vchCert, vtxPos) || vtxPos.empty())
 		throw runtime_error("failed to read from cert DB");
 	CCert ca = vtxPos.back();
+	if(alias.safetyLevel >= SAFETY_LEVEL2)
+		throw runtime_error("cert has been banned");
 	if (!GetSyscoinTransaction(ca.nHeight, ca.txHash, tx, Params().GetConsensus()))
 		throw runtime_error("failed to read transaction from disk");   
     string sHeight = strprintf("%llu", ca.nHeight);
@@ -1022,9 +1016,6 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 		safeSearch = params[2].get_bool();
 
     UniValue oRes(UniValue::VARR);
-	map<string, string> banList;
-	if(!getBanList(vchFromString("SYS_BAN"), banList, CERT_BAN))
-		throw runtime_error("failed to read SYS_BAN alias");
     
     vector<pair<vector<unsigned char>, CCert> > certScan;
     if (!pcertdb->ScanCerts(vchCert, 25, certScan))
@@ -1037,16 +1028,14 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
     pair<vector<unsigned char>, CCert> pairScan;
 	BOOST_FOREACH(pairScan, certScan) {
 		const CCert &txCert = pairScan.second;
-		const string &cert = stringFromVch(pairScan.first);
-		map<string,string>::iterator banIt;
-		banIt = banList.find(cert);
-		if (banIt != banList.end())
+		if(txCert.safetyLevel >= SAFETY_LEVEL1)
 		{
 			if(safeSearch)
 				continue;
-			if(banIt->second != "0")
+			if(txCert.safetyLevel > SAFETY_LEVEL1)
 				continue;
 		}
+		const string &cert = stringFromVch(pairScan.first);
 		string title = stringFromVch(txCert.vchTitle);
 		boost::algorithm::to_lower(title);
         if (strRegexp != "" && !regex_search(title, certparts, cregex) && strRegexp != cert)

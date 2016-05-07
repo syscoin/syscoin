@@ -606,7 +606,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	// we need to check for cert update specially because an alias update without data is sent along with offers linked with the alias
 	if (theAlias.IsNull() && op != OP_ALIAS_UPDATE)
 		return error("CheckAliasInputs() : null alias");
-	if(theAlias.vchPublicValue.size() > MAX_VALUE_LENGTH && (vvchArgs[0] != vchFromString("SYS_BAN") || vvchArgs[0] != vchFromString("SYS_RATES")))
+	if(theAlias.vchPublicValue.size() > MAX_VALUE_LENGTH && vvchArgs[0] != vchFromString("SYS_RATES"))
 	{
 		return error("alias pub value too big");
 	}
@@ -1135,7 +1135,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	vchPublicValue = vchFromString(strPublicValue);
 	string strPrivateValue = params.size()>=3?params[2].get_str():"";
 	vchPrivateValue = vchFromString(strPrivateValue);
-	if (vchPublicValue.size() > MAX_VALUE_LENGTH && (vchName != vchFromString("SYS_BAN") || vchName != vchFromString("SYS_RATES")))
+	if (vchPublicValue.size() > MAX_VALUE_LENGTH && vchName != vchFromString("SYS_RATES"))
 		throw runtime_error("alias public value cannot exceed 1023 bytes!");
 	if (vchPrivateValue.size() > MAX_VALUE_LENGTH)
 		throw runtime_error("alias public value cannot exceed 1023 bytes!");
@@ -1430,16 +1430,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		throw runtime_error("aliasinfo <aliasname>\n"
 				"Show values of an alias.\n");
 	vector<unsigned char> vchName = vchFromValue(params[0]);
-	map<string, string> banList;
-	if(!getBanList(vchFromString("SYS_BAN"), banList, ALIAS_BAN))
-		throw runtime_error("failed to read SYS_BAN alias");
-	map<string,string>::iterator banIt;
-	banIt = banList.find(stringFromVch(vchName));
-	if (banIt != banList.end())
-	{
-		if(banIt->second != "0" && banIt->second != "1")
-			throw runtime_error("alias has been banned");
-	}
+
 	CTransaction tx;
 	UniValue oShowResult(UniValue::VOBJ);
 
@@ -1465,6 +1456,8 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		nHeight = vtxPos.back().nHeight;
 		oName.push_back(Pair("name", stringFromVch(vchName)));
 		const CAliasIndex &alias= vtxPos.back();
+		if(alias.safetyLevel >= SAFETY_LEVEL2)
+			throw runtime_error("alias has been banned");
 		oName.push_back(Pair("value", stringFromVch(alias.vchPublicValue)));
 		string strPrivateValue = "";
 		if(alias.vchPrivateValue.size() > 0)
@@ -1621,9 +1614,6 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	vector<pair<vector<unsigned char>, CAliasIndex> > nameScan;
 	if (!paliasdb->ScanNames(vchName, 25, nameScan))
 		throw runtime_error("scan failed");
-	map<string, string> banList;
-	if(!getBanList(vchFromString("SYS_BAN"), banList, ALIAS_BAN))
-		throw runtime_error("failed to read SYS_BAN alias");
 
 	// regexp
 	using namespace boost::xpressive;
@@ -1637,20 +1627,18 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		CPubKey PubKey(alias.vchPubKey);
 		CSyscoinAddress address(PubKey.GetID());
 		string name = stringFromVch(pairScan.first);
-		map<string,string>::iterator banIt;
-		banIt = banList.find(name);
-		if (banIt != banList.end())
-		{
-			if(safeSearch)
-				continue;
-			if(banIt->second != "0")
-				continue;
-		}
 		boost::algorithm::to_lower(name);
 		if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != address.ToString())
 			continue;
 
 		CAliasIndex txName = pairScan.second;
+		if(txName.safetyLevel >= SAFETY_LEVEL1)
+		{
+			if(safeSearch)
+				continue;
+			if(txName.safetyLevel > SAFETY_LEVEL1)
+				continue;
+		}
 		int nHeight = txName.nHeight;
 
 		int expired = 0;

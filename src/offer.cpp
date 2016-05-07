@@ -3206,16 +3206,6 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	UniValue oLastOffer(UniValue::VOBJ);
 	vector<unsigned char> vchOffer = vchFromValue(params[0]);
 	string offer = stringFromVch(vchOffer);
-	map<string, string> banList;
-	if(!getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN))
-		throw runtime_error("failed to read SYS_BAN alias");
-	map<string,string>::iterator banIt;
-	banIt = banList.find(offer);
-	if (banIt != banList.end())
-	{
-		if(banIt->second != "0" && banIt->second != "1")
-			throw runtime_error("offer has been banned");
-	}
 	vector<COffer> vtxPos;
 	if (!pofferdb->ReadOffer(vchOffer, vtxPos))
 		throw runtime_error("failed to read from offer DB");
@@ -3238,6 +3228,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		theOffer.nHeight = ca.nAcceptHeight;
 		if(!theOffer.GetOfferFromList(vtxPos))
 			continue;
+		if(theOffer.safetyLevel >= SAFETY_LEVEL2)
+			throw runtime_error("offer has been banned");
 		if(ca.IsNull())
 			continue;
 		UniValue oOfferAccept(UniValue::VOBJ);
@@ -3979,9 +3971,6 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	vector<pair<vector<unsigned char>, COffer> > offerScan;
 	if (!pofferdb->ScanOffers(vchOffer, 25, offerScan))
 		throw runtime_error("scan failed");
-	map<string, string> banList;
-	if(!getBanList(vchFromString("SYS_BAN"), banList, OFFER_BAN))
-		throw runtime_error("failed to read SYS_BAN alias");
     // regexp
     using namespace boost::xpressive;
     smatch offerparts;
@@ -3994,13 +3983,11 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	BOOST_FOREACH(pairScan, offerScan) {
 		const COffer &txOffer = pairScan.second;
 		const string &offer = stringFromVch(pairScan.first);
-		map<string,string>::iterator banIt;
-		banIt = banList.find(offer);
-		if (banIt != banList.end())
+		if(txOffer.safetyLevel >= SAFETY_LEVEL1)
 		{
 			if(safeSearch)
 				continue;
-			if(banIt->second != "0")
+			if(txOffer.safetyLevel > SAFETY_LEVEL1)
 				continue;
 		}
 		string title = stringFromVch(txOffer.sTitle);
