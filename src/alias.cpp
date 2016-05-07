@@ -706,7 +706,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					theAlias.vchPublicValue = dbAlias.vchPublicValue;	
 				if(theAlias.vchPrivateValue.empty())
 					theAlias.vchPrivateValue = dbAlias.vchPrivateValue;	
-				theAlias.severityFlag = dbAlias.severityFlag;
+				theAlias.severityLevel = dbAlias.severityLevel;
 			}
 			// if transfer
 			if(vtxPos.back().vchPubKey != theAlias.vchPubKey)
