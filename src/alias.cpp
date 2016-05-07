@@ -393,6 +393,7 @@ bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, 
 				banCertList.insert(make_pair(idStr, severityNum));
 			}
 		}
+	}
 		
 	
 
@@ -540,7 +541,7 @@ bool IsSyscoinTxMine(const CTransaction& tx, const string &type, CSyscoinAddress
 	myAddress = address;
 	return IsMine(*pwalletMain, address.Get());
 }
-void updateBans(const vector<unsigned char> banData)
+void updateBans(const vector<unsigned char> &banData)
 {
 	map<string, unsigned char> banAliasList;
 	map<string, unsigned char> banCertList;
@@ -687,6 +688,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	}
 	
 	if (!fJustCheck ) {
+		bool update = false;
 		// get the alias from the DB
 		if (paliasdb->ExistsAlias(vvchArgs[0])) {
 			if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos))
@@ -695,6 +697,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		if(!vtxPos.empty())
 		{
+			update = true;
 			if(theAlias.IsNull())
 				theAlias = vtxPos.back();
 			else
@@ -704,10 +707,12 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					theAlias.vchPublicValue = dbAlias.vchPublicValue;	
 				if(theAlias.vchPrivateValue.empty())
 					theAlias.vchPrivateValue = dbAlias.vchPrivateValue;	
+				theAlias.severityFlag = dbAlias.severityFlag;
 			}
 			// if transfer
 			if(vtxPos.back().vchPubKey != theAlias.vchPubKey)
 			{
+				update = false;
 				CPubKey xferKey  = CPubKey(theAlias.vchPubKey);	
 				CSyscoinAddress myAddress = CSyscoinAddress(xferKey.GetID());
 				// make sure xfer to pubkey doesn't point to an alias already, otherwise don't assign pubkey to alias
@@ -717,10 +722,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					LogPrintf("CheckAliasInputs() : Warning, Cannot transfer an alias that points to another alias. Pubkey was not updated");
 				}
 			}
-			if(vvchArgs[0] == vchFromString("SYS_BAN"))
-			{
-				updateBans(theAlias.vchPublicValue)
-			}
+		}
 	
 
 		theAlias.nHeight = nHeight;
@@ -730,7 +732,10 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		CSyscoinAddress address(PubKey.GetID());
 		if (!paliasdb->WriteAlias(vvchArgs[0], vchFromString(address.ToString()), vtxPos))
 			return error( "CheckAliasInputs() :  failed to write to alias DB");
-		
+		if(update && vvchArgs[0] == vchFromString("SYS_BAN"))
+		{
+			updateBans(theAlias.vchPublicValue);
+		}		
 		if(fDebug)
 			LogPrintf(
 				"CONNECTED ALIAS: name=%s  op=%s  hash=%s  height=%d\n",
