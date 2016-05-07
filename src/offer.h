@@ -206,6 +206,7 @@ public:
 	std::vector<std::vector<unsigned char> > offerLinks;
 	bool bPrivate;
 	bool bOnlyAcceptBTC;
+	unsigned char safetyLevel;
 	COffer() { 
         SetNull();
     }
@@ -250,6 +251,7 @@ public:
 		READWRITE(bPrivate);
 		READWRITE(vchAliasPeg);
 		READWRITE(bOnlyAcceptBTC);
+		READWRITE(safetyLevel);
 		
 		
 	}
@@ -318,6 +320,7 @@ public:
 		&& a.bPrivate == b.bPrivate
 		&& a.bOnlyAcceptBTC == b.bOnlyAcceptBTC
 		&& a.vchAliasPeg == b.vchAliasPeg
+		&& a.safetyLevel == b.safetyLevel
 		
         );
     }
@@ -341,6 +344,7 @@ public:
 		bPrivate = b.bPrivate;
 		bOnlyAcceptBTC = b.bOnlyAcceptBTC;
 		vchAliasPeg = b.vchAliasPeg;
+		safetyLevel = b.safetyLevel;
         return *this;
     }
 
@@ -348,8 +352,8 @@ public:
         return !(a == b);
     }
     
-    void SetNull() { nHeight = nPrice = nQty = 0; txHash.SetNull(); bPrivate = false; bOnlyAcceptBTC = false; accept.SetNull(); vchAliasPeg.clear(); sTitle.clear(); sDescription.clear();vchLinkOffer.clear();linkWhitelist.SetNull();sCurrencyCode.clear();offerLinks.clear();nCommission=0;vchPubKey.clear();vchCert.clear();}
-    bool IsNull() const { return (vchPubKey.empty() && txHash.IsNull() && nHeight == 0 && nPrice == 0 && nQty == 0 &&  linkWhitelist.IsNull() && vchAliasPeg.empty() && offerLinks.empty() && nCommission == 0 && bPrivate == false && bOnlyAcceptBTC == false); }
+    void SetNull() { safetyLevel = nHeight = nPrice = nQty = 0; txHash.SetNull(); bPrivate = false; bOnlyAcceptBTC = false; accept.SetNull(); vchAliasPeg.clear(); sTitle.clear(); sDescription.clear();vchLinkOffer.clear();linkWhitelist.SetNull();sCurrencyCode.clear();offerLinks.clear();nCommission=0;vchPubKey.clear();vchCert.clear();}
+    bool IsNull() const { return (safetyLevel == 0 && vchPubKey.empty() && txHash.IsNull() && nHeight == 0 && nPrice == 0 && nQty == 0 &&  linkWhitelist.IsNull() && vchAliasPeg.empty() && offerLinks.empty() && nCommission == 0 && bPrivate == false && bOnlyAcceptBTC == false); }
 
     bool UnserializeFromTx(const CTransaction &tx);
 	const std::vector<unsigned char> Serialize();
