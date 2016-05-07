@@ -66,7 +66,7 @@ public:
         && a.nHeight == b.nHeight
 		&& a.vchPubKey == b.vchPubKey
 		&& a.bPrivate == b.bPrivate
-		&& a.safetyLevel == b.safetyLevel;
+		&& a.safetyLevel == b.safetyLevel
         );
     }
 
