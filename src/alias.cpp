@@ -549,7 +549,7 @@ void updateBans(const vector<unsigned char> &banData)
 	if(getBanList(banData, banAliasList, banCertList, banOfferList))
 	{
 		// update alias bans
-		for (map<int, unsigned char>::iterator it = banAliasList.begin(); it != banAliasList.end(); it++) {
+		for (map<string, unsigned char>::iterator it = banAliasList.begin(); it != banAliasList.end(); it++) {
 			vector<unsigned char> vchGUID = vchFromString((*it).first);
 			unsigned char severity = (*it).second;
 			if(paliasdb->ExistsAlias(vchGUID))
@@ -568,7 +568,7 @@ void updateBans(const vector<unsigned char> &banData)
 			}
 		}
 		// update cert bans
-		for (map<int, unsigned char>::iterator it = banCertList.begin(); it != banCertList.end(); it++) {
+		for (map<string, unsigned char>::iterator it = banCertList.begin(); it != banCertList.end(); it++) {
 			vector<unsigned char> vchGUID = vchFromString((*it).first);
 			unsigned char severity = (*it).second;
 			if(pcertdb->ExistsCert(vchGUID))
@@ -585,7 +585,7 @@ void updateBans(const vector<unsigned char> &banData)
 			}
 		}
 		// update offer bans
-		for (map<int, unsigned char>::iterator it = banOfferList.begin(); it != banOfferList.end(); it++) {
+		for (map<string, unsigned char>::iterator it = banOfferList.begin(); it != banOfferList.end(); it++) {
 			vector<unsigned char> vchGUID = vchFromString((*it).first);
 			unsigned char severity = (*it).second;
 			if(pofferdb->ExistsOffer(vchGUID))
