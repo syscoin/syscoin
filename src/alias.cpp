@@ -558,7 +558,7 @@ void updateBans(const vector<unsigned char> &banData)
 				if (paliasdb->ReadAlias(vchGUID, vtxAliasPos) && !vtxAliasPos.empty())
 				{
 					CAliasIndex aliasBan = vtxAliasPos.back();
-					aliasBan.severityLevel = severity;
+					aliasBan.safetyLevel = severity;
 					PutToAliasList(vtxAliasPos, aliasBan);
 					CPubKey PubKey(aliasBan.vchPubKey);
 					CSyscoinAddress address(PubKey.GetID());
@@ -577,7 +577,7 @@ void updateBans(const vector<unsigned char> &banData)
 				if (pcertdb->ReadCert(vchGUID, vtxCertPos) && !vtxCertPos.empty())
 				{
 					CCert certBan = vtxCertPos.back();
-					certBan.severityLevel = severity;
+					certBan.safetyLevel = severity;
 					PutToCertList(vtxCertPos, certBan);
 					pcertdb->WriteCert(vchGUID, vtxCertPos);
 					
@@ -594,8 +594,8 @@ void updateBans(const vector<unsigned char> &banData)
 				if (pofferdb->ReadOffer(vchGUID, vtxOfferPos) && !vtxOfferPos.empty())
 				{
 					COffer offerBan = vtxOfferPos.back();
-					offerBan.severityLevel = severity;
-					PutToOfferList(vtxOfferPos, offerBan);
+					offerBan.safetyLevel = severity;
+					offerBan.PutToOfferList(vtxOfferPos);
 					pofferdb->WriteOffer(vchGUID, vtxOfferPos);
 					
 				}		
@@ -706,7 +706,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					theAlias.vchPublicValue = dbAlias.vchPublicValue;	
 				if(theAlias.vchPrivateValue.empty())
 					theAlias.vchPrivateValue = dbAlias.vchPrivateValue;	
-				theAlias.severityLevel = dbAlias.severityLevel;
+				theAlias.safetyLevel = dbAlias.safetyLevel;
 			}
 			// if transfer
 			if(vtxPos.back().vchPubKey != theAlias.vchPubKey)
