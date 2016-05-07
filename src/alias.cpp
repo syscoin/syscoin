@@ -414,7 +414,7 @@ bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, 
 		}
 	}
 }
-bool getBanList(const vector<unsigned char> banData,, map<string, unsigned char>> banAliasList,  map<string, unsigned char>>& banCertList,  map<string, unsigned char>>& banOfferList)
+bool getBanList(const vector<unsigned char> banData, map<string, unsigned char> banAliasList,  map<string, unsigned char>& banCertList,  map<string, unsigned char>& banOfferList)
 {
 	bool found = false;
 	string value = stringFromVch(banData);
