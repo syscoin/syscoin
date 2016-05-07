@@ -717,7 +717,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					LogPrintf("CheckAliasInputs() : Warning, Cannot transfer an alias that points to another alias. Pubkey was not updated");
 				}
 			}
-			if(vvchArgs[0] == vchFromString("SYS_BAN))
+			if(vvchArgs[0] == vchFromString("SYS_BAN"))
 			{
 				updateBans(theAlias.vchPublicValue)
 			}
