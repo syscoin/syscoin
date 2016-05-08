@@ -184,7 +184,7 @@ public:
 
     }
 
-    void updateEntry(const QString &cert, const QString &title, const QString &data, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &privatecert, const QString &alias, Cconst QString &safesearch, CertModelType type, int status)
+    void updateEntry(const QString &cert, const QString &title, const QString &data, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &privatecert, const QString &alias, const QString &safesearch, CertModelType type, int status)
     {
 		if(!parent || parent->modelType != type)
 		{
@@ -484,7 +484,7 @@ void CertTableModel::updateEntry(const QString &cert, const QString &value, cons
     priv->updateEntry(cert, value, data, expires_on, expires_in, expired, privatecert, alias, safesearch, type, status);
 }
 
-QString CertTableModel::addRow(const QString &type, const QString &cert, const QString &value, const QString &data, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &privatecert, const QString &safesearch, const QString &alias)
+QString CertTableModel::addRow(const QString &type, const QString &cert, const QString &value, const QString &data, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &privatecert, const QString &alias, const QString &safesearch)
 {
     std::string strCert = cert.toStdString();
     editStatus = OK;
