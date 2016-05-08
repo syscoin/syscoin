@@ -129,7 +129,7 @@ public:
 							expired = expired_value.get_int();
 						const UniValue& safesearch_value = find_value(o, "safesearch");
 						if (safesearch_value.type() == UniValue::VSTR)
-							safeserach_str = safesearch_value.get_str();
+							safesearch_str = safesearch_value.get_str();
 						const UniValue& pending_value = find_value(o, "pending");
 						int pending = 0;
 						if (pending_value.type() == UniValue::VNUM)
@@ -429,7 +429,7 @@ QModelIndex AliasTableModel::index(int row, int column, const QModelIndex &paren
     }
 }
 
-void AliasTableModel::updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, AliasModelType type, int status)
+void AliasTableModel::updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, AliasModelType type, int status)
 {
     // Update alias book model from Syscoin core
     priv->updateEntry(alias, value, expires_on, expires_in, expired, safesearch, type, status);
