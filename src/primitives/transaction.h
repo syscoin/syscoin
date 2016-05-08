@@ -119,6 +119,8 @@ public:
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(nValue);
+		if(nType & SER_GETHASH && scriptPubKey.IsUnspendable())
+			return;
         READWRITE(*(CScriptBase*)(&scriptPubKey));
     }
 
