@@ -491,7 +491,7 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	newCert.nHeight = chainActive.Tip()->nHeight;
 	newCert.vchPubKey = alias.vchPubKey;
 	newCert.bPrivate = bPrivate;
-	newCert.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1
+	newCert.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
 
     scriptPubKey << CScript::EncodeOP_N(OP_CERT_ACTIVATE) << vchCert << OP_2DROP;
     scriptPubKey += scriptPubKeyOrig;
