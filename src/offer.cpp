@@ -3226,6 +3226,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
     uint256 txHash = vtxPos.back().txHash;
     if (!GetSyscoinTransaction(vtxPos.back().nHeight, txHash, tx, Params().GetConsensus()))
         throw runtime_error("failed to read offer transaction from disk");
+	if(vtxPos.back().safetyLevel >= SAFETY_LEVEL2)
+		throw runtime_error("offer has been banned");
     COffer theOffer;
 	vector<vector<unsigned char> > vvch;
     int op, nOut;
@@ -3237,8 +3239,6 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		theOffer.nHeight = ca.nAcceptHeight;
 		if(!theOffer.GetOfferFromList(vtxPos))
 			continue;
-		if(theOffer.safetyLevel >= SAFETY_LEVEL2)
-			throw runtime_error("offer has been banned");
 		if(ca.IsNull())
 			continue;
 		UniValue oOfferAccept(UniValue::VOBJ);
