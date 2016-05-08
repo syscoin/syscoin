@@ -184,7 +184,7 @@ public:
 
     }
 
-    void updateEntry(const QString &cert, const QString &title, const QString &data, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &privatecert, const QString &alias, Cconst QString &safesearch, ertModelType type, int status)
+    void updateEntry(const QString &cert, const QString &title, const QString &data, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &privatecert, const QString &alias, Cconst QString &safesearch, CertModelType type, int status)
     {
 		if(!parent || parent->modelType != type)
 		{
