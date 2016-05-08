@@ -468,7 +468,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(private_str),
 					QString::fromStdString(alias_str),
 					QString::fromStdString(acceptBTCOnly_str),
-					QString::fromStdString(alias_peg_str));
+					QString::fromStdString(alias_peg_str),
+					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No");
 				this->model->updateEntry(QString::fromStdString(name_str),
 					QString::fromStdString(cert_str),
 					QString::fromStdString(value_str),
@@ -482,7 +483,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(private_str), 
 					QString::fromStdString(alias_str), 
 					QString::fromStdString(acceptBTCOnly_str),
-					QString::fromStdString(alias_peg_str), AllOffer, CT_NEW);	
+					QString::fromStdString(alias_peg_str), 
+					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No", AllOffer, CT_NEW);	
 		  }
 
 		  pageMap[currentPage] = make_pair(firstOffer, lastOffer);  

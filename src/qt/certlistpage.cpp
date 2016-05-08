@@ -312,7 +312,8 @@ void CertListPage::on_searchCert_clicked(string GUID)
 					QString::fromStdString(expires_in_str),
 					QString::fromStdString(expired_str),
 					QString::fromStdString(private_str),
-					QString::fromStdString(alias_str));
+					QString::fromStdString(alias_str),
+					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No");
 		   this->model->updateEntry(QString::fromStdString(name_str),
 					QString::fromStdString(value_str),
 					QString::fromStdString(data_str),
@@ -320,7 +321,8 @@ void CertListPage::on_searchCert_clicked(string GUID)
 					QString::fromStdString(expires_in_str),
 					QString::fromStdString(expired_str), 
 					QString::fromStdString(private_str), 
-					QString::fromStdString(alias_str), AllCert, CT_NEW);	
+					QString::fromStdString(alias_str), 
+					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No", AllCert, CT_NEW);	
 		  }
 		  pageMap[currentPage] = make_pair(firstCert, lastCert);  
 		  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));

@@ -337,12 +337,14 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 						QString::fromStdString(value_str),
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
-						QString::fromStdString(expired_str));
+						QString::fromStdString(expired_str),
+						ui->safeSearch->checkState() == Qt::Checked? "Yes": "No");
 					this->model->updateEntry(QString::fromStdString(name_str),
 						QString::fromStdString(value_str),
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
-						QString::fromStdString(expired_str), AllAlias, CT_NEW);	
+						QString::fromStdString(expired_str), 
+						ui->safeSearch->checkState() == Qt::Checked? "Yes": "No", AllAlias, CT_NEW);	
 			  }
 			  pageMap[currentPage] = make_pair(firstAlias, lastAlias);  
 			  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));
