@@ -36,12 +36,12 @@ struct OfferTableEntry
 	QString alias;
 	QString acceptBTCOnly;
 	QString alias_peg;
-	QString safesearch_str;
+	QString safesearch;
     OfferTableEntry() {}
     OfferTableEntry(Type type,const QString &cert,  const QString &title, const QString &offer, const QString &description, const QString &category,const QString &price, const QString &currency,const QString &qty,const QString &expired, const QString &exclusive_resell, const QString &private_str,const QString &alias, const QString &acceptBTCOnly, const QString &alias_peg, const QString &safesearch):
         type(type), cert(cert), title(title), offer(offer), description(description), category(category),price(price), currency(currency),qty(qty), expired(expired), exclusive_resell(exclusive_resell), private_str(private_str), alias(alias), acceptBTCOnly(acceptBTCOnly),alias_peg(alias_peg), safesearch(safesearch) {}
 };
-
+f
 struct OfferTableEntryLessThan
 {
     bool operator()(const OfferTableEntry &a, const OfferTableEntry &b) const
