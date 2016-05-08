@@ -469,7 +469,15 @@ bool EditOfferDialog::saveCurrentRow()
     }
     return !offer.isEmpty();
 }
-
+void EditOfferDialog::on_cancelButton_clicked()
+{
+    reject();
+}
+void EditOfferDialog::on_okButton_clicked()
+{
+    mapper->submit();
+    accept();
+}
 void EditOfferDialog::accept()
 {
     if(!saveCurrentRow())

@@ -39,6 +39,8 @@ public Q_SLOTS:
     void accept();
 	void certChanged(int);
 	void on_aliasPegEdit_editingFinished();
+	void on_okButton_clicked();
+	void on_cancelButton_clicked();
 private:
     bool saveCurrentRow();
 	void loadCerts();
