@@ -33,6 +33,8 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 	ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
 	ui->transferDisclaimer->setText(tr("<font color='blue'>Enter the alias of the recipient of this certificate</font>"));
     ui->transferDisclaimer->setVisible(false);
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this cert safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create a cert that is offensive and do not set this option to <b>No</b> your cert will be banned! You may only set this option when creating an cert, you cannot update it later so choose this option carefully based upon your descretion.</font>"));
+	
 	loadAliases();
 	switch(mode)
     {
@@ -45,10 +47,14 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 		ui->aliasDisclaimer->setVisible(false);
 		ui->aliasEdit->setEnabled(false);
         setWindowTitle(tr("Edit Cert"));
+		ui->safeSearchEdit->setEnabled(false);
+		ui->safeSearchDisclaimer->setVisible(false);
         break;
     case TransferCert:
         setWindowTitle(tr("Transfer Cert"));
 		ui->nameEdit->setEnabled(false);
+		ui->safeSearchEdit->setEnabled(false);
+		ui->safeSearchDisclaimer->setVisible(false);
 		ui->certDataEdit->setVisible(false);
 		ui->certDataEdit->setEnabled(false);
 		ui->certDataLabel->setVisible(false);
@@ -152,10 +158,16 @@ void EditCertDialog::loadRow(int row, const QString &privatecert)
 	if(model)
 	{
 		QModelIndex indexAlias = model->index(row, CertTableModel::Alias, tmpIndex);
+		QModelIndex indexSafeSearch= model->index(row, CertTableModel::SafeSearch, tmpIndex);
 		if(indexAlias.isValid())
 		{
 			QString aliasStr = indexAlias.data(CertTableModel::AliasRole).toString();
 			ui->aliasEdit->setCurrentIndex(ui->aliasEdit->findText(aliasStr));
+		}
+		if(indexSafeSearch.isValid())
+		{
+			QString safeSearchStr = indexSafeSearch.data(CertTableModel::SafeSearchRole).toString();
+			ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText(safeSearchStr));
 		}
 	}
 	if(privatecert == tr("Yes"))
@@ -192,6 +204,8 @@ bool EditCertDialog::saveCurrentRow()
 		params.push_back(ui->nameEdit->text().toStdString());
 		params.push_back(ui->certDataEdit->toPlainText().toStdString());
 		params.push_back(ui->privateBox->currentText() == QString("Yes")? "1": "0");
+		if(ui->safeSearchEdit->currentIndex() > 0)
+			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
 			if (result.type() != UniValue::VNULL)

@@ -20,6 +20,8 @@ EditAliasDialog::EditAliasDialog(Mode mode, QWidget *parent) :
 
 	ui->transferEdit->setVisible(false);
 	ui->transferLabel->setVisible(false);
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this alias safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an alias that is offensive and do not set this option to <b>No</b> your alias will be banned! You may only set this option when creating an alias, you cannot update it later so choose this option carefully based upon your descretion.</font>"));
+	
     switch(mode)
     {
     case NewDataAlias:
@@ -31,10 +33,14 @@ EditAliasDialog::EditAliasDialog(Mode mode, QWidget *parent) :
     case EditDataAlias:
         setWindowTitle(tr("Edit Data Alias"));
 		ui->aliasEdit->setEnabled(false);
+		ui->safeSearchEdit->setEnabled(false);
+		ui->safeSearchDisclaimer->setVisible(false);
         break;
     case EditAlias:
         setWindowTitle(tr("Edit Alias"));
 		ui->aliasEdit->setEnabled(false);
+		ui->safeSearchEdit->setEnabled(false);
+		ui->safeSearchDisclaimer->setVisible(false);
         break;
     case TransferAlias:
         setWindowTitle(tr("Transfer Alias"));
@@ -42,6 +48,8 @@ EditAliasDialog::EditAliasDialog(Mode mode, QWidget *parent) :
 		ui->nameEdit->setEnabled(false);
 		ui->transferEdit->setVisible(true);
 		ui->transferLabel->setVisible(true);
+		ui->safeSearchEdit->setEnabled(false);
+		ui->safeSearchDisclaimer->setVisible(false);
         break;
     }
     mapper = new QDataWidgetMapper(this);
@@ -69,6 +77,16 @@ void EditAliasDialog::setModel(WalletModel* walletModel, AliasTableModel *model)
 void EditAliasDialog::loadRow(int row)
 {
     mapper->setCurrentIndex(row);
+	const QModelIndex tmpIndex;
+	if(model)
+	{
+		QModelIndex indexSafeSearch= model->index(row, AliasTableModel::SafeSearch, tmpIndex);
+		if(indexSafeSearch.isValid())
+		{
+			QString safeSearchStr = indexSafeSearch.data(AliasTableModel::SafeSearchRole).toString();
+			ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText(safeSearchStr));
+		}
+	}
 }
 
 bool EditAliasDialog::saveCurrentRow()
@@ -97,6 +115,8 @@ bool EditAliasDialog::saveCurrentRow()
 		strMethod = string("aliasnew");
         params.push_back(ui->aliasEdit->text().trimmed().toStdString());
 		params.push_back(ui->nameEdit->text().toStdString());
+		if(ui->safeSearchEdit->currentIndex() > 0)
+			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
 			if (result.type() != UniValue::VNULL)

@@ -25,6 +25,7 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
 	ui->aliasPegDisclaimer->setText(tr("<font color='blue'>Choose an alias which has peg information to allow exchange of currencies into SYS amounts based on the pegged values. Consumers will pay amounts based on this peg, the alias must be managed effectively or you may end up selling your offers for unexpected amounts.</font>"));
 	ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this offer</font>"));
 	ui->privateDisclaimer->setText(tr("<font color='blue'>All offers are first listed as private. If you would like your offer to be public, please edit it after it is created.</font>"));
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this offer safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an offer that is offensive and do not set this option to <b>No</b> your offer will be banned aswell as possibly your store alias! You may only set this option when creating an offer, you cannot update it later so choose this option carefully based upon your descretion.</font>"));
 	ui->offerLabel->setVisible(true);
 	ui->offerEdit->setVisible(true);
 	ui->offerEdit->setEnabled(false);
@@ -60,7 +61,10 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
         break;
     case EditOffer:
 		ui->currencyEdit->setEnabled(false);
+		ui->safeSearchEdit->setEnabled(false);
+		ui->safeSearchDisclaimer->setVisible(false);
 		ui->currencyDisclaimer->setVisible(false);
+		
         setWindowTitle(tr("Edit Offer"));
         break;
     case NewCertOffer:
@@ -303,6 +307,7 @@ void EditOfferDialog::loadRow(int row)
 		QModelIndex indexAlias = model->index(row, OfferTableModel::Alias, tmpIndex);
 		QModelIndex indexQty = model->index(row, OfferTableModel::Qty, tmpIndex);
 		QModelIndex indexBTCOnly = model->index(row, OfferTableModel::AcceptBTCOnly, tmpIndex);
+		QModelIndex indexSafeSearch = model->index(row, OfferTableModel::SafeSearch, tmpIndex);
 		if(indexPrivate.isValid())
 		{
 			QString privateStr = indexPrivate.data(OfferTableModel::PrivateRole).toString();
@@ -318,6 +323,11 @@ void EditOfferDialog::loadRow(int row)
 		{
 			QString btcOnlyStr = indexBTCOnly.data(OfferTableModel::BTCOnlyRole).toString();
 			ui->acceptBTCOnlyEdit->setCurrentIndex(ui->acceptBTCOnlyEdit->findText(btcOnlyStr));
+		}
+		if(indexSafeSearch.isValid())
+		{
+			QString safeSearchStr = indexSafeSearch.data(OfferTableModel::SafeSearchRole).toString();
+			ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText(safeSearchStr));
 		}
 		if(indexAlias.isValid())
 		{
@@ -382,6 +392,8 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back("");
 		params.push_back("1");
 		params.push_back(ui->acceptBTCOnlyEdit->currentText() == QString("Yes")? "1": "0");
+		if(ui->safeSearchEdit->currentIndex() > 0)
+			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
 			const UniValue &arr = result.get_array();

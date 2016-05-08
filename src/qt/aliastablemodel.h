@@ -26,12 +26,14 @@ public:
         Value = 1,  /**< Alias value */
 		ExpiresOn = 2,
 		ExpiresIn = 3,
-		Expired = 4
+		Expired = 4,
+		SafeSearch = 5
     };
 
     enum RoleIndex {
         TypeRole = Qt::UserRole, /**< Type of alias (#Send or #Receive) */
-		NameRole
+		NameRole,
+		SafeSearchRole
 	};
 
     /** Return status of edit/insert operation */
@@ -61,7 +63,7 @@ public:
     /* Add an alias to the model.
        Returns the added alias on success, and an empty string otherwise.
      */
-    QString addRow(const QString &type, const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired);
+    QString addRow(const QString &type, const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch);
 
     /* Look up row index of an alias in the model.
        Return -1 if not found.
@@ -84,7 +86,7 @@ private:
 public Q_SLOTS:
     /* Update alias list from core.
      */
-    void updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, AliasModelType type, int status);
+    void updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, AliasModelType type, int status);
 
     friend class AliasTablePriv;
 };

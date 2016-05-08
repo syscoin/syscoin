@@ -406,14 +406,15 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 
 
 UniValue certnew(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() < 3 || params.size() > 4)
+    if (fHelp || params.size() < 3 || params.size() > 5)
         throw runtime_error(
-		"certnew <alias> <title> <data> [private=0]\n"
+		"certnew <alias> <title> <data> [private=0] [safe search=Yes]\n"
 						"<alias> An alias you own.\n"
                         "<title> title, 255 bytes max.\n"
                         "<data> data, 1KB max.\n"
 						"<private> set to 1 if you only want to make the cert data private, only the owner of the cert can view it. Off by default.\n"
-                        + HelpRequiringPassphrase());
+ 						"<safe search> set to No if this cert should only show in the search when safe search is not selected. Defaults to Yes (cert shows with or without safe search selected in search lists).\n"                     
+						+ HelpRequiringPassphrase());
 	vector<unsigned char> vchAlias = vchFromValue(params[0]);
 	CSyscoinAddress aliasAddress = CSyscoinAddress(stringFromVch(vchAlias));
 	if (!aliasAddress.IsValid())
@@ -443,6 +444,11 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	if(params.size() >= 4)
 	{
 		bPrivate = atoi(params[3].get_str().c_str()) == 1? true: false;
+	}
+	string strSafeSearch = "Yes";
+	if(params.size() >= 5)
+	{
+		strSafeSearch = params[5].get_str();
 	}
     if (vchData.size() < 1)
 	{
@@ -485,6 +491,7 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	newCert.nHeight = chainActive.Tip()->nHeight;
 	newCert.vchPubKey = alias.vchPubKey;
 	newCert.bPrivate = bPrivate;
+	newCert.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1
 
     scriptPubKey << CScript::EncodeOP_N(OP_CERT_ACTIVATE) << vchCert << OP_2DROP;
     scriptPubKey += scriptPubKeyOrig;
@@ -887,6 +894,7 @@ UniValue certlist(const UniValue& params, bool fHelp) {
 				strData = strDecrypted;	
 		}
 		oName.push_back(Pair("private", cert.bPrivate? "Yes": "No"));
+		oName.push_back(Pair("safesearch", cert.safetyLevel <= 0 ? "Yes" : "No"));
 		oName.push_back(Pair("data", strData));
 		CPubKey PubKey(cert.vchPubKey);
 		CSyscoinAddress address(PubKey.GetID());

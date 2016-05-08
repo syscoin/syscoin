@@ -1082,9 +1082,9 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 }
 
 UniValue offernew(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() < 7 || params.size() > 11)
+	if (fHelp || params.size() < 7 || params.size() > 12)
 		throw runtime_error(
-		"offernew <aliaspeg> <alias> <category> <title> <quantity> <price> <description> <currency> [cert. guid] [exclusive resell=1] [accept btc only=0]\n"
+		"offernew <aliaspeg> <alias> <category> <title> <quantity> <price> <description> <currency> [cert. guid] [exclusive resell=1] [accept btc only=0] [safe search=Yes]\n"
 						"<aliaspeg> Alias peg you wish to use, leave blank to use SYS_RATES.\n"	
 						"<alias> An alias you own.\n"
 						"<category> category, 255 chars max.\n"
@@ -1096,6 +1096,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 						"<cert. guid> Set this to the guid of a certificate you wish to sell\n"
 						"<exclusive resell> set to 1 if you only want those who control the affiliate's who are able to resell this offer via offerlink. Defaults to 1.\n"
 						"<accept btc only> set to 1 if you only want accept Bitcoins for payment and your currency is set to BTC, note you cannot resell or sell a cert in this mode. Defaults to 0.\n"
+						"<safe search> set to No if this offer should only show in the search when safe search is not selected. Defaults to Yes (offer shows with or without safe search selected in search lists).\n"
 						+ HelpRequiringPassphrase());
 	// gather inputs
 	string baSig;
@@ -1201,6 +1202,11 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 			throw runtime_error("Can only accept Bitcoins for offer's that set their currency to BTC");
 
 	}	
+	string strSafeSearch = "Yes";
+	if(params.size() >= 12)
+	{
+		strSafeSearch = params[11].get_str();
+	}
 	CAmount nRate;
 	vector<string> rateList;
 	int precision;
@@ -1244,6 +1250,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	newOffer.bPrivate = true;
 	newOffer.bOnlyAcceptBTC = bOnlyAcceptBTC;
 	newOffer.vchAliasPeg = vchAliasPeg;
+	newOffer.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
 
 	CPubKey currentOfferKey(newOffer.vchPubKey);
 	scriptPubKeyOrig= GetScriptForDestination(currentOfferKey.GetID());
@@ -3828,6 +3835,7 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("btconly", theOfferA.bOnlyAcceptBTC ? "Yes" : "No"));
 			oName.push_back(Pair("alias_peg", stringFromVch(theOfferA.vchAliasPeg)));
 			oName.push_back(Pair("private", theOfferA.bPrivate ? "Yes" : "No"));
+			oName.push_back(Pair("safesearch", theOfferA.safetyLevel <= 0 ? "Yes" : "No"));
 			expired_block = nHeight + GetOfferExpirationDepth();
             if(pending == 0 && (nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight <= 0))
 			{

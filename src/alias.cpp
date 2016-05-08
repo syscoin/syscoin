@@ -1072,12 +1072,13 @@ void CreateFeeRecipient(const CScript& scriptPubKey, const vector<unsigned char>
 	recipient = recipienttmp;
 }
 UniValue aliasnew(const UniValue& params, bool fHelp) {
-	if (fHelp || 2 > params.size() || 3 < params.size())
+	if (fHelp || 2 > params.size() || 4 < params.size())
 		throw runtime_error(
-		"aliasnew <aliasname> <public value> [private value]\n"
+		"aliasnew <aliasname> <public value> [private value] [safe search=Yes]\n"
 						"<aliasname> alias name.\n"
 						"<public value> alias public profile data, 1023 chars max.\n"
 						"<private value> alias private profile data, 1023 chars max. Will be private and readable by owner only.\n"
+						"<safe search> set to No if this alias should only show in the search when safe search is not selected. Defaults to Yes (alias shows with or without safe search selected in search lists).\n"										
 						+ HelpRequiringPassphrase());
 
 	vector<unsigned char> vchName = vchFromString(params[0].get_str());
@@ -1087,6 +1088,11 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	vchPublicValue = vchFromString(strPublicValue);
 
 	string strPrivateValue = params.size()>=3?params[2].get_str():"";
+	string strSafeSearch = "Yes";
+	if(params.size() >= 4)
+	{
+		strSafeSearch = params[4].get_str();
+	}
 	vchPrivateValue = vchFromString(strPrivateValue);
 	if (vchPublicValue.size() > MAX_VALUE_LENGTH)
 		throw runtime_error("alias public value cannot exceed 1023 bytes!");
@@ -1145,6 +1151,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	newAlias.vchPubKey = vchPubKey;
 	newAlias.vchPublicValue = vchPublicValue;
 	newAlias.vchPrivateValue = vchPrivateValue;
+	newAlias.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
 
     vector<CRecipient> vecSend;
 	CRecipient recipient;
@@ -1357,6 +1364,7 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 			if(DecryptMessage(alias.vchPubKey, alias.vchPrivateValue, strDecrypted))
 				strPrivateValue = strDecrypted;		
 			oName.push_back(Pair("privatevalue", strPrivateValue));
+			oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
 			expired_block = nHeight + GetAliasExpirationDepth();
 			if(pending == 0 && (nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight <= 0))
 			{
