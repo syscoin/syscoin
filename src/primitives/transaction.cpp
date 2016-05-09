@@ -8,7 +8,7 @@
 #include "hash.h"
 #include "tinyformat.h"
 #include "utilstrencodings.h"
-
+#include "alias.h"
 std::string COutPoint::ToString() const
 {
     return strprintf("COutPoint(%s, %u)", hash.ToString().substr(0,10), n);
@@ -48,7 +48,10 @@ CTxOut::CTxOut(const CAmount& nValueIn, CScript scriptPubKeyIn)
     nValue = nValueIn;
     scriptPubKey = scriptPubKeyIn;
 }
-
+bool CTxOut::IsTxOutExpired(const CScript &scriptPubKey)
+{
+	return IsSysServiceExpired(scriptPubKey);
+}
 uint256 CTxOut::GetHash() const
 {
     return SerializeHash(*this);
