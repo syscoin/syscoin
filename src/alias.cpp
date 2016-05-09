@@ -1055,21 +1055,13 @@ CScript RemoveAliasScriptPrefix(const CScript& scriptIn) {
 }
 void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 {
-	CAmount defaultamt = 0;
-	CRecipient recipienttmp = {scriptPubKey, defaultamt, false};
-	CTxOut txout(recipienttmp.nAmount,	recipienttmp.scriptPubKey);
-	recipienttmp.nAmount = txout.GetDustThreshold(::minRelayTxFee);
-	recipient = recipienttmp;
+	recipient = {scriptPubKey, 0, false};
+	CTxOut txout(recipient.nAmount,	recipient.scriptPubKey);
+	recipient.nAmount = txout.GetDustThreshold(::minRelayTxFee);
 }
 void CreateFeeRecipient(const CScript& scriptPubKey, const vector<unsigned char>& data, CRecipient& recipient)
 {
-	CAmount defaultamt = 0;
-	CScript script;
-	script += CScript() << data;
-	CTxOut txout(defaultamt,script);
-	CRecipient recipienttmp = {scriptPubKey, defaultamt, false};
-	recipienttmp.nAmount = 0.02;
-	recipient = recipienttmp;
+	recipient = {scriptPubKey, 0.02*COIN, false};
 }
 UniValue aliasnew(const UniValue& params, bool fHelp) {
 	if (fHelp || 2 > params.size() || 4 < params.size())
