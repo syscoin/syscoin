@@ -432,14 +432,15 @@ libsyscoinconsensus_la_SOURCES = \
   script/interpreter.cpp \
   script/script.cpp \
   uint256.cpp \
-  utilstrencodings.cpp
+  utilstrencodings.cpp \
+  $(SYSCOIN_CORE_H)
 
 if GLIBC_BACK_COMPAT
   libsyscoinconsensus_la_SOURCES += compat/glibc_compat.cpp
 endif
 
 libsyscoinconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)
-libsyscoinconsensus_la_LIBADD = $(LIBSECP256K1)
+libsyscoinconsensus_la_LIBADD = $(LIBSECP256K1) $(LIBUNIVALUE) $(LIBSYSCOIN_COMMON)
 libsyscoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_SYSCOIN_INTERNAL
 libsyscoinconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
