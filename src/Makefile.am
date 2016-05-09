@@ -426,14 +426,12 @@ libsyscoinconsensus_la_SOURCES = \
   crypto/sha256.cpp \
   crypto/sha512.cpp \
   hash.cpp \
-  primitives/transaction.cpp \
   pubkey.cpp \
   script/syscoinconsensus.cpp \
   script/interpreter.cpp \
   script/script.cpp \
   uint256.cpp \
-  utilstrencodings.cpp \
-  $(SYSCOIN_CORE_H)
+  utilstrencodings.cpp
 
 if GLIBC_BACK_COMPAT
   libsyscoinconsensus_la_SOURCES += compat/glibc_compat.cpp
