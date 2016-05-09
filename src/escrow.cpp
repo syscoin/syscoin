@@ -329,7 +329,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
     COffer theOffer;
     
 	if(theEscrow.IsNull() && op != OP_ESCROW_COMPLETE)
-		return error("CheckEscrowInputs() : null escrow");
+		return true;
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("escrow tx GUID too big");
 	if(!theEscrow.vchBuyerKey.empty() && !IsCompressedOrUncompressedPubKey(theEscrow.vchBuyerKey))

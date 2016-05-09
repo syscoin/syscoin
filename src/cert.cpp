@@ -307,7 +307,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
     CCert theCert(tx);
 	// we need to check for cert update specially because a cert update without data is sent along with offers linked with the cert
     if (theCert.IsNull() && op != OP_CERT_UPDATE)
-        return error("CheckCertInputs() : null cert object");
+        return true;
 	if(theCert.vchData.size() > MAX_ENCRYPTED_VALUE_LENGTH)
 	{
 		return error("cert data too big");

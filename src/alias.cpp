@@ -644,7 +644,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	CAliasIndex theAlias(tx);
 	// we need to check for cert update specially because an alias update without data is sent along with offers linked with the alias
 	if (theAlias.IsNull() && op != OP_ALIAS_UPDATE)
-		return error("CheckAliasInputs() : null alias");
+		return true);
 	if(theAlias.vchPublicValue.size() > MAX_VALUE_LENGTH && vvchArgs[0] != vchFromString("SYS_RATES"))
 	{
 		return error("alias pub value too big");

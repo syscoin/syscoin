@@ -494,7 +494,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	COffer theOffer(tx);
 	COfferAccept theOfferAccept;
 	if (theOffer.IsNull())
-		return error("CheckOfferInputs() : null offer");
+		return true;
 	if(theOffer.sDescription.size() > MAX_VALUE_LENGTH)
 	{
 		return error("offer description too big");
