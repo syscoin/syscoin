@@ -1055,13 +1055,15 @@ CScript RemoveAliasScriptPrefix(const CScript& scriptIn) {
 }
 void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 {
-	recipient = {scriptPubKey, 0, false};
+	CRecipient recp = {scriptPubKey, 0, false};
+	recipient = recp;
 	CTxOut txout(recipient.nAmount,	recipient.scriptPubKey);
 	recipient.nAmount = txout.GetDustThreshold(::minRelayTxFee);
 }
 void CreateFeeRecipient(const CScript& scriptPubKey, const vector<unsigned char>& data, CRecipient& recipient)
 {
-	recipient = {scriptPubKey, 0.02*COIN, false};
+	CRecipient recp = {scriptPubKey, 0.02*COIN, false};
+	recipient = recp;
 	CTxOut txout(0,	recipient.scriptPubKey);
     size_t nSize = txout.GetSerializeSize(SER_DISK,0)+148u;
 	CAmount fee = 3*minRelayTxFee.GetFee(nSize);
