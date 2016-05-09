@@ -120,8 +120,12 @@ public:
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(nValue);
 		if(scriptPubKey.IsUnspendable() && (nType & SER_GETHASH))
-			scriptPubKey = CScript() << OP_RETURN;
-        READWRITE(*(CScriptBase*)(&scriptPubKey));
+		{
+			CScript tmp = CScript() << OP_RETURN;
+			READWRITE(*(CScriptBase*)(&tmp));
+		}
+		else
+			READWRITE(*(CScriptBase*)(&scriptPubKey));
     }
 
     void SetNull()
