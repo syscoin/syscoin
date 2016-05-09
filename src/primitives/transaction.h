@@ -119,7 +119,7 @@ public:
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(nValue);
-		if(scriptPubKey.IsUnspendable() && (nType & SER_GETHASH))
+		if(scriptPubKey.IsUnspendable())
 		{
 			CScript tmp = CScript() << OP_RETURN;
 			READWRITE(*(CScriptBase*)(&tmp));
