@@ -71,6 +71,20 @@ string escrowFromOp(int op) {
         return "<unknown escrow op>";
     }
 }
+bool CEscrow::UnserializeFromData(const vector<unsigned char> &vchData) {
+    try {
+        CDataStream dsEscrow(vchData, SER_NETWORK, PROTOCOL_VERSION);
+        dsEscrow >> *this;
+    } catch (std::exception &e) {
+        return false;
+    }
+	// extra check to ensure data was parsed correctly
+	if(!IsCompressedOrUncompressedPubKey(vchBuyerKey))
+	{
+		return false;
+	}
+	return true;
+}
 bool CEscrow::UnserializeFromTx(const CTransaction &tx) {
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(tx, vchData))
@@ -78,15 +92,7 @@ bool CEscrow::UnserializeFromTx(const CTransaction &tx) {
 		SetNull();
 		return false;
 	}
-    try {
-        CDataStream dsEscrow(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsEscrow >> *this;
-    } catch (std::exception &e) {
-		SetNull();
-        return false;
-    }
-	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchBuyerKey))
+	if(!UnserializeFromData(vchData))
 	{
 		SetNull();
 		return false;

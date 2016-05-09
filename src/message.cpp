@@ -53,6 +53,21 @@ string messageFromOp(int op) {
         return "<unknown message op>";
     }
 }
+bool CMessage::UnserializeFromData(const vector<unsigned char> &vchData) {
+    try {
+        CDataStream dsMessage(vchData, SER_NETWORK, PROTOCOL_VERSION);
+        dsMessage >> *this;
+    } catch (std::exception &e) {
+        return false;
+    }
+	// extra check to ensure data was parsed correctly
+	if(!IsCompressedOrUncompressedPubKey(vchPubKeyTo)
+		|| !IsCompressedOrUncompressedPubKey(vchPubKeyFrom))
+	{
+		return false;
+	}
+	return true;
+}
 bool CMessage::UnserializeFromTx(const CTransaction &tx) {
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(tx, vchData))
@@ -60,21 +75,11 @@ bool CMessage::UnserializeFromTx(const CTransaction &tx) {
 		SetNull();
 		return false;
 	}
-    try {
-        CDataStream dsMessage(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsMessage >> *this;
-    } catch (std::exception &e) {
-		SetNull();
-        return false;
-    }
-	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKeyTo)
-		|| !IsCompressedOrUncompressedPubKey(vchPubKeyFrom))
+	if(!UnserializeFromData(vchData))
 	{
 		SetNull();
 		return false;
 	}
-
     return true;
 }
 const vector<unsigned char> CMessage::Serialize() {

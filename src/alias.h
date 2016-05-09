@@ -75,6 +75,7 @@ public:
     void SetNull() { safetyLevel = 0; txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
     bool IsNull() const { return (safetyLevel == 0 && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
 	bool UnserializeFromTx(const CTransaction &tx);
+	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();
 };
 
@@ -157,6 +158,8 @@ CScript RemoveAliasScriptPrefix(const CScript& scriptIn);
 int GetSyscoinDataOutput(const CTransaction& tx);
 bool IsSyscoinDataOutput(const CTxOut& out);
 bool GetSyscoinData(const CTransaction &tx, std::vector<unsigned char> &vchData);
+bool GetSyscoinData(const CScript &scriptPubKey, vector<unsigned char> &vchData);
+bool IsSysServiceExpired(const CScript& scriptPubKey);
 bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut, const Consensus::Params& consensusParams);
 bool IsSyscoinScript(const CScript& scriptPubKey, int &op, std::vector<std::vector<unsigned char> > &vvchArgs);
 void RemoveSyscoinScript(const CScript& scriptPubKeyIn, CScript& scriptPubKeyOut);

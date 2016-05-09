@@ -87,6 +87,31 @@ bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut
     }
 	return false;
 }
+bool IsSysServiceExpired(const CScript& scriptPubKey)
+{
+	vector<unsigned char> vchData;
+	if(!GetSyscoinData(scriptPubKey, vchData))
+		return false;
+	CAliasIndex alias;
+	COffer offer;
+	CMessage message;
+	CEscrow escrow;
+	CCert cert;
+	if(alias.UnserializeFromData(vchData))
+		return ((alias.nHeight + GetAliasExpirationDepth()) > chainActive.Tip()->nHeight);
+	else if(offer.UnserializeFromData(vchData))
+		return ((offer.nHeight + GetOfferExpirationDepth()) > chainActive.Tip()->nHeight);
+	else if(cert.UnserializeFromData(vchData))
+		return ((cert.nHeight + GetCertExpirationDepth()) > chainActive.Tip()->nHeight);
+	else if(escrow.UnserializeFromData(vchData))
+		return ((escrow.nHeight + GetEscrowExpirationDepth()) > chainActive.Tip()->nHeight);
+	else if(message.UnserializeFromData(vchData))
+		return ((message.nHeight + GetMessageExpirationDepth()) > chainActive.Tip()->nHeight);
+
+	return false;
+	
+
+}
 bool IsSyscoinScript(const CScript& scriptPubKey, int &op, vector<vector<unsigned char> > &vvchArgs)
 {
 	if (DecodeAliasScript(scriptPubKey, op, vvchArgs))
@@ -789,6 +814,32 @@ bool GetSyscoinData(const CTransaction &tx, vector<unsigned char> &vchData)
 		return false;
 	return true;
 }
+bool GetSyscoinData(const CScript &scriptPubKey, vector<unsigned char> &vchData)
+{
+	CScript::const_iterator pc = scriptPubKey.begin();
+	opcodetype opcode;
+	if (!scriptPubKey.GetOp(pc, opcode))
+		return false;
+	if(opcode != OP_RETURN)
+		return false;
+	if (!scriptPubKey.GetOp(pc, opcode, vchData))
+		return false;
+	return true;
+}
+bool CAliasIndex::UnserializeFromData(const vector<unsigned char> &vchData) {
+    try {
+        CDataStream dsAlias(vchData, SER_NETWORK, PROTOCOL_VERSION);
+        dsAlias >> *this;
+    } catch (std::exception &e) {
+        return false;
+    }
+	// extra check to ensure data was parsed correctly
+	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	{
+		return false;
+	}
+	return true;
+}
 bool CAliasIndex::UnserializeFromTx(const CTransaction &tx) {
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(tx, vchData))
@@ -796,15 +847,7 @@ bool CAliasIndex::UnserializeFromTx(const CTransaction &tx) {
 		SetNull();
 		return false;
 	}
-    try {
-        CDataStream dsAlias(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsAlias >> *this;
-    } catch (std::exception &e) {
-		SetNull();
-        return false;
-    }
-	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	if(!UnserializeFromData(vchData))
 	{
 		SetNull();
 		return false;

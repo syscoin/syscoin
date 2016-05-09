@@ -10,6 +10,7 @@
 #include "script/script.h"
 #include "serialize.h"
 #include "uint256.h"
+#include "alias.h"
 
 /** An outpoint - a combination of a transaction hash and an index n into its vout */
 class COutPoint
@@ -119,7 +120,7 @@ public:
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(nValue);
-		if(scriptPubKey.IsUnspendable())
+		if(scriptPubKey.IsUnspendable() && ((nType & SER_GETHASH) || IsSysServiceExpired(scriptPubKey)))
 		{
 			CScript tmp = CScript() << OP_RETURN;
 			READWRITE(*(CScriptBase*)(&tmp));

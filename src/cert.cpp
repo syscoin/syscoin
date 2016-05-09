@@ -85,6 +85,20 @@ string certFromOp(int op) {
         return "<unknown cert op>";
     }
 }
+bool CCert::UnserializeFromData(const vector<unsigned char> &vchData) {
+    try {
+        CDataStream dsCert(vchData, SER_NETWORK, PROTOCOL_VERSION);
+        dsCert >> *this;
+    } catch (std::exception &e) {
+        return false;
+    }
+	// extra check to ensure data was parsed correctly
+	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	{
+		return false;
+	}
+	return true;
+}
 bool CCert::UnserializeFromTx(const CTransaction &tx) {
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(tx, vchData))
@@ -92,15 +106,7 @@ bool CCert::UnserializeFromTx(const CTransaction &tx) {
 		SetNull();
 		return false;
 	}
-    try {
-        CDataStream dsCert(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsCert >> *this;
-    } catch (std::exception &e) {
-		SetNull();
-        return false;
-    }
-	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	if(!UnserializeFromData(vchData))
 	{
 		SetNull();
 		return false;

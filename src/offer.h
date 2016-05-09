@@ -356,6 +356,7 @@ public:
     bool IsNull() const { return (safetyLevel == 0 && vchPubKey.empty() && txHash.IsNull() && nHeight == 0 && nPrice == 0 && nQty == 0 &&  linkWhitelist.IsNull() && vchAliasPeg.empty() && offerLinks.empty() && nCommission == 0 && bPrivate == false && bOnlyAcceptBTC == false); }
 
     bool UnserializeFromTx(const CTransaction &tx);
+	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();
 };
 

@@ -88,6 +88,7 @@ public:
     void SetNull() { safetyLevel = 0; nHeight = 0; txHash.SetNull(); vchPubKey.clear(); bPrivate = false; vchTitle.clear(); vchData.clear();}
     bool IsNull() const { return (safetyLevel == 0 && txHash.IsNull() &&  nHeight == 0 && vchPubKey.empty() && vchData.empty() && vchTitle.empty() && vchPubKey.empty()); }
     bool UnserializeFromTx(const CTransaction &tx);
+	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();
 };
 

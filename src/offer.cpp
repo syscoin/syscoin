@@ -181,7 +181,7 @@ int GetOfferExpirationDepth() {
 	#ifdef ENABLE_DEBUGRPC
     return 100;
   #else
-    return 525600;
+    return 100;
   #endif
 }
 
@@ -197,6 +197,20 @@ string offerFromOp(int op) {
 		return "<unknown offer op>";
 	}
 }
+bool COffer::UnserializeFromData(const vector<unsigned char> &vchData) {
+    try {
+        CDataStream dsOffer(vchData, SER_NETWORK, PROTOCOL_VERSION);
+        dsOffer >> *this;
+    } catch (std::exception &e) {
+        return false;
+    }
+	// extra check to ensure data was parsed correctly
+	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	{
+		return false;
+	}
+	return true;
+}
 bool COffer::UnserializeFromTx(const CTransaction &tx) {
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(tx, vchData))
@@ -204,15 +218,7 @@ bool COffer::UnserializeFromTx(const CTransaction &tx) {
 		SetNull();
 		return false;
 	}
-    try {
-        CDataStream dsOffer(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsOffer >> *this;
-    } catch (std::exception &e) {
-		SetNull();
-        return false;
-    }
-	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	if(!UnserializeFromData(vchData))
 	{
 		SetNull();
 		return false;
