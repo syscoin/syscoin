@@ -1062,6 +1062,11 @@ void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 void CreateFeeRecipient(const CScript& scriptPubKey, const vector<unsigned char>& data, CRecipient& recipient)
 {
 	recipient = {scriptPubKey, 0.02*COIN, false};
+	CTxOut txout(0,	recipient.scriptPubKey);
+    size_t nSize = txout.GetSerializeSize(SER_DISK,0)+148u;
+	CAmount fee = 3*minRelayTxFee.GetFee(nSize);
+	// minimum of 0.02 COIN fees for data
+	recipient.nAmount = fee > 0.02*COIN? fee: 0.02*COIN;
 }
 UniValue aliasnew(const UniValue& params, bool fHelp) {
 	if (fHelp || 2 > params.size() || 4 < params.size())
