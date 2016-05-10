@@ -98,15 +98,15 @@ bool IsSysServiceExpired(const CScript& scriptPubKey)
 	CEscrow escrow;
 	CCert cert;
 	if(alias.UnserializeFromData(vchData))
-		return ((alias.nHeight + GetAliasExpirationDepth()) > chainActive.Tip()->nHeight);
+		return ((alias.nHeight + GetAliasExpirationDepth()) < chainActive.Tip()->nHeight);
 	else if(offer.UnserializeFromData(vchData))
-		return ((offer.nHeight + GetOfferExpirationDepth()) > chainActive.Tip()->nHeight);
+		return ((offer.nHeight + GetOfferExpirationDepth()) < chainActive.Tip()->nHeight);
 	else if(cert.UnserializeFromData(vchData))
-		return ((cert.nHeight + GetCertExpirationDepth()) > chainActive.Tip()->nHeight);
+		return ((cert.nHeight + GetCertExpirationDepth()) < chainActive.Tip()->nHeight);
 	else if(escrow.UnserializeFromData(vchData))
-		return ((escrow.nHeight + GetEscrowExpirationDepth()) > chainActive.Tip()->nHeight);
+		return ((escrow.nHeight + GetEscrowExpirationDepth()) < chainActive.Tip()->nHeight);
 	else if(message.UnserializeFromData(vchData))
-		return ((message.nHeight + GetMessageExpirationDepth()) > chainActive.Tip()->nHeight);
+		return ((message.nHeight + GetMessageExpirationDepth()) < chainActive.Tip()->nHeight);
 
 	return false;
 	
@@ -442,7 +442,6 @@ bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, 
 }
 bool getBanList(const vector<unsigned char>& banData, map<string, unsigned char>& banAliasList,  map<string, unsigned char>& banCertList,  map<string, unsigned char>& banOfferList)
 {
-	bool found = false;
 	string value = stringFromVch(banData);
 	
 	UniValue outerValue(UniValue::VSTR);
@@ -457,6 +456,7 @@ bool getBanList(const vector<unsigned char>& banData, map<string, unsigned char>
 			LogPrintf("getBanList() Failed to get value from alias\n");
 		return false;
 	}
+	return false;
 
 }
 void PutToAliasList(std::vector<CAliasIndex> &aliasList, CAliasIndex& index) {
