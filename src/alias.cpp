@@ -1575,7 +1575,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		{
 			expired = 1;
 		}  
-		expires_in = expired_block - chainActive.Tip()->nHeight;}
+		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oName.push_back(Pair("expires_in", expires_in));
 		oName.push_back(Pair("expires_on", expired_block));
 		oName.push_back(Pair("expired", expired));
