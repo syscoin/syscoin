@@ -89,6 +89,8 @@ bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut
 }
 bool IsSysServiceExpired(const CScript& scriptPubKey)
 {
+	if(!chainActive.Tip())
+		return false;
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(scriptPubKey, vchData))
 		return false;
