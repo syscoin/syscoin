@@ -3380,14 +3380,11 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	oOffer.push_back(Pair("cert", stringFromVch(vchCert)));
 	oOffer.push_back(Pair("txid", tx.GetHash().GetHex()));
 	expired_block = nHeight + GetOfferExpirationDepth();
-    if(nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+    if(expired_block < chainActive.Tip()->nHeight)
 	{
 		expired = 1;
 	}  
-	if(expired == 0)
-	{
-		expires_in = nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight;
-	}
+	expires_in = expired_block - chainActive.Tip()->nHeight;
 	oOffer.push_back(Pair("expires_in", expires_in));
 	oOffer.push_back(Pair("expired_block", expired_block));
 	oOffer.push_back(Pair("expired", expired));
@@ -3843,14 +3840,12 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("private", theOfferA.bPrivate ? "Yes" : "No"));
 			oName.push_back(Pair("safesearch", theOfferA.safetyLevel <= 0 ? "Yes" : "No"));
 			expired_block = nHeight + GetOfferExpirationDepth();
-            if(pending == 0 && (nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight <= 0))
+            if(expired_block < chainActive.Tip()->nHeight)
 			{
 				expired = 1;
 			}  
-			if(pending == 0 && expired == 0)
-			{
-				expires_in = nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight;
-			}
+			expires_in = expired_block - chainActive.Tip()->nHeight;
+			
 			oName.push_back(Pair("alias", selleraddy.aliasName));
 			oName.push_back(Pair("expires_in", expires_in));
 			oName.push_back(Pair("expires_on", expired_block));
@@ -3934,14 +3929,11 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 
 			oOffer.push_back(Pair("txid", tx.GetHash().GetHex()));
 			expired_block = nHeight + GetOfferExpirationDepth();
-			if(nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+            if(expired_block < chainActive.Tip()->nHeight)
 			{
 				expired = 1;
 			}  
-			if(expired == 0)
-			{
-				expires_in = nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight;
-			}
+			expires_in = expired_block - chainActive.Tip()->nHeight;
 			CPubKey SellerPubKey(txPos2.vchPubKey);
 			CSyscoinAddress selleraddy(SellerPubKey.GetID());
 			selleraddy = CSyscoinAddress(selleraddy.ToString());
@@ -4049,11 +4041,8 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		oOffer.push_back(Pair("exclusive_resell", txOffer.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 		oOffer.push_back(Pair("btconly", txOffer.bOnlyAcceptBTC ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias_peg", stringFromVch(txOffer.vchAliasPeg)));
-		expired_block = nHeight + GetOfferExpirationDepth(); 
-		if(expired == 0)
-		{
-			expires_in = nHeight + GetOfferExpirationDepth() - chainActive.Tip()->nHeight;
-		}
+		expired_block = nHeight + GetOfferExpirationDepth();  
+		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oOffer.push_back(Pair("private", txOffer.bPrivate ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias", selleraddy.aliasName));
 		oOffer.push_back(Pair("expires_in", expires_in));

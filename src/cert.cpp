@@ -796,14 +796,11 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 	oCert.push_back(Pair("address", address.ToString()));
 	oCert.push_back(Pair("alias", address.aliasName));
 	expired_block = nHeight + GetCertExpirationDepth();
-	if(nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+    if(expired_block < chainActive.Tip()->nHeight)
 	{
 		expired = 1;
 	}  
-	if(expired == 0)
-	{
-		expires_in = nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight;
-	}
+	expires_in = expired_block - chainActive.Tip()->nHeight;
 	oCert.push_back(Pair("expires_in", expires_in));
 	oCert.push_back(Pair("expires_on", expired_block));
 	oCert.push_back(Pair("expired", expired));
@@ -908,14 +905,11 @@ UniValue certlist(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("address", address.ToString()));
 		oName.push_back(Pair("alias", address.aliasName));
 		expired_block = nHeight + GetCertExpirationDepth();
-        if(pending == 0 && (nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight <= 0))
+        if(expired_block < chainActive.Tip()->nHeight)
 		{
 			expired = 1;
 		}  
-		if(pending == 0 && expired == 0)
-		{
-			expires_in = nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight;
-		}
+		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oName.push_back(Pair("expires_in", expires_in));
 		oName.push_back(Pair("expires_on", expired_block));
 		oName.push_back(Pair("expired", expired));
@@ -988,14 +982,11 @@ UniValue certhistory(const UniValue& params, bool fHelp) {
 			oCert.push_back(Pair("address", address.ToString()));
 			oCert.push_back(Pair("alias", address.aliasName));
 			expired_block = nHeight + GetCertExpirationDepth();
-			if(nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+            if(expired_block < chainActive.Tip()->nHeight)
 			{
 				expired = 1;
 			}  
-			if(expired == 0)
-			{
-				expires_in = nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight;
-			}
+			expires_in = expired_block - chainActive.Tip()->nHeight;
 			oCert.push_back(Pair("expires_in", expires_in));
 			oCert.push_back(Pair("expires_on", expired_block));
 			oCert.push_back(Pair("expired", expired));
@@ -1081,14 +1072,11 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 		oCert.push_back(Pair("data", strData));
 		oCert.push_back(Pair("private", txCert.bPrivate? "Yes": "No"));
 		expired_block = nHeight + GetCertExpirationDepth();
-		if(nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+        if(expired_block < chainActive.Tip()->nHeight)
 		{
 			expired = 1;
 		}  
-		if(expired == 0)
-		{
-			expires_in = nHeight + GetCertExpirationDepth() - chainActive.Tip()->nHeight;
-		}
+		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oCert.push_back(Pair("expires_in", expires_in));
 		oCert.push_back(Pair("expires_on", expired_block));
 		oCert.push_back(Pair("expired", expired));

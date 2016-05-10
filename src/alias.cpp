@@ -1408,14 +1408,11 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("privatevalue", strPrivateValue));
 			oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
 			expired_block = nHeight + GetAliasExpirationDepth();
-			if(pending == 0 && (nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight <= 0))
+            if(expired_block < chainActive.Tip()->nHeight)
 			{
 				expired = 1;
 			}  
-			if(pending == 0 && expired == 0)
-			{
-				expires_in = nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight;
-			}
+			expires_in = expired_block - chainActive.Tip()->nHeight;
 			oName.push_back(Pair("expires_in", expires_in));
 			oName.push_back(Pair("expires_on", expired_block));
 			oName.push_back(Pair("expired", expired));
@@ -1572,14 +1569,11 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("ismine", fAliasMine));
         oName.push_back(Pair("lastupdate_height", nHeight));
 		expired_block = nHeight + GetAliasExpirationDepth();
-		if(nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+        if(expired_block < chainActive.Tip()->nHeight)
 		{
 			expired = 1;
 		}  
-		if(expired == 0)
-		{
-			expires_in = nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight;
-		}
+		expires_in = expired_block - chainActive.Tip()->nHeight;}
 		oName.push_back(Pair("expires_in", expires_in));
 		oName.push_back(Pair("expires_on", expired_block));
 		oName.push_back(Pair("expired", expired));
@@ -1646,14 +1640,11 @@ UniValue aliashistory(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("address", address.ToString()));
             oName.push_back(Pair("lastupdate_height", nHeight));
 			expired_block = nHeight + GetAliasExpirationDepth();
-			if(nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+            if(expired_block < chainActive.Tip()->nHeight)
 			{
 				expired = 1;
 			}  
-			if(expired == 0)
-			{
-				expires_in = nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight;
-			}
+			expires_in = expired_block - chainActive.Tip()->nHeight;
 			oName.push_back(Pair("expires_in", expires_in));
 			oName.push_back(Pair("expires_on", expired_block));
 			oName.push_back(Pair("expired", expired));
@@ -1752,14 +1743,11 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("privatevalue", strPrivateValue));
         oName.push_back(Pair("lastupdate_height", nHeight));
 		expired_block = nHeight + GetAliasExpirationDepth();
-        if(nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+        if(expired_block < chainActive.Tip()->nHeight)
 		{
 			expired = 1;
 		}  
-		if(expired == 0)
-		{
-			expires_in = nHeight + GetAliasExpirationDepth() - chainActive.Tip()->nHeight;
-		}
+		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oName.push_back(Pair("expires_in", expires_in));
 		oName.push_back(Pair("expires_on", expired_block));
 		oName.push_back(Pair("expired", expired));
