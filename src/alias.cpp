@@ -677,7 +677,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("alias pub value too big");
 	}
-	if(theAlias.vchPrivateValue.size() > MAX_VALUE_LENGTH)
+	if(theAlias.vchPrivateValue.size() > MAX_ENCRYPTED_VALUE_LENGTH)
 	{
 		return error("alias priv value too big");
 	}
