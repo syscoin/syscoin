@@ -158,7 +158,7 @@ CScript RemoveAliasScriptPrefix(const CScript& scriptIn);
 int GetSyscoinDataOutput(const CTransaction& tx);
 bool IsSyscoinDataOutput(const CTxOut& out);
 bool GetSyscoinData(const CTransaction &tx, std::vector<unsigned char> &vchData);
-bool GetSyscoinData(const CScript &scriptPubKey, vector<unsigned char> &vchData);
+bool GetSyscoinData(const CScript &scriptPubKey, std::vector<unsigned char> &vchData);
 bool IsSysServiceExpired(const CScript& scriptPubKey);
 bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut, const Consensus::Params& consensusParams);
 bool IsSyscoinScript(const CScript& scriptPubKey, int &op, std::vector<std::vector<unsigned char> > &vvchArgs);
