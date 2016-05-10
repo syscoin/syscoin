@@ -61,8 +61,8 @@ bool CMessage::UnserializeFromData(const vector<unsigned char> &vchData) {
         return false;
     }
 	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKeyTo)
-		|| !IsCompressedOrUncompressedPubKey(vchPubKeyFrom))
+	if(!IsSysCompressedOrUncompressedPubKey(vchPubKeyTo)
+		|| !IsSysCompressedOrUncompressedPubKey(vchPubKeyFrom))
 	{
 		return false;
 	}
@@ -276,11 +276,11 @@ bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<v
         return error("CheckMessageInputs() : null message");
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("message tx GUID too big");
-	if(!IsCompressedOrUncompressedPubKey(theMessage.vchPubKeyTo))
+	if(!IsSysCompressedOrUncompressedPubKey(theMessage.vchPubKeyTo))
 	{
 		return error("message public key to, invalid length");
 	}
-	if(!IsCompressedOrUncompressedPubKey(theMessage.vchPubKeyFrom))
+	if(!IsSysCompressedOrUncompressedPubKey(theMessage.vchPubKeyFrom))
 	{
 		return error("message public key from, invalid length");
 	}

@@ -79,7 +79,7 @@ bool CEscrow::UnserializeFromData(const vector<unsigned char> &vchData) {
         return false;
     }
 	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchBuyerKey))
+	if(!IsSysCompressedOrUncompressedPubKey(vchBuyerKey))
 	{
 		return false;
 	}
@@ -338,15 +338,15 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 		return true;
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("escrow tx GUID too big");
-	if(!theEscrow.vchBuyerKey.empty() && !IsCompressedOrUncompressedPubKey(theEscrow.vchBuyerKey))
+	if(!theEscrow.vchBuyerKey.empty() && !IsSysCompressedOrUncompressedPubKey(theEscrow.vchBuyerKey))
 	{
 		return error("escrow buyer pub key invalid length");
 	}
-	if(!theEscrow.vchSellerKey.empty() && !IsCompressedOrUncompressedPubKey(theEscrow.vchSellerKey))
+	if(!theEscrow.vchSellerKey.empty() && !IsSysCompressedOrUncompressedPubKey(theEscrow.vchSellerKey))
 	{
 		return error("escrow seller pub key invalid length");
 	}
-	if(!theEscrow.vchArbiterKey.empty() && !IsCompressedOrUncompressedPubKey(theEscrow.vchArbiterKey))
+	if(!theEscrow.vchArbiterKey.empty() && !IsSysCompressedOrUncompressedPubKey(theEscrow.vchArbiterKey))
 	{
 		return error("escrow arbiter pub key invalid length");
 	}

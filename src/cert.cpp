@@ -93,7 +93,7 @@ bool CCert::UnserializeFromData(const vector<unsigned char> &vchData) {
         return false;
     }
 	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	if(!IsSysCompressedOrUncompressedPubKey(vchPubKey))
 	{
 		return false;
 	}
@@ -322,7 +322,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 	{
 		return error("cert title too big");
 	}
-	if(!theCert.vchPubKey.empty() && !IsCompressedOrUncompressedPubKey(theCert.vchPubKey))
+	if(!theCert.vchPubKey.empty() && !IsSysCompressedOrUncompressedPubKey(theCert.vchPubKey))
 	{
 		return error("cert pub key invalid length");
 	}

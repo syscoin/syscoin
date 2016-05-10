@@ -205,7 +205,7 @@ bool COffer::UnserializeFromData(const vector<unsigned char> &vchData) {
         return false;
     }
 	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	if(!IsSysCompressedOrUncompressedPubKey(vchPubKey))
 	{
 		return false;
 	}
@@ -517,7 +517,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("offer link guid too big");
 	}
-	if(!IsCompressedOrUncompressedPubKey(theOffer.vchPubKey))
+	if(!IsSysCompressedOrUncompressedPubKey(theOffer.vchPubKey))
 	{
 		return error("offer pub key too invalid length");
 	}

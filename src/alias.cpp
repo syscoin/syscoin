@@ -33,7 +33,7 @@ CCertDB *pcertdb = NULL;
 CEscrowDB *pescrowdb = NULL;
 CMessageDB *pmessagedb = NULL;
 extern void SendMoneySyscoin(const vector<CRecipient> &vecSend, CAmount nValue, bool fSubtractFeeFromAmount, CWalletTx& wtxNew, const CWalletTx* wtxInOffer=NULL, const CWalletTx* wtxInCert=NULL, const CWalletTx* wtxInAlias=NULL, const CWalletTx* wtxInEscrow=NULL, bool syscoinTx=true);
-bool IsCompressedOrUncompressedPubKey(const vector<unsigned char> &vchPubKey) {
+bool IsSysCompressedOrUncompressedPubKey(const vector<unsigned char> &vchPubKey) {
     if (vchPubKey.size() < 33) {
         //  Non-canonical public key: too short
         return false;
@@ -678,7 +678,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("alias priv value too big");
 	}
-	if(!theAlias.vchPubKey.empty() && !IsCompressedOrUncompressedPubKey(theAlias.vchPubKey))
+	if(!theAlias.vchPubKey.empty() && !IsSysCompressedOrUncompressedPubKey(theAlias.vchPubKey))
 	{
 		return error("alias pub key invalid length");
 	}
@@ -834,7 +834,7 @@ bool CAliasIndex::UnserializeFromData(const vector<unsigned char> &vchData) {
         return false;
     }
 	// extra check to ensure data was parsed correctly
-	if(!IsCompressedOrUncompressedPubKey(vchPubKey))
+	if(!IsSysCompressedOrUncompressedPubKey(vchPubKey))
 	{
 		return false;
 	}
