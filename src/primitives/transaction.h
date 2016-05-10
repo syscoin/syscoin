@@ -10,7 +10,7 @@
 #include "script/script.h"
 #include "serialize.h"
 #include "uint256.h"
-extern bool IsSysServiceExpired(const CScript& scriptPubKey);
+#include "alias.h"
 
 /** An outpoint - a combination of a transaction hash and an index n into its vout */
 class COutPoint
