@@ -428,27 +428,27 @@ void SendMoneySyscoin(const vector<CRecipient> &vecSend, CAmount nValue, bool fS
 	CCoinsViewCache inputs(pcoinsTip);
 	if(DecodeAliasTx(wtxNew, op, nOut, vvch))
 	{
-		if(!CheckAliasInputs(wtxNew, op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight))
+		if(!CheckAliasInputs(wtxNew, op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight, NULL))
 			 throw runtime_error("Error: The transaction was rejected! Alias Inputs were invalid!");
 	}
 	if(DecodeCertTx(wtxNew, op, nOut, vvch))
 	{
-		if(!CheckCertInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight))
+		if(!CheckCertInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight, NULL))
 			throw runtime_error("Error: The transaction was rejected! Certificate Inputs were invalid!");
 	}
 	if(DecodeEscrowTx(wtxNew, op, nOut, vvch))
 	{
-		if(!CheckEscrowInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight))
+		if(!CheckEscrowInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight, NULL))
 			throw runtime_error("Error: The transaction was rejected! Escrow Inputs were invalid!");
 	}
 	if(DecodeOfferTx(wtxNew, op, nOut, vvch))		
 	{
-		if(!CheckOfferInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight))
+		if(!CheckOfferInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight, NULL))
 			throw runtime_error("Error: The transaction was rejected! Offer Inputs were invalid!");
 	}
 	if(DecodeMessageTx(wtxNew, op, nOut, vvch))
 	{
-		if(!CheckMessageInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight))
+		if(!CheckMessageInputs(wtxNew,  op, nOut, vvch, inputs, fJustCheck, chainActive.Tip()->nHeight, NULL))
 			throw runtime_error("Error: The transaction was rejected! Message Inputs were invalid!");
 	}
 	
