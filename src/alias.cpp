@@ -89,7 +89,8 @@ bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut
 }
 bool IsSysServiceExpired(const CScript& scriptPubKey)
 {
-	if(!chainActive.Tip())
+	// if we don't have a chain or we are in txindex mode (no pruning or culling), the service never expires
+	if(!chainActive.Tip() || fTxIndex)
 		return false;
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(scriptPubKey, vchData))
