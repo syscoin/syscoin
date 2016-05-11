@@ -390,8 +390,9 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
         case DefaultPegAlias:
             if (settings.value("defaultPegAlias") != value) {
 				if(value == "")
-					value = "SYS_RATES";
-                settings.setValue("defaultPegAlias", value);
+					settings.setValue("defaultPegAlias", "SYS_RATES");
+				else
+					settings.setValue("defaultPegAlias", value);
             }
             break;
         case CoinControlFeatures:
