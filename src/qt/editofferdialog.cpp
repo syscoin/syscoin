@@ -365,6 +365,7 @@ bool EditOfferDialog::saveCurrentRow()
 			model->editStatus = OfferTableModel::WALLET_UNLOCK_FAILURE;
         return false;
     }
+	QString defaultPegAlias;
 	UniValue params(UniValue::VARR);
 	string strMethod;
     switch(mode)
@@ -378,7 +379,7 @@ bool EditOfferDialog::saveCurrentRow()
                 QMessageBox::Ok, QMessageBox::Ok);
             return false;
         }
-		QString defaultPegAlias = settings.value("defaultPegAlias", "").toString();
+		defaultPegAlias = settings.value("defaultPegAlias", "").toString();
 		 if (ui->aliasPegEdit->text() != defaultPegAlias) {
 			QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Alias Peg"),
                  tr("Warning: By default the system peg is <b>%1</b>.") + "<br><br>" + tr("Are you sure you wish to choose this alias as your offer peg?").arg(defaultPegAlias),
@@ -429,7 +430,7 @@ bool EditOfferDialog::saveCurrentRow()
 
         break;
     case EditOffer:
-		QString defaultPegAlias = settings.value("defaultPegAlias", "").toString();
+		defaultPegAlias = settings.value("defaultPegAlias", "").toString();
 		 if (ui->aliasPegEdit->text() != defaultPegAlias) {
 			QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Alias Peg"),
                  tr("Warning: By default the system peg is <b>%1</b>.") + "<br><br>" + tr("Are you sure you wish to choose this alias as your offer peg?").arg(defaultPegAlias),
