@@ -20,7 +20,7 @@
    <item>
     <widget class="QTabWidget" name="tabWidget">
      <property name="currentIndex">
-      <number>0</number>
+      <number>5</number>
      </property>
      <widget class="QWidget" name="tabMain">
       <attribute name="title">
@@ -617,6 +617,26 @@
         </layout>
        </item>
        <item>
+        <spacer name="verticalSpacer_Display">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabSyscoin">
+      <attribute name="title">
+       <string>&amp;Preferences</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayout_3">
+       <item>
         <layout class="QHBoxLayout" name="horizontalLayout_4_Display">
          <item>
           <widget class="QLabel" name="themeLabel">
@@ -631,7 +651,63 @@
         </layout>
        </item>
        <item>
-        <spacer name="verticalSpacer_Display">
+        <layout class="QHBoxLayout" name="horizontalLayout">
+         <item>
+          <widget class="QLabel" name="labelDefaultOffer">
+           <property name="text">
+            <string>Default Offer Alias:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="defaultOfferAlias"/>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_2">
+         <item>
+          <widget class="QLabel" name="labelDefaultMessage">
+           <property name="text">
+            <string>Default Message Alias:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="defaultMessageAlias"/>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_3">
+         <item>
+          <widget class="QLabel" name="labelDefaultCert">
+           <property name="text">
+            <string>Default Cert Alias:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="defaultCertAlias"/>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_4">
+         <item>
+          <widget class="QLabel" name="labelDefaultPeg">
+           <property name="text">
+            <string>Default Peg Alias:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="defaultPegAlias"/>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <spacer name="verticalSpacer">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
          </property>
@@ -644,6 +720,13 @@
         </spacer>
        </item>
       </layout>
+      <zorder>layoutWidget</zorder>
+      <zorder>horizontalLayoutWidget</zorder>
+      <zorder>labelDefaultMessage</zorder>
+      <zorder>horizontalLayoutWidget_2</zorder>
+      <zorder>horizontalLayoutWidget_3</zorder>
+      <zorder>horizontalLayoutWidget_4</zorder>
+      <zorder>verticalSpacer</zorder>
      </widget>
     </widget>
    </item>

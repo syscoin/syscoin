@@ -40,7 +40,11 @@ public:
         DisplayUnit,            // SyscoinUnits::Unit
         ThirdPartyTxUrls,       // QString
 		// SYSCOIN
-		Theme,                  // QString  
+		Theme,                  // QString
+		DefaultOfferAlias,		// QString
+		DefaultMessageAlias,	// QString
+		DefaultCertAlias,		// QString
+		DefaultAliasPeg,		// QString
         Language,               // QString
         CoinControlFeatures,    // bool
         ThreadsScriptVerif,     // int

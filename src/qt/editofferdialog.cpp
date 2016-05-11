@@ -52,7 +52,12 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
     case NewOffer:
 		ui->offerLabel->setVisible(false);
 		ui->offerEdit->setVisible(false);
-		ui->aliasPegEdit->setText(tr("SYS_RATES"));
+		
+		QSettings settings;
+		QString defaultPegAlias = settings.value("defaultPegAlias", "").toString();
+		ui->aliasPegEdit->setText(defaultPegAlias);
+		QString defaultOfferAlias = settings.value("defaultOfferAlias", "").toString();
+		ui->aliasEdit->setText(defaultOfferAlias);
 		on_aliasPegEdit_editingFinished();
 		ui->privateEdit->setCurrentIndex(ui->privateEdit->findText("Yes"));
 		ui->privateEdit->setEnabled(false);
@@ -369,9 +374,10 @@ bool EditOfferDialog::saveCurrentRow()
                 QMessageBox::Ok, QMessageBox::Ok);
             return false;
         }
-		 if (ui->aliasPegEdit->text() != "SYS_RATES") {
+		QString defaultPegAlias = settings.value("defaultPegAlias", "").toString();
+		 if (ui->aliasPegEdit->text() != defaultPegAlias) {
 			QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Alias Peg"),
-                 tr("Warning: By default the system peg is <b>SYS_RATES</b>. You have chosen a peg managed by someone other than the Syscoin team!") + "<br><br>" + tr("Are you sure you wish to choose this alias as your offer peg?"),
+                 tr("Warning: By default the system peg is <b>%1</b>.") + "<br><br>" + tr("Are you sure you wish to choose this alias as your offer peg?").arg(defaultPegAlias),
                  QMessageBox::Yes|QMessageBox::Cancel,
                  QMessageBox::Cancel);
 			if(retval == QMessageBox::Cancel)
@@ -419,9 +425,10 @@ bool EditOfferDialog::saveCurrentRow()
 
         break;
     case EditOffer:
-		 if (ui->aliasPegEdit->text() != "SYS_RATES") {
+		QString defaultPegAlias = settings.value("defaultPegAlias", "").toString();
+		 if (ui->aliasPegEdit->text() != defaultPegAlias) {
 			QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Alias Peg"),
-                 tr("Warning: By default the system peg is <b>SYS_RATES</b>. You have chosen a peg managed by someone other than the Syscoin team!") + "<br><br>" + tr("Are you sure you wish to choose this alias as your offer peg?"),
+                 tr("Warning: By default the system peg is <b>%1</b>.") + "<br><br>" + tr("Are you sure you wish to choose this alias as your offer peg?").arg(defaultPegAlias),
                  QMessageBox::Yes|QMessageBox::Cancel,
                  QMessageBox::Cancel);
 			if(retval == QMessageBox::Cancel)

@@ -34,6 +34,8 @@ NewMessageDialog::NewMessageDialog(Mode mode, const QString &to, const QString &
 		ui->replyEdit->setVisible(false);
 		ui->replyLabel->setVisible(false);
 		ui->fromDisclaimer->setText(tr("<font color='blue'>Select an Alias</font>"));
+		QString defaultMessageAlias = settings.value("defaultMessageAlias", "").toString();
+		ui->aliasEdit->setText(defaultMessageAlias);
         break;
     case ReplyMessage:
         setWindowTitle(tr("Reply Message"));

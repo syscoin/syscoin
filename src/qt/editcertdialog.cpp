@@ -41,6 +41,9 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     case NewCert:
 		ui->certLabel->setVisible(false);
 		ui->certEdit->setVisible(false);
+		QSettings settings;
+		QString defaultCertAlias = settings.value("defaultCertAlias", "").toString();
+		ui->aliasEdit->setText(defaultCertAlias);
         setWindowTitle(tr("New Cert"));
         break;
     case EditCert:

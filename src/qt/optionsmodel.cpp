@@ -72,9 +72,6 @@ void OptionsModel::Init(bool resetSettings)
         settings.setValue("fCoinControlFeatures", false);
     fCoinControlFeatures = settings.value("fCoinControlFeatures", false).toBool();
 
-	// SYSCOIN
-    if (!settings.contains("theme"))
-        settings.setValue("theme", "");
     // These are shared with the core or have a command-line parameter
     // and we want command-line parameters to overwrite the GUI settings.
     //
@@ -137,6 +134,14 @@ void OptionsModel::Init(bool resetSettings)
 	// SYSCOIN
     if (!settings.contains("theme"))
         settings.setValue("theme", "");
+    if (!settings.contains("defaultOfferAlias"))
+        settings.setValue("defaultOfferAlias", "");
+    if (!settings.contains("defaultMessageAlias"))
+        settings.setValue("defaultMessageAlias", "");
+    if (!settings.contains("defaultCertAlias"))
+        settings.setValue("defaultCertAlias", "");
+    if (!settings.contains("defaultPegAlias"))
+        settings.setValue("defaultPegAlias", "SYS_RATES");
     if (!settings.contains("language"))
         settings.setValue("language", "");
     if (!SoftSetArg("-lang", settings.value("language").toString().toStdString()))
@@ -231,7 +236,15 @@ QVariant OptionsModel::data(const QModelIndex & index, int role) const
             return settings.value("fListen");
         // SYSCOIN
 		case Theme:
-            return settings.value("theme");   
+            return settings.value("theme");  
+        case DefaultOfferAlias:
+            return settings.value("defaultOfferAlias");   
+        case DefaultCertAlias:
+            return settings.value("defaultCertAlias");  
+        case DefaultMessageAlias:
+            return settings.value("defaultMessageAlias");  
+        case DefaultAliasPeg:
+            return settings.value("defaultAliasPeg");  
         default:
             return QVariant();
         }
@@ -359,6 +372,28 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
                 setRestartRequired(true);
             }
             break; 
+        case DefaultOfferAlias:
+            if (settings.value("defaultOfferAlias") != value) {
+                settings.setValue("defaultOfferAlias", value);
+            }
+            break; 
+        case DefaultCertAlias:
+            if (settings.value("defaultCertAlias") != value) {
+                settings.setValue("defaultCertAlias", value);
+            }
+            break; 
+        case DefaultMessageAlias:
+            if (settings.value("defaultMessageAlias") != value) {
+                settings.setValue("defaultMessageAlias", value);
+            }
+            break;
+        case DefaultAliasPeg:
+            if (settings.value("defaultAliasPeg") != value) {
+				if(value == "")
+					value = "SYS_RATES";
+                settings.setValue("defaultAliasPeg", value);
+            }
+            break;
         case CoinControlFeatures:
             fCoinControlFeatures = value.toBool();
             settings.setValue("fCoinControlFeatures", fCoinControlFeatures);

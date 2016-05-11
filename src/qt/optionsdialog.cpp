@@ -78,8 +78,8 @@ OptionsDialog::OptionsDialog(QWidget *parent, bool enableWallet) :
 
     /* Display elements init */
     // SYSCOIN Theme selector
-     ui->theme->addItem(tr("shade"), QVariant(""));
-
+    ui->theme->addItem(tr("shade"), QVariant(""));
+	ui->defaultPegAlias->setPlaceholderText("SYS_RATES");
      
     QDir translations(":translations");
     ui->lang->addItem(QString("(") + tr("default") + QString(")"), QVariant(""));
@@ -206,6 +206,10 @@ void OptionsDialog::setMapper()
     /* Display */
 	// SYSCOIN
 	mapper->addMapping(ui->theme, OptionsModel::Theme);
+	mapper->addMapping(ui->defaultOfferAlias, OptionsModel::DefaultOfferAlias);
+	mapper->addMapping(ui->defaultMessageAlias, OptionsModel::DefaultMessageAlias);
+	mapper->addMapping(ui->defaultCertAlias, OptionsModel::DefaultCertAlias);
+	mapper->addMapping(ui->defaultPegAlias, OptionsModel::DefaultPegAlias);
     mapper->addMapping(ui->lang, OptionsModel::Language);
     mapper->addMapping(ui->unit, OptionsModel::DisplayUnit);
     mapper->addMapping(ui->thirdPartyTxUrls, OptionsModel::ThirdPartyTxUrls);
