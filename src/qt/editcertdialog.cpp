@@ -36,14 +36,19 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this cert safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create a cert that is offensive and do not set this option to <b>No</b> your cert will be banned! You may only set this option when creating an cert, you cannot update it later so choose this option carefully based upon your descretion.</font>"));
 	
 	loadAliases();
+	QSettings settings;
+	QString defaultCertAlias;
+	int aliasIndex;
 	switch(mode)
     {
     case NewCert:
 		ui->certLabel->setVisible(false);
 		ui->certEdit->setVisible(false);
-		QSettings settings;
-		QString defaultCertAlias = settings.value("defaultCertAlias", "").toString();
-		ui->aliasEdit->setText(defaultCertAlias);
+		
+		defaultCertAlias = settings.value("defaultCertAlias", "").toString();
+		aliasIndex = ui->aliasEdit->findText(defaultCertAlias);
+		if(aliasIndex >= 0)
+			ui->aliasEdit->setCurrentIndex(aliasIndex);
         setWindowTitle(tr("New Cert"));
         break;
     case EditCert:

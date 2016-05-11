@@ -47,17 +47,20 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
 	loadAliases();
 	loadCerts();
 	ui->descriptionEdit->setStyleSheet("color: rgb(0, 0, 0); background-color: rgb(255, 255, 255)");
-    switch(mode)
+    QSettings settings;
+	QString defaultPegAlias, defaultOfferAlias;
+	int aliasIndex;
+	switch(mode)
     {
     case NewOffer:
 		ui->offerLabel->setVisible(false);
 		ui->offerEdit->setVisible(false);
-		
-		QSettings settings;
-		QString defaultPegAlias = settings.value("defaultPegAlias", "").toString();
+		defaultPegAlias = settings.value("defaultPegAlias", "").toString();
 		ui->aliasPegEdit->setText(defaultPegAlias);
-		QString defaultOfferAlias = settings.value("defaultOfferAlias", "").toString();
-		ui->aliasEdit->setText(defaultOfferAlias);
+		defaultOfferAlias = settings.value("defaultOfferAlias", "").toString();
+		aliasIndex = ui->aliasEdit->findText(defaultOfferAlias);
+		if(aliasIndex >= 0)
+			ui->aliasEdit->setCurrentIndex(aliasIndex);
 		on_aliasPegEdit_editingFinished();
 		ui->privateEdit->setCurrentIndex(ui->privateEdit->findText("Yes"));
 		ui->privateEdit->setEnabled(false);

@@ -27,6 +27,9 @@ NewMessageDialog::NewMessageDialog(Mode mode, const QString &to, const QString &
 	{
 		ui->topicEdit->setText(title);
 	}
+	QSettings settings;
+	QString defaultMessageAlias;
+	int aliasIndex;
     switch(mode)
     {
     case NewMessage:
@@ -34,8 +37,10 @@ NewMessageDialog::NewMessageDialog(Mode mode, const QString &to, const QString &
 		ui->replyEdit->setVisible(false);
 		ui->replyLabel->setVisible(false);
 		ui->fromDisclaimer->setText(tr("<font color='blue'>Select an Alias</font>"));
-		QString defaultMessageAlias = settings.value("defaultMessageAlias", "").toString();
-		ui->aliasEdit->setText(defaultMessageAlias);
+		defaultMessageAlias = settings.value("defaultMessageAlias", "").toString();
+		aliasIndex = ui->aliasEdit->findText(defaultMessageAlias);
+		if(aliasIndex >= 0)
+			ui->aliasEdit->setCurrentIndex(aliasIndex);
         break;
     case ReplyMessage:
         setWindowTitle(tr("Reply Message"));
