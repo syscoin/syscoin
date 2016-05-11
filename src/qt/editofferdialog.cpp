@@ -366,6 +366,7 @@ bool EditOfferDialog::saveCurrentRow()
         return false;
     }
 	QString defaultPegAlias;
+	QSettings settings;
 	UniValue params(UniValue::VARR);
 	string strMethod;
     switch(mode)
