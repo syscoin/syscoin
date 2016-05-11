@@ -9,6 +9,7 @@
 #include <QDataWidgetMapper>
 #include <QMessageBox>
 #include "rpcserver.h"
+#include <QSettings>
 using namespace std;
 
 extern const CRPCTable tableRPC;

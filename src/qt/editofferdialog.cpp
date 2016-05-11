@@ -11,6 +11,7 @@
 #include <QStringList>
 #include "rpcserver.h"
 #include "main.h"
+#include <QSettings>
 using namespace std;
 
 extern const CRPCTable tableRPC;
