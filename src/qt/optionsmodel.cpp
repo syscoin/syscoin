@@ -243,8 +243,8 @@ QVariant OptionsModel::data(const QModelIndex & index, int role) const
             return settings.value("defaultCertAlias");  
         case DefaultMessageAlias:
             return settings.value("defaultMessageAlias");  
-        case DefaultAliasPeg:
-            return settings.value("defaultAliasPeg");  
+        case DefaultPegAlias:
+            return settings.value("defaultPegAlias");  
         default:
             return QVariant();
         }
@@ -387,11 +387,11 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
                 settings.setValue("defaultMessageAlias", value);
             }
             break;
-        case DefaultAliasPeg:
-            if (settings.value("defaultAliasPeg") != value) {
+        case DefaultPegAlias:
+            if (settings.value("defaultPegAlias") != value) {
 				if(value == "")
 					value = "SYS_RATES";
-                settings.setValue("defaultAliasPeg", value);
+                settings.setValue("defaultPegAlias", value);
             }
             break;
         case CoinControlFeatures:

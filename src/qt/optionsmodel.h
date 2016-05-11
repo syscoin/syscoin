@@ -44,7 +44,7 @@ public:
 		DefaultOfferAlias,		// QString
 		DefaultMessageAlias,	// QString
 		DefaultCertAlias,		// QString
-		DefaultAliasPeg,		// QString
+		DefaultPegAlias,		// QString
         Language,               // QString
         CoinControlFeatures,    // bool
         ThreadsScriptVerif,     // int
