@@ -637,7 +637,7 @@
       </attribute>
       <layout class="QVBoxLayout" name="verticalLayout_3">
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout_4_Display">
+        <layout class="QHBoxLayout" name="horizontalLayout_4_Pref">
          <item>
           <widget class="QLabel" name="themeLabel">
            <property name="text">
@@ -651,7 +651,7 @@
         </layout>
        </item>
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout">
+        <layout class="QHBoxLayout" name="horizontalLayout_Pref">
          <item>
           <widget class="QLabel" name="labelDefaultOffer">
            <property name="text">
@@ -665,7 +665,7 @@
         </layout>
        </item>
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout_2">
+        <layout class="QHBoxLayout" name="horizontalLayout_2_Pref">
          <item>
           <widget class="QLabel" name="labelDefaultMessage">
            <property name="text">
@@ -679,7 +679,7 @@
         </layout>
        </item>
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout_3">
+        <layout class="QHBoxLayout" name="horizontalLayout_3_Pref">
          <item>
           <widget class="QLabel" name="labelDefaultCert">
            <property name="text">
@@ -693,7 +693,7 @@
         </layout>
        </item>
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout_4">
+        <layout class="QHBoxLayout" name="horizontalLayout_4_Pref_2">
          <item>
           <widget class="QLabel" name="labelDefaultPeg">
            <property name="text">
@@ -707,7 +707,7 @@
         </layout>
        </item>
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout_5">
+        <layout class="QHBoxLayout" name="horizontalLayout_5_Pref">
          <item>
           <widget class="QLabel" name="labelDefaultBuyOffer">
            <property name="text">
@@ -721,7 +721,7 @@
         </layout>
        </item>
        <item>
-        <spacer name="verticalSpacer">
+        <spacer name="verticalSpacer_Pref">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
          </property>
@@ -740,7 +740,7 @@
       <zorder>horizontalLayoutWidget_2</zorder>
       <zorder>horizontalLayoutWidget_3</zorder>
       <zorder>horizontalLayoutWidget_4</zorder>
-      <zorder>verticalSpacer</zorder>
+      <zorder>verticalSpacer_Pref</zorder>
       <zorder>horizontalLayoutWidget_5</zorder>
      </widget>
     </widget>
