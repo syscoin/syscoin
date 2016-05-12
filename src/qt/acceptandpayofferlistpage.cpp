@@ -26,6 +26,7 @@
 #include "rpcserver.h"
 #include "alias.h"
 #include "walletmodel.h"
+#include <QSettings>
 using namespace std;
 
 extern const CRPCTable tableRPC;
