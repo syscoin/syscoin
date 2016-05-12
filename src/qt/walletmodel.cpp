@@ -39,6 +39,8 @@ extern bool DecodeAndParseOfferTx(const CTransaction& tx, int& op, int& nOut, ve
 extern bool DecodeAndParseCertTx(const CTransaction& tx, int& op, int& nOut, vector<vector<unsigned char> >& vvch);
 extern bool DecodeAndParseMessageTx(const CTransaction& tx, int& op, int& nOut, vector<vector<unsigned char> >& vvch);
 extern bool DecodeAndParseEscrowTx(const CTransaction& tx, int& op, int& nOut, vector<vector<unsigned char> >& vvch);
+extern bool IsSyscoinScript(const CScript& scriptPubKey, int &op, vector<vector<unsigned char> > &vvchArgs);
+
 WalletModel::WalletModel(const PlatformStyle *platformStyle, CWallet *wallet, OptionsModel *optionsModel, QObject *parent) :
     QObject(parent), wallet(wallet), optionsModel(optionsModel), addressTableModel(0),
 	// SYSCOIN
@@ -720,7 +722,11 @@ void WalletModel::listCoins(std::map<QString, std::vector<COutput> >& mapCoins) 
             if (!wallet->mapWallet.count(cout.tx->vin[0].prevout.hash)) break;
             cout = COutput(&wallet->mapWallet[cout.tx->vin[0].prevout.hash], cout.tx->vin[0].prevout.n, 0, true);
         }
-
+		// SYSCOIN
+		int op;
+		vector<vector<unsigned char> > vvchArgs;
+		if (IsSyscoinScript(cout.tx->vout[cout.i].scriptPubKey, op, vvchArgs))
+			continue;
         CTxDestination address;
         if(!out.fSpendable || !ExtractDestination(cout.tx->vout[cout.i].scriptPubKey, address))
             continue;
