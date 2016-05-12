@@ -35,7 +35,6 @@ extern bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vec
 extern bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vector<unsigned char> > &vvchArgs, const CCoinsViewCache &inputs, bool fJustCheck, int nHeight, const CBlock *block);
 extern bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<vector<unsigned char> > &vvchArgs, const CCoinsViewCache &inputs, bool fJustCheck, int nHeight, const CBlock *block);
 extern bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<vector<unsigned char> > &vvchArgs, const CCoinsViewCache &inputs, bool fJustCheck, int nHeight, const CBlock *block);
-extern bool IsSyscoinScript(const CScript& scriptPubKey, int &op, vector<vector<unsigned char> > &vvchArgs);
 
 int64_t nWalletUnlockTime;
 static CCriticalSection cs_nWalletUnlockTime;
@@ -2462,11 +2461,7 @@ UniValue listunspent(const UniValue& params, bool fHelp)
             if (!setAddress.count(address))
                 continue;
         }
-		// SYSCOIN
-		int op;
-		vector<vector<unsigned char> > vvchArgs;
-		if (IsSyscoinScript(out.tx->vout[out.i].scriptPubKey, op, vvchArgs))
-			continue;
+
         CAmount nValue = out.tx->vout[out.i].nValue;
         const CScript& pk = out.tx->vout[out.i].scriptPubKey;
         UniValue entry(UniValue::VOBJ);
