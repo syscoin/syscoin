@@ -126,8 +126,12 @@ void AcceptandPayOfferListPage::loadAliases()
 		QMessageBox::critical(this, windowTitle(),
 			tr("There was an exception trying to refresh the alias list: ") + QString::fromStdString(e.what()),
 				QMessageBox::Ok, QMessageBox::Ok);
-	}         
- 
+	}       
+	QSettings settings;
+ 	QString defaultOfferAlias = settings.value("defaultOfferAlias", "").toString();
+	int aliasIndex = ui->aliasEdit->findText(defaultOfferAlias);
+	if(aliasIndex >= 0)
+		ui->aliasEdit->setCurrentIndex(aliasIndex);
 }
 
 void AcceptandPayOfferListPage::on_imageButton_clicked()

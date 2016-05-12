@@ -45,6 +45,7 @@ public:
 		DefaultMessageAlias,	// QString
 		DefaultCertAlias,		// QString
 		DefaultPegAlias,		// QString
+		DefaultBuyOfferAlias,	// QString
         Language,               // QString
         CoinControlFeatures,    // bool
         ThreadsScriptVerif,     // int

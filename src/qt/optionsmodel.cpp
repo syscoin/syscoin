@@ -142,6 +142,8 @@ void OptionsModel::Init(bool resetSettings)
         settings.setValue("defaultCertAlias", "");
     if (!settings.contains("defaultPegAlias"))
         settings.setValue("defaultPegAlias", "SYS_RATES");
+    if (!settings.contains("defaultBuyOfferAlias"))
+        settings.setValue("defaultBuyOfferAlias", "");
     if (!settings.contains("language"))
         settings.setValue("language", "");
     if (!SoftSetArg("-lang", settings.value("language").toString().toStdString()))
@@ -242,9 +244,11 @@ QVariant OptionsModel::data(const QModelIndex & index, int role) const
         case DefaultCertAlias:
             return settings.value("defaultCertAlias");  
         case DefaultMessageAlias:
-            return settings.value("defaultMessageAlias");  
+            return settings.value("defaultMessageAlias");
         case DefaultPegAlias:
-            return settings.value("defaultPegAlias");  
+            return settings.value("defaultPegAlias");
+        case DefaultBuyOfferAlias:
+            return settings.value("defaultBuyOfferAlias");
         default:
             return QVariant();
         }
@@ -393,6 +397,11 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
 					settings.setValue("defaultPegAlias", "SYS_RATES");
 				else
 					settings.setValue("defaultPegAlias", value);
+            }
+            break;
+        case DefaultBuyOfferAlias:
+            if (settings.value("defaultBuyOfferAlias") != value) {
+				settings.setValue("defaultBuyOfferAlias", value);
             }
             break;
         case CoinControlFeatures:

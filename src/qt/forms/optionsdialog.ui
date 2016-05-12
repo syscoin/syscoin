@@ -707,6 +707,20 @@
         </layout>
        </item>
        <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_5">
+         <item>
+          <widget class="QLabel" name="labelDefaultBuyOffer">
+           <property name="text">
+            <string>Default Alias When Purchasing Offers:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="defaultBuyOfferAlias"/>
+         </item>
+        </layout>
+       </item>
+       <item>
         <spacer name="verticalSpacer">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
@@ -727,6 +741,7 @@
       <zorder>horizontalLayoutWidget_3</zorder>
       <zorder>horizontalLayoutWidget_4</zorder>
       <zorder>verticalSpacer</zorder>
+      <zorder>horizontalLayoutWidget_5</zorder>
      </widget>
     </widget>
    </item>
