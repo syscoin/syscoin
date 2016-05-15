@@ -1121,7 +1121,20 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
 	}
 	catch (UniValue& objError)
 	{
-		throw runtime_error(find_value(objError, "message").get_str());
+		string rawtxError = find_value(objError, "message").get_str();
+		UniValue arrayAcceptParams(UniValue::VARR);
+		arrayAcceptParams.push_back(stringFromVch(vchEscrow));
+		try
+		{
+			res = tableRPC.execute("escrowcomplete", arrayAcceptParams);
+		}
+		catch (UniValue& objError)
+		{
+			throw runtime_error(rawtxError);
+		}
+		if (!res.isArray())
+			throw runtime_error("Could not complete escrow: Invalid response from escrowcomplete!");
+		return res;
 	}
 	if (!res.isStr())
 		throw runtime_error("Could not send escrow transaction: Invalid response from sendrawtransaction!");
