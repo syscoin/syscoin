@@ -30,6 +30,10 @@
 #include <QString>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+// SYSCOIN
+using namespace std;
+extern bool IsSyscoinScript(const CScript& scriptPubKey, int &op, vector<vector<unsigned char> > &vvchArgs);
+extern int GetSyscoinTxVersion();
 
 QList<CAmount> CoinControlDialog::payAmounts;
 CCoinControl* CoinControlDialog::coinControl = new CCoinControl();
