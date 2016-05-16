@@ -125,6 +125,7 @@ void MyEscrowListPage::setModel(WalletModel *walletModel, EscrowTableModel *mode
 	ui->tableView->setModel(proxyModel);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setSelectionMode(QAbstractItemView::SingleSelection);
+	ui->tableView->sortByColumn(1, Qt::DescendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 50); //escrow id
