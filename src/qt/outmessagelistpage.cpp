@@ -111,9 +111,13 @@ void OutMessageListPage::setModel(WalletModel* walletModel, MessageTableModel *m
     proxyModel->setDynamicSortFilter(true);
     proxyModel->setSortCaseSensitivity(Qt::CaseInsensitive);
     proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+
+	proxyModel->setFilterRole(MessageTableModel::TypeRole);
+
     ui->tableView->setModel(proxyModel);
-    ui->tableView->sortByColumn(1, Qt::DescendingOrder);
+    ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    ui->tableView->setSelectionMode(QAbstractItemView::SingleSelection);
+	ui->tableView->sortByColumn(1, Qt::DescendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //guid
