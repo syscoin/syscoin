@@ -723,18 +723,6 @@ void WalletModel::listCoins(std::map<QString, std::vector<COutput> >& mapCoins) 
             if (!wallet->mapWallet.count(cout.tx->vin[0].prevout.hash)) break;
             cout = COutput(&wallet->mapWallet[cout.tx->vin[0].prevout.hash], cout.tx->vin[0].prevout.n, 0, true);
         }
-		// SYSCOIN txs are unspendable unless input to another syscoin tx (passed into createtransaction)
-		if(cout.tx->nVersion == GetSyscoinTxVersion())
-		{
-			qDebug() << "GetSyscoinTxVersion";
-			int op;
-			vector<vector<unsigned char> > vvchArgs;
-			if (IsSyscoinScript(cout.tx->vout[cout.i].scriptPubKey, op, vvchArgs))
-			{
-				qDebug() << "IsSyscoinScript";
-				continue;
-			}
-		}
         CTxDestination address;
         if(!out.fSpendable || !ExtractDestination(cout.tx->vout[cout.i].scriptPubKey, address))
             continue;

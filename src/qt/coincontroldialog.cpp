@@ -769,7 +769,16 @@ void CoinControlDialog::updateView()
                     sLabel = tr("(no label)");
                 itemOutput->setText(COLUMN_LABEL, sLabel);
             }
-
+			// SYSCOIN txs are unspendable unless input to another syscoin tx (passed into createtransaction)
+			if(out.tx->nVersion == GetSyscoinTxVersion())
+			{
+				int op;
+				vector<vector<unsigned char> > vvchArgs;
+				if (IsSyscoinScript(out.tx->vout[out.i].scriptPubKey, op, vvchArgs))
+				{
+					 itemOutput->setText(COLUMN_LABEL, tr("(syscoin input)"));
+				}
+			}
             // amount
             itemOutput->setText(COLUMN_AMOUNT, SyscoinUnits::format(nDisplayUnit, out.tx->vout[out.i].nValue));
             itemOutput->setText(COLUMN_AMOUNT_INT64, strPad(QString::number(out.tx->vout[out.i].nValue), 15, " ")); // padding so that sorting works correctly
