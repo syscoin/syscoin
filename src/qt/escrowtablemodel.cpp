@@ -49,7 +49,7 @@ private:
     Qt::SortOrder order;
 };
 
-bool EscrowEntryLessThan::operator()(MessageTableEntry &left, MessageTableEntry &right) const
+bool EscrowEntryLessThan::operator()(EscrowTableEntry &left, EscrowTableEntry &right) const
 {
     EscrowTableEntry *pLeft = &left;
     EscrowTableEntry *pRight = &right;
@@ -60,6 +60,22 @@ bool EscrowEntryLessThan::operator()(MessageTableEntry &left, MessageTableEntry 
     {
     case EscrowTableModel::Time:
         return pLeft->itime < pRight->itime;
+    case EscrowTableModel::Seller:
+        return pLeft->seller < pRight->seller;
+    case EscrowTableModel::Arbiter:
+        return pLeft->arbiter < pRight->arbiter;
+    case EscrowTableModel::Buyer:
+        return pLeft->buyer < pRight->buyer;
+    case EscrowTableModel::Offer:
+        return pLeft->offer < pRight->offer;
+    case EscrowTableModel::OfferTitle:
+        return pLeft->offertitle < pRight->offertitle;
+    case EscrowTableModel::OfferAccept;
+        return pLeft->offeraccept < pRight->offeraccept;
+    case EscrowTableModel::Total;
+        return pLeft->total < pRight->total;
+    case EscrowTableModel::Status;
+        return pLeft->status < pRight->status;
     default:
         return pLeft->escrow < pRight->escrow;
     }

@@ -52,6 +52,14 @@ bool MessageEntryLessThan::operator()(MessageTableEntry &left, MessageTableEntry
     {
     case MessageTableModel::Time:
         return pLeft->itime < pRight->itime;
+    case MessageTableModel::Subject:
+        return pLeft->subject < pRight->subject;
+    case MessageTableModel::From:
+        return pLeft->from < pRight->from;
+    case MessageTableModel::To:
+        return pLeft->to < pRight->to;
+    case MessageTableModel::Message:
+        return pLeft->message < pRight->message;
     default:
         return pLeft->guid < pRight->guid;
     }
