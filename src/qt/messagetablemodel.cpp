@@ -20,29 +20,30 @@ struct MessageTableEntry
 
     QString guid;
     QString time;
+	int itime;
 	QString subject;
 	QString message;
 	QString from;
 	QString to;
 
     MessageTableEntry() {}
-    MessageTableEntry(const QString &guid, const QString &time,const QString &from, const QString &to, const QString &subject, const QString &message):
-        guid(guid), time(time), from(from), to(to), subject(subject), message(message) {}
+    MessageTableEntry(const QString &guid, int itime, const QString &time,const QString &from, const QString &to, const QString &subject, const QString &message):
+        guid(guid), itime(itime), time(time), from(from), to(to), subject(subject), message(message) {}
 };
 
 struct MessageTableEntryLessThan
 {
     bool operator()(const MessageTableEntry &a, const MessageTableEntry &b) const
     {
-        return a.time < b.time;
+        return a.itime < b.itime;
     }
-    bool operator()(const MessageTableEntry &a, const QString &b) const
+    bool operator()(const MessageTableEntry &a, const int b) const
     {
-        return a.time < b;
+        return a.itime < b;
     }
-    bool operator()(const QString &a, const MessageTableEntry &b) const
+    bool operator()(const int a, const MessageTableEntry &b) const
     {
-        return a < b.time;
+        return a < b.itime;
     }
 };
 
@@ -127,7 +128,7 @@ public:
 						if (message_value.type() == UniValue::VSTR)
 							message_str = message_value.get_str();
 				
-						updateEntry(QString::fromStdString(guid_str), QString::fromStdString(time_str), QString::fromStdString(from_str), QString::fromStdString(to_str), QString::fromStdString(subject_str), QString::fromStdString(message_str), type, CT_NEW); 
+						updateEntry(QString::fromStdString(guid_str), unixTime, QString::fromStdString(time_str), QString::fromStdString(from_str), QString::fromStdString(to_str), QString::fromStdString(subject_str), QString::fromStdString(message_str), type, CT_NEW); 
 					}
 				}
  			}
@@ -140,9 +141,10 @@ public:
 				return;
 			}           
          }
+		qSort(cachedMessageTable.begin(), cachedMessageTable.end(), MessageTableEntryLessThan());
     }
 
-    void updateEntry(const QString &guid, const QString &time, const QString &from, const QString &to, const QString &subject, const QString &message, MessageModelType type,int status)
+    void updateEntry(const QString &guid, const int itime, const QString &time, const QString &from, const QString &to, const QString &subject, const QString &message, MessageModelType type,int status)
     {
 		if(!parent || parent->modelType != type)
 		{
@@ -167,7 +169,7 @@ public:
             
             }
             parent->beginInsertRows(QModelIndex(), lowerIndex, lowerIndex);
-            cachedMessageTable.insert(lowerIndex, MessageTableEntry(guid, time, from, to, subject, message));
+            cachedMessageTable.insert(lowerIndex, MessageTableEntry(guid, itime, time, from, to, subject, message));
             parent->endInsertRows();
             break;
         case CT_UPDATED:
@@ -176,6 +178,7 @@ public:
                 break;
             }
             lower->guid = guid;
+			lower->itime = itime;
 			lower->time = time;
 			lower->from = from;
 			lower->to = to;
@@ -390,29 +393,6 @@ QModelIndex MessageTableModel::index(int row, int column, const QModelIndex &par
     }
 }
 
-void MessageTableModel::updateEntry(const QString &guid, const QString &time, const QString &from, const QString &to, const QString &subject, const QString &message, MessageModelType type, int status)
-{
-    // Update message book model from Syscoin core
-    priv->updateEntry(guid, time, from, to, subject, message, type, status);
-}
-
-QString MessageTableModel::addRow(const QString &guid, const QString &time, const QString &from, const QString &to, const QString &subject, const QString &message)
-{
-    editStatus = OK;
-    // Check for duplicate messagees
-    {
-        LOCK(wallet->cs_wallet);
-        if(lookupMessage(guid) != -1)
-        {
-            editStatus = DUPLICATE_MESSAGE;
-            return QString();
-        }
-    }
-
-    // Add entry
-
-    return guid;
-}
 void MessageTableModel::clear()
 {
 	beginResetModel();
