@@ -263,8 +263,8 @@ MessageTableModel::~MessageTableModel()
 }
 void MessageTableModel::sort(int column, Qt::SortOrder order)
 {
-    qSort(cachedMessageTable.begin(), cachedMessageTable.end(), MessageEntryLessThan(column, order));
-    Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(cachedMessageTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
+    qSort(priv->cachedMessageTable.begin(), priv->cachedMessageTable.end(), MessageEntryLessThan(column, order));
+    Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(priv->cachedMessageTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
 }
 void MessageTableModel::refreshMessageTable() 
 {

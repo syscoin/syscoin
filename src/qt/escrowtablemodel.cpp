@@ -70,11 +70,11 @@ bool EscrowEntryLessThan::operator()(EscrowTableEntry &left, EscrowTableEntry &r
         return pLeft->offer < pRight->offer;
     case EscrowTableModel::OfferTitle:
         return pLeft->offertitle < pRight->offertitle;
-    case EscrowTableModel::OfferAccept;
+	case EscrowTableModel::OfferAccept:
         return pLeft->offeraccept < pRight->offeraccept;
-    case EscrowTableModel::Total;
+	case EscrowTableModel::Total:
         return pLeft->total < pRight->total;
-    case EscrowTableModel::Status;
+	case EscrowTableModel::Status:
         return pLeft->status < pRight->status;
     default:
         return pLeft->escrow < pRight->escrow;
@@ -193,7 +193,7 @@ public:
 						dateTime.setTime_t(unixTime);
 						time_str = dateTime.toString().toStdString();	
 
-						updateEntry(QString::fromStdString(name_str), unitTime, QString::fromStdString(time_str), QString::fromStdString(seller_str), QString::fromStdString(arbiter_str), QString::fromStdString(offer_str), QString::fromStdString(offertitle_str), QString::fromStdString(offeraccept_str), QString::fromStdString(total_str), QString::fromStdString(status_str), QString::fromStdString(buyer_str), type, CT_NEW); 
+						updateEntry(QString::fromStdString(name_str), unixTime, QString::fromStdString(time_str), QString::fromStdString(seller_str), QString::fromStdString(arbiter_str), QString::fromStdString(offer_str), QString::fromStdString(offertitle_str), QString::fromStdString(offeraccept_str), QString::fromStdString(total_str), QString::fromStdString(status_str), QString::fromStdString(buyer_str), type, CT_NEW); 
 					}
 				}
  			}
@@ -300,8 +300,8 @@ EscrowTableModel::~EscrowTableModel()
 }
 void EscrowTableModel::sort(int column, Qt::SortOrder order)
 {
-    qSort(cachedEscrowTable.begin(), cachedEscrowTable.end(), EscrowEntryLessThan(column, order));
-    Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(cachedEscrowTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
+    qSort(priv->cachedEscrowTable.begin(), priv->cachedEscrowTable.end(), EscrowEntryLessThan(column, order));
+    Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(priv->cachedEscrowTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
 }
 void EscrowTableModel::refreshEscrowTable() 
 {
