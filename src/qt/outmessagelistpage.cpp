@@ -108,6 +108,9 @@ void OutMessageListPage::setModel(WalletModel* walletModel, MessageTableModel *m
 
     proxyModel = new QSortFilterProxyModel(this);
     proxyModel->setSourceModel(model);
+    proxyModel->setDynamicSortFilter(true);
+    proxyModel->setSortCaseSensitivity(Qt::CaseInsensitive);
+    proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setModel(proxyModel);
     ui->tableView->sortByColumn(1, Qt::DescendingOrder);
