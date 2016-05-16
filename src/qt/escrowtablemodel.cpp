@@ -24,6 +24,7 @@ struct EscrowTableEntry
     Type type;
     QString escrow;
 	QString time;
+	int itime;
 	QString seller;
 	QString arbiter;
 	QString offer;
@@ -33,10 +34,36 @@ struct EscrowTableEntry
 	QString status;
 	QString buyer;
     EscrowTableEntry() {}
-    EscrowTableEntry(Type type, const QString &escrow, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer):
-        type(type), escrow(escrow), time(time), seller(seller), arbiter(arbiter), offer(offer), offertitle(offertitle), offeraccept(offeraccept), total(total), status(status), buyer(buyer){}
+    EscrowTableEntry(Type type, const QString &escrow, const int itime, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer):
+        type(type), escrow(escrow), itime(itime), time(time), seller(seller), arbiter(arbiter), offer(offer), offertitle(offertitle), offeraccept(offeraccept), total(total), status(status), buyer(buyer){}
+};
+class EscrowEntryLessThan
+{
+public:
+    EscrowEntryLessThan(int nColumn, Qt::SortOrder fOrder):
+        column(nColumn), order(fOrder) {}
+    bool operator()(EscrowTableEntry &left, EscrowTableEntry &right) const;
+
+private:
+    int column;
+    Qt::SortOrder order;
 };
 
+bool EscrowEntryLessThan::operator()(MessageTableEntry &left, MessageTableEntry &right) const
+{
+    EscrowTableEntry *pLeft = &left;
+    EscrowTableEntry *pRight = &right;
+    if (order == Qt::DescendingOrder)
+        std::swap(pLeft, pRight);
+
+    switch(column)
+    {
+    case EscrowTableModel::Time:
+        return pLeft->itime < pRight->itime;
+    default:
+        return pLeft->escrow < pRight->escrow;
+    }
+}
 struct EscrowTableEntryLessThan
 {
     bool operator()(const EscrowTableEntry &a, const EscrowTableEntry &b) const
@@ -150,7 +177,7 @@ public:
 						dateTime.setTime_t(unixTime);
 						time_str = dateTime.toString().toStdString();	
 
-						updateEntry(QString::fromStdString(name_str), QString::fromStdString(time_str), QString::fromStdString(seller_str), QString::fromStdString(arbiter_str), QString::fromStdString(offer_str), QString::fromStdString(offertitle_str), QString::fromStdString(offeraccept_str), QString::fromStdString(total_str), QString::fromStdString(status_str), QString::fromStdString(buyer_str), type, CT_NEW); 
+						updateEntry(QString::fromStdString(name_str), unitTime, QString::fromStdString(time_str), QString::fromStdString(seller_str), QString::fromStdString(arbiter_str), QString::fromStdString(offer_str), QString::fromStdString(offertitle_str), QString::fromStdString(offeraccept_str), QString::fromStdString(total_str), QString::fromStdString(status_str), QString::fromStdString(buyer_str), type, CT_NEW); 
 					}
 				}
  			}
@@ -165,7 +192,7 @@ public:
          }
     }
 
-    void updateEntry(const QString &escrow, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer, EscrowModelType type, int statusi)
+    void updateEntry(const QString &escrow, const int itime, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer, EscrowModelType type, int statusi)
     {
 		if(!parent || parent->modelType != type)
 		{
@@ -191,7 +218,7 @@ public:
                 break; 
             }
             parent->beginInsertRows(QModelIndex(), lowerIndex, lowerIndex);
-            cachedEscrowTable.insert(lowerIndex, EscrowTableEntry(newEntryType, escrow, time, seller, arbiter, offer, offertitle, offeraccept, total, status, buyer));
+            cachedEscrowTable.insert(lowerIndex, EscrowTableEntry(newEntryType, escrow, itime, time, seller, arbiter, offer, offertitle, offeraccept, total, status, buyer));
             parent->endInsertRows();
             break;
         case CT_UPDATED:
@@ -200,6 +227,7 @@ public:
                 break;
             }
             lower->type = newEntryType;
+			lower->itime = itime;
 			lower->time = time;
             lower->seller = seller;
 			lower->arbiter = arbiter;
@@ -253,6 +281,11 @@ EscrowTableModel::EscrowTableModel(CWallet *wallet, WalletModel *parent,  Escrow
 EscrowTableModel::~EscrowTableModel()
 {
     delete priv;
+}
+void EscrowTableModel::sort(int column, Qt::SortOrder order)
+{
+    qSort(cachedEscrowTable.begin(), cachedEscrowTable.end(), EscrowEntryLessThan(column, order));
+    Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(cachedEscrowTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
 }
 void EscrowTableModel::refreshEscrowTable() 
 {
@@ -485,13 +518,13 @@ QModelIndex EscrowTableModel::index(int row, int column, const QModelIndex &pare
     }
 }
 
-void EscrowTableModel::updateEntry(const QString &escrow, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer, EscrowModelType type, int statusi)
+void EscrowTableModel::updateEntry(const QString &escrow, const int itime, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer, EscrowModelType type, int statusi)
 {
     // Update escrow book model from Syscoin core
-    priv->updateEntry(escrow, time, seller, arbiter, offer, offertitle, offeraccept, total, status, buyer, type, statusi);
+    priv->updateEntry(escrow, itime, time, seller, arbiter, offer, offertitle, offeraccept, total, status, buyer, type, statusi);
 }
 
-QString EscrowTableModel::addRow(const QString &escrow, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status,  const QString &buyer)
+QString EscrowTableModel::addRow(const QString &escrow, const int itime, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status,  const QString &buyer)
 {
     std::string strEscrow = escrow.toStdString();
     editStatus = OK;

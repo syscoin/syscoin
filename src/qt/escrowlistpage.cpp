@@ -314,7 +314,7 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 				dateTime.setTime_t(unixTime);
 				time_str = dateTime.toString().toStdString();
 
-				model->addRow(QString::fromStdString(name_str), QString::fromStdString(time_str),
+				model->addRow(QString::fromStdString(name_str), unixTime, QString::fromStdString(time_str),
 						QString::fromStdString(seller_str),
 						QString::fromStdString(arbiter_str),
 						QString::fromStdString(offer_str),
@@ -323,7 +323,7 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 						QString::fromStdString(total_str),
 						QString::fromStdString(status_str),
 						QString::fromStdString(buyer_str));
-					this->model->updateEntry(QString::fromStdString(name_str), QString::fromStdString(time_str),
+					this->model->updateEntry(QString::fromStdString(name_str), unixTime, QString::fromStdString(time_str),
 						QString::fromStdString(seller_str),
 						QString::fromStdString(arbiter_str),
 						QString::fromStdString(offer_str),

@@ -27,7 +27,8 @@ public:
         From = 2,  
 		To = 3,  
 		Subject = 4,
-		Message = 5
+		Message = 5,
+		NUMBER_OF_COLUMNS
     };
 
     enum RoleIndex {
@@ -75,9 +76,7 @@ private:
     void emitDataChanged(int index);
 
 public Q_SLOTS:
-    /* Update message list from core.
-     */
-
+	void sort(int column, Qt::SortOrder order = Qt::AscendingOrder);
     friend class MessageTablePriv;
 };
 

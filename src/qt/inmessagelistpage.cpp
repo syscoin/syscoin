@@ -132,6 +132,7 @@ void InMessageListPage::setModel(WalletModel* walletModel, MessageTableModel *mo
     proxyModel->setDynamicSortFilter(true);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setModel(proxyModel);
+    ui->tableView->sortByColumn(1, Qt::DescendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //guid
