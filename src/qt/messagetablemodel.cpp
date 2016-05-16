@@ -28,7 +28,7 @@ struct MessageTableEntry
 
     MessageTableEntry() {}
     MessageTableEntry(const QString &guid, const int itime, const QString &time,const QString &from, const QString &to, const QString &subject, const QString &message):
-        guid(guid), itime(itime), itime(itime), time(time), from(from), to(to), subject(subject), message(message) {}
+        guid(guid), itime(itime), time(time), from(from), to(to), subject(subject), message(message) {}
 };
 class MessageEntryLessThan
 {
