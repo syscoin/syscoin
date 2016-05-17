@@ -31,8 +31,8 @@ using namespace std;
 
 extern const CRPCTable tableRPC;
 
-AcceptandPayOfferListPage::AcceptandPayOfferListPage(WalletModel* model, const PlatformStyle *platformStyle, QWidget *parent) :
-    QDialog(parent), pwalletModel(model), latformStyle(platformStyle),
+AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platformStyle, QWidget *parent) :
+    QDialog(parent), platformStyle(platformStyle),
     ui(new Ui::AcceptandPayOfferListPage)
 {	
 	sAddress = "";
@@ -67,6 +67,10 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(WalletModel* model, const P
 	ui->certLabel->setVisible(false);
 	RefreshImage();
 
+}
+void AcceptandPayOfferListPage::setModel(WalletModel* model)
+{
+	walletModel = model;
 }
 void AcceptandPayOfferListPage::loadAliases()
 {

@@ -39,7 +39,7 @@ class AcceptandPayOfferListPage : public QDialog
 public:
 
 
-    explicit AcceptandPayOfferListPage(WalletModel* model, const PlatformStyle *platformStyle, QWidget *parent = 0);
+    explicit AcceptandPayOfferListPage(const PlatformStyle *platformStyle, QWidget *parent = 0);
     ~AcceptandPayOfferListPage();
 
     const QString &getReturnValue() const { return returnValue; }
@@ -50,6 +50,7 @@ public:
 	void OpenBTCPayDialog();
 	void RefreshImage();
 	void loadAliases();
+	void setModel(WalletModel* model);
 public Q_SLOTS:
     void acceptOffer();
 	bool lookup(const QString &id = QString(""));

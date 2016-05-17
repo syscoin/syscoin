@@ -83,6 +83,7 @@ void OfferView::setWalletModel(WalletModel *walletModel)
 		myOfferListPage->setModel(walletModel, walletModel->getOfferTableModelMine());
 		myAcceptedOfferListPage->setModel(walletModel, walletModel->getOfferTableModelMyAccept());
 		acceptedOfferListPage->setModel(walletModel, walletModel->getOfferTableModelAccept());
+		acceptandPayOfferListPage->setModel(walletModel);
 
     }
 }
