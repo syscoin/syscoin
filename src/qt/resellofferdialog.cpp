@@ -8,10 +8,12 @@
 #include <QMessageBox>
 #include <QStringList>
 #include "rpcserver.h"
+#include "walletmodel.h"
 using namespace std;
 extern const CRPCTable tableRPC;
-ResellOfferDialog::ResellOfferDialog(QModelIndex *idx, QWidget *parent) :
+ResellOfferDialog::ResellOfferDialog(QModelIndex *idx, WalletModel* model, QWidget *parent) :
     QDialog(parent),
+	walletModel(model),
     ui(new Ui::ResellOfferDialog)
 {
     ui->setupUi(this);
@@ -30,7 +32,12 @@ ResellOfferDialog::~ResellOfferDialog()
 
 bool ResellOfferDialog::saveCurrentRow()
 {
-
+	if(!walletModel) return false;
+	WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+	if(!ctx.isValid())
+	{
+		return false;
+	}
 	UniValue params(UniValue::VARR);
 	string strMethod;
 

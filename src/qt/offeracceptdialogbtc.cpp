@@ -11,6 +11,7 @@
 #include "rpcserver.h"
 #include "pubkey.h"
 #include "wallet/wallet.h"
+#include "walletmodel.h"
 #include "main.h"
 #include "utilmoneystr.h"
 #include <QDesktopServices>
@@ -31,8 +32,9 @@ using namespace std;
 #include <QNetworkRequest>
 #include <QNetworkReply>
 extern const CRPCTable tableRPC;
-OfferAcceptDialogBTC::OfferAcceptDialogBTC(const PlatformStyle *platformStyle, QString alias, QString offer, QString quantity, QString notes, QString title, QString currencyCode, QString qstrPrice, QString sellerAlias, QString address, QWidget *parent) :
+OfferAcceptDialogBTC::OfferAcceptDialogBTC(WalletModel* model, const PlatformStyle *platformStyle, QString alias, QString offer, QString quantity, QString notes, QString title, QString currencyCode, QString qstrPrice, QString sellerAlias, QString address, QWidget *parent) :
     QDialog(parent),
+	walletModel(model),
     ui(new Ui::OfferAcceptDialogBTC), platformStyle(platformStyle), alias(alias), offer(offer), notes(notes), quantity(quantity), title(title), sellerAlias(sellerAlias), address(address)
 {
     ui->setupUi(this);
@@ -224,6 +226,12 @@ void OfferAcceptDialogBTC::tryAcceptOffer()
 	CheckPaymentInBTC();		
 }
 void OfferAcceptDialogBTC::acceptOffer(){
+		if(!walletModel) return;
+		WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+		if(!ctx.isValid())
+		{
+			return;
+		}
 		UniValue params(UniValue::VARR);
 		UniValue valError;
 		UniValue valResult;

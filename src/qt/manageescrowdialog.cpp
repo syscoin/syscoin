@@ -7,11 +7,13 @@
 #include "ui_interface.h"
 #include <QMessageBox>
 #include "rpcserver.h"
+@include "walletmodel.h"
 using namespace std;
 
 extern const CRPCTable tableRPC;
-ManageEscrowDialog::ManageEscrowDialog(const QString &escrow, QWidget *parent) :
+ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow, QWidget *parent) :
     QDialog(parent),
+	walletModel(model),
     ui(new Ui::ManageEscrowDialog), escrow(escrow)
 {
     ui->setupUi(this);
@@ -178,6 +180,12 @@ ManageEscrowDialog::~ManageEscrowDialog()
 }
 void ManageEscrowDialog::on_releaseButton_clicked()
 {
+    if(!walletModel) return;
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if(!ctx.isValid())
+    {
+		return;
+    }
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrelease");
 	params.push_back(escrow.toStdString());
@@ -204,6 +212,12 @@ void ManageEscrowDialog::on_releaseButton_clicked()
 }
 void ManageEscrowDialog::on_refundButton_clicked()
 {
+    if(!walletModel) return;
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if(!ctx.isValid())
+    {
+		return;
+    }
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrefund");
 	params.push_back(escrow.toStdString());
