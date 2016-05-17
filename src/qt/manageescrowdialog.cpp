@@ -7,7 +7,7 @@
 #include "ui_interface.h"
 #include <QMessageBox>
 #include "rpcserver.h"
-@include "walletmodel.h"
+#include "walletmodel.h"
 using namespace std;
 
 extern const CRPCTable tableRPC;
