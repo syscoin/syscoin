@@ -140,6 +140,13 @@ void EditWhitelistOfferDialog::on_copy()
 }
 void EditWhitelistOfferDialog::on_exclusiveButton_clicked()
 {
+    if(!model || !walletModel) return;
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if(!ctx.isValid())
+    {
+		model->editStatus = OfferWhitelistTableModel::WALLET_UNLOCK_FAILURE;
+        return;
+    }
 	QString tmpExclusiveWhitelist = exclusiveWhitelist;
 	string strError;
 	string strMethod = string("offerupdate");
@@ -198,8 +205,13 @@ void EditWhitelistOfferDialog::on_exclusiveButton_clicked()
 
 void EditWhitelistOfferDialog::on_removeButton_clicked()
 {
-	if(!model)
-		return;
+    if(!model || !walletModel) return;
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if(!ctx.isValid())
+    {
+		model->editStatus = OfferWhitelistTableModel::WALLET_UNLOCK_FAILURE;
+        return;
+    }
 	if(!ui->tableView->selectionModel())
         return;
     QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
@@ -243,8 +255,13 @@ void EditWhitelistOfferDialog::on_removeButton_clicked()
 }
 void EditWhitelistOfferDialog::on_removeAllButton_clicked()
 {
-	if(!model)
-		return;
+    if(!model || !walletModel) return;
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if(!ctx.isValid())
+    {
+		model->editStatus = OfferWhitelistTableModel::WALLET_UNLOCK_FAILURE;
+        return;
+    }
 	string strError;
 	string strMethod = string("offerclearwhitelist");
 	UniValue params(UniValue::VARR);

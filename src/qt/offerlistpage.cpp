@@ -168,7 +168,7 @@ void OfferListPage::on_messageButton_clicked()
 }
 void OfferListPage::on_resellButton_clicked()
 {
- 	if(!model)	
+ 	if(!model || !walletModel)	
 		return;
 	if(!ui->tableView->selectionModel())
         return;
@@ -185,7 +185,7 @@ void OfferListPage::on_resellButton_clicked()
             QMessageBox::Ok, QMessageBox::Ok);
 		return;
 	}
-    ResellOfferDialog dlg((QModelIndex*)&selection.at(0));   
+    ResellOfferDialog dlg((QModelIndex*)&selection.at(0), walletModel);   
     dlg.exec();
 }
 void OfferListPage::on_purchaseButton_clicked()

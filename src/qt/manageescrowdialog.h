@@ -2,7 +2,7 @@
 #define MANAGEESCROWDIALOG_H
 
 #include <QDialog>
-
+class WalletModel;
 namespace Ui {
     class ManageEscrowDialog;
 }
@@ -20,7 +20,7 @@ public:
 		Arbiter,
 		None
     };
-    explicit ManageEscrowDialog(const QString &escrow, QWidget *parent = 0);
+    explicit ManageEscrowDialog(WalletModel* model, const QString &escrow, QWidget *parent = 0);
     ~ManageEscrowDialog();
 
 	bool isYourAlias(const QString &alias);
@@ -32,6 +32,7 @@ public Q_SLOTS:
 	void on_refundButton_clicked();
 	void on_cancelButton_clicked();
 private:
+	WalletModel* walletModel;
     Ui::ManageEscrowDialog *ui;
 	QString escrow;
 };

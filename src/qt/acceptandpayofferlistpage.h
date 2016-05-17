@@ -14,6 +14,7 @@ namespace Ui {
 class JSONRequest;
 
 class OptionsModel;
+class WalletModel;
 class COffer;
 QT_BEGIN_NAMESPACE
 class QTableView;
@@ -38,7 +39,7 @@ class AcceptandPayOfferListPage : public QDialog
 public:
 
 
-    explicit AcceptandPayOfferListPage(const PlatformStyle *platformStyle, QWidget *parent = 0);
+    explicit AcceptandPayOfferListPage(WalletModel* model, const PlatformStyle *platformStyle, QWidget *parent = 0);
     ~AcceptandPayOfferListPage();
 
     const QString &getReturnValue() const { return returnValue; }
@@ -56,6 +57,7 @@ public Q_SLOTS:
 	void netwManagerFinished();
 	void on_imageButton_clicked();
 private:
+	WalletModel* walletModel;
 	const PlatformStyle *platformStyle;
     Ui::AcceptandPayOfferListPage *ui;
 	bool URIHandled;

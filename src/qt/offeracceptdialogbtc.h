@@ -6,6 +6,7 @@
 #include <QLabel>
 #include "amount.h"
 class PlatformStyle;
+class WalletModel;
 QT_BEGIN_NAMESPACE
 class QNetworkReply;
 QT_END_NAMESPACE
@@ -17,12 +18,13 @@ class OfferAcceptDialogBTC : public QDialog
     Q_OBJECT
 
 public:
-    explicit OfferAcceptDialogBTC(const PlatformStyle *platformStyle, QString alias, QString offer, QString quantity, QString notes, QString title, QString currencyCode, QString strPrice, QString sellerAlias, QString address, QWidget *parent=0);
+    explicit OfferAcceptDialogBTC(WalletModel* model, const PlatformStyle *platformStyle, QString alias, QString offer, QString quantity, QString notes, QString title, QString currencyCode, QString strPrice, QString sellerAlias, QString address, QWidget *parent=0);
     ~OfferAcceptDialogBTC();
 	void CheckPaymentInBTC();
     bool getPaymentStatus();
 
 private:
+	WalletModel* walletModel;
 	const PlatformStyle *platformStyle;
     Ui::OfferAcceptDialogBTC *ui;
 	SendCoinsRecipient info;

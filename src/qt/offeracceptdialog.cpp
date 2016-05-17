@@ -18,8 +18,9 @@
 using namespace std;
 
 extern const CRPCTable tableRPC;
-OfferAcceptDialog::OfferAcceptDialog(const PlatformStyle *platformStyle, QString aliaspeg, QString alias, QString offer, QString quantity, QString notes, QString title, QString currencyCode, QString qstrPrice, QString sellerAlias, QString address, QWidget *parent) :
+OfferAcceptDialog::OfferAcceptDialog(WalletModel* model, const PlatformStyle *platformStyle, QString aliaspeg, QString alias, QString offer, QString quantity, QString notes, QString title, QString currencyCode, QString qstrPrice, QString sellerAlias, QString address, QWidget *parent) :
     QDialog(parent),
+	walletModel(model),
     ui(new Ui::OfferAcceptDialog), platformStyle(platformStyle), aliaspeg(aliaspeg), alias(alias), offer(offer), notes(notes), quantity(quantity), title(title), currency(currencyCode), seller(sellerAlias), address(address)
 {
     ui->setupUi(this);
@@ -102,7 +103,9 @@ void OfferAcceptDialog::onEscrowCheckBoxChanged(bool toggled)
 }
 void OfferAcceptDialog::acceptBTCPayment()
 {
-	OfferAcceptDialogBTC dlg(platformStyle, this->alias, this->offer, this->quantity, this->notes, this->title, this->currency, this->fprice, this->seller, this->address, this);
+	if(!walletModel)
+		return;
+	OfferAcceptDialogBTC dlg(walletModel, platformStyle, this->alias, this->offer, this->quantity, this->notes, this->title, this->currency, this->fprice, this->seller, this->address, this);
 	if(dlg.exec())
 	{
 		this->offerPaid = dlg.getPaymentStatus();
@@ -122,7 +125,12 @@ void OfferAcceptDialog::acceptPayment()
 // send offeraccept with offer guid/qty as params and then send offerpay with wtxid (first param of response) as param, using RPC commands.
 void OfferAcceptDialog::acceptOffer()
 {
-
+		if(!walletModel) return;
+		WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+		if(!ctx.isValid())
+		{
+			return;
+		}
 		UniValue params(UniValue::VARR);
 		UniValue valError;
 		UniValue valResult;
@@ -185,7 +193,12 @@ void OfferAcceptDialog::acceptOffer()
 }
 void OfferAcceptDialog::acceptEscrow()
 {
-
+		if(!walletModel) return;
+		WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+		if(!ctx.isValid())
+		{
+			return;
+		}
 		UniValue params(UniValue::VARR);
 		UniValue valError;
 		UniValue valResult;

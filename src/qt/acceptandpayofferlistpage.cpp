@@ -31,8 +31,8 @@ using namespace std;
 
 extern const CRPCTable tableRPC;
 
-AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platformStyle, QWidget *parent) :
-    QDialog(parent), platformStyle(platformStyle),
+AcceptandPayOfferListPage::AcceptandPayOfferListPage(WalletModel* model, const PlatformStyle *platformStyle, QWidget *parent) :
+    QDialog(parent), pwalletModel(model), latformStyle(platformStyle),
     ui(new Ui::AcceptandPayOfferListPage)
 {	
 	sAddress = "";
@@ -187,7 +187,9 @@ void AcceptandPayOfferListPage::updateCaption()
 }
 void AcceptandPayOfferListPage::OpenPayDialog()
 {
-	OfferAcceptDialog dlg(platformStyle, ui->aliasPegEdit->text(), ui->aliasEdit->currentText(), ui->offeridEdit->text(), ui->qtyEdit->text(), ui->notesEdit->toPlainText(), ui->infoTitle->text(), ui->infoCurrency->text(), ui->infoPrice->text(), ui->sellerEdit->text(), sAddress, this);
+	if(!walletModel)
+		return;
+	OfferAcceptDialog dlg(walletModel, platformStyle, ui->aliasPegEdit->text(), ui->aliasEdit->currentText(), ui->offeridEdit->text(), ui->qtyEdit->text(), ui->notesEdit->toPlainText(), ui->infoTitle->text(), ui->infoCurrency->text(), ui->infoPrice->text(), ui->sellerEdit->text(), sAddress, this);
 	if(dlg.exec())
 	{
 		this->offerPaid = dlg.getPaymentStatus();
@@ -196,7 +198,9 @@ void AcceptandPayOfferListPage::OpenPayDialog()
 }
 void AcceptandPayOfferListPage::OpenBTCPayDialog()
 {
-	OfferAcceptDialogBTC dlg(platformStyle, ui->aliasEdit->currentText(), ui->offeridEdit->text(), ui->qtyEdit->text(), ui->notesEdit->toPlainText(), ui->infoTitle->text(), ui->infoCurrency->text(), ui->infoPrice->text(), ui->sellerEdit->text(), sAddress, this);
+	if(!walletModel)
+		return;
+	OfferAcceptDialogBTC dlg(walletModel, platformStyle, ui->aliasEdit->currentText(), ui->offeridEdit->text(), ui->qtyEdit->text(), ui->notesEdit->toPlainText(), ui->infoTitle->text(), ui->infoCurrency->text(), ui->infoPrice->text(), ui->sellerEdit->text(), sAddress, this);
 	if(dlg.exec())
 	{
 		this->offerPaid = dlg.getPaymentStatus();
