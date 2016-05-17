@@ -160,7 +160,7 @@ void MyEscrowListPage::on_copyOffer_clicked()
 }
 void MyEscrowListPage::on_manageButton_clicked()
 {
- 	if(!model)	
+ 	if(!model || !walletModel)	
 		return;
 	if(!ui->tableView->selectionModel())
         return;
@@ -170,7 +170,7 @@ void MyEscrowListPage::on_manageButton_clicked()
         return;
     }
 	QString escrow = selection.at(0).data(EscrowTableModel::EscrowRole).toString();
-	ManageEscrowDialog dlg(escrow);   
+	ManageEscrowDialog dlg(walletModel, escrow);   
 	dlg.exec();
 }
 void MyEscrowListPage::on_buyerMessageButton_clicked()
