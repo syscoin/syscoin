@@ -181,7 +181,7 @@ int GetOfferExpirationDepth() {
 	#ifdef ENABLE_DEBUGRPC
     return 100;
   #else
-    return 100;
+    return 525600;
   #endif
 }
 

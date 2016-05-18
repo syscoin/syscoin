@@ -77,6 +77,7 @@ MyOfferListPage::MyOfferListPage(const PlatformStyle *platformStyle, QWidget *pa
 	connect(editWhitelistAction, SIGNAL(triggered()), this, SLOT(onEditWhitelistAction()));
 	connect(ui->tableView, SIGNAL(doubleClicked(QModelIndex)), this, SLOT(on_editButton_clicked()));
     connect(ui->tableView, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
+	connect(ui->soldOutCheck,SIGNAL(clicked(bool)),SLOT(onToggleShowSoldOut(bool)));
 
     // Pass through accept action from button box
     connect(ui->buttonBox, SIGNAL(accepted()), this, SLOT(accept()));
@@ -86,6 +87,12 @@ MyOfferListPage::MyOfferListPage(const PlatformStyle *platformStyle, QWidget *pa
 MyOfferListPage::~MyOfferListPage()
 {
     delete ui;
+}
+void MyOfferListPage::onToggleShowSoldOut(bool toggled)
+{
+	if(!model)
+		return;
+	model->showSoldOut(toggled);
 }
 void MyOfferListPage::showEvent ( QShowEvent * event )
 {

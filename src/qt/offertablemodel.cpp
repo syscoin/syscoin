@@ -68,7 +68,7 @@ public:
     OfferTablePriv(CWallet *wallet, OfferTableModel *parent):
         wallet(wallet), parent(parent) {}
 
-    void refreshOfferTable(OfferModelType type)
+    void refreshOfferTable(OfferModelType type, bool showSoldOut=false)
     {
         cachedOfferTable.clear();
         {
@@ -150,6 +150,8 @@ public:
 						const UniValue& qty_value = find_value(o, "quantity");
 						if (qty_value.type() == UniValue::VSTR)
 							qty_str = qty_value.get_str();
+						if(qty_str == "0" && !showSoldOut)
+							continue;
 						const UniValue& expired_value = find_value(o, "expired");
 						if (expired_value.type() == UniValue::VNUM)
 							expired = expired_value.get_int();
@@ -300,6 +302,13 @@ void OfferTableModel::refreshOfferTable()
 		return;
 	clear();
 	priv->refreshOfferTable(modelType);
+}
+void OfferTableModel::showSoldOut(bool show)
+{
+	if(modelType != MyOffer)
+		return;
+	clear();
+	priv->refreshOfferTable(modelType, show);
 }
 int OfferTableModel::rowCount(const QModelIndex &parent) const
 {
