@@ -232,29 +232,7 @@ public:
 
  	ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
-        READWRITE(sCategory);
-        READWRITE(sTitle);
-        READWRITE(sDescription);
-		READWRITE(txHash);
-		READWRITE(VARINT(nHeight));
-    	READWRITE(nPrice);
-    	READWRITE(nQty);
-    	READWRITE(accept);
-		READWRITE(vchLinkOffer);
-		READWRITE(linkWhitelist);
-		READWRITE(sCurrencyCode);
-		READWRITE(nCommission);
-		READWRITE(offerLinks);
-		READWRITE(vchPubKey);
-		READWRITE(vchCert);
-		READWRITE(bPrivate);
-		READWRITE(vchAliasPeg);
-		READWRITE(bOnlyAcceptBTC);
-		READWRITE(safetyLevel);
-		
-		
-	}
+    void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion);
 	float GetPrice(const COfferLinkWhitelistEntry& entry=COfferLinkWhitelistEntry()){
 		float price = nPrice;
 		if(price==0 && !accept.IsNull())

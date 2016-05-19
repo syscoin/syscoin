@@ -46,7 +46,7 @@ void COffer::SerializationOp(Stream& s, Operation ser_action, int nType, int nVe
 		READWRITE(bPrivate);
 		READWRITE(vchAliasPeg);
 		READWRITE(bOnlyAcceptBTC);
-		if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1)
+		if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1 || ChainNameFromCommandLine() != CBaseChainParams::MAIN)
 			READWRITE(safetyLevel);	
 }
 bool foundOfferLinkInWallet(const vector<unsigned char> &vchOffer, const vector<unsigned char> &vchAcceptRandLink)
