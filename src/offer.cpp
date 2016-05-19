@@ -2859,8 +2859,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	else if(wtxAliasIn != NULL)
 		vecSend.push_back(aliasRecipient);
 
-	vecSend.push_back(acceptRecipient);
-
 	// check for Bitcoin payment on the bitcoin network, otherwise pay in syscoin
 	if(!vchBTCTxId.empty() && stringFromVch(theOffer.sCurrencyCode) == "BTC")
 	{
@@ -2873,6 +2871,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		if(!CreateLinkedOfferAcceptRecipients(vecSend, nPrice, wtxOfferIn, vchOffer, scriptPayment))
 		{
 			vecSend.push_back(paymentRecipient);
+			vecSend.push_back(acceptRecipient);
 		}
 	}
 	else
