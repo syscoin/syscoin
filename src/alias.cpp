@@ -33,6 +33,16 @@ CCertDB *pcertdb = NULL;
 CEscrowDB *pescrowdb = NULL;
 CMessageDB *pmessagedb = NULL;
 extern void SendMoneySyscoin(const vector<CRecipient> &vecSend, CAmount nValue, bool fSubtractFeeFromAmount, CWalletTx& wtxNew, const CWalletTx* wtxInOffer=NULL, const CWalletTx* wtxInCert=NULL, const CWalletTx* wtxInAlias=NULL, const CWalletTx* wtxInEscrow=NULL, bool syscoinTx=true);
+template <typename Stream, typename Operation>
+void CAliasIndex::SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {        
+	READWRITE(txHash);
+    READWRITE(VARINT(nHeight));
+	READWRITE(vchPublicValue);
+	READWRITE(vchPrivateValue);
+	READWRITE(vchPubKey);
+	if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1 || ChainNameFromCommandLine() != CBaseChainParams::MAIN)
+		READWRITE(safetyLevel);	
+}
 bool IsSysCompressedOrUncompressedPubKey(const vector<unsigned char> &vchPubKey) {
     if (vchPubKey.size() < 33) {
         //  Non-canonical public key: too short

@@ -27,6 +27,7 @@ bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, in
 bool DisconnectMessage(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs );
 bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs );
 static const CBlock *linkedAcceptBlock = NULL;
+template <typename Stream, typename Operation>
 void COffer::SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(sCategory);
         READWRITE(sTitle);

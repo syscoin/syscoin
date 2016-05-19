@@ -46,17 +46,7 @@ public:
 	}
 	ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
-        READWRITE(vchTitle);
-        READWRITE(vchData);
-        READWRITE(txHash);
-        READWRITE(VARINT(nHeight));
-		READWRITE(vchPubKey);
-		READWRITE(bPrivate);
-		READWRITE(safetyLevel);
-		
-		
-	}
+    void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion);
 
     friend bool operator==(const CCert &a, const CCert &b) {
         return (
