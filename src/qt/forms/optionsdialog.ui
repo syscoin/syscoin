@@ -20,7 +20,7 @@
    <item>
     <widget class="QTabWidget" name="tabWidget">
      <property name="currentIndex">
-      <number>0</number>
+      <number>5</number>
      </property>
      <widget class="QWidget" name="tabMain">
       <attribute name="title">
@@ -721,6 +721,31 @@
         </layout>
        </item>
        <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_6_Pref">
+         <item>
+          <widget class="QLabel" name="labelSafeSearch">
+           <property name="text">
+            <string>Safe Search:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="safeSearch">
+           <item>
+            <property name="text">
+             <string>Yes</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>No</string>
+            </property>
+           </item>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
         <spacer name="verticalSpacer_Pref">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
@@ -735,6 +760,7 @@
        </item>
       </layout>
       <zorder>verticalSpacer_Pref</zorder>
+      <zorder>horizontalLayoutWidget</zorder>
      </widget>
     </widget>
    </item>

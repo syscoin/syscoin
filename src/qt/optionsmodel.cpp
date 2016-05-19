@@ -144,6 +144,8 @@ void OptionsModel::Init(bool resetSettings)
         settings.setValue("defaultPegAlias", "SYS_RATES");
     if (!settings.contains("defaultBuyOfferAlias"))
         settings.setValue("defaultBuyOfferAlias", "");
+    if (!settings.contains("safesearch"))
+        settings.setValue("safesearch", "Yes");
     if (!settings.contains("language"))
         settings.setValue("language", "");
     if (!SoftSetArg("-lang", settings.value("language").toString().toStdString()))
@@ -249,6 +251,8 @@ QVariant OptionsModel::data(const QModelIndex & index, int role) const
             return settings.value("defaultPegAlias");
         case DefaultBuyOfferAlias:
             return settings.value("defaultBuyOfferAlias");
+       case SafeSearch:
+            return settings.value("safesearch");
         default:
             return QVariant();
         }
@@ -402,6 +406,11 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
         case DefaultBuyOfferAlias:
             if (settings.value("defaultBuyOfferAlias") != value) {
 				settings.setValue("defaultBuyOfferAlias", value);
+            }
+            break;
+        case SafeSearch:
+            if (settings.value("safesearch") != value) {
+				settings.setValue("safesearch", value);
             }
             break;
         case CoinControlFeatures:

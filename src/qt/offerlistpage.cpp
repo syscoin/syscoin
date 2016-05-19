@@ -19,6 +19,7 @@
 #include <QMenu>
 #include "main.h"
 #include "rpcserver.h"
+#include <QSettings>
 using namespace std;
 
 
@@ -316,7 +317,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 		pageMap.clear();
 		currentPage = 0;
 	}
-	
+	QSettings settings;
     UniValue params(UniValue::VARR);
     UniValue valError;
     UniValue valResult;
@@ -344,7 +345,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	int expired = 0;
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
-	params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
+	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
     try {
         result = tableRPC.execute(strMethod, params);
     }
@@ -469,7 +470,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_str),
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str),
-					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No");
+					settings.value("safesearch", "").toString());
 				this->model->updateEntry(QString::fromStdString(name_str),
 					QString::fromStdString(cert_str),
 					QString::fromStdString(value_str),
@@ -484,7 +485,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_str), 
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str), 
-					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No", AllOffer, CT_NEW);	
+					settings.value("safesearch", "").toString(), AllOffer, CT_NEW);	
 		  }
 
 		  pageMap[currentPage] = make_pair(firstOffer, lastOffer);  

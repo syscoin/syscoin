@@ -20,6 +20,7 @@
 #include <QMenu>
 #include "main.h"
 #include "rpcserver.h"
+#include <QSettings>
 using namespace std;
 
 
@@ -235,7 +236,8 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 		ui->prevButton->setEnabled(false);
 		pageMap.clear();
 		currentPage = 0;
-	}
+	}	
+		QSettings settings;
         UniValue params(UniValue::VARR);
         UniValue valError;
         UniValue valResult;
@@ -256,7 +258,7 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 		int expires_on = 0;  
         params.push_back(ui->lineEditAliasSearch->text().toStdString());
 		params.push_back(GUID);
-		params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
+		params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
 
         try {
             result = tableRPC.execute(strMethod, params);
@@ -338,13 +340,13 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str),
-						ui->safeSearch->checkState() == Qt::Checked? "Yes": "No");
+						settings.value("safesearch", "").toString());
 					this->model->updateEntry(QString::fromStdString(name_str),
 						QString::fromStdString(value_str),
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str), 
-						ui->safeSearch->checkState() == Qt::Checked? "Yes": "No", AllAlias, CT_NEW);	
+						settings.value("safesearch", "").toString(), AllAlias, CT_NEW);	
 			  }
 			  pageMap[currentPage] = make_pair(firstAlias, lastAlias);  
 			  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));

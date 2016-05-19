@@ -30,19 +30,6 @@
       <widget class="QLineEdit" name="lineEditOfferSearch"/>
      </item>
      <item>
-      <widget class="QCheckBox" name="safeSearch">
-       <property name="toolTip">
-        <string>Filters out provocative material from the search listing.</string>
-       </property>
-       <property name="text">
-        <string>Safe Search</string>
-       </property>
-       <property name="checked">
-        <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
       <widget class="QPushButton" name="searchOffer">
        <property name="maximumSize">
         <size>

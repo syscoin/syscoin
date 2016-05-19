@@ -30,13 +30,6 @@
       <widget class="QLineEdit" name="lineEditCertSearch"/>
      </item>
      <item>
-      <widget class="QCheckBox" name="safeSearch">
-       <property name="text">
-        <string>Safe Search</string>
-       </property>
-      </widget>
-     </item>
-     <item>
       <widget class="QPushButton" name="searchCert">
        <property name="maximumSize">
         <size>

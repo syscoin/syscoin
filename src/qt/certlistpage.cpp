@@ -15,6 +15,7 @@
 #include <QMenu>
 #include "main.h"
 #include "rpcserver.h"
+#include <QSettings>
 using namespace std;
 
 CertListPage::CertListPage(const PlatformStyle *platformStyle, QWidget *parent) :
@@ -202,6 +203,7 @@ void CertListPage::on_searchCert_clicked(string GUID)
 		pageMap.clear();
 		currentPage = 0;
 	}
+	QSettings settings;
     UniValue params(UniValue::VARR);
     UniValue valError;
     UniValue valResult;
@@ -225,7 +227,7 @@ void CertListPage::on_searchCert_clicked(string GUID)
 	int expires_on = 0; 
     params.push_back(ui->lineEditCertSearch->text().toStdString());
 	params.push_back(GUID);
-	params.push_back(ui->safeSearch->checkState() == Qt::Checked? true: false);
+	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
 
 
     try {
@@ -313,7 +315,7 @@ void CertListPage::on_searchCert_clicked(string GUID)
 					QString::fromStdString(expired_str),
 					QString::fromStdString(private_str),
 					QString::fromStdString(alias_str),
-					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No");
+					settings.value("safesearch", "").toString());
 		   this->model->updateEntry(QString::fromStdString(name_str),
 					QString::fromStdString(value_str),
 					QString::fromStdString(data_str),
@@ -322,7 +324,7 @@ void CertListPage::on_searchCert_clicked(string GUID)
 					QString::fromStdString(expired_str), 
 					QString::fromStdString(private_str), 
 					QString::fromStdString(alias_str), 
-					ui->safeSearch->checkState() == Qt::Checked? "Yes": "No", AllCert, CT_NEW);	
+					settings.value("safesearch", "").toString(), AllCert, CT_NEW);	
 		  }
 		  pageMap[currentPage] = make_pair(firstCert, lastCert);  
 		  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));
