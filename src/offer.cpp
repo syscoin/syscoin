@@ -3234,6 +3234,19 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
         throw runtime_error("failed to read offer transaction from disk");
 	if(vtxPos.back().safetyLevel >= SAFETY_LEVEL2)
 		throw runtime_error("offer has been banned");
+	// get sellers alias
+	CPubKey SellerPubKey(vtxPos.back().vchPubKey);
+	CSyscoinAddress selleraddy(SellerPubKey.GetID());
+	selleraddy = CSyscoinAddress(selleraddy.ToString());
+
+	// check that the seller isn't banned level 2
+	vector<CAliasIndex> vtxAliasPos;
+	if (!paliasdb->ReadAlias(vchFromString(selleraddy.aliasName), vtxAliasPos))
+		throw runtime_error("failed to read seller alias from alias DB");
+	if (vtxAliasPos.size() < 1)
+		throw runtime_error("no seller found for this offer");
+	if(vtxAliasPos.back().safetyLevel >= SAFETY_LEVEL2)
+		throw runtime_error("offer owner has been banned");
     COffer theOffer;
 	vector<vector<unsigned char> > vvch;
     int op, nOut;
@@ -3389,9 +3402,6 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	oOffer.push_back(Pair("expired_block", expired_block));
 	oOffer.push_back(Pair("expired", expired));
 	oOffer.push_back(Pair("height", strprintf("%llu", nHeight)));
-	CPubKey SellerPubKey(theOffer.vchPubKey);
-	CSyscoinAddress selleraddy(SellerPubKey.GetID());
-	selleraddy = CSyscoinAddress(selleraddy.ToString());
 	oOffer.push_back(Pair("address", selleraddy.ToString()));
 	oOffer.push_back(Pair("category", stringFromVch(theOffer.sCategory)));
 	oOffer.push_back(Pair("title", stringFromVch(theOffer.sTitle)));

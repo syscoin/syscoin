@@ -772,6 +772,20 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 		throw runtime_error("cert has been banned");
 	if (!GetSyscoinTransaction(ca.nHeight, ca.txHash, tx, Params().GetConsensus()))
 		throw runtime_error("failed to read transaction from disk");   
+	// get owner alias
+	CPubKey SellerPubKey(vtxPos.back().vchPubKey);
+	CSyscoinAddress address(SellerPubKey.GetID());
+	address = CSyscoinAddress(address.ToString());
+
+	// check that the seller isn't banned level 2
+	vector<CAliasIndex> vtxAliasPos;
+	if (!paliasdb->ReadAlias(vchFromString(address.aliasName), vtxAliasPos))
+		throw runtime_error("failed to read owner alias from alias DB");
+	if (vtxAliasPos.size() < 1)
+		throw runtime_error("no owner found for this cert");
+	if(vtxAliasPos.back().safetyLevel >= SAFETY_LEVEL2)
+		throw runtime_error("cert owner has been banned");
+
     string sHeight = strprintf("%llu", ca.nHeight);
     oCert.push_back(Pair("cert", stringFromVch(vchCert)));
     oCert.push_back(Pair("txid", ca.txHash.GetHex()));
@@ -790,9 +804,6 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 
     uint64_t nHeight;
 	nHeight = ca.nHeight;
-	CPubKey PubKey(ca.vchPubKey);
-	CSyscoinAddress address(PubKey.GetID());
-	address = CSyscoinAddress(address.ToString());
 	oCert.push_back(Pair("address", address.ToString()));
 	oCert.push_back(Pair("alias", address.aliasName));
 	expired_block = nHeight + GetCertExpirationDepth();
