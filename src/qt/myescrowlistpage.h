@@ -46,6 +46,7 @@ private:
     QString newEscrowToSelect;
 	const PlatformStyle *platformStyle;
 private Q_SLOTS:
+	void onToggleShowComplete(bool toggled)
     void on_copyEscrow_clicked();
 	void on_copyOffer_clicked();
     /** Export button clicked */

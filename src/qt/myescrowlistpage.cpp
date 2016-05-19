@@ -93,6 +93,7 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 	connect(detailsAction, SIGNAL(triggered()), this, SLOT(on_detailButton_clicked()));
 
     connect(ui->tableView, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
+	connect(ui->completeCheck,SIGNAL(clicked(bool)),SLOT(onToggleShowComplete(bool)));
 
     // Pass through accept action from button box
     connect(ui->buttonBox, SIGNAL(accepted()), this, SLOT(accept()));
@@ -102,6 +103,12 @@ MyEscrowListPage::MyEscrowListPage(const PlatformStyle *platformStyle, QWidget *
 MyEscrowListPage::~MyEscrowListPage()
 {
     delete ui;
+}
+void MyEscrowListPage::onToggleShowComplete(bool toggled)
+{
+	if(!model)
+		return;
+	model->showComplete(toggled);
 }
 void MyEscrowListPage::showEvent ( QShowEvent * event )
 {

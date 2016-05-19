@@ -108,7 +108,7 @@ public:
     EscrowTablePriv(CWallet *wallet, EscrowTableModel *parent):
         wallet(wallet), parent(parent) {}
 
-    void refreshEscrowTable(EscrowModelType type)
+    void refreshEscrowTable(EscrowModelType type, bool showComplete=false)
     {
 
         cachedEscrowTable.clear();
@@ -188,7 +188,8 @@ public:
 						const UniValue& status_value = find_value(o, "status");
 						if (status_value.type() == UniValue::VSTR)
 							status_str = status_value.get_str();
-						
+						if((status_str == "complete" || status_str == "escrow refunded") && !showComplete)
+							continue;
 						unixTime = atoi(time_str.c_str());
 						dateTime.setTime_t(unixTime);
 						time_str = dateTime.toString().toStdString();	
@@ -302,6 +303,13 @@ void EscrowTableModel::sort(int column, Qt::SortOrder order)
 {
     qSort(priv->cachedEscrowTable.begin(), priv->cachedEscrowTable.end(), EscrowEntryLessThan(column, order));
     Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(priv->cachedEscrowTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
+}
+void EscrowTableModel::showComplete(bool show)
+{
+	if(modelType != MyEscrow)
+		return;
+	clear();
+	priv->refreshEscrowTable(modelType, show);
 }
 void EscrowTableModel::refreshEscrowTable() 
 {
