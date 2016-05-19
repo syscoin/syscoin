@@ -211,7 +211,7 @@ void OptionsDialog::setMapper()
 	mapper->addMapping(ui->defaultCertAlias, OptionsModel::DefaultCertAlias);
 	mapper->addMapping(ui->defaultPegAlias, OptionsModel::DefaultPegAlias);
 	mapper->addMapping(ui->defaultBuyOfferAlias, OptionsModel::DefaultBuyOfferAlias);
-	mapper->addMapping(ui->safesearch, OptionsModel::SafeSearch);
+	mapper->addMapping(ui->safeSearch, OptionsModel::SafeSearch);
     mapper->addMapping(ui->lang, OptionsModel::Language);
     mapper->addMapping(ui->unit, OptionsModel::DisplayUnit);
     mapper->addMapping(ui->thirdPartyTxUrls, OptionsModel::ThirdPartyTxUrls);
