@@ -358,7 +358,6 @@ bool DecodeOfferTx(const CTransaction& tx, int& op, int& nOut,
 	// Strict check - bug disallowed
 	for (unsigned int i = 0; i < tx.vout.size(); i++) {
 		const CTxOut& out = tx.vout[i];
-		vector<vector<unsigned char> > vvchRead;
 		if (DecodeOfferScript(out.scriptPubKey, op, vvch)) {
 			nOut = i; found = true;
 			break;
@@ -367,7 +366,13 @@ bool DecodeOfferTx(const CTransaction& tx, int& op, int& nOut,
 	if (!found) vvch.clear();
 	return found && IsOfferOp(op);
 }
-
+bool FindOfferAcceptPayment(const CTransaction& tx, const CAmount &nPrice) {
+	for (unsigned int i = 0; i < tx.vout.size(); i++) {
+		if((tx.vout[i].nValue - nPrice) <= COIN)
+			return true;
+	}
+	return false;
+}
 
 bool DecodeOfferScript(const CScript& script, int& op,
 		vector<vector<unsigned char> > &vvch, CScript::const_iterator& pc) {
@@ -822,13 +827,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				int precision = 2;
 				// lookup the price of the offer in syscoin based on pegged alias at the block # when accept/escrow was made
 				CAmount nPrice = convertCurrencyCodeToSyscoin(myPriceOffer.vchAliasPeg, myPriceOffer.sCurrencyCode, priceAtTimeOfAccept, heightToCheckAgainst, precision)*theOfferAccept.nQty;
-				if((tx.vout[nOut].nValue - nPrice) > COIN)
+				if(!FindOfferAcceptPayment(tx, nPrice))
 				{
 					nPrice = convertCurrencyCodeToSyscoin(myPriceOffer.vchAliasPeg, myPriceOffer.sCurrencyCode, priceAtTimeOfAccept, heightToCheckAgainst+1, precision)*theOfferAccept.nQty;
-					if((tx.vout[nOut].nValue - nPrice) > COIN)
+					if(!FindOfferAcceptPayment(tx, nPrice))
 					{
 						nPrice = convertCurrencyCodeToSyscoin(myPriceOffer.vchAliasPeg, myPriceOffer.sCurrencyCode, priceAtTimeOfAccept, heightToCheckAgainst-1, precision)*theOfferAccept.nQty;
-						if((tx.vout[nOut].nValue - nPrice) > COIN)
+						if(!FindOfferAcceptPayment(tx, nPrice))
 						{
 							return error("CheckOfferInputs() OP_OFFER_ACCEPT: this offer accept does not pay enough according to the offer price %ld, currency %s, value found %ld, height %d\n", nPrice, stringFromVch(theOffer.sCurrencyCode).c_str(), tx.vout[nOut].nValue, heightToCheckAgainst-1);	
 						}
@@ -2538,7 +2543,7 @@ bool CreateLinkedOfferAcceptRecipients(vector<CRecipient> &vecSend, const CAmoun
 	// add recipients to vecSend if we find any linked accepts that are trying to accept linkedOfferGUID (they can be grouped into one accept for root offer owner)
 	for (unsigned int i = 0; i < linkedAcceptBlock->vtx.size(); i++)
     {
-		CScript scriptPubKey;
+		CScript scriptPubKeyAccept, scriptPubKeyPayment;
         const CTransaction &tx = linkedAcceptBlock->vtx[i];
 		if(tx.nVersion != GetSyscoinTxVersion())
 			continue;
@@ -2554,9 +2559,13 @@ bool CreateLinkedOfferAcceptRecipients(vector<CRecipient> &vecSend, const CAmoun
 		vector<unsigned char> vchAccept = vchFromString(HexStr(vchAcceptRand));
 		unsigned int nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchOffer[3]));
 		CAmount nTotalValue = ( nPrice * nQty );
-		scriptPubKey << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << linkedOfferGUID << vchAccept << vvchOffer[2] << vvchOffer[3] << OP_2DROP << OP_2DROP << OP_DROP; 
-		scriptPubKey += scriptPubKeyDestination;
-		CRecipient paymentRecipient = {scriptPubKey, nTotalValue, false};
+		scriptPubKeyAccept << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << linkedOfferGUID << vchAccept << vvchOffer[2] << vvchOffer[3] << OP_2DROP << OP_2DROP << OP_DROP; 
+		scriptPubKeyAccept += scriptPubKeyDestination;
+		scriptPubKeyPayment += scriptPubKeyDestination;
+		CRecipient acceptRecipient;
+		CreateRecipient(scriptPubKeyAccept, acceptRecipient);
+		CRecipient paymentRecipient = {scriptPubKeyPayment, nTotalValue, false};
+		vecSend.push_back(acceptRecipient);
 		vecSend.push_back(paymentRecipient);
 	}
 	return vecSend.size() != size;
@@ -2625,7 +2634,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchAccept = vchFromString(HexStr(vchAcceptRand));
 
 	// create OFFERACCEPT txn keys
-	CScript scriptPubKey;
+	CScript scriptPubKeyAccept, scriptPubKeyPayment;
 	CScript scriptPubKeyEscrow, scriptPubKeyAlias;
 	EnsureWalletIsUnlocked();
 	CTransaction acceptTx;
@@ -2789,7 +2798,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		vchPaymentMessage = vchFromString(strCipherText);
 	else
 		vchPaymentMessage = vchMessage;
-	scriptPubKey << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << OP_2DROP << OP_2DROP << OP_DROP;
+	scriptPubKeyAccept << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << OP_2DROP << OP_2DROP << OP_DROP;
 	if(wtxOfferIn != NULL && !vchBTCTxId.empty())
 		throw runtime_error("Cannot accept a linked offer by paying in Bitcoins");
 
@@ -2829,10 +2838,13 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
     CScript scriptPayment;
 	CPubKey currentKey(theOffer.vchPubKey);
 	scriptPayment = GetScriptForDestination(currentKey.GetID());
-	scriptPubKey += scriptPayment;
+	scriptPubKeyAccept += scriptPayment;
+	scriptPubKeyPayment += scriptPayment;
 
 	vector<CRecipient> vecSend;
-	CRecipient paymentRecipient = {scriptPubKey, nTotalValue, false};
+	CRecipient acceptRecipient;
+	CRecipient paymentRecipient;
+	CreateRecipient(scriptPubKeyAccept, acceptRecipient);
 	CRecipient aliasRecipient;
 	CreateRecipient(scriptPubKeyAlias, aliasRecipient);
 	CRecipient escrowRecipient;
@@ -2847,19 +2859,22 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	else if(wtxAliasIn != NULL)
 		vecSend.push_back(aliasRecipient);
 
+	vecSend.push_back(acceptRecipient);
+
 	// check for Bitcoin payment on the bitcoin network, otherwise pay in syscoin
 	if(!vchBTCTxId.empty() && stringFromVch(theOffer.sCurrencyCode) == "BTC")
 	{
 		uint256 txBTCId(uint256S(stringFromVch(vchBTCTxId)));
 		txAccept.txBTCId = txBTCId;
-		CreateRecipient(scriptPubKey, paymentRecipient);
-		vecSend.push_back(paymentRecipient);
 	}
 	else if(!theOffer.bOnlyAcceptBTC)
 	{
 		// linked accept will go through the linkedAcceptBlock and find all linked accepts to same offer and group them together into vecSend so it can go into one tx (inputs can be shared, mainly the whitelist alias inputs)
 		if(!CreateLinkedOfferAcceptRecipients(vecSend, nPrice, wtxOfferIn, vchOffer, scriptPayment))
+		{
+			paymentRecipient = {scriptPubKeyPayment, nTotalValue, false};
 			vecSend.push_back(paymentRecipient);
+		}
 	}
 	else
 	{
@@ -2877,7 +2892,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInCert=NULL;
 	// if making a purchase and we are using an alias from the whitelist of the offer, we may need to prove that we own that alias so in that case we attach an input from the alias
 	// if purchasing an escrow, we adjust the height to figure out pricing of the accept so we may also attach escrow inputs to the tx
-	SendMoneySyscoin(vecSend, paymentRecipient.nAmount+fee.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
+	SendMoneySyscoin(vecSend, acceptRecipient.nAmount+paymentRecipient.nAmount+fee.nAmount+escrowRecipient.nAmount+aliasRecipient.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
 	
 	UniValue res(UniValue::VARR);
 	res.push_back(wtx.GetHash().GetHex());
