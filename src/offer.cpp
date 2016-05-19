@@ -2843,7 +2843,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 
 	vector<CRecipient> vecSend;
 	CRecipient acceptRecipient;
-	CRecipient paymentRecipient;
 	CreateRecipient(scriptPubKeyAccept, acceptRecipient);
 	CRecipient aliasRecipient;
 	CreateRecipient(scriptPubKeyAlias, aliasRecipient);
@@ -2872,7 +2871,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		// linked accept will go through the linkedAcceptBlock and find all linked accepts to same offer and group them together into vecSend so it can go into one tx (inputs can be shared, mainly the whitelist alias inputs)
 		if(!CreateLinkedOfferAcceptRecipients(vecSend, nPrice, wtxOfferIn, vchOffer, scriptPayment))
 		{
-			paymentRecipient = {scriptPubKeyPayment, nTotalValue, false};
+			CRecipient paymentRecipient = {scriptPubKeyPayment, nTotalValue, false};
 			vecSend.push_back(paymentRecipient);
 		}
 	}
@@ -2892,7 +2891,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInCert=NULL;
 	// if making a purchase and we are using an alias from the whitelist of the offer, we may need to prove that we own that alias so in that case we attach an input from the alias
 	// if purchasing an escrow, we adjust the height to figure out pricing of the accept so we may also attach escrow inputs to the tx
-	SendMoneySyscoin(vecSend, acceptRecipient.nAmount+paymentRecipient.nAmount+fee.nAmount+escrowRecipient.nAmount+aliasRecipient.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
+	SendMoneySyscoin(vecSend, acceptRecipient.nAmount+fee.nAmount+escrowRecipient.nAmount+aliasRecipient.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
 	
 	UniValue res(UniValue::VARR);
 	res.push_back(wtx.GetHash().GetHex());
