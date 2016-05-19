@@ -27,6 +27,28 @@ bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, in
 bool DisconnectMessage(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs );
 bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs );
 static const CBlock *linkedAcceptBlock = NULL;
+void COffer::SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
+        READWRITE(sCategory);
+        READWRITE(sTitle);
+        READWRITE(sDescription);
+		READWRITE(txHash);
+		READWRITE(VARINT(nHeight));
+    	READWRITE(nPrice);
+    	READWRITE(nQty);
+    	READWRITE(accept);
+		READWRITE(vchLinkOffer);
+		READWRITE(linkWhitelist);
+		READWRITE(sCurrencyCode);
+		READWRITE(nCommission);
+		READWRITE(offerLinks);
+		READWRITE(vchPubKey);
+		READWRITE(vchCert);
+		READWRITE(bPrivate);
+		READWRITE(vchAliasPeg);
+		READWRITE(bOnlyAcceptBTC);
+		if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1)
+			READWRITE(safetyLevel);	
+}
 bool foundOfferLinkInWallet(const vector<unsigned char> &vchOffer, const vector<unsigned char> &vchAcceptRandLink)
 {
     TRY_LOCK(pwalletMain->cs_wallet, cs_trylock);
