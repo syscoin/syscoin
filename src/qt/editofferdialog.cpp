@@ -404,6 +404,7 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back("");
 		params.push_back("1");
 		params.push_back(ui->acceptBTCOnlyEdit->currentText() == QString("Yes")? "1": "0");
+		params.push_back(ui->geoLocationEdit->text().toStdString());
 		if(ui->safeSearchEdit->currentIndex() > 0)
 			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
 		try {

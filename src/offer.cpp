@@ -48,7 +48,10 @@ void COffer::SerializationOp(Stream& s, Operation ser_action, int nType, int nVe
 		READWRITE(vchAliasPeg);
 		READWRITE(bOnlyAcceptBTC);
 		if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1 || ChainNameFromCommandLine() != CBaseChainParams::MAIN)
+		{
 			READWRITE(safetyLevel);	
+			READWRITE(vchGeoLocation);	
+		}
 }
 bool foundOfferLinkInWallet(const vector<unsigned char> &vchOffer, const vector<unsigned char> &vchAcceptRandLink)
 {
@@ -556,6 +559,10 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	if(theOffer.vchAliasPeg.size() > MAX_NAME_LENGTH)
 	{
 		return error("offer alias peg too big");
+	}
+	if(theOffer.vchGeoLocation.size() > MAX_NAME_LENGTH)
+	{
+		return error("offer geolocation too big");
 	}
 	if(theOffer.offerLinks.size() > 0)
 	{
@@ -1116,9 +1123,9 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 }
 
 UniValue offernew(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() < 7 || params.size() > 12)
+	if (fHelp || params.size() < 7 || params.size() > 13)
 		throw runtime_error(
-		"offernew <aliaspeg> <alias> <category> <title> <quantity> <price> <description> <currency> [cert. guid] [exclusive resell=1] [accept btc only=0] [safe search=Yes]\n"
+		"offernew <aliaspeg> <alias> <category> <title> <quantity> <price> <description> <currency> [cert. guid] [exclusive resell=1] [accept btc only=0] [geolocation=''] [safe search=Yes]\n"
 						"<aliaspeg> Alias peg you wish to use, leave blank to use SYS_RATES.\n"	
 						"<alias> An alias you own.\n"
 						"<category> category, 255 chars max.\n"
@@ -1130,6 +1137,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 						"<cert. guid> Set this to the guid of a certificate you wish to sell\n"
 						"<exclusive resell> set to 1 if you only want those who control the affiliate's who are able to resell this offer via offerlink. Defaults to 1.\n"
 						"<accept btc only> set to 1 if you only want accept Bitcoins for payment and your currency is set to BTC, note you cannot resell or sell a cert in this mode. Defaults to 0.\n"
+						"<geolocation> set to your geolocation. Defaults to empty. \n"
 						"<safe search> set to No if this offer should only show in the search when safe search is not selected. Defaults to Yes (offer shows with or without safe search selected in search lists).\n"
 						+ HelpRequiringPassphrase());
 	// gather inputs
@@ -1236,11 +1244,17 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 			throw runtime_error("Can only accept Bitcoins for offer's that set their currency to BTC");
 
 	}	
-	string strSafeSearch = "Yes";
+	string strGeoLocation = "";
 	if(params.size() >= 12)
 	{
-		strSafeSearch = params[11].get_str();
+		strGeoLocation = params[11].get_str();
 	}
+	string strSafeSearch = "Yes";
+	if(params.size() >= 13)
+	{
+		strSafeSearch = params[12].get_str();
+	}
+
 	CAmount nRate;
 	vector<string> rateList;
 	int precision;
@@ -1285,6 +1299,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	newOffer.bOnlyAcceptBTC = bOnlyAcceptBTC;
 	newOffer.vchAliasPeg = vchAliasPeg;
 	newOffer.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newOffer.vchGeoLocation = vchFromString(strGeoLocation);
 
 	CPubKey currentOfferKey(newOffer.vchPubKey);
 	scriptPubKeyOrig= GetScriptForDestination(currentOfferKey.GetID());
@@ -3471,6 +3486,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	oOffer.push_back(Pair("alias_peg", stringFromVch(theOffer.vchAliasPeg)));
 	oOffer.push_back(Pair("description", stringFromVch(theOffer.sDescription)));
 	oOffer.push_back(Pair("alias", selleraddy.aliasName));
+	oOffer.push_back(Pair("geolocation", stringFromVch(theOffer.vchGeoLocation)));
 	oOffer.push_back(Pair("accepts", aoOfferAccepts));
 	oLastOffer = oOffer;
 	
@@ -3885,6 +3901,7 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("alias_peg", stringFromVch(theOfferA.vchAliasPeg)));
 			oName.push_back(Pair("private", theOfferA.bPrivate ? "Yes" : "No"));
 			oName.push_back(Pair("safesearch", theOfferA.safetyLevel <= 0 ? "Yes" : "No"));
+			oName.push_back(Pair("geolocation", stringFromVch(theOfferA.vchGeoLocation)));
 			expired_block = nHeight + GetOfferExpirationDepth();
             if(expired_block < chainActive.Tip()->nHeight)
 			{
@@ -4091,6 +4108,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oOffer.push_back(Pair("private", txOffer.bPrivate ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias", selleraddy.aliasName));
+		oOffer.push_back(Pair("geolocation", stringFromVch(txOffer.vchGeoLocation)));
 		oOffer.push_back(Pair("expires_in", expires_in));
 		oOffer.push_back(Pair("expires_on", expired_block));
 		oRes.push_back(oOffer);
