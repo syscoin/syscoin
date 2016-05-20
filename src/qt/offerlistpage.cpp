@@ -86,6 +86,7 @@ OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *pare
 
 
 	ui->lineEditOfferSearch->setPlaceholderText(tr("Enter search term, regex accepted (ie: ^name returns all Offer's starting with 'name'). Empty will search for all."));
+	loadCategories();
 }
 
 OfferListPage::~OfferListPage()
