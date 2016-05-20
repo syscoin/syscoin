@@ -108,9 +108,6 @@ bool IsSysServiceExpired(const CScript& scriptPubKey)
 	CMessage message;
 	CEscrow escrow;
 	CCert cert;
-	if(ChainNameFromCommandLine() == == CBaseChainParams::MAIN)
-	{
-	}
 	if(alias.UnserializeFromData(vchData) && ((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 		return ((alias.nHeight + GetAliasExpirationDepth()) < chainActive.Tip()->nHeight);
 	else if(offer.UnserializeFromData(vchData) &&((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
