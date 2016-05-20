@@ -47,7 +47,7 @@ void COffer::SerializationOp(Stream& s, Operation ser_action, int nType, int nVe
 		READWRITE(bPrivate);
 		READWRITE(vchAliasPeg);
 		READWRITE(bOnlyAcceptBTC);
-		if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1 || ChainNameFromCommandLine() != CBaseChainParams::MAIN)
+		if(!IsSys21Fork())
 		{
 			READWRITE(safetyLevel);	
 			READWRITE(vchGeoLocation);	

@@ -147,6 +147,7 @@ unsigned int QtyOfPendingAcceptsInMempool(const std::vector<unsigned char>& vchT
 std::string getCurrencyToSYSFromAlias(const std::vector<unsigned char> &vchAliasPeg, const std::vector<unsigned char> &vchCurrency, CAmount &nFee, const unsigned int &nHeightToFind, std::vector<std::string>& rateList, int &precision);
 std::string aliasFromOp(int op);
 bool IsAliasOp(int op);
+bool IsSys21Fork();
 int GetAliasExpirationDepth();
 CScript RemoveAliasScriptPrefix(const CScript& scriptIn);
 int GetSyscoinDataOutput(const CTransaction& tx);

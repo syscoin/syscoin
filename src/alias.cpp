@@ -40,7 +40,7 @@ void CAliasIndex::SerializationOp(Stream& s, Operation ser_action, int nType, in
 	READWRITE(vchPublicValue);
 	READWRITE(vchPrivateValue);
 	READWRITE(vchPubKey);
-	if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1 || ChainNameFromCommandLine() != CBaseChainParams::MAIN)
+	if(!IsSys21Fork())
 		READWRITE(safetyLevel);	
 }
 bool IsSysCompressedOrUncompressedPubKey(const vector<unsigned char> &vchPubKey) {
@@ -96,6 +96,13 @@ bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut
         }
     }
 	return false;
+}
+bool IsSys21Fork()
+{
+	if(!chainActive.Tip() )
+		return false;
+	if(chainActive.Tip()->nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
+		return false;
 }
 bool IsSysServiceExpired(const CScript& scriptPubKey)
 {

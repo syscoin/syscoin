@@ -25,7 +25,7 @@ void CCert::SerializationOp(Stream& s, Operation ser_action, int nType, int nVer
     READWRITE(VARINT(nHeight));
 	READWRITE(vchPubKey);
 	READWRITE(bPrivate);
-	if(chainActive.Tip()->nHeight >= SYSCOIN_FORK1 || ChainNameFromCommandLine() != CBaseChainParams::MAIN)
+	if(!IsSys21Fork())
 		READWRITE(safetyLevel);			
 }
 bool EncryptMessage(const vector<unsigned char> &vchPubKey, const vector<unsigned char> &vchMessage, string &strCipherText)
