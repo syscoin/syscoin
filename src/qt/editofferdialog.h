@@ -48,6 +48,7 @@ private:
     bool saveCurrentRow();
 	void loadCerts();
 	void loadAliases();
+	void loadCategories();
     Ui::EditOfferDialog *ui;
     QDataWidgetMapper *mapper;
     Mode mode;

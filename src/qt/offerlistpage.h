@@ -17,6 +17,7 @@ class QItemSelection;
 class QMenu;
 class QModelIndex;
 class QKeyEvent;
+class QStandardItemModel;
 QT_END_NAMESPACE
 
 /** Widget that shows a list of owned certs.
@@ -31,6 +32,8 @@ public:
     explicit OfferListPage(const PlatformStyle *platformStyle, OfferView *parent);
     ~OfferListPage();
 
+    void addParentItem(QStandardItemModel * model, const QString& text );
+    void addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data );
 
     void setModel(WalletModel*, OfferTableModel *model);
     void setOptionsModel(OptionsModel *optionsModel);
@@ -38,6 +41,7 @@ public:
 	void keyPressEvent(QKeyEvent * event);
 	void showEvent ( QShowEvent * event );
 private:
+	void loadCategories();
     Ui::OfferListPage *ui;
     OfferTableModel *model;
     OptionsModel *optionsModel;

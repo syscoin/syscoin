@@ -19,7 +19,9 @@
 #include <QMenu>
 #include "main.h"
 #include "rpcserver.h"
+#include "qcomboboxdelegate.h"
 #include <QSettings>
+#include <QStandardItemModel>
 using namespace std;
 
 
@@ -89,6 +91,42 @@ OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *pare
 OfferListPage::~OfferListPage()
 {
     delete ui;
+}
+
+void OfferListPage::addParentItem( QStandardItemModel * model, const QString& text )
+{
+    QStandardItem* item = new QStandardItem( text );
+    item->setFlags( item->flags() & ~( Qt::ItemIsEnabled | Qt::ItemIsSelectable ) );
+    item->setData( "parent", Qt::AccessibleDescriptionRole );
+    QFont font = item->font();
+    font.setBold( true );
+    font.setItalic( true );
+    item->setFont( font );
+    model->appendRow( item );
+}
+
+void OfferListPage::addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data )
+{
+    QStandardItem* item = new QStandardItem( text + QString( 4, QChar( ' ' ) ) );
+    item->setData( data, Qt::UserRole );
+    item->setData( "child", Qt::AccessibleDescriptionRole );
+    model->appendRow( item );
+}
+void OfferListPage::loadCategories()
+{
+    QStandardItemModel * model = new QStandardItemModel;
+
+    addParentItem(model, "Success");
+    addChildItem(model, "one", 1);
+    addChildItem(model, "two", 2);
+    addChildItem(model, "three", 3);
+    addParentItem(model, "Failed");
+    addChildItem(model, "one", 1);
+    addChildItem(model, "two", 2);
+    addChildItem(model, "three", 3);
+
+    ui->categoryEdit->setModel(model);
+    ui->categoryEdit->setItemDelegate(new ComboBoxDelegate);
 }
 void OfferListPage::showEvent ( QShowEvent * event )
 {
