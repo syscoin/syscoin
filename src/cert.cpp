@@ -17,17 +17,6 @@
 #include <boost/thread.hpp>
 using namespace std;
 extern void SendMoneySyscoin(const vector<CRecipient> &vecSend, CAmount nValue, bool fSubtractFeeFromAmount, CWalletTx& wtxNew, const CWalletTx* wtxInOffer=NULL, const CWalletTx* wtxInCert=NULL, const CWalletTx* wtxInAlias=NULL, const CWalletTx* wtxInEscrow=NULL, bool syscoinTx=true);
-template <typename Stream, typename Operation>
-void CCert::SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
-    READWRITE(vchTitle);
-    READWRITE(vchData);
-    READWRITE(txHash);
-    READWRITE(VARINT(nHeight));
-	READWRITE(vchPubKey);
-	READWRITE(bPrivate);
-	if(!IsSys21Fork())
-		READWRITE(safetyLevel);			
-}
 bool EncryptMessage(const vector<unsigned char> &vchPubKey, const vector<unsigned char> &vchMessage, string &strCipherText)
 {
 	CMessageCrypter crypter;

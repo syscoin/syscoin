@@ -48,8 +48,14 @@ public:
 	}
 	ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
-    void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion);
-
+	inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {        
+		READWRITE(txHash);
+		READWRITE(VARINT(nHeight));
+		READWRITE(vchPublicValue);
+		READWRITE(vchPrivateValue);
+		READWRITE(vchPubKey);
+		READWRITE(safetyLevel);	
+	}
     friend bool operator==(const CAliasIndex &a, const CAliasIndex &b) {
 		return (a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
     }
