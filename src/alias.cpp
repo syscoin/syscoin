@@ -113,7 +113,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData))
 	{
-		if((alias.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if(alias.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
 			nHeight = alias.nHeight + GetAliasExpirationDepth();
 			return true;
@@ -121,7 +121,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
-		if((offer.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if(offer.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
 			nHeight = offer.nHeight + GetOfferExpirationDepth();
 			return true;
@@ -129,7 +129,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
-		if((cert.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if(cert.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
 			nHeight = cert.nHeight + GetCertExpirationDepth();
 			return true;
@@ -137,16 +137,15 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
-		if((escrow.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if(escrow.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
-			LogPrintf("escrow prune height %llu SYSCOIN_FORK1 %d\n", escrow.nHeight,SYSCOIN_FORK1 );
 			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
 			return true;
 		}
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
-		if((message.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if(message.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
 			nHeight = message.nHeight + GetMessageExpirationDepth();
 			return true;
