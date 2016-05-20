@@ -490,7 +490,7 @@ SYSCOIN_QT_CPP += \
   qt/certtablemodel.cpp \
   qt/editcertdialog.cpp \
   qt/mycertlistpage.cpp \
-  qt/qcomboboxdelegate.h \
+  qt/qcomboboxdelegate.cpp \
   qt/certlistpage.cpp
 endif
 
