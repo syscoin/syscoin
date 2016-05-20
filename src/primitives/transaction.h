@@ -123,7 +123,7 @@ public:
         READWRITE(nValue);
 		// SYSCOIN
 		int nHeight;
-		if(scriptPubKey.IsUnspendable()) && IsInSys21Fork(scriptPubKey, nHeight)  && (nType & SER_GETHASH) || IsSysServiceExpired(nHeight)))
+		if(scriptPubKey.IsUnspendable() && IsInSys21Fork(scriptPubKey, nHeight)  && ((nType & SER_GETHASH) || IsSysServiceExpired(nHeight))
 		{
 	
 			CScript tmp = CScript() << OP_RETURN;
