@@ -24,7 +24,7 @@ static const unsigned int MAX_ENCRYPTED_VALUE_LENGTH = 1108;
 
 static const unsigned int SAFETY_LEVEL1 = 1;
 static const unsigned int SAFETY_LEVEL2 = 2;
-static const unsigned int SYSCOIN_FORK1 = 50000;
+static const unsigned int SYSCOIN_FORK1 = 26562;
 bool IsSys21Fork();
 class CAliasIndex {
 public:
