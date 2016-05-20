@@ -11,7 +11,9 @@
 #include <QStringList>
 #include "rpcserver.h"
 #include "main.h"
+#include "qcomboboxdelegate.h"
 #include <QSettings>
+#include <QStandardItemModel>
 using namespace std;
 
 extern const CRPCTable tableRPC;
@@ -47,6 +49,7 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
 	connect(ui->certEdit, SIGNAL(currentIndexChanged(int)), this, SLOT(certChanged(int)));
 	loadAliases();
 	loadCerts();
+	loadCategories();
 	ui->descriptionEdit->setStyleSheet("color: rgb(0, 0, 0); background-color: rgb(255, 255, 255)");
     QSettings settings;
 	QString defaultPegAlias, defaultOfferAlias;
@@ -128,6 +131,42 @@ void EditOfferDialog::certChanged(int index)
 		ui->aliasEdit->setEnabled(true);
 		ui->qtyEdit->setEnabled(true);
 	}
+}
+
+void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& text )
+{
+    QStandardItem* item = new QStandardItem( text );
+    item->setFlags( item->flags() & ~( Qt::ItemIsEnabled | Qt::ItemIsSelectable ) );
+    item->setData( "parent", Qt::AccessibleDescriptionRole );
+    QFont font = item->font();
+    font.setBold( true );
+    font.setItalic( true );
+    item->setFont( font );
+    model->appendRow( item );
+}
+
+void EditOfferDialog::addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data )
+{
+    QStandardItem* item = new QStandardItem( text + QString( 4, QChar( ' ' ) ) );
+    item->setData( data, Qt::UserRole );
+    item->setData( "child", Qt::AccessibleDescriptionRole );
+    model->appendRow( item );
+}
+void EditOfferDialog::loadCategories()
+{
+    QStandardItemModel * model = new QStandardItemModel;
+
+    addParentItem(model, "Success");
+    addChildItem(model, "one", 1);
+    addChildItem(model, "two", 2);
+    addChildItem(model, "three", 3);
+    addParentItem(model, "Failed");
+    addChildItem(model, "one", 1);
+    addChildItem(model, "two", 2);
+    addChildItem(model, "three", 3);
+
+    ui->categoryEdit->setModel(model);
+    ui->categoryEdit->setItemDelegate(new ComboBoxDelegate);
 }
 void EditOfferDialog::loadCerts()
 {
@@ -317,6 +356,7 @@ void EditOfferDialog::loadRow(int row)
 		QModelIndex indexQty = model->index(row, OfferTableModel::Qty, tmpIndex);
 		QModelIndex indexBTCOnly = model->index(row, OfferTableModel::AcceptBTCOnly, tmpIndex);
 		QModelIndex indexSafeSearch = model->index(row, OfferTableModel::SafeSearch, tmpIndex);
+		QModelIndex indexCategory = model->index(row, OfferTableModel::Category, tmpIndex);
 		if(indexPrivate.isValid())
 		{
 			QString privateStr = indexPrivate.data(OfferTableModel::PrivateRole).toString();
@@ -337,6 +377,11 @@ void EditOfferDialog::loadRow(int row)
 		{
 			QString safeSearchStr = indexSafeSearch.data(OfferTableModel::SafeSearchRole).toString();
 			ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText(safeSearchStr));
+		}
+		if(indexCategory.isValid())
+		{
+			QString categoryStr = indexCategory.data(OfferTableModel::Category).toString();
+			ui->categoryEdit->setCurrentIndex(ui->categoryEdit->findText(categoryStr));
 		}
 		if(indexAlias.isValid())
 		{
@@ -392,7 +437,7 @@ bool EditOfferDialog::saveCurrentRow()
 		strMethod = string("offernew");
 		params.push_back(ui->aliasPegEdit->text().toStdString());
 		params.push_back(ui->aliasEdit->currentText().toStdString());
-		params.push_back(ui->categoryEdit->text().toStdString());
+		params.push_back(ui->categoryEdit->currentText().toStdString());
 		params.push_back(ui->nameEdit->text().toStdString());
 		params.push_back(ui->qtyEdit->text().toStdString());
 		params.push_back(ui->priceEdit->text().toStdString());

@@ -328,6 +328,7 @@ SYSCOIN_QT_H = \
   qt/certtablemodel.h \
   qt/editcertdialog.h \
   qt/mycertlistpage.h \
+  qt/qcomboboxdelegate.h \
   qt/certlistpage.h
 
 RES_ICONS = \
@@ -489,6 +490,7 @@ SYSCOIN_QT_CPP += \
   qt/certtablemodel.cpp \
   qt/editcertdialog.cpp \
   qt/mycertlistpage.cpp \
+  qt/qcomboboxdelegate.h \
   qt/certlistpage.cpp
 endif
 

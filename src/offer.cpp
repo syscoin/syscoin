@@ -4012,19 +4012,21 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerfilter(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() > 3)
+	if (fHelp || params.size() > 4)
 		throw runtime_error(
-				"offerfilter [[[[[regexp]] from=0]] safesearch]\n"
+				"offerfilter [[[[[regexp]] from=0]] safesearch category]\n"
 						"scan and filter offers\n"
 						"[regexp] : apply [regexp] on offers, empty means all offers\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
 						"[safesearch] : shows all offers that are safe to display (not on the ban list)\n"
+						"[category] : category you want to search in, empty for all\n"
 						"offerfilter \"\" 5 # list offers updated in last 5 blocks\n"
 						"offerfilter \"^offer\" # list all offers starting with \"offer\"\n"
 						"offerfilter 36000 0 0 stat # display stats (number of offers) on active offers\n");
 
 	string strRegexp;
 	vector<unsigned char> vchOffer;
+	string strCategory;
 	bool safeSearch = true;
 
 	if (params.size() > 0)
@@ -4035,6 +4037,9 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 
 	if (params.size() > 2)
 		safeSearch = params[2].get_bool();
+
+	if (params.size() > 3)
+		strCategory = params[2].get_str();
 
 	UniValue oRes(UniValue::VARR);
 
@@ -4061,6 +4066,8 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 			if(txOffer.safetyLevel > SAFETY_LEVEL1)
 				continue;
 		}
+		if(strCategory.size() > 0 && strCategory != stringFromVch(txOffer.vchCategory))
+			continue;
 		string title = stringFromVch(txOffer.sTitle);
 		boost::algorithm::to_lower(title);
 		string description = stringFromVch(txOffer.sDescription);

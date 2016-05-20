@@ -11,6 +11,7 @@ class WalletModel;
 QT_BEGIN_NAMESPACE
 class QDataWidgetMapper;
 class QString;
+class QStandardItemModel;
 QT_END_NAMESPACE
 
 /** Dialog for editing an offer
@@ -31,6 +32,8 @@ public:
 
     void setModel(WalletModel*,OfferTableModel *model);
     void loadRow(int row);
+    void addParentItem(QStandardItemModel * model, const QString& text );
+    void addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data );
 
     QString getOffer() const;
     void setOffer(const QString &offer);
