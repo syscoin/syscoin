@@ -119,17 +119,17 @@ bool IsInSys21Fork(const CScript& scriptPubKey, int &nHeight)
 	}
 	else if(cert.UnserializeFromData(vchData) && ((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		nHeight = cert.nHeight + GetCertExpirationDepth);
+		nHeight = cert.nHeight + GetCertExpirationDepth();
 		return true;
 	}
 	else if(escrow.UnserializeFromData(vchData) && ((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		nHeight = escrow.nHeight + GetEscrowExpirationDepth);
+		nHeight = escrow.nHeight + GetEscrowExpirationDepth();
 		return true;
 	}
 	else if(message.UnserializeFromData(vchData) && ((message.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		nHeight = message.nHeight + GetMessageExpirationDepth);
+		nHeight = message.nHeight + GetMessageExpirationDepth();
 		return true;
 	}
 
