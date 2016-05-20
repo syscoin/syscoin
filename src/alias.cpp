@@ -111,35 +111,50 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	CCert cert;
 	nHeight = 0;
 	const string &chainName = ChainNameFromCommandLine();
-	if(alias.UnserializeFromData(vchData) && ((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
+	if(alias.UnserializeFromData(vchData))
 	{
-		LogPrintf("alias prune height %llu SYSCOIN_FORK1 %d\n", alias.nHeight,SYSCOIN_FORK1 );
-		nHeight = alias.nHeight + GetAliasExpirationDepth();
-		return true;
+		if((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		{
+			LogPrintf("alias prune height %llu SYSCOIN_FORK1 %d\n", alias.nHeight,SYSCOIN_FORK1 );
+			nHeight = alias.nHeight + GetAliasExpirationDepth();
+			return true;
+		}
 	}
-	else if(offer.UnserializeFromData(vchData) &&((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
+	else if(offer.UnserializeFromData(vchData))
 	{
-		LogPrintf("offer prune height %llu SYSCOIN_FORK1 %d\n", offer.nHeight,SYSCOIN_FORK1 );
-		nHeight = offer.nHeight + GetOfferExpirationDepth();
-		return true;
+		if(((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		{
+			LogPrintf("offer prune height %llu SYSCOIN_FORK1 %d\n", offer.nHeight,SYSCOIN_FORK1 );
+			nHeight = offer.nHeight + GetOfferExpirationDepth();
+			return true;
+		}
 	}
-	else if(cert.UnserializeFromData(vchData) && ((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
+	else if(cert.UnserializeFromData(vchData))
 	{
-		LogPrintf("cert prune height %llu SYSCOIN_FORK1 %d\n", cert.nHeight,SYSCOIN_FORK1 );
-		nHeight = cert.nHeight + GetCertExpirationDepth();
-		return true;
+		if(((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
+		{
+			LogPrintf("cert prune height %llu SYSCOIN_FORK1 %d\n", cert.nHeight,SYSCOIN_FORK1 );
+			nHeight = cert.nHeight + GetCertExpirationDepth();
+			return true;
+		}
 	}
-	else if(escrow.UnserializeFromData(vchData) && ((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
+	else if(escrow.UnserializeFromData(vchData))
 	{
-		LogPrintf("escrow prune height %llu SYSCOIN_FORK1 %d\n", escrow.nHeight,SYSCOIN_FORK1 );
-		nHeight = escrow.nHeight + GetEscrowExpirationDepth();
-		return true;
+		if(((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		{
+			LogPrintf("escrow prune height %llu SYSCOIN_FORK1 %d\n", escrow.nHeight,SYSCOIN_FORK1 );
+			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
+			return true;
+		}
 	}
-	else if(message.UnserializeFromData(vchData) && ((message.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
+	else if(message.UnserializeFromData(vchData))
 	{
-		LogPrintf("message prune height %llu SYSCOIN_FORK1 %d\n", message.nHeight,SYSCOIN_FORK1 );
-		nHeight = message.nHeight + GetMessageExpirationDepth();
-		return true;
+		if(((message.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		{
+			LogPrintf("message prune height %llu SYSCOIN_FORK1 %d\n", message.nHeight,SYSCOIN_FORK1 );
+			nHeight = message.nHeight + GetMessageExpirationDepth();
+			return true;
+		}
 	}
 
 	return false;
