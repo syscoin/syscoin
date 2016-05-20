@@ -91,7 +91,7 @@ bool IsSys21Fork()
 {
 	if(!chainActive.Tip() )
 		return false;
-	if(chainActive.Tip()->nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
+	if(chainActive.Tip()->nHeight < SYSCOIN_FORK1/* && ChainNameFromCommandLine() == CBaseChainParams::MAIN*/)
 		return false;
 	return true;
 }
@@ -113,34 +113,31 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData))
 	{
-		if((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		if((alias.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
-			LogPrintf("alias prune height %llu SYSCOIN_FORK1 %d\n", alias.nHeight,SYSCOIN_FORK1 );
 			nHeight = alias.nHeight + GetAliasExpirationDepth();
 			return true;
 		}
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
-		if((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		if((offer.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
-			LogPrintf("offer prune height %llu SYSCOIN_FORK1 %d\n", offer.nHeight,SYSCOIN_FORK1 );
 			nHeight = offer.nHeight + GetOfferExpirationDepth();
 			return true;
 		}
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
-		if((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		if((cert.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
-			LogPrintf("cert prune height %llu SYSCOIN_FORK1 %d\n", cert.nHeight,SYSCOIN_FORK1 );
 			nHeight = cert.nHeight + GetCertExpirationDepth();
 			return true;
 		}
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
-		if((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		if((escrow.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
 			LogPrintf("escrow prune height %llu SYSCOIN_FORK1 %d\n", escrow.nHeight,SYSCOIN_FORK1 );
 			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
@@ -149,9 +146,8 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
-		if((message.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
+		if((message.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
 		{
-			LogPrintf("message prune height %llu SYSCOIN_FORK1 %d\n", message.nHeight,SYSCOIN_FORK1 );
 			nHeight = message.nHeight + GetMessageExpirationDepth();
 			return true;
 		}
