@@ -492,7 +492,7 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back(ui->aliasPegEdit->text().toStdString());
 			params.push_back(ui->aliasEdit->currentText().toStdString());
 			params.push_back(ui->offerEdit->text().toStdString());
-			params.push_back(ui->categoryEdit->text().toStdString());
+			params.push_back(ui->categoryEdit->currentText().toStdString());
 			params.push_back(ui->nameEdit->text().toStdString());
 			params.push_back(ui->qtyEdit->text().toStdString());
 			params.push_back(ui->priceEdit->text().toStdString());
