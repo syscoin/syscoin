@@ -93,6 +93,7 @@ bool IsSys21Fork()
 		return false;
 	if(chainActive.Tip()->nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
 		return false;
+	return true;
 }
 bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 {
@@ -110,31 +111,26 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData) && ((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		printf("Pruning alias at height %d, SYSCOIN_FORK1 %d\n", alias.nHeight, SYSCOIN_FORK1);
 		nHeight = alias.nHeight + GetAliasExpirationDepth();
 		return true;
 	}
 	else if(offer.UnserializeFromData(vchData) &&((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		printf("Pruning offer at height %d, SYSCOIN_FORK1 %d\n", offer.nHeight, SYSCOIN_FORK1);
 		nHeight = offer.nHeight + GetOfferExpirationDepth();
 		return true;
 	}
 	else if(cert.UnserializeFromData(vchData) && ((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		printf("Pruning cert at height %d, SYSCOIN_FORK1 %d\n", cert.nHeight, SYSCOIN_FORK1);
 		nHeight = cert.nHeight + GetCertExpirationDepth();
 		return true;
 	}
 	else if(escrow.UnserializeFromData(vchData) && ((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		printf("Pruning escrow at height %d, SYSCOIN_FORK1 %d\n", escrow.nHeight, SYSCOIN_FORK1);
 		nHeight = escrow.nHeight + GetEscrowExpirationDepth();
 		return true;
 	}
 	else if(message.UnserializeFromData(vchData) && ((message.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
-		printf("Pruning message at height %d, SYSCOIN_FORK1 %d\n", message.nHeight, SYSCOIN_FORK1);
 		nHeight = message.nHeight + GetMessageExpirationDepth();
 		return true;
 	}
