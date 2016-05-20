@@ -4066,7 +4066,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 			if(txOffer.safetyLevel > SAFETY_LEVEL1)
 				continue;
 		}
-		if(strCategory.size() > 0 && strCategory != stringFromVch(txOffer.vchCategory))
+		if(strCategory.size() > 0 && strCategory != stringFromVch(txOffer.sCategory))
 			continue;
 		string title = stringFromVch(txOffer.sTitle);
 		boost::algorithm::to_lower(title);
