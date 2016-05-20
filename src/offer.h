@@ -23,7 +23,7 @@ int IndexOfOfferOutput(const CTransaction& tx);
 int GetOfferExpirationDepth();
 std::string offerFromOp(int op);
 CScript RemoveOfferScriptPrefix(const CScript& scriptIn);
-
+extern bool IsSys21Fork();
 class COfferAccept {
 public:
 	std::vector<unsigned char> vchAcceptRand;
@@ -253,8 +253,12 @@ public:
 			READWRITE(bPrivate);
 			READWRITE(vchAliasPeg);
 			READWRITE(bOnlyAcceptBTC);
-			READWRITE(safetyLevel);	
-			READWRITE(vchGeoLocation);	
+			if(IsSys21Fork())
+			{
+				READWRITE(safetyLevel);
+				READWRITE(vchGeoLocation);
+			}
+				
 	}
 	float GetPrice(const COfferLinkWhitelistEntry& entry=COfferLinkWhitelistEntry()){
 		float price = nPrice;

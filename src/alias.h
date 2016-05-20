@@ -25,7 +25,7 @@ static const unsigned int MAX_ENCRYPTED_VALUE_LENGTH = 1108;
 static const unsigned int SAFETY_LEVEL1 = 1;
 static const unsigned int SAFETY_LEVEL2 = 2;
 static const unsigned int SYSCOIN_FORK1 = 50000;
-
+bool IsSys21Fork();
 class CAliasIndex {
 public:
     uint256 txHash;
@@ -54,7 +54,10 @@ public:
 		READWRITE(vchPublicValue);
 		READWRITE(vchPrivateValue);
 		READWRITE(vchPubKey);
-		READWRITE(safetyLevel);	
+		if(IsSys21Fork())
+		{
+			READWRITE(safetyLevel);
+		}
 	}
     friend bool operator==(const CAliasIndex &a, const CAliasIndex &b) {
 		return (a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
@@ -153,7 +156,6 @@ unsigned int QtyOfPendingAcceptsInMempool(const std::vector<unsigned char>& vchT
 std::string getCurrencyToSYSFromAlias(const std::vector<unsigned char> &vchAliasPeg, const std::vector<unsigned char> &vchCurrency, CAmount &nFee, const unsigned int &nHeightToFind, std::vector<std::string>& rateList, int &precision);
 std::string aliasFromOp(int op);
 bool IsAliasOp(int op);
-bool IsSys21Fork();
 int GetAliasExpirationDepth();
 CScript RemoveAliasScriptPrefix(const CScript& scriptIn);
 int GetSyscoinDataOutput(const CTransaction& tx);

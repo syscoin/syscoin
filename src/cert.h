@@ -22,7 +22,7 @@ bool DecryptMessage(const std::vector<unsigned char> &vchPublicKey, const std::v
 std::string certFromOp(int op);
 int GetCertExpirationDepth();
 CScript RemoveCertScriptPrefix(const CScript& scriptIn);
-
+extern bool IsSys21Fork();
 class CCert {
 public:
 	std::vector<unsigned char> vchPubKey;
@@ -53,7 +53,10 @@ public:
 		READWRITE(VARINT(nHeight));
 		READWRITE(vchPubKey);
 		READWRITE(bPrivate);
-		READWRITE(safetyLevel);			
+		if(IsSys21Fork())
+		{
+			READWRITE(safetyLevel);
+		}		
 	}
     friend bool operator==(const CCert &a, const CCert &b) {
         return (
