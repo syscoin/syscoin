@@ -58,12 +58,14 @@ bool CMessage::UnserializeFromData(const vector<unsigned char> &vchData) {
         CDataStream dsMessage(vchData, SER_NETWORK, PROTOCOL_VERSION);
         dsMessage >> *this;
     } catch (std::exception &e) {
+		SetNull();
         return false;
     }
 	// extra check to ensure data was parsed correctly
 	if(!IsSysCompressedOrUncompressedPubKey(vchPubKeyTo)
 		|| !IsSysCompressedOrUncompressedPubKey(vchPubKeyFrom))
 	{
+		SetNull();
 		return false;
 	}
 	return true;
@@ -77,7 +79,6 @@ bool CMessage::UnserializeFromTx(const CTransaction &tx) {
 	}
 	if(!UnserializeFromData(vchData))
 	{
-		SetNull();
 		return false;
 	}
     return true;

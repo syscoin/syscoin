@@ -202,11 +202,13 @@ bool COffer::UnserializeFromData(const vector<unsigned char> &vchData) {
         CDataStream dsOffer(vchData, SER_NETWORK, PROTOCOL_VERSION);
         dsOffer >> *this;
     } catch (std::exception &e) {
+		SetNull();
         return false;
     }
 	// extra check to ensure data was parsed correctly
 	if(!IsSysCompressedOrUncompressedPubKey(vchPubKey))
 	{
+		SetNull();
 		return false;
 	}
 	return true;
@@ -220,7 +222,6 @@ bool COffer::UnserializeFromTx(const CTransaction &tx) {
 	}
 	if(!UnserializeFromData(vchData))
 	{
-		SetNull();
 		return false;
 	}
     return true;

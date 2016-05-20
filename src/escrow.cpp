@@ -76,11 +76,13 @@ bool CEscrow::UnserializeFromData(const vector<unsigned char> &vchData) {
         CDataStream dsEscrow(vchData, SER_NETWORK, PROTOCOL_VERSION);
         dsEscrow >> *this;
     } catch (std::exception &e) {
+		SetNull();
         return false;
     }
 	// extra check to ensure data was parsed correctly
 	if(!IsSysCompressedOrUncompressedPubKey(vchBuyerKey))
 	{
+		SetNull();
 		return false;
 	}
 	return true;
@@ -94,7 +96,6 @@ bool CEscrow::UnserializeFromTx(const CTransaction &tx) {
 	}
 	if(!UnserializeFromData(vchData))
 	{
-		SetNull();
 		return false;
 	}
     return true;

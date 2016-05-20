@@ -90,11 +90,13 @@ bool CCert::UnserializeFromData(const vector<unsigned char> &vchData) {
         CDataStream dsCert(vchData, SER_NETWORK, PROTOCOL_VERSION);
         dsCert >> *this;
     } catch (std::exception &e) {
+		SetNull();
         return false;
     }
 	// extra check to ensure data was parsed correctly
 	if(!IsSysCompressedOrUncompressedPubKey(vchPubKey))
 	{
+		SetNull();
 		return false;
 	}
 	return true;
@@ -107,8 +109,7 @@ bool CCert::UnserializeFromTx(const CTransaction &tx) {
 		return false;
 	}
 	if(!UnserializeFromData(vchData))
-	{
-		SetNull();
+	{	
 		return false;
 	}
     return true;
