@@ -122,8 +122,10 @@ public:
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(nValue);
 		// SYSCOIN
-		if(IsSys21Fork() && scriptPubKey.IsUnspendable() && ((nType & SER_GETHASH) || IsSysServiceExpired(scriptPubKey)))
+		int nHeight;
+		if(scriptPubKey.IsUnspendable()) && IsInSys21Fork(scriptPubKey, nHeight)  && ((nType & SER_GETHASH) || IsSysServiceExpired(nHeight)))
 		{
+	
 			CScript tmp = CScript() << OP_RETURN;
 			READWRITE(*(CScriptBase*)(&tmp));
 		}

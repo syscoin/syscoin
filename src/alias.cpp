@@ -94,13 +94,11 @@ bool IsSys21Fork()
 	if(chainActive.Tip()->nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
 		return false;
 }
-bool IsSysServiceExpired(const CScript& scriptPubKey)
+bool IsInSys21Fork(const CScript& scriptPubKey, int &nHeight)
 {
-	// if we don't have a chain or we are in txindex mode (no pruning or culling), the service never expires
-	if(!chainActive.Tip() || fTxIndex)
+	if(!chainActive.Tip())
 		return false;
 	vector<unsigned char> vchData;
-	const string &chainName = ChainNameFromCommandLine();
 	if(!GetSyscoinData(scriptPubKey, vchData))
 		return false;
 	CAliasIndex alias;
@@ -108,19 +106,41 @@ bool IsSysServiceExpired(const CScript& scriptPubKey)
 	CMessage message;
 	CEscrow escrow;
 	CCert cert;
+	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData) && ((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
-		return ((alias.nHeight + GetAliasExpirationDepth()) < chainActive.Tip()->nHeight);
+	{
+		nHeight = alias.nHeight + GetAliasExpirationDepth();
+		return true;
+	}
 	else if(offer.UnserializeFromData(vchData) &&((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
-		return ((offer.nHeight + GetOfferExpirationDepth()) < chainActive.Tip()->nHeight);
+	{
+		nHeight = offer.nHeight + GetOfferExpirationDepth();
+		return true;
+	}
 	else if(cert.UnserializeFromData(vchData) && ((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
-		return ((cert.nHeight + GetCertExpirationDepth()) < chainActive.Tip()->nHeight);
+	{
+		nHeight = cert.nHeight + GetCertExpirationDepth);
+		return true;
+	}
 	else if(escrow.UnserializeFromData(vchData) && ((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
-		return ((escrow.nHeight + GetEscrowExpirationDepth()) < chainActive.Tip()->nHeight);
+	{
+		nHeight = escrow.nHeight + GetEscrowExpirationDepth);
+		return true;
+	}
 	else if(message.UnserializeFromData(vchData) && ((message.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
-		return ((message.nHeight + GetMessageExpirationDepth()) < chainActive.Tip()->nHeight);
+	{
+		nHeight = message.nHeight + GetMessageExpirationDepth);
+		return true;
+	}
 
 	return false;
-	
+}
+bool IsSysServiceExpired(const int &nHeight)
+{
+	// if we don't have a chain or we are in txindex mode (no pruning or culling), the service never expires
+	if(!chainActive.Tip() || fTxIndex)
+		return false;
+	return (nHeight < chainActive.Tip()->nHeight);
 
 }
 bool IsSyscoinScript(const CScript& scriptPubKey, int &op, vector<vector<unsigned char> > &vvchArgs)
