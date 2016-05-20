@@ -4,9 +4,6 @@ ComboBoxDelegate::ComboBoxDelegate(QObject *parent)
 :QItemDelegate(parent)
 {
 }
-ComboBoxDelegate::~ComboBoxDelegate()
-{
-}
 void ComboBoxDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const
 {
     if(index.data(Qt::AccessibleDescriptionRole).toString() == QLatin1String("separator"))
