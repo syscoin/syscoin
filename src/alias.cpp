@@ -96,6 +96,7 @@ bool IsSys21Fork()
 }
 bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 {
+	return false;
 	if(!chainActive.Tip())
 		return false;
 	vector<unsigned char> vchData;
