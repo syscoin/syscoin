@@ -94,7 +94,7 @@ bool IsSys21Fork()
 	if(chainActive.Tip()->nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
 		return false;
 }
-bool IsInSys21Fork(const CScript& scriptPubKey, int &nHeight)
+bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 {
 	if(!chainActive.Tip())
 		return false;
@@ -106,6 +106,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, int &nHeight)
 	CMessage message;
 	CEscrow escrow;
 	CCert cert;
+	nHeight = 0;
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData) && ((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 	{
@@ -135,7 +136,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, int &nHeight)
 
 	return false;
 }
-bool IsSysServiceExpired(const int &nHeight)
+bool IsSysServiceExpired(const uint64_t &nHeight)
 {
 	// if we don't have a chain or we are in txindex mode (no pruning or culling), the service never expires
 	if(!chainActive.Tip() || fTxIndex)

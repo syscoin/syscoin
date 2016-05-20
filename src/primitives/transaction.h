@@ -122,7 +122,7 @@ public:
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(nValue);
 		// SYSCOIN
-		int nHeight;
+		uint64_t nHeight;
 		if(scriptPubKey.IsUnspendable() && IsInSys21Fork(scriptPubKey, nHeight)  && ((nType & SER_GETHASH) || IsSysServiceExpired(nHeight)))
 		{
 	
