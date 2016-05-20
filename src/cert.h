@@ -46,7 +46,7 @@ public:
 	}
 	ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
-	inline void CCert::SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
+	inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
 		READWRITE(vchTitle);
 		READWRITE(vchData);
 		READWRITE(txHash);

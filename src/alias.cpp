@@ -100,6 +100,7 @@ bool IsSysServiceExpired(const CScript& scriptPubKey)
 	if(!chainActive.Tip() || fTxIndex)
 		return false;
 	vector<unsigned char> vchData;
+	const string &chainName = ChainNameFromCommandLine();
 	if(!GetSyscoinData(scriptPubKey, vchData))
 		return false;
 	CAliasIndex alias;
@@ -107,15 +108,18 @@ bool IsSysServiceExpired(const CScript& scriptPubKey)
 	CMessage message;
 	CEscrow escrow;
 	CCert cert;
-	if(alias.UnserializeFromData(vchData))
+	if(ChainNameFromCommandLine() == == CBaseChainParams::MAIN)
+	{
+	}
+	if(alias.UnserializeFromData(vchData) && ((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 		return ((alias.nHeight + GetAliasExpirationDepth()) < chainActive.Tip()->nHeight);
-	else if(offer.UnserializeFromData(vchData))
+	else if(offer.UnserializeFromData(vchData) &&((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 		return ((offer.nHeight + GetOfferExpirationDepth()) < chainActive.Tip()->nHeight);
-	else if(cert.UnserializeFromData(vchData))
+	else if(cert.UnserializeFromData(vchData) && ((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 		return ((cert.nHeight + GetCertExpirationDepth()) < chainActive.Tip()->nHeight);
-	else if(escrow.UnserializeFromData(vchData))
+	else if(escrow.UnserializeFromData(vchData) && ((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 		return ((escrow.nHeight + GetEscrowExpirationDepth()) < chainActive.Tip()->nHeight);
-	else if(message.UnserializeFromData(vchData))
+	else if(message.UnserializeFromData(vchData) && ((message.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN))
 		return ((message.nHeight + GetMessageExpirationDepth()) < chainActive.Tip()->nHeight);
 
 	return false;
