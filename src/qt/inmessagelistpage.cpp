@@ -157,7 +157,6 @@ void InMessageListPage::setModel(WalletModel* walletModel, MessageTableModel *mo
 
     // Select row for newly created inmessage
     connect(model, SIGNAL(rowsInserted(QModelIndex,int,int)), this, SLOT(selectNewMessage(QModelIndex,int,int)));
-	model->sort(MessageTableModel::Time, Qt::DescendingOrder);
     selectionChanged();
 
 }

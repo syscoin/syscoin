@@ -148,7 +148,6 @@ void MyEscrowListPage::setModel(WalletModel *walletModel, EscrowTableModel *mode
 
     // Select row for newly created escrow
     connect(model, SIGNAL(rowsInserted(QModelIndex,int,int)), this, SLOT(selectNewEscrow(QModelIndex,int,int)));
-	model->sort(EscrowTableModel::Time, Qt::DescendingOrder);
 }
 
 void MyEscrowListPage::setOptionsModel(ClientModel* clientmodel, OptionsModel *optionsModel)

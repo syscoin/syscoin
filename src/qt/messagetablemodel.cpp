@@ -184,13 +184,21 @@ public:
 			return;
 		}
         // Find message / value in model
-        QList<MessageTableEntry>::iterator lower = qLowerBound(
+        QList<MessageTableEntry>::iterator lowerGuid = qLowerBound(
             cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageTableEntryLessThan());
+        QList<MessageTableEntry>::iterator upperGuid = qUpperBound(
+            cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageTableEntryLessThan());
+        int lowerIndex = (lowerGuid - cachedMessageTable.begin());
+        int upperIndex = (upperGuid - cachedMessageTable.begin());
+
+		QList<MessageTableEntry>::iterator lower = qLowerBound(
+            cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageEntryLessThan(MessageTableModel::Time, Qt::DescendingOrder));
         QList<MessageTableEntry>::iterator upper = qUpperBound(
-            cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageTableEntryLessThan());
+            cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageEntryLessThan(MessageTableModel::Time, Qt::DescendingOrder));
         int lowerIndex = (lower - cachedMessageTable.begin());
         int upperIndex = (upper - cachedMessageTable.begin());
-        bool inModel = (lower != upper);
+
+        bool inModel = (lowerGuid != upperGuid);
 		int index;
         switch(status)
         {
