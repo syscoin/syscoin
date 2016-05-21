@@ -425,6 +425,10 @@ void EditOfferDialog::loadRow(int row)
 			{
 				ui->categoryEdit->setCurrentIndex(index);
 			}
+			else
+			{
+				ui->categoryEdit->setText(categoryStr);
+			}
 		}
 		if(indexAlias.isValid())
 		{
