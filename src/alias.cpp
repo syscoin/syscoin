@@ -547,7 +547,7 @@ bool getCategoryList(vector<string>& categoryList)
 	bool read = outerValue.read(stringFromVch(categoryAlias.vchPublicValue));
 	if (read)
 	{
-		return getCategoryListFromValue(categoryList);
+		return getCategoryListFromValue(categoryList, outerValue);
 	}
 	else
 	{
