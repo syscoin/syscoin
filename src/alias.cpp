@@ -89,17 +89,12 @@ bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut
 }
 bool IsSys21Fork(const uint64_t& nHeight)
 {
-	if(!chainActive.Tip() )
-		return false;
-	if(nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
+	if(nHeight <= SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
 		return false;
 	return true;
 }
 bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 {
-	
-	if(!chainActive.Tip())
-		return false;
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(scriptPubKey, vchData))
 		return false;
