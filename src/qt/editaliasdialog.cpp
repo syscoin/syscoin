@@ -115,6 +115,7 @@ bool EditAliasDialog::saveCurrentRow()
 		strMethod = string("aliasnew");
         params.push_back(ui->aliasEdit->text().trimmed().toStdString());
 		params.push_back(ui->nameEdit->text().toStdString());
+		params.push_back("");
 		if(ui->safeSearchEdit->currentIndex() >= 0)
 			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
 		try {
