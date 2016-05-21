@@ -115,7 +115,7 @@ bool EditAliasDialog::saveCurrentRow()
 		strMethod = string("aliasnew");
         params.push_back(ui->aliasEdit->text().trimmed().toStdString());
 		params.push_back(ui->nameEdit->text().toStdString());
-		if(ui->safeSearchEdit->currentIndex() > 0)
+		if(ui->safeSearchEdit->currentIndex() >= 0)
 			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
