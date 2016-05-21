@@ -57,7 +57,7 @@ struct EscrowEntryLessThan
 {
     bool operator()(const EscrowTableEntry &a, const EscrowTableEntry &b) const
     {
-        return a.itime < b.itime;
+        return a.itime > b.itime;
     }
     bool operator()(const EscrowTableEntry &a, const int &b) const
     {
@@ -65,7 +65,7 @@ struct EscrowEntryLessThan
     }
     bool operator()(const int &a, const EscrowTableEntry &b) const
     {
-        return a < b.itime;
+        return a > b.itime;
     }
 };
 
