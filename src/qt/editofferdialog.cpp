@@ -481,7 +481,7 @@ bool EditOfferDialog::saveCurrentRow()
 		params.push_back(ui->aliasPegEdit->text().toStdString());
 		params.push_back(ui->aliasEdit->currentText().toStdString());
 		if(ui->categoryEdit->currentIndex() > 0)
-			params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toStdString());
+			params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
 		else
 			params.push_back("");
 		params.push_back(ui->nameEdit->text().toStdString());
