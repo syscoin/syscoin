@@ -158,7 +158,13 @@ void EditOfferDialog::loadCategories()
 {
     QStandardItemModel * model = new QStandardItemModel;
 	vector<string>& categoryList;
-	getCategoryList(categoryList);
+	if(!getCategoryList(categoryList))
+	{
+		QMessageBox::warning(this, windowTitle(),
+			tr("Warning: SYS_CATEGORY alias not found. No default categories available!"),
+				QMessageBox::Ok, QMessageBox::Ok);
+		return;
+	}
 	for(unsigned int i = 0;i< categoryList.size(); i++)
 	{
 		vector<string> categories;
