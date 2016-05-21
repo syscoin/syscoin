@@ -425,9 +425,6 @@ void EditOfferDialog::loadRow(int row)
 			{
 				ui->categoryEdit->setCurrentIndex(index);
 			}
-			else
-			{
-			}
 		}
 		if(indexAlias.isValid())
 		{
@@ -486,20 +483,20 @@ bool EditOfferDialog::saveCurrentRow()
 		if(ui->categoryEdit->currentIndex() > 0)
 			params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
 		else
-			params.push_back("");
+			params.push_back(ui->categoryEdit->currentText().toStdString());
 		params.push_back(ui->nameEdit->text().toStdString());
 		params.push_back(ui->qtyEdit->text().toStdString());
 		params.push_back(ui->priceEdit->text().toStdString());
 		params.push_back(ui->descriptionEdit->toPlainText().toStdString());
 		params.push_back(ui->currencyEdit->currentText().toStdString());
-		if(ui->certEdit->currentIndex() > 0)
+		if(ui->certEdit->currentIndex() >= 0)
 			params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
 		else
 			params.push_back("");
 		params.push_back("1");
 		params.push_back(ui->acceptBTCOnlyEdit->currentText() == QString("Yes")? "1": "0");
 		params.push_back(ui->geoLocationEdit->text().toStdString());
-		if(ui->safeSearchEdit->currentIndex() > 0)
+		if(ui->safeSearchEdit->currentIndex() >= 0)
 			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
