@@ -1772,10 +1772,27 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		if (!pescrowdb->ReadEscrow(vchName, vtxPos) || vtxPos.empty())
 		{
 			pending = 1;
+			escrow = CEscrow(wtx);
+			if(!IsSyscoinTxMine(wtx, "escrow"))
+				continue;
 		}
-		escrow = CEscrow(wtx);
-		if(!IsSyscoinTxMine(wtx, "escrow"))
-			continue;
+		else
+		{
+			escrow = vtxPos.back();
+			CTransaction tx;
+			if (!GetSyscoinTransaction(escrow.nHeight, escrow.txHash, tx, Params().GetConsensus()))
+			{
+				pending = 1;
+				if(!IsSyscoinTxMine(wtx, "escrow"))
+					continue;
+			}
+			else{
+				if (!DecodeEscrowTx(tx, op, nOut, vvch) || !IsEscrowOp(op))
+					continue;
+				if(!IsSyscoinTxMine(tx, "escrow"))
+					continue;
+			}
+		}
 		COffer offer;
 		CTransaction offertx;
 		if (!GetTxOfOffer(escrow.vchOffer, offer, offertx))

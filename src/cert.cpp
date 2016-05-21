@@ -872,11 +872,27 @@ UniValue certlist(const UniValue& params, bool fHelp) {
 		if (!pcertdb->ReadCert(vchName, vtxPos) || vtxPos.empty())
 		{
 			pending = 1;
+			cert = CCert(wtx);
+			if(!IsSyscoinTxMine(wtx, "cert"))
+				continue;
 		}
-
-		cert = CCert(wtx);
-		if(!IsSyscoinTxMine(wtx, "cert"))
-			continue;
+		else
+		{
+			cert = vtxPos.back();
+			CTransaction tx;
+			if (!GetSyscoinTransaction(cert.nHeight, cert.txHash, tx, Params().GetConsensus()))
+			{
+				pending = 1;
+				if(!IsSyscoinTxMine(wtx, "cert"))
+					continue;
+			}
+			else{
+				if (!DecodeCertTx(tx, op, nOut, vvch) || !IsCertOp(op))
+					continue;
+				if(!IsSyscoinTxMine(tx, "cert"))
+					continue;
+			}
+		}
 		nHeight = cert.nHeight;
 		// get last active name only
 		if (vNamesI.find(vchName) != vNamesI.end() && (nHeight < vNamesI[vchName] || vNamesI[vchName] < 0))

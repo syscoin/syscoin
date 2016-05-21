@@ -670,11 +670,28 @@ UniValue messagesentlist(const UniValue& params, bool fHelp) {
 		if (!pmessagedb->ReadMessage(vchName, vtxPos) || vtxPos.empty())
 		{
 			pending = 1;
+			message = CMessage(wtx);
+			if(!IsSyscoinTxMine(wtx, "message"))
+				continue;
 		}
-		message = CMessage(wtx);
-		if(IsSyscoinTxMine(wtx, "message"))
-			continue;
-
+		else
+		{
+			message = vtxPos.back();
+			CTransaction tx;
+			if (!GetSyscoinTransaction(message.nHeight, message.txHash, tx, Params().GetConsensus()))
+			{
+				pending == 1;
+				if(!IsSyscoinTxMine(wtx, "message"))
+					continue;
+			}
+			else
+			{
+				if (!DecodeMessageTx(tx, op, nOut, vvch) || !IsMessageOp(op))
+					continue;
+				if(!IsSyscoinTxMine(tx, "message"))
+					continue;
+			}
+		}
         // build the output
         UniValue oName(UniValue::VOBJ);
         oName.push_back(Pair("GUID", stringFromVch(vchName)));
