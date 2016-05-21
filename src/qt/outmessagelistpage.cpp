@@ -135,7 +135,7 @@ void OutMessageListPage::setModel(WalletModel* walletModel, MessageTableModel *m
 
     // Select row for newly created outmessage
     connect(model, SIGNAL(rowsInserted(QModelIndex,int,int)), this, SLOT(selectNewMessage(QModelIndex,int,int)));
-
+	model->sort(MessageTableModel::Time, Qt::DescendingOrder);
     selectionChanged();
 
 }
