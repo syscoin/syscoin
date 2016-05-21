@@ -438,7 +438,7 @@ void getCategoryListFromValue(vector<string>& categoryList,const UniValue& outer
 	UniValue categories = objCategoriesValue.get_array();
 	for (unsigned int idx = 0; idx < categories.size(); idx++) {
 		const UniValue& category = categories[idx];
-		Uconst niValue& categoryObj = category.get_obj();	
+		const UniValue& categoryObj = category.get_obj();	
 		const UniValue categoryValue = find_value(categoryObj, "cat");
 		categoryList.push_back(categoryValue.get_str());
 	}
