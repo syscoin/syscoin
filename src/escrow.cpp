@@ -1773,8 +1773,6 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		{
 			pending = 1;
 			escrow = CEscrow(wtx);
-			if(!IsSyscoinTxMine(wtx, "escrow"))
-				continue;
 		}
 		else
 		{
@@ -1783,13 +1781,9 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 			if (!GetSyscoinTransaction(escrow.nHeight, escrow.txHash, tx, Params().GetConsensus()))
 			{
 				pending = 1;
-				if(!IsSyscoinTxMine(wtx, "escrow"))
-					continue;
 			}
 			else{
 				if (!DecodeEscrowTx(tx, op, nOut, vvch) || !IsEscrowOp(op))
-					continue;
-				if(!IsSyscoinTxMine(tx, "escrow"))
 					continue;
 			}
 		}
@@ -1936,7 +1930,20 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 			{
 				expired = 1;
 			}  
+	
+			string status = "unknown";
 
+			if(op == OP_ESCROW_ACTIVATE)
+				status = "in-escrow";
+			else if(op == OP_ESCROW_RELEASE)
+				status = "escrow released";
+			else if(op == OP_ESCROW_REFUND)
+				status = "escrow refunded";
+			else if(op == OP_ESCROW_COMPLETE)
+				status = "complete";
+		
+
+			oEscrow.push_back(Pair("status", status));
 			oEscrow.push_back(Pair("expired", expired));
 			oEscrow.push_back(Pair("height", strprintf("%d", nHeight)));
 			oRes.push_back(oEscrow);
@@ -2028,7 +2035,14 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		oEscrow.push_back(Pair("offer", stringFromVch(txEscrow.vchOffer)));
 		oEscrow.push_back(Pair("offertitle", stringFromVch(offer.sTitle)));
 		oEscrow.push_back(Pair("offeracceptlink", stringFromVch(txEscrow.vchOfferAcceptLink)));
+		string status = "unknown";
 
+		if(txEscrow.vchOfferAcceptLink.size() <= 0)
+			status = "in-escrow";
+		else
+			status = "complete";
+
+		oEscrow.push_back(Pair("status", status));
 		string sTotal = strprintf("%llu SYS", (txEscrow.nPricePerUnit/COIN)*txEscrow.nQty);
 		oEscrow.push_back(Pair("total", sTotal));
         oRes.push_back(oEscrow);
