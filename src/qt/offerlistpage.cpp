@@ -537,7 +537,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_str), 
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str), 
-					QString::fromStdString(safesearch_str)
+					QString::fromStdString(safesearch_str),
 					QString::fromStdString(geolocation_str), AllOffer, CT_NEW);	
 		  }
 
