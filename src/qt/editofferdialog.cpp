@@ -15,6 +15,7 @@
 #include <QSettings>
 #include <QStandardItemModel>
 #include <boost/algorithm/string.hpp>
+#include <QDebug>
 using namespace std;
 
 extern const CRPCTable tableRPC;
@@ -148,7 +149,6 @@ void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& 
     item->setData( "parent", Qt::AccessibleDescriptionRole );
     QFont font = item->font();
     font.setBold( true );
-    font.setItalic( true );
     item->setFont( font );
     model->appendRow( item );
 }
@@ -418,15 +418,18 @@ void EditOfferDialog::loadRow(int row)
 		}
 		if(indexCategory.isValid())
 		{
+			qDebug() << "index category";
 			QString categoryStr = indexCategory.data(OfferTableModel::Category).toString();
-			int index = ui->categoryEdit->findData(QVariant(categoryStr), Qt::UserRole, Qt::MatchExactly);
+			int index = ui->categoryEdit->findData(QVariant(categoryStr));
 			if ( index != -1 ) 
 			{
+				qDebug() << "found index " << QString::number(index); 
 				ui->categoryEdit->setCurrentIndex(index);
 			}
 			else
 			{
-				ui->categoryEdit->addItem(categoryStr, QVariant(categoryStr));
+				qDebug() << "add cat " << categoryStr; 
+				ui->categoryEdit->addItem(categoryStr, categoryStr);
 			}
 		}
 		if(indexAlias.isValid())
