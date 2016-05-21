@@ -418,17 +418,14 @@ void EditOfferDialog::loadRow(int row)
 		}
 		if(indexCategory.isValid())
 		{
-			qDebug() << "index category";
-			QString categoryStr = indexCategory.data(OfferTableModel::Category).toString();
+			QString categoryStr = indexCategory.data(OfferTableModel::CategoryRole).toString();
 			int index = ui->categoryEdit->findData(QVariant(categoryStr));
 			if ( index != -1 ) 
-			{
-				qDebug() << "found index " << QString::number(index); 
+			{ 
 				ui->categoryEdit->setCurrentIndex(index);
 			}
 			else
 			{
-				qDebug() << "add cat " << categoryStr; 
 				ui->categoryEdit->addItem(categoryStr, categoryStr);
 			}
 		}
