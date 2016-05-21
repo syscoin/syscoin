@@ -132,7 +132,6 @@ void MyEscrowListPage::setModel(WalletModel *walletModel, EscrowTableModel *mode
 	ui->tableView->setModel(proxyModel);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setSelectionMode(QAbstractItemView::SingleSelection);
-	ui->tableView->sortByColumn(1, Qt::DescendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 50); //escrow id
@@ -149,6 +148,7 @@ void MyEscrowListPage::setModel(WalletModel *walletModel, EscrowTableModel *mode
 
     // Select row for newly created escrow
     connect(model, SIGNAL(rowsInserted(QModelIndex,int,int)), this, SLOT(selectNewEscrow(QModelIndex,int,int)));
+	model->sort(EscrowTableModel::Time, Qt::DescendingOrder);
 }
 
 void MyEscrowListPage::setOptionsModel(ClientModel* clientmodel, OptionsModel *optionsModel)

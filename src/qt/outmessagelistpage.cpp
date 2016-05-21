@@ -117,7 +117,6 @@ void OutMessageListPage::setModel(WalletModel* walletModel, MessageTableModel *m
     ui->tableView->setModel(proxyModel);
     ui->tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableView->setSelectionMode(QAbstractItemView::SingleSelection);
-	ui->tableView->sortByColumn(1, Qt::DescendingOrder);
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 75); //guid
