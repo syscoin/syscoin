@@ -427,7 +427,7 @@ void EditOfferDialog::loadRow(int row)
 			}
 			else
 			{
-				ui->categoryEdit->setText(categoryStr);
+				addParentItem(ui->categoryEdit->model(), QcategoryStr, categoryStr));
 			}
 		}
 		if(indexAlias.isValid())
