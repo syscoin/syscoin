@@ -32,7 +32,7 @@ public:
 
     void setModel(WalletModel*,OfferTableModel *model);
     void loadRow(int row);
-    void addParentItem(QStandardItemModel * model, const QString& text );
+    void addParentItem(QStandardItemModel * model, const QString& text, const QVariant& data );
     void addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data );
 
     QString getOffer() const;
