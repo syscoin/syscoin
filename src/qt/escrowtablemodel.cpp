@@ -37,49 +37,6 @@ struct EscrowTableEntry
     EscrowTableEntry(Type type, const QString &escrow, const int itime, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer):
         type(type), escrow(escrow), itime(itime), time(time), seller(seller), arbiter(arbiter), offer(offer), offertitle(offertitle), offeraccept(offeraccept), total(total), status(status), buyer(buyer){}
 };
-class EscrowEntryLessThan
-{
-public:
-    EscrowEntryLessThan(int nColumn, Qt::SortOrder fOrder):
-        column(nColumn), order(fOrder) {}
-    bool operator()(EscrowTableEntry &left, EscrowTableEntry &right) const;
-
-private:
-    int column;
-    Qt::SortOrder order;
-};
-
-bool EscrowEntryLessThan::operator()(EscrowTableEntry &left, EscrowTableEntry &right) const
-{
-    EscrowTableEntry *pLeft = &left;
-    EscrowTableEntry *pRight = &right;
-    if (order == Qt::DescendingOrder)
-        std::swap(pLeft, pRight);
-
-    switch(column)
-    {
-    case EscrowTableModel::Time:
-        return pLeft->itime < pRight->itime;
-    case EscrowTableModel::Seller:
-        return pLeft->seller < pRight->seller;
-    case EscrowTableModel::Arbiter:
-        return pLeft->arbiter < pRight->arbiter;
-    case EscrowTableModel::Buyer:
-        return pLeft->buyer < pRight->buyer;
-    case EscrowTableModel::Offer:
-        return pLeft->offer < pRight->offer;
-    case EscrowTableModel::OfferTitle:
-        return pLeft->offertitle < pRight->offertitle;
-	case EscrowTableModel::OfferAccept:
-        return pLeft->offeraccept < pRight->offeraccept;
-	case EscrowTableModel::Total:
-        return pLeft->total < pRight->total;
-	case EscrowTableModel::Status:
-        return pLeft->status < pRight->status;
-    default:
-        return pLeft->escrow < pRight->escrow;
-    }
-}
 struct EscrowTableEntryLessThan
 {
     bool operator()(const EscrowTableEntry &a, const EscrowTableEntry &b) const
@@ -96,6 +53,21 @@ struct EscrowTableEntryLessThan
     }
 };
 
+struct EscrowEntryLessThan
+{
+    bool operator()(const EscrowTableEntry &a, const EscrowTableEntry &b) const
+    {
+        return a.itime < b.itime;
+    }
+    bool operator()(const EscrowTableEntry &a, const int &b) const
+    {
+        return a.itime < b;
+    }
+    bool operator()(const int &a, const EscrowTableEntry &b) const
+    {
+        return a < b.itime;
+    }
+};
 
 // Private implementation
 class EscrowTablePriv
@@ -227,9 +199,9 @@ public:
             cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowTableEntryLessThan());
 
         QList<EscrowTableEntry>::iterator lower = qLowerBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), itime, EscrowEntryLessThan(EscrowTableModel::Time, Qt::DescendingOrder));
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), itime, EscrowEntryLessThan());
         QList<EscrowTableEntry>::iterator upper = qUpperBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), itime, EscrowEntryLessThan(EscrowTableModel::Time, Qt::DescendingOrder));
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), itime, EscrowEntryLessThan());
         int lowerIndex = (lower - cachedEscrowTable.begin());
         int upperIndex = (upper - cachedEscrowTable.begin());
 
@@ -309,11 +281,6 @@ EscrowTableModel::EscrowTableModel(CWallet *wallet, WalletModel *parent,  Escrow
 EscrowTableModel::~EscrowTableModel()
 {
     delete priv;
-}
-void EscrowTableModel::sort(int column, Qt::SortOrder order)
-{
-    qSort(priv->cachedEscrowTable.begin(), priv->cachedEscrowTable.end(), EscrowEntryLessThan(column, order));
-    Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(priv->cachedEscrowTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
 }
 void EscrowTableModel::showComplete(bool show)
 {

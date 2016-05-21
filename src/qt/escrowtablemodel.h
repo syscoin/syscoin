@@ -97,7 +97,6 @@ public Q_SLOTS:
     /* Update escrow list from core.
      */
     void updateEntry(const QString &escrow, const int itime, const QString &time, const QString &seller, const QString &arbiter, const QString &offer, const QString &offertitle, const QString &offeraccept, const QString &total, const QString &status, const QString &buyer, EscrowModelType type, int statusi);
-	void sort(int column, Qt::SortOrder order = Qt::AscendingOrder);
     friend class EscrowTablePriv;
 };
 

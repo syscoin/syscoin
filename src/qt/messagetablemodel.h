@@ -76,7 +76,6 @@ private:
     void emitDataChanged(int index);
 
 public Q_SLOTS:
-	void sort(int column, Qt::SortOrder order = Qt::AscendingOrder);
     friend class MessageTablePriv;
 };
 

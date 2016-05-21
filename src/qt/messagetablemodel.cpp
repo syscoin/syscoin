@@ -30,41 +30,7 @@ struct MessageTableEntry
     MessageTableEntry(const QString &guid, const int itime, const QString &time,const QString &from, const QString &to, const QString &subject, const QString &message):
         guid(guid), itime(itime), time(time), from(from), to(to), subject(subject), message(message) {}
 };
-class MessageEntryLessThan
-{
-public:
-    MessageEntryLessThan(int nColumn, Qt::SortOrder fOrder):
-        column(nColumn), order(fOrder) {}
-    bool operator()(MessageTableEntry &left, MessageTableEntry &right) const;
 
-private:
-    int column;
-    Qt::SortOrder order;
-};
-
-bool MessageEntryLessThan::operator()(MessageTableEntry &left, MessageTableEntry &right) const
-{
-    MessageTableEntry *pLeft = &left;
-    MessageTableEntry *pRight = &right;
-    if (order == Qt::DescendingOrder)
-        std::swap(pLeft, pRight);
-
-    switch(column)
-    {
-    case MessageTableModel::Time:
-        return pLeft->itime < pRight->itime;
-    case MessageTableModel::Subject:
-        return pLeft->subject < pRight->subject;
-    case MessageTableModel::From:
-        return pLeft->from < pRight->from;
-    case MessageTableModel::To:
-        return pLeft->to < pRight->to;
-    case MessageTableModel::Message:
-        return pLeft->message < pRight->message;
-    default:
-        return pLeft->guid < pRight->guid;
-    }
-}
 struct MessageTableEntryLessThan
 {
     bool operator()(const MessageTableEntry &a, const MessageTableEntry &b) const
@@ -81,6 +47,21 @@ struct MessageTableEntryLessThan
     }
 };
 
+struct MessageEntryLessThan
+{
+    bool operator()(const MessageTableEntry &a, const MessageTableEntry &b) const
+    {
+        return a.itime < b.itime;
+    }
+    bool operator()(const MessageTableEntry &a, const int &b) const
+    {
+        return a.itime < b;
+    }
+    bool operator()(const int &a, const MessageTableEntry &b) const
+    {
+        return a < b.itime;
+    }
+};
 // Private implementation
 class MessageTablePriv
 {
@@ -192,9 +173,9 @@ public:
         int upperIndex = (upperGuid - cachedMessageTable.begin());
 
 		QList<MessageTableEntry>::iterator lower = qLowerBound(
-            cachedMessageTable.begin(), cachedMessageTable.end(), itime, MessageEntryLessThan(MessageTableModel::Time, Qt::DescendingOrder));
+            cachedMessageTable.begin(), cachedMessageTable.end(), itime, MessageEntryLessThan());
         QList<MessageTableEntry>::iterator upper = qUpperBound(
-            cachedMessageTable.begin(), cachedMessageTable.end(), itime, MessageEntryLessThan(MessageTableModel::Time, Qt::DescendingOrder));
+            cachedMessageTable.begin(), cachedMessageTable.end(), itime, MessageEntryLessThan());
         int lowerIndex = (lower - cachedMessageTable.begin());
         int upperIndex = (upper - cachedMessageTable.begin());
 
@@ -269,11 +250,6 @@ MessageTableModel::MessageTableModel(CWallet *wallet, WalletModel *parent, Messa
 MessageTableModel::~MessageTableModel()
 {
     delete priv;
-}
-void MessageTableModel::sort(int column, Qt::SortOrder order)
-{
-    qSort(priv->cachedMessageTable.begin(), priv->cachedMessageTable.end(), MessageEntryLessThan(column, order));
-    Q_EMIT dataChanged(index(0, 0, QModelIndex()), index(priv->cachedMessageTable.size() - 1, NUMBER_OF_COLUMNS - 1, QModelIndex()));
 }
 void MessageTableModel::refreshMessageTable() 
 {
