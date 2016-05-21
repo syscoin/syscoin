@@ -547,7 +547,18 @@ bool getCategoryList(vector<string>& categoryList)
 	bool read = outerValue.read(stringFromVch(categoryAlias.vchPublicValue));
 	if (read)
 	{
-		return getCategoryListFromValue(categoryList, outerValue);
+		try{
+		
+			getCategoryListFromValue(categoryList, outerValue);
+			return true;
+		}
+		catch(std::runtime_error& err)
+		{
+			
+			if(fDebug)
+				LogPrintf("getCategoryListFromValue(): Failed to get category list from value\n");
+			return false;
+		}
 	}
 	else
 	{

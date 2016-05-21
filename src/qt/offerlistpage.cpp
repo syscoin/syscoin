@@ -381,6 +381,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	string acceptBTCOnly_str;
 	string alias_peg_str;
 	string alias_str;
+	string safesearch_str;
+	string geolocation_str;
+
 	int expired = 0;
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
@@ -436,6 +439,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			alias_str = "";
 			acceptBTCOnly_str = "";
 			alias_peg_str = "";
+			safesearch_str = "";
+			geolocation_str = "";
 			expired = 0;
 
 
@@ -484,7 +489,12 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			const UniValue& expired_value = find_value(o, "expired");
 			if (expired_value.type() == UniValue::VNUM)
 				expired = expired_value.get_int();
-
+			const UniValue& safesearch_value = find_value(o, "safesearch");
+			if (safesearch_value.type() == UniValue::VSTR)
+				safesearch_str = safesearch_value.get_str();
+			const UniValue& geolocation_value = find_value(o, "geolocation");
+			if (geolocation_value.type() == UniValue::VSTR)
+				geolocation_str = geolocation_value.get_str();
 			if(expired == 1)
 			{
 				expired_str = "Expired";
@@ -511,7 +521,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_str),
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str),
-					settings.value("safesearch", "").toString());
+					QString::fromStdString(safesearch_str),
+					QString::fromStdString(geolocation_str));
 				this->model->updateEntry(QString::fromStdString(name_str),
 					QString::fromStdString(cert_str),
 					QString::fromStdString(value_str),
@@ -526,7 +537,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(alias_str), 
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str), 
-					settings.value("safesearch", "").toString(), AllOffer, CT_NEW);	
+					QString::fromStdString(safesearch_str)
+					QString::fromStdString(geolocation_str), AllOffer, CT_NEW);	
 		  }
 
 		  pageMap[currentPage] = make_pair(firstOffer, lastOffer);  

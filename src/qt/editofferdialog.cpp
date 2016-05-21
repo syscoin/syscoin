@@ -367,6 +367,7 @@ void EditOfferDialog::setModel(WalletModel* walletModel, OfferTableModel *model)
 	mapper->addMapping(ui->qtyEdit, OfferTableModel::Qty);	
 	mapper->addMapping(ui->descriptionEdit, OfferTableModel::Description);		
 	mapper->addMapping(ui->aliasPegEdit, OfferTableModel::AliasPeg);	
+	mapper->addMapping(ui->geoLocationEdit, OfferTableModel::GeoLocation);
     
 }
 
