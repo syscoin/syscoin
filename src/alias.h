@@ -24,7 +24,7 @@ static const unsigned int MAX_ENCRYPTED_VALUE_LENGTH = 1108;
 
 static const unsigned int SAFETY_LEVEL1 = 1;
 static const unsigned int SAFETY_LEVEL2 = 2;
-static const unsigned int SYSCOIN_FORK1 = 500;
+static const unsigned int SYSCOIN_FORK1 = 50000;
 bool IsSys21Fork(const uint64_t& nHeight);
 class CAliasIndex {
 public:
@@ -138,7 +138,7 @@ void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient);
 void CreateFeeRecipient(const CScript& scriptPubKey, const std::vector<unsigned char>& data, CRecipient& recipient);
 bool IsSyscoinTxMine(const CTransaction& tx,const std::string &type);
 bool IsAliasOp(int op);
-
+bool getCategoryList(std::vector<std::string>& categoryList);
 bool getBanList(const std::vector<unsigned char> &banData, std::map<std::string, unsigned char> &banAliasList,  std::map<std::string, unsigned char>& banCertList,  std::map<std::string, unsigned char>& banOfferList);
 bool GetTxOfAlias(const std::vector<unsigned char> &vchName, CAliasIndex& alias, CTransaction& tx);
 int IndexOfAliasOutput(const CTransaction& tx);

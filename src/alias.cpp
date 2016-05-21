@@ -91,7 +91,7 @@ bool IsSys21Fork(const uint64_t& nHeight)
 {
 	if(!chainActive.Tip() )
 		return false;
-	if(nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() != CBaseChainParams::MAIN)
+	if(nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() == CBaseChainParams::MAIN)
 		return false;
 	return true;
 }
@@ -113,7 +113,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData))
 	{
-		if((alias.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
+		if((alias.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
 		{
 			nHeight = alias.nHeight + GetAliasExpirationDepth();
 			return true;
@@ -121,7 +121,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
-		if((offer.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
+		if((offer.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
 		{
 			nHeight = offer.nHeight + GetOfferExpirationDepth();
 			return true;
@@ -129,7 +129,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
-		if((cert.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
+		if((cert.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
 		{
 			nHeight = cert.nHeight + GetCertExpirationDepth();
 			return true;
@@ -137,7 +137,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
-		if((escrow.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
+		if((escrow.nHeight > SYSCOIN_FORK1 && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN)
 		{
 			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
 			return true;
@@ -431,6 +431,20 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 	return "";
 
 }
+void getCategoryListFromValue(vector<string>& categoryList,const UniValue& outerValue)
+{
+	UniValue outerObj = outerValue.get_array();
+	UniValue objCategoriesValue = find_value(outerObj, "categories");
+	if(objCategoriesValue.isArray())
+	{
+		UniValue categories = objCategoriesValue.get_array();
+		for (unsigned int idx = 0; idx < categories.size(); idx++) {
+			const UniValue& category = categories[idx];
+			const UniValue categoryValue = find_value(category, "cat");
+			categoryList.push_back(categoryValue.get_str());
+		}
+	}
+}
 bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, unsigned char>& banCertList,  map<string, unsigned char>& banOfferList,const UniValue& outerValue)
 {
 	UniValue outerObj = outerValue.get_obj();
@@ -504,6 +518,41 @@ bool getBanList(const vector<unsigned char>& banData, map<string, unsigned char>
 	{
 		if(fDebug)
 			LogPrintf("getBanList() Failed to get value from alias\n");
+		return false;
+	}
+	return false;
+
+}
+bool getCategoryList(vector<string>& categoryList)
+{
+	// check for alias existence in DB
+	vector<CAliasIndex> vtxPos;
+	if (!paliasdb->ReadAlias(vchFromString("SYS_CATEGORY"), vtxPos) || vtxPos.empty())
+	{
+		if(fDebug)
+			LogPrintf("getCategoryList() Could not find SYS_CATEGORY alias\n");
+		return false;
+	}
+	
+	if (vtxPos.size() < 1)
+	{
+		if(fDebug)
+			LogPrintf("getCategoryList() Could not find SYS_CATEGORY alias (vtxPos.size() == 0)\n");
+		return false;
+	}
+
+	CAliasIndex categoryAlias = vtxPos.back();
+
+	UniValue outerValue(UniValue::VSTR);
+	bool read = outerValue.read(stringFromVch(categoryAlias.vchPublicValue));
+	if (read)
+	{
+		return getCategoryListFromValue(categoryList);
+	}
+	else
+	{
+		if(fDebug)
+			LogPrintf("getCategoryList() Failed to get value from alias\n");
 		return false;
 	}
 	return false;

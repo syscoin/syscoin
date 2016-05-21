@@ -14,10 +14,12 @@
 #include "qcomboboxdelegate.h"
 #include <QSettings>
 #include <QStandardItemModel>
+#include <boost/algorithm/string.hpp>
 using namespace std;
 
 extern const CRPCTable tableRPC;
 string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const vector<unsigned char> &vchCurrency, CAmount &nFee, const unsigned int &nHeightToFind, vector<string>& rateList, int &precision);
+extern bool getCategoryList(vector<string>& categoryList);
 extern vector<unsigned char> vchFromString(const std::string &str);
 EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *parent) :
     QDialog(parent),
@@ -133,10 +135,10 @@ void EditOfferDialog::certChanged(int index)
 	}
 }
 
-void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& text )
+void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& text, const QVariant& data )
 {
     QStandardItem* item = new QStandardItem( text );
-    item->setFlags( item->flags() & ~( Qt::ItemIsEnabled | Qt::ItemIsSelectable ) );
+	item->setData( data, Qt::UserRole );
     item->setData( "parent", Qt::AccessibleDescriptionRole );
     QFont font = item->font();
     font.setBold( true );
@@ -155,16 +157,34 @@ void EditOfferDialog::addChildItem( QStandardItemModel * model, const QString& t
 void EditOfferDialog::loadCategories()
 {
     QStandardItemModel * model = new QStandardItemModel;
-
-    addParentItem(model, "Success");
-    addChildItem(model, "one", 1);
-    addChildItem(model, "two", 2);
-    addChildItem(model, "three", 3);
-    addParentItem(model, "Failed");
-    addChildItem(model, "one", 1);
-    addChildItem(model, "two", 2);
-    addChildItem(model, "three", 3);
-
+	vector<string>& categoryList;
+	getCategoryList(categoryList);
+	for(unsigned int i = 0;i< categoryList.size(); i++)
+	{
+		vector<string> categories;
+		boost::split(categories,categoryList[i],boost::is_any_of(">"));
+		if(categories.size() > 0)
+		{
+			for(unsigned int j = 0;j< categories.size(); j++)
+			{
+				boost::algorithm::trim_left(categories[j]);
+				boost::algorithm::trim_right(categories[j]);
+				// only support 2 levels in qt GUI for categories
+				if(j == 0)
+				{
+					addParentItem(model, categories[0], QString(categories[0]));
+				}
+				else if(j == 1)
+				{
+					addChildItem(model, categories[1], QString(categoryList[i]));
+				}
+			}
+		}
+		else
+		{
+			addParentItem(model, categoryList[i], QString(categoryList[i]));
+		}
+	}
     ui->categoryEdit->setModel(model);
     ui->categoryEdit->setItemDelegate(new ComboBoxDelegate);
 }
