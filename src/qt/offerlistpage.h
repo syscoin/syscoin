@@ -32,8 +32,9 @@ public:
     explicit OfferListPage(const PlatformStyle *platformStyle, OfferView *parent);
     ~OfferListPage();
 
-    void addParentItem(QStandardItemModel * model, const QString& text );
+    void addParentItem(QStandardItemModel * model, const QString& text, const QVariant& data );
     void addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data );
+
 
     void setModel(WalletModel*, OfferTableModel *model);
     void setOptionsModel(OptionsModel *optionsModel);

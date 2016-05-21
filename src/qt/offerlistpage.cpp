@@ -26,7 +26,7 @@ using namespace std;
 
 
 extern const CRPCTable tableRPC;
-
+extern bool getCategoryList(vector<string>& categoryList);
 OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *parent) :
     QDialog(0),
     ui(new Ui::OfferListPage),
@@ -94,20 +94,32 @@ OfferListPage::~OfferListPage()
     delete ui;
 }
 
-void OfferListPage::addParentItem( QStandardItemModel * model, const QString& text )
+void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& text, const QVariant& data )
 {
+	QList<QStandardItem*> lst = model->findItems(text,Qt::MatchExactly);
+	for(unsigned int i=0; i<lst.count(); ++i )
+	{ 
+		if(lst[i]->data(Qt::UserRole) == data)
+			return;
+	}
     QStandardItem* item = new QStandardItem( text );
-    item->setFlags( item->flags() & ~( Qt::ItemIsEnabled | Qt::ItemIsSelectable ) );
+	item->setData( data, Qt::UserRole );
     item->setData( "parent", Qt::AccessibleDescriptionRole );
     QFont font = item->font();
     font.setBold( true );
-    font.setItalic( true );
     item->setFont( font );
     model->appendRow( item );
 }
 
 void OfferListPage::addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data )
 {
+	QList<QStandardItem*> lst = model->findItems(text,Qt::MatchExactly);
+	for(unsigned int i=0; i<lst.count(); ++i )
+	{ 
+		if(lst[i]->data(Qt::UserRole) == data)
+			return;
+	}
+
     QStandardItem* item = new QStandardItem( text + QString( 4, QChar( ' ' ) ) );
     item->setData( data, Qt::UserRole );
     item->setData( "child", Qt::AccessibleDescriptionRole );
@@ -116,16 +128,40 @@ void OfferListPage::addChildItem( QStandardItemModel * model, const QString& tex
 void OfferListPage::loadCategories()
 {
     QStandardItemModel * model = new QStandardItemModel;
-
-    addParentItem(model, "Success");
-    addChildItem(model, "one", 1);
-    addChildItem(model, "two", 2);
-    addChildItem(model, "three", 3);
-    addParentItem(model, "Failed");
-    addChildItem(model, "one", 1);
-    addChildItem(model, "two", 2);
-    addChildItem(model, "three", 3);
-
+	vector<string> categoryList;
+	if(!getCategoryList(categoryList))
+	{
+		QMessageBox::warning(this, windowTitle(),
+			tr("Warning: SYS_CATEGORY alias not found. No default categories available!"),
+				QMessageBox::Ok, QMessageBox::Ok);
+		return;
+	}
+	addParentItem(model, tr("All Categories"), tr("All Categories"));
+	for(unsigned int i = 0;i< categoryList.size(); i++)
+	{
+		vector<string> categories;
+		boost::split(categories,categoryList[i],boost::is_any_of(">"));
+		if(categories.size() > 0)
+		{
+			for(unsigned int j = 0;j< categories.size(); j++)
+			{
+				boost::algorithm::trim(categories[j]);
+				// only support 2 levels in qt GUI for categories
+				if(j == 0)
+				{
+					addParentItem(model, QString::fromStdString(categories[0]), QVariant(QString::fromStdString(categories[0])));
+				}
+				else if(j == 1)
+				{
+					addChildItem(model, QString::fromStdString(categories[1]), QVariant(QString::fromStdString(categoryList[i])));
+				}
+			}
+		}
+		else
+		{
+			addParentItem(model, QString::fromStdString(categoryList[i]), QVariant(QString::fromStdString(categoryList[i])));
+		}
+	}
     ui->categoryEdit->setModel(model);
     ui->categoryEdit->setItemDelegate(new ComboBoxDelegate);
 }
@@ -388,8 +424,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
 	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
-	if(ui->categoryEdit->currentIndex() >= 0)
-		params.push_back(ui->categoryEdit->currentText().toStdString());
+	if(ui->categoryEdit->currentIndex() > 0)
+		params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
+
     try {
         result = tableRPC.execute(strMethod, params);
     }

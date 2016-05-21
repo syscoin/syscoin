@@ -4021,7 +4021,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		safeSearch = params[2].get_bool();
 
 	if (params.size() > 3)
-		strCategory = params[2].get_str();
+		strCategory = params[3].get_str();
 
 	UniValue oRes(UniValue::VARR);
 
@@ -4048,7 +4048,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 			if(txOffer.safetyLevel > SAFETY_LEVEL1)
 				continue;
 		}
-		if(strCategory.size() > 0 && strCategory != stringFromVch(txOffer.sCategory))
+		if(strCategory.size() > 0 && boost::algorithm::starts_with(stringFromVch(txOffer.sCategory), strCategory))
 			continue;
 		string title = stringFromVch(txOffer.sTitle);
 		boost::algorithm::to_lower(title);

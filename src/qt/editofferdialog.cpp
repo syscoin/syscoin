@@ -427,6 +427,7 @@ void EditOfferDialog::loadRow(int row)
 			else
 			{
 				ui->categoryEdit->addItem(categoryStr, categoryStr);
+				ui->categoryEdit->setCurrentIndex(ui->categoryEdit->count() - 1);
 			}
 		}
 		if(indexAlias.isValid())
