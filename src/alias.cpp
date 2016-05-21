@@ -433,16 +433,14 @@ string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const
 }
 void getCategoryListFromValue(vector<string>& categoryList,const UniValue& outerValue)
 {
-	UniValue outerObj = outerValue.get_array();
+	UniValue outerObj = outerValue.get_obj();
 	UniValue objCategoriesValue = find_value(outerObj, "categories");
-	if(objCategoriesValue.isArray())
-	{
-		UniValue categories = objCategoriesValue.get_array();
-		for (unsigned int idx = 0; idx < categories.size(); idx++) {
-			const UniValue& category = categories[idx];
-			const UniValue categoryValue = find_value(category, "cat");
-			categoryList.push_back(categoryValue.get_str());
-		}
+	UniValue categories = objCategoriesValue.get_array();
+	for (unsigned int idx = 0; idx < categories.size(); idx++) {
+		const UniValue& category = categories[idx];
+		Uconst niValue& categoryObj = category.get_obj();	
+		const UniValue categoryValue = find_value(categoryObj, "cat");
+		categoryList.push_back(categoryValue.get_str());
 	}
 }
 bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, unsigned char>& banCertList,  map<string, unsigned char>& banOfferList,const UniValue& outerValue)
