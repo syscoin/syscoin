@@ -169,8 +169,6 @@ public:
             cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageTableEntryLessThan());
         QList<MessageTableEntry>::iterator upperGuid = qUpperBound(
             cachedMessageTable.begin(), cachedMessageTable.end(), guid, MessageTableEntryLessThan());
-        int lowerIndex = (lowerGuid - cachedMessageTable.begin());
-        int upperIndex = (upperGuid - cachedMessageTable.begin());
 
 		QList<MessageTableEntry>::iterator lower = qLowerBound(
             cachedMessageTable.begin(), cachedMessageTable.end(), itime, MessageEntryLessThan());
