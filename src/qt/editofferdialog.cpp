@@ -420,7 +420,7 @@ void EditOfferDialog::loadRow(int row)
 		if(indexCategory.isValid())
 		{
 			QString categoryStr = indexCategory.data(OfferTableModel::Category).toString();
-			int index = ui->categoryEdit->findData(categoryStr,Qt:UserRole);
+			int index = ui->categoryEdit->findData(categoryStr,Qt::UserRole);
 			if ( index != -1 ) 
 			{
 				ui->categoryEdit->setCurrentIndex(index);
