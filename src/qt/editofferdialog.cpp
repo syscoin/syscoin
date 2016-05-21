@@ -137,6 +137,12 @@ void EditOfferDialog::certChanged(int index)
 
 void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& text, const QVariant& data )
 {
+	QList<QStandardItem*> lst = model->findItems(text,Qt::MatchExactly);
+	for(unsigned int i=0; i<lst.count(); ++i )
+	{ 
+		if(lst[i]->data(Qt::UserRole) == data)
+			return;
+	}
     QStandardItem* item = new QStandardItem( text );
 	item->setData( data, Qt::UserRole );
     item->setData( "parent", Qt::AccessibleDescriptionRole );
@@ -149,6 +155,13 @@ void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& 
 
 void EditOfferDialog::addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data )
 {
+	QList<QStandardItem*> lst = model->findItems(text,Qt::MatchExactly);
+	for(unsigned int i=0; i<lst.count(); ++i )
+	{ 
+		if(lst[i]->data(Qt::UserRole) == data)
+			return;
+	}
+
     QStandardItem* item = new QStandardItem( text + QString( 4, QChar( ' ' ) ) );
     item->setData( data, Qt::UserRole );
     item->setData( "child", Qt::AccessibleDescriptionRole );
@@ -173,8 +186,7 @@ void EditOfferDialog::loadCategories()
 		{
 			for(unsigned int j = 0;j< categories.size(); j++)
 			{
-				boost::algorithm::trim_left(categories[j]);
-				boost::algorithm::trim_right(categories[j]);
+				boost::algorithm::trim(categories[j]);
 				// only support 2 levels in qt GUI for categories
 				if(j == 0)
 				{
