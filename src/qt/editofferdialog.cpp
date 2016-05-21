@@ -178,17 +178,17 @@ void EditOfferDialog::loadCategories()
 				// only support 2 levels in qt GUI for categories
 				if(j == 0)
 				{
-					addParentItem(model, categories[0], QString(categories[0]));
+					addParentItem(model, categories[0], QString::fromStdString(categories[0]));
 				}
 				else if(j == 1)
 				{
-					addChildItem(model, categories[1], QString(categoryList[i]));
+					addChildItem(model, categories[1], QString::fromStdString(categoryList[i]));
 				}
 			}
 		}
 		else
 		{
-			addParentItem(model, categoryList[i], QString(categoryList[i]));
+			addParentItem(model, categoryList[i], QString::fromStdString(categoryList[i]));
 		}
 	}
     ui->categoryEdit->setModel(model);
