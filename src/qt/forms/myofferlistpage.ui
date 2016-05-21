@@ -27,7 +27,7 @@
    <item>
     <widget class="QCheckBox" name="soldOutCheck">
      <property name="text">
-      <string>Show Sold Out Offers</string>
+      <string>Show Sold Out/ Expired Offers</string>
      </property>
     </widget>
    </item>

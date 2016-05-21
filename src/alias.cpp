@@ -1481,22 +1481,10 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 			if (!paliasdb->ReadAlias(vchName, vtxPos) || vtxPos.empty())
 			{
 				pending = 1;
-				alias = CAliasIndex(wtx);
-				if(!IsSyscoinTxMine(wtx, "alias"))
-					continue;
 			}
-			else
-			{
-				alias = vtxPos.back();
-				CTransaction tx;
-				if (!GetSyscoinTransaction(alias.nHeight, alias.txHash, tx, Params().GetConsensus()))
-					continue;
-				if (!DecodeAliasTx(tx, op, nOut, vvch) || !IsAliasOp(op))
-					continue;
-				if(!IsSyscoinTxMine(tx, "alias"))
-					continue;
-			}
-
+			alias = CAliasIndex(wtx);
+			if(!IsSyscoinTxMine(wtx, "alias"))
+				continue;
 			nHeight = alias.nHeight;
 			// get last active name only
 			if (vNamesI.find(vchName) != vNamesI.end() && (nHeight < vNamesI[vchName] || vNamesI[vchName] < 0))

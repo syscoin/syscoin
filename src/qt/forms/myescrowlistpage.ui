@@ -27,7 +27,7 @@
    <item>
     <widget class="QCheckBox" name="completeCheck">
      <property name="text">
-      <string>Show Completed or Refunded Escrows</string>
+      <string>Show Completed/ Refunded/Expired Escrows</string>
      </property>
     </widget>
    </item>

@@ -3827,22 +3827,10 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			if (!pofferdb->ReadOffer(vchName, vtxPos) || vtxPos.empty())
 			{
 				pending = 1;
-				theOfferA = COffer(wtx);
-				if(!IsSyscoinTxMine(wtx, "offer"))
-					continue;
 			}	
-			else
-			{
-				theOfferA = vtxPos.back();
-				CTransaction tx;
-				if (!GetSyscoinTransaction(theOfferA.nHeight, theOfferA.txHash, tx, Params().GetConsensus()))
-					continue;
-				if (!DecodeOfferTx(tx, op, nOut, vvch) || !IsOfferOp(op))
-					continue;
-				if(!IsSyscoinTxMine(tx, "offer"))
-					continue;
-			}
-
+			theOfferA = COffer(wtx);
+			if(!IsSyscoinTxMine(wtx, "offer"))
+				continue;
 			// get last active name only
 			if (vNamesI.find(vchName) != vNamesI.end() && (theOfferA.nHeight < vNamesI[vchName] || vNamesI[vchName] < 0))
 				continue;	

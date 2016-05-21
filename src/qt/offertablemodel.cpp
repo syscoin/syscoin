@@ -154,11 +154,11 @@ public:
 						const UniValue& qty_value = find_value(o, "quantity");
 						if (qty_value.type() == UniValue::VSTR)
 							qty_str = qty_value.get_str();
-						if(qty_str == "0" && !showSoldOut)
-							continue;
 						const UniValue& expired_value = find_value(o, "expired");
 						if (expired_value.type() == UniValue::VNUM)
 							expired = expired_value.get_int();
+						if((qty_str == "0" || expired == 1) && !showSoldOut)
+							continue;
 						const UniValue& exclusive_resell_value = find_value(o, "exclusive_resell");
 						if (exclusive_resell_value.type() == UniValue::VSTR)
 							exclusive_resell_str = exclusive_resell_value.get_str();

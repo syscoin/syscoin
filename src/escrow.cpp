@@ -1693,7 +1693,13 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 		strMessage = string("Encrypted for owner of offer");
 	oEscrow.push_back(Pair("pay_message", strMessage));
 	oEscrow.push_back(Pair("rawpay_message", stringFromVch(ca.vchPaymentMessage)));
-
+	int expired_block = ca.nHeight + GetEscrowExpirationDepth();
+	int expired = 0;
+    if(expired_block < chainActive.Tip()->nHeight)
+	{
+		expired = 1;
+	}  
+	oEscrow.push_back(Pair("expired", expired));
 	
     return oEscrow;
 }
@@ -1747,6 +1753,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 	int pending = 0;
     BOOST_FOREACH(PAIRTYPE(const uint256, CWalletTx)& item, pwalletMain->mapWallet)
     {
+		int expired_block;
 		int expired = 0;
 		pending = 0;
         // get txn hash, read txn index
@@ -1765,17 +1772,10 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		if (!pescrowdb->ReadEscrow(vchName, vtxPos) || vtxPos.empty())
 		{
 			pending = 1;
-			escrow = CEscrow(wtx);
 		}
-		else
-		{
-			escrow = vtxPos.back();
-			CTransaction tx;
-			if (!GetSyscoinTransaction(escrow.nHeight, escrow.txHash, tx, Params().GetConsensus()))
-				continue;
-			if (!DecodeEscrowTx(tx, op, nOut, vvch) || !IsEscrowOp(op))
-				continue;
-		}
+		escrow = CEscrow(wtx);
+		if(!IsSyscoinTxMine(wtx, "escrow"))
+			continue;
 		COffer offer;
 		CTransaction offertx;
 		if (!GetTxOfOffer(escrow.vchOffer, offer, offertx))
@@ -1818,10 +1818,11 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 
 		string sTotal = strprintf("%llu SYS", (escrow.nPricePerUnit/COIN)*escrow.nQty);
 		oName.push_back(Pair("total", sTotal));
-		if(pending == 0 && (nHeight + (GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0)))
+		expired_block = nHeight + GetEscrowExpirationDepth();
+        if(expired_block < chainActive.Tip()->nHeight)
 		{
 			expired = 1;
-		}  
+		} 
 	
 		string status = "unknown";
 		if(pending == 0)
@@ -1839,7 +1840,6 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 			status = "pending";
 
 		oName.push_back(Pair("status", status));
-
 		oName.push_back(Pair("expired", expired));
  
 		vNamesI[vchName] = nHeight;

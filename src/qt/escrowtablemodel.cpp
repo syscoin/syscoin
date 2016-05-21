@@ -126,7 +126,7 @@ public:
 			string offertitle_str;
 			string total_str;
 			string buyer_str;
-			int unixTime;
+			int unixTime, expired;
 			QDateTime dateTime;	
 			try {
 				result = tableRPC.execute(strMethod, params);
@@ -142,6 +142,7 @@ public:
 					offertitle_str = "";
 					total_str = "";	
 					buyer_str = "";
+					expired = 0;
 					const UniValue &arr = result.get_array();
 				    for (unsigned int idx = 0; idx < arr.size(); idx++) {
 					    const UniValue& input = arr[idx];
@@ -156,6 +157,7 @@ public:
 						offeraccept_str = "";
 						offer_str = "";
 						total_str = "";
+						expired = 0;
 			
 				
 						const UniValue& name_value = find_value(o, "escrow");
@@ -188,7 +190,10 @@ public:
 						const UniValue& status_value = find_value(o, "status");
 						if (status_value.type() == UniValue::VSTR)
 							status_str = status_value.get_str();
-						if((status_str == "complete" || status_str == "escrow refunded") && !showComplete)
+						const UniValue& expired_value = find_value(o, "expired");
+						if (expired_value.type() == UniValue::VNUM)
+							expired = expired_value.get_int();
+						if((expired == 1 || status_str == "complete" || status_str == "escrow refunded") && !showComplete)
 							continue;
 						unixTime = atoi(time_str.c_str());
 						dateTime.setTime_t(unixTime);
