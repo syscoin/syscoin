@@ -1242,7 +1242,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	string strSafeSearch = "Yes";
 	if(params.size() >= 4)
 	{
-		strSafeSearch = params[4].get_str();
+		strSafeSearch = params[3].get_str();
 	}
 	vchPrivateValue = vchFromString(strPrivateValue);
 	if (vchPublicValue.size() > MAX_VALUE_LENGTH)
@@ -1681,6 +1681,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("address", address.ToString()));
 		bool fAliasMine = IsSyscoinTxMine(tx, "alias")? true:  false;
 		oName.push_back(Pair("ismine", fAliasMine));
+		oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
         oName.push_back(Pair("lastupdate_height", nHeight));
 		expired_block = nHeight + GetAliasExpirationDepth();
         if(expired_block < chainActive.Tip()->nHeight)

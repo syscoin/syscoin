@@ -455,7 +455,7 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	string strSafeSearch = "Yes";
 	if(params.size() >= 5)
 	{
-		strSafeSearch = params[5].get_str();
+		strSafeSearch = params[4].get_str();
 	}
     if (vchData.size() < 1)
 	{
@@ -801,6 +801,7 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 	}
     oCert.push_back(Pair("data", strData));
 	oCert.push_back(Pair("private", ca.bPrivate? "Yes": "No"));
+	oCert.push_back(Pair("safesearch", ca.safetyLevel <= 0 ? "Yes" : "No"));
     oCert.push_back(Pair("ismine", IsSyscoinTxMine(tx, "cert") ? "true" : "false"));
 
     uint64_t nHeight;

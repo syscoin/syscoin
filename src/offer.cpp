@@ -3457,6 +3457,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	}
 	oOffer.push_back(Pair("exclusive_resell", theOffer.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 	oOffer.push_back(Pair("private", theOffer.bPrivate ? "Yes" : "No"));
+	oOffer.push_back(Pair("safesearch", theOffer.safetyLevel <= 0 ? "Yes" : "No"));
 	oOffer.push_back(Pair("btconly", theOffer.bOnlyAcceptBTC ? "Yes" : "No"));
 	oOffer.push_back(Pair("alias_peg", stringFromVch(theOffer.vchAliasPeg)));
 	oOffer.push_back(Pair("description", stringFromVch(theOffer.sDescription)));
