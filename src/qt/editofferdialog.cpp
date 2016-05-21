@@ -374,7 +374,6 @@ void EditOfferDialog::setModel(WalletModel* walletModel, OfferTableModel *model)
 	mapper->addMapping(ui->offerEdit, OfferTableModel::Name);
 	mapper->addMapping(ui->certEdit, OfferTableModel::Cert);
     mapper->addMapping(ui->nameEdit, OfferTableModel::Title);
-	mapper->addMapping(ui->categoryEdit, OfferTableModel::Category);
     mapper->addMapping(ui->priceEdit, OfferTableModel::Price);
 	mapper->addMapping(ui->qtyEdit, OfferTableModel::Qty);	
 	mapper->addMapping(ui->descriptionEdit, OfferTableModel::Description);		
@@ -424,6 +423,10 @@ void EditOfferDialog::loadRow(int row)
 			if ( index != -1 ) 
 			{
 				ui->categoryEdit->setCurrentIndex(index);
+			}
+			else
+			{
+				ui->categoryEdit->addItem(categoryStr, QVariant(categoryStr));
 			}
 		}
 		if(indexAlias.isValid())
