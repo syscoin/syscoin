@@ -420,7 +420,11 @@ void EditOfferDialog::loadRow(int row)
 		if(indexCategory.isValid())
 		{
 			QString categoryStr = indexCategory.data(OfferTableModel::Category).toString();
-			ui->categoryEdit->setCurrentIndex(ui->categoryEdit->findText(categoryStr));
+			int index = ui->categoryEdit->findData(categoryStr Qt:UserRole);
+			if ( index != -1 ) 
+			{
+				ui->categoryEdit->setCurrentIndex(index);
+			}
 		}
 		if(indexAlias.isValid())
 		{
@@ -476,7 +480,10 @@ bool EditOfferDialog::saveCurrentRow()
 		strMethod = string("offernew");
 		params.push_back(ui->aliasPegEdit->text().toStdString());
 		params.push_back(ui->aliasEdit->currentText().toStdString());
-		params.push_back(ui->categoryEdit->currentText().toStdString());
+		if(ui->categoryEdit->currentIndex() > 0)
+			params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toStdString());
+		else
+			params.push_back("");
 		params.push_back(ui->nameEdit->text().toStdString());
 		params.push_back(ui->qtyEdit->text().toStdString());
 		params.push_back(ui->priceEdit->text().toStdString());
