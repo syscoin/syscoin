@@ -22,7 +22,7 @@ bool DecryptMessage(const std::vector<unsigned char> &vchPublicKey, const std::v
 std::string certFromOp(int op);
 int GetCertExpirationDepth();
 CScript RemoveCertScriptPrefix(const CScript& scriptIn);
-extern bool IsSys21Fork();
+extern bool IsSys21Fork(const uint64_t& nHeight);
 class CCert {
 public:
 	std::vector<unsigned char> vchPubKey;
@@ -53,7 +53,7 @@ public:
 		READWRITE(VARINT(nHeight));
 		READWRITE(vchPubKey);
 		READWRITE(bPrivate);
-		if(IsSys21Fork())
+		if(IsSys21Fork(nHeight))
 		{
 			READWRITE(safetyLevel);
 		}		

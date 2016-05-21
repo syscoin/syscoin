@@ -24,8 +24,8 @@ static const unsigned int MAX_ENCRYPTED_VALUE_LENGTH = 1108;
 
 static const unsigned int SAFETY_LEVEL1 = 1;
 static const unsigned int SAFETY_LEVEL2 = 2;
-static const unsigned int SYSCOIN_FORK1 = 500;
-bool IsSys21Fork();
+static const unsigned int SYSCOIN_FORK1 = 50000;
+bool IsSys21Fork(const uint64_t& nHeight);
 class CAliasIndex {
 public:
     uint256 txHash;
@@ -54,7 +54,7 @@ public:
 		READWRITE(vchPublicValue);
 		READWRITE(vchPrivateValue);
 		READWRITE(vchPubKey);
-		if(IsSys21Fork())
+		if(IsSys21Fork(nHeight))
 		{
 			READWRITE(safetyLevel);
 		}

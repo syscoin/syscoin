@@ -87,11 +87,11 @@ bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut
     }
 	return false;
 }
-bool IsSys21Fork()
+bool IsSys21Fork(const uint64_t& nHeight)
 {
 	if(!chainActive.Tip() )
 		return false;
-	if(chainActive.Tip()->nHeight < SYSCOIN_FORK1/* && ChainNameFromCommandLine() == CBaseChainParams::MAIN*/)
+	if(nHeight < SYSCOIN_FORK1 && ChainNameFromCommandLine() != CBaseChainParams::MAIN)
 		return false;
 	return true;
 }
@@ -113,7 +113,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData))
 	{
-		if(alias.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if((alias.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
 		{
 			nHeight = alias.nHeight + GetAliasExpirationDepth();
 			return true;
@@ -121,7 +121,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
-		if(offer.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if((offer.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
 		{
 			nHeight = offer.nHeight + GetOfferExpirationDepth();
 			return true;
@@ -129,7 +129,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
-		if(cert.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if((cert.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
 		{
 			nHeight = cert.nHeight + GetCertExpirationDepth();
 			return true;
@@ -137,7 +137,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
-		if(escrow.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if((escrow.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
 		{
 			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
 			return true;
@@ -145,7 +145,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
-		if(message.nHeight > SYSCOIN_FORK1/* && chainName == CBaseChainParams::MAIN) || chainName != CBaseChainParams::MAIN*/)
+		if((message.nHeight > SYSCOIN_FORK1 && chainName != CBaseChainParams::MAIN) || chainName == CBaseChainParams::MAIN)
 		{
 			nHeight = message.nHeight + GetMessageExpirationDepth();
 			return true;

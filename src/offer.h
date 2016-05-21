@@ -23,7 +23,7 @@ int IndexOfOfferOutput(const CTransaction& tx);
 int GetOfferExpirationDepth();
 std::string offerFromOp(int op);
 CScript RemoveOfferScriptPrefix(const CScript& scriptIn);
-extern bool IsSys21Fork();
+extern bool IsSys21Fork(const uint64_t& nHeight);
 class COfferAccept {
 public:
 	std::vector<unsigned char> vchAcceptRand;
@@ -253,7 +253,7 @@ public:
 			READWRITE(bPrivate);
 			READWRITE(vchAliasPeg);
 			READWRITE(bOnlyAcceptBTC);
-			if(IsSys21Fork())
+			if(IsSys21Fork(nHeight))
 			{
 				READWRITE(safetyLevel);
 				READWRITE(vchGeoLocation);
