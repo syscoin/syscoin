@@ -222,14 +222,14 @@ public:
 		}
         // Find escrow / value in model
         QList<EscrowTableEntry>::iterator lowerGuid = qLowerBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowTableEntryLessThan(EscrowTableModel::Time, Qt::DescendingOrder));
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowTableEntryLessThan());
         QList<EscrowTableEntry>::iterator upperGuid = qUpperBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowTableEntryLessThan(EscrowTableModel::Time, Qt::DescendingOrder));
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowTableEntryLessThan());
 
         QList<EscrowTableEntry>::iterator lower = qLowerBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowEntryLessThan());
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowEntryLessThan(EscrowTableModel::Time, Qt::DescendingOrder));
         QList<EscrowTableEntry>::iterator upper = qUpperBound(
-            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowEntryLessThan());
+            cachedEscrowTable.begin(), cachedEscrowTable.end(), escrow, EscrowEntryLessThan(EscrowTableModel::Time, Qt::DescendingOrder));
         int lowerIndex = (lower - cachedEscrowTable.begin());
         int upperIndex = (upper - cachedEscrowTable.begin());
 
