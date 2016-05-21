@@ -22,6 +22,7 @@
 #include "qcomboboxdelegate.h"
 #include <QSettings>
 #include <QStandardItemModel>
+#include <boost/algorithm/string.hpp>
 using namespace std;
 
 
@@ -94,7 +95,7 @@ OfferListPage::~OfferListPage()
     delete ui;
 }
 
-void EditOfferDialog::addParentItem( QStandardItemModel * model, const QString& text, const QVariant& data )
+void OfferListPage::addParentItem( QStandardItemModel * model, const QString& text, const QVariant& data )
 {
 	QList<QStandardItem*> lst = model->findItems(text,Qt::MatchExactly);
 	for(unsigned int i=0; i<lst.count(); ++i )

@@ -15,7 +15,6 @@
 #include <QSettings>
 #include <QStandardItemModel>
 #include <boost/algorithm/string.hpp>
-#include <QDebug>
 using namespace std;
 
 extern const CRPCTable tableRPC;

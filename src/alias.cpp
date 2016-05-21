@@ -110,7 +110,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	{
 		if(IsSys21Fork(alias.nHeight))
 		{
-			LogPrintf("alias pruning at height %lld\n", alias.nHeight);
 			nHeight = alias.nHeight + GetAliasExpirationDepth();
 			return true;
 		}
@@ -119,7 +118,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	{
 		if(IsSys21Fork(offer.nHeight))
 		{
-			LogPrintf("offer pruning at height %lld \n", offer.nHeight);
 			nHeight = offer.nHeight + GetOfferExpirationDepth();
 			return true;
 		}
@@ -128,7 +126,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	{
 		if(IsSys21Fork(cert.nHeight))
 		{
-			LogPrintf("cert pruning at height %lld \n", cert.nHeight);
 			nHeight = cert.nHeight + GetCertExpirationDepth();
 			return true;
 		}
@@ -137,7 +134,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	{
 		if(IsSys21Fork(escrow.nHeight))
 		{
-			LogPrintf("escrow pruning at height %lld \n", escrow.nHeight);
 			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
 			return true;
 		}
@@ -146,7 +142,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	{
 		if(IsSys21Fork(message.nHeight))
 		{
-			LogPrintf("message pruning at height %lld \n", message.nHeight);
 			nHeight = message.nHeight + GetMessageExpirationDepth();
 			return true;
 		}
