@@ -425,9 +425,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
 	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
-	if(ui->categoryEdit->currentIndex() > 0)
-		params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
-
+	int index = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
+	if(index != -1)
+		params.push_back(ui->categoryEdit->itemData(index, Qt::UserRole).toString().toStdString());
     try {
         result = tableRPC.execute(strMethod, params);
     }
