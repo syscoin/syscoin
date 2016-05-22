@@ -22,7 +22,6 @@
 #include "qcomboboxdelegate.h"
 #include <QSettings>
 #include <QStandardItemModel>
-#include <QDebug>
 #include <boost/algorithm/string.hpp>
 using namespace std;
 
@@ -427,13 +426,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
 	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
-	index = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
-	qDebug() << "index " << QString::number(index);
-	if(index != -1)
-	{
-		qDebug() << "str " << ui->categoryEdit->itemData(index, Qt::UserRole).toString();
-		params.push_back(ui->categoryEdit->itemData(index, Qt::UserRole).toString().toStdString());
-	}
+	if(ui->categoryEdit->currentIndex() >= 0)
+		params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
     try {
         result = tableRPC.execute(strMethod, params);
     }

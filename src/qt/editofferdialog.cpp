@@ -14,7 +14,6 @@
 #include "qcomboboxdelegate.h"
 #include <QSettings>
 #include <QStandardItemModel>
-#include <QDebug>
 #include <boost/algorithm/string.hpp>
 using namespace std;
 
@@ -454,7 +453,6 @@ bool EditOfferDialog::saveCurrentRow()
     }
 	QString defaultPegAlias;
 	QSettings settings;
-	int index;
 	UniValue params(UniValue::VARR);
 	string strMethod;
     switch(mode)
@@ -480,13 +478,8 @@ bool EditOfferDialog::saveCurrentRow()
 		strMethod = string("offernew");
 		params.push_back(ui->aliasPegEdit->text().toStdString());
 		params.push_back(ui->aliasEdit->currentText().toStdString());
-		index = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
-		qDebug() << "index1 " << QString::number(index);
-		if(index != -1)
-		{
-			qDebug() << "str " << ui->categoryEdit->itemData(index, Qt::UserRole).toString();
-			params.push_back(ui->categoryEdit->itemData(index, Qt::UserRole).toString().toStdString());
-		}
+		if(ui->categoryEdit->currentIndex() >= 0)
+			params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
 		else
 			params.push_back(ui->categoryEdit->currentText().toStdString());
 		params.push_back(ui->nameEdit->text().toStdString());
@@ -543,7 +536,10 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back(ui->aliasPegEdit->text().toStdString());
 			params.push_back(ui->aliasEdit->currentText().toStdString());
 			params.push_back(ui->offerEdit->text().toStdString());
-			params.push_back(ui->categoryEdit->currentText().toStdString());
+			if(ui->categoryEdit->currentIndex() >= 0)
+				params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
+			else
+				params.push_back(ui->categoryEdit->currentText().toStdString());
 			params.push_back(ui->nameEdit->text().toStdString());
 			params.push_back(ui->qtyEdit->text().toStdString());
 			params.push_back(ui->priceEdit->text().toStdString());
