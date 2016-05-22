@@ -479,7 +479,7 @@ bool EditOfferDialog::saveCurrentRow()
 		strMethod = string("offernew");
 		params.push_back(ui->aliasPegEdit->text().toStdString());
 		params.push_back(ui->aliasEdit->currentText().toStdString());
-		fsindex = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
+		index = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
 		if(index != -1)
 			params.push_back(ui->categoryEdit->itemData(index, Qt::UserRole).toString().toStdString());
 		else
