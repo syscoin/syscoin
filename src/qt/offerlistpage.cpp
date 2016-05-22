@@ -422,10 +422,11 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	string geolocation_str;
 
 	int expired = 0;
+	int index;
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
 	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
-	int index = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
+	index = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
 	if(index != -1)
 		params.push_back(ui->categoryEdit->itemData(index, Qt::UserRole).toString().toStdString());
     try {

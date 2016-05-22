@@ -453,6 +453,7 @@ bool EditOfferDialog::saveCurrentRow()
     }
 	QString defaultPegAlias;
 	QSettings settings;
+	int index;
 	UniValue params(UniValue::VARR);
 	string strMethod;
     switch(mode)
@@ -478,7 +479,7 @@ bool EditOfferDialog::saveCurrentRow()
 		strMethod = string("offernew");
 		params.push_back(ui->aliasPegEdit->text().toStdString());
 		params.push_back(ui->aliasEdit->currentText().toStdString());
-		int index = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
+		fsindex = ui->categoryEdit->findData(QVariant(ui->categoryEdit->currentText()));
 		if(index != -1)
 			params.push_back(ui->categoryEdit->itemData(index, Qt::UserRole).toString().toStdString());
 		else
