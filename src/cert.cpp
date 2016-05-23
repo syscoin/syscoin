@@ -529,14 +529,15 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 }
 
 UniValue certupdate(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() != 4)
+    if (fHelp || params.size() > 5)
         throw runtime_error(
-		"certupdate <guid> <title> <data> <private>\n"
+		"certupdate <guid> <title> <data> <private>  [safe search]\n"
                         "Perform an update on an certificate you control.\n"
                         "<guid> certificate guidkey.\n"
                         "<title> certificate title, 255 bytes max.\n"
                         "<data> certificate data, 1KB max.\n"
 						"<private> set to 1 if you only want to make the cert data private, only the owner of the cert can view it.\n"
+						"<safe search> set to No if this cert should only show in the search when safe search is not selected.\n"					
                         + HelpRequiringPassphrase());
     // gather & validate inputs
     vector<unsigned char> vchCert = vchFromValue(params[0]);
@@ -547,7 +548,11 @@ UniValue certupdate(const UniValue& params, bool fHelp) {
         throw runtime_error("certificate title cannot be empty!");
     if(vchTitle.size() > MAX_NAME_LENGTH)
         throw runtime_error("certificate title cannot exceed 255 bytes!");
-
+	string strSafeSearch = "";
+	if(params.size() >= 5)
+	{
+		strSafeSearch = params[4].get_str();
+	}
     if (vchData.size() < 1)
         vchData = vchFromString(" ");
     // this is a syscoind txn
@@ -598,7 +603,12 @@ UniValue certupdate(const UniValue& params, bool fHelp) {
 		theCert.vchData = vchData;
 	theCert.nHeight = chainActive.Tip()->nHeight;
 	theCert.bPrivate = bPrivate;
-
+	if(strSafeSearch.size() > 0)
+	{
+		int iSafety = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+		if(copyCert.safetyLevel != iSafety)
+			theCert.safetyLevel = iSafety;
+	}
 
 	vector<CRecipient> vecSend;
 	CRecipient recipient;
