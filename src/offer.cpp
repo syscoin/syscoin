@@ -2093,9 +2093,9 @@ UniValue offerwhitelist(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerupdate(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() < 5 || params.size() > 12)
+	if (fHelp || params.size() < 5 || params.size() > 11)
 		throw runtime_error(
-		"offerupdate <aliaspeg> <alias> <guid> <category> <title> <quantity> <price> [description] [private=0] [cert. guid] [safe search] [exclusive resell=1]\n"
+		"offerupdate <aliaspeg> <alias> <guid> <category> <title> <quantity> <price> [description] [private=0] [cert. guid] [exclusive resell=1]\n"
 						"Perform an update on an offer you control.\n"
 						+ HelpRequiringPassphrase());
 	// gather & validate inputs
@@ -2116,12 +2116,8 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	if (params.size() >= 8) vchDesc = vchFromValue(params[7]);
 	if (params.size() >= 8) bPrivate = atoi(params[8].get_str().c_str()) == 1? true: false;
 	if (params.size() >= 10) vchCert = vchFromValue(params[9]);
-	if(params.size() >= 12) bExclusiveResell = atoi(params[11].get_str().c_str()) == 1? true: false;
-	string strSafeSearch = "";
-	if(params.size() >= 11)
-	{
-		strSafeSearch = params[10].get_str();
-	}
+	if(params.size() >= 11) bExclusiveResell = atoi(params[10].get_str().c_str()) == 1? true: false;
+
 	try {
 		nQty = atoi(params[5].get_str());
 		price = atof(params[6].get_str().c_str());
@@ -2264,12 +2260,6 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		theOffer.sTitle = vchTitle;
 	if(offerCopy.sDescription != vchDesc)
 		theOffer.sDescription = vchDesc;
-	if(strSafeSearch.size() > 0)
-	{
-		int iSafety = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
-		if(offerCopy.safetyLevel != iSafety)
-			theOffer.safetyLevel = iSafety;
-	}
 	// update pubkey to new cert if we change the cert we are selling for this offer or remove it
 	if(wtxCertIn != NULL)
 	{

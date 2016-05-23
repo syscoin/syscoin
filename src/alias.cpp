@@ -1317,15 +1317,14 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	return res;
 }
 UniValue aliasupdate(const UniValue& params, bool fHelp) {
-	if (fHelp || 2 > params.size() || 5 < params.size())
+	if (fHelp || 2 > params.size() || 4 < params.size())
 		throw runtime_error(
-		"aliasupdate <aliasname> <public value> [private value] [<toalias_pubkey>] [safe search]\n"
+		"aliasupdate <aliasname> <public value> [private value] [<toalias_pubkey>]\n"
 						"Update and possibly transfer an alias.\n"
 						"<aliasname> alias name.\n"
 						"<public value> alias public profile data, 1023 chars max.\n"
 						"<private value> alias private profile data, 1023 chars max. Will be private and readable by owner only.\n"
 						"<toalias_pubkey> receiver syscoin alias pub key, if transferring alias.\n"
-						"<safe search> set to No if this alias should only show in the search when safe search is not selected.\n"										
 						+ HelpRequiringPassphrase());
 
 	vector<unsigned char> vchName = vchFromString(params[0].get_str());
@@ -1357,11 +1356,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 		if (paliasdb->ExistsAddress(vchFromString(myAddress.ToString())))
 			throw runtime_error("You must transfer to a public key that's not associated with any other alias");
 	}
-	string strSafeSearch = "";
-	if(params.size() >= 5)
-	{
-		strSafeSearch = params[4].get_str();
-	}
+
 
 	EnsureWalletIsUnlocked();
 	CTransaction tx;
@@ -1404,12 +1399,6 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 		theAlias.vchPublicValue = vchPublicValue;
 	if(copyAlias.vchPrivateValue != vchPrivateValue)
 		theAlias.vchPrivateValue = vchPrivateValue;
-	if(strSafeSearch.size() > 0)
-	{
-		int iSafety = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
-		if(copyAlias.safetyLevel != iSafety)
-			theAlias.safetyLevel = iSafety;
-	}
 
 	theAlias.vchPubKey = vchPubKeyByte;
 	CPubKey currentKey(vchPubKeyByte);

@@ -164,7 +164,6 @@ void EditWhitelistOfferDialog::on_exclusiveButton_clicked()
 		// keep it the same as what's in the database
 		params.push_back(offerPrivate.toStdString());
 		params.push_back("");
-		params.push_back("");
 		if(tmpExclusiveWhitelist == QString("ON"))
 			params.push_back("0");
 		else 
