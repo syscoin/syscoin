@@ -78,6 +78,7 @@ MyOfferListPage::MyOfferListPage(const PlatformStyle *platformStyle, QWidget *pa
 	connect(ui->tableView, SIGNAL(doubleClicked(QModelIndex)), this, SLOT(on_editButton_clicked()));
     connect(ui->tableView, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
 	connect(ui->soldOutCheck,SIGNAL(clicked(bool)),SLOT(onToggleShowSoldOut(bool)));
+	connect(ui->showDigitalOffers,SIGNAL(clicked(bool)),SLOT(onToggleShowDigitalOffers(bool)));
 
     // Pass through accept action from button box
     connect(ui->buttonBox, SIGNAL(accepted()), this, SLOT(accept()));
@@ -92,7 +93,13 @@ void MyOfferListPage::onToggleShowSoldOut(bool toggled)
 {
 	if(!model)
 		return;
-	model->showSoldOut(toggled);
+	model->filterOffers(ui->soldOutCheck->isChecked(), ui->showDigitalOffers->isChecked());
+}
+void MyOfferListPage::onToggleShowDigitalOffers(bool toggled)
+{
+	if(!model)
+		return;
+	model->filterOffers(ui->soldOutCheck->isChecked(), ui->showDigitalOffers->isChecked());
 }
 void MyOfferListPage::showEvent ( QShowEvent * event )
 {

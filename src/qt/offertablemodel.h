@@ -90,7 +90,7 @@ public:
     int lookupOffer(const QString &offer) const;
 	void clear();
 	void refreshOfferTable();
-	void showSoldOut(bool show);
+	void filterOffers(bool showSold, bool showDigital);
     EditStatus getEditStatus() const { return editStatus; }
 	EditStatus editStatus;
 private:

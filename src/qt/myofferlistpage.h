@@ -53,6 +53,7 @@ private:
 	const PlatformStyle *platformStyle;
 private Q_SLOTS:
 	void onToggleShowSoldOut(bool toggled);
+	void onToggleShowDigitalOffers(bool toggled);
 	void on_whitelistButton_clicked();
 	void onEditWhitelistAction();
     void on_newOffer_clicked();

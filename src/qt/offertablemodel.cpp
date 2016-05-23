@@ -69,7 +69,7 @@ public:
     OfferTablePriv(CWallet *wallet, OfferTableModel *parent):
         wallet(wallet), parent(parent) {}
 
-    void refreshOfferTable(OfferModelType type, bool showSoldOut=false)
+    void refreshOfferTable(OfferModelType type, bool showSoldOut=false, bool showDigitalOffers=false)
     {
         cachedOfferTable.clear();
         {
@@ -136,6 +136,8 @@ public:
 						const UniValue& cert_value = find_value(o, "cert");
 						if (cert_value.type() == UniValue::VSTR)
 							cert_str = cert_value.get_str();
+						if(showDigitalOffers && cert_str.size() <= 0)
+							continue;
 						const UniValue& value_value = find_value(o, "title");
 						if (value_value.type() == UniValue::VSTR)
 							value_str = value_value.get_str();
@@ -311,12 +313,12 @@ void OfferTableModel::refreshOfferTable()
 	clear();
 	priv->refreshOfferTable(modelType);
 }
-void OfferTableModel::showSoldOut(bool show)
+void OfferTableModel::filterOffers(bool showSold, bool showDigital)
 {
 	if(modelType != MyOffer)
 		return;
 	clear();
-	priv->refreshOfferTable(modelType, show);
+	priv->refreshOfferTable(modelType, showSold, showDigital);
 }
 int OfferTableModel::rowCount(const QModelIndex &parent) const
 {

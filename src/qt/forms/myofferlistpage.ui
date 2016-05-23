@@ -25,11 +25,22 @@
     </widget>
    </item>
    <item>
-    <widget class="QCheckBox" name="soldOutCheck">
-     <property name="text">
-      <string>Show Sold Out/ Expired Offers</string>
-     </property>
-    </widget>
+    <layout class="QHBoxLayout" name="horizontalLayout_3">
+     <item>
+      <widget class="QCheckBox" name="soldOutCheck">
+       <property name="text">
+        <string>Show Sold Out/ Expired Offers</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QCheckBox" name="showDigitalOffers">
+       <property name="text">
+        <string>Show Digital Offers Only</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
    </item>
    <item>
     <widget class="QTableView" name="tableView">
