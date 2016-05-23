@@ -965,10 +965,17 @@ const vector<unsigned char> CAliasIndex::Serialize() {
     return vchData;
 
 }
-bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName,
+bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string& strRegexp,
 		unsigned int nMax,
 		vector<pair<vector<unsigned char>, CAliasIndex> >& nameScan) {
 	int nMaxAge  = GetAliasExpirationDepth();
+
+	// regexp
+	using namespace boost::xpressive;
+	smatch nameparts;
+	string strRegexpLower = strRegexp;
+	boost::algorithm::to_lower(strRegexpLower);
+	sregex cregex = sregex::compile(strRegexpLower);
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("namei"), vchName));
     while (pcursor->Valid()) {
@@ -989,7 +996,11 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName,
 				{
 					pcursor->Next();
 					continue;
-				}     
+				} 
+				string name = stringFromVch(vchName);
+				boost::algorithm::to_lower(name);
+				if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != name)
+					continue;
                 nameScan.push_back(make_pair(vchName, txPos));
             }
             if (nameScan.size() >= nMax)
@@ -1809,24 +1820,12 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 
 	
 	vector<pair<vector<unsigned char>, CAliasIndex> > nameScan;
-	if (!paliasdb->ScanNames(vchName, 25, nameScan))
+	if (!paliasdb->ScanNames(vchName, strRegexp, 25, nameScan))
 		throw runtime_error("scan failed");
 
-	// regexp
-	using namespace boost::xpressive;
-	smatch nameparts;
-	string strRegexpLower = strRegexp;
-	boost::algorithm::to_lower(strRegexpLower);
-	sregex cregex = sregex::compile(strRegexpLower);
 	pair<vector<unsigned char>, CAliasIndex> pairScan;
 	BOOST_FOREACH(pairScan, nameScan) {
 		const CAliasIndex &alias = pairScan.second;
-		CPubKey PubKey(alias.vchPubKey);
-		CSyscoinAddress address(PubKey.GetID());
-		string name = stringFromVch(pairScan.first);
-		boost::algorithm::to_lower(name);
-		if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != address.ToString())
-			continue;
 
 		CAliasIndex txName = pairScan.second;
 		if(txName.safetyLevel >= SAFETY_LEVEL1)
