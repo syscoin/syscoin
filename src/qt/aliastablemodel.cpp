@@ -82,6 +82,7 @@ public:
 			string safesearch_str;
 			int expires_in = 0;
 			int expires_on = 0;
+			int ratingcount = 0;
 			
 			int lastupdate_height = 0;
 			try {
@@ -94,6 +95,7 @@ public:
 					expires_on_str = "";
 					safesearch_str = "";
 					rating = 0;
+					ratingcount = 0;
 					expired = 0;
 					expires_in = 0;
 					expires_on = 0;
@@ -112,6 +114,7 @@ public:
 						safesearch_str = "";
 						expired = 0;
 						rating = 0;
+						ratingcount = 0;
 						expires_in = 0;
 						expires_on = 0;
 						lastupdate_height = 0;

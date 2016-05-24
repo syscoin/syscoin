@@ -258,6 +258,7 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 		string expired_str;
 		int expired = 0;
 		int rating = 0;
+		int ratingcount = 0;
 		int expires_in = 0;
 		int expires_on = 0;  
         params.push_back(ui->lineEditAliasSearch->text().toStdString());
@@ -306,6 +307,7 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 				expires_on_str = "";
 				expired = 0;
 				rating = 0;
+				ratingcount = 0;
 				expires_in = 0;
 				expires_on = 0;
 
