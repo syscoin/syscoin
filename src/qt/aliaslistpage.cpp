@@ -330,6 +330,9 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 				const UniValue& rating_value = find_value(o, "rating");
 				if (rating_value.type() == UniValue::VNUM)
 					rating = rating_value.get_int();
+				const UniValue& ratingcount_value = find_value(o, "ratingcount");
+				if (ratingcount_value.type() == UniValue::VNUM)
+					ratingcount = ratingcount_value.get_int();
 				if(expired == 1)
 				{
 					expired_str = "Expired";
@@ -349,14 +352,14 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str),
 						settings.value("safesearch", "").toString(),
-						rating);
+						rating, ratingcount);
 					this->model->updateEntry(QString::fromStdString(name_str),
 						QString::fromStdString(value_str),
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str), 
 						settings.value("safesearch", "").toString(), 
-						rating, AllAlias, CT_NEW);	
+						rating, ratingcount, AllAlias, CT_NEW);	
 			  }
 			  pageMap[currentPage] = make_pair(firstAlias, lastAlias);  
 			  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));
