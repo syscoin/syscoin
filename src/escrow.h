@@ -24,7 +24,7 @@ int GetEscrowExpirationDepth();
 
 std::string escrowFromOp(int op);
 CScript RemoveEscrowScriptPrefix(const CScript& scriptIn);
-
+extern bool IsSys21Fork(const uint64_t& nHeight);
 class CEscrow {
 public:
 	std::vector<unsigned char> vchSellerKey;
@@ -36,6 +36,12 @@ public:
 	std::vector<unsigned char> vchOfferAcceptLink;
 	std::vector<unsigned char> vchBuyerKey;
 	std::vector<unsigned char> vchWhitelistAlias;
+	std::vector<unsigned char> vchBuyerFeedback;
+	unsigned int nBuyerRating;
+	std::vector<unsigned char> vchSellerFeedback;
+	unsigned int nSellerRating;
+	std::vector<unsigned char> vchArbiterFeedback;
+	unsigned int nArbiterRating;
 	
 	
     uint256 txHash;
@@ -52,6 +58,9 @@ public:
 		vchPaymentMessage.clear();
 		vchWhitelistAlias.clear();
 		vchOfferAcceptLink.clear();
+		vchBuyerFeedback.clear();
+		vchSellerFeedback.clear();
+		vchArbiterFeedback.clear();
 	}
     CEscrow() {
         SetNull();
@@ -78,6 +87,15 @@ public:
 		READWRITE(VARINT(nQty));
 		READWRITE(VARINT(nPricePerUnit));
         READWRITE(vchBuyerKey);	
+		if(IsSys21Fork(nHeight))
+		{
+			READWRITE(vchBuyerFeedback);	
+			READWRITE(vchSellerFeedback);	
+			READWRITE(vchArbiterFeedback);	
+			READWRITE(nBuyerRating);	
+			READWRITE(nSellerRating);	
+			READWRITE(nArbiterRating);	
+		}
 	}
 
     friend bool operator==(const CEscrow &a, const CEscrow &b) {
@@ -96,6 +114,12 @@ public:
 		&& a.nHeight == b.nHeight
 		&& a.nQty == b.nQty
 		&& a.nPricePerUnit == b.nPricePerUnit
+		&& a.vchBuyerFeedback == b.vchBuyerFeedback
+		&& a.vchSellerFeedback == b.vchSellerFeedback
+		&& a.vchArbiterFeedback == b.vchArbiterFeedback
+		&& a.nBuyerRating == b.nBuyerRating
+		&& a.nSellerRating == b.nSellerRating
+		&& a.nArbiterRating == b.nArbiterRating
         );
     }
 
@@ -113,7 +137,12 @@ public:
 		escrowInputTxHash = b.escrowInputTxHash;
 		nHeight = b.nHeight;
 		nQty = b.nQty;
-		nPricePerUnit = b.nPricePerUnit;
+		vchBuyerFeedback = b.vchBuyerFeedback;
+		vchSellerFeedback = b.vchSellerFeedback;
+		vchArbiterFeedback = b.vchArbiterFeedback;
+		nBuyerRating = b.nBuyerRating;
+		nSellerRating = b.nSellerRating;
+		nArbiterRating = b.nArbiterRating;
         return *this;
     }
 
@@ -121,8 +150,8 @@ public:
         return !(a == b);
     }
 
-    void SetNull() { nHeight = 0; txHash.SetNull(); escrowInputTxHash.SetNull(); nQty = 0; nPricePerUnit = 0; vchBuyerKey.clear(); vchArbiterKey.clear(); vchSellerKey.clear(); vchRedeemScript.clear(); vchOffer.clear(); vchWhitelistAlias.clear(); rawTx.clear(); vchOfferAcceptLink.clear(); vchPaymentMessage.clear();}
-    bool IsNull() const { return (txHash.IsNull() && escrowInputTxHash.IsNull() && nHeight == 0 && nQty == 0 && nPricePerUnit == 0 && vchBuyerKey.empty() && vchArbiterKey.empty() && vchSellerKey.empty()); }
+    void SetNull() { nBuyerRating = 0; nSellerRating = 0; nArbiterRating = 0; nHeight = 0; txHash.SetNull(); escrowInputTxHash.SetNull(); nQty = 0; nPricePerUnit = 0; vchBuyerKey.clear(); vchArbiterKey.clear(); vchSellerKey.clear(); vchRedeemScript.clear(); vchOffer.clear(); vchWhitelistAlias.clear(); rawTx.clear(); vchOfferAcceptLink.clear(); vchPaymentMessage.clear(); vchBuyerFeedback.clear(); vchSellerFeedback.clear(); vchArbiterFeedback.clear();}
+    bool IsNull() const { return (txHash.IsNull() && escrowInputTxHash.IsNull() && nBuyerFeedback == 0 && nSellerFeedback == 0 && nArbiterFeedback == 0 && vchBuyerFeedback.empty() && vchSellerFeedback.empty() && vchArbiterFeedback.empty() && nHeight == 0 && nQty == 0 && nPricePerUnit == 0 && vchBuyerKey.empty() && vchArbiterKey.empty() && vchSellerKey.empty()); }
     bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();

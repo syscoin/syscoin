@@ -355,6 +355,18 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 	{
 		return error("escrow redeem script too long");
 	}
+	if(theEscrow.vchBuyerFeedback.size() > MAX_VALUE_SIZE)
+	{
+		return error("buyer feedback too long");
+	}
+	if(theEscrow.vchSellerFeedback.size() > MAX_VALUE_SIZE)
+	{
+		return error("seller feedback too long");
+	}
+	if(theEscrow.vchArbiterFeedback.size() > MAX_VALUE_SIZE)
+	{
+		return error("arbiter feedback too long");
+	}
 	if(theEscrow.vchOffer.size() > MAX_ID_LENGTH)
 	{
 		return error("escrow offer guid too long");
