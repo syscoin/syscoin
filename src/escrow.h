@@ -27,7 +27,7 @@ CScript RemoveEscrowScriptPrefix(const CScript& scriptIn);
 extern bool IsSys21Fork(const uint64_t& nHeight);
 class CEscrowFeedback {
 public:
-    enum UserType {
+    enum {
         BUYER,
 		SELLER,
 		ARBITER

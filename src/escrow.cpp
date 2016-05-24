@@ -1054,20 +1054,20 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	// arbiter
 	if(arbiterSigning)
 	{
-		CEscrowFeedback sellerFeedback(CEscrowFeedback::Arbiter);
+		CEscrowFeedback sellerFeedback(ARBITER);
 		sellerFeedback.vchFeedback = vchFeedbackSeller;
 		sellerFeedback.nRating = nRatingSeller;
-		CEscrowFeedback buyerFeedback(CEscrowFeedback::Arbiter);
+		CEscrowFeedback buyerFeedback(ARBITER);
 		buyerFeedback.vchFeedback = vchFeedbackSecondary;
 		buyerFeedback.nRating = nRatingSecondary;
 	}
 	// buyer
 	else
 	{
-		CEscrowFeedback sellerFeedback(CEscrowFeedback::Buyer);
+		CEscrowFeedback sellerFeedback(BUYER);
 		sellerFeedback.vchFeedback = vchFeedbackSeller;
 		sellerFeedback.nRating = nRatingSeller;
-		CEscrowFeedback arbiterFeedback(CEscrowFeedback::Buyer);
+		CEscrowFeedback arbiterFeedback(BUYER);
 		buyerFeedback.vchFeedback = vchFeedbackSecondary;
 		buyerFeedback.nRating = nRatingSecondary;
 	}
@@ -1616,10 +1616,10 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	// arbiter
 	if(arbiterSigning)
 	{
-		CEscrowFeedback buyerFeedback(CEscrowFeedback::Arbiter);
+		CEscrowFeedback buyerFeedback(ARBITER);
 		buyerFeedback.vchFeedback = vchFeedbackBuyer;
 		buyerFeedback.nRating = nRatingBuyer;
-		CEscrowFeedback sellerFeedback(CEscrowFeedback::Arbiter);
+		CEscrowFeedback sellerFeedback(ARBITER);
 		sellerFeedback.vchFeedback = vchFeedbackSecondary;
 		sellerFeedback.nRating = nRatingSecondary;
 		escrow.sellerFeedback = sellerFeedback;
@@ -1628,10 +1628,10 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	// seller
 	else
 	{
-		CEscrowFeedback buyerFeedback(CEscrowFeedback::Seller);
+		CEscrowFeedback buyerFeedback(SELLER);
 		buyerFeedback.vchFeedback = vchFeedbackBuyer;
 		buyerFeedback.nRating = nRatingBuyer;
-		CEscrowFeedback arbiterFeedback(CEscrowFeedback::Seller);
+		CEscrowFeedback arbiterFeedback(SELLER);
 		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
@@ -1850,7 +1850,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 UniValue escrowfeedback(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 5)
         throw runtime_error(
-		"escrowfeedback <escrow guid> [feedbackprimary] [ratingprimary] [feedbacksecondary] [ratingsecondary]\n"
+		"escrowfeedback <escrow guid> [feedbackprimary] [ratingprimary] [feedbacksecondary] [ratingsecondary]\n" +
                         "Send feedback for primary and secondary users in escrow, depending on who you are. \n" +
 						"If you are the buyer, feedbackprimary is for seller and feedback secondary is for arbiter.\n" +
 						"If you are the seller, feedbackprimary is for buyer and feedback secondary is for arbiter.\n" +
@@ -1969,10 +1969,10 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	// buyer
 	if(foundBuyerKey)
 	{
-		CEscrowFeedback sellerFeedback(CEscrowFeedback::Buyer);
+		CEscrowFeedback sellerFeedback(BUYER);
 		sellerFeedback.vchFeedback = vchFeedbackPrimary;
 		sellerFeedback.nRating = nRatingPrimary;
-		CEscrowFeedback arbiterFeedback(CEscrowFeedback::Buyer);
+		CEscrowFeedback arbiterFeedback(BUYER);
 		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.arbiterFeedback = arbiterFeedback;
@@ -1981,10 +1981,10 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	// seller
 	else if(foundSellerKey)
 	{
-		CEscrowFeedback buyerFeedback(CEscrowFeedback::Seller);
+		CEscrowFeedback buyerFeedback(SELLER);
 		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
-		CEscrowFeedback arbiterFeedback(ECscrowFeedback::Seller);
+		CEscrowFeedback arbiterFeedback(SELLER);
 		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
@@ -1993,10 +1993,10 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	// arbiter
 	else if(foundArbiterKey)
 	{
-		CEscrowFeedback buyerFeedback(CEscrowFeedback::Arbiter);
+		CEscrowFeedback buyerFeedback(ARBITER);
 		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
-		CEscrowFeedback sellerFeedback(CEscrowFeedback::Arbiter);
+		CEscrowFeedback sellerFeedback(ARBITER);
 		sellerFeedback.vchFeedback = vchFeedbackSecondary;
 		sellerFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
