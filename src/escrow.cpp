@@ -1889,6 +1889,9 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 			throw runtime_error("invalid secondary rating value");
 		}
 	}
+    // this is a syscoin transaction
+    CWalletTx wtx;
+
 	EnsureWalletIsUnlocked();
 
     // look for a transaction with this key
@@ -1897,9 +1900,14 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
     if (!GetTxOfEscrow( vchEscrow, 
 		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
-	vector<CEscrow> vtxPos;
-	if (!pescrowdb->ReadEscrow(vchEscrow, vtxPos) || vtxPos.empty())
-		  throw runtime_error("failed to read from escrow DB");
+    vector<vector<unsigned char> > vvch;
+    int op, nOut;
+    if (!DecodeEscrowTx(tx, op, nOut, vvch) 
+    	|| !IsEscrowOp(op))
+        throw runtime_error("could not decode escrow tx");
+	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
+	if (wtxIn == NULL)
+		throw runtime_error("this escrow is not in your wallet");
 
 	CPubKey arbiterKey(escrow.vchArbiterKey);
 	CSyscoinAddress arbiterAddress(arbiterKey.GetID());
@@ -2030,7 +2038,6 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
 	UniValue ret(UniValue::VARR);
 	ret.push_back(wtx.GetHash().GetHex());
-	ret.push_back(returnRes.get_str());
 	return ret;
 }
 UniValue escrowinfo(const UniValue& params, bool fHelp) {
