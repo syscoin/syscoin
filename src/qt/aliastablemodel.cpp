@@ -31,9 +31,10 @@ struct AliasTableEntry
 	QString expired;
 	QString safesearch;
 	int rating;
+	int ratingcount;
     AliasTableEntry() {}
-    AliasTableEntry(Type type, const QString &alias, const QString &value,  const QString &expires_on,const QString &expires_in, const QString &expired,  const QString &safesearch, int rating):
-        type(type), alias(alias), value(value), expires_on(expires_on), expires_in(expires_in), expired(expired), safesearch(safesearch), rating(rating) {}
+    AliasTableEntry(Type type, const QString &alias, const QString &value,  const QString &expires_on,const QString &expires_in, const QString &expired,  const QString &safesearch, int rating, int ratingcount):
+        type(type), alias(alias), value(value), expires_on(expires_on), expires_in(expires_in), expired(expired), safesearch(safesearch), rating(rating), ratingcount(ratingcount) {}
 };
 
 struct AliasTableEntryLessThan
@@ -133,6 +134,9 @@ public:
 						const UniValue& rating_value = find_value(o, "rating");
 						if (rating_value.type() == UniValue::VNUM)
 							rating = rating_value.get_int();
+						const UniValue& ratingcount_value = find_value(o, "ratingcount");
+						if (ratingcount_value.type() == UniValue::VNUM)
+							ratingcount = ratingcount_value.get_int();
 						const UniValue& safesearch_value = find_value(o, "safesearch");
 						if (safesearch_value.type() == UniValue::VSTR)
 							safesearch_str = safesearch_value.get_str();
@@ -156,7 +160,7 @@ public:
 						expires_in_str = strprintf("%d Blocks", expires_in);
 						expires_on_str = strprintf("Block %d", expires_on);
 	
-						updateEntry(QString::fromStdString(name_str), QString::fromStdString(value_str), QString::fromStdString(expires_on_str), QString::fromStdString(expires_in_str), QString::fromStdString(expired_str), QString::fromStdString(safesearch_str),rating,type, CT_NEW); 
+						updateEntry(QString::fromStdString(name_str), QString::fromStdString(value_str), QString::fromStdString(expires_on_str), QString::fromStdString(expires_in_str), QString::fromStdString(expired_str), QString::fromStdString(safesearch_str),rating,ratingcount, type, CT_NEW); 
 					}
 				}
  			}
@@ -172,7 +176,7 @@ public:
 
     }
 
-    void updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating, AliasModelType type, int status)
+    void updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating, int ratingcount, AliasModelType type, int status)
     {
 		if(!parent || parent->modelType != type)
 		{
@@ -199,7 +203,7 @@ public:
             
             }
             parent->beginInsertRows(QModelIndex(), lowerIndex, lowerIndex);
-            cachedAliasTable.insert(lowerIndex, AliasTableEntry(newEntryType, alias, value, expires_on, expires_in, expired, safesearch, rating));
+            cachedAliasTable.insert(lowerIndex, AliasTableEntry(newEntryType, alias, value, expires_on, expires_in, expired, safesearch, rating, ratingcount));
             parent->endInsertRows();
             break;
         case CT_UPDATED:
@@ -214,6 +218,7 @@ public:
 			lower->expired = expired;
 			lower->safesearch = safesearch;
 			lower->rating = rating;
+			lower->ratingcount = ratingcount;
             parent->emitDataChanged(lowerIndex);
             break;
         case CT_DELETED:
@@ -250,7 +255,7 @@ AliasTableModel::AliasTableModel(CWallet *wallet, WalletModel *parent,  AliasMod
     QAbstractTableModel(parent),walletModel(parent),wallet(wallet),priv(0), modelType(type)
 {
 
-	columns << tr("Alias") << tr("Value") << tr("Expires On") << tr("Expires In") << tr("Alias Status") << tr("Rating");		 
+	columns << tr("Alias") << tr("Value") << tr("Expires On") << tr("Expires In") << tr("Alias Status") << tr("Rating") << tr("Rating Count");		 
     priv = new AliasTablePriv(wallet, this);
 	refreshAliasTable();
 }
@@ -303,6 +308,8 @@ QVariant AliasTableModel::data(const QModelIndex &index, int role) const
             return rec->safesearch;
         case Rating:
             return rec->rating;
+        case RatingCount:
+            return rec->ratingcount;
         }
     }
     else if (role == TypeRole)
@@ -323,10 +330,6 @@ QVariant AliasTableModel::data(const QModelIndex &index, int role) const
     else if (role == SafeSearchRole)
     {
          return rec->safesearch;
-    }
-    else if (role == RatingRole)
-    {
-         return rec->rating;
     }
     return QVariant();
 }
@@ -350,14 +353,13 @@ bool AliasTableModel::setData(const QModelIndex &index, const QVariant &value, i
                 editStatus = NO_CHANGES;
                 return false;
             }
-                
-        case ExpiresOn:
+         case RatingCount:
             // Do nothing, if old value == new value
-            if(rec->expires_on == value.toString())
+            if(rec->ratingcount == value.toInt())
             {
                 editStatus = NO_CHANGES;
                 return false;
-            }
+            }               
          
         case ExpiresOn:
             // Do nothing, if old value == new value
@@ -457,13 +459,13 @@ QModelIndex AliasTableModel::index(int row, int column, const QModelIndex &paren
     }
 }
 
-void AliasTableModel::updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating, AliasModelType type, int status)
+void AliasTableModel::updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating, int ratingcount, AliasModelType type, int status)
 {
     // Update alias book model from Syscoin core
     priv->updateEntry(alias, value, expires_on, expires_in, expired, safesearch, rating, type, status);
 }
 
-QString AliasTableModel::addRow(const QString &type, const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating)
+QString AliasTableModel::addRow(const QString &type, const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating, int ratingcount)
 {
     std::string strAlias = alias.toStdString();
     editStatus = OK;

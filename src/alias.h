@@ -35,6 +35,7 @@ public:
 	std::vector<unsigned char> vchPubKey;
 	unsigned char safetyLevel;
 	unsigned char nRating;
+	unsigned int nRatingCount;
     CAliasIndex() { 
         SetNull();
     }
@@ -59,10 +60,11 @@ public:
 		{
 			READWRITE(safetyLevel);
 			READWRITE(nRating);
+			READWRITE(nRatingCount);
 		}
 	}
     friend bool operator==(const CAliasIndex &a, const CAliasIndex &b) {
-		return (a.nRating == b.nRating && a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
+		return (a.nRatingCount == b.nRatingCount && a.nRating == b.nRating && a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
     }
 
     friend bool operator!=(const CAliasIndex &a, const CAliasIndex &b) {
@@ -76,10 +78,11 @@ public:
         vchPubKey = b.vchPubKey;
 		safetyLevel = b.safetyLevel;
 		nRating = b.nRating;
+		nRatingCount = b.nRatingCount;
         return *this;
     }   
-    void SetNull() { nRating = 0; safetyLevel = 0; txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
-    bool IsNull() const { return (nRating == 0 && safetyLevel == 0 && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
+    void SetNull() { nRatingCount = 0; nRating = 0; safetyLevel = 0; txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
+    bool IsNull() const { return (nRatingCount == 0 && nRating == 0 && safetyLevel == 0 && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
 	bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();
