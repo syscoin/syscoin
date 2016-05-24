@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QMenu>
 #include "rpcserver.h"
+#include "stardelegate.h"
 using namespace std;
 extern const CRPCTable tableRPC;
 MyAliasListPage::MyAliasListPage(const PlatformStyle *platformStyle, QWidget *parent) :
@@ -128,6 +129,8 @@ void MyAliasListPage::setModel(WalletModel *walletModel, AliasTableModel *model)
     ui->tableView->setColumnWidth(2, 75); //expires on
     ui->tableView->setColumnWidth(3, 75); //expires in
     ui->tableView->setColumnWidth(4, 75); //expired status
+	ui->tableView->setColumnWidth(5, 75); //rating
+	ui->tableView->setItemDelegateForColumn(5, new StarDelegate);
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 

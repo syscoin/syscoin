@@ -20,6 +20,7 @@
 #include <QMenu>
 #include "main.h"
 #include "rpcserver.h"
+#include "stardelegate.h"
 #include <QSettings>
 using namespace std;
 
@@ -103,7 +104,8 @@ void AliasListPage::setModel(WalletModel* walletModel, AliasTableModel *model)
     ui->tableView->setColumnWidth(2, 75); //expires on
     ui->tableView->setColumnWidth(3, 75); //expires in
     ui->tableView->setColumnWidth(4, 75); //expired status
-
+	ui->tableView->setColumnWidth(5, 75); //rating
+	ui->tableView->setItemDelegateForColumn(5, new StarDelegate);
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
     connect(ui->tableView->selectionModel(), SIGNAL(selectionChanged(QItemSelection,QItemSelection)),
@@ -254,6 +256,7 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 		string expires_on_str;
 		string expired_str;
 		int expired = 0;
+		int rating = 0;
 		int expires_in = 0;
 		int expires_on = 0;  
         params.push_back(ui->lineEditAliasSearch->text().toStdString());
@@ -301,27 +304,31 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 				expires_in_str = "";
 				expires_on_str = "";
 				expired = 0;
+				rating = 0;
 				expires_in = 0;
 				expires_on = 0;
 
-					const UniValue& name_value = find_value(o, "name");
-					if (name_value.type() == UniValue::VSTR)
-						name_str = name_value.get_str();
-					if(firstAlias == "")
-						firstAlias = name_str;
-					lastAlias = name_str;
-					const UniValue& value_value = find_value(o, "value");
-					if (value_value.type() == UniValue::VSTR)
-						value_str = value_value.get_str();
-					const UniValue& expires_on_value = find_value(o, "expires_on");
-					if (expires_on_value.type() == UniValue::VNUM)
-						expires_on = expires_on_value.get_int();
-					const UniValue& expires_in_value = find_value(o, "expires_in");
-					if (expires_in_value.type() == UniValue::VNUM)
-						expires_in = expires_in_value.get_int();
-					const UniValue& expired_value = find_value(o, "expired");
-					if (expired_value.type() == UniValue::VNUM)
-						expired = expired_value.get_int();
+				const UniValue& name_value = find_value(o, "name");
+				if (name_value.type() == UniValue::VSTR)
+					name_str = name_value.get_str();
+				if(firstAlias == "")
+					firstAlias = name_str;
+				lastAlias = name_str;
+				const UniValue& value_value = find_value(o, "value");
+				if (value_value.type() == UniValue::VSTR)
+					value_str = value_value.get_str();
+				const UniValue& expires_on_value = find_value(o, "expires_on");
+				if (expires_on_value.type() == UniValue::VNUM)
+					expires_on = expires_on_value.get_int();
+				const UniValue& expires_in_value = find_value(o, "expires_in");
+				if (expires_in_value.type() == UniValue::VNUM)
+					expires_in = expires_in_value.get_int();
+				const UniValue& expired_value = find_value(o, "expired");
+				if (expired_value.type() == UniValue::VNUM)
+					expired = expired_value.get_int();
+				const UniValue& rating_value = find_value(o, "rating");
+				if (rating_value.type() == UniValue::VNUM)
+					rating = rating_value.get_int();
 				if(expired == 1)
 				{
 					expired_str = "Expired";
@@ -340,13 +347,15 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str),
-						settings.value("safesearch", "").toString());
+						settings.value("safesearch", "").toString(),
+						rating);
 					this->model->updateEntry(QString::fromStdString(name_str),
 						QString::fromStdString(value_str),
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str), 
-						settings.value("safesearch", "").toString(), AllAlias, CT_NEW);	
+						settings.value("safesearch", "").toString(), 
+						rating, AllAlias, CT_NEW);	
 			  }
 			  pageMap[currentPage] = make_pair(firstAlias, lastAlias);  
 			  ui->labelPage->setText(tr("Current Page: <b>%1</b>").arg(currentPage+1));
