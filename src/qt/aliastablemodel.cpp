@@ -356,7 +356,7 @@ bool AliasTableModel::setData(const QModelIndex &index, const QVariant &value, i
          
         case ExpiresOn:
             // Do nothing, if old value == new value
-            if(rec->rating == value.toString())
+            if(rec->expires_on == value.toString())
             {
                 editStatus = NO_CHANGES;
                 return false;
