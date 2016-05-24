@@ -465,7 +465,7 @@ QModelIndex AliasTableModel::index(int row, int column, const QModelIndex &paren
 void AliasTableModel::updateEntry(const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating, int ratingcount, AliasModelType type, int status)
 {
     // Update alias book model from Syscoin core
-    priv->updateEntry(alias, value, expires_on, expires_in, expired, safesearch, rating, type, status);
+    priv->updateEntry(alias, value, expires_on, expires_in, expired, safesearch, rating, ratingcount, type, status);
 }
 
 QString AliasTableModel::addRow(const QString &type, const QString &alias, const QString &value, const QString &expires_on,const QString &expires_in, const QString &expired, const QString &safesearch, int rating, int ratingcount)
