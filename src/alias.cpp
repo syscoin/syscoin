@@ -1000,7 +1000,10 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string
 				string name = stringFromVch(vchName);
 				boost::algorithm::to_lower(name);
 				if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != name)
+				{
+					pcursor->Next();
 					continue;
+				}
                 nameScan.push_back(make_pair(vchName, txPos));
             }
             if (nameScan.size() >= nMax)
