@@ -57,7 +57,7 @@ public:
 		READWRITE(nFeedbackUser);
 	}
 
-    friend bool operator==(const CEscrow &a, const CEscrow &b) {
+    friend bool operator==(const CEscrowFeedback &a, const CEscrowFeedback &b) {
         return (
         a.vchFeedback == b.vchBuyerKey
 		&& a.nRating == b.nRating
@@ -65,14 +65,14 @@ public:
         );
     }
 
-    CEscrow operator=(const CEscrow &b) {
+    CEscrow operator=(const CEscrowFeedback &b) {
         vchFeedback = b.vchFeedback;
 		nRating = b.nRating;
 		nFeedbackUser = b.nFeedbackUser;
         return *this;
     }
 
-    friend bool operator!=(const CEscrow &a, const CEscrow &b) {
+    friend bool operator!=(const CEscrowFeedback &a, const CEscrowFeedback &b) {
         return !(a == b);
     }
 
