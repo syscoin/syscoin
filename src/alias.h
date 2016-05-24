@@ -35,7 +35,7 @@ public:
 	std::vector<unsigned char> vchPubKey;
 	unsigned char safetyLevel;
 	unsigned char nRating;
-	unsigned int nRatingCount;
+	int nRatingCount;
     CAliasIndex() { 
         SetNull();
     }
