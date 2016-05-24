@@ -9,6 +9,7 @@
 
 #include <QFont>
 #include "rpcserver.h"
+#include "starrating.h"
 using namespace std;
 
 const QString AliasTableModel::Alias = "A";
@@ -310,7 +311,7 @@ QVariant AliasTableModel::data(const QModelIndex &index, int role) const
         case SafeSearch:
             return rec->safesearch;
         case Rating:
-            return rec->rating;
+            return QVariant::fromValue(StarRating(rec->rating));
         case RatingCount:
             return rec->ratingcount;
         }
@@ -351,7 +352,7 @@ bool AliasTableModel::setData(const QModelIndex &index, const QVariant &value, i
         {
         case Rating:
             // Do nothing, if old value == new value
-            if(rec->rating == value.toInt())
+            if(rec->rating == QVariant::fromValue(StarRating(value.toInt())))
             {
                 editStatus = NO_CHANGES;
                 return false;
