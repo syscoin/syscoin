@@ -126,8 +126,9 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
     // regexp
     using namespace boost::xpressive;
     smatch certparts;
-	boost::algorithm::to_lower(strRegexp);
-    sregex cregex = sregex::compile(strRegexp);
+	string strRegexpLower = strRegexp;
+	boost::algorithm::to_lower(strRegexpLower);
+    sregex cregex = sregex::compile(strRegexpLower);
 	int nMaxAge  = GetCertExpirationDepth();
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("certi"), vchCert));
