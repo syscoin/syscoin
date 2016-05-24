@@ -37,7 +37,7 @@ void StarEditor::mouseMoveEvent(QMouseEvent *event)
 
 void StarEditor::mouseReleaseEvent(QMouseEvent * /* event */)
 {
-    emit editingFinished();
+    Q_EMIT editingFinished();
 }
 
 int StarEditor::starAtPosition(int x)
