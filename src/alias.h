@@ -79,7 +79,7 @@ public:
         return *this;
     }   
     void SetNull() { nRating = 0; safetyLevel = 0; txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
-    bool IsNull() const { return (nRating = 0 && safetyLevel == 0 && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
+    bool IsNull() const { return (nRating == 0 && safetyLevel == 0 && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
 	bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();
