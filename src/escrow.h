@@ -179,7 +179,7 @@ public:
     }
 
     bool ScanEscrows(
-            const std::vector<unsigned char>& vchName, const string& strRegExp, 
+		const std::vector<unsigned char>& vchName, const std::string& strRegExp, 
             unsigned int nMax,
             std::vector<std::pair<std::vector<unsigned char>, CEscrow> >& escrowScan);
 
