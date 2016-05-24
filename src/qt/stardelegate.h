@@ -24,7 +24,7 @@ public:
     void setModelData(QWidget *editor, QAbstractItemModel *model,
                       const QModelIndex &index) const Q_DECL_OVERRIDE;
 
-private slots:
+private Q_SLOTS:
     void commitAndCloseEditor();
 };
 

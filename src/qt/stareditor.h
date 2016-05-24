@@ -21,7 +21,8 @@ public:
     }
     StarRating starRating() { return myStarRating; }
 
-signals:
+Q_SIGNALS:
+
     void editingFinished();
 
 protected:
