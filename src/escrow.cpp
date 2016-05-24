@@ -2021,6 +2021,13 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
     pair<vector<unsigned char>, CEscrow> pairScan;
     BOOST_FOREACH(pairScan, escrowScan) {
 		const CEscrow &txEscrow = pairScan.second;  
+		const string &escrow = stringFromVch(pairScan.first);
+		vector<COffer> vtxOfferPos;
+		if (!pofferdb->ReadOffer(txEscrow.vchOffer, vtxOfferPos) || vtxOfferPos.empty())
+		{
+			continue;
+		}
+		COffer offer = vtxOfferPos.back();
         int nHeight = txEscrow.nHeight;
  
 		CPubKey SellerPubKey(txEscrow.vchSellerKey);
