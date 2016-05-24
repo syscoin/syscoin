@@ -98,6 +98,7 @@ public:
         EscrowRefund,
 		EscrowRefundRecv,
 		EscrowComplete,
+		EscrowFeedback,
 
 		MessageActivate,
 		MessageRecv
