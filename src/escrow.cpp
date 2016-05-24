@@ -2023,8 +2023,17 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		const CEscrow &txEscrow = pairScan.second;  
         int nHeight = txEscrow.nHeight;
  
-		COffer offer;
+		CPubKey SellerPubKey(txEscrow.vchSellerKey);
+		CSyscoinAddress selleraddy(SellerPubKey.GetID());
+		selleraddy = CSyscoinAddress(selleraddy.ToString());
 
+		CPubKey ArbiterPubKey(txEscrow.vchArbiterKey);
+		CSyscoinAddress arbiteraddy(ArbiterPubKey.GetID());
+		arbiteraddy = CSyscoinAddress(arbiteraddy.ToString());
+
+		CPubKey BuyerPubKey(txEscrow.vchBuyerKey);
+		CSyscoinAddress buyeraddy(BuyerPubKey.GetID());
+		buyeraddy = CSyscoinAddress(buyeraddy.ToString());
 		int expired = 0;
 
         UniValue oEscrow(UniValue::VOBJ);

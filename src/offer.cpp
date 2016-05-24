@@ -4077,7 +4077,9 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		}
 		if(strCategory.size() > 0 && !boost::algorithm::starts_with(stringFromVch(txOffer.sCategory), strCategory))
 			continue;
-
+		CPubKey SellerPubKey(txOffer.vchPubKey);
+		CSyscoinAddress selleraddy(SellerPubKey.GetID());
+		selleraddy = CSyscoinAddress(selleraddy.ToString());
 		int expired = 0;
 		int expires_in = 0;
 		int expired_block = 0;		
