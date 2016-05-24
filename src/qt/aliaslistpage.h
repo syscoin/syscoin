@@ -53,8 +53,6 @@ private Q_SLOTS:
     /** Create a new alias for receiving coins and / or add a new alias book entry */
     /** Copy alias of currently selected alias entry to clipboard */
     void on_copyAlias_clicked();
-    /** Copy value of currently selected alias entry to clipboard (no button) */
-    void onCopyAliasValueAction();
 	void on_messageButton_clicked();
 
     /** Set button states based on selected tab and selection */
