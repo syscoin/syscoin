@@ -27,7 +27,7 @@ public:
 		ExpiresIn = 2,
 		Expired = 3,
 		Rating = 4,
-		Rating = 5,
+		RatingCount = 5,
 		SafeSearch = 6
     };
 
