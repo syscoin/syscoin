@@ -174,4 +174,5 @@ bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut
 bool IsSyscoinScript(const CScript& scriptPubKey, int &op, std::vector<std::vector<unsigned char> > &vvchArgs);
 void RemoveSyscoinScript(const CScript& scriptPubKeyIn, CScript& scriptPubKeyOut);
 bool GetPreviousInput(const COutPoint * outpoint, int &op, std::vector<std::vector<unsigned char> > &vvchArgs);
+void PutToAliasList(std::vector<CAliasIndex> &aliasList, CAliasIndex& index);
 #endif // ALIAS_H

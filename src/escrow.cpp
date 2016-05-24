@@ -319,7 +319,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		if(address.IsValid() && address.isAlias)
 		{
 			vector<CAliasIndex> vtxPos;
-			const vector<unsigned char> &vchAlias = vchFromString(address.isAlias);
+			const vector<unsigned char> &vchAlias = vchFromString(address.aliasName);
 			if (paliasdb->ReadAlias(vchAlias, vtxPos) && !vtxPos.empty())
 			{
 				CAliasIndex alias = vtxPos.back();
@@ -338,7 +338,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		if(address.IsValid() && address.isAlias)
 		{
 			vector<CAliasIndex> vtxPos;
-			const vector<unsigned char> &vchAlias = vchFromString(address.isAlias);
+			const vector<unsigned char> &vchAlias = vchFromString(address.aliasName);
 			if (paliasdb->ReadAlias(vchAlias, vtxPos) && !vtxPos.empty())
 			{
 				CAliasIndex alias = vtxPos.back();
@@ -356,7 +356,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		if(address.IsValid() && address.isAlias)
 		{
 			vector<CAliasIndex> vtxPos;
-			const vector<unsigned char> &vchAlias = vchFromString(address.isAlias);
+			const vector<unsigned char> &vchAlias = vchFromString(address.aliasName);
 			if (paliasdb->ReadAlias(vchAlias, vtxPos) && !vtxPos.empty())
 			{
 				CAliasIndex alias = vtxPos.back();
@@ -443,15 +443,15 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 	{
 		return error("escrow redeem script too long");
 	}
-	if(theEscrow.vchBuyerFeedback.size() > MAX_VALUE_LENGTH)
+	if(theEscrow.buyerFeedback.vchFeedback.size() > MAX_VALUE_LENGTH)
 	{
 		return error("buyer feedback too long");
 	}
-	if(theEscrow.vchSellerFeedback.size() > MAX_VALUE_LENGTH)
+	if(theEscrow.sellerFeedback.vchFeedback.size() > MAX_VALUE_LENGTH)
 	{
 		return error("seller feedback too long");
 	}
-	if(theEscrow.vchArbiterFeedback.size() > MAX_VALUE_LENGTH)
+	if(theEscrow.arbiterFeedback.vchFeedback.size() > MAX_VALUE_LENGTH)
 	{
 		return error("arbiter feedback too long");
 	}
@@ -1054,21 +1054,21 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	// arbiter
 	if(arbiterSigning)
 	{
-		EscrowFeedback sellerFeedback(EscrowFeedback::Arbiter);
-		sellerFeedback.vchFeedback = vchSellerFeedback;
+		CEscrowFeedback sellerFeedback(CEscrowFeedback::Arbiter);
+		sellerFeedback.vchFeedback = vchFeedbackSeller;
 		sellerFeedback.nRating = nRatingSeller;
-		EscrowFeedback buyerFeedback(EscrowFeedback::Arbiter);
-		buyerFeedback.vchFeedback = vchSecondaryFeedback;
+		CEscrowFeedback buyerFeedback(CEscrowFeedback::Arbiter);
+		buyerFeedback.vchFeedback = vchFeedbackSecondary;
 		buyerFeedback.nRating = nRatingSecondary;
 	}
 	// buyer
 	else
 	{
-		EscrowFeedback sellerFeedback(EscrowFeedback::Buyer);
-		sellerFeedback.vchFeedback = vchSellerFeedback;
+		CEscrowFeedback sellerFeedback(CEscrowFeedback::Buyer);
+		sellerFeedback.vchFeedback = vchFeedbackSeller;
 		sellerFeedback.nRating = nRatingSeller;
-		EscrowFeedback arbiterFeedback(EscrowFeedback::Buyer);
-		buyerFeedback.vchFeedback = vchSecondaryFeedback;
+		CEscrowFeedback arbiterFeedback(CEscrowFeedback::Buyer);
+		buyerFeedback.vchFeedback = vchFeedbackSecondary;
 		buyerFeedback.nRating = nRatingSecondary;
 	}
 	escrow.rawTx = ParseHex(hex_str);
@@ -1616,11 +1616,11 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	// arbiter
 	if(arbiterSigning)
 	{
-		EscrowFeedback buyerFeedback(EscrowFeedback::Arbiter);
-		buyerFeedback.vchFeedback = vchBuyerFeedback;
+		CEscrowFeedback buyerFeedback(CEscrowFeedback::Arbiter);
+		buyerFeedback.vchFeedback = vchFeedbackBuyer;
 		buyerFeedback.nRating = nRatingBuyer;
-		EscrowFeedback sellerFeedback(EscrowFeedback::Arbiter);
-		sellerFeedback.vchFeedback = vchSecondaryFeedback;
+		CEscrowFeedback sellerFeedback(CEscrowFeedback::Arbiter);
+		sellerFeedback.vchFeedback = vchFeedbackSecondary;
 		sellerFeedback.nRating = nRatingSecondary;
 		escrow.sellerFeedback = sellerFeedback;
 		escrow.buyerFeedback = buyerFeedback;
@@ -1628,11 +1628,11 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	// seller
 	else
 	{
-		EscrowFeedback buyerFeedback(EscrowFeedback::Seller);
-		buyerFeedback.vchFeedback = vchBuyerFeedback;
+		CEscrowFeedback buyerFeedback(CEscrowFeedback::Seller);
+		buyerFeedback.vchFeedback = vchFeedbackBuyer;
 		buyerFeedback.nRating = nRatingBuyer;
-		EscrowFeedback arbiterFeedback(EscrowFeedback::Seller);
-		arbiterFeedback.vchFeedback = vchSecondaryFeedback;
+		CEscrowFeedback arbiterFeedback(CEscrowFeedback::Seller);
+		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.arbiterFeedback = arbiterFeedback;
@@ -1855,7 +1855,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 						"If you are the buyer, feedbackprimary is for seller and feedback secondary is for arbiter.\n" +
 						"If you are the seller, feedbackprimary is for buyer and feedback secondary is for arbiter.\n" +
 						"If you are the arbiter, feedbackprimary is for buyer and feedback secondary is for seller.\n" +
-						"If arbiter didn't do any work for this escrow you can leave his feedback empty and rating as a 0.\n" +
+						"If arbiter didn't do any work for this escrow you can leave his feedback empty and rating as a 0.\n"
                         + HelpRequiringPassphrase());
    // gather & validate inputs
     vector<unsigned char> vchEscrow = vchFromValue(params[0]);
@@ -1969,11 +1969,11 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	// buyer
 	if(foundBuyerKey)
 	{
-		EscrowFeedback sellerFeedback(EscrowFeedback::Buyer);
-		sellerFeedback.vchFeedback = vchPrimaryFeedback;
+		CEscrowFeedback sellerFeedback(CEscrowFeedback::Buyer);
+		sellerFeedback.vchFeedback = vchFeedbackPrimary;
 		sellerFeedback.nRating = nRatingPrimary;
-		EscrowFeedback arbiterFeedback(EscrowFeedback::Buyer);
-		arbiterFeedback.vchFeedback = vchSecondaryFeedback;
+		CEscrowFeedback arbiterFeedback(CEscrowFeedback::Buyer);
+		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.arbiterFeedback = arbiterFeedback;
 		escrow.sellerFeedback = sellerFeedback;
@@ -1981,11 +1981,11 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	// seller
 	else if(foundSellerKey)
 	{
-		EscrowFeedback buyerFeedback(EscrowFeedback::Seller);
-		buyerFeedback.vchFeedback = vchPrimaryFeedback;
+		CEscrowFeedback buyerFeedback(CEscrowFeedback::Seller);
+		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
-		EscrowFeedback arbiterFeedback(EscrowFeedback::Seller);
-		arbiterFeedback.vchFeedback = vchSecondaryFeedback;
+		CEscrowFeedback arbiterFeedback(ECscrowFeedback::Seller);
+		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.arbiterFeedback = arbiterFeedback;
@@ -1993,11 +1993,11 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	// arbiter
 	else if(foundArbiterKey)
 	{
-		EscrowFeedback buyerFeedback(EscrowFeedback::Arbiter);
-		buyerFeedback.vchFeedback = vchPrimaryFeedback;
+		CEscrowFeedback buyerFeedback(CEscrowFeedback::Arbiter);
+		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
-		EscrowFeedback sellerFeedback(EscrowFeedback::Arbiter);
-		sellerFeedback.vchFeedback = vchSecondaryFeedback;
+		CEscrowFeedback sellerFeedback(CEscrowFeedback::Arbiter);
+		sellerFeedback.vchFeedback = vchFeedbackSecondary;
 		sellerFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.sellerFeedback = sellerFeedback;
