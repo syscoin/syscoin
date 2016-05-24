@@ -77,7 +77,7 @@ public:
     }
 
     void SetNull() { nRating = 0; nFeedbackUser = 0; vchFeedback.clear();}
-    bool IsNull() const { return (nRating == 0 && nFeedbackUser == 0 && nArbiterRating == 0 && vchFeedback.empty()); }
+    bool IsNull() const { return (nRating == 0 && nFeedbackUser == 0 && vchFeedback.empty()); }
 };
 
 class CEscrow {
