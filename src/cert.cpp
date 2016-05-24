@@ -1056,7 +1056,7 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
     UniValue oRes(UniValue::VARR);
     
     vector<pair<vector<unsigned char>, CCert> > certScan;
-    if (!pcertdb->ScanCerts(vchCert, 25, certScan))
+    if (!pcertdb->ScanCerts(vchCert, strRegexp, 25, certScan))
         throw runtime_error("scan failed");
     pair<vector<unsigned char>, CCert> pairScan;
 	BOOST_FOREACH(pairScan, certScan) {
