@@ -65,7 +65,7 @@ public:
         );
     }
 
-    CEscrow operator=(const CEscrowFeedback &b) {
+    CEscrowFeedback operator=(const CEscrowFeedback &b) {
         vchFeedback = b.vchFeedback;
 		nRating = b.nRating;
 		nFeedbackUser = b.nFeedbackUser;
