@@ -287,6 +287,7 @@ extern UniValue escrowlist(const UniValue& params, bool fHelp);
 extern UniValue escrowcipher(const UniValue& params, bool fHelp);
 extern UniValue escrowhistory(const UniValue& params, bool fHelp);
 extern UniValue escrowfilter(const UniValue& params, bool fHelp);
+extern UniValue escrowfeedback(const UniValue& params, bool fHelp);
 
 extern UniValue messagenew(const UniValue& params, bool fHelp);
 extern UniValue messageinfo(const UniValue& params, bool fHelp);

@@ -856,8 +856,8 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	
 		if(op == OP_ALIAS_ACTIVATE)
 		{
-			theAlias.nRating = 3;
-			theAlias.nRatingCount = 1;
+			theAlias.nRating = 0;
+			theAlias.nRatingCount = 0;
 		}
 
 		theAlias.nHeight = nHeight;
@@ -1550,7 +1550,7 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 				strPrivateValue = strDecrypted;		
 			oName.push_back(Pair("privatevalue", strPrivateValue));
 			oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
-			oName.push_back(Pair("rating", alias.nRating));
+			oName.push_back(Pair("rating", (int)alias.nRating));
 			oName.push_back(Pair("ratingcount", alias.nRatingCount));
 			expired_block = nHeight + GetAliasExpirationDepth();
             if(expired_block < chainActive.Tip()->nHeight)
@@ -1713,7 +1713,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		bool fAliasMine = IsSyscoinTxMine(tx, "alias")? true:  false;
 		oName.push_back(Pair("ismine", fAliasMine));
 		oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
-		oName.push_back(Pair("rating", alias.nRating));
+		oName.push_back(Pair("rating", (int)alias.nRating));
 		oName.push_back(Pair("ratingcount", alias.nRatingCount));
         oName.push_back(Pair("lastupdate_height", nHeight));
 		expired_block = nHeight + GetAliasExpirationDepth();
@@ -1787,7 +1787,7 @@ UniValue aliashistory(const UniValue& params, bool fHelp) {
 			CSyscoinAddress address(PubKey.GetID());
 			oName.push_back(Pair("address", address.ToString()));
             oName.push_back(Pair("lastupdate_height", nHeight));
-			oName.push_back(Pair("rating", txPos2.nRating));
+			oName.push_back(Pair("rating", (int)txPos2.nRating));
 			oName.push_back(Pair("ratingcount", txPos2.nRatingCount));
 			expired_block = nHeight + GetAliasExpirationDepth();
             if(expired_block < chainActive.Tip()->nHeight)
@@ -1873,7 +1873,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 			strPrivateValue = strDecrypted;		
 		oName.push_back(Pair("privatevalue", strPrivateValue));
         oName.push_back(Pair("lastupdate_height", nHeight));
-		oName.push_back(Pair("rating", alias.nRating));
+		oName.push_back(Pair("rating", (int)alias.nRating));
 		oName.push_back(Pair("ratingcount", alias.nRatingCount));
 		expired_block = nHeight + GetAliasExpirationDepth();
         if(expired_block < chainActive.Tip()->nHeight)

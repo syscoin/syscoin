@@ -89,6 +89,10 @@ static bool CreateSyscoinTransactionRecord(TransactionRecord& sub, int op, const
 		if(type == SEND || type == RECV)
 			sub.type = TransactionRecord::EscrowComplete;
 		break;
+	case OP_ESCROW_FEEDBACK:
+		if(type == SEND || type == RECV)
+			sub.type = TransactionRecord::EscrowFeedback;
+		break;
 	case OP_ESCROW_REFUND:
 		if(type == SEND)
 			sub.type = TransactionRecord::EscrowRefund;
