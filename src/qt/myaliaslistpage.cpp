@@ -63,21 +63,18 @@ MyAliasListPage::MyAliasListPage(const PlatformStyle *platformStyle, QWidget *pa
 	
     // Context menu actions
     QAction *copyAliasAction = new QAction(ui->copyAlias->text(), this);
-    QAction *copyAliasValueAction = new QAction(tr("Copy Va&lue"), this);
     QAction *editAction = new QAction(tr("&Edit"), this);
     QAction *transferAliasAction = new QAction(tr("&Transfer"), this);
 
     // Build context menu
     contextMenu = new QMenu();
     contextMenu->addAction(copyAliasAction);
-    contextMenu->addAction(copyAliasValueAction);
     contextMenu->addAction(editAction);
     contextMenu->addSeparator();
     contextMenu->addAction(transferAliasAction);
 
     // Connect signals for context menu actions
     connect(copyAliasAction, SIGNAL(triggered()), this, SLOT(on_copyAlias_clicked()));
-    connect(copyAliasValueAction, SIGNAL(triggered()), this, SLOT(onCopyAliasValueAction()));
     connect(editAction, SIGNAL(triggered()), this, SLOT(on_editButton_clicked()));
     connect(transferAliasAction, SIGNAL(triggered()), this, SLOT(on_transferButton_clicked()));
 
@@ -125,13 +122,12 @@ void MyAliasListPage::setModel(WalletModel *walletModel, AliasTableModel *model)
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 500); //alias name
-    ui->tableView->setColumnWidth(1, 500); //alias value
-    ui->tableView->setColumnWidth(2, 75); //expires on
-    ui->tableView->setColumnWidth(3, 75); //expires in
-    ui->tableView->setColumnWidth(4, 75); //expired status
-	ui->tableView->setColumnWidth(5, 75); //rating
-	ui->tableView->setColumnWidth(6, 50); //rating
-	ui->tableView->setItemDelegateForColumn(5, new StarDelegate);
+    ui->tableView->setColumnWidth(1, 75); //expires on
+    ui->tableView->setColumnWidth(2, 75); //expires in
+    ui->tableView->setColumnWidth(3, 75); //expired status
+	ui->tableView->setColumnWidth(4, 75); //rating
+	ui->tableView->setColumnWidth(5, 50); //ratingcount
+	ui->tableView->setItemDelegateForColumn(4, new StarDelegate);
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
@@ -155,10 +151,6 @@ void MyAliasListPage::on_copyAlias_clicked()
     GUIUtil::copyEntryData(ui->tableView, AliasTableModel::Name);
 }
 
-void MyAliasListPage::onCopyAliasValueAction()
-{
-    GUIUtil::copyEntryData(ui->tableView, AliasTableModel::Value);
-}
 
 void MyAliasListPage::on_editButton_clicked()
 {
@@ -293,10 +285,11 @@ void MyAliasListPage::on_exportButton_clicked()
     // name, column, role
     writer.setModel(proxyModel);
     writer.addColumn("Alias", AliasTableModel::Name, Qt::EditRole);
-    writer.addColumn("Value", AliasTableModel::Value, Qt::EditRole);
 	writer.addColumn("Expires On", AliasTableModel::ExpiresOn, Qt::EditRole);
 	writer.addColumn("Expires In", AliasTableModel::ExpiresIn, Qt::EditRole);
 	writer.addColumn("Expired", AliasTableModel::Expired, Qt::EditRole);
+	writer.addColumn("Rating", AliasTableModel::Rating, Qt::EditRole);
+	writer.addColumn("Rating Count", AliasTableModel::RatingCount, Qt::EditRole);
     if(!writer.write())
     {
         QMessageBox::critical(this, tr("Error exporting"), tr("Could not write to file %1.").arg(filename),

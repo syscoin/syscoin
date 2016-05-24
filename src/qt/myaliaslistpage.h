@@ -55,8 +55,6 @@ private Q_SLOTS:
     /** Copy alias of currently selected alias entry to clipboard */
     void on_copyAlias_clicked();
 
-    /** Copy value of currently selected alias entry to clipboard (no button) */
-    void onCopyAliasValueAction();
     /** Edit currently selected alias entry (no button) */
     void on_editButton_clicked();
     /** Export button clicked */

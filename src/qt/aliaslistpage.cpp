@@ -53,18 +53,15 @@ AliasListPage::AliasListPage(const PlatformStyle *platformStyle, QWidget *parent
 	
     // Context menu actions
     QAction *copyAliasAction = new QAction(ui->copyAlias->text(), this);
-    QAction *copyAliasValueAction = new QAction(tr("&Copy Value"), this);
 	QAction *messageAction = new QAction(tr("&Send Msg"), this);
 
     // Build context menu
     contextMenu = new QMenu();
     contextMenu->addAction(copyAliasAction);
-    contextMenu->addAction(copyAliasValueAction);
 	contextMenu->addSeparator();
 	contextMenu->addAction(messageAction);
     // Connect signals for context menu actions
     connect(copyAliasAction, SIGNAL(triggered()), this, SLOT(on_copyAlias_clicked()));
-    connect(copyAliasValueAction, SIGNAL(triggered()), this, SLOT(onCopyAliasValueAction()));
 	connect(messageAction, SIGNAL(triggered()), this, SLOT(on_messageButton_clicked()));
 
     connect(ui->tableView, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
@@ -100,13 +97,12 @@ void AliasListPage::setModel(WalletModel* walletModel, AliasTableModel *model)
 
     // Set column widths
     ui->tableView->setColumnWidth(0, 500); //alias name
-    ui->tableView->setColumnWidth(1, 500); //alias value
-    ui->tableView->setColumnWidth(2, 75); //expires on
-    ui->tableView->setColumnWidth(3, 75); //expires in
-    ui->tableView->setColumnWidth(4, 75); //expired status
-	ui->tableView->setColumnWidth(5, 75); //rating
-	ui->tableView->setColumnWidth(6, 50); //rating
-	ui->tableView->setItemDelegateForColumn(5, new StarDelegate);
+    ui->tableView->setColumnWidth(1, 75); //expires on
+    ui->tableView->setColumnWidth(2, 75); //expires in
+    ui->tableView->setColumnWidth(3, 75); //expired status
+	ui->tableView->setColumnWidth(4, 75); //rating
+	ui->tableView->setColumnWidth(5, 50); //ratingcount
+	ui->tableView->setItemDelegateForColumn(4, new StarDelegate);
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
     connect(ui->tableView->selectionModel(), SIGNAL(selectionChanged(QItemSelection,QItemSelection)),
@@ -148,12 +144,6 @@ void AliasListPage::on_copyAlias_clicked()
    
     GUIUtil::copyEntryData(ui->tableView, AliasTableModel::Name);
 }
-
-void AliasListPage::onCopyAliasValueAction()
-{
-    GUIUtil::copyEntryData(ui->tableView, AliasTableModel::Value);
-}
-
 
 void AliasListPage::selectionChanged()
 {
@@ -252,7 +242,6 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 		string firstAlias = "";
 		string lastAlias = "";
 		string name_str;
-		string value_str;
 		string expires_in_str;
 		string expires_on_str;
 		string expired_str;
@@ -317,9 +306,6 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 				if(firstAlias == "")
 					firstAlias = name_str;
 				lastAlias = name_str;
-				const UniValue& value_value = find_value(o, "value");
-				if (value_value.type() == UniValue::VSTR)
-					value_str = value_value.get_str();
 				const UniValue& expires_on_value = find_value(o, "expires_on");
 				if (expires_on_value.type() == UniValue::VNUM)
 					expires_on = expires_on_value.get_int();
@@ -349,14 +335,12 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 	
 				model->addRow(AliasTableModel::Alias,
 						QString::fromStdString(name_str),
-						QString::fromStdString(value_str),
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str),
 						settings.value("safesearch", "").toString(),
 						rating, ratingcount);
 					this->model->updateEntry(QString::fromStdString(name_str),
-						QString::fromStdString(value_str),
 						QString::fromStdString(expires_on_str),
 						QString::fromStdString(expires_in_str),
 						QString::fromStdString(expired_str), 
