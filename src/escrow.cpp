@@ -107,8 +107,10 @@ const vector<unsigned char> CEscrow::Serialize() {
     return vchData;
 
 }
-bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, unsigned int nMax,
+bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, const string& strRegexp, unsigned int nMax,
         std::vector<std::pair<std::vector<unsigned char>, CEscrow> >& escrowScan) {
+	string strSearchLower = strRegexp;
+	boost::algorithm::to_lower(strSearchLower);
 	int nMaxAge  = GetEscrowExpirationDepth();
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("escrowi"), vchEscrow));
@@ -130,7 +132,32 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, unsigne
 				{
 					pcursor->Next();
 					continue;
-				}     
+				}   
+				const string &escrow = stringFromVch(vchEscrow);
+				const string &offerstr = stringFromVch(txPos.vchOffer);
+				CPubKey SellerPubKey(txPos.vchSellerKey);
+				CSyscoinAddress selleraddy(SellerPubKey.GetID());
+				selleraddy = CSyscoinAddress(selleraddy.ToString());
+
+				CPubKey ArbiterPubKey(txPos.vchArbiterKey);
+				CSyscoinAddress arbiteraddy(ArbiterPubKey.GetID());
+				arbiteraddy = CSyscoinAddress(arbiteraddy.ToString());
+
+				CPubKey BuyerPubKey(txPos.vchBuyerKey);
+				CSyscoinAddress buyeraddy(BuyerPubKey.GetID());
+				buyeraddy = CSyscoinAddress(buyeraddy.ToString());
+				string buyerAliasLower = buyeraddy.aliasName;
+				string sellerAliasLower = selleraddy.aliasName;
+				string arbiterAliasLower = arbiteraddy.aliasName;
+				boost::algorithm::to_lower(buyerAliasLower);
+				boost::algorithm::to_lower(sellerAliasLower);
+				boost::algorithm::to_lower(arbiterAliasLower);
+
+				if (strRegexp != "" && strRegexp != offerstr && strRegexp != escrow && strSearchLower != buyerAliasLower && strSearchLower != sellerAliasLower && strSearchLower != arbiterAliasLower)
+				{
+					pcursor->Next();
+					continue;
+				}  
                 escrowScan.push_back(make_pair(vchEscrow, txPos));
             }
             if (escrowScan.size() >= nMax)
@@ -1967,7 +1994,7 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 UniValue escrowfilter(const UniValue& params, bool fHelp) {
 	if (fHelp || params.size() > 2)
 		throw runtime_error(
-				"escrowfilter [[[[[regexp]] from=0]]]\n"
+				"escrowfilter [[[[[regexp]] from=0]}\n"
 						"scan and filter escrows\n"
 						"[regexp] : apply [regexp] on escrows, empty means all escrows\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
@@ -1979,8 +2006,6 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchEscrow;
 	string strRegexp;
 
-	bool safeSearch = true;
-
 	if (params.size() > 0)
 		strRegexp = params[0].get_str();
 
@@ -1991,37 +2016,11 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 
    
     vector<pair<vector<unsigned char>, CEscrow> > escrowScan;
-    if (!pescrowdb->ScanEscrows(vchEscrow, 25, escrowScan))
+    if (!pescrowdb->ScanEscrows(vchEscrow, strRegexp, 25, escrowScan))
         throw runtime_error("scan failed");
-	string strSearchLower = strRegexp;
-	boost::algorithm::to_lower(strSearchLower);
     pair<vector<unsigned char>, CEscrow> pairScan;
     BOOST_FOREACH(pairScan, escrowScan) {
-		const CEscrow &txEscrow = pairScan.second;
-		const string &escrow = stringFromVch(pairScan.first);
-		const string &offerstr = stringFromVch(txEscrow.vchOffer);
-		CPubKey SellerPubKey(txEscrow.vchSellerKey);
-		CSyscoinAddress selleraddy(SellerPubKey.GetID());
-		selleraddy = CSyscoinAddress(selleraddy.ToString());
-
-		CPubKey ArbiterPubKey(txEscrow.vchArbiterKey);
-		CSyscoinAddress arbiteraddy(ArbiterPubKey.GetID());
-		arbiteraddy = CSyscoinAddress(arbiteraddy.ToString());
-
-		CPubKey BuyerPubKey(txEscrow.vchBuyerKey);
-		CSyscoinAddress buyeraddy(BuyerPubKey.GetID());
-		buyeraddy = CSyscoinAddress(buyeraddy.ToString());
-		string buyerAliasLower = buyeraddy.aliasName;
-		string sellerAliasLower = selleraddy.aliasName;
-		string arbiterAliasLower = arbiteraddy.aliasName;
-		boost::algorithm::to_lower(buyerAliasLower);
-		boost::algorithm::to_lower(sellerAliasLower);
-		boost::algorithm::to_lower(arbiterAliasLower);
-
-        if (strRegexp != "" && strRegexp != escrow && strSearchLower != buyerAliasLower && strSearchLower != sellerAliasLower && strSearchLower != arbiterAliasLower)
-            continue;
-
-        
+		const CEscrow &txEscrow = pairScan.second;  
         int nHeight = txEscrow.nHeight;
  
 		COffer offer;

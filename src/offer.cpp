@@ -233,8 +233,15 @@ const vector<unsigned char> COffer::Serialize() {
     return vchData;
 
 }
-bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, unsigned int nMax,
+bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const string& strRegexp, unsigned int nMax,
 		std::vector<std::pair<std::vector<unsigned char>, COffer> >& offerScan) {
+   // regexp
+    using namespace boost::xpressive;
+    smatch offerparts;
+	smatch nameparts;
+	string strRegexpLower = strRegexp;
+	boost::algorithm::to_lower(strRegexpLower);
+	sregex cregex = sregex::compile(strRegexpLower);
 	int nMaxAge  = GetOfferExpirationDepth();
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("offeri"), vchOffer));
@@ -259,6 +266,33 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, unsigned i
 				}     
 				// dont return sold out offers
 				if(txPos.nQty <= 0 && txPos.nQty != -1)
+				{
+					pcursor->Next();
+					continue;
+				}
+				string title = stringFromVch(txPos.sTitle);
+				string offer = stringFromVch(vchOffer);
+				boost::algorithm::to_lower(title);
+				string description = stringFromVch(txPos.sDescription);
+				boost::algorithm::to_lower(description);
+				string category = stringFromVch(txPos.sCategory);
+				boost::algorithm::to_lower(category);
+				CPubKey SellerPubKey(txPos.vchPubKey);
+				CSyscoinAddress selleraddy(SellerPubKey.GetID());
+				selleraddy = CSyscoinAddress(selleraddy.ToString());
+				if(!selleraddy.IsValid() || !selleraddy.isAlias)
+				{
+					pcursor->Next();
+					continue;
+				}
+				string alias = selleraddy.aliasName;
+				boost::algorithm::to_lower(alias);
+				if (strRegexp != "" && !regex_search(title, offerparts, cregex) && !regex_search(category, offerparts, cregex) && !regex_search(description, offerparts, cregex) && strRegexp != offer && strRegexpLower != alias)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if(txPos.bPrivate && strRegexp != offer)
 				{
 					pcursor->Next();
 					continue;
@@ -4027,15 +4061,8 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 
 	
 	vector<pair<vector<unsigned char>, COffer> > offerScan;
-	if (!pofferdb->ScanOffers(vchOffer, 25, offerScan))
+	if (!pofferdb->ScanOffers(vchOffer, strRegexp, 25, offerScan))
 		throw runtime_error("scan failed");
-    // regexp
-    using namespace boost::xpressive;
-    smatch offerparts;
-	smatch nameparts;
-	string strRegexpLower = strRegexp;
-	boost::algorithm::to_lower(strRegexpLower);
-	sregex cregex = sregex::compile(strRegexpLower);
 	
 	pair<vector<unsigned char>, COffer> pairScan;
 	BOOST_FOREACH(pairScan, offerScan) {
@@ -4050,32 +4077,16 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		}
 		if(strCategory.size() > 0 && !boost::algorithm::starts_with(stringFromVch(txOffer.sCategory), strCategory))
 			continue;
-		string title = stringFromVch(txOffer.sTitle);
-		boost::algorithm::to_lower(title);
-		string description = stringFromVch(txOffer.sDescription);
-		boost::algorithm::to_lower(description);
-		string category = stringFromVch(txOffer.sCategory);
-		boost::algorithm::to_lower(category);
-		CPubKey SellerPubKey(txOffer.vchPubKey);
-		CSyscoinAddress selleraddy(SellerPubKey.GetID());
-		selleraddy = CSyscoinAddress(selleraddy.ToString());
-		if(!selleraddy.IsValid() || !selleraddy.isAlias)
-			continue;
-		string alias = selleraddy.aliasName;
-		boost::algorithm::to_lower(alias);
-        if (strRegexp != "" && !regex_search(title, offerparts, cregex) && !regex_search(category, offerparts, cregex) && !regex_search(description, offerparts, cregex) && strRegexp != offer && strRegexpLower != alias)
-            continue;
-		if(txOffer.bPrivate && strRegexp != offer)
-			continue;
+
 		int expired = 0;
 		int expires_in = 0;
 		int expired_block = 0;		
 		int nHeight = txOffer.nHeight;
 		UniValue oOffer(UniValue::VOBJ);
 		oOffer.push_back(Pair("offer", offer));
-			vector<unsigned char> vchCert;
-			if(!txOffer.vchCert.empty())
-				vchCert = txOffer.vchCert;
+		vector<unsigned char> vchCert;
+		if(!txOffer.vchCert.empty())
+			vchCert = txOffer.vchCert;
 		oOffer.push_back(Pair("cert", stringFromVch(vchCert)));
         oOffer.push_back(Pair("title", stringFromVch(txOffer.sTitle)));
 		oOffer.push_back(Pair("description", stringFromVch(txOffer.sDescription)));

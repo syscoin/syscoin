@@ -121,8 +121,13 @@ const vector<unsigned char> CCert::Serialize() {
     return vchData;
 
 }
-bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int nMax,
+bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string &strRegexp, unsigned int nMax,
         std::vector<std::pair<std::vector<unsigned char>, CCert> >& certScan) {
+    // regexp
+    using namespace boost::xpressive;
+    smatch certparts;
+	boost::algorithm::to_lower(strRegexp);
+    sregex cregex = sregex::compile(strRegexp);
 	int nMaxAge  = GetCertExpirationDepth();
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("certi"), vchCert));
@@ -144,13 +149,21 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, unsigned int 
 				{
 					pcursor->Next();
 					continue;
-				}     
-                certScan.push_back(make_pair(vchCert, txPos));
-            }
-            if (certScan.size() >= nMax)
-                break;
+				}
+				const string &cert = stringFromVch(vchCert);
+				string title = stringFromVch(txPos.vchTitle);
+				boost::algorithm::to_lower(title);
+				if (strRegexp != "" && !regex_search(title, certparts, cregex) && strRegexp != cert)
+				{
+					pcursor->Next();
+					continue;
+				}
+				certScan.push_back(make_pair(vchCert, txPos));
+			}
+			if (certScan.size() >= nMax)
+				break;
 
-            pcursor->Next();
+			pcursor->Next();
         } catch (std::exception &e) {
             return error("%s() : deserialize error", __PRETTY_FUNCTION__);
         }
@@ -1045,11 +1058,6 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
     vector<pair<vector<unsigned char>, CCert> > certScan;
     if (!pcertdb->ScanCerts(vchCert, 25, certScan))
         throw runtime_error("scan failed");
-    // regexp
-    using namespace boost::xpressive;
-    smatch certparts;
-	boost::algorithm::to_lower(strRegexp);
-    sregex cregex = sregex::compile(strRegexp);
     pair<vector<unsigned char>, CCert> pairScan;
 	BOOST_FOREACH(pairScan, certScan) {
 		const CCert &txCert = pairScan.second;
@@ -1061,10 +1069,6 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 				continue;
 		}
 		const string &cert = stringFromVch(pairScan.first);
-		string title = stringFromVch(txCert.vchTitle);
-		boost::algorithm::to_lower(title);
-        if (strRegexp != "" && !regex_search(title, certparts, cregex) && strRegexp != cert)
-            continue;
 
        int nHeight = txCert.nHeight;
 
