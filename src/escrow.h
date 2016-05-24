@@ -59,7 +59,7 @@ public:
 
     friend bool operator==(const CEscrowFeedback &a, const CEscrowFeedback &b) {
         return (
-        a.vchFeedback == b.vchBuyerKey
+        a.vchFeedback == b.vchFeedback
 		&& a.nRating == b.nRating
 		&& a.nFeedbackUser == b.nFeedbackUser
         );
