@@ -107,7 +107,7 @@ public:
 	    return Exists(make_pair(std::string("namea"), address));
 	}
     bool ScanNames(
-		const std::vector<unsigned char>& vchName, const std::string& strRegExp,
+		const std::vector<unsigned char>& vchName, const std::string& strRegExp, bool safeSearch,
             unsigned int nMax,
             std::vector<std::pair<std::vector<unsigned char>, CAliasIndex> >& nameScan);
 

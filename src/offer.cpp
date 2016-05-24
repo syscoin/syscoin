@@ -233,7 +233,7 @@ const vector<unsigned char> COffer::Serialize() {
     return vchData;
 
 }
-bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const string& strRegexp, unsigned int nMax,
+bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const string& strRegexp, bool safeSearch,const string& strCategory, unsigned int nMax,
 		std::vector<std::pair<std::vector<unsigned char>, COffer> >& offerScan) {
    // regexp
     using namespace boost::xpressive;
@@ -266,6 +266,24 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 				}     
 				// dont return sold out offers
 				if(txPos.nQty <= 0 && txPos.nQty != -1)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if(txPos.safetyLevel >= SAFETY_LEVEL1)
+				{
+					if(safeSearch)
+					{
+						pcursor->Next();
+						continue;
+					}
+					if(txPos.safetyLevel > SAFETY_LEVEL1)
+					{
+						pcursor->Next();
+						continue;
+					}
+				}
+				if(strCategory.size() > 0 && !boost::algorithm::starts_with(stringFromVch(txPos.sCategory), strCategory))
 				{
 					pcursor->Next();
 					continue;
@@ -4061,22 +4079,13 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 
 	
 	vector<pair<vector<unsigned char>, COffer> > offerScan;
-	if (!pofferdb->ScanOffers(vchOffer, strRegexp, 25, offerScan))
+	if (!pofferdb->ScanOffers(vchOffer, strRegexp, safeSearch, strCategory, 25, offerScan))
 		throw runtime_error("scan failed");
 	
 	pair<vector<unsigned char>, COffer> pairScan;
 	BOOST_FOREACH(pairScan, offerScan) {
 		const COffer &txOffer = pairScan.second;
 		const string &offer = stringFromVch(pairScan.first);
-		if(txOffer.safetyLevel >= SAFETY_LEVEL1)
-		{
-			if(safeSearch)
-				continue;
-			if(txOffer.safetyLevel > SAFETY_LEVEL1)
-				continue;
-		}
-		if(strCategory.size() > 0 && !boost::algorithm::starts_with(stringFromVch(txOffer.sCategory), strCategory))
-			continue;
 		CPubKey SellerPubKey(txOffer.vchPubKey);
 		CSyscoinAddress selleraddy(SellerPubKey.GetID());
 		selleraddy = CSyscoinAddress(selleraddy.ToString());

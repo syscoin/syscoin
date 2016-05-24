@@ -389,7 +389,7 @@ public:
 
 
     bool ScanOffers(
-            const std::vector<unsigned char>& vchName,const std::string &strRegExp,
+		const std::vector<unsigned char>& vchName,const std::string &strRegExp, bool safeSearch,const std::string& strCategory,
             unsigned int nMax,
             std::vector<std::pair<std::vector<unsigned char>, COffer> >& offerScan);
 

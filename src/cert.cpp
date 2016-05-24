@@ -121,7 +121,7 @@ const vector<unsigned char> CCert::Serialize() {
     return vchData;
 
 }
-bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string &strRegexp, unsigned int nMax,
+bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string &strRegexp, bool safeSearch, unsigned int nMax,
         std::vector<std::pair<std::vector<unsigned char>, CCert> >& certScan) {
     // regexp
     using namespace boost::xpressive;
@@ -150,6 +150,13 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
 				{
 					pcursor->Next();
 					continue;
+				}
+				if(txPos.safetyLevel >= SAFETY_LEVEL1)
+				{
+					if(safeSearch)
+						continue;
+					if(txPos.safetyLevel > SAFETY_LEVEL1)
+						continue;
 				}
 				const string &cert = stringFromVch(vchCert);
 				string title = stringFromVch(txPos.vchTitle);
@@ -1057,18 +1064,11 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
     UniValue oRes(UniValue::VARR);
     
     vector<pair<vector<unsigned char>, CCert> > certScan;
-    if (!pcertdb->ScanCerts(vchCert, strRegexp, 25, certScan))
+    if (!pcertdb->ScanCerts(vchCert, strRegexp, safeSearch, 25, certScan))
         throw runtime_error("scan failed");
     pair<vector<unsigned char>, CCert> pairScan;
 	BOOST_FOREACH(pairScan, certScan) {
 		const CCert &txCert = pairScan.second;
-		if(txCert.safetyLevel >= SAFETY_LEVEL1)
-		{
-			if(safeSearch)
-				continue;
-			if(txCert.safetyLevel > SAFETY_LEVEL1)
-				continue;
-		}
 		const string &cert = stringFromVch(pairScan.first);
 
        int nHeight = txCert.nHeight;

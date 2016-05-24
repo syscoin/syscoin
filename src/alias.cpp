@@ -965,7 +965,7 @@ const vector<unsigned char> CAliasIndex::Serialize() {
     return vchData;
 
 }
-bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string& strRegexp,
+bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string& strRegexp, bool safeSearch, 
 		unsigned int nMax,
 		vector<pair<vector<unsigned char>, CAliasIndex> >& nameScan) {
 	int nMaxAge  = GetAliasExpirationDepth();
@@ -997,6 +997,19 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string
 					pcursor->Next();
 					continue;
 				} 
+				if(txPos.safetyLevel >= SAFETY_LEVEL1)
+				{
+					if(safeSearch)
+					{
+						pcursor->Next();
+						continue;
+					}
+					if(txPos.safetyLevel > SAFETY_LEVEL1)
+					{
+						pcursor->Next();
+						continue;
+					}
+				}
 				string name = stringFromVch(vchName);
 				boost::algorithm::to_lower(name);
 				if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != name)
@@ -1823,7 +1836,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 
 	
 	vector<pair<vector<unsigned char>, CAliasIndex> > nameScan;
-	if (!paliasdb->ScanNames(vchName, strRegexp, 25, nameScan))
+	if (!paliasdb->ScanNames(vchName, strRegexp, safeSearch, 25, nameScan))
 		throw runtime_error("scan failed");
 
 	pair<vector<unsigned char>, CAliasIndex> pairScan;
@@ -1831,13 +1844,6 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		const CAliasIndex &alias = pairScan.second;
 
 		CAliasIndex txName = pairScan.second;
-		if(txName.safetyLevel >= SAFETY_LEVEL1)
-		{
-			if(safeSearch)
-				continue;
-			if(txName.safetyLevel > SAFETY_LEVEL1)
-				continue;
-		}
 		int nHeight = txName.nHeight;
 
 		int expired = 0;
