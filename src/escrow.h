@@ -37,11 +37,11 @@ public:
 	std::vector<unsigned char> vchBuyerKey;
 	std::vector<unsigned char> vchWhitelistAlias;
 	std::vector<unsigned char> vchBuyerFeedback;
-	unsigned int nBuyerRating;
+	unsigned char nBuyerRating;
 	std::vector<unsigned char> vchSellerFeedback;
-	unsigned int nSellerRating;
+	unsigned char nSellerRating;
 	std::vector<unsigned char> vchArbiterFeedback;
-	unsigned int nArbiterRating;
+	unsigned char nArbiterRating;
 	
 	
     uint256 txHash;

@@ -62,7 +62,7 @@ public:
 		}
 	}
     friend bool operator==(const CAliasIndex &a, const CAliasIndex &b) {
-		return (a.nRatin == b.nRating && a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
+		return (a.nRating == b.nRating && a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
     }
 
     friend bool operator!=(const CAliasIndex &a, const CAliasIndex &b) {
