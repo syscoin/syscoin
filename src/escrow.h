@@ -151,7 +151,7 @@ public:
     }
 
     void SetNull() { nBuyerRating = 0; nSellerRating = 0; nArbiterRating = 0; nHeight = 0; txHash.SetNull(); escrowInputTxHash.SetNull(); nQty = 0; nPricePerUnit = 0; vchBuyerKey.clear(); vchArbiterKey.clear(); vchSellerKey.clear(); vchRedeemScript.clear(); vchOffer.clear(); vchWhitelistAlias.clear(); rawTx.clear(); vchOfferAcceptLink.clear(); vchPaymentMessage.clear(); vchBuyerFeedback.clear(); vchSellerFeedback.clear(); vchArbiterFeedback.clear();}
-    bool IsNull() const { return (txHash.IsNull() && escrowInputTxHash.IsNull() && nBuyerFeedback == 0 && nSellerFeedback == 0 && nArbiterFeedback == 0 && vchBuyerFeedback.empty() && vchSellerFeedback.empty() && vchArbiterFeedback.empty() && nHeight == 0 && nQty == 0 && nPricePerUnit == 0 && vchBuyerKey.empty() && vchArbiterKey.empty() && vchSellerKey.empty()); }
+    bool IsNull() const { return (txHash.IsNull() && escrowInputTxHash.IsNull() && nBuyerRating == 0 && nSellerRating == 0 && nArbiterRating == 0 && vchBuyerFeedback.empty() && vchSellerFeedback.empty() && vchArbiterFeedback.empty() && nHeight == 0 && nQty == 0 && nPricePerUnit == 0 && vchBuyerKey.empty() && vchArbiterKey.empty() && vchSellerKey.empty()); }
     bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();
