@@ -27,8 +27,9 @@ public:
 		ExpiresIn = 2,
 		Expired = 3,
 		Rating = 4,
-		SafeSearch = 5,
-		Value = 6  /**< Alias value */
+		RatingCount = 5,
+		SafeSearch = 6,
+		Value = 7  /**< Alias value */
     };
 
     enum RoleIndex {
