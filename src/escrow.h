@@ -25,13 +25,13 @@ int GetEscrowExpirationDepth();
 std::string escrowFromOp(int op);
 CScript RemoveEscrowScriptPrefix(const CScript& scriptIn);
 extern bool IsSys21Fork(const uint64_t& nHeight);
+enum EscrowUser {
+    BUYER=0,
+	SELLER,
+	ARBITER
+};
 class CEscrowFeedback {
 public:
-    enum EscrowUser {
-        BUYER=0,
-		SELLER,
-		ARBITER
-    };
 	std::vector<unsigned char> vchFeedback;
 	unsigned char nRating;
 	unsigned char nFeedbackUser;
