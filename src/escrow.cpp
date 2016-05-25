@@ -312,16 +312,13 @@ CScript RemoveEscrowScriptPrefix(const CScript& scriptIn) {
 }
 void HandleEscrowFeedback(const CEscrow& escrow)
 {
-	LogPrintf("HandleEscrowFeedback\n");
 	if(escrow.buyerFeedback.nRating > 0)
 	{
-		LogPrintf("buyer feedback\n");
 		CPubKey key(escrow.vchBuyerKey);
 		CSyscoinAddress address(key.GetID());
 		address = CSyscoinAddress(address.ToString());
 		if(address.IsValid() && address.isAlias)
 		{
-			LogPrintf("buyer address\n");
 			vector<CAliasIndex> vtxPos;
 			const vector<unsigned char> &vchAlias = vchFromString(address.aliasName);
 			if (paliasdb->ReadAlias(vchAlias, vtxPos) && !vtxPos.empty())
@@ -330,7 +327,6 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
 				alias.nRating = (alias.nRating+escrow.buyerFeedback.nRating)/alias.nRatingCount;
-				LogPrintf("write alias rating %f\n", alias.nRating);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -339,13 +335,11 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 	}
 	if(escrow.sellerFeedback.nRating > 0)
 	{
-		LogPrintf("seller feedback\n");
 		CPubKey key(escrow.vchSellerKey);
 		CSyscoinAddress address(key.GetID());
 		address = CSyscoinAddress(address.ToString());
 		if(address.IsValid() && address.isAlias)
 		{
-			LogPrintf("seller address\n");
 			vector<CAliasIndex> vtxPos;
 			const vector<unsigned char> &vchAlias = vchFromString(address.aliasName);
 			if (paliasdb->ReadAlias(vchAlias, vtxPos) && !vtxPos.empty())
@@ -353,7 +347,6 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
 				alias.nRating = (alias.nRating+escrow.sellerFeedback.nRating)/alias.nRatingCount;
-				LogPrintf("write alias rating %f\n", alias.nRating);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -361,13 +354,11 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 	}
 	if(escrow.arbiterFeedback.nRating > 0)
 	{
-		LogPrintf("arbiter feedback\n");
 		CPubKey key(escrow.vchArbiterKey);
 		CSyscoinAddress address(key.GetID());
 		address = CSyscoinAddress(address.ToString());
 		if(address.IsValid() && address.isAlias)
 		{
-			LogPrintf("arbiter address\n");
 			vector<CAliasIndex> vtxPos;
 			const vector<unsigned char> &vchAlias = vchFromString(address.aliasName);
 			if (paliasdb->ReadAlias(vchAlias, vtxPos) && !vtxPos.empty())
@@ -375,7 +366,6 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
 				alias.nRating = (alias.nRating+escrow.arbiterFeedback.nRating)/alias.nRatingCount;
-				LogPrintf("write alias rating %f\n", alias.nRating);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -855,7 +845,6 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	if(params.size() > 2)
 	{
 		try {
-			LogPrintf("primary rating %s\n", params[2].get_str().c_str());
 			nRatingSeller = atoi(params[2].get_str());
 			if(nRatingSeller < 0 || nRatingSeller > 5)
 				throw runtime_error("invalid seller rating value, must be less than or equal to 5 and greater than or equal to 0");
@@ -1069,7 +1058,6 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	// arbiter
 	if(arbiterSigning)
 	{
-		LogPrintf("arbiterSigning rating seller %d, buyer %d\n", nRatingSeller, nRatingSecondary);
 		CEscrowFeedback sellerFeedback(ARBITER);
 		sellerFeedback.vchFeedback = vchFeedbackSeller;
 		sellerFeedback.nRating = nRatingSeller;
@@ -1082,7 +1070,6 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	// buyer
 	else
 	{
-		LogPrintf("buyer signing rating seller %d, arbiter %d\n", nRatingSeller, nRatingSecondary);
 		CEscrowFeedback sellerFeedback(BUYER);
 		sellerFeedback.vchFeedback = vchFeedbackSeller;
 		sellerFeedback.nRating = nRatingSeller;
@@ -2425,7 +2412,16 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 			offer = vtxOfferPos.back();
 		}
         int nHeight = txEscrow.nHeight;
- 
+		CTransaction tx;
+		if (!GetSyscoinTransaction(nHeight, txEscrow.txHash, tx, Params().GetConsensus())) {
+			continue;
+		}
+        // decode txn, skip non-alias txns
+        vector<vector<unsigned char> > vvch;
+        int op, nOut;
+        if (!DecodeEscrowTx(tx, op, nOut, vvch) 
+        	|| !IsEscrowOp(op) )
+            continue; 
 		CPubKey SellerPubKey(txEscrow.vchSellerKey);
 		CSyscoinAddress selleraddy(SellerPubKey.GetID());
 		selleraddy = CSyscoinAddress(selleraddy.ToString());
@@ -2458,12 +2454,18 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		oEscrow.push_back(Pair("offer", stringFromVch(txEscrow.vchOffer)));
 		oEscrow.push_back(Pair("offertitle", stringFromVch(offer.sTitle)));
 		oEscrow.push_back(Pair("offeracceptlink", stringFromVch(txEscrow.vchOfferAcceptLink)));
+	
 		string status = "unknown";
 
-		if(txEscrow.vchOfferAcceptLink.size() <= 0)
+		if(op == OP_ESCROW_ACTIVATE)
 			status = "in-escrow";
-		else
+		else if(op == OP_ESCROW_RELEASE)
+			status = "escrow released";
+		else if(op == OP_ESCROW_REFUND)
+			status = "escrow refunded";
+		else if(op == OP_ESCROW_COMPLETE)
 			status = "complete";
+		
 
 		oEscrow.push_back(Pair("status", status));
 		int64_t nEscrowFee = GetEscrowArbiterFee(txEscrow.nPricePerUnit * txEscrow.nQty);
