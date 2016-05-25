@@ -318,6 +318,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		LogPrintf("buyer feedback\n");
 		CPubKey key(escrow.vchBuyerKey);
 		CSyscoinAddress address(key.GetID());
+		address = CSyscoinAddress(address.toString());
 		if(address.IsValid() && address.isAlias)
 		{
 			LogPrintf("buyer address\n");
@@ -341,6 +342,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		LogPrintf("seller feedback\n");
 		CPubKey key(escrow.vchSellerKey);
 		CSyscoinAddress address(key.GetID());
+		address = CSyscoinAddress(address.toString());
 		if(address.IsValid() && address.isAlias)
 		{
 			LogPrintf("seller address\n");
@@ -362,6 +364,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		LogPrintf("arbiter feedback\n");
 		CPubKey key(escrow.vchArbiterKey);
 		CSyscoinAddress address(key.GetID());
+		address = CSyscoinAddress(address.toString());
 		if(address.IsValid() && address.isAlias)
 		{
 			LogPrintf("arbiter address\n");
