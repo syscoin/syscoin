@@ -183,6 +183,7 @@ public:
 		escrowInputTxHash = b.escrowInputTxHash;
 		nHeight = b.nHeight;
 		nQty = b.nQty;
+		nPricePerUnit = b.nPricePerUnit;
 		buyerFeedback = b.buyerFeedback;
 		sellerFeedback = b.sellerFeedback;
 		arbiterFeedback = b.arbiterFeedback;
