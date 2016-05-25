@@ -926,7 +926,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 		foundSellerKey = false;
 	}
 	if(foundSellerKey)
-		return tableRPC.execute("escrowclaimrelease", params);
+		return tableRPC.execute("escrowclaimrelease", params[0]);
     if (op != OP_ESCROW_ACTIVATE)
         throw runtime_error("Release can only happen on an activated escrow");
 	int nOutMultiSig = 0;
@@ -1495,7 +1495,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 		foundBuyerKey = false;
 	}
 	if(foundBuyerKey)
-		return tableRPC.execute("escrowclaimrefund", params);
+		return tableRPC.execute("escrowclaimrefund", params[0]);
 	if(op != OP_ESCROW_ACTIVATE)
 		 throw runtime_error("Refund can only happen on an activated escrow");
 	int nOutMultiSig = 0;
