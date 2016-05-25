@@ -1060,6 +1060,8 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 		CEscrowFeedback buyerFeedback(ARBITER);
 		buyerFeedback.vchFeedback = vchFeedbackSecondary;
 		buyerFeedback.nRating = nRatingSecondary;
+		escrow.buyerFeedback = buyerFeedback;
+		escrow.sellerFeedback = sellerFeedback;
 	}
 	// buyer
 	else
@@ -1068,8 +1070,10 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 		sellerFeedback.vchFeedback = vchFeedbackSeller;
 		sellerFeedback.nRating = nRatingSeller;
 		CEscrowFeedback arbiterFeedback(BUYER);
-		buyerFeedback.vchFeedback = vchFeedbackSecondary;
-		buyerFeedback.nRating = nRatingSecondary;
+		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
+		arbiterFeedback.nRating = nRatingSecondary;
+		escrow.arbiterFeedback = arbiterFeedback;
+		escrow.sellerFeedback = sellerFeedback;
 	}
 	escrow.rawTx = ParseHex(hex_str);
 	escrow.nHeight = chainActive.Tip()->nHeight;
