@@ -344,9 +344,9 @@ void ManageEscrowDialog::onLeaveFeedback()
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowfeedback");
 	params.push_back(escrow.toStdString());
-	params.push_back(QString::number(ui->primaryRating->value()).toStdString());
+	params.push_back(ui->primaryRating->cleanText().toStdString());
 	params.push_back(ui->primaryFeedback->toPlainText().toStdString());
-	params.push_back(QString::number(ui->secondaryRating->value()).toStdString());
+	params.push_back(ui->secondaryRating->cleanText().toStdString());
 	params.push_back(ui->secondaryFeedback->toPlainText().toStdString());
 	try {
 		UniValue result = tableRPC.execute(strMethod, params);
@@ -385,9 +385,9 @@ void ManageEscrowDialog::on_releaseButton_clicked()
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrelease");
 	params.push_back(escrow.toStdString());
-	params.push_back(QString::number(ui->primaryRating->value()).toStdString());
+	params.push_back(ui->primaryRating->cleanText().toStdString());
 	params.push_back(ui->primaryFeedback->toPlainText().toStdString());
-	params.push_back(QString::number(ui->secondaryRating->value()).toStdString());
+	params.push_back(ui->secondaryRating->cleanText().toStdString());
 	params.push_back(ui->secondaryFeedback->toPlainText().toStdString());
 	try {
 		UniValue result = tableRPC.execute(strMethod, params);
@@ -421,9 +421,9 @@ void ManageEscrowDialog::on_refundButton_clicked()
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrefund");
 	params.push_back(escrow.toStdString());
-	params.push_back(QString::number(ui->primaryRating->value()).toStdString());
+	params.push_back(ui->primaryRating->cleanText().toStdString());
 	params.push_back(ui->primaryFeedback->toPlainText().toStdString());
-	params.push_back(QString::number(ui->secondaryRating->value()).toStdString());
+	params.push_back(ui->secondaryRating->cleanText().toStdString());
 	params.push_back(ui->secondaryFeedback->toPlainText().toStdString());
 	try {
 		UniValue result = tableRPC.execute(strMethod, params);

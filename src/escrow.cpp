@@ -852,6 +852,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	if(params.size() > 2)
 	{
 		try {
+			LogPrintf("primary rating %s\n", params[2].get_str().c_str());
 			nRatingSeller = atoi(params[2].get_str());
 			if(nRatingSeller < 0 || nRatingSeller > 5)
 				throw runtime_error("invalid seller rating value, must be less than or equal to 5 and greater than or equal to 0");
