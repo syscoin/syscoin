@@ -936,10 +936,13 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	int64_t nExpectedAmount = escrow.nPricePerUnit*escrow.nQty;
 	int64_t nEscrowFee = GetEscrowArbiterFee(nExpectedAmount);
 	int64_t nExpectedAmountWithFee = nExpectedAmount+nEscrowFee+recipientFee.nAmount;
+	LogPrintf("total outputs: %d\n", fundingTx.vout.size());
 	for(unsigned int i=0;i<fundingTx.vout.size();i++)
 	{
+		LogPrintf("output %d: value found %" PRId64" vs expected %" PRId64"\n",i, fundingTx.vout[i].nValue, nExpectedAmountWithFee);
 		if(fundingTx.vout[i].nValue == nExpectedAmountWithFee)
 		{
+			LogPrintf("found!\n"); 
 			nOutMultiSig = i;
 			break;
 		}
