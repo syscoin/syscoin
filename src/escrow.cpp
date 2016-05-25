@@ -327,6 +327,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
 				alias.nRating = (int)(((alias.nRating+(float)escrow.buyerFeedback.nRating)/(float)alias.nRatingCount) + 0.5);
+				LogPrintf("buyer feedback rating %d, rating count %d, final rating %f\n", escrow.buyerFeedback.nRating, alias.nRatingCount, alias.nRating);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -347,6 +348,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
 				alias.nRating = (int)(((alias.nRating+(float)escrow.sellerFeedback.nRating)/(float)alias.nRatingCount) + 0.5);
+				LogPrintf("seller feedback rating %d, rating count %d, final rating %f\n", escrow.sellerFeedback.nRating, alias.nRatingCount, alias.nRating);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -366,6 +368,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
 				alias.nRating = (int)(((alias.nRating+(float)escrow.arbiterFeedback.nRating)/(float)alias.nRatingCount) + 0.5);
+				LogPrintf("arbiter feedback rating %d, rating count %d, final rating %f\n", escrow.arbiterFeedback.nRating, alias.nRatingCount, alias.nRating);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
