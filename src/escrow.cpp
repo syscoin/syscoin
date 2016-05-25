@@ -326,7 +326,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 				
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
-				alias.nRating = (alias.nRating+escrow.buyerFeedback.nRating)/alias.nRatingCount;
+				alias.nRating = (int)(((alias.nRating+(float)escrow.buyerFeedback.nRating)/(float)alias.nRatingCount) + 0.5);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -346,7 +346,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 			{
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
-				alias.nRating = (alias.nRating+escrow.sellerFeedback.nRating)/alias.nRatingCount;
+				alias.nRating = (int)(((alias.nRating+(float)escrow.sellerFeedback.nRating)/(float)alias.nRatingCount) + 0.5);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -365,7 +365,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 			{
 				CAliasIndex alias = vtxPos.back();
 				alias.nRatingCount++;
-				alias.nRating = (alias.nRating+escrow.arbiterFeedback.nRating)/alias.nRatingCount;
+				alias.nRating = (int)(((alias.nRating+(float)escrow.arbiterFeedback.nRating)/(float)alias.nRatingCount) + 0.5);
 				PutToAliasList(vtxPos, alias);
 				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
 			}
@@ -2383,7 +2383,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 						"[from] : show results from this GUID [from], 0 means first.\n"
 						"[escrowfilter] : shows all escrows that are safe to display (not on the ban list)\n"
 						"escrowfilter \"\" 5 # list escrows updated in last 5 blocks\n"
-						"escrowfilter \"^excrow\" # list all excrows starting with \"escrow\"\n"
+						"escrowfilter \"^escrow\" # list all excrows starting with \"escrow\"\n"
 						"escrowfilter 36000 0 0 stat # display stats (number of escrows) on active escrows\n");
 
 	vector<unsigned char> vchEscrow;
