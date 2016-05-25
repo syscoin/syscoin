@@ -26,12 +26,12 @@ public:
 	bool isYourAlias(const QString &alias);
 	bool loadEscrow(const QString &escrow, QString &buyer, QString &seller, QString &arbiter, QString &status, QString &offertitle, QString &total);
 	ManageEscrowDialog::EscrowType findYourEscrowRoleFromAliases(const QString &buyer, const QString &seller, const QString &arbiter);
-	
 public Q_SLOTS:
 	void on_releaseButton_clicked();
 	void on_refundButton_clicked();
 	void on_cancelButton_clicked();
 private:
+	void onLeaveFeedback();
 	WalletModel* walletModel;
     Ui::ManageEscrowDialog *ui;
 	QString escrow;
