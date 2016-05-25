@@ -2240,9 +2240,11 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("offer", stringFromVch(escrow.vchOffer)));
 		oName.push_back(Pair("offertitle", stringFromVch(offer.sTitle)));
 		oName.push_back(Pair("offeracceptlink", stringFromVch(escrow.vchOfferAcceptLink)));
-
-		string sTotal = strprintf("%llu SYS", (escrow.nPricePerUnit/COIN)*escrow.nQty);
+		int64_t nEscrowFee = GetEscrowArbiterFee(escrow.nPricePerUnit * escrow.nQty);
+		oName.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
+		string sTotal = strprintf("%llu SYS", ((nEscrowFee+escrow.nPricePerUnit)*escrow.nQty)/COIN);
 		oName.push_back(Pair("total", sTotal));
+
 		expired_block = nHeight + GetEscrowExpirationDepth();
         if(expired_block < chainActive.Tip()->nHeight)
 		{
@@ -2338,7 +2340,9 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 			oEscrow.push_back(Pair("offertitle", stringFromVch(offer.sTitle)));
 			oEscrow.push_back(Pair("offeracceptlink", stringFromVch(txPos2.vchOfferAcceptLink)));
 
-			string sTotal = strprintf("%llu SYS", (txPos2.nPricePerUnit/COIN)*txPos2.nQty);
+			int64_t nEscrowFee = GetEscrowArbiterFee(txPos2.nPricePerUnit * txPos2.nQty);
+			oEscrow.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
+			string sTotal = strprintf("%llu SYS", ((nEscrowFee+txPos2.nPricePerUnit)*txPos2.nQty)/COIN);
 			oEscrow.push_back(Pair("total", sTotal));
 			if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0)
 			{
@@ -2445,7 +2449,9 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 			status = "complete";
 
 		oEscrow.push_back(Pair("status", status));
-		string sTotal = strprintf("%llu SYS", (txEscrow.nPricePerUnit/COIN)*txEscrow.nQty);
+		int64_t nEscrowFee = GetEscrowArbiterFee(txEscrow.nPricePerUnit * txEscrow.nQty);
+		oEscrow.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
+		string sTotal = strprintf("%llu SYS", ((nEscrowFee+txEscrow.nPricePerUnit)*txEscrow.nQty)/COIN);
 		oEscrow.push_back(Pair("total", sTotal));
         oRes.push_back(oEscrow);
     }
