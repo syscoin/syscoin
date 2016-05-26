@@ -499,9 +499,11 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				break;
 			case OP_ESCROW_COMPLETE:
 				// Check input
+				if (vvchArgs.size() > 1 && vvchArgs[1].size() > 1)
+					eturn error("CheckEscrowInputs() : escrow complete status too large");
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(vvchArgs.size() > 1 && vvchArgs[1] == "1" && prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
+				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1") && prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
 					return error("CheckEscrowInputs() : can only leave feedback for a completed escrow");
 				else
 				{
@@ -518,9 +520,11 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				break;			
 			case OP_ESCROW_REFUND:
+				if (vvchArgs.size() > 1 && vvchArgs[1].size() > 1)
+					eturn error("CheckEscrowInputs() : escrow refund status too large");
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(vvchArgs.size() > 1 && vvchArgs[1] == "1" && prevOp != OP_ESCROW_REFUND)
+				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1") && prevOp != OP_ESCROW_REFUND)
 					return error("CheckEscrowInputs() :  can only complete refund on a refunded escrow");
 				else
 				{
@@ -566,10 +570,10 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					theOffer.UnserializeFromTx(tx);
 					theEscrow.vchOfferAcceptLink = theOffer.accept.vchAcceptRand;
-					if(vvchArgs.size() > 1 && vvchArgs[1] == "1")
+					if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
 					{
 						// only allow to rate users once 
-						if(vvchPrevArgs.size() > 1 && prevOp == OP_ESCROW_COMPLETE && vvchPrevArgs[1] == "1")
+						if(vvchPrevArgs.size() > 1 && prevOp == OP_ESCROW_COMPLETE && vvchPrevArgs[1] == vchFromString("1"))
 						{
 							theEscrow.buyerFeedback.nRating = 0;
 							theEscrow.sellerFeedback.nRating = 0;
@@ -2247,13 +2251,13 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 				status = "in-escrow";
 			else if(op == OP_ESCROW_RELEASE)
 				status = "escrow released";
-			else if(op == OP_ESCROW_REFUND && vvch[1] == "0")
+			else if(op == OP_ESCROW_REFUND && vvch.size() == 1)
 				status = "escrow refunded";
-			else if(op == OP_ESCROW_COMPLETE && vvch[1] == "1")
+			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 				status = "escrow feedback";
-			else if(op == OP_ESCROW_REFUND && vvch[1] == "1")
+			else if(op == OP_ESCROW_REFUND && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 				status = "escrow refund complete";
-			else if(op == OP_ESCROW_COMPLETE && vvch[1] == "0")
+			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 1)
 				status = "complete";
 		}
 		else
@@ -2348,13 +2352,13 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 				status = "in-escrow";
 			else if(op == OP_ESCROW_RELEASE)
 				status = "escrow released";
-			else if(op == OP_ESCROW_REFUND && vvch[1] == "0")
+			else if(op == OP_ESCROW_REFUND && vvch.size() == 1)
 				status = "escrow refunded";
-			else if(op == OP_ESCROW_COMPLETE && vvch[1] == "1")
+			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 				status = "escrow feedback";
-			else if(op == OP_ESCROW_REFUND && vvch[1] == "1")
+			else if(op == OP_ESCROW_REFUND && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 				status = "escrow refund complete";
-			else if(op == OP_ESCROW_COMPLETE && vvch[1] == "0")
+			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 1)
 				status = "complete";
 
 			oEscrow.push_back(Pair("status", status));
@@ -2453,13 +2457,13 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 			status = "in-escrow";
 		else if(op == OP_ESCROW_RELEASE)
 			status = "escrow released";
-		else if(op == OP_ESCROW_REFUND && vvch[1] == "0")
+		else if(op == OP_ESCROW_REFUND && vvch.size() == 1)
 			status = "escrow refunded";
-		else if(op == OP_ESCROW_COMPLETE && vvch[1] == "1")
+		else if(op == OP_ESCROW_COMPLETE && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 			status = "escrow feedback";
-		else if(op == OP_ESCROW_REFUND && vvch[1] == "1")
+		else if(op == OP_ESCROW_REFUND && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 			status = "escrow refund complete";
-		else if(op == OP_ESCROW_COMPLETE && vvch[1] == "0")
+		else if(op == OP_ESCROW_COMPLETE && vvch.size() == 1)
 			status = "complete";
 		
 
