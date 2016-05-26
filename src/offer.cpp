@@ -2750,7 +2750,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		if (pescrowdb->ExistsEscrow(escrowVvch[0])) {
 			if (pescrowdb->ReadEscrow(escrowVvch[0], escrowVtxPos) && !escrowVtxPos.empty())
 			{	
-				CScript scriptPubKeyEscrowBuyerDestination, scriptPubKeyEscrowBuyerDestination, scriptPubKeyEscrowArbiterDestination;
+				CScript scriptPubKeyEscrowBuyerDestination, scriptPubKeyEscrowSellerDestination, scriptPubKeyEscrowArbiterDestination;
 				// we want the initial funding escrow transaction height as when to calculate this offer accept price from convertCurrencyCodeToSyscoin()
 				CEscrow fundingEscrow = escrowVtxPos.front();
 				vchEscrowWhitelistAlias = fundingEscrow.vchWhitelistAlias;
@@ -2761,7 +2761,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 				scriptPubKeyEscrowSellerDestination = GetScriptForDestination(sellerEscrowKey.GetID());
 				CPubKey buyerEscrowKey(fundingEscrow.vchBuyerKey);
 				scriptPubKeyEscrowBuyerDestination = GetScriptForDestination(buyerEscrowKey.GetID());
-				CPubKey arbiterEscrowKey(fundingEscrow.vchArbiterrKey);
+				CPubKey arbiterEscrowKey(fundingEscrow.vchArbiterKey);
 				scriptPubKeyEscrowArbiterDestination = GetScriptForDestination(arbiterEscrowKey.GetID());
 				scriptPubKeyEscrowBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
 				scriptPubKeyEscrowBuyer += scriptPubKeyEscrowBuyerDestination;
