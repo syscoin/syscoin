@@ -584,9 +584,6 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				else if(op == OP_ESCROW_FEEDBACK)
 				{
-					theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
-					theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
-					theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 					// only allow to rate users once 
 					if(prevOp == OP_ESCROW_FEEDBACK)
 					{
@@ -595,7 +592,12 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						theEscrow.arbiterFeedback.nRating = 0;
 					}
 					else
+					{
+						theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
+						theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
+						theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 						HandleEscrowFeedback(theEscrow);	
+					}
 				}
 			}
 					
