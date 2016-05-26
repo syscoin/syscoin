@@ -50,7 +50,7 @@ public:
 		READWRITE(vchMessageTo);
 		READWRITE(vchMessageFrom);
 		READWRITE(txHash);
-		READWRITE(nHeight);
+		READWRITE(VARINT(nHeight));
 	}
 
     friend bool operator==(const CMessage &a, const CMessage &b) {

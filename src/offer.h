@@ -241,7 +241,7 @@ public:
 			READWRITE(txHash);
 			READWRITE(VARINT(nHeight));
     		READWRITE(nPrice);
-    		READWRITE(nQty);
+    		READWRITE(VARINT(nQty));
     		READWRITE(accept);
 			READWRITE(vchLinkOffer);
 			READWRITE(linkWhitelist);
