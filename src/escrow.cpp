@@ -1847,7 +1847,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInOffer=NULL;
 	const CWalletTx * wtxInCert=NULL;
 	const CWalletTx * wtxInAlias=NULL;
-	if(IsSys21Fork())
+	if(IsSys21Fork(chainActive.Tip()->nHeight))
 		SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
 	UniValue ret(UniValue::VARR);
 	ret.push_back(wtx.GetHash().GetHex());
@@ -2011,8 +2011,8 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
 		CEscrowFeedback sellerFeedback(ARBITER);
-		sellerFeedback.vchFeedback = vchFeedbackBuyer;
-		sellerFeedback.nRating = nRatingBuyer;
+		sellerFeedback.vchFeedback = vchFeedbackSecondary;
+		sellerFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.sellerFeedback = sellerFeedback;
 	}
@@ -2049,7 +2049,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInOffer=NULL;
 	const CWalletTx * wtxInCert=NULL;
 	const CWalletTx * wtxInAlias=NULL;
-	if(IsSys21Fork())
+	if(IsSys21Fork(chainActive.Tip()->nHeight))
 		SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
 	UniValue ret(UniValue::VARR);
 	ret.push_back(wtx.GetHash().GetHex());
