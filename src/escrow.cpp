@@ -1576,7 +1576,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 
     CScript scriptPubKey, scriptPubKeyBuyer;
 	scriptPubKeyBuyer= GetScriptForDestination(buyerKey.GetID());
-    scriptPubKey << CScript::EncodeOP_N(OP_ESCROW_REFUND) << vchEscrow  << vchFromString("0") << OP_2DROP << OP_DROP;
+    scriptPubKey << CScript::EncodeOP_N(OP_ESCROW_REFUND) << vchEscrow << OP_2DROP;
     scriptPubKey += scriptPubKeyBuyer;
 	vector<CRecipient> vecSend;
 	CRecipient recipient;
