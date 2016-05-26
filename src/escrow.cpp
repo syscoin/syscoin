@@ -588,7 +588,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
 					theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 					// only allow to rate users once 
-					if(prevOp != OP_ESCROW_FEEDBACK)
+					if(prevOp == OP_ESCROW_FEEDBACK)
 					{
 						theEscrow.buyerFeedback.nRating = 0;
 						theEscrow.sellerFeedback.nRating = 0;
