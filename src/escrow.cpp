@@ -2012,10 +2012,16 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
 
-	CScript scriptPubKeyBuyer, scriptPubKeySeller, scriptPubKeyArbiter;
+    CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyArbiter, scriptPubKeyBuyerDestination, scriptPubKeySellerDestination, scriptPubKeyArbiterDestination;
+	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
+	scriptPubKeySellerDestination= GetScriptForDestination(sellerKey.GetID());
+	scriptPubKeyArbiterDestination= GetScriptForDestination(arbiterKey.GetID());
 	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
 	scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+	scriptPubKeySeller += scriptPubKeySellerDestination;
 	scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+	scriptPubKeyArbiter += scriptPubKeyArbiterDestination;
 	vector<CRecipient> vecSend;
 	CRecipient recipientBuyer;
 	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
