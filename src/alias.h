@@ -29,7 +29,7 @@ bool IsSys21Fork(const uint64_t& nHeight);
 class CAliasIndex {
 public:
     uint256 txHash;
-    uint64_t nHeight;
+    int64_t nHeight;
     std::vector<unsigned char> vchPublicValue;
 	std::vector<unsigned char> vchPrivateValue;
 	std::vector<unsigned char> vchPubKey;

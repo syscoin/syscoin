@@ -105,6 +105,7 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 	else if(status == "complete")
 	{		
 		ui->manageInfo2->setText(tr("The escrow has been successfully claimed by the merchant. The escrow is complete."));
+		ui->refundButton->setEnabled(false);
 		ui->primaryLabel->setVisible(true);
 		ui->primaryRating->setVisible(true);
 		ui->primaryFeedback->setVisible(true);
@@ -141,6 +142,7 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 	else if(status == "escrow refund complete")
 	{		
 		ui->manageInfo2->setText(tr("The escrow has been successfully refunded to the buyer. The escrow is complete."));
+		ui->refundButton->setEnabled(false);
 		ui->primaryLabel->setVisible(true);
 		ui->primaryRating->setVisible(true);
 		ui->primaryFeedback->setVisible(true);
@@ -168,6 +170,7 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 	else if(status == "escrow feedback")
 	{		
 		ui->manageInfo2->setText(tr("The escrow is complete."));
+		ui->refundButton->setEnabled(false);
 		ui->primaryLabel->setVisible(true);
 		ui->primaryRating->setVisible(false);
 		ui->primaryFeedback->setVisible(true);
