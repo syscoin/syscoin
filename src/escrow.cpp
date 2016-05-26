@@ -285,7 +285,7 @@ bool DecodeEscrowScript(const CScript& script, int& op,
     if ((op == OP_ESCROW_ACTIVATE && vvch.size() == 1)
         || (op == OP_ESCROW_RELEASE && vvch.size() == 1)
         || (op == OP_ESCROW_REFUND && vvch.size() <= 2)
-		|| (op == OP_ESCROW_COMPLETE && vvch.size() <= 2)
+		|| (op == OP_ESCROW_COMPLETE && vvch.size() <= 2))
         return true;
 
     return false;
@@ -500,7 +500,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 			case OP_ESCROW_COMPLETE:
 				// Check input
 				if (vvchArgs.size() > 1 && vvchArgs[1].size() > 1)
-					eturn error("CheckEscrowInputs() : escrow complete status too large");
+					return error("CheckEscrowInputs() : escrow complete status too large");
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
 				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1") && prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
@@ -521,7 +521,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				break;			
 			case OP_ESCROW_REFUND:
 				if (vvchArgs.size() > 1 && vvchArgs[1].size() > 1)
-					eturn error("CheckEscrowInputs() : escrow refund status too large");
+					return error("CheckEscrowInputs() : escrow refund status too large");
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
 				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1") && prevOp != OP_ESCROW_REFUND)
