@@ -34,7 +34,7 @@ public:
 	std::vector<unsigned char> vchPrivateValue;
 	std::vector<unsigned char> vchPubKey;
 	unsigned char safetyLevel;
-	uint64_t nRating;
+	int64_t nRating;
 	int nRatingCount;
     CAliasIndex() { 
         SetNull();
