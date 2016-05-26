@@ -1724,7 +1724,6 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	CSyscoinAddress buyerAddress(buyerKey.GetID());
 	if(!buyerAddress.IsValid())
 		throw runtime_error("Buyer address is invalid!");
-
 	if (!buyerAddress.GetKeyID(keyID))
 		throw runtime_error("Buyer address does not refer to a key");
 	CKey vchSecret;
@@ -1814,7 +1813,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
     scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_REFUND_COMPLETE) << vchEscrow << OP_2DROP;
     scriptPubKeySeller += scriptPubKeySellerDestination;
 
-	scriptPubKeyArbiterDestination= GetScriptForDestination(arbiterrKey.GetID());
+	scriptPubKeyArbiterDestination= GetScriptForDestination(arbiterKey.GetID());
     scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_REFUND_COMPLETE) << vchEscrow << OP_2DROP;
     scriptPubKeyArbiter += scriptPubKeyArbiterDestination;
 
@@ -1827,7 +1826,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	vecSend.push_back(recipientSeller);
 	CRecipient recipientArbiter;
 	CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
-	vecSend.push_back(recipientArbiter)
+	vecSend.push_back(recipientArbiter);
 
 	const vector<unsigned char> &data = escrow.Serialize();
 	CScript scriptData;
