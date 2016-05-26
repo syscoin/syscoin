@@ -1849,7 +1849,6 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInAlias=NULL;
 	if(IsSys21Fork(chainActive.Tip()->nHeight))
 		SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
-	UniValue ret(UniValue::VARR);
 	ret.push_back(wtx.GetHash().GetHex());
 	return ret;
 }
@@ -2050,7 +2049,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInCert=NULL;
 	const CWalletTx * wtxInAlias=NULL;
 	if(IsSys21Fork(chainActive.Tip()->nHeight))
-		SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
+		SendMoneySyscoin(vecSend, recipientBuyer.nAmount+recipientSeller.nAmount+recipientArbiter.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
 	UniValue ret(UniValue::VARR);
 	ret.push_back(wtx.GetHash().GetHex());
 	return ret;
