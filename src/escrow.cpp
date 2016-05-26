@@ -503,8 +503,11 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					return error("CheckEscrowInputs() : escrow complete status too large");
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1") && prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
-					return error("CheckEscrowInputs() : can only leave feedback for a completed escrow");
+				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
+				{
+					if(prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
+						return error("CheckEscrowInputs() : can only leave feedback for a completed escrow");
+				}
 				else
 				{
 					if(prevOp != OP_ESCROW_RELEASE)
@@ -524,8 +527,11 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					return error("CheckEscrowInputs() : escrow refund status too large");
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1") && prevOp != OP_ESCROW_REFUND)
-					return error("CheckEscrowInputs() :  can only complete refund on a refunded escrow");
+				if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
+				{
+					if(prevOp != OP_ESCROW_REFUND)
+						return error("CheckEscrowInputs() :  can only complete refund on a refunded escrow");
+				}
 				else
 				{
 					if(prevOp != OP_ESCROW_ACTIVATE)
