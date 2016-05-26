@@ -34,8 +34,8 @@ public:
 	std::vector<unsigned char> vchPrivateValue;
 	std::vector<unsigned char> vchPubKey;
 	unsigned char safetyLevel;
-	int64_t nRating;
-	int nRatingCount;
+	unsigned int nRating;
+	unsigned int nRatingCount;
     CAliasIndex() { 
         SetNull();
     }
@@ -59,8 +59,8 @@ public:
 		if(IsSys21Fork(nHeight))
 		{
 			READWRITE(safetyLevel);
-			READWRITE(nRating);
-			READWRITE(nRatingCount);
+			READWRITE(VARINT(nRating));
+			READWRITE(VARINT(nRatingCount));
 		}
 	}
     friend bool operator==(const CAliasIndex &a, const CAliasIndex &b) {
