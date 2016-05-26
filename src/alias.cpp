@@ -1794,8 +1794,8 @@ UniValue aliashistory(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("address", address.ToString()));
             oName.push_back(Pair("lastupdate_height", nHeight));
 			int rating = 0;
-			if(alias.nRatingCount > 0)
-				rating = (int)txPos2.nRating/txPos2.nRatingCount;
+			if(txPos2.nRatingCount > 0)
+				rating = txPos2.nRating/txPos2.nRatingCount;
 			oName.push_back(Pair("rating", rating));
 			oName.push_back(Pair("ratingcount", txPos2.nRatingCount));
 			expired_block = nHeight + GetAliasExpirationDepth();
