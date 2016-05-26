@@ -29,13 +29,13 @@ bool IsSys21Fork(const uint64_t& nHeight);
 class CAliasIndex {
 public:
     uint256 txHash;
-    int64_t nHeight;
+    uint64_t nHeight;
     std::vector<unsigned char> vchPublicValue;
 	std::vector<unsigned char> vchPrivateValue;
 	std::vector<unsigned char> vchPubKey;
 	unsigned char safetyLevel;
-	unsigned int nRating;
-	unsigned int nRatingCount;
+	int nRating;
+	int nRatingCount;
     CAliasIndex() { 
         SetNull();
     }
