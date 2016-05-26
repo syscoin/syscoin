@@ -68,8 +68,6 @@ enum opcodetype
 
      // syscoin extended reserved 
     OP_SYSCOIN_EXTENDED=0x10,
-	OP_ESCROW_FEEDBACK=0x11,
-	OP_ESCROW_REFUND_COMPLETE=0x12,
     OP_FALSE = OP_0,
     OP_PUSHDATA1 = 0x4c,
     OP_PUSHDATA2 = 0x4d,
