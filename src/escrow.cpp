@@ -284,8 +284,8 @@ bool DecodeEscrowScript(const CScript& script, int& op,
 
     if ((op == OP_ESCROW_ACTIVATE && vvch.size() == 1)
         || (op == OP_ESCROW_RELEASE && vvch.size() == 1)
-        || (op == OP_ESCROW_REFUND && vvch.size() == 2)
-		|| (op == OP_ESCROW_COMPLETE && vvch.size() == 2)
+        || (op == OP_ESCROW_REFUND && vvch.size() <= 2)
+		|| (op == OP_ESCROW_COMPLETE && vvch.size() <= 2)
         return true;
 
     return false;
@@ -501,7 +501,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				// Check input
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(vvchArgs[1] == "1" && prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
+				if(vvchArgs.size() > 1 && vvchArgs[1] == "1" && prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
 					return error("CheckEscrowInputs() : can only leave feedback for a completed escrow");
 				else
 				{
@@ -520,7 +520,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 			case OP_ESCROW_REFUND:
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(vvchArgs[1] == "1" && prevOp != OP_ESCROW_REFUND)
+				if(vvchArgs.size() > 1 && vvchArgs[1] == "1" && prevOp != OP_ESCROW_REFUND)
 					return error("CheckEscrowInputs() :  can only complete refund on a refunded escrow");
 				else
 				{
@@ -566,10 +566,10 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					theOffer.UnserializeFromTx(tx);
 					theEscrow.vchOfferAcceptLink = theOffer.accept.vchAcceptRand;
-					if(vvchArgs[1] == "1")
+					if(vvchArgs.size() > 1 && vvchArgs[1] == "1")
 					{
 						// only allow to rate users once 
-						if(prevOp == OP_ESCROW_COMPLETE && vvchPrevArgs[1] == "1")
+						if(vvchPrevArgs.size() > 1 && prevOp == OP_ESCROW_COMPLETE && vvchPrevArgs[1] == "1")
 						{
 							theEscrow.buyerFeedback.nRating = 0;
 							theEscrow.sellerFeedback.nRating = 0;
