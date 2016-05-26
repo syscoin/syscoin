@@ -101,8 +101,8 @@ public:
 
 		MessageActivate,
 		MessageRecv,
-		EscrowRefundRecv,
-		EscrowFeedback,
+		EscrowRefundComplete,
+		EscrowFeedback
     };
 
     /** Number of confirmation recommended for accepting a transaction */
