@@ -141,11 +141,12 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
                 vector<CCert> vtxPos;
 				pcursor->GetValue(vtxPos);
                 CCert txPos;
-				txPos = vtxPos.back();
+				
 				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
 				}
+				txPos = vtxPos.back();
   				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
 				{
 					pcursor->Next();

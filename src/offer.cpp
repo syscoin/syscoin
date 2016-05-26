@@ -253,12 +253,12 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
             	vector<unsigned char> vchOffer = key.second;
                 vector<COffer> vtxPos;
 				pcursor->GetValue(vtxPos);
-                COffer txPos;
-				txPos = vtxPos.back();
+				
 				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
 				}
+				const COffer &txPos = vtxPos.back();
   				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
 				{
 					pcursor->Next();
@@ -2692,7 +2692,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	vchPubKey = alias.vchPubKey;
 	// this is a syscoin txn
 	CWalletTx wtx;
-	CScript scriptPubKeyOrig, scriptPubKeyAliasOrig, scriptPubKeyEscrowOrig;
+	CScript scriptPubKeyOrig, scriptPubKeyAliasOrig;
 	// generate offer accept identifier and hash
 	int64_t rand = GetRand(std::numeric_limits<int64_t>::max());
 	vector<unsigned char> vchAcceptRand = CScriptNum(rand).getvch();
@@ -2700,7 +2700,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 
 	// create OFFERACCEPT txn keys
 	CScript scriptPubKeyAccept, scriptPubKeyPayment;
-	CScript scriptPubKeyEscrow, scriptPubKeyAlias;
+	CScript scriptPubKeyEscrowBuyer, scriptPubKeyEscrowSeller, scriptPubKeyEscrowArbiter , scriptPubKeyAlias;
 	EnsureWalletIsUnlocked();
 	CTransaction acceptTx;
 	COffer theOffer;
@@ -2750,16 +2750,25 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		if (pescrowdb->ExistsEscrow(escrowVvch[0])) {
 			if (pescrowdb->ReadEscrow(escrowVvch[0], escrowVtxPos) && !escrowVtxPos.empty())
 			{	
+				CScript scriptPubKeyEscrowBuyerDestination, scriptPubKeyEscrowBuyerDestination, scriptPubKeyEscrowArbiterDestination;
 				// we want the initial funding escrow transaction height as when to calculate this offer accept price from convertCurrencyCodeToSyscoin()
 				CEscrow fundingEscrow = escrowVtxPos.front();
 				vchEscrowWhitelistAlias = fundingEscrow.vchWhitelistAlias;
 				// update height if it is bigger than escrow creation height, we want earlier of two, linked heifht or escrow creation to index into sysrates check
 				if(nHeight > fundingEscrow.nHeight)
 					nHeight = fundingEscrow.nHeight;
-				CPubKey currentEscrowKey(fundingEscrow.vchSellerKey);
-				scriptPubKeyEscrowOrig = GetScriptForDestination(currentEscrowKey.GetID());
-				scriptPubKeyEscrow << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
-				scriptPubKeyEscrow += scriptPubKeyEscrowOrig;
+				CPubKey sellerEscrowKey(fundingEscrow.vchSellerKey);
+				scriptPubKeyEscrowSellerDestination = GetScriptForDestination(sellerEscrowKey.GetID());
+				CPubKey buyerEscrowKey(fundingEscrow.vchBuyerKey);
+				scriptPubKeyEscrowBuyerDestination = GetScriptForDestination(buyerEscrowKey.GetID());
+				CPubKey arbiterEscrowKey(fundingEscrow.vchArbiterrKey);
+				scriptPubKeyEscrowArbiterDestination = GetScriptForDestination(arbiterEscrowKey.GetID());
+				scriptPubKeyEscrowBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
+				scriptPubKeyEscrowBuyer += scriptPubKeyEscrowBuyerDestination;
+				scriptPubKeyEscrowSeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
+				scriptPubKeyEscrowSeller += scriptPubKeyEscrowSellerDestination;
+				scriptPubKeyEscrowArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
+				scriptPubKeyEscrowArbiter += scriptPubKeyEscrowArbiterDestination;
 			}
 		}	
 	}
@@ -2912,13 +2921,19 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	CRecipient paymentRecipient = {scriptPubKeyPayment, nTotalValue, false};
 	CRecipient aliasRecipient;
 	CreateRecipient(scriptPubKeyAlias, aliasRecipient);
-	CRecipient escrowRecipient;
-	CreateRecipient(scriptPubKeyEscrow, escrowRecipient);
+	CRecipient escrowBuyerRecipient;
+	CreateRecipient(scriptPubKeyEscrowBuyer, escrowBuyerRecipient);
+	CRecipient escrowSellerRecipient;
+	CreateRecipient(scriptPubKeyEscrowSeller, escrowSellerRecipient);
+	CRecipient escrowArbiterRecipient;
+	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
 	{
 		wtxAliasIn = NULL;
-		vecSend.push_back(escrowRecipient);
+		vecSend.push_back(escrowBuyerRecipient);
+		vecSend.push_back(escrowSellerRecipient);
+		vecSend.push_back(escrowArbiterRecipient);
 	}
 	// if not accepting an escrow accept, if we use a alias as input to this offer tx, we need another utxo for further alias transactions on this alias, so we create one here
 	else if(wtxAliasIn != NULL)
@@ -3091,6 +3106,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 				scriptPubKeyEscrowOrig = GetScriptForDestination(currentEscrowKey.GetID());
 				scriptPubKeyEscrow << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
 				scriptPubKeyEscrow += scriptPubKeyEscrowOrig;
+
 			}
 		}	
 	}

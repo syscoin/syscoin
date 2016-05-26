@@ -38,6 +38,7 @@ bool IsEscrowOp(int op) {
     return op == OP_ESCROW_ACTIVATE
         || op == OP_ESCROW_RELEASE
         || op == OP_ESCROW_REFUND
+		|| op == OP_ESCROW_REFUND_COMPLETE
 		|| op == OP_ESCROW_COMPLETE
 		|| op == OP_ESCROW_FEEDBACK;
 }
@@ -66,6 +67,8 @@ string escrowFromOp(int op) {
         return "escrowrelease";
     case OP_ESCROW_REFUND:
         return "escrowrefund";
+    case OP_ESCROW_REFUND_COMPLETE:
+        return "escrowrefundcomplete";
 	case OP_ESCROW_COMPLETE:
 		return "escrowcomplete";
 	case OP_ESCROW_FEEDBACK:
@@ -125,17 +128,22 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, const s
             	vector<unsigned char> vchEscrow = key.second;
                 vector<CEscrow> vtxPos;
 				pcursor->GetValue(vtxPos);
-                CEscrow txPos;
-				txPos = vtxPos.back();
+				// skip feedback states in our searches
+				while (!vtxPos.back().buyerFeedback.IsNull() || !vtxPos.back().sellerFeedback.IsNull() || !vtxPos.back().arbiterFeedback.IsNull())	
+					vtxPos.pop_back();
 				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
 				}
+				const CEscrow &txPos = vtxPos.back();
   				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
 				{
 					pcursor->Next();
 					continue;
 				}   
+				// skip searching feedback escrow tx's
+				while(!txPos.buyerFeedback.IsNull() || !txPos.sellerFeedback.IsNull() || !txPos.arbiterFeedback.IsNull())
+					txPos = vtxPos.back();
 				const string &escrow = stringFromVch(vchEscrow);
 				const string &offerstr = stringFromVch(txPos.vchOffer);
 				CPubKey SellerPubKey(txPos.vchSellerKey);
@@ -286,6 +294,7 @@ bool DecodeEscrowScript(const CScript& script, int& op,
     if ((op == OP_ESCROW_ACTIVATE && vvch.size() == 1)
         || (op == OP_ESCROW_RELEASE && vvch.size() == 1)
         || (op == OP_ESCROW_REFUND && vvch.size() == 1)
+		|| (op == OP_ESCROW_REFUND_COMPLETE && vvch.size() == 1)
 		|| (op == OP_ESCROW_COMPLETE && vvch.size() == 1)
 		|| (op == OP_ESCROW_FEEDBACK && vvch.size() == 1))
         return true;
@@ -483,13 +492,21 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					return error("CheckEscrowInputs() : an escrow offer accept using an alias must attach the alias as an input");
 				if(IsAliasOp(prevAliasOp) && vvchPrevAliasArgs[0] != theEscrow.vchWhitelistAlias)
 					return error("CheckEscrowInputs() : escrow alias guid and alias input guid mismatch");
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				{
+					return error("CheckEscrowInputs() :cannot leave feedback in activate tx");
+				}
 				break;
 			case OP_ESCROW_RELEASE:
 				if(prevOp != OP_ESCROW_ACTIVATE)
 					return error("CheckEscrowInputs() : can only release an activated escrow");
 				// Check input
 				if (vvchPrevArgs[0] != vvchArgs[0])
-					return error("CheckEscrowInputs() : escrow input guid mismatch");				
+					return error("CheckEscrowInputs() : escrow input guid mismatch");
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				{
+					return error("CheckEscrowInputs() :cannot leave feedback in release tx");
+				}
 				break;
 			case OP_ESCROW_COMPLETE:
 				if(prevOp != OP_ESCROW_RELEASE)
@@ -500,17 +517,38 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				theOffer.UnserializeFromTx(tx);
 				if(theOffer.accept.IsNull())
 					return error("CheckEscrowInputs() : no offeraccept payload found");
-
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				{
+					return error("CheckEscrowInputs() :cannot leave feedback in complete tx");
+				}
+				break;			
+			case OP_ESCROW_REFUND_COMPLETE:
+				if(prevOp != OP_ESCROW_REFUND)
+					return error("CheckEscrowInputs() : can only complete refund on a refunded escrow");
+				// Check input
+				if (vvchPrevArgs[0] != vvchArgs[0])
+					return error("CheckEscrowInputs() : escrow input guid mismatch");
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				{
+					return error("CheckEscrowInputs() :cannot leave feedback in refund complete tx");
+				}
 				break;
+
 			case OP_ESCROW_REFUND:
 				if(prevOp != OP_ESCROW_ACTIVATE)
 					return error("CheckEscrowInputs() : can only refund an activated escrow");
 				// Check input
 				if (vvchPrevArgs[0] != vvchArgs[0])
-					return error("CheckEscrowInputs() : escrow input guid mismatch");				
+					return error("CheckEscrowInputs() : escrow input guid mismatch");
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				{
+					return error("CheckEscrowInputs() :cannot leave feedback in refund tx");
+				}
+
+
 				break;
 			case OP_ESCROW_FEEDBACK:
-				if(prevOp != OP_ESCROW_REFUND || prevOp != OP_ESCROW_COMPLETE)
+				if(prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND_COMPLETE && prevOp != OP_ESCROW_FEEDBACK)
 					return error("CheckEscrowInputs() : can only leave feedback for a completed escrow");
 				// Check input
 				if (vvchPrevArgs[0] != vvchArgs[0])
@@ -542,19 +580,29 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				// these are the only settings allowed to change outside of activate
 				if(!serializedEscrow.rawTx.empty())
 					theEscrow.rawTx = serializedEscrow.rawTx;
-				theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
-				theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
-				theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 				if(op == OP_ESCROW_COMPLETE)
 				{
 					theOffer.UnserializeFromTx(tx);
-					theEscrow.vchOfferAcceptLink = theOffer.accept.vchAcceptRand;	
+					theEscrow.vchOfferAcceptLink = theOffer.accept.vchAcceptRand;
 				}
-				HandleEscrowFeedback(theEscrow);		
+				else if(op == OP_ESCROW_FEEDBACK)
+				{
+					theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
+					theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
+					theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
+					// only allow to rate users once 
+					if(prevOp != OP_ESCROW_FEEDBACK)
+					{
+						theEscrow.buyerFeedback.nRating = 0;
+						theEscrow.sellerFeedback.nRating = 0;
+						theEscrow.arbiterFeedback.nRating = 0;
+					}
+					else
+						HandleEscrowFeedback(theEscrow);	
+				}
 			}
+					
 		}
-		if(op == OP_ESCROW_FEEDBACK)
-			return true;
         // set the escrow's txn-dependent values
 		theEscrow.txHash = tx.GetHash();
 		theEscrow.nHeight = nHeight;
@@ -829,43 +877,13 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	return res;
 }
 UniValue escrowrelease(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() < 1 || params.size() > 5)
+    if (fHelp || params.size() != 1)
         throw runtime_error(
-		"escrowrelease <escrow guid> [feedbackseller] [ratingseller] [feedbacksecondary] [ratingsecondary]\n"
+		"escrowrelease <escrow guid>\n"
                         "Releases escrow funds to seller, seller needs to sign the output transaction and send to the network.\n"
                         + HelpRequiringPassphrase());
     // gather & validate inputs
     vector<unsigned char> vchEscrow = vchFromValue(params[0]);
-	int nRatingSeller = 0;
-	int nRatingSecondary = 0;
-	vector<unsigned char> vchFeedbackSeller;
-	vector<unsigned char> vchFeedbackSecondary;
-	if(params.size() > 1)
-		vchFeedbackSeller = vchFromValue(params[1]);
-	if(params.size() > 2)
-	{
-		try {
-			nRatingSeller = atoi(params[2].get_str());
-			if(nRatingSeller < 0 || nRatingSeller > 5)
-				throw runtime_error("invalid seller rating value, must be less than or equal to 5 and greater than or equal to 0");
-
-		} catch (std::exception &e) {
-			throw runtime_error("invalid seller rating value");
-		}
-	}
-	if(params.size() > 3)
-		vchFeedbackSecondary = vchFromValue(params[3]);
-	if(params.size() > 4)
-	{
-		try {
-			nRatingSecondary = atoi(params[4].get_str());
-			if(nRatingSecondary < 0 || nRatingSecondary > 5)
-				throw runtime_error("invalid secondary rating value, must be less than or equal to 5 and greater than or equal to 0");
-
-		} catch (std::exception &e) {
-			throw runtime_error("invalid secondary rating value");
-		}
-	}
 
     // this is a syscoin transaction
     CWalletTx wtx;
@@ -930,7 +948,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 		foundSellerKey = false;
 	}
 	if(foundSellerKey)
-		return tableRPC.execute("escrowclaimrelease", params[0]);
+		return tableRPC.execute("escrowclaimrelease", params);
     if (op != OP_ESCROW_ACTIVATE)
         throw runtime_error("Release can only happen on an activated escrow");
 	int nOutMultiSig = 0;
@@ -981,7 +999,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 		strPrivateKey = CSyscoinSecret(vchSecret).ToString();
 	}
      	// check for existing escrow 's
-	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE)) {
+	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE) || ExistsInMempool(vchEscrow, OP_ESCROW_FEEDBACK) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND_COMPLETE)) {
 		throw runtime_error("there are pending operations on that escrow");
 	}
 	// create a raw tx that sends escrow amount to seller and collateral to buyer
@@ -1055,30 +1073,6 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 
 
 	escrow.ClearEscrow();
-	// arbiter
-	if(arbiterSigning)
-	{
-		CEscrowFeedback sellerFeedback(ARBITER);
-		sellerFeedback.vchFeedback = vchFeedbackSeller;
-		sellerFeedback.nRating = nRatingSeller;
-		CEscrowFeedback buyerFeedback(ARBITER);
-		buyerFeedback.vchFeedback = vchFeedbackSecondary;
-		buyerFeedback.nRating = nRatingSecondary;
-		escrow.buyerFeedback = buyerFeedback;
-		escrow.sellerFeedback = sellerFeedback;
-	}
-	// buyer
-	else
-	{
-		CEscrowFeedback sellerFeedback(BUYER);
-		sellerFeedback.vchFeedback = vchFeedbackSeller;
-		sellerFeedback.nRating = nRatingSeller;
-		CEscrowFeedback arbiterFeedback(BUYER);
-		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
-		arbiterFeedback.nRating = nRatingSecondary;
-		escrow.arbiterFeedback = arbiterFeedback;
-		escrow.sellerFeedback = sellerFeedback;
-	}
 	escrow.rawTx = ParseHex(hex_str);
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
@@ -1240,7 +1234,7 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
 	if(!foundFeePayment)    
 		throw runtime_error("Expected fee payment to arbiter or buyer from escrow does not match what was expected!");	
 	// check for existing escrow 's
-	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE)) {
+	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE) || ExistsInMempool(vchEscrow, OP_ESCROW_FEEDBACK) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND_COMPLETE)) {
 		throw runtime_error("there are pending operations on that escrow");
 	}
     // Seller signs it
@@ -1359,7 +1353,7 @@ UniValue escrowcomplete(const UniValue& params, bool fHelp) {
 		throw runtime_error("this escrow is not in your wallet");
 	
       	// check for existing escrow 's
-	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE)) {
+	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE) || ExistsInMempool(vchEscrow, OP_ESCROW_FEEDBACK) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND_COMPLETE)) {
 		throw runtime_error("there are pending operations on that escrow");
 	}
 	CPubKey buyerKey(escrow.vchBuyerKey);
@@ -1401,43 +1395,13 @@ UniValue escrowcomplete(const UniValue& params, bool fHelp) {
 	return ret;
 }
 UniValue escrowrefund(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() < 1 || params.size() > 5)
+    if (fHelp || params.size() != 1)
         throw runtime_error(
-		"escrowrefund <escrow guid> [feedbackbuyer] [ratingbuyer] [feedbacksecondary] [ratingsecondary]\n"
+		"escrowrefund <escrow guid>\n"
                          "Refunds escrow funds back to buyer, buyer needs to sign the output transaction and send to the network.\n"
                         + HelpRequiringPassphrase());
     // gather & validate inputs
     vector<unsigned char> vchEscrow = vchFromValue(params[0]);
-	int nRatingBuyer = 0;
-	int nRatingSecondary = 0;
-	vector<unsigned char> vchFeedbackBuyer;
-	vector<unsigned char> vchFeedbackSecondary;
-	if(params.size() > 1)
-		vchFeedbackBuyer = vchFromValue(params[1]);
-	if(params.size() > 2)
-	{
-		try {
-			nRatingBuyer = atoi(params[2].get_str());
-			if(nRatingBuyer < 0 || nRatingBuyer > 5)
-				throw runtime_error("invalid buyer rating value, must be less than or equal to 5 and greater than or equal to 0");
-
-		} catch (std::exception &e) {
-			throw runtime_error("invalid buyer rating value");
-		}
-	}
-	if(params.size() > 3)
-		vchFeedbackSecondary = vchFromValue(params[3]);
-	if(params.size() > 4)
-	{
-		try {
-			nRatingSecondary = atoi(params[4].get_str());
-			if(nRatingSecondary < 0 || nRatingSecondary > 5)
-				throw runtime_error("invalid secondary rating value, must be less than or equal to 5 and greater than or equal to 0");
-
-		} catch (std::exception &e) {
-			throw runtime_error("invalid secondary rating value");
-		}
-	}
     // this is a syscoin transaction
     CWalletTx wtx;
 
@@ -1549,7 +1513,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 		strPrivateKey = CSyscoinSecret(vchSecret).ToString();
 	}
      	// check for existing escrow 's
-	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE)) {
+	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE) || ExistsInMempool(vchEscrow, OP_ESCROW_FEEDBACK) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND_COMPLETE)) {
 		throw runtime_error("there are pending operations on that escrow");
 	}
 	// refunds buyer from escrow
@@ -1621,31 +1585,6 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 
 	escrow.ClearEscrow();
 
-	// arbiter
-	if(arbiterSigning)
-	{
-		CEscrowFeedback buyerFeedback(ARBITER);
-		buyerFeedback.vchFeedback = vchFeedbackBuyer;
-		buyerFeedback.nRating = nRatingBuyer;
-		CEscrowFeedback sellerFeedback(ARBITER);
-		sellerFeedback.vchFeedback = vchFeedbackSecondary;
-		sellerFeedback.nRating = nRatingSecondary;
-		escrow.sellerFeedback = sellerFeedback;
-		escrow.buyerFeedback = buyerFeedback;
-	}
-	// seller
-	else
-	{
-		CEscrowFeedback buyerFeedback(SELLER);
-		buyerFeedback.vchFeedback = vchFeedbackBuyer;
-		buyerFeedback.nRating = nRatingBuyer;
-		CEscrowFeedback arbiterFeedback(SELLER);
-		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
-		arbiterFeedback.nRating = nRatingSecondary;
-		escrow.buyerFeedback = buyerFeedback;
-		escrow.arbiterFeedback = arbiterFeedback;
-	}
-
 	escrow.rawTx = ParseHex(hex_str);
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
@@ -1692,6 +1631,11 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
     if (!GetTxOfEscrow( vchEscrow, 
 		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
+	CWalletTx wtx;
+	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
+	if (wtxIn == NULL)
+		throw runtime_error("this escrow is not in your wallet");
+
 	vector<CEscrow> vtxPos;
 	if (!pescrowdb->ReadEscrow(vchEscrow, vtxPos) || vtxPos.empty())
 		  throw runtime_error("failed to read from escrow DB");
@@ -1793,7 +1737,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	if(!foundBuyerPayment)
 		throw runtime_error("Expected payment amount from escrow does not match what was expected by the buyer!");
       	// check for existing escrow 's
-	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE) ) {
+	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE) || ExistsInMempool(vchEscrow, OP_ESCROW_FEEDBACK) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND_COMPLETE) || ExistsInMempool(vchEscrow, OP_ESCROW_FEEDBACK) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND_COMPLETE)) {
 		throw runtime_error("there are pending operations on that escrow");
 	}
     // Seller signs it
@@ -1852,17 +1796,71 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	if (!returnRes.isStr())
 		throw runtime_error("Could not send escrow transaction: Invalid response from sendrawtransaction!");
 
-	ret.push_back(returnRes.get_str());
+	CPubKey buyerKey(escrow.vchBuyerKey);
+	CSyscoinAddress buyerAddress(buyerKey.GetID());
+	if(!buyerAddress.IsValid())
+		throw runtime_error("Buyer address is invalid!");
+
+	CPubKey sellerKey(escrow.vchSellerKey);
+	CSyscoinAddress sellerAddress(sellerKey.GetID());
+	if(!sellerAddress.IsValid())
+		throw runtime_error("Seller address is invalid!");
+
+	CPubKey arbiterKey(escrow.vchArbiterKey);
+	CSyscoinAddress arbiterAddress(sellerKey.GetID());
+	if(!arbiterAddress.IsValid())
+		throw runtime_error("Arbiter address is invalid!");
+
+	escrow.ClearEscrow();
+	escrow.nHeight = chainActive.Tip()->nHeight;
+    CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyArbiter, scriptPubKeyBuyerDestination, scriptPubKeySellerDestination, scriptPubKeyArbiterDestination;
+	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
+    scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_REFUND_COMPLETE) << vchEscrow << OP_2DROP;
+    scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+ 
+	scriptPubKeySellerDestination= GetScriptForDestination(sellerKey.GetID());
+    scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_REFUND_COMPLETE) << vchEscrow << OP_2DROP;
+    scriptPubKeySeller += scriptPubKeySellerDestination;
+
+	scriptPubKeyArbiterDestination= GetScriptForDestination(arbiterrKey.GetID());
+    scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_REFUND_COMPLETE) << vchEscrow << OP_2DROP;
+    scriptPubKeyArbiter += scriptPubKeyArbiterDestination;
+
+	vector<CRecipient> vecSend;
+	CRecipient recipientBuyer;
+	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+	vecSend.push_back(recipientBuyer);
+	CRecipient recipientSeller;
+	CreateRecipient(scriptPubKeySeller, recipientSeller);
+	vecSend.push_back(recipientSeller);
+	CRecipient recipientArbiter;
+	CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
+	vecSend.push_back(recipientArbiter)
+
+	const vector<unsigned char> &data = escrow.Serialize();
+	CScript scriptData;
+	scriptData << OP_RETURN << data;
+	CRecipient fee;
+	CreateFeeRecipient(scriptData, data, fee);
+	vecSend.push_back(fee);
+
+	const CWalletTx * wtxInOffer=NULL;
+	const CWalletTx * wtxInCert=NULL;
+	const CWalletTx * wtxInAlias=NULL;
+	if(IsSys21Fork())
+		SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
+	UniValue ret(UniValue::VARR);
+	ret.push_back(wtx.GetHash().GetHex());
 	return ret;
 }
 UniValue escrowfeedback(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 5)
         throw runtime_error(
-		"escrowfeedback <escrow guid> [feedbackprimary] [ratingprimary] [feedbacksecondary] [ratingsecondary]\n"
+		"escrowfeedback <escrow guid> [feedbackprimary] [ratingprimary] [feedbacksecondary] [ratingasecondary]\n"
                         "Send feedback for primary and secondary users in escrow, depending on who you are. \n"
-						"If you are the buyer, feedbackprimary is for seller and feedback secondary is for arbiter.\n"
-						"If you are the seller, feedbackprimary is for buyer and feedback secondary is for arbiter.\n"
-						"If you are the arbiter, feedbackprimary is for buyer and feedback secondary is for seller.\n"
+						"If you are the buyer, feedbackprimary is for seller and feedbacksecondary is for arbiter.\n"
+						"If you are the seller, feedbackprimary is for buyer and feedbacksecondary is for arbiter.\n"
+						"If you are the arbiter, feedbackprimary is for buyer and feedbacksecondary is for seller.\n"
 						"If arbiter didn't do any work for this escrow you can leave his feedback empty and rating as a 0.\n"
                         + HelpRequiringPassphrase());
    // gather & validate inputs
@@ -1977,7 +1975,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		foundArbiterKey = false;
 	}
      	// check for existing escrow 's
-	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE)) {
+	if (ExistsInMempool(vchEscrow, OP_ESCROW_ACTIVATE) || ExistsInMempool(vchEscrow, OP_ESCROW_RELEASE) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND) || ExistsInMempool(vchEscrow, OP_ESCROW_COMPLETE) || ExistsInMempool(vchEscrow, OP_ESCROW_FEEDBACK) || ExistsInMempool(vchEscrow, OP_ESCROW_REFUND_COMPLETE)) {
 		throw runtime_error("there are pending operations on that escrow");
 	}
 	escrow.ClearEscrow();
@@ -2013,8 +2011,8 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
 		CEscrowFeedback sellerFeedback(ARBITER);
-		sellerFeedback.vchFeedback = vchFeedbackSecondary;
-		sellerFeedback.nRating = nRatingSecondary;
+		sellerFeedback.vchFeedback = vchFeedbackBuyer;
+		sellerFeedback.nRating = nRatingBuyer;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.sellerFeedback = sellerFeedback;
 	}
@@ -2026,12 +2024,20 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
 
-	CScript scriptPubKey;
-	scriptPubKey << CScript::EncodeOP_N(OP_ESCROW_FEEDBACK) << vchEscrow << OP_2DROP;
+	CScript scriptPubKeyBuyer, scriptPubKeySeller, scriptPubKeyArbiter;
+	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_FEEDBACK) << vchEscrow << OP_2DROP;
+	scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_FEEDBACK) << vchEscrow << OP_2DROP;
+	scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_FEEDBACK) << vchEscrow << OP_2DROP;
 	vector<CRecipient> vecSend;
-	CRecipient recipient;
-	CreateRecipient(scriptPubKey, recipient);
-	vecSend.push_back(recipient);
+	CRecipient recipientBuyer;
+	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+	vecSend.push_back(recipientBuyer);
+	CRecipient recipientSeller;
+	CreateRecipient(scriptPubKeySeller, recipientSeller);
+	vecSend.push_back(recipientSeller);
+	CRecipient recipientArbiter;
+	CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
+	vecSend.push_back(recipientArbiter);
 
 	const vector<unsigned char> &data = escrow.Serialize();
 	CScript scriptData;
@@ -2043,7 +2049,8 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInOffer=NULL;
 	const CWalletTx * wtxInCert=NULL;
 	const CWalletTx * wtxInAlias=NULL;
-	SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
+	if(IsSys21Fork())
+		SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
 	UniValue ret(UniValue::VARR);
 	ret.push_back(wtx.GetHash().GetHex());
 	return ret;
@@ -2264,6 +2271,10 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 				status = "escrow released";
 			else if(op == OP_ESCROW_REFUND)
 				status = "escrow refunded";
+			else if(op == OP_ESCROW_REFUND_COMPLETE)
+				status = "escrow refund complete";
+			else if(op == OP_ESCROW_FEEDBACK)
+				status = "escrow feedback";
 			else if(op == OP_ESCROW_COMPLETE)
 				status = "complete";
 		}
@@ -2361,6 +2372,10 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 				status = "escrow released";
 			else if(op == OP_ESCROW_REFUND)
 				status = "escrow refunded";
+			else if(op == OP_ESCROW_REFUND_COMPLETE)
+				status = "escrow refund complete";
+			else if(op == OP_ESCROW_FEEDBACK)
+				status = "escrow feedback";
 			else if(op == OP_ESCROW_COMPLETE)
 				status = "complete";
 		
@@ -2463,6 +2478,10 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 			status = "escrow released";
 		else if(op == OP_ESCROW_REFUND)
 			status = "escrow refunded";
+		else if(op == OP_ESCROW_REFUND_COMPLETE)
+			status = "escrow refund complete";
+		else if(op == OP_ESCROW_FEEDBACK)
+			status = "escrow feedback";
 		else if(op == OP_ESCROW_COMPLETE)
 			status = "complete";
 		

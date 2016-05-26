@@ -993,12 +993,12 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string
             	vector<unsigned char> vchName = key.second;
                 vector<CAliasIndex> vtxPos;
 				pcursor->GetValue(vtxPos);
-                CAliasIndex txPos;
-				txPos = vtxPos.back();
+				
 				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
 				}
+				const CAliasIndex &txPos = vtxPos.back();
   				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
 				{
 					pcursor->Next();

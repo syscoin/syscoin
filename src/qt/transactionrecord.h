@@ -98,10 +98,11 @@ public:
         EscrowRefund,
 		EscrowRefundRecv,
 		EscrowComplete,
-		EscrowFeedback,
 
 		MessageActivate,
-		MessageRecv
+		MessageRecv,
+		EscrowRefundRecv,
+		EscrowFeedback,
     };
 
     /** Number of confirmation recommended for accepting a transaction */

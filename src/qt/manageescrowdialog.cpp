@@ -20,6 +20,12 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 	QString theme = GUIUtil::getThemeName();  
 	ui->aboutEscrow->setPixmap(QPixmap(":/images/" + theme + "/escrow"));
 	QString buyer, seller, arbiter, status, offertitle, total;
+	ui->primaryLabel->setVisible(false);
+	ui->primaryRating->setVisible(false);
+	ui->primaryFeedback->setVisible(false);
+	ui->secondaryLabel->setVisible(false);
+	ui->secondaryRating->setVisible(false);
+	ui->secondaryFeedback->setVisible(false);
 	if(!loadEscrow(escrow, buyer, seller, arbiter, status, offertitle, total))
 	{
 		ui->manageInfo2->setText(tr("Cannot find this escrow on the network, please try again later."));
@@ -28,79 +34,28 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 		return;
 	}
 	EscrowType escrowType = findYourEscrowRoleFromAliases(buyer, seller, arbiter);
-	ui->manageInfo->setText(tr("You are managing escrow ID: <b>%1</b> of an offer for <b>%2</b> totalling <b>%3</b>. The buyer is <b>%4</b>, seller is <b>%5</b> and arbiter is <b>%6</b>").arg(escrow).arg(offertitle).arg(total).arg(buyer).arg(seller).arg(arbiter));
+	ui->manageInfo->setText(tr("You are managing escrow ID: <b>%1</b> of an offer for <b>%2</b> totalling <b>%3</b>. The buyer is <b>%4</b>, merchant is <b>%5</b> and arbiter is <b>%6</b>").arg(escrow).arg(offertitle).arg(total).arg(buyer).arg(seller).arg(arbiter));
 	if(escrowType == None)
 	{
-		ui->manageInfo2->setText(tr("You cannot manage this escrow because you do not own one of either the buyer, seller or arbiter aliases."));
+		ui->manageInfo2->setText(tr("You cannot manage this escrow because you do not own one of either the buyer, merchant or arbiter aliases."));
 		ui->releaseButton->setEnabled(false);
 		ui->refundButton->setEnabled(false);
-		ui->primaryLabel->setVisible(false);
-		ui->primaryRating->setVisible(false);
-		ui->primaryFeedback->setVisible(false);
-		ui->secondaryLabel->setVisible(false);
-		ui->secondaryRating->setVisible(false);
-		ui->secondaryFeedback->setVisible(false);
 	}
 	else if(status == "in-escrow")
 	{
 		if(escrowType == Buyer)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>buyer</b> of the offer held in escrow, you may release the coins to the seller once you have confirmed that you have recieved the item as per the description of the offer."));
+			ui->manageInfo2->setText(tr("You are the <b>buyer</b> of the offer held in escrow, you may release the coins to the merchant once you have confirmed that you have recieved the item as per the description of the offer."));
 			ui->refundButton->setEnabled(false);
-			if(!ui->primaryRating->isEnabled())
-			{
-				ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-				ui->primaryFeedback->setVisible(false);
-				ui->secondaryLabel->setVisible(false);
-				ui->secondaryRating->setVisible(false);
-				ui->secondaryFeedback->setVisible(false);
-				ui->primaryRating->setVisible(false);
-				ui->releaseButton->setEnabled(false);
-			}
-			else
-			{
-				ui->primaryLabel->setText("Choose a rating for the seller (1-5) or leave at 0 for no rating. Below please give feedback to the seller.");
-				ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
-			}
 		}
 		else if(escrowType == Seller)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>seller</b> of the offer held in escrow, you may refund the coins back to the buyer."));
+			ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow, you may refund the coins back to the buyer."));
 			ui->releaseButton->setEnabled(false);
-			if(!ui->primaryRating->isEnabled())
-			{
-				ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-				ui->primaryFeedback->setVisible(false);
-				ui->secondaryLabel->setVisible(false);
-				ui->secondaryRating->setVisible(false);
-				ui->secondaryFeedback->setVisible(false);
-				ui->primaryRating->setVisible(false);
-				ui->releaseButton->setEnabled(false);
-			}
-			else
-			{
-				ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-				ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
-			}
 		}
 		else if(escrowType == Arbiter)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow, you may refund the coins back to the buyer if you have evidence that the seller did not honour the agreement to ship the offer item. You may also release the coins to the seller if the buyer has not released. You may use Syscoin messages to communicate with the buyer and seller to ensure you have adequate proof for your decision."));
-			if(!ui->primaryRating->isEnabled())
-			{
-				ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-				ui->primaryFeedback->setVisible(false);
-				ui->secondaryLabel->setVisible(false);
-				ui->secondaryRating->setVisible(false);
-				ui->secondaryFeedback->setVisible(false);
-				ui->primaryRating->setVisible(false);
-				ui->releaseButton->setEnabled(false);
-			}
-			else
-			{			
-				ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-				ui->secondaryLabel->setText("Choose a rating for the seller (1-5) or leave at 0 for no rating. Below please give feedback to the seller.");	
-			}
+			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow, you may refund the coins back to the buyer if you have evidence that the merchant did not honour the agreement to ship the offer item. You may also release the coins to the merchant if the buyer has not released in a timely manor. You may use Syscoin messages to communicate with the buyer and merchant to ensure you have adequate proof for your decision."));
 		}
 
 	}
@@ -108,120 +63,54 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 	{
 		if(escrowType == Buyer)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>buyer</b> of the offer held in escrow. The escrow has been released to the seller. You may communicate with your arbiter or seller via Syscoin messages. Please leave feedback and rating for the seller and arbiter below."));
+			ui->manageInfo2->setText(tr("You are the <b>buyer</b> of the offer held in escrow. The escrow has been released to the merchant. You may communicate with your arbiter or merchant via Syscoin messages. You may leave feedback after the money is claimed by the merchant."));
 			ui->refundButton->setEnabled(false);
-			ui->releaseButton->setText(tr("Leave Feedback"));
-			if(!ui->primaryRating->isEnabled())
-			{
-				ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-				ui->primaryFeedback->setVisible(false);
-				ui->secondaryLabel->setVisible(false);
-				ui->secondaryRating->setVisible(false);
-				ui->secondaryFeedback->setVisible(false);
-				ui->primaryRating->setVisible(false);
-				ui->releaseButton->setEnabled(false);
-			}
-			else
-			{
-				ui->primaryLabel->setText("Choose a rating for the seller (1-5) or leave at 0 for no rating. Below please give feedback to the seller.");
-				ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
-			}
+			ui->releaseButton->setEnabled(false);
 		}
 		else if(escrowType == Seller)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>seller</b> of the offer held in escrow. The payment of coins have been released to you, you may claim them now."));
+			ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow. The payment of coins have been released to you, you may claim them now. After claiming, please return to this dialog and provide feedback for this escrow transaction."));
 			ui->refundButton->setEnabled(false);
 			ui->releaseButton->setText(tr("Claim Payment"));
-			ui->primaryLabel->setVisible(false);
-			ui->primaryRating->setVisible(false);
-			ui->primaryFeedback->setVisible(false);
-			ui->secondaryLabel->setVisible(false);
-			ui->secondaryRating->setVisible(false);
-			ui->secondaryFeedback->setVisible(false);
 		}
 		else if(escrowType == Arbiter)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow. The escrow has been released to the seller. You're job is done, if you were the one to release the coins you will recieve a commission as soon as the seller claims his payment."));
+			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow. The escrow has been released to the merchant. You're job is done, if you were the one to release the coins you will recieve a commission as soon as the merchant claims his payment. You may leave feedback after the money is claimed by the merchant."));
 			ui->refundButton->setEnabled(false);
-			ui->releaseButton->setText(tr("Leave Feedback"));
-			if(!ui->primaryRating->isEnabled())
-			{
-				ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-				ui->primaryFeedback->setVisible(false);
-				ui->secondaryLabel->setVisible(false);
-				ui->secondaryRating->setVisible(false);
-				ui->secondaryFeedback->setVisible(false);
-				ui->primaryRating->setVisible(false);
-				ui->releaseButton->setEnabled(false);
-			}
-			else
-			{
-				ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-				ui->secondaryLabel->setText("Choose a rating for the seller (1-5) or leave at 0 for no rating. Below please give feedback to the seller.");		
-			}
+			ui->releaseButton->setEnabled(false);
 		}
 	}
 	else if(status == "escrow refunded")
 	{
 		if(escrowType == Buyer)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>buyer</b> of the offer held in escrow. The coins have been refunded back to you, you may claim them now."));
+			ui->manageInfo2->setText(tr("You are the <b>buyer</b> of the offer held in escrow. The coins have been refunded back to you, you may claim them now. After claiming, please return to this dialog and provide feedback for this escrow transaction."));
 			ui->refundButton->setText(tr("Claim Refund"));
 			ui->releaseButton->setEnabled(false);
-			ui->primaryLabel->setVisible(false);
-			ui->primaryRating->setVisible(false);
-			ui->primaryFeedback->setVisible(false);
-			ui->secondaryLabel->setVisible(false);
-			ui->secondaryRating->setVisible(false);
-			ui->secondaryFeedback->setVisible(false);
 		}
 		else if(escrowType == Seller)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>seller</b> of the offer held in escrow. The escrow has been refunded back to the buyer."));
+			ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow. The escrow has been refunded back to the buyer. You may leave feedback after the money is claimed by the buyer."));
 			ui->refundButton->setEnabled(false);
-			ui->releaseButton->setText(tr("Leave Feedback"));
-			if(!ui->primaryRating->isEnabled())
-			{
-				ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-				ui->primaryFeedback->setVisible(false);
-				ui->secondaryLabel->setVisible(false);
-				ui->secondaryRating->setVisible(false);
-				ui->secondaryFeedback->setVisible(false);
-				ui->primaryRating->setVisible(false);
-				ui->releaseButton->setEnabled(false);
-			}
-			else
-			{
-				ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-				ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
-			}
+			ui->releaseButton->setEnabled(false);
+
 		}
 		else if(escrowType == Arbiter)
 		{
-			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow. The escrow has been refunded back to the buyer. You're job is done, if you were the one to refund the coins you will recieve a commission as soon as the buyer claims his refund."));
+			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow. The escrow has been refunded back to the buyer. You're job is done, if you were the one to refund the coins you will recieve a commission as soon as the buyer claims his refund. You may leave feedback after the money is claimed by the buyer."));
 			ui->refundButton->setEnabled(false);
-			ui->releaseButton->setText(tr("Leave Feedback"));
-			if(!ui->primaryRating->isEnabled())
-			{
-				ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-				ui->primaryFeedback->setVisible(false);
-				ui->secondaryLabel->setVisible(false);
-				ui->secondaryRating->setVisible(false);
-				ui->secondaryFeedback->setVisible(false);
-				ui->primaryRating->setVisible(false);
-				ui->releaseButton->setEnabled(false);
-			}
-			else
-			{
-				ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-				ui->secondaryLabel->setText("Choose a rating for the seller (1-5) or leave at 0 for no rating. Below please give feedback to the seller.");
-			}
+			ui->releaseButton->setEnabled(false);
 		}
 	}
 	else if(status == "complete")
 	{		
-		ui->manageInfo2->setText(tr("The escrow has been successfully claimed by the seller. The escrow is complete."));
-		ui->refundButton->setEnabled(false);
+		ui->manageInfo2->setText(tr("The escrow has been successfully claimed by the merchant. The escrow is complete."));
+		ui->primaryLabel->setVisible(true);
+		ui->primaryRating->setVisible(true);
+		ui->primaryFeedback->setVisible(true);
+		ui->secondaryLabel->setVisible(true);
+		ui->secondaryRating->setVisible(true);
+		ui->secondaryFeedback->setVisible(true);
 		ui->releaseButton->setText(tr("Leave Feedback"));
 		if(!ui->primaryRating->isEnabled())
 		{
@@ -235,7 +124,7 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 		}
 		else if(escrowType == Buyer)
 		{
-			ui->primaryLabel->setText("Choose a rating for the seller (1-5) or leave at 0 for no rating. Below please give feedback to the seller.");
+			ui->primaryLabel->setText("Choose a rating for the merchant (1-5) or leave at 0 for no rating. Below please give feedback to the merchant.");
 			ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
 		}
 		else if(escrowType == Seller)
@@ -246,33 +135,73 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 		else if(escrowType == Arbiter)
 		{
 			ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-			ui->secondaryLabel->setText("Choose a rating for the seller (1-5) or leave at 0 for no rating. Below please give feedback to the seller.");	
+			ui->secondaryLabel->setText("Choose a rating for the merchant (1-5) or leave at 0 for no rating. Below please give feedback to the merchant.");	
+		}
+	}
+	else if(status == "escrow refund complete")
+	{		
+		ui->manageInfo2->setText(tr("The escrow has been successfully refunded to the buyer. The escrow is complete."));
+		ui->primaryLabel->setVisible(true);
+		ui->primaryRating->setVisible(true);
+		ui->primaryFeedback->setVisible(true);
+		ui->secondaryLabel->setVisible(true);
+		ui->secondaryRating->setVisible(true);
+		ui->secondaryFeedback->setVisible(true);
+		ui->releaseButton->setText(tr("Leave Feedback"));
+		if(escrowType == Buyer)
+		{
+			ui->primaryLabel->setText("Choose a rating for the merchant (1-5) or leave at 0 for no rating. Below please give feedback to the merchant.");
+			ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
+		}
+		else if(escrowType == Seller)
+		{
+			ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
+			ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
+		}
+		else if(escrowType == Arbiter)
+		{
+			ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
+			ui->secondaryLabel->setText("Choose a rating for the merchant (1-5) or leave at 0 for no rating. Below please give feedback to the merchant.");	
 		}
 
+	}
+	else if(status == "escrow feedback")
+	{		
+		ui->manageInfo2->setText(tr("The escrow is complete."));
+		ui->primaryLabel->setVisible(true);
+		ui->primaryRating->setVisible(false);
+		ui->primaryFeedback->setVisible(true);
+		ui->secondaryLabel->setVisible(true);
+		ui->secondaryRating->setVisible(false);
+		ui->secondaryFeedback->setVisible(true);
+		ui->releaseButton->setText(tr("Leave Feedback"));
+		if(escrowType == Buyer)
+		{
+			ui->primaryLabel->setText("Provide additional feedback to the merchant.");
+			ui->secondaryLabel->setText("Provide additional feedback to the arbiter.");
+		}
+		else if(escrowType == Seller)
+		{
+			ui->primaryLabel->setText("Provide additional feedback to the buyer.");
+			ui->secondaryLabel->setText("Provide additional feedback to the arbiter.");
+		}
+		else if(escrowType == Arbiter)
+		{
+			ui->primaryLabel->setText("Provide additional feedback to the buyer.");
+			ui->secondaryLabel->setText("Provide additional feedback to the merchant.");
+		}
 	}
 	else if(status == "pending")
 	{		
 		ui->manageInfo2->setText(tr("The escrow is still pending a confirmation by the network. Please try again later."));
 		ui->refundButton->setEnabled(false);
 		ui->releaseButton->setEnabled(false);
-		ui->primaryLabel->setVisible(false);
-		ui->primaryRating->setVisible(false);
-		ui->primaryFeedback->setVisible(false);
-		ui->secondaryLabel->setVisible(false);
-		ui->secondaryRating->setVisible(false);
-		ui->secondaryFeedback->setVisible(false);
 	}
 	else
 	{
 		ui->manageInfo2->setText(tr("The escrow status was not recognized. Please contact the Syscoin team."));
 		ui->refundButton->setEnabled(false);
 		ui->releaseButton->setEnabled(false);
-		ui->primaryLabel->setVisible(false);
-		ui->primaryRating->setVisible(false);
-		ui->primaryFeedback->setVisible(false);
-		ui->secondaryLabel->setVisible(false);
-		ui->secondaryRating->setVisible(false);
-		ui->secondaryFeedback->setVisible(false);
 	}
 }
 bool ManageEscrowDialog::loadEscrow(const QString &escrow, QString &buyer, QString &seller, QString &arbiter, QString &status, QString &offertitle, QString &total)
@@ -385,10 +314,6 @@ void ManageEscrowDialog::on_releaseButton_clicked()
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrelease");
 	params.push_back(escrow.toStdString());
-	params.push_back(ui->primaryFeedback->toPlainText().toStdString());
-	params.push_back(ui->primaryRating->cleanText().toStdString());	
-	params.push_back(ui->secondaryFeedback->toPlainText().toStdString());
-	params.push_back(ui->secondaryRating->cleanText().toStdString());
 	try {
 		UniValue result = tableRPC.execute(strMethod, params);
 		QMessageBox::information(this, windowTitle(),
@@ -421,10 +346,6 @@ void ManageEscrowDialog::on_refundButton_clicked()
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrefund");
 	params.push_back(escrow.toStdString());
-	params.push_back(ui->primaryFeedback->toPlainText().toStdString());
-	params.push_back(ui->primaryRating->cleanText().toStdString());
-	params.push_back(ui->secondaryFeedback->toPlainText().toStdString());
-	params.push_back(ui->secondaryRating->cleanText().toStdString());
 	try {
 		UniValue result = tableRPC.execute(strMethod, params);
 		QMessageBox::information(this, windowTitle(),
