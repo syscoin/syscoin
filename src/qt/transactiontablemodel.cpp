@@ -412,7 +412,7 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
         return tr("Escrow Feedback");
     case TransactionRecord::EscrowRefundRecv:
         return tr("Escrow Refund Received");
-    case TransactionRecord::EscrowRefundComplete
+	case TransactionRecord::EscrowRefundComplete:
         return tr("Escrow Refund Complete");
     case TransactionRecord::EscrowComplete:
         return tr("Escrow Complete");
