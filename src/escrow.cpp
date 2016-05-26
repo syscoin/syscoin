@@ -141,9 +141,6 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, const s
 					pcursor->Next();
 					continue;
 				}   
-				// skip searching feedback escrow tx's
-				while(!txPos.buyerFeedback.IsNull() || !txPos.sellerFeedback.IsNull() || !txPos.arbiterFeedback.IsNull())
-					txPos = vtxPos.back();
 				const string &escrow = stringFromVch(vchEscrow);
 				const string &offerstr = stringFromVch(txPos.vchOffer);
 				CPubKey SellerPubKey(txPos.vchSellerKey);
@@ -492,7 +489,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					return error("CheckEscrowInputs() : an escrow offer accept using an alias must attach the alias as an input");
 				if(IsAliasOp(prevAliasOp) && vvchPrevAliasArgs[0] != theEscrow.vchWhitelistAlias)
 					return error("CheckEscrowInputs() : escrow alias guid and alias input guid mismatch");
-				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull())
 				{
 					return error("CheckEscrowInputs() :cannot leave feedback in activate tx");
 				}
@@ -503,7 +500,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				// Check input
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull())
 				{
 					return error("CheckEscrowInputs() :cannot leave feedback in release tx");
 				}
@@ -540,7 +537,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				// Check input
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckEscrowInputs() : escrow input guid mismatch");
-				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull()
+				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull())
 				{
 					return error("CheckEscrowInputs() :cannot leave feedback in refund tx");
 				}
@@ -1796,11 +1793,6 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	if (!returnRes.isStr())
 		throw runtime_error("Could not send escrow transaction: Invalid response from sendrawtransaction!");
 
-	CPubKey buyerKey(escrow.vchBuyerKey);
-	CSyscoinAddress buyerAddress(buyerKey.GetID());
-	if(!buyerAddress.IsValid())
-		throw runtime_error("Buyer address is invalid!");
-
 	CPubKey sellerKey(escrow.vchSellerKey);
 	CSyscoinAddress sellerAddress(sellerKey.GetID());
 	if(!sellerAddress.IsValid())
@@ -1848,7 +1840,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInCert=NULL;
 	const CWalletTx * wtxInAlias=NULL;
 	if(IsSys21Fork(chainActive.Tip()->nHeight))
-		SendMoneySyscoin(vecSend, recipient.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
+		SendMoneySyscoin(vecSend, recipientBuyer.nAmount+recipientSeller.nAmount+recipientArbiter.nAmount+fee.nAmount, false, wtx, wtxInOffer, wtxInCert, wtxInAlias, wtxIn);
 	ret.push_back(wtx.GetHash().GetHex());
 	return ret;
 }
