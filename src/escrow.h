@@ -36,11 +36,6 @@ public:
 	unsigned char nRating;
 	unsigned char nFeedbackUser;
 	
-	
-	void ClearFeedback()
-	{
-		vchFeedback.clear();
-	}
     CEscrowFeedback() {
         SetNull();
     }
@@ -110,9 +105,9 @@ public:
 		vchPaymentMessage.clear();
 		vchWhitelistAlias.clear();
 		vchOfferAcceptLink.clear();
-		buyerFeedback.ClearFeedback();
-		sellerFeedback.ClearFeedback();
-		arbiterFeedback.ClearFeedback();
+		buyerFeedback.SetNull();
+		sellerFeedback.SetNull();
+		arbiterFeedback.SetNull();
 	}
     CEscrow() {
         SetNull();
