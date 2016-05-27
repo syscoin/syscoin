@@ -51,15 +51,15 @@ struct MessageEntryLessThan
 {
     bool operator()(const MessageTableEntry &a, const MessageTableEntry &b) const
     {
-        return a.itime > b.itime;
+        return a.itime < b.itime;
     }
     bool operator()(const MessageTableEntry &a, const int &b) const
     {
-        return a.itime < b;
+        return a.itime > b;
     }
     bool operator()(const int &a, const MessageTableEntry &b) const
     {
-        return a > b.itime;
+        return a < b.itime;
     }
 };
 // Private implementation

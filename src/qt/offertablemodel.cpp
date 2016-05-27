@@ -65,11 +65,12 @@ public:
     CWallet *wallet;
     QList<OfferTableEntry> cachedOfferTable;
     OfferTableModel *parent;
-
+	bool showSoldOut;
+	bool showDigitalOffers;
     OfferTablePriv(CWallet *wallet, OfferTableModel *parent):
-        wallet(wallet), parent(parent) {}
+        wallet(wallet), parent(parent), showSoldOut(false), showDigitalOffers(false)  {}
 
-    void refreshOfferTable(OfferModelType type, bool showSoldOut=false, bool showDigitalOffers=false)
+    void refreshOfferTable(OfferModelType type)
     {
         cachedOfferTable.clear();
         {
@@ -318,7 +319,9 @@ void OfferTableModel::filterOffers(bool showSold, bool showDigital)
 	if(modelType != MyOffer)
 		return;
 	clear();
-	priv->refreshOfferTable(modelType, showSold, showDigital);
+	priv->showSoldOut = showSold;
+	priv->showDigitalOffers = showDigital
+	priv->refreshOfferTable(modelType);
 }
 int OfferTableModel::rowCount(const QModelIndex &parent) const
 {

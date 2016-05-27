@@ -57,15 +57,15 @@ struct EscrowEntryLessThan
 {
     bool operator()(const EscrowTableEntry &a, const EscrowTableEntry &b) const
     {
-        return a.itime > b.itime;
+        return a.itime < b.itime;
     }
     bool operator()(const EscrowTableEntry &a, const int &b) const
     {
-        return a.itime < b;
+        return a.itime > b;
     }
     bool operator()(const int &a, const EscrowTableEntry &b) const
     {
-        return a > b.itime;
+        return a < b.itime;
     }
 };
 
@@ -76,11 +76,11 @@ public:
     CWallet *wallet;
     QList<EscrowTableEntry> cachedEscrowTable;
     EscrowTableModel *parent;
-
+	bool showComplete;
     EscrowTablePriv(CWallet *wallet, EscrowTableModel *parent):
-        wallet(wallet), parent(parent) {}
+        wallet(wallet), parent(parent), showComplete(false) {}
 
-    void refreshEscrowTable(EscrowModelType type, bool showComplete=false)
+    void refreshEscrowTable(EscrowModelType type)
     {
 
         cachedEscrowTable.clear();
@@ -287,7 +287,8 @@ void EscrowTableModel::showComplete(bool show)
 	if(modelType != MyEscrow)
 		return;
 	clear();
-	priv->refreshEscrowTable(modelType, show);
+	priv->showComplete = show;
+	priv->refreshEscrowTable(modelType);
 }
 void EscrowTableModel::refreshEscrowTable() 
 {
