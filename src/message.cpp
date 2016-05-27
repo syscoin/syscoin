@@ -671,7 +671,7 @@ UniValue messagesentlist(const UniValue& params, bool fHelp) {
 		{
 			pending = 1;
 			message = CMessage(wtx);
-			if(!IsSyscoinTxMine(wtx, "message"))
+			if(IsSyscoinTxMine(wtx, "message"))
 				continue;
 		}
 		else
@@ -681,14 +681,14 @@ UniValue messagesentlist(const UniValue& params, bool fHelp) {
 			if (!GetSyscoinTransaction(message.nHeight, message.txHash, tx, Params().GetConsensus()))
 			{
 				pending == 1;
-				if(!IsSyscoinTxMine(wtx, "message"))
+				if(IsSyscoinTxMine(wtx, "message"))
 					continue;
 			}
 			else
 			{
 				if (!DecodeMessageTx(tx, op, nOut, vvch) || !IsMessageOp(op))
 					continue;
-				if(!IsSyscoinTxMine(tx, "message"))
+				if(IsSyscoinTxMine(tx, "message"))
 					continue;
 			}
 		}

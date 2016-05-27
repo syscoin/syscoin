@@ -636,38 +636,7 @@ bool IsSyscoinTxMine(const CTransaction& tx, const string &type) {
 	else
 		return false;
 
-	CScript scriptPubKey;
-	RemoveSyscoinScript(tx.vout[myNout].scriptPubKey, scriptPubKey);
-	CTxDestination dest;
-	ExtractDestination(scriptPubKey, dest);
-	CSyscoinAddress address(dest);
-	return IsMine(*pwalletMain, address.Get());
-}
-bool IsSyscoinTxMine(const CTransaction& tx, const string &type, CSyscoinAddress& myAddress) {
-	if (tx.nVersion != SYSCOIN_TX_VERSION)
-		return false;
-	int op, nOut, myNout;
-	vector<vector<unsigned char> > vvch;
-	if ((type == "alias" || type == "any") && DecodeAliasTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "offer" || type == "any") && DecodeOfferTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "cert" || type == "any") && DecodeCertTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "message" || type == "any") && DecodeMessageTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "escrow" || type == "any") && DecodeEscrowTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else
-		return false;
-
-	CScript scriptPubKey;
-	RemoveSyscoinScript(tx.vout[myNout].scriptPubKey, scriptPubKey);
-	CTxDestination dest;
-	ExtractDestination(scriptPubKey, dest);
-	CSyscoinAddress address(dest);
-	myAddress = address;
-	return IsMine(*pwalletMain, address.Get());
+	return pwalletMain->IsMine(tx.vout[myNout]);
 }
 void updateBans(const vector<unsigned char> &banData)
 {
