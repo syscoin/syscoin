@@ -1971,6 +1971,14 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	}
 	escrow.ClearEscrow();
 
+
+	CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyArbiter, scriptPubKeyBuyerDestination, scriptPubKeySellerDestination, scriptPubKeyArbiterDestination;
+	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
+	scriptPubKeySellerDestination= GetScriptForDestination(sellerKey.GetID());
+	scriptPubKeyArbiterDestination= GetScriptForDestination(arbiterKey.GetID());
+	vector<CRecipient> vecSend;
+	CRecipient recipientBuyer, recipientSeller, recipientArbiter;
+
 	// buyer
 	if(foundBuyerKey)
 	{
@@ -1982,6 +1990,14 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.arbiterFeedback = arbiterFeedback;
 		escrow.sellerFeedback = sellerFeedback;
+		scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+		scriptPubKeySeller += scriptPubKeySellerDestination;
+		scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+		scriptPubKeyArbiter += scriptPubKeyArbiterDestination;   
+		CreateRecipient(scriptPubKeySeller, recipientSeller);
+		vecSend.push_back(recipientSeller);
+		CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
+		vecSend.push_back(recipientArbiter);
 	}
 	// seller
 	else if(foundSellerKey)
@@ -1994,6 +2010,14 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		arbiterFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.arbiterFeedback = arbiterFeedback;
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+		scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+		scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+		scriptPubKeyArbiter += scriptPubKeyArbiterDestination; 
+		CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+		vecSend.push_back(recipientBuyer);
+		CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
+		vecSend.push_back(recipientArbiter);
 	}
 	// arbiter
 	else if(foundArbiterKey)
@@ -2006,6 +2030,14 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		sellerFeedback.nRating = nRatingSecondary;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.sellerFeedback = sellerFeedback;
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+		scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+		scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+		scriptPubKeySeller += scriptPubKeySellerDestination;
+		CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+		vecSend.push_back(recipientBuyer);
+		CreateRecipient(scriptPubKeySeller, recipientSeller);
+		vecSend.push_back(recipientSeller);
 	}
 	else
 	{
@@ -2014,27 +2046,6 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
-
-    CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyArbiter, scriptPubKeyBuyerDestination, scriptPubKeySellerDestination, scriptPubKeyArbiterDestination;
-	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
-	scriptPubKeySellerDestination= GetScriptForDestination(sellerKey.GetID());
-	scriptPubKeyArbiterDestination= GetScriptForDestination(arbiterKey.GetID());
-	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
-	scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-	scriptPubKeySeller += scriptPubKeySellerDestination;
-	scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-	scriptPubKeyArbiter += scriptPubKeyArbiterDestination;
-	vector<CRecipient> vecSend;
-	CRecipient recipientBuyer;
-	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
-	vecSend.push_back(recipientBuyer);
-	CRecipient recipientSeller;
-	CreateRecipient(scriptPubKeySeller, recipientSeller);
-	vecSend.push_back(recipientSeller);
-	CRecipient recipientArbiter;
-	CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
-	vecSend.push_back(recipientArbiter);
 
 	const vector<unsigned char> &data = escrow.Serialize();
 	CScript scriptData;
