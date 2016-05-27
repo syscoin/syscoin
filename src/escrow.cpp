@@ -425,7 +425,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
     theEscrow.UnserializeFromTx(tx);
     COffer theOffer;
     
-	if(theEscrow.IsNull() && op != OP_ESCROW_COMPLETE)
+	if(theEscrow.IsNull() && op != OP_ESCROW_COMPLETE && vvchArgs.size() == 1)
 		return true;
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("escrow tx GUID too big");
@@ -574,8 +574,6 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					theEscrow.rawTx = serializedEscrow.rawTx;
 				if(op == OP_ESCROW_COMPLETE)
 				{
-					theOffer.UnserializeFromTx(tx);
-					theEscrow.vchOfferAcceptLink = theOffer.accept.vchAcceptRand;
 					if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
 					{
 						// only allow to rate users once 
@@ -592,6 +590,11 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 							HandleEscrowFeedback(theEscrow);	
 						}
+					}
+					else
+					{
+						theOffer.UnserializeFromTx(tx);
+						theEscrow.vchOfferAcceptLink = theOffer.accept.vchAcceptRand;
 					}
 				}
 				
