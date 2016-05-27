@@ -320,7 +320,7 @@ void OfferTableModel::filterOffers(bool showSold, bool showDigital)
 		return;
 	clear();
 	priv->showSoldOut = showSold;
-	priv->showDigitalOffers = showDigital
+	priv->showDigitalOffers = showDigital;
 	priv->refreshOfferTable(modelType);
 }
 int OfferTableModel::rowCount(const QModelIndex &parent) const
