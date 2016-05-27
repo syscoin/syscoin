@@ -1947,6 +1947,9 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
     if (!GetTxOfEscrow( vchEscrow, 
 		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
+    if(!IsSyscoinTxMine(tx, "escrow")) {
+		throw runtime_error("You must wait for feedback from others involved in this escrow");
+    }
     vector<vector<unsigned char> > vvch;
     int op, nOut;
     if (!DecodeEscrowTx(tx, op, nOut, vvch) 
