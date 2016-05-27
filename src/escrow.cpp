@@ -631,7 +631,7 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		}
 	}
 }
-bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowType type, const vector<CEscrow> &vtxPos)
+bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser type, const vector<CEscrow> &vtxPos)
 {
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
@@ -653,7 +653,7 @@ bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowType ty
 	}
 	return false;
 }
-void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, const EscrowType type, const vector<CEscrow> &vtxPos)
+void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, const EscrowUser type, const vector<CEscrow> &vtxPos)
 {
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
