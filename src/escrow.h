@@ -26,9 +26,9 @@ std::string escrowFromOp(int op);
 CScript RemoveEscrowScriptPrefix(const CScript& scriptIn);
 extern bool IsSys21Fork(const uint64_t& nHeight);
 enum EscrowUser {
-    BUYER=0,
-	SELLER,
-	ARBITER
+    BUYER=1,
+	SELLER=2,
+	ARBITER=3
 };
 class CEscrowFeedback {
 public:

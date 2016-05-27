@@ -1990,10 +1990,10 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	{
 		CKeyID keyID;
 		if (!sellerAddress.GetKeyID(keyID))
-			throw runtime_error("Buyer address does not refer to a key");
+			throw runtime_error("Seller address does not refer to a key");
 		CKey vchSecret;
 		if (!pwalletMain->GetKey(keyID, vchSecret))
-			throw runtime_error("Private key for buyer address " + buyerAddress.ToString() + " is not known");
+			throw runtime_error("Private key for seller address " + sellerAddress.ToString() + " is not known");
 		foundSellerKey = true;
 	}
 	catch(...)
@@ -2005,10 +2005,10 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	{
 		CKeyID keyID;
 		if (!arbiterAddress.GetKeyID(keyID))
-			throw runtime_error("Buyer address does not refer to a key");
+			throw runtime_error("Arbiter address does not refer to a key");
 		CKey vchSecret;
 		if (!pwalletMain->GetKey(keyID, vchSecret))
-			throw runtime_error("Private key for buyer address " + buyerAddress.ToString() + " is not known");
+			throw runtime_error("Private key for arbiter address " + arbiterAddress.ToString() + " is not known");
 		foundArbiterKey = true;
 	}
 	catch(...)
