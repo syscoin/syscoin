@@ -519,18 +519,18 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
 					{
 							// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
-							if(!FindFeedbackInEscrow(serializedEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos)
+							if(!FindFeedbackInEscrow(serializedEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
 								theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
 							// otherwise make sure they can't rate again
 							else
 								theEscrow.buyerFeedback.nRating = 0;
 
-							if(!FindFeedbackInEscrow(serializedEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos)
+							if(!FindFeedbackInEscrow(serializedEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos))
 								theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
 							else
 								theEscrow.sellerFeedback.nRating = 0;
 
-							if(!FindFeedbackInEscrow(serializedEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos)
+							if(!FindFeedbackInEscrow(serializedEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos))
 								theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 							else
 								theEscrow.arbiterFeedback.nRating = 0;
