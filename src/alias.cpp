@@ -1935,7 +1935,7 @@ UniValue aliasfeedbackfilter(const UniValue& params, bool fHelp) {
 		UniValue oBuyerFeedBack(UniValue::VARR);
 		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
 		{
-			UniValue oFeedback(UnitValue::VOBJ);
+			UniValue oFeedback(UniValue::VOBJ);
 			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
@@ -1946,7 +1946,7 @@ UniValue aliasfeedbackfilter(const UniValue& params, bool fHelp) {
 		UniValue oSellerFeedBack(UniValue::VARR);
 		for(unsigned int i =0;i<sellerFeedBacks.size();i++)
 		{
-			UniValue oFeedback(UnitValue::VOBJ);
+			UniValue oFeedback(UniValue::VOBJ);
 			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
@@ -1957,7 +1957,7 @@ UniValue aliasfeedbackfilter(const UniValue& params, bool fHelp) {
 		UniValue oArbiterFeedBack(UniValue::VARR);
 		for(unsigned int i =0;i<arbiterFeedBacks.size();i++)
 		{
-			UniValue oFeedback(UnitValue::VOBJ);
+			UniValue oFeedback(UniValue::VOBJ);
 			oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(arbiterFeedBacks[i].vchFeedback)));
