@@ -122,9 +122,6 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, const s
             	vector<unsigned char> vchEscrow = key.second;
                 vector<CEscrow> vtxPos;
 				pcursor->GetValue(vtxPos);
-				// skip feedback states in our searches
-				while (!vtxPos.back().buyerFeedback.IsNull() || !vtxPos.back().sellerFeedback.IsNull() || !vtxPos.back().arbiterFeedback.IsNull())	
-					vtxPos.pop_back();
 				if (vtxPos.empty()){
 					pcursor->Next();
 					continue;
@@ -160,71 +157,6 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, const s
 					pcursor->Next();
 					continue;
 				}  
-                escrowScan.push_back(make_pair(vchEscrow, txPos));
-            }
-            if (escrowScan.size() >= nMax)
-                break;
-
-            pcursor->Next();
-        } catch (std::exception &e) {
-            return error("%s() : deserialize error", __PRETTY_FUNCTION__);
-        }
-    }
-    return true;
-}
-bool CEscrowDB::ScanEscrowFeedbacks(const std::vector<unsigned char>& vchEscrow, const string& strRegexp, unsigned int nMax,
-        std::vector<std::pair<std::vector<unsigned char>, CEscrow> >& escrowScan) {
-	string strSearchLower = strRegexp;
-	boost::algorithm::to_lower(strSearchLower);
-	int nMaxAge  = GetEscrowExpirationDepth();
-	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
-	pcursor->Seek(make_pair(string("escrowi"), vchEscrow));
-    while (pcursor->Valid()) {
-        boost::this_thread::interruption_point();
-		pair<string, vector<unsigned char> > key;
-        try {
-			if (pcursor->GetKey(key) && key.first == "escrowi") {
-            	vector<unsigned char> vchEscrow = key.second;
-                vector<CEscrow> vtxPos;
-				pcursor->GetValue(vtxPos);
-				// find a feedback state, skip the rest
-				while (vtxPos.back().buyerFeedback.IsNull() && vtxPos.back().sellerFeedback.IsNull() && vtxPos.back().arbiterFeedback.IsNull())	
-					vtxPos.pop_back();
-				if (vtxPos.empty()){
-					pcursor->Next();
-					continue;
-				}
-				const CEscrow &txPos = vtxPos.back();
-  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
-				{
-					pcursor->Next();
-					continue;
-				}   
-				const string &escrow = stringFromVch(vchEscrow);
-				const string &offerstr = stringFromVch(txPos.vchOffer);
-				CPubKey SellerPubKey(txPos.vchSellerKey);
-				CSyscoinAddress selleraddy(SellerPubKey.GetID());
-				selleraddy = CSyscoinAddress(selleraddy.ToString());
-
-				CPubKey ArbiterPubKey(txPos.vchArbiterKey);
-				CSyscoinAddress arbiteraddy(ArbiterPubKey.GetID());
-				arbiteraddy = CSyscoinAddress(arbiteraddy.ToString());
-
-				CPubKey BuyerPubKey(txPos.vchBuyerKey);
-				CSyscoinAddress buyeraddy(BuyerPubKey.GetID());
-				buyeraddy = CSyscoinAddress(buyeraddy.ToString());
-				string buyerAliasLower = buyeraddy.aliasName;
-				string sellerAliasLower = selleraddy.aliasName;
-				string arbiterAliasLower = arbiteraddy.aliasName;
-				boost::algorithm::to_lower(buyerAliasLower);
-				boost::algorithm::to_lower(sellerAliasLower);
-				boost::algorithm::to_lower(arbiterAliasLower);
-
-				if (strRegexp != "" && strRegexp != offerstr && strRegexp != escrow && strSearchLower != buyerAliasLower && strSearchLower != sellerAliasLower && strSearchLower != arbiterAliasLower)
-				{
-					pcursor->Next();
-					continue;
-				}
                 escrowScan.push_back(make_pair(vchEscrow, txPos));
             }
             if (escrowScan.size() >= nMax)
@@ -2409,11 +2341,9 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 				status = "escrow released";
 			else if(op == OP_ESCROW_REFUND && vvch.size() == 1)
 				status = "escrow refunded";
-			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 2 && vvch[1] == vchFromString("1"))
-				status = "escrow feedback";
 			else if(op == OP_ESCROW_REFUND && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 				status = "escrow refund complete";
-			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 1)
+			else if(op == OP_ESCROW_COMPLETE )
 				status = "complete";
 		}
 		else
@@ -2510,11 +2440,9 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 				status = "escrow released";
 			else if(op == OP_ESCROW_REFUND && vvch.size() == 1)
 				status = "escrow refunded";
-			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 2 && vvch[1] == vchFromString("1"))
-				status = "escrow feedback";
 			else if(op == OP_ESCROW_REFUND && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 				status = "escrow refund complete";
-			else if(op == OP_ESCROW_COMPLETE && vvch.size() == 1)
+			else if(op == OP_ESCROW_COMPLETE)
 				status = "complete";
 
 			oEscrow.push_back(Pair("status", status));
@@ -2574,6 +2502,14 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
         if (!DecodeEscrowTx(tx, op, nOut, vvch) 
         	|| !IsEscrowOp(op) )
             continue; 
+		int avgBuyerRating, avgSellerRating, avgArbiterRating;
+		vector<CEscrowFeedback> buyerFeedBacks, sellerFeedBacks, arbiterFeedBacks;
+		if (!pescrowdb->ReadEscrow(pairScan.first, vtxPos) || vtxPos.empty())
+			continue;
+		GetFeedbackInEscrow(buyerFeedBacks, avgBuyerRating, BUYER, vtxPos);
+		GetFeedbackInEscrow(sellerFeedBacks, avgSellerRating, SELLER, vtxPos);
+		GetFeedbackInEscrow(arbiterFeedBacks, avgArbiterRating, ARBITER, vtxPos);
+		
 		CPubKey SellerPubKey(txEscrow.vchSellerKey);
 		CSyscoinAddress selleraddy(SellerPubKey.GetID());
 		selleraddy = CSyscoinAddress(selleraddy.ToString());
@@ -2615,11 +2551,9 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 			status = "escrow released";
 		else if(op == OP_ESCROW_REFUND && vvch.size() == 1)
 			status = "escrow refunded";
-		else if(op == OP_ESCROW_COMPLETE && vvch.size() == 2 && vvch[1] == vchFromString("1"))
-			status = "escrow feedback";
 		else if(op == OP_ESCROW_REFUND && vvch.size() == 2 && vvch[1] == vchFromString("1"))
 			status = "escrow refund complete";
-		else if(op == OP_ESCROW_COMPLETE && vvch.size() == 1)
+		else if(op == OP_ESCROW_COMPLETE)
 			status = "complete";
 		
 
@@ -2628,6 +2562,50 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		oEscrow.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
 		string sTotal = strprintf("%" PRIu64" SYS", ((nEscrowFee+txEscrow.nPricePerUnit)*txEscrow.nQty)/COIN);
 		oEscrow.push_back(Pair("total", sTotal));
+		UniValue oBuyerFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
+			oBuyerFeedBack.push_back(oFeedback);
+		}
+		oEscrow.push_back(Pair("buyer_feedback", oBuyerFeedBack));
+		oEscrow.push_back(Pair("avg_buyer_rating", avgBuyerRating));
+		UniValue oSellerFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<sellerFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
+			oSellerFeedBack.push_back(oFeedback);
+		}
+		oEscrow.push_back(Pair("seller_feedback", oSellerFeedBack));
+		oEscrow.push_back(Pair("avg_seller_rating", avgSellerRating));
+		UniValue oArbiterFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<arbiterFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(arbiterFeedBacks[i].vchFeedback)));
+			oArbiterFeedBack.push_back(oFeedback);
+		}
+		oEscrow.push_back(Pair("arbiter_feedback", oArbiterFeedBack));
+		oEscrow.push_back(Pair("avg_arbiter_rating", avgArbiterRating));
+		unsigned int ratingCount = 0;
+		if(avgArbiterRating > 0)
+			ratingCount++;
+		if(avgSellerRating > 0)
+			ratingCount++;
+		if(avgBuyerRating > 0)
+			ratingCount++;
+		if(ratingCount == 0)
+			ratingCount = 1;
+		oEscrow.push_back(Pair("avg_rating", (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount));
+
         oRes.push_back(oEscrow);
     }
 

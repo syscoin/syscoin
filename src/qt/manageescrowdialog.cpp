@@ -167,43 +167,6 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 		}
 
 	}
-	else if(status == "escrow feedback")
-	{		
-		ui->manageInfo2->setText(tr("The escrow is complete. Please leave feedback if you haven't already done so."));
-		ui->refundButton->setEnabled(false);
-		ui->primaryLabel->setVisible(true);
-		ui->primaryRating->setVisible(true);
-		ui->primaryFeedback->setVisible(true);
-		ui->secondaryLabel->setVisible(true);
-		ui->secondaryRating->setVisible(true);
-		ui->secondaryFeedback->setVisible(true);
-		ui->releaseButton->setText(tr("Leave Feedback"));
-		if(!ui->primaryRating->isEnabled())
-		{
-			ui->primaryLabel->setText("Thank you for providing feedback for this escrow!");
-			ui->primaryFeedback->setVisible(false);
-			ui->secondaryLabel->setVisible(false);
-			ui->secondaryRating->setVisible(false);
-			ui->secondaryFeedback->setVisible(false);
-			ui->primaryRating->setVisible(false);
-			ui->releaseButton->setEnabled(false);
-		}
-		else if(escrowType == Buyer)
-		{
-			ui->primaryLabel->setText("Choose a rating for the merchant (1-5) or leave at 0 for no rating. Below please give feedback to the merchant.");
-			ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
-		}
-		else if(escrowType == Seller)
-		{
-			ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-			ui->secondaryLabel->setText("Choose a rating for the arbiter (1-5) or leave at 0 for no rating. Below please give feedback to the arbiter. Skip if escrow arbiter was not involved.");
-		}
-		else if(escrowType == Arbiter)
-		{
-			ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
-			ui->secondaryLabel->setText("Choose a rating for the merchant (1-5) or leave at 0 for no rating. Below please give feedback to the merchant.");	
-		}
-	}
 	else if(status == "pending")
 	{		
 		ui->manageInfo2->setText(tr("The escrow is still pending a confirmation by the network. Please try again later."));
