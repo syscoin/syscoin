@@ -1902,7 +1902,7 @@ UniValue aliasfeedbackfilter(const UniValue& params, bool fHelp) {
 		const CEscrow &txEscrow = pairScan.second;  
 		const string &escrow = stringFromVch(pairScan.first);
 	    vector<CEscrow> vtxPos;
-		int avgBuyerRating, avgSellerRating, avgArbiterRating;
+		EscrowUser avgBuyerRating, avgSellerRating, avgArbiterRating;
 		vector<CEscrowFeedback> buyerFeedBacks, sellerFeedBacks, arbiterFeedBacks;
 		if (!pescrowdb->ReadEscrow(pairScan.first, vtxPos) || vtxPos.empty())
 			continue;
