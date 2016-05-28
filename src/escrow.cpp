@@ -172,6 +172,71 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, const s
     }
     return true;
 }
+bool CEscrowDB::ScanEscrowFeedbacks(const std::vector<unsigned char>& vchEscrow, const string& strRegexp, unsigned int nMax,
+        std::vector<std::pair<std::vector<unsigned char>, CEscrow> >& escrowScan) {
+	string strSearchLower = strRegexp;
+	boost::algorithm::to_lower(strSearchLower);
+	int nMaxAge  = GetEscrowExpirationDepth();
+	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
+	pcursor->Seek(make_pair(string("escrowi"), vchEscrow));
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
+		pair<string, vector<unsigned char> > key;
+        try {
+			if (pcursor->GetKey(key) && key.first == "escrowi") {
+            	vector<unsigned char> vchEscrow = key.second;
+                vector<CEscrow> vtxPos;
+				pcursor->GetValue(vtxPos);
+				// find a feedback state, skip the rest
+				while (vtxPos.back().buyerFeedback.IsNull() && vtxPos.back().sellerFeedback.IsNull() && vtxPos.back().arbiterFeedback.IsNull())	
+					vtxPos.pop_back();
+				if (vtxPos.empty()){
+					pcursor->Next();
+					continue;
+				}
+				const CEscrow &txPos = vtxPos.back();
+  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+				{
+					pcursor->Next();
+					continue;
+				}   
+				const string &escrow = stringFromVch(vchEscrow);
+				const string &offerstr = stringFromVch(txPos.vchOffer);
+				CPubKey SellerPubKey(txPos.vchSellerKey);
+				CSyscoinAddress selleraddy(SellerPubKey.GetID());
+				selleraddy = CSyscoinAddress(selleraddy.ToString());
+
+				CPubKey ArbiterPubKey(txPos.vchArbiterKey);
+				CSyscoinAddress arbiteraddy(ArbiterPubKey.GetID());
+				arbiteraddy = CSyscoinAddress(arbiteraddy.ToString());
+
+				CPubKey BuyerPubKey(txPos.vchBuyerKey);
+				CSyscoinAddress buyeraddy(BuyerPubKey.GetID());
+				buyeraddy = CSyscoinAddress(buyeraddy.ToString());
+				string buyerAliasLower = buyeraddy.aliasName;
+				string sellerAliasLower = selleraddy.aliasName;
+				string arbiterAliasLower = arbiteraddy.aliasName;
+				boost::algorithm::to_lower(buyerAliasLower);
+				boost::algorithm::to_lower(sellerAliasLower);
+				boost::algorithm::to_lower(arbiterAliasLower);
+
+				if (strRegexp != "" && strRegexp != offerstr && strRegexp != escrow && strSearchLower != buyerAliasLower && strSearchLower != sellerAliasLower && strSearchLower != arbiterAliasLower)
+				{
+					pcursor->Next();
+					continue;
+				}
+                escrowScan.push_back(make_pair(vchEscrow, txPos));
+            }
+            if (escrowScan.size() >= nMax)
+                break;
+
+            pcursor->Next();
+        } catch (std::exception &e) {
+            return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+        }
+    }
+    return true;
+}
 int IndexOfEscrowOutput(const CTransaction& tx) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
@@ -653,26 +718,41 @@ bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser ty
 	}
 	return false;
 }
-void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, const EscrowUser type, const vector<CEscrow> &vtxPos)
+void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, const vector<CEscrow> &vtxPos)
 {
+	int nRating = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
 		if(type == BUYER)
 		{
 			if(!vtxPos[i].buyerFeedback.IsNull())
+			{
+				nRating += vtxPos[i].buyerFeedback.nRating;
 				feedBack.push_back(vtxPos[i].buyerFeedback);
+			}
 		}
 		else if(type == SELLER)
 		{
 			if(!vtxPos[i].sellerFeedback.IsNull())
+			{
+				nRating += vtxPos[i].sellerFeedback.nRating;
 				feedBack.push_back(vtxPos[i].sellerFeedback);
+			}
 		}
 		else if(type == ARBITER)
 		{
 			if(!vtxPos[i].arbiterFeedback.IsNull())
+			{
+				nRating += vtxPos[i].arbiterFeedback.nRating;
 				feedBack.push_back(vtxPos[i].arbiterFeedback);
+			}
 		}
 	}
+	if(feedBack.size() > 0)
+	{
+		nRating /= feedBack.size();
+	}
+	avgRating = nRating;
 }
 UniValue escrownew(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 5 )

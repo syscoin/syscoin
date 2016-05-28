@@ -247,8 +247,8 @@ extern UniValue aliasaffiliates(const UniValue& params, bool fHelp);
 extern UniValue aliasinfo(const UniValue& params, bool fHelp);
 extern UniValue aliashistory(const UniValue& params, bool fHelp);
 extern UniValue aliasfilter(const UniValue& params, bool fHelp);
+extern UniValue aliasfeedbackfilter(const UniValue& params, bool fHelp);
 extern UniValue generatepublickey(const UniValue& params, bool fHelp);
-
 
 extern UniValue offernew(const UniValue& params, bool fHelp);
 extern UniValue offerupdate(const UniValue& params, bool fHelp);
