@@ -349,12 +349,7 @@ QVariant EscrowTableModel::data(const QModelIndex &index, int role) const
         case Buyer:
             return rec->buyer;
         case Rating:
-			{
-				if(modelType != MyEscrow)
-					return QVariant::fromValue(StarRating(rec->rating));
-				else
-					return rec->rating;
-			}
+			return QVariant::fromValue(StarRating(rec->rating));
         }
     }
     else if (role == EscrowRole)

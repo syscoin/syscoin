@@ -125,7 +125,7 @@ void MyAliasListPage::setModel(WalletModel *walletModel, AliasTableModel *model)
     ui->tableView->setColumnWidth(1, 75); //expires on
     ui->tableView->setColumnWidth(2, 75); //expires in
     ui->tableView->setColumnWidth(3, 75); //expired status
-	ui->tableView->setColumnWidth(4, 75); //rating
+	ui->tableView->setColumnWidth(4, 100); //rating
 	ui->tableView->setColumnWidth(5, 50); //ratingcount
 	ui->tableView->setItemDelegateForColumn(4, new StarDelegate);
 
