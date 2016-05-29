@@ -2415,8 +2415,8 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		}
 		else
 			status = "pending";
-		}
-	``	UniValue oBuyerFeedBack(UniValue::VARR);
+		
+	``	UniValue oBuy}erFeedBack(UniValue::VARR);
 		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
@@ -2465,6 +2465,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
  
 		vNamesI[vchName] = nHeight;
 		vNamesO[vchName] = oName;	
+		
     
 	}
     BOOST_FOREACH(const PAIRTYPE(vector<unsigned char>, UniValue)& item, vNamesO)
