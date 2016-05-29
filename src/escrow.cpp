@@ -2171,8 +2171,6 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	}
 	int avgBuyerRating, avgSellerRating, avgArbiterRating;
 	vector<CEscrowFeedback> buyerFeedBacks, sellerFeedBacks, arbiterFeedBacks;
-	if (!pescrowdb->ReadEscrow(pairScan.first, vtxPos) || vtxPos.empty())
-		continue;
 	GetFeedbackInEscrow(buyerFeedBacks, avgBuyerRating, BUYER, vtxPos);
 	GetFeedbackInEscrow(sellerFeedBacks, avgSellerRating, SELLER, vtxPos);
 	GetFeedbackInEscrow(arbiterFeedBacks, avgArbiterRating, ARBITER, vtxPos);
@@ -2417,6 +2415,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		}
 		else
 			status = "pending";
+		}
 	``	UniValue oBuyerFeedBack(UniValue::VARR);
 		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
 		{
