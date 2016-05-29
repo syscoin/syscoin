@@ -89,9 +89,10 @@ void EscrowListPage::setModel(WalletModel* walletModel, EscrowTableModel *model)
     ui->tableView->setColumnWidth(4, 150); //buyer
     ui->tableView->setColumnWidth(5, 80); //offer
 	ui->tableView->setColumnWidth(6, 250); //offer title
-    ui->tableView->setColumnWidth(7, 80); //offeraccept
-	ui->tableView->setColumnWidth(8, 80); //rating
-    ui->tableView->setColumnWidth(9, 0); //status
+    ui->tableView->setColumnWidth(7, 80); //total
+	ui->tableView->setColumnWidth(8, 80); //offeraccept
+	ui->tableView->setColumnWidth(9, 80); //rating
+    ui->tableView->setColumnWidth(10, 0); //status
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
