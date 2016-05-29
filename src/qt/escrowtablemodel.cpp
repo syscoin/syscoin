@@ -481,7 +481,7 @@ bool EscrowTableModel::setData(const QModelIndex &index, const QVariant &value, 
             break;
        case Rating:
             // Do nothing, if old value == new value
-            if(rec->rating == value.toInt()))
+            if(rec->rating == value.toInt())
             {
                 editStatus = NO_CHANGES;
                 return false;
