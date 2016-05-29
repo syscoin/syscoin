@@ -313,7 +313,7 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 				const UniValue& status_value = find_value(o, "status");
 				if (status_value.type() == UniValue::VSTR)
 					status_str = status_value.get_str();
-				const UniValue& rating_value = find_value(o, "status");
+				const UniValue& rating_value = find_value(o, "avg_rating");
 				if (rating_value.type() == UniValue::VNUM)
 					rating = rating_value.get_int();
 

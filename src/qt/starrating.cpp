@@ -5,7 +5,7 @@
 #include <cmath>
 
 #include "starrating.h"
-#include <QDebug>
+
 const int PaintingScaleFactor = 20;
 
 StarRating::StarRating(int starCount, int maxStarCount)
@@ -44,9 +44,8 @@ void StarRating::paint(QPainter *painter, const QRect &rect,
 
     int yOffset = (rect.height() - PaintingScaleFactor) / 2;
     painter->translate(rect.x(), rect.y() + yOffset);
-	qDebug() << "rect.x(): " << QString::number(rect.x()) << " rect.y(): " << QString::number(rect.y()) << " yOffset: " << yOffset;
     painter->scale(PaintingScaleFactor, PaintingScaleFactor);
-	qDebug() << "myMaxStarCount: " << QString::number(myMaxStarCount) << " myStarCount: " << QString::number(myStarCount);
+	
     for (int i = 0; i < myMaxStarCount; ++i) {
         if (i < myStarCount) {
             painter->drawPolygon(starPolygon, Qt::WindingFill);
