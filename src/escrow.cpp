@@ -2415,8 +2415,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		}
 		else
 			status = "pending";
-		
-	``	UniValue oBuyerFeedBack(UniValue::VARR);
+		UniValue oBuyerFeedBack(UniValue::VARR);
 		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
