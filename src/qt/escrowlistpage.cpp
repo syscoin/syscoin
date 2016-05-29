@@ -90,7 +90,8 @@ void EscrowListPage::setModel(WalletModel* walletModel, EscrowTableModel *model)
     ui->tableView->setColumnWidth(5, 80); //offer
 	ui->tableView->setColumnWidth(6, 250); //offer title
     ui->tableView->setColumnWidth(7, 80); //offeraccept
-    ui->tableView->setColumnWidth(8, 0); //status
+	i->tableView->setColumnWidth(8, 80); //rating
+    ui->tableView->setColumnWidth(9, 0); //status
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
@@ -222,7 +223,7 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 		string offertitle_str;
 		string total_str;	
 		string buyer_str;
-		int unixTime;
+		int unixTime, rating;
 		QDateTime dateTime;
         params.push_back(ui->lineEditEscrowSearch->text().toStdString());
 		params.push_back(GUID);
@@ -273,6 +274,7 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 				offertitle_str = "";
 				total_str = "";
 				buyer_str = "";
+				rating = 0;
 				
 				const UniValue& name_value = find_value(o, "escrow");
 				if (name_value.type() == UniValue::VSTR)
@@ -308,6 +310,9 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 				const UniValue& status_value = find_value(o, "status");
 				if (status_value.type() == UniValue::VSTR)
 					status_str = status_value.get_str();
+				const UniValue& rating_value = find_value(o, "status");
+				if (rating_value.type() == UniValue::VNUM)
+					rating = rating_value.get_int();
 
 				unixTime = atoi(time_str.c_str());
 				dateTime.setTime_t(unixTime);
@@ -320,6 +325,7 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 						QString::fromStdString(offertitle_str),
 						QString::fromStdString(offeraccept_str),
 						QString::fromStdString(total_str),
+						rating,
 						QString::fromStdString(status_str),
 						QString::fromStdString(buyer_str));
 					this->model->updateEntry(QString::fromStdString(name_str), unixTime, QString::fromStdString(time_str),
@@ -329,6 +335,7 @@ void EscrowListPage::on_searchEscrow_clicked(string GUID)
 						QString::fromStdString(offertitle_str),
 						QString::fromStdString(offeraccept_str),
 						QString::fromStdString(total_str),
+						rating,
 						QString::fromStdString(status_str), 
 						QString::fromStdString(buyer_str), AllEscrow, CT_NEW);	
 			  }
