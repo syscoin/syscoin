@@ -2605,7 +2605,8 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 			ratingCount++;
 		if(ratingCount == 0)
 			ratingCount = 1;
-		oEscrow.push_back(Pair("avg_rating", (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount));
+		int totalAvgRating = (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount;
+		oEscrow.push_back(Pair("avg_rating", totalAvgRating));
 
         oRes.push_back(oEscrow);
     }
