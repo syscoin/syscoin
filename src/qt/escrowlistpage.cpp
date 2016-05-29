@@ -18,6 +18,7 @@
 #include <QMenu>
 #include "main.h"
 #include "rpcserver.h"
+#include "stardelegate.h"
 using namespace std;
 
 
@@ -93,6 +94,7 @@ void EscrowListPage::setModel(WalletModel* walletModel, EscrowTableModel *model)
 	ui->tableView->setColumnWidth(8, 80); //offeraccept
 	ui->tableView->setColumnWidth(9, 80); //rating
     ui->tableView->setColumnWidth(10, 0); //status
+	ui->tableView->setItemDelegateForColumn(9, new StarDelegate);
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 

@@ -653,13 +653,18 @@ bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser ty
 void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, const vector<CEscrow> &vtxPos)
 {
 	int nRating = 0;
+	int nRatingCount = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
 		if(type == BUYER)
 		{
 			if(!vtxPos[i].buyerFeedback.IsNull())
 			{
-				nRating += vtxPos[i].buyerFeedback.nRating;
+				if(vtxPos[i].buyerFeedback.nRating > 0)
+				{
+					nRating += vtxPos[i].buyerFeedback.nRating;
+					nRatingCount++;
+				}
 				feedBack.push_back(vtxPos[i].buyerFeedback);
 			}
 		}
@@ -667,7 +672,11 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 		{
 			if(!vtxPos[i].sellerFeedback.IsNull())
 			{
-				nRating += vtxPos[i].sellerFeedback.nRating;
+				if(vtxPos[i].sellerFeedback.nRating > 0)
+				{
+					nRating += vtxPos[i].sellerFeedback.nRating;
+					nRatingCount++;
+				}
 				feedBack.push_back(vtxPos[i].sellerFeedback);
 			}
 		}
@@ -675,14 +684,18 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 		{
 			if(!vtxPos[i].arbiterFeedback.IsNull())
 			{
-				nRating += vtxPos[i].arbiterFeedback.nRating;
+				if(vtxPos[i].arbiterFeedback.nRating > 0)
+				{
+					nRating += vtxPos[i].arbiterFeedback.nRating;
+					nRatingCount++;
+				}
 				feedBack.push_back(vtxPos[i].arbiterFeedback);
 			}
 		}
 	}
-	if(feedBack.size() > 0)
+	if(nRatingCount > 0)
 	{
-		nRating /= feedBack.size();
+		nRating /= nRatingCount;
 	}
 	avgRating = nRating;
 }
@@ -2156,7 +2169,14 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	if (pindex) {
 		sTime = strprintf("%llu", pindex->nTime);
 	}
-
+	int avgBuyerRating, avgSellerRating, avgArbiterRating;
+	vector<CEscrowFeedback> buyerFeedBacks, sellerFeedBacks, arbiterFeedBacks;
+	if (!pescrowdb->ReadEscrow(pairScan.first, vtxPos) || vtxPos.empty())
+		continue;
+	GetFeedbackInEscrow(buyerFeedBacks, avgBuyerRating, BUYER, vtxPos);
+	GetFeedbackInEscrow(sellerFeedBacks, avgSellerRating, SELLER, vtxPos);
+	GetFeedbackInEscrow(arbiterFeedBacks, avgArbiterRating, ARBITER, vtxPos);
+		
 	CPubKey SellerPubKey(ca.vchSellerKey);
 	CSyscoinAddress selleraddy(SellerPubKey.GetID());
 	selleraddy = CSyscoinAddress(selleraddy.ToString());
@@ -2195,7 +2215,50 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 		expired = 1;
 	}  
 	oEscrow.push_back(Pair("expired", expired));
-	
+	UniValue oBuyerFeedBack(UniValue::VARR);
+	for(unsigned int i =0;i<buyerFeedBacks.size();i++)
+	{
+		UniValue oFeedback(UniValue::VOBJ);
+		oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
+		oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
+		oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
+		oBuyerFeedBack.push_back(oFeedback);
+	}
+	oEscrow.push_back(Pair("buyer_feedback", oBuyerFeedBack));
+	oEscrow.push_back(Pair("avg_buyer_rating", avgBuyerRating));
+	UniValue oSellerFeedBack(UniValue::VARR);
+	for(unsigned int i =0;i<sellerFeedBacks.size();i++)
+	{
+		UniValue oFeedback(UniValue::VOBJ);
+		oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
+		oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
+		oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
+		oSellerFeedBack.push_back(oFeedback);
+	}
+	oEscrow.push_back(Pair("seller_feedback", oSellerFeedBack));
+	oEscrow.push_back(Pair("avg_seller_rating", avgSellerRating));
+	UniValue oArbiterFeedBack(UniValue::VARR);
+	for(unsigned int i =0;i<arbiterFeedBacks.size();i++)
+	{
+		UniValue oFeedback(UniValue::VOBJ);
+		oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
+		oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
+		oFeedback.push_back(Pair("feedback", stringFromVch(arbiterFeedBacks[i].vchFeedback)));
+		oArbiterFeedBack.push_back(oFeedback);
+	}
+	oEscrow.push_back(Pair("arbiter_feedback", oArbiterFeedBack));
+	oEscrow.push_back(Pair("avg_arbiter_rating", avgArbiterRating));
+	unsigned int ratingCount = 0;
+	if(avgArbiterRating > 0)
+		ratingCount++;
+	if(avgSellerRating > 0)
+		ratingCount++;
+	if(avgBuyerRating > 0)
+		ratingCount++;
+	if(ratingCount == 0)
+		ratingCount = 1;
+	int totalAvgRating = (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount;
+	oEscrow.push_back(Pair("avg_rating", totalAvgRating));	
     return oEscrow;
 }
 
@@ -2302,6 +2365,12 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		if (pindex) {
 			sTime = strprintf("%llu", pindex->nTime);
 		}
+		int avgBuyerRating, avgSellerRating, avgArbiterRating;
+		vector<CEscrowFeedback> buyerFeedBacks, sellerFeedBacks, arbiterFeedBacks;
+		GetFeedbackInEscrow(buyerFeedBacks, avgBuyerRating, BUYER, vtxPos);
+		GetFeedbackInEscrow(sellerFeedBacks, avgSellerRating, SELLER, vtxPos);
+		GetFeedbackInEscrow(arbiterFeedBacks, avgArbiterRating, ARBITER, vtxPos);
+		
 		CPubKey SellerPubKey(escrow.vchSellerKey);
 		CSyscoinAddress selleraddy(SellerPubKey.GetID());
 		selleraddy = CSyscoinAddress(selleraddy.ToString());
@@ -2348,7 +2417,50 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		}
 		else
 			status = "pending";
-
+	``	UniValue oBuyerFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
+			oBuyerFeedBack.push_back(oFeedback);
+		}
+		oName.push_back(Pair("buyer_feedback", oBuyerFeedBack));
+		oName.push_back(Pair("avg_buyer_rating", avgBuyerRating));
+		UniValue oSellerFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<sellerFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
+			oSellerFeedBack.push_back(oFeedback);
+		}
+		oName.push_back(Pair("seller_feedback", oSellerFeedBack));
+		oName.push_back(Pair("avg_seller_rating", avgSellerRating));
+		UniValue oArbiterFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<arbiterFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(arbiterFeedBacks[i].vchFeedback)));
+			oArbiterFeedBack.push_back(oFeedback);
+		}
+		oName.push_back(Pair("arbiter_feedback", oArbiterFeedBack));
+		oName.push_back(Pair("avg_arbiter_rating", avgArbiterRating));
+		unsigned int ratingCount = 0;
+		if(avgArbiterRating > 0)
+			ratingCount++;
+		if(avgSellerRating > 0)
+			ratingCount++;
+		if(avgBuyerRating > 0)
+			ratingCount++;
+		if(ratingCount == 0)
+			ratingCount = 1;
+		int totalAvgRating = (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount;
+		oName.push_back(Pair("avg_rating", totalAvgRating));
 		oName.push_back(Pair("status", status));
 		oName.push_back(Pair("expired", expired));
  

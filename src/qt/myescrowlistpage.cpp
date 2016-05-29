@@ -20,6 +20,7 @@
 #include <QMessageBox>
 #include <QMenu>
 #include "rpcserver.h"
+#include "stardelegate.h"
 using namespace std;
 
 extern const CRPCTable tableRPC;
@@ -145,6 +146,7 @@ void MyEscrowListPage::setModel(WalletModel *walletModel, EscrowTableModel *mode
 	ui->tableView->setColumnWidth(8, 80); //total
 	ui->tableView->setColumnWidth(9, 80); //rating
     ui->tableView->setColumnWidth(10, 0); //status
+	ui->tableView->setItemDelegateForColumn(9, new StarDelegate);
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
