@@ -2486,6 +2486,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		const CEscrow &txEscrow = pairScan.second;  
 		const string &escrow = stringFromVch(pairScan.first);
 		vector<COffer> vtxOfferPos;
+		vector<CEscrow> vtxPos;
 		COffer offer;
 		if (pofferdb->ReadOffer(txEscrow.vchOffer, vtxOfferPos) && !vtxOfferPos.empty())
 		{
