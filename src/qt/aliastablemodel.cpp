@@ -352,7 +352,7 @@ bool AliasTableModel::setData(const QModelIndex &index, const QVariant &value, i
         {
         case Rating:
             // Do nothing, if old value == new value
-            if(rec->rating == QVariant::fromValue(StarRating(value.toInt())))
+            if(rec->rating == value.toInt())
             {
                 editStatus = NO_CHANGES;
                 return false;

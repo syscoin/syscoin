@@ -80,7 +80,7 @@ public:
     EscrowTableModel *parent;
 	bool showComplete;
     EscrowTablePriv(CWallet *wallet, EscrowTableModel *parent):
-        wallet(wallet), parent(parent), showComplete(false) {}
+        wallet(wallet), parent(parent), showComplete(true) {}
 
     void refreshEscrowTable(EscrowModelType type)
     {
@@ -349,7 +349,12 @@ QVariant EscrowTableModel::data(const QModelIndex &index, int role) const
         case Buyer:
             return rec->buyer;
         case Rating:
-            return QVariant::fromValue(StarRating(rec->rating));
+			{
+				if(modelType != MyEscrow)
+					return QVariant::fromValue(StarRating(rec->rating));
+				else
+					return rec->rating;
+			}
         }
     }
     else if (role == EscrowRole)

@@ -29,6 +29,9 @@
      <property name="text">
       <string>Show Completed/ Refunded/Expired Escrows</string>
      </property>
+     <property name="checked">
+      <bool>true</bool>
+     </property>
     </widget>
    </item>
    <item>
