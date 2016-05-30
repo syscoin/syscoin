@@ -698,7 +698,7 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 		nRating /= nRatingCount;
 	}
 	avgRating = nRating;
-	if(feedback.size() > 0)
+	if(feedBack.size() > 0)
 		sort(feedBack.begin(), feedBack.end(), escrowfeedgreaterthan());
 	
 }
