@@ -115,13 +115,13 @@ bool EscrowInfoDialog::lookup()
 					userStr = tr("%1 (Arbiter)").arg(QString::fromStdString(arbiter));
 				}
 				QLineEdit *userText = new QLineEdit(QString::fromStdString(userStr));
-				user->setEnabled(false);
+				userText->setEnabled(false);
 				userBox->addWidget(userLabel);
 				userBox->addWidget(userText);
 				userBox->addStretch(1);
 				vbox->addLayout(userBox);
 			 `` QHBoxLayout *ratingBox = new QHBoxLayout;
-				QLabel *ratingLabel = new QLabel(tr("Rating:")));
+				QLabel *ratingLabel = new QLabel(tr("Rating:"));
 				QLineEdit *ratingText = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
 				ratingText->setEnabled(false);
 				ratingBox->addWidget(ratingLabel);
