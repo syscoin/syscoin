@@ -209,10 +209,10 @@
       <widget class="QScrollArea" name="scrollArea">
        <property name="geometry">
         <rect>
-         <x>1</x>
-         <y>1</y>
-         <width>22</width>
-         <height>22</height>
+         <x>0</x>
+         <y>0</y>
+         <width>501</width>
+         <height>481</height>
         </rect>
        </property>
        <property name="verticalScrollBarPolicy">
@@ -232,8 +232,8 @@
          <rect>
           <x>0</x>
           <y>0</y>
-          <width>20</width>
-          <height>20</height>
+          <width>499</width>
+          <height>479</height>
          </rect>
         </property>
         <layout class="QVBoxLayout" name="verticalLayout_3">
@@ -257,8 +257,8 @@
         <rect>
          <x>0</x>
          <y>0</y>
-         <width>22</width>
-         <height>22</height>
+         <width>501</width>
+         <height>481</height>
         </rect>
        </property>
        <property name="verticalScrollBarPolicy">
@@ -278,8 +278,8 @@
          <rect>
           <x>0</x>
           <y>0</y>
-          <width>20</width>
-          <height>20</height>
+          <width>499</width>
+          <height>479</height>
          </rect>
         </property>
         <layout class="QVBoxLayout" name="verticalLayout_4">
@@ -303,8 +303,8 @@
         <rect>
          <x>0</x>
          <y>0</y>
-         <width>22</width>
-         <height>22</height>
+         <width>501</width>
+         <height>481</height>
         </rect>
        </property>
        <property name="verticalScrollBarPolicy">
@@ -324,8 +324,8 @@
          <rect>
           <x>0</x>
           <y>0</y>
-          <width>20</width>
-          <height>20</height>
+          <width>499</width>
+          <height>479</height>
          </rect>
         </property>
         <layout class="QVBoxLayout" name="verticalLayout_5">
