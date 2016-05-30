@@ -521,17 +521,26 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					{
 						// ensure we don't add same feedback twice (feedback in db should be older than current height)
 						if(theEscrow.buyerFeedback.nHeight < nHeight)
+						{
 							theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
+							theEscrow.buyerFeedback.nHeight = nHeight;
+						}
 						else
 							theEscrow.buyerFeedback.SetNull();
 
 						if(theEscrow.sellerFeedback.nHeight < nHeight)
+						{
 							theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
+							theEscrow.sellerFeedback.nHeight = nHeight;
+						}
 						else
 							theEscrow.sellerFeedback.SetNull();
 
 						if(theEscrow.arbiterFeedback.nHeight < nHeight)
+						{
 							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
+							theEscrow.arbiterFeedback.nHeight = nHeight;
+						}
 						else
 							theEscrow.arbiterFeedback.SetNull();
 						// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
@@ -541,9 +550,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							theEscrow.sellerFeedback.nRating = 0;
 						if(FindFeedbackInEscrow(theEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos))
 							theEscrow.arbiterFeedback.nRating = 0;
-						theEscrow.buyerFeedback.nHeight = nHeight;
-						theEscrow.sellerFeedback.nHeight = nHeight;
-						theEscrow.arbiterFeedback.nHeight = nHeight;
+
 						HandleEscrowFeedback(theEscrow);	
 					
 					}
