@@ -534,7 +534,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						{
 							theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
 							theEscrow.sellerFeedback.nHeight = nHeight;
-							count++
+							count++;
 						}
 						else
 							return true;
@@ -543,7 +543,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						{
 							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 							theEscrow.arbiterFeedback.nHeight = nHeight;
-							count++
+							count++;
 						}
 						else
 							return true;
