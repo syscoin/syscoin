@@ -2,7 +2,7 @@
 #include "ui_escrowinfodialog.h"
 #include "init.h"
 #include "util.h"
-#include "offer.h"
+#include "escrow.h"
 #include "guiutil.h"
 #include "syscoingui.h"
 #include "escrowtablemodel.h"
@@ -11,6 +11,11 @@
 #include <QModelIndex>
 #include <QDateTime>
 #include <QDataWidgetMapper>
+#include <QLineEdit>
+#include <QTextEdit>
+#include <QGroupBox>
+#include <QLabel>
+#include <QHBoxLayout>
 #include "rpcserver.h"
 using namespace std;
 
@@ -62,6 +67,9 @@ bool EscrowInfoDialog::lookup()
 
 		if (result.type() == UniValue::VOBJ)
 		{
+			string seller = find_value(result.get_obj(), "seller").get_str();
+			string arbiter = find_value(result.get_obj(), "arbiter").get_str();
+			string buyer = find_value(result.get_obj(), "buyer").get_str();
 			ui->guidEdit->setText(QString::fromStdString(find_value(result.get_obj(), "escrow").get_str()));
 			ui->offerEdit->setText(QString::fromStdString(find_value(result.get_obj(), "offer").get_str()));
 			ui->acceptEdit->setText(QString::fromStdString(find_value(result.get_obj(), "offeracceptlink").get_str()));
@@ -73,6 +81,52 @@ bool EscrowInfoDialog::lookup()
 			ui->feeEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "sysfee"))));
 			ui->totalEdit->setText(QString::fromStdString(find_value(result.get_obj(), "total").get_str()));
 			ui->paymessageEdit->setText(QString::fromStdString(find_value(result.get_obj(), "pay_message").get_str()));
+			int avgRating = find_value(result.get_obj(), "avg_rating").get_int();
+			UniValue buyerFeedback = find_value(result.get_obj(), "buyer_feedback").get_array());
+			UniValue sellerFeedback = find_value(result.get_obj(), "seller_feedback").get_array());
+			UniValue arbiterFeedback = find_value(result.get_obj(), "arbiter_feedback").get_array());
+			for(unsigned int i = 0;i<buyerFeedback.size(); i++)
+			{
+				UniValue feedbackObj = buyerFeedback[i].get_obj();
+				int rating =  find_value(feedbackObj, "rating").get_int());
+				int user =  find_value(feedbackObj, "feedbackuser").get_int());
+				string feedback =  find_value(feedbackObj, "feedback").get_str());
+				QGroupBox *groupBox = new QGroupBox(tr("Buyer Feedback #%1").arg(QString::number(i)));
+				QTextEdit *feedbackText = new QTextEdit(QString::fromStdString(feedback));
+				feedbackText->setEnabled(false);
+			 `` QHBoxLayout *ratingBox = new QHBoxLayout;
+				QLabel *userLabel = new QLabel(tr("From:")));
+
+				QString userStr = "";
+				if(user == BUYER)
+				{
+					userStr = tr("%1 (Buyer)").arg(QString::fromStdString(buyer));
+				}
+				else if(user == SELLER)
+				{
+					userStr = tr("%1 (Merchant)").arg(QString::fromStdString(seller));
+				}
+				else if(user == Arbiter)
+				{
+					userStr = tr("%1 (Arbiter)").arg(QString::fromStdString(arbiter));
+				}
+				QLineEdit *user = new QLineEdit(QString::fromStdString(userStr));
+				user->setEnabled(false);
+				vbox->addWidget(userLabel);
+				vbox->addWidget(user);
+				vbox->addStretch(1);
+				groupBox->addLayout(ratingBox);
+			 `` QHBoxLayout *ratingBox = new QHBoxLayout;
+				QLabel *ratingLabel = new QLabel(tr("Rating:")));
+				QLineEdit *rating = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
+				ratingText->setEnabled(false);
+				vbox->addWidget(ratingLabel);
+				vbox->addWidget(ratingText);
+				vbox->addStretch(1);
+				groupBox->addLayout(ratingBox);
+				groupBox->addWidget(feedbackText);
+				ui->buyerFeebackLayout->addWidget(groupBox);
+			}
 			return true;
 		}
 		 
