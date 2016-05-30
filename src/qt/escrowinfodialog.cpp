@@ -110,7 +110,7 @@ bool EscrowInfoDialog::lookup()
 				{
 					userStr = tr("%1 (Merchant)").arg(QString::fromStdString(seller));
 				}
-				else if(user == Arbiter)
+				else if(user == ARBITER)
 				{
 					userStr = tr("%1 (Arbiter)").arg(QString::fromStdString(arbiter));
 				}
