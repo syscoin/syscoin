@@ -51,6 +51,7 @@ public:
 		READWRITE(vchFeedback);
 		READWRITE(nRating);
 		READWRITE(nFeedbackUser);
+		READWRITE(nHeight);
 	}
 
     friend bool operator==(const CEscrowFeedback &a, const CEscrowFeedback &b) {
@@ -77,7 +78,11 @@ public:
     void SetNull() { nHeight = 0; nRating = 0; nFeedbackUser = 0; vchFeedback.clear();}
     bool IsNull() const { return (nHeight == 0 && nRating == 0 && nFeedbackUser == 0 && vchFeedback.empty()); }
 };
-
+struct escrowfeedgreaterthan {
+    bool operator ()(const CEscrowFeedback& a, const CEscrowFeedback& b) {
+        return a.nHeight > b.nHeight;
+    }
+}
 class CEscrow {
 public:
 	std::vector<unsigned char> vchSellerKey;

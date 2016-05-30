@@ -519,23 +519,19 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
 					{
+						theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
+						theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
+						theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 						// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
-						if(!FindFeedbackInEscrow(serializedEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
-							theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
-						// otherwise make sure they can't rate again
-						else
+						if(FindFeedbackInEscrow(serializedEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
 							theEscrow.buyerFeedback.nRating = 0;
-
-						if(!FindFeedbackInEscrow(serializedEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos))
-							theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
-						else
+						if(FindFeedbackInEscrow(serializedEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos))
 							theEscrow.sellerFeedback.nRating = 0;
-
-						if(!FindFeedbackInEscrow(serializedEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos))
-							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
-						else
+						if(FindFeedbackInEscrow(serializedEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos))
 							theEscrow.arbiterFeedback.nRating = 0;
-
+						theEscrow.buyerFeedback.nHeight = nHeight;
+						theEscrow.sellerFeedback.nHeight = nHeight;
+						theEscrow.arbiterFeedback.nHeight = nHeight;
 						HandleEscrowFeedback(theEscrow);	
 					
 					}
@@ -667,7 +663,6 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 				if(vtxPos[i].buyerFeedback.nRating > 0)
 				{
 					nRating += vtxPos[i].buyerFeedback.nRating;
-					vtxPos[i].buyerFeedback.nHeight = vtxPos[i].nHeight;
 					nRatingCount++;
 				}
 				feedBack.push_back(vtxPos[i].buyerFeedback);
@@ -680,7 +675,6 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 				if(vtxPos[i].sellerFeedback.nRating > 0)
 				{
 					nRating += vtxPos[i].sellerFeedback.nRating;
-					vtxPos[i].sellerFeedback.nHeight = vtxPos[i].nHeight;
 					nRatingCount++;
 				}
 				feedBack.push_back(vtxPos[i].sellerFeedback);
@@ -693,7 +687,6 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 				if(vtxPos[i].arbiterFeedback.nRating > 0)
 				{
 					nRating += vtxPos[i].arbiterFeedback.nRating;
-					vtxPos[i].arbiterFeedback.nHeight = vtxPos[i].nHeight;
 					nRatingCount++;
 				}
 				feedBack.push_back(vtxPos[i].arbiterFeedback);
@@ -705,6 +698,9 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 		nRating /= nRatingCount;
 	}
 	avgRating = nRating;
+	if(feedback.size() > 0)
+		sort(feedBack.begin(), feedBack.end(), escrowfeedgreaterthan());
+	
 }
 UniValue escrownew(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 5 )
