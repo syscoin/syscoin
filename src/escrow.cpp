@@ -519,30 +519,39 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
 					{
+						int count = 0;
 						// ensure we don't add same feedback twice (feedback in db should be older than current height)
-						if(theEscrow.buyerFeedback.nHeight < nHeight)
+						if(!theEscrow.buyerFeedback.IsNull() && theEscrow.buyerFeedback.nHeight < nHeight)
 						{
 							theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
 							theEscrow.buyerFeedback.nHeight = nHeight;
+							count++;
 						}
 						else
-							theEscrow.buyerFeedback.SetNull();
+							return true;
 
-						if(theEscrow.sellerFeedback.nHeight < nHeight)
+						if(!theEscrow.sellerFeedback.IsNull() && theEscrow.sellerFeedback.nHeight < nHeight)
 						{
 							theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
 							theEscrow.sellerFeedback.nHeight = nHeight;
+							count++
 						}
 						else
-							theEscrow.sellerFeedback.SetNull();
+							return true;
 
-						if(theEscrow.arbiterFeedback.nHeight < nHeight)
+						if(!theEscrow.arbiterFeedback.IsNull() && theEscrow.arbiterFeedback.nHeight < nHeight)
 						{
 							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 							theEscrow.arbiterFeedback.nHeight = nHeight;
+							count++
 						}
 						else
-							theEscrow.arbiterFeedback.SetNull();
+							return true;
+
+						// can't leave more than 2 feedbacks at once
+						if(count > 2)
+							return true;
+
 						// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
 						if(FindFeedbackInEscrow(theEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
 							theEscrow.buyerFeedback.nRating = 0;
