@@ -519,15 +519,27 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
 					{
-						theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
-						theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
-						theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
+						// ensure we don't add same feedback twice (feedback in db should be older than current height)
+						if(theEscrow.buyerFeedback.nHeight < nHeight)
+							theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
+						else
+							theEscrow.buyerFeedback.SetNull();
+
+						if(theEscrow.sellerFeedback.nHeight < nHeight)
+							theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
+						else
+							theEscrow.sellerFeedback.SetNull();
+
+						if(theEscrow.arbiterFeedback.nHeight < nHeight)
+							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
+						else
+							theEscrow.arbiterFeedback.SetNull();
 						// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
-						if(FindFeedbackInEscrow(serializedEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
+						if(FindFeedbackInEscrow(theEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
 							theEscrow.buyerFeedback.nRating = 0;
-						if(FindFeedbackInEscrow(serializedEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos))
+						if(FindFeedbackInEscrow(theEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos))
 							theEscrow.sellerFeedback.nRating = 0;
-						if(FindFeedbackInEscrow(serializedEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos))
+						if(FindFeedbackInEscrow(theEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos))
 							theEscrow.arbiterFeedback.nRating = 0;
 						theEscrow.buyerFeedback.nHeight = nHeight;
 						theEscrow.sellerFeedback.nHeight = nHeight;
@@ -2064,11 +2076,14 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		CEscrowFeedback sellerFeedback(BUYER);
 		sellerFeedback.vchFeedback = vchFeedbackPrimary;
 		sellerFeedback.nRating = nRatingPrimary;
+		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
 		CEscrowFeedback arbiterFeedback(BUYER);
 		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
+		arbiterFeedback.nHeight = chainActive.Tip()->nHeight;
 		escrow.arbiterFeedback = arbiterFeedback;
 		escrow.sellerFeedback = sellerFeedback;
+
 		scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
 		scriptPubKeySeller += scriptPubKeySellerDestination;
 		scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
@@ -2084,9 +2099,11 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		CEscrowFeedback buyerFeedback(SELLER);
 		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
+		buyerFeedback.nHeight = chainActive.Tip()->nHeight;
 		CEscrowFeedback arbiterFeedback(SELLER);
 		arbiterFeedback.vchFeedback = vchFeedbackSecondary;
 		arbiterFeedback.nRating = nRatingSecondary;
+		arbiterFeedback.nHeight = chainActive.Tip()->nHeight;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.arbiterFeedback = arbiterFeedback;
 		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
@@ -2104,9 +2121,11 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		CEscrowFeedback buyerFeedback(ARBITER);
 		buyerFeedback.vchFeedback = vchFeedbackPrimary;
 		buyerFeedback.nRating = nRatingPrimary;
+		buyerFeedback.nHeight = chainActive.Tip()->nHeight;
 		CEscrowFeedback sellerFeedback(ARBITER);
 		sellerFeedback.vchFeedback = vchFeedbackSecondary;
 		sellerFeedback.nRating = nRatingSecondary;
+		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.sellerFeedback = sellerFeedback;
 		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
