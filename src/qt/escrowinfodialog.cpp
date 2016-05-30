@@ -94,7 +94,7 @@ bool EscrowInfoDialog::lookup()
 				int rating =  find_value(feedbackObj, "rating").get_int();
 				int user =  find_value(feedbackObj, "feedbackuser").get_int();
 				string feedback =  find_value(feedbackObj, "feedback").get_str();
-				QGroupBox *groupBox = new QGroupBox(tr("Buyer Feedback #%1").arg(QString::number(i)));
+				QGroupBox *groupBox = new QGroupBox(tr("Buyer Feedback #%1").arg(QString::number(i+1)));
 				QTextEdit *feedbackText = new QTextEdit(QString::fromStdString(feedback));
 				feedbackText->setEnabled(false);
 				QVBoxLayout *vbox = new QVBoxLayout;
@@ -120,15 +120,19 @@ bool EscrowInfoDialog::lookup()
 				userBox->addWidget(userText);
 				userBox->addStretch(1);
 				vbox->addLayout(userBox);
-				QHBoxLayout *ratingBox = new QHBoxLayout;
-				QLabel *ratingLabel = new QLabel(tr("Rating:"));
-				QLineEdit *ratingText = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
-				ratingText->setEnabled(false);
-				ratingBox->addWidget(ratingLabel);
-				ratingBox->addWidget(ratingText);
-				ratingBox->addStretch(1);
-				vbox->addLayout(ratingBox);
-				vbox->addWidget(feedbackText);
+				if(i == 0)
+				{
+					QHBoxLayout *ratingBox = new QHBoxLayout;
+					QLabel *ratingLabel = new QLabel(tr("Rating:"));
+					QLineEdit *ratingText = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
+					ratingText->setEnabled(false);
+					ratingBox->addWidget(ratingLabel);
+					ratingBox->addWidget(ratingText);
+					ratingBox->addStretch(1);
+					vbox->addLayout(ratingBox);
+				}
+				if(feedback.size() > 0)
+					vbox->addWidget(feedbackText);
 				groupBox->setLayout(vbox);
 				ui->buyerFeedbackLayout->addWidget(groupBox);
 			}
