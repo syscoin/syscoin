@@ -79,9 +79,11 @@ bool EscrowInfoDialog::lookup()
 			ui->timeEdit->setText(QString::fromStdString(find_value(result.get_obj(), "time").get_str()));
 			ui->priceEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "systotal"))));
 			ui->feeEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "sysfee"))));
+
 			ui->totalEdit->setText(QString::fromStdString(find_value(result.get_obj(), "total").get_str()));
 			ui->paymessageEdit->setText(QString::fromStdString(find_value(result.get_obj(), "pay_message").get_str()));
 			int avgRating = find_value(result.get_obj(), "avg_rating").get_int();
+			ui->ratingEdit->setText(tr("%1 Stars").arg(QString::number(avgRating));
 			UniValue buyerFeedback = find_value(result.get_obj(), "buyer_feedback").get_array());
 			UniValue sellerFeedback = find_value(result.get_obj(), "seller_feedback").get_array());
 			UniValue arbiterFeedback = find_value(result.get_obj(), "arbiter_feedback").get_array());
