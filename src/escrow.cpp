@@ -521,7 +521,9 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					{
 						int count = 0;
 						// ensure we don't add same feedback twice (feedback in db should be older than current height)
-						if(!theEscrow.buyerFeedback.IsNull() && theEscrow.buyerFeedback.nHeight < nHeight)
+						// ensure feedback is valid
+						// ensure you aren't leaving feedback for yourself
+						if(!theEscrow.buyerFeedback.IsNull()  && theEscrow.buyerFeedback.nFeedbackUser != BUYER && theEscrow.buyerFeedback.nHeight < nHeight)
 						{
 							theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
 							theEscrow.buyerFeedback.nHeight = nHeight;
@@ -530,7 +532,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						else
 							return true;
 
-						if(!theEscrow.sellerFeedback.IsNull() && theEscrow.sellerFeedback.nHeight < nHeight)
+						if(!theEscrow.sellerFeedback.IsNull() && theEscrow.sellerFeedback.nFeedbackUser != SELLER && theEscrow.sellerFeedback.nHeight < nHeight)
 						{
 							theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
 							theEscrow.sellerFeedback.nHeight = nHeight;
@@ -539,7 +541,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						else
 							return true;
 
-						if(!theEscrow.arbiterFeedback.IsNull() && theEscrow.arbiterFeedback.nHeight < nHeight)
+						if(!theEscrow.arbiterFeedback.IsNull() && theEscrow.arbiterFeedback.nFeedbackUser != ARBITER && theEscrow.arbiterFeedback.nHeight < nHeight)
 						{
 							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 							theEscrow.arbiterFeedback.nHeight = nHeight;
