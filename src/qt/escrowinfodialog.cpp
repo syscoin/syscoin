@@ -84,10 +84,10 @@ bool EscrowInfoDialog::lookup()
 			ui->totalEdit->setText(QString::fromStdString(find_value(result.get_obj(), "total").get_str()));
 			ui->paymessageEdit->setText(QString::fromStdString(find_value(result.get_obj(), "pay_message").get_str()));
 			int avgRating = find_value(result.get_obj(), "avg_rating").get_int();
-			ui->ratingEdit->setText(tr("%1 Stars").arg(QString::number(avgRating));
-			UniValue buyerFeedback = find_value(result.get_obj(), "buyer_feedback").get_array());
-			UniValue sellerFeedback = find_value(result.get_obj(), "seller_feedback").get_array());
-			UniValue arbiterFeedback = find_value(result.get_obj(), "arbiter_feedback").get_array());
+			ui->ratingEdit->setText(tr("%1 Stars").arg(QString::number(avgRating)));
+			UniValue buyerFeedback = find_value(result.get_obj(), "buyer_feedback").get_array();
+			UniValue sellerFeedback = find_value(result.get_obj(), "seller_feedback").get_array();
+			UniValue arbiterFeedback = find_value(result.get_obj(), "arbiter_feedback").get_array();
 			for(unsigned int i = 0;i<buyerFeedback.size(); i++)
 			{
 				UniValue feedbackObj = buyerFeedback[i].get_obj();
@@ -120,7 +120,7 @@ bool EscrowInfoDialog::lookup()
 				userBox->addWidget(userText);
 				userBox->addStretch(1);
 				vbox->addLayout(userBox);
-			 `` QHBoxLayout *ratingBox = new QHBoxLayout;
+				QHBoxLayout *ratingBox = new QHBoxLayout;
 				QLabel *ratingLabel = new QLabel(tr("Rating:"));
 				QLineEdit *ratingText = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
 				ratingText->setEnabled(false);
