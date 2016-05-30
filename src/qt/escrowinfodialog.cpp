@@ -123,7 +123,7 @@ bool EscrowInfoDialog::lookup()
 				vbox->addLayout(userBox);
 			 `` QHBoxLayout *ratingBox = new QHBoxLayout;
 				QLabel *ratingLabel = new QLabel(tr("Rating:")));
-				QLineEdit *rating = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
+				QLineEdit *ratingText = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
 				ratingText->setEnabled(false);
 				ratingBox->addWidget(ratingLabel);
 				ratingBox->addWidget(ratingText);
@@ -131,7 +131,7 @@ bool EscrowInfoDialog::lookup()
 				vbox->addLayout(ratingBox);
 				vbox->addWidget(feedbackText);
 				groupBox->setLayout(vbox);
-				ui->buyerFeebackLayout->addWidget(groupBox);
+				ui->buyerFeedbackLayout->addWidget(groupBox);
 			}
 			return true;
 		}
