@@ -663,6 +663,7 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 				if(vtxPos[i].buyerFeedback.nRating > 0)
 				{
 					nRating += vtxPos[i].buyerFeedback.nRating;
+					vtxPos[i].buyerFeedback.nHeight = vtxPos[i].nHeight;
 					nRatingCount++;
 				}
 				feedBack.push_back(vtxPos[i].buyerFeedback);
@@ -675,6 +676,7 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 				if(vtxPos[i].sellerFeedback.nRating > 0)
 				{
 					nRating += vtxPos[i].sellerFeedback.nRating;
+					vtxPos[i].sellerFeedback.nHeight = vtxPos[i].nHeight;
 					nRatingCount++;
 				}
 				feedBack.push_back(vtxPos[i].sellerFeedback);
@@ -687,6 +689,7 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 				if(vtxPos[i].arbiterFeedback.nRating > 0)
 				{
 					nRating += vtxPos[i].arbiterFeedback.nRating;
+					vtxPos[i].arbiterFeedback.nHeight = vtxPos[i].nHeight;
 					nRatingCount++;
 				}
 				feedBack.push_back(vtxPos[i].arbiterFeedback);
@@ -2217,6 +2220,12 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	for(unsigned int i =0;i<buyerFeedBacks.size();i++)
 	{
 		UniValue oFeedback(UniValue::VOBJ);
+		string sFeedbackTime;
+		CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+		if (pindex) {
+			sFeedbackTime = strprintf("%llu", pindex->nTime);
+		}
+		oFeedback.push_back(Pair("time", sFeedbackTime));
 		oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 		oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
 		oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
@@ -2228,6 +2237,12 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	for(unsigned int i =0;i<sellerFeedBacks.size();i++)
 	{
 		UniValue oFeedback(UniValue::VOBJ);
+		string sFeedbackTime;
+		CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+		if (pindex) {
+			sFeedbackTime = strprintf("%llu", pindex->nTime);
+		}
+		oFeedback.push_back(Pair("time", sFeedbackTime));
 		oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 		oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
 		oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
@@ -2239,6 +2254,12 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	for(unsigned int i =0;i<arbiterFeedBacks.size();i++)
 	{
 		UniValue oFeedback(UniValue::VOBJ);
+		string sFeedbackTime;
+		CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+		if (pindex) {
+			sFeedbackTime = strprintf("%llu", pindex->nTime);
+		}
+		oFeedback.push_back(Pair("time", sFeedbackTime));
 		oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
 		oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
 		oFeedback.push_back(Pair("feedback", stringFromVch(arbiterFeedBacks[i].vchFeedback)));
@@ -2419,6 +2440,12 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
@@ -2430,6 +2457,12 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		for(unsigned int i =0;i<sellerFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
@@ -2441,6 +2474,12 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		for(unsigned int i =0;i<arbiterFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(arbiterFeedBacks[i].vchFeedback)));
@@ -2678,6 +2717,12 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
@@ -2689,6 +2734,12 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		for(unsigned int i =0;i<sellerFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
@@ -2700,6 +2751,12 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 		for(unsigned int i =0;i<arbiterFeedBacks.size();i++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
 			oFeedback.push_back(Pair("feedback", stringFromVch(arbiterFeedBacks[i].vchFeedback)));

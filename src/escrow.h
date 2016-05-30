@@ -35,6 +35,7 @@ public:
 	std::vector<unsigned char> vchFeedback;
 	unsigned char nRating;
 	unsigned char nFeedbackUser;
+	uint64_t nHeight;
 	
     CEscrowFeedback() {
         SetNull();
@@ -57,6 +58,7 @@ public:
         a.vchFeedback == b.vchFeedback
 		&& a.nRating == b.nRating
 		&& a.nFeedbackUser == b.nFeedbackUser
+		&& a.nHeight == b.nHeight
         );
     }
 
@@ -64,6 +66,7 @@ public:
         vchFeedback = b.vchFeedback;
 		nRating = b.nRating;
 		nFeedbackUser = b.nFeedbackUser;
+		nHeight = b.nHeight;
         return *this;
     }
 
@@ -71,8 +74,8 @@ public:
         return !(a == b);
     }
 
-    void SetNull() { nRating = 0; nFeedbackUser = 0; vchFeedback.clear();}
-    bool IsNull() const { return (nRating == 0 && nFeedbackUser == 0 && vchFeedback.empty()); }
+    void SetNull() { nHeight = 0; nRating = 0; nFeedbackUser = 0; vchFeedback.clear();}
+    bool IsNull() const { return (nHeight == 0 && nRating == 0 && nFeedbackUser == 0 && vchFeedback.empty()); }
 };
 
 class CEscrow {
