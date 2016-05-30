@@ -91,9 +91,9 @@ bool EscrowInfoDialog::lookup()
 			for(unsigned int i = 0;i<buyerFeedback.size(); i++)
 			{
 				UniValue feedbackObj = buyerFeedback[i].get_obj();
-				int rating =  find_value(feedbackObj, "rating").get_int());
-				int user =  find_value(feedbackObj, "feedbackuser").get_int());
-				string feedback =  find_value(feedbackObj, "feedback").get_str());
+				int rating =  find_value(feedbackObj, "rating").get_int();
+				int user =  find_value(feedbackObj, "feedbackuser").get_int();
+				string feedback =  find_value(feedbackObj, "feedback").get_str();
 				QGroupBox *groupBox = new QGroupBox(tr("Buyer Feedback #%1").arg(QString::number(i)));
 				QTextEdit *feedbackText = new QTextEdit(QString::fromStdString(feedback));
 				feedbackText->setEnabled(false);
