@@ -63,7 +63,7 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 			int rating =  find_value(feedbackObj, "rating").get_int();
 			int user =  find_value(feedbackObj, "feedbackuser").get_int();
 			string feedback =  find_value(feedbackObj, "feedback").get_str();
-			string time =  find_value(feedbackObj, "time").get_str();
+			QString time =  QString::fromStdString(find_value(feedbackObj, "time").get_str());
 			QGroupBox *groupBox = new QGroupBox(tr("%1 Feedback #%2").arg(userType).arg(QString::number(i+1)));
 			QTextEdit *feedbackText;
 			if(feedback.size() > 0)
@@ -71,11 +71,15 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 			else
 				feedbackText = new QTextEdit(tr("No Feedback"));
 
-			feedbackText->setEnabled(false);
 			QVBoxLayout *vbox = new QVBoxLayout;
 			QHBoxLayout *timeBox = new QHBoxLayout;
 			QLabel *timeLabel = new QLabel(tr("Time:"));
-			QLineEdit *timeText = new QLineEdit(QString::fromStdString(time));
+			QDateTime dateTime;	
+			int unixTime = time.toInt();
+			dateTime.setTime_t(unixTime);
+			time = dateTime.toString();	
+			QLineEdit *timeText = new QLineEdit(time);
+			timeText->setEnabled(false);
 			timeBox->addWidget(timeLabel);
 			timeBox->addWidget(timeText);
 			timeBox->addStretch(1);

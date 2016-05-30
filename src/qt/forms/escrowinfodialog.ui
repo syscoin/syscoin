@@ -244,7 +244,7 @@
          </property>
          <layout class="QVBoxLayout" name="buyerFeedbackLayout">
           <property name="sizeConstraint">
-           <enum>QLayout::SetFixedSize</enum>
+           <enum>QLayout::SetMinimumSize</enum>
           </property>
          </layout>
         </widget>
@@ -293,7 +293,7 @@
          </property>
          <layout class="QVBoxLayout" name="sellerFeedbackLayout">
           <property name="sizeConstraint">
-           <enum>QLayout::SetFixedSize</enum>
+           <enum>QLayout::SetMinimumSize</enum>
           </property>
          </layout>
         </widget>
@@ -342,7 +342,7 @@
          </property>
          <layout class="QVBoxLayout" name="arbiterFeedbackLayout">
           <property name="sizeConstraint">
-           <enum>QLayout::SetFixedSize</enum>
+           <enum>QLayout::SetMinimumSize</enum>
           </property>
          </layout>
         </widget>
