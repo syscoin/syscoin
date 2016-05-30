@@ -221,6 +221,9 @@
        <property name="horizontalScrollBarPolicy">
         <enum>Qt::ScrollBarAlwaysOff</enum>
        </property>
+       <property name="sizeAdjustPolicy">
+        <enum>QAbstractScrollArea::AdjustToContents</enum>
+       </property>
        <property name="widgetResizable">
         <bool>true</bool>
        </property>
@@ -244,7 +247,7 @@
          </property>
          <layout class="QVBoxLayout" name="buyerFeedbackLayout">
           <property name="sizeConstraint">
-           <enum>QLayout::SetMinimumSize</enum>
+           <enum>QLayout::SetMinAndMaxSize</enum>
           </property>
          </layout>
         </widget>
@@ -270,6 +273,9 @@
        <property name="horizontalScrollBarPolicy">
         <enum>Qt::ScrollBarAlwaysOff</enum>
        </property>
+       <property name="sizeAdjustPolicy">
+        <enum>QAbstractScrollArea::AdjustToContents</enum>
+       </property>
        <property name="widgetResizable">
         <bool>true</bool>
        </property>
@@ -293,7 +299,7 @@
          </property>
          <layout class="QVBoxLayout" name="sellerFeedbackLayout">
           <property name="sizeConstraint">
-           <enum>QLayout::SetMinimumSize</enum>
+           <enum>QLayout::SetMinAndMaxSize</enum>
           </property>
          </layout>
         </widget>
@@ -319,6 +325,9 @@
        <property name="horizontalScrollBarPolicy">
         <enum>Qt::ScrollBarAlwaysOff</enum>
        </property>
+       <property name="sizeAdjustPolicy">
+        <enum>QAbstractScrollArea::AdjustToContents</enum>
+       </property>
        <property name="widgetResizable">
         <bool>true</bool>
        </property>
@@ -342,7 +351,7 @@
          </property>
          <layout class="QVBoxLayout" name="arbiterFeedbackLayout">
           <property name="sizeConstraint">
-           <enum>QLayout::SetMinimumSize</enum>
+           <enum>QLayout::SetMinAndMaxSize</enum>
           </property>
          </layout>
         </widget>
