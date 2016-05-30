@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Offer Accept Info</string>
+   <string>Escrow Info</string>
   </property>
   <property name="autoFillBackground">
    <bool>true</bool>
@@ -242,7 +242,11 @@
            <height>491</height>
           </rect>
          </property>
-         <layout class="QVBoxLayout" name="buyerFeedbackLayout"/>
+         <layout class="QVBoxLayout" name="buyerFeedbackLayout">
+          <property name="sizeConstraint">
+           <enum>QLayout::SetFixedSize</enum>
+          </property>
+         </layout>
         </widget>
        </widget>
       </widget>
@@ -287,7 +291,11 @@
            <height>491</height>
           </rect>
          </property>
-         <layout class="QVBoxLayout" name="sellerFeedbackLayout"/>
+         <layout class="QVBoxLayout" name="sellerFeedbackLayout">
+          <property name="sizeConstraint">
+           <enum>QLayout::SetFixedSize</enum>
+          </property>
+         </layout>
         </widget>
        </widget>
       </widget>
@@ -332,7 +340,11 @@
            <height>491</height>
           </rect>
          </property>
-         <layout class="QVBoxLayout" name="arbiterFeedbackLayout"/>
+         <layout class="QVBoxLayout" name="arbiterFeedbackLayout">
+          <property name="sizeConstraint">
+           <enum>QLayout::SetFixedSize</enum>
+          </property>
+         </layout>
         </widget>
        </widget>
       </widget>
