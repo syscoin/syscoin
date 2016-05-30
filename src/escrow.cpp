@@ -1987,7 +1987,8 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
 	if (wtxIn == NULL)
 		throw runtime_error("this escrow is not in your wallet");
-
+	if(vvch.size() > 1 && vvch[1] == vchFromString("1") && vchFeedbackPrimary.size() <= 0 && vchFeedbackSecondary.size() <= 0)
+		throw runtime_error("Feedback reply cannot be empty");
 	CPubKey arbiterKey(escrow.vchArbiterKey);
 	CSyscoinAddress arbiterAddress(arbiterKey.GetID());
 	if(!arbiterAddress.IsValid())
