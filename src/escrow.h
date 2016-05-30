@@ -82,7 +82,7 @@ struct escrowfeedgreaterthan {
     bool operator ()(const CEscrowFeedback& a, const CEscrowFeedback& b) {
         return a.nHeight > b.nHeight;
     }
-}
+};
 class CEscrow {
 public:
 	std::vector<unsigned char> vchSellerKey;
