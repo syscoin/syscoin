@@ -3,7 +3,7 @@
 #include <QDialog>
 class PlatformStyle;
 class QDataWidgetMapper;
-class CEscrowFeedback;
+class UniValue;
 class QString;
 namespace Ui {
     class EscrowInfoDialog;
@@ -22,7 +22,7 @@ public:
     ~EscrowInfoDialog();
 private:
 	bool lookup();
-	void SetFeedbackUI(const CEscrowFeedback &escrowFeedback, const QString &userType, const QString& buyer, const QString& seller, const QString& arbiter);
+	void SetFeedbackUI(const UniValue &escrowFeedback, const QString &userType, const QString& buyer, const QString& seller, const QString& arbiter);
 private Q_SLOTS:
 	void on_okButton_clicked();
 private:

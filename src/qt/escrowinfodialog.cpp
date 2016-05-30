@@ -55,7 +55,7 @@ void EscrowInfoDialog::on_okButton_clicked()
     mapper->submit();
     accept();
 }
-void EscrowInfoDialog::SetFeedbackUI(const CEscrowFeedback &escrowFeedback, const QString &userType, const QString& buyer, const QString& seller, const QString& arbiter)
+void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QString &userType, const QString& buyer, const QString& seller, const QString& arbiter)
 {
 		for(unsigned int i = 0;i<escrowFeedback.size(); i++)
 		{
