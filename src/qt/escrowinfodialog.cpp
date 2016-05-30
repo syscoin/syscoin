@@ -16,6 +16,7 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
 #include "rpcserver.h"
 using namespace std;
 
@@ -96,7 +97,9 @@ bool EscrowInfoDialog::lookup()
 				QGroupBox *groupBox = new QGroupBox(tr("Buyer Feedback #%1").arg(QString::number(i)));
 				QTextEdit *feedbackText = new QTextEdit(QString::fromStdString(feedback));
 				feedbackText->setEnabled(false);
+				QVBoxLayout *vbox = new QVBoxLayout;
 			 `` QHBoxLayout *ratingBox = new QHBoxLayout;
+				QHBoxLayout *userBox = new QHBoxLayout;
 				QLabel *userLabel = new QLabel(tr("From:")));
 
 				QString userStr = "";
@@ -114,19 +117,20 @@ bool EscrowInfoDialog::lookup()
 				}
 				QLineEdit *user = new QLineEdit(QString::fromStdString(userStr));
 				user->setEnabled(false);
-				vbox->addWidget(userLabel);
-				vbox->addWidget(user);
-				vbox->addStretch(1);
-				groupBox->addLayout(ratingBox);
+				userBox->addWidget(userLabel);
+				userBox->addWidget(user);
+				userBox->addStretch(1);
+				vbox->addLayout(userBox);
 			 `` QHBoxLayout *ratingBox = new QHBoxLayout;
 				QLabel *ratingLabel = new QLabel(tr("Rating:")));
 				QLineEdit *rating = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
 				ratingText->setEnabled(false);
-				vbox->addWidget(ratingLabel);
-				vbox->addWidget(ratingText);
-				vbox->addStretch(1);
-				groupBox->addLayout(ratingBox);
-				groupBox->addWidget(feedbackText);
+				ratingBox->addWidget(ratingLabel);
+				ratingBox->addWidget(ratingText);
+				ratingBox->addStretch(1);
+				vbox->addLayout(ratingBox);
+				vbox->addWidget(feedbackText);
+				groupBox->setLayout(vbox);
 				ui->buyerFeebackLayout->addWidget(groupBox);
 			}
 			return true;
