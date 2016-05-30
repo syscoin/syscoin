@@ -650,7 +650,7 @@ bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser ty
 	}
 	return false;
 }
-void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, const vector<CEscrow> &vtxPos)
+void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, vector<CEscrow> &vtxPos)
 {
 	int nRating = 0;
 	int nRatingCount = 0;
