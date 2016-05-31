@@ -530,7 +530,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							count++;
 						}
 						else
-							return true;
+							theEscrow.buyerFeedback.SetNull();
 
 						if(!serializedEscrow.sellerFeedback.IsNull() && serializedEscrow.sellerFeedback.nFeedbackUser != SELLER && serializedEscrow.sellerFeedback.nHeight < nHeight)
 						{
@@ -539,7 +539,8 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							count++;
 						}
 						else
-							return true;
+							theEscrow.sellerFeedback.SetNull();
+
 
 						if(!serializedEscrow.arbiterFeedback.IsNull() && serializedEscrow.arbiterFeedback.nFeedbackUser != ARBITER && serializedEscrow.arbiterFeedback.nHeight < nHeight)
 						{
@@ -548,7 +549,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							count++;
 						}
 						else
-							return true;
+							theEscrow.arbiterFeedback.SetNull();
 
 						// can't leave more than 2 feedbacks at once
 						if(count > 2)
