@@ -47,6 +47,7 @@ private:
 	std::map<int, std::pair<std::string, std::string> > pageMap;
 	int currentPage;
 private Q_SLOTS:
+	void on_detailButton_clicked();
 	void on_searchEscrow_clicked(std::string offer="");
 	void on_prevButton_clicked();
 	void on_nextButton_clicked();
