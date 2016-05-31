@@ -110,7 +110,7 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 			QLabel *ratingLabel = new QLabel(tr("Rating:"));
 			QLabel *ratingText;
 			if(rating > 0)
-				ratingText = new QLineEdit( tr("<b>%1 Stars</b>").arg(QString::number(rating)));
+				ratingText = new QLabel( tr("<b>%1 Stars</b>").arg(QString::number(rating)));
 			else
 				ratingText = new QLabel( tr("<b>No Rating</b>"));
 
