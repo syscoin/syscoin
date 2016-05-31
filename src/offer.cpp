@@ -3964,7 +3964,7 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("private", theOfferA.bPrivate ? "Yes" : "No"));
 			oName.push_back(Pair("safesearch", theOfferA.safetyLevel <= 0 ? "Yes" : "No"));
 			oName.push_back(Pair("geolocation", stringFromVch(theOfferA.vchGeoLocation)));
-			oName.push_back(Pair("offers_sold", GetNumberOfAccepts(vtxPos));
+			oName.push_back(Pair("offers_sold", GetNumberOfAccepts(vtxPos)));
 			expired_block = nHeight + GetOfferExpirationDepth();
             if(expired_block < chainActive.Tip()->nHeight)
 			{
@@ -4153,7 +4153,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		oOffer.push_back(Pair("exclusive_resell", txOffer.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 		oOffer.push_back(Pair("btconly", txOffer.bOnlyAcceptBTC ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias_peg", stringFromVch(txOffer.vchAliasPeg)));
-		oOffer.push_back(Pair("offers_sold", GetNumberOfAccepts(vtxPos));
+		oOffer.push_back(Pair("offers_sold", GetNumberOfAccepts(vtxPos)));
 		expired_block = nHeight + GetOfferExpirationDepth();  
 		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oOffer.push_back(Pair("private", txOffer.bPrivate ? "Yes" : "No"));
