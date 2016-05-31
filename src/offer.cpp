@@ -18,6 +18,7 @@
 #include <boost/foreach.hpp>
 #include <boost/thread.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string.hpp>
 using namespace std;
 extern void SendMoney(const CTxDestination &address, CAmount nValue, bool fSubtractFeeFromAmount, CWalletTx& wtxNew);
 extern void SendMoneySyscoin(const vector<CRecipient> &vecSend, CAmount nValue, bool fSubtractFeeFromAmount, CWalletTx& wtxNew, const CWalletTx* wtxInOffer=NULL, const CWalletTx* wtxInCert=NULL, const CWalletTx* wtxInAlias=NULL, const CWalletTx* wtxInEscrow=NULL, bool syscoinTx=true);
@@ -620,6 +621,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	bool linkAccept = false;
 	bool escrowAccept = false;
 	vector<string> rateList;
+	vector<string> categories;
 	int precision = 2;
 	CAmount nRate;
 	// just check is for the memory pool inclusion, here we can stop bad transactions from entering before we get to include them in a block	
@@ -772,7 +774,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 
 			if(theOffer.sCategory == vchFromString("wanted"))
 				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
-			vector<string> categories;
+		
 			boost::split(categories,theOffer.sCategory,boost::find_last_of(">"));
 			if(categories.size() > 0 && categories[categories.size()-1] == "wanted")
 				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
