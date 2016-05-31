@@ -57,79 +57,90 @@ void EscrowInfoDialog::on_okButton_clicked()
 }
 void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QString &userType, const QString& buyer, const QString& seller, const QString& arbiter)
 {
-		for(unsigned int i = 0;i<escrowFeedback.size(); i++)
+	if(escrowFeedback.size() <= 0)
+	{
+		QLabel *noFeedback = new QLabel(tr("No Feedback Found"));
+		if(userType == tr("Buyer"))
+			ui->buyerFeedbackLayout->addWidget(noFeedback);
+		else if(userType == tr("Seller"))
+			ui->sellerFeedbackLayout->addWidget(noFeedback);
+		else if(userType == tr("Arbiter"))
+			ui->arbiterFeedbackLayout->addWidget(noFeedback);
+		return;
+	}
+	for(unsigned int i = 0;i<escrowFeedback.size(); i++)
+	{
+		UniValue feedbackObj = escrowFeedback[i].get_obj();
+		int rating =  find_value(feedbackObj, "rating").get_int();
+		int user =  find_value(feedbackObj, "feedbackuser").get_int();
+		string feedback =  find_value(feedbackObj, "feedback").get_str();
+		QString time =  QString::fromStdString(find_value(feedbackObj, "time").get_str());
+		QGroupBox *groupBox = new QGroupBox(tr("%1 Feedback #%2").arg(userType).arg(QString::number(i+1)));
+		QTextEdit *feedbackText;
+		if(feedback.size() > 0)
+			feedbackText = new QTextEdit(QString::fromStdString(feedback));
+		else
+			feedbackText = new QTextEdit(tr("No Feedback"));
+
+		QVBoxLayout *vbox = new QVBoxLayout;
+		QHBoxLayout *timeBox = new QHBoxLayout;
+		QLabel *timeLabel = new QLabel(tr("Time:"));
+		QDateTime dateTime;	
+		int unixTime = time.toInt();
+		dateTime.setTime_t(unixTime);
+		time = dateTime.toString();	
+		QLabel *timeText = new QLabel(tr("<b>%1</b>").arg(time));
+		timeBox->addWidget(timeLabel);
+		timeBox->addWidget(timeText);
+		timeBox->addStretch(1);
+		vbox->addLayout(timeBox);
+
+		QHBoxLayout *userBox = new QHBoxLayout;
+		QLabel *userLabel = new QLabel(tr("From:"));
+
+		QString userStr = "";
+		if(user == BUYER)
 		{
-			UniValue feedbackObj = escrowFeedback[i].get_obj();
-			int rating =  find_value(feedbackObj, "rating").get_int();
-			int user =  find_value(feedbackObj, "feedbackuser").get_int();
-			string feedback =  find_value(feedbackObj, "feedback").get_str();
-			QString time =  QString::fromStdString(find_value(feedbackObj, "time").get_str());
-			QGroupBox *groupBox = new QGroupBox(tr("%1 Feedback #%2").arg(userType).arg(QString::number(i+1)));
-			QTextEdit *feedbackText;
-			if(feedback.size() > 0)
-				feedbackText = new QTextEdit(QString::fromStdString(feedback));
-			else
-				feedbackText = new QTextEdit(tr("No Feedback"));
-
-			QVBoxLayout *vbox = new QVBoxLayout;
-			QHBoxLayout *timeBox = new QHBoxLayout;
-			QLabel *timeLabel = new QLabel(tr("Time:"));
-			QDateTime dateTime;	
-			int unixTime = time.toInt();
-			dateTime.setTime_t(unixTime);
-			time = dateTime.toString();	
-			QLabel *timeText = new QLabel(tr("<b>%1</b>").arg(time));
-			timeBox->addWidget(timeLabel);
-			timeBox->addWidget(timeText);
-			timeBox->addStretch(1);
-			vbox->addLayout(timeBox);
-
-			QHBoxLayout *userBox = new QHBoxLayout;
-			QLabel *userLabel = new QLabel(tr("From:"));
-
-			QString userStr = "";
-			if(user == BUYER)
-			{
-				userStr = tr("%1 (Buyer)").arg(buyer);
-			}
-			else if(user == SELLER)
-			{
-				userStr = tr("%1 (Merchant)").arg(seller);
-			}
-			else if(user == ARBITER)
-			{
-				userStr = tr("%1 (Arbiter)").arg(arbiter);
-			}
-			QLabel *userText = new QLabel(tr("<b>%1</b>").arg(userStr));
-			userBox->addWidget(userLabel);
-			userBox->addWidget(userText);
-			userBox->addStretch(1);
-			vbox->addLayout(userBox);
-		
-			QHBoxLayout *ratingBox = new QHBoxLayout;
-			QLabel *ratingLabel = new QLabel(tr("Rating:"));
-			QLabel *ratingText;
-			if(rating > 0)
-				ratingText = new QLabel( tr("<b>%1 Stars</b>").arg(QString::number(rating)));
-			else
-				ratingText = new QLabel( tr("<b>No Rating</b>"));
-
-			ratingBox->addWidget(ratingLabel);
-			ratingBox->addWidget(ratingText);
-			ratingBox->addStretch(1);
-			vbox->addLayout(ratingBox);
-			
-			
-			vbox->addWidget(feedbackText);
-
-			groupBox->setLayout(vbox);
-			if(userType == tr("Buyer"))
-				ui->buyerFeedbackLayout->addWidget(groupBox);
-			else if(userType == tr("Seller"))
-				ui->sellerFeedbackLayout->addWidget(groupBox);
-			else if(userType == tr("Arbiter"))
-				ui->arbiterFeedbackLayout->addWidget(groupBox);
+			userStr = tr("%1 (Buyer)").arg(buyer);
 		}
+		else if(user == SELLER)
+		{
+			userStr = tr("%1 (Merchant)").arg(seller);
+		}
+		else if(user == ARBITER)
+		{
+			userStr = tr("%1 (Arbiter)").arg(arbiter);
+		}
+		QLabel *userText = new QLabel(tr("<b>%1</b>").arg(userStr));
+		userBox->addWidget(userLabel);
+		userBox->addWidget(userText);
+		userBox->addStretch(1);
+		vbox->addLayout(userBox);
+	
+		QHBoxLayout *ratingBox = new QHBoxLayout;
+		QLabel *ratingLabel = new QLabel(tr("Rating:"));
+		QLabel *ratingText;
+		if(rating > 0)
+			ratingText = new QLabel( tr("<b>%1 Stars</b>").arg(QString::number(rating)));
+		else
+			ratingText = new QLabel( tr("<b>No Rating</b>"));
+
+		ratingBox->addWidget(ratingLabel);
+		ratingBox->addWidget(ratingText);
+		ratingBox->addStretch(1);
+		vbox->addLayout(ratingBox);
+		
+		
+		vbox->addWidget(feedbackText);
+
+		groupBox->setLayout(vbox);
+		if(userType == tr("Buyer"))
+			ui->buyerFeedbackLayout->addWidget(groupBox);
+		else if(userType == tr("Seller"))
+			ui->sellerFeedbackLayout->addWidget(groupBox);
+		else if(userType == tr("Arbiter"))
+			ui->arbiterFeedbackLayout->addWidget(groupBox);
+	}
 }
 bool EscrowInfoDialog::lookup()
 {
