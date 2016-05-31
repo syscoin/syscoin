@@ -60,6 +60,7 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 	if(escrowFeedback.size() <= 0)
 	{
 		QLabel *noFeedback = new QLabel(tr("No Feedback Found"));
+		noFeedback->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 		if(userType == tr("Buyer"))
 			ui->buyerFeedbackLayout->addWidget(noFeedback);
 		else if(userType == tr("Seller"))
