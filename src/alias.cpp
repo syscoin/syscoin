@@ -1519,10 +1519,10 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 				strPrivateValue = strDecrypted;		
 			oName.push_back(Pair("privatevalue", strPrivateValue));
 			oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
-			int rating = 0;
+			float rating = 0;
 			if(alias.nRatingCount > 0)
-				rating = alias.nRating/alias.nRatingCount;
-			oName.push_back(Pair("rating", rating));
+				rating = roundf(alias.nRating/(float)alias.nRatingCount);
+			oName.push_back(Pair("rating", (int)rating));
 			oName.push_back(Pair("ratingcount", alias.nRatingCount));
 			expired_block = nHeight + GetAliasExpirationDepth();
             if(expired_block < chainActive.Tip()->nHeight)
@@ -1686,10 +1686,10 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		bool fAliasMine = IsSyscoinTxMine(tx, "alias")? true:  false;
 		oName.push_back(Pair("ismine", fAliasMine));
 		oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
-		int rating = 0;
+		float rating = 0;
 		if(alias.nRatingCount > 0)
-			rating = alias.nRating/alias.nRatingCount;
-		oName.push_back(Pair("rating", rating));
+			rating = roundf(alias.nRating/(float)alias.nRatingCount);
+		oName.push_back(Pair("rating", (int)rating));
 		oName.push_back(Pair("ratingcount", alias.nRatingCount));
         oName.push_back(Pair("lastupdate_height", nHeight));
 		expired_block = nHeight + GetAliasExpirationDepth();
@@ -1763,10 +1763,10 @@ UniValue aliashistory(const UniValue& params, bool fHelp) {
 			CSyscoinAddress address(PubKey.GetID());
 			oName.push_back(Pair("address", address.ToString()));
             oName.push_back(Pair("lastupdate_height", nHeight));
-			int rating = 0;
+			float rating = 0;
 			if(txPos2.nRatingCount > 0)
-				rating = txPos2.nRating/txPos2.nRatingCount;
-			oName.push_back(Pair("rating", rating));
+				rating = roundf(txPos2.nRating/(float)txPos2.nRatingCount);
+			oName.push_back(Pair("rating", (int)rating));
 			oName.push_back(Pair("ratingcount", txPos2.nRatingCount));
 			expired_block = nHeight + GetAliasExpirationDepth();
             if(expired_block < chainActive.Tip()->nHeight)
@@ -1852,10 +1852,10 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 			strPrivateValue = strDecrypted;		
 		oName.push_back(Pair("privatevalue", strPrivateValue));
         oName.push_back(Pair("lastupdate_height", nHeight));
-		int rating = 0;
+		float rating = 0;
 		if(alias.nRatingCount > 0)
-			rating = alias.nRating/alias.nRatingCount;
-		oName.push_back(Pair("rating", rating));
+			rating = roundf(alias.nRating/(float)alias.nRatingCount);
+		oName.push_back(Pair("rating", (int)rating));
 		oName.push_back(Pair("ratingcount", alias.nRatingCount));
 		expired_block = nHeight + GetAliasExpirationDepth();
         if(expired_block < chainActive.Tip()->nHeight)
