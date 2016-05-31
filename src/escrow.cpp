@@ -686,7 +686,7 @@ bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser ty
 }
 void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, vector<CEscrow> &vtxPos)
 {
-	int nRating = 0;
+	float nRating = 0;
 	int nRatingCount = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
@@ -731,9 +731,9 @@ void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, cons
 	{
 		nRating /= nRatingCount;
 	}
-	avgRating = nRating;
+	avgRating = (int)roundf(nRating);
 	if(feedBack.size() > 0)
-		sort(feedBack.begin(), feedBack.end(), escrowfeedgreaterthan());
+		sort(feedBack.begin(), feedBack.end(), escrowfeedbacksort());
 	
 }
 UniValue escrownew(const UniValue& params, bool fHelp) {
@@ -2318,8 +2318,8 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 		ratingCount++;
 	if(ratingCount == 0)
 		ratingCount = 1;
-	int totalAvgRating = (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount;
-	oEscrow.push_back(Pair("avg_rating", totalAvgRating));	
+	float totalAvgRating = round((avgArbiterRating+avgSellerRating+avgBuyerRating)/(float)ratingCount);
+	oEscrow.push_back(Pair("avg_rating", (int)totalAvgRating));	
     return oEscrow;
 }
 
@@ -2538,8 +2538,8 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 			ratingCount++;
 		if(ratingCount == 0)
 			ratingCount = 1;
-		int totalAvgRating = (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount;
-		oName.push_back(Pair("avg_rating", totalAvgRating));
+		float totalAvgRating = round((avgArbiterRating+avgSellerRating+avgBuyerRating)/(float)ratingCount);
+		oName.push_back(Pair("avg_rating", (int)totalAvgRating));	
 		oName.push_back(Pair("status", status));
 		oName.push_back(Pair("expired", expired));
  
@@ -2815,8 +2815,8 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 			ratingCount++;
 		if(ratingCount == 0)
 			ratingCount = 1;
-		int totalAvgRating = (avgArbiterRating+avgSellerRating+avgBuyerRating)/ratingCount;
-		oEscrow.push_back(Pair("avg_rating", totalAvgRating));
+		float totalAvgRating = round((avgArbiterRating+avgSellerRating+avgBuyerRating)/(float)ratingCount);
+		oEscrow.push_back(Pair("avg_rating", (int)totalAvgRating));	
 
         oRes.push_back(oEscrow);
     }

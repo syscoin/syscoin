@@ -78,9 +78,9 @@ public:
     void SetNull() { nHeight = 0; nRating = 0; nFeedbackUser = 0; vchFeedback.clear();}
     bool IsNull() const { return (nHeight == 0 && nRating == 0 && nFeedbackUser == 0 && vchFeedback.empty()); }
 };
-struct escrowfeedgreaterthan {
+struct escrowfeedbacksort {
     bool operator ()(const CEscrowFeedback& a, const CEscrowFeedback& b) {
-        return a.nHeight > b.nHeight;
+        return a.nHeight < b.nHeight;
     }
 };
 class CEscrow {
