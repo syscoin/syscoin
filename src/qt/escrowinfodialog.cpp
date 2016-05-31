@@ -78,7 +78,7 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 			int unixTime = time.toInt();
 			dateTime.setTime_t(unixTime);
 			time = dateTime.toString();	
-			QLineEdit *timeText = new QLabel(QString("<b>") + time + QString("</b>"));
+			QLineEdit *timeText = new QLabel(tr("<b>%1</b>").arg(time));
 			timeBox->addWidget(timeLabel);
 			timeBox->addWidget(timeText);
 			timeBox->addStretch(1);
@@ -100,7 +100,7 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 			{
 				userStr = tr("%1 (Arbiter)").arg(arbiter);
 			}
-			QLineEdit *userText = new QLabel(QString("<b>") + userStr + QString("</b>"));
+			QLineEdit *userText = new QLabel(tr("<b>%1</b>").arg(userStr));
 			userBox->addWidget(userLabel);
 			userBox->addWidget(userText);
 			userBox->addStretch(1);
@@ -110,9 +110,9 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 			QLabel *ratingLabel = new QLabel(tr("Rating:"));
 			QLineEdit *ratingText;
 			if(rating > 0)
-				ratingText = new QLineEdit(QString("<b>") + tr("%1 Stars").arg(QString::number(rating) + + QString("</b>")));
+				ratingText = new QLineEdit( tr("<b>%1 Stars</b>").arg(QString::number(rating)));
 			else
-				ratingText = new new QLabel(QString("<b>") + tr("No Rating") + QString("</b>"));
+				ratingText = new new QLabel( tr("<b>No Rating</b>"));
 
 			ratingBox->addWidget(ratingLabel);
 			ratingBox->addWidget(ratingText);
