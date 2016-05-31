@@ -775,7 +775,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(theOffer.sCategory == vchFromString("wanted"))
 				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
 		
-			boost::split(categories,theOffer.sCategory,boost::find_last_of(">"));
+			boost::split(categories,stringFromVch(theOffer.sCategory),boost::is_any_of(">"));
 			if(categories.size() > 0 && categories[categories.size()-1] == "wanted")
 				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
 			if(!theOffer.vchLinkOffer.empty())
@@ -2909,7 +2909,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	if(theOffer.sCategory == vchFromString("wanted"))
 		throw runtime_error("Cannot purchase a wanted offer");
 	vector<string> categories;
-	boost::split(categories,theOffer.sCategory,boost::find_last_of(">"));
+	boost::split(categories,stringFromVch(theOffer.sCategory),boost::is_any_of(">"));
 	if(categories.size() > 0 && categories[categories.size()-1] == "wanted")
 		throw runtime_error("Cannot purchase a wanted offer");
 	// create accept
