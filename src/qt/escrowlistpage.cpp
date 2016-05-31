@@ -30,7 +30,8 @@ EscrowListPage::EscrowListPage(const PlatformStyle *platformStyle, QWidget *pare
     ui(new Ui::EscrowListPage),
     model(0),
     optionsModel(0),
-	currentPage(0)
+	currentPage(0),
+	platformStyle(platformStyle)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  

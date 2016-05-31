@@ -46,6 +46,7 @@ private:
     QString newEscrowToSelect;
 	std::map<int, std::pair<std::string, std::string> > pageMap;
 	int currentPage;
+	const PlatformStyle *platformStyle;
 private Q_SLOTS:
 	void on_detailButton_clicked();
 	void on_searchEscrow_clicked(std::string offer="");
