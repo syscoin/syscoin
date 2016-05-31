@@ -8,6 +8,7 @@
 
 #include <QFont>
 #include "rpcserver.h"
+#include "starrating.h"
 using namespace std;
 
 
@@ -35,13 +36,13 @@ struct OfferTableEntry
 	QString exclusive_resell;
 	QString private_str;
 	QString alias;
-	QString aliasRating;
+	int aliasRating;
 	QString acceptBTCOnly;
 	QString alias_peg;
 	QString safesearch;
 	QString geolocation;
     OfferTableEntry() {}
-    OfferTableEntry(Type type,const QString &cert,  const QString &title, const QString &offer, const QString &description, const QString &category,const QString &price, const QString &currency,const QString &qty,const QString &sold,const QString &expired, const QString &exclusive_resell, const QString &private_str,const QString &alias,const QString &aliasRating, const QString &acceptBTCOnly, const QString &alias_peg, const QString &safesearch, const QString &geolocation):
+    OfferTableEntry(Type type,const QString &cert,  const QString &title, const QString &offer, const QString &description, const QString &category,const QString &price, const QString &currency,const QString &qty,const QString &sold,const QString &expired, const QString &exclusive_resell, const QString &private_str,const QString &alias,const int &aliasRating, const QString &acceptBTCOnly, const QString &alias_peg, const QString &safesearch, const QString &geolocation):
         type(type), cert(cert), title(title), offer(offer), description(description), category(category),price(price), currency(currency),qty(qty), sold(sold),expired(expired), exclusive_resell(exclusive_resell), private_str(private_str), alias(alias), aliasRating(aliasRating), acceptBTCOnly(acceptBTCOnly),alias_peg(alias_peg), safesearch(safesearch), geolocation(geolocation) {}
 };
 struct OfferTableEntryLessThan
@@ -92,11 +93,11 @@ public:
 			string exclusive_resell_str;
 			string private_str;
 			string alias_str;
-			string aliasRating_str;
 			string acceptBTCOnly_str;
 			string alias_peg_str;
 			string safesearch_str;
 			string geolocation_str;
+			int aliasRating = 0;
 			int expired = 0;
 
 			
@@ -112,9 +113,9 @@ public:
 					value_str = "";
 					desc_str = "";
 					safesearch_str = "";
-					aliasRating_str = "";
 					geolocation_str = "";
 					expired = 0;
+					aliasRating = 0;
 
 
 			
@@ -133,9 +134,9 @@ public:
 						alias_peg_str = "";
 						safesearch_str = "";
 						geolocation_str = "";
-						aliasRating_str = "";
 						expired = 0;
 						sold = 0;
+						aliasRating = 0;
 			
 
 				
@@ -180,8 +181,8 @@ public:
 						if (alias_value.type() == UniValue::VSTR)
 							alias_str = alias_value.get_str();
 						const UniValue& aliasRating_value = find_value(o, "alias_rating");
-						if (aliasRating_value.type() == UniValue::VSTR)
-							aliasRating_str = aliasRating_value.get_str();
+						if (aliasRating_value.type() == UniValue::VNUM)
+							aliasRating = aliasRating_value.get_int();
 						const UniValue& sold_value = find_value(o, "offers_sold");
 						if (sold_value.type() == UniValue::VNUM)
 							sold = sold_value.get_int();
@@ -214,7 +215,7 @@ public:
 							expired_str = "Valid";
 						}
 
-						updateEntry( QString::fromStdString(name_str), QString::fromStdString(cert_str), QString::fromStdString(value_str), QString::fromStdString(desc_str), QString::fromStdString(category_str), QString::fromStdString(price_str), QString::fromStdString(currency_str), QString::fromStdString(qty_str), QString::number(sold), QString::fromStdString(expired_str),QString::fromStdString(exclusive_resell_str), QString::fromStdString(private_str),QString::fromStdString(alias_str), QString::fromStdString(aliasRating_str), QString::fromStdString(acceptBTCOnly_str), QString::fromStdString(alias_peg_str), QString::fromStdString(safesearch_str), QString::fromStdString(geolocation_str), type, CT_NEW); 
+						updateEntry( QString::fromStdString(name_str), QString::fromStdString(cert_str), QString::fromStdString(value_str), QString::fromStdString(desc_str), QString::fromStdString(category_str), QString::fromStdString(price_str), QString::fromStdString(currency_str), QString::fromStdString(qty_str), QString::number(sold), QString::fromStdString(expired_str),QString::fromStdString(exclusive_resell_str), QString::fromStdString(private_str),QString::fromStdString(alias_str), aliasRating, QString::fromStdString(acceptBTCOnly_str), QString::fromStdString(alias_peg_str), QString::fromStdString(safesearch_str), QString::fromStdString(geolocation_str), type, CT_NEW); 
 					}
 				}
    			}
@@ -389,7 +390,7 @@ QVariant OfferTableModel::data(const QModelIndex &index, int role) const
         case Alias:
             return rec->alias;
         case AliasRating:
-            return rec->aliasRating;
+            return QVariant::fromValue(StarRating(rec->aliasRating));
 		case AcceptBTCOnly:
 			return rec->acceptBTCOnly;
 		case AliasPeg:
@@ -544,7 +545,7 @@ bool OfferTableModel::setData(const QModelIndex &index, const QVariant &value, i
             break;
         case AliasRating:
             // Do nothing, if old value == new value
-            if(rec->aliasRating == value.toString())
+            if(rec->aliasRating == value.toInt())
             {
                 editStatus = NO_CHANGES;
                 return false;
@@ -695,13 +696,13 @@ QModelIndex OfferTableModel::index(int row, int column, const QModelIndex &paren
     }
 }
 
-void OfferTableModel::updateEntry(const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category,const QString &price, const QString &currency, const QString &qty, const QString &sold, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias, const QString &aliasRating, const QString& acceptBTCOnly, const QString& alias_peg, const QString &safesearch, const QString &geolocation, OfferModelType type, int status)
+void OfferTableModel::updateEntry(const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category,const QString &price, const QString &currency, const QString &qty, const QString &sold, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias, const int &aliasRating, const QString& acceptBTCOnly, const QString& alias_peg, const QString &safesearch, const QString &geolocation, OfferModelType type, int status)
 {
     // Update alias book model from Syscoin core
     priv->updateEntry(offer, cert, value, description, category, price, currency, qty, sold, expired, exclusive_resell,private_str, alias, aliasRating, acceptBTCOnly, alias_peg, safesearch, geolocation, type, status);
 }
 
-QString OfferTableModel::addRow(const QString &type, const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category,const QString &price, const QString &currency, const QString &qty, const QString &sold, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias, const QString &aliasRating, const QString &acceptBTCOnly, const QString &alias_peg, const QString &safesearch, const QString &geolocation)
+QString OfferTableModel::addRow(const QString &type, const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category,const QString &price, const QString &currency, const QString &qty, const QString &sold, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias, const int &aliasRating, const QString &acceptBTCOnly, const QString &alias_peg, const QString &safesearch, const QString &geolocation)
 {
     std::string strOffer = offer.toStdString();
     editStatus = OK;

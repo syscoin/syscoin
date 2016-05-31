@@ -3537,7 +3537,10 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	oOffer.push_back(Pair("alias_peg", stringFromVch(theOffer.vchAliasPeg)));
 	oOffer.push_back(Pair("description", stringFromVch(theOffer.sDescription)));
 	oOffer.push_back(Pair("alias", selleraddy.aliasName));
-	oOffer.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
+	float rating = 0;
+	if(vtxAliasPos.back().nRatingCount > 0)
+		rating = roundf(vtxAliasPos.back().nRating/(float)vtxAliasPos.back().nRatingCount);
+	oOffer.push_back(Pair("alias_rating",(int)rating);
 	oOffer.push_back(Pair("geolocation", stringFromVch(theOffer.vchGeoLocation)));
 	oOffer.push_back(Pair("offers_sold", aoOfferAccepts.size()));
 	oOffer.push_back(Pair("accepts", aoOfferAccepts));
@@ -3973,7 +3976,10 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			expires_in = expired_block - chainActive.Tip()->nHeight;
 			
 			oName.push_back(Pair("alias", selleraddy.aliasName));
-			oName.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
+			float rating = 0;
+			if(vtxAliasPos.back().nRatingCount > 0)
+				rating = roundf(vtxAliasPos.back().nRating/(float)vtxAliasPos.back().nRatingCount);
+			oName.push_back(Pair("alias_rating",(int)rating);
 			oName.push_back(Pair("expires_in", expires_in));
 			oName.push_back(Pair("expires_on", expired_block));
 			oName.push_back(Pair("expired", expired));
@@ -4066,7 +4072,10 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 			if (!paliasdb->ReadAlias(vchFromString(selleraddy.aliasName), vtxAliasPos) || vtxAliasPos.empty())
 				continue;
 			oOffer.push_back(Pair("alias", selleraddy.aliasName));
-			oOffer.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
+			float rating = 0;
+			if(vtxAliasPos.back().nRatingCount > 0)
+				rating = roundf(vtxAliasPos.back().nRating/(float)vtxAliasPos.back().nRatingCount);
+			oOffer.push_back(Pair("alias_rating",(int)rating);
 			oOffer.push_back(Pair("expires_in", expires_in));
 			oOffer.push_back(Pair("expires_on", expired_block));
 			oOffer.push_back(Pair("expired", expired));
@@ -4158,7 +4167,10 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oOffer.push_back(Pair("private", txOffer.bPrivate ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias", selleraddy.aliasName));
-		oOffer.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
+		float rating = 0;
+		if(vtxAliasPos.back().nRatingCount > 0)
+			rating = roundf(vtxAliasPos.back().nRating/(float)vtxAliasPos.back().nRatingCount);
+		oOffer.push_back(Pair("alias_rating",(int)rating);
 		oOffer.push_back(Pair("geolocation", stringFromVch(txOffer.vchGeoLocation)));
 		oOffer.push_back(Pair("expires_in", expires_in));
 		oOffer.push_back(Pair("expires_on", expired_block));

@@ -273,7 +273,7 @@ bool AcceptandPayOfferListPage::lookup(const QString &lookupid)
 			offerOut.sCurrencyCode = vchFromString(find_value(offerObj, "currency").get_str());
 			offerOut.vchAliasPeg = vchFromString(find_value(offerObj, "alias_peg").get_str());
 			const QString &strSold = QString::number(find_value(offerObj, "offers_sold").get_int());
-			const QString &strRating = QString::fromStdString(find_value(offerObj, "alias_rating").get_str());
+			const QString &strRating = QString::number(find_value(offerObj, "alias_rating").get_int());
 			if(find_value(offerObj, "quantity").get_str() == "unlimited")
 				offerOut.nQty = -1;
 			else
@@ -363,7 +363,7 @@ void AcceptandPayOfferListPage::setValue(const QString& strAlias, const QString&
 	ui->infoCategory->setText(QString::fromStdString(stringFromVch(offer.sCategory)));
 	ui->infoCurrency->setText(QString::fromStdString(stringFromVch(offer.sCurrencyCode)));
 	ui->aliasPegEdit->setText(QString::fromStdString(stringFromVch(offer.vchAliasPeg)));
-	ui->sellerRatingEdit->setText(strRating);
+	ui->sellerRatingEdit->setText(tr("%1 Stars").arg(strRating));
 	ui->infoPrice->setText(price);
 	if(offer.nQty == -1)
 		ui->infoQty->setText(tr("unlimited"));

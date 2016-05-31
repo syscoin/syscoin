@@ -23,6 +23,7 @@
 #include <QSettings>
 #include <QStandardItemModel>
 #include <boost/algorithm/string.hpp>
+#include "stardelegate.h"
 using namespace std;
 
 
@@ -202,6 +203,7 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
     ui->tableView->setColumnWidth(12, 100); //seller alias
 	ui->tableView->setColumnWidth(13, 75); //seller rating
     ui->tableView->setColumnWidth(14, 0); //btc only
+	ui->tableView->setItemDelegateForColumn(13, new StarDelegate);
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
@@ -422,7 +424,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	string alias_str;
 	string safesearch_str;
 	string geolocation_str;
-	string aliasRating_str;
+	int aliasRating;
 	int sold = 0;
 
 	int expired = 0;
@@ -482,7 +484,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			acceptBTCOnly_str = "";
 			alias_peg_str = "";
 			safesearch_str = "";
-			aliasRating_str = "";
+			aliasRating = 0;
 			geolocation_str = "";
 			expired = 0;
 			sold = 0;
@@ -527,9 +529,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			const UniValue& alias_value = find_value(o, "alias");
 			if (alias_value.type() == UniValue::VSTR)
 				alias_str = alias_value.get_str();
-			const UniValue& aliasRating_value = find_value(o, "aliasRating");
-			if (aliasRating_value.type() == UniValue::VSTR)
-				aliasRating_str =aliasRating_value.get_str();
+			const UniValue& aliasRating_value = find_value(o, "alias_rating");
+			if (aliasRating_value.type() == UniValue::VNUM)
+				aliasRating = aliasRating_value.get_int();
 			const UniValue& btconly_value = find_value(o, "btconly");
 			if (btconly_value.type() == UniValue::VSTR)
 				acceptBTCOnly_str = btconly_value.get_str();
@@ -570,7 +572,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(exclusive_resell_str),
 					QString::fromStdString(private_str),
 					QString::fromStdString(alias_str),
-					QString::fromStdString(aliasRating_str),
+					aliasRating,
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str),
 					QString::fromStdString(safesearch_str),
@@ -588,7 +590,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(exclusive_resell_str),
 					QString::fromStdString(private_str), 
 					QString::fromStdString(alias_str), 
-					QString::fromStdString(aliasRating_str),
+					aliasRating,
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str), 
 					QString::fromStdString(safesearch_str),

@@ -14,6 +14,7 @@
 #include "editofferdialog.h"
 #include "csvmodelwriter.h"
 #include "guiutil.h"
+#include "stardelegate.h"
 
 #include <QSortFilterProxyModel>
 #include <QClipboard>
@@ -147,8 +148,9 @@ void MyOfferListPage::setModel(WalletModel *walletModel, OfferTableModel *model)
         ui->tableView->setColumnWidth(10, 75); //exclusive resell
         ui->tableView->setColumnWidth(11, 50); //private
         ui->tableView->setColumnWidth(12, 100); //seller alias
-		ui->tableView->setColumnWidth(13, 75); //seller rating
+		ui->tableView->setColumnWidth(13, 100); //seller rating
         ui->tableView->setColumnWidth(14, 0); //btc only
+		ui->tableView->setItemDelegateForColumn(13, new StarDelegate);
 
         ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
