@@ -111,7 +111,7 @@ void EscrowInfoDialog::SetFeedbackUI(const UniValue &escrowFeedback, const QStri
 			QHBoxLayout *ratingBox = new QHBoxLayout;
 			QLabel *ratingLabel = new QLabel(tr("Rating:"));
 			QLineEdit *ratingText;
-			if(i==0)
+			if(rating > 0)
 				ratingText = new QLineEdit(tr("%1 Stars").arg(QString::number(rating)));
 			else
 				ratingText = new QLineEdit(tr("No Rating"));

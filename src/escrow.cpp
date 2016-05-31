@@ -553,7 +553,10 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 
 						// can't leave more than 2 feedbacks at once
 						if(count > 2)
+						{
+							LogPrintf("CheckEscrowInputs() : Trying to leave more than 2 feedbacks in the same transaction, skipping...");
 							return true;
+						}
 
 						// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
 						if(FindFeedbackInEscrow(theEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
