@@ -519,7 +519,7 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 				qty_str = qty_value.get_str();
 			const UniValue& sold_value = find_value(o, "offers_sold");
 			if (sold_value.type() == UniValue::VNUM)
-				sold = qty_value.get_int();
+				sold = sold_value.get_int();
 			const UniValue& exclusive_resell_value = find_value(o, "exclusive_resell");
 			if (exclusive_resell_value.type() == UniValue::VSTR)
 				exclusive_resell_str = exclusive_resell_value.get_str();		
