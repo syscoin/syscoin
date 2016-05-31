@@ -769,6 +769,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 			}
 			theOffer = vtxPos.back();
+
+			if(theOffer.sCategory == vchFromString("wanted"))
+				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
+			vector<string> categories;
+			boost::split(categories,theOffer.sCategory,boost::find_last_of(">"));
+			if(categories.size() > 0 && categories[categories.size()-1] == "wanted")
+				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
 			if(!theOffer.vchLinkOffer.empty())
 			{
 				if(!GetTxOfOffer( theOffer.vchLinkOffer, linkOffer, linkedTx))
@@ -2897,6 +2904,12 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		if (vchMessage.size() <= 0)
 			throw runtime_error("offeraccept message data cannot be empty!");
 	}
+	if(theOffer.sCategory == vchFromString("wanted"))
+		throw runtime_error("Cannot purchase a wanted offer");
+	vector<string> categories;
+	boost::split(categories,theOffer.sCategory,boost::find_last_of(">"));
+	if(categories.size() > 0 && categories[categories.size()-1] == "wanted")
+		throw runtime_error("Cannot purchase a wanted offer");
 	// create accept
 	COfferAccept txAccept;
 	txAccept.vchAcceptRand = vchAccept;
