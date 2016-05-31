@@ -28,14 +28,16 @@ public:
 		Price = 5,
 		Currency = 6,
 		Qty = 7,
-		Expired = 8,
-		ExclusiveResell = 9,
-		Private = 10,
-		Alias = 11,
-		AcceptBTCOnly = 12,
-		AliasPeg = 13,
-		SafeSearch = 14,
-		GeoLocation = 15
+		Sold = 8,
+		Expired = 9,
+		ExclusiveResell = 10,
+		Private = 11,
+		Alias = 12,
+		AliasRating = 13,
+		AcceptBTCOnly = 14,
+		AliasPeg = 15,
+		SafeSearch = 16,
+		GeoLocation = 17
     };
 
     enum RoleIndex {
@@ -46,12 +48,14 @@ public:
 		CategoryRole,
 		TitleRole,
 		QtyRole,
+		SoldRole,
 		CurrencyRole,
 		PriceRole,
 		DescriptionRole,
 		ExclusiveWhitelistRole,
 		PrivateRole,
 		AliasRole,
+		AliasRatingRole,
 		BTCOnlyRole,
 		AliasPegRole,
 		SafeSearchRole
@@ -82,7 +86,7 @@ public:
     /* Add an offer to the model.
        Returns the added offer on success, and an empty string otherwise.
      */
-    QString addRow(const QString &type, const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category,const QString &price, const QString &currency, const QString &qty, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias, const QString &acceptBTCOnly, const QString &alias_peg, const QString &safesearch, const QString &geolocation);
+    QString addRow(const QString &type, const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category,const QString &price, const QString &currency, const QString &qty, const QString &sold, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias,const QString &aliasRating, const QString &acceptBTCOnly, const QString &alias_peg, const QString &safesearch, const QString &geolocation);
 
     /* Look up row index of an offer in the model.
        Return -1 if not found.
@@ -105,7 +109,7 @@ private:
 public Q_SLOTS:
     /* Update offer list from core.
      */
-    void updateEntry(const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category, const QString &price, const QString &currency, const QString &qty, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias, const QString &acceptBTCOnly,const QString &alias_peg, const QString &safesearch, const QString &geolocation, OfferModelType type, int status);
+    void updateEntry(const QString &offer, const QString &cert, const QString &value, const QString &description, const QString &category, const QString &price, const QString &currency, const QString &qty, const QString &sold, const QString &expired, const QString &exclusive_resell, const QString &private_str, const QString &alias, const QString &aliasRating, const QString &acceptBTCOnly,const QString &alias_peg, const QString &safesearch, const QString &geolocation, OfferModelType type, int status);
 
     friend class OfferTablePriv;
 };

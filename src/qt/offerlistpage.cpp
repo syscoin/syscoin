@@ -195,11 +195,13 @@ void OfferListPage::setModel(WalletModel* walletModel, OfferTableModel *model)
     ui->tableView->setColumnWidth(5, 50); //price
     ui->tableView->setColumnWidth(6, 75); //currency
     ui->tableView->setColumnWidth(7, 75); //qty
-    ui->tableView->setColumnWidth(8, 50); //status
-    ui->tableView->setColumnWidth(9, 75); //exclusive resell
-    ui->tableView->setColumnWidth(10, 50); //private
-    ui->tableView->setColumnWidth(11, 100); //seller alias
-    ui->tableView->setColumnWidth(12, 0); //btc only
+	ui->tableView->setColumnWidth(8, 75); //sold
+    ui->tableView->setColumnWidth(9, 50); //status
+    ui->tableView->setColumnWidth(10, 75); //exclusive resell
+    ui->tableView->setColumnWidth(11, 50); //private
+    ui->tableView->setColumnWidth(12, 100); //seller alias
+	ui->tableView->setColumnWidth(13, 75); //seller rating
+    ui->tableView->setColumnWidth(14, 0); //btc only
 
     ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
@@ -420,6 +422,8 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 	string alias_str;
 	string safesearch_str;
 	string geolocation_str;
+	string aliasRating_str;
+	int sold = 0;
 
 	int expired = 0;
 	int index;
@@ -478,8 +482,10 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			acceptBTCOnly_str = "";
 			alias_peg_str = "";
 			safesearch_str = "";
+			aliasRating_str = "";
 			geolocation_str = "";
 			expired = 0;
+			sold = 0;
 
 
 			const UniValue& name_value = find_value(o, "offer");
@@ -509,6 +515,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			const UniValue& qty_value = find_value(o, "quantity");
 			if (qty_value.type() == UniValue::VSTR)
 				qty_str = qty_value.get_str();
+			const UniValue& sold_value = find_value(o, "offers_sold");
+			if (sold_value.type() == UniValue::VNUM)
+				sold = qty_value.get_int();
 			const UniValue& exclusive_resell_value = find_value(o, "exclusive_resell");
 			if (exclusive_resell_value.type() == UniValue::VSTR)
 				exclusive_resell_str = exclusive_resell_value.get_str();		
@@ -518,6 +527,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 			const UniValue& alias_value = find_value(o, "alias");
 			if (alias_value.type() == UniValue::VSTR)
 				alias_str = alias_value.get_str();
+			const UniValue& aliasRating_value = find_value(o, "aliasRating");
+			if (aliasRating_value.type() == UniValue::VSTR)
+				aliasRating_str =aliasRating_value.get_str();
 			const UniValue& btconly_value = find_value(o, "btconly");
 			if (btconly_value.type() == UniValue::VSTR)
 				acceptBTCOnly_str = btconly_value.get_str();
@@ -553,10 +565,12 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(price_str),
 					QString::fromStdString(currency_str),
 					QString::fromStdString(qty_str),
+					QString::number(sold),
 					QString::fromStdString(expired_str), 
 					QString::fromStdString(exclusive_resell_str),
 					QString::fromStdString(private_str),
 					QString::fromStdString(alias_str),
+					QString::fromStdString(aliasRating_str),
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str),
 					QString::fromStdString(safesearch_str),
@@ -569,10 +583,12 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
 					QString::fromStdString(price_str),
 					QString::fromStdString(currency_str),
 					QString::fromStdString(qty_str),
+					QString::number(sold),
 					QString::fromStdString(expired_str),
 					QString::fromStdString(exclusive_resell_str),
 					QString::fromStdString(private_str), 
 					QString::fromStdString(alias_str), 
+					QString::fromStdString(aliasRating_str),
 					QString::fromStdString(acceptBTCOnly_str),
 					QString::fromStdString(alias_peg_str), 
 					QString::fromStdString(safesearch_str),

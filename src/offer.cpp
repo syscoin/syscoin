@@ -3537,7 +3537,9 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	oOffer.push_back(Pair("alias_peg", stringFromVch(theOffer.vchAliasPeg)));
 	oOffer.push_back(Pair("description", stringFromVch(theOffer.sDescription)));
 	oOffer.push_back(Pair("alias", selleraddy.aliasName));
+	oOffer.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
 	oOffer.push_back(Pair("geolocation", stringFromVch(theOffer.vchGeoLocation)));
+	oOffer.push_back(Pair("offers_sold", aoOfferAccepts.size()));
 	oOffer.push_back(Pair("accepts", aoOfferAccepts));
 	oLastOffer = oOffer;
 	
@@ -3952,6 +3954,9 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			CPubKey SellerPubKey(theOfferA.vchPubKey);
 			CSyscoinAddress selleraddy(SellerPubKey.GetID());
 			selleraddy = CSyscoinAddress(selleraddy.ToString());
+			vector<CAliasIndex> vtxAliasPos;
+			if (!paliasdb->ReadAlias(vchFromString(selleraddy.aliasName), vtxAliasPos) || vtxAliasPos.empty())
+				continue;
 			oName.push_back(Pair("address", selleraddy.ToString()));
 			oName.push_back(Pair("exclusive_resell", theOfferA.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 			oName.push_back(Pair("btconly", theOfferA.bOnlyAcceptBTC ? "Yes" : "No"));
@@ -3959,6 +3964,7 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("private", theOfferA.bPrivate ? "Yes" : "No"));
 			oName.push_back(Pair("safesearch", theOfferA.safetyLevel <= 0 ? "Yes" : "No"));
 			oName.push_back(Pair("geolocation", stringFromVch(theOfferA.vchGeoLocation)));
+			oName.push_back(Pair("offers_sold", GetNumberOfAccepts(vtxPos));
 			expired_block = nHeight + GetOfferExpirationDepth();
             if(expired_block < chainActive.Tip()->nHeight)
 			{
@@ -3967,6 +3973,7 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			expires_in = expired_block - chainActive.Tip()->nHeight;
 			
 			oName.push_back(Pair("alias", selleraddy.aliasName));
+			oName.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
 			oName.push_back(Pair("expires_in", expires_in));
 			oName.push_back(Pair("expires_on", expired_block));
 			oName.push_back(Pair("expired", expired));
@@ -3996,9 +4003,7 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 
 	{
 
-		//vector<CDiskTxPos> vtxPos;
 		vector<COffer> vtxPos;
-		//COfferDB dbOffer("r");
 		if (!pofferdb->ReadOffer(vchOffer, vtxPos) || vtxPos.empty())
 			throw runtime_error("failed to read from offer DB");
 
@@ -4057,7 +4062,11 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 			CPubKey SellerPubKey(txPos2.vchPubKey);
 			CSyscoinAddress selleraddy(SellerPubKey.GetID());
 			selleraddy = CSyscoinAddress(selleraddy.ToString());
+			vector<CAliasIndex> vtxAliasPos;
+			if (!paliasdb->ReadAlias(vchFromString(selleraddy.aliasName), vtxAliasPos) || vtxAliasPos.empty())
+				continue;
 			oOffer.push_back(Pair("alias", selleraddy.aliasName));
+			oOffer.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
 			oOffer.push_back(Pair("expires_in", expires_in));
 			oOffer.push_back(Pair("expires_on", expired_block));
 			oOffer.push_back(Pair("expired", expired));
@@ -4109,9 +4118,15 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 	BOOST_FOREACH(pairScan, offerScan) {
 		const COffer &txOffer = pairScan.second;
 		const string &offer = stringFromVch(pairScan.first);
+		vector<COffer> vtxPos;
+		vector<CAliasIndex> vtxAliasPos;
+		if (!pofferdb->ReadOffer(vchFromString(offer), vtxPos) || vtxPos.empty())
+			continue;
 		CPubKey SellerPubKey(txOffer.vchPubKey);
 		CSyscoinAddress selleraddy(SellerPubKey.GetID());
 		selleraddy = CSyscoinAddress(selleraddy.ToString());
+		if (!paliasdb->ReadAlias(vchFromString(selleraddy.aliasName), vtxAliasPos) || vtxAliasPos.empty())
+			continue;
 		int expired = 0;
 		int expires_in = 0;
 		int expired_block = 0;		
@@ -4138,10 +4153,12 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		oOffer.push_back(Pair("exclusive_resell", txOffer.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 		oOffer.push_back(Pair("btconly", txOffer.bOnlyAcceptBTC ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias_peg", stringFromVch(txOffer.vchAliasPeg)));
+		oOffer.push_back(Pair("offers_sold", GetNumberOfAccepts(vtxPos));
 		expired_block = nHeight + GetOfferExpirationDepth();  
 		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oOffer.push_back(Pair("private", txOffer.bPrivate ? "Yes" : "No"));
 		oOffer.push_back(Pair("alias", selleraddy.aliasName));
+		oOffer.push_back(Pair("alias_rating",strprintf("%d Stars", vtxAliasPos.back().nRating)));
 		oOffer.push_back(Pair("geolocation", stringFromVch(txOffer.vchGeoLocation)));
 		oOffer.push_back(Pair("expires_in", expires_in));
 		oOffer.push_back(Pair("expires_on", expired_block));
@@ -4151,7 +4168,14 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 
 	return oRes;
 }
-
+int GetNumberOfAccepts(const std::vector<COffer> &offerList) {
+	int count = 0;
+	for(unsigned int i =0;i<offerList.size();i++) {
+		if(!offerList[i].accept.IsNull())
+			count++;
+    }
+    return count;
+}
 bool GetAcceptByHash(std::vector<COffer> &offerList, COfferAccept &ca) {
 	if(offerList.empty())
 		return false;

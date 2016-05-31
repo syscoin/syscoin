@@ -272,6 +272,8 @@ bool AcceptandPayOfferListPage::lookup(const QString &lookupid)
 			offerOut.sCategory = vchFromString(find_value(offerObj, "category").get_str());
 			offerOut.sCurrencyCode = vchFromString(find_value(offerObj, "currency").get_str());
 			offerOut.vchAliasPeg = vchFromString(find_value(offerObj, "alias_peg").get_str());
+			const QString &strSold = QString::number(find_value(offerObj, "offers_sold").get_int());
+			const QString &strRating = QString::fromStdString(find_value(offerObj, "alias_rating").get_str());
 			if(find_value(offerObj, "quantity").get_str() == "unlimited")
 				offerOut.nQty = -1;
 			else
@@ -295,7 +297,7 @@ bool AcceptandPayOfferListPage::lookup(const QString &lookupid)
 				}
 
 			}
-			setValue(QString::fromStdString(alias), QString::fromStdString(strRand), offerOut, QString::fromStdString(find_value(offerObj, "price").get_str()), QString::fromStdString(strAddress));
+			setValue(QString::fromStdString(alias), QString::fromStdString(strRand), strSold, strRating, offerOut, QString::fromStdString(find_value(offerObj, "price").get_str()), QString::fromStdString(strAddress));
 			return true;
 		}
 		 
@@ -340,7 +342,7 @@ bool AcceptandPayOfferListPage::handlePaymentRequest(const SendCoinsRecipient *r
 	}
     return true;
 }
-void AcceptandPayOfferListPage::setValue(const QString& strAlias, const QString& strRand, COffer &offer, QString price, QString address)
+void AcceptandPayOfferListPage::setValue(const QString& strAlias, const QString& strRand, const QString& strSold,  const QString& strRating, COffer &offer, QString price, QString address)
 {
 	loadAliases();
     ui->offeridEdit->setText(strRand);
@@ -361,11 +363,13 @@ void AcceptandPayOfferListPage::setValue(const QString& strAlias, const QString&
 	ui->infoCategory->setText(QString::fromStdString(stringFromVch(offer.sCategory)));
 	ui->infoCurrency->setText(QString::fromStdString(stringFromVch(offer.sCurrencyCode)));
 	ui->aliasPegEdit->setText(QString::fromStdString(stringFromVch(offer.vchAliasPeg)));
+	ui->sellerRatingEdit->setText(strRating);
 	ui->infoPrice->setText(price);
 	if(offer.nQty == -1)
 		ui->infoQty->setText(tr("unlimited"));
 	else
 		ui->infoQty->setText(QString::number(offer.nQty));
+	ui->infoSold->setText(strSold);
 	ui->infoDescription->setPlainText(QString::fromStdString(stringFromVch(offer.sDescription)));
 	ui->qtyEdit->setText(QString("1"));
 	ui->notesEdit->setPlainText(QString(""));

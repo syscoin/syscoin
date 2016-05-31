@@ -142,11 +142,13 @@ void MyOfferListPage::setModel(WalletModel *walletModel, OfferTableModel *model)
         ui->tableView->setColumnWidth(5, 50); //price
         ui->tableView->setColumnWidth(6, 75); //currency
         ui->tableView->setColumnWidth(7, 75); //qty
-        ui->tableView->setColumnWidth(8, 50); //status
-        ui->tableView->setColumnWidth(9, 75); //exclusive resell
-        ui->tableView->setColumnWidth(10, 50); //private
-        ui->tableView->setColumnWidth(11, 100); //seller alias
-        ui->tableView->setColumnWidth(12, 0); //btc only
+		ui->tableView->setColumnWidth(8, 75); //sold
+        ui->tableView->setColumnWidth(9, 50); //status
+        ui->tableView->setColumnWidth(10, 75); //exclusive resell
+        ui->tableView->setColumnWidth(11, 50); //private
+        ui->tableView->setColumnWidth(12, 100); //seller alias
+		ui->tableView->setColumnWidth(13, 75); //seller rating
+        ui->tableView->setColumnWidth(14, 0); //btc only
 
         ui->tableView->horizontalHeader()->setStretchLastSection(true);
 
@@ -307,9 +309,13 @@ void MyOfferListPage::on_exportButton_clicked()
 	writer.addColumn("Price", OfferTableModel::Price, Qt::EditRole);
 	writer.addColumn("Currency", OfferTableModel::Currency, Qt::EditRole);
 	writer.addColumn("Qty", OfferTableModel::Qty, Qt::EditRole);
+	writer.addColumn("Sold", OfferTableModel::Sold, Qt::EditRole);
 	writer.addColumn("Exclusive Resell", OfferTableModel::ExclusiveResell, Qt::EditRole);
 	writer.addColumn("Private", OfferTableModel::Private, Qt::EditRole);
 	writer.addColumn("Expired", OfferTableModel::Expired, Qt::EditRole);
+	writer.addColumn("Seller Alias", OfferTableModel::Alias, Qt::EditRole);
+	writer.addColumn("Seller Rating", OfferTableModel::AliasRating, Qt::EditRole);
+	writer.addColumn("BTC Only", OfferTableModel::AcceptBTCOnly, Qt::EditRole);
     if(!writer.write())
     {
         QMessageBox::critical(this, tr("Error exporting"), tr("Could not write to file %1.").arg(filename),
