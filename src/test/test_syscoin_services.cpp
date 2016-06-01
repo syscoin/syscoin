@@ -10,6 +10,7 @@
 #include <boost/test/unit_test.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/thread.hpp>
+#include <boost/lexical_cast.hpp>
 
 
 // SYSCOIN testing setup
@@ -285,7 +286,7 @@ void CreateSysCategoryIfNotExist()
 }
 void AliasBan(const string& node, const string& alias, int severity)
 {
-	string data = "{\\\"aliases\\\":[{\\\"id\\\":\\\"" + alias + "\\\",\\\"severity\\\":" + string(itoa(severity)) + "\\\"}]}";
+	string data = "{\\\"aliases\\\":[{\\\"id\\\":\\\"" + alias + "\\\",\\\"severity\\\":" + boost::lexical_cast<string>(severity) + "\\\"}]}";
 	CallRPC(node, "aliasupdate SYS_BAN " + data);
 	GenerateBlocks(10);
 }
