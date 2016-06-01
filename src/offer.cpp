@@ -305,7 +305,7 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 				}
 				string alias = selleraddy.aliasName;
 				boost::algorithm::to_lower(alias);
-				if (strRegexp != "" && !regex_search(title, offerparts, cregex) && !regex_search(category, offerparts, cregex) && !regex_search(description, offerparts, cregex) && strRegexp != offer && strRegexpLower != alias)
+				if (strRegexp != "" && !regex_search(title, offerparts, cregex) && !regex_search(description, offerparts, cregex) && strRegexp != offer && strRegexpLower != alias)
 				{
 					pcursor->Next();
 					continue;
