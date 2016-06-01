@@ -285,7 +285,7 @@ void CreateSysCategoryIfNotExist()
 }
 void AliasBan(const string& node, const string& alias, int severity)
 {
-	string data = "{\\\"aliases\\\":[{\\\"id\\\":\\\"" + alias + "\\\",\\\"severity\\\":" + severity + "\\\"}]}";
+	string data = "{\\\"aliases\\\":[{\\\"id\\\":\\\"" + alias + "\\\",\\\"severity\\\":" + string(itoa(severity)) + "\\\"}]}";
 	CallRPC(node, "aliasupdate SYS_BAN " + data);
 	GenerateBlocks(10);
 }
