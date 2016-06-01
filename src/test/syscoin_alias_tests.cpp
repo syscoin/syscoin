@@ -129,6 +129,7 @@ BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
 BOOST_AUTO_TEST_CASE (generate_aliasban)
 {
 	printf("Running generate_aliassafesearch...\n");
+	UniValue r;
 	GenerateBlocks(1);
 	// 2 aliases, one will be banned that is safe searchable other is banned that is not safe searchable
 	AliasNew("node1", "jagbansafesearch", "pubdata", "privdata", "Yes");
