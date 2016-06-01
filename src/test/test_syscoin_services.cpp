@@ -289,7 +289,7 @@ void AliasBan(const string& node, const string& alias, int severity)
 	CallRPC(node, "aliasupdate SYS_BAN " + data);
 	GenerateBlocks(10);
 }
-string AliasNew(const string& node, const string& aliasname, const string& pubdata, const string& privdata, const string safesearch)
+string AliasNew(const string& node, const string& aliasname, const string& pubdata, string privdata, string safesearch)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
