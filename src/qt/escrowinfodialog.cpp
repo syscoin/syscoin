@@ -170,7 +170,7 @@ bool EscrowInfoDialog::lookup()
 			dateTime.setTime_t(unixTime);	
 			ui->timeEdit->setText(dateTime.toString());
 			ui->priceEdit->setText(tr("%1 SYS").arg(QString::number(find_value(result.get_obj(), "systotal").get_int())));
-			ui->feeEdit->setTextt(tr("%1 SYS").arg(QString::number(find_value(result.get_obj(), "sysfee").get_int())));
+			ui->feeEdit->setText(tr("%1 SYS").arg(QString::number(find_value(result.get_obj(), "sysfee").get_int())));
 
 			ui->totalEdit->setText(QString::fromStdString(find_value(result.get_obj(), "total").get_str()));
 			ui->paymessageEdit->setText(QString::fromStdString(find_value(result.get_obj(), "pay_message").get_str()));
