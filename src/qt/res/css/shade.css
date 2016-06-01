@@ -139,7 +139,6 @@ background:#f2f2f2;
 }
 
 QComboBox:editable {
-background: #3398CC;
 color:#616161;
 border:0px solid transparent;
 }
