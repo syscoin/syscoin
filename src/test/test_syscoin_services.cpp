@@ -283,10 +283,10 @@ void CreateSysCategoryIfNotExist()
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew SYS_CATEGORY " + data));
 	GenerateBlocks(10);
 }
-void AliasBan(const string& alias, int severity)
+void AliasBan(const string& node, const string& alias, int severity)
 {
 	string data = "{\\\"aliases\\\":[{\\\"id\\\":\\\"" + alias + "\\\",\\\"severity\\\":" + severity + "\\\"}]}";
-	CallRPC("node1", "aliasupdate SYS_BAN " + data);
+	CallRPC(node, "aliasupdate SYS_BAN " + data);
 	GenerateBlocks(10);
 }
 string AliasNew(const string& node, const string& aliasname, const string& pubdata, const string& privdata, const string safesearch)

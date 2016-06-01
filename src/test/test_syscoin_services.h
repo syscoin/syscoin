@@ -16,7 +16,7 @@ void StopNodes();
 void GenerateBlocks(int nBlocks, const string& node="node1");
 void GenerateMainNetBlocks(int nBlocks, const string& node);
 string CallExternal(string &cmd);
-void AliasBan(const string& alias, int severity);
+void AliasBan(const string& node, const string& alias, int severity);
 string AliasNew(const string& node, const string& aliasname, const string& pubdata, const string& privdata, const string safesearch);
 void AliasUpdate(const string& node, const string& aliasname, const string& pubdata, const string& privdata);
 void AliasTransfer(const string& node, const string& aliasname, const string& tonode, const string& pubdata, const string& privdata, string pubkey="");
