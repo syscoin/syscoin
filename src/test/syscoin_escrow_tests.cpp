@@ -6,6 +6,7 @@ BOOST_FIXTURE_TEST_SUITE (syscoin_escrow_tests, BasicSyscoinTestingSetup)
 
 BOOST_AUTO_TEST_CASE (generate_escrow_release)
 {
+	printf("Running generate_escrow_release...\n");
 	UniValue r;
 	GenerateBlocks(200);
 	GenerateBlocks(200, "node2");
@@ -22,6 +23,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_release)
 }
 BOOST_AUTO_TEST_CASE (generate_escrow_big)
 {
+	printf("Running generate_escrow_big...\n");
 	UniValue r;
 	// 255 bytes long
 	string goodname1 = "SgsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsDfdfdd";
@@ -46,6 +48,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_big)
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrefund_seller)
 {
+	printf("Running generate_escrowrefund_seller...\n");
 	string qty = "4";
 	string message = "paymentmessage";
 	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "1.22", "description", "CAD");
@@ -55,6 +58,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowrefund_seller)
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrefund_arbiter)
 {
+	printf("Running generate_escrowrefund_arbiter...\n");
 	string qty = "5";
 	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "0.25", "description", "EUR");
 	string message = "paymentmessage";
@@ -64,6 +68,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowrefund_arbiter)
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrefund_invalid)
 {
+	printf("Running generate_escrowrefund_invalid...\n");
 	string qty = "2";
 	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "1.45", "description", "EUR");
 	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteralias", "selleralias");
@@ -85,6 +90,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowrefund_invalid)
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrelease_invalid)
 {
+	printf("Running generate_escrowrelease_invalid...\n");
 	string qty = "4";
 	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "1.45", "description", "SYS");
 	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteralias", "selleralias");
@@ -106,6 +112,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_invalid)
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 {
+	printf("Running generate_escrowrelease_arbiter...\n");
 	GenerateBlocks(200);
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
@@ -131,6 +138,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 }
 BOOST_AUTO_TEST_CASE (generate_escrow_linked_release)
 {
+	printf("Running generate_escrow_linked_release...\n");
 	GenerateBlocks(200);
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
@@ -151,6 +159,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release)
 }
 BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 {
+	printf("Running generate_escrow_linked_release_with_peg_update...\n");
 	GenerateBlocks(100);
 	GenerateBlocks(100, "node2");
 	GenerateBlocks(100, "node3");

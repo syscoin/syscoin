@@ -9,6 +9,7 @@ BOOST_FIXTURE_TEST_SUITE (syscoin_offer_tests, BasicSyscoinTestingSetup)
 
 BOOST_AUTO_TEST_CASE (generate_offernew)
 {
+	printf("Running generate_offernew...\n");
 	UniValue r;
 
 	GenerateBlocks(200);
@@ -57,6 +58,7 @@ BOOST_AUTO_TEST_CASE (generate_offernew)
 
 BOOST_AUTO_TEST_CASE (generate_certoffernew)
 {
+	printf("Running generate_certoffernew...\n");
 	UniValue r;
 
 	GenerateBlocks(200);
@@ -99,6 +101,7 @@ BOOST_AUTO_TEST_CASE (generate_certoffernew)
 
 BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 {
+	printf("Running generate_offernew_linkedoffer...\n");
 	UniValue r;
 
 	GenerateBlocks(200);
@@ -128,6 +131,7 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 
 BOOST_AUTO_TEST_CASE (generate_offernew_linkedofferexmode)
 {
+	printf("Running generate_offernew_linkedofferexmode...\n");
 	UniValue r;
 
 	GenerateBlocks(200);
@@ -154,6 +158,7 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedofferexmode)
 
 BOOST_AUTO_TEST_CASE (generate_offernew_linkedlinkedoffer)
 {
+	printf("Running generate_offernew_linkedlinkedoffer...\n");
 	UniValue r;
 
 	GenerateBlocks(200);
@@ -175,6 +180,7 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedlinkedoffer)
 
 BOOST_AUTO_TEST_CASE (generate_offerupdate)
 {
+	printf("Running generate_offerupdate...\n");
 	UniValue r;
 	
 	GenerateBlocks(200);
@@ -222,6 +228,7 @@ BOOST_AUTO_TEST_CASE (generate_offerupdate)
 
 BOOST_AUTO_TEST_CASE (generate_offeraccept)
 {
+	printf("Running generate_offeraccept...\n");
 	UniValue r;
 	
 	GenerateBlocks(200);
@@ -257,6 +264,7 @@ BOOST_AUTO_TEST_CASE (generate_offeraccept)
 
 BOOST_AUTO_TEST_CASE (generate_offerexpired)
 {
+	printf("Running generate_offerexpired...\n");
 	UniValue r;
 	
 	GenerateBlocks(200);
@@ -287,6 +295,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 
 BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 {
+	printf("Running generate_offerexpiredexmode...\n");
 	UniValue r;
 
 	GenerateBlocks(200);
@@ -314,6 +323,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 
 BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 {
+	printf("Running generate_certofferexpired...\n");
 	UniValue r;
 
 	GenerateBlocks(200);
@@ -349,6 +359,7 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 
 BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 {
+	printf("Running generate_offerlink_offlinenode...\n");
 	UniValue r;
 
 	GenerateBlocks(200);

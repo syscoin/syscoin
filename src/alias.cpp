@@ -1800,10 +1800,10 @@ UniValue generatepublickey(const UniValue& params, bool fHelp) {
 UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	if (fHelp || params.size() > 3)
 		throw runtime_error(
-				"aliasfilter [[[[[regexp]] from=0]] safesearch]\n"
+				"aliasfilter [[[[[regexp]] from='']] safesearch]\n"
 						"scan and filter aliases\n"
 						"[regexp] : apply [regexp] on aliases, empty means all aliases\n"
-						"[from] : show results from this GUID [from], 0 means first.\n"
+						"[from] : show results from this GUID [from], empty means first.\n"
 						"[aliasfilter] : shows all aliases that are safe to display (not on the ban list)\n"
 						"aliasfilter \"\" 5 # list aliases updated in last 5 blocks\n"
 						"aliasfilter \"^alias\" # list all aliases starting with \"alias\"\n"

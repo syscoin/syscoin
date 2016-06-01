@@ -6,6 +6,7 @@ BOOST_FIXTURE_TEST_SUITE (syscoin_cert_tests, BasicSyscoinTestingSetup)
 
 BOOST_AUTO_TEST_CASE (generate_big_certdata)
 {
+	printf("Running generate_big_certdata...\n");
 	GenerateBlocks(200);
 	AliasNew("node1", "jagcertbig1", "data");
 	// 1023 bytes long
@@ -25,6 +26,7 @@ BOOST_AUTO_TEST_CASE (generate_big_certdata)
 }
 BOOST_AUTO_TEST_CASE (generate_big_certtitle)
 {
+	printf("Running generate_big_certtitle...\n");
 	GenerateBlocks(50);
 	AliasNew("node1", "jagcertbig2", "data");
 	// 255 bytes long
@@ -38,6 +40,7 @@ BOOST_AUTO_TEST_CASE (generate_big_certtitle)
 }
 BOOST_AUTO_TEST_CASE (generate_certupdate)
 {
+	printf("Running generate_certupdate...\n");
 	AliasNew("node1", "jagcertupdate", "data");
 	string guid = CertNew("node1", "jagcertupdate", "title", "data");
 	// update an cert that isn't yours
@@ -49,6 +52,7 @@ BOOST_AUTO_TEST_CASE (generate_certupdate)
 }
 BOOST_AUTO_TEST_CASE (generate_certtransfer)
 {
+	printf("Running generate_certtransfer...\n");
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
 	AliasNew("node1", "jagcert1", "changeddata1");

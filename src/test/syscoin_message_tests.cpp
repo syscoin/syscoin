@@ -6,6 +6,7 @@ BOOST_FIXTURE_TEST_SUITE (syscoin_message_tests, BasicSyscoinTestingSetup)
 
 BOOST_AUTO_TEST_CASE (generate_big_msgdata)
 {
+	printf("Running generate_big_msgdata...\n");
 	GenerateBlocks(200);
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
@@ -22,6 +23,7 @@ BOOST_AUTO_TEST_CASE (generate_big_msgdata)
 }
 BOOST_AUTO_TEST_CASE (generate_big_msgsubject)
 {
+	printf("Running generate_big_msgsubject...\n");
 	GenerateBlocks(50);
 	// 255 bytes long
 	string goodtitle = "SfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsDfdfdd";
@@ -34,6 +36,7 @@ BOOST_AUTO_TEST_CASE (generate_big_msgsubject)
 }
 BOOST_AUTO_TEST_CASE (generate_msgaliastransfer)
 {
+	printf("Running generate_msgaliastransfer...\n");
 	MessageNew("node1", "node2", "title", "data", "jagmsg1", "jagmsg2");
 	// transfer an alias and send a message, the new node owner can now read messages to that alias
 	BOOST_CHECK_NO_THROW(AliasTransfer("node2", "jagmsg2", "node3", "changeddata2", "pvtdata"));

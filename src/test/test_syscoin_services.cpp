@@ -270,7 +270,26 @@ void CreateSysRatesIfNotExist()
 	}
 	GenerateBlocks(10);
 }
-string AliasNew(const string& node, const string& aliasname, const string& aliasdata)
+void CreateSysBanIfNotExist()
+{
+	string data = "";
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew SYS_BAN " + data));
+	GenerateBlocks(10);
+}
+void CreateSysCategoryIfNotExist()
+{
+	string data = "{\\\"categories\\\":[{\\\"cat\\\":\\\"certificates\\\"},{\\\"cat\\\":\\\"wanted\\\"},{\\\"cat\\\":\\\"for sale > general\\\"},{\\\"cat\\\":\\\"for sale > wanted\\\"},{\\\"cat\\\":\\\"services\\\"}]}";
+	
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew SYS_CATEGORY " + data));
+	GenerateBlocks(10);
+}
+void AliasBan(const string& alias, int severity)
+{
+	string data = "{\\\"aliases\\\":[{\\\"id\\\":\\\"" + alias + "\\\",\\\"severity\\\":" + severity + "\\\"}]}";
+	CallRPC("node1", "aliasupdate SYS_BAN " + data);
+	GenerateBlocks(10);
+}
+string AliasNew(const string& node, const string& aliasname, const string& pubdata, const string& privdata, const string safesearch)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -285,22 +304,28 @@ string AliasNew(const string& node, const string& aliasname, const string& alias
 		otherNode2 = "node2";
 	}
 	UniValue r;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + aliasdata));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + privdata + " " + safesearch));
 	string pubkey;
 	const UniValue &resultArray = r.get_array();
 	pubkey = resultArray[1].get_str();
 	GenerateBlocks(10, node);
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
-	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == aliasdata);
+	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == privdata);
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == true);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
-	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == aliasdata);
+	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
-	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == aliasdata);
+	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	return pubkey;
 }
@@ -364,6 +389,13 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+}
+bool AliasFilter(const string& node, const string& regex, const string& safesearch)
+{
+	UniValue r;
+	r = CallRPC(node, "aliasfilter " + regex + "/""/" + safesearch);
+	const UniValue &arr = r.get_array();
+	return !arr.empty();
 }
 const string CertNew(const string& node, const string& alias, const string& title, const string& data, bool privateData)
 {
