@@ -96,6 +96,7 @@ BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
 {
 	printf("Running generate_aliassafesearch...\n");
+	UniValue r;
 	GenerateBlocks(1);
 	// alias is safe to search
 	AliasNew("node1", "jagsafesearch", "pubdata", "privdata", "Yes");
