@@ -432,8 +432,9 @@ void OfferListPage::on_searchOffer_clicked(string GUID)
     params.push_back(ui->lineEditOfferSearch->text().toStdString());
 	params.push_back(GUID);
 	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
-	if(ui->categoryEdit->currentIndex() > 0)
-		params.push_back(ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole).toString().toStdString());
+	QVariant currentCategory = ui->categoryEdit->itemData(ui->categoryEdit->currentIndex(), Qt::UserRole);
+	if(ui->categoryEdit->currentIndex() > 0 &&  currentCategory != QVariant::Invalid)
+		params.push_back(currentCategory.toString().toStdString());
 	else if(ui->categoryEdit->currentText() != tr("All Categories"))
 		params.push_back(ui->categoryEdit->currentText().toStdString());
     try {
