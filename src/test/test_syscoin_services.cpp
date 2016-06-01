@@ -355,7 +355,7 @@ void AliasTransfer(const string& node, const string& aliasname, const string& to
 	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == privdata);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == true);
 }
-void AliasUpdate(const string& node, const string& aliasname, const string& pubdata, const string& privdata)
+void AliasUpdate(const string& node, const string& aliasname, const string& pubdata, const string& privdata, string safesearch)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -372,22 +372,25 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 	UniValue r;
 	r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata);
 	// ensure mempool blocks second tx until it confirms
-	BOOST_CHECK_THROW(CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata), runtime_error);
+	BOOST_CHECK_THROW(CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + safesearch), runtime_error);
 	GenerateBlocks(10, node);
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
 	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == privdata);
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == true);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
 }
 bool AliasFilter(const string& node, const string& regex, const string& safesearch)
