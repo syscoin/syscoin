@@ -150,7 +150,8 @@ bool EscrowInfoDialog::lookup()
 	UniValue params(UniValue::VARR);
 	UniValue result;
 	params.push_back(GUID.toStdString());
-
+	QDateTime dateTime;	
+	int unixTime = 0;
     try {
         result = tableRPC.execute(strMethod, params);
 
@@ -165,9 +166,11 @@ bool EscrowInfoDialog::lookup()
 			ui->txidEdit->setText(QString::fromStdString(find_value(result.get_obj(), "txid").get_str()));
 			ui->titleEdit->setText(QString::fromStdString(find_value(result.get_obj(), "offertitle").get_str()));
 			ui->heightEdit->setText(QString::fromStdString(find_value(result.get_obj(), "height").get_str()));
-			ui->timeEdit->setText(QString::fromStdString(find_value(result.get_obj(), "time").get_str()));
-			ui->priceEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "systotal"))));
-			ui->feeEdit->setText(QString::number(AmountFromValue(find_value(result.get_obj(), "sysfee"))));
+			unixTime = atoi(find_value(result.get_obj(), "time").get_str().c_str());
+			dateTime.setTime_t(unixTime);	
+			ui->timeEdit->setText(dateTime.toString());
+			ui->priceEdit->setText(tr("%1 SYS").arg(QString::number(find_value(result.get_obj(), "systotal").get_int())));
+			ui->feeEdit->setTextt(tr("%1 SYS").arg(QString::number(find_value(result.get_obj(), "sysfee").get_int())));
 
 			ui->totalEdit->setText(QString::fromStdString(find_value(result.get_obj(), "total").get_str()));
 			ui->paymessageEdit->setText(QString::fromStdString(find_value(result.get_obj(), "pay_message").get_str()));
