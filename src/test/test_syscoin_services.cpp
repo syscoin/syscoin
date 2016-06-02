@@ -342,7 +342,7 @@ void AliasTransfer(const string& node, const string& aliasname, const string& to
 		const UniValue &resultArray = pkr.get_array();
 		pubkey = resultArray[0].get_str();		
 	}
-	r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + pubkey);
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + pubkey));
 	GenerateBlocks(10, tonode);
 	GenerateBlocks(10, node);	
 	// check its not mine anymore
@@ -371,7 +371,7 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 		otherNode2 = "node2";
 	}
 	UniValue r;
-	r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata);
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + safesearch));
 	// ensure mempool blocks second tx until it confirms
 	BOOST_CHECK_THROW(CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + safesearch), runtime_error);
 	GenerateBlocks(10, node);
@@ -397,7 +397,7 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 bool AliasFilter(const string& node, const string& regex, const string& safesearch)
 {
 	UniValue r;
-	r = CallRPC(node, "aliasfilter " + regex + "/""/" + safesearch);
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasfilter " + regex + "/""/" + safesearch));
 	const UniValue &arr = r.get_array();
 	return !arr.empty();
 }
