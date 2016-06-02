@@ -90,7 +90,7 @@ BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 	AliasTransfer("node2", "jagnode1", "node3", "changeddata5", "pvtdata2");
 
 	// xfer an alias to another alias is prohibited
-	BOOST_CHECK_THROW(r = CallRPC("node2", "aliasupdate jagnode2 node1 changedata1 pvtdata " + strPubKey1), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node2", "aliasupdate jagnode2 changedata1 pvtdata " + strPubKey1), runtime_error);
 	
 }
 BOOST_AUTO_TEST_CASE (generate_aliassafesearch)

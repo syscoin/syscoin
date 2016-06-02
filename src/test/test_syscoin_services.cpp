@@ -394,7 +394,7 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 bool AliasFilter(const string& node, const string& regex, const string& safesearch)
 {
 	UniValue r;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasfilter " + regex + "/""/" + safesearch));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasfilter " + regex + " /""/ " + safesearch));
 	const UniValue &arr = r.get_array();
 	return !arr.empty();
 }
