@@ -121,15 +121,15 @@ BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
 }
 BOOST_AUTO_TEST_CASE (generate_aliasban)
 {
-	printf("Running generate_aliassafesearch...\n");
+	printf("Running generate_aliasban...\n");
 	UniValue r;
 	GenerateBlocks(1);
 	// 2 aliases, one will be banned that is safe searchable other is banned that is not safe searchable
 	AliasNew("node1", "jagbansafesearch", "pubdata", "privdata", "Yes");
 	AliasNew("node1", "jagbannonsafesearch", "pubdata", "privdata", "No");
 	// can't ban on any other node than one that created SYS_BAN
-	BOOST_CHECK_THROW(AliasBan("node2","jagbansafesearch",SAFETY_LEVEL1), runtime_error);
-	BOOST_CHECK_THROW(AliasBan("node3","jagbansafesearch",SAFETY_LEVEL1), runtime_error);
+	BOOST_CHECK_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1), runtime_error);
+	BOOST_CHECK_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1), runtime_error);
 	// ban both aliases level 1 (only owner of SYS_CATEGORY can do this)
 	AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1);
 	AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL1);
