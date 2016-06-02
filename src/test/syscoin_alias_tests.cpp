@@ -74,11 +74,14 @@ BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 	UniValue r;
 	string strPubKey1 = AliasNew("node1", "jagnode1", "changeddata1");
 	string strPubKey2 = AliasNew("node2", "jagnode2", "changeddata2");
-
+	UniValue pkr = CallRPC("node2", "generatepublickey");
+	BOOST_CHECK(pkr.type() == UniValue::VARR);
+	const UniValue &resultArray = pkr.get_array();
+	string newPubkey = resultArray[0].get_str();	
 	AliasTransfer("node1", "jagnode1", "node2", "changeddata1", "pvtdata");
 
 	// xfer an alias that isn't yours
-	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasupdate jagnode1 node2 changedata1 pvtdata"), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasupdate jagnode1 changedata1 pvtdata " + newPubkey), runtime_error);
 
 	// trasnfer alias and update it at the same time
 	AliasTransfer("node2", "jagnode2", "node3", "changeddata4", "pvtdata");
