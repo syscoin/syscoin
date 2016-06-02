@@ -253,7 +253,7 @@ void AliasListPage::on_searchAlias_clicked(string GUID)
 		int expires_on = 0;  
         params.push_back(ui->lineEditAliasSearch->text().toStdString());
 		params.push_back(GUID);
-		params.push_back(settings.value("safesearch", "").toString();
+		params.push_back(settings.value("safesearch", "").toString());
 
         try {
             result = tableRPC.execute(strMethod, params);
