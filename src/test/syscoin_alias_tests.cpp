@@ -110,18 +110,6 @@ BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "Yes"), false);
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "No"), true);
 
-	// update as not safe to search
-	AliasUpdate("node1", "jagsafesearch", "pubdata", "privdata", "No");
-	// should only include result if safe search is set to No in aliasfilter
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "No"), true);
-
-	// update as safe to search
-	AliasUpdate("node1", "jagnonsafesearch", "pubdata", "privdata", "Yes");
-	// should show regardless of safe search set to on or off in filter
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "Yes"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "No"), true);
-
 	// shouldn't affect aliasinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagsafesearch"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnonsafesearch"));

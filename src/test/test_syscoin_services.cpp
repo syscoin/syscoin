@@ -356,7 +356,7 @@ void AliasTransfer(const string& node, const string& aliasname, const string& to
 	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == privdata);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == true);
 }
-void AliasUpdate(const string& node, const string& aliasname, const string& pubdata, const string& privdata, string safesearch)
+void AliasUpdate(const string& node, const string& aliasname, const string& pubdata, const string& privdata)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -371,9 +371,9 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 		otherNode2 = "node2";
 	}
 	UniValue r;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + safesearch));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata));
 	// ensure mempool blocks second tx until it confirms
-	BOOST_CHECK_THROW(CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + safesearch), runtime_error);
+	BOOST_CHECK_THROW(CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata), runtime_error);
 	GenerateBlocks(10, node);
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
