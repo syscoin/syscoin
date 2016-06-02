@@ -131,20 +131,20 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 	BOOST_CHECK_THROW(AliasBan("node2","jagbansafesearch",SAFETY_LEVEL1), runtime_error);
 	BOOST_CHECK_THROW(AliasBan("node3","jagbansafesearch",SAFETY_LEVEL1), runtime_error);
 	// ban both aliases level 1 (only owner of SYS_CATEGORY can do this)
-	AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1);
-	AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL1);
-	// no matter what filter won't show banned aliases
+	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1));
+	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL1));
+	// should only show level 1 banned if safe search filter is not used
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), true);
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "No"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "No"), true);
 	// should be able to aliasinfo on level 1 banned aliases
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbansafesearch"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbannonsafesearch"));
 	
 	// ban both aliases level 2 (only owner of SYS_CATEGORY can do this)
-	AliasBan("node1","jagbansafesearch",SAFETY_LEVEL2);
-	AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL2);
+	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL2));
+	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL2));
 	// no matter what filter won't show banned aliases
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Yes"), false);
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), false);
@@ -156,13 +156,12 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasinfo jagbannonsafesearch"), runtime_error);
 
 	// unban both aliases (only owner of SYS_CATEGORY can do this)
-	AliasBan("node1","jagbansafesearch",0);
-	AliasBan("node1","jagbannonsafesearch",0);
-	// jagsafesearch is safe to search regardless of filter
+	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",0));
+	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",0));
+	// safe to search regardless of filter
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Yes"), true);
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), true);
-	// jagsafesearch shows only if filter sets safesearch to No
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), true);
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "No"), true);
 
 	// should be able to aliasinfo on non banned aliases
