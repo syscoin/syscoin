@@ -287,7 +287,7 @@ void CreateSysCategoryIfNotExist()
 void AliasBan(const string& node, const string& alias, int severity)
 {
 	string data = "{\\\"aliases\\\":[{\\\"id\\\":\\\"" + alias + "\\\",\\\"severity\\\":" + boost::lexical_cast<string>(severity) + "\\\"}]}";
-	BOOST_CHECK_NO_THROW(CallRPC(node, "aliasupdate SYS_BAN " + data));
+	CallRPC(node, "aliasupdate SYS_BAN " + data);
 	GenerateBlocks(10);
 }
 string AliasNew(const string& node, const string& aliasname, const string& pubdata, string privdata, string safesearch)
