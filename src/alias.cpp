@@ -1800,7 +1800,7 @@ UniValue generatepublickey(const UniValue& params, bool fHelp) {
 UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	if (fHelp || params.size() > 3)
 		throw runtime_error(
-				"aliasfilter [[[[[regexp]] from='']] safesearch]\n"
+				"aliasfilter [[[[[regexp]] from='']] safesearch=Yes]\n"
 						"scan and filter aliases\n"
 						"[regexp] : apply [regexp] on aliases, empty means all aliases\n"
 						"[from] : show results from this GUID [from], empty means first.\n"
@@ -1822,7 +1822,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		vchName = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		safeSearch = params[2].get_bool();
+		safeSearch = params[2].get_str()=="Yes"? true: false;
 
 	UniValue oRes(UniValue::VARR);
 
