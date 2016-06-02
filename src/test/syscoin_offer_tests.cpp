@@ -85,10 +85,16 @@ BOOST_AUTO_TEST_CASE (generate_certoffernew)
 
 	// should fail: generate a cert offer using a zero quantity
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias category title 0 0.05 description USD " + certguid1a), runtime_error);
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck node1alias category title 0 0.05 description USD " + certguid1a), runtime_error);	
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES node1alias category title 0 0.05 description USD " + certguid1a));
+	const UniValue &arr1 = r.get_array();
+	guid = arr1[1].get_str();
+	GenerateBlocks(10, "node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + guid));
+	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == "1");
 
 	// should fail: generate a cert offer using an unlimited quantity
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias category title -1 0.05 description USD " + certguid1a));
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias category title -1 0.05 description USD " + certguid1a), runtime_error);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES node1alias category title -1 0.05 description USD " + certguid1a));
 	const UniValue &arr2 = r.get_array();
 	guid = arr2[1].get_str();
 	GenerateBlocks(10, "node1");
