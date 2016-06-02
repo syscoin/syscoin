@@ -71,26 +71,26 @@ BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 	printf("Running generate_aliastransfer...\n");
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
-
+	UniValue r;
 	string strPubKey1 = AliasNew("node1", "jagnode1", "changeddata1");
 	string strPubKey2 = AliasNew("node2", "jagnode2", "changeddata2");
 
-	BOOST_CHECK_NO_THROW(AliasTransfer("node1", "jagnode1", "node2", "changeddata1", "pvtdata"));
+	AliasTransfer("node1", "jagnode1", "node2", "changeddata1", "pvtdata"));
 
 	// xfer an alias that isn't yours
-	BOOST_CHECK_THROW(AliasTransfer("node1", "jagnode1", "node2", "changeddata1", "pvtdata"), runtime_error);
+	BOOST_CHECK_THOW(r = CallRPC(node, "aliasupdate jagnode1 node2 changedata1 pvtdata"), runtime_error);
 
 	// trasnfer alias and update it at the same time
-	BOOST_CHECK_NO_THROW(AliasTransfer("node2", "jagnode2", "node3", "changeddata4", "pvtdata"));
+	AliasTransfer("node2", "jagnode2", "node3", "changeddata4", "pvtdata");
 
 	// update xferred alias
-	BOOST_CHECK_NO_THROW(AliasUpdate("node2", "jagnode1", "changeddata5", "pvtdata1"));
+	AliasUpdate("node2", "jagnode1", "changeddata5", "pvtdata1");
 
 	// retransfer alias
-	BOOST_CHECK_NO_THROW(AliasTransfer("node2", "jagnode1", "node3", "changeddata5", "pvtdata2"));
+	AliasTransfer("node2", "jagnode1", "node3", "changeddata5", "pvtdata2");
 
 	// xfer an alias to another alias is prohibited
-	BOOST_CHECK_THROW(AliasTransfer("node2", "jagnode2", "node1", "changeddata1", "pvtdata", strPubKey1), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC(node, "aliasupdate jagnode2 node1 changedata1 pvtdata " + pubkey), runtime_error);
 	
 }
 BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
