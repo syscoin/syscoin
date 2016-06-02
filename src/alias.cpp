@@ -440,62 +440,72 @@ void getCategoryListFromValue(vector<string>& categoryList,const UniValue& outer
 }
 bool getBanListFromValue(map<string, unsigned char>& banAliasList,  map<string, unsigned char>& banCertList,  map<string, unsigned char>& banOfferList,const UniValue& outerValue)
 {
-	UniValue outerObj = outerValue.get_obj();
-	UniValue objOfferValue = find_value(outerObj, "offers");
-	if (objOfferValue.isArray())
-	{
-		UniValue codes = objOfferValue.get_array();
-		for (unsigned int idx = 0; idx < codes.size(); idx++) {
-			const UniValue& code = codes[idx];					
-			UniValue codeObj = code.get_obj();					
-			UniValue idValue = find_value(codeObj, "id");
-			UniValue severityValue = find_value(codeObj, "severity");
-			if (idValue.isStr() && severityValue.isNum())
-			{		
-				string idStr = idValue.get_str();
-				int severityNum = severityValue.get_int();
-				banOfferList.insert(make_pair(idStr, severityNum));
+	try
+		{
+		UniValue outerObj = outerValue.get_obj();
+		UniValue objOfferValue = find_value(outerObj, "offers");
+		if (objOfferValue.isArray())
+		{
+			UniValue codes = objOfferValue.get_array();
+			for (unsigned int idx = 0; idx < codes.size(); idx++) {
+				const UniValue& code = codes[idx];					
+				UniValue codeObj = code.get_obj();					
+				UniValue idValue = find_value(codeObj, "id");
+				UniValue severityValue = find_value(codeObj, "severity");
+				if (idValue.isStr() && severityValue.isNum())
+				{		
+					string idStr = idValue.get_str();
+					int severityNum = severityValue.get_int();
+					banOfferList.insert(make_pair(idStr, severityNum));
+				}
 			}
 		}
-	}
 
-	UniValue objCertValue = find_value(outerObj, "certs");
-	if (objCertValue.isArray())
-	{
-		UniValue codes = objCertValue.get_array();
-		for (unsigned int idx = 0; idx < codes.size(); idx++) {
-			const UniValue& code = codes[idx];					
-			UniValue codeObj = code.get_obj();					
-			UniValue idValue = find_value(codeObj, "id");
-			UniValue severityValue = find_value(codeObj, "severity");
-			if (idValue.isStr() && severityValue.isNum())
-			{		
-				string idStr = idValue.get_str();
-				int severityNum = severityValue.get_int();
-				banCertList.insert(make_pair(idStr, severityNum));
+		UniValue objCertValue = find_value(outerObj, "certs");
+		if (objCertValue.isArray())
+		{
+			UniValue codes = objCertValue.get_array();
+			for (unsigned int idx = 0; idx < codes.size(); idx++) {
+				const UniValue& code = codes[idx];					
+				UniValue codeObj = code.get_obj();					
+				UniValue idValue = find_value(codeObj, "id");
+				UniValue severityValue = find_value(codeObj, "severity");
+				if (idValue.isStr() && severityValue.isNum())
+				{		
+					string idStr = idValue.get_str();
+					int severityNum = severityValue.get_int();
+					banCertList.insert(make_pair(idStr, severityNum));
+				}
 			}
 		}
-	}
+			
 		
-	
 
-	UniValue objAliasValue = find_value(outerObj, "aliases");
-	if (objAliasValue.isArray())
-	{
-		UniValue codes = objAliasValue.get_array();
-		for (unsigned int idx = 0; idx < codes.size(); idx++) {
-			const UniValue& code = codes[idx];					
-			UniValue codeObj = code.get_obj();					
-			UniValue idValue = find_value(codeObj, "id");
-			UniValue severityValue = find_value(codeObj, "severity");
-			if (idValue.isStr() && severityValue.isNum())
-			{		
-				string idStr = idValue.get_str();
-				int severityNum = severityValue.get_int();
-				banAliasList.insert(make_pair(idStr, severityNum));
+		UniValue objAliasValue = find_value(outerObj, "aliases");
+		if (objAliasValue.isArray())
+		{
+			UniValue codes = objAliasValue.get_array();
+			for (unsigned int idx = 0; idx < codes.size(); idx++) {
+				const UniValue& code = codes[idx];					
+				UniValue codeObj = code.get_obj();					
+				UniValue idValue = find_value(codeObj, "id");
+				UniValue severityValue = find_value(codeObj, "severity");
+				if (idValue.isStr() && severityValue.isNum())
+				{		
+					string idStr = idValue.get_str();
+					int severityNum = severityValue.get_int();
+					banAliasList.insert(make_pair(idStr, severityNum));
+				}
 			}
 		}
 	}
+	catch(std::runtime_error& err)
+	{	
+		if(fDebug)
+			LogPrintf("getBanListFromValue(): Failed to get ban list from value\n");
+		return false;
+	}
+	return true;
 }
 bool getBanList(const vector<unsigned char>& banData, map<string, unsigned char>& banAliasList,  map<string, unsigned char>& banCertList,  map<string, unsigned char>& banOfferList)
 {
