@@ -75,7 +75,7 @@ BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 	string strPubKey1 = AliasNew("node1", "jagnode1", "changeddata1");
 	string strPubKey2 = AliasNew("node2", "jagnode2", "changeddata2");
 
-	AliasTransfer("node1", "jagnode1", "node2", "changeddata1", "pvtdata"));
+	AliasTransfer("node1", "jagnode1", "node2", "changeddata1", "pvtdata");
 
 	// xfer an alias that isn't yours
 	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasupdate jagnode1 node2 changedata1 pvtdata"), runtime_error);
