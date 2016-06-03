@@ -412,8 +412,8 @@ BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
 
-	AliasNew("node1", "selleralias15", "changeddata1");
-	AliasNew("node2", "selleralias16", "changeddata1");
+	AliasNew("node2", "selleralias15", "changeddata1");
+	AliasNew("node1", "selleralias16", "changeddata1");
 
 	// generate a good offer
 	string offerguid = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "", false);
