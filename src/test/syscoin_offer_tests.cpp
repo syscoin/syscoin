@@ -432,5 +432,78 @@ BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + lofferguid));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "price").get_str(), "10.50");
 }
+BOOST_AUTO_TEST_CASE (generate_offersafesearch)
+{
+	printf("Running generate_offersafesearch...\n");
+	UniValue r;
+	GenerateBlocks(1);
+	// offer is safe to search
+	string offerguidsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "", true, "0", "", "Yes");
+	// not safe to search
+	string offerguidnotsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "", true, "0", "", "No");
+	// should include result in both safe search mode on and off
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
 
+	// should only show up if safe search is off
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
+
+	// shouldn't affect offerinfo
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidnotsafe));
+
+
+}
+BOOST_AUTO_TEST_CASE (generate_offerban)
+{
+	printf("Running generate_offerban...\n");
+	UniValue r;
+	GenerateBlocks(1);
+	// offer is safe to search
+	string offerguidsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "", true, "0", "", "Yes");
+	// not safe to search
+	string offerguidnotsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "", true, "0", "", "No");
+	// can't ban on any other node than one that created SYS_BAN
+	BOOST_CHECK_THROW(OfferBan("node2",offerguidnotsafe,SAFETY_LEVEL1), runtime_error);
+	BOOST_CHECK_THROW(OfferBan("node3",offerguidsafe,SAFETY_LEVEL1), runtime_error);
+	// ban both offers level 1 (only owner of SYS_CATEGORY can do this)
+	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidsafe,SAFETY_LEVEL1));
+	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidnotsafe,SAFETY_LEVEL1));
+	// should only show level 1 banned if safe search filter is not used
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
+	// should be able to offerinfo on level 1 banned offers
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidnotsafe));
+	
+	// ban both offers level 2 (only owner of SYS_CATEGORY can do this)
+	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidsafe,SAFETY_LEVEL2));
+	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidnotsafe,SAFETY_LEVEL2));
+	// no matter what filter won't show banned offers
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), false);
+
+	// shouldn't be able to offerinfo on level 2 banned offers
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidnotsafe), runtime_error);
+
+	// unban both offers (only owner of SYS_CATEGORY can do this)
+	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidsafe,0));
+	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidnotsafe,0));
+	// safe to search regardless of filter
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
+
+	// should be able to offerinfo on non banned offers
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidnotsafe));
+	
+}
 BOOST_AUTO_TEST_SUITE_END ()

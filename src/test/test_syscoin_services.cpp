@@ -290,6 +290,18 @@ void AliasBan(const string& node, const string& alias, int severity)
 	CallRPC(node, "aliasupdate SYS_BAN " + data);
 	GenerateBlocks(10);
 }
+void OfferBan(const string& node, const string& offer, int severity)
+{
+	string data = "{\\\"offers\\\":[{\\\"id\\\":\\\"" + offer + "\\\",\\\"severity\\\":" + boost::lexical_cast<string>(severity) + "}]}";
+	CallRPC(node, "aliasupdate SYS_BAN " + data);
+	GenerateBlocks(10);
+}
+void CertBan(const string& node, const string& cert, int severity)
+{
+	string data = "{\\\"certs\\\":[{\\\"id\\\":\\\"" + cert + "\\\",\\\"severity\\\":" + boost::lexical_cast<string>(severity) + "}]}";
+	CallRPC(node, "aliasupdate SYS_BAN " + data);
+	GenerateBlocks(10);
+}
 string AliasNew(const string& node, const string& aliasname, const string& pubdata, string privdata, string safesearch)
 {
 	string otherNode1 = "node2";
@@ -395,6 +407,20 @@ bool AliasFilter(const string& node, const string& regex, const string& safesear
 {
 	UniValue r;
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasfilter " + regex + " /""/ " + safesearch));
+	const UniValue &arr = r.get_array();
+	return !arr.empty();
+}
+bool OfferFilter(const string& node, const string& regex, const string& safesearch)
+{
+	UniValue r;
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerfilter " + regex + " /""/ " + safesearch));
+	const UniValue &arr = r.get_array();
+	return !arr.empty();
+}
+bool CertFilter(const string& node, const string& regex, const string& safesearch)
+{
+	UniValue r;
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certfilter " + regex + " /""/ " + safesearch));
 	const UniValue &arr = r.get_array();
 	return !arr.empty();
 }
