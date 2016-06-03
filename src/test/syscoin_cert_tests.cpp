@@ -96,9 +96,9 @@ BOOST_AUTO_TEST_CASE (generate_certsafesearch)
 	UniValue r;
 	GenerateBlocks(1);
 	// cert is safe to search
-	string certguidsafe = CertNew("node1", "jagcert1", certtitle, certdata, false, "Yes");
+	string certguidsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "Yes");
 	// not safe to search
-	string certguidnotsafe = CertNew("node1", "jagcert1", certtitle, certdata, false, "No");
+	string certguidnotsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "No");
 	// should include result in both safe search mode on and off
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), true);
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
@@ -119,9 +119,9 @@ BOOST_AUTO_TEST_CASE (generate_certban)
 	UniValue r;
 	GenerateBlocks(1);
 	// cert is safe to search
-	string certguidsafe = CertNew("node1", "jagcert1", certtitle, certdata, false, "Yes");
+	string certguidsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "Yes");
 	// not safe to search
-	string certguidnotsafe = CertNew("node1", "jagcert1", certtitle, certdata, false, "No");
+	string certguidnotsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "No");
 	// can't ban on any other node than one that created SYS_BAN
 	BOOST_CHECK_THROW(CertBan("node2",certguidnotsafe,SAFETY_LEVEL1), runtime_error);
 	BOOST_CHECK_THROW(CertBan("node3",certguidsafe,SAFETY_LEVEL1), runtime_error);
