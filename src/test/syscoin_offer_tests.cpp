@@ -327,20 +327,15 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 
 	// this will expire the offer
 	GenerateBlocks(100);
-
-	// should fail: perform an accept on expired offer
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept buyeralias4 " + offerguid + " 1 message"), runtime_error);
 	#ifdef ENABLE_DEBUGRPC
+		// should fail: perform an accept on expired offer
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept buyeralias4 " + offerguid + " 1 message"), runtime_error);
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck buyeralias4 " + offerguid + " 1 message"), runtime_error);
-	#endif
-	// should fail: offer update on an expired offer
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES selleralias4 " + offerguid + " category title 90 0.15 description"), runtime_error);
-	#ifdef ENABLE_DEBUGRPC
+		// should fail: offer update on an expired offer
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES selleralias4 " + offerguid + " category title 90 0.15 description"), runtime_error);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate_nocheck selleralias4 " + offerguid + " category title 90 0.15 description"), runtime_error);
-	#endif
-	// should fail: link to an expired offer
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink buyeralias4 " + offerguid + " 5 newdescription"), runtime_error);	
-	#ifdef ENABLE_DEBUGRPC
+		// should fail: link to an expired offer
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink buyeralias4 " + offerguid + " 5 newdescription"), runtime_error);	
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck buyeralias4 " + offerguid + " 5 newdescription"), runtime_error);	
 	#endif
 }
@@ -365,12 +360,12 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 
 	// this will expire the offer
 	GenerateBlocks(100);
-
-	// should fail: remove whitelist item from expired offer
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offerremovewhitelist " + offerguid + " selleralias11"), runtime_error);
-
-	// should fail: clear whitelist from expired offer
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offerclearwhitelist " + offerguid), runtime_error);
+	#ifdef ENABLE_DEBUGRPC
+		// should fail: remove whitelist item from expired offer
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offerremovewhitelist " + offerguid + " selleralias11"), runtime_error);
+		// should fail: clear whitelist from expired offer
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offerclearwhitelist " + offerguid), runtime_error);
+	#endif
 }
 
 BOOST_AUTO_TEST_CASE (generate_certofferexpired)
@@ -395,21 +390,15 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 
 	// this expires the cert but not the offer
 	GenerateBlocks(50);
-
-	// should fail: offer update on offer with expired cert
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
 	#ifdef ENABLE_DEBUGRPC
+		// should fail: offer update on offer with expired cert
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate_nocheck SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
-	#endif
-	// should fail: offer accept on offer with expired cert
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept node2alias2 " + offerguid + " 1 message"), runtime_error);
-	#ifdef ENABLE_DEBUGRPC
-		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error);	
-	#endif
-
-	// should fail: generate a cert offer using an expired cert
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
-	#ifdef ENABLE_DEBUGRPC
+		// should fail: offer accept on offer with expired cert
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept node2alias2 " + offerguid + " 1 message"), runtime_error);
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error)	;
+		// should fail: generate a cert offer using an expired cert
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);	
 	#endif
 }
@@ -427,13 +416,15 @@ BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 	AliasNew("node2", "selleralias16", "changeddata1");
 
 	// generate a good offer
-	string offerguid = OfferNew("node1", "selleralias15", "category", "title", "100", "0.05", "description", "USD");
+	string offerguid = OfferNew("node1", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "", false);
 
 	StopNode("node1");
 
 	string lofferguid = OfferLink("node2", "selleralias16", offerguid, "5", "newdescription");
 
 	StartNode("node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + lofferguid));
+	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "price").get_str(), "10.50");
 }
 
 BOOST_AUTO_TEST_SUITE_END ()
