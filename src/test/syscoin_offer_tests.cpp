@@ -138,12 +138,8 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == "10.50");
 
 	// generate a cert offer using a negative percentage
-	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " -5 newdescription"));	
-	const UniValue &arr1 = r.get_array();
-	string guid = arr1[1].get_str();
-	GenerateBlocks(10, "node1");
-	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + guid));
-	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == "9.50");
+	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " -5 newdescription"), runtime_error);	
+	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " -5 newdescription"), runtime_error);	
 
 
 	// should fail: generate a cert offer using too-large pergentage
