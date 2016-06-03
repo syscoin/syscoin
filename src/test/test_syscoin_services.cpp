@@ -669,10 +669,6 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	UniValue r;
 	string exclusivereselltmp =  exclusiveResell? "1": "0";
 	string offercreatestr = "offernew SYS_RATES " + aliasname + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency  + " " + certguid + " " + exclusivereselltmp + " " + acceptbtconly + " " + geolocation + " " + safesearch;
-	if(exclusiveResell == false)
-	{
-		offercreatestr += " 0";
-	}
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, offercreatestr));
 	const UniValue &arr = r.get_array();
 	string guid = arr[1].get_str();
@@ -744,9 +740,6 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	string privatetmp = isPrivate ? "1" : "0";
 	string offerupdatestr = "offerupdate SYS_RATES " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + privatetmp + " " + certguid + " " + exclusivereselltmp + " " + geolocation ;
 	
-	if(exclusiveResell == false) {
-		offerupdatestr += " 0";
-	}
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, offerupdatestr));
 	// ensure mempool blocks second tx until it confirms
@@ -759,7 +752,8 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 		
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
-	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
+	if(certguid != "nocert")
+		BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
@@ -771,7 +765,8 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "offerinfo " + offerguid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
-	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
+	if(certguid != "nocert")
+		BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
@@ -783,7 +778,8 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "offerinfo " + offerguid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
-	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
+	if(certguid != "nocert")
+		BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
