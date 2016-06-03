@@ -481,7 +481,7 @@ const string CertNew(const string& node, const string& alias, const string& titl
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	return guid;
 }
-void CertUpdate(const string& node, const string& guid, const string& title, const string& data, bool privateData)
+void CertUpdate(const string& node, const string& guid, const string& title, const string& data, bool privateData,const string& safesearch)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -497,9 +497,9 @@ void CertUpdate(const string& node, const string& guid, const string& title, con
 	}
 	UniValue r;
 	string privateFlag = privateData? "1":" 0";
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " +privateFlag));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " + privateFlag + " " + safesearch));
 	// ensure mempool blocks second tx until it confirms
-	BOOST_CHECK_THROW(CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " +privateFlag), runtime_error);
+	BOOST_CHECK_THROW(CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " + privateFlag + " " + safesearch), runtime_error);
 	GenerateBlocks(10, node);
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == guid);
@@ -648,7 +648,7 @@ const string OfferLink(const string& node, const string& alias, const string& gu
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	return linkedguid;
 }
-const string OfferNew(const string& node, const string& aliasname, const string& category, const string& title, const string& qty, const string& price, const string& description, const string& currency, const string& certguid, const bool exclusiveResell)
+const string OfferNew(const string& node, const string& aliasname, const string& category, const string& title, const string& qty, const string& price, const string& description, const string& currency, const string& certguid, const bool exclusiveResell, const string& acceptbtconly, const string& geolocation, const string& safesearch)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -667,7 +667,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	string certguidtmp = "0";
 	if(!certguid.empty())
 		certguidtmp = certguid;
-	string offercreatestr = "offernew SYS_RATES " + aliasname + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency  + " " + certguidtmp;
+	string offercreatestr = "offernew SYS_RATES " + aliasname + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency  + " " + certguidtmp + " " + exclusiveResell? "1 ": "0 " + acceptbtconly + " " + geolocation + " " + safesearch;
 	if(exclusiveResell == false)
 	{
 		offercreatestr += " 0";
@@ -689,6 +689,8 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
+	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "offerinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == guid);
@@ -700,6 +702,8 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
+	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "offerinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == guid);
@@ -711,11 +715,13 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
+	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	return guid;
 }
 
-void OfferUpdate(const string& node, const string& aliasname, const string& offerguid, const string& category, const string& title, const string& qty, const string& price, const string& description, const bool isPrivate, const string& certguid, const bool exclusiveResell) {
+void OfferUpdate(const string& node, const string& aliasname, const string& offerguid, const string& category, const string& title, const string& qty, const string& price, const string& description, const bool isPrivate, const string& certguid, const bool exclusiveResell, const string& geolocation) {
 
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -731,14 +737,15 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 
 	UniValue r;
 	string certguidtmp = !certguid.empty() ? certguid : "0";	
-	string offerupdatestr = "offerupdate SYS_RATES " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + (isPrivate ? "1" : "0")  + " " + certguidtmp;
+	string offerupdatestr = "offerupdate SYS_RATES " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + (isPrivate ? "1" : "0")  + " " + certguidtmp + " " + exclusiveResell? "1 ": "0 " + geolocation ;
 	
 	if(exclusiveResell == false) {
 		offerupdatestr += " 0";
 	}
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, offerupdatestr));
-	
+	// ensure mempool blocks second tx until it confirms
+	BOOST_CHECK_THROW(r = CallRPC(node, offerupdatestr), runtime_error);	
 	GenerateBlocks(10, node);
 
 	string exmode = "ON";
@@ -754,6 +761,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
+	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
 	
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "offerinfo " + offerguid));
@@ -765,6 +773,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
+	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "offerinfo " + offerguid));
@@ -776,6 +785,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
+	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 }
 

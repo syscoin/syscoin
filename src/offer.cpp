@@ -963,6 +963,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						theOffer.sTitle = dbOffer.sTitle;
 					if(serializedOffer.sDescription.empty())
 						theOffer.sDescription = dbOffer.sDescription;
+					if(serializedOffer.vchGeoLocation.empty())
+						theOffer.vchGeoLocation = dbOffer.vchGeoLocation;
 					if(serializedOffer.vchAliasPeg.empty())
 						theOffer.vchAliasPeg = dbOffer.vchAliasPeg;
 					// user can't update safety level after creation
@@ -2169,9 +2171,9 @@ UniValue offerwhitelist(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerupdate(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() < 5 || params.size() > 11)
+	if (fHelp || params.size() < 5 || params.size() > 12)
 		throw runtime_error(
-		"offerupdate <aliaspeg> <alias> <guid> <category> <title> <quantity> <price> [description] [private=0] [cert. guid] [exclusive resell=1]\n"
+		"offerupdate <aliaspeg> <alias> <guid> <category> <title> <quantity> <price> [description] [private='0'] [cert. guid=''] [exclusive resell='1'] [geolocation='']\n"
 						"Perform an update on an offer you control.\n"
 						+ HelpRequiringPassphrase());
 	// gather & validate inputs
@@ -2185,6 +2187,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchTitle = vchFromValue(params[4]);
 	vector<unsigned char> vchDesc;
 	vector<unsigned char> vchCert;
+	vector<unsigned char> vchGeoLocation;
 	bool bExclusiveResell = true;
 	int bPrivate = false;
 	int nQty;
@@ -2192,7 +2195,8 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	if (params.size() >= 8) vchDesc = vchFromValue(params[7]);
 	if (params.size() >= 9) bPrivate = atoi(params[8].get_str().c_str()) == 1? true: false;
 	if (params.size() >= 10) vchCert = vchFromValue(params[9]);
-	if(params.size() >= 11) bExclusiveResell = atoi(params[10].get_str().c_str()) == 1? true: false;
+	if (params.size() >= 11) bExclusiveResell = atoi(params[10].get_str().c_str()) == 1? true: false;
+	if (params.size() >= 12) vchGeoLocation = vchFromValue(params[11]);
 
 	try {
 		nQty = atoi(params[5].get_str());
@@ -2336,6 +2340,8 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		theOffer.sTitle = vchTitle;
 	if(offerCopy.sDescription != vchDesc)
 		theOffer.sDescription = vchDesc;
+	if(offerCopy.vchGeoLocation != vchGeoLocation)
+		theOffer.vchGeoLocation = vchGeoLocation;
 	// update pubkey to new cert if we change the cert we are selling for this offer or remove it
 	if(wtxCertIn != NULL)
 	{
