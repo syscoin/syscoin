@@ -418,10 +418,15 @@ BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 	// generate a good offer
 	string offerguid = OfferNew("node1", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "", false);
 
+	// stop node1 and link offer on node2 while node1 is offline
 	StopNode("node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerlink selleralias16 " + offerguid + " 5 newdescription"));
+	const UniValue &arr = r.get_array();
+	string lofferguid = arr[1].get_str();
+	// generate 10 blocks on node2
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "generate 10"));
 
-	string lofferguid = OfferLink("node2", "selleralias16", offerguid, "5", "newdescription");
-
+	// startup node1 again and see that it has linked offer and its right price (with markup)
 	StartNode("node1");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + lofferguid));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "price").get_str(), "10.50");
