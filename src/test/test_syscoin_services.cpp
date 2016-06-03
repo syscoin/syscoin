@@ -739,8 +739,9 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	CreateSysRatesIfNotExist();
 
 	UniValue r;
-	string certguidtmp = !certguid.empty() ? certguid : "0";	
-	string offerupdatestr = "offerupdate SYS_RATES " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + (isPrivate ? "1" : "0")  + " " + certguidtmp + " " + exclusiveResell? "1 ": "0 " + geolocation ;
+	string certguidtmp = !certguid.empty() ? certguid : "0";
+	string exclusivereselltmp = exclusiveResell? "1": "0";
+	string offerupdatestr = "offerupdate SYS_RATES " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + (isPrivate ? "1" : "0")  + " " + certguidtmp + " " + exclusivereselltmp + " " + geolocation ;
 	
 	if(exclusiveResell == false) {
 		offerupdatestr += " 0";
