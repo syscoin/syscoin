@@ -200,7 +200,7 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedlinkedoffer)
 	AliasNew("node3", "selleralias14", "changeddata1");
 
 	// generate a good offer
-	string offerguid = OfferNew("node1", "selleralias12", "category", "title", "100", "0.05", "description", "USD", "/""/", false);
+	string offerguid = OfferNew("node1", "selleralias12", "category", "title", "100", "0.05", "description", "USD", "nocert", false);
 	string lofferguid = OfferLink("node2", "selleralias13", offerguid, "5", "newdescription");
 
 	// should fail: try to generate a linked offer with a linked offer
@@ -354,7 +354,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 	AliasNew("node2", "selleralias11", "changeddata1");
 
 	// generate a good offer in exclusive mode
-	string offerguid = OfferNew("node1", "selleralias10", "category", "title", "100", "0.05", "description", "USD", "", true);
+	string offerguid = OfferNew("node1", "selleralias10", "category", "title", "100", "0.05", "description", "USD", "nocert", true);
 
 	// should succeed: offer seller adds affiliate to whitelist
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offeraddwhitelist " + offerguid + " selleralias11 10"));
@@ -417,7 +417,7 @@ BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 	AliasNew("node1", "selleralias16", "changeddata1");
 
 	// generate a good offer
-	string offerguid = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "/""/", false);
+	string offerguid = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", false);
 
 	// stop node2 and link offer on node1 while node2 is offline
 	StopNode("node2");
@@ -439,9 +439,9 @@ BOOST_AUTO_TEST_CASE (generate_offersafesearch)
 	UniValue r;
 	GenerateBlocks(1);
 	// offer is safe to search
-	string offerguidsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "/""/", true, "0", "location", "Yes");
+	string offerguidsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "Yes");
 	// not safe to search
-	string offerguidnotsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "/""/", true, "0", "location", "No");
+	string offerguidnotsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
 	// should include result in both safe search mode on and off
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), true);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
@@ -462,9 +462,9 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	UniValue r;
 	GenerateBlocks(1);
 	// offer is safe to search
-	string offerguidsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "/""/", true, "0", "location", "Yes");
+	string offerguidsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "Yes");
 	// not safe to search
-	string offerguidnotsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "/""/", true, "0", "location", "No");
+	string offerguidnotsafe = OfferNew("node2", "selleroffer15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
 	// can't ban on any other node than one that created SYS_BAN
 	BOOST_CHECK_THROW(OfferBan("node2",offerguidnotsafe,SAFETY_LEVEL1), runtime_error);
 	BOOST_CHECK_THROW(OfferBan("node3",offerguidsafe,SAFETY_LEVEL1), runtime_error);

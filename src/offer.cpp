@@ -1247,11 +1247,11 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 		vchCert = vchFromValue(params[8]);
 		CTransaction txCert;
 		
-		if(nQty <= 0)
-			throw runtime_error("qty must be greator than 0 for a cert offer");
 		// make sure this cert is still valid
 		if (GetTxOfCert( vchCert, theCert, txCert))
 		{
+			if(nQty <= 0)
+				throw runtime_error("qty must be greator than 0 for a cert offer");
       		// check for existing cert 's
 			if (ExistsInMempool(vchCert, OP_CERT_UPDATE) || ExistsInMempool(vchCert, OP_CERT_TRANSFER)) {
 				throw runtime_error("there are pending operations on that cert");
