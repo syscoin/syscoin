@@ -134,11 +134,13 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 	// generate a good offer
 	string offerguid = OfferNew("node1", "selleralias5", "category", "title", "100", "10", "description", "USD");
 	string lofferguid = OfferLink("node2", "selleralias6", offerguid, "5", "newdescription");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + offerguid));
+	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == "10.50");
 
 	// generate a cert offer using a negative percentage
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " -5 newdescription"));	
 	const UniValue &arr1 = r.get_array();
-	string guid = arr1[1].get_str();
+	guid = arr1[1].get_str();
 	GenerateBlocks(10, "node1");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == "9.50");
