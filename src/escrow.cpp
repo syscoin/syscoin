@@ -1573,7 +1573,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 		foundBuyerKey = false;
 	}
 	if(foundBuyerKey)
-		return tableRPC.execute("escrowclaimrefund", params[0]);
+		return tableRPC.execute("escrowclaimrefund", params);
 	if(op != OP_ESCROW_ACTIVATE)
 		 throw runtime_error("Refund can only happen on an activated escrow");
 	int nOutMultiSig = 0;

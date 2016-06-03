@@ -116,10 +116,13 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 	GenerateBlocks(200);
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
+	AliasNew("node1", "buyeralias1", "changeddata1");
+	AliasNew("node2", "selleralias1", "changeddata2");
+	AliasNew("node3", "arbiteralias1", "changeddata3");
 	UniValue r;
 	string qty = "1";
-	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "0.05", "description", "GBP");
-	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteralias", "selleralias");
+	string offerguid = OfferNew("node2", "selleralias1", "category", "title", "100", "0.05", "description", "GBP");
+	string guid = EscrowNew("node1", "buyeralias1", offerguid, qty, "message", "arbiteralias1", "selleralias1");
 	EscrowRelease("node3", guid);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "escrowinfo " + guid));
 	CAmount escrowfee = AmountFromValue(find_value(r.get_obj(), "sysfee"));
@@ -132,7 +135,9 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 	// 10 mined block subsidy + escrow fee
 	balanceBeforeArbiter += 10*54.13*COIN + escrowfee;
 	CAmount balanceAfterArbiter = AmountFromValue(find_value(r.get_obj(), "balance"));
+	BOOST_CHECK_EQUAL(1, escrowfee);
 	BOOST_CHECK_EQUAL(balanceBeforeArbiter, balanceAfterArbiter);
+	
 
 
 }
@@ -142,16 +147,19 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release)
 	GenerateBlocks(200);
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
+	AliasNew("node1", "buyeralias2", "changeddata1");
+	AliasNew("node2", "selleralias2", "changeddata2");
+	AliasNew("node3", "arbiteralias2", "changeddata3");
 	string qty = "3";
 	string message = "paymentmessage";
-	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "0.04", "description", "EUR");
+	string offerguid = OfferNew("node2", "selleralias2", "category", "title", "100", "0.04", "description", "EUR");
 	string commission = "10";
 	string description = "newdescription";
 	// offer should be set to exclusive mode by default so linking isn't allowed
-	BOOST_CHECK_THROW(CallRPC("node3", "offerlink arbiteralias " + offerguid + " " + commission + " " + description), runtime_error);
-	offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "0.04", "description", "EUR", "", false);
-	string offerlinkguid = OfferLink("node3", "arbiteralias", offerguid, commission, description);
-	string guid = EscrowNew("node1", "buyeralias", offerlinkguid, qty, message, "arbiteralias", "selleralias");
+	BOOST_CHECK_THROW(CallRPC("node3", "offerlink arbiteralias2 " + offerguid + " " + commission + " " + description), runtime_error);
+	offerguid = OfferNew("node2", "selleralias2", "category", "title", "100", "0.04", "description", "EUR", "", false);
+	string offerlinkguid = OfferLink("node3", "arbiteralias2", offerguid, commission, description);
+	string guid = EscrowNew("node1", "buyeralias2", offerlinkguid, qty, message, "arbiteralias2", "selleralias2");
 	EscrowRelease("node1", guid);
 	// reseller cant claim escrow, seller must claim it
 	BOOST_CHECK_THROW(CallRPC("node3", "escrowclaimrelease " + guid), runtime_error);
@@ -163,31 +171,34 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 	GenerateBlocks(100);
 	GenerateBlocks(100, "node2");
 	GenerateBlocks(100, "node3");
+	AliasNew("node1", "buyeralias3", "changeddata1");
+	AliasNew("node2", "selleralias3", "changeddata2");
+	AliasNew("node3", "arbiteralias3", "changeddata3");
 	string qty = "3";
 	string message = "paymentmessage";
-	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "0.05", "description", "EUR", "", false);
+	string offerguid = OfferNew("node2", "selleralias3", "category", "title", "100", "0.05", "description", "EUR", "", false);
 	string commission = "3";
 	string description = "newdescription";
-	string offerlinkguid = OfferLink("node3", "arbiteralias", offerguid, commission, description);
-	string guid = EscrowNew("node1", "buyeralias", offerlinkguid, qty, message, "arbiteralias", "selleralias");
+	string offerlinkguid = OfferLink("node3", "arbiteralias3", offerguid, commission, description);
+	string guid = EscrowNew("node1", "buyeralias3", offerlinkguid, qty, message, "arbiteralias3", "selleralias3");
 	EscrowRelease("node1", guid);
 	// update the EUR peg twice before claiming escrow
 	string data = "{\\\"rates\\\":[{\\\"currency\\\":\\\"USD\\\",\\\"rate\\\":2690.1,\\\"precision\\\":2},{\\\"currency\\\":\\\"EUR\\\",\\\"rate\\\":269.2,\\\"precision\\\":2},{\\\"currency\\\":\\\"GBP\\\",\\\"rate\\\":2697.3,\\\"precision\\\":2},{\\\"currency\\\":\\\"CAD\\\",\\\"rate\\\":2698.0,\\\"precision\\\":2},{\\\"currency\\\":\\\"BTC\\\",\\\"rate\\\":100000.0,\\\"precision\\\":8},{\\\"currency\\\":\\\"SYS\\\",\\\"rate\\\":1.0,\\\"precision\\\":2}]}";
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate SYS_RATES " + data));
-	GenerateBlocks(100);
-	GenerateBlocks(100, "node2");
-	GenerateBlocks(100, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	data = "{\\\"rates\\\":[{\\\"currency\\\":\\\"USD\\\",\\\"rate\\\":2690.1,\\\"precision\\\":2},{\\\"currency\\\":\\\"EUR\\\",\\\"rate\\\":218.2,\\\"precision\\\":2},{\\\"currency\\\":\\\"GBP\\\",\\\"rate\\\":2697.3,\\\"precision\\\":2},{\\\"currency\\\":\\\"CAD\\\",\\\"rate\\\":2698.0,\\\"precision\\\":2},{\\\"currency\\\":\\\"BTC\\\",\\\"rate\\\":100000.0,\\\"precision\\\":8},{\\\"currency\\\":\\\"SYS\\\",\\\"rate\\\":1.0,\\\"precision\\\":2}]}";
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate SYS_RATES " + data));
-	GenerateBlocks(100);
-	GenerateBlocks(100, "node2");
-	GenerateBlocks(100, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	EscrowClaimReleaseLink("node2", guid, "node3");
 	// restore EUR peg
 	data = "{\\\"rates\\\":[{\\\"currency\\\":\\\"USD\\\",\\\"rate\\\":2690.1,\\\"precision\\\":2},{\\\"currency\\\":\\\"EUR\\\",\\\"rate\\\":2695.2,\\\"precision\\\":2},{\\\"currency\\\":\\\"GBP\\\",\\\"rate\\\":2697.3,\\\"precision\\\":2},{\\\"currency\\\":\\\"CAD\\\",\\\"rate\\\":2698.0,\\\"precision\\\":2},{\\\"currency\\\":\\\"BTC\\\",\\\"rate\\\":100000.0,\\\"precision\\\":8},{\\\"currency\\\":\\\"SYS\\\",\\\"rate\\\":1.0,\\\"precision\\\":2}]}";
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate SYS_RATES " + data));
-	GenerateBlocks(10);
-	GenerateBlocks(10, "node2");
-	GenerateBlocks(10, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 }
 BOOST_AUTO_TEST_SUITE_END ()
