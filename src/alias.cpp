@@ -1810,7 +1810,7 @@ UniValue generatepublickey(const UniValue& params, bool fHelp) {
 UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	if (fHelp || params.size() > 3)
 		throw runtime_error(
-				"aliasfilter [[[[[regexp]] from='']] safesearch=Yes]\n"
+				"aliasfilter [[[[[regexp]] from='']] safesearch='Yes']\n"
 						"scan and filter aliases\n"
 						"[regexp] : apply [regexp] on aliases, empty means all aliases\n"
 						"[from] : show results from this GUID [from], empty means first.\n"

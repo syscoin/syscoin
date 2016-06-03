@@ -227,7 +227,7 @@ void CertListPage::on_searchCert_clicked(string GUID)
 	int expires_on = 0; 
     params.push_back(ui->lineEditCertSearch->text().toStdString());
 	params.push_back(GUID);
-	params.push_back(settings.value("safesearch", "").toString() == "Yes"? true: false);
+	params.push_back(settings.value("safesearch", "").toString().toStdString());
 
 
     try {

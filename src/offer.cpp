@@ -4021,7 +4021,7 @@ UniValue offerhistory(const UniValue& params, bool fHelp) {
 UniValue offerfilter(const UniValue& params, bool fHelp) {
 	if (fHelp || params.size() > 4)
 		throw runtime_error(
-				"offerfilter [[[[[regexp]] from=0]] safesearch category]\n"
+				"offerfilter [[[[[regexp]] from=0]] safesearch='Yes' category]\n"
 						"scan and filter offers\n"
 						"[regexp] : apply [regexp] on offers, empty means all offers\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
@@ -4043,7 +4043,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		vchOffer = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		safeSearch = params[2].get_bool();
+		safeSearch = params[2].get_str()=="Yes"? true: false;
 
 	if (params.size() > 3)
 		strCategory = params[3].get_str();

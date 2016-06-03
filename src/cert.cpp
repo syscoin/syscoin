@@ -1038,7 +1038,7 @@ UniValue certhistory(const UniValue& params, bool fHelp) {
 UniValue certfilter(const UniValue& params, bool fHelp) {
 	if (fHelp || params.size() > 3)
 		throw runtime_error(
-				"certfilter [[[[[regexp]] from=0]] safesearch]\n"
+				"certfilter [[[[[regexp]] from=0]] safesearch='Yes']\n"
 						"scan and filter certs\n"
 						"[regexp] : apply [regexp] on certs, empty means all certs\n"
 						"[from] : show results from this GUID [from], 0 means first.\n"
@@ -1060,7 +1060,7 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 		vchCert = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		safeSearch = params[2].get_bool();
+		safeSearch = params[2].get_str()=="Yes"? true: false;
 
     UniValue oRes(UniValue::VARR);
     
