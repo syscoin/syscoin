@@ -132,7 +132,7 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 	AliasNew("node2", "selleralias6", "changeddata1");
 
 	// generate a good offer
-	string offerguid = OfferNew("node1", "selleralias5", "category", "title", "100", "10", "description", "USD");
+	string offerguid = OfferNew("node1", "selleralias5", "category", "title", "100", "10.00", "description", "USD", "", false);
 	string lofferguid = OfferLink("node2", "selleralias6", offerguid, "5", "newdescription");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + offerguid));
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == "10.50");
