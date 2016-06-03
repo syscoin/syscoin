@@ -685,7 +685,8 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	if(!exclusiveResell)
 		exmode = "OFF";
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == guid);
-	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
+	if(certguid != "/""/")
+		BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
@@ -698,7 +699,8 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "offerinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == guid);
-	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
+	if(certguid != "/""/")
+		BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
@@ -711,7 +713,8 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "offerinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == guid);
-	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
+	if(certguid != "/""/")
+		BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == certguid);
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
