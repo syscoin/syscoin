@@ -3139,12 +3139,12 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		if(!theOffer.vchLinkOffer.empty())
 		{
 			// encrypt to root offer owner if this is a linked offer you are accepting
-			EncryptMessage(linkedOffer.vchPubKey, vchMessage, strCipherText)
+			EncryptMessage(linkedOffer.vchPubKey, vchMessage, strCipherText);
 		}
 		else
 		{
 			// encrypt to offer owner
-			EncryptMessage(theOffer.vchPubKey, vchMessage, strCipherText)
+			EncryptMessage(theOffer.vchPubKey, vchMessage, strCipherText);
 		}
 	}
 	vector<unsigned char> vchPaymentMessage;
