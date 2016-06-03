@@ -23,8 +23,8 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 void AliasUpdate(const string& node, const string& aliasname, const string& pubdata, const string& privdata);
 void AliasTransfer(const string& node, const string& aliasname, const string& tonode, const string& pubdata, const string& privdata, string pubkey="");
 bool AliasFilter(const string& node, const string& regex, const string& safesearch);
-const string CertNew(const string& node, const string& alias, const string& title, const string& data, bool privateData=false);
-void CertUpdate(const string& node, const string& guid, const string& title, const string& data, bool privateData=false, const string& safesearch="Yes");
+const string CertNew(const string& node, const string& alias, const string& title, const string& data, bool privateData=false, const string& safesearch="Yes");
+void CertUpdate(const string& node, const string& guid, const string& title, const string& data, bool privateData=false);
 void CertTransfer(const string& node, const string& guid, const string& toalias);
 bool CertFilter(const string& node, const string& regex, const string& safesearch);
 const string MessageNew(const string& fromnode, const string& tonode, const string& title, const string& data, const string& fromalias, const string& toalias);

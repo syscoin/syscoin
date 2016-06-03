@@ -424,7 +424,7 @@ bool CertFilter(const string& node, const string& regex, const string& safesearc
 	const UniValue &arr = r.get_array();
 	return !arr.empty();
 }
-const string CertNew(const string& node, const string& alias, const string& title, const string& data, bool privateData)
+const string CertNew(const string& node, const string& alias, const string& title, const string& data, bool privateData, const string& safesearch)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -440,7 +440,7 @@ const string CertNew(const string& node, const string& alias, const string& titl
 	}
 	string privateFlag = privateData? "1":"0";
 	UniValue r;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certnew " + alias + " " + title + " " + data + " " + privateFlag));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certnew " + alias + " " + title + " " + data + " " + privateFlag + " " + safesearch));
 	const UniValue &arr = r.get_array();
 	string guid = arr[1].get_str();
 	GenerateBlocks(10, node);
@@ -450,6 +450,7 @@ const string CertNew(const string& node, const string& alias, const string& titl
 	BOOST_CHECK(find_value(r.get_obj(), "data").get_str() == data);
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "certinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == guid);
 	if(privateData)
@@ -465,6 +466,7 @@ const string CertNew(const string& node, const string& alias, const string& titl
 
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "certinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == guid);
 	if(privateData)
@@ -479,9 +481,10 @@ const string CertNew(const string& node, const string& alias, const string& titl
 	}
 	BOOST_CHECK(find_value(r.get_obj(), "title").get_str() == title);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
+	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	return guid;
 }
-void CertUpdate(const string& node, const string& guid, const string& title, const string& data, bool privateData,const string& safesearch)
+void CertUpdate(const string& node, const string& guid, const string& title, const string& data, bool privateData)
 {
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -497,9 +500,9 @@ void CertUpdate(const string& node, const string& guid, const string& title, con
 	}
 	UniValue r;
 	string privateFlag = privateData? "1":" 0";
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " + privateFlag + " " + safesearch));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " + privateFlag));
 	// ensure mempool blocks second tx until it confirms
-	BOOST_CHECK_THROW(CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " + privateFlag + " " + safesearch), runtime_error);
+	BOOST_CHECK_THROW(CallRPC(node, "certupdate " + guid + " " + title + " " + data + " " + privateFlag), runtime_error);
 	GenerateBlocks(10, node);
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "certinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "cert").get_str() == guid);
