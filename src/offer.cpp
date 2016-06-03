@@ -646,7 +646,14 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}	
 			if(!theOffer.vchLinkOffer.empty())
 			{
-
+				if(theOffer.nCommission > 255)
+				{
+					return error("CheckOfferInputs() OP_OFFER_ACTIVATE: markup must be less than 256!");
+				}
+				if((theOffer.nCommission <= 0)
+				{
+					return error("CheckOfferInputs() OP_OFFER_ACTIVATE: markup must be greator than 0!");
+				}	
 				vector<COffer> myVtxPos;
 				if (pofferdb->ExistsOffer(theOffer.vchLinkOffer)) {
 					if (pofferdb->ReadOffer(theOffer.vchLinkOffer, myVtxPos))
@@ -1598,7 +1605,10 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 	{
 		throw runtime_error("markup must be less than 256!");
 	}
-	
+	if(commissionInteger <= 0)
+	{
+		throw runtime_error("markup must be greator than 0!");
+	}	
 	if(params.size() >= 4)
 	{
 
