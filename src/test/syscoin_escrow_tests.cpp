@@ -117,12 +117,12 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 	GenerateBlocks(200, "node2");
 	GenerateBlocks(200, "node3");
 	AliasNew("node1", "buyeralias1", "changeddata1");
-	AliasNew("node2", "selleralias11", "changeddata2");
+	AliasNew("node2", "selleralias111", "changeddata2");
 	AliasNew("node3", "arbiteralias1", "changeddata3");
 	UniValue r;
 	string qty = "1";
-	string offerguid = OfferNew("node2", "selleralias11", "category", "title", "100", "0.05", "description", "GBP");
-	string guid = EscrowNew("node1", "buyeralias1", offerguid, qty, "message", "arbiteralias1", "selleralias11");
+	string offerguid = OfferNew("node2", "selleralias111", "category", "title", "100", "0.05", "description", "GBP");
+	string guid = EscrowNew("node1", "buyeralias1", offerguid, qty, "message", "arbiteralias1", "selleralias111");
 	EscrowRelease("node3", guid);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "escrowinfo " + guid));
 	CAmount escrowfee = AmountFromValue(find_value(r.get_obj(), "sysfee"));
