@@ -132,21 +132,29 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 	AliasNew("node2", "selleralias6", "changeddata1");
 
 	// generate a good offer
-	string offerguid = OfferNew("node1", "selleralias5", "category", "title", "100", "0.05", "description", "USD");
+	string offerguid = OfferNew("node1", "selleralias5", "category", "title", "100", "10", "description", "USD");
 	string lofferguid = OfferLink("node2", "selleralias6", offerguid, "5", "newdescription");
 
-	// should fail: generate a cert offer using a negative percentage
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " -5 newdescription"), runtime_error);	
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " -5 newdescription"), runtime_error);	
+	// generate a cert offer using a negative percentage
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " -5 newdescription"));	
+	const UniValue &arr1 = r.get_array();
+	string guid = arr1[1].get_str();
+	GenerateBlocks(10, "node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + guid));
+	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == "9.50");
+
 
 	// should fail: generate a cert offer using too-large pergentage
 	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " 256 newdescription"), runtime_error);	
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " 256 newdescription"), runtime_error);	
-
+	#ifdef ENABLE_DEBUGRPC
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " 256 newdescription"), runtime_error);	
+	#endif
 	// should fail: generate an offerlink with too-large description
 	string s1024bytes =   "asdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfssdsfsdfsdfsdfsdfsdsdfdfsdfsdfsdfsdz";
 	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " 5 " + s1024bytes), runtime_error);
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " 5 " + s1024bytes), runtime_error);
+	#ifdef ENABLE_DEBUGRPC
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " 5 " + s1024bytes), runtime_error);
+	#endif
 }
 
 BOOST_AUTO_TEST_CASE (generate_offernew_linkedofferexmode)
