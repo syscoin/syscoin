@@ -650,7 +650,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				{
 					return error("CheckOfferInputs() OP_OFFER_ACTIVATE: markup must be less than 256!");
 				}
-				if((theOffer.nCommission <= 0)
+				if(theOffer.nCommission <= 0)
 				{
 					return error("CheckOfferInputs() OP_OFFER_ACTIVATE: markup must be greator than 0!");
 				}	

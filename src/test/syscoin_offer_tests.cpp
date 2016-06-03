@@ -139,8 +139,9 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 
 	// generate a cert offer using a negative percentage
 	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " -5 newdescription"), runtime_error);	
-	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " -5 newdescription"), runtime_error);	
-
+	#ifdef ENABLE_DEBUGRPC
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " -5 newdescription"), runtime_error);	
+	#endif
 
 	// should fail: generate a cert offer using too-large pergentage
 	BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink selleralias6 " + offerguid + " 256 newdescription"), runtime_error);	
