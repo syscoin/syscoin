@@ -171,7 +171,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 	GenerateBlocks(100);
 	GenerateBlocks(100, "node2");
 	GenerateBlocks(100, "node3");
-	AliasNew("node1", "buyeralias3", "changeddata1");
+	AliasNew("node1", "buyeralias33", "changeddata1");
 	AliasNew("node2", "selleralias33", "changeddata2");
 	AliasNew("node3", "arbiteralias3", "changeddata3");
 	string qty = "3";
@@ -180,7 +180,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 	string commission = "3";
 	string description = "newdescription";
 	string offerlinkguid = OfferLink("node3", "arbiteralias3", offerguid, commission, description);
-	string guid = EscrowNew("node1", "buyeralias3", offerlinkguid, qty, message, "arbiteralias3", "selleralias33");
+	string guid = EscrowNew("node1", "buyeralias33", offerlinkguid, qty, message, "arbiteralias3", "selleralias33");
 	EscrowRelease("node1", guid);
 	// update the EUR peg twice before claiming escrow
 	string data = "{\\\"rates\\\":[{\\\"currency\\\":\\\"USD\\\",\\\"rate\\\":2690.1,\\\"precision\\\":2},{\\\"currency\\\":\\\"EUR\\\",\\\"rate\\\":269.2,\\\"precision\\\":2},{\\\"currency\\\":\\\"GBP\\\",\\\"rate\\\":2697.3,\\\"precision\\\":2},{\\\"currency\\\":\\\"CAD\\\",\\\"rate\\\":2698.0,\\\"precision\\\":2},{\\\"currency\\\":\\\"BTC\\\",\\\"rate\\\":100000.0,\\\"precision\\\":8},{\\\"currency\\\":\\\"SYS\\\",\\\"rate\\\":1.0,\\\"precision\\\":2}]}";
