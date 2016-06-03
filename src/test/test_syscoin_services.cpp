@@ -668,9 +668,10 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	CreateSysRatesIfNotExist();
 	UniValue r;
 	string certguidtmp = "0";
+	string exclusivereselltmp =  exclusiveResell? "1": "0";
 	if(!certguid.empty())
 		certguidtmp = certguid;
-	string offercreatestr = "offernew SYS_RATES " + aliasname + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency  + " " + certguidtmp + " " + exclusiveResell? "1 ": "0 " + acceptbtconly + " " + geolocation + " " + safesearch;
+	string offercreatestr = "offernew SYS_RATES " + aliasname + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency  + " " + certguidtmp + " " + exclusivereselltmp + " " + acceptbtconly + " " + geolocation + " " + safesearch;
 	if(exclusiveResell == false)
 	{
 		offercreatestr += " 0";
@@ -741,7 +742,8 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	UniValue r;
 	string certguidtmp = !certguid.empty() ? certguid : "0";
 	string exclusivereselltmp = exclusiveResell? "1": "0";
-	string offerupdatestr = "offerupdate SYS_RATES " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + (isPrivate ? "1" : "0")  + " " + certguidtmp + " " + exclusivereselltmp + " " + geolocation ;
+	string privatetmp = isPrivate ? "1" : "0";
+	string offerupdatestr = "offerupdate SYS_RATES " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + privatetmp + " " + certguidtmp + " " + exclusivereselltmp + " " + geolocation ;
 	
 	if(exclusiveResell == false) {
 		offerupdatestr += " 0";
