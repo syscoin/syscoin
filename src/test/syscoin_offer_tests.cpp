@@ -428,6 +428,7 @@ BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 
 	// startup node1 again and see that it has linked offer and its right price (with markup)
 	StartNode("node1");
+	GenerateBlocks(10);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + lofferguid));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "price").get_str(), "10.50");
 }
