@@ -838,8 +838,14 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theAlias.nRating = 0;
 			theAlias.nRatingCount = 0;
 		}
-
-		theAlias.nHeight = nHeight;
+		if(vvchArgs[0] == vchFromString("SYS_BAN") ||
+			vvchArgs[0] == vchFromString("SYS_CATEGORY")  ||
+			vvchArgs[0] == vchFromString("SYS_RATES"))
+		{
+			theAlias.nHeight = INT64_MAX;
+		}
+		else
+			theAlias.nHeight = nHeight;
 		theAlias.txHash = tx.GetHash();
 		PutToAliasList(vtxPos, theAlias);
 		CPubKey PubKey(theAlias.vchPubKey);
@@ -1018,7 +1024,7 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string
 
 int GetAliasExpirationDepth() {
 	#ifdef ENABLE_DEBUGRPC
-    return 500;
+    return 100;
   #else
     return 525600;
   #endif
