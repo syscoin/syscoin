@@ -57,7 +57,7 @@ BOOST_AUTO_TEST_CASE (generate_messagepruning)
 		StartNode("node2");
 
 		// and it should say its expired
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "messageinfo " + messageguid));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "messageinfo " + messageguid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)

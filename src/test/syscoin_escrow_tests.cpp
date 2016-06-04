@@ -223,7 +223,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (certinfo node2 doesn't sync the data)
-		BOOST_CHECK_THROW(r = CallRPC("node2", "escrowinfo " + escrowguid), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node2", "escrowinfo " + escrowguid), runtime_error);
 		BOOST_CHECK_EQUAL(EscrowFilter("node2", escrowguid, "No"), false);
 	#endif
 }

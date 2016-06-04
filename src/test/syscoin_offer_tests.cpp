@@ -527,7 +527,7 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
-		BOOST_CHECK_THROW(r = CallRPC("node2", "offerinfo " + offerguid), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node2", "offerinfo " + offerguid), runtime_error);
 		BOOST_CHECK_EQUAL(OfferFilter("node2", offerguid, "No"), false);
 	#endif
 }

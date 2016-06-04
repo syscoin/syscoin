@@ -180,7 +180,7 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		// now we shouldn't be able to search it
 		BOOST_CHECK_EQUAL(CertFilter("node1", certguid, "No"), false);
 		// and it should say its expired
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguid));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "certinfo " + certguid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (certinfo node2 doesn't sync the data)

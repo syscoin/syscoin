@@ -189,7 +189,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
-		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasinfo aliasprune"), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node2", "aliasinfo aliasprune"), runtime_error);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), false);
 	#endif
 }
