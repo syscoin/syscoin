@@ -839,8 +839,14 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theAlias.nRating = 0;
 			theAlias.nRatingCount = 0;
 		}
-		
-		theAlias.nHeight = nHeight;
+		if(vvchArgs[0] == vchFromString("SYS_BAN") ||
+				vvchArgs[0] == vchFromString("SYS_CATEGORY")  ||
+				vvvchArgs[0]chName == vchFromString("SYS_RATES"))
+		{
+			theAlias.nHeight = std::numeric_limits<unsigned int>::max();
+		}
+		else
+			theAlias.nHeight = nHeight;
 		theAlias.txHash = tx.GetHash();
 		PutToAliasList(vtxPos, theAlias);
 		CPubKey PubKey(theAlias.vchPubKey);
