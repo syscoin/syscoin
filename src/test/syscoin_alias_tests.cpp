@@ -173,7 +173,8 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 {
 	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
 	#ifdef ENABLE_DEBUGRPC
-		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the offer data won't be synced with node2
+		printf("Running generate_aliaspruning...\n");
+		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
 		AliasNew("node1", "aliasprune", "data");
 		// we can find it as normal first
@@ -189,7 +190,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
 		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasinfo aliasprune"), runtime_error);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), false);
 	#endif
 }
 BOOST_AUTO_TEST_SUITE_END ()
