@@ -27,6 +27,7 @@ const string CertNew(const string& node, const string& alias, const string& titl
 void CertUpdate(const string& node, const string& guid, const string& title, const string& data, bool privateData=false);
 void CertTransfer(const string& node, const string& guid, const string& toalias);
 bool CertFilter(const string& node, const string& regex, const string& safesearch);
+bool EscrowFilter(const string& node, const string& regex);
 const string MessageNew(const string& fromnode, const string& tonode, const string& title, const string& data, const string& fromalias, const string& toalias);
 void CreateSysRatesIfNotExist();
 void CreateSysBanIfNotExist();

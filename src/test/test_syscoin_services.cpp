@@ -424,6 +424,13 @@ bool CertFilter(const string& node, const string& regex, const string& safesearc
 	const UniValue &arr = r.get_array();
 	return !arr.empty();
 }
+bool EscrowFilter(const string& node, const string& regex)
+{
+	UniValue r;
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "escrowfilter " + regex));
+	const UniValue &arr = r.get_array();
+	return !arr.empty();
+}
 const string CertNew(const string& node, const string& alias, const string& title, const string& data, bool privateData, const string& safesearch)
 {
 	string otherNode1 = "node2";
