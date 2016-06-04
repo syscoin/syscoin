@@ -213,19 +213,19 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		string offerguid = OfferNew("node2", "selleralias33", "category", "title", "100", "0.05", "description", "USD");
 		string escrowguid = EscrowNew("node1", "buyeralias33", offerguid, qty, message, "arbiteralias3", "selleralias33");
 		// we can find it as normal first
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", escrowguid, "No"), true);
+		BOOST_CHECK_EQUAL(EscrowFilter("node1", escrowguid), true);
 		// then we let the service expire
 		GenerateBlocks(100);
 		StartNode("node2");
 		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", escrowguid, "No"), false);
+		BOOST_CHECK_EQUAL(EscrowFilter("node1", escrowguid), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "escrowinfo " + escrowguid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (certinfo node2 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node2", "escrowinfo " + escrowguid), runtime_error);
-		BOOST_CHECK_EQUAL(EscrowFilter("node2", escrowguid, "No"), false);
+		BOOST_CHECK_EQUAL(EscrowFilter("node2", escrowguid), false);
 	#endif
 }
 BOOST_AUTO_TEST_SUITE_END ()
