@@ -1315,7 +1315,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 			vchName == vchFromString("SYS_CATEGORY")  ||
 			vchName == vchFromString("SYS_RATES"))
 	{
-		theAlias.nHeight = std::numeric_limits<unsigned int>::max();
+		newAlias.nHeight = std::numeric_limits<unsigned int>::max();
 	}
 	else
 		newAlias.nHeight = chainActive.Tip()->nHeight;
