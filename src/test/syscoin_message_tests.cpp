@@ -44,5 +44,24 @@ BOOST_AUTO_TEST_CASE (generate_msgaliastransfer)
 	// send message to new node owning alias
 	MessageNew("node1", "node3", "title", "data", "jagmsg1", "jagmsg2");
 }
+BOOST_AUTO_TEST_CASE (generate_messagepruning)
+{
+	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
+	#ifdef ENABLE_DEBUGRPC
+		printf("Running generate_messagepruning...\n");
+		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
+		StopNode("node2");
+		string messageguid = MessageNew("node1", "node2", "title", "data", "jagmsg1", "jagmsg2");
+		// then we let the service expire
+		GenerateBlocks(100);
+		StartNode("node2");
 
+		// and it should say its expired
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "messageinfo " + messageguid));
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
+
+		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
+		BOOST_CHECK_THROW(r = CallRPC("node2", "messageinfo " + messageguid), runtime_error);
+	#endif
+}
 BOOST_AUTO_TEST_SUITE_END ()
