@@ -171,6 +171,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 }
 BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 {
+	UniValue r;
 	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
 	#ifdef ENABLE_DEBUGRPC
 		printf("Running generate_aliaspruning...\n");

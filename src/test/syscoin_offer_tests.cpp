@@ -509,6 +509,7 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 }
 BOOST_AUTO_TEST_CASE (generate_offerpruning)
 {
+	UniValue r;
 	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
 	#ifdef ENABLE_DEBUGRPC
 		printf("Running generate_offerpruning...\n");
