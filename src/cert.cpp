@@ -155,9 +155,15 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
 				if(txPos.safetyLevel >= SAFETY_LEVEL1)
 				{
 					if(safeSearch)
+					{
+						pcursor->Next();
 						continue;
+					}
 					if(txPos.safetyLevel > SAFETY_LEVEL1)
+					{
+						pcursor->Next();
 						continue;
+					}
 				}
 				const string &cert = stringFromVch(vchCert);
 				string title = stringFromVch(txPos.vchTitle);

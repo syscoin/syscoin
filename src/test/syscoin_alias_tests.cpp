@@ -169,4 +169,27 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbannonsafesearch"));
 	
 }
+BOOST_AUTO_TEST_CASE (generate_aliaspruning)
+{
+	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
+	#ifdef ENABLE_DEBUGRPC
+		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the offer data won't be synced with node2
+		StopNode("node2");
+		AliasNew("node1", "aliasprune", "data");
+		// we can find it as normal first
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
+		// then we let the service expire
+		GenerateBlocks(100);
+		StartNode("node2");
+		// now we shouldn't be able to search it
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), false);
+		// and it should say its expired
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo aliasprune"));
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
+
+		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
+		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasinfo aliasprune"), runtime_error);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), false);
+	#endif
+}
 BOOST_AUTO_TEST_SUITE_END ()
