@@ -26,6 +26,7 @@
 #include <boost/foreach.hpp>
 #include <boost/thread.hpp>
 #include <boost/algorithm/hex.hpp>
+#include <limits>
 using namespace std;
 CAliasDB *paliasdb = NULL;
 COfferDB *pofferdb = NULL;
@@ -1421,7 +1422,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 			vchName == vchFromString("SYS_CATEGORY")  ||
 			vchName == vchFromString("SYS_RATES"))
 	{
-		theAlias.nHeight = INT64_MAX;
+		theAlias.nHeight = std::numeric_limits<unsigned int>::max();
 	}
 	else
 		theAlias.nHeight = chainActive.Tip()->nHeight;
