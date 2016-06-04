@@ -841,7 +841,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		if(vvchArgs[0] == vchFromString("SYS_BAN") ||
 				vvchArgs[0] == vchFromString("SYS_CATEGORY")  ||
-				vvvchArgs[0] == vchFromString("SYS_RATES"))
+				vvchArgs[0] == vchFromString("SYS_RATES"))
 		{
 			theAlias.nHeight = std::numeric_limits<unsigned int>::max();
 		}
