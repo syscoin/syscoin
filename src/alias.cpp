@@ -838,14 +838,8 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theAlias.nRating = 0;
 			theAlias.nRatingCount = 0;
 		}
-		if(vvchArgs[0] == vchFromString("SYS_BAN") ||
-			vvchArgs[0] == vchFromString("SYS_CATEGORY")  ||
-			vvchArgs[0] == vchFromString("SYS_RATES"))
-		{
-			theAlias.nHeight = INT64_MAX;
-		}
-		else
-			theAlias.nHeight = nHeight;
+		
+		theAlias.nHeight = nHeight;
 		theAlias.txHash = tx.GetHash();
 		PutToAliasList(vtxPos, theAlias);
 		CPubKey PubKey(theAlias.vchPubKey);
@@ -1316,7 +1310,14 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 
     // build alias
     CAliasIndex newAlias;
-	newAlias.nHeight = chainActive.Tip()->nHeight;
+	if(vchName == vchFromString("SYS_BAN") ||
+			vchName == vchFromString("SYS_CATEGORY")  ||
+			vchName == vchFromString("SYS_RATES"))
+	{
+		newAlias.nHeight = INT64_MAX;
+	}
+	else
+		newAlias.nHeight = chainActive.Tip()->nHeight;
 	newAlias.vchPubKey = vchPubKey;
 	newAlias.vchPublicValue = vchPublicValue;
 	newAlias.vchPrivateValue = vchPrivateValue;
@@ -1416,8 +1417,14 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 
 	CAliasIndex copyAlias = theAlias;
 	theAlias.ClearAlias();
-
-	theAlias.nHeight = chainActive.Tip()->nHeight;
+	if(vchName == vchFromString("SYS_BAN") ||
+			vchName == vchFromString("SYS_CATEGORY")  ||
+			vchName == vchFromString("SYS_RATES"))
+	{
+		theAlias.nHeight = INT64_MAX;
+	}
+	else
+		theAlias.nHeight = chainActive.Tip()->nHeight;
 	if(copyAlias.vchPublicValue != vchPublicValue)
 		theAlias.vchPublicValue = vchPublicValue;
 	if(copyAlias.vchPrivateValue != vchPrivateValue)
