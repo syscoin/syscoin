@@ -266,7 +266,7 @@ void CreateSysRatesIfNotExist()
 	}
 	catch(const runtime_error& err)
 	{
-		GenerateBlocks(200);	
+		GenerateBlocks(10);	
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew SYS_RATES " + data));
 	}
 	GenerateBlocks(10);
