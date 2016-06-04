@@ -172,7 +172,7 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		printf("Running generate_certpruning...\n");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		string certguid = CertNew("node1", "jagcert1", "category", "title", "100", "0.01", "description", "USD");
+		string certguid = CertNew("node1", "jagcert1", "certtitle", "certdata");
 		// we can find it as normal first
 		BOOST_CHECK_EQUAL(CertFilter("node1", certguid, "No"), true);
 		// then we let the service expire
