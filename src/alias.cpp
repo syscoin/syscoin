@@ -843,7 +843,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				vvchArgs[0] == vchFromString("SYS_CATEGORY")  ||
 				vvchArgs[0] == vchFromString("SYS_RATES"))
 		{
-			theAlias.nHeight = std::numeric_limits<unsigned int>::max();
+			theAlias.nHeight = std::numeric_limits<int>::max() - GetAliasExpirationDepth();
 		}
 		else
 			theAlias.nHeight = nHeight;
@@ -1037,7 +1037,7 @@ bool GetTxOfAlias(const vector<unsigned char> &vchName,
 		return false;
 	txPos = vtxPos.back();
 	int nHeight = txPos.nHeight;
-	if (nHeight + GetAliasExpirationDepth()
+	if ((nHeight + GetAliasExpirationDepth())
 			< chainActive.Tip()->nHeight) {
 		string name = stringFromVch(vchName);
 		LogPrintf("GetTxOfAlias(%s) : expired", name.c_str());
@@ -1321,7 +1321,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 			vchName == vchFromString("SYS_CATEGORY")  ||
 			vchName == vchFromString("SYS_RATES"))
 	{
-		newAlias.nHeight = std::numeric_limits<unsigned int>::max();
+		newAlias.nHeight = std::numeric_limits<int>::max() - GetAliasExpirationDepth();
 	}
 	else
 		newAlias.nHeight = chainActive.Tip()->nHeight;
@@ -1428,7 +1428,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 			vchName == vchFromString("SYS_CATEGORY")  ||
 			vchName == vchFromString("SYS_RATES"))
 	{
-		theAlias.nHeight = std::numeric_limits<unsigned int>::max();
+		theAlias.nHeight = std::numeric_limits<int>::max() - GetAliasExpirationDepth();
 	}
 	else
 		theAlias.nHeight = chainActive.Tip()->nHeight;
