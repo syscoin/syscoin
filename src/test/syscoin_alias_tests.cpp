@@ -205,17 +205,17 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		StopNode("node1");
 		StartNode("node1");
 		// ensure you can still update before expiry
-		AliasUpdate("node1", "aliasprune1", "newdata");
+		AliasUpdate("node1", "aliasprune1", "newdata","privdata");
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), true);
 		// generate 99 more blocks
 		GenerateBlocks(99);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
-		AliasUpdate("node1", "aliasprune1", "newdata1");
+		AliasUpdate("node1", "aliasprune1", "newdata1","privdata");
 		GenerateBlocks(100);
 		// now it should be expired
-		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasupdate aliasprune1 newdata2"), runtime_error);
+		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasupdate aliasprune1 newdata2 privdata"), runtime_error);
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), false);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), false);
 		// and it should say its expired
