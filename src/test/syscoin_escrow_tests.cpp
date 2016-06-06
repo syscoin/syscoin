@@ -8,9 +8,9 @@ BOOST_AUTO_TEST_CASE (generate_escrow_release)
 {
 	printf("Running generate_escrow_release...\n");
 	UniValue r;
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	AliasNew("node1", "buyeralias", "changeddata1");
 	AliasNew("node2", "selleralias", "changeddata2");
 	AliasNew("node3", "arbiteralias", "changeddata3");
@@ -113,9 +113,9 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_invalid)
 BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 {
 	printf("Running generate_escrowrelease_arbiter...\n");
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	AliasNew("node1", "buyeralias1", "changeddata1");
 	AliasNew("node2", "selleralias111", "changeddata2");
 	AliasNew("node3", "arbiteralias1", "changeddata3");
@@ -143,9 +143,9 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 BOOST_AUTO_TEST_CASE (generate_escrow_linked_release)
 {
 	printf("Running generate_escrow_linked_release...\n");
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	AliasNew("node1", "buyeralias2", "changeddata1");
 	AliasNew("node2", "selleralias22", "changeddata2");
 	AliasNew("node3", "arbiteralias2", "changeddata3");
@@ -167,9 +167,9 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release)
 BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 {
 	printf("Running generate_escrow_linked_release_with_peg_update...\n");
-	GenerateBlocks(100);
-	GenerateBlocks(100, "node2");
-	GenerateBlocks(100, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	AliasNew("node1", "buyeralias33", "changeddata1");
 	AliasNew("node2", "selleralias33", "changeddata2");
 	AliasNew("node3", "arbiteralias3", "changeddata3");
