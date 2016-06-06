@@ -1738,7 +1738,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		if(DecryptMessage(alias.vchPubKey, alias.vchPrivateValue, strDecrypted))
 			strPrivateValue = strDecrypted;		
 		oName.push_back(Pair("privatevalue", strPrivateValue));
-		oName.push_back(Pair("txid", stringFromVch(alias.txHash)));
+		oName.push_back(Pair("txid", alias.txHash.GetHex()));
 		CPubKey PubKey(alias.vchPubKey);
 		CSyscoinAddress address(PubKey.GetID());
 		if(!address.IsValid())
