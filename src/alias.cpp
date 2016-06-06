@@ -108,82 +108,42 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData))
 	{
-		CCoinsViewCache &view = *pcoinsTip;
-		const CCoins* coins = view.AccessCoins(alias.txHash);
-		if (coins)
+		if(IsSys21Fork(alias.nHeight))
 		{
-			if(IsSys21Fork(coins->nHeight))
-			{
-				// ensure we aren't pruning SYS_RATES, SYS_BAN or SYS_CATEGORY
-				uint256 hashBlock;
-				CTransaction tx;
-				if(GetTransaction(alias.txHash, tx, Params().GetConsensus(), hashBlock, true))
-				{
-					vector<vector<unsigned char> > vvch;
-					int op, nOut;
-					if(DecodeAliasTx(tx, op, nOut, vvch))
-					{
-						if(vvch[0] != vchFromString("SYS_RATES") && vvch[0] != vchFromString("SYS_BAN") && vvch[0] != vchFromString("SYS_CATEGORY"))
-						{
-							nHeight = coins->nHeight + GetAliasExpirationDepth();
-							return true;
-						}
-					}
-				}
-			}
-		}
-
+			nHeight = alias.nHeight + GetAliasExpirationDepth();
+			return true;			
+		}		
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
-		CCoinsViewCache &view = *pcoinsTip;
-		const CCoins* coins = view.AccessCoins(offer.txHash);
-		if (coins)
+		if(IsSys21Fork(offer.nHeight))
 		{
-			if(IsSys21Fork(coins->nHeight))
-			{
-				nHeight = coins->nHeight + GetOfferExpirationDepth();
-				return true;
-			}
+			nHeight = offer.nHeight + GetOfferExpirationDepth();
+			return true;			
 		}
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
-		CCoinsViewCache &view = *pcoinsTip;
-		const CCoins* coins = view.AccessCoins(cert.txHash);
-		if (coins)
+		if(IsSys21Fork(cert.nHeight))
 		{
-			if(IsSys21Fork(coins->nHeight))
-			{
-				nHeight = coins->nHeight + GetCertExpirationDepth();
-				return true;
-			}
+			nHeight = cert.nHeight + GetCertExpirationDepth();
+			return true;			
 		}
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
-		CCoinsViewCache &view = *pcoinsTip;
-		const CCoins* coins = view.AccessCoins(escrow.txHash);
-		if (coins)
+		if(IsSys21Fork(escrow.nHeight))
 		{
-			if(IsSys21Fork(coins->nHeight))
-			{
-				nHeight = coins->nHeight + GetEscrowExpirationDepth();
-				return true;
-			}
+			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
+			return true;			
 		}
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
-		CCoinsViewCache &view = *pcoinsTip;
-		const CCoins* coins = view.AccessCoins(message.txHash);
-		if (coins)
+		if(IsSys21Fork(message.nHeight))
 		{
-			if(IsSys21Fork(coins->nHeight))
-			{
-				nHeight = coins->nHeight + GetMessageExpirationDepth();
-				return true;
-			}
+			nHeight = message.nHeight + GetMessageExpirationDepth();
+			return true;			
 		}
 	}
 
