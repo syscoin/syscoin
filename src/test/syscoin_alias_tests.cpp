@@ -42,7 +42,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasupdate)
 {
 	printf("Running generate_aliasupdate...\n");
 	GenerateBlocks(1);
-	AliasNew("node1", "jagupdate", gooddata);
+	AliasNew("node1", "jagupdate", "data");
 	// update an alias that isn't yours
 	BOOST_CHECK_THROW(CallRPC("node2", "aliasupdate jagupdate test"), runtime_error);
 	AliasUpdate("node1", "jagupdate", "changeddata", "privdata");
