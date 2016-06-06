@@ -13,9 +13,9 @@ BOOST_AUTO_TEST_CASE (generate_offernew)
 	printf("Running generate_offernew...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias1", "changeddata1");
 
@@ -62,9 +62,9 @@ BOOST_AUTO_TEST_CASE (generate_certoffernew)
 	printf("Running generate_certoffernew...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "node1alias", "node1aliasdata");
 	AliasNew("node2", "node2alias", "node2aliasdata");
@@ -125,9 +125,9 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 	printf("Running generate_offernew_linkedoffer...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias5", "changeddata1");
 	AliasNew("node2", "selleralias6", "changeddata1");
@@ -162,9 +162,9 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedofferexmode)
 	printf("Running generate_offernew_linkedofferexmode...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias8", "changeddata1");
 	AliasNew("node2", "selleralias9", "changeddata1");
@@ -191,9 +191,9 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedlinkedoffer)
 	printf("Running generate_offernew_linkedlinkedoffer...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias12", "changeddata1");
 	AliasNew("node2", "selleralias13", "changeddata1");
@@ -215,9 +215,9 @@ BOOST_AUTO_TEST_CASE (generate_offerupdate)
 	printf("Running generate_offerupdate...\n");
 	UniValue r;
 	
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias2", "changeddata1");
 
@@ -274,9 +274,9 @@ BOOST_AUTO_TEST_CASE (generate_offeraccept)
 	printf("Running generate_offeraccept...\n");
 	UniValue r;
 	
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias3", "somedata");
 	AliasNew("node2", "buyeralias3", "somedata");
@@ -316,9 +316,9 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 	printf("Running generate_offerexpired...\n");
 	UniValue r;
 	
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias4", "somedata");
 	AliasNew("node2", "buyeralias4", "somedata");
@@ -346,9 +346,9 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 	printf("Running generate_offerexpiredexmode...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "selleralias10", "changeddata1");
 	AliasNew("node2", "selleralias11", "changeddata1");
@@ -374,9 +374,9 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	printf("Running generate_certofferexpired...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "node1alias2", "node1aliasdata");
 	AliasNew("node2", "node2alias2", "node2aliasdata");
@@ -390,7 +390,7 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	string offerguid = OfferNew("node1", "node1alias2", "category", "title", "1", "0.05", "description", "USD", certguid);
 
 	// this expires the cert but not the offer
-	GenerateBlocks(50);
+	GenerateBlocks(5);
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: offer update on offer with expired cert
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
@@ -409,9 +409,9 @@ BOOST_AUTO_TEST_CASE (generate_offerlink_offlinenode)
 	printf("Running generate_offerlink_offlinenode...\n");
 	UniValue r;
 
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
 	AliasNew("node2", "selleralias15", "changeddata1");
 	AliasNew("node1", "selleralias16", "changeddata1");

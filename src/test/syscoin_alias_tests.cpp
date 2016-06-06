@@ -17,7 +17,7 @@ BOOST_AUTO_TEST_CASE (generate_sysrates_alias)
 BOOST_AUTO_TEST_CASE (generate_big_aliasdata)
 {
 	printf("Running generate_big_aliasdata...\n");
-	GenerateBlocks(50);
+	GenerateBlocks(5);
 	// 1023 bytes long
 	string gooddata = "asdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfssdsfsdfsdfsdfsdfsdsdfdfsdfsdfsdfsd";
 	// 1024 bytes long
@@ -28,7 +28,7 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasdata)
 BOOST_AUTO_TEST_CASE (generate_big_aliasname)
 {
 	printf("Running generate_big_aliasname...\n");
-	GenerateBlocks(50);
+	GenerateBlocks(5);
 	// 255 bytes long
 	string goodname = "SfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsDfdfdd";
 	// 1023 bytes long
@@ -42,17 +42,18 @@ BOOST_AUTO_TEST_CASE (generate_aliasupdate)
 {
 	printf("Running generate_aliasupdate...\n");
 	GenerateBlocks(1);
+	AliasNew("node1", "jagupdate", gooddata);
 	// update an alias that isn't yours
-	BOOST_CHECK_THROW(CallRPC("node2", "aliasupdate jag test"), runtime_error);
-	AliasUpdate("node1", "jag", "changeddata", "privdata");
+	BOOST_CHECK_THROW(CallRPC("node2", "aliasupdate jagupdate test"), runtime_error);
+	AliasUpdate("node1", "jagupdate", "changeddata", "privdata");
 	// shouldnt update data, just uses prev data because it hasnt changed
-	AliasUpdate("node1", "jag", "changeddata", "privdata");
+	AliasUpdate("node1", "jagupdate", "changeddata", "privdata");
 
 }
 BOOST_AUTO_TEST_CASE (generate_sendmoneytoalias)
 {
 	printf("Running generate_sendmoneytoalias...\n");
-	GenerateBlocks(200, "node2");
+	GenerateBlocks(5, "node2");
 	AliasNew("node2", "sendnode2", "changeddata2");
 	UniValue r;
 	// get balance of node2 first to know we sent right amount oater
@@ -69,8 +70,8 @@ BOOST_AUTO_TEST_CASE (generate_sendmoneytoalias)
 BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 {
 	printf("Running generate_aliastransfer...\n");
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	UniValue r;
 	string strPubKey1 = AliasNew("node1", "jagnode1", "changeddata1");
 	string strPubKey2 = AliasNew("node2", "jagnode2", "changeddata2");

@@ -7,9 +7,9 @@ BOOST_FIXTURE_TEST_SUITE (syscoin_message_tests, BasicSyscoinTestingSetup)
 BOOST_AUTO_TEST_CASE (generate_big_msgdata)
 {
 	printf("Running generate_big_msgdata...\n");
-	GenerateBlocks(200);
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	AliasNew("node1", "jagmsg1", "changeddata1");
 	AliasNew("node2", "jagmsg2", "changeddata2");
 	AliasNew("node3", "jagmsg3", "changeddata3");
@@ -24,7 +24,7 @@ BOOST_AUTO_TEST_CASE (generate_big_msgdata)
 BOOST_AUTO_TEST_CASE (generate_big_msgsubject)
 {
 	printf("Running generate_big_msgsubject...\n");
-	GenerateBlocks(50);
+	GenerateBlocks(5);
 	// 255 bytes long
 	string goodtitle = "SfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsDfdfdd";
 	// 1023 bytes long

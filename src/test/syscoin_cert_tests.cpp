@@ -8,7 +8,7 @@ BOOST_FIXTURE_TEST_SUITE (syscoin_cert_tests, BasicSyscoinTestingSetup)
 BOOST_AUTO_TEST_CASE (generate_big_certdata)
 {
 	printf("Running generate_big_certdata...\n");
-	GenerateBlocks(200);
+	GenerateBlocks(5);
 	AliasNew("node1", "jagcertbig1", "data");
 	// 1023 bytes long
 	string gooddata = "asdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfasdfasdfsadfsadassdsfsdfsdfsdfsdfsdsdfssdsfsdfsdfsdfsdfsdsdfdfsdfsdfsdfsd";
@@ -28,7 +28,7 @@ BOOST_AUTO_TEST_CASE (generate_big_certdata)
 BOOST_AUTO_TEST_CASE (generate_big_certtitle)
 {
 	printf("Running generate_big_certtitle...\n");
-	GenerateBlocks(50);
+	GenerateBlocks(5);
 	AliasNew("node1", "jagcertbig2", "data");
 	// 255 bytes long
 	string goodtitle = "SfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsDfdfdd";
@@ -54,8 +54,8 @@ BOOST_AUTO_TEST_CASE (generate_certupdate)
 BOOST_AUTO_TEST_CASE (generate_certtransfer)
 {
 	printf("Running generate_certtransfer...\n");
-	GenerateBlocks(200, "node2");
-	GenerateBlocks(200, "node3");
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 	AliasNew("node1", "jagcert1", "changeddata1");
 	AliasNew("node2", "jagcert2", "changeddata2");
 	AliasNew("node3", "jagcert3", "changeddata3");
@@ -176,7 +176,7 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		// we can find it as normal first
 		BOOST_CHECK_EQUAL(CertFilter("node1", certguid, "No"), true);
 		// then we let the service expire
-		GenerateBlocks(100);
+		GenerateBlocks(5);
 		StartNode("node2");
 		// now we shouldn't be able to search it
 		BOOST_CHECK_EQUAL(CertFilter("node1", certguid, "No"), false);
