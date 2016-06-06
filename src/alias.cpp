@@ -26,7 +26,6 @@
 #include <boost/foreach.hpp>
 #include <boost/thread.hpp>
 #include <boost/algorithm/hex.hpp>
-#include <limits>
 using namespace std;
 CAliasDB *paliasdb = NULL;
 COfferDB *pofferdb = NULL;
@@ -109,42 +108,82 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(alias.nHeight))
+		CCoinsViewCache &view = *pcoinsTip;
+		const CCoins* coins = view.AccessCoins(alias.txHash);
+		if (coins)
 		{
-			nHeight = alias.nHeight + GetAliasExpirationDepth();
-			return true;
+			if(IsSys21Fork(coins->nHeight))
+			{
+				// ensure we aren't pruning SYS_RATES, SYS_BAN or SYS_CATEGORY
+				uint256 hashBlock;
+				CTransaction tx;
+				if(GetTransaction(alias.txHash, tx, Params().GetConsensus(), hashBlock, true))
+				{
+					vector<vector<unsigned char> > vvch;
+					int op, nOut;
+					if(DecodeAliasTx(tx, op, nOut, vvch))
+					{
+						if(vvch[0] != vchFromString("SYS_RATES") && vvch[0] != vchFromString("SYS_BAN") && vvch[0] != vchFromString("SYS_CATEGORY"))
+						{
+							nHeight = coins->nHeight + GetAliasExpirationDepth();
+							return true;
+						}
+					}
+				}
+			}
 		}
+
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(offer.nHeight))
+		CCoinsViewCache &view = *pcoinsTip;
+		const CCoins* coins = view.AccessCoins(offer.txHash);
+		if (coins)
 		{
-			nHeight = offer.nHeight + GetOfferExpirationDepth();
-			return true;
+			if(IsSys21Fork(coins->nHeight))
+			{
+				nHeight = coins->nHeight + GetOfferExpirationDepth();
+				return true;
+			}
 		}
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(cert.nHeight))
+		CCoinsViewCache &view = *pcoinsTip;
+		const CCoins* coins = view.AccessCoins(cert.txHash);
+		if (coins)
 		{
-			nHeight = cert.nHeight + GetCertExpirationDepth();
-			return true;
+			if(IsSys21Fork(coins->nHeight))
+			{
+				nHeight = coins->nHeight + GetCertExpirationDepth();
+				return true;
+			}
 		}
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(escrow.nHeight))
+		CCoinsViewCache &view = *pcoinsTip;
+		const CCoins* coins = view.AccessCoins(escrow.txHash);
+		if (coins)
 		{
-			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
-			return true;
+			if(IsSys21Fork(coins->nHeight))
+			{
+				nHeight = coins->nHeight + GetEscrowExpirationDepth();
+				return true;
+			}
 		}
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(message.nHeight))
+		CCoinsViewCache &view = *pcoinsTip;
+		const CCoins* coins = view.AccessCoins(message.txHash);
+		if (coins)
 		{
-			nHeight = message.nHeight + GetMessageExpirationDepth();
-			return true;
+			if(IsSys21Fork(coins->nHeight))
+			{
+				nHeight = coins->nHeight + GetMessageExpirationDepth();
+				return true;
+			}
 		}
 	}
 
@@ -839,14 +878,8 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theAlias.nRating = 0;
 			theAlias.nRatingCount = 0;
 		}
-		if(vvchArgs[0] == vchFromString("SYS_BAN") ||
-				vvchArgs[0] == vchFromString("SYS_CATEGORY")  ||
-				vvchArgs[0] == vchFromString("SYS_RATES"))
-		{
-			theAlias.nHeight = std::numeric_limits<int>::max() - GetAliasExpirationDepth();
-		}
-		else
-			theAlias.nHeight = nHeight;
+
+		theAlias.nHeight = nHeight;
 		theAlias.txHash = tx.GetHash();
 		PutToAliasList(vtxPos, theAlias);
 		CPubKey PubKey(theAlias.vchPubKey);
@@ -977,6 +1010,7 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string
         try {
 			if (pcursor->GetKey(key) && key.first == "namei") {
             	vector<unsigned char> vchName = key.second;
+				
                 vector<CAliasIndex> vtxPos;
 				pcursor->GetValue(vtxPos);
 				
@@ -1037,11 +1071,14 @@ bool GetTxOfAlias(const vector<unsigned char> &vchName,
 		return false;
 	txPos = vtxPos.back();
 	int nHeight = txPos.nHeight;
-	if ((nHeight + GetAliasExpirationDepth())
-			< chainActive.Tip()->nHeight) {
-		string name = stringFromVch(vchName);
-		LogPrintf("GetTxOfAlias(%s) : expired", name.c_str());
-		return false;
+	if(vchName != vchFromString("SYS_RATES") && vchName != vchFromString("SYS_BAN") && vchName != vchFromString("SYS_CATEGORY"))
+	{
+		if (nHeight + GetAliasExpirationDepth()
+				< chainActive.Tip()->nHeight) {
+			string name = stringFromVch(vchName);
+			LogPrintf("GetTxOfAlias(%s) : expired", name.c_str());
+			return false;
+		}
 	}
 
 	if (!GetSyscoinTransaction(nHeight, txPos.txHash, tx, Params().GetConsensus()))
@@ -1317,14 +1354,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 
     // build alias
     CAliasIndex newAlias;
-	if(vchName == vchFromString("SYS_BAN") ||
-			vchName == vchFromString("SYS_CATEGORY")  ||
-			vchName == vchFromString("SYS_RATES"))
-	{
-		newAlias.nHeight = std::numeric_limits<int>::max() - GetAliasExpirationDepth();
-	}
-	else
-		newAlias.nHeight = chainActive.Tip()->nHeight;
+	newAlias.nHeight = chainActive.Tip()->nHeight;
 	newAlias.vchPubKey = vchPubKey;
 	newAlias.vchPublicValue = vchPublicValue;
 	newAlias.vchPrivateValue = vchPrivateValue;
@@ -1424,14 +1454,8 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 
 	CAliasIndex copyAlias = theAlias;
 	theAlias.ClearAlias();
-	if(vchName == vchFromString("SYS_BAN") ||
-			vchName == vchFromString("SYS_CATEGORY")  ||
-			vchName == vchFromString("SYS_RATES"))
-	{
-		theAlias.nHeight = std::numeric_limits<int>::max() - GetAliasExpirationDepth();
-	}
-	else
-		theAlias.nHeight = chainActive.Tip()->nHeight;
+
+	theAlias.nHeight = chainActive.Tip()->nHeight;
 	if(copyAlias.vchPublicValue != vchPublicValue)
 		theAlias.vchPublicValue = vchPublicValue;
 	if(copyAlias.vchPrivateValue != vchPrivateValue)
@@ -1559,10 +1583,13 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("rating", (int)rating));
 			oName.push_back(Pair("ratingcount", alias.nRatingCount));
 			expired_block = nHeight + GetAliasExpirationDepth();
-            if(expired_block < chainActive.Tip()->nHeight)
+			if(vchName != vchFromString("SYS_RATES") && vchName != vchFromString("SYS_BAN") && vchName != vchFromString("SYS_CATEGORY"))
 			{
-				expired = 1;
-			}  
+				if(expired_block < chainActive.Tip()->nHeight)
+				{
+					expired = 1;
+				}
+			}
 			expires_in = expired_block - chainActive.Tip()->nHeight;
 			oName.push_back(Pair("expires_in", expires_in));
 			oName.push_back(Pair("expires_on", expired_block));
@@ -1727,10 +1754,13 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("ratingcount", alias.nRatingCount));
         oName.push_back(Pair("lastupdate_height", nHeight));
 		expired_block = nHeight + GetAliasExpirationDepth();
-        if(expired_block < chainActive.Tip()->nHeight)
+		if(vchName != vchFromString("SYS_RATES") && vchName != vchFromString("SYS_BAN") && vchName != vchFromString("SYS_CATEGORY"))
 		{
-			expired = 1;
-		}  
+			if(expired_block < chainActive.Tip()->nHeight)
+			{
+				expired = 1;
+			}  
+		}
 		expires_in = expired_block - chainActive.Tip()->nHeight;
 		oName.push_back(Pair("expires_in", expires_in));
 		oName.push_back(Pair("expires_on", expired_block));
@@ -1803,10 +1833,13 @@ UniValue aliashistory(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("rating", (int)rating));
 			oName.push_back(Pair("ratingcount", txPos2.nRatingCount));
 			expired_block = nHeight + GetAliasExpirationDepth();
-            if(expired_block < chainActive.Tip()->nHeight)
+			if(vchName != vchFromString("SYS_RATES") && vchName != vchFromString("SYS_BAN") && vchName != vchFromString("SYS_CATEGORY"))
 			{
-				expired = 1;
-			}  
+				if(expired_block < chainActive.Tip()->nHeight)
+				{
+					expired = 1;
+				} 
+			}
 			expires_in = expired_block - chainActive.Tip()->nHeight;
 			oName.push_back(Pair("expires_in", expires_in));
 			oName.push_back(Pair("expires_on", expired_block));
