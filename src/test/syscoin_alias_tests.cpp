@@ -207,21 +207,21 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// ensure you can still update before expiry
 		AliasUpdate("node1", "aliasprune1", "newdata","privdata");
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
 		// generate 79 more blocks (20 get mined from update)
 		GenerateBlocks(79);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		AliasUpdate("node1", "aliasprune1", "newdata1","privdata");
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
 
 		GenerateBlocks(100);
 		// now it should be expired
 		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasupdate aliasprune1 newdata2 privdata"), runtime_error);
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasinfo aliasprune1"));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
