@@ -121,8 +121,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
-		else
-			return true;
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
@@ -137,8 +135,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
-		else
-			return true;
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
@@ -152,8 +148,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
-		else
-			return true;
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
@@ -168,8 +162,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
-		else
-			return true;
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
@@ -184,8 +176,6 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
-		else
-			return true;
 	}
 
 	return false;
