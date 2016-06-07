@@ -113,11 +113,10 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 		vector<CAliasIndex> vtxPos;
 		if (paliasdb->ReadAlias(alias.vchName, vtxPos))
 		{
-			alias = vtxPos.back();
 			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
-				nHeight = alias.nHeight + GetAliasExpirationDepth();
+				nHeight = vtxPos.back().nHeight + GetAliasExpirationDepth();
 				return true;	
 			}		
 		}
@@ -127,11 +126,10 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 		vector<COffer> vtxPos;
 		if (pofferdb->ReadOffer(offer.vchOffer, vtxPos))
 		{
-			offer = vtxPos.back();
 			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
-				nHeight = offer.nHeight + GetOfferExpirationDepth();
+				nHeight = vtxPos.back().nHeight + GetOfferExpirationDepth();
 				return true;	
 			}		
 		}
@@ -144,7 +142,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
-				nHeight = cert.nHeight + GetCertExpirationDepth();
+				nHeight = vtxPos.back().nHeight + GetCertExpirationDepth();
 				return true;	
 			}		
 		}
@@ -154,11 +152,10 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 		vector<CEscrow> vtxPos;
 		if (pescrowdb->ReadEscrow(escrow.vchEscrow, vtxPos))
 		{
-			escrow = vtxPos.back();
 			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
-				nHeight = escrow.nHeight + GetEscrowExpirationDepth();
+				nHeight = vtxPos.back().nHeight + GetEscrowExpirationDepth();
 				return true;	
 			}		
 		}
@@ -168,11 +165,10 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 		vector<CMessage> vtxPos;
 		if (pmessagedb->ReadMessage(message.vchMessage, vtxPos))
 		{
-			message = vtxPos.back();
 			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
-				nHeight = message.nHeight + GetMessageExpirationDepth();
+				nHeight = vtxPos.back().nHeight + GetMessageExpirationDepth();
 				return true;	
 			}		
 		}
