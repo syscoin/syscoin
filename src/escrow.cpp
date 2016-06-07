@@ -408,7 +408,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 	{
 		return error("escrow offeraccept guid not allowed");
 	}
-	if(!theEscrow.vchMessage.empty() && theEscrow.vchMessage.empty() != vvchArgs[0])
+	if(!theEscrow.vchMessage.empty() && theEscrow.vchMessage != vvchArgs[0])
 	{
 		return error("guid in data output doesn't match guid in tx");
 	}

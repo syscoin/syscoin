@@ -174,7 +174,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	else if(message.UnserializeFromData(vchData))
 	{
 		vector<CMessage> vtxPos;
-		if (pofferdb->ReadMessage(message.vchMessage, vtxPos))
+		if (pmessagedb->ReadMessage(message.vchMessage, vtxPos))
 		{
 			message = vtxPos.back();
 			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
@@ -805,7 +805,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("alias pub key invalid length");
 	}
-	if(!theAlias.vchName.empty() && theAlias.vchName.empty() != vvchArgs[0])
+	if(!theAlias.vchName.empty() && theAlias.vchName != vvchArgs[0])
 	{
 		return error("guid in data output doesn't match guid in tx");
 	}

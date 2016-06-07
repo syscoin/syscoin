@@ -297,7 +297,7 @@ bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<v
 	{
 		return error("message data from too big");
 	}
-	if(!theMessage.vchMessage.empty() && theMessage.vchMessage.empty() != vvchArgs[0])
+	if(!theMessage.vchMessage.empty() && theMessage.vchMessage != vvchArgs[0])
 	{
 		return error("guid in data output doesn't match guid in tx");
 	}

@@ -355,6 +355,10 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 	{
 		return error("cert pub key invalid length");
 	}
+	if(!theCert.vchCert.empty() && theCert.vchCert != vvchArgs[0])
+	{
+		return error("guid in data output doesn't match guid in tx");
+	}
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("cert hex guid too long");
 	vector<CAliasIndex> vtxAliasPos;

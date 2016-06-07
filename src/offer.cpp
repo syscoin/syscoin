@@ -599,7 +599,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("offer has too many affiliate entries, only one allowed per tx");
 	}
-	if(!theOffer.vchOffer.empty() && theOffer.vchOffer.empty() != vvchArgs[0])
+	if(!theOffer.vchOffer.empty() && theOffer.vchOffer != vvchArgs[0])
 	{
 		return error("guid in data output doesn't match guid in tx");
 	}
