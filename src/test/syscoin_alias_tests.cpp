@@ -199,8 +199,8 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		StopNode("node3");
 		// create a new service
 		AliasNew("node1", "aliasprune1", "data");
-		// make 89 blocks (10 get mined with new)
-		GenerateBlocks(89);
+		// make 79 blocks (20 get mined with new)
+		GenerateBlocks(79);
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
@@ -209,8 +209,8 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), true);
-		// generate 89 more blocks (10 get mined from update)
-		GenerateBlocks(89);
+		// generate 79 more blocks (20 get mined from update)
+		GenerateBlocks(79);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		AliasUpdate("node1", "aliasprune1", "newdata1","privdata");
 		// you can search it still on node1/node2
