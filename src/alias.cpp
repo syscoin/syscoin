@@ -805,7 +805,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("alias pub key invalid length");
 	}
-	if(!theAlias.vchAlias.empty() && theAlias.vchAlias.empty() != vvchArgs[0])
+	if(!theAlias.vchName.empty() && theAlias.vchName.empty() != vvchArgs[0])
 	{
 		return error("guid in data output doesn't match guid in tx");
 	}

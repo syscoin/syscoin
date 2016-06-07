@@ -172,7 +172,7 @@ public:
 		&& a.buyerFeedback == b.buyerFeedback
 		&& a.sellerFeedback == b.sellerFeedback
 		&& a.arbiterFeedback == b.arbiterFeedback
-		&& a.vchEscrow == b.vchEscrow;
+		&& a.vchEscrow == b.vchEscrow
         );
     }
 
