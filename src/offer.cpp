@@ -599,7 +599,10 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("offer has too many affiliate entries, only one allowed per tx");
 	}
-
+	if(!theOffer.vchOffer.empty() && theOffer.vchOffer.empty() != vvchArgs[0])
+	{
+		return error("guid in data output doesn't match guid in tx");
+	}
 	if (vvchArgs[0].size() > MAX_NAME_LENGTH)
 		return error("offer hex guid too long");
 
@@ -1327,6 +1330,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 		newOffer.vchPubKey = alias.vchPubKey;
 	else
 		newOffer.vchPubKey = theCert.vchPubKey;
+	newOffer.vchOffer = vchOffer;
 	newOffer.sCategory = vchCat;
 	newOffer.sTitle = vchTitle;
 	newOffer.sDescription = vchDesc;
@@ -1513,6 +1517,7 @@ UniValue offernew_nocheck(const UniValue& params, bool fHelp) {
 		newOffer.vchPubKey = alias.vchPubKey;
 	else
 		newOffer.vchPubKey = theCert.vchPubKey;
+	newOffer.vchOffer = vchOffer;
 	newOffer.sCategory = vchCat;
 	newOffer.sTitle = vchTitle;
 	newOffer.sDescription = vchDesc;
@@ -1691,6 +1696,7 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 	// unserialize offer from txn, serialize back
 	// build offer
 	COffer newOffer;
+	newOffer.vchOffer = vchOffer;
 	newOffer.vchPubKey = alias.vchPubKey;
 	newOffer.sDescription = vchDesc;
 	newOffer.SetPrice(price);
@@ -1834,6 +1840,7 @@ UniValue offerlink_nocheck(const UniValue& params, bool fHelp) {
 	// unserialize offer from txn, serialize back
 	// build offer
 	COffer newOffer;
+	newOffer.vchOffer = vchOffer;
 	newOffer.vchPubKey = alias.vchPubKey;
 	newOffer.sDescription = vchDesc;
 	newOffer.SetPrice(price);

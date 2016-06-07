@@ -25,6 +25,7 @@ CScript RemoveCertScriptPrefix(const CScript& scriptIn);
 extern bool IsSys21Fork(const uint64_t& nHeight);
 class CCert {
 public:
+	std::vector<unsigned char> vchCert;
 	std::vector<unsigned char> vchPubKey;
     std::vector<unsigned char> vchTitle;
     std::vector<unsigned char> vchData;
@@ -41,6 +42,7 @@ public:
     }
 	void ClearCert()
 	{
+		vchCert.clear();
 		vchData.clear();
 		vchTitle.clear();
 	}
@@ -55,6 +57,7 @@ public:
 		READWRITE(bPrivate);
 		if(IsSys21Fork(nHeight))
 		{
+			READWRITE(vchCert);
 			READWRITE(safetyLevel);
 		}		
 	}
@@ -67,6 +70,7 @@ public:
 		&& a.vchPubKey == b.vchPubKey
 		&& a.bPrivate == b.bPrivate
 		&& a.safetyLevel == b.safetyLevel
+		&& a.vchCert == b.vchCert
         );
     }
 
@@ -78,6 +82,7 @@ public:
 		vchPubKey = b.vchPubKey;
 		bPrivate = b.bPrivate;
 		safetyLevel = b.safetyLevel;
+		vchCert = b.vchCert;
         return *this;
     }
 
@@ -85,8 +90,8 @@ public:
         return !(a == b);
     }
 
-    void SetNull() { safetyLevel = 0; nHeight = 0; txHash.SetNull(); vchPubKey.clear(); bPrivate = false; vchTitle.clear(); vchData.clear();}
-    bool IsNull() const { return (safetyLevel == 0 && txHash.IsNull() &&  nHeight == 0 && vchPubKey.empty() && vchData.empty() && vchTitle.empty() && vchPubKey.empty()); }
+    void SetNull() { vchCert.clear(); safetyLevel = 0; nHeight = 0; txHash.SetNull(); vchPubKey.clear(); bPrivate = false; vchTitle.clear(); vchData.clear();}
+    bool IsNull() const { return (vchCert.empty() && safetyLevel == 0 && txHash.IsNull() &&  nHeight == 0 && vchPubKey.empty() && vchData.empty() && vchTitle.empty() && vchPubKey.empty()); }
     bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();

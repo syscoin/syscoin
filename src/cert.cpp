@@ -521,6 +521,7 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	// calculate net
     // build cert object
     CCert newCert;
+	newCert.vchCert = vchCert;
     newCert.vchTitle = vchTitle;
 	newCert.vchData = vchData;
 	newCert.nHeight = chainActive.Tip()->nHeight;

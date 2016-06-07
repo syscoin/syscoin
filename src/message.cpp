@@ -297,6 +297,10 @@ bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<v
 	{
 		return error("message data from too big");
 	}
+	if(!theMessage.vchMessage.empty() && theMessage.vchMessage.empty() != vvchArgs[0])
+	{
+		return error("guid in data output doesn't match guid in tx");
+	}
 	if(fJustCheck)
 	{
 
@@ -459,6 +463,7 @@ UniValue messagenew(const UniValue& params, bool fHelp) {
 
     // build message
     CMessage newMessage;
+	newMessage.vchMessage = vchMessage;
 	newMessage.vchMessageFrom = vchFromString(strCipherTextFrom);
 	newMessage.vchMessageTo = vchFromString(strCipherTextTo);
 	newMessage.vchSubject = vchMySubject;

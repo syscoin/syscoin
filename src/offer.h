@@ -188,6 +188,7 @@ public:
 class COffer {
 
 public:
+	std::vector<unsigned char> vchOffer;
 	std::vector<unsigned char> vchPubKey;
     uint256 txHash;
     uint64_t nHeight;
@@ -219,6 +220,7 @@ public:
 	// clear everything but the necessary information for an offer to prepare it to go into a txn
 	void ClearOffer()
 	{
+		vchOffer.clear();
 		accept.SetNull();
 		linkWhitelist.SetNull();
 		offerLinks.clear();
@@ -255,6 +257,7 @@ public:
 			READWRITE(bOnlyAcceptBTC);
 			if(IsSys21Fork(nHeight))
 			{
+				READWRITE(vchOffer);
 				READWRITE(safetyLevel);
 				READWRITE(vchGeoLocation);
 			}
@@ -327,7 +330,7 @@ public:
 		&& a.vchAliasPeg == b.vchAliasPeg
 		&& a.safetyLevel == b.safetyLevel
 		&& a.vchGeoLocation == b.vchGeoLocation
-		
+		&& a.vchOffer == b.vchOffer
         );
     }
 
@@ -352,6 +355,7 @@ public:
 		vchAliasPeg = b.vchAliasPeg;
 		safetyLevel = b.safetyLevel;
 		vchGeoLocation = b.vchGeoLocation;
+		vchOffer = b.vchOffer;
         return *this;
     }
 
@@ -359,8 +363,8 @@ public:
         return !(a == b);
     }
     
-    void SetNull() { safetyLevel = nHeight = nPrice = nQty = 0; txHash.SetNull(); bPrivate = false; bOnlyAcceptBTC = false; accept.SetNull(); vchAliasPeg.clear(); sTitle.clear(); sDescription.clear();vchLinkOffer.clear();linkWhitelist.SetNull();sCurrencyCode.clear();offerLinks.clear();nCommission=0;vchPubKey.clear();vchCert.clear();vchGeoLocation.clear();}
-    bool IsNull() const { return (safetyLevel == 0 && vchPubKey.empty() && txHash.IsNull() && nHeight == 0 && nPrice == 0 && nQty == 0 &&  linkWhitelist.IsNull() && vchAliasPeg.empty() && offerLinks.empty() && vchGeoLocation.empty() && nCommission == 0 && bPrivate == false && bOnlyAcceptBTC == false); }
+    void SetNull() { vchOffer.clear(); safetyLevel = nHeight = nPrice = nQty = 0; txHash.SetNull(); bPrivate = false; bOnlyAcceptBTC = false; accept.SetNull(); vchAliasPeg.clear(); sTitle.clear(); sDescription.clear();vchLinkOffer.clear();linkWhitelist.SetNull();sCurrencyCode.clear();offerLinks.clear();nCommission=0;vchPubKey.clear();vchCert.clear();vchGeoLocation.clear();}
+    bool IsNull() const { return (vchOffer.empty() && safetyLevel == 0 && vchPubKey.empty() && txHash.IsNull() && nHeight == 0 && nPrice == 0 && nQty == 0 &&  linkWhitelist.IsNull() && vchAliasPeg.empty() && offerLinks.empty() && vchGeoLocation.empty() && nCommission == 0 && bPrivate == false && bOnlyAcceptBTC == false); }
 
     bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);

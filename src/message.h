@@ -21,12 +21,13 @@ int IndexOfMessageOutput(const CTransaction& tx);
 int GetMessageExpirationDepth();
 bool ExtractMessageAddress(const CScript& script, std::string& address);
 CScript RemoveMessageScriptPrefix(const CScript& scriptIn);
-
+extern bool IsSys21Fork(const uint64_t& nHeight);
 std::string messageFromOp(int op);
 
 
 class CMessage {
 public:
+	std::vector<unsigned char> vchMessage;
 	std::vector<unsigned char> vchPubKeyTo;
 	std::vector<unsigned char> vchPubKeyFrom;
 	std::vector<unsigned char> vchSubject;
@@ -51,6 +52,11 @@ public:
 		READWRITE(vchMessageFrom);
 		READWRITE(txHash);
 		READWRITE(VARINT(nHeight));
+		if(IsSys21Fork(nHeight))
+		{
+			READWRITE(vchMessage);
+		}
+		
 	}
 
     friend bool operator==(const CMessage &a, const CMessage &b) {
@@ -62,6 +68,7 @@ public:
 		&& a.vchMessageFrom == b.vchMessageFrom
 		&& a.txHash == b.txHash
 		&& a.nHeight == b.nHeight
+		&& a.vchMessage == b.vchMessage
         );
     }
 
@@ -73,6 +80,7 @@ public:
 		vchMessageFrom = b.vchMessageFrom;
 		txHash = b.txHash;
 		nHeight = b.nHeight;
+		vchMessage = b.vchMessage;
         return *this;
     }
 
@@ -80,8 +88,8 @@ public:
         return !(a == b);
     }
 
-    void SetNull() { txHash.SetNull(); nHeight = 0; vchPubKeyTo.clear(); vchPubKeyFrom.clear(); vchSubject.clear(); vchMessageTo.clear();vchMessageFrom.clear();}
-    bool IsNull() const { return (txHash.IsNull() && nHeight == 0 && vchPubKeyTo.empty() && vchPubKeyFrom.empty()); }
+    void SetNull() { vchMessage.clear(); txHash.SetNull(); nHeight = 0; vchPubKeyTo.clear(); vchPubKeyFrom.clear(); vchSubject.clear(); vchMessageTo.clear();vchMessageFrom.clear();}
+    bool IsNull() const { return (vchMessage.empty() && txHash.IsNull() && nHeight == 0 && vchPubKeyTo.empty() && vchPubKeyFrom.empty()); }
     bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();

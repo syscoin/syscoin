@@ -407,7 +407,11 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 	if(theEscrow.vchOfferAcceptLink.size() > 0)
 	{
 		return error("escrow offeraccept guid not allowed");
-	}		
+	}
+	if(!theEscrow.vchMessage.empty() && theEscrow.vchMessage.empty() != vvchArgs[0])
+	{
+		return error("guid in data output doesn't match guid in tx");
+	}
 	if(fJustCheck)
 	{
 		switch (op) {
@@ -940,6 +944,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	// send to seller/arbiter so they can track the escrow through GUI
     // build escrow
     CEscrow newEscrow;
+	newEscrow.vchEscrow = vchEscrow;
 	newEscrow.vchBuyerKey = buyeralias.vchPubKey;
 	newEscrow.vchArbiterKey = arbiteralias.vchPubKey;
 	newEscrow.vchWhitelistAlias = vchWhitelistAlias;

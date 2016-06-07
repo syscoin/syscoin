@@ -108,43 +108,84 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	const string &chainName = ChainNameFromCommandLine();
 	if(alias.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(alias.nHeight))
+		if(alias.vchName == vchFromString("SYS_RATES") || alias.vchName == vchFromString("SYS_BAN") || alias.vchName == vchFromString("SYS_CATEGORY"))
+			return false;
+		vector<CAliasIndex> vtxPos;
+		if (paliasdb->ReadAlias(alias.vchName, vtxPos))
 		{
-			nHeight = alias.nHeight + GetAliasExpirationDepth();
-			return true;			
-		}		
+			alias = vtxPos.back();
+			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
+			if(IsSys21Fork(vtxPos.front().nHeight))
+			{
+				nHeight = alias.nHeight + GetAliasExpirationDepth();
+				return true;	
+			}		
+		}
+		else
+			return true;
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(offer.nHeight))
+		vector<COffer> vtxPos;
+		if (pofferdb->ReadOffer(offer.vchOffer, vtxPos))
 		{
-			nHeight = offer.nHeight + GetOfferExpirationDepth();
-			return true;			
+			offer = vtxPos.back();
+			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
+			if(IsSys21Fork(vtxPos.front().nHeight))
+			{
+				nHeight = offer.nHeight + GetOfferExpirationDepth();
+				return true;	
+			}		
 		}
+		else
+			return true;
 	}
 	else if(cert.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(cert.nHeight))
+		vector<CCert> vtxPos;
+		if (pcertdb->ReadCert(cert.vchCert, vtxPos))
 		{
-			nHeight = cert.nHeight + GetCertExpirationDepth();
-			return true;			
+			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
+			if(IsSys21Fork(vtxPos.front().nHeight))
+			{
+				nHeight = cert.nHeight + GetCertExpirationDepth();
+				return true;	
+			}		
 		}
+		else
+			return true;
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(escrow.nHeight))
+		vector<CEscrow> vtxPos;
+		if (pescrowdb->ReadEscrow(escrow.vchEscrow, vtxPos))
 		{
-			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
-			return true;			
+			escrow = vtxPos.back();
+			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
+			if(IsSys21Fork(vtxPos.front().nHeight))
+			{
+				nHeight = escrow.nHeight + GetEscrowExpirationDepth();
+				return true;	
+			}		
 		}
+		else
+			return true;
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
-		if(IsSys21Fork(message.nHeight))
+		vector<CMessage> vtxPos;
+		if (pofferdb->ReadMessage(message.vchMessage, vtxPos))
 		{
-			nHeight = message.nHeight + GetMessageExpirationDepth();
-			return true;			
+			message = vtxPos.back();
+			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
+			if(IsSys21Fork(vtxPos.front().nHeight))
+			{
+				nHeight = message.nHeight + GetMessageExpirationDepth();
+				return true;	
+			}		
 		}
+		else
+			return true;
 	}
 
 	return false;
@@ -764,6 +805,10 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		return error("alias pub key invalid length");
 	}
+	if(!theAlias.vchAlias.empty() && theAlias.vchAlias.empty() != vvchArgs[0])
+	{
+		return error("guid in data output doesn't match guid in tx");
+	}
 	if (vvchArgs[0].size() > MAX_NAME_LENGTH)
 		return error("alias hex guid too long");
 	vector<CAliasIndex> vtxPos;
@@ -1314,6 +1359,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 
     // build alias
     CAliasIndex newAlias;
+	newAlias.vchName = vchName;
 	newAlias.nHeight = chainActive.Tip()->nHeight;
 	newAlias.vchPubKey = vchPubKey;
 	newAlias.vchPublicValue = vchPublicValue;
