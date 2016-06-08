@@ -1086,7 +1086,7 @@ bool GetTxOfAlias(const vector<unsigned char> &vchName,
 	int nHeight = txPos.nHeight;
 	if(vchName != vchFromString("SYS_RATES") && vchName != vchFromString("SYS_BAN") && vchName != vchFromString("SYS_CATEGORY"))
 	{
-		if (!skipExpiresCheck &&& (nHeight + GetAliasExpirationDepth()
+		if (!skipExpiresCheck && (nHeight + GetAliasExpirationDepth()
 				< chainActive.Tip()->nHeight)) {
 			string name = stringFromVch(vchName);
 			LogPrintf("GetTxOfAlias(%s) : expired", name.c_str());
