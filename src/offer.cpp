@@ -2301,29 +2301,37 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	CCert theCert;
 	CTransaction txCert;
 	const CWalletTx *wtxCertIn = NULL;
-	// make sure this cert is still valid
-	if (GetTxOfCert( vchCert, theCert, txCert))
+	if(!vchCert.empty())
 	{
-		// check for existing cert updates
-		if (ExistsInMempool(vchCert, OP_CERT_UPDATE) || ExistsInMempool(vchCert, OP_CERT_TRANSFER)) {
-			throw runtime_error("there are pending operations on that cert");
-		}
-		vector<vector<unsigned char> > vvch;
-		wtxCertIn = pwalletMain->GetWalletTx(txCert.GetHash());
-		// make sure its in your wallet (you control this cert)		
-		if (!IsSyscoinTxMine(txCert, "cert") || wtxCertIn == NULL) 
-			throw runtime_error("Cannot sell this certificate, it is not yours!");
-		int op, nOut;
-		if(DecodeCertTx(txCert, op, nOut, vvch))
-			vchCert = vvch[0];
-
-		CPubKey currentCertKey(theCert.vchPubKey);
-		scriptPubKeyCertOrig = GetScriptForDestination(currentCertKey.GetID());
-		if(!theOffer.vchLinkOffer.empty())
+		// make sure this cert is still valid
+		if (GetTxOfCert( vchCert, theCert, txCert))
 		{
-			throw runtime_error("cannot sell a cert as a linked offer");
+			// check for existing cert updates
+			if (ExistsInMempool(vchCert, OP_CERT_UPDATE) || ExistsInMempool(vchCert, OP_CERT_TRANSFER)) {
+				throw runtime_error("there are pending operations on that cert");
+			}
+			vector<vector<unsigned char> > vvch;
+			wtxCertIn = pwalletMain->GetWalletTx(txCert.GetHash());
+			// make sure its in your wallet (you control this cert)		
+			if (!IsSyscoinTxMine(txCert, "cert") || wtxCertIn == NULL) 
+				throw runtime_error("Cannot sell this certificate, it is not yours!");
+			int op, nOut;
+			if(DecodeCertTx(txCert, op, nOut, vvch))
+				vchCert = vvch[0];
+
+			CPubKey currentCertKey(theCert.vchPubKey);
+			scriptPubKeyCertOrig = GetScriptForDestination(currentCertKey.GetID());
+			if(!theOffer.vchLinkOffer.empty())
+			{
+				throw runtime_error("cannot sell a cert as a linked offer");
+			}
+		}
+		else
+		{
+			throw runtime_error("cannot update offer with a cert that doesn't exist");
 		}
 	}
+	
 
 
 	scriptPubKeyCert << CScript::EncodeOP_N(OP_CERT_UPDATE) << vchCert << OP_2DROP;
