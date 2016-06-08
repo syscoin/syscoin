@@ -327,7 +327,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 	string offerguid = OfferNew("node1", "selleralias4", "category", "title", "100", "0.01", "description", "USD");
 
 	// this will expire the offer
-	GenerateBlocks(100);
+	GenerateBlocks(101);
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: perform an accept on expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept buyeralias4 " + offerguid + " 1 message"), runtime_error);
@@ -360,10 +360,11 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offeraddwhitelist " + offerguid + " selleralias11 10"));
 
 	// this will expire the offer
-	GenerateBlocks(100);
+	GenerateBlocks(101);
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: remove whitelist item from expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerremovewhitelist " + offerguid + " selleralias11"), runtime_error);
+		GenerateBlocks(5);
 		// should fail: clear whitelist from expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerclearwhitelist " + offerguid), runtime_error);
 	#endif
@@ -394,12 +395,17 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: offer update on offer with expired cert
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
+		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate_nocheck SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
 		// should fail: offer accept on offer with expired cert
+		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept node2alias2 " + offerguid + " 1 message"), runtime_error);
-		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error)	;
+		GenerateBlocks(5);
+		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error);
 		// should fail: generate a cert offer using an expired cert
+		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
+		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);	
 	#endif
 }
@@ -461,6 +467,8 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	printf("Running generate_offerban...\n");
 	UniValue r;
 	GenerateBlocks(1);
+	// make sure alias doesn't expire 
+	AliasUpdate("node2", "selleralias15", "changeddata2");
 	// offer is safe to search
 	string offerguidsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "Yes");
 	// not safe to search
