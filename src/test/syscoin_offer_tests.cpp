@@ -155,6 +155,17 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 	#ifdef ENABLE_DEBUGRPC
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck selleralias6 " + offerguid + " 5 " + s1024bytes), runtime_error);
 	#endif
+	#ifdef ENABLE_DEBUGRPC
+		// ensure the alias doesn't expire
+		GenerateBlocks(40);
+		AliasUpdate("node2", "selleralias6", "changeddata1");
+		// let the offer expire
+		GenerateBlocks(51);
+		// should fail: try to link against an expired offer
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offerlink selleralias6 " + offerguid + " 5 newdescription"), runtime_error);
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offerlink_nocheck selleralias6 " + offerguid + " 5 newdescription"), runtime_error);
+	#endif
+	
 }
 
 BOOST_AUTO_TEST_CASE (generate_offernew_linkedofferexmode)
@@ -364,6 +375,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 	GenerateBlocks(40);
 	// ensure alias doesn't expire
 	AliasUpdate("node1", "selleralias10", "selleralias10", "data1");
+	AliasUpdate("node2", "selleralias11", "selleralias11", "data1");
 	// this will expire the offer
 	GenerateBlocks(51);
 	#ifdef ENABLE_DEBUGRPC

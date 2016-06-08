@@ -3038,7 +3038,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxOfferIn = NULL;
 	// if this is a linked offer accept, set the height to the first height so sys_rates price will match what it was at the time of the original accept
 	CTransaction tx;
-	GetTxOfOffer( vchOffer, theOffer, tx);
+	GetTxOfOffer( vchOffer, theOffer, tx, true);
 	if (!vchLinkOfferAcceptTxHash.empty())
 	{
 		uint256 linkTxHash(uint256S(stringFromVch(vchLinkOfferAcceptTxHash)));
@@ -3112,7 +3112,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	{
 		if(pofferdb->ExistsOffer(theOffer.vchLinkOffer))
 		{
-			GetTxOfOffer( theOffer.vchLinkOffer, linkedOffer, tmpTx);
+			GetTxOfOffer( theOffer.vchLinkOffer, linkedOffer, tmpTx, true);
 		}
 	}
 	COfferLinkWhitelistEntry foundAlias;
@@ -3126,7 +3126,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		vector<vector<unsigned char> > vvch;
 		COfferLinkWhitelistEntry& entry = theOffer.linkWhitelist.entries[i];
 		// make sure this alias is still valid
-		if (GetTxOfAlias(entry.aliasLinkVchRand, theAlias, txAlias))
+		if (GetTxOfAlias(entry.aliasLinkVchRand, theAlias, txAlias, true))
 		{
 			// make sure its in your wallet (you control this alias)
 			// if escrow has a whitelist alias attached, use that to get the offerlinkwhitelist entry, else check the seller's whitelist to see if we own any aliases from his whitelist
@@ -3182,7 +3182,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		CTransaction txCert;
 		CCert theCert;
 		// make sure this cert is still valid
-		GetTxOfCert( theOffer.vchCert, theCert, txCert);
+		GetTxOfCert( theOffer.vchCert, theCert, txCert, true);
 	}
 
 	// create accept
