@@ -468,7 +468,7 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	UniValue r;
 	GenerateBlocks(1);
 	// make sure alias doesn't expire 
-	AliasUpdate("node2", "selleralias15", "changeddata2");
+	AliasUpdate("node2", "selleralias15", "changeddata2", "privdata2");
 	// offer is safe to search
 	string offerguidsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "Yes");
 	// not safe to search
