@@ -358,9 +358,11 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 
 	// should succeed: offer seller adds affiliate to whitelist
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offeraddwhitelist " + offerguid + " selleralias11 10"));
-
+	GenerateBlocks(40);
+	// ensure alias doesn't expire
+	AliasUpdate("node1", "selleralias10", "selleralias10", "data1");
 	// this will expire the offer
-	GenerateBlocks(101);
+	GenerateBlocks(51);
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: remove whitelist item from expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerremovewhitelist " + offerguid + " selleralias11"), runtime_error);
@@ -389,6 +391,10 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	// generate a good cert offer - after this, 40 blocks to cert expire
 	string offerguid = OfferNew("node1", "node1alias2", "category", "title", "1", "0.05", "description", "USD", certguid);
 
+	// ensure aliases don't expire
+	AliasUpdate("node1", "node1alias2", "node1aliasdata1", "data2");
+	AliasUpdate("node2", "node2alias2", "node2aliasdata1", "data2");
+
 	// this expires the cert but not the offer
 	GenerateBlocks(51);
 	#ifdef ENABLE_DEBUGRPC
@@ -400,7 +406,10 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error);
 		// should fail: generate a cert offer using an expired cert
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
-		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);	
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
+		// should fail: generate an offer with expired cert
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias category title 1 0.05 description USD " + certguid), runtime_error);	
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES node1alias category title 1 0.05 description USD " + certguid), runtime_error);
 	#endif
 }
 

@@ -646,6 +646,9 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					if(theCert.vchPubKey != theOffer.vchPubKey)
 						return error("CheckOfferInputs() OP_OFFER_ACTIVATE: cert and offer pubkey's must match, this cert may already be linked to another offer");
 				}
+				else
+					return error("CheckOfferInputs() OP_OFFER_ACTIVATE: creating an offer with a cert that doesn't exist");
+
 			}	
 			if(!theOffer.vchLinkOffer.empty())
 			{
@@ -726,6 +729,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					if(theCert.vchPubKey != theOffer.vchPubKey)
 						return error("CheckOfferInputs() OP_OFFER_UPDATE: cert and offer pubkey mismatch");
 				}
+				else
+					return error("CheckOfferInputs() OP_OFFER_UPDATE: updating an offer with a cert that doesn't exist");
 			}
 			
 			break;
