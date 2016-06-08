@@ -158,7 +158,7 @@ BOOST_AUTO_TEST_CASE (generate_offernew_linkedoffer)
 	#ifdef ENABLE_DEBUGRPC
 		// ensure the alias doesn't expire
 		GenerateBlocks(40);
-		AliasUpdate("node2", "selleralias6", "changeddata1");
+		AliasUpdate("node2", "selleralias6", "changeddata1", "privdata");
 		// let the offer expire
 		GenerateBlocks(51);
 		// should fail: try to link against an expired offer
