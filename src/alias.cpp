@@ -194,7 +194,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 		}
 		else if(IsSys21Fork(message.nHeight))
 		{
-			nHeight = message.nHeight + GetMesaageExpirationDepth();
+			nHeight = message.nHeight + GetMessageExpirationDepth();
 			return true;
 		}
 	}
