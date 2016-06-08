@@ -376,7 +376,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 			if ( !foundCert || !IsCertOp(prevOp))
 				return error("CheckCertInputs(): certupdate previous op is invalid");
 			if (vvchPrevArgs[0] != vvchArgs[0])
-				return error("CheckCertInputs(): certupdate prev cert mismatch vvchPrevArgs[0]: %s, vvchArgs[0] %s", stringFromVch(vvchPrevArgs[0]).c_str(), stringFromVch(vvchArgs[0]).c_str());
+				return error("CheckCertInputs(): certupdate prev cert mismatch vvchPrevArgs[0]: %s, vvchArgs[0] %s", stringFromVch(vvchPrevArgs[0]).c_str(), stringFromVch(vvchArgs[0]).c_str());	
 			break;
 
 		case OP_CERT_TRANSFER:
@@ -393,28 +393,33 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 	}
 
     if (!fJustCheck ) {
-		// if not an certnew, load the cert data from the DB
-		vector<CCert> vtxPos;
-		if (pcertdb->ExistsCert(vvchArgs[0])) {
-			if (!pcertdb->ReadCert(vvchArgs[0], vtxPos))
-				return error(
-						"CheckCertInputs() : failed to read from cert DB");
-		}
-		if(!vtxPos.empty())
+		if(op != OP_CERT_ACTIVATE) 
 		{
-			if(theCert.IsNull())
-				theCert = vtxPos.back();
-			else
-			{
-				const CCert& dbCert = vtxPos.back();
-				if(theCert.vchData.empty())
-					theCert.vchData = dbCert.vchData;
-				if(theCert.vchTitle.empty())
-					theCert.vchTitle = dbCert.vchTitle;
-				// user can't update safety level after creation
-				theCert.safetyLevel = dbCert.safetyLevel;
-
+			// if not an certnew, load the cert data from the DB
+			vector<CCert> vtxPos;
+			if (pcertdb->ExistsCert(vvchArgs[0])) {
+				if (!pcertdb->ReadCert(vvchArgs[0], vtxPos))
+					return error(
+							"CheckCertInputs() : failed to read from cert DB");
 			}
+			if(!vtxPos.empty())
+			{
+				if(theCert.IsNull())
+					theCert = vtxPos.back();
+				else
+				{
+					const CCert& dbCert = vtxPos.back();
+					if(theCert.vchData.empty())
+						theCert.vchData = dbCert.vchData;
+					if(theCert.vchTitle.empty())
+						theCert.vchTitle = dbCert.vchTitle;
+					// user can't update safety level after creation
+					theCert.safetyLevel = dbCert.safetyLevel;
+
+				}
+			}
+			else
+				return true;
 		}
 
         // set the cert's txn-dependent values

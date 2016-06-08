@@ -925,17 +925,21 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	
 
 	if (!fJustCheck ) {
-		// save serialized offer for later use
-		COffer serializedOffer = theOffer;
-		// load the offer data from the DB
-		if (pofferdb->ExistsOffer(vvchArgs[0])) {
-			if (!pofferdb->ReadOffer(vvchArgs[0], vtxPos))
-				return error(
-						"CheckOfferInputs() : failed to read from offer DB");
+		COffer serializedOffer;
+		if(op != OP_OFFER_ACTIVATE) {
+			// save serialized offer for later use
+			serializedOffer = theOffer;
+
+			// load the offer data from the DB
+			if (pofferdb->ExistsOffer(vvchArgs[0])) {
+				if (!pofferdb->ReadOffer(vvchArgs[0], vtxPos))
+					return error(
+							"CheckOfferInputs() : failed to read from offer DB");
+			}
+			// get the latest offer from the db
+			if(!vtxPos.empty())
+				theOffer = vtxPos.back();	
 		}
-		// get the latest offer from the db
-		if(!vtxPos.empty())
-			theOffer = vtxPos.back();				
 
 		// If update, we make the serialized offer the master
 		// but first we assign fields from the DB since

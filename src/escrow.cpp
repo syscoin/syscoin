@@ -460,9 +460,6 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					if(prevOp != OP_ESCROW_RELEASE)
 						return error("CheckEscrowInputs() : can only complete a released escrow");
 
-					theOffer.UnserializeFromTx(tx);
-					if(theOffer.accept.IsNull())
-						return error("CheckEscrowInputs() : no offeraccept payload found");
 					if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull())
 					{
 						return error("CheckEscrowInputs() :cannot leave feedback in complete tx");
@@ -498,20 +495,20 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 		}
 	}
 
-	// save serialized escrow for later use
-	CEscrow serializedEscrow = theEscrow;
 
 
     if (!fJustCheck ) {
 		vector<CEscrow> vtxPos;
-		if (pescrowdb->ExistsEscrow(vvchArgs[0])) {
-			if (!pescrowdb->ReadEscrow(vvchArgs[0], vtxPos))
-				return error(
-						"CheckEscrowInputs() : failed to read from escrow DB");
-		}
 		// make sure escrow settings don't change (besides rawTx) outside of activation
 		if(op != OP_ESCROW_ACTIVATE) 
 		{
+			// save serialized escrow for later use
+			CEscrow serializedEscrow = theEscrow;
+			if (pescrowdb->ExistsEscrow(vvchArgs[0])) {
+				if (!pescrowdb->ReadEscrow(vvchArgs[0], vtxPos))
+					return error(
+							"CheckEscrowInputs() : failed to read from escrow DB");
+			}
 			// make sure we have found this escrow in db
 			if(!vtxPos.empty())
 			{
@@ -581,6 +578,8 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				
 			}
+			else
+				return true;
 					
 		}
         // set the escrow's txn-dependent values

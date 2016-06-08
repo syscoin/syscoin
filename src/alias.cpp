@@ -120,7 +120,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
-		else
+		else if(IsSys21Fork(alias.nHeight))
 		{
 			nHeight = alias.nHeight + GetAliasExpirationDepth();
 			return true;
@@ -834,14 +834,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				// Check name
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckAliasInputs() : aliasupdate alias mismatch");
-				// get the alias from the DB
-				if (paliasdb->ExistsAlias(vvchArgs[0])) {
-					if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos))
-						return error(
-								"CheckAliasInputs() : failed to read from alias DB");
-				}
-				if(vtxPos.empty())
-					return error("CheckAliasInputs() : No alias found to update");
 				break;
 		default:
 			return error(
@@ -851,42 +843,47 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	
 	if (!fJustCheck ) {
 		bool update = false;
-		// get the alias from the DB
-		if (paliasdb->ExistsAlias(vvchArgs[0])) {
-			if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos))
-				return error(
-						"CheckAliasInputs() : failed to read from alias DB");
-		}
-		if(!vtxPos.empty())
+		if(op != OP_ALIAS_ACTIVATE)
 		{
-			update = true;
-			if(theAlias.IsNull())
-				theAlias = vtxPos.back();
-			else
-			{
-				const CAliasIndex& dbAlias = vtxPos.back();
-				if(theAlias.vchPublicValue.empty())
-					theAlias.vchPublicValue = dbAlias.vchPublicValue;	
-				if(theAlias.vchPrivateValue.empty())
-					theAlias.vchPrivateValue = dbAlias.vchPrivateValue;	
-				// user can't update safety level or rating after creation
-				theAlias.safetyLevel = dbAlias.safetyLevel;
-				theAlias.nRating = dbAlias.nRating;
-				theAlias.nRatingCount = dbAlias.nRatingCount;
+			// get the alias from the DB
+			if (paliasdb->ExistsAlias(vvchArgs[0])) {
+				if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos))
+					return error(
+							"CheckAliasInputs() : failed to read from alias DB");
 			}
-			// if transfer
-			if(vtxPos.back().vchPubKey != theAlias.vchPubKey)
+			if(!vtxPos.empty())
 			{
-				update = false;
-				CPubKey xferKey  = CPubKey(theAlias.vchPubKey);	
-				CSyscoinAddress myAddress = CSyscoinAddress(xferKey.GetID());
-				// make sure xfer to pubkey doesn't point to an alias already, otherwise don't assign pubkey to alias
-				if (paliasdb->ExistsAddress(vchFromString(myAddress.ToString())))
+				update = true;
+				if(theAlias.IsNull())
+					theAlias = vtxPos.back();
+				else
 				{
-					theAlias.vchPubKey = vtxPos.back().vchPubKey;
-					LogPrintf("CheckAliasInputs() : Warning, Cannot transfer an alias that points to another alias. Pubkey was not updated");
+					const CAliasIndex& dbAlias = vtxPos.back();
+					if(theAlias.vchPublicValue.empty())
+						theAlias.vchPublicValue = dbAlias.vchPublicValue;	
+					if(theAlias.vchPrivateValue.empty())
+						theAlias.vchPrivateValue = dbAlias.vchPrivateValue;	
+					// user can't update safety level or rating after creation
+					theAlias.safetyLevel = dbAlias.safetyLevel;
+					theAlias.nRating = dbAlias.nRating;
+					theAlias.nRatingCount = dbAlias.nRatingCount;
+				}
+				// if transfer
+				if(vtxPos.back().vchPubKey != theAlias.vchPubKey)
+				{
+					update = false;
+					CPubKey xferKey  = CPubKey(theAlias.vchPubKey);	
+					CSyscoinAddress myAddress = CSyscoinAddress(xferKey.GetID());
+					// make sure xfer to pubkey doesn't point to an alias already, otherwise don't assign pubkey to alias
+					if (paliasdb->ExistsAddress(vchFromString(myAddress.ToString())))
+					{
+						theAlias.vchPubKey = vtxPos.back().vchPubKey;
+						LogPrintf("CheckAliasInputs() : Warning, Cannot transfer an alias that points to another alias. Pubkey was not updated");
+					}
 				}
 			}
+			else
+				return true;
 		}
 	
 		if(op == OP_ALIAS_ACTIVATE)
