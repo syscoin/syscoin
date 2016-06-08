@@ -393,10 +393,11 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 	}
 
     if (!fJustCheck ) {
+		vector<CCert> vtxPos;
 		if(op != OP_CERT_ACTIVATE) 
 		{
 			// if not an certnew, load the cert data from the DB
-			vector<CCert> vtxPos;
+			
 			if (pcertdb->ExistsCert(vvchArgs[0])) {
 				if (!pcertdb->ReadCert(vvchArgs[0], vtxPos))
 					return error(
