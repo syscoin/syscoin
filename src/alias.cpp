@@ -120,6 +120,11 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
+		else
+		{
+			nHeight = alias.nHeight + GetAliasExpirationDepth();
+			return true;
+		}
 	}
 	else if(offer.UnserializeFromData(vchData))
 	{
@@ -132,6 +137,11 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				nHeight = vtxPos.back().nHeight + GetOfferExpirationDepth();
 				return true;	
 			}		
+		}
+		else if(IsSys21Fork(offer.nHeight))
+		{
+			nHeight = offer.nHeight + GetOfferExpirationDepth();
+			return true;
 		}
 	}
 	else if(cert.UnserializeFromData(vchData))
@@ -146,6 +156,11 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
+		else if(IsSys21Fork(cert.nHeight))
+		{
+			nHeight = cert.nHeight + GetCertExpirationDepth();
+			return true;
+		}
 	}
 	else if(escrow.UnserializeFromData(vchData))
 	{
@@ -159,6 +174,11 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				return true;	
 			}		
 		}
+		else if(IsSys21Fork(escrow.nHeight))
+		{
+			nHeight = escrow.nHeight + GetEscrowExpirationDepth();
+			return true;
+		}
 	}
 	else if(message.UnserializeFromData(vchData))
 	{
@@ -171,6 +191,11 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 				nHeight = vtxPos.back().nHeight + GetMessageExpirationDepth();
 				return true;	
 			}		
+		}
+		else if(IsSys21Fork(message.nHeight))
+		{
+			nHeight = message.nHeight + GetMessaageExpirationDepth();
+			return true;
 		}
 	}
 
