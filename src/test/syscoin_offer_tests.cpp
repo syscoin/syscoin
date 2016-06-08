@@ -325,9 +325,12 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 
 	// generate a good offer
 	string offerguid = OfferNew("node1", "selleralias4", "category", "title", "100", "0.01", "description", "USD");
-
+	GenerateBlocks(40);
+	// ensure aliases dont't expire
+	AliasUpdate("node1", "selleralias4", "selleralias4", "data1");
+	AliasUpdate("node1", "buyeralias4", "buyeralias4", "data1");
 	// this will expire the offer
-	GenerateBlocks(101);
+	GenerateBlocks(51);
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: perform an accept on expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept buyeralias4 " + offerguid + " 1 message"), runtime_error);
