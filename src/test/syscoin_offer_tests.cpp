@@ -409,7 +409,8 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	// ensure aliases don't expire
 	AliasUpdate("node1", "node1alias2", "node1aliasdata1", "data2");
 	AliasUpdate("node2", "node2alias2", "node2aliasdata1", "data2");
-
+	// updates the offer so it won't expire
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offeraccept node2alias2 " + offerguid + " 1 message"));
 	// this expires the cert but not the offer
 	GenerateBlocks(51);
 	#ifdef ENABLE_DEBUGRPC
@@ -422,9 +423,6 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 		// should fail: generate a cert offer using an expired cert
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
-		// should fail: generate an offer with expired cert
-		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias category title 1 0.05 description USD " + certguid), runtime_error);	
-		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES node1alias category title 1 0.05 description USD " + certguid), runtime_error);
 	#endif
 }
 
