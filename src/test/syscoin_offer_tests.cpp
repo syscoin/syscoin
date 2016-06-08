@@ -364,7 +364,6 @@ BOOST_AUTO_TEST_CASE (generate_offerexpiredexmode)
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: remove whitelist item from expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerremovewhitelist " + offerguid + " selleralias11"), runtime_error);
-		GenerateBlocks(5);
 		// should fail: clear whitelist from expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerclearwhitelist " + offerguid), runtime_error);
 	#endif
@@ -391,21 +390,16 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	string offerguid = OfferNew("node1", "node1alias2", "category", "title", "1", "0.05", "description", "USD", certguid);
 
 	// this expires the cert but not the offer
-	GenerateBlocks(5);
+	GenerateBlocks(51);
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: offer update on offer with expired cert
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
-		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate_nocheck SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription"), runtime_error);
 		// should fail: offer accept on offer with expired cert
-		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept node2alias2 " + offerguid + " 1 message"), runtime_error);
-		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error);
 		// should fail: generate a cert offer using an expired cert
-		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
-		GenerateBlocks(5);
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);	
 	#endif
 }
