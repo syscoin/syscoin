@@ -1078,7 +1078,7 @@ int GetAliasExpirationDepth() {
   #endif
 }
 bool GetTxOfAlias(const vector<unsigned char> &vchName, 
-				  CAliasIndex& txPos, CTransaction& tx) {
+				  CAliasIndex& txPos, CTransaction& tx, bool skipExpiresCheck) {
 	vector<CAliasIndex> vtxPos;
 	if (!paliasdb->ReadAlias(vchName, vtxPos) || vtxPos.empty())
 		return false;
@@ -1086,8 +1086,8 @@ bool GetTxOfAlias(const vector<unsigned char> &vchName,
 	int nHeight = txPos.nHeight;
 	if(vchName != vchFromString("SYS_RATES") && vchName != vchFromString("SYS_BAN") && vchName != vchFromString("SYS_CATEGORY"))
 	{
-		if (nHeight + GetAliasExpirationDepth()
-				< chainActive.Tip()->nHeight) {
+		if (!skipExpiresCheck &&& (nHeight + GetAliasExpirationDepth()
+				< chainActive.Tip()->nHeight)) {
 			string name = stringFromVch(vchName);
 			LogPrintf("GetTxOfAlias(%s) : expired", name.c_str());
 			return false;

@@ -126,6 +126,6 @@ public:
     bool ReconstructCertIndex(CBlockIndex *pindexRescan);
 };
 bool GetTxOfCert(const std::vector<unsigned char> &vchCert,
-        CCert& txPos, CTransaction& tx);
+        CCert& txPos, CTransaction& tx, bool skipExpiresCheck=false);
 void PutToCertList(std::vector<CCert> &certList, CCert& index);
 #endif // CERT_H

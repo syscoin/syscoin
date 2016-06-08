@@ -340,7 +340,7 @@ int IndexOfOfferOutput(const CTransaction& tx) {
 }
 
 bool GetTxOfOffer(const vector<unsigned char> &vchOffer, 
-				  COffer& txPos, CTransaction& tx) {
+				  COffer& txPos, CTransaction& tx, bool skipExpiresCheck) {
 	vector<COffer> vtxPos;
 	if (!pofferdb->ReadOffer(vchOffer, vtxPos) || vtxPos.empty())
 		return false;
@@ -352,8 +352,8 @@ bool GetTxOfOffer(const vector<unsigned char> &vchOffer,
 			LogPrintf("GetTxOfOffer() : cannot find offer from this offer position");
 		return false;
 	}
-	if (nHeight + GetOfferExpirationDepth()
-			< chainActive.Tip()->nHeight) {
+	if (!skipExpiresCheck && (nHeight + GetOfferExpirationDepth()
+			< chainActive.Tip()->nHeight)) {
 		string offer = stringFromVch(vchOffer);
 		if(fDebug)
 			LogPrintf("GetTxOfOffer(%s) : expired", offer.c_str());
@@ -1423,7 +1423,7 @@ UniValue offernew_nocheck(const UniValue& params, bool fHelp) {
 
 	CTransaction aliastx;
 	CAliasIndex alias;
-	if (!GetTxOfAlias(vchAlias, alias, aliastx))
+	if (!GetTxOfAlias(vchAlias, alias, aliastx, true))
 		throw runtime_error("could not find an alias with this name");
     if(!IsSyscoinTxMine(aliastx, "alias")) {
 		throw runtime_error("This alias is not yours.");
@@ -1459,7 +1459,7 @@ UniValue offernew_nocheck(const UniValue& params, bool fHelp) {
 		CTransaction txCert;
 		
 		// make sure this cert is still valid
-		if (GetTxOfCert( vchCert, theCert, txCert))
+		if (GetTxOfCert( vchCert, theCert, txCert, true))
 		{
 			wtxCertIn = pwalletMain->GetWalletTx(txCert.GetHash());
 			// make sure its in your wallet (you control this cert)		
@@ -1810,7 +1810,7 @@ UniValue offerlink_nocheck(const UniValue& params, bool fHelp) {
 		CAliasIndex theAlias;
 		COfferLinkWhitelistEntry& entry = linkOffer.linkWhitelist.entries[i];
 		// make sure this alias is still valid
-		if (GetTxOfAlias(entry.aliasLinkVchRand, theAlias, txAlias))
+		if (GetTxOfAlias(entry.aliasLinkVchRand, theAlias, txAlias, true))
 		{
 			// make sure its in your wallet (you control this alias)		
 			if (IsSyscoinTxMine(txAlias, "alias")) 
@@ -2472,7 +2472,7 @@ UniValue offerupdate_nocheck(const UniValue& params, bool fHelp) {
 	// look for a transaction with this key
 	CTransaction tx, linktx;
 	COffer theOffer, linkOffer;
-	GetTxOfOffer( vchOffer, theOffer, tx);
+	GetTxOfOffer( vchOffer, theOffer, tx, true);
 	CPubKey currentKey(theOffer.vchPubKey);
 	scriptPubKeyOrig = GetScriptForDestination(currentKey.GetID());
 
@@ -2494,7 +2494,7 @@ UniValue offerupdate_nocheck(const UniValue& params, bool fHelp) {
 	CTransaction txCert;
 	const CWalletTx *wtxCertIn = NULL;
 	// make sure this cert is still valid
-	if (GetTxOfCert( vchCert, theCert, txCert))
+	if (GetTxOfCert( vchCert, theCert, txCert), true)
 	{
 		vector<vector<unsigned char> > vvch;
 		wtxCertIn = pwalletMain->GetWalletTx(txCert.GetHash());

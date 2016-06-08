@@ -328,7 +328,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 	GenerateBlocks(40);
 	// ensure aliases dont't expire
 	AliasUpdate("node1", "selleralias4", "selleralias4", "data1");
-	AliasUpdate("node1", "buyeralias4", "buyeralias4", "data1");
+	AliasUpdate("node2", "buyeralias4", "buyeralias4", "data1");
 	// this will expire the offer
 	GenerateBlocks(51);
 	#ifdef ENABLE_DEBUGRPC

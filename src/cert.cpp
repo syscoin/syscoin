@@ -198,14 +198,14 @@ int IndexOfCertOutput(const CTransaction& tx) {
 }
 
 bool GetTxOfCert(const vector<unsigned char> &vchCert,
-        CCert& txPos, CTransaction& tx) {
+        CCert& txPos, CTransaction& tx, bool skipExpiresCheck) {
     vector<CCert> vtxPos;
     if (!pcertdb->ReadCert(vchCert, vtxPos) || vtxPos.empty())
         return false;
     txPos = vtxPos.back();
     int nHeight = txPos.nHeight;
-    if (nHeight + GetCertExpirationDepth()
-            < chainActive.Tip()->nHeight) {
+    if (!skipExpiresCheck && (nHeight + GetCertExpirationDepth()
+            < chainActive.Tip()->nHeight)) {
         string cert = stringFromVch(vchCert);
         LogPrintf("GetTxOfCert(%s) : expired", cert.c_str());
         return false;
