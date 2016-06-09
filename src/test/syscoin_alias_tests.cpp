@@ -178,6 +178,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune data"));
+		GenerateBlocks(5);
 		// we can find it as normal first
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
 		// then we let the service expire
@@ -203,6 +204,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
+		GenerateBlocks(5);
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune1 newdata privdata"));
 		// you can search it still on node1/node2
