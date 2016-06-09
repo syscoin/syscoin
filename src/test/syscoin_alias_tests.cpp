@@ -201,10 +201,12 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune1 data"));
 		// make 89 blocks (10 get mined with new)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
+		MilliSleep(2500);
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		MilliSleep(2500);
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasprune1 newdata privdata"));
 		// you can search it still on node1/node2
@@ -212,14 +214,15 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
 		// generate 89 more blocks (10 get mined from update)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
+		MilliSleep(2500);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasprune1 newdata1 privdata"));
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
 
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
-		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
+		MilliSleep(2500);
 		// now it should be expired
 		BOOST_CHECK_THROW(CallRPC("node2", "aliasupdate aliasprune1 newdata2 privdata"), runtime_error);
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), false);
@@ -230,6 +233,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 
 		StartNode("node3");
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasprune1"), runtime_error);
 		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasprune1", "No"), false);
