@@ -206,7 +206,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		StartNode("node1");
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// ensure you can still update before expiry
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune1 newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasprune1 newdata privdata"));
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
