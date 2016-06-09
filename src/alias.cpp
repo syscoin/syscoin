@@ -1038,7 +1038,7 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string
 					continue;
 				}
 				const CAliasIndex &txPos = vtxPos.back();
-  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+  				if ((chainActive.Tip()->nHeight - txPos.nHeight) >= nMaxAge)
 				{
 					pcursor->Next();
 					continue;
