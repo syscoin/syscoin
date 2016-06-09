@@ -182,7 +182,12 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		// we can find it as normal first
 		BOOST_CHECK_EQUAL(CertFilter("node1", guid, "No"), true);
 		// then we let the service expire
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
+		MilliSleep(2500);
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate jagprune1 newdata privdata"));
+		// then we let the service expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		StartNode("node2");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));

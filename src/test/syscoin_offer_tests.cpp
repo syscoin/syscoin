@@ -415,7 +415,10 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	GenerateBlocks(10);
 	// this expires the cert but not the offer
 	GenerateBlocks(55);
+	MilliSleep(2500);
 	#ifdef ENABLE_DEBUGRPC
+		GenerateBlocks(15, "node2");
+		MilliSleep(2500);
 		// should fail: offer accept on offer with expired/transferred cert
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error);
 		// should fail: generate a cert offer using an expired cert
