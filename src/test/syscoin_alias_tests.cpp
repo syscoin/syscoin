@@ -178,13 +178,13 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune data"));
-		GenerateBlocks(5);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// we can find it as normal first
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
 		// then we let the service expire
-		GenerateBlocks(100);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
 		StartNode("node2");
-		GenerateBlocks(5, "node2");
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		// now we shouldn't be able to search it
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), false);
 		// and it should say its expired
@@ -200,25 +200,25 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// create a new service
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune1 data"));
 		// make 89 blocks (10 get mined with new)
-		GenerateBlocks(79);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
-		GenerateBlocks(5);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune1 newdata privdata"));
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
 		// generate 89 more blocks (10 get mined from update)
-		GenerateBlocks(89);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		AliasUpdate("node1", "aliasprune1", "newdata1","privdata");
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
 
-		GenerateBlocks(100);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
 		// now it should be expired
 		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasupdate aliasprune1 newdata2 privdata"), runtime_error);
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), false);
@@ -228,7 +228,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		StartNode("node3");
-		GenerateBlocks(5, "node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasprune1"), runtime_error);
 		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasprune1", "No"), false);
