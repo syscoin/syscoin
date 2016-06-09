@@ -399,6 +399,7 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	AliasNew("node2", "node2alias2", "node2aliasdata");
 
 	string certguid  = CertNew("node1", "node1alias2", "title", "data");
+	string certguid2  = CertNew("node1", "node1alias2", "title", "data");
 
 	// this leaves 50 blocks remaining before cert expires
 	GenerateBlocks(40);
@@ -420,8 +421,8 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 		// should fail: offer accept on offer with expired cert
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept_nocheck node2alias2 " + offerguid + " 1 message"), runtime_error);
 		// should fail: generate a cert offer using an expired cert
-		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
-		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid), runtime_error);
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid2), runtime_error);
+		BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES node1alias2 category title 1 0.05 description USD " + certguid2), runtime_error);
 	#endif
 }
 
