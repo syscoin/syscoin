@@ -705,7 +705,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 			}
 			myOffer = vtxPos.back();
-
+			if((myOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+				return error("CheckOfferInputs() : cannot update expired offer");	
 			// check for valid alias peg
 			if(!theOffer.vchAliasPeg.empty() && getCurrencyToSYSFromAlias(theOffer.vchAliasPeg, myOffer.sCurrencyCode, nRate, theOffer.nHeight, rateList,precision) != "")
 			{
@@ -786,7 +787,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 			}
 			theOffer = vtxPos.back();
-
+			if((myOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+				return error("CheckOfferInputs() : cannot accept expired offer");
 			if(theOffer.sCategory.size() > 0 && boost::algorithm::ends_with(stringFromVch(theOffer.sCategory), "wanted"))
 				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
 			if(!theOffer.vchLinkOffer.empty())
