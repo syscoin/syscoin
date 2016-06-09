@@ -96,9 +96,7 @@ BOOST_AUTO_TEST_CASE (generate_certsafesearch)
 	UniValue r;
 	GenerateBlocks(1);
 	// cert is safe to search
-	string certguidsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "Yes");
 	// not safe to search
-	string certguidnotsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "No");
 	// should include result in both safe search mode on and off
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), true);
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
@@ -119,9 +117,7 @@ BOOST_AUTO_TEST_CASE (generate_certban)
 	UniValue r;
 	GenerateBlocks(1);
 	// cert is safe to search
-	string certguidsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "Yes");
 	// not safe to search
-	string certguidnotsafe = CertNew("node1", "jagcert1", "certtitle", "certdata", false, "No");
 	// can't ban on any other node than one that created SYS_BAN
 	BOOST_CHECK_THROW(CertBan("node2",certguidnotsafe,SAFETY_LEVEL1), runtime_error);
 	BOOST_CHECK_THROW(CertBan("node3",certguidsafe,SAFETY_LEVEL1), runtime_error);
@@ -171,9 +167,10 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
 	#ifdef ENABLE_DEBUGRPC
 		printf("Running generate_certpruning...\n");
+		AliasNew("node1", "jagprune1", "changeddata1");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagcertbig1 jag1 data 0"));
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagprune1 jag1 data 0"));
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
@@ -198,7 +195,7 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		// stop node3
 		StopNode("node3");
 		// create a new service
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagcertbig1 jag1 data 0"));
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagprune1 jag1 data 0"));
 		const UniValue &arr1 = r.get_array();
 		string guid1 = arr1[1].get_str();
 		// make 89 blocks (10 get mined with new)
