@@ -218,7 +218,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
 
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
 		// now it should be expired
 		BOOST_CHECK_THROW(r = CallRPC("node2", "aliasupdate aliasprune1 newdata2 privdata"), runtime_error);
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), false);
