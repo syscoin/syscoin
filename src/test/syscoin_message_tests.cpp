@@ -54,7 +54,7 @@ BOOST_AUTO_TEST_CASE (generate_messagepruning)
 		AliasNew("node2", "messageprune2", "changeddata2");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "messagenew subject title data messageprune1 messageprune2"));
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "messagenew subject title messageprune1 messageprune2"));
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
 		// then we let the service expire
