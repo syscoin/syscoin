@@ -539,7 +539,7 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		AliasNew("node1", "pruneoffer", "changeddata1");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES pruneoffer category title 0 0.05 description USD"));
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES pruneoffer category title 1 0.05 description USD"));
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
@@ -597,7 +597,8 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), true);
 		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), true);
-
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate pruneoffer newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
 		MilliSleep(2500);
 		// make sure our offer alias doesn't expire
