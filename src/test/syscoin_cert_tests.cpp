@@ -164,6 +164,7 @@ BOOST_AUTO_TEST_CASE (generate_certban)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidnotsafe));
 	
 }
+
 BOOST_AUTO_TEST_CASE (generate_certpruning)
 {
 	UniValue r;
@@ -172,21 +173,73 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		printf("Running generate_certpruning...\n");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		string certguid = CertNew("node1", "jagcert1", "certtitle", "certdata");
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagcertbig1 jag1 data 0"));
+		const UniValue &arr = r.get_array();
+		string guid = arr[1].get_str();
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// we can find it as normal first
-		BOOST_CHECK_EQUAL(CertFilter("node1", certguid, "No"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid, "No"), true);
 		// then we let the service expire
-		GenerateBlocks(5);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
 		StartNode("node2");
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+		MilliSleep(2500);
 		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(CertFilter("node1", certguid, "No"), false);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid, "No"), false);
 		// and it should say its expired
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "certinfo " + certguid));
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + guid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
-		// node2 shouldn't find the service at all (certinfo node2 doesn't sync the data)
-		BOOST_CHECK_THROW(r = CallRPC("node2", "certinfo " + certguid), runtime_error);
-		BOOST_CHECK_EQUAL(CertFilter("node2", certguid, "No"), false);
+		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node2", "certinfo " + guid), runtime_error);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid, "No"), false);
+
+		// stop node3
+		StopNode("node3");
+		// create a new service
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagcertbig1 jag1 data 0"));
+		const UniValue &arr1 = r.get_array();
+		string guid1 = arr1[1].get_str();
+		// make 89 blocks (10 get mined with new)
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
+		MilliSleep(2500);
+		// stop and start node1
+		StopNode("node1");
+		StartNode("node1");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		// give some time to propogate the new blocks across other 2 nodes
+		MilliSleep(2500);
+		// ensure you can still update before expiry
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata"));
+		// you can search it still on node1/node2
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), true);
+		// generate 89 more blocks (10 get mined from update)
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
+		MilliSleep(2500);
+		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata"));
+		// you can search it still on node1/node2
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), true);
+
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
+		MilliSleep(2500);
+		// now it should be expired
+		BOOST_CHECK_THROW(CallRPC("node2",  "certupdate " + guid1 + " newdata1 privdata1"), runtime_error);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), false);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), false);
+		// and it should say its expired
+		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "certinfo " + guid1));
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
+
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node3", "certinfo " + guid1), runtime_error);
+		BOOST_CHECK_EQUAL(CertFilter("node3", guid1, "No"), false);
 	#endif
 }
 BOOST_AUTO_TEST_SUITE_END ()

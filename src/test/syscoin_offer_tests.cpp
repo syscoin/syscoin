@@ -413,8 +413,6 @@ BOOST_AUTO_TEST_CASE (generate_certofferexpired)
 	// updates the offer so it won't expire, and doesn't update cert linked to offer so we can have offer linked with expired cert
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offeraccept node2alias2 " + offerguid + " 1 message"));
 	GenerateBlocks(10);
-	// should fail: offer update on offer with transferred cert
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate_nocheck SYS_RATES node1alias2 " + offerguid + " category title 1 0.05 newdescription 0 " + certguid), runtime_error);
 	// this expires the cert but not the offer
 	GenerateBlocks(55);
 	#ifdef ENABLE_DEBUGRPC

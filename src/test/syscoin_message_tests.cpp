@@ -65,4 +65,29 @@ BOOST_AUTO_TEST_CASE (generate_messagepruning)
 		BOOST_CHECK_THROW(r = CallRPC("node2", "messageinfo " + messageguid), runtime_error);
 	#endif
 }
+BOOST_AUTO_TEST_CASE (generate_messagepruning)
+{
+	UniValue r;
+	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
+	#ifdef ENABLE_DEBUGRPC
+		printf("Running generate_messagepruning...\n");
+		AliasNew("node1", "messageprune1", "changeddata1");
+		AliasNew("node2", "messageprune2", "changeddata2");
+		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
+		StopNode("node2");
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "messagenew subject title data messageprune1 messageprune2"));
+		const UniValue &arr = r.get_array();
+		string guid = arr[1].get_str();
+		// then we let the service expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
+		StartNode("node2");
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+		MilliSleep(2500);
+		// node1 will have the service still (its just expired)
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "messageinfo " + guid));
+		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node2", "messageinfo " + guid), runtime_error);
+	#endif
+}
 BOOST_AUTO_TEST_SUITE_END ()
