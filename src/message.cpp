@@ -94,6 +94,7 @@ const vector<unsigned char> CMessage::Serialize() {
 bool CMessageDB::ScanMessages(const std::vector<unsigned char>& vchMessage, unsigned int nMax,
         std::vector<std::pair<std::vector<unsigned char>, CMessage> >& messageScan) {
 
+	int nMaxAge  = GetMessageExpirationDepth();
 	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
 	pcursor->Seek(make_pair(string("messagei"), vchMessage));
     while (pcursor->Valid()) {
@@ -104,9 +105,16 @@ bool CMessageDB::ScanMessages(const std::vector<unsigned char>& vchMessage, unsi
                 vector<unsigned char> vchMessage = key.second;
                 vector<CMessage> vtxPos;
                 pcursor->GetValue(vtxPos);
-                CMessage txPos;
-                if (!vtxPos.empty())
-                    txPos = vtxPos.back();
+				if (vtxPos.empty()){
+					pcursor->Next();
+					continue;
+				}
+				const CMessage &txPos = vtxPos.back();
+  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+				{
+					pcursor->Next();
+					continue;
+				}
                 messageScan.push_back(make_pair(vchMessage, txPos));
             }
             if (messageScan.size() >= nMax)
@@ -515,7 +523,8 @@ UniValue messageinfo(const UniValue& params, bool fHelp) {
 	if (!pmessagedb->ReadMessage(vchMessage, vtxPos) || vtxPos.empty())
 		 throw runtime_error("failed to read from message DB");
 	CMessage ca = vtxPos.back();
-
+	if (!GetSyscoinTransaction(ca.nHeight, ca.txHash, tx, Params().GetConsensus()))
+		throw runtime_error("failed to read transaction from disk");   
     string sHeight = strprintf("%llu", ca.nHeight);
 	oMessage.push_back(Pair("GUID", stringFromVch(vchMessage)));
 	string sTime;
