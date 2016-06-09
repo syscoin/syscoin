@@ -1281,7 +1281,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 			scriptPubKeyCert += scriptPubKeyCertOrig;
 		}
 		else
-			vchCert.clear();
+			throw runtime_error("Invalid cert");
 	}
 
 	if(params.size() >= 10)
@@ -1472,8 +1472,6 @@ UniValue offernew_nocheck(const UniValue& params, bool fHelp) {
 			scriptPubKeyCert << CScript::EncodeOP_N(OP_CERT_UPDATE) << vchCert << OP_2DROP;
 			scriptPubKeyCert += scriptPubKeyCertOrig;
 		}
-		else
-			vchCert.clear();
 	}
 
 	if(params.size() >= 10)
