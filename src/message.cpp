@@ -282,7 +282,7 @@ bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<v
     CMessage theMessage;
     theMessage.UnserializeFromTx(tx);
     if (theMessage.IsNull())
-        return error("CheckMessageInputs() : null message");
+        return true;
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("message tx GUID too big");
 	if(!IsSysCompressedOrUncompressedPubKey(theMessage.vchPubKeyTo))
