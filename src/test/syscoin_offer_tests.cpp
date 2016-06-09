@@ -593,7 +593,7 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
 		MilliSleep(2500);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description")));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description"));
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), true);
 		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), true);
