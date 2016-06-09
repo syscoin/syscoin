@@ -536,23 +536,89 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
 	#ifdef ENABLE_DEBUGRPC
 		printf("Running generate_offerpruning...\n");
-		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the offer data won't be synced with node2
+		AliasNew("node1", "pruneoffer", "changeddata1");
+		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		string offerguid = OfferNew("node1", "selleralias15", "category", "title", "100", "0.01", "description", "USD");
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES pruneoffer category title 0 0.05 description USD"));
+		const UniValue &arr = r.get_array();
+		string guid = arr[1].get_str();
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// we can find it as normal first
-		BOOST_CHECK_EQUAL(OfferFilter("node1", offerguid, "No"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid, "No"), true);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
+		MilliSleep(2500);
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate pruneoffer newdata privdata"));
 		// then we let the service expire
-		GenerateBlocks(100);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		StartNode("node2");
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+		MilliSleep(2500);
 		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(OfferFilter("node1", offerguid, "No"), false);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid, "No"), false);
 		// and it should say its expired
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + guid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
-		BOOST_CHECK_THROW(CallRPC("node2", "offerinfo " + offerguid), runtime_error);
-		BOOST_CHECK_EQUAL(OfferFilter("node2", offerguid, "No"), false);
+		BOOST_CHECK_THROW(CallRPC("node2", "offerinfo " + guid), runtime_error);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid, "No"), false);
+
+		// stop node3
+		StopNode("node3");
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate pruneoffer newdata privdata"));
+		// create a new service
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES pruneoffer category title 1 0.05 description USD"));
+		const UniValue &arr1 = r.get_array();
+		string guid1 = arr1[1].get_str();
+		// make 89 blocks (10 get mined with new)
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
+		MilliSleep(2500);
+		// stop and start node1
+		StopNode("node1");
+		StartNode("node1");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		// give some time to propogate the new blocks across other 2 nodes
+		MilliSleep(2500);
+		// ensure you can still update before expiry
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description"));
+		// you can search it still on node1/node2
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), true);
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate pruneoffer newdata privdata"));
+		// generate 89 more blocks (10 get mined from update)
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
+		MilliSleep(2500);
+		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description")));
+		// you can search it still on node1/node2
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), true);
+
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
+		MilliSleep(2500);
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate pruneoffer newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
+		MilliSleep(2500);
+		// now it should be expired
+		BOOST_CHECK_THROW(CallRPC("node2", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description"), runtime_error);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), false);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), false);
+		// and it should say its expired
+		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + guid1));
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
+
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node3", "offerinfo " + guid1), runtime_error);
+		BOOST_CHECK_EQUAL(OfferFilter("node3", guid1, "No"), false);
 	#endif
 }
+
 BOOST_AUTO_TEST_SUITE_END ()

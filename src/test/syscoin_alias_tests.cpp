@@ -184,7 +184,9 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// then we let the service expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
 		StartNode("node2");
+		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+		MilliSleep(2500);
 		// now we shouldn't be able to search it
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), false);
 		// and it should say its expired
@@ -206,6 +208,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		StopNode("node1");
 		StartNode("node1");
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		// give some time to propogate the new blocks across other 2 nodes
 		MilliSleep(2500);
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasprune1 newdata privdata"));
