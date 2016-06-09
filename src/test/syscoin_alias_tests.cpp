@@ -62,8 +62,7 @@ BOOST_AUTO_TEST_CASE (generate_sendmoneytoalias)
 	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress sendnode2 1.335"), runtime_error);
 	GenerateBlocks(1);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "getinfo"));
-	// 54.13 since 1 block matures
-	balanceBefore += 1.335*COIN + 54.13*COIN;
+	balanceBefore += 1.335*COIN;
 	CAmount balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK_EQUAL(balanceBefore, balanceAfter);
 }
@@ -178,7 +177,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		printf("Running generate_aliaspruning...\n");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		AliasNew("node1", "aliasprune", "data");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune data"));
 		// we can find it as normal first
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
 		// then we let the service expire
@@ -198,14 +197,14 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// stop node3
 		StopNode("node3");
 		// create a new service
-		AliasNew("node1", "aliasprune1", "data");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune1 data"));
 		// make 89 blocks (10 get mined with new)
 		GenerateBlocks(79);
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
 		// ensure you can still update before expiry
-		AliasUpdate("node1", "aliasprune1", "newdata","privdata");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune1 newdata privdata"));
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
