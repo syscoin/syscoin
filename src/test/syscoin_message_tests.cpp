@@ -58,7 +58,7 @@ BOOST_AUTO_TEST_CASE (generate_messagepruning)
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
 		// then we let the service expire
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
 		StartNode("node2");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
