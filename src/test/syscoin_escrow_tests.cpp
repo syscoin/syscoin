@@ -98,8 +98,11 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_invalid)
 {
 	printf("Running generate_escrowrelease_invalid...\n");
 	string qty = "4";
-	string offerguid = OfferNew("node2", "selleraliasrefund2", "category", "title", "100", "1.45", "description", "SYS");
-	string guid = EscrowNew("node1", "buyeraliasrefund2", offerguid, qty, "message", "arbiteraliasrefund2", "selleraliasrefund2");
+	AliasNew("node1", "buyeraliasrefund3", "changeddata1");
+	AliasNew("node2", "selleraliasrefund3", "changeddata2");
+	AliasNew("node3", "arbiteraliasrefund3", "changeddata3");
+	string offerguid = OfferNew("node2", "selleraliasrefund3", "category", "title", "100", "1.45", "description", "SYS");
+	string guid = EscrowNew("node1", "buyeraliasrefund3", offerguid, qty, "message", "arbiteraliasrefund3", "selleraliasrefund3");
 	// try to claim release even if not released
 	BOOST_CHECK_THROW(CallRPC("node2", "escrowclaimrelease " + guid), runtime_error);
 	// seller cant release buyers funds
@@ -185,7 +188,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 	string commission = "3";
 	string description = "newdescription";
 	string offerlinkguid = OfferLink("node3", "arbiteralias3", offerguid, commission, description);
-	string guid = EscrowNew("node1", "buyeralias33", offerlinkguid, qty, message, "arbiteralias3", "selleralias33");
+	string guid = EscrowNew("node1", "buyeralias33", offerlinkguid, qty, message, "arbiteralias33", "selleralias33");
 	EscrowRelease("node1", guid);
 	// update the EUR peg twice before claiming escrow
 	string data = "{\\\"rates\\\":[{\\\"currency\\\":\\\"USD\\\",\\\"rate\\\":2690.1,\\\"precision\\\":2},{\\\"currency\\\":\\\"EUR\\\",\\\"rate\\\":269.2,\\\"precision\\\":2},{\\\"currency\\\":\\\"GBP\\\",\\\"rate\\\":2697.3,\\\"precision\\\":2},{\\\"currency\\\":\\\"CAD\\\",\\\"rate\\\":2698.0,\\\"precision\\\":2},{\\\"currency\\\":\\\"BTC\\\",\\\"rate\\\":100000.0,\\\"precision\\\":8},{\\\"currency\\\":\\\"SYS\\\",\\\"rate\\\":1.0,\\\"precision\\\":2}]}";
