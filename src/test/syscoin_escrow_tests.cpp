@@ -223,23 +223,18 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
-		// we can find it as normal first
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid, "No"), true);
 		// then we let the service expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
 		StartNode("node2");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		MilliSleep(2500);
-		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid, "No"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "escrowinfo " + guid));
-		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node2", "escrowinfo " + guid), runtime_error);
-		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid, "No"), false);
+
 
 		// stop node3
 		StopNode("node3");
@@ -257,35 +252,29 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		// give some time to propogate the new blocks across other 2 nodes
 		MilliSleep(2500);
 		// ensure you can still update before expiry
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata"));
-		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid1, "No"), true);
-		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid1, "No"), true);
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowrelease " + guid1));
 		// generate 89 more blocks (10 get mined from update)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
 		MilliSleep(2500);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata"));
-		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid1, "No"), true);
-		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid1, "No"), true);
+		// this should claim the release because buyer calls it
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "escrowrelease " + guid1));
+		// leave some feedback
+		BOOST_CHECK_THROW(CallRPC("node1",  "escrowfeedback " + guid1 + " 1 2 3 4"), runtime_error);
 
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
 		MilliSleep(2500);
-		// now it should be expired
-		BOOST_CHECK_THROW(CallRPC("node2",  "certupdate " + guid1 + " newdata1 privdata1"), runtime_error);
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid1, "No"), false);
-		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid1, "No"), false);
+		// now it should be expired, try to leave feedback it shouldn't let you
+		BOOST_CHECK_THROW(CallRPC("node2",  "escrowfeedback " + guid1 + " 1 2 3 4"), runtime_error);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrowinfo " + guid1));
-		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
+
 
 		StartNode("node3");
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 		MilliSleep(2500);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "escrowinfo " + guid1), runtime_error);
-		BOOST_CHECK_EQUAL(EscrowFilter("node3", guid1, "No"), false);
 	#endif
 }
 
