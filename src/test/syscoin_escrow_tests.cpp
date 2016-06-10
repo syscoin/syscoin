@@ -201,7 +201,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 	// ensure dependent services don't expire
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate buyeralias33 data"));
 	BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate selleralias33 data"));
-	BOOST_CHECK_NO_THROW(CallRPC("node13", "aliasupdate arbiteralias333 data"));
+	BOOST_CHECK_NO_THROW(CallRPC("node3", "aliasupdate arbiteralias333 data"));
 
 	GenerateBlocks(5);
 	GenerateBlocks(5, "node2");
