@@ -222,9 +222,15 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune selleraliasprune"), runtime_error);
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// then we let the service expire
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
+		MilliSleep(2500);
+		// make sure our escrow alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate buyeraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate arbiteraliasprune newdata privdata"));
+		// then we let the service expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		StartNode("node2");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
