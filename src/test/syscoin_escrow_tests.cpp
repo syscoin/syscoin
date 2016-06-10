@@ -41,18 +41,21 @@ BOOST_AUTO_TEST_CASE (generate_escrow_big)
 
 	string offerguid = OfferNew("node2", goodname2, "category", "title", "100", "0.05", "description", "USD");
 	// payment message too long
-	BOOST_CHECK_THROW(r = CallRPC("node1", "escrownew " + goodname1 + " " + offerguid + " " + qty + " " + baddata + " " + goodname3), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node1", "escrownew " + goodname1 + " " + offerguid + " " + qty + " " + baddata + " " + goodname3 + " " + goodname2), runtime_error);
 	string guid = EscrowNew("node1", goodname1, offerguid, qty, gooddata, goodname3, goodname2);
 	EscrowRelease("node1", guid);	
 	EscrowClaimRelease("node2", guid);
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrefund_seller)
 {
+	AliasNew("node1", "buyeralias1", "changeddata1");
+	AliasNew("node2", "selleralias1", "changeddata2");
+	AliasNew("node3", "arbiteralias1", "changeddata3");
 	printf("Running generate_escrowrefund_seller...\n");
 	string qty = "4";
 	string message = "paymentmessage";
-	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "1.22", "description", "CAD");
-	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, message, "arbiteralias", "selleralias");
+	string offerguid = OfferNew("node2", "selleralias1", "category", "title", "100", "1.22", "description", "CAD");
+	string guid = EscrowNew("node1", "buyeralias1", offerguid, qty, message, "arbiteralias1", "selleralias1");
 	EscrowRefund("node2", guid);
 	EscrowRefund("node1", guid);
 }
@@ -60,18 +63,21 @@ BOOST_AUTO_TEST_CASE (generate_escrowrefund_arbiter)
 {
 	printf("Running generate_escrowrefund_arbiter...\n");
 	string qty = "5";
-	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "0.25", "description", "EUR");
+	string offerguid = OfferNew("node2", "selleralias1", "category", "title", "100", "0.25", "description", "EUR");
 	string message = "paymentmessage";
-	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, message, "arbiteralias", "selleralias");
+	string guid = EscrowNew("node1", "buyeralias1", offerguid, qty, message, "arbiteralias1", "selleralias1");
 	EscrowRefund("node3", guid);
 	EscrowRefund("node1", guid);
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrefund_invalid)
 {
 	printf("Running generate_escrowrefund_invalid...\n");
+	AliasNew("node1", "buyeralias2", "changeddata1");
+	AliasNew("node2", "selleralias2", "changeddata2");
+	AliasNew("node3", "arbiteralias2", "changeddata3");
 	string qty = "2";
-	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "1.45", "description", "EUR");
-	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteralias", "selleralias");
+	string offerguid = OfferNew("node2", "selleralias2", "category", "title", "100", "1.45", "description", "EUR");
+	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteralias2", "selleralias2");
 	// try to claim refund even if not refunded
 	BOOST_CHECK_THROW(CallRPC("node2", "escrowclaimrefund " + guid), runtime_error);
 	// buyer cant refund to himself
@@ -92,8 +98,8 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_invalid)
 {
 	printf("Running generate_escrowrelease_invalid...\n");
 	string qty = "4";
-	string offerguid = OfferNew("node2", "selleralias", "category", "title", "100", "1.45", "description", "SYS");
-	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteralias", "selleralias");
+	string offerguid = OfferNew("node2", "selleralias2", "category", "title", "100", "1.45", "description", "SYS");
+	string guid = EscrowNew("node1", "buyeralias2", offerguid, qty, "message", "arbiteralias2", "selleralias2");
 	// try to claim release even if not released
 	BOOST_CHECK_THROW(CallRPC("node2", "escrowclaimrelease " + guid), runtime_error);
 	// seller cant release buyers funds
@@ -205,27 +211,82 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 	UniValue r;
 	// makes sure services expire in 100 blocks instead of 1 year of blocks for testing purposes
 	#ifdef ENABLE_DEBUGRPC
-		printf("Running generate_escrowpruning...\n");
+		printf("Running generate_certpruning...\n");
+		AliasNew("node1", "selleraliasprune", "changeddata2");
+		AliasNew("node3", "buyeraliasprune", "changeddata2");
+		AliasNew("node2", "arbiteraliasprune", "changeddata2");
+		string offerguid = OfferNew("node1", "SYS_RATES", "category", "title", "100", "0.05", "description", "USD");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
-		string qty = "3";
-		string message = "paymentmessage";
-		string offerguid = OfferNew("node2", "selleralias33", "category", "title", "100", "0.05", "description", "USD");
-		string escrowguid = EscrowNew("node1", "buyeralias33", offerguid, qty, message, "arbiteralias3", "selleralias33");
+
+		BOOST_CHECK_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune selleraliasprune"), runtime_error);
+		const UniValue &arr = r.get_array();
+		string guid = arr[1].get_str();
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// we can find it as normal first
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", escrowguid), true);
+		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid, "No"), true);
 		// then we let the service expire
-		GenerateBlocks(100);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
 		StartNode("node2");
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+		MilliSleep(2500);
 		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(EscrowFilter("node1", escrowguid), false);
+		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid, "No"), false);
 		// and it should say its expired
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "escrowinfo " + escrowguid));
+		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "escrowinfo " + guid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
-		// node2 shouldn't find the service at all (certinfo node2 doesn't sync the data)
-		BOOST_CHECK_THROW(CallRPC("node2", "escrowinfo " + escrowguid), runtime_error);
-		BOOST_CHECK_EQUAL(EscrowFilter("node2", escrowguid), false);
+		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node2", "escrowinfo " + guid), runtime_error);
+		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid, "No"), false);
+
+		// stop node3
+		StopNode("node3");
+		// create a new service
+		BOOST_CHECK_THROW(r = CallRPC("node2", "escrownew arbiteraliasprune " + offerguid + " 1 message selleraliasprune selleraliasprune"), runtime_error);
+		const UniValue &arr1 = r.get_array();
+		string guid1 = arr1[1].get_str();
+		// make 89 blocks (10 get mined with new)
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
+		MilliSleep(2500);
+		// stop and start node1
+		StopNode("node1");
+		StartNode("node1");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		// give some time to propogate the new blocks across other 2 nodes
+		MilliSleep(2500);
+		// ensure you can still update before expiry
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata"));
+		// you can search it still on node1/node2
+		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid1, "No"), true);
+		// generate 89 more blocks (10 get mined from update)
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
+		MilliSleep(2500);
+		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata"));
+		// you can search it still on node1/node2
+		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid1, "No"), true);
+
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
+		MilliSleep(2500);
+		// now it should be expired
+		BOOST_CHECK_THROW(CallRPC("node2",  "certupdate " + guid1 + " newdata1 privdata1"), runtime_error);
+		BOOST_CHECK_EQUAL(EscrowFilter("node1", guid1, "No"), false);
+		BOOST_CHECK_EQUAL(EscrowFilter("node2", guid1, "No"), false);
+		// and it should say its expired
+		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrowinfo " + guid1));
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
+
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node3", "escrowinfo " + guid1), runtime_error);
+		BOOST_CHECK_EQUAL(EscrowFilter("node3", guid1, "No"), false);
 	#endif
 }
+
 BOOST_AUTO_TEST_SUITE_END ()
