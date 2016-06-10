@@ -187,7 +187,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 	string offerguid = OfferNew("node2", "selleralias33", "category", "title", "100", "0.05", "description", "EUR", "nocert", false);
 	string commission = "3";
 	string description = "newdescription";
-	string offerlinkguid = OfferLink("node3", "arbiteralias3", offerguid, commission, description);
+	string offerlinkguid = OfferLink("node3", "arbiteralias333", offerguid, commission, description);
 	string guid = EscrowNew("node1", "buyeralias33", offerlinkguid, qty, message, "arbiteralias333", "selleralias33");
 	EscrowRelease("node1", guid);
 	// update the EUR peg twice before claiming escrow
@@ -225,8 +225,9 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		AliasNew("node2", "arbiteraliasprune", "changeddata2");
 		string offerguid = OfferNew("node1", "SYS_RATES", "category", "title", "100", "0.05", "description", "USD");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
+		MilliSleep(2500);
 		StopNode("node2");
-
+		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune"));
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
