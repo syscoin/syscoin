@@ -230,34 +230,37 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrownew buyeraliasprune " + offerguid + " 1 message selleraliasprune"));
 		const UniValue &arr1 = r.get_array();
 		string guid1 = arr1[1].get_str();
-		
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 3"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		// make 79 blocks
 		// make sure our escrow alias doesn't expire
-		AliasUpdate("node1", "selleraliasprune", "changeddata5", "pvtdata1");
-		AliasUpdate("node2", "buyeraliasprune", "changeddata5", "pvtdata1");
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
 		MilliSleep(2500);
-		AliasUpdate("node1", "selleraliasprune", "changeddata5", "pvtdata1");
-		AliasUpdate("node2", "buyeraliasprune", "changeddata5", "pvtdata1");
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
 		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowrelease " + guid1));
-		AliasUpdate("node1", "selleraliasprune", "changeddata5", "pvtdata1");
-		AliasUpdate("node2", "buyeraliasprune", "changeddata5", "pvtdata1");
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		// generate 89 more blocks (10 get mined from update)
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// give some time to propogate the new blocks across other 2 nodes
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
 		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
-		AliasUpdate("node1", "selleraliasprune", "changeddata5", "pvtdata1");
-		AliasUpdate("node2", "buyeraliasprune", "changeddata5", "pvtdata1");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		// this should claim the release because buyer calls it
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "escrowrelease " + guid1));
@@ -266,14 +269,14 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
 		MilliSleep(2500);
-		AliasUpdate("node1", "selleraliasprune", "changeddata5", "pvtdata1");
-		AliasUpdate("node2", "buyeraliasprune", "changeddata5", "pvtdata1");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
 		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
-		AliasUpdate("node1", "selleraliasprune", "changeddata5", "pvtdata1");
-		AliasUpdate("node2", "buyeraliasprune", "changeddata5", "pvtdata1");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		// now it should be expired, try to leave feedback it shouldn't let you
 		BOOST_CHECK_THROW(CallRPC("node2",  "escrowfeedback " + guid1 + " 1 2 3 4"), runtime_error);
 		// and it should say its expired
