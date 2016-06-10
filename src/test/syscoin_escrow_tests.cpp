@@ -225,34 +225,6 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		AliasNew("node3", "buyeraliasprune", "changeddata2");
 		AliasNew("node2", "arbiteraliasprune", "changeddata2");
 		string offerguid = OfferNew("node1", "SYS_RATES", "category", "title", "100", "0.05", "description", "USD");
-		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
-		StopNode("node2");
-
-		BOOST_CHECK_NO_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune"));
-		const UniValue &arr = r.get_array();
-		string guid = arr[1].get_str();
-		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 3"));
-		// then we let the service expire
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
-		MilliSleep(2500);
-		// make sure our dependent services doesn't expire
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
-		BOOST_CHECK_NO_THROW(CallRPC("node3", "aliasupdate buyeraliasprune newdata privdata"));
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
-		// then we let the service expire
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
-		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 2"));
-		StartNode("node2");
-		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
-		MilliSleep(2500);
-		// and it should say its expired
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "escrowinfo " + guid));
-
-		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
-		BOOST_CHECK_THROW(CallRPC("node2", "escrowinfo " + guid), runtime_error);
-
-
 		// stop node3
 		StopNode("node3");
 		// create a new service
