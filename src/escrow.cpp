@@ -1970,7 +1970,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 5)
         throw runtime_error(
 		"escrowfeedback <escrow guid> [feedbackprimary] [ratingprimary] [feedbacksecondary] [ratingasecondary]\n"
-                        "Send feedback for primary and secondary users in escrow, depending on who you are. \n"
+                        "Send feedback for primary and secondary users in escrow, depending on who you are. Ratings are numbers from 1 to 5\n"
 						"If you are the buyer, feedbackprimary is for seller and feedbacksecondary is for arbiter.\n"
 						"If you are the seller, feedbackprimary is for buyer and feedbacksecondary is for arbiter.\n"
 						"If you are the arbiter, feedbackprimary is for buyer and feedbacksecondary is for seller.\n"

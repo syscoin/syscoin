@@ -41,21 +41,21 @@ BOOST_AUTO_TEST_CASE (generate_escrow_big)
 
 	string offerguid = OfferNew("node2", goodname2, "category", "title", "100", "0.05", "description", "USD");
 	// payment message too long
-	BOOST_CHECK_THROW(r = CallRPC("node1", "escrownew " + goodname1 + " " + offerguid + " " + qty + " " + baddata + " " + goodname3 + " " + goodname2), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node1", "escrownew " + goodname1 + " " + offerguid + " " + qty + " " + baddata + " " + goodname3), runtime_error);
 	string guid = EscrowNew("node1", goodname1, offerguid, qty, gooddata, goodname3, goodname2);
 	EscrowRelease("node1", guid);	
 	EscrowClaimRelease("node2", guid);
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrefund_seller)
 {
-	AliasNew("node1", "buyeralias1", "changeddata1");
-	AliasNew("node2", "selleralias1", "changeddata2");
-	AliasNew("node3", "arbiteralias1", "changeddata3");
+	AliasNew("node1", "buyeraliasrefund", "changeddata1");
+	AliasNew("node2", "selleraliasrefund", "changeddata2");
+	AliasNew("node3", "arbiteraliasrefund", "changeddata3");
 	printf("Running generate_escrowrefund_seller...\n");
 	string qty = "4";
 	string message = "paymentmessage";
-	string offerguid = OfferNew("node2", "selleralias1", "category", "title", "100", "1.22", "description", "CAD");
-	string guid = EscrowNew("node1", "buyeralias1", offerguid, qty, message, "arbiteralias1", "selleralias1");
+	string offerguid = OfferNew("node2", "selleraliasrefund", "category", "title", "100", "1.22", "description", "CAD");
+	string guid = EscrowNew("node1", "buyeraliasrefund", offerguid, qty, message, "arbiteraliasrefund", "selleraliasrefund");
 	EscrowRefund("node2", guid);
 	EscrowRefund("node1", guid);
 }
@@ -63,21 +63,21 @@ BOOST_AUTO_TEST_CASE (generate_escrowrefund_arbiter)
 {
 	printf("Running generate_escrowrefund_arbiter...\n");
 	string qty = "5";
-	string offerguid = OfferNew("node2", "selleralias1", "category", "title", "100", "0.25", "description", "EUR");
+	string offerguid = OfferNew("node2", "selleraliasrefund", "category", "title", "100", "0.25", "description", "EUR");
 	string message = "paymentmessage";
-	string guid = EscrowNew("node1", "buyeralias1", offerguid, qty, message, "arbiteralias1", "selleralias1");
+	string guid = EscrowNew("node1", "buyeraliasrefund", offerguid, qty, message, "arbiteraliasrefund", "selleraliasrefund");
 	EscrowRefund("node3", guid);
 	EscrowRefund("node1", guid);
 }
 BOOST_AUTO_TEST_CASE (generate_escrowrefund_invalid)
 {
 	printf("Running generate_escrowrefund_invalid...\n");
-	AliasNew("node1", "buyeralias2", "changeddata1");
-	AliasNew("node2", "selleralias2", "changeddata2");
-	AliasNew("node3", "arbiteralias2", "changeddata3");
+	AliasNew("node1", "buyeraliasrefund2", "changeddata1");
+	AliasNew("node2", "selleraliasrefund2", "changeddata2");
+	AliasNew("node3", "arbiteraliasrefund2", "changeddata3");
 	string qty = "2";
-	string offerguid = OfferNew("node2", "selleralias2", "category", "title", "100", "1.45", "description", "EUR");
-	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteralias2", "selleralias2");
+	string offerguid = OfferNew("node2", "selleraliasrefund2", "category", "title", "100", "1.45", "description", "EUR");
+	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteraliasrefund2", "selleraliasrefund2");
 	// try to claim refund even if not refunded
 	BOOST_CHECK_THROW(CallRPC("node2", "escrowclaimrefund " + guid), runtime_error);
 	// buyer cant refund to himself
@@ -98,8 +98,8 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_invalid)
 {
 	printf("Running generate_escrowrelease_invalid...\n");
 	string qty = "4";
-	string offerguid = OfferNew("node2", "selleralias2", "category", "title", "100", "1.45", "description", "SYS");
-	string guid = EscrowNew("node1", "buyeralias2", offerguid, qty, "message", "arbiteralias2", "selleralias2");
+	string offerguid = OfferNew("node2", "selleraliasrefund2", "category", "title", "100", "1.45", "description", "SYS");
+	string guid = EscrowNew("node1", "buyeraliasrefund2", offerguid, qty, "message", "arbiteraliasrefund2", "selleraliasrefund2");
 	// try to claim release even if not released
 	BOOST_CHECK_THROW(CallRPC("node2", "escrowclaimrelease " + guid), runtime_error);
 	// seller cant release buyers funds
@@ -219,7 +219,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
 
-		BOOST_CHECK_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune selleraliasprune"), runtime_error);
+		BOOST_CHECK_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune"), runtime_error);
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
 		// then we let the service expire
@@ -245,7 +245,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		// stop node3
 		StopNode("node3");
 		// create a new service
-		BOOST_CHECK_THROW(r = CallRPC("node2", "escrownew arbiteraliasprune " + offerguid + " 1 message selleraliasprune selleraliasprune"), runtime_error);
+		BOOST_CHECK_THROW(r = CallRPC("node2", "escrownew arbiteraliasprune " + offerguid + " 1 message selleraliasprune"), runtime_error);
 		const UniValue &arr1 = r.get_array();
 		string guid1 = arr1[1].get_str();
 		// make 89 blocks (10 get mined with new)
