@@ -201,11 +201,11 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
 	// ensure dependent services don't expire
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate buyeralias33 data"));
 	BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate selleralias33 data"));
-	BOOST_CHECK_NO_THROW(CallRPC("node3", "aliasupdate arbiteralias333 data"));
+	BOOST_CHECK_NO_THROW(CallRPC("node13", "aliasupdate arbiteralias333 data"));
+
 	GenerateBlocks(5);
 	GenerateBlocks(5, "node2");
 	GenerateBlocks(5, "node3");
-
 
 	EscrowClaimReleaseLink("node2", guid, "node3");
 	// restore EUR peg
@@ -226,9 +226,8 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		AliasNew("node2", "arbiteraliasprune", "changeddata2");
 		string offerguid = OfferNew("node1", "SYS_RATES", "category", "title", "100", "0.05", "description", "USD");
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
-		MilliSleep(2500);
 		StopNode("node2");
-		MilliSleep(2500);
+
 		BOOST_CHECK_NO_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune"));
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
@@ -242,7 +241,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		// then we let the service expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
-		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 2"));
 		StartNode("node2");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
