@@ -260,7 +260,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		// this should claim the release because buyer calls it
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "escrowrelease " + guid1));
 		// leave some feedback
-		BOOST_CHECK_THROW(CallRPC("node1",  "escrowfeedback " + guid1 + " 1 2 3 4"), runtime_error);
+		BOOST_CHECK_NO_THROW(CallRPC("node1",  "escrowfeedback " + guid1 + " 1 2 3 4"));
 
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
 		MilliSleep(2500);
