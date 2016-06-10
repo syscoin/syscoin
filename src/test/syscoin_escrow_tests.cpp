@@ -77,7 +77,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowrefund_invalid)
 	AliasNew("node3", "arbiteraliasrefund2", "changeddata3");
 	string qty = "2";
 	string offerguid = OfferNew("node2", "selleraliasrefund2", "category", "title", "100", "1.45", "description", "EUR");
-	string guid = EscrowNew("node1", "buyeralias", offerguid, qty, "message", "arbiteraliasrefund2", "selleraliasrefund2");
+	string guid = EscrowNew("node1", "buyeraliasrefund2", offerguid, qty, "message", "arbiteraliasrefund2", "selleraliasrefund2");
 	// try to claim refund even if not refunded
 	BOOST_CHECK_THROW(CallRPC("node2", "escrowclaimrefund " + guid), runtime_error);
 	// buyer cant refund to himself
@@ -139,9 +139,9 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_arbiter)
 	// get arbiter balance after release
 	BOOST_CHECK_NO_THROW(r = CallRPC("node3", "getinfo"));
 	// 10 mined block subsidy + escrow fee
-	balanceBeforeArbiter += 10*54.13*COIN + escrowfee;
+	balanceBeforeArbiter += escrowfee;
 	CAmount balanceAfterArbiter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(abs(balanceBeforeArbiter - balanceAfterArbiter) <= COIN);
+	BOOST_CHECK_EQUAL(balanceBeforeArbiter,balanceAfterArbiter);
 	
 
 
@@ -219,16 +219,17 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		// stop node2 create a service,  mine some blocks to expire the service, when we restart the node the service data won't be synced with node2
 		StopNode("node2");
 
-		BOOST_CHECK_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune"), runtime_error);
+		BOOST_CHECK_NO_THROW(r = CallRPC("node3", "escrownew buyeraliasprune " + offerguid + " 1 message arbiteraliasprune"));
 		const UniValue &arr = r.get_array();
 		string guid = arr[1].get_str();
 		// then we let the service expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		MilliSleep(2500);
-		// make sure our escrow alias doesn't expire
+		// make sure our dependent services doesn't expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate buyeraliasprune newdata privdata"));
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate arbiteraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "aliasupdate arbiteraliasprune newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		// then we let the service expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		StartNode("node2");
@@ -236,7 +237,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		MilliSleep(2500);
 		// and it should say its expired
-		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "escrowinfo " + guid));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "escrowinfo " + guid));
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node2", "escrowinfo " + guid), runtime_error);
@@ -245,15 +246,19 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		// stop node3
 		StopNode("node3");
 		// create a new service
-		BOOST_CHECK_THROW(r = CallRPC("node2", "escrownew arbiteraliasprune " + offerguid + " 1 message selleraliasprune"), runtime_error);
+		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrownew arbiteraliasprune " + offerguid + " 1 message selleraliasprune"));
 		const UniValue &arr1 = r.get_array();
 		string guid1 = arr1[1].get_str();
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		// make 89 blocks (10 get mined with new)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
 		MilliSleep(2500);
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// give some time to propogate the new blocks across other 2 nodes
 		MilliSleep(2500);
@@ -267,8 +272,11 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "escrowrelease " + guid1));
 		// leave some feedback
 		BOOST_CHECK_NO_THROW(CallRPC("node1",  "escrowfeedback " + guid1 + " 1 2 3 4"));
-
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
 		MilliSleep(2500);
 		// now it should be expired, try to leave feedback it shouldn't let you
 		BOOST_CHECK_THROW(CallRPC("node2",  "escrowfeedback " + guid1 + " 1 2 3 4"), runtime_error);
