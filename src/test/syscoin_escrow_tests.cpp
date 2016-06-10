@@ -252,6 +252,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		MilliSleep(2500);
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowrelease " + guid1));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		// generate 89 more blocks (10 get mined from update)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
