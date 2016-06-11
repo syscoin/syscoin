@@ -446,10 +446,6 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					if(prevOp != OP_ESCROW_COMPLETE && prevOp != OP_ESCROW_REFUND)
 						return error("CheckEscrowInputs() : can only leave feedback for a completed escrow");
-					if(theEscrow.buyerFeedback.IsNull() && theEscrow.sellerFeedback.IsNull() && theEscrow.arbiterFeedback.IsNull())
-					{
-						return error("CheckEscrowInputs() :cannot leave empty feedback");
-					}
 					if(prevOp == OP_ESCROW_COMPLETE && vvchPrevArgs.size() > 1 && vvchPrevArgs[1] == vchFromString("1") && theEscrow.buyerFeedback.vchFeedback.size() <= 0 && theEscrow.sellerFeedback.vchFeedback.size() <= 0 && theEscrow.arbiterFeedback.vchFeedback.size() <= 0)
 					{
 						return error("CheckEscrowInputs() :feedback reply must leave a message, rating is not used.");
