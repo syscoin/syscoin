@@ -260,7 +260,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// give some time to propogate the new blocks across other 2 nodes
 		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 84"));
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
