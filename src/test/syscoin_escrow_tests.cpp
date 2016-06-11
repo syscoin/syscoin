@@ -236,7 +236,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		// make sure our escrow alias doesn't expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 30"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 20"));
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
@@ -247,7 +247,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowrelease " + guid1));
-		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		// generate 89 more blocks (10 get mined from update)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
