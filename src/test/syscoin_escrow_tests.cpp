@@ -231,6 +231,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		const UniValue &arr1 = r.get_array();
 		string guid1 = arr1[1].get_str();
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 3"));
+		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		// make sure our escrow alias doesn't expire
