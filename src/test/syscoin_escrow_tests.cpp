@@ -265,7 +265,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
-		
+		MilliSleep(2500);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		// this should claim the release because buyer calls it
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "escrowrelease " + guid1));
