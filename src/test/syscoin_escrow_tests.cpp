@@ -232,12 +232,11 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		string guid1 = arr1[1].get_str();
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 3"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
-		// make 79 blocks
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		// make sure our escrow alias doesn't expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
-		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 30"));
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
