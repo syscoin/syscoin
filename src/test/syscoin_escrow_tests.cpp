@@ -283,6 +283,8 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
 		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 2"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
@@ -294,6 +296,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 
 
 		StartNode("node3");
+		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 		MilliSleep(2500);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
