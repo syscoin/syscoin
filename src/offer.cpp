@@ -787,7 +787,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 			}
 			theOffer = vtxPos.back();
-			if((theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			// cannot update expired offer accepts (as long not initiated by escrow, if in escrow we let the accept go through)
+			if(!IsEscrowOp(prevEscrowOp) && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 				return error("CheckOfferInputs() : cannot accept expired offer");
 			if(theOffer.sCategory.size() > 0 && boost::algorithm::ends_with(stringFromVch(theOffer.sCategory), "wanted"))
 				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
@@ -2760,7 +2761,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 				// we want the initial funding escrow transaction height as when to calculate this offer accept price from convertCurrencyCodeToSyscoin()
 				CEscrow fundingEscrow = escrowVtxPos.front();
 				vchEscrowWhitelistAlias = fundingEscrow.vchWhitelistAlias;
-				// update height if it is bigger than escrow creation height, we want earlier of two, linked heifht or escrow creation to index into sysrates check
+				// update height if it is bigger than escrow creation height, we want earlier of two, linked height or escrow creation to index into sysrates check
 				if(nHeight > fundingEscrow.nHeight)
 					nHeight = fundingEscrow.nHeight;
 				CPubKey sellerEscrowKey(fundingEscrow.vchSellerKey);
