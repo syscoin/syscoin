@@ -287,6 +287,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 2"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
+		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		MilliSleep(2500);
 		// now it should be expired, try to leave feedback it shouldn't let you
