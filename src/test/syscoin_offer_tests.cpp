@@ -349,7 +349,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offeraccept_nocheck buyeralias4 " + offerguid + " 1 message"));
 		const UniValue &arr = r.get_array();
 		string acceptguid = arr[1].get_str();
-		GenerateBlocks("node2", 5);
+		GenerateBlocks(5, "node2");
 		MilliSleep(2500);
 		GenerateBlocks(5);
 
