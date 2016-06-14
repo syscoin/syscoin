@@ -360,7 +360,7 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 		GenerateBlocks(5);
 		// ensure the qty hasn't been updated
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
-		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "qty").get_str(), "100");
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "quantity").get_str(), "100");
 		// should fail: link to an expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink buyeralias4 " + offerguid + " 5 newdescription"), runtime_error);	
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offerlink_nocheck buyeralias4 " + offerguid + " 5 newdescription"), runtime_error);	
