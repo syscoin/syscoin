@@ -38,7 +38,7 @@ bool IsMessageOp(int op) {
 // Use for validation purposes and pass the chain height.
 int GetMessageExpirationDepth() {
 	#ifdef ENABLE_DEBUGRPC
-    return 1440;
+    return 100;
   #else
     return 525600;
   #endif
