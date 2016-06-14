@@ -383,7 +383,7 @@ bool GetTxOfOfferAccept(const vector<unsigned char> &vchOffer, const vector<unsi
 			LogPrintf("GetTxOfOfferAccept() : cannot find offer from this offer accept position");
 		return false;
 	}
-	if (nHeight + GetOfferExpirationDepth()
+	if ((nHeight + GetOfferExpirationDepth())
 			< chainActive.Tip()->nHeight) {
 		string offer = stringFromVch(vchOfferAccept);
 		if(fDebug)
@@ -1031,7 +1031,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
 			// cannot buy expired offers
-			if(theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			if((theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 			{
 				if(fDebug)
 					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer");
