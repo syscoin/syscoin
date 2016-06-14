@@ -704,9 +704,6 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					return error(
 							"CheckOfferInputs() : failed to read from offer DB");
 				myOffer = vtxPos.back();
-				// cannot update expired offers
-				if((myOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
-					return error("CheckOfferInputs() : cannot update expired offer");	
 			}
 
 			// check for valid alias peg
@@ -966,6 +963,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(!vtxPos.empty())
 			{
 				const COffer& dbOffer = vtxPos.back();
+				// cannot update expired offers
+				if((dbOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+				{
+					if(fDebug)
+						LogPrintf("CheckOfferInputs(): Trying to update an expired service");
+					return true;
+				}
 				// if updating whitelist, we dont allow updating any offer details
 				if(theOffer.linkWhitelist.entries.size() > 0)
 					theOffer = dbOffer;
