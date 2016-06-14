@@ -892,7 +892,7 @@ void EscrowRefund(const string& node, const string& guid)
 	BOOST_CHECK_NO_THROW(CallRPC(node, "escrowrefund " + guid));
 	GenerateBlocks(10, node);
 }
-const UniValue FindOfferAccept(const string& node, const string& offerguid, const string& acceptguid)
+const UniValue FindOfferAccept(const string& node, const string& offerguid, const string& acceptguid, bool nocheck)
 {
 	UniValue r, ret;
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + offerguid));
@@ -908,7 +908,8 @@ const UniValue FindOfferAccept(const string& node, const string& offerguid, cons
 		}
 
 	}
-	BOOST_CHECK(!ret.isNull());
+	if(!nocheck)
+		BOOST_CHECK(!ret.isNull());
 	return ret;
 }
 const UniValue FindOfferLinkedAccept(const string& node, const string& offerguid, const string& acceptguid)
