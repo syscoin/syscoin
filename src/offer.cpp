@@ -703,11 +703,12 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				if (!pofferdb->ReadOffer(vvchArgs[0], vtxPos) || vtxPos.empty())
 					return error(
 							"CheckOfferInputs() : failed to read from offer DB");
+				myOffer = vtxPos.back();
+				// cannot update expired offers
+				if((myOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+					return error("CheckOfferInputs() : cannot update expired offer");	
 			}
-			myOffer = vtxPos.back();
-			// cannot update expired offers (as long not initiated by escrow, if in escrow we let the update go through)
-			if((myOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
-				return error("CheckOfferInputs() : cannot update expired offer");	
+
 			// check for valid alias peg
 			if(!theOffer.vchAliasPeg.empty() && getCurrencyToSYSFromAlias(theOffer.vchAliasPeg, myOffer.sCurrencyCode, nRate, theOffer.nHeight, rateList,precision) != "")
 			{
