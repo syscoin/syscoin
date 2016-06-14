@@ -786,9 +786,6 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 			}
 			theOffer = vtxPos.back();
-			// cannot buy expired offers (as long not initiated by escrow, if in escrow we let the accept go through)
-			if(!IsEscrowOp(prevEscrowOp) && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
-				return error("CheckOfferInputs() : cannot accept expired offer");
 			if(theOffer.sCategory.size() > 0 && boost::algorithm::ends_with(stringFromVch(theOffer.sCategory), "wanted"))
 				return error("CheckOfferInputs() OP_OFFER_ACCEPT: Cannot purchase a wanted offer");
 			if(!theOffer.vchLinkOffer.empty())
@@ -1033,6 +1030,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
+			// cannot buy expired offers
+			if(theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			{
+				if(fDebug)
+					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer");
+				return true;
+			}
 			theOfferAccept = serializedOffer.accept;
 			if(IsOfferOp(prevOp))
 				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchPrevArgs[3]));
