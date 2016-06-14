@@ -705,6 +705,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 			}
 			myOffer = vtxPos.back();
+			// cannot update expired offers (as long not initiated by escrow, if in escrow we let the update go through)
 			if((myOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 				return error("CheckOfferInputs() : cannot update expired offer");	
 			// check for valid alias peg
@@ -787,7 +788,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 			}
 			theOffer = vtxPos.back();
-			// cannot update expired offer accepts (as long not initiated by escrow, if in escrow we let the accept go through)
+			// cannot buy expired offers (as long not initiated by escrow, if in escrow we let the accept go through)
 			if(!IsEscrowOp(prevEscrowOp) && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 				return error("CheckOfferInputs() : cannot accept expired offer");
 			if(theOffer.sCategory.size() > 0 && boost::algorithm::ends_with(stringFromVch(theOffer.sCategory), "wanted"))

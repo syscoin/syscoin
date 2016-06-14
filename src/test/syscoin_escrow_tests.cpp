@@ -256,13 +256,13 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 2 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// give some time to propogate the new blocks across other 2 nodes
 		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 84"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 75"));
 		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 3 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
@@ -276,14 +276,14 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1",  "escrowfeedback " + guid1 + " 1 2 3 4"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
 		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 4 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
 		MilliSleep(2500);
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 1 0.05 description"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES selleraliasprune " + offerguid + " category title 5 0.05 description"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 2"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate selleraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
