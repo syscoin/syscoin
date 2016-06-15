@@ -133,30 +133,21 @@ bool AcceptandPayOfferListPage::getProfileData(QString& publicData, QString& pri
 	UniValue result ;
 	params.push_back(ui->aliasEdit->currentText().toStdString());
 
-	
+	publicData = "";
+	privateData = "";
 	try {
 		result = tableRPC.execute(strMethod, params);
 
-		if (result.type() == UniValue::VARR)
-		{
-		
-	
-			const UniValue &arr = result.get_array();
-		    for (unsigned int idx = 0; idx < arr.size(); idx++) {
-			    const UniValue& input = arr[idx];
-				if (input.type() != UniValue::VOBJ)
-					continue;
-				const UniValue& o = input.get_obj();
-			
-				const UniValue& pub_value = find_value(o, "value");
-				if (pub_value.type() == UniValue::VSTR)
-					publicData = QString::fromStdString(pub_value.get_str());
-				const UniValue& priv_value = find_value(o, "privatevalue");
-				if (priv_value.type() == UniValue::VSTR)
-					privateData = QString::fromStdString(priv_value.get_str());				
-				return true;
-				
-			}
+		if (result.type() == UniValue::VOBJ)
+		{	
+			const UniValue &o = result.get_obj();	
+			const UniValue& pub_value = find_value(o, "value");
+			if (pub_value.type() == UniValue::VSTR)
+				publicData = QString::fromStdString(pub_value.get_str());
+			const UniValue& priv_value = find_value(o, "privatevalue");
+			if (priv_value.type() == UniValue::VSTR)
+				privateData = QString::fromStdString(priv_value.get_str());				
+			return true;					
 		}
 	}
 	catch (UniValue& objError)
