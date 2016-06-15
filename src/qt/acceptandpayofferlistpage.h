@@ -44,6 +44,7 @@ public:
 
     const QString &getReturnValue() const { return returnValue; }
 	bool handlePaymentRequest(const SendCoinsRecipient *rv);
+	bool getProfileData(QString& publicData, QString& privateData);
 	void setValue(const QString& strAlias, const QString& strRand, const QString& strSold,  const QString& strRating, COffer &offer, QString price, QString address);
 	void updateCaption();
 	void OpenPayDialog();
@@ -52,6 +53,8 @@ public:
 	void loadAliases();
 	void setModel(WalletModel* model);
 public Q_SLOTS:
+	void on_pubProfile();
+	void on_privProfile();
     void acceptOffer();
 	bool lookup(const QString &id = QString(""));
 	void resetState();
@@ -72,6 +75,7 @@ private:
 	QStringList m_imageList;
 	QString sAddress;
 	bool bOnlyAcceptBTC;
+	bool usedProfileInfo;
 	
 };
 

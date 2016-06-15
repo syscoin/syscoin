@@ -52,6 +52,7 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 	}
 	ui->imageButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/imageplaceholder"));
 	this->offerPaid = false;
+	this->usedProfileInfo = false;
 	this->URIHandled = false;	
     ui->labelExplanation->setText(tr("Purchase an offer, Syscoin will be used from your balance to complete the transaction"));
     connect(ui->acceptButton, SIGNAL(clicked()), this, SLOT(acceptOffer()));
@@ -65,12 +66,111 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 	ui->imageButton->setToolTip(tr("Click to open image in browser..."));
 	ui->infoCert->setVisible(false);
 	ui->certLabel->setVisible(false);
+
+    // Build context menu
+	QAction *pubProfileAction = new QAction(tr("Use Public Profile"), this);
+	QAction *privProfileAction = new QAction(tr("Use Private Profile"), this);
+    contextMenu = new QMenu();
+    contextMenu->addAction(pubProfileAction);
+    contextMenu->addAction(privProfileAction);
+
+
+    // Connect signals for context menu actions
+    connect(pubProfileAction, SIGNAL(triggered()), this, SLOT(on_pubProfile()));
+    connect(privProfileAction, SIGNAL(triggered()), this, SLOT(on_privProfile()));
+   
+    connect(ui->notesEdit, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
+
 	RefreshImage();
 
 }
 void AcceptandPayOfferListPage::setModel(WalletModel* model)
 {
 	walletModel = model;
+}
+void AcceptandPayOfferListPage::on_pubProfile()
+{
+	if(this->usedProfileInfo)
+	{
+        QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Public Profile Inclusion"),
+                 tr("Warning:You have already appended profile information to the notes for this purchase!") + "<br><br>" + tr("Are you sure you wish to continue?"),
+                 QMessageBox::Yes|QMessageBox::Cancel,
+                 QMessageBox::Cancel);
+        if(retval == QMessageBox::Cancel)
+			return;
+	}
+	QString pubProfile, privProfile;
+	if(getProfileData(pubProfile, privProfile))
+	{
+		ui->notesEdit->appendPlainText(pubProfile);
+		this->usedProfileInfo = true;
+	}
+}
+void AcceptandPayOfferListPage::on_privProfile()
+{
+	if(this->usedProfileInfo)
+	{
+        QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Private Profile Inclusion"),
+                 tr("Warning:You have already appended profile information to the notes for this purchase!") + "<br><br>" + tr("Are you sure you wish to continue?"),
+                 QMessageBox::Yes|QMessageBox::Cancel,
+                 QMessageBox::Cancel);
+        if(retval == QMessageBox::Cancel)
+			return;
+	}
+	QString pubProfile, privProfile;
+	if(getProfileData(pubProfile, privProfile))
+	{
+		ui->notesEdit->appendPlainText(privProfile);
+		this->usedProfileInfo = true;
+	}
+}
+bool AcceptandPayOfferListPage::getProfileData(QString& publicData, QString& privateData)
+{
+	string strMethod = string("aliasinfo");
+    UniValue params(UniValue::VARR); 
+	UniValue result ;
+	params.push_back(ui->aliasEdit->currentText().toStdString());
+
+	
+	try {
+		result = tableRPC.execute(strMethod, params);
+
+		if (result.type() == UniValue::VARR)
+		{
+		
+	
+			const UniValue &arr = result.get_array();
+		    for (unsigned int idx = 0; idx < arr.size(); idx++) {
+			    const UniValue& input = arr[idx];
+				if (input.type() != UniValue::VOBJ)
+					continue;
+				const UniValue& o = input.get_obj();
+			
+				const UniValue& pub_value = find_value(o, "value");
+				if (pub_value.type() == UniValue::VSTR)
+					publicData = QString::fromStdString(pub_value.get_str());
+				const UniValue& priv_value = find_value(o, "privatevalue");
+				if (priv_value.type() == UniValue::VSTR)
+					privateData = QString::fromStdString(priv_value.get_str());				
+				return true;
+				
+			}
+		}
+	}
+	catch (UniValue& objError)
+	{
+		string strError = find_value(objError, "message").get_str();
+		QMessageBox::critical(this, windowTitle(),
+			tr("Could get alias profile data: %1").arg(QString::fromStdString(strError)),
+				QMessageBox::Ok, QMessageBox::Ok);
+	}
+	catch(std::exception& e)
+	{
+		QMessageBox::critical(this, windowTitle(),
+			tr("There was an exception trying to get the alias profile data: ") + QString::fromStdString(e.what()),
+				QMessageBox::Ok, QMessageBox::Ok);
+	}   
+	return false;
 }
 void AcceptandPayOfferListPage::loadAliases()
 {
@@ -174,6 +274,7 @@ void AcceptandPayOfferListPage::resetState()
 {
 		this->offerPaid = false;
 		this->URIHandled = false;
+		this->usedProfileInfo = false;
 		updateCaption();
 }
 void AcceptandPayOfferListPage::updateCaption()
