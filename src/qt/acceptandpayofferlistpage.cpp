@@ -66,10 +66,13 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 	ui->imageButton->setToolTip(tr("Click to open image in browser..."));
 	ui->infoCert->setVisible(false);
 	ui->certLabel->setVisible(false);
-
+    contextMenu = ui->notesEdit->createStandardContextMenu();
+	contextMenu->addSeparator();
+    contextMenu->addAction(pubProfileAction);
+    contextMenu->addAction(privProfileAction);
     // Build context menu
-	pubProfileAction = new QAction(tr("Use Public Profile"), this);
-	privProfileAction = new QAction(tr("Use Private Profile"), this);
+	QAction *pubProfileAction = new QAction(tr("Use Public Profile"), this);
+	QAction *privProfileAction = new QAction(tr("Use Private Profile"), this);
     // Connect signals for context menu actions
     connect(pubProfileAction, SIGNAL(triggered()), this, SLOT(on_pubProfile()));
     connect(privProfileAction, SIGNAL(triggered()), this, SLOT(on_privProfile()));
@@ -81,11 +84,7 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 }
 void AcceptandPayOfferListPage::contextualMenu(const QPoint &point)
 {
-    QMenu *contextMenu = ui->notesEdit->createStandardContextMenu();
-    contextMenu->addAction(pubProfileAction);
-    contextMenu->addAction(privProfileAction);
     contextMenu->exec(ui->notesEdit->mapToGlobal(point));
-	delete contextMenu;
 }
 void AcceptandPayOfferListPage::setModel(WalletModel* model)
 {
@@ -172,7 +171,10 @@ bool AcceptandPayOfferListPage::getProfileData(QString& publicData, QString& pri
 		QMessageBox::critical(this, windowTitle(),
 			tr("There was an exception trying to get the alias profile data: ") + QString::fromStdString(e.what()),
 				QMessageBox::Ok, QMessageBox::Ok);
-	}   
+	}  
+	QMessageBox::critical(this, windowTitle(),
+		tr("Couldn't find alias %1 in the database").arg(ui->aliasEdit->currentText()),
+			QMessageBox::Ok, QMessageBox::Ok);
 	return false;
 }
 void AcceptandPayOfferListPage::loadAliases()
@@ -272,6 +274,7 @@ AcceptandPayOfferListPage::~AcceptandPayOfferListPage()
 {
     delete ui;
 	this->URIHandled = false;
+	delete contextMenu;
 }
 void AcceptandPayOfferListPage::resetState()
 {

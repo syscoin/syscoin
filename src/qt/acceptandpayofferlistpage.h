@@ -69,8 +69,7 @@ private:
 	bool URIHandled;
     QString returnValue;
 	bool offerPaid;
-	QAction *pubProfileAction;
-	QAction *privProfileAction;
+	QMenu *contextMenu;
 	QNetworkAccessManager* m_netwManager;
 	QPixmap m_placeholderImage;
 	QUrl m_url;
