@@ -68,21 +68,24 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 	ui->certLabel->setVisible(false);
 
     // Build context menu
-	QAction *pubProfileAction = new QAction(tr("Use Public Profile"), this);
-	QAction *privProfileAction = new QAction(tr("Use Private Profile"), this);
-    contextMenu = new QMenu();
-    contextMenu->addAction(pubProfileAction);
-    contextMenu->addAction(privProfileAction);
-
-
+	pubProfileAction = new QAction(tr("Use Public Profile"), this);
+	privProfileAction = new QAction(tr("Use Private Profile"), this);
     // Connect signals for context menu actions
     connect(pubProfileAction, SIGNAL(triggered()), this, SLOT(on_pubProfile()));
     connect(privProfileAction, SIGNAL(triggered()), this, SLOT(on_privProfile()));
-   
+	ui->notesEdit->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(ui->notesEdit, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
 
 	RefreshImage();
 
+}
+void AcceptandPayOfferListPage::contextualMenu(const QPoint &point)
+{
+    QMenu *contextMenu = ui->notesEdit->createStandardContextMenu();
+    contextMenu->addAction(pubProfileAction);
+    contextMenu->addAction(privProfileAction);
+    contextMenu->exec(ui->notesEdit->mapToGlobal(pt));
+	delete contextMenu;
 }
 void AcceptandPayOfferListPage::setModel(WalletModel* model)
 {

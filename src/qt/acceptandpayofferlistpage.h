@@ -60,6 +60,8 @@ public Q_SLOTS:
 	void resetState();
 	void netwManagerFinished();
 	void on_imageButton_clicked();
+    /** Spawn contextual menu (right mouse menu) for escrow book entry */
+    void contextualMenu(const QPoint &point);
 private:
 	WalletModel* walletModel;
 	const PlatformStyle *platformStyle;
@@ -67,8 +69,8 @@ private:
 	bool URIHandled;
     QString returnValue;
 	bool offerPaid;
-    QMenu *contextMenu;
-    QAction *deleteAction; // to be able to explicitly disable it
+	QAction *pubProfileAction;
+	QAction *privProfileAction;
 	QNetworkAccessManager* m_netwManager;
 	QPixmap m_placeholderImage;
 	QUrl m_url;
