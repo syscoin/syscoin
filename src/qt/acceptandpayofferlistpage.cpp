@@ -66,13 +66,13 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 	ui->imageButton->setToolTip(tr("Click to open image in browser..."));
 	ui->infoCert->setVisible(false);
 	ui->certLabel->setVisible(false);
+    // Build context menu
+	QAction *pubProfileAction = new QAction(tr("Use Public Profile"), this);
+	QAction *privProfileAction = new QAction(tr("Use Private Profile"), this);
     contextMenu = ui->notesEdit->createStandardContextMenu();
 	contextMenu->addSeparator();
     contextMenu->addAction(pubProfileAction);
     contextMenu->addAction(privProfileAction);
-    // Build context menu
-	QAction *pubProfileAction = new QAction(tr("Use Public Profile"), this);
-	QAction *privProfileAction = new QAction(tr("Use Private Profile"), this);
     // Connect signals for context menu actions
     connect(pubProfileAction, SIGNAL(triggered()), this, SLOT(on_pubProfile()));
     connect(privProfileAction, SIGNAL(triggered()), this, SLOT(on_privProfile()));
