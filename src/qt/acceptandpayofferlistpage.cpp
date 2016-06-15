@@ -84,7 +84,7 @@ void AcceptandPayOfferListPage::contextualMenu(const QPoint &point)
     QMenu *contextMenu = ui->notesEdit->createStandardContextMenu();
     contextMenu->addAction(pubProfileAction);
     contextMenu->addAction(privProfileAction);
-    contextMenu->exec(ui->notesEdit->mapToGlobal(pt));
+    contextMenu->exec(ui->notesEdit->mapToGlobal(point));
 	delete contextMenu;
 }
 void AcceptandPayOfferListPage::setModel(WalletModel* model)
