@@ -3506,7 +3506,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		rating = roundf(vtxAliasPos.back().nRating/(float)vtxAliasPos.back().nRatingCount);
 	oOffer.push_back(Pair("alias_rating",(int)rating));
 	oOffer.push_back(Pair("geolocation", stringFromVch(theOffer.vchGeoLocation)));
-	oOffer.push_back(Pair("offers_sold", aoOfferAccepts.size()));
+	oOffer.push_back(Pair("offers_sold", (int)aoOfferAccepts.size()));
 	oOffer.push_back(Pair("accepts", aoOfferAccepts));
 	oLastOffer = oOffer;
 	
