@@ -495,7 +495,7 @@ bool EditOfferDialog::saveCurrentRow()
 		params.push_back(ui->acceptBTCOnlyEdit->currentText() == QString("Yes")? "1": "0");
 		params.push_back(ui->geoLocationEdit->text().toStdString());
 		if(ui->safeSearchEdit->currentIndex() >= 0)
-			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
+			params.push_back(ui->safeSearchEdit->currentText().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
 			const UniValue &arr = result.get_array();

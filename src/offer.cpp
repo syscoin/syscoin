@@ -310,7 +310,7 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 					pcursor->Next();
 					continue;
 				}
-				if(txPos.bPrivate && strRegexp != offer)
+				if(strRegexp != ""  && txPos.bPrivate && strRegexp != offer)
 				{
 					pcursor->Next();
 					continue;

@@ -214,7 +214,7 @@ bool EditCertDialog::saveCurrentRow()
 		params.push_back(ui->certDataEdit->toPlainText().toStdString());
 		params.push_back(ui->privateBox->currentText() == QString("Yes")? "1": "0");
 		if(ui->safeSearchEdit->currentIndex() >= 0)
-			params.push_back(ui->safeSearchEdit->itemData(ui->safeSearchEdit->currentIndex()).toString().toStdString());
+			params.push_back(ui->safeSearchEdit->currentText().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
 			if (result.type() != UniValue::VNULL)
