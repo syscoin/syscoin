@@ -389,9 +389,9 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 	}
 	string safeSearchFlag = safesearch? "Yes":" No";
 	UniValue r;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + safeSearchFlag));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " /""/ " + safeSearchFlag));
 	// ensure mempool blocks second tx until it confirms
-	BOOST_CHECK_THROW(CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " " + safeSearchFlag), runtime_error);
+	BOOST_CHECK_THROW(CallRPC(node, "aliasupdate " + aliasname + " " + pubdata + " " + privdata + " /""/ " + safeSearchFlag), runtime_error);
 	GenerateBlocks(10, node);
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);

@@ -1432,7 +1432,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	const CWalletTx* wtxIn;
 	CScript scriptPubKeyOrig;
 	string strPubKey;
-    if (params.size() >= 4) {
+    if (params.size() >= 4 && params[3].get_str().size() > 0) {
 		vector<unsigned char> vchPubKey;
 		vchPubKey = vchFromString(params[3].get_str());
 		boost::algorithm::unhex(vchPubKey.begin(), vchPubKey.end(), std::back_inserter(vchPubKeyByte));
