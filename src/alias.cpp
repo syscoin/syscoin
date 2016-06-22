@@ -1384,6 +1384,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	newAlias.vchPublicValue = vchPublicValue;
 	newAlias.vchPrivateValue = vchPrivateValue;
 	newAlias.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newAlias.safeSearch = strSafeSearch == "Yes"? true: false;
 
     vector<CRecipient> vecSend;
 	CRecipient recipient;
@@ -1778,7 +1779,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("address", address.ToString()));
 		bool fAliasMine = IsSyscoinTxMine(tx, "alias")? true:  false;
 		oName.push_back(Pair("ismine", fAliasMine));
-		oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
+		oName.push_back(Pair("safesearch", alias.safeSearch ? "Yes" : "No"));
 		oName.push_back(Pair("safetylevel", alias.safetyLevel ));
 		float rating = 0;
 		if(alias.nRatingCount > 0)
