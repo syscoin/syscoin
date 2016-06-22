@@ -1370,7 +1370,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	newOffer.bPrivate = true;
 	newOffer.bOnlyAcceptBTC = bOnlyAcceptBTC;
 	newOffer.vchAliasPeg = vchAliasPeg;
-	newOffer.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newOffer.safetyLevel = 0;
 	newOffer.safeSearch = strSafeSearch == "Yes"? true: false;
 	newOffer.vchGeoLocation = vchFromString(strGeoLocation);
 
@@ -1558,7 +1558,7 @@ UniValue offernew_nocheck(const UniValue& params, bool fHelp) {
 	newOffer.bPrivate = true;
 	newOffer.bOnlyAcceptBTC = bOnlyAcceptBTC;
 	newOffer.vchAliasPeg = vchAliasPeg;
-	newOffer.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newOffer.safetyLevel = 0;
 	newOffer.safeSearch = strSafeSearch == "Yes"? true: false;
 	newOffer.vchGeoLocation = vchFromString(strGeoLocation);
 

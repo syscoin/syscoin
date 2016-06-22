@@ -1383,7 +1383,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	newAlias.vchPubKey = vchPubKey;
 	newAlias.vchPublicValue = vchPublicValue;
 	newAlias.vchPrivateValue = vchPrivateValue;
-	newAlias.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newAlias.safetyLevel = 0;
 	newAlias.safeSearch = strSafeSearch == "Yes"? true: false;
 
     vector<CRecipient> vecSend;
