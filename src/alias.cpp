@@ -1420,7 +1420,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchPrivateValue;
 	string strPublicValue = params[1].get_str();
 	vchPublicValue = vchFromString(strPublicValue);
-	string strPrivateValue = params.size()>=3?params[2].get_str():"";
+	string strPrivateValue = params.size()>=3 && params[2].get_str().size() > 0?params[2].get_str():"";
 	vchPrivateValue = vchFromString(strPrivateValue);
 	if (vchPublicValue.size() > MAX_VALUE_LENGTH && vchName != vchFromString("SYS_RATES"))
 		throw runtime_error("alias public value cannot exceed 1023 bytes!");
