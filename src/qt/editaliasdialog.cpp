@@ -33,14 +33,10 @@ EditAliasDialog::EditAliasDialog(Mode mode, QWidget *parent) :
     case EditDataAlias:
         setWindowTitle(tr("Edit Data Alias"));
 		ui->aliasEdit->setEnabled(false);
-		ui->safeSearchEdit->setEnabled(false);
-		ui->safeSearchDisclaimer->setVisible(false);
         break;
     case EditAlias:
         setWindowTitle(tr("Edit Alias"));
 		ui->aliasEdit->setEnabled(false);
-		ui->safeSearchEdit->setEnabled(false);
-		ui->safeSearchDisclaimer->setVisible(false);
         break;
     case TransferAlias:
         setWindowTitle(tr("Transfer Alias"));
@@ -48,8 +44,6 @@ EditAliasDialog::EditAliasDialog(Mode mode, QWidget *parent) :
 		ui->nameEdit->setEnabled(false);
 		ui->transferEdit->setVisible(true);
 		ui->transferLabel->setVisible(true);
-		ui->safeSearchEdit->setEnabled(false);
-		ui->safeSearchDisclaimer->setVisible(false);
         break;
     }
     mapper = new QDataWidgetMapper(this);

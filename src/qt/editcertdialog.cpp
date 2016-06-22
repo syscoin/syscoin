@@ -56,14 +56,10 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 		ui->aliasDisclaimer->setVisible(false);
 		ui->aliasEdit->setEnabled(false);
         setWindowTitle(tr("Edit Cert"));
-		ui->safeSearchEdit->setEnabled(false);
-		ui->safeSearchDisclaimer->setVisible(false);
         break;
     case TransferCert:
         setWindowTitle(tr("Transfer Cert"));
 		ui->nameEdit->setEnabled(false);
-		ui->safeSearchEdit->setEnabled(false);
-		ui->safeSearchDisclaimer->setVisible(false);
 		ui->certDataEdit->setVisible(false);
 		ui->certDataEdit->setEnabled(false);
 		ui->certDataLabel->setVisible(false);
