@@ -30,7 +30,7 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
 	ui->aliasPegDisclaimer->setText(tr("<font color='blue'>Choose an alias which has peg information to allow exchange of currencies into SYS amounts based on the pegged values. Consumers will pay amounts based on this peg, the alias must be managed effectively or you may end up selling your offers for unexpected amounts.</font>"));
 	ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this offer</font>"));
 	ui->privateDisclaimer->setText(tr("<font color='blue'>All offers are first listed as private. If you would like your offer to be public, please edit it after it is created.</font>"));
-	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this offer safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an offer that is offensive and do not set this option to <b>No</b> your offer will be banned aswell as possibly your store alias! You may only set this option when creating an offer, you cannot update it later so choose this option carefully based upon your descretion.</font>"));
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this offer safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an offer that is offensive and do not set this option to <b>No</b> your offer will be banned aswell as possibly your store alias!</font>"));
 	ui->offerLabel->setVisible(true);
 	ui->offerEdit->setVisible(true);
 	ui->offerEdit->setEnabled(false);
@@ -547,6 +547,10 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back(ui->privateEdit->currentText() == QString("Yes")? "1": "0");
 			if(ui->certEdit->currentIndex() > 0)
 				params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
+			params.push_back("");
+			params.push_back(ui->geoLocationEdit->text().toStdString());
+			if(ui->safeSearchEdit->currentIndex() >= 0)
+				params.push_back(ui->safeSearchEdit->currentText().toStdString());
 			try {
 				UniValue result = tableRPC.execute(strMethod, params);
 				if (result.type() != UniValue::VNULL)

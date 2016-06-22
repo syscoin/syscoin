@@ -112,6 +112,22 @@ BOOST_AUTO_TEST_CASE (generate_certsafesearch)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidsafe));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidnotsafe));
 
+	// reverse the rolls
+	CertUpdate("node1", certguidsafe, "certtitle", "certdata", false, "No");
+	CertUpdate("node1", certguidnotsafe,  "certtitle", "certdata", false, "Yes");
+
+	// should include result in both safe search mode on and off
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), true);
+
+	// should only show up if safe search is off
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), true);
+
+	// shouldn't affect certinfo
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidsafe));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidnotsafe));
+
 
 }
 BOOST_AUTO_TEST_CASE (generate_certban)

@@ -1056,6 +1056,11 @@ bool CAliasDB::ScanNames(const std::vector<unsigned char>& vchName, const string
 						continue;
 					}
 				}
+				if(!txPos.safeSearch && safeSearch)
+				{
+					pcursor->Next();
+					continue;
+				}
 				string name = stringFromVch(vchName);
 				boost::algorithm::to_lower(name);
 				if (strRegexp != "" && !regex_search(name, nameparts, cregex) && strRegexp != name)
@@ -1398,14 +1403,15 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	return res;
 }
 UniValue aliasupdate(const UniValue& params, bool fHelp) {
-	if (fHelp || 2 > params.size() || 4 < params.size())
+	if (fHelp || 2 > params.size() || 5 < params.size())
 		throw runtime_error(
-		"aliasupdate <aliasname> <public value> [private value] [<toalias_pubkey>]\n"
+		"aliasupdate <aliasname> <public value> [private value=''] [toalias_pubkey=''] [safesearch=Yes]\n"
 						"Update and possibly transfer an alias.\n"
 						"<aliasname> alias name.\n"
 						"<public value> alias public profile data, 1023 chars max.\n"
 						"<private value> alias private profile data, 1023 chars max. Will be private and readable by owner only.\n"
 						"<toalias_pubkey> receiver syscoin alias pub key, if transferring alias.\n"
+						"<safesearch> is this alias safe to search. Defaults to Yes, No for not safe and to hide in GUI search queries\n"
 						+ HelpRequiringPassphrase());
 
 	vector<unsigned char> vchName = vchFromString(params[0].get_str());
@@ -1438,7 +1444,11 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 			throw runtime_error("You must transfer to a public key that's not associated with any other alias");
 	}
 
-
+	string strSafeSearch = "Yes";
+	if(params.size() >= 5)
+	{
+		strSafeSearch = params[4].get_str();
+	}
 	EnsureWalletIsUnlocked();
 	CTransaction tx;
 	CAliasIndex theAlias;
@@ -1480,8 +1490,9 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 		theAlias.vchPublicValue = vchPublicValue;
 	if(copyAlias.vchPrivateValue != vchPrivateValue)
 		theAlias.vchPrivateValue = vchPrivateValue;
-
+	
 	theAlias.vchPubKey = vchPubKeyByte;
+	theAlias.safeSearch = strSafeSearch == "Yes"? true: false;
 	CPubKey currentKey(vchPubKeyByte);
 	scriptPubKeyOrig = GetScriptForDestination(currentKey.GetID());
 	CScript scriptPubKey;
@@ -1596,7 +1607,8 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 			if(DecryptMessage(alias.vchPubKey, alias.vchPrivateValue, strDecrypted))
 				strPrivateValue = strDecrypted;		
 			oName.push_back(Pair("privatevalue", strPrivateValue));
-			oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
+			oName.push_back(Pair("safesearch", alias.safeSearch ? "Yes" : "No"));
+			oName.push_back(Pair("safetylevel", alias.safetyLevel ));
 			float rating = 0;
 			if(alias.nRatingCount > 0)
 				rating = roundf(alias.nRating/(float)alias.nRatingCount);
@@ -1767,6 +1779,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		bool fAliasMine = IsSyscoinTxMine(tx, "alias")? true:  false;
 		oName.push_back(Pair("ismine", fAliasMine));
 		oName.push_back(Pair("safesearch", alias.safetyLevel <= 0 ? "Yes" : "No"));
+		oName.push_back(Pair("safetylevel", alias.safetyLevel ));
 		float rating = 0;
 		if(alias.nRatingCount > 0)
 			rating = roundf(alias.nRating/(float)alias.nRatingCount);

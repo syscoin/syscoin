@@ -34,7 +34,7 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 	ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
 	ui->transferDisclaimer->setText(tr("<font color='blue'>Enter the alias of the recipient of this certificate</font>"));
     ui->transferDisclaimer->setVisible(false);
-	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this cert safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create a cert that is offensive and do not set this option to <b>No</b> your cert will be banned! You may only set this option when creating an cert, you cannot update it later so choose this option carefully based upon your descretion.</font>"));
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this cert safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create a cert that is offensive and do not set this option to <b>No</b> your cert will be banned!</font>"));
 	
 	loadAliases();
 	QSettings settings;
@@ -248,7 +248,8 @@ bool EditCertDialog::saveCurrentRow()
 			params.push_back(ui->nameEdit->text().toStdString());
 			params.push_back(ui->certDataEdit->toPlainText().toStdString());
 			params.push_back(ui->privateBox->currentText() == QString("Yes")? "1": "0");
-			
+			if(ui->safeSearchEdit->currentIndex() >= 0)
+				params.push_back(ui->safeSearchEdit->currentText().toStdString());			
 			try {
 				UniValue result = tableRPC.execute(strMethod, params);
 				if (result.type() != UniValue::VNULL)

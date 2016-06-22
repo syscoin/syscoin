@@ -283,6 +283,11 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 						continue;
 					}
 				}
+				if(!txPos.safeSearch && safeSearch)
+				{
+					pcursor->Next();
+					continue;
+				}
 				if(strCategory.size() > 0 && !boost::algorithm::starts_with(stringFromVch(txPos.sCategory), strCategory))
 				{
 					pcursor->Next();
@@ -1366,6 +1371,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	newOffer.bOnlyAcceptBTC = bOnlyAcceptBTC;
 	newOffer.vchAliasPeg = vchAliasPeg;
 	newOffer.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newOffer.safeSearch = strSafeSearch == "Yes"? true: false;
 	newOffer.vchGeoLocation = vchFromString(strGeoLocation);
 
 	CPubKey currentOfferKey(newOffer.vchPubKey);
@@ -1553,6 +1559,7 @@ UniValue offernew_nocheck(const UniValue& params, bool fHelp) {
 	newOffer.bOnlyAcceptBTC = bOnlyAcceptBTC;
 	newOffer.vchAliasPeg = vchAliasPeg;
 	newOffer.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newOffer.safeSearch = strSafeSearch == "Yes"? true: false;
 	newOffer.vchGeoLocation = vchFromString(strGeoLocation);
 
 	CPubKey currentOfferKey(newOffer.vchPubKey);
@@ -2200,9 +2207,9 @@ UniValue offerwhitelist(const UniValue& params, bool fHelp) {
 }
 
 UniValue offerupdate(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() < 5 || params.size() > 12)
+	if (fHelp || params.size() < 5 || params.size() > 13)
 		throw runtime_error(
-		"offerupdate <aliaspeg> <alias> <guid> <category> <title> <quantity> <price> [description] [private='0'] [cert. guid=''] [exclusive resell='1'] [geolocation='']\n"
+		"offerupdate <aliaspeg> <alias> <guid> <category> <title> <quantity> <price> [description] [private='0'] [cert. guid=''] [exclusive resell='1'] [geolocation=''] [safesearch=Yes]\n"
 						"Perform an update on an offer you control.\n"
 						+ HelpRequiringPassphrase());
 	// gather & validate inputs
@@ -2226,7 +2233,11 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	if (params.size() >= 10) vchCert = vchFromValue(params[9]);
 	if (params.size() >= 11) bExclusiveResell = atoi(params[10].get_str().c_str()) == 1? true: false;
 	if (params.size() >= 12) vchGeoLocation = vchFromValue(params[11]);
-
+	string strSafeSearch = "Yes";
+	if(params.size() >= 13)
+	{
+		strSafeSearch = params[12].get_str();
+	}
 	try {
 		nQty = atoi(params[5].get_str());
 		price = atof(params[6].get_str().c_str());
@@ -2387,6 +2398,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 			theOffer.vchPubKey = alias.vchPubKey;
 		theOffer.vchCert.clear();
 	}
+	theOffer.safeSearch = strSafeSearch == "Yes"? true: false;
 	// ensure pubkey points to an alias
 
 	CPubKey SellerPubKey(theOffer.vchPubKey);
@@ -2403,7 +2415,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		throw runtime_error("not enough remaining quantity to fulfill this offerupdate");
 	theOffer.nHeight = chainActive.Tip()->nHeight;
 	theOffer.SetPrice(price);
-	if(params.size() >= 11)
+	if(params.size() >= 11 && params[10].get_str().size() > 0)
 		theOffer.linkWhitelist.bExclusiveResell = bExclusiveResell;
 
 
@@ -3496,7 +3508,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	}
 	oOffer.push_back(Pair("exclusive_resell", theOffer.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 	oOffer.push_back(Pair("private", theOffer.bPrivate ? "Yes" : "No"));
-	oOffer.push_back(Pair("safesearch", theOffer.safetyLevel <= 0 ? "Yes" : "No"));
+	oOffer.push_back(Pair("safesearch", theOffer.safeSearch ? "Yes" : "No"));
+	oOffer.push_back(Pair("safetylevel", theOffer.safetyLevel ));
 	oOffer.push_back(Pair("btconly", theOffer.bOnlyAcceptBTC ? "Yes" : "No"));
 	oOffer.push_back(Pair("alias_peg", stringFromVch(theOffer.vchAliasPeg)));
 	oOffer.push_back(Pair("description", stringFromVch(theOffer.sDescription)));
@@ -3929,7 +3942,8 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("btconly", theOfferA.bOnlyAcceptBTC ? "Yes" : "No"));
 			oName.push_back(Pair("alias_peg", stringFromVch(theOfferA.vchAliasPeg)));
 			oName.push_back(Pair("private", theOfferA.bPrivate ? "Yes" : "No"));
-			oName.push_back(Pair("safesearch", theOfferA.safetyLevel <= 0 ? "Yes" : "No"));
+			oName.push_back(Pair("safesearch", theOfferA.safeSearch ? "Yes" : "No"));
+			oName.push_back(Pair("safetylevel", theOfferA.safetyLevel ));
 			oName.push_back(Pair("geolocation", stringFromVch(theOfferA.vchGeoLocation)));
 			oName.push_back(Pair("offers_sold", GetNumberOfAccepts(vtxPos)));
 			expired_block = nHeight + GetOfferExpirationDepth();

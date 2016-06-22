@@ -37,6 +37,7 @@ public:
 	unsigned char safetyLevel;
 	int nRating;
 	int nRatingCount;
+	bool safeSearch;
     CAliasIndex() { 
         SetNull();
     }
@@ -62,12 +63,13 @@ public:
 		{
 			READWRITE(vchName);
 			READWRITE(safetyLevel);
+			READWRITE(safeSearch);
 			READWRITE(VARINT(nRating));
 			READWRITE(VARINT(nRatingCount));
 		}
 	}
     friend bool operator==(const CAliasIndex &a, const CAliasIndex &b) {
-		return (a.vchName == b.vchName && a.nRatingCount == b.nRatingCount && a.nRating == b.nRating && a.safetyLevel == b.safetyLevel && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
+		return (a.vchName == b.vchName && a.nRatingCount == b.nRatingCount && a.nRating == b.nRating && a.safetyLevel == b.safetyLevel && a.safeSearch == b.safeSearch && a.nHeight == b.nHeight && a.txHash == b.txHash && a.vchPublicValue == b.vchPrivateValue && a.vchPubKey == b.vchPubKey);
     }
 
     friend bool operator!=(const CAliasIndex &a, const CAliasIndex &b) {
@@ -81,12 +83,13 @@ public:
         vchPrivateValue = b.vchPrivateValue;
         vchPubKey = b.vchPubKey;
 		safetyLevel = b.safetyLevel;
+		safeSearch = b.safeSearch;
 		nRating = b.nRating;
 		nRatingCount = b.nRatingCount;
         return *this;
     }   
-    void SetNull() {vchName.clear(); nRatingCount = 0; nRating = 0; safetyLevel = 0; txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
-    bool IsNull() const { return (vchName.empty() && nRatingCount == 0 && nRating == 0 && safetyLevel == 0 && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
+    void SetNull() {vchName.clear(); nRatingCount = 0; nRating = 0; safetyLevel = 0; safeSearch = false; txHash.SetNull(); nHeight = 0; vchPublicValue.clear(); vchPrivateValue.clear(); vchPubKey.clear(); }
+    bool IsNull() const { return (vchName.empty() && nRatingCount == 0 && nRating == 0 && safetyLevel == 0 && !safeSearch && nHeight == 0 && txHash.IsNull() && vchPublicValue.empty() && vchPrivateValue.empty() && vchPubKey.empty()); }
 	bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData);
 	const std::vector<unsigned char> Serialize();

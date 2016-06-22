@@ -163,6 +163,11 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
 						continue;
 					}
 				}
+				if(!txPos.safeSearch && safeSearch)
+				{
+					pcursor->Next();
+					continue;
+				}
 				const string &cert = stringFromVch(vchCert);
 				string title = stringFromVch(txPos.vchTitle);
 				boost::algorithm::to_lower(title);
@@ -542,6 +547,7 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	newCert.vchPubKey = alias.vchPubKey;
 	newCert.bPrivate = bPrivate;
 	newCert.safetyLevel = strSafeSearch == "Yes"? 0: SAFETY_LEVEL1;
+	newCert.safeSearch = strSafeSearch == "Yes"? true: false;
 
     scriptPubKey << CScript::EncodeOP_N(OP_CERT_ACTIVATE) << vchCert << OP_2DROP;
     scriptPubKey += scriptPubKeyOrig;
@@ -572,9 +578,9 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 }
 
 UniValue certupdate(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() != 4)
+    if (fHelp || params.size() < 4 || params.size() > 5)
         throw runtime_error(
-		"certupdate <guid> <title> <data> <private>\n"
+		"certupdate <guid> <title> <data> <private> [safesearch=Yes]\n"
                         "Perform an update on an certificate you control.\n"
                         "<guid> certificate guidkey.\n"
                         "<title> certificate title, 255 bytes max.\n"
@@ -585,7 +591,13 @@ UniValue certupdate(const UniValue& params, bool fHelp) {
     vector<unsigned char> vchCert = vchFromValue(params[0]);
     vector<unsigned char> vchTitle = vchFromValue(params[1]);
     vector<unsigned char> vchData = vchFromValue(params[2]);
+
 	bool bPrivate = atoi(params[3].get_str().c_str()) == 1? true: false;
+	string strSafeSearch = "Yes";
+	if(params.size() >= 5)
+	{
+		strSafeSearch = params[4].get_str();
+	}
     if(vchTitle.size() < 1)
         throw runtime_error("certificate title cannot be empty!");
     if(vchTitle.size() > MAX_NAME_LENGTH)
@@ -641,6 +653,7 @@ UniValue certupdate(const UniValue& params, bool fHelp) {
 		theCert.vchData = vchData;
 	theCert.nHeight = chainActive.Tip()->nHeight;
 	theCert.bPrivate = bPrivate;
+	theCert.safeSearch = strSafeSearch == "Yes"? true: false;
 
 
 	vector<CRecipient> vecSend;
@@ -844,7 +857,8 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
 	}
     oCert.push_back(Pair("data", strData));
 	oCert.push_back(Pair("private", ca.bPrivate? "Yes": "No"));
-	oCert.push_back(Pair("safesearch", ca.safetyLevel <= 0 ? "Yes" : "No"));
+	oCert.push_back(Pair("safesearch", ca.safeSearch ? "Yes" : "No"));
+	oCert.push_back(Pair("safetylevel", ca.safetyLevel));
     oCert.push_back(Pair("ismine", IsSyscoinTxMine(tx, "cert") ? "true" : "false"));
 
     uint64_t nHeight;
@@ -958,7 +972,8 @@ UniValue certlist(const UniValue& params, bool fHelp) {
 				strData = strDecrypted;	
 		}
 		oName.push_back(Pair("private", cert.bPrivate? "Yes": "No"));
-		oName.push_back(Pair("safesearch", cert.safetyLevel <= 0 ? "Yes" : "No"));
+		oName.push_back(Pair("safesearch", cert.safeSearch ? "Yes" : "No"));
+		oName.push_back(Pair("safetylevel", cert.safetyLevel));
 		oName.push_back(Pair("data", strData));
 		CPubKey PubKey(cert.vchPubKey);
 		CSyscoinAddress address(PubKey.GetID());

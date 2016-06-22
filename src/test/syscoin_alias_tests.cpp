@@ -117,6 +117,22 @@ BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagsafesearch"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnonsafesearch"));
 
+	// reverse the rolls
+	AliasUpdate("node1", "jagsafesearch", "pubdata", "privdata", "No");
+	AliasUpdate("node1", "jagnonsafesearch", "pubdata", "privdata", "Yes");
+
+	// should include result in both safe search mode on and off
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "No"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Yes"), true);
+
+	// should only show up if safe search is off
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "No"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "Yes"), true);
+
+	// shouldn't affect aliasinfo
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagsafesearch"));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnonsafesearch"));
+
 
 }
 BOOST_AUTO_TEST_CASE (generate_aliasban)

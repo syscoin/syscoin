@@ -20,7 +20,7 @@ EditAliasDialog::EditAliasDialog(Mode mode, QWidget *parent) :
 
 	ui->transferEdit->setVisible(false);
 	ui->transferLabel->setVisible(false);
-	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this alias safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an alias that is offensive and do not set this option to <b>No</b> your alias will be banned! You may only set this option when creating an alias, you cannot update it later so choose this option carefully based upon your descretion.</font>"));
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this alias safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an alias that is offensive and do not set this option to <b>No</b> your alias will be banned!</font>"));
 	
     switch(mode)
     {
@@ -150,7 +150,10 @@ bool EditAliasDialog::saveCurrentRow()
 			strMethod = string("aliasupdate");
 			params.push_back(ui->aliasEdit->text().toStdString());
 			params.push_back(ui->nameEdit->text().toStdString());
-			
+			params.push_back("");
+			params.push_back("");
+			if(ui->safeSearchEdit->currentIndex() >= 0)
+				params.push_back(ui->safeSearchEdit->currentText().toStdString());			
 			try {
 				UniValue result = tableRPC.execute(strMethod, params);
 				if (result.type() != UniValue::VNULL)
@@ -185,6 +188,8 @@ bool EditAliasDialog::saveCurrentRow()
 			params.push_back(ui->nameEdit->text().toStdString());
 			params.push_back("");
 			params.push_back(ui->transferEdit->text().toStdString());
+			if(ui->safeSearchEdit->currentIndex() >= 0)
+				params.push_back(ui->safeSearchEdit->currentText().toStdString());		
 			try {
 				UniValue result = tableRPC.execute(strMethod, params);
 				if (result.type() != UniValue::VNULL)
