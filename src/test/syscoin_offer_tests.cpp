@@ -499,7 +499,7 @@ BOOST_AUTO_TEST_CASE (generate_offersafesearch)
 
 	// should only show up if safe search is off
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), false);
-	BOOST_CHECK_EQUAL(CertFilOfferFilterOfferFilterter("node1", offerguidnotsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), true);
 
 	// shouldn't affect offerinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
