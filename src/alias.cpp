@@ -1406,13 +1406,13 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	if (fHelp || 2 > params.size() || 5 < params.size())
 		throw runtime_error(
-		"aliasupdate <aliasname> <public value> [private value=''] [toalias_pubkey=''] [safesearch=Yes]\n"
+		"aliasupdate <aliasname> <public value> [private value=''] [safesearch=Yes] [toalias_pubkey='']\n"
 						"Update and possibly transfer an alias.\n"
 						"<aliasname> alias name.\n"
 						"<public value> alias public profile data, 1023 chars max.\n"
-						"<private value> alias private profile data, 1023 chars max. Will be private and readable by owner only.\n"
-						"<toalias_pubkey> receiver syscoin alias pub key, if transferring alias.\n"
+						"<private value> alias private profile data, 1023 chars max. Will be private and readable by owner only.\n"				
 						"<safesearch> is this alias safe to search. Defaults to Yes, No for not safe and to hide in GUI search queries\n"
+						"<toalias_pubkey> receiver syscoin alias pub key, if transferring alias.\n"
 						+ HelpRequiringPassphrase());
 
 	vector<unsigned char> vchName = vchFromString(params[0].get_str());
@@ -1433,9 +1433,9 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	const CWalletTx* wtxIn;
 	CScript scriptPubKeyOrig;
 	string strPubKey;
-    if (params.size() >= 4 && params[3].get_str().size() > 0) {
+    if (params.size() >= 5 && params[4].get_str().size() > 0) {
 		vector<unsigned char> vchPubKey;
-		vchPubKey = vchFromString(params[3].get_str());
+		vchPubKey = vchFromString(params[4].get_str());
 		boost::algorithm::unhex(vchPubKey.begin(), vchPubKey.end(), std::back_inserter(vchPubKeyByte));
 		CPubKey xferKey  = CPubKey(vchPubKeyByte);
 		if(!xferKey.IsValid())
@@ -1446,9 +1446,9 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	}
 
 	string strSafeSearch = "Yes";
-	if(params.size() >= 5)
+	if(params.size() >= 4)
 	{
-		strSafeSearch = params[4].get_str();
+		strSafeSearch = params[3].get_str();
 	}
 	EnsureWalletIsUnlocked();
 	CTransaction tx;

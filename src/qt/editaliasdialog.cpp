@@ -145,7 +145,6 @@ bool EditAliasDialog::saveCurrentRow()
 			params.push_back(ui->aliasEdit->text().toStdString());
 			params.push_back(ui->nameEdit->text().toStdString());
 			params.push_back("");
-			params.push_back("");
 			if(ui->safeSearchEdit->currentIndex() >= 0)
 				params.push_back(ui->safeSearchEdit->currentText().toStdString());			
 			try {
@@ -181,9 +180,9 @@ bool EditAliasDialog::saveCurrentRow()
 			params.push_back(ui->aliasEdit->text().toStdString());
 			params.push_back(ui->nameEdit->text().toStdString());
 			params.push_back("");
-			params.push_back(ui->transferEdit->text().toStdString());
 			if(ui->safeSearchEdit->currentIndex() >= 0)
-				params.push_back(ui->safeSearchEdit->currentText().toStdString());		
+				params.push_back(ui->safeSearchEdit->currentText().toStdString());
+			params.push_back(ui->transferEdit->text().toStdString());
 			try {
 				UniValue result = tableRPC.execute(strMethod, params);
 				if (result.type() != UniValue::VNULL)
