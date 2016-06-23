@@ -494,8 +494,8 @@ BOOST_AUTO_TEST_CASE (generate_offersafesearch)
 
 
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), false);
 
 	// should only show up if safe search is off
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);

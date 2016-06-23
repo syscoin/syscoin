@@ -117,8 +117,8 @@ BOOST_AUTO_TEST_CASE (generate_certsafesearch)
 	CertUpdate("node1", certguidnotsafe,  "certtitle", "certdata", false, "Yes");
 
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), false);
 
 	// should only show up if safe search is off
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), true);

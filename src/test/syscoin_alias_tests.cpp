@@ -122,8 +122,8 @@ BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
 	AliasUpdate("node1", "jagnonsafesearch", "pubdata", "privdata", "Yes");
 
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "No"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Yes"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "No"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Yes"), false);
 
 	// should only show up if safe search is off
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "No"), true);
