@@ -357,6 +357,7 @@ public:
 		bOnlyAcceptBTC = b.bOnlyAcceptBTC;
 		vchAliasPeg = b.vchAliasPeg;
 		safetyLevel = b.safetyLevel;
+		safeSearch = b.safeSearch;
 		vchGeoLocation = b.vchGeoLocation;
 		vchOffer = b.vchOffer;
         return *this;

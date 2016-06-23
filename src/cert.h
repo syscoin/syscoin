@@ -85,7 +85,7 @@ public:
 		vchPubKey = b.vchPubKey;
 		bPrivate = b.bPrivate;
 		safetyLevel = b.safetyLevel;
-		safetyLevel = b.safetyLevel;
+		safeSearch = b.safeSearch;
 		vchCert = b.vchCert;
         return *this;
     }
