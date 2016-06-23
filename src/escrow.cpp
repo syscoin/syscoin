@@ -50,7 +50,7 @@ int64_t GetEscrowArbiterFee(int64_t escrowValue) {
 }
 int GetEscrowExpirationDepth() {
 	#ifdef ENABLE_DEBUGRPC
-    return 1440;
+    return 100;
   #else
     return 525600;
   #endif
