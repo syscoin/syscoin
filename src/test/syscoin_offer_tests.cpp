@@ -552,7 +552,8 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	// safe to search regardless of filter
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), true);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), true);
+
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
 
 	// should be able to offerinfo on non banned offers

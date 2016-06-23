@@ -177,7 +177,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 	// safe to search regardless of filter
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Yes"), true);
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), true);
+
+	// since safesearch is set to false on this alias, it won't show up in search still
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), false);
+	// it will if you are not doing a safe search
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "No"), true);
 
 	// should be able to aliasinfo on non banned aliases

@@ -173,7 +173,8 @@ BOOST_AUTO_TEST_CASE (generate_certban)
 	// safe to search regardless of filter
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), true);
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), true);
+
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), false);
 	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), true);
 
 	// should be able to certinfo on non banned certs
