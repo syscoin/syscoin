@@ -221,6 +221,9 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 
 		// stop node3
 		StopNode("node3");
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate jagprune1 newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// create a new service
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagprune1 jag1 data 0"));
 		const UniValue &arr1 = r.get_array();
@@ -239,9 +242,14 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), true);
 		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), true);
+		// make sure our offer alias doesn't expire
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate jagprune1 newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// generate 89 more blocks (10 get mined from update)
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 84"));
 		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate jagprune1 newdata privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata 0"));
 		// you can search it still on node1/node2
