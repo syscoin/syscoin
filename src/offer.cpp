@@ -932,7 +932,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		string retError = "";
 		if((retError = CheckForAliasExpiry(theOffer.vchPubKey, nHeight)) != "")
-			return error("CheckOfferInputs(): " + retError);
+			return error("CheckOfferInputs(): " + retError.c_str());
 	}
 	
 

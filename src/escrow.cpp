@@ -426,11 +426,11 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				string retError = "";
 				if((retError = CheckForAliasExpiry(theEscrow.vchBuyerKey, nHeight)) != "")
-					return error("CheckEscrowInputs(): " + retError);
+					return error("CheckEscrowInputs(): " + retError.c_str());
 				if((retError = CheckForAliasExpiry(theEscrow.vchSellerKey, nHeight)) != "")
-					return error("CheckEscrowInputs(): " + retError);	
+					return error("CheckEscrowInputs(): " + retError.c_str());	
 				if((retError = CheckForAliasExpiry(theEscrow.vchArbiterKey, nHeight)) != "")
-					return error("CheckEscrowInputs(): " + retError);
+					return error("CheckEscrowInputs(): " + retError.c_str());
 				break;
 			case OP_ESCROW_RELEASE:
 				if(prevOp != OP_ESCROW_ACTIVATE)
