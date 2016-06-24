@@ -277,6 +277,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	GenerateBlocks(50);
 	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");
 	string certguid = CertNew("node1", "aliasexpire", "certtitle", "certdata", false, "Yes");
+	string escrowguid = EscrowNew("node2", "aliasexpirenode2", offerguid, "1", "message", "aliasexpire", "aliasexpire");
 	// this will expire the alias but not other services above
 	GenerateBlocks(40);
 	string aliasexpire2pubkey = AliasNew("node1", "aliasexpire2", "somedata");
@@ -296,6 +297,8 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire changedata1 pvtdata Yes " + pubkey), runtime_error);
 		// should fail: alias transfer to another alias
 		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire2 changedata1 pvtdata Yes " + aliasexpirenode2pubkey), runtime_error);
+		// should fail: alias update on expired alias
+		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire newdata1 privdata"), runtime_error);
 
 		// should fail: offer update on an expired alias in offer
 		BOOST_CHECK_THROW(CallRPC("node1", "offerupdate_nocheck SYS_RATES aliasexpire " + offerguid + " category title 90 0.15 description"), runtime_error);
@@ -324,6 +327,14 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		// should fail: generate a cert using expired alias
 		BOOST_CHECK_THROW(CallRPC("node1", "certnew aliasexpire jag1 data 1"), runtime_error);
 
+		// should fail: new escrow with expired arbiter alias
+		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpire2node2 " + offerguid + " 1 message aliasexpire"), runtime_error);
+		// should fail: new escrow with expired alias
+		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpirenode2 " + offerguid + " 1 message aliasexpire2"), runtime_error);
+
+		// able to release and claim release on escrow with expired aliases
+		EscrowRelease("node1", escrowguid);	
+		EscrowClaimRelease("node2", escrowguid);
 	#endif
 }
 
