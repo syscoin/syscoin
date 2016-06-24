@@ -21,6 +21,8 @@ BOOST_AUTO_TEST_CASE (generate_offernew)
 
 	// generate a good offer
 	string offerguid = OfferNew("node1", "selleralias1", "category", "title", "100", "0.05", "description", "USD");
+	// by default offers are set to private and not searchable
+	BOOST_CHECK_EQUAL(OfferFilter("node1", "", "Yes"), false);
 
 	// should fail: generate an offer with unknown alias
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES fooalias category title 100 0.05 description USD"), runtime_error);
