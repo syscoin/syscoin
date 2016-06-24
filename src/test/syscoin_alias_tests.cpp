@@ -261,4 +261,32 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasprune1", "No"), false);
 	#endif
 }
+
+BOOST_AUTO_TEST_CASE (generate_aliasexpired)
+{
+	printf("Running generate_aliasexpired...\n");
+	UniValue r;
+	
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
+
+	AliasNew("node1", "aliasexpire", "somedata");
+	
+	GenerateBlocks(50);
+	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");
+	// this will expire the alias but not other services above
+	GenerateBlocks(60);
+	#ifdef ENABLE_DEBUGRPC
+		// should fail: offer update on an expired alias in offer
+		BOOST_CHECK_THROW(CallRPC("node1", "offerupdate_nocheck SYS_RATES aliasexpire " + offerguid + " category title 90 0.15 description"), runtime_error);
+		// should fail: perform an accept on expired alias in offer
+		BOOST_CHECK_THROW(CallRPC("node2", "offeraccept_nocheck aliasexpire " + offerguid + " 1 message"), runtime_error);
+		// should fail: link to an expired alias in offer
+		BOOST_CHECK_THROW(CallRPC("node2", "offerlink_nocheck aliasexpire " + offerguid + " 5 newdescription"), runtime_error);
+		// should fail: generate an offer using expired alias
+		BOOST_CHECK_THROW(CallRPC("node1", "offernew_nocheck SYS_RATES aliasexpire category title 1 0.05 description USD nocert 0 1"), runtime_error);	
+	#endif
+}
+
 BOOST_AUTO_TEST_SUITE_END ()
