@@ -279,7 +279,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	string certguid = CertNew("node1", "aliasexpire", "certtitle", "certdata", false, "Yes");
 	string escrowguid = EscrowNew("node2", "aliasexpirenode2", offerguid, "1", "message", "aliasexpire", "aliasexpire");
 	// this will expire the alias but not other services above
-	GenerateBlocks(40);
+	GenerateBlocks(10);
 	string aliasexpire2pubkey = AliasNew("node1", "aliasexpire2", "somedata");
 	string aliasexpire2node2pubkey = AliasNew("node2", "aliasexpire2node2", "somedata");
 	string certgoodguid = CertNew("node1", "aliasexpire2", "certtitle", "certdata", false, "Yes");
@@ -316,6 +316,15 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		// should fail: send message from non-expired alias to expired alias
 		BOOST_CHECK_THROW(CallRPC("node2", "messagenew subject title aliasexpire2node2 aliasexpire"), runtime_error);
 
+		// should fail: new escrow with expired arbiter alias
+		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpire2node2 " + offerguid + " 1 message aliasexpire"), runtime_error);
+		// should fail: new escrow with expired alias
+		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpirenode2 " + offerguid + " 1 message aliasexpire2"), runtime_error);
+
+		// able to release and claim release on escrow with expired aliases
+		EscrowRelease("node1", escrowguid);	
+		EscrowClaimRelease("node2", escrowguid);
+
 		// should fail: update cert with expired alias
 		BOOST_CHECK_THROW(CallRPC("node1", "certupdate " + certguid + " jag1 data 0"), runtime_error);
 		// should fail: xfer an cert with expired alias
@@ -327,14 +336,6 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		// should fail: generate a cert using expired alias
 		BOOST_CHECK_THROW(CallRPC("node1", "certnew aliasexpire jag1 data 1"), runtime_error);
 
-		// should fail: new escrow with expired arbiter alias
-		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpire2node2 " + offerguid + " 1 message aliasexpire"), runtime_error);
-		// should fail: new escrow with expired alias
-		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpirenode2 " + offerguid + " 1 message aliasexpire2"), runtime_error);
-
-		// able to release and claim release on escrow with expired aliases
-		EscrowRelease("node1", escrowguid);	
-		EscrowClaimRelease("node2", escrowguid);
 	#endif
 }
 
