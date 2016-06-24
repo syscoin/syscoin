@@ -835,23 +835,24 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				// Check name
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckAliasInputs() : aliasupdate alias mismatch");
-				if(!theAlias.IsNull())
+				if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
 				{
 					if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos) || vtxPos.empty())
 						return error("CheckAliasInputs() : failed to read from alias DB");
-					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight && vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY"))
+					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
 						return error("CheckAliasInputs(): Trying to update an expired service");
+					if((retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight)) != "")
+					{
+						retError = string("CheckAliasInputs(): ") + retError;
+						return error(retError.c_str());
+					}
 				}
 				break;
 		default:
 			return error(
 					"CheckAliasInputs() : alias transaction has unknown op");
 		}
-		if((retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight)) != "" && vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY"))
-		{
-			retError = string("CheckAliasInputs(): ") + retError;
-			return error(retError.c_str());
-		}
+
 	}
 	
 	if (!fJustCheck ) {
