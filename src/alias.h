@@ -146,7 +146,7 @@ std::string stringFromValue(const UniValue& value);
 bool IsSysCompressedOrUncompressedPubKey(const std::vector<unsigned char> &vchPubKey);
 int GetSyscoinTxVersion();
 const int SYSCOIN_TX_VERSION = 0x7400;
-std::string CheckForAliasExpiry(std::vector<unsigned char> vchPubKey)
+std::string CheckForAliasExpiry(std::vector<unsigned char> vchPubKey);
 bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const std::vector<std::vector<unsigned char> > &vvchArgs, const CCoinsViewCache &inputs, bool fJustCheck, int nHeight, const CBlock *block = NULL);
 void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient);
 void CreateFeeRecipient(const CScript& scriptPubKey, const std::vector<unsigned char>& data, CRecipient& recipient);
