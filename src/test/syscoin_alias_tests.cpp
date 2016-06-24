@@ -278,7 +278,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	string certguid = CertNew("node1", "aliasexpire", "certtitle", "certdata", false, "Yes");
 	// this will expire the alias but not other services above
 	GenerateBlocks(40);
-	AliasNew("node2", "aliasexpire2", "somedata");
+	AliasNew("node1", "aliasexpire2", "somedata");
 	string certgoodguid = CertNew("node1", "aliasexpire2", "certtitle", "certdata", false, "Yes");
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: offer update on an expired alias in offer
