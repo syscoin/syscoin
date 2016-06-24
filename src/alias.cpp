@@ -841,12 +841,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						return error("CheckAliasInputs() : failed to read from alias DB");
 					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
 						return error("CheckAliasInputs(): Trying to update an expired service");
-					// if we are transferring check the new pubkey points to non expired alias
-					if(theAlias.vchPubKey != vtxPos.back().vchPubKey && (retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight)) != "")
-					{
-						retError = string("CheckAliasInputs(): ") + retError;
-						return error(retError.c_str());
-					}
 				}
 				break;
 		default:

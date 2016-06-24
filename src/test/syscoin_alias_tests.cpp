@@ -283,11 +283,18 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	string aliasexpire2node2pubkey = AliasNew("node2", "aliasexpire2node2", "somedata");
 	string certgoodguid = CertNew("node1", "aliasexpire2", "certtitle", "certdata", false, "Yes");
 	#ifdef ENABLE_DEBUGRPC
+		UniValue pkr = CallRPC("node2", "generatepublickey");
+		if (pkr.type() != UniValue::VARR)
+			throw runtime_error("Could not parse rpc results");
+
+		const UniValue &resultArray = pkr.get_array();
+		string pubkey = resultArray[0].get_str();		
+
 		// should fail: alias update on expired alias
 		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire newdata1 privdata"), runtime_error);
 		// should fail: alias transfer from expired alias
-		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire changedata1 pvtdata Yes " + aliasexpire2node2pubkey), runtime_error);
-		// should fail: alias transfer to expired alias
+		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire changedata1 pvtdata Yes " + pubkey), runtime_error);
+		// should fail: alias transfer to another alias
 		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire2 changedata1 pvtdata Yes " + aliasexpirenode2pubkey), runtime_error);
 
 		// should fail: offer update on an expired alias in offer
