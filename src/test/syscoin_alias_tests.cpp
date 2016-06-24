@@ -277,12 +277,11 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	GenerateBlocks(50);
 	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");
 	string certguid = CertNew("node1", "aliasexpire", "certtitle", "certdata", false, "Yes");
-	// this will expire the alias but not other services above
-	GenerateBlocks(10);
 	string escrowguid = EscrowNew("node2", "aliasexpirenode2", offerguid, "1", "message", "aliasexpire", "aliasexpire");
 	string aliasexpire2pubkey = AliasNew("node1", "aliasexpire2", "somedata");
 	string aliasexpire2node2pubkey = AliasNew("node2", "aliasexpire2node2", "somedata");
 	string certgoodguid = CertNew("node1", "aliasexpire2", "certtitle", "certdata", false, "Yes");
+
 	#ifdef ENABLE_DEBUGRPC
 		UniValue pkr = CallRPC("node2", "generatepublickey");
 		if (pkr.type() != UniValue::VARR)
