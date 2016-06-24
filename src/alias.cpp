@@ -847,6 +847,11 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			return error(
 					"CheckAliasInputs() : alias transaction has unknown op");
 		}
+		if((retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight)) != "" && vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY"))
+		{
+			retError = string("CheckAliasInputs(): ") + retError;
+			return error(retError.c_str());
+		}
 	}
 	
 	if (!fJustCheck ) {
@@ -861,12 +866,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 			if(!vtxPos.empty())
 			{
-				if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight && vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY"))
-				{
-					if(fDebug)
-						LogPrintf("CheckAliasInputs(): Trying to update an expired service");
-					return true;
-				}
 				update = true;
 				if(theAlias.IsNull())
 					theAlias = vtxPos.back();
