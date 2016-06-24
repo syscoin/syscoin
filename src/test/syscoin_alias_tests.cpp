@@ -286,9 +286,9 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		// should fail: alias update on expired alias
 		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire newdata1 privdata"), runtime_error);
 		// should fail: alias transfer from expired alias
-		BOOST_CHECK_THROW(r = CallRPC("node1", "aliasupdate aliasexpire changedata1 pvtdata Yes " + aliasexpire2node2pubkey), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire changedata1 pvtdata Yes " + aliasexpire2node2pubkey), runtime_error);
 		// should fail: alias transfer to expired alias
-		BOOST_CHECK_THROW(r = CallRPC("node1", "aliasupdate aliasexpire2 changedata1 pvtdata Yes " + aliasexpirenode2pubkey), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpire2 changedata1 pvtdata Yes " + aliasexpirenode2pubkey), runtime_error);
 
 		// should fail: offer update on an expired alias in offer
 		BOOST_CHECK_THROW(CallRPC("node1", "offerupdate_nocheck SYS_RATES aliasexpire " + offerguid + " category title 90 0.15 description"), runtime_error);
@@ -300,11 +300,11 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		BOOST_CHECK_THROW(CallRPC("node1", "offernew_nocheck SYS_RATES aliasexpire category title 1 0.05 description USD nocert 0 1"), runtime_error);
 
 		// should fail: send message from expired alias to expired alias
-		BOOST_CHECK_THROW(r = CallRPC("node1", "messagenew subject title aliasexpire aliasexpirenode2"), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node1", "messagenew subject title aliasexpire aliasexpirenode2"), runtime_error);
 		// should fail: send message from expired alias to non-expired alias
-		BOOST_CHECK_THROW(r = CallRPC("node1", "messagenew subject title aliasexpire aliasexpire2node2"), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node1", "messagenew subject title aliasexpire aliasexpire2node2"), runtime_error);
 		// should fail: send message from non-expired alias to expired alias
-		BOOST_CHECK_THROW(r = CallRPC("node2", "messagenew subject title aliasexpire2node2 aliasexpire"), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node2", "messagenew subject title aliasexpire2node2 aliasexpire"), runtime_error);
 
 		// should fail: update cert with expired alias
 		BOOST_CHECK_THROW(CallRPC("node1", "certupdate " + certguid + " jag1 data 0"), runtime_error);
