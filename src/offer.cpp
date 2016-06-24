@@ -931,7 +931,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		default:
 			return error( "CheckOfferInputs() : offer transaction has unknown op");
 		}
-		if((retError = CheckForAliasExpiry(theOffer.vchPubKey, nHeight)) != "")
+		if(!IsEscrowOp(prevEscrowOp) && (retError = CheckForAliasExpiry(theOffer.vchPubKey, nHeight)) != "")
 		{
 			retError = string("CheckOfferInputs(): ") + retError;
 			return error(retError.c_str());
@@ -2714,7 +2714,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 
 	CAliasIndex alias;
 	CTransaction aliastx;
-	if (!GetTxOfAlias(vchAlias, alias, aliastx))
+	if (!GetTxOfAlias(vchAlias, alias, aliastx) && vchEscrowTxHash.empty())
 		throw runtime_error("could not find an alias with this name");
     if (vchEscrowTxHash.empty())
 	{
