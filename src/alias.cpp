@@ -1975,3 +1975,35 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 
 	return oRes;
 }
+
+string CheckForAliasExpiry(vector<unsigned char> vchPubKey)
+{
+	if(!vchPubKey.empty())
+	{
+		CPubKey PubKey(vchPubKey);
+		vector<unsigned char> aliasName;
+		vector<CAliasIndex> vtxAliasPos;
+		CSyscoinAddress address(PubKey.GetID());
+		if(!address.IsValid())
+			return string("alias address is invalid");
+		string strAddress = address.ToString();
+
+		if(!paliasdb->ExistsAddress(strAddress))
+		{
+			return string("alias does not exist in the db");
+		}
+		if(!paliasdb->ReadAddress(strAddress, aliasName))
+		{
+			return string("could not read alias address from the db");
+		}
+		if(!paliasdb->ReadAlias(aliasName, vtxAliasPos) || vtxAliasPos.empty())
+		{
+			return string("could not read alias from the db");
+		}
+		if((vtxAliasPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
+		{
+			return string("alias is expired");
+		}
+	}
+	return "";
+}
