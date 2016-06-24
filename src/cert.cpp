@@ -394,7 +394,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 			return error( "CheckCertInputs() : cert transaction has unknown op");
 		}
 		string retError = "";
-		if((retError = CheckForAliasExpiry(theCert.vchPubKey)) != "")
+		if((retError = CheckForAliasExpiry(theCert.vchPubKey, nHeight)) != "")
 			return error("CheckCertInputs(): " + retError);
 	}
 

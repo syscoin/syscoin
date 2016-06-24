@@ -1976,7 +1976,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	return oRes;
 }
 
-string CheckForAliasExpiry(vector<unsigned char> vchPubKey)
+string CheckForAliasExpiry(vector<unsigned char> vchPubKey, int nHeight)
 {
 	if(!vchPubKey.empty())
 	{
@@ -1988,11 +1988,11 @@ string CheckForAliasExpiry(vector<unsigned char> vchPubKey)
 			return string("alias address is invalid");
 		string strAddress = address.ToString();
 
-		if(!paliasdb->ExistsAddress(strAddress))
+		if(!paliasdb->ExistsAddress(vchFromString(strAddress)))
 		{
 			return string("alias does not exist in the db");
 		}
-		if(!paliasdb->ReadAddress(strAddress, aliasName))
+		if(!paliasdb->ReadAddress(vchFromString(strAddress), aliasName))
 		{
 			return string("could not read alias address from the db");
 		}
