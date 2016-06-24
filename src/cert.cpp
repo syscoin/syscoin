@@ -365,6 +365,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("cert hex guid too long");
 	vector<CAliasIndex> vtxAliasPos;
+	vector<CCert> vtxPos;
 	string retError = "";
 	if(fJustCheck)
 	{
@@ -389,6 +390,14 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 				return error("certtransfer previous op is invalid");
 			if (vvchPrevArgs[0] != vvchArgs[0])
 				return error("CheckCertInputs() : certtransfer cert mismatch");
+
+			if (!pcertdb->ReadCert(vvchArgs[0], vtxPos) || vtxPos.empty())
+				return error("CheckCertInputs() : failed to read from cert DB");
+			if((retError = CheckForAliasExpiry(vtxPos.back().vchPubKey, nHeight)) != "")
+			{
+				retError = string("CheckCertInputs(): ") + retError;
+				return error(retError.c_str());
+			}	
 			break;
 
 		default:
@@ -402,7 +411,6 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 	}
 
     if (!fJustCheck ) {
-		vector<CCert> vtxPos;
 		if(op != OP_CERT_ACTIVATE) 
 		{
 			// if not an certnew, load the cert data from the DB
