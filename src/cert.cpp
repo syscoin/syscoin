@@ -395,7 +395,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 		}
 		string retError = "";
 		if((retError = CheckForAliasExpiry(theCert.vchPubKey, nHeight)) != "")
-			return error("CheckCertInputs(): " + retError.c_str());
+			return error(string("CheckCertInputs(): ") + retError);
 	}
 
     if (!fJustCheck ) {
