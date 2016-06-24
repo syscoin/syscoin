@@ -359,6 +359,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
     CEscrow theEscrow;
     theEscrow.UnserializeFromTx(tx);
     COffer theOffer;
+	string retError = "";
     
 	if(theEscrow.IsNull() && op != OP_ESCROW_COMPLETE && vvchArgs.size() == 1)
 		return true;
@@ -424,7 +425,6 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					return error("CheckEscrowInputs() :cannot leave feedback in activate tx");
 				}
-				string retError = "";
 				if((retError = CheckForAliasExpiry(theEscrow.vchBuyerKey, nHeight)) != "")
 				{
 					retError = string("CheckEscrowInputs(): ") + retError;

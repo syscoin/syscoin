@@ -632,6 +632,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	string category;
 	int precision = 2;
 	CAmount nRate;
+	string retError = "";
 	// just check is for the memory pool inclusion, here we can stop bad transactions from entering before we get to include them in a block	
 	if(fJustCheck)
 	{
@@ -930,7 +931,6 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		default:
 			return error( "CheckOfferInputs() : offer transaction has unknown op");
 		}
-		string retError = "";
 		if((retError = CheckForAliasExpiry(theOffer.vchPubKey, nHeight)) != "")
 		{
 			retError = string("CheckOfferInputs(): ") + retError;

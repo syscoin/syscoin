@@ -280,6 +280,7 @@ bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<v
 
     // unserialize message UniValue from txn, check for valid
     CMessage theMessage;
+	string retError = "";
     theMessage.UnserializeFromTx(tx);
     if (theMessage.IsNull())
         return true;
@@ -326,7 +327,6 @@ bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<v
 		}
 		else
 			return error( "CheckMessageInputs() : message transaction has unknown op");
-		string retError = "";
 		if((retError = CheckForAliasExpiry(theMessage.vchPubKeyTo, nHeight)) != "")
 		{
 			retError = string("CheckMessageInputs(): ") + retError;

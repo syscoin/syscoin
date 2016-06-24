@@ -365,6 +365,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
     if (vvchArgs[0].size() > MAX_NAME_LENGTH)
         return error("cert hex guid too long");
 	vector<CAliasIndex> vtxAliasPos;
+	string retError = "";
 	if(fJustCheck)
 	{
 		switch (op) {
@@ -393,7 +394,6 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 		default:
 			return error( "CheckCertInputs() : cert transaction has unknown op");
 		}
-		string retError = "";
 		if((retError = CheckForAliasExpiry(theCert.vchPubKey, nHeight)) != "")
 		{
 			retError = string("CheckCertInputs(): ") + retError;
