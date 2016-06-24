@@ -262,6 +262,22 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 	#endif
 }
 
+BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
+{
+	printf("Running generate_aliasexpiredbuyback...\n");
+	UniValue r;
+	
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
+
+	AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
+	GenerateBlocks(110);
+	#ifdef ENABLE_DEBUGRPC
+		AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), true);
+	#endif
+}
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 {
 	printf("Running generate_aliasexpired...\n");
