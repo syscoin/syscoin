@@ -315,10 +315,18 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 					pcursor->Next();
 					continue;
 				}
-				if(strRegexp != ""  && txPos.bPrivate && strRegexp != offer)
+				if(txPos.bPrivate)
 				{
-					pcursor->Next();
-					continue;
+					if(strRegexp == "")
+					{
+						pcursor->Next();
+						continue;
+					}
+					else if(strRegexp != offer)
+					{
+						pcursor->Next();
+						continue;
+					}
 				}
                 offerScan.push_back(make_pair(vchOffer, txPos));
             }
