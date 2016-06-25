@@ -401,7 +401,6 @@ public:
             unsigned int nMax,
             std::vector<std::pair<std::vector<unsigned char>, COffer> >& offerScan);
 
-    bool ReconstructOfferIndex(CBlockIndex *pindexRescan);
 };
 bool GetAcceptByHash(std::vector<COffer> &offerList,  COfferAccept &ca);
 bool GetTxOfOfferAccept(const std::vector<unsigned char> &vchOffer, const std::vector<unsigned char> &vchOfferAccept,

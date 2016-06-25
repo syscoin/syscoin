@@ -121,7 +121,6 @@ public:
             unsigned int nMax,
             std::vector<std::pair<std::vector<unsigned char>, CMessage> >& MessageScan);
 
-    bool ReconstructMessageIndex(CBlockIndex *pindexRescan);
 };
 
 bool GetTxOfMessage(const std::vector<unsigned char> &vchMessage, CTransaction& tx);

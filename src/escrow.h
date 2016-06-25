@@ -238,7 +238,6 @@ public:
 		const std::vector<unsigned char>& vchName, const std::string& strRegExp, 
             unsigned int nMax,
             std::vector<std::pair<std::vector<unsigned char>, CEscrow> >& escrowScan);
-    bool ReconstructEscrowIndex(CBlockIndex *pindexRescan);
 };
 
 bool GetTxOfEscrow(const std::vector<unsigned char> &vchEscrow, CEscrow& txPos, CTransaction& tx);

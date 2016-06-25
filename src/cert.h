@@ -127,7 +127,6 @@ public:
             unsigned int nMax,
             std::vector<std::pair<std::vector<unsigned char>, CCert> >& certScan);
 
-    bool ReconstructCertIndex(CBlockIndex *pindexRescan);
 };
 bool GetTxOfCert(const std::vector<unsigned char> &vchCert,
         CCert& txPos, CTransaction& tx, bool skipExpiresCheck=false);
