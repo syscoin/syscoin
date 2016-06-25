@@ -147,6 +147,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 
 	AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
 	GenerateBlocks(110);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), false);
 	#ifdef ENABLE_DEBUGRPC
 		AliasNew("node1", "aliasexpirebuyback", "somedata1", "data1");
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), true);
