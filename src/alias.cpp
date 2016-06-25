@@ -857,6 +857,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos))
 				return error(
 						"CheckAliasInputs() : failed to read from alias DB");
+		}
 		if(op != OP_ALIAS_ACTIVATE)
 		{
 			if(!vtxPos.empty())
