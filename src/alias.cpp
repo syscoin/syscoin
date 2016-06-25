@@ -859,7 +859,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						"CheckAliasInputs() : failed to read from alias DB");
 		if(op != OP_ALIAS_ACTIVATE)
 		{
-			}
 			if(!vtxPos.empty())
 			{
 				update = true;
