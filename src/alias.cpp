@@ -840,12 +840,13 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			return error(
 					"CheckAliasInputs() : alias transaction has unknown op");
 		}
-		if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
+		if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY"))
 		{
-			if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos) || vtxPos.empty())
-				return error("CheckAliasInputs() : failed to read from alias DB");
-			if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
-				return error("CheckAliasInputs(): Trying to update or buy an expired service");
+			if((retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight)) != "")
+			{
+				retError = string("CheckAliasInputs(): ") + retError;
+				return error(retError.c_str());
+			}
 		}
 	}
 	
@@ -1978,7 +1979,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	return oRes;
 }
 
-string CheckForAliasExpiry(vector<unsigned char> vchPubKey, int nHeight)
+string CheckForAliasExpiry(const vector<unsigned char> &vchPubKey, const int nHeight, const vector<unsigned char> &vchAlias)
 {
 	if(!vchPubKey.empty())
 	{
@@ -1997,6 +1998,10 @@ string CheckForAliasExpiry(vector<unsigned char> vchPubKey, int nHeight)
 		if(!paliasdb->ReadAddress(vchFromString(strAddress), aliasName))
 		{
 			return string("could not read alias address from the db");
+		}
+		if(!vchAlias.empty() && vchAlias != aliasName)
+		{
+			return string("alias from address and tx alias name don't match");
 		}
 		if(!paliasdb->ReadAlias(aliasName, vtxAliasPos) || vtxAliasPos.empty())
 		{
