@@ -835,31 +835,31 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				// Check name
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckAliasInputs() : aliasupdate alias mismatch");
+				if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
+				{
+					if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos) || vtxPos.empty())
+						return error("CheckAliasInputs() : failed to read from alias DB");
+					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
+						return error("CheckAliasInputs(): Trying to update an expired service");
+				}
 				break;
 		default:
 			return error(
 					"CheckAliasInputs() : alias transaction has unknown op");
 		}
-		if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY"))
-		{
-			if((retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight, vvchArgs[0])) != "")
-			{
-				retError = string("CheckAliasInputs(): ") + retError;
-				return error(retError.c_str());
-			}
-		}
+
 	}
 	
 	if (!fJustCheck ) {
 		bool update = false;
+		// get the alias from the DB
+		if (paliasdb->ExistsAlias(vvchArgs[0])) {
+			if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos))
+				return error(
+						"CheckAliasInputs() : failed to read from alias DB");
+		}
 		if(op != OP_ALIAS_ACTIVATE)
 		{
-			// get the alias from the DB
-			if (paliasdb->ExistsAlias(vvchArgs[0])) {
-				if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos))
-					return error(
-							"CheckAliasInputs() : failed to read from alias DB");
-			}
 			if(!vtxPos.empty())
 			{
 				update = true;
@@ -1979,7 +1979,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	return oRes;
 }
 
-string CheckForAliasExpiry(const vector<unsigned char> &vchPubKey, const int nHeight, const vector<unsigned char> &vchAlias)
+string CheckForAliasExpiry(vector<unsigned char> vchPubKey, int nHeight)
 {
 	if(!vchPubKey.empty())
 	{
@@ -1998,10 +1998,6 @@ string CheckForAliasExpiry(const vector<unsigned char> &vchPubKey, const int nHe
 		if(!paliasdb->ReadAddress(vchFromString(strAddress), aliasName))
 		{
 			return string("could not read alias address from the db");
-		}
-		if(!vchAlias.empty() && vchAlias != aliasName)
-		{
-			return string("alias from address and tx alias name don't match");
 		}
 		if(!paliasdb->ReadAlias(aliasName, vtxAliasPos) || vtxAliasPos.empty())
 		{
