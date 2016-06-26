@@ -842,7 +842,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY"))
 		{
-			if((retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight)) != "")
+			if((retError = CheckForAliasExpiry(theAlias.vchPubKey, nHeight, vvchArgs[0])) != "")
 			{
 				retError = string("CheckAliasInputs(): ") + retError;
 				return error(retError.c_str());
