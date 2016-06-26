@@ -817,7 +817,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	COffer theOffer, linkedOffer;
 	CTransaction txOffer;
 	vector<unsigned char> vchSellerPubKey;
-	if (!GetTxOfOffer( vchOffer, theOffer, txOffer))
+	if (!GetTxOfOffer( vchOffer, theOffer, txOffer, true))
 		throw runtime_error("could not find an offer with this identifier");
 	vchSellerPubKey = theOffer.vchPubKey;
 	if(!theOffer.vchLinkOffer.empty())
@@ -825,8 +825,8 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 		if(pofferdb->ExistsOffer(theOffer.vchLinkOffer))
 		{
 			CTransaction tmpTx;
-			if (!GetTxOfOffer( theOffer.vchLinkOffer, linkedOffer, tmpTx))
-				throw runtime_error("Trying to accept a linked offer but could not find parent offer, perhaps it is expired");
+			if (!GetTxOfOffer( theOffer.vchLinkOffer, linkedOffer, tmpTx, true))
+				throw runtime_error("Trying to accept a linked offer but could not find parent offer");
 			if (linkedOffer.bOnlyAcceptBTC)
 				throw runtime_error("Linked offer only accepts Bitcoins, linked offers currently only work with Syscoin payments");
 			vchSellerPubKey = linkedOffer.vchPubKey;
@@ -2224,7 +2224,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	CEscrow ca = vtxPos.back();
 	CTransaction offertx;
 	COffer offer;
-	if (!GetTxOfOffer(ca.vchOffer, offer, offertx))
+	if (!GetTxOfOffer(ca.vchOffer, offer, offertx, true))
 		throw runtime_error("failed to read from offer DB");
 	
     string sHeight = strprintf("%llu", ca.nHeight);
@@ -2428,7 +2428,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		}
 		COffer offer;
 		CTransaction offertx;
-		if (!GetTxOfOffer(escrow.vchOffer, offer, offertx))
+		if (!GetTxOfOffer(escrow.vchOffer, offer, offertx, true))
 			continue;
 		// skip this escrow if it doesn't match the given filter value
 		if (vchNameUniq.size() > 0 && vchNameUniq != vchName)
@@ -2600,7 +2600,7 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 			}
 			COffer offer;
 			CTransaction offertx;
-			if (!GetTxOfOffer(txPos2.vchOffer, offer, offertx))
+			if (!GetTxOfOffer(txPos2.vchOffer, offer, offertx, true))
 				continue;
             // decode txn, skip non-alias txns
             vector<vector<unsigned char> > vvch;
