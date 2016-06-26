@@ -2743,7 +2743,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxOfferIn = NULL;
 	// if this is a linked offer accept, set the height to the first height so sys_rates price will match what it was at the time of the original accept
 	CTransaction tx;
-	if (!GetTxOfOffer( vchOffer, theOffer, tx))
+	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty())
 	{
 		throw runtime_error("could not find an offer with this identifier");
 	}

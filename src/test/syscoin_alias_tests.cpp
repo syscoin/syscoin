@@ -286,8 +286,9 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + certgoodguid + " newdata privdata 0"));
 		// expire the escrow
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
-		MilliSleep(2500);
+		
 		StartNode("node3");
+		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 		// ensure node3 can see (not pruned) expired escrows
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "escrowinfo " + escrowguid));
