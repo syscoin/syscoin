@@ -422,7 +422,7 @@ UniValue messagenew(const UniValue& params, bool fHelp) {
 		throw runtime_error("Invalid sending public key");
 	}
 	scriptPubKeyAliasOrig = GetScriptForDestination(FromPubKey.GetID());
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchFromString(strFromAddress) << OP_2DROP;
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchFromString(strFromAddress) <<  alias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKeyAlias += scriptPubKeyAliasOrig;		
 
 

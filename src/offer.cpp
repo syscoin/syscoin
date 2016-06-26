@@ -1706,7 +1706,7 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 			}
 		}
 		
-		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand << OP_2DROP;
+		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 		scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	}
 	// if the whitelist exclusive mode is on and you dont have an alias in the whitelist, you cannot link to this offer
@@ -1857,7 +1857,7 @@ UniValue offerlink_nocheck(const UniValue& params, bool fHelp) {
 			}
 		}
 		
-		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand << OP_2DROP;
+		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 		scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	}
 
@@ -2876,7 +2876,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		}
 	}
 
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias << OP_2DROP;
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 
 	// if this is an accept for a linked offer, the offer is set to exclusive mode and you dont have an alias in the whitelist, you cannot accept this offer
@@ -3187,7 +3187,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		}
 	}
 
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias << OP_2DROP;
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 
 
