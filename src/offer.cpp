@@ -979,13 +979,6 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(!vtxPos.empty())
 			{
 				const COffer& dbOffer = vtxPos.back();
-				// cannot update expired offers
-				if((dbOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
-				{
-					if(fDebug)
-						LogPrintf("CheckOfferInputs(): Trying to update an expired service");
-					return true;
-				}
 				// if updating whitelist, we dont allow updating any offer details
 				if(theOffer.linkWhitelist.entries.size() > 0)
 					theOffer = dbOffer;
@@ -1706,7 +1699,7 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 			}
 		}
 		
-		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand << OP_2DROP;
+		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 		scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	}
 	// if the whitelist exclusive mode is on and you dont have an alias in the whitelist, you cannot link to this offer
@@ -1857,7 +1850,7 @@ UniValue offerlink_nocheck(const UniValue& params, bool fHelp) {
 			}
 		}
 		
-		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand << OP_2DROP;
+		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 		scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	}
 
@@ -2750,7 +2743,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxOfferIn = NULL;
 	// if this is a linked offer accept, set the height to the first height so sys_rates price will match what it was at the time of the original accept
 	CTransaction tx;
-	if (!GetTxOfOffer( vchOffer, theOffer, tx))
+	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty())
 	{
 		throw runtime_error("could not find an offer with this identifier");
 	}
@@ -2847,13 +2840,14 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		}
 	}
 	COfferLinkWhitelistEntry foundAlias;
+	CAliasIndex theAlias;
 	const CWalletTx *wtxAliasIn = NULL;
 	vector<unsigned char> vchWhitelistAlias;
 	// go through the whitelist and see if you own any of the aliases to apply to this offer for a discount
 	for(unsigned int i=0;i<theOffer.linkWhitelist.entries.size();i++) {
 		CTransaction txAlias;
 		
-		CAliasIndex theAlias;
+		
 		vector<vector<unsigned char> > vvch;
 		COfferLinkWhitelistEntry& entry = theOffer.linkWhitelist.entries[i];
 		// make sure this alias is still valid
@@ -2876,7 +2870,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		}
 	}
 
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias << OP_2DROP;
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 
 	// if this is an accept for a linked offer, the offer is set to exclusive mode and you dont have an alias in the whitelist, you cannot accept this offer
@@ -3159,12 +3153,13 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	}
 	COfferLinkWhitelistEntry foundAlias;
 	const CWalletTx *wtxAliasIn = NULL;
+	CAliasIndex theAlias;
 	vector<unsigned char> vchWhitelistAlias;
 	// go through the whitelist and see if you own any of the aliases to apply to this offer for a discount
 	for(unsigned int i=0;i<theOffer.linkWhitelist.entries.size();i++) {
 		CTransaction txAlias;
 		
-		CAliasIndex theAlias;
+		
 		vector<vector<unsigned char> > vvch;
 		COfferLinkWhitelistEntry& entry = theOffer.linkWhitelist.entries[i];
 		// make sure this alias is still valid
@@ -3187,7 +3182,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		}
 	}
 
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias << OP_2DROP;
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 
 

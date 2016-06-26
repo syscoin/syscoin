@@ -196,12 +196,6 @@ bool GetTxOfEscrow(const vector<unsigned char> &vchEscrow,
         return false;
     txPos = vtxPos.back();
     int nHeight = txPos.nHeight;
-    if (nHeight + GetEscrowExpirationDepth()
-            < chainActive.Tip()->nHeight) {
-        string escrow = stringFromVch(vchEscrow);
-        LogPrintf("GetTxOfEscrow(%s) : expired", escrow.c_str());
-        return false;
-    }
 
     if (!GetSyscoinTransaction(nHeight, txPos.txHash, tx, Params().GetConsensus()))
         return error("GetTxOfEscrow() : could not read tx from disk");
@@ -528,12 +522,6 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 			// make sure we have found this escrow in db
 			if(!vtxPos.empty())
 			{
-				if((vtxPos.back().nHeight + GetEscrowExpirationDepth()) < nHeight)
-				{
-					if(fDebug)
-						LogPrintf("CheckEscrowInputs(): Trying to update an expired service");
-					return true;
-				}
 				theEscrow = vtxPos.back();					
 				// these are the only settings allowed to change outside of activate
 				if(!serializedEscrow.rawTx.empty())
@@ -605,6 +593,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					
 		}
         // set the escrow's txn-dependent values
+		theEscrow.op = op;
 		theEscrow.txHash = tx.GetHash();
 		theEscrow.nHeight = nHeight;
 		PutToEscrowList(vtxPos, theEscrow);
@@ -823,7 +812,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	COffer theOffer, linkedOffer;
 	CTransaction txOffer;
 	vector<unsigned char> vchSellerPubKey;
-	if (!GetTxOfOffer( vchOffer, theOffer, txOffer))
+	if (!GetTxOfOffer( vchOffer, theOffer, txOffer, true))
 		throw runtime_error("could not find an offer with this identifier");
 	vchSellerPubKey = theOffer.vchPubKey;
 	if(!theOffer.vchLinkOffer.empty())
@@ -831,21 +820,21 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 		if(pofferdb->ExistsOffer(theOffer.vchLinkOffer))
 		{
 			CTransaction tmpTx;
-			if (!GetTxOfOffer( theOffer.vchLinkOffer, linkedOffer, tmpTx))
-				throw runtime_error("Trying to accept a linked offer but could not find parent offer, perhaps it is expired");
+			if (!GetTxOfOffer( theOffer.vchLinkOffer, linkedOffer, tmpTx, true))
+				throw runtime_error("Trying to accept a linked offer but could not find parent offer");
 			if (linkedOffer.bOnlyAcceptBTC)
 				throw runtime_error("Linked offer only accepts Bitcoins, linked offers currently only work with Syscoin payments");
 			vchSellerPubKey = linkedOffer.vchPubKey;
 		}
 	}
 	COfferLinkWhitelistEntry foundAlias;
+	CAliasIndex theAlias;
 	const CWalletTx *wtxAliasIn = NULL;
 	vector<unsigned char> vchWhitelistAlias;
 	CScript scriptPubKeyAlias, scriptPubKeyAliasOrig;
 	// go through the whitelist and see if you own any of the aliases to apply to this offer for a discount
 	for(unsigned int i=0;i<theOffer.linkWhitelist.entries.size();i++) {
 		CTransaction txAlias;	
-		CAliasIndex theAlias;
 		vector<vector<unsigned char> > vvch;
 		COfferLinkWhitelistEntry& entry = theOffer.linkWhitelist.entries[i];
 		// make sure this alias is still valid
@@ -866,7 +855,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 			}		
 		}
 	}
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias << OP_2DROP;
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchWhitelistAlias << theAlias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 
 	if (ExistsInMempool(vchOffer, OP_OFFER_ACTIVATE) || ExistsInMempool(vchOffer, OP_OFFER_UPDATE)) {
@@ -2230,7 +2219,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	CEscrow ca = vtxPos.back();
 	CTransaction offertx;
 	COffer offer;
-	if (!GetTxOfOffer(ca.vchOffer, offer, offertx))
+	if (!GetTxOfOffer(ca.vchOffer, offer, offertx, true))
 		throw runtime_error("failed to read from offer DB");
 	
     string sHeight = strprintf("%llu", ca.nHeight);
@@ -2279,7 +2268,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	oEscrow.push_back(Pair("rawpay_message", stringFromVch(ca.vchPaymentMessage)));
 	int expired_block = ca.nHeight + GetEscrowExpirationDepth();
 	int expired = 0;
-    if(expired_block < chainActive.Tip()->nHeight)
+    if(expired_block < chainActive.Tip()->nHeight && (ca.op == OP_ESCROW_COMPLETE || ca.op == OP_ESCROW_REFUND))
 	{
 		expired = 1;
 	}  
@@ -2434,7 +2423,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		}
 		COffer offer;
 		CTransaction offertx;
-		if (!GetTxOfOffer(escrow.vchOffer, offer, offertx))
+		if (!GetTxOfOffer(escrow.vchOffer, offer, offertx, true))
 			continue;
 		// skip this escrow if it doesn't match the given filter value
 		if (vchNameUniq.size() > 0 && vchNameUniq != vchName)
@@ -2483,7 +2472,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("total", sTotal));
 
 		expired_block = nHeight + GetEscrowExpirationDepth();
-        if(expired_block < chainActive.Tip()->nHeight)
+        if(expired_block < chainActive.Tip()->nHeight && (escrow.op == OP_ESCROW_COMPLETE || escrow.op == OP_ESCROW_REFUND))
 		{
 			expired = 1;
 		} 
@@ -2606,7 +2595,7 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 			}
 			COffer offer;
 			CTransaction offertx;
-			if (!GetTxOfOffer(txPos2.vchOffer, offer, offertx))
+			if (!GetTxOfOffer(txPos2.vchOffer, offer, offertx, true))
 				continue;
             // decode txn, skip non-alias txns
             vector<vector<unsigned char> > vvch;
@@ -2645,7 +2634,7 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 			oEscrow.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
 			string sTotal = strprintf("%" PRIu64" SYS", ((nEscrowFee+txPos2.nPricePerUnit)*txPos2.nQty)/COIN);
 			oEscrow.push_back(Pair("total", sTotal));
-			if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+			if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0  && (txPos2.op == OP_ESCROW_COMPLETE || txPos2.op == OP_ESCROW_REFUND))
 			{
 				expired = 1;
 			}  
@@ -2744,7 +2733,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 
         UniValue oEscrow(UniValue::VOBJ);
         oEscrow.push_back(Pair("escrow", escrow));
-		if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+		if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0 && (txEscrow.op == OP_ESCROW_COMPLETE || txEscrow.op == OP_ESCROW_REFUND))
 		{
 			expired = 1;
 		} 

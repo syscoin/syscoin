@@ -116,7 +116,10 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 			// have to check the first tx in the service because if it was created before the fork, the chain has hashed the data, so we can't prune it
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
-				nHeight = vtxPos.back().nHeight + GetAliasExpirationDepth();
+				if(!alias.vchGUID.empty() && vtxPos.back().vchGUID != alias.vchGUID)
+					nHeight = alias.nHeight + GetAliasExpirationDepth();
+				else
+					nHeight = vtxPos.back().nHeight + GetAliasExpirationDepth();
 				return true;	
 			}		
 		}
@@ -171,7 +174,11 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
 				nHeight = vtxPos.back().nHeight + GetEscrowExpirationDepth();
-				return true;	
+				// if escrow is not refunded or complete don't prune otherwise escrow gets stuck (coins are still safe, just a GUI thing)
+				if(vtxPos.back().op != OP_ESCROW_COMPLETE && vtxPos.back().op != OP_ESCROW_REFUND)
+					return false;
+				else
+					return true;	
 			}		
 		}
 		else if(IsSys21Fork(escrow.nHeight))
@@ -821,13 +828,23 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		return error("guid in data output doesn't match guid in tx");
 	}
 	if (vvchArgs[0].size() > MAX_NAME_LENGTH)
-		return error("alias hex guid too long");
+		return error("alias name too long");
+    if (vvchArgs[1].size() > MAX_NAME_LENGTH)
+        return error("alias hex guid too long");
 	vector<CAliasIndex> vtxPos;
 	string retError = "";
 	if(fJustCheck)
 	{
 		switch (op) {
 			case OP_ALIAS_ACTIVATE:
+				if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
+				{
+					if (paliasdb->ReadAlias(vvchArgs[0], vtxPos) && !vtxPos.empty())
+					{
+						if((vtxPos.back().nHeight + GetAliasExpirationDepth()) >= nHeight)
+							return error("CheckAliasInputs(): Trying to renew an alias that isn't expired");
+					}
+				}
 				break;
 			case OP_ALIAS_UPDATE:
 				if (!IsAliasOp(prevOp))
@@ -835,12 +852,17 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				// Check name
 				if (vvchPrevArgs[0] != vvchArgs[0])
 					return error("CheckAliasInputs() : aliasupdate alias mismatch");
+				// Check GUID
+				if (vvchArgs.size() > 1 && vvchPrevArgs[1] != vvchArgs[1])
+					return error("CheckAliasInputs() : aliasupdate GUID mismatch");
 				if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
 				{
 					if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos) || vtxPos.empty())
 						return error("CheckAliasInputs() : failed to read from alias DB");
 					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
 						return error("CheckAliasInputs(): Trying to update an expired service");
+					if(vvchArgs.size() > 1 && vtxPos.back().vchGUID != vvchArgs[1])
+						return error("CheckAliasInputs() : aliasupdate vchGUID mismatch");
 				}
 				break;
 		default:
@@ -900,7 +922,8 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theAlias.nRating = 0;
 			theAlias.nRatingCount = 0;
 		}
-
+		if(vvchArgs.size() > 1)
+			theAlias.vchGUID = vvchArgs[1];
 		theAlias.nHeight = nHeight;
 		theAlias.txHash = tx.GetHash();
 		PutToAliasList(vtxPos, theAlias);
@@ -1268,8 +1291,8 @@ bool DecodeAliasScript(const CScript& script, int& op,
 
 	pc--;
 
-	if ((op == OP_ALIAS_ACTIVATE && vvch.size() == 1)
-			|| (op == OP_ALIAS_UPDATE && vvch.size() == 1))
+	if ((op == OP_ALIAS_ACTIVATE && vvch.size() <= 2)
+			|| (op == OP_ALIAS_UPDATE && vvch.size() <= 2))
 		return true;
 	return false;
 }
@@ -1357,13 +1380,16 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 		throw runtime_error("there are pending operations on that alias");
 	}
 	
+	int64_t rand = GetRand(std::numeric_limits<int64_t>::max());
+	vector<unsigned char> vchRand = CScriptNum(rand).getvch();
+    vector<unsigned char> vchRandAlias = vchFromValue(HexStr(vchRand));
 
 	CPubKey newDefaultKey;
 	pwalletMain->GetKeyFromPool(newDefaultKey);
 	CScript scriptPubKeyOrig;
 	scriptPubKeyOrig = GetScriptForDestination(newDefaultKey.GetID());
 	CScript scriptPubKey;
-	scriptPubKey << CScript::EncodeOP_N(OP_ALIAS_ACTIVATE) << vchName << OP_2DROP;
+	scriptPubKey << CScript::EncodeOP_N(OP_ALIAS_ACTIVATE) << vchName << vchRandAlias << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyOrig;
 	std::vector<unsigned char> vchPubKey(newDefaultKey.begin(), newDefaultKey.end());
 
@@ -1381,6 +1407,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 
     // build alias
     CAliasIndex newAlias;
+	newAlias.vchGUID = vchRandAlias;
 	newAlias.vchName = vchName;
 	newAlias.nHeight = chainActive.Tip()->nHeight;
 	newAlias.vchPubKey = vchPubKey;
@@ -1500,7 +1527,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	CPubKey currentKey(vchPubKeyByte);
 	scriptPubKeyOrig = GetScriptForDestination(currentKey.GetID());
 	CScript scriptPubKey;
-	scriptPubKey << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchName << OP_2DROP;
+	scriptPubKey << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchName << copyAlias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyOrig;
 
     vector<CRecipient> vecSend;

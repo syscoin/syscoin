@@ -144,13 +144,59 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 	GenerateBlocks(5);
 	GenerateBlocks(5, "node2");
 	GenerateBlocks(5, "node3");
-
+	
 	AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
 	GenerateBlocks(110);
+	// expired aliases shouldnt be searchable
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), false);
 	#ifdef ENABLE_DEBUGRPC
+		// renew alias and now its searchable
 		AliasNew("node1", "aliasexpirebuyback", "somedata1", "data1");
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), true);
+		GenerateBlocks(110);
+		// try to renew alias again second time
+		AliasNew("node1", "aliasexpirebuyback", "somedata2", "data2");
+		// run the test with node3 offline to test pruning with renewing alias
+		StopNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback1 data"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "Yes"), false);
+
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback1", "Yes"), false);
+		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasexpirebuyback1"), runtime_error);
+
+		// run the test with node3 offline to test pruning with renewing alias twice
+		StopNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback2 data"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		// renew second time
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback2 data"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback2", "Yes"), false);
+		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasexpirebuyback2"), runtime_error);
+
 	#endif
 }
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)
@@ -168,10 +214,32 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	GenerateBlocks(50);
 	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");
 	string certguid = CertNew("node1", "aliasexpire", "certtitle", "certdata", false, "Yes");
-	string escrowguid = EscrowNew("node2", "aliasexpirenode2", offerguid, "1", "message", "aliasexpire", "aliasexpire");
-	string aliasexpire2pubkey = AliasNew("node1", "aliasexpire2", "somedata");
-	string aliasexpire2node2pubkey = AliasNew("node2", "aliasexpire2node2", "somedata");
-	string certgoodguid = CertNew("node1", "aliasexpire2", "certtitle", "certdata", false, "Yes");
+	StopNode("node3");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrownew aliasexpirenode2 " + offerguid + " 1 message aliasexpire"));
+	const UniValue &array = r.get_array();
+	string escrowguid = array[1].get_str();	
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+	MilliSleep(2500);
+
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasexpire2 somedata"));
+	const UniValue &array1 = r.get_array();
+	string aliasexpire2pubkey = array1[1].get_str();
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+
+
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasexpire2node2 somedata"));
+	const UniValue &array2 = r.get_array();
+	string aliasexpire2node2pubkey = array2[1].get_str();	
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew aliasexpire2 certtitle certdata 0"));
+	const UniValue &array3 = r.get_array();
+	string certgoodguid = array3[1].get_str();	
+	// expire aliasexpire and aliasexpirenode2 aliases
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
 
 	#ifdef ENABLE_DEBUGRPC
 		UniValue pkr = CallRPC("node2", "generatepublickey");
@@ -211,7 +279,23 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		// should fail: new escrow with expired alias
 		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpirenode2 " + offerguid + " 1 message aliasexpire2"), runtime_error);
 
-		// able to release and claim release on escrow with expired aliases
+		// keep aliasexpire2 alive for later calls
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasexpire2 newdata1 privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1","generate 10"));
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + certgoodguid + " newdata privdata 0"));
+		// expire the escrow
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
+		
+		StartNode("node3");
+		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		// ensure node3 can see (not pruned) expired escrows that aren't complete or refunded yet
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "escrowinfo " + escrowguid));
+		// and node2
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowinfo " + escrowguid));
+		// able to release and claim release on escrow with expired aliases and expired escrow (not complete or refunded)
 		EscrowRelease("node2", escrowguid);	
 		EscrowClaimRelease("node1", escrowguid);
 

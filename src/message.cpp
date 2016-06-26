@@ -422,7 +422,7 @@ UniValue messagenew(const UniValue& params, bool fHelp) {
 		throw runtime_error("Invalid sending public key");
 	}
 	scriptPubKeyAliasOrig = GetScriptForDestination(FromPubKey.GetID());
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchFromString(strFromAddress) << OP_2DROP;
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << vchFromString(strFromAddress) <<  alias.vchGUID << OP_2DROP << OP_DROP;
 	scriptPubKeyAlias += scriptPubKeyAliasOrig;		
 
 
@@ -703,7 +703,7 @@ UniValue messagesentlist(const UniValue& params, bool fHelp) {
 			CTransaction tx;
 			if (!GetSyscoinTransaction(message.nHeight, message.txHash, tx, Params().GetConsensus()))
 			{
-				pending == 1;
+				pending = 1;
 				if(IsSyscoinTxMine(wtx, "message"))
 					continue;
 			}
