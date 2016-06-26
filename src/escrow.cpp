@@ -593,7 +593,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					
 		}
         // set the escrow's txn-dependent values
-		theEscrow.op = vvchArgs[0];
+		theEscrow.op = op;
 		theEscrow.txHash = tx.GetHash();
 		theEscrow.nHeight = nHeight;
 		PutToEscrowList(vtxPos, theEscrow);
