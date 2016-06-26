@@ -228,10 +228,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	MilliSleep(2500);
 
 
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasexpire2node2 somedata"));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasnew aliasexpire2node2 somedata"));
 	const UniValue &array2 = r.get_array();
 	string aliasexpire2node2pubkey = array2[1].get_str();	
-	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
 	MilliSleep(2500);
 
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew aliasexpire2 certtitle certdata 0"));
@@ -285,8 +285,8 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + certgoodguid + " newdata privdata 0"));
 		// expire the escrow
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
-		
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 55"));
+		MilliSleep(2500);
 		StartNode("node3");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
