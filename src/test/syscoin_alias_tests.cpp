@@ -224,12 +224,12 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	string aliasexpire2pubkey = array1[1].get_str();	
 
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasexpire2node2 somedata"));
-	const UniValue &array1 = r.get_array();
-	string aliasexpire2node2pubkey = array1[1].get_str();	
+	const UniValue &array2 = r.get_array();
+	string aliasexpire2node2pubkey = array2[1].get_str();	
 
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew aliasexpire2 certtitle certdata 0"));
-	const UniValue &array2 = r.get_array();
-	string certgoodguid = array2[1].get_str();	
+	const UniValue &array3 = r.get_array();
+	string certgoodguid = array3[1].get_str();	
 	// expire aliasexpire and aliasexpirenode2 aliases
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 	MilliSleep(2500);
