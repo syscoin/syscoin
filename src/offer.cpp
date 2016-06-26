@@ -979,6 +979,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(!vtxPos.empty())
 			{
 				const COffer& dbOffer = vtxPos.back();
+				// cannot update expired offers
+				if((dbOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+				{
+					if(fDebug)
+						LogPrintf("CheckOfferInputs(): Trying to update an expired service");
+					return true;
+				}
 				// if updating whitelist, we dont allow updating any offer details
 				if(theOffer.linkWhitelist.entries.size() > 0)
 					theOffer = dbOffer;

@@ -422,6 +422,12 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 			}
 			if(!vtxPos.empty())
 			{
+				if((vtxPos.back().nHeight + GetCertExpirationDepth()) < nHeight)
+				{
+					if(fDebug)
+						LogPrintf("CheckCertInputs(): Trying to update an expired service");
+					return true;
+				}
 				if(theCert.IsNull())
 					theCert = vtxPos.back();
 				else
