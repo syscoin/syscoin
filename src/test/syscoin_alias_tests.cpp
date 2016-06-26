@@ -290,9 +290,9 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		StartNode("node3");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
-		// ensure node3 can see (not pruned) expired escrows
-		BOOST_CHECK_NO_THROW(CallRPC("node3", "escrowinfo " + escrowguid));
 		MilliSleep(2500);
+		// ensure node3 can see (not pruned) expired escrows
+		BOOST_CHECK_THROW(CallRPC("node3", "escrowinfo " + escrowguid), runtime_error);
 		// able to release and claim release on escrow with expired aliases and expired escrow
 		EscrowRelease("node2", escrowguid);	
 		EscrowClaimRelease("node1", escrowguid);
