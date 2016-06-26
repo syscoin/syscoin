@@ -144,15 +144,55 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 	GenerateBlocks(5);
 	GenerateBlocks(5, "node2");
 	GenerateBlocks(5, "node3");
-
+	
 	AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
 	GenerateBlocks(110);
+	// expired aliases shouldnt be searchable
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), false);
 	BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), false);
 	#ifdef ENABLE_DEBUGRPC
+		// renew alias and now its searchable
 		AliasNew("node1", "aliasexpirebuyback", "somedata1", "data1");
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), true);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), true);
+		// run the test with node3 offline to test pruning with renewing alias
+		StopNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback1 data"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "Yes"), false);
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback1", "Yes"), false);
+		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasexpirebuyback1"), runtime_error);
+
+		// run the test with node3 offline to test pruning with renewing alias twice
+		StopNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback2 data"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		// renew second time
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback2 data"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		MilliSleep(2500);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback2", "Yes"), false);
+		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
+		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasexpirebuyback2"), runtime_error);
+
 	#endif
 }
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)
