@@ -857,7 +857,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						return error("CheckAliasInputs() : failed to read from alias DB");
 					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
 						return error("CheckAliasInputs(): Trying to update an expired service");
-					if(vtxPos.back().vchGUID != vvchArgs[1])
+					if(vvchArgs.size() > 1 && vtxPos.back().vchGUID != vvchArgs[1])
 						return error("CheckAliasInputs() : aliasupdate vchGUID mismatch");
 				}
 				break;
@@ -918,7 +918,8 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theAlias.nRating = 0;
 			theAlias.nRatingCount = 0;
 		}
-		theAlias.vchGUID = vvchArgs[1];
+		if(vvchArgs.size() > 1)
+			theAlias.vchGUID = vvchArgs[1];
 		theAlias.nHeight = nHeight;
 		theAlias.txHash = tx.GetHash();
 		PutToAliasList(vtxPos, theAlias);
