@@ -214,11 +214,27 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	GenerateBlocks(50);
 	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");
 	string certguid = CertNew("node1", "aliasexpire", "certtitle", "certdata", false, "Yes");
-	string escrowguid = EscrowNew("node2", "aliasexpirenode2", offerguid, "1", "message", "aliasexpire", "aliasexpire");
-	string aliasexpire2pubkey = AliasNew("node1", "aliasexpire2", "somedata");
-	string aliasexpire2node2pubkey = AliasNew("node2", "aliasexpire2node2", "somedata");
-	string certgoodguid = CertNew("node1", "aliasexpire2", "certtitle", "certdata", false, "Yes");
+	StopNode("node3");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrownew aliasexpirenode2 " + offerguid + " 1 message aliasexpire"));
+	const UniValue &array = r.get_array();
+	string escrowguid = array[1].get_str();	
 
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasexpire2 somedata"));
+	const UniValue &array1 = r.get_array();
+	string aliasexpire2pubkey = array1[1].get_str();	
+
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasexpire2node2 somedata"));
+	const UniValue &array1 = r.get_array();
+	string aliasexpire2node2pubkey = array1[1].get_str();	
+
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew aliasexpire2 certtitle certdata 0"));
+	const UniValue &array2 = r.get_array();
+	string certgoodguid = array2[1].get_str();	
+	// expire aliasexpire and aliasexpirenode2 aliases
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+	MilliSleep(2500);
 	#ifdef ENABLE_DEBUGRPC
 		UniValue pkr = CallRPC("node2", "generatepublickey");
 		if (pkr.type() != UniValue::VARR)
@@ -257,7 +273,18 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		// should fail: new escrow with expired alias
 		BOOST_CHECK_THROW(CallRPC("node2", "escrownew aliasexpirenode2 " + offerguid + " 1 message aliasexpire2"), runtime_error);
 
-		// able to release and claim release on escrow with expired aliases
+		// keep aliasexpire2 alive for later calls
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasexpire2 newdata1 privdata"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + certgoodguid + " newdata privdata 0"));
+		// expire the escrow
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
+		MilliSleep(2500);
+		StartNode("node3");
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+		// ensure node3 can see (not pruned) expired escrows
+		BOOST_CHECK_NO_THROW(CallRPC("node3", "escrowinfo " + escrowguid));
+		MilliSleep(2500);
+		// able to release and claim release on escrow with expired aliases and expired escrow
 		EscrowRelease("node2", escrowguid);	
 		EscrowClaimRelease("node1", escrowguid);
 

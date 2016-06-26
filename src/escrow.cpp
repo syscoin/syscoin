@@ -528,12 +528,6 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 			// make sure we have found this escrow in db
 			if(!vtxPos.empty())
 			{
-				if((vtxPos.back().nHeight + GetEscrowExpirationDepth()) < nHeight)
-				{
-					if(fDebug)
-						LogPrintf("CheckEscrowInputs(): Trying to update an expired service");
-					return true;
-				}
 				theEscrow = vtxPos.back();					
 				// these are the only settings allowed to change outside of activate
 				if(!serializedEscrow.rawTx.empty())
