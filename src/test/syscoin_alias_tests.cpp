@@ -162,6 +162,9 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 		MilliSleep(2500);
 		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "Yes"), false);
 		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "Yes"), false);
+		// try to renew alias again second time
+		AliasNew("node1", "aliasexpirebuyback", "somedata2", "data2");
+
 		StartNode("node3");
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 		MilliSleep(2500);
