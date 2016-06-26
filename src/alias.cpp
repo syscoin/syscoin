@@ -175,7 +175,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 			{
 				nHeight = vtxPos.back().nHeight + GetEscrowExpirationDepth();
 				// if escrow is not refunded or complete don't prune otherwise escrow gets stuck (coins are still safe, just a GUI thing)
-				if(vtxPos.back().op == OP_ESCROW_COMPLETE || vtxPos.back().op == OP_ESCROW_REFUND)
+			//	if(vtxPos.back().op == OP_ESCROW_COMPLETE || vtxPos.back().op == OP_ESCROW_REFUND)
 					return true;	
 			}		
 		}
