@@ -196,12 +196,6 @@ bool GetTxOfEscrow(const vector<unsigned char> &vchEscrow,
         return false;
     txPos = vtxPos.back();
     int nHeight = txPos.nHeight;
-    if (nHeight + GetEscrowExpirationDepth()
-            < chainActive.Tip()->nHeight) {
-        string escrow = stringFromVch(vchEscrow);
-        LogPrintf("GetTxOfEscrow(%s) : expired", escrow.c_str());
-        return false;
-    }
 
     if (!GetSyscoinTransaction(nHeight, txPos.txHash, tx, Params().GetConsensus()))
         return error("GetTxOfEscrow() : could not read tx from disk");
@@ -599,6 +593,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					
 		}
         // set the escrow's txn-dependent values
+		theEscrow.op = vvchArgs[0];
 		theEscrow.txHash = tx.GetHash();
 		theEscrow.nHeight = nHeight;
 		PutToEscrowList(vtxPos, theEscrow);
@@ -2273,7 +2268,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	oEscrow.push_back(Pair("rawpay_message", stringFromVch(ca.vchPaymentMessage)));
 	int expired_block = ca.nHeight + GetEscrowExpirationDepth();
 	int expired = 0;
-    if(expired_block < chainActive.Tip()->nHeight)
+    if(expired_block < chainActive.Tip()->nHeight && (ca.op == OP_ESCROW_COMPLETE || ca.op == OP_ESCROW_REFUND))
 	{
 		expired = 1;
 	}  
@@ -2477,7 +2472,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("total", sTotal));
 
 		expired_block = nHeight + GetEscrowExpirationDepth();
-        if(expired_block < chainActive.Tip()->nHeight)
+        if(expired_block < chainActive.Tip()->nHeight && (escrow.op == OP_ESCROW_COMPLETE || escrow.op == OP_ESCROW_REFUND))
 		{
 			expired = 1;
 		} 
@@ -2639,7 +2634,7 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 			oEscrow.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
 			string sTotal = strprintf("%" PRIu64" SYS", ((nEscrowFee+txPos2.nPricePerUnit)*txPos2.nQty)/COIN);
 			oEscrow.push_back(Pair("total", sTotal));
-			if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+			if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0  && (txPos2.op == OP_ESCROW_COMPLETE || txPos2.op == OP_ESCROW_REFUND))
 			{
 				expired = 1;
 			}  
@@ -2738,7 +2733,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 
         UniValue oEscrow(UniValue::VOBJ);
         oEscrow.push_back(Pair("escrow", escrow));
-		if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0)
+		if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0 && (txEscrow.op == OP_ESCROW_COMPLETE || txEscrow.op == OP_ESCROW_REFUND))
 		{
 			expired = 1;
 		} 
