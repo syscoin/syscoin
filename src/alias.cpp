@@ -1979,7 +1979,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	return oRes;
 }
 
-string CheckForAliasExpiry(const vector<unsigned char> &vchPubKey, const int nHeight, const vector<unsigned char> vchAlias)
+string CheckForAliasExpiry(const vector<unsigned char> &vchPubKey, const int nHeight, const vector<unsigned char> &vchAlias)
 {
 	if(!vchPubKey.empty())
 	{
