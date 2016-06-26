@@ -3159,12 +3159,13 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	}
 	COfferLinkWhitelistEntry foundAlias;
 	const CWalletTx *wtxAliasIn = NULL;
+	CAliasIndex theAlias;
 	vector<unsigned char> vchWhitelistAlias;
 	// go through the whitelist and see if you own any of the aliases to apply to this offer for a discount
 	for(unsigned int i=0;i<theOffer.linkWhitelist.entries.size();i++) {
 		CTransaction txAlias;
 		
-		CAliasIndex theAlias;
+		
 		vector<vector<unsigned char> > vvch;
 		COfferLinkWhitelistEntry& entry = theOffer.linkWhitelist.entries[i];
 		// make sure this alias is still valid
