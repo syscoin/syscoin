@@ -148,9 +148,13 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 	AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
 	GenerateBlocks(110);
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), false);
 	#ifdef ENABLE_DEBUGRPC
-		AliasNew("node1", "aliasexpirebuyback", "somedata1", "data1");
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), true);
+		// make sure we can't renew alias that's expired
+		BOOST_CHECK_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback newdata"), runtime_error);
+		// shouldn't be able to search for renewal because it didn't get through
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), false);
 	#endif
 }
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)

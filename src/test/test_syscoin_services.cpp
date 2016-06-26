@@ -340,7 +340,7 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 0);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
-	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
+	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "value").get_str(), pubdata);
 	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
