@@ -836,14 +836,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	{
 		switch (op) {
 			case OP_ALIAS_ACTIVATE:
-				if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
-				{
-					if (paliasdb->ReadAlias(vvchArgs[0], vtxPos) && !vtxPos.empty())
-					{
-						if((vtxPos.back().nHeight + GetAliasExpirationDepth()) >= nHeight)
-							return error("CheckAliasInputs(): Trying to renew an alias that isn't expired");
-					}
-				}
 				break;
 			case OP_ALIAS_UPDATE:
 				if (!IsAliasOp(prevOp))
@@ -886,7 +878,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
 					{
 						if(fDebug)
-							LogPrintf("CheckAliasInputss(): Trying to update an expired service");
+							LogPrintf("CheckAliasInputs(): Trying to update an expired service");
 						return true;
 					}
 				}
@@ -925,6 +917,17 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	
 		if(op == OP_ALIAS_ACTIVATE)
 		{
+			if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
+			{
+				if (paliasdb->ReadAlias(vvchArgs[0], vtxPos) && !vtxPos.empty())
+				{
+					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) >= nHeight)
+					{
+						LogPrintf("CheckAliasInputs():  Warning, Trying to renew an alias that isn't expired");
+						return true;
+					}
+				}
+			}
 			theAlias.nRating = 0;
 			theAlias.nRatingCount = 0;
 		}
