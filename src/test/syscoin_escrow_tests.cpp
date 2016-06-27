@@ -171,6 +171,10 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release)
 	EscrowRelease("node1", guid);
 	// reseller cant claim escrow, seller must claim it
 	BOOST_CHECK_THROW(CallRPC("node3", "escrowclaimrelease " + guid), runtime_error);
+	AliasUpdate("node1", "buyeralias2", "changeddata1", "priv");
+	AliasUpdate("node1", "selleralias22", "changeddata1", "priv");
+	AliasUpdate("node1", "arbiteralias2", "changeddata1", "priv");
+	OfferUpdate("node2", "selleralias22", offerguid, "category", "titlenew", "100", "0.15", "descriptionnew", false, "nocert", false, "location");
 	EscrowClaimReleaseLink("node2", guid, "node3");
 }
 BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
