@@ -190,13 +190,18 @@ int IndexOfMyEscrowOutput(const CTransaction& tx) {
     return nOut;
 }
 bool GetTxOfEscrow(const vector<unsigned char> &vchEscrow,
-        CEscrow& txPos, CTransaction& tx) {
+        CEscrow& txPos, CTransaction& tx, bool skipExpiresCheck) {
     vector<CEscrow> vtxPos;
     if (!pescrowdb->ReadEscrow(vchEscrow, vtxPos) || vtxPos.empty())
         return false;
     txPos = vtxPos.back();
     int nHeight = txPos.nHeight;
-
+    if (!skipExpiresCheck && (nHeight + GetEscrowExpirationDepth()
+            < chainActive.Tip()->nHeight)) {
+        string escrow = stringFromVch(vchEscrow);
+        LogPrintf("GetTxOfEscrow(%s) : expired", escrow.c_str());
+        return false;
+    }
     if (!GetSyscoinTransaction(nHeight, txPos.txHash, tx, Params().GetConsensus()))
         return error("GetTxOfEscrow() : could not read tx from disk");
 
@@ -1025,7 +1030,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx))
+		escrow, tx, true))
         throw runtime_error("could not find a escrow with this key");
     vector<vector<unsigned char> > vvch;
     int op, nOut;
@@ -1247,7 +1252,7 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx))
+		escrow, tx, true))
         throw runtime_error("could not find a escrow with this key");
 	vector<CEscrow> vtxPos;
 	if (!pescrowdb->ReadEscrow(vchEscrow, vtxPos) || vtxPos.empty())
@@ -1470,7 +1475,7 @@ UniValue escrowcomplete(const UniValue& params, bool fHelp) {
 	CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx))
+		escrow, tx, true))
         throw runtime_error("could not find a escrow with this key");
 	uint256 hash;
     vector<vector<unsigned char> > vvch;
@@ -1542,7 +1547,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx))
+		escrow, tx, true))
         throw runtime_error("could not find a escrow with this key");
     vector<vector<unsigned char> > vvch;
     int op, nOut;
@@ -1760,7 +1765,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx))
+		escrow, tx, true))
         throw runtime_error("could not find a escrow with this key");
 	CWalletTx wtx;
 	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
@@ -2028,7 +2033,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx))
+		escrow, tx, true))
         throw runtime_error("could not find a escrow with this key");
     vector<vector<unsigned char> > vvch;
     int op, nOut;
@@ -2225,7 +2230,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	CEscrow ca = vtxPos.back();
 	CTransaction offertx;
 	COffer offer;
-	if (!GetTxOfOffer(ca.vchOffer, offer, offertx, true))
+	if (!GetTxOfOffer(ca.vchOffer, offer, offertx))
 		throw runtime_error("failed to read from offer DB");
 	
     string sHeight = strprintf("%llu", ca.nHeight);

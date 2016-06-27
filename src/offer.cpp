@@ -3716,7 +3716,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 			COffer theOffer;
 			CTransaction acceptTx;
 			
-			if(!GetTxOfEscrow( vchEscrow, theEscrow, escrowTx))	
+			if(!GetTxOfEscrow( vchEscrow, theEscrow, escrowTx, true))	
 				continue;
 			CPubKey buyerKey(theEscrow.vchBuyerKey);
 			CSyscoinAddress buyerAddress(buyerKey.GetID());
