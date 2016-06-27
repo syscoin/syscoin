@@ -418,7 +418,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 		StartNode("node3");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
-		MilliSleep(2500);
+		MilliSleep(2500); 
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		MilliSleep(2500);
 		// ensure node3 can see (not pruned) expired escrows that aren't complete or refunded yet
