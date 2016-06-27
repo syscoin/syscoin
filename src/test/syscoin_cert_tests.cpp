@@ -228,8 +228,7 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew jagprune1 jag1 data 0"));
 		const UniValue &arr1 = r.get_array();
 		string guid1 = arr1[1].get_str();
-		// make 89 blocks (10 get mined with new)
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 79"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 70"));
 		MilliSleep(2500);
 		// stop and start node1
 		StopNode("node1");
@@ -239,19 +238,22 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		MilliSleep(2500);
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata 0"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		MilliSleep(2500);
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), true);
 		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), true);
 		// make sure our offer alias doesn't expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate jagprune1 newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
-		// generate 89 more blocks (10 get mined from update)
-		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 84"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 75"));
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate jagprune1 newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + guid1 + " newdata privdata 0"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		MilliSleep(2500);
 		// you can search it still on node1/node2
 		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), true);
 		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), true);
@@ -260,6 +262,8 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		MilliSleep(2500);
 		// now it should be expired
 		BOOST_CHECK_THROW(CallRPC("node2",  "certupdate " + guid1 + " newdata1 privdata1 0"), runtime_error);
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+		MilliSleep(2500);
 		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), false);
 		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), false);
 		// and it should say its expired
