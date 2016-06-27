@@ -488,12 +488,11 @@ bool EditOfferDialog::saveCurrentRow()
 		if(ui->certEdit->currentIndex() >= 0)
 			params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
 		else
-			params.push_back("");
+			params.push_back("nocert");
 		params.push_back("1");
 		params.push_back(ui->acceptBTCOnlyEdit->currentText() == QString("Yes")? "1": "0");
 		params.push_back(ui->geoLocationEdit->text().toStdString());
-		if(ui->safeSearchEdit->currentIndex() >= 0)
-			params.push_back(ui->safeSearchEdit->currentText().toStdString());
+		params.push_back(ui->safeSearchEdit->currentText().toStdString());
 		try {
             UniValue result = tableRPC.execute(strMethod, params);
 			const UniValue &arr = result.get_array();
@@ -545,10 +544,14 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back(ui->privateEdit->currentText() == QString("Yes")? "1": "0");
 			if(ui->certEdit->currentIndex() > 0)
 				params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
+			else
+				params.push_back("nocert");
+
 			params.push_back("");
 			params.push_back(ui->geoLocationEdit->text().toStdString());
-			if(ui->safeSearchEdit->currentIndex() >= 0)
-				params.push_back(ui->safeSearchEdit->currentText().toStdString());
+			params.push_back(ui->safeSearchEdit->currentText().toStdString());
+
+
 			try {
 				UniValue result = tableRPC.execute(strMethod, params);
 				if (result.type() != UniValue::VNULL)
