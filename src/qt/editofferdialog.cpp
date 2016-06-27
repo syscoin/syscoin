@@ -170,9 +170,6 @@ void EditOfferDialog::loadCategories()
 	vector<string> categoryList;
 	if(!getCategoryList(categoryList))
 	{
-		QMessageBox::warning(this, windowTitle(),
-			tr("Warning: SYS_CATEGORY alias not found. No default categories available!"),
-				QMessageBox::Ok, QMessageBox::Ok);
 		return;
 	}
 	for(unsigned int i = 0;i< categoryList.size(); i++)

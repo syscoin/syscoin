@@ -133,9 +133,6 @@ void OfferListPage::loadCategories()
 	vector<string> categoryList;
 	if(!getCategoryList(categoryList))
 	{
-		QMessageBox::warning(this, windowTitle(),
-			tr("Warning: SYS_CATEGORY alias not found. No default categories available!"),
-				QMessageBox::Ok, QMessageBox::Ok);
 		return;
 	}
 	addParentItem(model, tr("All Categories"), tr("All Categories"));
