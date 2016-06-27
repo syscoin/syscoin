@@ -919,7 +919,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		{
 			if(vvchArgs[0] != vchFromString("SYS_BAN") && vvchArgs[0] != vchFromString("SYS_RATES") && vvchArgs[0] != vchFromString("SYS_CATEGORY") && !theAlias.IsNull())
 			{
-				if (paliasdb->ReadAlias(vvchArgs[0], vtxPos) && !vtxPos.empty())
+				if (!vtxPos.empty())
 				{
 					if((vtxPos.back().nHeight + GetAliasExpirationDepth()) >= nHeight)
 					{
