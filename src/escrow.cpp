@@ -1724,7 +1724,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 		hex_str = hex_value.get_str();
 
 	escrow.ClearEscrow();
-	escrow.op = OP_ESCROW_COMPLETE;
+	escrow.op = OP_ESCROW_REFUND;
 	escrow.rawTx = ParseHex(hex_str);
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
