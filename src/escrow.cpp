@@ -2230,7 +2230,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	CEscrow ca = vtxPos.back();
 	CTransaction offertx;
 	COffer offer;
-	if (!GetTxOfOffer(ca.vchOffer, offer, offertx))
+	if (!GetTxOfOffer(ca.vchOffer, offer, offertx, true))
 		throw runtime_error("failed to read from offer DB");
 	
     string sHeight = strprintf("%llu", ca.nHeight);
