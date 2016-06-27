@@ -174,7 +174,8 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 			if(IsSys21Fork(vtxPos.front().nHeight))
 			{
 				// if escrow is not refunded or complete don't prune otherwise escrow gets stuck (coins are still safe, just a GUI thing)
-				if(vtxPos.back().op == OP_ESCROW_COMPLETE)
+				// by setting to chainheight + a number we effectively tell it not to prune ever unless its complete
+				if(vtxPos.back().op != OP_ESCROW_COMPLETE)
 					nHeight = chainActive.Tip()->nHeight + GetEscrowExpirationDepth();
 				else
 					nHeight = vtxPos.back().nHeight + GetEscrowExpirationDepth();
@@ -183,7 +184,7 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 		}
 		else if(IsSys21Fork(escrow.nHeight))
 		{
-			if(escrow.op == OP_ESCROW_COMPLETE)
+			if(escrow.op != OP_ESCROW_COMPLETE)
 				nHeight = chainActive.Tip()->nHeight + GetEscrowExpirationDepth();
 			else
 				nHeight = escrow.nHeight + GetEscrowExpirationDepth();
