@@ -98,7 +98,8 @@ bool IsInSys21Fork(const CScript& scriptPubKey, uint64_t &nHeight)
 	vector<unsigned char> vchData;
 	if(!GetSyscoinData(scriptPubKey, vchData))
 		return false;
-
+	if(!chainActive.Tip())
+		return false;
 	CAliasIndex alias;
 	COffer offer;
 	CMessage message;
