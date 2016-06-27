@@ -91,7 +91,7 @@ AC_ARG_ENABLE([debugrpc],
   [AS_HELP_STRING([--enable-debugrpc],
   [Enable debug RPC methods (default is no)])],
   [use_debugrpc=$enableval],
-  [use_debugrpc=no])
+  [use_debugrpc=yes])
 
 AC_ARG_ENABLE(tests,
     AS_HELP_STRING([--disable-tests],[do not compile tests (default is to compile)]),
