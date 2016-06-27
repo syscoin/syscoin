@@ -127,7 +127,7 @@ bool CEscrowDB::ScanEscrows(const std::vector<unsigned char>& vchEscrow, const s
 					continue;
 				}
 				const CEscrow &txPos = vtxPos.back();
-  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge)
+  				if (chainActive.Tip()->nHeight - txPos.nHeight >= nMaxAge && txPos.op == OP_ESCROW_COMPLETE)
 				{
 					pcursor->Next();
 					continue;
@@ -190,14 +190,14 @@ int IndexOfMyEscrowOutput(const CTransaction& tx) {
     return nOut;
 }
 bool GetTxOfEscrow(const vector<unsigned char> &vchEscrow,
-        CEscrow& txPos, CTransaction& tx, bool skipExpiresCheck) {
+        CEscrow& txPos, CTransaction& tx) {
     vector<CEscrow> vtxPos;
     if (!pescrowdb->ReadEscrow(vchEscrow, vtxPos) || vtxPos.empty())
         return false;
     txPos = vtxPos.back();
     int nHeight = txPos.nHeight;
-    if (!skipExpiresCheck && (nHeight + GetEscrowExpirationDepth()
-            < chainActive.Tip()->nHeight)) {
+    if ((nHeight + GetEscrowExpirationDepth()
+            < chainActive.Tip()->nHeight) && txPos.op == OP_ESCROW_COMPLETE) {
         string escrow = stringFromVch(vchEscrow);
         LogPrintf("GetTxOfEscrow(%s) : expired", escrow.c_str());
         return false;
@@ -527,7 +527,9 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 			// make sure we have found this escrow in db
 			if(!vtxPos.empty())
 			{
-				if((vtxPos.back().nHeight + GetEscrowExpirationDepth()) < nHeight)
+				// if escrow is refunded or claimed and its expired
+				// if not refunded or claimed it cannot expire
+				if(vtxPos.back().op == OP_ESCROW_COMPLETE && (vtxPos.back().nHeight + GetEscrowExpirationDepth()) < nHeight)
 				{
 					if(fDebug)
 						LogPrintf("CheckEscrowInputs(): Trying to update an expired service");
@@ -1033,7 +1035,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx, true))
+		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
     vector<vector<unsigned char> > vvch;
     int op, nOut;
@@ -1256,7 +1258,7 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx, true))
+		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
 	vector<CEscrow> vtxPos;
 	if (!pescrowdb->ReadEscrow(vchEscrow, vtxPos) || vtxPos.empty())
@@ -1479,7 +1481,7 @@ UniValue escrowcomplete(const UniValue& params, bool fHelp) {
 	CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx, true))
+		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
 	uint256 hash;
     vector<vector<unsigned char> > vvch;
@@ -1551,7 +1553,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx, true))
+		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
     vector<vector<unsigned char> > vvch;
     int op, nOut;
@@ -1769,7 +1771,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx, true))
+		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
 	CWalletTx wtx;
 	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
@@ -2038,7 +2040,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	CEscrow escrow;
     if (!GetTxOfEscrow( vchEscrow, 
-		escrow, tx, true))
+		escrow, tx))
         throw runtime_error("could not find a escrow with this key");
     vector<vector<unsigned char> > vvch;
     int op, nOut;
