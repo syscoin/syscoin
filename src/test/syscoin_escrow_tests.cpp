@@ -250,6 +250,8 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasupdate buyeraliasprune newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 2"));
 		MilliSleep(2500);
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		MilliSleep(2500);
 		// stop and start node1
 		StopNode("node1");
 		StartNode("node1");
