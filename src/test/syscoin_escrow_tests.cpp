@@ -174,7 +174,7 @@ BOOST_AUTO_TEST_CASE (generate_escrow_linked_release)
 	AliasUpdate("node1", "buyeralias2", "changeddata1", "priv");
 	AliasUpdate("node2", "selleralias22", "changeddata1", "priv");
 	AliasUpdate("node3", "arbiteralias2", "changeddata1", "priv");
-	OfferUpdate("node2", "selleralias22", offerguid, "category", "titlenew", "100", "0.15", "descriptionnew", false, "nocert", false, "location");
+	OfferUpdate("node2", "selleralias22", offerguid, "category", "titlenew", "100", "0.04", "descriptionnew", false, "nocert", false, "location");
 	EscrowClaimReleaseLink("node2", guid, "node3");
 }
 BOOST_AUTO_TEST_CASE (generate_escrow_linked_release_with_peg_update)
@@ -254,6 +254,7 @@ BOOST_AUTO_TEST_CASE (generate_escrowpruning)
 		StartNode("node1");
 		MilliSleep(2500);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
+		MilliSleep(2500);
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowrelease " + guid1));
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
