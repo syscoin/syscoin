@@ -604,7 +604,9 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					
 		}
         // set the escrow's txn-dependent values
-		theEscrow.op = op;
+		theEscrow.op = op; 
+		if(op == OP_ESCROW_REFUND && vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
+			theEscrow.op = OP_ESCROW_COMPLETE;
 		theEscrow.txHash = tx.GetHash();
 		theEscrow.nHeight = nHeight;
 		PutToEscrowList(vtxPos, theEscrow);
@@ -965,6 +967,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	// send to seller/arbiter so they can track the escrow through GUI
     // build escrow
     CEscrow newEscrow;
+	newEscrow.op = OP_ESCROW_ACTIVATE;
 	newEscrow.vchEscrow = vchEscrow;
 	newEscrow.vchBuyerKey = buyeralias.vchPubKey;
 	newEscrow.vchArbiterKey = arbiteralias.vchPubKey;
@@ -1209,6 +1212,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 
 
 	escrow.ClearEscrow();
+	escrow.op = OP_ESCROW_RELEASE;
 	escrow.rawTx = ParseHex(hex_str);
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
@@ -1720,7 +1724,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 		hex_str = hex_value.get_str();
 
 	escrow.ClearEscrow();
-
+	escrow.op = OP_ESCROW_COMPLETE;
 	escrow.rawTx = ParseHex(hex_str);
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
@@ -1942,6 +1946,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 		throw runtime_error("Arbiter address is invalid!");
 
 	escrow.ClearEscrow();
+	escrow.op = OP_ESCROW_REFUND;
 	escrow.nHeight = chainActive.Tip()->nHeight;
     CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyArbiter, scriptPubKeyBuyerDestination, scriptPubKeySellerDestination, scriptPubKeyArbiterDestination;
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
@@ -2189,7 +2194,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	{
 		throw runtime_error("You must be either the arbiter, buyer or seller to leave feedback on this escrow");
 	}
-
+	escrow.op = OP_ESCROW_COMPLETE;
 	escrow.nHeight = chainActive.Tip()->nHeight;
 
 
@@ -2279,7 +2284,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	oEscrow.push_back(Pair("rawpay_message", stringFromVch(ca.vchPaymentMessage)));
 	int expired_block = ca.nHeight + GetEscrowExpirationDepth();
 	int expired = 0;
-    if(expired_block < chainActive.Tip()->nHeight && (ca.op == OP_ESCROW_COMPLETE || ca.op == OP_ESCROW_REFUND))
+    if(expired_block < chainActive.Tip()->nHeight && ca.op == OP_ESCROW_COMPLETE)
 	{
 		expired = 1;
 	}  
@@ -2483,7 +2488,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("total", sTotal));
 
 		expired_block = nHeight + GetEscrowExpirationDepth();
-        if(expired_block < chainActive.Tip()->nHeight && (escrow.op == OP_ESCROW_COMPLETE || escrow.op == OP_ESCROW_REFUND))
+        if(expired_block < chainActive.Tip()->nHeight && escrow.op == OP_ESCROW_COMPLETE)
 		{
 			expired = 1;
 		} 
@@ -2645,7 +2650,7 @@ UniValue escrowhistory(const UniValue& params, bool fHelp) {
 			oEscrow.push_back(Pair("sysfee", ValueFromAmount(nEscrowFee)));
 			string sTotal = strprintf("%" PRIu64" SYS", ((nEscrowFee+txPos2.nPricePerUnit)*txPos2.nQty)/COIN);
 			oEscrow.push_back(Pair("total", sTotal));
-			if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0  && (txPos2.op == OP_ESCROW_COMPLETE || txPos2.op == OP_ESCROW_REFUND))
+			if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0  && txPos2.op == OP_ESCROW_COMPLETE)
 			{
 				expired = 1;
 			}  
@@ -2744,7 +2749,7 @@ UniValue escrowfilter(const UniValue& params, bool fHelp) {
 
         UniValue oEscrow(UniValue::VOBJ);
         oEscrow.push_back(Pair("escrow", escrow));
-		if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0 && (txEscrow.op == OP_ESCROW_COMPLETE || txEscrow.op == OP_ESCROW_REFUND))
+		if(nHeight + GetEscrowExpirationDepth() - chainActive.Tip()->nHeight <= 0 && txEscrow.op == OP_ESCROW_COMPLETE)
 		{
 			expired = 1;
 		} 
