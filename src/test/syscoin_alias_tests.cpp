@@ -106,28 +106,28 @@ BOOST_AUTO_TEST_CASE (generate_aliassafesearch)
 	// not safe to search
 	AliasNew("node1", "jagnonsafesearch", "pubdata", "privdata", "No");
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Yes"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "No"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "On"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Off"), true);
 
 	// should only show up if safe search is off
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "No"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "On"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "Off"), true);
 
 	// shouldn't affect aliasinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagsafesearch"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnonsafesearch"));
 
 	// reverse the rolls
-	AliasUpdate("node1", "jagsafesearch", "pubdata", "privdata", "No");
-	AliasUpdate("node1", "jagnonsafesearch", "pubdata", "privdata", "Yes");
+	AliasUpdate("node1", "jagsafesearch", "pubdata", "privdata", "Off");
+	AliasUpdate("node1", "jagnonsafesearch", "pubdata", "privdata", "On");
 
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "No"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Yes"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "Off"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagsafesearch", "On"), false);
 
 	// should only show up if safe search is off
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "No"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "Yes"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "Off"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagnonsafesearch", "On"), true);
 
 	// shouldn't affect aliasinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagsafesearch"));
@@ -148,13 +148,13 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 	AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
 	GenerateBlocks(110);
 	// expired aliases shouldnt be searchable
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "On"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "On"), false);
 	#ifdef ENABLE_DEBUGRPC
 		// renew alias and now its searchable
 		AliasNew("node1", "aliasexpirebuyback", "somedata1", "data1");
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "Yes"), true);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "Yes"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback", "On"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback", "On"), true);
 		GenerateBlocks(110);
 		// try to renew alias again second time
 		AliasNew("node1", "aliasexpirebuyback", "somedata2", "data2");
@@ -163,15 +163,15 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback1 data"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
 		MilliSleep(2500);
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "Yes"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "On"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "On"), false);
 
 		StartNode("node3");
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 		MilliSleep(2500);
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "Yes"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "Yes"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback1", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback1", "On"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback1", "On"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback1", "On"), false);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasexpirebuyback1"), runtime_error);
 
@@ -180,20 +180,20 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback2 data"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
 		MilliSleep(2500);
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "On"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "On"), false);
 		// renew second time
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback2 data"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 110"));
 		MilliSleep(2500);
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "On"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "On"), false);
 		StartNode("node3");
 		BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 		MilliSleep(2500);
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "Yes"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "Yes"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback2", "Yes"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasexpirebuyback2", "On"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasexpirebuyback2", "On"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasexpirebuyback2", "On"), false);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasexpirebuyback2"), runtime_error);
 
@@ -215,10 +215,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL1));
 	// should only show level 1 banned if safe search filter is not used
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "No"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "On"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Off"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "On"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Off"), true);
 	// should be able to aliasinfo on level 1 banned aliases
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbansafesearch"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbannonsafesearch"));
@@ -227,10 +227,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL2));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL2));
 	// no matter what filter won't show banned aliases
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "No"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "On"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Off"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "On"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Off"), false);
 
 	// shouldn't be able to aliasinfo on level 2 banned aliases
 	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasinfo jagbansafesearch"), runtime_error);
@@ -240,13 +240,13 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",0));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",0));
 	// safe to search regardless of filter
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Yes"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "No"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "On"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Off"), true);
 
 	// since safesearch is set to false on this alias, it won't show up in search still
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Yes"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "On"), false);
 	// it will if you are not doing a safe search
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "No"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Off"), true);
 
 	// should be able to aliasinfo on non banned aliases
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbansafesearch"));
@@ -264,7 +264,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprune data"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// we can find it as normal first
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "Off"), true);
 		// then we let the service expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 100"));
 		StartNode("node2");
@@ -272,14 +272,14 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		MilliSleep(2500);
 		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "No"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune", "Off"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo aliasprune"));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node2", "aliasinfo aliasprune"), runtime_error);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "No"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune", "Off"), false);
 
 		// stop node3
 		StopNode("node3");
@@ -297,23 +297,23 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasprune1 newdata privdata"));
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "Off"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "Off"), true);
 		// generate 89 more blocks (10 get mined from update)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 89"));
 		MilliSleep(2500);
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate aliasprune1 newdata1 privdata"));
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), true);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "Off"), true);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "Off"), true);
 
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
 		MilliSleep(2500);
 		// now it should be expired
 		BOOST_CHECK_THROW(CallRPC("node2", "aliasupdate aliasprune1 newdata2 privdata"), runtime_error);
-		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "No"), false);
-		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "No"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node1", "aliasprune1", "Off"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node2", "aliasprune1", "Off"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasinfo aliasprune1"));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
@@ -323,7 +323,7 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		MilliSleep(2500);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasprune1"), runtime_error);
-		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasprune1", "No"), false);
+		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasprune1", "Off"), false);
 	#endif
 }
 

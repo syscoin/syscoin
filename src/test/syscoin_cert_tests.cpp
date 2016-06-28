@@ -101,12 +101,12 @@ BOOST_AUTO_TEST_CASE (generate_certsafesearch)
 	// not safe to search
 	string certguidnotsafe = CertNew("node1", "jagsafesearch1", "certtitle", "certdata", false, "No");
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), true);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "On"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Off"), true);
 
 	// should only show up if safe search is off
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Off"), true);
 
 	// shouldn't affect certinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidsafe));
@@ -117,12 +117,12 @@ BOOST_AUTO_TEST_CASE (generate_certsafesearch)
 	CertUpdate("node1", certguidnotsafe,  "certtitle", "certdata", false, "Yes");
 
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Off"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "On"), false);
 
 	// should only show up if safe search is off
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), true);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Off"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "On"), true);
 
 	// shouldn't affect certinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidsafe));
@@ -146,10 +146,10 @@ BOOST_AUTO_TEST_CASE (generate_certban)
 	BOOST_CHECK_NO_THROW(CertBan("node1",certguidsafe,SAFETY_LEVEL1));
 	BOOST_CHECK_NO_THROW(CertBan("node1",certguidnotsafe,SAFETY_LEVEL1));
 	// should only show level 1 banned if safe search filter is not used
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "On"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Off"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Off"), true);
 	// should be able to certinfo on level 1 banned certs
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidsafe));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidnotsafe));
@@ -158,10 +158,10 @@ BOOST_AUTO_TEST_CASE (generate_certban)
 	BOOST_CHECK_NO_THROW(CertBan("node1",certguidsafe,SAFETY_LEVEL2));
 	BOOST_CHECK_NO_THROW(CertBan("node1",certguidnotsafe,SAFETY_LEVEL2));
 	// no matter what filter won't show banned certs
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "On"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Off"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Off"), false);
 
 	// shouldn't be able to certinfo on level 2 banned certs
 	BOOST_CHECK_THROW(r = CallRPC("node1", "certinfo " + certguidsafe), runtime_error);
@@ -171,11 +171,11 @@ BOOST_AUTO_TEST_CASE (generate_certban)
 	BOOST_CHECK_NO_THROW(CertBan("node1",certguidsafe,0));
 	BOOST_CHECK_NO_THROW(CertBan("node1",certguidnotsafe,0));
 	// safe to search regardless of filter
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Yes"), true);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "On"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidsafe, "Off"), true);
 
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "No"), true);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(CertFilter("node1", certguidnotsafe, "Off"), true);
 
 	// should be able to certinfo on non banned certs
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + certguidsafe));
@@ -197,7 +197,7 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		string guid = arr[1].get_str();
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// we can find it as normal first
-		BOOST_CHECK_EQUAL(CertFilter("node1", guid, "No"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid, "Off"), true);
 		// then we let the service expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		MilliSleep(2500);
@@ -210,14 +210,14 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		MilliSleep(2500);
 		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(CertFilter("node1", guid, "No"), false);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid, "Off"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certinfo " + guid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node2", "certinfo " + guid), runtime_error);
-		BOOST_CHECK_EQUAL(CertFilter("node2", guid, "No"), false);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid, "Off"), false);
 
 		// stop node3
 		StopNode("node3");
@@ -241,8 +241,8 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		MilliSleep(2500);
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), true);
-		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "Off"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "Off"), true);
 		// make sure our offer alias doesn't expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate jagprune1 newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
@@ -255,8 +255,8 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		MilliSleep(2500);
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), true);
-		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "Off"), true);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "Off"), true);
 
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 125"));
 		MilliSleep(2500);
@@ -264,8 +264,8 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		BOOST_CHECK_THROW(CallRPC("node2",  "certupdate " + guid1 + " newdata1 privdata1 0"), runtime_error);
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		MilliSleep(2500);
-		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "No"), false);
-		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "No"), false);
+		BOOST_CHECK_EQUAL(CertFilter("node1", guid1, "Off"), false);
+		BOOST_CHECK_EQUAL(CertFilter("node2", guid1, "Off"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "certinfo " + guid1));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
@@ -275,7 +275,7 @@ BOOST_AUTO_TEST_CASE (generate_certpruning)
 		MilliSleep(2500);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "certinfo " + guid1), runtime_error);
-		BOOST_CHECK_EQUAL(CertFilter("node3", guid1, "No"), false);
+		BOOST_CHECK_EQUAL(CertFilter("node3", guid1, "Off"), false);
 	#endif
 }
 BOOST_AUTO_TEST_SUITE_END ()

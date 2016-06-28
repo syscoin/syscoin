@@ -733,12 +733,12 @@
           <widget class="QComboBox" name="safeSearch">
            <item>
             <property name="text">
-             <string>Yes</string>
+             <string>On</string>
             </property>
            </item>
            <item>
             <property name="text">
-             <string>No</string>
+             <string>Off</string>
             </property>
            </item>
           </widget>
@@ -760,7 +760,6 @@
        </item>
       </layout>
       <zorder>verticalSpacer_Pref</zorder>
-      <zorder>horizontalLayoutWidget</zorder>
      </widget>
     </widget>
    </item>

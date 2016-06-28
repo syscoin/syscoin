@@ -4092,7 +4092,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 		vchOffer = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		safeSearch = params[2].get_str()=="Yes"? true: false;
+		safeSearch = params[2].get_str()=="On"? true: false;
 
 	if (params.size() > 3)
 		strCategory = params[3].get_str();

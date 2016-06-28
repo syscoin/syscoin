@@ -22,9 +22,9 @@ BOOST_AUTO_TEST_CASE (generate_offernew)
 	// generate a good offer
 	string offerguid = OfferNew("node1", "selleralias1", "category", "title", "100", "0.05", "description", "USD");
 	// by default offers are set to private and not searchable
-	BOOST_CHECK_EQUAL(OfferFilter("node1", "", "Yes"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", "", "On"), false);
 	// direct search should work
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguid, "Yes"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguid, "On"), true);
 
 	// should fail: generate an offer with unknown alias
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew SYS_RATES fooalias category title 100 0.05 description USD"), runtime_error);
@@ -483,12 +483,12 @@ BOOST_AUTO_TEST_CASE (generate_offersafesearch)
 	// not safe to search
 	string offerguidnotsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), true);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "On"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Off"), true);
 
 	// should only show up if safe search is off
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Off"), true);
 
 	// shouldn't affect offerinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
@@ -500,12 +500,12 @@ BOOST_AUTO_TEST_CASE (generate_offersafesearch)
 
 
 	// should include result in both safe search mode on and off
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Off"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "On"), false);
 
 	// should only show up if safe search is off
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Off"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "On"), true);
 
 	// shouldn't affect offerinfo
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
@@ -531,10 +531,10 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidsafe,SAFETY_LEVEL1));
 	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidnotsafe,SAFETY_LEVEL1));
 	// should only show level 1 banned if safe search filter is not used
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Off"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Off"), true);
 	// should be able to offerinfo on level 1 banned offers
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidnotsafe));
@@ -543,10 +543,10 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidsafe,SAFETY_LEVEL2));
 	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidnotsafe,SAFETY_LEVEL2));
 	// no matter what filter won't show banned offers
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Off"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Off"), false);
 
 	// shouldn't be able to offerinfo on level 2 banned offers
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe), runtime_error);
@@ -556,11 +556,11 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidsafe,0));
 	BOOST_CHECK_NO_THROW(OfferBan("node1",offerguidnotsafe,0));
 	// safe to search regardless of filter
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Yes"), true);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "On"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Off"), true);
 
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Yes"), false);
-	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "No"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidnotsafe, "Off"), true);
 
 	// should be able to offerinfo on non banned offers
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe));
@@ -581,7 +581,7 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		string guid = arr[1].get_str();
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 		// we can find it as normal first
-		BOOST_CHECK_EQUAL(OfferFilter("node1", guid, "No"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid, "Off"), true);
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
 		MilliSleep(2500);
 		// make sure our offer alias doesn't expire
@@ -593,14 +593,14 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 		MilliSleep(2500);
 		// now we shouldn't be able to search it
-		BOOST_CHECK_EQUAL(OfferFilter("node1", guid, "No"), false);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid, "Off"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + guid));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
 
 		// node2 shouldn't find the service at all (meaning node2 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node2", "offerinfo " + guid), runtime_error);
-		BOOST_CHECK_EQUAL(OfferFilter("node2", guid, "No"), false);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid, "Off"), false);
 
 		// stop node3
 		StopNode("node3");
@@ -622,8 +622,8 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		// ensure you can still update before expiry
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description"));
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), true);
-		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "Off"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "Off"), true);
 		// make sure our offer alias doesn't expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate pruneoffer newdata privdata"));
 		// generate 89 more blocks (10 get mined from update)
@@ -632,8 +632,8 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		// ensure service is still active since its supposed to expire at 100 blocks of non updated services
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description"));
 		// you can search it still on node1/node2
-		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), true);
-		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "Off"), true);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "Off"), true);
 		// make sure our offer alias doesn't expire
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasupdate pruneoffer newdata privdata"));
 		BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 60"));
@@ -644,8 +644,8 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		MilliSleep(2500);
 		// now it should be expired
 		BOOST_CHECK_THROW(CallRPC("node2", "offerupdate SYS_RATES pruneoffer " + guid1 + " category title 1 0.05 description"), runtime_error);
-		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "No"), false);
-		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "No"), false);
+		BOOST_CHECK_EQUAL(OfferFilter("node1", guid1, "Off"), false);
+		BOOST_CHECK_EQUAL(OfferFilter("node2", guid1, "Off"), false);
 		// and it should say its expired
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offerinfo " + guid1));
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 1);	
@@ -655,7 +655,7 @@ BOOST_AUTO_TEST_CASE (generate_offerpruning)
 		MilliSleep(2500);
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "offerinfo " + guid1), runtime_error);
-		BOOST_CHECK_EQUAL(OfferFilter("node3", guid1, "No"), false);
+		BOOST_CHECK_EQUAL(OfferFilter("node3", guid1, "Off"), false);
 	#endif
 }
 

@@ -1110,7 +1110,7 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 		vchCert = vchFromValue(params[1]);
 
 	if (params.size() > 2)
-		safeSearch = params[2].get_str()=="Yes"? true: false;
+		safeSearch = params[2].get_str()=="On"? true: false;
 
     UniValue oRes(UniValue::VARR);
     
