@@ -192,7 +192,7 @@ void MyCertListPage::on_editButton_clicked()
     QModelIndexList indexes = ui->tableView->selectionModel()->selectedRows();
     if(indexes.isEmpty())
         return;
-	QString status = indexes.at(0).data(AliasTableModel::ExpiredRole).toString();
+	QString status = indexes.at(0).data(CertTableModel::ExpiredRole).toString();
 	if(status == QString("pending"))
 	{
            QMessageBox::information(this, windowTitle(),
@@ -221,7 +221,7 @@ void MyCertListPage::on_transferButton_clicked()
     QModelIndexList indexes = ui->tableView->selectionModel()->selectedRows();
     if(indexes.isEmpty())
         return;
-QString status = indexes.at(0).data(AliasTableModel::ExpiredRole).toString();
+	QString status = indexes.at(0).data(CertTableModel::ExpiredRole).toString();
 	if(status == QString("pending"))
 	{
            QMessageBox::information(this, windowTitle(),
