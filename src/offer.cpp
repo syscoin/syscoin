@@ -512,51 +512,49 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	int prevOp, prevCertOp, prevEscrowOp, prevAliasOp;
 	prevOp = prevCertOp = prevEscrowOp = prevAliasOp = 0;
 	vector<vector<unsigned char> > vvchPrevArgs, vvchPrevCertArgs, vvchPrevEscrowArgs, vvchPrevAliasArgs;
-	if(fJustCheck)
-	{
-		// Strict check - bug disallowed
-		for (unsigned int i = 0; i < tx.vin.size(); i++) {
-			vector<vector<unsigned char> > vvch;
-			int pop;
-			prevOutput = &tx.vin[i].prevout;
-			if(!prevOutput)
-				continue;
-			// ensure inputs are unspent when doing consensus check to add to block
-			if(!inputs.GetCoins(prevOutput->hash, prevCoins))
-				continue;
-			if(!IsSyscoinScript(prevCoins.vout[prevOutput->n].scriptPubKey, pop, vvch))
-				continue;
+	// Strict check - bug disallowed
+	for (unsigned int i = 0; i < tx.vin.size(); i++) {
+		vector<vector<unsigned char> > vvch;
+		int pop;
+		prevOutput = &tx.vin[i].prevout;
+		if(!prevOutput)
+			continue;
+		// ensure inputs are unspent when doing consensus check to add to block
+		if(!inputs.GetCoins(prevOutput->hash, prevCoins))
+			continue;
+		if(!IsSyscoinScript(prevCoins.vout[prevOutput->n].scriptPubKey, pop, vvch))
+			continue;
 
 
-			if(foundEscrow && foundOffer && foundCert && foundAlias)
-				break;
+		if(foundEscrow && foundOffer && foundCert && foundAlias)
+			break;
 
-			if (!foundOffer && IsOfferOp(pop)) {
-				foundOffer = true; 
-				prevOp = pop;
-				vvchPrevArgs = vvch;
-				prevOfferHash = prevOutput->hash;
-			}
-			else if (!foundCert && IsCertOp(pop))
-			{
-				foundCert = true; 
-				prevCertOp = pop;
-				vvchPrevCertArgs = vvch;
-			}
-			else if (!foundEscrow && IsEscrowOp(pop))
-			{
-				foundEscrow = true; 
-				prevEscrowOp = pop;
-				vvchPrevEscrowArgs = vvch;
-			}
-			else if (!foundAlias && IsAliasOp(pop))
-			{
-				foundAlias = true; 
-				prevAliasOp = pop;
-				vvchPrevAliasArgs = vvch;
-			}
+		if (!foundOffer && IsOfferOp(pop)) {
+			foundOffer = true; 
+			prevOp = pop;
+			vvchPrevArgs = vvch;
+			prevOfferHash = prevOutput->hash;
+		}
+		else if (!foundCert && IsCertOp(pop))
+		{
+			foundCert = true; 
+			prevCertOp = pop;
+			vvchPrevCertArgs = vvch;
+		}
+		else if (!foundEscrow && IsEscrowOp(pop))
+		{
+			foundEscrow = true; 
+			prevEscrowOp = pop;
+			vvchPrevEscrowArgs = vvch;
+		}
+		else if (!foundAlias && IsAliasOp(pop))
+		{
+			foundAlias = true; 
+			prevAliasOp = pop;
+			vvchPrevAliasArgs = vvch;
 		}
 	}
+	
 	
 
 	// Make sure offer outputs are not spent by a regular transaction, or the offer would be lost
@@ -719,7 +717,6 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							"CheckOfferInputs() : failed to read from offer DB");
 				myOffer = vtxPos.back();
 			}
-
 			// check for valid alias peg
 			if(!theOffer.vchAliasPeg.empty() && getCurrencyToSYSFromAlias(theOffer.vchAliasPeg, myOffer.sCurrencyCode, nRate, theOffer.nHeight, rateList,precision) != "")
 			{
@@ -1029,13 +1026,12 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						COffer myParentOffer = myVtxPos.back();
 						// if creating a linked offer we set some mandatory fields to the parent
 						theOffer.nQty = myParentOffer.nQty;
-						theOffer.sCategory = myParentOffer.sCategory;
-						theOffer.sTitle = myParentOffer.sTitle;
 						theOffer.linkWhitelist.bExclusiveResell = true;
 						theOffer.sCurrencyCode = myParentOffer.sCurrencyCode;
 						theOffer.vchCert = myParentOffer.vchCert;
 						theOffer.vchAliasPeg = myParentOffer.vchAliasPeg;
-
+						theOffer.sCategory = myParentOffer.sCategory;
+						theOffer.sTitle = myParentOffer.sTitle;
 						myParentOffer.offerLinks.push_back(vvchArgs[0]);							
 						myParentOffer.PutToOfferList(myVtxPos);
 						// write parent offer
@@ -1051,7 +1047,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		else if (op == OP_OFFER_ACCEPT) {	
 			// cannot buy expired offers unless its inside an escrow (which doesnt expire until release claimed or refunded)
 			// also a linked offer accept must be able to go through aswell
-			if(!IsEscrowOp(prevEscrowOp) && !IsOfferOp(prevOp)  && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			if(!IsEscrowOp(prevEscrowOp) && !IsOfferOp(prevOp)  && theOffer.vchLinkOffer.empty && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 			{
 				if(fDebug)
 					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer");
@@ -2751,7 +2747,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxOfferIn = NULL;
 	// if this is a linked offer accept, set the height to the first height so sys_rates price will match what it was at the time of the original accept
 	CTransaction tx;
-	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty() && vchLinkOfferAcceptTxHash.empty() )
+	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty() && vchLinkOfferAcceptTxHash.empty() && theOffer.vchLinkOffer.empty())
 	{
 		throw runtime_error("could not find an offer with this identifier");
 	}
@@ -3090,8 +3086,6 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		if (wtxOfferIn == NULL)
 			throw runtime_error("this offer accept is not in your wallet");	
 		COffer linkOffer(*wtxOfferIn);
-		if(linkOffer.accept.IsNull())
-	
 		vchPubKey = linkOffer.accept.vchBuyerKey;
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
