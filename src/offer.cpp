@@ -1049,8 +1049,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
-			// cannot buy expired offers
-			if((theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			// cannot buy expired offers unless its inside an escrow (which doesnt expire until release claimed or refunded)
+			if(!IsEscrowOp(prevEscrowOp) && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 			{
 				if(fDebug)
 					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer");
