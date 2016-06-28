@@ -57,7 +57,7 @@ OfferListPage::OfferListPage(const PlatformStyle *platformStyle, OfferView *pare
 	}
 	
 
-    ui->labelExplanation->setText(tr("Search for Syscoin Offers (double click on one to purchase). Select Safe Search if you wish to omit potentially offensive Offers."));
+    ui->labelExplanation->setText(tr("Search for Syscoin Offers (double click on one to purchase). Select Safe Search from wallet options if you wish to omit potentially offensive Offers(On by default)"));
 	
     // Context menu actions
     QAction *copyOfferAction = new QAction(ui->copyOffer->text(), this);

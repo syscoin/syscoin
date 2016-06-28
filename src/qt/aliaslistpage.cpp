@@ -49,7 +49,7 @@ AliasListPage::AliasListPage(const PlatformStyle *platformStyle, QWidget *parent
 		ui->searchAlias->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/search"));
 	}
 
-    ui->labelExplanation->setText(tr("Search for Syscoin Aliases. Select Safe Search if you wish to omit potentially offensive Aliases."));
+    ui->labelExplanation->setText(tr("Search for Syscoin Aliases. Select Safe Search from wallet options if you wish to omit potentially offensive Aliases(On by default)"));
 	
     // Context menu actions
     QAction *copyAliasAction = new QAction(ui->copyAlias->text(), this);
