@@ -335,7 +335,10 @@ QVariant CertTableModel::data(const QModelIndex &index, int role) const
     {
         return rec->safesearch;
     }
-
+   else if (role == ExpiredRole)
+    {
+        return rec->expired;
+    }
     else if (role == TypeRole)
     {
         switch(rec->type)

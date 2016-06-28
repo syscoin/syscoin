@@ -52,6 +52,7 @@ public:
 		CurrencyRole,
 		PriceRole,
 		DescriptionRole,
+		ExpiredRole,
 		ExclusiveWhitelistRole,
 		PrivateRole,
 		AliasRole,

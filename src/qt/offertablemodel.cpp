@@ -446,6 +446,10 @@ QVariant OfferTableModel::data(const QModelIndex &index, int role) const
 	{
 		return rec->exclusive_resell;
 	}
+	else if(role == ExpiredRole)
+	{
+		return rec->expired;
+	}
 	else if(role == PrivateRole)
 	{
 		return rec->private_str;

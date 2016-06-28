@@ -159,6 +159,21 @@ void MyAliasListPage::on_editButton_clicked()
     QModelIndexList indexes = ui->tableView->selectionModel()->selectedRows();
     if(indexes.isEmpty())
         return;
+	QString status = indexes.at(0).data(AliasTableModel::ExpiredRole).toString();
+	if(status == QString("pending"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("This alias is still pending, click the refresh button once the alias confirms and try again"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
+	if(status == QString("expired"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("You cannot edit this alias because it has expired"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
 
     EditAliasDialog dlg(EditAliasDialog::EditAlias);
     dlg.setModel(walletModel, model);
@@ -174,7 +189,21 @@ void MyAliasListPage::on_transferButton_clicked()
     QModelIndexList indexes = ui->tableView->selectionModel()->selectedRows();
     if(indexes.isEmpty())
         return;
-
+	QString status = indexes.at(0).data(AliasTableModel::ExpiredRole).toString();
+	if(status == QString("pending"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("This alias is still pending, click the refresh button once the alias confirms and try again"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
+	if(status == QString("expired"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("You cannot transfer this alias because it has expired"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
     EditAliasDialog dlg(EditAliasDialog::TransferAlias);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));

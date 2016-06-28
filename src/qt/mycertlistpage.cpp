@@ -97,6 +97,21 @@ void MyCertListPage::on_sellCertButton_clicked()
         return;
 
 	QString certGUID = indexes.at(0).data(CertTableModel::NameRole).toString();
+	QString status = indexes.at(0).data(CertTableModel::ExpiredRole).toString();
+	if(status == QString("pending"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("This certificate is still pending, click the refresh button once the certificate confirms and try again"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
+	if(status == QString("expired"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("You cannot sell this certificate because it has expired"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
     EditOfferDialog dlg(EditOfferDialog::NewCertOffer, certGUID);
     dlg.setModel(walletModel,0);
     dlg.exec();
@@ -177,7 +192,21 @@ void MyCertListPage::on_editButton_clicked()
     QModelIndexList indexes = ui->tableView->selectionModel()->selectedRows();
     if(indexes.isEmpty())
         return;
-
+	QString status = indexes.at(0).data(AliasTableModel::ExpiredRole).toString();
+	if(status == QString("pending"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("This certificate is still pending, click the refresh button once the certificate confirms and try again"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
+	if(status == QString("expired"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("You cannot edit this certificate because it has expired"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
     EditCertDialog dlg(EditCertDialog::EditCert);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
@@ -192,7 +221,21 @@ void MyCertListPage::on_transferButton_clicked()
     QModelIndexList indexes = ui->tableView->selectionModel()->selectedRows();
     if(indexes.isEmpty())
         return;
-
+QString status = indexes.at(0).data(AliasTableModel::ExpiredRole).toString();
+	if(status == QString("pending"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("This certificate is still pending, click the refresh button once the certificate confirms and try again"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
+	if(status == QString("expired"))
+	{
+           QMessageBox::information(this, windowTitle(),
+           tr("You cannot transfer this certificate because it has expired"),
+               QMessageBox::Ok, QMessageBox::Ok);
+		   return;
+	}
     EditCertDialog dlg(EditCertDialog::TransferCert);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));

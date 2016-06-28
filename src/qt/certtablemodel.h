@@ -35,6 +35,7 @@ public:
         TypeRole = Qt::UserRole, /**< Type of cert (#Send or #Receive) */
 		NameRole,
 		PrivateRole,
+		ExpiredRole,
 		AliasRole,
 		SafeSearchRole
     };

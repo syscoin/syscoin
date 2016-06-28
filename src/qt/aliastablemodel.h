@@ -35,6 +35,7 @@ public:
     enum RoleIndex {
         TypeRole = Qt::UserRole, /**< Type of alias (#Send or #Receive) */
 		NameRole,
+		ExpiredRole,
 		SafeSearchRole
 	};
 
