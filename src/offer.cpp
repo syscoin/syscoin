@@ -1050,7 +1050,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
 			// cannot buy expired offers unless its inside an escrow (which doesnt expire until release claimed or refunded)
-			if(!IsEscrowOp(prevEscrowOp) && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			// also a linked offer accept must be able to go through aswell
+			if(!IsEscrowOp(prevEscrowOp) && !IsOfferOp(prevOp)  && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 			{
 				if(fDebug)
 					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer");
@@ -2750,7 +2751,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxOfferIn = NULL;
 	// if this is a linked offer accept, set the height to the first height so sys_rates price will match what it was at the time of the original accept
 	CTransaction tx;
-	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty())
+	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty() && vchLinkOfferAcceptTxHash.empty() )
 	{
 		throw runtime_error("could not find an offer with this identifier");
 	}
