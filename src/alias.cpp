@@ -62,7 +62,7 @@ bool GetPreviousInput(const COutPoint * outpoint, int &op, vector<vector<unsigne
     if (it != pwalletMain->mapWallet.end())
     {
         const CWalletTx* pcoin = &it->second;
-		if(IsSyscoinScript(pcoin->vout[outpoint->n].scriptPubKey, op, vvchArgs))
+		if(pcoin->vout.size() >= outpoint->n && IsSyscoinScript(pcoin->vout[outpoint->n].scriptPubKey, op, vvchArgs))
 			return true;
 
     } else
@@ -796,7 +796,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			// ensure inputs are unspent when doing consensus check to add to block
 			if(!inputs.GetCoins(prevOutput->hash, prevCoins))
 				continue;
-			if(!IsSyscoinScript(prevCoins.vout[prevOutput->n].scriptPubKey, pop, vvch))
+			if(prevCoins.vout.size() <= prevOutput->n || !IsSyscoinScript(prevCoins.vout[prevOutput->n].scriptPubKey, pop, vvch))
 				continue;
 
 			if (IsAliasOp(pop)) {

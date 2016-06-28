@@ -1693,7 +1693,7 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
 		{
 			int op;
 			vector<vector<unsigned char> > vvchArgs;
-			if (IsSyscoinScript(pcoin->vout[i].scriptPubKey, op, vvchArgs))
+			if (pcoin->vout.size() >= i && IsSyscoinScript(pcoin->vout[i].scriptPubKey, op, vvchArgs))
 				continue;
 		}
         pair<CAmount,pair<const CWalletTx*,unsigned int> > coin = make_pair(n,make_pair(pcoin, i));
@@ -1805,7 +1805,7 @@ bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*
 			{
 				int op;
 				vector<vector<unsigned char> > vvchArgs;
-				if (IsSyscoinScript(pcoin->vout[outpoint.n].scriptPubKey, op, vvchArgs))
+				if (pcoin->vout.size() >= output.n && IsSyscoinScript(pcoin->vout[outpoint.n].scriptPubKey, op, vvchArgs))
 					continue;
 			}
             // Clearly invalid input, fail

@@ -737,7 +737,7 @@ void CoinControlDialog::updateView()
 			{
 				int op;
 				vector<vector<unsigned char> > vvchArgs;
-				if (IsSyscoinScript(out.tx->vout[out.i].scriptPubKey, op, vvchArgs))
+				if (out.tx->vout.size() >= out.i && IsSyscoinScript(out.tx->vout[out.i].scriptPubKey, op, vvchArgs))
 					continue;
 			}
             int nInputSize = 0;
