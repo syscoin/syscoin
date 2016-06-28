@@ -2668,7 +2668,7 @@ bool CreateLinkedOfferAcceptRecipients(vector<CRecipient> &vecSend, const CAmoun
 	return vecSend.size() != size;
 }
 
-UniValue offeraccept(const UniValue& params, bool fHelp) {
+UniValue `const UniValue& params, bool fHelp) {
 	if (fHelp || 1 > params.size() || params.size() > 7)
 		throw runtime_error("offeraccept <acceptGuid> <alias> <guid> [quantity] [message] [BTC TxId] [linkedacceptguidtxhash] [escrowTxHash]\n"
 				"Accept&Pay for a confirmed offer.\n"
@@ -2739,7 +2739,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxOfferIn = NULL;
 	// if this is a linked offer accept, set the height to the first height so sys_rates price will match what it was at the time of the original accept
 	CTransaction tx;
-	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty() && vchLinkOfferAcceptTxHash.empty() && theOffer.vchLinkOffer.empty())
+	if (!GetTxOfOffer( vchOffer, theOffer, tx) && vchEscrowTxHash.empty())
 	{
 		throw runtime_error("could not find an offer with this identifier");
 	}
