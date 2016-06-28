@@ -938,7 +938,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		default:
 			return error( "CheckOfferInputs() : offer transaction has unknown op");
 		}
-		if(!IsEscrowOp(prevEscrowOp) && (retError = CheckForAliasExpiry(theOffer.vchPubKey, nHeight)) != "")
+		if(!IsEscrowOp(prevEscrowOp) && (retError = CheckForAliasExpiryAndSafety(theOffer.vchPubKey, nHeight, theOffer.safetyLevel, theOffer.safeSearch)) != "")
 		{
 			retError = string("CheckOfferInputs(): ") + retError;
 			return error(retError.c_str());

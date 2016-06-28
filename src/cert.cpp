@@ -393,7 +393,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 
 			if (!pcertdb->ReadCert(vvchArgs[0], vtxPos) || vtxPos.empty())
 				return error("CheckCertInputs() : failed to read from cert DB");
-			if((retError = CheckForAliasExpiry(vtxPos.back().vchPubKey, nHeight)) != "")
+			if((retError = CheckForAliasExpiryAndSafety(vtxPos.back().vchPubKey, nHeight, vtxPos.back().safetyLevel, vtxPos.back().safeSearch)) != "")
 			{
 				retError = string("CheckCertInputs(): ") + retError;
 				return error(retError.c_str());
@@ -403,7 +403,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 		default:
 			return error( "CheckCertInputs() : cert transaction has unknown op");
 		}
-		if((retError = CheckForAliasExpiry(theCert.vchPubKey, nHeight)) != "")
+		if((retError = CheckForAliasExpiryAndSafety(theCert.vchPubKey, nHeight, theCert.safetyLevel, theCert.safeSearch)) != "")
 		{
 			retError = string("CheckCertInputs(): ") + retError;
 			return error(retError.c_str());

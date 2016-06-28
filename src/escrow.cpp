@@ -424,17 +424,17 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					return error("CheckEscrowInputs() :cannot leave feedback in activate tx");
 				}
-				if((retError = CheckForAliasExpiry(theEscrow.vchBuyerKey, nHeight)) != "")
+				if((retError = CheckForAliasExpiryAndSafety(theEscrow.vchBuyerKey, nHeight)) != "")
 				{
 					retError = string("CheckEscrowInputs(): ") + retError;
 					return error(retError.c_str());
 				}
-				if((retError = CheckForAliasExpiry(theEscrow.vchSellerKey, nHeight)) != "")
+				if((retError = CheckForAliasExpiryAndSafety(theEscrow.vchSellerKey, nHeight)) != "")
 				{
 					retError = string("CheckEscrowInputs(): ") + retError;
 					return error(retError.c_str());
 				}	
-				if((retError = CheckForAliasExpiry(theEscrow.vchArbiterKey, nHeight)) != "")
+				if((retError = CheckForAliasExpiryAndSafety(theEscrow.vchArbiterKey, nHeight)) != "")
 				{
 					retError = string("CheckEscrowInputs(): ") + retError;
 					return error(retError.c_str());

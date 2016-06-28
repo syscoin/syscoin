@@ -2021,10 +2021,11 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	return oRes;
 }
 
-string CheckForAliasExpiry(vector<unsigned char> vchPubKey, int nHeight)
+string CheckForAliasExpiryAndSafety(const vector<unsigned char> &vchPubKey, const int nHeight, const unsigned char safetyLevel, const bool safeSearch)
 {
 	if(!vchPubKey.empty())
 	{
+		CAliasIndex alias;
 		CPubKey PubKey(vchPubKey);
 		vector<unsigned char> aliasName;
 		vector<CAliasIndex> vtxAliasPos;
@@ -2045,9 +2046,18 @@ string CheckForAliasExpiry(vector<unsigned char> vchPubKey, int nHeight)
 		{
 			return string("could not read alias from the db");
 		}
-		if((vtxAliasPos.back().nHeight + GetAliasExpirationDepth()) < nHeight)
+		alias = vtxAliasPos.back();
+		if(alias.nHeight + GetAliasExpirationDepth()) < nHeight)
 		{
 			return string("alias is expired");
+		}
+		if(!alias.safeSearch && safeSearch)
+		{
+			return string("alias is not safe to search yet service is set to safe search");
+		}
+		if(alias.safetyLevel > safetyLevel)
+		{
+			return string("alias safety level cannot exceed services safety level");
 		}
 	}
 	return "";

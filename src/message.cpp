@@ -327,12 +327,12 @@ bool CheckMessageInputs(const CTransaction &tx, int op, int nOut, const vector<v
 		}
 		else
 			return error( "CheckMessageInputs() : message transaction has unknown op");
-		if((retError = CheckForAliasExpiry(theMessage.vchPubKeyTo, nHeight)) != "")
+		if((retError = CheckForAliasExpiryAndSafety(theMessage.vchPubKeyTo, nHeight)) != "")
 		{
 			retError = string("CheckMessageInputs(): ") + retError;
 			return error(retError.c_str());
 		}
-		if((retError = CheckForAliasExpiry(theMessage.vchPubKeyFrom, nHeight)) != "")
+		if((retError = CheckForAliasExpiryAndSafety(theMessage.vchPubKeyFrom, nHeight)) != "")
 		{
 			retError = string("CheckMessageInputs(): ") + retError;
 			return error(retError.c_str());
