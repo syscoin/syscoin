@@ -1805,7 +1805,7 @@ bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*
 			{
 				int op;
 				vector<vector<unsigned char> > vvchArgs;
-				if (pcoin->vout.size() >= output.n && IsSyscoinScript(pcoin->vout[outpoint.n].scriptPubKey, op, vvchArgs))
+				if (pcoin->vout.size() >= outpoint.n && IsSyscoinScript(pcoin->vout[outpoint.n].scriptPubKey, op, vvchArgs))
 					continue;
 			}
             // Clearly invalid input, fail
