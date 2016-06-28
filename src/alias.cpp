@@ -2047,7 +2047,7 @@ string CheckForAliasExpiryAndSafety(const vector<unsigned char> &vchPubKey, cons
 			return string("could not read alias from the db");
 		}
 		alias = vtxAliasPos.back();
-		if(alias.nHeight + GetAliasExpirationDepth()) < nHeight)
+		if((alias.nHeight + GetAliasExpirationDepth()) < nHeight)
 		{
 			return string("alias is expired");
 		}
