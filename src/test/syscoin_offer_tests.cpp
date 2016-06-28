@@ -348,15 +348,15 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 	#ifdef ENABLE_DEBUGRPC
 		// should fail: perform an accept on expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node2", "offeraccept buyeralias4 " + offerguid + " 1 message"), runtime_error);
-		// even though the transaction goes through, the offer db isn't updated
+		// accept an expired offer without checks
 		BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offeraccept_nocheck buyeralias4 " + offerguid + " 1 message"));
 		const UniValue &arr = r.get_array();
 		string acceptguid = arr[1].get_str();
 		GenerateBlocks(5, "node2");
-
-		// ensure this offeraccept guid is not found
+		// ensure this offeraccept guid is found
 		UniValue acceptRet = FindOfferAccept("node2", offerguid, acceptguid, true);
-		BOOST_CHECK(acceptRet.isNull());
+		BOOST_CHECK(!acceptRet.isNull());
+
 		GenerateBlocks(5);
 		// should fail: offer update on an expired offer
 		BOOST_CHECK_THROW(r = CallRPC("node1", "offerupdate SYS_RATES selleralias4 " + offerguid + " category title 90 0.15 description"), runtime_error);
