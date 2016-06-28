@@ -512,50 +512,52 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	int prevOp, prevCertOp, prevEscrowOp, prevAliasOp;
 	prevOp = prevCertOp = prevEscrowOp = prevAliasOp = 0;
 	vector<vector<unsigned char> > vvchPrevArgs, vvchPrevCertArgs, vvchPrevEscrowArgs, vvchPrevAliasArgs;
-	// Strict check - bug disallowed
-	for (unsigned int i = 0; i < tx.vin.size(); i++) {
-		vector<vector<unsigned char> > vvch;
-		int pop;
-		prevOutput = &tx.vin[i].prevout;
-		if(!prevOutput)
-			continue;
-		// ensure inputs are unspent when doing consensus check to add to block
-		if(!inputs.GetCoins(prevOutput->hash, prevCoins))
-			continue;
-		if(prevCoins.vout.size() <= prevOutput->n || !IsSyscoinScript(prevCoins.vout[prevOutput->n].scriptPubKey, pop, vvch))
-			continue;
+	if(fJustCheck)
+	{
+		// Strict check - bug disallowed
+		for (unsigned int i = 0; i < tx.vin.size(); i++) {
+			vector<vector<unsigned char> > vvch;
+			int pop;
+			prevOutput = &tx.vin[i].prevout;
+			if(!prevOutput)
+				continue;
+			// ensure inputs are unspent when doing consensus check to add to block
+			if(!inputs.GetCoins(prevOutput->hash, prevCoins))
+				continue;
+			if(prevCoins.vout.size() <= prevOutput->n || !IsSyscoinScript(prevCoins.vout[prevOutput->n].scriptPubKey, pop, vvch))
+				continue;
 
 
-		if(foundEscrow && foundOffer && foundCert && foundAlias)
-			break;
+			if(foundEscrow && foundOffer && foundCert && foundAlias)
+				break;
 
-		if (!foundOffer && IsOfferOp(pop)) {
-			foundOffer = true; 
-			prevOp = pop;
-			vvchPrevArgs = vvch;
-			prevOfferHash = prevOutput->hash;
+			if (!foundOffer && IsOfferOp(pop)) {
+				foundOffer = true; 
+				prevOp = pop;
+				vvchPrevArgs = vvch;
+				prevOfferHash = prevOutput->hash;
+			}
+			else if (!foundCert && IsCertOp(pop))
+			{
+				foundCert = true; 
+				prevCertOp = pop;
+				vvchPrevCertArgs = vvch;
+			}
+			else if (!foundEscrow && IsEscrowOp(pop))
+			{
+				foundEscrow = true; 
+				prevEscrowOp = pop;
+				vvchPrevEscrowArgs = vvch;
+			}
+			else if (!foundAlias && IsAliasOp(pop))
+			{
+				foundAlias = true; 
+				prevAliasOp = pop;
+				vvchPrevAliasArgs = vvch;
+			}
 		}
-		else if (!foundCert && IsCertOp(pop))
-		{
-			foundCert = true; 
-			prevCertOp = pop;
-			vvchPrevCertArgs = vvch;
-		}
-		else if (!foundEscrow && IsEscrowOp(pop))
-		{
-			foundEscrow = true; 
-			prevEscrowOp = pop;
-			vvchPrevEscrowArgs = vvch;
-		}
-		else if (!foundAlias && IsAliasOp(pop))
-		{
-			foundAlias = true; 
-			prevAliasOp = pop;
-			vvchPrevAliasArgs = vvch;
-		}
+	
 	}
-	
-	
 
 	// Make sure offer outputs are not spent by a regular transaction, or the offer would be lost
 	if (tx.nVersion != SYSCOIN_TX_VERSION) {
@@ -1045,19 +1047,9 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
-			// cannot buy expired offers unless its inside an escrow (which doesnt expire until release claimed or refunded)
-			// also a linked offer accept must be able to go through aswell
-			if(!IsEscrowOp(prevEscrowOp) && !IsOfferOp(prevOp)  && theOffer.vchLinkOffer.empty() && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
-			{
-				if(fDebug)
-					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer");
-				return true;
-			}
-			theOfferAccept = serializedOffer.accept;
-			if(IsOfferOp(prevOp))
-				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchPrevArgs[3]));
-			else
-				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
+
+			theOfferAccept = serializedOffer.accept;			
+			theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
 			if(theOfferAccept.nQty <= 0)
 				theOfferAccept.nQty = 1;
 			if((theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty)) {
