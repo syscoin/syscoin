@@ -1057,7 +1057,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(theOfferAccept.nQty <= 0)
 				theOfferAccept.nQty = 1;
 			// update qty if not an escrow accept (since that updates qty on escrow creation, and refunds qty on escrow refund)
-			if(!theOfferAccept.vchEscrow.empty())
+			if(theOfferAccept.vchEscrow.empty())
 			{
 				if((theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty)) {
 					if(fDebug)
