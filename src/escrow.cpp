@@ -643,7 +643,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 		else
 		{
 			vector<COffer> myVtxPos;
-			if (vvchArgs.size() > 2 && theEscrow.qty != -1 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
+			if (vvchArgs.size() > 2 && theEscrow.nQty != -1 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
 				if (pofferdb->ReadOffer(theEscrow.vchOffer, myVtxPos) && !myVtxPos.empty())
 				{
 					COffer &dbOffer = myVtxPos.back();
