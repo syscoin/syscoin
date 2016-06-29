@@ -270,7 +270,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	string offerguidsafe3 = OfferNew("node2", "jagbannonsafesearchoffer", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
 
 	// bade case, safe offer with unsafe alias
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES jagbannonsafesearchoffer category title -1 0.05 description USD nocert true 0 location Yes" + certguid1a));
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES jagbannonsafesearchoffer category title -1 0.05 description USD nocert true 0 location Yes"), runtime_error);
 	// ban both aliases level 1 (only owner of SYS_CATEGORY can do this)
 	/*BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL1));
