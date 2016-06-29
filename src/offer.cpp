@@ -2766,6 +2766,8 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
+	// create accept
+	COfferAccept txAccept;
 	vector<vector<unsigned char> > escrowVvch;
 	vector<unsigned char> vchEscrowWhitelistAlias;
 	if(!vchEscrowTxHash.empty())
@@ -2809,7 +2811,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 				scriptPubKeyEscrowSeller += scriptPubKeyEscrowSellerDestination;
 				scriptPubKeyEscrowArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
 				scriptPubKeyEscrowArbiter += scriptPubKeyEscrowArbiterDestination;
-				theOffer.accept.vchEscrow = escrowVvch[0]; 
+				txAccept.vchEscrow = escrowVvch[0]; 
 			}
 		}	
 	}
@@ -2941,8 +2943,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	}
 	if(theOffer.sCategory.size() > 0 && boost::algorithm::ends_with(stringFromVch(theOffer.sCategory), "wanted"))
 		throw runtime_error("Cannot purchase a wanted offer");
-	// create accept
-	COfferAccept txAccept;
+
 	txAccept.vchAcceptRand = vchAccept;
 	txAccept.nQty = nQty;
 	txAccept.nPrice = theOffer.GetPrice(foundAlias);
