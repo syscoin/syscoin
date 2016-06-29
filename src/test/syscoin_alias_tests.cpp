@@ -256,23 +256,23 @@ BOOST_AUTO_TEST_CASE (generate_aliasban)
 
 BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 {
-	/*printf("Running generate_aliasbanwithoffers...\n");
+	printf("Running generate_aliasbanwithoffers...\n");
 	UniValue r;
 	GenerateBlocks(10);
 	// 2 aliases, one will be banned that is safe searchable other is banned that is not safe searchable
 	AliasNew("node1", "jagbansafesearchoffer", "pubdata", "privdata", "Yes");
 	AliasNew("node1", "jagbannonsafesearchoffer", "pubdata", "privdata", "No");
 	// good case, safe offer with safe alias
-	string offerguidsafe1 = OfferNew("node1", "jagbansafesearchoffer", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "Yes");
+	string offerguidsafe1 = OfferNew("node1", "jagbansafesearchoffer", "category", "title", "100", "1.00", "description", "USD", "nocert", true, "0", "location", "Yes");
 	// good case, unsafe offer with safe alias
-	string offerguidsafe2 = OfferNew("node1", "jagbansafesearchoffer", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
+	string offerguidsafe2 = OfferNew("node1", "jagbansafesearchoffer", "category", "title", "100", "1.00", "description", "USD", "nocert", true, "0", "location", "No");
 	// good case, unsafe offer with unsafe alias
-	string offerguidsafe3 = OfferNew("node1", "jagbannonsafesearchoffer", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
+	string offerguidsafe3 = OfferNew("node1", "jagbannonsafesearchoffer", "category", "title", "100", "1.00", "description", "USD", "nocert", true, "0", "location", "No");
 
-	// bade case, safe offer with unsafe alias
+	// bad case, safe offer with unsafe alias
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew_nocheck SYS_RATES jagbannonsafesearchoffer category title -1 0.05 description USD nocert true 0 location Yes"), runtime_error);
 	// ban both aliases level 1 (only owner of SYS_CATEGORY can do this)
-	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1));
+	/*BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL1));
 	// should only show level 1 banned if safe search filter is not used
 	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "On"), false);
