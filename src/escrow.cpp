@@ -562,6 +562,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							}
 							else if(dbOffer.nQty != -1)
 							{
+								vector<COffer> myLinkVtxPos;
 								unsigned int nQty = dbOffer.nQty + theEscrow.nQty;
 								// if this is a linked offer we must update the linked offer qty aswell
 								if (pofferdb->ExistsOffer(dbOffer.vchLinkOffer)) {
