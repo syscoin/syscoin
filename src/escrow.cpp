@@ -562,14 +562,30 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							}
 							else if(dbOffer.nQty != -1)
 							{
-								dbOffer.nQty += theEscrow.nQty;
+								unsigned int nQty = dbOffer.nQty + theEscrow.nQty;
+								// if this is a linked offer we must update the linked offer qty aswell
+								if (pofferdb->ExistsOffer(dbOffer.vchLinkOffer)) {
+									if (pofferdb->ReadOffer(dbOffer.vchLinkOffer, myLinkVtxPos))
+									{
+										COffer &myLinkOffer = myLinkVtxPos.back();
+										myLinkOffer.nQty += theEscrow.nQty;
+										if(myLinkOffer.nQty < 0)
+											myLinkOffer.nQty = 0;
+										nQty = myLinkOffer.nQty;
+										myLinkOffer.PutToOfferList(myLinkVtxPos);
+										if (!pofferdb->WriteOffer(dbOffer.vchLinkOffer, myLinkVtxPos))
+												return error( "CheckEscrowInputs() : failed to write to offer link to DB");
+										
+									}
+								}
+								dbOffer.nQty = nQty;
 								if(dbOffer.nQty < 0)
 									dbOffer.nQty = 0;
 								dbOffer.PutToOfferList(myVtxPos);
 								if (!pofferdb->WriteOffer(theEscrow.vchOffer, myVtxPos))
 									return error( "CheckEscrowInputs() : failed to write to offer to DB");
-							}
-						}
+									}
+								}
 
 					}
 				}
@@ -654,12 +670,29 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					}
 					else if(dbOffer.nQty != -1)
 					{
-						dbOffer.nQty -= theEscrow.nQty;
+						unsigned int nQty = dbOffer.nQty - theEscrow.nQty;
+						// if this is a linked offer we must update the linked offer qty aswell
+						if (pofferdb->ExistsOffer(dbOffer.vchLinkOffer)) {
+							if (pofferdb->ReadOffer(dbOffer.vchLinkOffer, myLinkVtxPos))
+							{
+								COffer &myLinkOffer = myLinkVtxPos.back();
+								myLinkOffer.nQty -= theEscrow.nQty;
+								if(myLinkOffer.nQty < 0)
+									myLinkOffer.nQty = 0;
+								nQty = myLinkOffer.nQty;
+								myLinkOffer.PutToOfferList(myLinkVtxPos);
+								if (!pofferdb->WriteOffer(dbOffer.vchLinkOffer, myLinkVtxPos))
+										return error( "CheckEscrowInputs() : failed to write to offer link to DB");
+								
+							}
+						}
+						dbOffer.nQty = nQty;
 						if(dbOffer.nQty < 0)
 							dbOffer.nQty = 0;
 						dbOffer.PutToOfferList(myVtxPos);
 						if (!pofferdb->WriteOffer(theEscrow.vchOffer, myVtxPos))
 							return error( "CheckEscrowInputs() : failed to write to offer to DB");
+
 					}
 				}
 

@@ -934,7 +934,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			// if not escrow check qty to see if enough, escrow creation already deducts qty
 			if(!IsEscrowOp(prevEscrowOp))
 			{
-				if(theOfferAccept.nQty <= 0 || (theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty))
+				if(theOfferAccept.nQty <= 0 || (theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty)vchEscrowTxHash.empty() || (!linkOffer.IsNull() && theOfferAccept.nQty > linkOffer.nQty && linkOffer.nQty != -1))
 					return error("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s rejected because desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
 			}	
 			break;
@@ -1057,19 +1057,18 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(theOfferAccept.nQty <= 0)
 				theOfferAccept.nQty = 1;
 			// update qty if not an escrow accept (since that updates qty on escrow creation, and refunds qty on escrow refund)
-			if(theOfferAccept.vchEscrow.empty())
+			// also if this offer you are accepting is linked to another offer don't need to update qty (once the root accept is done this offer qty will be updated)
+			if(theOffer.nQty != -1 && theOfferAccept.vchEscrow.empty() && theOffer.vchLinkOffer.empty())
 			{
-				if((theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty)) {
+				if((theOfferAccept.nQty > theOffer.nQty)) {
 					if(fDebug)
 						LogPrintf("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
 					return true;
-				}
-				if(theOffer.nQty != -1)
-				{
-					theOffer.nQty -= theOfferAccept.nQty;
-					if(theOffer.nQty < 0)
-						theOffer.nQty = 0;
-				}
+				}				
+				theOffer.nQty -= theOfferAccept.nQty;
+				if(theOffer.nQty < 0)
+					theOffer.nQty = 0;
+				
 			}
 
 			theOfferAccept.nHeight = nHeight;
@@ -2887,7 +2886,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	}
 
 	unsigned int memPoolQty = QtyOfPendingAcceptsInMempool(vchOffer);
-	if(vtxPos.back().nQty != -1 && vtxPos.back().nQty < (nQty+memPoolQty))
+	if(vtxPos.back().nQty != -1 && vtxPos.back().nQty < ((!vchEscrowTxHash.empty()? 0: nQty)+memPoolQty))
 		throw runtime_error(strprintf("not enough remaining quantity to fulfill this orderaccept, qty remaining %u, qty desired %u,  qty waiting to be accepted by the network %d", vtxPos.back().nQty, nQty, memPoolQty));
 
 	int precision = 2;
