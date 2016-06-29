@@ -560,7 +560,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 								if(fDebug)
 									LogPrintf("CheckEscrowInputs() : OP_ESCROW_ACTIVATE trying to refund an expired offer");	
 							}
-							else (dbOffer.nQty != -1)
+							else if(dbOffer.nQty != -1)
 							{
 								dbOffer.nQty += theEscrow.nQty;
 								if(dbOffer.nQty < 0)
