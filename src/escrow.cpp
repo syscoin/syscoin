@@ -551,7 +551,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				if(op == OP_ESCROW_REFUND && vvchArgs.size() == 1)
 				{
 					vector<COffer> myVtxPos;
-					if (vvchArgs.size() > 2 && dbOffer.qty != -1 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
+					if (vvchArgs.size() > 2 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
 						if (pofferdb->ReadOffer(theEscrow.vchOffer, myVtxPos) && !myVtxPos.empty())
 						{
 							COffer &dbOffer = myVtxPos.back();
@@ -560,7 +560,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 								if(fDebug)
 									LogPrintf("CheckEscrowInputs() : OP_ESCROW_ACTIVATE trying to refund an expired offer");	
 							}
-							else
+							else (dbOffer.nQty != -1)
 							{
 								dbOffer.nQty += theEscrow.nQty;
 								if(dbOffer.nQty < 0)
@@ -643,7 +643,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 		else
 		{
 			vector<COffer> myVtxPos;
-			if (vvchArgs.size() > 2 && theEscrow.nQty != -1 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
+			if (vvchArgs.size() > 2 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
 				if (pofferdb->ReadOffer(theEscrow.vchOffer, myVtxPos) && !myVtxPos.empty())
 				{
 					COffer &dbOffer = myVtxPos.back();
@@ -652,7 +652,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						if(fDebug)
 							LogPrintf("CheckEscrowInputs() : OP_ESCROW_ACTIVATE trying to purchase an expired offer");	
 					}
-					else
+					else if(dbOffer.nQty != -1)
 					{
 						dbOffer.nQty -= theEscrow.nQty;
 						if(dbOffer.nQty < 0)
