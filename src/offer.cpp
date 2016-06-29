@@ -759,7 +759,9 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if (IsEscrowOp(prevEscrowOp) && IsAliasOp(prevAliasOp))
 				return error("OP_OFFER_ACCEPT Cannot have both alias and escrow inputs to an accept");
 			if (IsEscrowOp(prevEscrowOp) && !theOfferAccept.txBTCId.IsNull())
-				return error("OP_OFFER_ACCEPT can't use BTC for escrow transactions");				
+				return error("OP_OFFER_ACCEPT can't use BTC for escrow transactions");	
+			if (IsEscrowOp(prevEscrowOp) && theOfferAccept.vchEscrow != vvchPrevEscrowArgs[0])
+				return error("OP_OFFER_ACCEPT escrow guid mismatch");	
 			if (vvchArgs[1].size() > MAX_NAME_LENGTH)
 				return error("OP_OFFER_ACCEPT offeraccept tx with guid too big");
 			if(prevOp == OP_OFFER_ACCEPT)
@@ -928,11 +930,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						}
 					}
 				}												
-			}						
-		
-			if(theOfferAccept.nQty <= 0 || (theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty) || (!linkOffer.IsNull() && theOfferAccept.nQty > linkOffer.nQty && linkOffer.nQty != -1))
-				return error("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s rejected because desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
-					
+			}	
+			// if not escrow check qty to see if enough, escrow creation already deducts qty
+			if(!IsEscrowOp(prevEscrowOp))
+			{
+				if(theOfferAccept.nQty <= 0 || (theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty))
+					return error("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s rejected because desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
+			}	
 			break;
 
 		default:
@@ -1052,16 +1056,20 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
 			if(theOfferAccept.nQty <= 0)
 				theOfferAccept.nQty = 1;
-			if((theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty)) {
-				if(fDebug)
-					LogPrintf("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
-				return true;
-			}
-			if(theOffer.nQty != -1)
+			// update qty if not an escrow accept (since that updates qty on escrow creation, and refunds qty on escrow refund)
+			if(!theOfferAccept.vchEscrow.empty())
 			{
-				theOffer.nQty -= theOfferAccept.nQty;
-				if(theOffer.nQty < 0)
-					theOffer.nQty = 0;
+				if((theOffer.nQty != -1 && theOfferAccept.nQty > theOffer.nQty)) {
+					if(fDebug)
+						LogPrintf("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
+					return true;
+				}
+				if(theOffer.nQty != -1)
+				{
+					theOffer.nQty -= theOfferAccept.nQty;
+					if(theOffer.nQty < 0)
+						theOffer.nQty = 0;
+				}
 			}
 
 			theOfferAccept.nHeight = nHeight;
@@ -1070,70 +1078,70 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			theOffer.accept = theOfferAccept;
 		}
 		
-		if(op == OP_OFFER_ACTIVATE || op == OP_OFFER_UPDATE) {
-			if(op == OP_OFFER_UPDATE)
+
+		if(op == OP_OFFER_UPDATE)
+		{
+			// if the txn whitelist entry exists (meaning we want to remove or add)
+			if(serializedOffer.linkWhitelist.entries.size() == 1)
 			{
-				// if the txn whitelist entry exists (meaning we want to remove or add)
-				if(serializedOffer.linkWhitelist.entries.size() == 1)
+				// special case we use to remove all entries
+				if(serializedOffer.linkWhitelist.entries[0].nDiscountPct == 127)
 				{
-					// special case we use to remove all entries
-					if(serializedOffer.linkWhitelist.entries[0].nDiscountPct == 127)
-					{
-						theOffer.linkWhitelist.SetNull();
-					}
-					// the stored offer has this entry meaning we want to remove this entry
-					else if(theOffer.linkWhitelist.GetLinkEntryByHash(serializedOffer.linkWhitelist.entries[0].aliasLinkVchRand, entry))
-					{
-						theOffer.linkWhitelist.RemoveWhitelistEntry(serializedOffer.linkWhitelist.entries[0].aliasLinkVchRand);
-					}
-					// we want to add it to the whitelist
-					else
-					{
-						if(!serializedOffer.linkWhitelist.entries[0].aliasLinkVchRand.empty() && serializedOffer.linkWhitelist.entries[0].nDiscountPct <= 99)
-							theOffer.linkWhitelist.PutWhitelistEntry(serializedOffer.linkWhitelist.entries[0]);
-					}
+					theOffer.linkWhitelist.SetNull();
 				}
-				// if this offer is linked to a parent update it with parent information
-				if(!theOffer.vchLinkOffer.empty())
+				// the stored offer has this entry meaning we want to remove this entry
+				else if(theOffer.linkWhitelist.GetLinkEntryByHash(serializedOffer.linkWhitelist.entries[0].aliasLinkVchRand, entry))
 				{
-					vector<COffer> myVtxPos;
-					if (pofferdb->ExistsOffer(theOffer.vchLinkOffer)) {
-						if (pofferdb->ReadOffer(theOffer.vchLinkOffer, myVtxPos))
-						{
-							COffer myLinkOffer = myVtxPos.back();
-							theOffer.nQty = myLinkOffer.nQty;	
-							theOffer.vchAliasPeg = myLinkOffer.vchAliasPeg;	
-							theOffer.SetPrice(myLinkOffer.nPrice);
-							
-						}
-					}
-						
+					theOffer.linkWhitelist.RemoveWhitelistEntry(serializedOffer.linkWhitelist.entries[0].aliasLinkVchRand);
 				}
+				// we want to add it to the whitelist
 				else
 				{
-					// go through the linked offers, if any, and update the linked offer info based on the this info
-					for(unsigned int i=0;i<theOffer.offerLinks.size();i++) {
-						vector<COffer> myVtxPos;
-						if (pofferdb->ExistsOffer(theOffer.offerLinks[i])) {
-							if (pofferdb->ReadOffer(theOffer.offerLinks[i], myVtxPos))
-							{
-								COffer myLinkOffer = myVtxPos.back();
-								myLinkOffer.nQty = theOffer.nQty;	
-								myLinkOffer.vchAliasPeg = theOffer.vchAliasPeg;	
-								myLinkOffer.SetPrice(theOffer.nPrice);
-								myLinkOffer.PutToOfferList(myVtxPos);
-								// write offer
-							
-								if (!pofferdb->WriteOffer(theOffer.offerLinks[i], myVtxPos))
-										return error( "CheckOfferInputs() : failed to write to offer link to DB");
-								
-							}
-						}
-					}
-					
+					if(!serializedOffer.linkWhitelist.entries[0].aliasLinkVchRand.empty() && serializedOffer.linkWhitelist.entries[0].nDiscountPct <= 99)
+						theOffer.linkWhitelist.PutWhitelistEntry(serializedOffer.linkWhitelist.entries[0]);
 				}
 			}
+			// if this offer is linked to a parent update it with parent information
+			if(!theOffer.vchLinkOffer.empty())
+			{
+				vector<COffer> myVtxPos;
+				if (pofferdb->ExistsOffer(theOffer.vchLinkOffer)) {
+					if (pofferdb->ReadOffer(theOffer.vchLinkOffer, myVtxPos))
+					{
+						COffer myLinkOffer = myVtxPos.back();
+						theOffer.nQty = myLinkOffer.nQty;	
+						theOffer.vchAliasPeg = myLinkOffer.vchAliasPeg;	
+						theOffer.SetPrice(myLinkOffer.nPrice);
+						
+					}
+				}
+					
+			}
+			else
+			{
+				// go through the linked offers, if any, and update the linked offer info based on the this info
+				for(unsigned int i=0;i<theOffer.offerLinks.size();i++) {
+					vector<COffer> myVtxPos;
+					if (pofferdb->ExistsOffer(theOffer.offerLinks[i])) {
+						if (pofferdb->ReadOffer(theOffer.offerLinks[i], myVtxPos))
+						{
+							COffer myLinkOffer = myVtxPos.back();
+							myLinkOffer.nQty = theOffer.nQty;	
+							myLinkOffer.vchAliasPeg = theOffer.vchAliasPeg;	
+							myLinkOffer.SetPrice(theOffer.nPrice);
+							myLinkOffer.PutToOfferList(myVtxPos);
+							// write offer
+						
+							if (!pofferdb->WriteOffer(theOffer.offerLinks[i], myVtxPos))
+									return error( "CheckOfferInputs() : failed to write to offer link to DB");
+							
+						}
+					}
+				}
+				
+			}
 		}
+		
 		theOffer.nHeight = nHeight;
 		theOffer.txHash = tx.GetHash();
 		theOffer.PutToOfferList(vtxPos);
@@ -2801,6 +2809,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 				scriptPubKeyEscrowSeller += scriptPubKeyEscrowSellerDestination;
 				scriptPubKeyEscrowArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << escrowVvch[0] << OP_2DROP;
 				scriptPubKeyEscrowArbiter += scriptPubKeyEscrowArbiterDestination;
+				theOffer.accept.vchEscrow = escrowVvch[0]; 
 			}
 		}	
 	}

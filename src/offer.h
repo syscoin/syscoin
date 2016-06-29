@@ -27,6 +27,7 @@ extern bool IsSys21Fork(const uint64_t& nHeight);
 class COfferAccept {
 public:
 	std::vector<unsigned char> vchAcceptRand;
+	std::vector<unsigned char> vchEscrow;
 	uint256 txHash;
 	uint64_t nHeight;
 	uint64_t nAcceptHeight;
@@ -49,6 +50,10 @@ public:
     	READWRITE(nPrice);
 		READWRITE(vchBuyerKey);	
 		READWRITE(txBTCId);	
+		if(IsSys21Fork(nHeight))
+		{
+			READWRITE(vchEscrow);	
+		}
 		
 	}
 
@@ -62,6 +67,7 @@ public:
         && a.nPrice == b.nPrice
 		&& a.vchBuyerKey == b.vchBuyerKey
 		&& a.txBTCId == b.txBTCId
+		&& a.vchEscrow == b.vchEscrow
         );
     }
 
@@ -74,6 +80,7 @@ public:
         nPrice = b.nPrice;
 		vchBuyerKey = b.vchBuyerKey;
 		txBTCId = b.txBTCId;
+		vchEscrow = b.vchEscrow;
         return *this;
     }
 
@@ -81,8 +88,8 @@ public:
         return !(a == b);
     }
 
-    void SetNull() { vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerKey.clear();}
-    bool IsNull() const { return (vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 &&nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerKey.empty()); }
+    void SetNull() { vchEscrow.clear(); vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerKey.clear();}
+    bool IsNull() const { return (vchEscrow.empty() && vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 &&nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerKey.empty()); }
 
 };
 class COfferLinkWhitelistEntry {

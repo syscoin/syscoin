@@ -439,6 +439,8 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					retError = string("CheckEscrowInputs(): ") + retError;
 					return error(retError.c_str());
 				}
+				if(theEscrow.op != OP_ESCROW_ACTIVATE)
+					return error("CheckEscrowInputs() :  invalid op, should be escrow activate");
 				break;
 			case OP_ESCROW_RELEASE:
 				if(prevOp != OP_ESCROW_ACTIVATE)
@@ -450,6 +452,8 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					return error("CheckEscrowInputs() :cannot leave feedback in release tx");
 				}
+				if(theEscrow.op != OP_ESCROW_RELEASE)
+					return error("CheckEscrowInputs() :  invalid op, should be escrow release");
 				break;
 			case OP_ESCROW_COMPLETE:
 				// Check input
@@ -490,11 +494,16 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					if(prevOp != OP_ESCROW_REFUND)
 						return error("CheckEscrowInputs() :  can only complete refund on a refunded escrow");
+					if(theEscrow.op != OP_ESCROW_COMPLETE)
+						return error("CheckEscrowInputs() :  invalid op, should be escrow complete");
+
 				}
 				else
 				{
 					if(prevOp != OP_ESCROW_ACTIVATE)
 						return error("CheckEscrowInputs() : can only refund an activated escrow");
+					if(theEscrow.op != OP_ESCROW_REFUND)
+						return error("CheckEscrowInputs() :  invalid op, should be escrow refund");
 				}
 				// Check input
 				if(!theEscrow.buyerFeedback.IsNull() || !theEscrow.sellerFeedback.IsNull() || !theEscrow.arbiterFeedback.IsNull())
@@ -539,6 +548,31 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				// these are the only settings allowed to change outside of activate
 				if(!serializedEscrow.rawTx.empty())
 					theEscrow.rawTx = serializedEscrow.rawTx;
+				if(op == OP_ESCROW_REFUND && vvchArgs.size() == 1)
+				{
+					vector<COffer> myVtxPos;
+					if (vvchArgs.size() > 2 && dbOffer.qty != -1 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
+						if (pofferdb->ReadOffer(theEscrow.vchOffer, myVtxPos) && !myVtxPos.empty())
+						{
+							COffer &dbOffer = myVtxPos.back();
+							if((dbOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+							{
+								if(fDebug)
+									LogPrintf("CheckEscrowInputs() : OP_ESCROW_ACTIVATE trying to refund an expired offer");	
+							}
+							else
+							{
+								dbOffer.nQty += theEscrow.nQty;
+								if(dbOffer.nQty < 0)
+									dbOffer.nQty = 0;
+								dbOffer.PutToOfferList(myVtxPos);
+								if (!pofferdb->WriteOffer(theEscrow.vchOffer, myVtxPos))
+									return error( "CheckEscrowInputs() : failed to write to offer to DB");
+							}
+						}
+
+					}
+				}
 				if(op == OP_ESCROW_COMPLETE)
 				{
 					if(vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
@@ -578,7 +612,8 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						// can't leave more than 2 feedbacks at once
 						if(count > 2)
 						{
-							LogPrintf("CheckEscrowInputs() : Trying to leave more than 2 feedbacks in the same transaction, skipping...");
+							if(fDebug)
+								LogPrintf("CheckEscrowInputs() : Trying to leave more than 2 feedbacks in the same transaction, skipping...");
 							return true;
 						}
 
@@ -605,10 +640,35 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				return true;
 					
 		}
+		else
+		{
+			vector<COffer> myVtxPos;
+			if (vvchArgs.size() > 2 && dbOffer.qty != -1 && pofferdb->ExistsOffer(theEscrow.vchOffer)) {
+				if (pofferdb->ReadOffer(theEscrow.vchOffer, myVtxPos) && !myVtxPos.empty())
+				{
+					COffer &dbOffer = myVtxPos.back();
+					if((dbOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+					{
+						if(fDebug)
+							LogPrintf("CheckEscrowInputs() : OP_ESCROW_ACTIVATE trying to purchase an expired offer");	
+					}
+					else
+					{
+						dbOffer.nQty -= theEscrow.nQty;
+						if(dbOffer.nQty < 0)
+							dbOffer.nQty = 0;
+						dbOffer.PutToOfferList(myVtxPos);
+						if (!pofferdb->WriteOffer(theEscrow.vchOffer, myVtxPos))
+							return error( "CheckEscrowInputs() : failed to write to offer to DB");
+					}
+				}
+
+			}
+
+		}
         // set the escrow's txn-dependent values
-		theEscrow.op = op; 
-		if(op == OP_ESCROW_REFUND && vvchArgs.size() > 1 && vvchArgs[1] == vchFromString("1"))
-			theEscrow.op = OP_ESCROW_COMPLETE;
+		if(op == OP_ESCROW_COMPLETE)
+			theEscrow.op = op;
 		theEscrow.txHash = tx.GetHash();
 		theEscrow.nHeight = nHeight;
 		PutToEscrowList(vtxPos, theEscrow);
@@ -829,6 +889,11 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchSellerPubKey;
 	if (!GetTxOfOffer( vchOffer, theOffer, txOffer, true))
 		throw runtime_error("could not find an offer with this identifier");
+	unsigned int memPoolQty = QtyOfPendingAcceptsInMempool(vchOffer);
+	if(theOffer.nQty != -1 && theOffer.nQty < (nQty+memPoolQty))
+		throw runtime_error(strprintf("not enough remaining quantity to fulfill this escrow, qty remaining %u, qty desired %u,  qty waiting to be accepted by the network %d", theOffer.nQty, nQty, memPoolQty));
+
+
 	vchSellerPubKey = theOffer.vchPubKey;
 	if(!theOffer.vchLinkOffer.empty())
 	{
@@ -912,7 +977,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	scriptSeller= GetScriptForDestination(SellerPubKey.GetID());
 	scriptBuyer= GetScriptForDestination(BuyerPubKey.GetID());
 	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_ACTIVATE) << vchEscrow << OP_2DROP;
-	scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_ACTIVATE) << vchEscrow << OP_2DROP;
+	scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_ACTIVATE) << vchEscrow  << OP_2DROP;
 	scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_ACTIVATE) << vchEscrow << OP_2DROP;
 	scriptPubKeySeller += scriptSeller;
 	scriptPubKeyArbiter += scriptArbiter;
@@ -1948,7 +2013,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 		throw runtime_error("Arbiter address is invalid!");
 
 	escrow.ClearEscrow();
-	escrow.op = OP_ESCROW_REFUND;
+	escrow.op = OP_ESCROW_COMPLETE;
 	escrow.nHeight = chainActive.Tip()->nHeight;
     CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyArbiter, scriptPubKeyBuyerDestination, scriptPubKeySellerDestination, scriptPubKeyArbiterDestination;
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
