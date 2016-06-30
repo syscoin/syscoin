@@ -169,7 +169,7 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
 					pcursor->Next();
 					continue;
 				}
-				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, txPos.safetyLevel, txPos.safeSearch)) != "")
+				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, txPos.safetyLevel, safeSearch)) != "")
 				{
 					pcursor->Next();
 					continue;
