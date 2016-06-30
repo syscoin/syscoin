@@ -337,45 +337,52 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "Off"), true);
 
 	// ban both aliases level 1 (only owner of SYS_CATEGORY can do this)
-	/*BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1));
+	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL1));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL1));
 	// should only show level 1 banned if safe search filter is not used
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "On"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Off"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "On"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Off"), true);
-	// should be able to aliasinfo on level 1 banned aliases
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbansafesearch"));
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbannonsafesearch"));
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "Off"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe2, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe2, "Off"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "Off"), true);
+	// should be able to offerinfo on level 1 banned aliases
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe1));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe2));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe3));
 	
 	// ban both aliases level 2 (only owner of SYS_CATEGORY can do this)
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",SAFETY_LEVEL2));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",SAFETY_LEVEL2));
 	// no matter what filter won't show banned aliases
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "On"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Off"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "On"), false);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Off"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "Off"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe2, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe2, "Off"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "Off"), false);
 
-	// shouldn't be able to aliasinfo on level 2 banned aliases
-	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasinfo jagbansafesearch"), runtime_error);
-	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasinfo jagbannonsafesearch"), runtime_error);
+	// shouldn't be able to offerinfo on level 2 banned aliases
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe1), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe2), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe3), runtime_error);
 
 	// unban both aliases (only owner of SYS_CATEGORY can do this)
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearch",0));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearch",0));
-	// safe to search regardless of filter
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "On"), true);
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearch", "Off"), true);
+	// back to original settings
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "On"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "Off"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe2, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe2, "Off"), true);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "On"), false);
+	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "Off"), true);
 
-	// since safesearch is set to false on this alias, it won't show up in search still
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "On"), false);
-	// it will if you are not doing a safe search
-	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearch", "Off"), true);
 
-	// should be able to aliasinfo on non banned aliases
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbansafesearch"));
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagbannonsafesearch"));*/
+	// should be able to offerinfo on non banned aliases
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe1));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe2));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe3));
 	
 }
 BOOST_AUTO_TEST_CASE (generate_aliaspruning)
