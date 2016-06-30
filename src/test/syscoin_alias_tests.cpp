@@ -318,7 +318,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	BOOST_CHECK_THROW(CallRPC("node1", "offerupdate SYS_RATES jagbannonsafesearchoffer " + offerguidsafe3 + " category title 1 0.05 description 0 nocert 1 location Yes"), runtime_error);
 
 	// edit the offer to change the alias to a safe alias from an unsafe alias
-	BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES jagbansafesearchoffer " + offerguidsafe3 + " category title 1 0.05 description 0 nocert 1 location Yes"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES jagbansafesearchoffer " + offerguidsafe3 + " category title 1 0.05 description 0 nocert 1 location No"));
 	GenerateBlocks(5);
 	// you won't be able to find it unless in safe search off mode because the alias doesn't actually change
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "On"), false);

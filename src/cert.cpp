@@ -127,6 +127,7 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
     using namespace boost::xpressive;
     smatch certparts;
 	string strRegexpLower = strRegexp;
+	string retError;
 	boost::algorithm::to_lower(strRegexpLower);
     sregex cregex = sregex::compile(strRegexpLower);
 	int nMaxAge  = GetCertExpirationDepth();
@@ -164,6 +165,11 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
 					}
 				}
 				if(!txPos.safeSearch && safeSearch)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, txPos.safetyLevel, txPos.safeSearch)) != "")
 				{
 					pcursor->Next();
 					continue;

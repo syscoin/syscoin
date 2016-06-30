@@ -239,6 +239,7 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
     using namespace boost::xpressive;
     smatch offerparts;
 	smatch nameparts;
+	string retError;
 	string strRegexpLower = strRegexp;
 	boost::algorithm::to_lower(strRegexpLower);
 	sregex cregex = sregex::compile(strRegexpLower);
@@ -293,6 +294,12 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 					pcursor->Next();
 					continue;
 				}
+				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, txPos.safetyLevel, txPos.safeSearch)) != "")
+				{
+					pcursor->Next();
+					continue;
+				}
+
 				string title = stringFromVch(txPos.sTitle);
 				string offer = stringFromVch(vchOffer);
 				boost::algorithm::to_lower(title);
