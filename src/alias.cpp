@@ -857,7 +857,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					if (!paliasdb->ReadAlias(vvchArgs[0], vtxPos) || vtxPos.empty())
 						return error("CheckAliasInputs() : failed to read from alias DB");
 					if(vvchArgs.size() > 1 && vtxPos.back().vchGUID != vvchArgs[1])
-						return error("CheckAliasInputs() : aliasupdate vchGUID mismatch");
+						return error("CheckAliasInputs() : aliasupdate vchGUID mismatch")	;
 				}
 				break;
 		default:

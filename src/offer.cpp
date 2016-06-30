@@ -977,6 +977,10 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			serializedOffer.bOnlyAcceptBTC = theOffer.bOnlyAcceptBTC;
 			// currency cannot change after creation
 			serializedOffer.sCurrencyCode = theOffer.sCurrencyCode;
+			// cannot edit safety level
+			serializedOffer.safetyLevel = theOffer.safetyLevel;
+			// can't edit the payment address of this offer
+			serializedOffer.vchPubKey = theOffer.vchPubKey;
 			serializedOffer.accept.SetNull();
 			theOffer = serializedOffer;
 			if(!vtxPos.empty())

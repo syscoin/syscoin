@@ -393,11 +393,11 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 
 			if (!pcertdb->ReadCert(vvchArgs[0], vtxPos) || vtxPos.empty())
 				return error("CheckCertInputs() : failed to read from cert DB");
-			if((retError = CheckForAliasExpiryAndSafety(vtxPos.back().vchPubKey, nHeight, vtxPos.back().safetyLevel, vtxPos.back().safeSearch)) != "")
+			if((retError = CheckForAliasExpiryAndSafety(vtxPos.back().vchPubKey, nHeight)) != "")
 			{
 				retError = string("CheckCertInputs(): ") + retError;
 				return error(retError.c_str());
-			}	
+			}
 			break;
 
 		default:
