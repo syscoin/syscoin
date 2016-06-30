@@ -262,10 +262,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	// 2 aliases, one will be banned that is safe searchable other is banned that is not safe searchable
 	AliasNew("node1", "jagbansafesearchoffer", "pubdata", "privdata", "Yes");
 	AliasNew("node1", "jagbannonsafesearchoffer", "pubdata", "privdata", "No");
-	BOOST_CHECK_EQUAL(Aliasilter("node1", "jagbansafesearchoffer", "On"), true);
-	BOOST_CHECK_EQUAL(Aliasilter("node1", "jagbansafesearchoffer", "Off"), true);
-	BOOST_CHECK_EQUAL(Aliasilter("node1", "jagbannonsafesearchoffer", "On"), true);
-	BOOST_CHECK_EQUAL(Aliasilter("node1", "jagbannonsafesearchoffer", "Off"), false);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearchoffer", "On"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbansafesearchoffer", "Off"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearchoffer", "On"), true);
+	BOOST_CHECK_EQUAL(AliasFilter("node1", "jagbannonsafesearchoffer", "Off"), false);
 
 	// good case, safe offer with safe alias
 	string offerguidsafe1 = OfferNew("node1", "jagbansafesearchoffer", "category", "title", "100", "1.00", "description", "USD", "nocert", true, "0", "location", "Yes");
