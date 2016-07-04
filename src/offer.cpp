@@ -289,7 +289,7 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 					pcursor->Next();
 					continue;
 				}
-				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, txPos.safetyLevel, safeSearch)) != "")
+				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, safeSearch? SAFETY_LEVEL0: SAFETY_LEVEL1, safeSearch)) != "")
 				{
 					pcursor->Next();
 					continue;
