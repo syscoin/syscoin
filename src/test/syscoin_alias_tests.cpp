@@ -483,14 +483,14 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
 	StopNode("node3");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasprunewithoffer somedata"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew aliasprunewithoffer1 somedata"));
-	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasnew aliasprunewithoffer2 somedata"));	B
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasnew aliasprunewithoffer2 somedata"));
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 40"));
 	MilliSleep(2500);
 	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
 	MilliSleep(2500);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES pruneoffer category title 1 0.05 description USD"));
 	const UniValue &arr = r.get_array();
-	string guid = arr[1].get_str();
+	string offerguid = arr[1].get_str();
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
 	MilliSleep(2500);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrownew aliasprunewithoffer2 " + offerguid + " 1 message aliasprunewithoffer1"));
