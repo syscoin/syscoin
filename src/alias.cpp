@@ -1178,7 +1178,7 @@ void GetAddressFromAlias(const std::string& strAlias, std::string& strAddress, u
 		if(!address.IsValid())
 			throw runtime_error("alias address is invalid");
 		strAddress = address.ToString();
-		safetyLevel = alias.safetylevel;
+		safetyLevel = alias.safetyLevel;
 		safeSearch = alias.safeSearch;
 	}
 	catch(...)
