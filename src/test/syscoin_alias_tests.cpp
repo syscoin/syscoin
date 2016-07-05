@@ -301,11 +301,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "On"), false);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "Off"), true);
 
-	OfferUpdate("node1", "jagbansafesearchoffer", offerguidsafe1, "category", "titlenew", "10", "1.00", "descriptionnew", false, "nocert", true, "location", "Yes");
-
 	// swap them back and check filters again
 	AliasUpdate("node1", "jagbansafesearchoffer", "pubdata1", "privatedata1", "Yes");	
 	AliasUpdate("node1", "jagbannonsafesearchoffer", "pubdata1", "privatedata1", "No");
+
 	// safe offer with safe alias should show regardless of safe search
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "On"), true);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe1, "Off"), true);
@@ -315,6 +314,8 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	// unsafe offer with unsafe alias should show only in safe search off mode
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "On"), false);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "Off"), true);
+
+	OfferUpdate("node1", "jagbansafesearchoffer", offerguidsafe1, "category", "titlenew", "10", "1.00", "descriptionnew", false, "nocert", true, "location", "Yes");
 
 	// unsafe offer with unsafe alias, can't edit the offer to safe because the alias is unsafe
 	BOOST_CHECK_THROW(CallRPC("node1", "offerupdate SYS_RATES jagbannonsafesearchoffer " + offerguidsafe3 + " category title 1 0.05 description 0 nocert 1 location Yes"), runtime_error);
