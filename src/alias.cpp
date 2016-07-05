@@ -2045,8 +2045,6 @@ string CheckForAliasExpiryAndSafety(const vector<unsigned char> &vchPubKey, cons
 		alias = CSyscoinAddress(alias.ToString());
 		if(!alias.IsValid())
 			return string("alias address is invalid");
-		if(!alias.isAlias)
-			return string("not an alias");
 		if(alias.isAlias)
 		{
 			if((alias.nHeight + GetAliasExpirationDepth()) < nHeight)
