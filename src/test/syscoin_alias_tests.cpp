@@ -481,8 +481,8 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
 	GenerateBlocks(5, "node2");
 	GenerateBlocks(5, "node3");
 
-	AliasNew("node1", "aliasprunewithoffer1", "somedata");
-	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");
+	AliasNew("node1", "aliasprunewithoffer", "somedata");
+	string offerguid = OfferNew("node1", "aliasprunewithoffer", "category", "title", "100", "0.01", "description", "USD");
 	AliasNew("node1", "aliasprunewithoffer1", "somedata");
 	AliasNew("node2", "aliasprunewithoffer2", "somedata");
 	GenerateBlocks(20);
