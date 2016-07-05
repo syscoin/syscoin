@@ -165,7 +165,7 @@ bool DecodeAndParseAliasTx(const CTransaction& tx, int& op, int& nOut, std::vect
 bool DecodeAndParseSyscoinTx(const CTransaction& tx, int& op, int& nOut, std::vector<std::vector<unsigned char> >& vvch);
 bool DecodeAliasScript(const CScript& script, int& op,
 		std::vector<std::vector<unsigned char> > &vvch);
-void GetAddressFromAlias(const std::string& strAlias, std::string& strAddress);
+void GetAddressFromAlias(const std::string& strAlias, std::string& strAddress, unsigned char& safetyLevel, bool& safeSearch);
 void GetAliasFromAddress(const std::string& strAddress, std::string& strAlias);
 CAmount convertCurrencyCodeToSyscoin(const std::vector<unsigned char> &vchAliasPeg, const std::vector<unsigned char> &vchCurrencyCode, const float &nPrice, const unsigned int &nHeight, int &precision);
 bool ExistsInMempool(const std::vector<unsigned char> &vchToFind, opcodetype type);

@@ -225,10 +225,14 @@ public:
 CSyscoinAddress::CSyscoinAddress() {
 	isAlias = false;
 	aliasName = "";
+	safeSearch = false;
+	safetyLevel = 0;
 }
 // SYSCOIN support old sys
 CSyscoinAddress::CSyscoinAddress(const CTxDestination &dest, bool oldSys) { 
 	isAlias = false;
+	safeSearch = false;
+	safetyLevel = 0;
 	aliasName = "";
     Set(dest, oldSys);
 }
@@ -242,7 +246,7 @@ CSyscoinAddress::CSyscoinAddress(const std::string& strAddress) {
 		try 
 		{
 			std::string strAliasAddress;
-			GetAddressFromAlias(strAddress, strAliasAddress);
+			GetAddressFromAlias(strAddress, strAliasAddress, safetyLevel, safeSearch);
 			SetString(strAliasAddress);
 			aliasName = strAddress;
 			isAlias = true;
@@ -257,7 +261,7 @@ CSyscoinAddress::CSyscoinAddress(const std::string& strAddress) {
 		try 
 		{
 			std::string strAlias;
-			GetAliasFromAddress(strAddress, strAlias);
+			GetAliasFromAddress(strAddress, strAlias, safetyLevel, safeSearch);
 			aliasName = strAlias;
 			isAlias = true;
 		}

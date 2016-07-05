@@ -239,7 +239,6 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
     using namespace boost::xpressive;
     smatch offerparts;
 	smatch nameparts;
-	string retError;
 	string strRegexpLower = strRegexp;
 	boost::algorithm::to_lower(strRegexpLower);
 	sregex cregex = sregex::compile(strRegexpLower);
