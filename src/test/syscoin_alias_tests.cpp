@@ -488,7 +488,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
 	MilliSleep(2500);
 	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
 	MilliSleep(2500);
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES pruneoffer category title 1 0.05 description USD"));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES aliasprunewithoffer category title 1 0.05 description USD"));
 	const UniValue &arr = r.get_array();
 	string offerguid = arr[1].get_str();
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
