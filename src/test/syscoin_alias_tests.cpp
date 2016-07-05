@@ -472,7 +472,38 @@ BOOST_AUTO_TEST_CASE (generate_aliaspruning)
 		BOOST_CHECK_EQUAL(AliasFilter("node3", "aliasprune1", "Off"), false);
 	#endif
 }
+BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
+{
+	printf("Running generate_aliasprunewithoffer...\n");
+	UniValue r;
+	
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
 
+	AliasNew("node1", "aliasprunewithoffer1", "somedata");
+	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");", "pubdata", "privdata", "Yes");
+	AliasNew("node1", "aliasprunewithoffer1", "somedata");
+	AliasNew("node2", "aliasprunewithoffer2", "somedata");
+	string offerguid = OfferNew("node1", "	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");", "category", "title", "100", "0.01", "description", "USD");
+	GenerateBlocks(20);
+	StopNode("node3");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrownew aliasprunewithoffer2 " + offerguid + " 1 message aliasprunewithoffer1"));
+	const UniValue &array = r.get_array();
+	string escrowguid = array[1].get_str();	
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowrelease " + escrowguid));
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "escrowrelease " + escrowguid));
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+	MilliSleep(2500);
+	StartNode("node3");
+	BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+}
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 {
 	printf("Running generate_aliasexpired...\n");
