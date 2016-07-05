@@ -520,12 +520,14 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
 	StopNode("node3");
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprunewithcertoffer somedata"));
 	BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasnew aliasprunewithcertoffer2 somedata"));
-	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 30"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 20"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
 	MilliSleep(2500);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew aliasprunewithcertoffer jag1 data 0"));
 	const UniValue &arr = r.get_array();
 	string certguid = arr[1].get_str();
-	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
 	MilliSleep(2500);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES aliasprunewithcertoffer category title 2 0.05 description USD " + certguid));
 	const UniValue &arr1 = r.get_array();
@@ -547,7 +549,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offeraccept aliasprunewithcertoffer " + offerguid + " 1 message"));
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
 	MilliSleep(2500);
-	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 30"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 30"));
 	MilliSleep(2500);
 	StartNode("node3");
 	BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
