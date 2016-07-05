@@ -507,7 +507,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
 	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 30"));
 	MilliSleep(2500);
 	StartNode("node3");
-	BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+	GenerateBlocks(5, "node3");
 }
 BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
 {
@@ -553,7 +553,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 30"));
 	MilliSleep(2500);
 	StartNode("node3");
-	BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+	GenerateBlocks(5, "node3");
 }
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 {
