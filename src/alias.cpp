@@ -2037,7 +2037,7 @@ string CheckForAliasExpiryAndSafety(const vector<unsigned char> &vchPubKey, cons
 {
 	if(!vchPubKey.empty())
 	{
-		CAliasIndex alias;
+	
 		CPubKey PubKey(vchPubKey);
 		vector<unsigned char> aliasName;
 		vector<CAliasIndex> vtxAliasPos;
