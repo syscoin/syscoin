@@ -332,8 +332,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 
 	// safe offer with safe alias, edit to unsafe offer
 	OfferUpdate("node1", "jagbansafesearchoffer", offerguidsafe3, "category", "titlenew", "90", "0.15", "descriptionnew", false, "nocert", true, "location", "No");
-	// keep offer1 alive
+	// keep offers alive
 	OfferUpdate("node1", "jagbansafesearchoffer", offerguidsafe1, "category", "titlenew", "10", "1.00", "descriptionnew", false, "nocert", true, "location", "Yes");
+	OfferUpdate("node1", "jagbansafesearchoffer", offerguidsafe2, "category", "titlenew", "10", "1.00", "descriptionnew", false, "nocert", true, "location", "No");
+	OfferUpdate("node1", "jagbannonsafesearchoffer", offerguidsafe3, "category", "titlenew", "10", "1.00", "descriptionnew", false, "nocert", true, "location", "No");
 	// unsafe offer with safe alias should show in safe off mode only
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "On"), false);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe3, "Off"), true);
