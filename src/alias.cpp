@@ -1188,7 +1188,7 @@ void GetAddressFromAlias(const std::string& strAlias, std::string& strAddress, u
 	}
 }
 
-void GetAliasFromAddress(const std::string& strAddress, std::string& strAlias) {
+void GetAliasFromAddress(const std::string& strAddress, std::string& strAlias, unsigned char& safetyLevel, bool& safeSearch, int64_t& nHeight) {
 	try
 	{
 		const vector<unsigned char> &vchAddress = vchFromValue(strAddress);
@@ -1201,7 +1201,16 @@ void GetAliasFromAddress(const std::string& strAddress, std::string& strAlias) {
 			throw runtime_error("failed to read from alias DB");
 		if (vchAlias.empty())
 			throw runtime_error("no alias address mapping result returned");
+		vector<CAliasIndex> vtxPos;
+		if (paliasdb && !paliasdb->ReadAlias(vchAlias, vtxPos))
+			throw runtime_error("failed to read from alias DB");
+		if (vtxPos.size() < 1)
+			throw runtime_error("no alias result returned");
+		const CAliasIndex &alias = vtxPos.back();
 		strAlias = stringFromVch(vchAlias);
+		safetyLevel = alias.safetyLevel;
+		safeSearch = alias.safeSearch;
+		nHeight = alias.nHeight;
 	}
 	catch(...)
 	{
@@ -2032,35 +2041,26 @@ string CheckForAliasExpiryAndSafety(const vector<unsigned char> &vchPubKey, cons
 		CPubKey PubKey(vchPubKey);
 		vector<unsigned char> aliasName;
 		vector<CAliasIndex> vtxAliasPos;
-		CSyscoinAddress address(PubKey.GetID());
-		if(!address.IsValid())
+		CSyscoinAddress alias(PubKey.GetID());
+		alias = CSyscoinAddress(alias.ToString());
+		if(!alias.IsValid())
 			return string("alias address is invalid");
-		string strAddress = address.ToString();
-
-		if(!paliasdb->ExistsAddress(vchFromString(strAddress)))
+		if(!alias.isAlias)
+			return string("not an alias");
+		if(alias.isAlias)
 		{
-			return string("alias does not exist in the db");
-		}
-		if(!paliasdb->ReadAddress(vchFromString(strAddress), aliasName))
-		{
-			return string("could not read alias address from the db");
-		}
-		if(!paliasdb->ReadAlias(aliasName, vtxAliasPos) || vtxAliasPos.empty())
-		{
-			return string("could not read alias from the db");
-		}
-		alias = vtxAliasPos.back();
-		if((alias.nHeight + GetAliasExpirationDepth()) < nHeight)
-		{
-			return string("alias is expired");
-		}
-		if(!alias.safeSearch && safeSearch)
-		{
-			return string("alias is not safe to search yet service is set to safe search");
-		}
-		if(alias.safetyLevel > safetyLevel)
-		{
-			return string("alias safety level cannot exceed services safety level");
+			if((alias.nHeight + GetAliasExpirationDepth()) < nHeight)
+			{
+				return string("alias is expired");
+			}
+			if(!alias.safeSearch && safeSearch)
+			{
+				return string("alias is not safe to search yet service is set to safe search");
+			}
+			if(alias.safetyLevel > safetyLevel)
+			{
+				return string("alias safety level cannot exceed services safety level");
+			}
 		}
 	}
 	return "";
