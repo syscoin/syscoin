@@ -511,7 +511,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
 }
 BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
 {
-	printf("Running generate_aliasprunewithoffer...\n");
+	printf("Running generate_aliasprunewithcertoffer...\n");
 	UniValue r;
 	
 	GenerateBlocks(5);
@@ -541,8 +541,9 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
 	MilliSleep(2500);
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES aliasprunewithcertoffer " + offerguid + " category title 1 0.05 description"));
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES aliasprunewithcertoffer " + certofferguid + " category title 1 0.05 description 0 " + certguid));
-	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 5"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offeraccept aliasprunewithcertoffer2 " + certofferguid + " 1 message"));
 	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
 	MilliSleep(2500);
