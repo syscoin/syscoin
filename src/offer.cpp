@@ -289,11 +289,6 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 					pcursor->Next();
 					continue;
 				}
-				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, safeSearch? 0: SAFETY_LEVEL1, safeSearch)) != "")
-				{
-					pcursor->Next();
-					continue;
-				}
 				if(strCategory.size() > 0 && !boost::algorithm::starts_with(stringFromVch(txPos.sCategory), strCategory))
 				{
 					pcursor->Next();
@@ -311,6 +306,21 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
 				CSyscoinAddress selleraddy(SellerPubKey.GetID());
 				selleraddy = CSyscoinAddress(selleraddy.ToString());
 				if(!selleraddy.IsValid() || !selleraddy.isAlias)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if((selleraddy.nHeight + GetAliasExpirationDepth()) < chainActive.Tip()->nHeight)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if(!selleraddy.safeSearch && safeSearch)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if((safeSearch && selleraddy.safetyLevel > txPos.safetyLevel) || (!safeSearch && selleraddy.safetyLevel > SAFETY_LEVEL1))
 				{
 					pcursor->Next();
 					continue;

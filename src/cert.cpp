@@ -169,7 +169,25 @@ bool CCertDB::ScanCerts(const std::vector<unsigned char>& vchCert, const string 
 					pcursor->Next();
 					continue;
 				}
-				if((retError = CheckForAliasExpiryAndSafety(txPos.vchPubKey, chainActive.Tip()->nHeight, safeSearch? 0: SAFETY_LEVEL1, safeSearch)) != "")
+				CPubKey OwnerPubKey(txPos.vchPubKey);
+				CSyscoinAddress owneraddy(OwnerPubKey.GetID());
+				owneraddy = CSyscoinAddress(owneraddy.ToString());
+				if(!owneraddy.IsValid() || !owneraddy.isAlias)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if((owneraddy.nHeight + GetAliasExpirationDepth()) < chainActive.Tip()->nHeight)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if(!owneraddy.safeSearch && safeSearch)
+				{
+					pcursor->Next();
+					continue;
+				}
+				if((safeSearch && owneraddy.safetyLevel > txPos.safetyLevel) || (!safeSearch && owneraddy.safetyLevel > SAFETY_LEVEL1))
 				{
 					pcursor->Next();
 					continue;
