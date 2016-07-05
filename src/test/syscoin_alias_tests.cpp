@@ -509,6 +509,49 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
 	StartNode("node3");
 	BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
 }
+BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
+{
+	printf("Running generate_aliasprunewithoffer...\n");
+	UniValue r;
+	
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
+	StopNode("node3");
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprunewithcertoffer somedata"));
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasnew aliasprunewithcertoffer2 somedata"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 30"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew aliasprunewithcertoffer jag1 data 0"));
+	const UniValue &arr = r.get_array();
+	string certguid = arr[1].get_str();
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES aliasprunewithcertoffer category title 2 0.05 description USD " + certguid));
+	const UniValue &arr = r.get_array();
+	string certofferguid = arr[1].get_str();
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offernew SYS_RATES aliasprunewithcertoffer category title 2 0.05 description USD"));
+	const UniValue &arr = r.get_array();
+	string offerguid = arr[1].get_str();
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES aliasprunewithcertoffer " + offerguid + " category title 1 0.05 description"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate SYS_RATES aliasprunewithcertoffer " + certofferguid + " category title 1 0.05 description 0 " + certguid));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "offeraccept aliasprunewithcertoffer2 " + certofferguid + " 1 message"));
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 5"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offeraccept aliasprunewithcertoffer " + offerguid + " 1 message"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 30"));
+	MilliSleep(2500);
+	StartNode("node3");
+	BOOST_CHECK_NO_THROW(CallRPC("node3", "generate 5"));
+}
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 {
 	printf("Running generate_aliasexpired...\n");
