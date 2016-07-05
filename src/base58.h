@@ -105,6 +105,7 @@ class CSyscoinAddress : public CBase58Data {
 public:
 	bool isAlias;
 	unsigned char safetyLevel;
+	int64_t nHeight;
 	bool safeSearch;
 	std::string aliasName;
 	// SYSCOIN support old sys
