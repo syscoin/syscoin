@@ -1152,7 +1152,7 @@ bool GetTxOfAlias(const vector<unsigned char> &vchName,
 	return true;
 }
 
-void GetAddressFromAlias(const std::string& strAlias, std::string& strAddress, unsigned char& safetyLevel, bool& safeSearch) {
+void GetAddressFromAlias(const std::string& strAlias, std::string& strAddress, unsigned char& safetyLevel, bool& safeSearch, int64_t& nHeight) {
 	try
 	{
 		const vector<unsigned char> &vchAlias = vchFromValue(strAlias);
@@ -1180,6 +1180,7 @@ void GetAddressFromAlias(const std::string& strAlias, std::string& strAddress, u
 		strAddress = address.ToString();
 		safetyLevel = alias.safetyLevel;
 		safeSearch = alias.safeSearch;
+		nHeight = alias.nHeight;
 	}
 	catch(...)
 	{
