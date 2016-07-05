@@ -482,10 +482,9 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithoffer)
 	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "aliasprunewithoffer1", "somedata");
-	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");", "pubdata", "privdata", "Yes");
+	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");
 	AliasNew("node1", "aliasprunewithoffer1", "somedata");
 	AliasNew("node2", "aliasprunewithoffer2", "somedata");
-	string offerguid = OfferNew("node1", "	string offerguid = OfferNew("node1", "aliasexpire", "category", "title", "100", "0.01", "description", "USD");", "category", "title", "100", "0.01", "description", "USD");
 	GenerateBlocks(20);
 	StopNode("node3");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "escrownew aliasprunewithoffer2 " + offerguid + " 1 message aliasprunewithoffer1"));
