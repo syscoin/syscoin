@@ -79,6 +79,8 @@ OptionsDialog::OptionsDialog(QWidget *parent, bool enableWallet) :
     /* Display elements init */
     // SYSCOIN Theme selector
     ui->theme->addItem(tr("shade"), QVariant(""));
+	ui->theme->addItem(tr("solid"), QVariant(""));
+	ui->theme->addItem(tr("white"), QVariant(""));
 	ui->defaultPegAlias->setPlaceholderText("SYS_RATES");
      
     QDir translations(":translations");
