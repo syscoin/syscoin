@@ -555,6 +555,36 @@ BOOST_AUTO_TEST_CASE (generate_aliasprunewithcertoffer)
 	StartNode("node3");
 	GenerateBlocks(5, "node3");
 }
+
+BOOST_AUTO_TEST_CASE (generate_aliasprunewithcert)
+{
+	printf("Running generate_aliasprunewithcert...\n");
+	UniValue r;
+	
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
+	StopNode("node3");
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasprunewithcert somedata"));
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasnew aliasprunewithcert2 somedata"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 50"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "certnew aliasprunewithcert jag1 data 0"));
+	const UniValue &arr = r.get_array();
+	string certguid = arr[1].get_str();
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "certupdate " + certguid + " newdata privdata 0"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 10"));
+	MilliSleep(2500);
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "certtransfer " + certguid + " aliasprunewithcert2"));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "generate 30"));
+	MilliSleep(2500);
+	StartNode("node3");
+	GenerateBlocks(5, "node3");
+}
 BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 {
 	printf("Running generate_aliasexpired...\n");
