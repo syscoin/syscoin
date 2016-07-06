@@ -111,7 +111,7 @@ public:
 		if(IsSys21Fork(nHeight))
 		{
 			READWRITE(vchEscrow);
-			READWRITE(feedBack);
+			READWRITE(feedback);
 			
 		}
 		
@@ -128,7 +128,7 @@ public:
 		&& a.vchBuyerKey == b.vchBuyerKey
 		&& a.txBTCId == b.txBTCId
 		&& a.vchEscrow == b.vchEscrow
-		&& a.feedBack == b.feedBack
+		&& a.feedback == b.feedback
         );
     }
 
@@ -142,7 +142,7 @@ public:
 		vchBuyerKey = b.vchBuyerKey;
 		txBTCId = b.txBTCId;
 		vchEscrow = b.vchEscrow;
-		feedBack = b.feedBack;
+		feedback = b.feedback;
         return *this;
     }
 
@@ -150,8 +150,8 @@ public:
         return !(a == b);
     }
 
-    void SetNull() { feedBack.SetNull(); vchEscrow.clear(); vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerKey.clear();}
-    bool IsNull() const { return (feedBack.IsNull() && vchEscrow.empty() && vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 &&nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerKey.empty()); }
+    void SetNull() { feedback.SetNull(); vchEscrow.clear(); vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerKey.clear();}
+    bool IsNull() const { return (feedback.IsNull() && vchEscrow.empty() && vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 &&nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerKey.empty()); }
 
 };
 class COfferLinkWhitelistEntry {
