@@ -3402,11 +3402,11 @@ void GetFeedbackInAccept(vector<CAcceptFeedback> &feedBack, int &avgRating, cons
 	int nRatingCount = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
-		if(!vtxPos[i].accept.feedback.IsNull() && vtxPos[i].accept.vchAcceptRand == vchAccept && vtxPos[i]accept..feedback.nFeedbackUser == type)
+		if(!vtxPos[i].accept.feedback.IsNull() && vtxPos[i].accept.vchAcceptRand == vchAccept && vtxPos[i].accept.feedback.nFeedbackUser == type)
 		{
 			if(vtxPos[i].accept.feedback.nRating > 0)
 			{
-				nRating += vtxPos[i].feedback.nRating;
+				nRating += vtxPos[i].accept.feedback.nRating;
 				nRatingCount++;
 			}
 			feedBack.push_back(vtxPos[i].accept.feedback);
