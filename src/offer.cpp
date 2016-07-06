@@ -1099,7 +1099,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 
 							
 				int feedbackCount = FindFeedbackInAccept(vvchArgs[1], theOfferAccept.feedback.nFeedbackUser, vtxPos);
-				// has this user (nFeedbackUser) already left feedback (BUYER/SELLER) by checking offer history of tx's (vtxPos)
+				// has this user (nFeedbackUser) already left feedback (ACCEPTBUYER/ACCEPTSELLER) by checking offer history of tx's (vtxPos)
 				if(feedbackCount > 0)
 					theOfferAccept.feedback.nRating = 0;
 				if(feedbackCount > 10 && !theOfferAccept.feedback.IsNull())
@@ -3527,7 +3527,7 @@ UniValue acceptfeedback(const UniValue& params, bool fHelp) {
 	// buyer
 	if(foundBuyerKey)
 	{
-		CAcceptFeedback sellerFeedback(BUYER);
+		CAcceptFeedback sellerFeedback(ACCEPTBUYER);
 		sellerFeedback.vchFeedback = vchFeedback;
 		sellerFeedback.nRating = nRating;
 		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
@@ -3542,7 +3542,7 @@ UniValue acceptfeedback(const UniValue& params, bool fHelp) {
 	// seller
 	else if(foundSellerKey)
 	{
-		CAcceptFeedback buyerFeedback(SELLER);
+		CAcceptFeedback buyerFeedback(ACCEPTSELLER);
 		buyerFeedback.vchFeedback = vchFeedback;
 		buyerFeedback.nRating = nRating;
 		buyerFeedback.nHeight = chainActive.Tip()->nHeight;
@@ -3657,8 +3657,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		}
 		int avgBuyerRating, avgSellerRating;
 		vector<CAcceptFeedback> buyerFeedBacks, sellerFeedBacks;
-		GetFeedbackInAccept(buyerFeedBacks, ca.vchAcceptRand, avgBuyerRating, BUYER, vtxPos);
-		GetFeedbackInAccept(sellerFeedBacks, ca.vchAcceptRand, avgSellerRating, SELLER, vtxPos);
+		GetFeedbackInAccept(buyerFeedBacks, ca.vchAcceptRand, avgBuyerRating, ACCEPTBUYER, vtxPos);
+		GetFeedbackInAccept(sellerFeedBacks, ca.vchAcceptRand, avgSellerRating, ACCEPTSELLER, vtxPos);
         string sHeight = strprintf("%llu", ca.nHeight);
 		oOfferAccept.push_back(Pair("id", stringFromVch(vchAcceptRand)));
 		oOfferAccept.push_back(Pair("txid", ca.txHash.GetHex()));
@@ -3925,8 +3925,8 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					continue;
 				int avgBuyerRating, avgSellerRating;
 				vector<CAcceptFeedback> buyerFeedBacks, sellerFeedBacks;
-				GetFeedbackInAccept(buyerFeedBacks, vchAcceptRand, avgBuyerRating, BUYER, vtxPos);
-				GetFeedbackInAccept(sellerFeedBacks, vchAcceptRand, avgSellerRating, SELLER, vtxPos);
+				GetFeedbackInAccept(buyerFeedBacks, vchAcceptRand, avgBuyerRating, ACCEPTBUYER, vtxPos);
+				GetFeedbackInAccept(sellerFeedBacks, vchAcceptRand, avgSellerRating, ACCEPTSELLER, vtxPos);
 				oOfferAccept.push_back(Pair("offer", offer));
 				oOfferAccept.push_back(Pair("title", stringFromVch(theOffer.sTitle)));
 				oOfferAccept.push_back(Pair("id", stringFromVch(vchAcceptRand)));

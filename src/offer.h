@@ -25,8 +25,8 @@ std::string offerFromOp(int op);
 CScript RemoveOfferScriptPrefix(const CScript& scriptIn);
 extern bool IsSys21Fork(const uint64_t& nHeight);
 enum AcceptUser {
-    BUYER=1,
-	SELLER=2
+    ACCEPTBUYER=1,
+	ACCEPTSELLER=2
 };
 class CAcceptFeedback {
 public:
