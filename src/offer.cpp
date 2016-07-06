@@ -765,7 +765,20 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			break;
 		case OP_OFFER_ACCEPT:
 			// check for existence of offeraccept in txn offer obj
-			theOfferAccept = theOffer.accept;		
+			theOfferAccept = theOffer.accept;	
+			if(!theOfferAccept.feedback.IsNull())
+			{
+				if(prevOp != OP_OFFER_ACCEPT)
+					return error("CheckOfferInputs(): must use offeraccept as input to an accept feedback");	
+				if (vvchPrevArgs[0] != vvchArgs[0])
+					return error("CheckOfferInputs() : offeraccept feedback mismatch");	
+				if(theOfferAccept.feedback.vchFeedback.empty())
+				{
+					return error("CheckOfferInputs() :cannot leave empty feedback");
+				}
+				break;
+			}
+
 			if(IsOfferOp(prevOp))
 				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchPrevArgs[3]));
 			else
@@ -1072,23 +1085,50 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
 
-			theOfferAccept = serializedOffer.accept;			
-			theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
-			if(theOfferAccept.nQty <= 0)
-				theOfferAccept.nQty = 1;
-			// update qty if not an escrow accept (since that updates qty on escrow creation, and refunds qty on escrow refund)
-			// also if this offer you are accepting is linked to another offer don't need to update qty (once the root accept is done this offer qty will be updated)
-			if(theOffer.nQty != -1 && theOfferAccept.vchEscrow.empty() && theOffer.vchLinkOffer.empty())
+			theOfferAccept = serializedOffer.accept;	
+			if(!theOfferAccept.feedback.IsNull())
 			{
-				if((theOfferAccept.nQty > theOffer.nQty)) {
-					if(fDebug)
-						LogPrintf("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
+				// ensure we don't add same feedback twice (feedback in db should be older than current height)
+				// ensure feedback is valid
+				if(!theOfferAccept.feedback.IsNull()  && theOfferAccept.feedback.nHeight < nHeight)
+				{
+					theOfferAccept.feedback.nHeight = nHeight;
+				}
+				else
+					theOfferAccept.feedback.SetNull();
+
+							
+				int feedbackCount = FindFeedbackInAccept(vvchArgs[1], theOfferAccept.feedback.nFeedbackUser, vtxPos);
+				// has this user (nFeedbackUser) already left feedback (BUYER/SELLER) by checking offer history of tx's (vtxPos)
+				if(feedbackCount > 0)
+					theOfferAccept.feedback.nRating = 0;
+				if(feedbackCount > 10 && !theOfferAccept.feedback.IsNull())
+				{
+					LogPrintf( "CheckOfferInputs() : Cannot exceed 10 feedback entries for this user of this offer accept");
 					return true;
-				}				
-				theOffer.nQty -= theOfferAccept.nQty;
-				if(theOffer.nQty < 0)
-					theOffer.nQty = 0;
-				
+				}
+				HandleAcceptFeedback(theOfferAccept);	
+			
+			}
+			else
+			{
+				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
+				if(theOfferAccept.nQty <= 0)
+					theOfferAccept.nQty = 1;
+				// update qty if not an escrow accept (since that updates qty on escrow creation, and refunds qty on escrow refund)
+				// also if this offer you are accepting is linked to another offer don't need to update qty (once the root accept is done this offer qty will be updated)
+				if(theOffer.nQty != -1 && theOfferAccept.vchEscrow.empty() && theOffer.vchLinkOffer.empty())
+				{
+					if((theOfferAccept.nQty > theOffer.nQty)) {
+						if(fDebug)
+							LogPrintf("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
+						return true;
+					}				
+					theOffer.nQty -= theOfferAccept.nQty;
+					if(theOffer.nQty < 0)
+						theOffer.nQty = 0;
+					
+				}
 			}
 
 			theOfferAccept.nHeight = nHeight;
@@ -3322,11 +3362,70 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	res.push_back(stringFromVch(vchAccept));
 	return res;
 }
-/*UniValue acceptfeedback(const UniValue& params, bool fHelp) {
+void HandleAcceptFeedback(const COfferAccept& accept)
+{
+	if(accept.feedback.nRating > 0)
+	{
+		CPubKey key(accept.vchBuyerKey);
+		CSyscoinAddress address(key.GetID());
+		address = CSyscoinAddress(address.ToString());
+		if(address.IsValid() && address.isAlias)
+		{
+			vector<CAliasIndex> vtxPos;
+			const vector<unsigned char> &vchAlias = vchFromString(address.aliasName);
+			if (paliasdb->ReadAlias(vchAlias, vtxPos) && !vtxPos.empty())
+			{
+				
+				CAliasIndex alias = vtxPos.back();
+				alias.nRatingCount++;
+				alias.nRating += accept.feedback.nRating;
+				PutToAliasList(vtxPos, alias);
+				paliasdb->WriteAlias(vchAlias, vchFromString(address.ToString()), vtxPos);
+			}
+		}
+			
+	}
+}
+int FindFeedbackInAccept(const vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const vector<CEscrow> &vtxPos)
+{
+	int count = 0;
+	for(unsigned int i =0;i<vtxPos.size();i++)
+	{	
+		if(!vtxPos[i].feedback.IsNull() && vtxPos[i].accept.vchAcceptRand == vchAccept && vtxPos[i].feedback.nFeedbackUser == nFeedbackUser)
+			count++;	
+	}
+	return count;
+}
+void GetFeedbackInAccept(vector<CAcceptFeedback> &feedBack, int &avgRating, const vector<unsigned char> &vchAccept, const AcceptUser type, const vector<COffer> &vtxPos)
+{
+	float nRating = 0;
+	int nRatingCount = 0;
+	for(unsigned int i =0;i<vtxPos.size();i++)
+	{
+		if(!vtxPos[i].feedback.IsNull() && vtxPos[i].accept.vchAcceptRand == vchAccept && vtxPos[i].feedback.nFeedbackUser == type)
+		{
+			if(vtxPos[i].feedback.nRating > 0)
+			{
+				nRating += vtxPos[i].feedback.nRating;
+				nRatingCount++;
+			}
+			feedBack.push_back(vtxPos[i].feedback);
+		}
+	}
+	if(nRatingCount > 0)
+	{
+		nRating /= nRatingCount;
+	}
+	avgRating = (int)roundf(nRating);
+	if(feedBack.size() > 0)
+		sort(feedBack.begin(), feedBack.end(), acceptfeedbacksort());
+	
+}
+UniValue acceptfeedback(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 3)
         throw runtime_error(
 		"acceptfeedback <offeraccept txid> [feedback] [rating] \n"
-                        "Send feedback and rating for offer transaction. Ratings are numbers from 1 to 5\n"
+                        "Send feedback and rating for offer accept transaction. Ratings are numbers from 1 to 5\n"
                         + HelpRequiringPassphrase());
    // gather & validate inputs
 	uint256 acceptTxId;
@@ -3368,7 +3467,8 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
 	if (wtxIn == NULL)
 		throw runtime_error("This offer accept is not in your wallet");
-	if(vvch.size() > 1 && vvch[1] == vchFromString("1") && vchFeedback.size() <= 0)
+	offer = COffer(tx);
+	if(!offer.accept.feedback.IsNull() && vchFeedback.size() <= 0)
 		throw runtime_error("Feedback reply cannot be empty");
 
 	CPubKey buyerKey(offer.accept.vchBuyerKey);
@@ -3427,7 +3527,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	// buyer
 	if(foundBuyerKey)
 	{
-		CFeedback sellerFeedback(BUYER);
+		CAcceptFeedback sellerFeedback(BUYER);
 		sellerFeedback.vchFeedback = vchFeedback;
 		sellerFeedback.nRating = nRating;
 		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
@@ -3442,7 +3542,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	// seller
 	else if(foundSellerKey)
 	{
-		CFeedback buyerFeedback(SELLER);
+		CAcceptFeedback buyerFeedback(SELLER);
 		buyerFeedback.vchFeedback = vchFeedback;
 		buyerFeedback.nRating = nRating;
 		buyerFeedback.nHeight = chainActive.Tip()->nHeight;
@@ -3476,7 +3576,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	UniValue ret(UniValue::VARR);
 	ret.push_back(wtx.GetHash().GetHex());
 	return ret;
-}*/
+}
 UniValue offerinfo(const UniValue& params, bool fHelp) {
 	if (fHelp || 1 != params.size())
 		throw runtime_error("offerinfo <guid>\n"
@@ -3524,6 +3624,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 			continue;
 		if(ca.IsNull())
 			continue;
+		if(!ca.feedback.IsNull())
+			continue;
 		UniValue oOfferAccept(UniValue::VOBJ);
 
         // get transaction pointed to by offer
@@ -3553,6 +3655,10 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		if (pindex) {
 			sTime = strprintf("%llu", pindex->nTime);
 		}
+		int avgBuyerRating, avgSellerRating;
+		vector<CAcceptFeedback> buyerFeedBacks, sellerFeedBacks;
+		GetFeedbackInAccept(buyerFeedBacks, ca.vchAcceptRand, avgBuyerRating, BUYER, vtxPos);
+		GetFeedbackInAccept(sellerFeedBacks, ca.vchAcceptRand, avgSellerRating, SELLER, vtxPos);
         string sHeight = strprintf("%llu", ca.nHeight);
 		oOfferAccept.push_back(Pair("id", stringFromVch(vchAcceptRand)));
 		oOfferAccept.push_back(Pair("txid", ca.txHash.GetHex()));
@@ -3637,6 +3743,50 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		if(!DecryptMessage(theOffer.vchPubKey, vchMessage, strMessage))
 			strMessage = string("Encrypted for owner of offer");
 		oOfferAccept.push_back(Pair("pay_message", strMessage));
+		UniValue oBuyerFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
+			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
+			oBuyerFeedBack.push_back(oFeedback);
+		}
+		oOfferAccept.push_back(Pair("buyer_feedback", oBuyerFeedBack));
+		oOfferAccept.push_back(Pair("avg_buyer_rating", avgBuyerRating));
+		UniValue oSellerFeedBack(UniValue::VARR);
+		for(unsigned int i =0;i<sellerFeedBacks.size();i++)
+		{
+			UniValue oFeedback(UniValue::VOBJ);
+			string sFeedbackTime;
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			if (pindex) {
+				sFeedbackTime = strprintf("%llu", pindex->nTime);
+			}
+			oFeedback.push_back(Pair("time", sFeedbackTime));
+			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
+			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
+			oSellerFeedBack.push_back(oFeedback);
+		}
+		oOfferAccept.push_back(Pair("seller_feedback", oSellerFeedBack));
+		oOfferAccept.push_back(Pair("avg_seller_rating", avgSellerRating));
+		unsigned int ratingCount = 0;
+		if(avgSellerRating > 0)
+			ratingCount++;
+		if(avgBuyerRating > 0)
+			ratingCount++;
+		if(ratingCount == 0)
+			ratingCount = 1;
+		float totalAvgRating = roundf((avgSellerRating+avgBuyerRating)/(float)ratingCount);
+		oOfferAccept.push_back(Pair("avg_rating", (int)totalAvgRating));	
+
 		aoOfferAccepts.push_back(oOfferAccept);
 	}
 
@@ -3766,9 +3916,17 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					continue;
 				if(theOfferAccept.vchAcceptRand != vchAcceptRand)
 					continue;
-
 				string offer = stringFromVch(vchOffer);
 				string sHeight = strprintf("%llu", theOfferAccept.nHeight);
+				vector<COffer> vtxPos;
+				if (!pofferdb->ReadOffer(vchOffer, vtxPos))
+					continue;
+				if (vtxPos.size() < 1)
+					continue;
+				int avgBuyerRating, avgSellerRating;
+				vector<CAcceptFeedback> buyerFeedBacks, sellerFeedBacks;
+				GetFeedbackInAccept(buyerFeedBacks, vchAcceptRand, avgBuyerRating, BUYER, vtxPos);
+				GetFeedbackInAccept(sellerFeedBacks, vchAcceptRand, avgSellerRating, SELLER, vtxPos);
 				oOfferAccept.push_back(Pair("offer", offer));
 				oOfferAccept.push_back(Pair("title", stringFromVch(theOffer.sTitle)));
 				oOfferAccept.push_back(Pair("id", stringFromVch(vchAcceptRand)));
@@ -3860,7 +4018,49 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				if(!DecryptMessage(theOffer.vchPubKey, vchMessage, strMessage))
 					strMessage = string("Encrypted for owner of offer");
 				oOfferAccept.push_back(Pair("pay_message", strMessage));
-
+				UniValue oBuyerFeedBack(UniValue::VARR);
+				for(unsigned int i =0;i<buyerFeedBacks.size();i++)
+				{
+					UniValue oFeedback(UniValue::VOBJ);
+					string sFeedbackTime;
+					CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+					if (pindex) {
+						sFeedbackTime = strprintf("%llu", pindex->nTime);
+					}
+					oFeedback.push_back(Pair("time", sFeedbackTime));
+					oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
+					oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
+					oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
+					oBuyerFeedBack.push_back(oFeedback);
+				}
+				oOfferAccept.push_back(Pair("buyer_feedback", oBuyerFeedBack));
+				oOfferAccept.push_back(Pair("avg_buyer_rating", avgBuyerRating));
+				UniValue oSellerFeedBack(UniValue::VARR);
+				for(unsigned int i =0;i<sellerFeedBacks.size();i++)
+				{
+					UniValue oFeedback(UniValue::VOBJ);
+					string sFeedbackTime;
+					CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+					if (pindex) {
+						sFeedbackTime = strprintf("%llu", pindex->nTime);
+					}
+					oFeedback.push_back(Pair("time", sFeedbackTime));
+					oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
+					oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
+					oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
+					oSellerFeedBack.push_back(oFeedback);
+				}
+				oOfferAccept.push_back(Pair("seller_feedback", oSellerFeedBack));
+				oOfferAccept.push_back(Pair("avg_seller_rating", avgSellerRating));
+				unsigned int ratingCount = 0;
+				if(avgSellerRating > 0)
+					ratingCount++;
+				if(avgBuyerRating > 0)
+					ratingCount++;
+				if(ratingCount == 0)
+					ratingCount = 1;
+				float totalAvgRating = roundf((avgSellerRating+avgBuyerRating)/(float)ratingCount);
+				oOfferAccept.push_back(Pair("avg_rating", (int)totalAvgRating));	
 				oRes.push_back(oOfferAccept);
 			}
         }
@@ -4358,7 +4558,8 @@ bool GetAcceptByHash(std::vector<COffer> &offerList, COfferAccept &ca) {
 		return false;
 	for(std::vector<COffer>::reverse_iterator it = offerList.rbegin(); it != offerList.rend(); ++it) {
 		const COffer& myoffer = *it;
-		if(myoffer.accept.IsNull())
+		// skip null states or ones with feedback (these aren't considered normal accepts)
+		if(myoffer.accept.IsNull() || !myoffer.accept.feedback.IsNull())
 			continue;
         if(myoffer.accept.vchAcceptRand == ca.vchAcceptRand) {
             ca = myoffer.accept;

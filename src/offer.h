@@ -24,6 +24,63 @@ int GetOfferExpirationDepth();
 std::string offerFromOp(int op);
 CScript RemoveOfferScriptPrefix(const CScript& scriptIn);
 extern bool IsSys21Fork(const uint64_t& nHeight);
+enum AcceptUser {
+    BUYER=1,
+	SELLER=2
+};
+class CAcceptFeedback {
+public:
+	std::vector<unsigned char> vchFeedback;
+	unsigned char nRating;
+	unsigned char nFeedbackUser;
+	uint64_t nHeight;
+	
+    CAcceptFeedback() {
+        SetNull();
+    }
+    CAcceptFeedback(unsigned char nAcceptFeedbackUser) {
+        SetNull();
+		nFeedbackUser = nAcceptFeedbackUser;
+    }
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
+		READWRITE(vchFeedback);
+		READWRITE(nRating);
+		READWRITE(nFeedbackUser);
+		READWRITE(nHeight);
+	}
+
+    friend bool operator==(const CAcceptFeedback &a, const CAcceptFeedback &b) {
+        return (
+        a.vchFeedback == b.vchFeedback
+		&& a.nRating == b.nRating
+		&& a.nFeedbackUser == b.nFeedbackUser
+		&& a.nHeight == b.nHeight
+        );
+    }
+
+    CAcceptFeedback operator=(const CAcceptFeedback &b) {
+        vchFeedback = b.vchFeedback;
+		nRating = b.nRating;
+		nFeedbackUser = b.nFeedbackUser;
+		nHeight = b.nHeight;
+        return *this;
+    }
+
+    friend bool operator!=(const CAcceptFeedback &a, const CAcceptFeedback &b) {
+        return !(a == b);
+    }
+
+    void SetNull() { nHeight = 0; nRating = 0; nFeedbackUser = 0; vchFeedback.clear();}
+    bool IsNull() const { return (nHeight == 0 && nRating == 0 && nFeedbackUser == 0 && vchFeedback.empty()); }
+};
+struct acceptfeedbacksort {
+    bool operator ()(const CAcceptFeedback& a, const CAcceptFeedback& b) {
+        return a.nHeight < b.nHeight;
+    }
+};
 class COfferAccept {
 public:
 	std::vector<unsigned char> vchAcceptRand;
@@ -35,6 +92,7 @@ public:
 	float nPrice;
 	uint256 txBTCId;
 	std::vector<unsigned char> vchBuyerKey;	
+	CAcceptFeedback feedback;
 	COfferAccept() {
         SetNull();
     }
@@ -52,7 +110,9 @@ public:
 		READWRITE(txBTCId);	
 		if(IsSys21Fork(nHeight))
 		{
-			READWRITE(vchEscrow);	
+			READWRITE(vchEscrow);
+			READWRITE(feedBack);
+			
 		}
 		
 	}
@@ -68,6 +128,7 @@ public:
 		&& a.vchBuyerKey == b.vchBuyerKey
 		&& a.txBTCId == b.txBTCId
 		&& a.vchEscrow == b.vchEscrow
+		&& a.feedBack == b.feedBack
         );
     }
 
@@ -81,6 +142,7 @@ public:
 		vchBuyerKey = b.vchBuyerKey;
 		txBTCId = b.txBTCId;
 		vchEscrow = b.vchEscrow;
+		feedBack = b.feedBack;
         return *this;
     }
 
@@ -88,8 +150,8 @@ public:
         return !(a == b);
     }
 
-    void SetNull() { vchEscrow.clear(); vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerKey.clear();}
-    bool IsNull() const { return (vchEscrow.empty() && vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 &&nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerKey.empty()); }
+    void SetNull() { feedBack.SetNull(); vchEscrow.clear(); vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerKey.clear();}
+    bool IsNull() const { return (feedBack.IsNull() && vchEscrow.empty() && vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 &&nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerKey.empty()); }
 
 };
 class COfferLinkWhitelistEntry {
@@ -409,6 +471,9 @@ public:
             std::vector<std::pair<std::vector<unsigned char>, COffer> >& offerScan);
 
 };
+void HandleAcceptFeedback(const COfferAccept& accept);
+int FindFeedbackInAccept(const std::vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const std::vector<COffer> &vtxPos);
+void GetFeedbackInAccept(std::vector<CAcceptFeedback> &feedBack, const std::vector<unsigned char> &vchAccept, int &avgRating, const AcceptUser type, const std::vector<COffer> &vtxPos);
 bool GetAcceptByHash(std::vector<COffer> &offerList,  COfferAccept &ca);
 bool GetTxOfOfferAccept(const std::vector<unsigned char> &vchOffer, const std::vector<unsigned char> &vchOfferAccept,
 		COffer &theOffer, COfferAccept &theOfferAccept, CTransaction& tx);

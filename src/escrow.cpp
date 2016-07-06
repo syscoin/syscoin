@@ -825,7 +825,7 @@ int FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser typ
 	}
 	return count;
 }
-void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, vector<CEscrow> &vtxPos)
+void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, const vector<CEscrow> &vtxPos)
 {
 	float nRating = 0;
 	int nRatingCount = 0;
