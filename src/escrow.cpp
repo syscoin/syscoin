@@ -424,17 +424,17 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				{
 					return error("CheckEscrowInputs() :cannot leave feedback in activate tx");
 				}
-				if((retError = CheckForAliasExpiryAndSafety(theEscrow.vchBuyerKey, nHeight)) != "")
+				if((retError = CheckForAliasExpiry(theEscrow.vchBuyerKey, nHeight)) != "")
 				{
 					retError = string("CheckEscrowInputs(): ") + retError;
 					return error(retError.c_str());
 				}
-				if((retError = CheckForAliasExpiryAndSafety(theEscrow.vchSellerKey, nHeight)) != "")
+				if((retError = CheckForAliasExpiry(theEscrow.vchSellerKey, nHeight)) != "")
 				{
 					retError = string("CheckEscrowInputs(): ") + retError;
 					return error(retError.c_str());
 				}	
-				if((retError = CheckForAliasExpiryAndSafety(theEscrow.vchArbiterKey, nHeight)) != "")
+				if((retError = CheckForAliasExpiry(theEscrow.vchArbiterKey, nHeight)) != "")
 				{
 					retError = string("CheckEscrowInputs(): ") + retError;
 					return error(retError.c_str());
@@ -633,15 +633,31 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 								LogPrintf("CheckEscrowInputs() : Trying to leave more than 2 feedbacks in the same transaction, skipping...");
 							return true;
 						}
-
+						int buyerFeedbackCount = FindFeedbackInEscrow(theEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos);
+						int sellerFeedbackCount = FindFeedbackInEscrow(theEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos);
+						int arbiterFeedbackCount = FindFeedbackInEscrow(theEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos);
 						// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
-						if(FindFeedbackInEscrow(theEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos))
+						if(buyerFeedbackCount > 0)
 							theEscrow.buyerFeedback.nRating = 0;
-						if(FindFeedbackInEscrow(theEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos))
+						if(sellerFeedbackCount > 0)
 							theEscrow.sellerFeedback.nRating = 0;
-						if(FindFeedbackInEscrow(theEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos))
+						if(arbiterFeedbackCount > 0)
 							theEscrow.arbiterFeedback.nRating = 0;
-
+						if(buyerFeedbackCount > 10 && !serializedEscrow.buyerFeedback.IsNull())
+						{
+							LogPrintf( "CheckEscrowInputs() : Buyer cannot exceed 10 feedback entries for this escrow");
+							return true;
+						}
+						if(sellerFeedbackCount > 10 && !serializedEscrow.sellerFeedback.IsNull())
+						{
+							LogPrintf( "CheckEscrowInputs() : Seller cannot exceed 10 feedback entries for this escrow");
+							return true;
+						}
+						if(arbiterFeedbackCount > 10 && !serializedEscrow.arbiterFeedback.IsNull())
+						{
+							LogPrintf( "CheckEscrowInputs() : Arbiter cannot exceed 10 feedback entries for this escrow");
+							return true;
+						}
 						HandleEscrowFeedback(theEscrow);	
 					
 					}
@@ -786,27 +802,28 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		}
 	}
 }
-bool FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser type, const vector<CEscrow> &vtxPos)
+int FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser type, const vector<CEscrow> &vtxPos)
 {
+	int count = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
 		if(type == BUYER)
 		{
 			if(vtxPos[i].buyerFeedback.nFeedbackUser == nFeedbackUser)
-				return true;
+				count++;
 		}
 		else if(type == SELLER)
 		{
 			if(vtxPos[i].sellerFeedback.nFeedbackUser == nFeedbackUser)
-				return true;
+				count++;
 		}
 		else if(type == ARBITER)
 		{
 			if(vtxPos[i].arbiterFeedback.nFeedbackUser == nFeedbackUser)
-				return true;
+				count++;
 		}
 	}
-	return false;
+	return count;
 }
 void GetFeedbackInEscrow(vector<CEscrowFeedback> &feedBack, int &avgRating, const EscrowUser type, vector<CEscrow> &vtxPos)
 {

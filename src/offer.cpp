@@ -958,7 +958,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		default:
 			return error( "CheckOfferInputs() : offer transaction has unknown op");
 		}
-		if(!IsEscrowOp(prevEscrowOp) && (retError = CheckForAliasExpiryAndSafety(theOffer.vchPubKey, nHeight, theOffer.safetyLevel, theOffer.safeSearch)) != "")
+		if(!IsEscrowOp(prevEscrowOp) && (retError = CheckForAliasExpiry(theOffer.vchPubKey, nHeight)) != "")
 		{
 			retError = string("CheckOfferInputs(): ") + retError;
 			return error(retError.c_str());
@@ -3322,6 +3322,161 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	res.push_back(stringFromVch(vchAccept));
 	return res;
 }
+/*UniValue acceptfeedback(const UniValue& params, bool fHelp) {
+    if (fHelp || params.size() != 3)
+        throw runtime_error(
+		"acceptfeedback <offeraccept txid> [feedback] [rating] \n"
+                        "Send feedback and rating for offer transaction. Ratings are numbers from 1 to 5\n"
+                        + HelpRequiringPassphrase());
+   // gather & validate inputs
+	uint256 acceptTxId;
+	acceptTxId.SetHex(params[0].get_str());
+	int nRating = 0;
+	vector<unsigned char> vchFeedback;
+	if(params.size() > 1)
+		vchFeedback = vchFromValue(params[1]);
+	if(params.size() > 2)
+	{
+		try {
+			nRating = atoi(params[2].get_str());
+			if(nRating < 0 || nRating > 5)
+				throw runtime_error("invalid rating value, must be less than or equal to 5 and greater than or equal to 0");
+
+		} catch (std::exception &e) {
+			throw runtime_error("invalid rating value");
+		}
+	}
+	
+    // this is a syscoin transaction
+    CWalletTx wtx;
+
+	EnsureWalletIsUnlocked();
+
+    // look for a transaction with this key
+    CTransaction tx;
+	COffer offer;
+	uint256 hashBlock;
+
+	if(!GetTransaction(acceptTxId, tx, Params().GetConsensus(), hashBlock, true))
+		throw runtime_error("Could not find offer accept tx");
+    
+    vector<vector<unsigned char> > vvch;
+    int op, nOut;
+    if (!DecodeOfferTx(tx, op, nOut, vvch) 
+    	|| op != OP_OFFER_ACCEPT)
+        throw runtime_error("Could not decode offer accept tx");
+	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
+	if (wtxIn == NULL)
+		throw runtime_error("This offer accept is not in your wallet");
+	if(vvch.size() > 1 && vvch[1] == vchFromString("1") && vchFeedback.size() <= 0)
+		throw runtime_error("Feedback reply cannot be empty");
+
+	CPubKey buyerKey(offer.accept.vchBuyerKey);
+	CSyscoinAddress buyerAddress(buyerKey.GetID());
+	if(!buyerAddress.IsValid())
+		throw runtime_error("Buyer address is invalid!");
+	
+	CPubKey sellerKey(offer.vchPubKey);
+	CSyscoinAddress sellerAddress(sellerKey.GetID());
+	if(!sellerAddress.IsValid())
+		throw runtime_error("Seller address is invalid!");
+	bool foundBuyerKey = false;
+	try
+	{
+		CKeyID keyID;
+		if (!buyerAddress.GetKeyID(keyID))
+			throw runtime_error("Buyer address does not refer to a key");
+		CKey vchSecret;
+		if (!pwalletMain->GetKey(keyID, vchSecret))
+			throw runtime_error("Private key for buyer address " + buyerAddress.ToString() + " is not known");
+		foundBuyerKey = true;
+	}
+	catch(...)
+	{
+		foundBuyerKey = false;
+	}
+	bool foundSellerKey = false;
+	try
+	{
+		CKeyID keyID;
+		if (!sellerAddress.GetKeyID(keyID))
+			throw runtime_error("Seller address does not refer to a key");
+		CKey vchSecret;
+		if (!pwalletMain->GetKey(keyID, vchSecret))
+			throw runtime_error("Private key for seller address " + sellerAddress.ToString() + " is not known");
+		foundSellerKey = true;
+	}
+	catch(...)
+	{
+		foundSellerKey = false;
+	}
+	
+     	// check for existing escrow 's
+	if (ExistsInMempool(vvch[0], OP_OFFER_ACCEPT)) {
+		throw runtime_error("there are pending operations on that offer");
+	}
+	offer.ClearOffer();
+
+
+	CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyBuyerDestination, scriptPubKeySellerDestination;
+	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
+	scriptPubKeySellerDestination= GetScriptForDestination(sellerKey.GetID());
+	vector<CRecipient> vecSend;
+	CRecipient recipientBuyer, recipientSeller;
+
+	// buyer
+	if(foundBuyerKey)
+	{
+		CFeedback sellerFeedback(BUYER);
+		sellerFeedback.vchFeedback = vchFeedback;
+		sellerFeedback.nRating = nRating;
+		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
+		offer.accept.feedback = sellerFeedback;
+		scriptPubKeySeller << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vvch[0] << vvch[1] << vvch[2] << vvch[3] << OP_2DROP << OP_2DROP << OP_DROP;
+		scriptPubKeySeller += scriptPubKeySellerDestination;
+
+		CreateRecipient(scriptPubKeySeller, recipientSeller);
+		vecSend.push_back(recipientSeller);
+
+	}
+	// seller
+	else if(foundSellerKey)
+	{
+		CFeedback buyerFeedback(SELLER);
+		buyerFeedback.vchFeedback = vchFeedback;
+		buyerFeedback.nRating = nRating;
+		buyerFeedback.nHeight = chainActive.Tip()->nHeight;
+		offer.accept.feedback = buyerFeedback;	
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vvch[0] << vvch[1] << vvch[2] << vvch[3] << OP_2DROP << OP_2DROP << OP_DROP;
+		scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+
+		CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+		vecSend.push_back(recipientBuyer);
+
+	}
+	else
+	{
+		throw runtime_error("You must be either the buyer or seller to leave feedback on this offer purchase");
+	}
+	offer.nHeight = chainActive.Tip()->nHeight;
+
+
+	const vector<unsigned char> &data = offer.Serialize();
+	CScript scriptData;
+	scriptData << OP_RETURN << data;
+	CRecipient fee;
+	CreateFeeRecipient(scriptData, data, fee);
+	vecSend.push_back(fee);
+
+	const CWalletTx * wtxInEscrow=NULL;
+	const CWalletTx * wtxInCert=NULL;
+	const CWalletTx * wtxInAlias=NULL;
+	if(IsSys21Fork(chainActive.Tip()->nHeight))
+		SendMoneySyscoin(vecSend, recipientBuyer.nAmount+recipientSeller.nAmount+fee.nAmount, false, wtx, wtxIn, wtxInCert, wtxInAlias, wtxInEscrow);
+	UniValue ret(UniValue::VARR);
+	ret.push_back(wtx.GetHash().GetHex());
+	return ret;
+}*/
 UniValue offerinfo(const UniValue& params, bool fHelp) {
 	if (fHelp || 1 != params.size())
 		throw runtime_error("offerinfo <guid>\n"

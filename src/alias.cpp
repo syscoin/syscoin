@@ -2033,7 +2033,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 	return oRes;
 }
 
-string CheckForAliasExpiryAndSafety(const vector<unsigned char> &vchPubKey, const int nHeight, const unsigned char safetyLevel, const bool safeSearch)
+string CheckForAliasExpiry(const vector<unsigned char> &vchPubKey, const int nHeight)
 {
 	if(!vchPubKey.empty())
 	{
@@ -2050,14 +2050,6 @@ string CheckForAliasExpiryAndSafety(const vector<unsigned char> &vchPubKey, cons
 			if((alias.nHeight + GetAliasExpirationDepth()) < nHeight)
 			{
 				return string("alias is expired");
-			}
-			if(!alias.safeSearch && safeSearch)
-			{
-				return string("alias is not safe to search yet service is set to safe search");
-			}
-			if(alias.safetyLevel > safetyLevel)
-			{
-				return string("alias safety level cannot exceed services safety level");
 			}
 		}
 	}
