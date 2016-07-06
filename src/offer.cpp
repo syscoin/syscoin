@@ -3386,7 +3386,7 @@ void HandleAcceptFeedback(const COfferAccept& accept)
 			
 	}
 }
-int FindFeedbackInAccept(const vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const vector<CEscrow> &vtxPos)
+int FindFeedbackInAccept(const vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const vector<COffer> &vtxPos)
 {
 	int count = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
