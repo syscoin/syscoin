@@ -364,7 +364,15 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe1));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe2));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe3));
-	
+	// should be able to accept offer still
+    OfferAccept("node1", "node2", "jagbansafesearchoffer", offerguidsafe1, "1", "message");
+	OfferAccept("node1", "node2", "jagbansafesearchoffer", offerguidsafe2, "1", "message");
+	OfferAccept("node1", "node2", "jagbansafesearchoffer", offerguidsafe3, "1", "message");
+
+	// keep aliases alive
+	AliasUpdate("node1", "jagbansafesearchoffer", "pubdata1", "privatedata1", "Yes");	
+	AliasUpdate("node1", "jagbannonsafesearchoffer", "pubdata1", "privatedata1", "No");
+
 	// ban both aliases level 2 (only owner of SYS_CATEGORY can do this)
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearchoffer",SAFETY_LEVEL2));
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbannonsafesearchoffer",SAFETY_LEVEL2));
@@ -380,6 +388,11 @@ BOOST_AUTO_TEST_CASE (generate_aliasbanwithoffers)
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe1), runtime_error);
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe2), runtime_error);
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offerinfo " + offerguidsafe3), runtime_error);
+	// should be able to accept offer still
+    OfferAccept("node1", "node1", "jagbansafesearchoffer", offerguidsafe1, "1", "message");
+	OfferAccept("node1", "node1", "jagbansafesearchoffer", offerguidsafe2, "1", "message");
+	OfferAccept("node1", "node1", "jagbansafesearchoffer", offerguidsafe3, "1", "message");
+
 
 	// unban both aliases (only owner of SYS_CATEGORY can do this)
 	BOOST_CHECK_NO_THROW(AliasBan("node1","jagbansafesearchoffer",0));
