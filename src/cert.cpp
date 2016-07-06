@@ -584,7 +584,7 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	newCert.vchPubKey = alias.vchPubKey;
 	newCert.bPrivate = bPrivate;
 	newCert.safetyLevel = 0;
-	newCert.safeSearch = strSafeSearch == "Yes" true: false;
+	newCert.safeSearch = strSafeSearch == "Yes"? true: false;
 
     scriptPubKey << CScript::EncodeOP_N(OP_CERT_ACTIVATE) << vchCert << OP_2DROP;
     scriptPubKey += scriptPubKeyOrig;

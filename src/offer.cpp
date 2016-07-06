@@ -1401,7 +1401,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	newOffer.bOnlyAcceptBTC = bOnlyAcceptBTC;
 	newOffer.vchAliasPeg = vchAliasPeg;
 	newOffer.safetyLevel = 0;
-	newOffer.safeSearch = strSafeSearch == "Yes" true: false;
+	newOffer.safeSearch = strSafeSearch == "Yes"? true: false;
 	newOffer.vchGeoLocation = vchFromString(strGeoLocation);
 
 	CPubKey currentOfferKey(newOffer.vchPubKey);
