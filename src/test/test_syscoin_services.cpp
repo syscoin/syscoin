@@ -838,22 +838,22 @@ void OfferAcceptFeedback(const string& node, const string& offerguid, const stri
 	const UniValue &arr = r.get_array();
 	string acceptTxid = arr[1].get_str();
 	GenerateBlocks(10, node);
-
+	string ratingstr = (israting? rating: "0");
 	r = FindOfferAcceptFeedback(node, offerguid, acceptguid, acceptTxid);
 	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
-	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == (israting? rating: "0"));
+	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == ratingstr);
 	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
 	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
 	
 	r = FindOfferAcceptFeedback(othernode1, offerguid, acceptguid, acceptTxid);
 	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
-	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == (israting? rating: "0"));
+	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == ratingstr);
 	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
 	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
 	
 	r = FindOfferAcceptFeedback(othernode2, offerguid, acceptguid, acceptTxid);
 	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
-	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == (israting? rating: "0"));
+	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == ratingstr);
 	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
 	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
 }
