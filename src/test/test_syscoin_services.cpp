@@ -985,25 +985,25 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 				const UniValue &arrayBuyerFeedbackValue = arrayBuyerFeedbackObject.get_array();
 				for(int j=0;j<arrayBuyerFeedbackValue.size();j++)
 				{
-					const UniValue& arrayFeedbackObj = arrayBuyerFeedbackValue[j].get_obj();
-					const string &acceptFeedbackTxid = find_value(arrayFeedbackObj, "txid").get_str();
+					const UniValue& arrayBuyerFeedback = arrayBuyerFeedbackValue[j].get_obj();
+					const string &acceptFeedbackTxid = find_value(arrayBuyerFeedback, "txid").get_str();
 					if(acceptFeedbackTxid == accepttxid)
 					{
-						ret = arrayFeedbackObj;
+						ret = arrayBuyerFeedback;
 						return ret;
 					}
 				}
 			}
 			if(arraySellerFeedbackObject.type() == UniValue::VARR)
 			{
-				const UniValue &arraySellerFeedbackValue = arraySellerFeedbackObject.get_array();
+				const UniValue &arraySellerFeedbackValue = arrayBuyerFeedbackObject.get_array();
 				for(int j=0;j<arraySellerFeedbackValue.size();j++)
 				{
-					const UniValue &arraySellerFeedbackValue = arraySellerFeedbackValue[j].get_obj();
-					const string &acceptFeedbackTxid = find_value(arraySellerFeedbackValue, "txid").get_str();
+					const UniValue &arraySellerFeedback = arraySellerFeedbackValue[i].get_obj();
+					const string &acceptFeedbackTxid = find_value(arraySellerFeedback, "txid").get_str();
 					if(acceptFeedbackTxid == accepttxid)
 					{
-						ret = arraySellerFeedbackValue;
+						ret = arraySellerFeedback;
 						return ret;
 					}
 				}
