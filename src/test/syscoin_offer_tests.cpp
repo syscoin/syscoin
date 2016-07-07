@@ -335,14 +335,14 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	GenerateBlocks(5, "node2");
 	GenerateBlocks(5, "node3");
 
-	AliasNew("node1", "selleralias3", "somedata");
-	AliasNew("node2", "buyeralias3", "somedata");
+	AliasNew("node1", "selleraliasfeedback", "somedata");
+	AliasNew("node2", "buyeraliasfeedback", "somedata");
 
 	// generate a good offer
-	string offerguid = OfferNew("node1", "selleralias3", "category", "title", "100", "0.01", "description", "USD");
+	string offerguid = OfferNew("node1", "selleraliasfeedback", "category", "title", "100", "0.01", "description", "USD");
 
 	// perform a valid accept
-	string acceptguid = OfferAccept("node1", "node2", "buyeralias3", offerguid, "1", "message");
+	string acceptguid = OfferAccept("node1", "node2", "buyeraliasfeedback", offerguid, "1", "message");
 	// seller must leave feedback first
 	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller", "1", ACCEPTSELLER, true);
 	// then buyer can leave feedback
