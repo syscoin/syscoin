@@ -325,9 +325,9 @@ BOOST_AUTO_TEST_CASE (generate_offeraccept)
 	#endif
 }
 
-BOOST_AUTO_TEST_CASE (generate_offeraccept)
+BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 {
-	printf("Running generate_offeraccept...\n");
+	printf("Running generate_offeracceptfeedback...\n");
 	UniValue r;
 	
 	GenerateBlocks(5);
