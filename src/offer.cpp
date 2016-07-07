@@ -3464,7 +3464,7 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	// feedback is skipped by default but we want to use it as input to another feedback possibly if this is a reply
 	bool skipFeedback = false;
 	if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, offer, theOfferAccept, tx, skipFeedback))
-		continue;
+		throw runtime_error("Could not find this offer accept");
     vector<vector<unsigned char> > vvch;
     int op, nOut;
     if (!DecodeOfferTx(tx, op, nOut, vvch) 
