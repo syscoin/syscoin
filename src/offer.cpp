@@ -3624,11 +3624,11 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	for(int i=vtxPos.size()-1;i>=0;i--) {
 		COfferAccept ca = vtxPos[i].accept;
 		theOffer.nHeight = ca.nAcceptHeight;
-		if(!theOffer.GetOfferFromList(vtxPos))
-			continue;
 		if(ca.IsNull())
 			continue;
 		if(!ca.feedback.IsNull())
+			continue;
+		if(!theOffer.GetOfferFromList(vtxPos))
 			continue;
 		UniValue oOfferAccept(UniValue::VOBJ);
 

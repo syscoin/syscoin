@@ -996,7 +996,7 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 			}
 			if(arraySellerFeedbackObject.type() == UniValue::VARR)
 			{
-				const UniValue &arraySellerFeedbackValue = arrayBuyerFeedbackObject.get_array();
+				const UniValue &arraySellerFeedbackValue = arraySellerFeedbackObject.get_array();
 				for(int j=0;j<arraySellerFeedbackValue.size();j++)
 				{
 					const UniValue &arraySellerFeedback = arraySellerFeedbackValue[j].get_obj();
