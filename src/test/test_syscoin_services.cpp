@@ -815,6 +815,48 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 }
 
+void OfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid, const string& feedback, const string& rating, const char& user, const bool israting) {
+
+	string otherNode1 = "node2";
+	string otherNode2 = "node3";
+	if(node == "node2") {
+		otherNode1 = "node3";
+		otherNode2 = "node1";
+	} else if(node == "node3") {
+		otherNode1 = "node1";
+		otherNode2 = "node2";
+	}
+	
+
+	UniValue r;
+	string offerfeedbackstr = "offeracceptfeedback " + offerguid + " " + acceptguid + " " + feedback + " " + rating;
+	
+
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, offerfeedbackstr));
+	// ensure mempool blocks second tx until it confirms
+	BOOST_CHECK_THROW(r = CallRPC(node, offerfeedbackstr), runtime_error);	
+	const UniValue &arr = r.get_array();
+	string acceptTxid = arr[1].get_str();
+	GenerateBlocks(10, node);
+
+	r = FindOfferAcceptFeedback(node, offerguid, acceptguid, acceptTxid);
+	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
+	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == israting? rating: "0");
+	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
+	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
+	
+	r = FindOfferAcceptFeedback(othernode1, offerguid, acceptguid, acceptTxid);
+	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
+	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == israting? rating: "0");
+	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
+	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
+	
+	r = FindOfferAcceptFeedback(othernode2, offerguid, acceptguid, acceptTxid);
+	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
+	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == israting? rating: "0");
+	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
+	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
+}
 // offeraccept <alias> <guid> [quantity] [message]
 const string OfferAccept(const string& ownernode, const string& node, const string& aliasname, const string& offerguid, const string& qty, const string& message) {
 
@@ -920,6 +962,45 @@ const UniValue FindOfferAccept(const string& node, const string& offerguid, cons
 	}
 	if(!nocheck)
 		BOOST_CHECK(!ret.isNull());
+	return ret;
+}
+const UniValue FindOfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid,const string& accepttxid)
+{
+	UniValue r, ret;
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
+	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
+	for(int i=0;i<arrayValue.size();i++)
+	{
+		const string &acceptvalueguid = find_value(arrayValue[i].get_obj(), "id").get_str();
+		const string &offervalueguid = find_value(arrayValue[i].get_obj(), "offer").get_str();
+		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
+		{
+			const UniValue &arrayBuyerFeedbackValue = find_value(r.get_obj(), "buyer_feedback").get_array();
+			for(int j=0;j<arrayBuyerFeedbackValue.size();j++)
+			{
+				const string &acceptFeedbackTxid = find_value(arrayBuyerFeedbackValue[j].get_obj(), "txid").get_str();
+				if(acceptFeedbackTxid == accepttxid)
+				{
+					ret = arrayBuyerFeedbackValue[j].get_obj();
+					return ret;
+				}
+			}
+			const UniValue &arraySellerFeedbackValue = find_value(r.get_obj(), "seller_feedback").get_array();
+			for(int j=0;j<arraySellerFeedbackValue.size();j++)
+			{
+				const string &acceptFeedbackTxid = find_value(arraySellerFeedbackValue[j].get_obj(), "txid").get_str();
+				if(acceptFeedbackTxid == accepttxid)
+				{
+					ret = arraySellerFeedbackValue[j].get_obj();
+					return ret;
+				}
+			}
+			break;
+		}
+
+	}
+
+	BOOST_CHECK(!ret.isNull());
 	return ret;
 }
 const UniValue FindOfferLinkedAccept(const string& node, const string& offerguid, const string& acceptguid)

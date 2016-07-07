@@ -32,7 +32,9 @@ const string MessageNew(const string& fromnode, const string& tonode, const stri
 void CreateSysRatesIfNotExist();
 void CreateSysBanIfNotExist();
 void CreateSysCategoryIfNotExist();
+void OfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid, const string& feedback, const string& rating, const char& user, const bool israting);
 const UniValue FindOfferAccept(const string& node, const string& offerguid, const string& acceptguid, bool nocheck=false);
+const UniValue FindOfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid,const string& accepttxid);
 const string OfferNew(const string& node, const string& aliasname, const string& category, const string& title, const string& qty, const string& price, const string& description, const string& currency, const string& certguid="nocert", const bool exclusiveResell=true, const string& acceptbtconly="0", const string& geolocation="location", const string& safesearch="Yes");
 void OfferUpdate(const string& node, const string& aliasname, const string& offerguid, const string& category, const string& title, const string& qty, const string& price, const string& description, const bool isPrivate=false, const string& certguid="nocert", const bool exclusiveResell=true, const string& geolocation="newlocation", string safesearch="Yes");
 bool OfferFilter(const string& node, const string& regex, const string& safesearch);

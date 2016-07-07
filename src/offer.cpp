@@ -1095,13 +1095,17 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(!theOfferAccept.feedback.IsNull())
 			{
 				// ensure we don't add same feedback twice (feedback in db should be older than current height)
-				// ensure feedback is valid
-				if(!theOfferAccept.feedback.IsNull()  && theOfferAccept.feedback.nHeight < nHeight)
+				if(heOfferAccept.feedback.nHeight < nHeight)
 				{
 					theOfferAccept.feedback.nHeight = nHeight;
+					theOfferAccept.feedback.txHash = tx.GetHash();
 				}
 				else
-					theOfferAccept.feedback.SetNull();
+				{
+					if(fDebug)
+						LogPrintf( "CheckOfferInputs() : feedback in db is newer than the current height");
+					return true;
+				}
 
 							
 				int feedbackCount = FindFeedbackInAccept(vvchArgs[1], theOfferAccept.feedback.nFeedbackUser, vtxPos);
@@ -1110,7 +1114,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					theOfferAccept.feedback.nRating = 0;
 				if(feedbackCount > 10 && !theOfferAccept.feedback.IsNull())
 				{
-					LogPrintf( "CheckOfferInputs() : Cannot exceed 10 feedback entries for this user of this offer accept");
+					if(fDebug)
+						LogPrintf( "CheckOfferInputs() : Cannot exceed 10 feedback entries for this user of this offer accept");
 					return true;
 				}
 				HandleAcceptFeedback(theOfferAccept);	
@@ -3757,6 +3762,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
+			oFeedback.push_back(Pair("txid", buyerFeedBacks[i].txHash.GetHex()));
 			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
@@ -3774,6 +3780,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
+			oFeedback.push_back(Pair("txid", sellerFeedBacks[i].txHash.GetHex()));
 			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
@@ -4031,6 +4038,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					if (pindex) {
 						sFeedbackTime = strprintf("%llu", pindex->nTime);
 					}
+					oFeedback.push_back(Pair("txid", buyerFeedBacks[i].txHash.GetHex()));
 					oFeedback.push_back(Pair("time", sFeedbackTime));
 					oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 					oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
@@ -4048,6 +4056,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					if (pindex) {
 						sFeedbackTime = strprintf("%llu", pindex->nTime);
 					}
+					oFeedback.push_back(Pair("txid", sellerFeedBacks[i].txHash.GetHex()));
 					oFeedback.push_back(Pair("time", sFeedbackTime));
 					oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 					oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));

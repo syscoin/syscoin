@@ -325,6 +325,28 @@ BOOST_AUTO_TEST_CASE (generate_offeraccept)
 	#endif
 }
 
+BOOST_AUTO_TEST_CASE (generate_offeraccept)
+{
+	printf("Running generate_offeraccept...\n");
+	UniValue r;
+	
+	GenerateBlocks(5);
+	GenerateBlocks(5, "node2");
+	GenerateBlocks(5, "node3");
+
+	AliasNew("node1", "selleralias3", "somedata");
+	AliasNew("node2", "buyeralias3", "somedata");
+
+	// generate a good offer
+	string offerguid = OfferNew("node1", "selleralias3", "category", "title", "100", "0.01", "description", "USD");
+
+	// perform a valid accept
+	string acceptguid = OfferAccept("node1", "node2", "buyeralias3", offerguid, "1", "message");
+	// seller must leave feedback first
+	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller", "1", SELLER, true);
+	// then buyer can leave feedback
+	OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer", "2", BUYER, false);
+}
 BOOST_AUTO_TEST_CASE (generate_offerexpired)
 {
 	printf("Running generate_offerexpired...\n");

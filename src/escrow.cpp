@@ -602,6 +602,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						{
 							theEscrow.buyerFeedback = serializedEscrow.buyerFeedback;
 							theEscrow.buyerFeedback.nHeight = nHeight;
+							theEscrow.buyerFeedback.txHash = tx.GetHash();
 							count++;
 						}
 						else
@@ -611,6 +612,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						{
 							theEscrow.sellerFeedback = serializedEscrow.sellerFeedback;
 							theEscrow.sellerFeedback.nHeight = nHeight;
+							theEscrow.sellerFeedback.txHash = tx.GetHash();
 							count++;
 						}
 						else
@@ -621,6 +623,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 						{
 							theEscrow.arbiterFeedback = serializedEscrow.arbiterFeedback;
 							theEscrow.arbiterFeedback.nHeight = nHeight;
+							theEscrow.arbiterFeedback.txHash = tx.GetHash();
 							count++;
 						}
 						else
@@ -2417,6 +2420,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 		if (pindex) {
 			sFeedbackTime = strprintf("%llu", pindex->nTime);
 		}
+		oFeedback.push_back(Pair("txid", buyerFeedBacks[i].txHash.GetHex()));
 		oFeedback.push_back(Pair("time", sFeedbackTime));
 		oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 		oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
@@ -2434,6 +2438,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 		if (pindex) {
 			sFeedbackTime = strprintf("%llu", pindex->nTime);
 		}
+		oFeedback.push_back(Pair("txid", sellerFeedBacks[i].txHash.GetHex()));
 		oFeedback.push_back(Pair("time", sFeedbackTime));
 		oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 		oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
@@ -2451,6 +2456,7 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 		if (pindex) {
 			sFeedbackTime = strprintf("%llu", pindex->nTime);
 		}
+		oFeedback.push_back(Pair("txid", arbiterFeedBacks[i].txHash.GetHex()));
 		oFeedback.push_back(Pair("time", sFeedbackTime));
 		oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
 		oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
@@ -2637,6 +2643,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
+			oFeedback.push_back(Pair("txid", buyerFeedBacks[i].txHash.GetHex()));
 			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
@@ -2654,6 +2661,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
+			oFeedback.push_back(Pair("txid", sellerFeedBacks[i].txHash.GetHex()));
 			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
@@ -2671,6 +2679,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
+			oFeedback.push_back(Pair("txid", arbiterFeedBacks[i].txHash.GetHex()));
 			oFeedback.push_back(Pair("time", sFeedbackTime));
 			oFeedback.push_back(Pair("rating", arbiterFeedBacks[i].nRating));
 			oFeedback.push_back(Pair("feedbackuser", arbiterFeedBacks[i].nFeedbackUser));
