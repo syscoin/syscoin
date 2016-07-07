@@ -3748,37 +3748,37 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 			strMessage = string("Encrypted for owner of offer");
 		oOfferAccept.push_back(Pair("pay_message", strMessage));
 		UniValue oBuyerFeedBack(UniValue::VARR);
-		for(unsigned int i =0;i<buyerFeedBacks.size();i++)
+		for(unsigned int j =0;j<buyerFeedBacks.size();j++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
 			string sFeedbackTime;
-			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[j].nHeight];
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
-			oFeedback.push_back(Pair("txid", buyerFeedBacks[i].txHash.GetHex()));
+			oFeedback.push_back(Pair("txid", buyerFeedBacks[j].txHash.GetHex()));
 			oFeedback.push_back(Pair("time", sFeedbackTime));
-			oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
-			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
-			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
+			oFeedback.push_back(Pair("rating", buyerFeedBacks[j].nRating));
+			oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[j].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[j].vchFeedback)));
 			oBuyerFeedBack.push_back(oFeedback);
 		}
 		oOfferAccept.push_back(Pair("buyer_feedback", oBuyerFeedBack));
 		oOfferAccept.push_back(Pair("avg_buyer_rating", avgBuyerRating));
 		UniValue oSellerFeedBack(UniValue::VARR);
-		for(unsigned int i =0;i<sellerFeedBacks.size();i++)
+		for(unsigned int j =0;j<sellerFeedBacks.size();j++)
 		{
 			UniValue oFeedback(UniValue::VOBJ);
 			string sFeedbackTime;
-			CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+			CBlockIndex *pindex = chainActive[buyerFeedBacks[j].nHeight];
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
-			oFeedback.push_back(Pair("txid", sellerFeedBacks[i].txHash.GetHex()));
+			oFeedback.push_back(Pair("txid", sellerFeedBacks[j].txHash.GetHex()));
 			oFeedback.push_back(Pair("time", sFeedbackTime));
-			oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
-			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
-			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
+			oFeedback.push_back(Pair("rating", sellerFeedBacks[j].nRating));
+			oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[j].nFeedbackUser));
+			oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[j].vchFeedback)));
 			oSellerFeedBack.push_back(oFeedback);
 		}
 		oOfferAccept.push_back(Pair("seller_feedback", oSellerFeedBack));
