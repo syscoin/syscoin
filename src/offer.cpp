@@ -3684,10 +3684,10 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		bool foundCert = false;
 		bool foundEscrow = false;
 		bool foundAlias = false;
-		for (unsigned int i = 0; i < txA.vin.size(); i++) {
+		for (unsigned int j = 0; j < txA.vin.size(); j++) {
 			vector<vector<unsigned char> > vvchIn;
 			int opIn;
-			const COutPoint *prevOutput = &txA.vin[i].prevout;
+			const COutPoint *prevOutput = &txA.vin[j].prevout;
 			if(!GetPreviousInput(prevOutput, opIn, vvchIn))
 				continue;
 			if(foundOffer && foundCert && foundEscrow && foundAlias)
