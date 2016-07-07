@@ -53,7 +53,7 @@ public:
 		READWRITE(nRating);
 		READWRITE(nFeedbackUser);
 		READWRITE(nHeight);
-		READERITE(txHash);
+		READWRITE(txHash);
 	}
 
     friend bool operator==(const CEscrowFeedback &a, const CEscrowFeedback &b) {
