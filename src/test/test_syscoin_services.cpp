@@ -978,26 +978,34 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 		
 		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
 		{
-			const UniValue &arrayBuyerFeedbackValue = find_value(arrayObj, "buyer_feedback").get_array();
-			for(int j=0;j<arrayBuyerFeedbackValue.size();j++)
+			const UniValue &arrayBuyerFeedbackObject = find_value(arrayObj, "buyer_feedback");
+			const UniValue &arraySellerFeedbackObject  = find_value(arrayObj, "seller_feedback");
+			if(arrayBuyerFeedbackObject.type() == UniValue::VARR)
 			{
-				const UniValue& arrayFeedbackObj = arrayBuyerFeedbackValue[j].get_obj();
-				const string &acceptFeedbackTxid = find_value(arrayFeedbackObj, "txid").get_str();
-				if(acceptFeedbackTxid == accepttxid)
+				const UniValue &arrayBuyerFeedbackValue = arrayBuyerFeedbackObject.get_array();
+				for(int j=0;j<arrayBuyerFeedbackValue.size();j++)
 				{
-					ret = arrayFeedbackObj;
-					return ret;
+					const UniValue& arrayFeedbackObj = arrayBuyerFeedbackValue[j].get_obj();
+					const string &acceptFeedbackTxid = find_value(arrayFeedbackObj, "txid").get_str();
+					if(acceptFeedbackTxid == accepttxid)
+					{
+						ret = arrayFeedbackObj;
+						return ret;
+					}
 				}
 			}
-			const UniValue &arraySellerFeedbackValue = find_value(arrayObj, "seller_feedback").get_array();
-			for(int j=0;j<arraySellerFeedbackValue.size();j++)
+			if(arraySellerFeedbackObject.type() == UniValue::VARR)
 			{
-				const UniValue &arraySellerFeedbackValue = arraySellerFeedbackValue[i].get_obj();
-				const string &acceptFeedbackTxid = find_value(arraySellerFeedbackValue, "txid").get_str();
-				if(acceptFeedbackTxid == accepttxid)
+				const UniValue &arraySellerFeedbackValue = arraySellerFeedbackObject.get_array();
+				for(int j=0;j<arraySellerFeedbackValue.size();j++)
 				{
-					ret = arraySellerFeedbackValue;
-					return ret;
+					const UniValue &arraySellerFeedbackValue = arraySellerFeedbackValue[i].get_obj();
+					const string &acceptFeedbackTxid = find_value(arraySellerFeedbackValue, "txid").get_str();
+					if(acceptFeedbackTxid == accepttxid)
+					{
+						ret = arraySellerFeedbackValue;
+						return ret;
+					}
 				}
 			}
 			break;
