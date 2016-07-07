@@ -412,12 +412,6 @@ bool GetTxOfOfferAccept(const vector<unsigned char> &vchOffer, const vector<unsi
 			LogPrintf("GetTxOfOfferAccept() : cannot find offer from this offer accept position");
 		return false;
 	}
-	if(theOffer.accept.vchAcceptRand != vchOfferAccept)
-	{
-		if(fDebug)
-			LogPrintf("GetTxOfOfferAccept() : cannot find offer accept in the offer that matches the accept guid specified");
-		return false;
-	}
 	if ((nHeight + GetOfferExpirationDepth())
 			< chainActive.Tip()->nHeight) {
 		string offer = stringFromVch(vchOfferAccept);
