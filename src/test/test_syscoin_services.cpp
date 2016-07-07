@@ -833,10 +833,11 @@ void OfferAcceptFeedback(const string& node, const string& offerguid, const stri
 	
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, offerfeedbackstr));
-	// ensure mempool blocks second tx until it confirms
-	BOOST_CHECK_THROW(r = CallRPC(node, offerfeedbackstr), runtime_error);	
 	const UniValue &arr = r.get_array();
 	string acceptTxid = arr[1].get_str();
+	// ensure mempool blocks second tx until it confirms
+	BOOST_CHECK_THROW(r = CallRPC(node, offerfeedbackstr), runtime_error);	
+
 	GenerateBlocks(10, node);
 	string ratingstr = (israting? rating: "0");
 	r = FindOfferAcceptFeedback(node, offerguid, acceptguid, acceptTxid);
