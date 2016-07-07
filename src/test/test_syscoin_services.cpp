@@ -845,13 +845,13 @@ void OfferAcceptFeedback(const string& node, const string& offerguid, const stri
 	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
 	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
 	
-	r = FindOfferAcceptFeedback(othernode1, offerguid, acceptguid, acceptTxid);
+	r = FindOfferAcceptFeedback(otherNode1, offerguid, acceptguid, acceptTxid);
 	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
 	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == ratingstr);
 	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
 	BOOST_CHECK(find_value(r.get_obj(), "feedbackuser").get_int() == user);
 	
-	r = FindOfferAcceptFeedback(othernode2, offerguid, acceptguid, acceptTxid);
+	r = FindOfferAcceptFeedback(otherNode2, offerguid, acceptguid, acceptTxid);
 	BOOST_CHECK(find_value(r.get_obj(), "txid").get_str() == acceptTxid);
 	BOOST_CHECK(find_value(r.get_obj(), "rating").get_str() == ratingstr);
 	BOOST_CHECK(find_value(r.get_obj(), "feedback").get_str() == feedback);
