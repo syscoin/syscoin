@@ -3770,7 +3770,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		{
 			UniValue oFeedback(UniValue::VOBJ);
 			string sFeedbackTime;
-			CBlockIndex *pindex = chainActive[buyerFeedBacks[j].nHeight];
+			CBlockIndex *pindex = chainActive[sellerFeedBacks[j].nHeight];
 			if (pindex) {
 				sFeedbackTime = strprintf("%llu", pindex->nTime);
 			}
@@ -4046,7 +4046,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				{
 					UniValue oFeedback(UniValue::VOBJ);
 					string sFeedbackTime;
-					CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
+					CBlockIndex *pindex = chainActive[sellerFeedBacks[i].nHeight];
 					if (pindex) {
 						sFeedbackTime = strprintf("%llu", pindex->nTime);
 					}
