@@ -972,27 +972,30 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
-		const string &acceptvalueguid = find_value(arrayValue[i].get_obj(), "id").get_str();
-		const string &offervalueguid = find_value(arrayValue[i].get_obj(), "offer").get_str();
+		const UniValue& arrayObj = arrayValue[i].get_obj();
+		const string &acceptvalueguid = find_value(arrayObj, "id").get_str();
+		const string &offervalueguid = find_value(arrayObj, "offer").get_str();
 		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
 		{
-			const UniValue &arrayBuyerFeedbackValue = find_value(arrayValue[i].get_obj(), "buyer_feedback").get_array();
+			const UniValue &arrayBuyerFeedbackValue = arrayBuyerFeedbackValue[j].get_obj();
 			for(int j=0;j<arrayBuyerFeedbackValue.size();j++)
 			{
-				const string &acceptFeedbackTxid = find_value(arrayBuyerFeedbackValue[j].get_obj(), "txid").get_str();
+				const UniValue& arrayFeedbackObj = arrayBuyerFeedbackValue[j].get_obj();
+				const string &acceptFeedbackTxid = find_value(arrayFeedbackObj, "txid").get_str();
 				if(acceptFeedbackTxid == accepttxid)
 				{
-					ret = arrayBuyerFeedbackValue[j].get_obj();
+					ret = arrayFeedbackObj;
 					return ret;
 				}
 			}
-			const UniValue &arraySellerFeedbackValue = find_value(arrayValue[i].get_obj(), "seller_feedback").get_array();
+			const UniValue &arraySellerFeedbackValue = find_value(arrayObj, "seller_feedback").get_array();
 			for(int j=0;j<arraySellerFeedbackValue.size();j++)
 			{
-				const string &acceptFeedbackTxid = find_value(arraySellerFeedbackValue[j].get_obj(), "txid").get_str();
+				const UniValue &arraySellerFeedbackValue = arraySellerFeedbackValue[j].get_obj();
+				const string &acceptFeedbackTxid = find_value(arraySellerFeedbackValue, "txid").get_str();
 				if(acceptFeedbackTxid == accepttxid)
 				{
-					ret = arraySellerFeedbackValue[j].get_obj();
+					ret = arraySellerFeedbackValue;
 					return ret;
 				}
 			}
