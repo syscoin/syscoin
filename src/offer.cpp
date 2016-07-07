@@ -1095,7 +1095,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(!theOfferAccept.feedback.IsNull())
 			{
 				// ensure we don't add same feedback twice (feedback in db should be older than current height)
-				if(heOfferAccept.feedback.nHeight < nHeight)
+				if(theOfferAccept.feedback.nHeight < nHeight)
 				{
 					theOfferAccept.feedback.nHeight = nHeight;
 					theOfferAccept.feedback.txHash = tx.GetHash();
