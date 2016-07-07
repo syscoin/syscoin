@@ -344,9 +344,9 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	// perform a valid accept
 	string acceptguid = OfferAccept("node1", "node2", "buyeralias3", offerguid, "1", "message");
 	// seller must leave feedback first
-	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller", "1", SELLER, true);
+	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller", "1", ACCEPTSELLER, true);
 	// then buyer can leave feedback
-	OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer", "2", BUYER, false);
+	OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer", "2", ACCEPTBUYER, false);
 }
 BOOST_AUTO_TEST_CASE (generate_offerexpired)
 {
