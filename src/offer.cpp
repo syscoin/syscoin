@@ -396,12 +396,12 @@ bool GetTxOfOffer(const vector<unsigned char> &vchOffer,
 }
 
 bool GetTxOfOfferAccept(const vector<unsigned char> &vchOffer, const vector<unsigned char> &vchOfferAccept,
-		COffer &theOffer, COfferAccept &theOfferAccept, CTransaction& tx) {
+		COffer &theOffer, COfferAccept &theOfferAccept, CTransaction& tx, bool skipFeedback) {
 	vector<COffer> vtxPos;
 	if (!pofferdb->ReadOffer(vchOffer, vtxPos) || vtxPos.empty()) return false;
 	theOfferAccept.SetNull();
 	theOfferAccept.vchAcceptRand = vchOfferAccept;
-	GetAcceptByHash(vtxPos, theOfferAccept);
+	GetAcceptByHash(vtxPos, theOfferAccept, skipFeedback);
 	if(theOfferAccept.IsNull())
 		return false;
 	int nHeight = theOfferAccept.nHeight;
@@ -410,6 +410,12 @@ bool GetTxOfOfferAccept(const vector<unsigned char> &vchOffer, const vector<unsi
 	{
 		if(fDebug)
 			LogPrintf("GetTxOfOfferAccept() : cannot find offer from this offer accept position");
+		return false;
+	}
+	if(theOffer.accept.vchAcceptRand != vchOfferAccept)
+	{
+		if(fDebug)
+			LogPrintf("GetTxOfOfferAccept() : cannot find offer accept in the offer that matches the accept guid specified");
 		return false;
 	}
 	if ((nHeight + GetOfferExpirationDepth())
@@ -3421,16 +3427,16 @@ void GetFeedbackInAccept(vector<CAcceptFeedback> &feedBack, int &avgRating, cons
 		sort(feedBack.begin(), feedBack.end(), acceptfeedbacksort());
 	
 }
-UniValue acceptfeedback(const UniValue& params, bool fHelp) {
-    if (fHelp || params.size() != 3)
+UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
+    if (fHelp || params.size() != 4)
         throw runtime_error(
-		"acceptfeedback <offeraccept txid> [feedback] [rating] \n"
-                        "Send feedback and rating for offer accept transaction. Ratings are numbers from 1 to 5\n"
+		"offeracceptfeedback <offer guid> <offeraccept guid> [feedback] [rating] \n"
+                        "Send feedback and rating for offer accept specified. Ratings are numbers from 1 to 5\n"
                         + HelpRequiringPassphrase());
    // gather & validate inputs
-	uint256 acceptTxId;
-	acceptTxId.SetHex(params[0].get_str());
 	int nRating = 0;
+	vector<unsigned char> vchOffer = vchFromValue(params[0]);
+	vector<unsigned char> vchAcceptRand = vchFromValue(params[1]);
 	vector<unsigned char> vchFeedback;
 	if(params.size() > 1)
 		vchFeedback = vchFromValue(params[1]);
@@ -3454,11 +3460,11 @@ UniValue acceptfeedback(const UniValue& params, bool fHelp) {
     // look for a transaction with this key
     CTransaction tx;
 	COffer offer;
-	uint256 hashBlock;
-
-	if(!GetTransaction(acceptTxId, tx, Params().GetConsensus(), hashBlock, true))
-		throw runtime_error("Could not find offer accept tx");
-    
+	COfferAccept theOfferAccept;
+	// feedback is skipped by default but we want to use it as input to another feedback possibly if this is a reply
+	bool skipFeedback = false;
+	if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, offer, theOfferAccept, tx, skipFeedback))
+		continue;
     vector<vector<unsigned char> > vvch;
     int op, nOut;
     if (!DecodeOfferTx(tx, op, nOut, vvch) 
@@ -3467,7 +3473,6 @@ UniValue acceptfeedback(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
 	if (wtxIn == NULL)
 		throw runtime_error("This offer accept is not in your wallet");
-	offer = COffer(tx);
 	if(!offer.accept.feedback.IsNull() && vchFeedback.size() <= 0)
 		throw runtime_error("Feedback reply cannot be empty");
 
@@ -3914,8 +3919,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				COffer theOffer;
 				if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, theOffer, theOfferAccept, acceptTx))
 					continue;
-				if(theOfferAccept.vchAcceptRand != vchAcceptRand)
-					continue;
+
 				string offer = stringFromVch(vchOffer);
 				string sHeight = strprintf("%llu", theOfferAccept.nHeight);
 				vector<COffer> vtxPos;
@@ -4096,9 +4100,6 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 			if (!GetTxOfOfferAccept(theEscrow.vchOffer, theEscrow.vchOfferAcceptLink, theOffer, theOfferAccept, acceptTx))
 				continue;
 
-			// check for existence of offeraccept in txn offer obj
-			if(theOfferAccept.vchAcceptRand != theEscrow.vchOfferAcceptLink)
-				continue;	
  
             // decode txn, skip non-alias txns
             vector<vector<unsigned char> > offerVvch;
@@ -4553,13 +4554,13 @@ int GetNumberOfAccepts(const std::vector<COffer> &offerList) {
     }
     return count;
 }
-bool GetAcceptByHash(std::vector<COffer> &offerList, COfferAccept &ca) {
+bool GetAcceptByHash(std::vector<COffer> &offerList, COfferAccept &ca, bool skipFeedback) {
 	if(offerList.empty())
 		return false;
 	for(std::vector<COffer>::reverse_iterator it = offerList.rbegin(); it != offerList.rend(); ++it) {
 		const COffer& myoffer = *it;
 		// skip null states or ones with feedback (these aren't considered normal accepts)
-		if(myoffer.accept.IsNull() || !myoffer.accept.feedback.IsNull())
+		if(myoffer.accept.IsNull() || (skipFeedback && !myoffer.accept.feedback.IsNull()))
 			continue;
         if(myoffer.accept.vchAcceptRand == ca.vchAcceptRand) {
             ca = myoffer.accept;
