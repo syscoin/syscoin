@@ -999,7 +999,7 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 				const UniValue &arraySellerFeedbackValue = arraySellerFeedbackObject.get_array();
 				for(int j=0;j<arraySellerFeedbackValue.size();j++)
 				{
-					const UniValue &arraySellerFeedbackValue = arraySellerFeedbackValue[i].get_obj();
+					const UniValue &arraySellerFeedbackValue = arraySellerFeedbackValue[j].get_obj();
 					const string &acceptFeedbackTxid = find_value(arraySellerFeedbackValue, "txid").get_str();
 					if(acceptFeedbackTxid == accepttxid)
 					{
