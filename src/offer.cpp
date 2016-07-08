@@ -3524,7 +3524,12 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	scriptPubKeySellerDestination= GetScriptForDestination(sellerKey.GetID());
 	vector<CRecipient> vecSend;
 	CRecipient recipientBuyer, recipientSeller;
-
+	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vvch[0] << vvch[1] << vvch[2] << vvch[3] << OP_2DROP << OP_2DROP << OP_DROP;
+	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+	scriptPubKeySeller << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vvch[0] << vvch[1] << vvch[2] << vvch[3] << OP_2DROP << OP_2DROP << OP_DROP;
+	scriptPubKeySeller += scriptPubKeySellerDestination;
+	CreateRecipient(scriptPubKeySeller, recipientSeller);
 	// buyer
 	if(foundBuyerKey)
 	{
@@ -3533,10 +3538,6 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 		sellerFeedback.nRating = nRating;
 		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
 		offer.accept.feedback = sellerFeedback;
-		scriptPubKeySeller << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vvch[0] << vvch[1] << vvch[2] << vvch[3] << OP_2DROP << OP_2DROP << OP_DROP;
-		scriptPubKeySeller += scriptPubKeySellerDestination;
-
-		CreateRecipient(scriptPubKeySeller, recipientSeller);
 		vecSend.push_back(recipientSeller);
 
 	}
@@ -3548,10 +3549,6 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 		buyerFeedback.nRating = nRating;
 		buyerFeedback.nHeight = chainActive.Tip()->nHeight;
 		offer.accept.feedback = buyerFeedback;	
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vvch[0] << vvch[1] << vvch[2] << vvch[3] << OP_2DROP << OP_2DROP << OP_DROP;
-		scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
-
-		CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 		vecSend.push_back(recipientBuyer);
 
 	}
