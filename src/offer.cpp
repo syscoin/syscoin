@@ -3436,20 +3436,16 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	int nRating = 0;
 	vector<unsigned char> vchOffer = vchFromValue(params[0]);
 	vector<unsigned char> vchAcceptRand = vchFromValue(params[1]);
-	vector<unsigned char> vchFeedback;
-	if(params.size() > 1)
-		vchFeedback = vchFromValue(params[1]);
-	if(params.size() > 2)
-	{
-		try {
-			nRating = atoi(params[2].get_str());
-			if(nRating < 0 || nRating > 5)
-				throw runtime_error("invalid rating value, must be less than or equal to 5 and greater than or equal to 0");
+	vector<unsigned char> vchFeedback = vchFromValue(params[2]);
+	try {
+		nRating = atoi(params[3].get_str());
+		if(nRating < 0 || nRating > 5)
+			throw runtime_error("invalid rating value, must be less than or equal to 5 and greater than or equal to 0");
 
-		} catch (std::exception &e) {
-			throw runtime_error("invalid rating value");
-		}
+	} catch (std::exception &e) {
+		throw runtime_error("invalid rating value");
 	}
+	
 	
     // this is a syscoin transaction
     CWalletTx wtx;
