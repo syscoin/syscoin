@@ -3468,10 +3468,10 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
 	if (wtxIn == NULL)
 		throw runtime_error("This offer accept is not in your wallet");
-	if(!offer.accept.feedback.IsNull() && vchFeedback.size() <= 0)
+	if(!theOfferAccept.feedback.IsNull() && vchFeedback.size() <= 0)
 		throw runtime_error("Feedback reply cannot be empty");
 
-	CPubKey buyerKey(offer.accept.vchBuyerKey);
+	CPubKey buyerKey(theOfferAccept.vchBuyerKey);
 	CSyscoinAddress buyerAddress(buyerKey.GetID());
 	if(!buyerAddress.IsValid())
 		throw runtime_error("Buyer address is invalid!");
@@ -3515,9 +3515,8 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	if (ExistsInMempool(vvch[0], OP_OFFER_ACCEPT)) {
 		throw runtime_error("there are pending operations on that offer");
 	}
-	COfferAccept txAccept = offer.accept;
 	offer.ClearOffer();
-	offer.accept = txAccept;
+	offer.accept = theOfferAccept;
 
 
 	CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyBuyerDestination, scriptPubKeySellerDestination;
