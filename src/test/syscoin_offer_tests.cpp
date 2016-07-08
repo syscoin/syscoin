@@ -374,7 +374,7 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	string acceptTxid = arr[0].get_str();
 
 	GenerateBlocks(10, "node1");
-	r = FindOfferAcceptFeedback("node1", offerguid, acceptguid, acceptTxid);
+	r = FindOfferAcceptFeedback("node1", offerguid, acceptguid, acceptTxid, true);
 	// ensure this feedback is not found because its over the limit
 	BOOST_CHECK(r.isNull());
 
@@ -384,7 +384,7 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	string acceptTxid = arr[0].get_str();
 
 	GenerateBlocks(10, "node2");
-	r = FindOfferAcceptFeedback("node2", offerguid, acceptguid, acceptTxid);
+	r = FindOfferAcceptFeedback("node2", offerguid, acceptguid, acceptTxid, true);
 	// ensure this feedback is not found because its over the limit
 	BOOST_CHECK(r.isNull());
 
