@@ -3515,7 +3515,9 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	if (ExistsInMempool(vvch[0], OP_OFFER_ACCEPT)) {
 		throw runtime_error("there are pending operations on that offer");
 	}
+	COfferAccept txAccept = offer.accept;
 	offer.ClearOffer();
+	theOffer.accept = txAccept;
 
 
 	CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyBuyerDestination, scriptPubKeySellerDestination;
