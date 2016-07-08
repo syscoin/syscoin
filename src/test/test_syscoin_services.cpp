@@ -965,7 +965,7 @@ const UniValue FindOfferAccept(const string& node, const string& offerguid, cons
 		BOOST_CHECK(!ret.isNull());
 	return ret;
 }
-const UniValue FindOfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid,const string& accepttxid)
+const UniValue FindOfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid,const string& accepttxid, bool nocheck)
 {
 	UniValue r, ret;
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
@@ -1012,8 +1012,8 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 		}
 
 	}
-
-	BOOST_CHECK(!ret.isNull());
+	if(!nocheck)
+		BOOST_CHECK(!ret.isNull());
 	return ret;
 }
 const UniValue FindOfferLinkedAccept(const string& node, const string& offerguid, const string& acceptguid)

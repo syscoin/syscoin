@@ -345,12 +345,49 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	string acceptguid = OfferAccept("node1", "node2", "buyeraliasfeedback", offerguid, "1", "message");
 	// seller must leave feedback first
 	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller", "1", ACCEPTSELLER, true);
+	// seller can't leave feedback twice in a row
+	string offerfeedbackstr = "offeracceptfeedback " + offerguid + " " + acceptguid + " testfeedback 1";
+	BOOST_CHECK_THROW(CallRPC("node1", offerfeedbackstr), runtime_error);
+
 	// then buyer can leave feedback
 	OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer", "5", ACCEPTBUYER, true);
-	// seller can reply but no rate
-	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller1", "2", ACCEPTSELLER, false);
-	// buyer can reply but no rate
-	OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer1", "3", ACCEPTBUYER, false);
+	// buyer can't leave feedback twice in a row
+	BOOST_CHECK_THROW(CallRPC("node2", offerfeedbackstr), runtime_error);
+
+	// create up to 10 replies each
+	for(int i =0;i<8;i++)
+	{
+		// keep alive
+		AliasUpdate("node1", "selleraliasfeedback", "changeddata2", "privdata2");
+		AliasUpdate("node2", "buyeraliasfeedback", "changeddata2", "privdata2");
+
+		// seller can reply but no rate
+		OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller1", "2", ACCEPTSELLER, false);
+		// buyer can reply but no rate
+		OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer1", "3", ACCEPTBUYER, false);
+	}
+
+	// now you can't leave any more feedback
+	// seller
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", offerfeedbackstr));
+	const UniValue &arr = r.get_array();
+	string acceptTxid = arr[0].get_str();
+
+	GenerateBlocks(10, "node1");
+	r = FindOfferAcceptFeedback("node1", offerguid, acceptguid, acceptTxid);
+	// ensure this feedback is not found because its over the limit
+	BOOST_CHECK(r.isNull());
+
+	// buyer
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", offerfeedbackstr));
+	const UniValue &arr = r.get_array();
+	string acceptTxid = arr[0].get_str();
+
+	GenerateBlocks(10, "node2");
+	r = FindOfferAcceptFeedback("node2", offerguid, acceptguid, acceptTxid);
+	// ensure this feedback is not found because its over the limit
+	BOOST_CHECK(r.isNull());
+
 }
 BOOST_AUTO_TEST_CASE (generate_offerexpired)
 {
