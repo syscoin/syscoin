@@ -380,8 +380,8 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 
 	// buyer
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", offerfeedbackstr));
-	const UniValue &arr = r.get_array();
-	string acceptTxid = arr[0].get_str();
+	const UniValue &arr1 = r.get_array();
+	acceptTxid = arr1[0].get_str();
 
 	GenerateBlocks(10, "node2");
 	r = FindOfferAcceptFeedback("node2", offerguid, acceptguid, acceptTxid, true);
