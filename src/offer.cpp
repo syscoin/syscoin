@@ -3517,7 +3517,7 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	}
 	COfferAccept txAccept = offer.accept;
 	offer.ClearOffer();
-	theOffer.accept = txAccept;
+	offer.accept = txAccept;
 
 
 	CScript scriptPubKeyBuyer, scriptPubKeySeller,scriptPubKeyBuyerDestination, scriptPubKeySellerDestination;
