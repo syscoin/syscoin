@@ -1106,7 +1106,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				// has this user (nFeedbackUser) already left feedback (ACCEPTBUYER/ACCEPTSELLER) by checking offer history of tx's (vtxPos)
 				if(feedbackCount > 0)
 					theOfferAccept.feedback.nRating = 0;
-				if(feedbackCount > 10 && !theOfferAccept.feedback.IsNull())
+				if(feedbackCount >= 10)
 				{
 					if(fDebug)
 						LogPrintf( "CheckOfferInputs() : Cannot exceed 10 feedback entries for this user of this offer accept");

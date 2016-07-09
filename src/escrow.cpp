@@ -646,17 +646,17 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							theEscrow.sellerFeedback.nRating = 0;
 						if(arbiterFeedbackCount > 0)
 							theEscrow.arbiterFeedback.nRating = 0;
-						if(buyerFeedbackCount > 10 && !serializedEscrow.buyerFeedback.IsNull())
+						if(buyerFeedbackCount >= 10 && !serializedEscrow.buyerFeedback.IsNull())
 						{
 							LogPrintf( "CheckEscrowInputs() : Buyer cannot exceed 10 feedback entries for this escrow");
 							return true;
 						}
-						if(sellerFeedbackCount > 10 && !serializedEscrow.sellerFeedback.IsNull())
+						if(sellerFeedbackCount >= 10 && !serializedEscrow.sellerFeedback.IsNull())
 						{
 							LogPrintf( "CheckEscrowInputs() : Seller cannot exceed 10 feedback entries for this escrow");
 							return true;
 						}
-						if(arbiterFeedbackCount > 10 && !serializedEscrow.arbiterFeedback.IsNull())
+						if(arbiterFeedbackCount >= 10 && !serializedEscrow.arbiterFeedback.IsNull())
 						{
 							LogPrintf( "CheckEscrowInputs() : Arbiter cannot exceed 10 feedback entries for this escrow");
 							return true;
