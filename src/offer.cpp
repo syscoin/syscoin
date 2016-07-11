@@ -1112,7 +1112,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						LogPrintf( "CheckOfferInputs() : Cannot exceed 10 feedback entries for this user of this offer accept");
 					return true;
 				}
-				HandleAcceptFeedback(theOfferAccept);	
+				HandleAcceptFeedback(theOfferAccept, theOffer);	
 			
 			}
 			else
@@ -3367,11 +3367,15 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	res.push_back(stringFromVch(vchAccept));
 	return res;
 }
-void HandleAcceptFeedback(const COfferAccept& accept)
+void HandleAcceptFeedback(const COfferAccept& accept, const COffer& offer)
 {
 	if(accept.feedback.nRating > 0)
 	{
-		CPubKey key(accept.vchBuyerKey);
+		CPubKey key;
+		if(accept.feedback.nFeedbackUser == ACCEPTBUYER)
+			key = CPubKey(accept.vchBuyerKey);
+		else if(accept.feedback.nFeedbackUser == ACCEPTSELLER)
+			key = CPubKey(offer.vchPubKey);
 		CSyscoinAddress address(key.GetID());
 		address = CSyscoinAddress(address.ToString());
 		if(address.IsValid() && address.isAlias)
@@ -3533,7 +3537,7 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	// buyer
 	if(foundBuyerKey)
 	{
-		CAcceptFeedback sellerFeedback(ACCEPTBUYER);
+		CAcceptFeedback sellerFeedback(ACCEPTSELLER);
 		sellerFeedback.vchFeedback = vchFeedback;
 		sellerFeedback.nRating = nRating;
 		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
@@ -3544,7 +3548,7 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	// seller
 	else if(foundSellerKey)
 	{
-		CAcceptFeedback buyerFeedback(ACCEPTSELLER);
+		CAcceptFeedback buyerFeedback(ACCEPTBUYER);
 		buyerFeedback.vchFeedback = vchFeedback;
 		buyerFeedback.nRating = nRating;
 		buyerFeedback.nHeight = chainActive.Tip()->nHeight;

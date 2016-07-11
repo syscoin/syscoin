@@ -101,6 +101,13 @@
       </widget>
      </item>
      <item>
+      <widget class="QPushButton" name="feedbackButton">
+       <property name="text">
+        <string>Leave Feedback</string>
+       </property>
+      </widget>
+     </item>
+     <item>
       <spacer name="horizontalSpacer">
        <property name="orientation">
         <enum>Qt::Horizontal</enum>
