@@ -12,16 +12,16 @@
 using namespace std;
 
 extern const CRPCTable tableRPC;
-OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offer, const QString &accept, QWidget *parent) :
+OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offerStr, const QString &acceptStr, QWidget *parent) :
     QDialog(parent),
 	walletModel(model),
-    ui(new Ui::OfferFeedbackDialog), offer(offer), acceptGUID(accept)
+    ui(new Ui::OfferFeedbackDialog), offer(offerStr), acceptGUID(acceptStr)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
 	ui->aboutFeedback->setPixmap(QPixmap(":/images/" + theme + "/about_horizontal"));
 	QString buyer, seller, currency, offertitle, total, systotal;
-	if(!lookup(offer, accept, buyer, seller, offertitle, currency, total, systotal))
+	if(!lookup(offerStr, acceptStr, buyer, seller, offertitle, currency, total, systotal))
 	{
 		ui->manageInfo2->setText(tr("Cannot find this offer accept on the network, please try again later."));
 		ui->feedbackButton->setEnabled(false);
