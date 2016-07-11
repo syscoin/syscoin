@@ -990,7 +990,7 @@ UniValue certlist(const UniValue& params, bool fHelp) {
 		}
 		nHeight = cert.nHeight;
 		// get last active name only
-		if (vNamesI.find(vchName) != vNamesI.end() && (nHeight < vNamesI[vchName] || vNamesI[vchName] < 0))
+		if (vNamesI.find(vchName) != vNamesI.end() && (nHeight <= vNamesI[vchName] || vNamesI[vchName] < 0))
 			continue;
 
 		

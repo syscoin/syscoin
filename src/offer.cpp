@@ -3925,7 +3925,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, theOffer, theOfferAccept, acceptTx))
 					continue;
 				// get last active accepts only
-				if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight < vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
+				if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight <= vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
 					continue;	
 				string offer = stringFromVch(vchOffer);
 				string sHeight = strprintf("%llu", theOfferAccept.nHeight);
@@ -4122,7 +4122,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 			const vector<unsigned char> &vchAcceptRand = offerVvch[1];
 			const vector<unsigned char> &vchMessage = offerVvch[2];
 			// get last active accepts only
-			if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight < vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
+			if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight <= vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
 				continue;		
 			string offer = stringFromVch(theEscrow.vchOffer);
 			string sHeight = strprintf("%llu", theOfferAccept.nHeight);
@@ -4309,7 +4309,7 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 				}
 			}	
 			// get last active name only
-			if (vNamesI.find(vchName) != vNamesI.end() && (theOfferA.nHeight < vNamesI[vchName] || vNamesI[vchName] < 0))
+			if (vNamesI.find(vchName) != vNamesI.end() && (theOfferA.nHeight <= vNamesI[vchName] || vNamesI[vchName] < 0))
 				continue;	
 			nHeight = theOfferA.nHeight;
             // build the output UniValue

@@ -2570,7 +2570,7 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
 		if (vchNameUniq.size() > 0 && vchNameUniq != vchName)
 			continue;
 		// get last active name only
-		if (vNamesI.find(vchName) != vNamesI.end() && (escrow.nHeight < vNamesI[vchName] || vNamesI[vchName] < 0))
+		if (vNamesI.find(vchName) != vNamesI.end() && (escrow.nHeight <= vNamesI[vchName] || vNamesI[vchName] < 0))
 			continue;
 
 		nHeight = escrow.nHeight;
