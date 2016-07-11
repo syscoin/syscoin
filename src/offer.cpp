@@ -3647,7 +3647,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		if(op != OP_OFFER_ACCEPT)
 			continue;
 		// get buyers alias
-		CPubKey BuyerPubKey(ca.vchBuyerPubKey);
+		CPubKey BuyerPubKey(ca.vchBuyerKey);
 		CSyscoinAddress buyeraddy(BuyerPubKey.GetID());
 		buyeraddy = CSyscoinAddress(buyeraddy.ToString());
 
