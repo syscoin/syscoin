@@ -20,6 +20,7 @@ public:
 		None
     };
     explicit OfferFeedbackDialog(WalletModel* model, const QString &escrow, QWidget *parent = 0);
+    ~OfferFeedbackDialog();
 public Q_SLOTS:
 	void on_feedbackButton_clicked();
 	void on_cancelButton_clicked();
