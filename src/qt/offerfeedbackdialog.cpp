@@ -23,7 +23,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	ui->primaryLabel->setVisible(false);
 	ui->primaryRating->setVisible(false);
 	ui->primaryFeedback->setVisible(false);
-	if(!lookup(buyer, seller, currency, total, systotal))
+	if(!lookup(buyer, seller, offertitle, currency, total, systotal))
 	{
 		ui->manageInfo2->setText(tr("Cannot find this offer accept on the network, please try again later."));
 		ui->feedbackButton->setEnabled(false);
