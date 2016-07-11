@@ -74,10 +74,14 @@ bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offer
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
 				total = QString::fromStdString(find_value(acceptObj, "total").get_str());
 				systotal = QString::fromStdString(find_value(acceptObj, "systotal").get_str());
-				return true;
+				break;
 			}
-
+			if(offerAcceptHash != acceptGUID)
+			{
+				return false;
+			}
 			offertitle = QString::fromStdString(find_value(result.get_obj(), "title").get_str());
+			return true;
 		}
 		 
 
