@@ -20,13 +20,13 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	QString theme = GUIUtil::getThemeName();  
 	ui->aboutFeedback->setPixmap(QPixmap(":/images/" + theme + "/about_horizontal"));
 	QString buyer, seller, currency, offertitle, total, systotal;
-	ui->primaryLabel->setVisible(false);
-	ui->primaryRating->setVisible(false);
-	ui->primaryFeedback->setVisible(false);
 	if(!lookup(buyer, seller, offertitle, currency, total, systotal))
 	{
 		ui->manageInfo2->setText(tr("Cannot find this offer accept on the network, please try again later."));
 		ui->feedbackButton->setEnabled(false);
+		ui->primaryLabel->setVisible(false);
+		ui->primaryRating->setVisible(false);
+		ui->primaryFeedback->setVisible(false);
 		return;
 	}
 	OfferType offerType = findYourOfferRoleFromAliases(buyer, seller);
@@ -35,6 +35,9 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	{
 		ui->manageInfo2->setText(tr("You cannot leave feedback this offer accept because you do not own either the buyer, or merchant aliases."));
 		ui->feedbackButton->setEnabled(false);
+		ui->primaryLabel->setVisible(false);
+		ui->primaryRating->setVisible(false);
+		ui->primaryFeedback->setVisible(false);
 	}
 	if(offerType == Buyer)
 	{
