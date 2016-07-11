@@ -8,6 +8,7 @@
 #include <QMessageBox>
 #include "rpcserver.h"
 #include "walletmodel.h"
+#include <QDebug>
 using namespace std;
 
 extern const CRPCTable tableRPC;
@@ -64,6 +65,7 @@ bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offer
 			UniValue offerAcceptsValue = find_value(result.get_obj(), "accepts");
 			if(offerAcceptsValue.type() != UniValue::VARR)
 				return false;
+			 qDebug() << "accepts found";
 			seller = QString::fromStdString(find_value(result.get_obj(), "alias").get_str());
 			QString offerAcceptHash;
 			const UniValue &offerAccepts = offerAcceptsValue.get_array();
@@ -73,16 +75,21 @@ bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offer
 				offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
 				if(offerAcceptHash != acceptGUID)
 					continue;
-
+				 qDebug() << "accept found!";
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
+				 qDebug() << "currency";
 				total = QString::fromStdString(find_value(acceptObj, "total").get_str());
+				qDebug() << "total";
 				systotal = QString::number(find_value(acceptObj.get_obj(), "systotal").get_real());
+				qDebug() << "systotal";
 				break;
 			}
+			qDebug() << "check equal";
 			if(offerAcceptHash != acceptGUID)
 			{
 				return false;
 			}
+			qDebug() << "title";
 			offertitle = QString::fromStdString(find_value(result.get_obj(), "title").get_str());
 			return true;
 		}
