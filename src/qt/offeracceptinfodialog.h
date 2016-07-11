@@ -3,6 +3,7 @@
 #include <QDialog>
 class PlatformStyle;
 class QDataWidgetMapper;
+class UniValue;
 namespace Ui {
     class OfferAcceptInfoDialog;
 }
