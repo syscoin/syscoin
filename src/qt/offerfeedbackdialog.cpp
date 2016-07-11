@@ -33,7 +33,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	ui->manageInfo->setText(tr("This offer payment was for Offer ID: <b>%1</b> for <b>%2</b> totaling <b>%3 %4 (%5 SYS)</b>. The buyer is <b>%6</b>, merchant is <b>%7</b>").arg(offer).arg(offertitle).arg(total).arg(currency).arg(systotal).arg(buyer).arg(seller));
 	if(offerType == None)
 	{
-		ui->manageInfo2->setText(tr("You cannot leave feedback this offer accept because you do not own either the buyer, or merchant aliases."));
+		ui->manageInfo2->setText(tr("You cannot leave feedback this offer accept because you do not own either the buyer or merchant aliases."));
 		ui->feedbackButton->setEnabled(false);
 		ui->primaryLabel->setVisible(false);
 		ui->primaryRating->setVisible(false);
@@ -41,10 +41,12 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	}
 	if(offerType == Buyer)
 	{
+		ui->primaryLabel->setText("Choose a rating for the merchant (1-5) or leave at 0 for no rating. Below please give feedback to the merchant.");
 		ui->manageInfo2->setText(tr("You are the <b>buyer</b> of this offer, you may release the feedback for the merchant once you have confirmed that you have recieved the item as per the description of the offer."));
 	}
 	else if(offerType == Seller)
 	{
+		ui->primaryLabel->setText("Choose a rating for the buyer (1-5) or leave at 0 for no rating. Below please give feedback to the buyer.");
 		ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow, you may leave feedback for the buyer once you confirmed you have recieved full payment from buyer and you have ship the goods (if its for a physical good)."));
 	}
 }
@@ -73,6 +75,7 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid
 				offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
 				if(offerAcceptHash != acceptGuid)
 					continue;
+				buyer = QString::fromStdString(find_value(acceptObj, "buyer").get_str());
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
 				total = QString::fromStdString(find_value(acceptObj, "total").get_str());
 				systotal = QString::number(find_value(acceptObj.get_obj(), "systotal").get_real());
@@ -169,13 +172,13 @@ bool OfferFeedbackDialog::isYourAlias(const QString &alias)
 	{
 		string strError = find_value(objError, "message").get_str();
 		QMessageBox::critical(this, windowTitle(),
-			tr("Could find your alias: %1").arg(QString::fromStdString(strError)),
+			tr("Could find alias: %1").arg(QString::fromStdString(strError)),
 				QMessageBox::Ok, QMessageBox::Ok);
 	}
 	catch(std::exception& e)
 	{
 		QMessageBox::critical(this, windowTitle(),
-			tr("There was an exception trying to refresh the cert list: ") + QString::fromStdString(e.what()),
+			tr("There was an exception trying to refresh get alias: ") + QString::fromStdString(e.what()),
 				QMessageBox::Ok, QMessageBox::Ok);
 	}   
 	return false;
