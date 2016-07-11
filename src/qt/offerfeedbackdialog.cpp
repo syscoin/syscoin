@@ -74,11 +74,10 @@ bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offer
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
 				total = QString::fromStdString(find_value(acceptObj, "total").get_str());
 				systotal = QString::fromStdString(find_value(acceptObj, "systotal").get_str());
-				
+				return true;
 			}
 
 			offertitle = QString::fromStdString(find_value(result.get_obj(), "title").get_str());
-			return true;
 		}
 		 
 
@@ -147,8 +146,6 @@ bool OfferFeedbackDialog::isYourAlias(const QString &alias)
 	string strMethod = string("aliasinfo");
     UniValue params(UniValue::VARR); 
 	UniValue result ;
-	string name_str;
-	int expired = 0;
 	params.push_back(alias.toStdString());	
 	try {
 		result = tableRPC.execute(strMethod, params);
@@ -166,7 +163,7 @@ bool OfferFeedbackDialog::isYourAlias(const QString &alias)
 	{
 		string strError = find_value(objError, "message").get_str();
 		QMessageBox::critical(this, windowTitle(),
-			tr("Could not refresh cert list: %1").arg(QString::fromStdString(strError)),
+			tr("Could find your alias: %1").arg(QString::fromStdString(strError)),
 				QMessageBox::Ok, QMessageBox::Ok);
 	}
 	catch(std::exception& e)
