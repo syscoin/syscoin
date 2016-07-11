@@ -11,6 +11,12 @@
 #include <QModelIndex>
 #include <QDateTime>
 #include <QDataWidgetMapper>
+#include <QLineEdit>
+#include <QTextEdit>
+#include <QGroupBox>
+#include <QLabel>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
 #include "rpcserver.h"
 using namespace std;
 
