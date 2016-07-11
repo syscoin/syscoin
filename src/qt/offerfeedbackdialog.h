@@ -28,7 +28,7 @@ private:
 	QString offer;
 	QString acceptGUID;
 	bool isYourAlias(const QString &alias);
-	bool lookup(QString &buyer,QString &seller,QString &offertitle,QString &currency,QString &total,QString &systotal);
+	bool lookup(const QString &offer, const QString &accept, QString &buyer,QString &seller,QString &offertitle,QString &currency,QString &total,QString &systotal);
 	OfferFeedbackDialog::OfferType findYourOfferRoleFromAliases(const QString &buyer, const QString &seller);
 	WalletModel* walletModel;
     Ui::OfferFeedbackDialog *ui;

@@ -21,7 +21,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	QString theme = GUIUtil::getThemeName();  
 	ui->aboutFeedback->setPixmap(QPixmap(":/images/" + theme + "/about_horizontal"));
 	QString buyer, seller, currency, offertitle, total, systotal;
-	if(!lookup(buyer, seller, offertitle, currency, total, systotal))
+	if(!lookup(offer, accept, buyer, seller, offertitle, currency, total, systotal))
 	{
 		ui->manageInfo2->setText(tr("Cannot find this offer accept on the network, please try again later."));
 		ui->feedbackButton->setEnabled(false);
@@ -49,7 +49,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 		ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow, you may leave feedback for the buyer once you confirmed you have recieved full payment from buyer and you have ship the goods (if its for a physical good)."));
 	}
 }
-bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offertitle, QString &currency, QString &total, QString &systotal)
+bool OfferFeedbackDialog::lookup(const QString &offer, const QString &accept, QString &buyer, QString &seller, QString &offertitle, QString &currency, QString &total, QString &systotal)
 {
 	string strError;
 	string strMethod = string("offerinfo");
@@ -70,10 +70,11 @@ bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offer
 			QString offerAcceptHash;
 			const UniValue &offerAccepts = offerAcceptsValue.get_array();
 		    for (unsigned int idx = 0; idx < offerAccepts.size(); idx++) {
+				 qDebug() << "accept!";
 			    const UniValue& accept = offerAccepts[idx];				
 				const UniValue& acceptObj = accept.get_obj();
 				offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
-				if(offerAcceptHash != acceptGUID)
+				if(offerAcceptHash != accept)
 					continue;
 				 qDebug() << "accept found!";
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
@@ -85,7 +86,7 @@ bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offer
 				break;
 			}
 			qDebug() << "check equal";
-			if(offerAcceptHash != acceptGUID)
+			if(offerAcceptHash != accept)
 			{
 				return false;
 			}
