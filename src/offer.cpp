@@ -3882,6 +3882,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
     if (params.size() == 1)
         vchOfferToFind = vchFromValue(params[0]);	
 	vector<unsigned char> vchEscrow;	
+    map< vector<unsigned char>, int > vNamesI;
     UniValue oRes(UniValue::VARR);
     {
 
@@ -3923,7 +3924,9 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				COffer theOffer;
 				if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, theOffer, theOfferAccept, acceptTx))
 					continue;
-
+				// get last active accepts only
+				if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight < vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
+					continue;	
 				string offer = stringFromVch(vchOffer);
 				string sHeight = strprintf("%llu", theOfferAccept.nHeight);
 				vector<COffer> vtxPos;
@@ -4072,9 +4075,10 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				float totalAvgRating = roundf((avgSellerRating+avgBuyerRating)/(float)ratingCount);
 				oOfferAccept.push_back(Pair("avg_rating", (int)totalAvgRating));	
 				oRes.push_back(oOfferAccept);
+				vNamesI[vchAcceptRand] = theOfferAccept.nHeight;
 			}
         }
-
+		vNamesI.clear();
        BOOST_FOREACH(PAIRTYPE(const uint256, CWalletTx)& item, pwalletMain->mapWallet)
         {
 			UniValue oOfferAccept(UniValue::VOBJ);
@@ -4117,7 +4121,9 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				continue;
 			const vector<unsigned char> &vchAcceptRand = offerVvch[1];
 			const vector<unsigned char> &vchMessage = offerVvch[2];
-	
+			// get last active accepts only
+			if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight < vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
+				continue;		
 			string offer = stringFromVch(theEscrow.vchOffer);
 			string sHeight = strprintf("%llu", theOfferAccept.nHeight);
 			oOfferAccept.push_back(Pair("offer", offer));
@@ -4209,7 +4215,8 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 			if(!DecryptMessage(theOffer.vchPubKey, vchMessage, strMessage))
 				strMessage = string("Encrypted for owner of offer");
 			oOfferAccept.push_back(Pair("pay_message", strMessage));
-			oRes.push_back(oOfferAccept);	
+			oRes.push_back(oOfferAccept);
+			vNamesI[vchAcceptRand] = theOfferAccept.nHeight;
         }
     }
 
