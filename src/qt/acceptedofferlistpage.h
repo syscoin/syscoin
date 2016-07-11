@@ -60,6 +60,7 @@ private Q_SLOTS:
     void on_exportButton_clicked();
 	void on_refreshButton_clicked();
 	void on_messageButton_clicked();
+	void on_feedbackButton_clicked();
     /** Set button states based on selected tab and selection */
     void selectionChanged();
     /** Spawn contextual menu (right mouse menu) for cert book entry */

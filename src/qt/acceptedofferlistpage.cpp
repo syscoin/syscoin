@@ -6,6 +6,7 @@
 #include "offeraccepttablemodel.h"
 #include "offeracceptinfodialog.h"
 #include "newmessagedialog.h"
+#include "offerfeedbackdialog.h"
 #include "clientmodel.h"
 #include "optionsmodel.h"
 #include "walletmodel.h"
@@ -60,7 +61,8 @@ AcceptedOfferListPage::AcceptedOfferListPage(const PlatformStyle *platformStyle,
     QAction *copyOfferAction = new QAction(ui->copyOffer->text(), this);
     QAction *copyOfferValueAction = new QAction(tr("&Copy OfferAccept ID"), this);
 	QAction *detailsAction = new QAction(tr("&Details"), this);
-	QAction *messageAction = new QAction(tr("&Message Seller"), this);
+	QAction *messageAction = new QAction(tr("&Message Merchant"), this);
+	QAction *feedbackAction = new QAction(tr("&Leave Feedback For Merchant"), this);
 
     // Build context menu
     contextMenu = new QMenu();
@@ -69,11 +71,13 @@ AcceptedOfferListPage::AcceptedOfferListPage(const PlatformStyle *platformStyle,
 	contextMenu->addSeparator();
 	contextMenu->addAction(detailsAction);
 	contextMenu->addAction(messageAction);
+	contextMenu->addAction(feedbackAction);
     // Connect signals for context menu actions
     connect(copyOfferAction, SIGNAL(triggered()), this, SLOT(on_copyOffer_clicked()));
     connect(copyOfferValueAction, SIGNAL(triggered()), this, SLOT(onCopyOfferValueAction()));
 	connect(detailsAction, SIGNAL(triggered()), this, SLOT(on_detailButton_clicked()));
 	connect(messageAction, SIGNAL(triggered()), this, SLOT(on_messageButton_clicked()));
+	connect(feedbackAction, SIGNAL(triggered()), this, SLOT(on_feedbackButton_clicked()));
 
     connect(ui->tableView, SIGNAL(customContextMenuRequested(QPoint)), this, SLOT(contextualMenu(QPoint)));
 
@@ -167,6 +171,22 @@ void AcceptedOfferListPage::on_messageButton_clicked()
 	dlg.exec();
 
 
+}
+void AcceptedOfferListPage::on_feedbackButton_clicked()
+{
+ 	if(!model || !walletModel)	
+		return;
+	if(!ui->tableView->selectionModel())
+        return;
+    QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
+    if(selection.isEmpty())
+    {
+        return;
+    }
+	QString accept = selection.at(0).data(OfferAcceptTableModel::GUID).toString();
+	QString offer = selection.at(0).data(OfferAcceptTableModel::Name).toString();
+	OfferFeedbackDialog dlg(walletModel, offer, accept);   
+	dlg.exec();
 }
 void AcceptedOfferListPage::on_copyOffer_clicked()
 {
