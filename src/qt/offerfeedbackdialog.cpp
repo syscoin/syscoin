@@ -65,32 +65,28 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid
 			UniValue offerAcceptsValue = find_value(result.get_obj(), "accepts");
 			if(offerAcceptsValue.type() != UniValue::VARR)
 				return false;
-			 qDebug() << "accepts found";
 			seller = QString::fromStdString(find_value(result.get_obj(), "alias").get_str());
 			QString offerAcceptHash;
 			const UniValue &offerAccepts = offerAcceptsValue.get_array();
 		    for (unsigned int idx = 0; idx < offerAccepts.size(); idx++) {
-				 qDebug() << "accept!";
-			    const UniValue& accept = offerAccepts[idx];				
+				 qDebug() << "accept1";
+			    const UniValue& accept = offerAccepts[idx];		
+				 qDebug() << "accept2";
 				const UniValue& acceptObj = accept.get_obj();
+				 qDebug() << "accept3";
 				offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
+				 qDebug() << "offerAcceptHash " << offerAcceptHash << " vs acceptGuid " << acceptGuid;
 				if(offerAcceptHash != acceptGuid)
 					continue;
-				 qDebug() << "accept found!";
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
-				 qDebug() << "currency";
 				total = QString::fromStdString(find_value(acceptObj, "total").get_str());
-				qDebug() << "total";
 				systotal = QString::number(find_value(acceptObj.get_obj(), "systotal").get_real());
-				qDebug() << "systotal";
 				break;
 			}
-			qDebug() << "check equal";
 			if(offerAcceptHash != acceptGuid)
 			{
 				return false;
 			}
-			qDebug() << "title";
 			offertitle = QString::fromStdString(find_value(result.get_obj(), "title").get_str());
 			return true;
 		}
