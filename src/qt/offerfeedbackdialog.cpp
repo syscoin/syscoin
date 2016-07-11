@@ -49,7 +49,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 		ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow, you may leave feedback for the buyer once you confirmed you have recieved full payment from buyer and you have ship the goods (if its for a physical good)."));
 	}
 }
-bool OfferFeedbackDialog::lookup(const QString &offer, const QString &accept, QString &buyer, QString &seller, QString &offertitle, QString &currency, QString &total, QString &systotal)
+bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid, QString &buyer, QString &seller, QString &offertitle, QString &currency, QString &total, QString &systotal)
 {
 	string strError;
 	string strMethod = string("offerinfo");
@@ -74,7 +74,7 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &accept, QS
 			    const UniValue& accept = offerAccepts[idx];				
 				const UniValue& acceptObj = accept.get_obj();
 				offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
-				if(offerAcceptHash != accept)
+				if(offerAcceptHash != acceptGuid)
 					continue;
 				 qDebug() << "accept found!";
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
@@ -86,7 +86,7 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &accept, QS
 				break;
 			}
 			qDebug() << "check equal";
-			if(offerAcceptHash != accept)
+			if(offerAcceptHash != acceptGuid)
 			{
 				return false;
 			}
