@@ -62,12 +62,12 @@ bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offer
 			if(offerAcceptsValue.type() != UniValue::VARR)
 				return false;
 			seller = QString::fromStdString(find_value(result.get_obj(), "alias").get_str());
-		
+			QString offerAcceptHash;
 			const UniValue &offerAccepts = offerAcceptsValue.get_array();
 		    for (unsigned int idx = 0; idx < offerAccepts.size(); idx++) {
 			    const UniValue& accept = offerAccepts[idx];				
 				const UniValue& acceptObj = accept.get_obj();
-				QString offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
+				offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
 				if(offerAcceptHash != acceptGUID)
 					continue;
 
