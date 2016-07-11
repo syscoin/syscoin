@@ -14,7 +14,7 @@ extern const CRPCTable tableRPC;
 OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offer, const QString &accept, QWidget *parent) :
     QDialog(parent),
 	walletModel(model),
-    ui(new Ui::OfferFeedbackDialog), offer(offer), accept(accept)
+    ui(new Ui::OfferFeedbackDialog), offer(offer), acceptGUID(accept)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
@@ -30,7 +30,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 		return;
 	}
 	OfferType offerType = findYourEscrowRoleFromAliases(buyer, seller);
-	ui->manageInfo->setText(tr("This offer payment was for Offer ID: <b>%1</b> for <b>%2</b> totaling <b>%3 %4 (%5 SYS)</b>. The buyer is <b>%6</b>, merchant is <b>%7</b>").arg(escrow).arg(offertitle).arg(total).arg(currency).arg(systotal).arg(buyer).arg(seller));
+	ui->manageInfo->setText(tr("This offer payment was for Offer ID: <b>%1</b> for <b>%2</b> totaling <b>%3 %4 (%5 SYS)</b>. The buyer is <b>%6</b>, merchant is <b>%7</b>").arg(offer).arg(offertitle).arg(total).arg(currency).arg(systotal).arg(buyer).arg(seller));
 	if(offerType == None)
 	{
 		ui->manageInfo2->setText(tr("You cannot leave feedback this offer accept because you do not own either the buyer, or merchant aliases."));
@@ -70,7 +70,7 @@ bool OfferFeedbackDialog::lookup(const QString &buyer, const QString &seller, co
 			    const UniValue& accept = offerAccepts[idx];				
 				const UniValue& acceptObj = accept.get_obj();
 				QString offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
-				if(offerAcceptHash != accept)
+				if(offerAcceptHash != acceptGUID)
 					continue;
 
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
@@ -109,7 +109,7 @@ void OfferFeedbackDialog::on_feedbackButton_clicked()
 	UniValue params(UniValue::VARR);
 	string strMethod = string("offeracceptfeedback");
 	params.push_back(offer.toStdString());
-	params.push_back(accept.toStdString());
+	params.push_back(acceptGUID.toStdString());
 	params.push_back(ui->primaryFeedback->toPlainText().toStdString());
 	params.push_back(ui->primaryRating->cleanText().toStdString());
 	try {

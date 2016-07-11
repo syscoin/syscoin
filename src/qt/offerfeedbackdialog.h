@@ -26,7 +26,7 @@ public Q_SLOTS:
 	void on_cancelButton_clicked();
 private:
 	QString offer;
-	QString accept;
+	QString acceptGUID;
 	bool isYourAlias(const QString &alias);
 	bool lookup(const QString &buyer, const QString &seller, const QString &offertitle, const QString &currency, const QString &total, const QString &systotal);
 	OfferFeedbackDialog::OfferType findYourOfferRoleFromAliases(const QString &buyer, const QString &seller);
