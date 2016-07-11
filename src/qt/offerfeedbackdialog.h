@@ -19,7 +19,7 @@ public:
         Seller,
 		None
     };
-    explicit OfferFeedbackDialog(WalletModel* model, const QString &escrow, QWidget *parent = 0);
+    explicit OfferFeedbackDialog(WalletModel* model, const QString &offer, const QString &accept, QWidget *parent = 0);
     ~OfferFeedbackDialog();
 public Q_SLOTS:
 	void on_feedbackButton_clicked();
@@ -28,7 +28,7 @@ private:
 	QString offer;
 	QString acceptGUID;
 	bool isYourAlias(const QString &alias);
-	bool lookup(const QString &buyer, const QString &seller, const QString &offertitle, const QString &currency, const QString &total, const QString &systotal);
+	bool lookup(QString &buyer,QString &seller,QString &offertitle,QString &currency,QString &total,QString &systotal);
 	OfferFeedbackDialog::OfferType findYourOfferRoleFromAliases(const QString &buyer, const QString &seller);
 	WalletModel* walletModel;
     Ui::OfferFeedbackDialog *ui;

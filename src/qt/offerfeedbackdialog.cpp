@@ -45,7 +45,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 		ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow, you may leave feedback for the buyer once you confirmed you have recieved full payment from buyer and you have ship the goods (if its for a physical good)."));
 	}
 }
-bool OfferFeedbackDialog::lookup(const QString &buyer, const QString &seller, const QString &offertitle, const QString &currency, const QString &total, const QString &systotal)
+bool OfferFeedbackDialog::lookup(QString &buyer, QString &seller, QString &offertitle, QString &currency, QString &total, QString &systotal)
 {
 	string strError;
 	string strMethod = string("offerinfo");
@@ -64,8 +64,6 @@ bool OfferFeedbackDialog::lookup(const QString &buyer, const QString &seller, co
 			seller = QString::fromStdString(find_value(result.get_obj(), "alias").get_str());
 		
 			const UniValue &offerAccepts = offerAcceptsValue.get_array();
-			COfferAccept myAccept;
-			QDateTime timestamp;
 		    for (unsigned int idx = 0; idx < offerAccepts.size(); idx++) {
 			    const UniValue& accept = offerAccepts[idx];				
 				const UniValue& acceptObj = accept.get_obj();
@@ -74,7 +72,6 @@ bool OfferFeedbackDialog::lookup(const QString &buyer, const QString &seller, co
 					continue;
 
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());
-				ui->currencyEdit->setText(currencyStr);
 				total = QString::fromStdString(find_value(acceptObj, "total").get_str());
 				systotal = QString::fromStdString(find_value(acceptObj, "systotal").get_str());
 				
