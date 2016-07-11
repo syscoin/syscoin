@@ -8,7 +8,6 @@
 #include <QMessageBox>
 #include "rpcserver.h"
 #include "walletmodel.h"
-#include <QDebug>
 using namespace std;
 
 extern const CRPCTable tableRPC;
@@ -69,13 +68,9 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid
 			QString offerAcceptHash;
 			const UniValue &offerAccepts = offerAcceptsValue.get_array();
 		    for (unsigned int idx = 0; idx < offerAccepts.size(); idx++) {
-				 qDebug() << "accept1";
 			    const UniValue& accept = offerAccepts[idx];		
-				 qDebug() << "accept2";
 				const UniValue& acceptObj = accept.get_obj();
-				 qDebug() << "accept3";
 				offerAcceptHash = QString::fromStdString(find_value(acceptObj, "id").get_str());
-				 qDebug() << "offerAcceptHash " << offerAcceptHash << " vs acceptGuid " << acceptGuid;
 				if(offerAcceptHash != acceptGuid)
 					continue;
 				currency = QString::fromStdString(find_value(acceptObj, "currency").get_str());

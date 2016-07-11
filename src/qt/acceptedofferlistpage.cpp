@@ -183,8 +183,8 @@ void AcceptedOfferListPage::on_feedbackButton_clicked()
     {
         return;
     }
-	QString accept = selection.at(0).data(OfferAcceptTableModel::GUID).toString();
-	QString offer = selection.at(0).data(OfferAcceptTableModel::Name).toString();
+	QString offer = selection.at(0).data(OfferAcceptTableModel::NameRole).toString();
+	QString accept = selection.at(0).data(OfferAcceptTableModel::GUIDRole).toString();
 	OfferFeedbackDialog dlg(walletModel, offer, accept);   
 	dlg.exec();
 }
