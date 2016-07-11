@@ -20,6 +20,7 @@ public:
     ~OfferAcceptInfoDialog();
 private:
 	bool lookup();
+	void SetFeedbackUI(const UniValue &feedbackObj, const QString &userType, const QString& buyer, const QString& seller);
 private Q_SLOTS:
 	void on_okButton_clicked();
 private:

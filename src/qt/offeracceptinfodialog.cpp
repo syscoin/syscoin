@@ -58,6 +58,86 @@ void OfferAcceptInfoDialog::on_okButton_clicked()
     mapper->submit();
     accept();
 }
+void OfferAcceptInfoDialog::SetFeedbackUI(const UniValue &feedbackObj, const QString &userType, const QString& buyer, const QString& seller)
+{
+	if(feedbackObj.size() <= 0)
+	{
+		QLabel *noFeedback = new QLabel(tr("No Feedback Found"));
+		noFeedback->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+		if(userType == tr("Buyer"))
+			ui->buyerFeedbackLayout->addWidget(noFeedback);
+		else if(userType == tr("Seller"))
+			ui->sellerFeedbackLayout->addWidget(noFeedback);
+		return;
+	}
+	for(unsigned int i = 0;i<feedbackObj.size(); i++)
+	{
+		UniValue feedbackValue = feedbackObj[i].get_obj();
+		int rating =  find_value(feedbackValue, "rating").get_int();
+		int user =  find_value(feedbackValue, "feedbackuser").get_int();
+		string feedback =  find_value(feedbackValue, "feedback").get_str();
+		QString time =  QString::fromStdString(find_value(feedbackValue, "time").get_str());
+		QGroupBox *groupBox = new QGroupBox(tr("%1 Feedback #%2").arg(userType).arg(QString::number(i+1)));
+		QTextEdit *feedbackText;
+		if(feedback.size() > 0)
+			feedbackText = new QTextEdit(QString::fromStdString(feedback));
+		else
+			feedbackText = new QTextEdit(tr("No Feedback"));
+
+		QVBoxLayout *vbox = new QVBoxLayout;
+		QHBoxLayout *timeBox = new QHBoxLayout;
+		QLabel *timeLabel = new QLabel(tr("Time:"));
+		QDateTime dateTime;	
+		int unixTime = time.toInt();
+		dateTime.setTime_t(unixTime);
+		time = dateTime.toString();	
+		QLabel *timeText = new QLabel(tr("<b>%1</b>").arg(time));
+		timeBox->addWidget(timeLabel);
+		timeBox->addWidget(timeText);
+		timeBox->addStretch(1);
+		vbox->addLayout(timeBox);
+
+		QHBoxLayout *userBox = new QHBoxLayout;
+		QLabel *userLabel = new QLabel(tr("From:"));
+
+		QString userStr = "";
+		if(user == ACCEPTBUYER)
+		{
+			userStr = tr("%1 (Merchant)").arg(buyer);
+		}
+		else if(user == ACCEPTSELLER)
+		{
+			userStr = tr("%1 (Buyer)").arg(seller);
+		}
+		QLabel *userText = new QLabel(tr("<b>%1</b>").arg(userStr));
+		userBox->addWidget(userLabel);
+		userBox->addWidget(userText);
+		userBox->addStretch(1);
+		vbox->addLayout(userBox);
+	
+		QHBoxLayout *ratingBox = new QHBoxLayout;
+		QLabel *ratingLabel = new QLabel(tr("Rating:"));
+		QLabel *ratingText;
+		if(rating > 0)
+			ratingText = new QLabel( tr("<b>%1 Stars</b>").arg(QString::number(rating)));
+		else
+			ratingText = new QLabel( tr("<b>No Rating</b>"));
+
+		ratingBox->addWidget(ratingLabel);
+		ratingBox->addWidget(ratingText);
+		ratingBox->addStretch(1);
+		vbox->addLayout(ratingBox);
+		
+		
+		vbox->addWidget(feedbackText);
+
+		groupBox->setLayout(vbox);
+		if(userType == tr("Buyer"))
+			ui->buyerFeedbackLayout->addWidget(groupBox);
+		else if(userType == tr("Seller"))
+			ui->sellerFeedbackLayout->addWidget(groupBox);
+	}
+}
 bool OfferAcceptInfoDialog::lookup()
 {
 	string strError;
@@ -74,6 +154,8 @@ bool OfferAcceptInfoDialog::lookup()
 			UniValue offerAcceptsValue = find_value(result.get_obj(), "accepts");
 			if(offerAcceptsValue.type() != UniValue::VARR)
 				return false;
+			QString sellerStr = QString::fromStdString(find_value(result.get_obj(), "alias").get_str());
+			ui->sellerEdit->setText(sellerStr);
 			QString linkedStr = QString::fromStdString(find_value(result.get_obj(), "offerlink").get_str());
 			if(linkedStr == QString("true"))
 			{
@@ -119,7 +201,8 @@ bool OfferAcceptInfoDialog::lookup()
 				ui->totalEdit->setText(tr("%1 SYS").arg(QString::fromStdString(find_value(acceptObj, "total").get_str())));
 				ui->discountEdit->setText(QString::fromStdString(find_value(acceptObj, "offer_discount_percentage").get_str()));
 				ui->paidEdit->setText(QString::fromStdString(find_value(acceptObj, "paid").get_str()));
-				
+				QString buyerStr = QString::fromStdString(find_value(acceptObj.get_obj(), "buyer").get_str());
+				ui->buyerEdit->setText(buyerStr);
 				ui->paymessageEdit->setText(QString::fromStdString(find_value(acceptObj, "pay_message").get_str()));
 				QString escrowStr = QString::fromStdString(find_value(acceptObj.get_obj(), "escrowlink").get_str());
 				if(escrowStr != "")
@@ -128,6 +211,12 @@ bool OfferAcceptInfoDialog::lookup()
 					ui->escrowLabel->setVisible(true);
 					ui->escrowEdit->setText(escrowStr);
 				}
+				int avgRating = find_value(acceptObj.get_obj(), "avg_rating").get_int();
+				ui->ratingEdit->setText(tr("%1 Stars").arg(QString::number(avgRating)));
+				const UniValue &buyerFeedback = find_value(acceptObj.get_obj(), "buyer_feedback").get_array();
+				const UniValue &sellerFeedback = find_value(acceptObj.get_obj(), "seller_feedback").get_array();
+				SetFeedbackUI(buyerFeedback, tr("Buyer"), buyerStr, sellerStr);
+				SetFeedbackUI(sellerFeedback, tr("Seller"), buyerStr, sellerStr);
 			}
 
 			ui->titleEdit->setText(QString::fromStdString(find_value(result.get_obj(), "title").get_str()));

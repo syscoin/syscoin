@@ -176,9 +176,9 @@ bool EscrowInfoDialog::lookup()
 			ui->paymessageEdit->setText(QString::fromStdString(find_value(result.get_obj(), "pay_message").get_str()));
 			int avgRating = find_value(result.get_obj(), "avg_rating").get_int();
 			ui->ratingEdit->setText(tr("%1 Stars").arg(QString::number(avgRating)));
-			UniValue buyerFeedback = find_value(result.get_obj(), "buyer_feedback").get_array();
-			UniValue sellerFeedback = find_value(result.get_obj(), "seller_feedback").get_array();
-			UniValue arbiterFeedback = find_value(result.get_obj(), "arbiter_feedback").get_array();
+			const UniValue &buyerFeedback = find_value(result.get_obj(), "buyer_feedback").get_array();
+			const UniValue &sellerFeedback = find_value(result.get_obj(), "seller_feedback").get_array();
+			const UniValue &arbiterFeedback = find_value(result.get_obj(), "arbiter_feedback").get_array();
 			SetFeedbackUI(buyerFeedback, tr("Buyer"), buyer, seller, arbiter);
 			SetFeedbackUI(sellerFeedback, tr("Seller"), buyer, seller, arbiter);
 			SetFeedbackUI(arbiterFeedback, tr("Arbiter"), buyer, seller, arbiter);

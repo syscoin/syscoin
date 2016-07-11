@@ -3646,6 +3646,11 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		}
 		if(op != OP_OFFER_ACCEPT)
 			continue;
+		// get buyers alias
+		CPubKey BuyerPubKey(ca.vchBuyerPubKey);
+		CSyscoinAddress buyeraddy(BuyerPubKey.GetID());
+		buyeraddy = CSyscoinAddress(buyeraddy.ToString());
+
 		const vector<unsigned char> &vchAcceptRand = vvch[1];	
 		const vector<unsigned char> &vchMessage = vvch[2];	
 		string sTime;
@@ -3730,7 +3735,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		oOfferAccept.push_back(Pair("sysprice", ValueFromAmount(nPricePerUnit)));
 		oOfferAccept.push_back(Pair("price", strprintf("%.*f", precision, ca.nPrice ))); 	
 		oOfferAccept.push_back(Pair("total", strprintf("%.*f", precision, ca.nPrice * ca.nQty )));
-
+		oOfferAccept.push_back(Pair("buyer", buyeraddy.aliasName));
 		oOfferAccept.push_back(Pair("ismine", IsSyscoinTxMine(txA, "offer") ? "true" : "false"));
 
 		if(!ca.txBTCId.IsNull())
