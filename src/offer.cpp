@@ -524,7 +524,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			chainActive.Tip()->nHeight, tx.GetHash().ToString().c_str(),
 			op==OP_OFFER_ACCEPT ? "OFFERACCEPT: ": "", 
 			op==OP_OFFER_ACCEPT ? stringFromVch(vvchArgs[1]).c_str(): "", 
-			fJustCheck ? "JUSTCHECK" : "BLOCK", " VOUT SIZE: ", vvchArgs.size());
+			fJustCheck ? "JUSTCHECK" : "BLOCK", " VVCH SIZE: ", vvchArgs.size());
 	bool foundOffer = false;
 	bool foundCert = false;
 	bool foundEscrow = false;
@@ -594,7 +594,11 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	COffer theOffer(tx);
 	COfferAccept theOfferAccept;
 	if (theOffer.IsNull())
+	{
+		if(fDebug)
+			LogPrintf("CheckOfferInputs() : Null offer, skipping...");	
 		return true;
+	}
 	if(theOffer.sDescription.size() > MAX_VALUE_LENGTH)
 	{
 		return error("offer description too big");
