@@ -109,11 +109,11 @@ void OfferAcceptInfoDialog::SetFeedbackUI(const UniValue &feedbackObj, const QSt
 		QString userStr = "";
 		if(user == ACCEPTBUYER)
 		{
-			userStr = tr("%1 (Buyer)").arg(buyer);
+			userStr = tr("%1 (Merchant)").arg(seller);
 		}
 		else if(user == ACCEPTSELLER)
 		{
-			userStr = tr("%1 (Merchant)").arg(seller);
+			userStr = tr("%1 (Buyer)").arg(buyer);
 		}
 		QLabel *userText = new QLabel(tr("<b>%1</b>").arg(userStr));
 		userBox->addWidget(userLabel);
