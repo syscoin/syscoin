@@ -376,7 +376,6 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	r = FindOfferAcceptFeedback("node1", offerguid, acceptguid, acceptTxid, true);
 	// ensure this feedback is not found because its over the limit
 	BOOST_CHECK(r.isNull());
-	GenerateBlocks(5, "node2");
 	// perform a valid accept
 	acceptguid = OfferAccept("node1", "node2", "buyeraliasfeedback", offerguid, "1", "message");
 	// this time buyer leaves feedback first
