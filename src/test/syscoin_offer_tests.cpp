@@ -343,7 +343,7 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 
 	// perform a valid accept
 	string acceptguid = OfferAccept("node1", "node2", "buyeraliasfeedback", offerguid, "1", "message");
-	// seller must leave feedback first
+	// seller leaves feedback first
 	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller", "1", ACCEPTBUYER, true);
 	// seller can't leave feedback twice in a row
 	string offerfeedbackstr = "offeracceptfeedback " + offerguid + " " + acceptguid + " testfeedback 1";
@@ -376,6 +376,20 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	r = FindOfferAcceptFeedback("node1", offerguid, acceptguid, acceptTxid, true);
 	// ensure this feedback is not found because its over the limit
 	BOOST_CHECK(r.isNull());
+
+	// perform a valid accept
+	acceptguid = OfferAccept("node1", "node2", "buyeraliasfeedback", offerguid, "1", "message");
+	// this time buyer leaves feedback first
+	OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer", "1", ACCEPTSELLER, true);
+	// buyer can't leave feedback twice in a row
+	offerfeedbackstr = "offeracceptfeedback " + offerguid + " " + acceptguid + " testfeedback 1";
+	BOOST_CHECK_THROW(CallRPC("node2", offerfeedbackstr), runtime_error);
+
+	// then seller can leave feedback
+	OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller", "5", ACCEPTBUYER, true);
+	// seller can't leave feedback twice in a row
+	BOOST_CHECK_THROW(CallRPC("node1", offerfeedbackstr), runtime_error);
+
 
 
 }
