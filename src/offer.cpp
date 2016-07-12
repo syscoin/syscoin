@@ -1096,7 +1096,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				
 			}
 		}
-		else if (op == OP_OFFER_ACCEPT) {	
+		else if (op == OP_OFFER_ACCEPT) {
+			theOfferAccept = serializedOffer.accept;
 			// cannot accept expired offers that aren't related to escrow
 			if(theOfferAccept.vchEscrow.empty() && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
 			{
@@ -1104,7 +1105,6 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer that is not a part of escrow");
 				return true;
 			}			
-			theOfferAccept = serializedOffer.accept;
 			if(vvchArgs.size() >= 5)
 			{
 				if(fDebug)
