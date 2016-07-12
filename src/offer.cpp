@@ -1092,7 +1092,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
 
-			theOfferAccept = serializedOffer.accept;	
+			theOfferAccept = serializedOffer.accept;
+			if(vvchArgs.size() >= 5)
+			{
+				if(fDebug)
+					LogPrintf( "CheckOfferInputs() : Buyer special accept output... skipping");
+				return true;
+			}
 			if(!theOfferAccept.feedback.IsNull())
 			{
 				// ensure we don't add same feedback twice (feedback in db should be older than current height)
@@ -1104,7 +1110,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				else
 				{
 					if(fDebug)
-						LogPrintf( "CheckOfferInputs() : feedback in db is newer than the current height");
+						LogPrintf( "CheckOfferInputs() : Warning, feedback in db is newer than the current height");
 					return true;
 				}
 
@@ -1116,14 +1122,14 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				if(feedbackCount >= 10)
 				{
 					if(fDebug)
-						LogPrintf( "CheckOfferInputs() : Cannot exceed 10 feedback entries for this user of this offer accept");
+						LogPrintf( "CheckOfferInputs() : Warning, cannot exceed 10 feedback entries for this user of this offer accept");
 					return true;
 				}
 				HandleAcceptFeedback(theOfferAccept, theOffer);	
 			
 			}
 			// if its not a special feedback output for the buyer then we decrease qty accordingly
-			else if(vvchArgs.size() < 5)
+			else
 			{
 				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
 				if(theOfferAccept.nQty <= 0)
