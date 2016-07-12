@@ -421,9 +421,9 @@ BOOST_AUTO_TEST_CASE (generate_offerexpired)
 		const UniValue &arr = r.get_array();
 		string acceptguid = arr[1].get_str();
 		GenerateBlocks(5, "node2");
-		// ensure this offeraccept guid is found
+		// ensure this offeraccept guid is not found
 		UniValue acceptRet = FindOfferAccept("node2", offerguid, acceptguid, true);
-		BOOST_CHECK(!acceptRet.isNull());
+		BOOST_CHECK(acceptRet.isNull());
 
 		GenerateBlocks(5);
 		// should fail: offer update on an expired offer
