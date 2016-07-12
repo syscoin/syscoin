@@ -361,9 +361,9 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 		AliasUpdate("node1", "selleraliasfeedback", "changeddata2", "privdata2");
 		AliasUpdate("node2", "buyeraliasfeedback", "changeddata2", "privdata2");
 
-		// seller can reply but no rate
+		// seller can reply but not rate
 		OfferAcceptFeedback("node1", offerguid, acceptguid, "feedbackseller1", "2", ACCEPTBUYER, false);
-		// buyer can reply but no rate
+		// buyer can reply but not rate
 		OfferAcceptFeedback("node2", offerguid, acceptguid, "feedbackbuyer1", "3", ACCEPTSELLER, false);
 	}
 
@@ -376,7 +376,7 @@ BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 	r = FindOfferAcceptFeedback("node1", offerguid, acceptguid, acceptTxid, true);
 	// ensure this feedback is not found because its over the limit
 	BOOST_CHECK(r.isNull());
-
+	GenerateBlocks(5);
 	// perform a valid accept
 	acceptguid = OfferAccept("node1", "node2", "buyeraliasfeedback", offerguid, "1", "message");
 	// this time buyer leaves feedback first
