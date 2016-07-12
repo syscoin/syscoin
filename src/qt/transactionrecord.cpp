@@ -58,10 +58,21 @@ static bool CreateSyscoinTransactionRecord(TransactionRecord& sub, int op, const
 			sub.type = TransactionRecord::OfferUpdate;
 		break;
 	case OP_OFFER_ACCEPT:
-		if(type == SEND)
-			sub.type = TransactionRecord::OfferAccept;
-		else if(type == RECV)
-			sub.type = TransactionRecord::OfferAcceptRecv;
+		COffer offer(wtx);
+		if(!offer.accept.feedback.IsNull())
+		{
+			if(type == SEND)
+				sub.type = TransactionRecord::OfferAcceptFeedback;
+			else if(type == RECV)
+				sub.type = TransactionRecord::OfferAcceptFeedbackRecv;
+		}
+		else
+		{
+			if(type == SEND)
+				sub.type = TransactionRecord::OfferAccept;
+			else if(type == RECV)
+				sub.type = TransactionRecord::OfferAcceptRecv;
+		}
 		break;
 	case OP_CERT_ACTIVATE:
 		if(type == SEND)

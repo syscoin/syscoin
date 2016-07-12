@@ -102,7 +102,9 @@ public:
 		MessageActivate,
 		MessageRecv,
 		EscrowRefundComplete,
-		EscrowFeedback
+		EscrowFeedback,
+        OfferAcceptFeedback,
+		OfferAcceptFeedbackRecv,
     };
 
     /** Number of confirmation recommended for accepting a transaction */

@@ -394,6 +394,10 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
         return tr("Offer Accepted");
     case TransactionRecord::OfferAcceptRecv:
         return tr("Offer Accept Received");
+    case TransactionRecord::OfferAcceptFeedback:
+        return tr("Offer Accepted Feedback");
+    case TransactionRecord::OfferAcceptRecv:
+        return tr("Offer Accept Feedback Received");
     case TransactionRecord::CertActivate:
         return tr("Cert. Activated");
     case TransactionRecord::CertUpdate:
@@ -439,6 +443,7 @@ QVariant TransactionTableModel::txAddressDecoration(const TransactionRecord *wtx
 	case TransactionRecord::AliasRecv:
 	case TransactionRecord::CertRecv:
 	case TransactionRecord::OfferAcceptRecv:
+	case TransactionRecord::OfferAcceptFeedbackRecv:
 	case TransactionRecord::EscrowRefundRecv:
 	case TransactionRecord::MessageRecv:
         return QIcon(":/icons/" + theme + "/tx_input");
@@ -447,8 +452,10 @@ QVariant TransactionTableModel::txAddressDecoration(const TransactionRecord *wtx
 	// SYSCOIN
 	case TransactionRecord::AliasActivate:
     case TransactionRecord::AliasTransfer:
+    case TransactionRecord::OfferUpdate:
     case TransactionRecord::OfferActivate:
     case TransactionRecord::OfferAccept:
+	case TransactionRecord::OfferAcceptFeedback:
     case TransactionRecord::CertActivate:
 	case TransactionRecord::CertTransfer:
     case TransactionRecord::EscrowActivate:
@@ -490,6 +497,8 @@ QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, b
     case TransactionRecord::OfferUpdate:
     case TransactionRecord::OfferAccept:
 	case TransactionRecord::OfferAcceptRecv:
+    case TransactionRecord::OfferAcceptFeedback:
+	case TransactionRecord::OfferAcceptFeedbackRecv:
     case TransactionRecord::CertActivate:
     case TransactionRecord::CertUpdate:
     case TransactionRecord::CertTransfer:

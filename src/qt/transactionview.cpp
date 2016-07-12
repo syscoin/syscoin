@@ -102,6 +102,8 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     typeWidget->addItem(tr("Offer Updated"), TransactionFilterProxy::TYPE(TransactionRecord::OfferUpdate));
     typeWidget->addItem(tr("Offer Accepted"), TransactionFilterProxy::TYPE(TransactionRecord::OfferAccept));
 	typeWidget->addItem(tr("Offer Accept Received"), TransactionFilterProxy::TYPE(TransactionRecord::OfferAcceptRecv));
+    typeWidget->addItem(tr("Offer Accept Feedback"), TransactionFilterProxy::TYPE(TransactionRecord::OfferAcceptFeedback));
+	typeWidget->addItem(tr("Offer Accept Feedback Received"), TransactionFilterProxy::TYPE(TransactionRecord::OfferAcceptFeedbackRecv));
 
     typeWidget->addItem(tr("Certificate Activated"), TransactionFilterProxy::TYPE(TransactionRecord::CertActivate));
     typeWidget->addItem(tr("Certificate Updated"), TransactionFilterProxy::TYPE(TransactionRecord::CertUpdate));
