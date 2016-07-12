@@ -1221,6 +1221,7 @@ int IndexOfAliasOutput(const CTransaction& tx) {
 	vector<vector<unsigned char> > vvch;
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
+	int op;
 	for (unsigned int i = 0; i < tx.vout.size(); i++) {
 		const CTxOut& out = tx.vout[i];
 		// find an output you own
