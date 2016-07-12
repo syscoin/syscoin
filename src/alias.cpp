@@ -697,20 +697,19 @@ bool IsSyscoinTxMine(const CTransaction& tx, const string &type) {
 		return false;
 	int op, nOut, myNout;
 	vector<vector<unsigned char> > vvch;
-	if ((type == "alias" || type == "any") && DecodeAliasTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "offer" || type == "any") && DecodeOfferTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "cert" || type == "any") && DecodeCertTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "message" || type == "any") && DecodeMessageTx(tx, op, nOut, vvch))
-		myNout = nOut;
-	else if ((type == "escrow" || type == "any") && DecodeEscrowTx(tx, op, nOut, vvch))
-		myNout = nOut;
+	if ((type == "alias" || type == "any"))
+		myNout = IndexOfAliasOutput(tx);
+	else if ((type == "offer" || type == "any"))
+		myNout = IndexOfOfferOutput(tx);
+	else if ((type == "cert" || type == "any"))
+		myNout = IndexOfCertOutput(tx);
+	else if ((type == "message" || type == "any"))
+		myNout = IndexOfMessageOutput(tx);
+	else if ((type == "escrow" || type == "any"))
+		myNout = IndexOfEscrowOutput(tx);
 	else
 		return false;
-
-	return pwalletMain->IsMine(tx.vout[myNout]);
+	return myNout >= 0;
 }
 void updateBans(const vector<unsigned char> &banData)
 {

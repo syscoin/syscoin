@@ -132,11 +132,15 @@ int IndexOfMessageOutput(const CTransaction& tx) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
     vector<vector<unsigned char> > vvch;
-    int op, nOut;
-	bool good = DecodeMessageTx(tx, op, nOut, vvch);
-	if (!good)
-		return -1;
-    return nOut;
+	int op;
+	for (unsigned int i = 0; i < tx.vout.size(); i++) {
+		const CTxOut& out = tx.vout[i];
+		// find an output you own
+		if (pwalletMain->IsMine(out) && DecodeMessageScript(out.scriptPubKey, op, vvch)) {
+			return i;
+		}
+	}
+	return -1;
 }
 
 
