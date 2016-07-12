@@ -1004,22 +1004,22 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 			// get the latest offer from the db
 			if(!vtxPos.empty())
-			{
 				theOffer = vtxPos.back();
-				// cannot update expired offers
-				if((theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
-				{
-					if(fDebug)
-						LogPrintf("CheckOfferInputs(): Trying to update an expired service");
-					return true;
-				}
-			}
+
+			
 		}
 
 		// If update, we make the serialized offer the master
 		// but first we assign fields from the DB since
 		// they are not shipped in an update txn to keep size down
 		if(op == OP_OFFER_UPDATE) {
+			// cannot update expired offers
+			if((theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			{
+				if(fDebug)
+					LogPrintf("CheckOfferInputs(): Trying to update an expired service");
+				return true;
+			}
 			serializedOffer.offerLinks = theOffer.offerLinks;
 			serializedOffer.vchLinkOffer = theOffer.vchLinkOffer;
 			// btc setting cannot change on update
@@ -1097,7 +1097,13 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 		}
 		else if (op == OP_OFFER_ACCEPT) {	
-			
+			// cannot accept expired offers that aren't related to escrow
+			if(theOfferAccept.vchEscrow.empty() && (theOffer.nHeight + GetOfferExpirationDepth()) < nHeight)
+			{
+				if(fDebug)
+					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer that is not a part of escrow");
+				return true;
+			}			
 			theOfferAccept = serializedOffer.accept;
 			if(vvchArgs.size() >= 5)
 			{
