@@ -19,7 +19,6 @@ bool DecodeAndParseEscrowTx(const CTransaction& tx, int& op, int& nOut, std::vec
 bool DecodeEscrowScript(const CScript& script, int& op, std::vector<std::vector<unsigned char> > &vvch);
 bool IsEscrowOp(int op);
 int IndexOfEscrowOutput(const CTransaction& tx);
-int IndexOfMyEscrowOutput(const CTransaction& tx);
 int GetEscrowExpirationDepth();
 
 std::string escrowFromOp(int op);

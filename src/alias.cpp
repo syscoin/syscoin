@@ -1221,12 +1221,14 @@ int IndexOfAliasOutput(const CTransaction& tx) {
 	vector<vector<unsigned char> > vvch;
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
-	int op;
-	int nOut;
-	bool good = DecodeAliasTx(tx, op, nOut, vvch);
-	if (!good)
-		return -1;
-	return nOut;
+	for (unsigned int i = 0; i < tx.vout.size(); i++) {
+		const CTxOut& out = tx.vout[i];
+		// find an output you own
+		if (pwalletMain->IsMine(out) && DecodeAliasScript(out.scriptPubKey, op, vvch)) {
+			return i;
+		}
+	}
+	return -1;
 }
 
 bool GetAliasOfTx(const CTransaction& tx, vector<unsigned char>& name) {

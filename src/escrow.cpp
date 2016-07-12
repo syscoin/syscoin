@@ -173,21 +173,14 @@ int IndexOfEscrowOutput(const CTransaction& tx) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
     vector<vector<unsigned char> > vvch;
-    int op, nOut;
-	bool good = DecodeEscrowTx(tx, op, nOut, vvch);
-	if (!good)
-		return -1;
-    return nOut;
-}
-int IndexOfMyEscrowOutput(const CTransaction& tx) {
-	if (tx.nVersion != SYSCOIN_TX_VERSION)
-		return -1;
-    vector<vector<unsigned char> > vvch;
-    int op, nOut;
-	bool good = DecodeMyEscrowTx(tx, op, nOut, vvch);
-	if (!good)
-		return -1;
-    return nOut;
+	for (unsigned int i = 0; i < tx.vout.size(); i++) {
+		const CTxOut& out = tx.vout[i];
+		// find an output you own
+		if (pwalletMain->IsMine(out) && DecodeEscrowScript(out.scriptPubKey, op, vvch)) {
+			return i;
+		}
+	}
+	return -1;
 }
 bool GetTxOfEscrow(const vector<unsigned char> &vchEscrow,
         CEscrow& txPos, CTransaction& tx) {

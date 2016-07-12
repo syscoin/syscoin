@@ -216,11 +216,14 @@ int IndexOfCertOutput(const CTransaction& tx) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
     vector<vector<unsigned char> > vvch;
-    int op, nOut;
-	bool good = DecodeCertTx(tx, op, nOut, vvch);
-	if (!good)
-		return -1;
-    return nOut;
+	for (unsigned int i = 0; i < tx.vout.size(); i++) {
+		const CTxOut& out = tx.vout[i];
+		// find an output you own
+		if (pwalletMain->IsMine(out) && DecodeCertScript(out.scriptPubKey, op, vvch)) {
+			return i;
+		}
+	}
+	return -1;
 }
 
 bool GetTxOfCert(const vector<unsigned char> &vchCert,

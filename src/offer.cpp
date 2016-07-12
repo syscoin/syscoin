@@ -361,11 +361,15 @@ int IndexOfOfferOutput(const CTransaction& tx) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
 	vector<vector<unsigned char> > vvch;
-	int op, nOut;
-	bool good = DecodeOfferTx(tx, op, nOut, vvch);
-	if (!good)
-		return -1;
-	return nOut;
+	int op;
+	for (unsigned int i = 0; i < tx.vout.size(); i++) {
+		const CTxOut& out = tx.vout[i];
+		// find an output you own
+		if (pwalletMain->IsMine(out) && DecodeOfferScript(out.scriptPubKey, op, vvch)) {
+			return i;
+		}
+	}
+	return -1;
 }
 
 bool GetTxOfOffer(const vector<unsigned char> &vchOffer, 
@@ -440,7 +444,8 @@ bool DecodeOfferTx(const CTransaction& tx, int& op, int& nOut,
 	// Strict check - bug disallowed
 	for (unsigned int i = 0; i < tx.vout.size(); i++) {
 		const CTxOut& out = tx.vout[i];
-		if (DecodeOfferScript(out.scriptPubKey, op, vvch)) {
+		// skip the special buyer feedback output which has the size of 5 (we should have another one in this tx which is of size 4, the normal offer accept output)
+		if (DecodeOfferScript(out.scriptPubKey, op, vvch) && vvch.size() < 5) {
 			nOut = i; found = true;
 			break;
 		}
@@ -485,7 +490,7 @@ bool DecodeOfferScript(const CScript& script, int& op,
 
 	if ((op == OP_OFFER_ACTIVATE && vvch.size() == 1)
 		|| (op == OP_OFFER_UPDATE && vvch.size() == 1)
-		|| (op == OP_OFFER_ACCEPT && vvch.size() == 4))
+		|| (op == OP_OFFER_ACCEPT && vvch.size() <= 5))
 		return true;
 	return false;
 }
@@ -1115,7 +1120,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				HandleAcceptFeedback(theOfferAccept, theOffer);	
 			
 			}
-			else
+			// if its not a special feedback output for the buyer then we decrease qty accordingly
+			else if(vvchArgs.size() < 5)
 			{
 				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
 				if(theOfferAccept.nQty <= 0)
@@ -1236,7 +1242,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					}
 				}
 			}	
-			if (pwalletMain && !theOffer.vchLinkOffer.empty() && IsSyscoinTxMine(tx, "offer"))
+			// if its my offer and its linked and its not a special feedback output for the buyer
+			if (pwalletMain && !theOffer.vchLinkOffer.empty() && IsSyscoinTxMine(tx, "offer") && vvchArgs.size() < 5)
 			{	
 				// theOffer.vchLinkOffer is the linked offer guid
 				// theOffer is this reseller offer used to get pubkey to send to offeraccept as first parameter
@@ -3017,6 +3024,15 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	txAccept.vchBuyerKey = vchPubKey;
     CAmount nTotalValue = ( nPrice * nQty );
     
+	// send one to ourselves to we can leave feedback (notice the last opcode is 1 to denote its a special feedback output for the buyer to be able to leave feedback first and not a normal accept output)
+	CScript scriptPubKeyBuyer, scriptPubKeyBuyerDestination;
+	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
+	CRecipient recipientBuyer;
+	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+
+
 
     CScript scriptPayment;
 	CPubKey currentKey(theOffer.vchPubKey);
@@ -3061,6 +3077,9 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		{
 			vecSend.push_back(paymentRecipient);
 			vecSend.push_back(acceptRecipient);
+			vecSend.push_back(recipientBuyer);
+			
+
 		}
 	}
 	else
@@ -3079,7 +3098,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInCert=NULL;
 	// if making a purchase and we are using an alias from the whitelist of the offer, we may need to prove that we own that alias so in that case we attach an input from the alias
 	// if purchasing an escrow, we adjust the height to figure out pricing of the accept so we may also attach escrow inputs to the tx
-	SendMoneySyscoin(vecSend, acceptRecipient.nAmount+paymentRecipient.nAmount+fee.nAmount+escrowBuyerRecipient.nAmount+escrowArbiterRecipient.nAmount+escrowSellerRecipient.nAmount+aliasRecipient.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
+	SendMoneySyscoin(vecSend, recipientBuyer.nAmount+acceptRecipient.nAmount+paymentRecipient.nAmount+fee.nAmount+escrowBuyerRecipient.nAmount+escrowArbiterRecipient.nAmount+escrowSellerRecipient.nAmount+aliasRecipient.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
 	
 	UniValue res(UniValue::VARR);
 	res.push_back(wtx.GetHash().GetHex());
@@ -3301,6 +3320,12 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	txAccept.vchBuyerKey = vchPubKey;
     CAmount nTotalValue = ( nPrice * nQty );
     
+	CScript scriptPubKeyBuyer, scriptPubKeyBuyerDestination;
+	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
+	CRecipient recipientBuyer;
+	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 
     CScript scriptPayment;
 	CPubKey currentKey(theOffer.vchPubKey);
@@ -3345,6 +3370,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		{
 			vecSend.push_back(paymentRecipient);
 			vecSend.push_back(acceptRecipient);
+			vecSend.push_back(recipientBuyer);
 		}
 	}
 
@@ -3360,7 +3386,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	const CWalletTx * wtxInCert=NULL;
 	// if making a purchase and we are using an alias from the whitelist of the offer, we may need to prove that we own that alias so in that case we attach an input from the alias
 	// if purchasing an escrow, we adjust the height to figure out pricing of the accept so we may also attach escrow inputs to the tx
-	SendMoneySyscoin(vecSend, acceptRecipient.nAmount+paymentRecipient.nAmount+fee.nAmount+escrowBuyerRecipient.nAmount+escrowArbiterRecipient.nAmount+escrowSellerRecipient.nAmount+aliasRecipient.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
+	SendMoneySyscoin(vecSend, recipientBuyer.nAmount+acceptRecipient.nAmount+paymentRecipient.nAmount+fee.nAmount+escrowBuyerRecipient.nAmount+escrowArbiterRecipient.nAmount+escrowSellerRecipient.nAmount+aliasRecipient.nAmount, false, wtx, wtxOfferIn, wtxInCert, wtxAliasIn, wtxEscrowIn);
 	
 	UniValue res(UniValue::VARR);
 	res.push_back(wtx.GetHash().GetHex());

@@ -35,7 +35,7 @@ using namespace std;
 extern int IndexOfOfferOutput(const CTransaction& tx);
 extern int IndexOfCertOutput(const CTransaction& tx);
 extern int IndexOfAliasOutput(const CTransaction& tx);
-extern int IndexOfMyEscrowOutput(const CTransaction& tx);
+extern int IndexOfEscrowOutput(const CTransaction& tx);
 extern bool IsSyscoinScript(const CScript& scriptPubKey, int &op, vector<vector<unsigned char> > &vvchArgs);
 extern int GetSyscoinTxVersion();
 extern vector<unsigned char> vchFromString(const string &str);
@@ -1927,7 +1927,7 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
 	{
 		const CTransaction& txIn = wtxInEscrow[0];
 		// escrow sends multiple outs of same scriptpubkey to arbiter, seller and buyer.. we need the one this wallet owns to sign with it
-		nTxOutEscrow = IndexOfMyEscrowOutput(txIn);
+		nTxOutEscrow = IndexOfEscrowOutput(txIn);
 		if (nTxOutEscrow < 0)
 		{
 			strFailReason = _("Can't determine type of escrow input into syscoin service transaction");
