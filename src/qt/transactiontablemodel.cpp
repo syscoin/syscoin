@@ -395,8 +395,8 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
     case TransactionRecord::OfferAcceptRecv:
         return tr("Offer Accept Received");
     case TransactionRecord::OfferAcceptFeedback:
-        return tr("Offer Accepted Feedback");
-    case TransactionRecord::OfferAcceptRecv:
+        return tr("Offer Accept Feedback");
+    case TransactionRecord::OfferAcceptFeedbackRecv:
         return tr("Offer Accept Feedback Received");
     case TransactionRecord::CertActivate:
         return tr("Cert. Activated");
