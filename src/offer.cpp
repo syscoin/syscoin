@@ -357,7 +357,7 @@ bool COfferDB::ScanOffers(const std::vector<unsigned char>& vchOffer, const stri
     return true;
 }
 
-int IndexOfOfferOutput(const CTransaction& tx) {
+int IndexOfOfferOutput(const CTransaction& tx, bool skipAcceptBuyerSpecialOutput) {
 	if (tx.nVersion != SYSCOIN_TX_VERSION)
 		return -1;
 	vector<vector<unsigned char> > vvch;
@@ -366,6 +366,8 @@ int IndexOfOfferOutput(const CTransaction& tx) {
 		const CTxOut& out = tx.vout[i];
 		// find an output you own
 		if (pwalletMain->IsMine(out) && DecodeOfferScript(out.scriptPubKey, op, vvch)) {
+			if(skipAcceptBuyerSpecialOutput && vvch.size() >= 5)
+				continue;
 			return i;
 		}
 	}
@@ -1243,7 +1245,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				}
 			}	
 			// if its my offer and its linked and its not a special feedback output for the buyer
-			if (pwalletMain && !theOffer.vchLinkOffer.empty() && IsSyscoinTxMine(tx, "offer") && vvchArgs.size() < 5)
+			if (pwalletMain && !theOffer.vchLinkOffer.empty() && IsSyscoinTxMine(tx, "offer"))
 			{	
 				// theOffer.vchLinkOffer is the linked offer guid
 				// theOffer is this reseller offer used to get pubkey to send to offeraccept as first parameter

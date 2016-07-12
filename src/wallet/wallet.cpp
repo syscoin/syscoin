@@ -32,7 +32,7 @@
 
 using namespace std;
 // SYSCOIN services
-extern int IndexOfOfferOutput(const CTransaction& tx);
+extern int IndexOfOfferOutput(const CTransaction& tx, bool skipBuyerSpecialOutput);
 extern int IndexOfCertOutput(const CTransaction& tx);
 extern int IndexOfAliasOutput(const CTransaction& tx);
 extern int IndexOfEscrowOutput(const CTransaction& tx);
@@ -1896,7 +1896,7 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
 	if(wtxInOffer != NULL)
 	{
 		const CTransaction& txIn = wtxInOffer[0];
-		nTxOutOffer = IndexOfOfferOutput(txIn);
+		nTxOutOffer = IndexOfOfferOutput(txIn, false);
 		if (nTxOutOffer < 0)
 		{
 			strFailReason = _("Can't determine type of offer input into syscoin service transaction");

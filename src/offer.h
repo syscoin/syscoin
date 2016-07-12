@@ -19,7 +19,7 @@ bool DecodeOfferTx(const CTransaction& tx, int& op, int& nOut, std::vector<std::
 bool DecodeAndParseOfferTx(const CTransaction& tx, int& op, int& nOut, std::vector<std::vector<unsigned char> >& vvch);
 bool DecodeOfferScript(const CScript& script, int& op, std::vector<std::vector<unsigned char> > &vvch);
 bool IsOfferOp(int op);
-int IndexOfOfferOutput(const CTransaction& tx);
+int IndexOfOfferOutput(const CTransaction& tx, bool skipAcceptBuyerSpecialOutput);
 int GetOfferExpirationDepth();
 std::string offerFromOp(int op);
 CScript RemoveOfferScriptPrefix(const CScript& scriptIn);

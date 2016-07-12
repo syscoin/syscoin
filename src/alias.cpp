@@ -700,7 +700,10 @@ bool IsSyscoinTxMine(const CTransaction& tx, const string &type) {
 	if ((type == "alias" || type == "any"))
 		myNout = IndexOfAliasOutput(tx);
 	else if ((type == "offer" || type == "any"))
-		myNout = IndexOfOfferOutput(tx);
+	{
+		bool skipAcceptBuyerSpecialOutput = true;
+		myNout = IndexOfOfferOutput(tx, skipAcceptBuyerSpecialOutput);
+	}
 	else if ((type == "cert" || type == "any"))
 		myNout = IndexOfCertOutput(tx);
 	else if ((type == "message" || type == "any"))
