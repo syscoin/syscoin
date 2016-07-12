@@ -931,6 +931,10 @@ bool AddSyscoinServicesToDB(const CBlock& block, const CCoinsViewCache& inputs, 
 			{
 				good = CheckEscrowInputs(tx,  op, nOut, vvchArgs, inputs, fJustCheck, nHeight, &block);		
 			}
+			if(DecodeMessageTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckMessageInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, &block);		
+			}
 			// remove tx's that don't pass our check
 			if(!good)
 			{
@@ -949,27 +953,22 @@ bool AddSyscoinServicesToDB(const CBlock& block, const CCoinsViewCache& inputs, 
 		{
 			
 			bool good = true;
-			if(DecodeOfferTx(tx, op, nOut, vvchArgs))
-			{	
-				offerVvch.clear();
-				// go through each vout and see if we have multiple offers in this transactions... the linked offer accept needs this to group multiple accepts into one 
-				// so we can use one alias input attached which proves to the network that you are on the whitelist of the root merchant offer owner, we can only use 1 input per block, so we need to group all of the accepts in a block into one tx
-				for (unsigned int j = 0; j < tx.vout.size(); j++)
-				{
-					if (!IsSyscoinScript(tx.vout[j].scriptPubKey, offerOp, offerVvch))
-						continue;
-					if(!IsOfferOp(offerOp))
-						continue;
-					good = CheckOfferInputs(tx, offerOp, j, offerVvch, inputs, fJustCheck, nHeight, &block);	
-					if(!good)
-						break;
-				}
-			}
-
-			if(DecodeMessageTx(tx, op, nOut, vvchArgs))
+				
+			offerVvch.clear();
+			// go through each vout and see if we have multiple offers in this transactions... the linked offer accept needs this to group multiple accepts into one 
+			// so we can use one alias input attached which proves to the network that you are on the whitelist of the root merchant offer owner, we can only use 1 input per block, so we need to group all of the accepts in a block into one tx
+			for (unsigned int j = 0; j < tx.vout.size(); j++)
 			{
-				good = CheckMessageInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, &block);		
+				if (!IsSyscoinScript(tx.vout[j].scriptPubKey, offerOp, offerVvch))
+					continue;
+				if(!IsOfferOp(offerOp))
+					continue;
+				good = CheckOfferInputs(tx, offerOp, j, offerVvch, inputs, fJustCheck, nHeight, &block);	
+				if(!good)
+					break;
 			}
+			
+
 			// remove tx's that don't pass our check
 			if(!good)
 			{
