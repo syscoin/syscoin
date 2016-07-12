@@ -596,7 +596,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	if (theOffer.IsNull())
 	{
 		if(fDebug)
-			LogPrintf("CheckOfferInputs() : Null offer, skipping...");	
+			LogPrintf("CheckOfferInputs() : Null offer, skipping...\n");	
 		return true;
 	}
 	if(theOffer.sDescription.size() > MAX_VALUE_LENGTH)
@@ -1100,7 +1100,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			if(vvchArgs.size() >= 5)
 			{
 				if(fDebug)
-					LogPrintf( "CheckOfferInputs() : Buyer special accept output... skipping");
+					LogPrintf( "CheckOfferInputs() : Buyer special accept output... skipping\n");
 				return true;
 			}
 			if(!theOfferAccept.feedback.IsNull())
@@ -3104,7 +3104,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	}
 	theOffer.ClearOffer();
 	theOffer.accept = txAccept;
-
+	theOffer.nHeight = chainActive.Tip()->nHeight;
 	const vector<unsigned char> &data = theOffer.Serialize();
 	CScript scriptData;
 	scriptData << OP_RETURN << data;
@@ -3396,7 +3396,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 
 	theOffer.ClearOffer();
 	theOffer.accept = txAccept;
-
+	theOffer.nHeight = chainActive.Tip()->nHeight;
 	const vector<unsigned char> &data = theOffer.Serialize();
 	CScript scriptData;
 	scriptData << OP_RETURN << data;
