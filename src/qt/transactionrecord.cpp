@@ -37,6 +37,7 @@ bool TransactionRecord::showTransaction(const CWalletTx &wtx)
 }
 static bool CreateSyscoinTransactionRecord(TransactionRecord& sub, int op, const vector<vector<unsigned char> > &vvchArgs, const CWalletTx &wtx, int type)
 {
+	COffer offer;
 	switch(op)
 	{
 	case OP_ALIAS_ACTIVATE:
@@ -58,7 +59,7 @@ static bool CreateSyscoinTransactionRecord(TransactionRecord& sub, int op, const
 			sub.type = TransactionRecord::OfferUpdate;
 		break;
 	case OP_OFFER_ACCEPT:
-		COffer offer(wtx);
+		offer = COffer(wtx);
 		if(!offer.accept.feedback.IsNull())
 		{
 			if(type == SEND)
