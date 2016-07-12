@@ -3026,6 +3026,10 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
     
 	// send one to ourselves to we can leave feedback (notice the last opcode is 1 to denote its a special feedback output for the buyer to be able to leave feedback first and not a normal accept output)
 	CScript scriptPubKeyBuyer, scriptPubKeyBuyerDestination;
+	CPubKey buyerKey(txAccept.vchBuyerKey);
+	CSyscoinAddress buyerAddress(buyerKey.GetID());
+	if(!buyerAddress.IsValid())
+		throw runtime_error("Buyer address is invalid!");
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
 	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
@@ -3321,6 +3325,10 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
     CAmount nTotalValue = ( nPrice * nQty );
     
 	CScript scriptPubKeyBuyer, scriptPubKeyBuyerDestination;
+	CPubKey buyerKey(txAccept.vchBuyerKey);
+	CSyscoinAddress buyerAddress(buyerKey.GetID());
+	if(!buyerAddress.IsValid())
+		throw runtime_error("Buyer address is invalid!");
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
 	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
