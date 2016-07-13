@@ -2850,7 +2850,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		COffer linkOffer(*wtxOfferIn);
 		if(linkOffer.accept.IsNull())
 			throw runtime_error("offer accept passed into the function is not actually an offer accept");	
-		vchPubKey = linkOffer.accept.vchBuyerKey;
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 	}
@@ -3195,7 +3194,6 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		if (wtxOfferIn == NULL)
 			throw runtime_error("this offer accept is not in your wallet");	
 		COffer linkOffer(*wtxOfferIn);
-		vchPubKey = linkOffer.accept.vchBuyerKey;
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 	}
