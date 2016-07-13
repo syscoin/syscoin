@@ -3051,7 +3051,14 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		throw runtime_error("Buyer address is invalid!");
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
-	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	// if this is a linked accept then we create output for feedback for the reseller since the normal accept from buyer is used here by the linked accept
+	if (vchLinkOfferAcceptTxHash.empty())
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	else
+	{
+		COffer linkOffer(*wtxOfferIn);
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkOffer.accept.vchAcceptRand << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	}
 	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
 	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 
@@ -3350,7 +3357,14 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		throw runtime_error("Buyer address is invalid!");
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
-	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	// if this is a linked accept then we create output for feedback for the reseller since the normal accept from buyer is used here by the linked accept
+	if (vchLinkOfferAcceptTxHash.empty())
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	else
+	{
+		COffer linkOffer(*wtxOfferIn);
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkOffer.accept.vchAcceptRand << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	}
 	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
 	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 
