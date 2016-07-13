@@ -1791,12 +1791,11 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 				scriptPubKeyAliasOrig = GetScriptForDestination(currentAliasKey.GetID());
 				if(commissionInteger <= -foundEntry.nDiscountPct)
 						throw runtime_error(strprintf("You cannot re-sell at a lower price than the discount you received as an affiliate (current discount received: %d%%)", foundEntry.nDiscountPct));
-
+				scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
+				scriptPubKeyAlias += scriptPubKeyAliasOrig;			
 			}
 		}
 	}
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
-	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	// if the whitelist exclusive mode is on and you dont have an alias in the whitelist, you cannot link to this offer
 	if(foundEntry.IsNull() && linkOffer.linkWhitelist.bExclusiveResell)
 	{
@@ -1943,11 +1942,11 @@ UniValue offerlink_nocheck(const UniValue& params, bool fHelp) {
 				scriptPubKeyAliasOrig = GetScriptForDestination(currentAliasKey.GetID());
 				
 			}
+			scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
+			scriptPubKeyAlias += scriptPubKeyAliasOrig;
 		}
 		
 	}
-	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
-	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 
 	// this is a syscoin transaction
 	CWalletTx wtx;
