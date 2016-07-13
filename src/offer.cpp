@@ -3085,7 +3085,10 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	}
 	// if not accepting an escrow accept, if we use a alias as input to this offer tx, we need another utxo for further alias transactions on this alias, so we create one here
 	else if(wtxAliasIn != NULL)
+	{
 		vecSend.push_back(aliasRecipient);
+		vecSend.push_back(recipientBuyer);
+	}
 
 	// check for Bitcoin payment on the bitcoin network, otherwise pay in syscoin
 	if(!vchBTCTxId.empty() && stringFromVch(theOffer.sCurrencyCode) == "BTC")
@@ -3100,9 +3103,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		{
 			vecSend.push_back(paymentRecipient);
 			vecSend.push_back(acceptRecipient);
-			vecSend.push_back(recipientBuyer);
-			
-
 		}
 	}
 	else
@@ -3381,8 +3381,10 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	}
 	// if not accepting an escrow accept, if we use a alias as input to this offer tx, we need another utxo for further alias transactions on this alias, so we create one here
 	else if(wtxAliasIn != NULL)
+	{
 		vecSend.push_back(aliasRecipient);
-
+		vecSend.push_back(recipientBuyer);
+	}
 	// check for Bitcoin payment on the bitcoin network, otherwise pay in syscoin
 	if(!vchBTCTxId.empty() && stringFromVch(theOffer.sCurrencyCode) == "BTC")
 	{
@@ -3524,8 +3526,8 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
 	if (wtxIn == NULL)
 		throw runtime_error("This offer accept is not in your wallet");
-	if(!theOfferAccept.feedback.IsNull() && vchFeedback.size() <= 0)
-		throw runtime_error("Feedback reply cannot be empty");
+	if(vchFeedback.size() <= 0)
+		throw runtime_error("Feedback cannot be empty");
 
 	CPubKey buyerKey(theOfferAccept.vchBuyerKey);
 	CSyscoinAddress buyerAddress(buyerKey.GetID());
