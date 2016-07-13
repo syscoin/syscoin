@@ -3641,6 +3641,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	UniValue oLastOffer(UniValue::VOBJ);
 	vector<unsigned char> vchOffer = vchFromValue(params[0]);
 	string offer = stringFromVch(vchOffer);
+	COffer theOffer;
 	vector<COffer> vtxPos;
 	if (!pofferdb->ReadOffer(vchOffer, vtxPos))
 		throw runtime_error("failed to read from offer DB");
@@ -3648,14 +3649,13 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		throw runtime_error("no result returned");
 
     // get transaction pointed to by offer
-    CTransaction tx;
-    uint256 txHash = vtxPos.back().txHash;
-    if (!GetSyscoinTransaction(vtxPos.back().nHeight, txHash, tx, Params().GetConsensus()))
-        throw runtime_error("failed to read offer transaction from disk");
-	if(vtxPos.back().safetyLevel >= SAFETY_LEVEL2)
+	CTransaction tx;
+	if(!GetTxOfOffer( vchOffer, theOffer, tx, true))
+		throw runtime_error("failed to read offer transaction from disk");
+	if(theOffer.safetyLevel >= SAFETY_LEVEL2)
 		throw runtime_error("offer has been banned");
 	// get sellers alias
-	CPubKey SellerPubKey(vtxPos.back().vchPubKey);
+	CPubKey SellerPubKey(theOffer.vchPubKey);
 	CSyscoinAddress selleraddy(SellerPubKey.GetID());
 	selleraddy = CSyscoinAddress(selleraddy.ToString());
 
@@ -3667,7 +3667,6 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		throw runtime_error("no seller found for this offer");
 	if(vtxAliasPos.back().safetyLevel >= SAFETY_LEVEL2)
 		throw runtime_error("offer owner has been banned");
-    COffer theOffer;
 	vector<vector<unsigned char> > vvch;
     int op, nOut;
 	UniValue oOffer(UniValue::VOBJ);
@@ -3675,12 +3674,13 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	UniValue aoOfferAccepts(UniValue::VARR);
 	for(int i=vtxPos.size()-1;i>=0;i--) {
 		COfferAccept ca = vtxPos[i].accept;
-		theOffer.nHeight = ca.nAcceptHeight;
+		COffer acceptOffer;
+		acceptOffer.nHeight = ca.nAcceptHeight;
 		if(ca.IsNull())
 			continue;
 		if(!ca.feedback.IsNull())
 			continue;
-		if(!theOffer.GetOfferFromList(vtxPos))
+		if(!acceptOffer.GetOfferFromList(vtxPos))
 			continue;
 		UniValue oOfferAccept(UniValue::VOBJ);
 
@@ -3730,7 +3730,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		oOfferAccept.push_back(Pair("height", sHeight));
 		oOfferAccept.push_back(Pair("time", sTime));
 		oOfferAccept.push_back(Pair("quantity", strprintf("%d", ca.nQty)));
-		oOfferAccept.push_back(Pair("currency", stringFromVch(theOffer.sCurrencyCode)));
+		oOfferAccept.push_back(Pair("currency", stringFromVch(acceptOffer.sCurrencyCode)));
 		vector<unsigned char> vchEscrowLink;
 		COfferLinkWhitelistEntry entry;	
 		vector<unsigned char> vchAliasLink;
@@ -3770,17 +3770,16 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 			}
 		}
 		if(foundAlias)
-			theOffer.linkWhitelist.GetLinkEntryByHash(vchAliasLink, entry);	
+			acceptOffer.linkWhitelist.GetLinkEntryByHash(vchAliasLink, entry);	
 		if(foundEscrow)
 		{
 			vector<CEscrow> vtxEscrowPos;
 			pescrowdb->ReadEscrow(vchEscrowLink, vtxEscrowPos);
 			if(!vtxEscrowPos.back().vchWhitelistAlias.empty())
-				theOffer.linkWhitelist.GetLinkEntryByHash(vtxEscrowPos.back().vchWhitelistAlias, entry);	
+				acceptOffer.linkWhitelist.GetLinkEntryByHash(vtxEscrowPos.back().vchWhitelistAlias, entry);	
 				
 		}
 		
-		theOffer = vtxPos.back();
 		string linkAccept = "";
 		if(!vchOfferAcceptLink.empty())
 			linkAccept = stringFromVch(vchOfferAcceptLink);
@@ -3788,7 +3787,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		oOfferAccept.push_back(Pair("offer_discount_percentage", strprintf("%d%%", entry.nDiscountPct)));			
 		oOfferAccept.push_back(Pair("escrowlink", stringFromVch(vchEscrowLink)));
 		int precision = 2;
-		CAmount nPricePerUnit = convertCurrencyCodeToSyscoin(theOffer.vchAliasPeg, theOffer.sCurrencyCode, ca.nPrice, ca.nAcceptHeight, precision);
+		CAmount nPricePerUnit = convertCurrencyCodeToSyscoin(acceptOffer.vchAliasPeg, acceptOffer.sCurrencyCode, ca.nPrice, ca.nAcceptHeight, precision);
 		oOfferAccept.push_back(Pair("systotal", ValueFromAmount(nPricePerUnit * ca.nQty)));
 		oOfferAccept.push_back(Pair("sysprice", ValueFromAmount(nPricePerUnit)));
 		oOfferAccept.push_back(Pair("price", strprintf("%.*f", precision, ca.nPrice ))); 	
@@ -3801,7 +3800,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		else
 			oOfferAccept.push_back(Pair("paid","true"));
 		string strMessage = string("");
-		if(!DecryptMessage(theOffer.vchPubKey, vchMessage, strMessage))
+		if(!DecryptMessage(acceptOffer.vchPubKey, vchMessage, strMessage))
 			strMessage = string("Encrypted for owner of offer");
 		oOfferAccept.push_back(Pair("pay_message", strMessage));
 		UniValue oBuyerFeedBack(UniValue::VARR);
@@ -3861,8 +3860,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	expired = 0;	
 	expires_in = 0;
 	expired_block = 0;
-	theOffer = vtxPos.back();
-    nHeight = theOffer.nHeight;
+    nHeight = vtxPos.back().nHeight;
 	vector<unsigned char> vchCert;
 	if(!theOffer.vchCert.empty())
 		vchCert = theOffer.vchCert;
@@ -3885,7 +3883,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	if(theOffer.nQty == -1)
 		oOffer.push_back(Pair("quantity", "unlimited"));
 	else
-		oOffer.push_back(Pair("quantity", strprintf("%d", theOffer.nQty)));
+		oOffer.push_back(Pair("quantity", strprintf("%d", vtxPos.back().nQty)));
 	oOffer.push_back(Pair("currency", stringFromVch(theOffer.sCurrencyCode)));
 	
 	
