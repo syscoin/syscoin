@@ -1781,8 +1781,9 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 		// make sure this alias is still valid
 		if (GetTxOfAlias(entry.aliasLinkVchRand, theAlias, txAlias))
 		{
-			// make sure its in your wallet (you control this alias)		
-			if (IsSyscoinTxMine(txAlias, "alias")) 
+			// make sure its in your wallet (you control this alias)
+			// it must be the same one that you passed in to this function
+			if (IsSyscoinTxMine(txAlias, "alias") && theAlias.vchPubKey == alias.vchPubKey) 
 			{
 				wtxAliasIn = pwalletMain->GetWalletTx(txAlias.GetHash());
 				foundEntry = entry;
@@ -1793,10 +1794,9 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 
 			}
 		}
-		
-		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
-		scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	}
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
+	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	// if the whitelist exclusive mode is on and you dont have an alias in the whitelist, you cannot link to this offer
 	if(foundEntry.IsNull() && linkOffer.linkWhitelist.bExclusiveResell)
 	{
@@ -1935,7 +1935,7 @@ UniValue offerlink_nocheck(const UniValue& params, bool fHelp) {
 		if (GetTxOfAlias(entry.aliasLinkVchRand, theAlias, txAlias, true))
 		{
 			// make sure its in your wallet (you control this alias)		
-			if (IsSyscoinTxMine(txAlias, "alias")) 
+			if (IsSyscoinTxMine(txAlias, "alias") && theAlias.vchPubKey == alias.vchPubKey) 
 			{
 				wtxAliasIn = pwalletMain->GetWalletTx(txAlias.GetHash());
 				foundEntry = entry;
@@ -1945,10 +1945,9 @@ UniValue offerlink_nocheck(const UniValue& params, bool fHelp) {
 			}
 		}
 		
-		scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
-		scriptPubKeyAlias += scriptPubKeyAliasOrig;
 	}
-
+	scriptPubKeyAlias << CScript::EncodeOP_N(OP_ALIAS_UPDATE) << foundEntry.aliasLinkVchRand <<  theAlias.vchGUID << OP_2DROP << OP_DROP;
+	scriptPubKeyAlias += scriptPubKeyAliasOrig;
 
 	// this is a syscoin transaction
 	CWalletTx wtx;
@@ -2771,7 +2770,7 @@ bool CreateLinkedOfferAcceptRecipients(vector<CRecipient> &vecSend, const CAmoun
 
 UniValue offeraccept(const UniValue& params, bool fHelp) {
 	if (fHelp || 1 > params.size() || params.size() > 7)
-		throw runtime_error("offeraccept <acceptGuid> <alias> <guid> [quantity] [message] [BTC TxId] [linkedacceptguidtxhash] [escrowTxHash]\n"
+		throw runtime_error("offeraccept <alias> <guid> [quantity] [message] [BTC TxId] [linkedacceptguidtxhash] [escrowTxHash]\n"
 				"Accept&Pay for a confirmed offer.\n"
 				"<alias> An alias of the buyer.\n"
 				"<guid> guidkey from offer.\n"
@@ -2781,7 +2780,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 				"<linkedacceptguidtxhash> transaction id of the linking offer accept. For internal use only, leave blank\n"
 				"<escrowTxHash> If this offer accept is done by an escrow release. For internal use only, leave blank\n"
 				+ HelpRequiringPassphrase());
-
 	CSyscoinAddress refundAddr;	
 	vector<unsigned char> vchAlias = vchFromValue(params[0]);
 	vector<unsigned char> vchOffer = vchFromValue(params[1]);
@@ -3134,7 +3132,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 
 UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	if (fHelp || 1 > params.size() || params.size() > 7)
-		throw runtime_error("offeraccept_nocheck <acceptGuid> <alias> <guid> [quantity] [message] [BTC TxId] [linkedacceptguidtxhash] [escrowTxHash]\n"
+		throw runtime_error("offeraccept_nocheck <alias> <guid> [quantity] [message] [BTC TxId] [linkedacceptguidtxhash] [escrowTxHash]\n"
 				"Accept&Pay for a confirmed offer.\n"
 				"<alias> An alias of the buyer.\n"
 				"<guid> guidkey from offer.\n"
