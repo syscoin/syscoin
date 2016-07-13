@@ -162,7 +162,7 @@ public:
 							expired_str = "Valid";
 						}
 
-						}
+						
 						expires_in_str = strprintf("%d Blocks", expires_in);
 						expires_on_str = strprintf("Block %d", expires_on);
 	
