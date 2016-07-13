@@ -4383,9 +4383,9 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			if(nQty == -1)
 				oName.push_back(Pair("quantity", "unlimited"));
 			else
-				oName.push_back(Pair("quantity", strprintf("%d", )));
+				oName.push_back(Pair("quantity", strprintf("%d", nQty)));
 			CPubKey SellerPubKey(theOfferA.vchPubKey);
-			CSyscoinAddress selleraddy(SellerPubKey.GetID());nQty
+			CSyscoinAddress selleraddy(SellerPubKey.GetID());
 			selleraddy = CSyscoinAddress(selleraddy.ToString());
 			vector<CAliasIndex> vtxAliasPos;
 			if (!paliasdb->ReadAlias(vchFromString(selleraddy.aliasName), vtxAliasPos) || vtxAliasPos.empty())
