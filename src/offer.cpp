@@ -3075,6 +3075,8 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	CreateRecipient(scriptPubKeyEscrowSeller, escrowSellerRecipient);
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
+	// send back to yourself always for feedback
+	vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
 	{
@@ -3087,7 +3089,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	else if(wtxAliasIn != NULL)
 	{
 		vecSend.push_back(aliasRecipient);
-		vecSend.push_back(recipientBuyer);
 	}
 
 	// check for Bitcoin payment on the bitcoin network, otherwise pay in syscoin
@@ -3371,6 +3372,8 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	CreateRecipient(scriptPubKeyEscrowSeller, escrowSellerRecipient);
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
+	// send back to yourself always for feedback
+	vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
 	{
@@ -3383,7 +3386,6 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	else if(wtxAliasIn != NULL)
 	{
 		vecSend.push_back(aliasRecipient);
-		vecSend.push_back(recipientBuyer);
 	}
 	// check for Bitcoin payment on the bitcoin network, otherwise pay in syscoin
 	if(!vchBTCTxId.empty() && stringFromVch(theOffer.sCurrencyCode) == "BTC")
@@ -3398,7 +3400,6 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		{
 			vecSend.push_back(paymentRecipient);
 			vecSend.push_back(acceptRecipient);
-			vecSend.push_back(recipientBuyer);
 		}
 	}
 
