@@ -4293,7 +4293,7 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
     map< vector<unsigned char>, UniValue > vNamesO;
 
     {
-
+		int nQty = 0;
         uint256 blockHash;
         uint256 hash;
         CTransaction tx;
@@ -4344,9 +4344,9 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 			}	
 			else
 			{
-				theOfferA = vtxPos.back();
+				nQty = vtxPos.back().nQty;
 				CTransaction tx;
-				if (!GetSyscoinTransaction(theOfferA.nHeight, theOfferA.txHash, tx, Params().GetConsensus()))
+				if(!GetTxOfOffer( vchName, theOfferA, tx))
 				{
 					pending = 1;
 					if(!IsSyscoinTxMine(wtx, "offer"))
@@ -4380,12 +4380,12 @@ UniValue offerlist(const UniValue& params, bool fHelp) {
 
 			oName.push_back(Pair("currency", stringFromVch(theOfferA.sCurrencyCode) ) );
 			oName.push_back(Pair("commission", strprintf("%d%%", theOfferA.nCommission)));
-			if(theOfferA.nQty == -1)
+			if(nQty == -1)
 				oName.push_back(Pair("quantity", "unlimited"));
 			else
-				oName.push_back(Pair("quantity", strprintf("%d", theOfferA.nQty)));
+				oName.push_back(Pair("quantity", strprintf("%d", )));
 			CPubKey SellerPubKey(theOfferA.vchPubKey);
-			CSyscoinAddress selleraddy(SellerPubKey.GetID());
+			CSyscoinAddress selleraddy(SellerPubKey.GetID());nQty
 			selleraddy = CSyscoinAddress(selleraddy.ToString());
 			vector<CAliasIndex> vtxAliasPos;
 			if (!paliasdb->ReadAlias(vchFromString(selleraddy.aliasName), vtxAliasPos) || vtxAliasPos.empty())

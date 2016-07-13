@@ -202,13 +202,14 @@ public:
 						const UniValue& geolocation_value = find_value(o, "geolocation");
 						if (geolocation_value.type() == UniValue::VSTR)
 							geolocation_str = geolocation_value.get_str();
-						if(pending == 1)
-						{
-							expired_str = "Pending";
-						}
-						else if(expired == 1)
+						
+						if(expired == 1)
 						{
 							expired_str = "Expired";
+						}
+						else if(pending == 1)
+						{
+							expired_str = "Pending";
 						}
 						else
 						{
