@@ -4614,7 +4614,7 @@ UniValue offerfilter(const UniValue& params, bool fHelp) {
 int GetNumberOfAccepts(const std::vector<COffer> &offerList) {
 	int count = 0;
 	for(unsigned int i =0;i<offerList.size();i++) {
-		if(!offerList[i].accept.IsNull())
+		if(!offerList[i].accept.IsNull() && myoffer.accept.feedback.IsNull())
 			count++;
     }
     return count;
