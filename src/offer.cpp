@@ -899,8 +899,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						return error("CheckOfferInputs() OP_OFFER_ACCEPT: could not find a linked offer accept with this identifier");
 					heightToCheckAgainst = theLinkedOfferAccept.accept.nAcceptHeight;
 					linkAccept = true;
-					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.accept.vchBuyerKey)
-						return error("CheckOfferInputs() OP_OFFER_ACCEPT: buyer public key of linked accept does not match the public key of the buyer of the linked offer");
+					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.vchPubKey)
+						return error("CheckOfferInputs() OP_OFFER_ACCEPT: linked accept buyer must match the seller of the reselling offer");
 				}
 				else
 					return error("CheckOfferInputs() OP_OFFER_ACCEPT: could not find a linked offer accept from mempool or disk");
