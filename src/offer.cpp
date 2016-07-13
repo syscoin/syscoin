@@ -2460,7 +2460,8 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 
 	theOffer = vtxPos.back();
 	COffer offerCopy = theOffer;
-	theOffer.ClearOffer();	
+	theOffer.ClearOffer();
+	theOffer.nHeight = chainActive.Tip()->nHeight;
 	CAmount nRate;
 	vector<string> rateList;
 	// get precision & check for valid alias peg
@@ -2644,6 +2645,7 @@ UniValue offerupdate_nocheck(const UniValue& params, bool fHelp) {
 	theOffer = vtxPos.back();
 	COffer offerCopy = theOffer;
 	theOffer.ClearOffer();	
+	theOffer.nHeight = chainActive.Tip()->nHeight;
 	CAmount nRate;
 	vector<string> rateList;
 	// get precision & check for valid alias peg

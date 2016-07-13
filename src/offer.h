@@ -302,7 +302,6 @@ public:
 		sTitle.clear();
 		sDescription.clear();
 		vchLinkOffer.clear();
-		vchLinkOffer.clear();
 		vchCert.clear();
 		vchAliasPeg.clear();
 		vchGeoLocation.clear();
