@@ -975,7 +975,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 			}
 			// make sure its in your wallet (you control this alias)
 			wtxAliasIn = pwalletMain->GetWalletTx(txAlias.GetHash());		
-			if (IsSyscoinTxMine(txAlias, "alias") && wtxAliasIn != NULL) 
+			if (IsSyscoinTxMine(txAlias, "alias") && wtxAliasIn != NULL && theAlias.vchPubKey == buyeralias.vchPubKey) 
 			{
 				foundAlias = entry;
 				vchWhitelistAlias = entry.aliasLinkVchRand;

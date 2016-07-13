@@ -2952,8 +2952,9 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		if (GetTxOfAlias(entry.aliasLinkVchRand, theAlias, txAlias))
 		{
 			// make sure its in your wallet (you control this alias)
-			// if escrow has a whitelist alias attached, use that to get the offerlinkwhitelist entry, else check the seller's whitelist to see if we own any aliases from his whitelist
-			if (IsSyscoinTxMine(txAlias, "alias") || vchEscrowWhitelistAlias == entry.aliasLinkVchRand) 
+			// if escrow has a whitelist alias attached (the alias used to buy with escrow), use that to get the offerlinkwhitelist entry, else check the seller's whitelist to see if we own any aliases from his whitelist
+			// if not escrow then ensure the discount applies to the alias thats passed in
+			if (IsSyscoinTxMine(txAlias, "alias") && ((theAlias.vchPubKey == alias.vchPubKey && vchEscrowWhitelistAlias.empty()) || vchEscrowWhitelistAlias == entry.aliasLinkVchRand)) 
 			{
 				// find the entry with the biggest discount, for buyers convenience
 				if(entry.nDiscountPct >= foundAlias.nDiscountPct || foundAlias.nDiscountPct == 0)
@@ -3278,7 +3279,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		{
 			// make sure its in your wallet (you control this alias)
 			// if escrow has a whitelist alias attached, use that to get the offerlinkwhitelist entry, else check the seller's whitelist to see if we own any aliases from his whitelist
-			if (IsSyscoinTxMine(txAlias, "alias") || vchEscrowWhitelistAlias == entry.aliasLinkVchRand) 
+			if (IsSyscoinTxMine(txAlias, "alias") && ((theAlias.vchPubKey == alias.vchPubKey && vchEscrowWhitelistAlias.empty()) || vchEscrowWhitelistAlias == entry.aliasLinkVchRand)) 
 			{
 				// find the entry with the biggest discount, for buyers convenience
 				if(entry.nDiscountPct >= foundAlias.nDiscountPct || foundAlias.nDiscountPct == 0)
