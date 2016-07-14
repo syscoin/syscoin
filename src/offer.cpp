@@ -2755,7 +2755,7 @@ bool CreateLinkedOfferAcceptRecipients(vector<CRecipient> &vecSend, const CAmoun
 			continue;
 		unsigned int nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchOffer[3]));
 		CAmount nTotalValue = ( nPrice * nQty );
-		scriptPubKeyAccept << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << linkedOfferGUID << vvchOffer[2] << vvchOffer[2] << vvchOffer[3] << OP_2DROP << OP_2DROP << OP_DROP; 
+		scriptPubKeyAccept << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << linkedOfferGUID << vvchOffer[1] << vvchOffer[2] << vvchOffer[3] << OP_2DROP << OP_2DROP << OP_DROP; 
 		scriptPubKeyAccept += scriptPubKeyDestination;
 		scriptPubKeyPayment += scriptPubKeyDestination;
 		CRecipient acceptRecipient;
