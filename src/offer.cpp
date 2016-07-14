@@ -3066,11 +3066,13 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	scriptPubKeySeller << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkedOffer.accept.vchAcceptRand << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
 	scriptPubKeySeller += scriptPayment;
 	CreateRecipient(scriptPubKeySeller, recipientSeller);
+
+
+	vector<CRecipient> vecSend;
 	// if this is a linked offer we need an additional output for the reseller because the linked accept uses one and feedback needs one aswell
 	if(!theOffer.vchLinkOffer.empty())
 		vecSend.push_back(recipientSeller);
 
-	vector<CRecipient> vecSend;
 	CRecipient acceptRecipient;
 	CreateRecipient(scriptPubKeyAccept, acceptRecipient);
 	CRecipient paymentRecipient = {scriptPubKeyPayment, nTotalValue, false};
