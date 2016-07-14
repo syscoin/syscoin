@@ -903,7 +903,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						return error("CheckOfferInputs() OP_OFFER_ACCEPT: could not find a linked offer accept with this identifier");
 					heightToCheckAgainst = theLinkedOfferAccept.accept.nAcceptHeight;
 					linkAccept = true;
-					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.accept.vchBuyerPubKey)
+					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.accept.vchBuyerKey)
 						return error("CheckOfferInputs() OP_OFFER_ACCEPT: linked accept buyer must match the buyer of the reselling offer");
 				}
 				else
@@ -2853,7 +2853,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 		vchAccept = linkOffer.accept.vchAcceptRand;
-		vchPubKey = linkOffer.accept.vchBuyerPubKey;
+		vchPubKey = linkOffer.accept.vchBuyerKey;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
@@ -3207,7 +3207,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 		vchAccept = linkOffer.accept.vchAcceptRand;
-		vchPubKey = linkOffer.accept.vchBuyerPubKey;
+		vchPubKey = linkOffer.accept.vchBuyerKey;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
