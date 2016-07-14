@@ -886,9 +886,9 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			// find the payment from the tx outputs (make sure right amount of coins were paid for this offer accept), the payment amount found has to be exact	
 			heightToCheckAgainst = theOfferAccept.nAcceptHeight;
 			// if this is a linked offer accept, set the height to the first height so sys_rates price will match what it was at the time of the original accept
-			// we assume previous tx still in mempool because it calls offeraccept within the eheckinputs stage (not entering a block yet)
+			// we assume previous tx still in mempool because it calls offeraccept within the checkinputs stage (not entering a block yet)
 			if (IsOfferOp(prevOp))
-			{
+			{				
 				CTransaction acceptTx;
 				COffer theLinkedOfferAccept;
 				uint256 hashBlock;
@@ -3044,17 +3044,24 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
     CAmount nTotalValue = ( nPrice * nQty );
     
 	// send one to ourselves to we can leave feedback (notice the last opcode is 1 to denote its a special feedback output for the buyer to be able to leave feedback first and not a normal accept output)
-	CScript scriptPubKeyBuyer, scriptPubKeySeller, scriptPubKeyBuyerDestination;
+	CScript scriptPubKeyBuyer, scriptPubKeyBuyerDestination;
 	CPubKey buyerKey(txAccept.vchBuyerKey);
 	CSyscoinAddress buyerAddress(buyerKey.GetID());
 	if(!buyerAddress.IsValid())
 		throw runtime_error("Buyer address is invalid!");
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
-	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	// if this is a linked accept then we create output for feedback for the reseller since the normal accept from buyer is used here by the linked accept
+	if (vchLinkOfferAcceptTxHash.empty())
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	else
+	{
+		COffer linkOffer(*wtxOfferIn);
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkOffer.accept.vchAcceptRand << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	}	
+
 	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
 	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
-	
 
 
     CScript scriptPayment;
@@ -3062,16 +3069,11 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	scriptPayment = GetScriptForDestination(currentKey.GetID());
 	scriptPubKeyAccept += scriptPayment;
 	scriptPubKeyPayment += scriptPayment;
-	CRecipient recipientSeller;
-	scriptPubKeySeller << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkedOffer.accept.vchAcceptRand << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
-	scriptPubKeySeller += scriptPayment;
-	CreateRecipient(scriptPubKeySeller, recipientSeller);
+
 
 
 	vector<CRecipient> vecSend;
-	// if this is a linked offer we need an additional output for the reseller because the linked accept uses one and feedback needs one aswell
-	if(!theOffer.vchLinkOffer.empty())
-		vecSend.push_back(recipientSeller);
+
 
 	CRecipient acceptRecipient;
 	CreateRecipient(scriptPubKeyAccept, acceptRecipient);
@@ -3359,7 +3361,14 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		throw runtime_error("Buyer address is invalid!");
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
-	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	// if this is a linked accept then we create output for feedback for the reseller since the normal accept from buyer is used here by the linked accept
+	if (vchLinkOfferAcceptTxHash.empty())
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	else
+	{
+		COffer linkOffer(*wtxOfferIn);
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkOffer.accept.vchAcceptRand << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	}
 	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
 	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 
