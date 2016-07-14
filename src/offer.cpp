@@ -3539,12 +3539,12 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, offer, theOfferAccept, tx, skipFeedback))
 		throw runtime_error("Could not find this offer accept");
 	// if this is a feedback for a linked offer then get the input from the linked offer which should have an output that the reseller can use for feedback
-	if(!offer.vchOfferLink.empty())
+	if(!offer.vchLinkOfferf.empty())
 	{
 		CTransaction tmpTx;
 		COffer tmpOffer;
 		COfferAccept tmpAccept;
-		if (!GetTxOfOfferAccept(offer.vchOfferLink, vchAcceptRand, tmpOffer, tmpAccept, tmpTx, skipFeedback))
+		if (!GetTxOfOfferAccept(offer.vchLinkOffer, vchAcceptRand, tmpOffer, tmpAccept, tmpTx, skipFeedback))
 			throw runtime_error("Could not find this offer accept link");
 		wtxIn = pwalletMain->GetWalletTx(tmpTx.GetHash());
 		if (wtxIn == NULL)
