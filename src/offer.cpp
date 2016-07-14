@@ -1262,7 +1262,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				}
 			}	
 			// if its my offer and its linked and its not a special feedback output for the buyer
-			if (pwalletMain && !theOffer.vchLinkOffer.empty() && IsSyscoinTxMine(tx, "offer"))
+			if (pwalletMain && !theOffer.vchLinkOffer.empty() && IsSyscoinTxMine(tx, "offer") && vvchArgs.size() < 5)
 			{	
 				// theOffer.vchLinkOffer is the linked offer guid
 				// theOffer is this reseller offer used to get pubkey to send to offeraccept as first parameter
@@ -1274,7 +1274,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			// only if we are the root offer owner do we even consider xfering a cert					
  			// purchased a cert so xfer it
 			// also can't auto xfer offer paid in btc, need to do manually
- 			if(pwalletMain && theOfferAccept.txBTCId.IsNull() && IsSyscoinTxMine(tx, "offer") && !theOffer.vchCert.empty() && theOffer.vchLinkOffer.empty())
+ 			if(pwalletMain && theOfferAccept.txBTCId.IsNull() && IsSyscoinTxMine(tx, "offer") && !theOffer.vchCert.empty() && theOffer.vchLinkOffer.empty() && vvchArgs.size() < 5)
  			{
  				string strError = makeTransferCertTX(theOffer, theOfferAccept);
  				if(strError != "")
