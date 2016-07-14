@@ -3539,7 +3539,7 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, offer, theOfferAccept, tx, skipFeedback))
 		throw runtime_error("Could not find this offer accept");
 	// if this is a feedback for a linked offer then get the input from the linked offer which should have an output that the reseller can use for feedback
-	if(!offer.vchLinkOfferf.empty())
+	if(!offer.vchLinkOffer.empty())
 	{
 		CTransaction tmpTx;
 		COffer tmpOffer;
