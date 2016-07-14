@@ -903,8 +903,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						return error("CheckOfferInputs() OP_OFFER_ACCEPT: could not find a linked offer accept with this identifier");
 					heightToCheckAgainst = theLinkedOfferAccept.accept.nAcceptHeight;
 					linkAccept = true;
-					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.accept.vchBuyerKey)
-						return error("CheckOfferInputs() OP_OFFER_ACCEPT: linked accept buyer must match the buyer of the reselling offer");
+					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.vchPubKey)
+						return error("CheckOfferInputs() OP_OFFER_ACCEPT: linked accept buyer must match the seller of the reselling offer");
 				}
 				else
 					return error("CheckOfferInputs() OP_OFFER_ACCEPT: could not find a linked offer accept from mempool or disk");
@@ -2854,7 +2854,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		COffer linkOffer(*wtxOfferIn);
 		if(linkOffer.accept.IsNull())
 			throw runtime_error("offer accept passed into the function is not actually an offer accept");	
-		vchPubKey = linkOffer.accept.vchBuyerKey;
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 	}
@@ -3087,7 +3086,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
 	// send back to yourself always for feedback unless its a linked accept (reseller can't leave feedback) or escrow
-	if(vchEscrowTxHash.empty()  && vchLinkOfferAcceptTxHash.empty())
+	if(vchEscrowTxHash.empty())
 		vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
@@ -3207,7 +3206,6 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		if (wtxOfferIn == NULL)
 			throw runtime_error("this offer accept is not in your wallet");	
 		COffer linkOffer(*wtxOfferIn);
-		vchPubKey = linkOffer.accept.vchBuyerKey;
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 	}
@@ -3387,7 +3385,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
 	// send back to yourself always for feedback unless its a linked accept (reseller can't leave feedback) or escrow
-	if(vchEscrowTxHash.empty()  && vchLinkOfferAcceptTxHash.empty())
+	if(vchEscrowTxHash.empty())
 		vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
