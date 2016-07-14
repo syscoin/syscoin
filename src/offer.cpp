@@ -2852,6 +2852,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 			throw runtime_error("offer accept passed into the function is not actually an offer accept");	
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
+		vchAccept = linkOffer.accept.vchAcceptRand;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
@@ -3204,6 +3205,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		COffer linkOffer(*wtxOfferIn);
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
+		vchAccept = linkOffer.accept.vchAcceptRand;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
