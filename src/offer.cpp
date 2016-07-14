@@ -3533,18 +3533,35 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
     CTransaction tx;
 	COffer offer;
 	COfferAccept theOfferAccept;
+	const CWalletTx *wtxIn;
 	// feedback is skipped by default but we want to use it as input to another feedback possibly if this is a reply
 	bool skipFeedback = false;
 	if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, offer, theOfferAccept, tx, skipFeedback))
 		throw runtime_error("Could not find this offer accept");
+	// if this is a feedback for a linked offer then get the input from the linked offer which should have an output that the reseller can use for feedback
+	if(!offer.vchOfferLink.empty())
+	{
+		CTransaction tmpTx;
+		COffer tmpOffer;
+		COfferAccept tmpAccept;
+		if (!GetTxOfOfferAccept(offer.vchOfferLink, vchAcceptRand, tmpOffer, tmpAccept, tmpTx, skipFeedback))
+			throw runtime_error("Could not find this offer accept link");
+		wtxIn = pwalletMain->GetWalletTx(tmpTx.GetHash());
+		if (wtxIn == NULL)
+			throw runtime_error("This linked offer accept is not in your wallet");
+	}
+	else
+	{
+		wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
+		if (wtxIn == NULL)
+			throw runtime_error("This offer accept is not in your wallet");
+	}
     vector<vector<unsigned char> > vvch;
     int op, nOut;
     if (!DecodeOfferTx(tx, op, nOut, vvch) 
     	|| op != OP_OFFER_ACCEPT)
         throw runtime_error("Could not decode offer accept tx");
-	const CWalletTx *wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
-	if (wtxIn == NULL)
-		throw runtime_error("This offer accept is not in your wallet");
+	
 	if(vchFeedback.size() <= 0)
 		throw runtime_error("Feedback cannot be empty");
 
