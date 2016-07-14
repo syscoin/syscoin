@@ -20,6 +20,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	QString theme = GUIUtil::getThemeName();  
 	ui->aboutFeedback->setPixmap(QPixmap(":/images/" + theme + "/about_horizontal"));
 	QString buyer, seller, currency, offertitle, total, systotal;
+	bool reseller = false;
 	if(!lookup(offerStr, acceptStr, buyer, seller, offertitle, currency, total, systotal, reseller))
 	{
 		ui->manageInfo2->setText(tr("Cannot find this offer accept on the network, please try again later."));
@@ -57,7 +58,7 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid
 	UniValue params(UniValue::VARR);
 	UniValue result;
 	params.push_back(offer.toStdString());
-
+	reseller = false;
     try {
         result = tableRPC.execute(strMethod, params);
 
