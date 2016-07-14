@@ -31,7 +31,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 		return;
 	}
 	OfferType offerType = findYourOfferRoleFromAliases(buyer, seller);
-	ui->manageInfo->setText(tr("This offer payment was for Offer ID: <b>%1</b> for <b>%2</b> totaling <b>%3 %4 (%5 SYS)</b>. The buyer is <b>%6</b>, merchant is <b>%7%8</b>").arg(offer).arg(offertitle).arg(total).arg(currency).arg(systotal).arg(buyer).arg(seller).arg(reseller? tr("(reseller)"): ""));
+	ui->manageInfo->setText(tr("This offer payment was for Offer ID: <b>%1</b> for <b>%2</b> totaling <b>%3 %4 (%5 SYS)</b>. The buyer is <b>%6</b>, merchant is <b>%7%8</b>").arg(offer).arg(offertitle).arg(total).arg(currency).arg(systotal).arg(buyer).arg(seller).arg(reseller? tr(" (reseller)"): ""));
 	if(offerType == None)
 	{
 		ui->manageInfo2->setText(tr("You cannot leave feedback this offer accept because you do not own either the buyer or merchant aliases. %1").arg(reseller? "The merchant as a reseller cannot leave feedback.": ""));

@@ -3086,8 +3086,9 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	CreateRecipient(scriptPubKeyEscrowSeller, escrowSellerRecipient);
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
-	// send back to yourself always for feedback
-	vecSend.push_back(recipientBuyer);
+	// send back to yourself always for feedback unless its a linked accept (reseller can't leave feedback)
+	if(vchEscrowTxHash.empty())
+		vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
 	{
@@ -3385,8 +3386,9 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	CreateRecipient(scriptPubKeyEscrowSeller, escrowSellerRecipient);
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
-	// send back to yourself always for feedback
-	vecSend.push_back(recipientBuyer);
+	// send back to yourself always for feedback unless its a linked accept (reseller can't leave feedback)
+	if(vchEscrowTxHash.empty())
+		vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
 	{
@@ -3936,7 +3938,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		CPubKey LinkedSellerPubKey(linkOffer.vchPubKey);
 		CSyscoinAddress linkedselleraddy(LinkedSellerPubKey.GetID());
 		linkedselleraddy = CSyscoinAddress(linkedselleraddy.ToString());
-		oOffer.push_back(Pair("offerlink_seller", linkedselleraddy.ToString()));
+		oOffer.push_back(Pair("offerlink_seller", linkedselleraddy.aliasName));
 
 	}
 	else
