@@ -1109,59 +1109,60 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					LogPrintf("CheckOfferInputs(): Trying to accept an expired offer that is not a part of escrow");
 				return true;
 			}			
-			if(vvchArgs.size() < 5)
+			if(vvchArgs.size() >= 5)
 			{
-			
-			
-				if(!theOfferAccept.feedback.IsNull())
+				if(fDebug)
+					LogPrintf( "CheckOfferInputs() : Buyer special accept output... skipping\n");
+				return true;
+			}
+			if(!theOfferAccept.feedback.IsNull())
+			{
+				// ensure we don't add same feedback twice (feedback in db should be older than current height)
+				if(theOfferAccept.feedback.nHeight < nHeight)
 				{
-					// ensure we don't add same feedback twice (feedback in db should be older than current height)
-					if(theOfferAccept.feedback.nHeight < nHeight)
-					{
-						theOfferAccept.feedback.nHeight = nHeight;
-						theOfferAccept.feedback.txHash = tx.GetHash();
-					}
-					else
-					{
-						if(fDebug)
-							LogPrintf( "CheckOfferInputs() : Warning, feedback in db is newer than the current height");
-						return true;
-					}
-
-								
-					int feedbackCount = FindFeedbackInAccept(vvchArgs[1], theOfferAccept.feedback.nFeedbackUser, vtxPos);
-					// has this user (nFeedbackUser) already left feedback (ACCEPTBUYER/ACCEPTSELLER) by checking offer history of tx's (vtxPos)
-					if(feedbackCount > 0)
-						theOfferAccept.feedback.nRating = 0;
-					if(feedbackCount >= 10)
-					{
-						if(fDebug)
-							LogPrintf( "CheckOfferInputs() : Warning, cannot exceed 10 feedback entries for this user of this offer accept");
-						return true;
-					}
-					HandleAcceptFeedback(theOfferAccept, theOffer);	
-				
+					theOfferAccept.feedback.nHeight = nHeight;
+					theOfferAccept.feedback.txHash = tx.GetHash();
 				}
-				// if its not a special feedback output for the buyer then we decrease qty accordingly
 				else
 				{
-					theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
-					if(theOfferAccept.nQty <= 0)
-						theOfferAccept.nQty = 1;
-					// update qty if not an escrow accept (since that updates qty on escrow creation, and refunds qty on escrow refund)
-					// also if this offer you are accepting is linked to another offer don't need to update qty (once the root accept is done this offer qty will be updated)
-					if(theOffer.nQty != -1 && theOfferAccept.vchEscrow.empty() && theOffer.vchLinkOffer.empty())
-					{
-						if((theOfferAccept.nQty > theOffer.nQty)) {
-							if(fDebug)
-								LogPrintf("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
-							return true;
-						}				
-						theOffer.nQty -= theOfferAccept.nQty;
-						if(theOffer.nQty < 0)
-							theOffer.nQty = 0;
-						
-					}
+					if(fDebug)
+						LogPrintf( "CheckOfferInputs() : Warning, feedback in db is newer than the current height");
+					return true;
+				}
+
+							
+				int feedbackCount = FindFeedbackInAccept(vvchArgs[1], theOfferAccept.feedback.nFeedbackUser, vtxPos);
+				// has this user (nFeedbackUser) already left feedback (ACCEPTBUYER/ACCEPTSELLER) by checking offer history of tx's (vtxPos)
+				if(feedbackCount > 0)
+					theOfferAccept.feedback.nRating = 0;
+				if(feedbackCount >= 10)
+				{
+					if(fDebug)
+						LogPrintf( "CheckOfferInputs() : Warning, cannot exceed 10 feedback entries for this user of this offer accept");
+					return true;
+				}
+				HandleAcceptFeedback(theOfferAccept, theOffer);	
+			
+			}
+			// if its not a special feedback output for the buyer then we decrease qty accordingly
+			else
+			{
+				theOfferAccept.nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchArgs[3]));
+				if(theOfferAccept.nQty <= 0)
+					theOfferAccept.nQty = 1;
+				// update qty if not an escrow accept (since that updates qty on escrow creation, and refunds qty on escrow refund)
+				// also if this offer you are accepting is linked to another offer don't need to update qty (once the root accept is done this offer qty will be updated)
+				if(theOffer.nQty != -1 && theOfferAccept.vchEscrow.empty() && theOffer.vchLinkOffer.empty())
+				{
+					if((theOfferAccept.nQty > theOffer.nQty)) {
+						if(fDebug)
+							LogPrintf("CheckOfferInputs() OP_OFFER_ACCEPT: txn %s desired qty %u is more than available qty %u\n", tx.GetHash().GetHex().c_str(), theOfferAccept.nQty, theOffer.nQty);
+						return true;
+					}				
+					theOffer.nQty -= theOfferAccept.nQty;
+					if(theOffer.nQty < 0)
+						theOffer.nQty = 0;
+					
 				}
 			}
 
@@ -1243,7 +1244,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 		if (!pofferdb->WriteOffer(vvchArgs[0], vtxPos))
 			return error( "CheckOfferInputs() : failed to write to offer DB");
 		
-		if(op == OP_OFFER_ACCEPT && vvchArgs.size() < 5)
+		if(op == OP_OFFER_ACCEPT)
 		{
  			if(theOffer.vchLinkOffer.empty())
 			{
@@ -2853,6 +2854,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		COffer linkOffer(*wtxOfferIn);
 		if(linkOffer.accept.IsNull())
 			throw runtime_error("offer accept passed into the function is not actually an offer accept");	
+		vchPubKey = linkOffer.accept.vchBuyerKey;
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 	}
@@ -3055,13 +3057,8 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
 	// if this is a linked accept then we create output for feedback for the reseller since the normal accept from buyer is used here by the linked accept
-	if (vchLinkOfferAcceptTxHash.empty())
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
-	else
-	{
-		COffer linkOffer(*wtxOfferIn);
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkOffer.accept.vchAcceptRand << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
-	}	
+	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	
 
 	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
 	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
@@ -3209,6 +3206,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		if (wtxOfferIn == NULL)
 			throw runtime_error("this offer accept is not in your wallet");	
 		COffer linkOffer(*wtxOfferIn);
+		vchPubKey = linkOffer.accept.vchBuyerKey;
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 	}
@@ -3365,13 +3363,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	scriptPubKeyBuyerDestination= GetScriptForDestination(buyerKey.GetID());
 	CRecipient recipientBuyer;
 	// if this is a linked accept then we create output for feedback for the reseller since the normal accept from buyer is used here by the linked accept
-	if (vchLinkOfferAcceptTxHash.empty())
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
-	else
-	{
-		COffer linkOffer(*wtxOfferIn);
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkOffer.accept.vchAcceptRand << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
-	}
+	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
 	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
 	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 
@@ -3541,26 +3533,11 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	bool skipFeedback = false;
 	if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, offer, theOfferAccept, tx, skipFeedback))
 		throw runtime_error("Could not find this offer accept");
-	LogPrintf("offer tx hash %s\n", tx.GetHash().GetHex().c_str());
-	// if this is a feedback for a linked offer then get the input from the linked offer which should have an output that the reseller can use for feedback
-	if(!offer.vchLinkOffer.empty())
-	{
-		CTransaction tmpTx;
-		COffer tmpOffer;
-		COfferAccept tmpAccept;
-		if (!GetTxOfOfferAccept(offer.vchLinkOffer, vchAcceptRand, tmpOffer, tmpAccept, tmpTx, skipFeedback))
-			throw runtime_error("Could not find this offer accept link");
-		LogPrintf("linked offer tx hash %s\n", tmpTx.GetHash().GetHex().c_str());
-		wtxIn = pwalletMain->GetWalletTx(tmpTx.GetHash());
-		if (wtxIn == NULL)
-			throw runtime_error("This linked offer accept is not in your wallet");
-	}
-	else
-	{
-		wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
-		if (wtxIn == NULL)
-			throw runtime_error("This offer accept is not in your wallet");
-	}
+
+	wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
+	if (wtxIn == NULL)
+		throw runtime_error("This offer accept is not in your wallet");
+	
     vector<vector<unsigned char> > vvch;
     int op, nOut;
     if (!DecodeOfferTx(tx, op, nOut, vvch) 
@@ -3574,8 +3551,22 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	CSyscoinAddress buyerAddress(buyerKey.GetID());
 	if(!buyerAddress.IsValid())
 		throw runtime_error("Buyer address is invalid!");
-	
-	CPubKey sellerKey(offer.vchPubKey);
+	CPubKey sellerKey;
+	// check if parent to linked offer is still valid
+	if (!theOffer.vchLinkOffer.empty())
+	{
+		CTransaction tmpTx;
+		COffer linkedOffer;
+		if(!GetTxOfOffer( theOffer.vchLinkOffer, linkedOffer, tmpTx))
+		{
+			throw runtime_error("Cannot find linked offer!");
+		}
+		sellerKey = CPubKey(linkedOffer.vchPubKey);
+		
+	}	
+	else
+		sellerKey = CPubKey(offer.vchPubKey);
+
 	CSyscoinAddress sellerAddress(sellerKey.GetID());
 	if(!sellerAddress.IsValid())
 		throw runtime_error("Seller address is invalid!");
@@ -3938,12 +3929,22 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		oOffer.push_back(Pair("commission", strprintf("%d%%", theOffer.nCommission)));
 		oOffer.push_back(Pair("offerlink", "true"));
 		oOffer.push_back(Pair("offerlink_guid", stringFromVch(theOffer.vchLinkOffer)));
+		CTransaction tmpTx;
+		COffer linkOffer;
+		GetTxOfOffer( theOffer.vchLinkOffer, linkOffer, tmpTx, true);
+		// get linked seller alias
+		CPubKey LinkedSellerPubKey(linkOffer.vchPubKey);
+		CSyscoinAddress linkedselleraddy(LinkedSellerPubKey.GetID());
+		linkedselleraddy = CSyscoinAddress(linkedselleraddy.ToString());
+		oOffer.push_back(Pair("offerlink_seller", linkedselleraddy.ToString()));
+
 	}
 	else
 	{
 		oOffer.push_back(Pair("commission", "0"));
 		oOffer.push_back(Pair("offerlink", "false"));
 		oOffer.push_back(Pair("offerlink_guid", ""));
+		oOffer.push_back(Pair("offerlink_seller", ""));
 	}
 	oOffer.push_back(Pair("exclusive_resell", theOffer.linkWhitelist.bExclusiveResell ? "ON" : "OFF"));
 	oOffer.push_back(Pair("private", theOffer.bPrivate ? "Yes" : "No"));
