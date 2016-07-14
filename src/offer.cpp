@@ -730,6 +730,10 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					return error("CheckOfferInputs() : could not find currency %s in the %s alias!\n", stringFromVch(theOffer.sCurrencyCode).c_str(), stringFromVch(theOffer.vchAliasPeg).c_str());
 				}
 			}
+			if (pofferdb->ExistsOffer(vvchArgs[0]))
+			{
+				return error("CheckOfferInputs() OP_OFFER_ACTIVATE: offer already exists");
+			}
 			
 			break;
 		case OP_OFFER_UPDATE:
@@ -781,7 +785,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			{
 				if(prevOp != OP_OFFER_ACCEPT)
 					return error("CheckOfferInputs(): must use offeraccept as input to an accept feedback");	
-				if (vvchPrevArgs[0] != vvchArgs[0])
+				if (vvchPrevArgs[1] != vvchArgs[1])
 					return error("CheckOfferInputs() : offeraccept feedback mismatch");	
 				if(theOfferAccept.feedback.vchFeedback.empty())
 				{

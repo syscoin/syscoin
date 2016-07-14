@@ -435,6 +435,10 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				if(theEscrow.op != OP_ESCROW_ACTIVATE)
 					return error("CheckEscrowInputs() :  invalid op, should be escrow activate");
+				if (pescrowdb->ExistsEscrow(vvchArgs[0]))
+				{
+					return error("CheckEscrowInputs() OP_ESCROW_ACTIVATE: escrow already exists");
+				}
 				break;
 			case OP_ESCROW_RELEASE:
 				if(prevOp != OP_ESCROW_ACTIVATE)

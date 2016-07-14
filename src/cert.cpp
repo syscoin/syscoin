@@ -401,6 +401,10 @@ bool CheckCertInputs(const CTransaction &tx, int op, int nOut, const vector<vect
 			if (foundCert)
 				return error(
 						"CheckCertInputs() : certactivate tx pointing to previous syscoin tx");
+			if (pcertdb->ExistsCert(vvchArgs[0]))
+			{
+				return error("CheckCertInputs() OP_CERT_ACTIVATE: cert already exists");
+			}
 			break;
 
 		case OP_CERT_UPDATE:
