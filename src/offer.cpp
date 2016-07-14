@@ -903,8 +903,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 						return error("CheckOfferInputs() OP_OFFER_ACCEPT: could not find a linked offer accept with this identifier");
 					heightToCheckAgainst = theLinkedOfferAccept.accept.nAcceptHeight;
 					linkAccept = true;
-					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.vchPubKey)
-						return error("CheckOfferInputs() OP_OFFER_ACCEPT: linked accept buyer must match the seller of the reselling offer");
+					if(theOfferAccept.vchBuyerKey != theLinkedOfferAccept.accept.vchBuyerPubKey)
+						return error("CheckOfferInputs() OP_OFFER_ACCEPT: linked accept buyer must match the buyer of the reselling offer");
 				}
 				else
 					return error("CheckOfferInputs() OP_OFFER_ACCEPT: could not find a linked offer accept from mempool or disk");
@@ -2853,6 +2853,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 		vchAccept = linkOffer.accept.vchAcceptRand;
+		vchPubKey = linkOffer.accept.vchBuyerPubKey;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
@@ -3206,6 +3207,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
 		vchAccept = linkOffer.accept.vchAcceptRand;
+		vchPubKey = linkOffer.accept.vchBuyerPubKey;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
@@ -3533,25 +3535,11 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 		throw runtime_error("Could not find this offer accept");
 
 	LogPrintf("offer tx hash %s\n", tx.GetHash().GetHex().c_str());
-	// if this is a feedback for a linked offer then get the input from the linked offer which should have an output that the reseller can use for feedback
-	if(!offer.vchLinkOffer.empty())
-	{
-		CTransaction tmpTx;
-		COffer tmpOffer;
-		COfferAccept tmpAccept;
-		if (!GetTxOfOfferAccept(offer.vchLinkOffer, vchAcceptRand, tmpOffer, tmpAccept, tmpTx, skipFeedback))
-			throw runtime_error("Could not find this offer accept link");
-		LogPrintf("linked offer tx hash %s\n", tmpTx.GetHash().GetHex().c_str());
-		wtxIn = pwalletMain->GetWalletTx(tmpTx.GetHash());
-		if (wtxIn == NULL)
-			throw runtime_error("This linked offer accept is not in your wallet");
-	}
-	else
-	{
-		wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
-		if (wtxIn == NULL)
-			throw runtime_error("This offer accept is not in your wallet");
-	}
+
+	wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
+	if (wtxIn == NULL)
+		throw runtime_error("This offer accept is not in your wallet");
+
 	
     vector<vector<unsigned char> > vvch;
     int op, nOut;

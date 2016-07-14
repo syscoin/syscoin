@@ -91,8 +91,8 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid
 			string offerlinkStr = find_value(result.get_obj(), "offerlink").get_str();
 			if(offerlinkStr == "true")
 			{
-				//reseller = true;
-				//seller = QString::fromStdString(find_value(result.get_obj(), "offerlink_seller").get_str());
+				reseller = true;
+				seller = QString::fromStdString(find_value(result.get_obj(), "offerlink_seller").get_str());
 			}
 			return true;
 		}
