@@ -3063,7 +3063,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	scriptPubKeyAccept += scriptPayment;
 	scriptPubKeyPayment += scriptPayment;
 	CRecipient recipientSeller;
-	scriptPubKeySeller << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkedOffer.accept.vchAcceptRand << vchFromString("") << vchFromString("0") << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+	scriptPubKeySeller << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << linkedOffer.accept.vchAcceptRand << vchFromString("NA") << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
 	scriptPubKeySeller += scriptPayment;
 	CreateRecipient(scriptPubKeySeller, recipientSeller);
 
