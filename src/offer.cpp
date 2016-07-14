@@ -2753,13 +2753,9 @@ bool CreateLinkedOfferAcceptRecipients(vector<CRecipient> &vecSend, const CAmoun
 			continue;
 		if(vvchOffer[0] != offerGUID)
 			continue;
-		// generate offer accept identifier and hash
-		int64_t rand = GetRand(std::numeric_limits<int64_t>::max());
-		vector<unsigned char> vchAcceptRand = CScriptNum(rand).getvch();
-		vector<unsigned char> vchAccept = vchFromString(HexStr(vchAcceptRand));
 		unsigned int nQty = boost::lexical_cast<unsigned int>(stringFromVch(vvchOffer[3]));
 		CAmount nTotalValue = ( nPrice * nQty );
-		scriptPubKeyAccept << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << linkedOfferGUID << vchAccept << vvchOffer[2] << vvchOffer[3] << OP_2DROP << OP_2DROP << OP_DROP; 
+		scriptPubKeyAccept << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << linkedOfferGUID << vvchOffer[2] << vvchOffer[2] << vvchOffer[3] << OP_2DROP << OP_2DROP << OP_DROP; 
 		scriptPubKeyAccept += scriptPubKeyDestination;
 		scriptPubKeyPayment += scriptPubKeyDestination;
 		CRecipient acceptRecipient;
@@ -2856,7 +2852,6 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 			throw runtime_error("offer accept passed into the function is not actually an offer accept");	
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
-		vchAccept = linkOffer.accept.vchAcceptRand;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
@@ -3209,7 +3204,6 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 		COffer linkOffer(*wtxOfferIn);
 		nHeight = linkOffer.accept.nAcceptHeight;
 		nQty = linkOffer.accept.nQty;
-		vchAccept = linkOffer.accept.vchAcceptRand;
 	}
 	const CWalletTx *wtxEscrowIn = NULL;
 	CEscrow escrow;
