@@ -3552,19 +3552,7 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	if(!buyerAddress.IsValid())
 		throw runtime_error("Buyer address is invalid!");
 	CPubKey sellerKey;
-	// check if parent to linked offer is still valid
-	if (!offer.vchLinkOffer.empty())
-	{
-		CTransaction tmpTx;
-		COffer linkedOffer;
-		if(!GetTxOfOffer( offer.vchLinkOffer, linkedOffer, tmpTx))
-		{
-			throw runtime_error("Cannot find linked offer!");
-		}
-		sellerKey = CPubKey(linkedOffer.vchPubKey);
-		
-	}	
-	else
+	
 		sellerKey = CPubKey(offer.vchPubKey);
 
 	CSyscoinAddress sellerAddress(sellerKey.GetID());
