@@ -3052,7 +3052,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	CRecipient recipientBuyer;
 	// if this is a linked accept then we create output for feedback for the reseller since the normal accept from buyer is used here by the linked accept
 	if (vchLinkOfferAcceptTxHash.empty())
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
+		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_OFFER_ACCEPT) << vchOffer << vchAccept << vchPaymentMessage << vchFromString(boost::lexical_cast<std::string>(nQty)) << vchFromString("1") << OP_2DROP << OP_2DROP << OP_2DROP;
 	else
 	{
 		COffer linkOffer(*wtxOfferIn);
