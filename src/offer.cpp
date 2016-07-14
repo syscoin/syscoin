@@ -3084,7 +3084,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
 	// send back to yourself always for feedback unless its a linked accept (reseller can't leave feedback) or escrow
-	if(vchEscrowTxHash.empty())
+	if(vchEscrowTxHash.empty() && vchLinkOfferAcceptTxHash.empty())
 		vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
@@ -3385,7 +3385,7 @@ UniValue offeraccept_nocheck(const UniValue& params, bool fHelp) {
 	CRecipient escrowArbiterRecipient;
 	CreateRecipient(scriptPubKeyEscrowArbiter, escrowArbiterRecipient);
 	// send back to yourself always for feedback unless its a linked accept (reseller can't leave feedback) or escrow
-	if(vchEscrowTxHash.empty())
+	if(vchEscrowTxHash.empty() && vchLinkOfferAcceptTxHash.empty())
 		vecSend.push_back(recipientBuyer);
 	// if we are accepting an escrow transaction then create another escrow utxo for escrowcomplete to be able to do its thing
 	if (wtxEscrowIn != NULL) 
