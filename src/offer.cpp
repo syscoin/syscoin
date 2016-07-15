@@ -4015,7 +4015,9 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					continue;
 				if(op != OP_OFFER_ACCEPT)
 					continue;
-
+				// dont show feedback outputs as accepts
+				if(vvch.size() >= 5)
+					continue;
 
 				if(vvch[0] != vchOfferToFind && !vchOfferToFind.empty())
 					continue;
@@ -4040,10 +4042,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					continue;
 				if (vtxPos.size() < 1)
 					continue;
-				int avgBuyerRating, avgSellerRating;
-				vector<CAcceptFeedback> buyerFeedBacks, sellerFeedBacks;
-				GetFeedbackInAccept(buyerFeedBacks, avgBuyerRating, vchAcceptRand, ACCEPTBUYER, vtxPos);
-				GetFeedbackInAccept(sellerFeedBacks, avgSellerRating, vchAcceptRand, ACCEPTSELLER, vtxPos);
+
 				oOfferAccept.push_back(Pair("offer", offer));
 				oOfferAccept.push_back(Pair("title", stringFromVch(theOffer.sTitle)));
 				oOfferAccept.push_back(Pair("id", stringFromVch(vchAcceptRand)));
@@ -4135,51 +4134,6 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				if(!DecryptMessage(theOffer.vchPubKey, vchMessage, strMessage))
 					strMessage = string("Encrypted for owner of offer");
 				oOfferAccept.push_back(Pair("pay_message", strMessage));
-				UniValue oBuyerFeedBack(UniValue::VARR);
-				for(unsigned int i =0;i<buyerFeedBacks.size();i++)
-				{
-					UniValue oFeedback(UniValue::VOBJ);
-					string sFeedbackTime;
-					CBlockIndex *pindex = chainActive[buyerFeedBacks[i].nHeight];
-					if (pindex) {
-						sFeedbackTime = strprintf("%llu", pindex->nTime);
-					}
-					oFeedback.push_back(Pair("txid", buyerFeedBacks[i].txHash.GetHex()));
-					oFeedback.push_back(Pair("time", sFeedbackTime));
-					oFeedback.push_back(Pair("rating", buyerFeedBacks[i].nRating));
-					oFeedback.push_back(Pair("feedbackuser", buyerFeedBacks[i].nFeedbackUser));
-					oFeedback.push_back(Pair("feedback", stringFromVch(buyerFeedBacks[i].vchFeedback)));
-					oBuyerFeedBack.push_back(oFeedback);
-				}
-				oOfferAccept.push_back(Pair("buyer_feedback", oBuyerFeedBack));
-				oOfferAccept.push_back(Pair("avg_buyer_rating", avgBuyerRating));
-				UniValue oSellerFeedBack(UniValue::VARR);
-				for(unsigned int i =0;i<sellerFeedBacks.size();i++)
-				{
-					UniValue oFeedback(UniValue::VOBJ);
-					string sFeedbackTime;
-					CBlockIndex *pindex = chainActive[sellerFeedBacks[i].nHeight];
-					if (pindex) {
-						sFeedbackTime = strprintf("%llu", pindex->nTime);
-					}
-					oFeedback.push_back(Pair("txid", sellerFeedBacks[i].txHash.GetHex()));
-					oFeedback.push_back(Pair("time", sFeedbackTime));
-					oFeedback.push_back(Pair("rating", sellerFeedBacks[i].nRating));
-					oFeedback.push_back(Pair("feedbackuser", sellerFeedBacks[i].nFeedbackUser));
-					oFeedback.push_back(Pair("feedback", stringFromVch(sellerFeedBacks[i].vchFeedback)));
-					oSellerFeedBack.push_back(oFeedback);
-				}
-				oOfferAccept.push_back(Pair("seller_feedback", oSellerFeedBack));
-				oOfferAccept.push_back(Pair("avg_seller_rating", avgSellerRating));
-				unsigned int ratingCount = 0;
-				if(avgSellerRating > 0)
-					ratingCount++;
-				if(avgBuyerRating > 0)
-					ratingCount++;
-				if(ratingCount == 0)
-					ratingCount = 1;
-				float totalAvgRating = roundf((avgSellerRating+avgBuyerRating)/(float)ratingCount);
-				oOfferAccept.push_back(Pair("avg_rating", (int)totalAvgRating));	
 				oRes.push_back(oOfferAccept);
 				vNamesI[vchAcceptRand] = theOfferAccept.nHeight;
 			}
