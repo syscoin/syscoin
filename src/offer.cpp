@@ -3668,7 +3668,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchOffer = vchFromValue(params[0]);
 	string offer = stringFromVch(vchOffer);
 	COffer theOffer;
-	vector<COffer> vtxPos;
+	vector<COffer> vtxPos, vtxLinkPos;
 	if (!pofferdb->ReadOffer(vchOffer, vtxPos))
 		throw runtime_error("failed to read from offer DB");
 	if (vtxPos.size() < 1)
@@ -3680,6 +3680,19 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		throw runtime_error("failed to read offer transaction from disk");
 	if(theOffer.safetyLevel >= SAFETY_LEVEL2)
 		throw runtime_error("offer has been banned");
+	CTransaction linkTx;
+	COffer linkOffer;
+	if( !theOffer.vchLinkOffer.empty())
+	{
+		if (!pofferdb->ReadOffer(theOffer.vchLinkOffer, vtxLinkPos))
+			throw runtime_error("failed to read from linked offer DB");
+		if (vtxLinkPos.size() < 1)
+			throw runtime_error("no linked result returned");
+		if(!GetTxOfOffer( theOffer.vchLinkOffer, linkOffer, linkTx, true))
+			throw runtime_error("failed to read linked offer transaction from disk");
+	}
+
+
 	// get sellers alias
 	CPubKey SellerPubKey(theOffer.vchPubKey);
 	CSyscoinAddress selleraddy(SellerPubKey.GetID());
@@ -3725,6 +3738,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 				continue;
 			if(op != OP_OFFER_ACCEPT)
 				continue;
+			if(vvch.size() >= 5)
+				continue;
 			if(ca.vchAcceptRand == vvch[1])
 				break;
 		}
@@ -3744,8 +3759,16 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		}
 		int avgBuyerRating, avgSellerRating;
 		vector<CAcceptFeedback> buyerFeedBacks, sellerFeedBacks;
-		GetFeedbackInAccept(buyerFeedBacks, avgBuyerRating, ca.vchAcceptRand,ACCEPTBUYER, vtxPos);
-		GetFeedbackInAccept(sellerFeedBacks, avgSellerRating, ca.vchAcceptRand,ACCEPTSELLER, vtxPos);
+		if( !theOffer.vchLinkOffer.empty())
+		{
+			GetFeedbackInAccept(buyerFeedBacks, avgBuyerRating, ca.vchAcceptRand,ACCEPTBUYER, vtxLinkPos);
+			GetFeedbackInAccept(sellerFeedBacks, avgSellerRating, ca.vchAcceptRand,ACCEPTSELLER, vtxLinkPos);
+		}
+		else
+		{
+			GetFeedbackInAccept(buyerFeedBacks, avgBuyerRating, ca.vchAcceptRand,ACCEPTBUYER, vtxPos);
+			GetFeedbackInAccept(sellerFeedBacks, avgSellerRating, ca.vchAcceptRand,ACCEPTSELLER, vtxPos);
+		}
         string sHeight = strprintf("%llu", ca.nHeight);
 		oOfferAccept.push_back(Pair("id", stringFromVch(vchAcceptRand)));
 		oOfferAccept.push_back(Pair("txid", ca.txHash.GetHex()));
@@ -3923,9 +3946,6 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		oOffer.push_back(Pair("commission", strprintf("%d%%", theOffer.nCommission)));
 		oOffer.push_back(Pair("offerlink", "true"));
 		oOffer.push_back(Pair("offerlink_guid", stringFromVch(theOffer.vchLinkOffer)));
-		CTransaction tmpTx;
-		COffer linkOffer;
-		GetTxOfOffer( theOffer.vchLinkOffer, linkOffer, tmpTx, true);
 		// get linked seller alias
 		CPubKey LinkedSellerPubKey(linkOffer.vchPubKey);
 		CSyscoinAddress linkedselleraddy(LinkedSellerPubKey.GetID());
