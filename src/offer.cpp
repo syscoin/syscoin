@@ -1117,7 +1117,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 			if(!theOfferAccept.feedback.IsNull())
 			{
-				if(!theOffer.vchOfferLink.empty())
+				if(!theOffer.vchLinkOffer.empty())
 				{
 					if(fDebug)
 						LogPrintf( "CheckOfferInputs() : Warning, can't leave feedback for linked offers");
