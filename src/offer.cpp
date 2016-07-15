@@ -4038,7 +4038,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				// if we own an output in this accept tx yet the tx isn't ours
 				// it must be a buyer special output that was sent via linked accept
 				// so we skip it from showing in the accept lists
-				if(nOut > 0 && !isAcceptMine)
+				if(nOut >= 0 && !isAcceptMine)
 					continue;
 				// get last active accepts only
 				if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight <= vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
