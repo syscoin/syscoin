@@ -654,10 +654,6 @@ const string OfferLink(const string& node, const string& alias, const string& gu
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == olddescription);
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == linkedguid);
-	// if offer is not yours you cannot see the offer link status including commission
-	BOOST_CHECK(find_value(r.get_obj(), "offerlink_guid").get_str() == "");
-	BOOST_CHECK(find_value(r.get_obj(), "offerlink").get_str() == "false");
-	BOOST_CHECK(find_value(r.get_obj(), "commission").get_str() == "0");
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "offerinfo " + linkedguid));
@@ -666,9 +662,6 @@ const string OfferLink(const string& node, const string& alias, const string& gu
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == olddescription);
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == linkedguid);
-	BOOST_CHECK(find_value(r.get_obj(), "offerlink_guid").get_str() == "");
-	BOOST_CHECK(find_value(r.get_obj(), "offerlink").get_str() == "false");
-	BOOST_CHECK(find_value(r.get_obj(), "commission").get_str() == "0");
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
 	return linkedguid;

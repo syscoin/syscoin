@@ -2994,7 +2994,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 		throw runtime_error(strprintf("%s currency not found in offer's alias peg %s", stringFromVch(theOffer.sCurrencyCode), stringFromVch(theOffer.vchAliasPeg)));
 	string strCipherText = "";
 	// encryption should only happen once even when not a resell or not an escrow accept. It is already encrypted in both cases.
-	if(wtxOfferIn == NULL && vchEscrowTxHash.empty())
+	if(vchLinkOfferAcceptTxHash.empty() && vchEscrowTxHash.empty())
 	{
 		if(!theOffer.vchLinkOffer.empty())
 		{
@@ -3745,6 +3745,8 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 				continue;
 			if(ca.vchAcceptRand == vvch[1])
 				break;
+			if(vvch.size() >= 5)
+				continue;
 		}
 		if(op != OP_OFFER_ACCEPT)
 			continue;
