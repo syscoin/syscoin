@@ -1117,6 +1117,12 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			}
 			if(!theOfferAccept.feedback.IsNull())
 			{
+				if(!theOffer.vchOfferLink.empty())
+				{
+					if(fDebug)
+						LogPrintf( "CheckOfferInputs() : Warning, can't leave feedback for linked offers");
+					return true;
+				}
 				// ensure we don't add same feedback twice (feedback in db should be older than current height)
 				if(theOfferAccept.feedback.nHeight < nHeight)
 				{
