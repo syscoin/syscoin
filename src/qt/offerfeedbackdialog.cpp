@@ -21,7 +21,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 	ui->aboutFeedback->setPixmap(QPixmap(":/images/" + theme + "/about_horizontal"));
 	QString buyer, seller, currency, offertitle, total, systotal;
 	bool reseller = false;
-	if(!lookup(offerStr, acceptStr, buyer, seller, offertitle, currency, total, systotal, reseller))
+	if(!lookup(offerStr, acceptStr, buyer, seller, offertitle, currency, total, systotal, reseller, resellerguid))
 	{
 		ui->manageInfo2->setText(tr("Cannot find this offer accept on the network, please try again later."));
 		ui->feedbackButton->setEnabled(false);
@@ -30,8 +30,10 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 		ui->primaryFeedback->setVisible(false);
 		return;
 	}
+	if(reseller)
+		offer = resellerguid;
 	OfferType offerType = findYourOfferRoleFromAliases(buyer, seller);
-	ui->manageInfo->setText(tr("This offer payment was for Offer ID: <b>%1</b> for <b>%2</b> totaling <b>%3 %4 (%5 SYS)</b>. The buyer is <b>%6</b>, merchant is <b>%7%8</b>").arg(offer).arg(offertitle).arg(total).arg(currency).arg(systotal).arg(buyer).arg(seller).arg(reseller? tr(" (reseller)"): ""));
+	ui->manageInfo->setText(tr("This offer payment was for Offer ID: <b>%1</b> for <b>%2</b> totaling <b>%3 %4 (%5 SYS)</b>. The buyer is <b>%6</b>, merchant is <b>%7</b>%8").arg(offer).arg(offertitle).arg(total).arg(currency).arg(systotal).arg(buyer).arg(seller).arg(reseller? tr(" (reseller)"): ""));
 	if(offerType == None)
 	{
 		ui->manageInfo2->setText(tr("You cannot leave feedback this offer accept because you do not own either the buyer or merchant aliases. %1").arg(reseller? "The merchant as a reseller cannot leave feedback.": ""));
@@ -51,7 +53,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
 		ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow, you may leave feedback for the buyer once you confirmed you have recieved full payment from buyer and you have ship the goods (if its for a physical good)."));
 	}
 }
-bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid, QString &buyer, QString &seller, QString &offertitle, QString &currency, QString &total, QString &systotal, bool &reseller)
+bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid, QString &buyer, QString &seller, QString &offertitle, QString &currency, QString &total, QString &systotal, bool &reseller, QString &resellerguid)
 {
 	string strError;
 	string strMethod = string("offerinfo");
@@ -93,6 +95,7 @@ bool OfferFeedbackDialog::lookup(const QString &offer, const QString &acceptGuid
 			{
 				reseller = true;
 				seller = QString::fromStdString(find_value(result.get_obj(), "offerlink_seller").get_str());
+				resellerguid = QString::fromStdString(find_value(result.get_obj(), "offerlink_guid").get_str());
 			}
 			return true;
 		}

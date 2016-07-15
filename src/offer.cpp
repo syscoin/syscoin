@@ -3534,14 +3534,9 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, offer, theOfferAccept, tx, skipFeedback))
 		throw runtime_error("Could not find this offer accept");
 
-	LogPrintf("offer tx hash %s\n", tx.GetHash().GetHex().c_str());
-
 	wtxIn = pwalletMain->GetWalletTx(tx.GetHash());
 	if (wtxIn == NULL)
-		throw runtime_error("This offer accept is not in your wallet");
-
-	
-    vector<vector<unsigned char> > vvch;
+		throw runtime_error("This offer accept is not in your wallet");    vector<vector<unsigned char> > vvch;
     int op, nOut;
     if (!DecodeOfferTx(tx, op, nOut, vvch) 
     	|| op != OP_OFFER_ACCEPT)
@@ -3554,9 +3549,11 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	CSyscoinAddress buyerAddress(buyerKey.GetID());
 	if(!buyerAddress.IsValid())
 		throw runtime_error("Buyer address is invalid!");
-	CPubKey sellerKey;
-	
-		sellerKey = CPubKey(offer.vchPubKey);
+	if (!offer.vchLinkOffer.empty())
+	{
+		throw runtime_error("Cannot leave feedback for linked offer");		
+	}	
+	CPubKey sellerKey = CPubKey(offer.vchPubKey);
 
 	CSyscoinAddress sellerAddress(sellerKey.GetID());
 	if(!sellerAddress.IsValid())
@@ -3916,7 +3913,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 	oOffer.push_back(Pair("price", strprintf("%.*f", precision, theOffer.GetPrice() ))); 
 	
 	oOffer.push_back(Pair("ismine", IsSyscoinTxMine(tx, "offer") ? "true" : "false"));
-	if(!theOffer.vchLinkOffer.empty() && IsSyscoinTxMine(tx, "offer")) {
+	if(!theOffer.vchLinkOffer.empty()) {
 		oOffer.push_back(Pair("commission", strprintf("%d%%", theOffer.nCommission)));
 		oOffer.push_back(Pair("offerlink", "true"));
 		oOffer.push_back(Pair("offerlink_guid", stringFromVch(theOffer.vchLinkOffer)));
