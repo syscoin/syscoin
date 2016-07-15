@@ -172,6 +172,7 @@ bool OfferAcceptInfoDialog::lookup()
 				ui->commissionLabel->setVisible(true);
 				ui->linkGUIDEdit->setText(QString::fromStdString(find_value(result.get_obj(), "offerlink_guid").get_str()));
 				ui->commissionEdit->setText(QString::fromStdString(find_value(result.get_obj(), "commission").get_str()));
+				sellerStr = QString::fromStdString(find_value(result.get_obj(), "offerlink_seller").get_str());
 			}
 			const UniValue &offerAccepts = offerAcceptsValue.get_array();
 			COfferAccept myAccept;
