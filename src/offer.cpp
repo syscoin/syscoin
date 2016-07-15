@@ -3479,7 +3479,7 @@ int FindFeedbackInAccept(const vector<unsigned char> &vchAccept, const unsigned 
 		{
 			count++;
 			if(vtxPos[i].accept.feedback.nRating > 0)
-				numRatings
+				numRatings++;
 		}
 	}
 	return count;
