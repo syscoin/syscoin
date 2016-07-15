@@ -475,7 +475,7 @@ public:
 
 };
 void HandleAcceptFeedback(const COfferAccept& accept, const COffer& offer);
-int FindFeedbackInAccept(const std::vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const std::vector<COffer> &vtxPos);
+int FindFeedbackInAccept(const std::vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const std::vector<COffer> &vtxPos, int& numRatings);
 void GetFeedbackInAccept(std::vector<CAcceptFeedback> &feedback, int &avgRating, const std::vector<unsigned char> &vchAccept, const AcceptUser type, const std::vector<COffer> &vtxPos);
 bool GetAcceptByHash(std::vector<COffer> &offerList,  COfferAccept &ca, bool skipFeedback);
 bool GetTxOfOfferAccept(const std::vector<unsigned char> &vchOffer, const std::vector<unsigned char> &vchOfferAccept,

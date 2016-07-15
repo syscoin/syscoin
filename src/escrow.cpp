@@ -634,15 +634,16 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 								LogPrintf("CheckEscrowInputs() : Trying to leave more than 2 feedbacks in the same transaction, skipping...");
 							return true;
 						}
-						int buyerFeedbackCount = FindFeedbackInEscrow(theEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos);
-						int sellerFeedbackCount = FindFeedbackInEscrow(theEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos);
-						int arbiterFeedbackCount = FindFeedbackInEscrow(theEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos);
-						// has this user (nFeedbackUser) already left feedback (BUYER/SELLER/ARBITER) by checking escrow history of tx's (vtxPos)
-						if(buyerFeedbackCount > 0)
+						int numBuyerRatings, numSellerRatings, numArbiterRatings;
+						int buyerFeedbackCount = FindFeedbackInEscrow(theEscrow.buyerFeedback.nFeedbackUser, BUYER, vtxPos, numBuyerRatings);
+						int sellerFeedbackCount = FindFeedbackInEscrow(theEscrow.sellerFeedback.nFeedbackUser, SELLER, vtxPos, numSellerRatings);
+						int arbiterFeedbackCount = FindFeedbackInEscrow(theEscrow.arbiterFeedback.nFeedbackUser, ARBITER, vtxPos, numArbiterRatings);
+						// has this user (nFeedbackUser) already rated?
+						if(numBuyerRatings > 0)
 							theEscrow.buyerFeedback.nRating = 0;
-						if(sellerFeedbackCount > 0)
+						if(numSellerRatings > 0)
 							theEscrow.sellerFeedback.nRating = 0;
-						if(arbiterFeedbackCount > 0)
+						if(numArbiterRatings > 0)
 							theEscrow.arbiterFeedback.nRating = 0;
 						if(buyerFeedbackCount >= 10 && !serializedEscrow.buyerFeedback.IsNull())
 						{
@@ -803,25 +804,38 @@ void HandleEscrowFeedback(const CEscrow& escrow)
 		}
 	}
 }
-int FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser type, const vector<CEscrow> &vtxPos)
+int FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser type, const vector<CEscrow> &vtxPos, int &numRatings)
 {
 	int count = 0;
+	numRatings = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{
 		if(type == BUYER)
 		{
 			if(vtxPos[i].buyerFeedback.nFeedbackUser == nFeedbackUser)
+			{
 				count++;
+				if(vtxPos[i].buyerFeedback.nRaring > 0)
+					numRatings++;
+			}
 		}
 		else if(type == SELLER)
 		{
 			if(vtxPos[i].sellerFeedback.nFeedbackUser == nFeedbackUser)
+			{
 				count++;
+				if(vtxPos[i].sellerFeedback.nRaring > 0)
+					numRatings++;
+			}
 		}
 		else if(type == ARBITER)
 		{
 			if(vtxPos[i].arbiterFeedback.nFeedbackUser == nFeedbackUser)
+			{
 				count++;
+				if(vtxPos[i].arbiterFeedback.nRaring > 0)
+					numRatings++;
+			}
 		}
 	}
 	return count;

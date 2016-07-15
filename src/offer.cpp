@@ -1136,10 +1136,10 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					return true;
 				}
 
-							
-				int feedbackCount = FindFeedbackInAccept(vvchArgs[1], theOfferAccept.feedback.nFeedbackUser, vtxPos);
-				// has this user (nFeedbackUser) already left feedback (ACCEPTBUYER/ACCEPTSELLER) by checking offer history of tx's (vtxPos)
-				if(feedbackCount > 0)
+				int numRatings;				
+				int feedbackCount = FindFeedbackInAccept(vvchArgs[1], theOfferAccept.feedback.nFeedbackUser, vtxPos, numRatings);
+				// has this user (nFeedbackUser) already rated? if so set desired rating to 0
+				if(numRatings > 0)
 					theOfferAccept.feedback.nRating = 0;
 				if(feedbackCount >= 10)
 				{
@@ -3469,13 +3469,18 @@ void HandleAcceptFeedback(const COfferAccept& accept, const COffer& offer)
 			
 	}
 }
-int FindFeedbackInAccept(const vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const vector<COffer> &vtxPos)
+int FindFeedbackInAccept(const vector<unsigned char> &vchAccept, const unsigned char nFeedbackUser, const vector<COffer> &vtxPos, int& numRatings)
 {
 	int count = 0;
+	numRatings = 0;
 	for(unsigned int i =0;i<vtxPos.size();i++)
 	{	
 		if(!vtxPos[i].accept.feedback.IsNull() && vtxPos[i].accept.vchAcceptRand == vchAccept && vtxPos[i].accept.feedback.nFeedbackUser == nFeedbackUser)
-			count++;	
+		{
+			count++;
+			if(vtxPos[i].accept.nRating > 0)
+				numRatings
+		}
 	}
 	return count;
 }

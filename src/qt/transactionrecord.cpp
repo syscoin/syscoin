@@ -74,6 +74,8 @@ static bool CreateSyscoinTransactionRecord(TransactionRecord& sub, int op, const
 			else if(type == RECV)
 				sub.type = TransactionRecord::OfferAcceptRecv;
 		}
+		sub.address = stringFromVch(vvchArgs[1]) + " (" + stringFromVch(vvchArgs[0]) + ")";
+		return true;
 		break;
 	case OP_CERT_ACTIVATE:
 		if(type == SEND)
