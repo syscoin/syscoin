@@ -39,15 +39,12 @@ bool foundOfferLinkInWallet(const vector<unsigned char> &vchOffer, const vector<
             continue;
 		if(wtx.nVersion != GetSyscoinTxVersion())
 			continue;
-		LogPrintf("decoding\n");
 		if (DecodeOfferTx(wtx, op, nOut, vvchArgs))
 		{
 			if(op == OP_OFFER_ACCEPT)
 			{
-				LogPrintf("found accept\n");
 				if(vvchArgs[0] == vchOffer)
 				{
-					LogPrintf("found accept with same offer id\n");
 					vector<unsigned char> vchOfferAcceptLink;
 					bool foundOffer = false;
 					for (unsigned int i = 0; i < wtx.vin.size(); i++) {
@@ -66,7 +63,6 @@ bool foundOfferLinkInWallet(const vector<unsigned char> &vchOffer, const vector<
 							vchOfferAcceptLink = vvchIn[1];
 						}
 					}
-					LogPrintf("check accept id vchOfferAcceptLink %s vs vchAcceptRandLink %s\n", stringFromVch(vchOfferAcceptLink).c_str(), stringFromVch(vchAcceptRandLink).c_str());
 					if(vchOfferAcceptLink == vchAcceptRandLink)
 						return true;				
 				}
@@ -124,13 +120,11 @@ string makeOfferLinkAcceptTX(const COfferAccept& theOfferAccept, const vector<un
 			
 			int op, nOut;			
 			bool good = true;
-			LogPrintf("start foundOfferLinkInWallet\n");
 			// find first offer accept in this block and make sure it is for the linked offer we are checking
 			// the first one is the one that is used to do the offer accept tx, so any subsequent accept tx for the same offer will also check this tx and find that
 			// the linked accept tx was already done (grouped all accept's together in this block)
 			if(DecodeOfferTx(tx, op, nOut, vvchArgs) && op == OP_OFFER_ACCEPT && vvchArgs[0] == vchOffer)
 			{	
-				LogPrintf("foundOfferTx vchOffer %s vchLinkOffer %s vvchArgs[1] %s\n", stringFromVch(vchOffer).c_str(), stringFromVch(vchLinkOffer).c_str(), stringFromVch(vvchArgs[1]).c_str());
 				foundOfferTx = true;
 				if(foundOfferLinkInWallet(vchLinkOffer, vvchArgs[1]))
 				{
