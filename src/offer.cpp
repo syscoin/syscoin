@@ -3478,7 +3478,7 @@ int FindFeedbackInAccept(const vector<unsigned char> &vchAccept, const unsigned 
 		if(!vtxPos[i].accept.feedback.IsNull() && vtxPos[i].accept.vchAcceptRand == vchAccept && vtxPos[i].accept.feedback.nFeedbackUser == nFeedbackUser)
 		{
 			count++;
-			if(vtxPos[i].accept.nRating > 0)
+			if(vtxPos[i].accept.feedback.nRating > 0)
 				numRatings
 		}
 	}
