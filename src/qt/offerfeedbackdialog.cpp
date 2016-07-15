@@ -19,7 +19,7 @@ OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offe
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
 	ui->aboutFeedback->setPixmap(QPixmap(":/images/" + theme + "/about_horizontal"));
-	QString buyer, seller, currency, offertitle, total, systotal;
+	QString buyer, seller, currency, offertitle, total, systotal, reselleralias, resellerguid;
 	bool reseller = false;
 	if(!lookup(offerStr, acceptStr, buyer, seller, offertitle, currency, total, systotal, reseller, reselleralias, resellerguid))
 	{
