@@ -815,7 +815,7 @@ int FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser typ
 			if(vtxPos[i].buyerFeedback.nFeedbackUser == nFeedbackUser)
 			{
 				count++;
-				if(vtxPos[i].buyerFeedback.nRaring > 0)
+				if(vtxPos[i].buyerFeedback.nRating > 0)
 					numRatings++;
 			}
 		}
@@ -824,7 +824,7 @@ int FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser typ
 			if(vtxPos[i].sellerFeedback.nFeedbackUser == nFeedbackUser)
 			{
 				count++;
-				if(vtxPos[i].sellerFeedback.nRaring > 0)
+				if(vtxPos[i].sellerFeedback.nRating > 0)
 					numRatings++;
 			}
 		}
@@ -833,7 +833,7 @@ int FindFeedbackInEscrow(const unsigned char nFeedbackUser, const EscrowUser typ
 			if(vtxPos[i].arbiterFeedback.nFeedbackUser == nFeedbackUser)
 			{
 				count++;
-				if(vtxPos[i].arbiterFeedback.nRaring > 0)
+				if(vtxPos[i].arbiterFeedback.nRating > 0)
 					numRatings++;
 			}
 		}
