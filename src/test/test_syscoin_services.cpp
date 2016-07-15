@@ -941,8 +941,8 @@ void EscrowRefund(const string& node, const string& guid)
 const UniValue FindOfferAccept(const string& node, const string& offerguid, const string& acceptguid, bool nocheck)
 {
 	UniValue r, ret;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + offerguid));
-	UniValue arrayValue = r.get_array();
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
+	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
 		const string &acceptvalueguid = find_value(arrayValue[i].get_obj(), "id").get_str();
@@ -1012,8 +1012,8 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 const UniValue FindOfferLinkedAccept(const string& node, const string& offerguid, const string& acceptguid)
 {
 	UniValue r, ret;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + offerguid));
-	UniValue arrayValue = r.get_array();
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
+	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
 		const string &linkedacceptguid = find_value(arrayValue[i].get_obj(), "linkofferaccept").get_str();
@@ -1103,6 +1103,7 @@ void EscrowClaimReleaseLink(const string& node, const string& guid, const string
 	GenerateBlocks(5, "node2");
 	GenerateBlocks(5, "node3");
 	const UniValue &acceptSellerValue = FindOfferLinkedAccept(node, rootofferguid, acceptguid);
+	BOOST_CHECK(find_value(acceptSellerValue, "escrowlink").get_str().empty());
 	nTotal = AmountFromValue(find_value(acceptSellerValue, "systotal"));
 	if(commission != 0 || discount != 0)
 		BOOST_CHECK(nTotal != escrowtotal);
