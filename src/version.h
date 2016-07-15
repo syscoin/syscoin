@@ -9,7 +9,7 @@
  * network protocol versioning
  */
 //SYSCOIN
-static const int PROTOCOL_VERSION = 70014;
+static const int PROTOCOL_VERSION = 70015;
 
 //! initial proto version, to be increased after version/verack negotiation
 static const int INIT_PROTO_VERSION = 209;
