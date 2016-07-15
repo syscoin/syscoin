@@ -40,8 +40,6 @@ OfferAcceptInfoDialog::OfferAcceptInfoDialog(const PlatformStyle *platformStyle,
 	ui->btctxidLabel->setVisible(false);
 	ui->certEdit->setVisible(false);
 	ui->certLabel->setVisible(false);
-	ui->escrowEdit->setVisible(false);
-	ui->escrowLabel->setVisible(false);
 	QString theme = GUIUtil::getThemeName();  
 	if (!platformStyle->getImagesOnButtons())
 	{
@@ -211,13 +209,6 @@ bool OfferAcceptInfoDialog::lookup()
 				QString buyerStr = QString::fromStdString(find_value(acceptObj.get_obj(), "buyer").get_str());
 				ui->buyerEdit->setText(buyerStr);
 				ui->paymessageEdit->setText(QString::fromStdString(find_value(acceptObj, "pay_message").get_str()));
-				QString escrowStr = QString::fromStdString(find_value(acceptObj.get_obj(), "escrowlink").get_str());
-				if(escrowStr != "")
-				{
-					ui->escrowEdit->setVisible(true);
-					ui->escrowLabel->setVisible(true);
-					ui->escrowEdit->setText(escrowStr);
-				}
 				int avgRating = find_value(acceptObj.get_obj(), "avg_rating").get_int();
 				ui->ratingEdit->setText(tr("%1 Stars").arg(QString::number(avgRating)));
 				const UniValue &buyerFeedback = find_value(acceptObj.get_obj(), "buyer_feedback").get_array();

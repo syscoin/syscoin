@@ -3795,7 +3795,6 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		vector<unsigned char> vchCertLink;
 		bool foundOffer = false;
 		bool foundCert = false;
-		bool foundEscrow = false;
 		bool foundAlias = false;
 		for (unsigned int j = 0; j < txA.vin.size(); j++) {
 			vector<vector<unsigned char> > vvchIn;
@@ -3803,7 +3802,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 			const COutPoint *prevOutput = &txA.vin[j].prevout;
 			if(!GetPreviousInput(prevOutput, opIn, vvchIn))
 				continue;
-			if(foundOffer && foundCert && foundEscrow && foundAlias)
+			if(foundOffer && foundCert && foundAlias)
 				break;
 
 			if (!foundOffer && IsOfferOp(opIn)) {
@@ -3814,10 +3813,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 				if(opIn == OP_OFFER_ACCEPT)
 					vchOfferAcceptLink = vvchIn[1];
 			}
-			if (!foundEscrow && IsEscrowOp(opIn)) {
-				foundEscrow = true; 
-				vchEscrowLink = vvchIn[0];
-			}
+		
 			if (!foundCert && IsCertOp(opIn)) {
 				foundCert = true; 
 				vchCertLink = vvchIn[0];
@@ -3829,10 +3825,10 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		}
 		if(foundAlias)
 			acceptOffer.linkWhitelist.GetLinkEntryByHash(vchAliasLink, entry);	
-		if(foundEscrow)
+		if(!ca.vchEscrow.empty())
 		{
 			vector<CEscrow> vtxEscrowPos;
-			pescrowdb->ReadEscrow(vchEscrowLink, vtxEscrowPos);
+			pescrowdb->ReadEscrow(ca.vchEscrow, vtxEscrowPos);
 			if(!vtxEscrowPos.back().vchWhitelistAlias.empty())
 				acceptOffer.linkWhitelist.GetLinkEntryByHash(vtxEscrowPos.back().vchWhitelistAlias, entry);	
 				
@@ -3843,7 +3839,7 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 			linkAccept = stringFromVch(vchOfferAcceptLink);
 		oOfferAccept.push_back(Pair("linkofferaccept", linkAccept));
 		oOfferAccept.push_back(Pair("offer_discount_percentage", strprintf("%d%%", entry.nDiscountPct)));			
-		oOfferAccept.push_back(Pair("escrowlink", stringFromVch(vchEscrowLink)));
+		oOfferAccept.push_back(Pair("escrowlink", stringFromVch(ca.vchEscrow)));
 		int precision = 2;
 		CAmount nPricePerUnit = convertCurrencyCodeToSyscoin(acceptOffer.vchAliasPeg, acceptOffer.sCurrencyCode, ca.nPrice, ca.nAcceptHeight, precision);
 		oOfferAccept.push_back(Pair("systotal", ValueFromAmount(nPricePerUnit * ca.nQty)));
@@ -4081,13 +4077,11 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				oOfferAccept.push_back(Pair("quantity", strprintf("%d", theOfferAccept.nQty)));
 				oOfferAccept.push_back(Pair("currency", stringFromVch(theOffer.sCurrencyCode)));
 				COfferLinkWhitelistEntry entry;
-				vector<unsigned char> vchEscrowLink;
 				vector<unsigned char> vchCertLink;
 				vector<unsigned char> vchOfferLink;
 				vector<unsigned char> vchOfferAcceptLink;
 				vector<unsigned char> vchAliasLink;
 				bool foundOffer = false;
-				bool foundEscrow = false;
 				bool foundCert = false;
 				bool foundAlias = false;
 				for (unsigned int i = 0; i < acceptTx.vin.size(); i++) {
@@ -4096,7 +4090,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					const COutPoint *prevOutput = &acceptTx.vin[i].prevout;
 					if(!GetPreviousInput(prevOutput, opIn, vvchIn))
 						continue;
-					if(foundOffer && foundEscrow && foundCert && foundAlias)
+					if(foundOffer && foundCert && foundAlias)
 						break;
 
 					if (!foundOffer && IsOfferOp(opIn)) {
@@ -4107,10 +4101,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 						if(opIn == OP_OFFER_ACCEPT)
 							vchOfferAcceptLink = vvchIn[1];
 					}
-					if (!foundEscrow && IsEscrowOp(opIn)) {
-						foundEscrow = true; 
-						vchEscrowLink = vvchIn[0];
-					}
+				
 					if (!foundCert && IsCertOp(opIn)) {
 						foundCert = true; 
 						vchCertLink = vvchIn[0];
@@ -4122,20 +4113,15 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				}
 				if(foundAlias)
 					theOffer.linkWhitelist.GetLinkEntryByHash(vchAliasLink, entry);
-				if(foundEscrow)
-				{
-					vector<CEscrow> vtxEscrowPos;
-					pescrowdb->ReadEscrow(vchEscrowLink, vtxEscrowPos);
-					if(!vtxEscrowPos.back().vchWhitelistAlias.empty())
-						theOffer.linkWhitelist.GetLinkEntryByHash(vtxEscrowPos.back().vchWhitelistAlias, entry);	
+				if(!theOfferAccept.vchEscrow.empty())
+					continue;
 						
-				}		
+						
 				string linkAccept = "";
 				if(!vchOfferAcceptLink.empty())
 					linkAccept = stringFromVch(vchOfferAcceptLink);
 				oOfferAccept.push_back(Pair("linkofferaccept", linkAccept));
 				oOfferAccept.push_back(Pair("offer_discount_percentage", strprintf("%d%%", entry.nDiscountPct)));
-				oOfferAccept.push_back(Pair("escrowlink", stringFromVch(vchEscrowLink)));
 				int precision = 2;
 				CAmount nPricePerUnit = convertCurrencyCodeToSyscoin(theOffer.vchAliasPeg, theOffer.sCurrencyCode, theOfferAccept.nPrice, theOfferAccept.nAcceptHeight, precision);
 				oOfferAccept.push_back(Pair("systotal", ValueFromAmount(nPricePerUnit * theOfferAccept.nQty)));
