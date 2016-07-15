@@ -943,10 +943,12 @@ const UniValue FindOfferAccept(const string& node, const string& offerguid, cons
 	UniValue r, ret;
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
 	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
+	const string &offervalueguid = find_value(r.get_obj(), "offer").get_str();
+	UniValue arrayValue = r.get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
 		const string &acceptvalueguid = find_value(arrayValue[i].get_obj(), "id").get_str();
-		const string &offervalueguid = find_value(arrayValue[i].get_obj(), "offer").get_str();
+		
 		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
 		{
 			ret = arrayValue[i].get_obj();
@@ -1013,11 +1015,11 @@ const UniValue FindOfferLinkedAccept(const string& node, const string& offerguid
 {
 	UniValue r, ret;
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
+	const string &offervalueguid = find_value(r.get_obj(), "offer").get_str();
 	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
 		const string &linkedacceptguid = find_value(arrayValue[i].get_obj(), "linkofferaccept").get_str();
-		const string &offervalueguid = find_value(arrayValue[i].get_obj(), "offer").get_str();
 		if(linkedacceptguid == acceptguid && offervalueguid == offerguid)
 		{
 			ret = arrayValue[i].get_obj();
