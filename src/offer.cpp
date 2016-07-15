@@ -3741,12 +3741,12 @@ UniValue offerinfo(const UniValue& params, bool fHelp) {
 		{
 			if (!IsSyscoinScript(txA.vout[j].scriptPubKey, op, vvch))
 				continue;
+			if(vvch.size() >= 5)
+				continue;
 			if(op != OP_OFFER_ACCEPT)
 				continue;
 			if(ca.vchAcceptRand == vvch[1])
 				break;
-			if(vvch.size() >= 5)
-				continue;
 		}
 		if(op != OP_OFFER_ACCEPT)
 			continue;
