@@ -2256,7 +2256,15 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	scriptPubKeyArbiterDestination= GetScriptForDestination(arbiterKey.GetID());
 	vector<CRecipient> vecSend;
 	CRecipient recipientBuyer, recipientSeller, recipientArbiter;
-
+	scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+	scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
+	scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+	scriptPubKeyArbiter += scriptPubKeyArbiterDestination; 
+	scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
+	scriptPubKeySeller += scriptPubKeySellerDestination;
+	CreateRecipient(scriptPubKeySeller, recipientSeller);		
+	CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
+	CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
 	// buyer
 	if(foundBuyerKey)
 	{
@@ -2270,14 +2278,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		arbiterFeedback.nHeight = chainActive.Tip()->nHeight;
 		escrow.arbiterFeedback = arbiterFeedback;
 		escrow.sellerFeedback = sellerFeedback;
-
-		scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-		scriptPubKeySeller += scriptPubKeySellerDestination;
-		scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-		scriptPubKeyArbiter += scriptPubKeyArbiterDestination;   
-		CreateRecipient(scriptPubKeySeller, recipientSeller);
 		vecSend.push_back(recipientSeller);
-		CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
 		vecSend.push_back(recipientArbiter);
 	}
 	// seller
@@ -2293,13 +2294,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		arbiterFeedback.nHeight = chainActive.Tip()->nHeight;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.arbiterFeedback = arbiterFeedback;
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-		scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
-		scriptPubKeyArbiter << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-		scriptPubKeyArbiter += scriptPubKeyArbiterDestination; 
-		CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 		vecSend.push_back(recipientBuyer);
-		CreateRecipient(scriptPubKeyArbiter, recipientArbiter);
 		vecSend.push_back(recipientArbiter);
 	}
 	// arbiter
@@ -2315,13 +2310,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 		sellerFeedback.nHeight = chainActive.Tip()->nHeight;
 		escrow.buyerFeedback = buyerFeedback;
 		escrow.sellerFeedback = sellerFeedback;
-		scriptPubKeyBuyer << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-		scriptPubKeyBuyer += scriptPubKeyBuyerDestination;
-		scriptPubKeySeller << CScript::EncodeOP_N(OP_ESCROW_COMPLETE) << vchEscrow << vchFromString("1") << OP_2DROP << OP_DROP;
-		scriptPubKeySeller += scriptPubKeySellerDestination;
-		CreateRecipient(scriptPubKeyBuyer, recipientBuyer);
 		vecSend.push_back(recipientBuyer);
-		CreateRecipient(scriptPubKeySeller, recipientSeller);
 		vecSend.push_back(recipientSeller);
 	}
 	else
