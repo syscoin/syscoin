@@ -4056,7 +4056,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				// it must be a buyer special output that was sent via linked accept
 				// so we skip it from showing in the accept lists
 				// this only applies to escrow or linked offer accepts because those ones don't attach buyer special output
-				if(!theOfferAccept.vchEscrow.empty() || !theOffer,vchLinkOffer.empty())
+				if(!theOfferAccept.vchEscrow.empty() || !theOffer.vchLinkOffer.empty())
 				{
 					if(nOut >= 0 && !isAcceptMine)
 						continue;
