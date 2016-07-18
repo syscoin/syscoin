@@ -852,6 +852,10 @@ bool CheckAliasInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							{
 								return error("CheckAliasInputs(): Trying to renew an alias that isn't expired");
 							}
+							if(vvchArgs[0] == vchFromString("SYS_BAN") || vvchArgs[0] == vchFromString("SYS_RATES") || vvchArgs[0] == vchFromString("SYS_CATEGORY"))
+							{
+								return error("CheckAliasInputs(): Can't recreate system aliases");
+							}				
 						}					
 					}
 				}
