@@ -861,7 +861,7 @@ QWidget .QFrame#frame_2 { /* Transactions Widget */
 min-width:410px;
 margin-left:0;
 margin-top:0;
-background-image: url(':/images/shade/shade_logo_horizontal');
+background-image: url(':/images/solid/solid_logo_horizontal');
 background-size: 100%;
 background-repeat:none;
 }
