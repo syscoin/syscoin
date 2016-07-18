@@ -69,11 +69,11 @@ background-color:#F8F6F6;
 
 QLabel { /* Base Text Size & Color */
 font-size:12px;
-color:#333333;
+color:#ffffff;
 }
 
 .QCheckBox { /* Checkbox Labels */
-color:#333333;
+color:#ffffff;
 background-color:transparent;
 }
 
@@ -742,6 +742,8 @@ background-color:transparent;
 color:#3398CC;
 margin-right:5px;
 padding-right:5px;
+font-weight:bold;
+font-size:16px;
 }
 
 QWidget .QFrame#frame .QLabel#labelWalletStatus { /* Wallet Sync Status */
@@ -865,15 +867,14 @@ qproperty-alignment: 'AlignVCenter | AlignRight';
 min-width:160px;
 background-color:transparent;
 color:#3398CC;
-margin-right:5px;
-padding-right:5px;
+font-weight:bold;
+font-size:16px;
 
 
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
-margin-left:3px;
 }
 
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
