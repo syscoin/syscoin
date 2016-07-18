@@ -4055,8 +4055,8 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				// if we own an output in this accept tx yet the tx isn't ours
 				// it must be a buyer special output that was sent via linked accept
 				// so we skip it from showing in the accept lists
-				// this only applies to escrow or linked offer accepts because those ones don't attach buyer special output
-				if(!theOfferAccept.vchEscrow.empty() || !theOffer.vchLinkOffer.empty())
+				// this only applies to linked offer accepts because those ones don't attach buyer special output
+				if(!theOffer.vchLinkOffer.empty())
 				{
 					if(nOut >= 0 && !isAcceptMine)
 						continue;
