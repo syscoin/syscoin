@@ -197,6 +197,23 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpiredbuyback)
 		// node3 shouldn't find the service at all (meaning node3 doesn't sync the data)
 		BOOST_CHECK_THROW(CallRPC("node3", "aliasinfo aliasexpirebuyback2"), runtime_error);
 
+		// steal alias after expiry and original node try to recreate or update should fail
+		AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
+		GenerateBlocks(110);
+		AliasNew("node2", "aliasexpirebuyback", "somedata", "data");
+		BOOST_CHECK_THROW(CallRPC("node2", "aliasnew aliasexpirebuyback data"), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback data"), runtime_error);
+		BOOST_CHECK_THROW(CallRPC("node1", "aliasupdate aliasexpirebuyback changedata1 pvtdata"), runtime_error);
+
+		// this time steal the alias and original recreate at the same time
+		GenerateBlocks(110);
+		AliasNew("node1", "aliasexpirebuyback", "somedata", "data");
+		GenerateBlocks(110);
+		BOOST_CHECK_NO_THROW(CallRPC("node2", "aliasnew aliasexpirebuyback data1"));
+		BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasnew aliasexpirebuyback data2"));
+		GenerateBlocks(5);
+		
+
 	#endif
 }
 
