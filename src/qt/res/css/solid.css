@@ -873,6 +873,9 @@ margin-top:83px;
 margin-left:16px;
 margin-right:5px;
 min-height:24px;
+color:#3398CC;
+font-weight:bold;
+font-size:16px;
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
