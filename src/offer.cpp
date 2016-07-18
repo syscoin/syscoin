@@ -4039,14 +4039,6 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 				COffer theOffer;
 				if (!GetTxOfOfferAccept(vchOffer, vchAcceptRand, theOffer, theOfferAccept, acceptTx))
 					continue;
-				bool isAcceptMine = IsSyscoinTxMine(acceptTx, "offer");
-				bool skipAcceptBuyerSpecialOutput = false;
-				int nOut = IndexOfOfferOutput(acceptTx, skipAcceptBuyerSpecialOutput);
-				// if we own an output in this accept tx yet the tx isn't ours
-				// it must be a buyer special output that was sent via linked accept
-				// so we skip it from showing in the accept lists
-				if(nOut >= 0 && !isAcceptMine)
-					continue;
 				// get last active accepts only
 				if (vNamesI.find(vchAcceptRand) != vNamesI.end() && (theOfferAccept.nHeight <= vNamesI[vchAcceptRand] || vNamesI[vchAcceptRand] < 0))
 					continue;	
@@ -4057,6 +4049,18 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					continue;
 				if (vtxPos.size() < 1)
 					continue;
+				bool isAcceptMine = IsSyscoinTxMine(acceptTx, "offer");
+				bool skipAcceptBuyerSpecialOutput = false;
+				int nOut = IndexOfOfferOutput(acceptTx, skipAcceptBuyerSpecialOutput);
+				// if we own an output in this accept tx yet the tx isn't ours
+				// it must be a buyer special output that was sent via linked accept
+				// so we skip it from showing in the accept lists
+				// this only applies to escrow or linked offer accepts because those ones don't attach buyer special output
+				if(!theOfferAccept.vchEscrow.empty() || !theOffer,vchLinkOffer.empty())
+				{
+					if(nOut >= 0 && !isAcceptMine)
+						continue;
+				}
 
 				oOfferAccept.push_back(Pair("offer", offer));
 				oOfferAccept.push_back(Pair("title", stringFromVch(theOffer.sTitle)));
