@@ -857,29 +857,31 @@ margin-left:16px;
 
 /* RECENT TRANSACTIONS */
 
-QWidget .QFrame#frame_2 .QFrame#transactionHeader { /* Transactions Widget */
+QWidget .QFrame#frame_2 .QFrame#transactionHeaderFrame .QLabel#transactionHeader { /* Transactions Widget */
 min-width:410px;
 height:130px;
+margin-left:0;
+margin-top:0;
 background-image: url(':/images/solid/solid_logo_horizontal');
 background-size: 100%;
 background-repeat:none;
 }
 
 QWidget .QFrame#frame_2 .QLabel#label_4 { /* Recent Transactions Label */
-qproperty-alignment: 'AlignVCenter | AlignRight';
+qproperty-alignment: 'AlignVCenter | AlignLeft';
 min-width:160px;
 background-color:transparent;
 color:#3398CC;
 font-weight:bold;
 font-size:16px;
-margin-left:3px;
+margin-left:10px;
 
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
-qproperty-alignment: 'AlignVCenter | AlignLeft';
-margin-right:5px;
-padding-right:5px;
+qproperty-alignment: 'AlignVCenter | AlignRight';
+margin-right:10px;
+padding-right:10px;
 }
 
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
