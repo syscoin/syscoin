@@ -739,7 +739,9 @@ QWidget .QFrame#frame .QLabel#label_5 { /* Wallet Label */
 qproperty-alignment: 'AlignVCenter | AlignRight';
 min-width:160px;
 background-color:transparent;
-color:#fff;
+color:#3398CC;
+font-weight:bold;
+font-size:16px;
 margin-right:5px;
 padding-right:5px;
 }
@@ -874,13 +876,7 @@ font-size:16px;
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
-qproperty-alignment: 'AlignBottom | AlignLeft';
-min-width:15px;
-margin-top:83px;
-min-height:16px;
-margin-right:5px;
-padding-right:5px;
-min-height:16px;
+display:none;
 }
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
 font-weight:normal;
