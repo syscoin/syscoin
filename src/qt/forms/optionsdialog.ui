@@ -646,7 +646,11 @@
           </widget>
          </item>
          <item>
-          <widget class="QComboBox" name="theme"/>
+          <widget class="QComboBox" name="theme">
+           <property name="toolTip">
+            <string>The user interface theme can be set here. This setting will take effect after restarting Syscoin Core.</string>
+           </property>
+          </widget>
          </item>
         </layout>
        </item>

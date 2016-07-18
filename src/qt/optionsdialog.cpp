@@ -78,9 +78,9 @@ OptionsDialog::OptionsDialog(QWidget *parent, bool enableWallet) :
 
     /* Display elements init */
     // SYSCOIN Theme selector
-    ui->theme->addItem(tr("shade"), QVariant(""));
-	ui->theme->addItem(tr("solid"), QVariant(""));
-	ui->theme->addItem(tr("white"), QVariant(""));
+    ui->theme->addItem(tr("shade"), QVariant("1"));
+	ui->theme->addItem(tr("solid"), QVariant("2"));
+	ui->theme->addItem(tr("white"), QVariant("3"));
 	ui->defaultPegAlias->setPlaceholderText("SYS_RATES");
      
     QDir translations(":translations");
@@ -171,7 +171,7 @@ void OptionsDialog::setModel(OptionsModel *model)
     connect(ui->connectSocksTor, SIGNAL(clicked(bool)), this, SLOT(showRestartWarning()));
     /* Display */
 	// SYSCOIN
-	connect(ui->theme, SIGNAL(valueChanged()), this, SLOT(showRestartWarning()));
+	connect(ui->theme, SIGNAL(valueChanged(int)), this, SLOT(showRestartWarning()));
     connect(ui->lang, SIGNAL(valueChanged()), this, SLOT(showRestartWarning()));
     connect(ui->thirdPartyTxUrls, SIGNAL(textChanged(const QString &)), this, SLOT(showRestartWarning()));
 }
