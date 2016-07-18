@@ -867,19 +867,22 @@ background-repeat:none;
 }
 
 QWidget .QFrame#frame_2 .QLabel#label_4 { /* Recent Transactions Label */
-min-width:160px;
-background-color:transparent;
-color:#3398CC;
-font-weight:bold;
-font-size:16px;
-margin-left:20px;
-margin-top:130px;
+qproperty-alignment: 'AlignBottom | AlignRight';
+min-width:180px;
+margin-top:83px;
+margin-left:16px;
+margin-right:5px;
+min-height:24px;
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
-margin-right:20px;
-padding-right:20px;
-margin-top:200px;
+qproperty-alignment: 'AlignBottom | AlignLeft';
+min-width:15px;
+margin-top:83px;
+min-height:16px;
+margin-right:5px;
+padding-right:5px;
+min-height:16px;
 }
 
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
