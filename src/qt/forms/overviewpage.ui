@@ -425,15 +425,12 @@
          </property>
          <layout class="QVBoxLayout" name="verticalLayout">
           <item>
-           <widget class="QLabel" name="transactionHeader">
+           <widget class="QFrame" name="transactionHeader">
             <property name="frameShape">
              <enum>QFrame::StyledPanel</enum>
             </property>
-            <property name="lineWidth">
-             <number>0</number>
-            </property>
-            <property name="text">
-             <string/>
+            <property name="frameShadow">
+             <enum>QFrame::Raised</enum>
             </property>
            </widget>
           </item>

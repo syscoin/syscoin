@@ -796,6 +796,7 @@ font-size:12px;
 background-color:#F8F6F6;
 margin-right:5px;
 padding-right:5px;
+color:#333333;
 }
 
 QWidget .QFrame#frame .QLabel#labelUnconfirmed { /* Pending Balance */
@@ -817,6 +818,7 @@ font-size:12px;
 background-color:#F8F6F6;
 margin-right:5px;
 padding-right:5px;
+color:#333333;
 }
 
 QWidget .QFrame#frame .QLabel#labelImmature { /* Immature Balance */
@@ -838,6 +840,7 @@ font-size:12px;
 background-color:#F8F6F6;
 margin-right:5px;
 padding-right:5px;
+color:#333333;
 }
 
 QWidget .QFrame#frame .QLabel#labelTotal { /* Total Balance */
@@ -854,7 +857,7 @@ margin-left:16px;
 
 /* RECENT TRANSACTIONS */
 
-QWidget .QFrame#frame_2 .QLabel#transactionHeader { /* Transactions Widget */
+QWidget .QFrame#frame_2 .QFrame#transactionHeader { /* Transactions Widget */
 min-width:410px;
 height:130px;
 background-image: url(':/images/solid/solid_logo_horizontal');
@@ -869,12 +872,14 @@ background-color:transparent;
 color:#3398CC;
 font-weight:bold;
 font-size:16px;
-
+margin-left:3px;
 
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
+margin-right:5px;
+padding-right:5px;
 }
 
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
