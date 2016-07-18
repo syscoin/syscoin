@@ -425,28 +425,6 @@
          </property>
          <layout class="QVBoxLayout" name="verticalLayout">
           <item>
-           <widget class="QFrame" name="transactionHeaderFrame">
-            <property name="frameShape">
-             <enum>QFrame::StyledPanel</enum>
-            </property>
-            <property name="frameShadow">
-             <enum>QFrame::Raised</enum>
-            </property>
-            <layout class="QVBoxLayout" name="verticalLayout_5">
-             <item>
-              <widget class="QLabel" name="transactionHeader">
-               <property name="frameShape">
-                <enum>QFrame::StyledPanel</enum>
-               </property>
-               <property name="text">
-                <string/>
-               </property>
-              </widget>
-             </item>
-            </layout>
-           </widget>
-          </item>
-          <item>
            <layout class="QHBoxLayout" name="horizontalLayout_2">
             <item>
              <widget class="QPushButton" name="labelTransactionsStatus">
