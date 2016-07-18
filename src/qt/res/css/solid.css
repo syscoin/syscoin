@@ -739,7 +739,7 @@ QWidget .QFrame#frame .QLabel#label_5 { /* Wallet Label */
 qproperty-alignment: 'AlignVCenter | AlignRight';
 min-width:160px;
 background-color:transparent;
-color:#fff;
+color:#3398CC;
 margin-right:5px;
 padding-right:5px;
 }
@@ -852,35 +852,27 @@ margin-left:16px;
 
 /* RECENT TRANSACTIONS */
 
-QWidget .QFrame#frame_2 { /* Transactions Widget */
+QWidget .QFrame#frame_2 .QLabel#transactionHeader { /* Transactions Widget */
 min-width:410px;
-margin-right:20px;
-margin-left:0;
-margin-top:0;
 background-image: url(':/images/solid/solid_logo_horizontal');
 background-size: 100%;
 background-repeat:none;
 }
 
 QWidget .QFrame#frame_2 .QLabel#label_4 { /* Recent Transactions Label */
-min-width:180px;
+qproperty-alignment: 'AlignVCenter | AlignRight';
+min-width:160px;
+background-color:transparent;
 color:#3398CC;
-margin-left:67px;
-margin-top:83px;
 margin-right:5px;
 padding-right:5px;
-font-weight:bold;
-font-size:15px;
-min-height:24px;
+
+
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
-qproperty-alignment: 'AlignBottom | AlignRight';
-min-width:93px;
-margin-top:83px;
-margin-left:16px;
-margin-right:5px;
-min-height:16px;
+qproperty-alignment: 'AlignVCenter | AlignLeft';
+margin-left:3px;
 }
 
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
