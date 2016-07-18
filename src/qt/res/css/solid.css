@@ -867,7 +867,6 @@ background-repeat:none;
 }
 
 QWidget .QFrame#frame_2 .QLabel#label_4 { /* Recent Transactions Label */
-qproperty-alignment: 'AlignLeft';
 min-width:160px;
 background-color:transparent;
 color:#3398CC;
@@ -878,10 +877,9 @@ margin-top:130px;
 }
 
 QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
-qproperty-alignment: 'AlignRight';
 margin-right:20px;
 padding-right:20px;
-margin-top:130px;
+margin-top:200px;
 }
 
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
