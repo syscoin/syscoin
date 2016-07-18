@@ -854,6 +854,7 @@ margin-left:16px;
 
 QWidget .QFrame#frame_2 .QLabel#transactionHeader { /* Transactions Widget */
 min-width:410px;
+height:130px;
 background-image: url(':/images/solid/solid_logo_horizontal');
 background-size: 100%;
 background-repeat:none;
