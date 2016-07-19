@@ -16,11 +16,12 @@
 //! These need to be macros, as clientversion.cpp's and syscoin*-res.rc's voodoo requires it
 #define CLIENT_VERSION_MAJOR 0
 #define CLIENT_VERSION_MINOR 12
-#define CLIENT_VERSION_REVISION 99
-#define CLIENT_VERSION_BUILD 210
+// SYSCOIN
+#define CLIENT_VERSION_REVISION 99_211
+#define CLIENT_VERSION_BUILD 211
 
 //! Set to true for release, false for prerelease or test build
-#define CLIENT_VERSION_IS_RELEASE true
+#define CLIENT_VERSION_IS_RELEASE false
 
 /**
  * Copyright year (2009-this)

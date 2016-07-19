@@ -181,7 +181,7 @@ bool IsOfferOp(int op) {
 
 int GetOfferExpirationDepth() {
 	#ifdef ENABLE_DEBUGRPC
-    return 100;
+    return 1440;
   #else
     return 525600;
   #endif
