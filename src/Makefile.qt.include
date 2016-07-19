@@ -389,6 +389,7 @@ RES_ICONS = \
   qt/res/icons/shade/tx_mined.png \
   qt/res/icons/shade/warning.png \
   qt/res/icons/shade/verify.png \
+  qt/res/icons/shade/thumbsup.png \
   qt/res/icons/shade/alias.png \
   qt/res/icons/shade/cart.png \
   qt/res/icons/shade/cert.png \
@@ -449,6 +450,7 @@ RES_ICONS = \
   qt/res/icons/solid/tx_mined.png \
   qt/res/icons/solid/warning.png \
   qt/res/icons/solid/verify.png \
+  qt/res/icons/solid/thumbsup.png \
   qt/res/icons/solid/alias.png \
   qt/res/icons/solid/cart.png \
   qt/res/icons/solid/cert.png \
@@ -509,6 +511,7 @@ RES_ICONS = \
   qt/res/icons/white/tx_mined.png \
   qt/res/icons/white/warning.png \
   qt/res/icons/white/verify.png \
+  qt/res/icons/white/thumbsup.png \  
   qt/res/icons/white/alias.png \
   qt/res/icons/white/cart.png \
   qt/res/icons/white/cert.png \

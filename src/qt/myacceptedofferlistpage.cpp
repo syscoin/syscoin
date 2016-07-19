@@ -45,6 +45,7 @@ MyAcceptedOfferListPage::MyAcceptedOfferListPage(const PlatformStyle *platformSt
 		ui->copyOffer->setIcon(QIcon());
 		ui->refreshButton->setIcon(QIcon());
 		ui->btcButton->setIcon(QIcon());
+		ui->feedbackButton->setIcon(QIcon());
 
 	}
 	else
@@ -55,6 +56,7 @@ MyAcceptedOfferListPage::MyAcceptedOfferListPage(const PlatformStyle *platformSt
 		ui->copyOffer->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->refreshButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/refresh"));
 		ui->btcButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/search"));
+		ui->feedbackButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/thumbsup"));
 		
 	}
 

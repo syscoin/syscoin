@@ -35,6 +35,7 @@ AcceptedOfferListPage::AcceptedOfferListPage(const PlatformStyle *platformStyle,
 		ui->detailButton->setIcon(QIcon());
 		ui->copyOffer->setIcon(QIcon());
 		ui->refreshButton->setIcon(QIcon());
+		ui->feedbackButton->setIcon(QIcon());
 	}
 	else
 	{
@@ -43,6 +44,7 @@ AcceptedOfferListPage::AcceptedOfferListPage(const PlatformStyle *platformStyle,
 		ui->detailButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/details"));
 		ui->copyOffer->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/editcopy"));
 		ui->refreshButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/refresh"));
+		ui->feedbackButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/thumbsup"));
 	}
 #ifdef Q_OS_MAC // Icons on push buttons are very uncommon on Mac
     ui->copyOffer->setIcon(QIcon());

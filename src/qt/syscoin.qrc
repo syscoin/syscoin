@@ -45,6 +45,7 @@
         <file alias="about">res/icons/shade/about.png</file>
         <file alias="about_qt">res/icons/shade/about_qt.png</file>
         <file alias="verify">res/icons/shade/verify.png</file>
+        <file alias="thumbsup">res/icons/shade/thumbsup.png</file>
         <file alias="warning">res/icons/shade/warning.png</file>
         <file alias="alias">res/icons/shade/alias.png</file>
         <file alias="cart">res/icons/shade/cart.png</file>
@@ -107,6 +108,7 @@
     <file alias="about">res/icons/solid/about.png</file>
     <file alias="about_qt">res/icons/solid/about_qt.png</file>
     <file alias="verify">res/icons/solid/verify.png</file>
+    <file alias="thumbsup">res/icons/solid/thumbsup.png</file>
     <file alias="warning">res/icons/solid/warning.png</file>
     <file alias="alias">res/icons/solid/alias.png</file>
     <file alias="cart">res/icons/solid/cart.png</file>
@@ -169,6 +171,7 @@
     <file alias="about">res/icons/white/about.png</file>
     <file alias="about_qt">res/icons/white/about_qt.png</file>
     <file alias="verify">res/icons/white/verify.png</file>
+    <file alias="thumbsup">res/icons/white/thumbsup.png</file>
     <file alias="warning">res/icons/white/warning.png</file>
     <file alias="alias">res/icons/white/alias.png</file>
     <file alias="cart">res/icons/white/cart.png</file>
