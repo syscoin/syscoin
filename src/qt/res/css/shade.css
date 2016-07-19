@@ -874,9 +874,6 @@ font-weight:bold;
 font-size:16px;
 }
 
-QWidget .QFrame#frame_2 .QLabel#labelTransactionsStatus { /* Recent Transactions Sync Status */
-display:none;
-}
 
 QWidget .QFrame#frame_2 QListView { /* Transaction List */
 font-weight:normal;
