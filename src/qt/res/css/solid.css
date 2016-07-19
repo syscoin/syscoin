@@ -803,12 +803,14 @@ QWidget .QFrame#frame .QLabel#labelUnconfirmed { /* Pending Balance */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
 font-size:12px;
 margin-left:0px;
+color:#fff;
 }
 
 QWidget .QFrame#frame .QLabel#labelWatchPending { /* Watch-only Pending Balance */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
 font-size:12px;
 margin-left:16px;
+color:#fff;
 }
 
 QWidget .QFrame#frame .QLabel#labelImmatureText { /* Immature Balance Label */
@@ -825,12 +827,14 @@ QWidget .QFrame#frame .QLabel#labelImmature { /* Immature Balance */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
 font-size:12px;
 margin-left:0px;
+color:#fff;
 }
 
 QWidget .QFrame#frame .QLabel#labelWatchImmature { /* Watch-only Immature Balance */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
 font-size:12px;
 margin-left:16px;
+color:#fff;
 }
 
 QWidget .QFrame#frame .QLabel#labelTotalText { /* Total Balance Label */
@@ -847,12 +851,14 @@ QWidget .QFrame#frame .QLabel#labelTotal { /* Total Balance */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
 font-size:12px;
 margin-left:0px;
+color:#fff;
 }
 
 QWidget .QFrame#frame .QLabel#labelWatchTotal { /* Watch-only Total Balance */
 qproperty-alignment: 'AlignVCenter | AlignLeft';
 font-size:12px;
 margin-left:16px;
+color:#fff;
 }
 
 /* RECENT TRANSACTIONS */

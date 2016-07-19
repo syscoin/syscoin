@@ -265,5 +265,6 @@ void OverviewPage::updateAlerts(const QString &warnings)
 void OverviewPage::showOutOfSyncWarning(bool fShow)
 {
     ui->labelWalletStatus->setVisible(fShow);
-    ui->labelTransactionsStatus->setVisible(fShow);
+	// SYSCOIN
+    //ui->labelTransactionsStatus->setVisible(fShow);
 }
