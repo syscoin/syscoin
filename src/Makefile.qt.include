@@ -638,6 +638,7 @@ RES_IMAGES = \
   qt/res/images/shade/shade_overview.png \
   qt/res/images/shade/shade_splash.png \
   qt/res/images/shade/shade_logo_horizontal.png \
+  qt/res/images/shade/shade_logo_horizontal_big.png \  
   qt/res/images/shade/shade_downArrow.png \
   qt/res/images/shade/shade_downArrow_small.png \
   qt/res/images/shade/shade_upArrow_small.png \
@@ -653,6 +654,7 @@ RES_IMAGES = \
   qt/res/images/solid/solid_overview.png \
   qt/res/images/solid/solid_splash.png \
   qt/res/images/solid/solid_logo_horizontal.png \
+  qt/res/images/solid/solid_logo_horizontal_big.png \
   qt/res/images/solid/solid_downArrow.png \
   qt/res/images/solid/solid_downArrow_small.png \
   qt/res/images/solid/solid_upArrow_small.png \
@@ -668,6 +670,7 @@ RES_IMAGES = \
   qt/res/images/white/white_overview.png \
   qt/res/images/white/white_splash.png \
   qt/res/images/white/white_logo_horizontal.png \
+  qt/res/images/white/white_logo_horizontal_big.png \
   qt/res/images/white/white_downArrow.png \
   qt/res/images/white/white_downArrow_small.png \
   qt/res/images/white/white_upArrow_small.png \
