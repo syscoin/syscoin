@@ -37,7 +37,7 @@ public:
 
 public Q_SLOTS:
     void accept();
-	void aliasChanged(const QString& text);
+	void aliasChanged(int index);
 
 private:
     bool saveCurrentRow();
