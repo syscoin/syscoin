@@ -580,6 +580,7 @@ bool EditOfferDialog::saveCurrentRow()
 				QMessageBox::critical(this, windowTitle(),
 				tr("Error creating new Offer: Certificate offers must use a certificate category"),
 					QMessageBox::Ok, QMessageBox::Ok);
+				return;
 			}
 			params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
 		}
@@ -590,6 +591,7 @@ bool EditOfferDialog::saveCurrentRow()
 				QMessageBox::critical(this, windowTitle(),
 				tr("Error creating new Offer: offer not selling a certificate yet used certificate as a category"),
 					QMessageBox::Ok, QMessageBox::Ok);
+				return;
 			}
 			params.push_back("nocert");
 		}
@@ -653,6 +655,7 @@ bool EditOfferDialog::saveCurrentRow()
 					QMessageBox::critical(this, windowTitle(),
 					tr("Error updating Offer: Certificate offers must use a certificate category"),
 						QMessageBox::Ok, QMessageBox::Ok);
+					return;
 				}
 				params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
 			}
@@ -663,6 +666,7 @@ bool EditOfferDialog::saveCurrentRow()
 					QMessageBox::critical(this, windowTitle(),
 					tr("Error updating Offer: offer not selling a certificate yet used certificate as a category"),
 						QMessageBox::Ok, QMessageBox::Ok);
+					return;
 				}
 				params.push_back("nocert");
 			}
