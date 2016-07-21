@@ -31,11 +31,9 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 	ui->transferEdit->setVisible(false);
 	ui->privateBox->addItem(tr("Yes"));
 	ui->privateBox->addItem(tr("No"));
-	ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
 	ui->transferDisclaimer->setText(tr("<font color='blue'>Enter the alias of the recipient of this certificate</font>"));
     ui->transferDisclaimer->setVisible(false);
-	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this cert safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create a cert that is offensive and do not set this option to <b>No</b> your cert will be banned!</font>"));
-	
+	connect(ui->safeSearch,SIGNAL(currentIndexChanged(const QString &text)),this,SLOT(safeSearchChanged(const QString &text)));
 	loadAliases();
 	QSettings settings;
 	QString defaultCertAlias;
@@ -76,11 +74,85 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
 	
 }
+void EditCertDialog::safeSearchChanged(const QString &alias)
+{
+	string strMethod = string("aliasinfo");
+    UniValue params(UniValue::VARR); 
+	params.push_back(alias.toStdString());
+	UniValue result ;
+	string name_str;
+	int expired = 0;
+	bool safeSearch;
+	int safetyLevel;
+	try {
+		result = tableRPC.execute(strMethod, params);
+
+		if (result.type() == UniValue::VOBJ)
+		{
+			name_str = "";
+			safeSearch = false;
+			expired = safetyLevel = 0;
+			const UniValue& o = result.get_obj();
+			name_str = "";
+			safeSearch = false;
+			expired = safetyLevel = 0;
+
+
+	
+			const UniValue& name_value = find_value(o, "name");
+			if (name_value.type() == UniValue::VSTR)
+				name_str = name_value.get_str();		
+			const UniValue& expired_value = find_value(o, "expired");
+			if (expired_value.type() == UniValue::VNUM)
+				expired = expired_value.get_int();
+			const UniValue& ss_value = find_value(o, "safesearch");
+			if (ss_value.type() == UniValue::VSTR)
+				safeSearch = ss_value.get_str() == "Yes";	
+			const UniValue& sl_value = find_value(o, "safetylevel");
+			if (sl_value.type() == UniValue::VNUM)
+				safetyLevel = sl_value.get_int();
+			if(!safeSearch || safetyLevel > 0)
+			{
+				setCertNotSafeBecauseOfAlias(QString::fromStdString(name_str));
+			}
+			else
+				resetSafeSearch();
+
+			if(expired != 0)
+			{
+				ui->aliasDisclaimer->setText(tr("<font color='red'>This alias has expired, please choose another one</font>"));					
+			}
+			else
+				ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
+		}
+		else
+		{
+			resetSafeSearch();
+			ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
+		}
+	}
+	catch (UniValue& objError)
+	{
+		resetSafeSearch();
+		ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
+	}
+	catch(std::exception& e)
+	{
+		resetSafeSearch();
+		ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
+	}  
+}
 void EditCertDialog::setCertNotSafeBecauseOfAlias(QString alias)
 {
 	ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText("No"));
 	ui->safeSearchEdit->setEnabled(false);
-	ui->safeSearchDisclaimer->setText(tr("<font color='red'>Alias(<b>%1</b>) is not safe to search so this setting can only be set to No").arg(alias));
+	ui->safeSearchDisclaimer->setText(tr("<font color='red'><b>%1</b> is not safe to search so this setting can only be set to No").arg(alias));
+}
+void EditCertDialog::resetSafeSearch(QString alias)
+{
+	ui->safeSearchEdit->setEnabled(true);
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this cert safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create a cert that is offensive and do not set this option to <b>No</b> your cert will be banned!</font>"));
+	
 }
 void EditCertDialog::loadAliases()
 {
@@ -90,16 +162,13 @@ void EditCertDialog::loadAliases()
 	UniValue result ;
 	string name_str;
 	int expired = 0;
-	bool safeSearch;
-	int safetyLevel;
 	try {
 		result = tableRPC.execute(strMethod, params);
 
 		if (result.type() == UniValue::VARR)
 		{
 			name_str = "";
-			safeSearch = false;
-			expired = safetyLevel = 0;
+			expired = 0;
 
 
 	
@@ -111,7 +180,7 @@ void EditCertDialog::loadAliases()
 				const UniValue& o = input.get_obj();
 				name_str = "";
 				safeSearch = false;
-				expired = safetyLevel = 0;
+				expired = 0;
 
 
 		
@@ -121,16 +190,6 @@ void EditCertDialog::loadAliases()
 				const UniValue& expired_value = find_value(o, "expired");
 				if (expired_value.type() == UniValue::VNUM)
 					expired = expired_value.get_int();
-				const UniValue& ss_value = find_value(o, "safesearch");
-				if (ss_value.type() == UniValue::VSTR)
-					safeSearch = ss_value.get_str() == "Yes";	
-				const UniValue& sl_value = find_value(o, "safetylevel");
-				if (sl_value.type() == UniValue::VNUM)
-					safetyLevel = sl_value.get_int();
-				if(!safeSearch || safetyLevel > 0)
-				{
-					setCertNotSafeBecauseOfAlias(QString::fromStdString(name_str));
-				}
 				if(expired == 0)
 				{
 					QString name = QString::fromStdString(name_str);
