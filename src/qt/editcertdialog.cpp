@@ -33,9 +33,10 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 	ui->privateBox->addItem(tr("No"));
 	ui->transferDisclaimer->setText(tr("<font color='blue'>Enter the alias of the recipient of this certificate</font>"));
     ui->transferDisclaimer->setVisible(false);
-	connect(ui->aliasEdit,SIGNAL(activated(int)),this,SLOT(aliasChanged(int)));
+	
 	loadAliases();
-	aliasChanged(ui->aliasEdit->currentIndex());
+	connect(ui->aliasEdit,SIGNAL(currentIndexChanged(int)),this,SLOT(aliasChanged(int)));
+	
 	QSettings settings;
 	QString defaultCertAlias;
 	int aliasIndex;
@@ -55,6 +56,7 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 		ui->aliasDisclaimer->setVisible(false);
 		ui->aliasEdit->setEnabled(false);
         setWindowTitle(tr("Edit Cert"));
+		
         break;
     case TransferCert:
         setWindowTitle(tr("Transfer Cert"));
@@ -68,11 +70,13 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 		ui->transferEdit->setVisible(true);
 		ui->transferDisclaimer->setVisible(true);
 		ui->aliasDisclaimer->setVisible(false);
+
 		ui->aliasEdit->setEnabled(false);
         break;
     }
     mapper = new QDataWidgetMapper(this);
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
+	aliasChanged(ui->aliasEdit->currentIndex());
 	
 }
 void EditCertDialog::aliasChanged(int index)
