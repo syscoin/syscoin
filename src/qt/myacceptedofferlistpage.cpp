@@ -315,7 +315,7 @@ void MyAcceptedOfferListPage::on_messageButton_clicked()
     }
 	QString buyer = selection.at(0).data(OfferAcceptTableModel::BuyerRole).toString();
 	// send message to buyer
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, buyer);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, buyer, this);   
 	dlg.exec();
 
 
@@ -332,7 +332,7 @@ void MyAcceptedOfferListPage::on_detailButton_clicked()
     QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
     if(!selection.isEmpty())
     {
-        OfferAcceptInfoDialog dlg(platformStyle, selection.at(0));
+        OfferAcceptInfoDialog dlg(platformStyle, selection.at(0), this);
         dlg.exec();
     }
 }
@@ -411,7 +411,7 @@ void MyAcceptedOfferListPage::on_feedbackButton_clicked()
     }
 	QString offer = selection.at(0).data(OfferAcceptTableModel::NameRole).toString();
 	QString accept = selection.at(0).data(OfferAcceptTableModel::GUIDRole).toString();
-	OfferFeedbackDialog dlg(walletModel, offer, accept);   
+	OfferFeedbackDialog dlg(walletModel, offer, accept, this);   
 	dlg.exec();
 }
 void MyAcceptedOfferListPage::on_copyOffer_clicked()

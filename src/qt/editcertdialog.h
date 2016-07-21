@@ -37,7 +37,7 @@ public:
 
 public Q_SLOTS:
     void accept();
-	void safeSearchChanged(int index);
+	void aliasChanged(int index);
 
 private:
     bool saveCurrentRow();

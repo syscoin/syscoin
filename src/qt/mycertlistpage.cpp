@@ -112,7 +112,7 @@ void MyCertListPage::on_sellCertButton_clicked()
                QMessageBox::Ok, QMessageBox::Ok);
 		   return;
 	}
-    EditOfferDialog dlg(EditOfferDialog::NewCertOffer, certGUID);
+    EditOfferDialog dlg(EditOfferDialog::NewCertOffer, certGUID, this);
     dlg.setModel(walletModel,0);
     dlg.exec();
 }

@@ -180,7 +180,7 @@ void MyEscrowListPage::on_manageButton_clicked()
         return;
     }
 	QString escrow = selection.at(0).data(EscrowTableModel::EscrowRole).toString();
-	ManageEscrowDialog dlg(walletModel, escrow);   
+	ManageEscrowDialog dlg(walletModel, escrow, this);   
 	dlg.exec();
 }
 void MyEscrowListPage::on_buyerMessageButton_clicked()
@@ -196,7 +196,7 @@ void MyEscrowListPage::on_buyerMessageButton_clicked()
     }
 	QString buyer = selection.at(0).data(EscrowTableModel::BuyerRole).toString();
 	// send message to seller
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, buyer);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, buyer, this);   
 	dlg.exec();
 }
 void MyEscrowListPage::on_sellerMessageButton_clicked()
@@ -212,7 +212,7 @@ void MyEscrowListPage::on_sellerMessageButton_clicked()
     }
 	QString sellerAlias = selection.at(0).data(EscrowTableModel::SellerRole).toString();
 	// send message to seller
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, sellerAlias);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, sellerAlias, this);   
 	dlg.exec();
 }
 void MyEscrowListPage::on_arbiterMessageButton_clicked()
@@ -228,7 +228,7 @@ void MyEscrowListPage::on_arbiterMessageButton_clicked()
     }
 	QString arbAlias = selection.at(0).data(EscrowTableModel::ArbiterRole).toString();
 	// send message to arbiter
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, arbAlias);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, arbAlias, this);   
 	dlg.exec();
 }
 void MyEscrowListPage::on_refreshButton_clicked()
@@ -276,7 +276,7 @@ void MyEscrowListPage::on_detailButton_clicked()
     QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
     if(!selection.isEmpty())
     {
-        EscrowInfoDialog dlg(platformStyle, selection.at(0));
+        EscrowInfoDialog dlg(platformStyle, selection.at(0), this);
         dlg.exec();
     }
 }

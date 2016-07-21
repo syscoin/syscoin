@@ -239,7 +239,7 @@ void OfferListPage::on_messageButton_clicked()
 	QString offerAlias = selection.at(0).data(OfferTableModel::AliasRole).toString();
 	QString offerTitle = selection.at(0).data(OfferTableModel::TitleRole).toString();
 	// send message to seller
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, offerAlias, offerTitle);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, offerAlias, offerTitle, this);   
 	dlg.exec();
 
 
@@ -263,7 +263,7 @@ void OfferListPage::on_resellButton_clicked()
             QMessageBox::Ok, QMessageBox::Ok);
 		return;
 	}
-    ResellOfferDialog dlg((QModelIndex*)&selection.at(0), walletModel);   
+    ResellOfferDialog dlg((QModelIndex*)&selection.at(0), walletModel, this);   
     dlg.exec();
 }
 void OfferListPage::on_purchaseButton_clicked()

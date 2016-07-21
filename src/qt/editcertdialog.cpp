@@ -33,8 +33,9 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 	ui->privateBox->addItem(tr("No"));
 	ui->transferDisclaimer->setText(tr("<font color='blue'>Enter the alias of the recipient of this certificate</font>"));
     ui->transferDisclaimer->setVisible(false);
-	connect(ui->safeSearchEdit,SIGNAL(activated(int)),this,SLOT(safeSearchChanged(int)));
+	connect(ui->aliasEdit,SIGNAL(activated(int)),this,SLOT(aliasChanged(int)));
 	loadAliases();
+	aliasChanged(ui->aliasEdit->currentIndex());
 	QSettings settings;
 	QString defaultCertAlias;
 	int aliasIndex;
@@ -74,11 +75,11 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
 	
 }
-void EditCertDialog::safeSearchChanged(int index)
+void EditCertDialog::aliasChanged(int index)
 {
 	string strMethod = string("aliasinfo");
     UniValue params(UniValue::VARR); 
-	params.push_back(ui->safeSearchEdit->itemData(index).toString().toStdString());
+	params.push_back(ui->aliasEdit->itemData(index).toString().toStdString());
 	UniValue result ;
 	string name_str;
 	int expired = 0;

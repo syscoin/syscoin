@@ -166,7 +166,7 @@ void EscrowListPage::on_detailButton_clicked()
     QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
     if(!selection.isEmpty())
     {
-        EscrowInfoDialog dlg(platformStyle, selection.at(0));
+        EscrowInfoDialog dlg(platformStyle, selection.at(0), this);
         dlg.exec();
     }
 }

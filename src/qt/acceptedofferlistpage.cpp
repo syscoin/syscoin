@@ -169,7 +169,7 @@ void AcceptedOfferListPage::on_messageButton_clicked()
     }
 	QString offerAlias = selection.at(0).data(OfferAcceptTableModel::AliasRole).toString();
 	// send message to seller
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, offerAlias);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, offerAlias, this);   
 	dlg.exec();
 
 
@@ -187,7 +187,7 @@ void AcceptedOfferListPage::on_feedbackButton_clicked()
     }
 	QString offer = selection.at(0).data(OfferAcceptTableModel::NameRole).toString();
 	QString accept = selection.at(0).data(OfferAcceptTableModel::GUIDRole).toString();
-	OfferFeedbackDialog dlg(walletModel, offer, accept);   
+	OfferFeedbackDialog dlg(walletModel, offer, accept, this);   
 	dlg.exec();
 }
 void AcceptedOfferListPage::on_copyOffer_clicked()
