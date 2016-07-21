@@ -116,13 +116,13 @@ void EditOfferDialog::on_aliasPegEdit_editingFinished()
 	}
 
 }
-void EditCertDialog::setOfferNotSafeBecauseOfAlias(const QString &alias)
+void EditOfferDialog::setOfferNotSafeBecauseOfAlias(const QString &alias)
 {
 	ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText("No"));
 	ui->safeSearchEdit->setEnabled(false);
 	ui->safeSearchDisclaimer->setText(tr("<font color='red'><b>%1</b> is not safe to search so this setting can only be set to No").arg(alias));
 }
-void EditCertDialog::resetSafeSearch()
+void EditOfferDialog::resetSafeSearch()
 {
 	ui->safeSearchEdit->setEnabled(true);
 	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this offer safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an offer that is offensive and do not set this option to <b>No</b> your offer will be banned aswell as possibly your store alias!</font>"));
