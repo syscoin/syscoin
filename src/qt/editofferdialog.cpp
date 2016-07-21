@@ -573,7 +573,7 @@ bool EditOfferDialog::saveCurrentRow()
 		params.push_back(ui->priceEdit->text().toStdString());
 		params.push_back(ui->descriptionEdit->toPlainText().toStdString());
 		params.push_back(ui->currencyEdit->currentText().toStdString());
-		if(ui->certEdit->currentIndex() >= 0)
+		if(ui->certEdit->currentIndex() > 0)
 		{
 			if(!ui->categoryEdit->currentText().startsWith("certificate"))
 			{
@@ -648,7 +648,7 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back(ui->priceEdit->text().toStdString());
 			params.push_back(ui->descriptionEdit->toPlainText().toStdString());
 			params.push_back(ui->privateEdit->currentText() == QString("Yes")? "1": "0");
-			if(ui->certEdit->currentIndex() >= 0)
+			if(ui->certEdit->currentIndex() > 0)
 			{
 				if(!ui->categoryEdit->currentText().startsWith("certificate"))
 				{
