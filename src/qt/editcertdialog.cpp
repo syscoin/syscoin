@@ -76,6 +76,12 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
 	
 }
+void EditCertDialog::setCertNotSafeBecauseOfAlias(QString alias)
+{
+	ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText("No"));
+	ui->safeSearchEdit->setEnabled(false);
+	ui->safeSearchDisclaimer->setText(tr("<font color='red'>Alias(<b>%1</b>) is not safe to search so this setting can only be set to No").arg(alias))
+}
 void EditCertDialog::loadAliases()
 {
 	ui->aliasEdit->clear();
@@ -84,14 +90,16 @@ void EditCertDialog::loadAliases()
 	UniValue result ;
 	string name_str;
 	int expired = 0;
-	
+	bool safeSearch;
+	int safetyLevel;
 	try {
 		result = tableRPC.execute(strMethod, params);
 
 		if (result.type() == UniValue::VARR)
 		{
 			name_str = "";
-			expired = 0;
+			safeSearch = false;
+			expired = safetyLevel = 0;
 
 
 	
@@ -102,8 +110,8 @@ void EditCertDialog::loadAliases()
 					continue;
 				const UniValue& o = input.get_obj();
 				name_str = "";
-
-				expired = 0;
+				safeSearch = false;
+				expired = safetyLevel = 0;
 
 
 		
@@ -113,7 +121,16 @@ void EditCertDialog::loadAliases()
 				const UniValue& expired_value = find_value(o, "expired");
 				if (expired_value.type() == UniValue::VNUM)
 					expired = expired_value.get_int();
-				
+				const UniValue& ss_value = find_value(o, "safesearch");
+				if (ss_value.type() == UniValue::VSTR)
+					safeSearch = ss_value.get_str() == "Yes";	
+				const UniValue& sl_value = find_value(o, "safetylevel");
+				if (sl_value.type() == UniValue::VNUM)
+					safetyLevel = sl_value.get_int();
+				if(!safeSearch || safetyLevel > 0)
+				{
+					setCertNotSafeBecauseOfAlias(QString::fromStdString(name_str));
+				}
 				if(expired == 0)
 				{
 					QString name = QString::fromStdString(name_str);

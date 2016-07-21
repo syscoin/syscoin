@@ -34,7 +34,7 @@ public:
     void loadRow(int row);
     void addParentItem(QStandardItemModel * model, const QString& text, const QVariant& data );
     void addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data );
-
+	void setOfferNotSafeBecauseOfAlias(QString alias);
     QString getOffer() const;
     void setOffer(const QString &offer);
 

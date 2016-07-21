@@ -30,7 +30,7 @@ public:
 
     void setModel(WalletModel*,CertTableModel *model);
     void loadRow(int row, const QString &privatecert="");
-
+	void setCertNotSafeBecauseOfAlias(QString alias);
     QString getCert() const;
     void setCert(const QString &cert);
 
