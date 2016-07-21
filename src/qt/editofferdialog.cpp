@@ -304,6 +304,7 @@ void EditOfferDialog::loadAliases()
     UniValue params(UniValue::VARR); 
 	UniValue result ;
 	string name_str;
+	int expired = 0;
 	bool safeSearch;
 	int safetyLevel;
 	try {
@@ -312,8 +313,8 @@ void EditOfferDialog::loadAliases()
 		if (result.type() == UniValue::VARR)
 		{
 			name_str = "";
-				safeSearch = false;
-				expired = safetyLevel = 0;
+			safeSearch = false;
+			expired = safetyLevel = 0;
 
 
 	
