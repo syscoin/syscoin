@@ -35,7 +35,7 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     ui->transferDisclaimer->setVisible(false);
 	
 	loadAliases();
-	connect(ui->aliasEdit,SIGNAL(currentIndexChanged(int)),this,SLOT(aliasChanged(int)));
+	connect(ui->aliasEdit,SIGNAL(currentIndexChanged(const QString&)),this,SLOT(aliasChanged(const QString&)));
 	
 	QSettings settings;
 	QString defaultCertAlias;
@@ -76,14 +76,14 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     }
     mapper = new QDataWidgetMapper(this);
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
-	aliasChanged(ui->aliasEdit->currentIndex());
+	aliasChanged(ui->aliasEdit->currentText());
 	
 }
-void EditCertDialog::aliasChanged(int index)
+void EditCertDialog::aliasChanged(const QString& alias)
 {
 	string strMethod = string("aliasinfo");
     UniValue params(UniValue::VARR); 
-	params.push_back(ui->aliasEdit->itemData(index).toString().toStdString());
+	params.push_back(alias.toStdString());
 	UniValue result ;
 	string name_str;
 	int expired = 0;
