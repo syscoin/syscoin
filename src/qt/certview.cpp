@@ -27,7 +27,7 @@ CertView::CertView(const PlatformStyle *platformStyle, QStackedWidget *parent):
 {
 	tabWidget = new QTabWidget();
     certListPage = new CertListPage(platformStyle, parent);
-    myCertListPage = new MyCertListPage(platformStyle);
+    myCertListPage = new MyCertListPage(platformStyle, parent);
 	QString theme = GUIUtil::getThemeName();
 	tabWidget->addTab(myCertListPage, tr("&My Certificates"));
 	tabWidget->addTab(certListPage, tr("&Search"));
