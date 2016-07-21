@@ -75,7 +75,8 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
     case EditOffer:
 		ui->currencyEdit->setEnabled(false);
 		ui->currencyDisclaimer->setVisible(false);
-		
+		ui->aliasEdit->setEnabled(false);
+		ui->aliasDisclaimer->setVisible(false);
         setWindowTitle(tr("Edit Offer"));
         break;
     case NewCertOffer:

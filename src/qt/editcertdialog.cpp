@@ -70,7 +70,6 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 		ui->transferEdit->setVisible(true);
 		ui->transferDisclaimer->setVisible(true);
 		ui->aliasDisclaimer->setVisible(false);
-
 		ui->aliasEdit->setEnabled(false);
         break;
     }
