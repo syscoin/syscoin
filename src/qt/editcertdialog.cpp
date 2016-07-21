@@ -179,10 +179,7 @@ void EditCertDialog::loadAliases()
 					continue;
 				const UniValue& o = input.get_obj();
 				name_str = "";
-				safeSearch = false;
 				expired = 0;
-
-
 		
 				const UniValue& name_value = find_value(o, "name");
 				if (name_value.type() == UniValue::VSTR)
@@ -194,8 +191,7 @@ void EditCertDialog::loadAliases()
 				{
 					QString name = QString::fromStdString(name_str);
 					ui->aliasEdit->addItem(name);					
-				}
-				
+				}				
 			}
 		}
 	}
