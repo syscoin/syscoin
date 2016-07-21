@@ -207,7 +207,7 @@ void MyCertListPage::on_editButton_clicked()
                QMessageBox::Ok, QMessageBox::Ok);
 		   return;
 	}
-    EditCertDialog dlg(EditCertDialog::EditCert, this);
+    EditCertDialog dlg(EditCertDialog::EditCert);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
     dlg.loadRow(origIndex.row(), indexes.at(0).data(CertTableModel::PrivateRole).toString());
@@ -236,7 +236,7 @@ void MyCertListPage::on_transferButton_clicked()
                QMessageBox::Ok, QMessageBox::Ok);
 		   return;
 	}
-    EditCertDialog dlg(EditCertDialog::TransferCert, this);
+    EditCertDialog dlg(EditCertDialog::TransferCert);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
     dlg.loadRow(origIndex.row());
@@ -253,7 +253,7 @@ void MyCertListPage::on_newCert_clicked()
     if(!model)
         return;
 
-    EditCertDialog dlg(EditCertDialog::NewCert, this);
+    EditCertDialog dlg(EditCertDialog::NewCert);
     dlg.setModel(walletModel,model);
     if(dlg.exec())
     {
