@@ -1038,7 +1038,12 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	selleraddy = CSyscoinAddress(selleraddy.ToString());
 	if(!selleraddy.IsValid() || !selleraddy.isAlias)
 		throw runtime_error("Invalid seller alias or address");
-
+	CKeyID keyID;
+	if (!selleraddy.GetKeyID(keyID))
+		throw runtime_error("Buyer address does not refer to a key");
+	CKey vchSecret;
+	if (pwalletMain->GetKey(keyID, vchSecret))
+		throw runtime_error("Cannot purchase your own offer");
 	CPubKey BuyerPubKey(buyeralias.vchPubKey);
 	scriptArbiter= GetScriptForDestination(ArbiterPubKey.GetID());
 	scriptSeller= GetScriptForDestination(SellerPubKey.GetID());

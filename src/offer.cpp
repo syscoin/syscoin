@@ -2914,6 +2914,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 			}
 		}	
 	}
+
 	if (ExistsInMempool(vchOffer, OP_OFFER_ACTIVATE)) {
 		throw runtime_error("there are pending operations on that offer");
 	}
@@ -2944,6 +2945,20 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 			if (linkedOffer.bOnlyAcceptBTC)
 				throw runtime_error("Linked offer only accepts Bitcoins, linked offers currently only work with Syscoin payments");
 		}
+	}
+	// if not escrow accept then make sure you can't buy your own offer
+	if(vchEscrowTxHash.empty())
+	{
+		CPubKey sellerKey = CPubKey(theOffer.vchPubKey);
+		CSyscoinAddress sellerAddress(sellerKey.GetID());
+		if(!sellerAddress.IsValid())
+			throw runtime_error("Seller address is invalid!");	
+		CKeyID keyID;
+		if (!sellerAddress.GetKeyID(keyID))
+			throw runtime_error("Buyer address does not refer to a key");
+		CKey vchSecret;
+		if (pwalletMain->GetKey(keyID, vchSecret))
+			throw runtime_error("Cannot purchase your own offer");
 	}
 	COfferLinkWhitelistEntry foundAlias;
 	CAliasIndex theAlias;
