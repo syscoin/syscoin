@@ -215,6 +215,34 @@
      <item row="4" column="1">
       <layout class="QVBoxLayout" name="verticalLayout_2"/>
      </item>
+     <item row="5" column="0">
+      <widget class="QLabel" name="label_8">
+       <property name="text">
+        <string>Merchant:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <widget class="QLineEdit" name="sellerEdit">
+       <property name="enabled">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="0">
+      <widget class="QLabel" name="label_14">
+       <property name="text">
+        <string>Merchant Rating:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="1">
+      <widget class="QLineEdit" name="sellerRatingEdit">
+       <property name="enabled">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
      <item row="7" column="0">
       <widget class="QLabel" name="label_4">
        <property name="text">
@@ -283,6 +311,20 @@
      <item row="14" column="1">
       <layout class="QVBoxLayout" name="verticalLayout_6"/>
      </item>
+     <item row="15" column="0">
+      <widget class="QLabel" name="label_10">
+       <property name="text">
+        <string>Alias for Exchange Rate Peg:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="15" column="1">
+      <widget class="QLineEdit" name="aliasPegEdit">
+       <property name="enabled">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
      <item row="16" column="0">
       <widget class="QLabel" name="label_7">
        <property name="text">
@@ -294,6 +336,13 @@
       <widget class="QLineEdit" name="infoQty">
        <property name="enabled">
         <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item row="17" column="0">
+      <widget class="QLabel" name="label_13">
+       <property name="text">
+        <string>Quantity Sold:</string>
        </property>
       </widget>
      </item>
@@ -347,55 +396,6 @@
      </item>
      <item row="21" column="1">
       <layout class="QVBoxLayout" name="verticalLayout_9"/>
-     </item>
-     <item row="5" column="0">
-      <widget class="QLabel" name="label_8">
-       <property name="text">
-        <string>Merchant:</string>
-       </property>
-      </widget>
-     </item>
-     <item row="5" column="1">
-      <widget class="QLineEdit" name="sellerEdit">
-       <property name="enabled">
-        <bool>false</bool>
-       </property>
-      </widget>
-     </item>
-     <item row="15" column="0">
-      <widget class="QLabel" name="label_10">
-       <property name="text">
-        <string>Alias for Exchange Rate Peg:</string>
-       </property>
-      </widget>
-     </item>
-     <item row="15" column="1">
-      <widget class="QLineEdit" name="aliasPegEdit">
-       <property name="enabled">
-        <bool>false</bool>
-       </property>
-      </widget>
-     </item>
-     <item row="17" column="0">
-      <widget class="QLabel" name="label_13">
-       <property name="text">
-        <string>Quantity Sold:</string>
-       </property>
-      </widget>
-     </item>
-     <item row="6" column="0">
-      <widget class="QLabel" name="label_14">
-       <property name="text">
-        <string>Merchant Rating:</string>
-       </property>
-      </widget>
-     </item>
-     <item row="6" column="1">
-      <widget class="QLineEdit" name="sellerRatingEdit">
-       <property name="enabled">
-        <bool>false</bool>
-       </property>
-      </widget>
      </item>
     </layout>
    </item>

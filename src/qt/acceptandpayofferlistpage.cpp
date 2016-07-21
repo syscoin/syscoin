@@ -64,8 +64,7 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 	m_placeholderImage.load(":/images/" + theme + "/imageplaceholder");
 
 	ui->imageButton->setToolTip(tr("Click to open image in browser..."));
-	ui->infoCert->setVisible(false);
-	ui->certLabel->setVisible(false);
+	ui->infoCert->setEnabled(false);
     // Build context menu
 	QAction *pubProfileAction = new QAction(tr("Use Public Profile"), this);
 	QAction *privProfileAction = new QAction(tr("Use Private Profile"), this);
@@ -446,15 +445,13 @@ void AcceptandPayOfferListPage::setValue(const QString& strAlias, const QString&
     ui->offeridEdit->setText(strRand);
 	if(!offer.vchCert.empty())
 	{
-		ui->infoCert->setVisible(true);
-		ui->certLabel->setVisible(true);
+		ui->infoCert->setEnabled(true);
 		ui->infoCert->setText(QString::fromStdString(stringFromVch(offer.vchCert)));
 	}
 	else
 	{
-		ui->infoCert->setVisible(false);
 		ui->infoCert->setText("");
-		ui->certLabel->setVisible(false);
+		ui->infoCert->setEnabled(false);	
 	}
 	ui->sellerEdit->setText(strAlias);
 	ui->infoTitle->setText(QString::fromStdString(stringFromVch(offer.sTitle)));
