@@ -88,7 +88,7 @@ void OutMessageListPage::on_detailButton_clicked()
 }
 void OutMessageListPage::on_newMessage_clicked()
 {
-    NewMessageDialog dlg(NewMessageDialog::NewMessage, this);
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, "", "", this);
     dlg.setModel(walletModel, model);
     dlg.exec();
 }
