@@ -27,8 +27,8 @@ AliasView::AliasView(const PlatformStyle *platformStyle, QStackedWidget *parent)
     walletModel(0)
 {
 	tabWidget = new QTabWidget();
-    aliasListPage = new AliasListPage(platformStyle, parent);
-    myAliasListPage = new MyAliasListPage(platformStyle, parent);
+    aliasListPage = new AliasListPage(platformStyle);
+    myAliasListPage = new MyAliasListPage(platformStyle);
 	QString theme = GUIUtil::getThemeName();
 	tabWidget->addTab(myAliasListPage, tr("&My Aliases"));
 	tabWidget->addTab(aliasListPage, tr("&Search"));
