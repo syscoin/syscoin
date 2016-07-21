@@ -80,7 +80,7 @@ void InMessageListPage::on_detailButton_clicked()
     QModelIndexList selection = ui->tableView->selectionModel()->selectedRows();
     if(!selection.isEmpty())
     {
-        MessageInfoDialog dlg(this);
+        MessageInfoDialog dlg;
 		QModelIndex origIndex = proxyModel->mapToSource(selection.at(0));
 		dlg.setModel(walletModel, model);	
 		dlg.loadRow(origIndex.row());
@@ -89,7 +89,7 @@ void InMessageListPage::on_detailButton_clicked()
 }
 void InMessageListPage::on_newMessage_clicked()
 {
-    NewMessageDialog dlg(NewMessageDialog::NewMessage, "", "", this);
+    NewMessageDialog dlg(NewMessageDialog::NewMessage);
     dlg.setModel(walletModel, model);
     dlg.exec();
 }
@@ -101,7 +101,7 @@ void InMessageListPage::on_replyMessage_clicked()
     if(indexes.isEmpty())
         return;
 
-    NewMessageDialog dlg(NewMessageDialog::ReplyMessage, "", "", this);
+    NewMessageDialog dlg(NewMessageDialog::ReplyMessage);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
     dlg.loadRow(origIndex.row());

@@ -175,7 +175,7 @@ void MyAliasListPage::on_editButton_clicked()
 		   return;
 	}
 
-    EditAliasDialog dlg(EditAliasDialog::EditAlias, this);
+    EditAliasDialog dlg(EditAliasDialog::EditAlias);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
     dlg.loadRow(origIndex.row());
@@ -204,7 +204,7 @@ void MyAliasListPage::on_transferButton_clicked()
                QMessageBox::Ok, QMessageBox::Ok);
 		   return;
 	}
-    EditAliasDialog dlg(EditAliasDialog::TransferAlias, this);
+    EditAliasDialog dlg(EditAliasDialog::TransferAlias);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
     dlg.loadRow(origIndex.row());
@@ -218,7 +218,7 @@ void MyAliasListPage::on_refreshButton_clicked()
 }
 void MyAliasListPage::on_whitelistButton_clicked()
 {
-    MyWhitelistOfferDialog dlg(platformStyle, this);
+    MyWhitelistOfferDialog dlg(platformStyle);
 	dlg.setModel(walletModel);
     dlg.exec();    
 }
@@ -227,7 +227,7 @@ void MyAliasListPage::on_newAlias_clicked()
     if(!model)
         return;
 
-    EditAliasDialog dlg(EditAliasDialog::NewAlias, this);
+    EditAliasDialog dlg(EditAliasDialog::NewAlias);
     dlg.setModel(walletModel,model);
     if(dlg.exec())
     {

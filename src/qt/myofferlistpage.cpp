@@ -211,7 +211,7 @@ void MyOfferListPage::on_editButton_clicked()
                QMessageBox::Ok, QMessageBox::Ok);
 		   return;
 	}
-    EditOfferDialog dlg(EditOfferDialog::EditOffer, certGUID, this);
+    EditOfferDialog dlg(EditOfferDialog::EditOffer, certGUID);
     dlg.setModel(walletModel, model);
     QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
     dlg.loadRow(origIndex.row());
@@ -225,7 +225,7 @@ void MyOfferListPage::on_whitelistButton_clicked()
     if(indexes.isEmpty())
         return;
 	QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
-    EditWhitelistOfferDialog dlg(platformStyle, &origIndex, this);
+    EditWhitelistOfferDialog dlg(platformStyle, &origIndex);
 	dlg.setModel(walletModel, offerWhitelistTableModel);
     dlg.exec();
 }
@@ -237,7 +237,7 @@ void MyOfferListPage::onEditWhitelistAction()
     if(indexes.isEmpty())
         return;
 	QModelIndex origIndex = proxyModel->mapToSource(indexes.at(0));
-    EditWhitelistOfferDialog dlg(platformStyle, &origIndex, this);
+    EditWhitelistOfferDialog dlg(platformStyle, &origIndex);
 	dlg.setModel(walletModel, offerWhitelistTableModel);
     dlg.exec();
 }
@@ -252,7 +252,7 @@ void MyOfferListPage::on_newOffer_clicked()
     if(!model)
         return;
 
-    EditOfferDialog dlg(EditOfferDialog::NewOffer, "", this);
+    EditOfferDialog dlg(EditOfferDialog::NewOffer, "");
     dlg.setModel(walletModel,model);
     if(dlg.exec())
     {

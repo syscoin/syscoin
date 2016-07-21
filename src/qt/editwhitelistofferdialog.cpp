@@ -358,7 +358,7 @@ void EditWhitelistOfferDialog::on_newEntry_clicked()
 {
     if(!model)
         return;
-    NewWhitelistDialog dlg(offerGUID, this);   
+    NewWhitelistDialog dlg(offerGUID);   
 	dlg.setModel(walletModel, model);
     dlg.exec();
 }

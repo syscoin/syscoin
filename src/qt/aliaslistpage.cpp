@@ -135,7 +135,7 @@ void AliasListPage::on_messageButton_clicked()
     }
 	QString alias = selection.at(0).data(AliasTableModel::NameRole).toString();
 	// send message to seller
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, alias, "", this);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, alias);   
 	dlg.exec();
 }
 
