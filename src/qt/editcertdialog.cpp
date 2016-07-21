@@ -80,7 +80,7 @@ void EditCertDialog::setCertNotSafeBecauseOfAlias(QString alias)
 {
 	ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText("No"));
 	ui->safeSearchEdit->setEnabled(false);
-	ui->safeSearchDisclaimer->setText(tr("<font color='red'>Alias(<b>%1</b>) is not safe to search so this setting can only be set to No").arg(alias))
+	ui->safeSearchDisclaimer->setText(tr("<font color='red'>Alias(<b>%1</b>) is not safe to search so this setting can only be set to No").arg(alias));
 }
 void EditCertDialog::loadAliases()
 {
