@@ -35,7 +35,7 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     ui->transferDisclaimer->setVisible(false);
 	connect(ui->aliasEdit,SIGNAL(activated(int)),this,SLOT(aliasChanged(int)));
 	loadAliases();
-	aliasChanged(ui->aliasEdit->currentIndex());
+	
 	QSettings settings;
 	QString defaultCertAlias;
 	int aliasIndex;
@@ -53,8 +53,10 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
         break;
     case EditCert:
 		ui->aliasDisclaimer->setVisible(false);
+		aliasChanged(ui->aliasEdit->currentIndex());
 		ui->aliasEdit->setEnabled(false);
         setWindowTitle(tr("Edit Cert"));
+		
         break;
     case TransferCert:
         setWindowTitle(tr("Transfer Cert"));
@@ -68,6 +70,7 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 		ui->transferEdit->setVisible(true);
 		ui->transferDisclaimer->setVisible(true);
 		ui->aliasDisclaimer->setVisible(false);
+		aliasChanged(ui->aliasEdit->currentIndex());
 		ui->aliasEdit->setEnabled(false);
         break;
     }
