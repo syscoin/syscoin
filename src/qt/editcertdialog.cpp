@@ -33,7 +33,7 @@ EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
 	ui->privateBox->addItem(tr("No"));
 	ui->transferDisclaimer->setText(tr("<font color='blue'>Enter the alias of the recipient of this certificate</font>"));
     ui->transferDisclaimer->setVisible(false);
-	connect(ui->safeSearch,SIGNAL(currentIndexChanged(const QString &text)),this,SLOT(safeSearchChanged(const QString &text)));
+	connect(ui->safeSearchEdit,SIGNAL(currentIndexChanged(const QString &text)),this,SLOT(safeSearchChanged(const QString &text)));
 	loadAliases();
 	QSettings settings;
 	QString defaultCertAlias;
@@ -142,7 +142,7 @@ void EditCertDialog::safeSearchChanged(const QString &alias)
 		ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this certificate</font>"));	
 	}  
 }
-void EditCertDialog::setCertNotSafeBecauseOfAlias(QString alias)
+void EditCertDialog::setCertNotSafeBecauseOfAlias(const QString &alias)
 {
 	ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText("No"));
 	ui->safeSearchEdit->setEnabled(false);
