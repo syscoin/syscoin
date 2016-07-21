@@ -51,7 +51,7 @@ WalletView::WalletView(const PlatformStyle *platformStyle, QWidget *parent):
 	// SYSCOIN
     aliasListPage = new QStackedWidget();
 	messageListPage = new QStackedWidget();
-	certListPage = new QStackedWidget(parent);
+	certListPage = new QStackedWidget(this);
     escrowListPage = new QStackedWidget();
 	offerListPage = new QStackedWidget();
     aliasView = new AliasView(platformStyle, aliasListPage);
