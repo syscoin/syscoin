@@ -186,7 +186,7 @@ void EditCertDialog::loadRow(int row, const QString &privatecert)
 			QString aliasStr = indexAlias.data(CertTableModel::AliasRole).toString();
 			ui->aliasEdit->setCurrentIndex(ui->aliasEdit->findText(aliasStr));
 		}
-		if(indexSafeSearch.isValid())
+		if(indexSafeSearch.isValid() && ui->safeSearchEdit->isEnabled())
 		{
 			QString safeSearchStr = indexSafeSearch.data(CertTableModel::SafeSearchRole).toString();
 			ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText(safeSearchStr));

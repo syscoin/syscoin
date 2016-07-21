@@ -422,7 +422,7 @@ void EditOfferDialog::loadRow(int row)
 			QString btcOnlyStr = indexBTCOnly.data(OfferTableModel::BTCOnlyRole).toString();
 			ui->acceptBTCOnlyEdit->setCurrentIndex(ui->acceptBTCOnlyEdit->findText(btcOnlyStr));
 		}
-		if(indexSafeSearch.isValid())
+		if(indexSafeSearch.isValid() && ui->safeSearchEdit->isEnabled())
 		{
 			QString safeSearchStr = indexSafeSearch.data(OfferTableModel::SafeSearchRole).toString();
 			ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText(safeSearchStr));
