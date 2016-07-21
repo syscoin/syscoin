@@ -148,8 +148,8 @@ void EditCertDialog::setCertNotSafeBecauseOfAlias(QString alias)
 	ui->safeSearchEdit->setEnabled(false);
 	ui->safeSearchDisclaimer->setText(tr("<font color='red'><b>%1</b> is not safe to search so this setting can only be set to No").arg(alias));
 }
-void EditCertDialog::resetSafeSearch(QString alias)
-{
+void EditCertDialog::resetSafeSearch()
+
 	ui->safeSearchEdit->setEnabled(true);
 	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this cert safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create a cert that is offensive and do not set this option to <b>No</b> your cert will be banned!</font>"));
 	
