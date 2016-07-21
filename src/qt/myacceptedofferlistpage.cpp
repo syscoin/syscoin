@@ -315,7 +315,7 @@ void MyAcceptedOfferListPage::on_messageButton_clicked()
     }
 	QString buyer = selection.at(0).data(OfferAcceptTableModel::BuyerRole).toString();
 	// send message to buyer
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, buyer, this);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, buyer, "", this);   
 	dlg.exec();
 
 

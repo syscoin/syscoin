@@ -169,7 +169,7 @@ void AcceptedOfferListPage::on_messageButton_clicked()
     }
 	QString offerAlias = selection.at(0).data(OfferAcceptTableModel::AliasRole).toString();
 	// send message to seller
-	NewMessageDialog dlg(NewMessageDialog::NewMessage, offerAlias, this);   
+	NewMessageDialog dlg(NewMessageDialog::NewMessage, offerAlias, "", this);   
 	dlg.exec();
 
 
