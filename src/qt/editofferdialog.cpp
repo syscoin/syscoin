@@ -371,7 +371,7 @@ void EditOfferDialog::loadCerts()
 	}         
  
 }
-void EditOfferDialog::setOfferNotSafeBecauseOfAlias(QString alias)
+void EditOfferDialog::setOfferNotSafeBecauseOfAlias(const QString &alias)
 {
 	ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText("No"));
 	ui->safeSearchEdit->setEnabled(false);
@@ -584,7 +584,7 @@ bool EditOfferDialog::saveCurrentRow()
 			if(!ui->categoryEdit->currentText().startsWith("certificate"))
 			{
 				QMessageBox::critical(this, windowTitle(),
-				tr("Error creating new Offer: Certificate offers must use a certificate category")),
+				tr("Error creating new Offer: Certificate offers must use a certificate category"),
 					QMessageBox::Ok, QMessageBox::Ok);
 			}
 			params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
@@ -594,7 +594,7 @@ bool EditOfferDialog::saveCurrentRow()
 			if(ui->categoryEdit->currentText().startsWith("certificate"))
 			{
 				QMessageBox::critical(this, windowTitle(),
-				tr("Error creating new Offer: offer not selling a certificate yet used certificate as a category")),
+				tr("Error creating new Offer: offer not selling a certificate yet used certificate as a category"),
 					QMessageBox::Ok, QMessageBox::Ok);
 			}
 			params.push_back("nocert");
@@ -657,7 +657,7 @@ bool EditOfferDialog::saveCurrentRow()
 				if(!ui->categoryEdit->currentText().startsWith("certificate"))
 				{
 					QMessageBox::critical(this, windowTitle(),
-					tr("Error updating Offer: Certificate offers must use a certificate category")),
+					tr("Error updating Offer: Certificate offers must use a certificate category"),
 						QMessageBox::Ok, QMessageBox::Ok);
 				}
 				params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
@@ -667,7 +667,7 @@ bool EditOfferDialog::saveCurrentRow()
 				if(ui->categoryEdit->currentText().startsWith("certificate"))
 				{
 					QMessageBox::critical(this, windowTitle(),
-					tr("Error updating Offer: offer not selling a certificate yet used certificate as a category")),
+					tr("Error updating Offer: offer not selling a certificate yet used certificate as a category"),
 						QMessageBox::Ok, QMessageBox::Ok);
 				}
 				params.push_back("nocert");
