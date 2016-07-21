@@ -344,7 +344,7 @@ void EditOfferDialog::loadAliases()
 					safetyLevel = sl_value.get_int();
 				if(!safeSearch || safetyLevel > 0)
 				{
-					setCertNotSafeBecauseOfAlias(QString::fromStdString(name_str));
+					setOfferNotSafeBecauseOfAlias(QString::fromStdString(name_str));
 				}				
 				if(expired == 0)
 				{
