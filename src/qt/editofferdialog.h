@@ -34,12 +34,14 @@ public:
     void loadRow(int row);
     void addParentItem(QStandardItemModel * model, const QString& text, const QVariant& data );
     void addChildItem( QStandardItemModel * model, const QString& text, const QVariant& data );
-	void setOfferNotSafeBecauseOfAlias(QString alias);
+	void setOfferNotSafeBecauseOfAlias(const QString &alias);
+	void resetSafeSearch();
     QString getOffer() const;
     void setOffer(const QString &offer);
 
 public Q_SLOTS:
     void accept();
+	void aliasChanged(const QString& text);
 	void certChanged(int);
 	void on_aliasPegEdit_editingFinished();
 	void on_okButton_clicked();

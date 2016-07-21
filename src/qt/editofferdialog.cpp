@@ -28,9 +28,7 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
     ui->setupUi(this);
 
 	ui->aliasPegDisclaimer->setText(tr("<font color='blue'>Choose an alias which has peg information to allow exchange of currencies into SYS amounts based on the pegged values. Consumers will pay amounts based on this peg, the alias must be managed effectively or you may end up selling your offers for unexpected amounts.</font>"));
-	ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this offer</font>"));
 	ui->privateDisclaimer->setText(tr("<font color='blue'>All offers are first listed as private. If you would like your offer to be public, please edit it after it is created.</font>"));
-	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this offer safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an offer that is offensive and do not set this option to <b>No</b> your offer will be banned aswell as possibly your store alias!</font>"));
 	ui->offerLabel->setVisible(true);
 	ui->offerEdit->setVisible(true);
 	ui->offerEdit->setEnabled(false);
@@ -50,6 +48,7 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
 	ui->certEdit->addItem(tr("Select Certificate (optional)"));
 	connect(ui->certEdit, SIGNAL(currentIndexChanged(int)), this, SLOT(certChanged(int)));
 	loadAliases();
+	connect(ui->aliasEdit,SIGNAL(currentIndexChanged(const QString&)),this,SLOT(aliasChanged(const QString&)));
 	loadCerts();
 	loadCategories();
 	ui->descriptionEdit->setStyleSheet("color: rgb(0, 0, 0); background-color: rgb(255, 255, 255)");
@@ -94,6 +93,7 @@ EditOfferDialog::EditOfferDialog(Mode mode, const QString &strCert, QWidget *par
 		ui->currencyDisclaimer->setText(tr("<font color='blue'>You will receive payment in Syscoin equivalent to the Market-value of the currency you have selected.</font>"));
         break;
 	}
+	aliasChanged(ui->aliasEdit->currentText());
     mapper = new QDataWidgetMapper(this);
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
 }
@@ -115,6 +115,86 @@ void EditOfferDialog::on_aliasPegEdit_editingFinished()
 		ui->currencyEdit->addItem(QString::fromStdString(rateList[i]));
 	}
 
+}
+void EditCertDialog::setOfferNotSafeBecauseOfAlias(const QString &alias)
+{
+	ui->safeSearchEdit->setCurrentIndex(ui->safeSearchEdit->findText("No"));
+	ui->safeSearchEdit->setEnabled(false);
+	ui->safeSearchDisclaimer->setText(tr("<font color='red'><b>%1</b> is not safe to search so this setting can only be set to No").arg(alias));
+}
+void EditCertDialog::resetSafeSearch()
+{
+	ui->safeSearchEdit->setEnabled(true);
+	ui->safeSearchDisclaimer->setText(tr("<font color='blue'>Is this offer safe to search? Anything that can be considered offensive to someone should be set to <b>No</b> here. If you do create an offer that is offensive and do not set this option to <b>No</b> your offer will be banned aswell as possibly your store alias!</font>"));
+	
+}
+void EditOfferDialog::aliasChanged(const QString& alias)
+{
+	string strMethod = string("aliasinfo");
+    UniValue params(UniValue::VARR); 
+	params.push_back(alias.toStdString());
+	UniValue result ;
+	string name_str;
+	int expired = 0;
+	bool safeSearch;
+	int safetyLevel;
+	try {
+		result = tableRPC.execute(strMethod, params);
+
+		if (result.type() == UniValue::VOBJ)
+		{
+			name_str = "";
+			safeSearch = false;
+			expired = safetyLevel = 0;
+			const UniValue& o = result.get_obj();
+			name_str = "";
+			safeSearch = false;
+			expired = safetyLevel = 0;
+
+
+	
+			const UniValue& name_value = find_value(o, "name");
+			if (name_value.type() == UniValue::VSTR)
+				name_str = name_value.get_str();		
+			const UniValue& expired_value = find_value(o, "expired");
+			if (expired_value.type() == UniValue::VNUM)
+				expired = expired_value.get_int();
+			const UniValue& ss_value = find_value(o, "safesearch");
+			if (ss_value.type() == UniValue::VSTR)
+				safeSearch = ss_value.get_str() == "Yes";	
+			const UniValue& sl_value = find_value(o, "safetylevel");
+			if (sl_value.type() == UniValue::VNUM)
+				safetyLevel = sl_value.get_int();
+			if(!safeSearch || safetyLevel > 0)
+			{
+				setOfferNotSafeBecauseOfAlias(QString::fromStdString(name_str));
+			}
+			else
+				resetSafeSearch();
+
+			if(expired != 0)
+			{
+				ui->aliasDisclaimer->setText(tr("<font color='red'>This alias has expired, please choose another one</font>"));					
+			}
+			else
+				ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this offer</font>"));	
+		}
+		else
+		{
+			resetSafeSearch();
+			ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this offer</font>"));	
+		}
+	}
+	catch (UniValue& objError)
+	{
+		resetSafeSearch();
+		ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this offer</font>"));	
+	}
+	catch(std::exception& e)
+	{
+		resetSafeSearch();
+		ui->aliasDisclaimer->setText(tr("<font color='blue'>Select an alias to own this offer</font>"));	
+	}  
 }
 void EditOfferDialog::certChanged(int index)
 {
@@ -500,9 +580,25 @@ bool EditOfferDialog::saveCurrentRow()
 		params.push_back(ui->descriptionEdit->toPlainText().toStdString());
 		params.push_back(ui->currencyEdit->currentText().toStdString());
 		if(ui->certEdit->currentIndex() >= 0)
+		{
+			if(!ui->categoryEdit->currentText().startsWith("certificate"))
+			{
+				QMessageBox::critical(this, windowTitle(),
+				tr("Error creating new Offer: Certificate offers must use a certificate category")),
+					QMessageBox::Ok, QMessageBox::Ok);
+			}
 			params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
+		}
 		else
+		{
+			if(ui->categoryEdit->currentText().startsWith("certificate"))
+			{
+				QMessageBox::critical(this, windowTitle(),
+				tr("Error creating new Offer: offer not selling a certificate yet used certificate as a category")),
+					QMessageBox::Ok, QMessageBox::Ok);
+			}
 			params.push_back("nocert");
+		}
 		params.push_back("1");
 		params.push_back(ui->acceptBTCOnlyEdit->currentText() == QString("Yes")? "1": "0");
 		params.push_back(ui->geoLocationEdit->text().toStdString());
@@ -556,10 +652,26 @@ bool EditOfferDialog::saveCurrentRow()
 			params.push_back(ui->priceEdit->text().toStdString());
 			params.push_back(ui->descriptionEdit->toPlainText().toStdString());
 			params.push_back(ui->privateEdit->currentText() == QString("Yes")? "1": "0");
-			if(ui->certEdit->currentIndex() > 0)
+			if(ui->certEdit->currentIndex() >= 0)
+			{
+				if(!ui->categoryEdit->currentText().startsWith("certificate"))
+				{
+					QMessageBox::critical(this, windowTitle(),
+					tr("Error updating Offer: Certificate offers must use a certificate category")),
+						QMessageBox::Ok, QMessageBox::Ok);
+				}
 				params.push_back(ui->certEdit->itemData(ui->certEdit->currentIndex()).toString().toStdString());
+			}
 			else
+			{
+				if(ui->categoryEdit->currentText().startsWith("certificate"))
+				{
+					QMessageBox::critical(this, windowTitle(),
+					tr("Error updating Offer: offer not selling a certificate yet used certificate as a category")),
+						QMessageBox::Ok, QMessageBox::Ok);
+				}
 				params.push_back("nocert");
+			}
 
 			params.push_back("");
 			params.push_back(ui->geoLocationEdit->text().toStdString());
