@@ -34,6 +34,8 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
     ui->setupUi(this);
 
     QString version = tr("Syscoin Core") + " " + tr("version") + " " + QString::fromStdString(FormatFullVersion());
+	// SYSCOIN
+	QString sysversion = tr("Syscoin Client") + " " + tr("version") + " " + QString::fromStdString(SYSCOIN_CLIENT_VERSION);
     /* On x86 add a bit specifier to the version so that users can distinguish between
      * 32 and 64 bit builds. On other architectures, 32/64 bit may be more ambigious.
      */
@@ -72,6 +74,7 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
             "  syscoin-qt [" + tr("command-line options") + "]                     " + "\n";
         QTextCursor cursor(ui->helpMessage->document());
         cursor.insertText(version);
+		cursor.insertText(sysversion);
         cursor.insertBlock();
         cursor.insertText(header);
         cursor.insertBlock();
