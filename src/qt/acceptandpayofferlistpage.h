@@ -77,7 +77,7 @@ private:
 	QString sAddress;
 	bool bOnlyAcceptBTC;
 	bool usedProfileInfo;
-	
+	bool isOfferCert;
 };
 
 #endif // ACCEPTANDPAYOFFERLISTPAGE_H

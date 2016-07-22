@@ -36,6 +36,7 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
     ui(new Ui::AcceptandPayOfferListPage)
 {	
 	sAddress = "";
+	isOfferCert = false;
 	bOnlyAcceptBTC = false;
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
@@ -64,7 +65,6 @@ AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platfo
 	m_placeholderImage.load(":/images/" + theme + "/imageplaceholder");
 
 	ui->imageButton->setToolTip(tr("Click to open image in browser..."));
-	ui->infoCert->setEnabled(false);
     // Build context menu
 	QAction *pubProfileAction = new QAction(tr("Use Public Profile"), this);
 	QAction *privProfileAction = new QAction(tr("Use Private Profile"), this);
@@ -315,7 +315,7 @@ void AcceptandPayOfferListPage::acceptOffer()
 			QMessageBox::Ok, QMessageBox::Ok);
 		return;
 	}
-	if(ui->notesEdit->toPlainText().size() <= 0 && ui->infoCert->text().size() <= 0)
+	if(ui->notesEdit->toPlainText().size() <= 0 && isOfferCert)
 	{
 		QMessageBox::information(this, windowTitle(),
 			tr("Please enter pertinent information required to the offer in the <b>Notes</b> field (address, e-mail address, shipping notes, etc)."),
@@ -442,13 +442,11 @@ void AcceptandPayOfferListPage::setValue(const QString& strAlias, const QString&
     ui->offeridEdit->setText(strRand);
 	if(!offer.vchCert.empty())
 	{
-		ui->infoCert->setEnabled(true);
-		ui->infoCert->setText(QString::fromStdString(stringFromVch(offer.vchCert)));
+		isOfferCert = true;
 	}
 	else
 	{
-		ui->infoCert->setText("");
-		ui->infoCert->setEnabled(false);	
+		isOfferCert = false;	
 	}
 	ui->sellerEdit->setText(strAlias);
 	ui->infoTitle->setText(QString::fromStdString(stringFromVch(offer.sTitle)));
