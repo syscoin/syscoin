@@ -315,7 +315,7 @@ void AcceptandPayOfferListPage::acceptOffer()
 			QMessageBox::Ok, QMessageBox::Ok);
 		return;
 	}
-	if(ui->notesEdit->toPlainText().size() <= 0 && isOfferCert)
+	if(ui->notesEdit->toPlainText().size() <= 0 && !isOfferCert)
 	{
 		QMessageBox::information(this, windowTitle(),
 			tr("Please enter pertinent information required to the offer in the <b>Notes</b> field (address, e-mail address, shipping notes, etc)."),
