@@ -18,6 +18,7 @@
 #define CLIENT_VERSION_MINOR 12
 #define CLIENT_VERSION_REVISION 99
 #define CLIENT_VERSION_BUILD 0
+#define SYSCOIN_CLIENT_VERSION "2.10b2"
 
 //! Set to true for release, false for prerelease or test build
 #define CLIENT_VERSION_IS_RELEASE true
