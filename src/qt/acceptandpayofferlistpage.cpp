@@ -245,9 +245,6 @@ void AcceptandPayOfferListPage::netwManagerFinished()
 	if(!reply)
 		return;
 	if (reply->error() != QNetworkReply::NoError) {
-			QMessageBox::critical(this, windowTitle(),
-				reply->errorString(),
-				QMessageBox::Ok, QMessageBox::Ok);
 		return;
 	}
 
