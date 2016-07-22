@@ -56,10 +56,16 @@
          <verstretch>0</verstretch>
         </sizepolicy>
        </property>
+       <property name="minimumSize">
+        <size>
+         <width>300</width>
+         <height>300</height>
+        </size>
+       </property>
        <property name="maximumSize">
         <size>
-         <width>280</width>
-         <height>280</height>
+         <width>300</width>
+         <height>300</height>
         </size>
        </property>
        <property name="baseSize">
@@ -111,6 +117,12 @@
        </item>
        <item row="1" column="1">
         <widget class="QLineEdit" name="offeridEdit">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>20</height>
+          </size>
+         </property>
          <property name="toolTip">
           <string>The value associated with this offer.</string>
          </property>
@@ -118,6 +130,12 @@
        </item>
        <item row="2" column="1">
         <widget class="QPushButton" name="lookupButton">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>25</height>
+          </size>
+         </property>
          <property name="toolTip">
           <string>Lookup the OfferID from the blockchain DB</string>
          </property>
@@ -126,42 +144,62 @@
          </property>
         </widget>
        </item>
-       <item row="3" column="0">
+       <item row="4" column="0">
         <widget class="QLabel" name="label_2">
          <property name="text">
           <string>Quantity:</string>
          </property>
         </widget>
        </item>
-       <item row="3" column="1">
-        <widget class="QLineEdit" name="qtyEdit"/>
+       <item row="4" column="1">
+        <widget class="QLineEdit" name="qtyEdit">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>20</height>
+          </size>
+         </property>
+        </widget>
        </item>
-       <item row="4" column="0">
+       <item row="5" column="0">
         <widget class="QLabel" name="aliasLabel">
          <property name="text">
           <string>Alias:</string>
          </property>
         </widget>
        </item>
-       <item row="4" column="1">
-        <widget class="QComboBox" name="aliasEdit"/>
-       </item>
        <item row="5" column="1">
+        <widget class="QComboBox" name="aliasEdit">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>20</height>
+          </size>
+         </property>
+        </widget>
+       </item>
+       <item row="6" column="1">
         <widget class="QLabel" name="aliasDisclaimer">
          <property name="text">
           <string/>
          </property>
         </widget>
        </item>
-       <item row="6" column="0">
+       <item row="8" column="0">
         <widget class="QLabel" name="label_11">
          <property name="text">
           <string>Notes:</string>
          </property>
         </widget>
        </item>
-       <item row="6" column="1">
+       <item row="8" column="1">
         <widget class="QPlainTextEdit" name="notesEdit">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>75</height>
+          </size>
+         </property>
          <property name="maximumSize">
           <size>
            <width>16777215</width>
@@ -169,6 +207,32 @@
           </size>
          </property>
         </widget>
+       </item>
+       <item row="7" column="1">
+        <spacer name="verticalSpacer">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+       <item row="3" column="1">
+        <spacer name="verticalSpacer_2">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
        </item>
       </layout>
      </item>
@@ -342,6 +406,12 @@
       <widget class="QPlainTextEdit" name="infoDescription">
        <property name="enabled">
         <bool>true</bool>
+       </property>
+       <property name="minimumSize">
+        <size>
+         <width>0</width>
+         <height>70</height>
+        </size>
        </property>
        <property name="maximumSize">
         <size>
