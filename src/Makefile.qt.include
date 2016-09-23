@@ -183,7 +183,7 @@ QT_MOC_CPP = \
   qt/moc_utilitydialog.cpp \
   qt/moc_walletframe.cpp \
   qt/moc_walletmodel.cpp \
-  qt/moc_walletview.cpp
+  qt/moc_walletview.cpp \
   qt/moc_aliasview.cpp \
   qt/moc_certview.cpp \
   qt/moc_offerview.cpp \
