@@ -18,7 +18,7 @@
 #include <QDateTime>
 #include <QMenu>
 #include "main.h"
-#include "server.h"
+#include "rpc/server.h"
 #include "stardelegate.h"
 using namespace std;
 

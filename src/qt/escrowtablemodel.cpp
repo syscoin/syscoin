@@ -9,7 +9,7 @@
 
 #include <QFont>
 #include <QDateTime>
-#include "server.h"
+#include "rpc/server.h"
 #include "starrating.h"
 using namespace std;
 

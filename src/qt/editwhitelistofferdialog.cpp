@@ -20,7 +20,7 @@
 #include <QModelIndex>
 #include <QMenu>
 #include <QItemSelection>
-#include "server.h"
+#include "rpc/server.h"
 #include "tinyformat.h"
 
 using namespace std;

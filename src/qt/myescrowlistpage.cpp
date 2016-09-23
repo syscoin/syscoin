@@ -19,7 +19,7 @@
 #include <QClipboard>
 #include <QMessageBox>
 #include <QMenu>
-#include "server.h"
+#include "rpc/server.h"
 #include "stardelegate.h"
 using namespace std;
 

@@ -17,7 +17,7 @@
 #include <QLabel>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
-#include "server.h"
+#include "rpc/server.h"
 using namespace std;
 
 extern const CRPCTable tableRPC;

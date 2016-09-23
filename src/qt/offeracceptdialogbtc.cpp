@@ -9,7 +9,7 @@
 #include "platformstyle.h"
 #include "syscoingui.h"
 #include <QMessageBox>
-#include "server.h"
+#include "rpc/server.h"
 #include "pubkey.h"
 #include "wallet/wallet.h"
 #include "walletmodel.h"

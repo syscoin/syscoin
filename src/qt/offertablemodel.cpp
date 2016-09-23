@@ -7,7 +7,7 @@
 #include "base58.h"
 
 #include <QFont>
-#include "server.h"
+#include "rpc/server.h"
 #include "starrating.h"
 using namespace std;
 

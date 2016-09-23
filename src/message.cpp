@@ -6,7 +6,7 @@
 #include "util.h"
 #include "random.h"
 #include "base58.h"
-#include "server.h"
+#include "rpc/server.h"
 #include "wallet/wallet.h"
 #include "chainparams.h"
 #include <boost/algorithm/hex.hpp>

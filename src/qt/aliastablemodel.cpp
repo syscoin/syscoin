@@ -8,7 +8,7 @@
 #include "base58.h"
 
 #include <QFont>
-#include "server.h"
+#include "rpc/server.h"
 using namespace std;
 
 const QString AliasTableModel::Alias = "A";

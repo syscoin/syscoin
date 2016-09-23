@@ -1,7 +1,7 @@
 #ifndef CERT_H
 #define CERT_H
 
-#include "server.h"
+#include "rpc/server.h"
 #include "dbwrapper.h"
 #include "script/script.h"
 #include "serialize.h"

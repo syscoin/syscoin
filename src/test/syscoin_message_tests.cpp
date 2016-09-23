@@ -1,6 +1,6 @@
 #include "test/test_syscoin_services.h"
 #include "utiltime.h"
-#include "server.h"
+#include "rpc/server.h"
 #include <boost/test/unit_test.hpp>
 BOOST_FIXTURE_TEST_SUITE (syscoin_message_tests, BasicSyscoinTestingSetup)
 

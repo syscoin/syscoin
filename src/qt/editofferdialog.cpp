@@ -9,7 +9,7 @@
 #include <QDataWidgetMapper>
 #include <QMessageBox>
 #include <QStringList>
-#include "server.h"
+#include "rpc/server.h"
 #include "main.h"
 #include "qcomboboxdelegate.h"
 #include <QSettings>

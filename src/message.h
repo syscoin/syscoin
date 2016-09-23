@@ -1,7 +1,7 @@
 #ifndef MESSAGE_H
 #define MESSAGE_H
 
-#include "server.h"
+#include "rpc/server.h"
 #include "dbwrapper.h"
 #include "script/script.h"
 #include "serialize.h"
