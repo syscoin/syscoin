@@ -50,7 +50,6 @@ $(LIBCRYPTOPP):
 # Make is not made aware of per-object dependencies to avoid limiting building parallelization
 # But to build the less dependent modules first, we manually select their order here:
 EXTRA_LIBRARIES += \
-  $(LIBCRYPTOPP) \
   $(LIBSYSCOIN_CRYPTO) \
   $(LIBSYSCOIN_UTIL) \
   $(LIBSYSCOIN_COMMON) \
