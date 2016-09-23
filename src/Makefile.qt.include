@@ -3,12 +3,12 @@ EXTRA_LIBRARIES += qt/libsyscoinqt.a
 
 # syscoin qt core #
 QT_TS = \
+  qt/locale/syscoin_af.ts \
   qt/locale/syscoin_af_ZA.ts \
   qt/locale/syscoin_ar.ts \
   qt/locale/syscoin_be_BY.ts \
-  qt/locale/syscoin_bg_BG.ts \
   qt/locale/syscoin_bg.ts \
-  qt/locale/syscoin_bs.ts \
+  qt/locale/syscoin_bg_BG.ts \
   qt/locale/syscoin_ca_ES.ts \
   qt/locale/syscoin_ca.ts \
   qt/locale/syscoin_ca@valencia.ts \
@@ -22,7 +22,9 @@ QT_TS = \
   qt/locale/syscoin_en_GB.ts \
   qt/locale/syscoin_en.ts \
   qt/locale/syscoin_eo.ts \
+  qt/locale/syscoin_es_AR.ts \
   qt/locale/syscoin_es_CL.ts \
+  qt/locale/syscoin_es_CO.ts \
   qt/locale/syscoin_es_DO.ts \
   qt/locale/syscoin_es_ES.ts \
   qt/locale/syscoin_es_MX.ts \
@@ -43,11 +45,13 @@ QT_TS = \
   qt/locale/syscoin_hr.ts \
   qt/locale/syscoin_hu.ts \
   qt/locale/syscoin_id_ID.ts \
+  qt/locale/syscoin_it_IT.ts \
   qt/locale/syscoin_it.ts \
   qt/locale/syscoin_ja.ts \
   qt/locale/syscoin_ka.ts \
   qt/locale/syscoin_kk_KZ.ts \
   qt/locale/syscoin_ko_KR.ts \
+  qt/locale/syscoin_ku_IQ.ts \
   qt/locale/syscoin_ky.ts \
   qt/locale/syscoin_la.ts \
   qt/locale/syscoin_lt.ts \
@@ -62,13 +66,16 @@ QT_TS = \
   qt/locale/syscoin_pt_BR.ts \
   qt/locale/syscoin_pt_PT.ts \
   qt/locale/syscoin_ro_RO.ts \
+  qt/locale/syscoin_ro.ts \
   qt/locale/syscoin_ru_RU.ts \
   qt/locale/syscoin_ru.ts \
   qt/locale/syscoin_sk.ts \
   qt/locale/syscoin_sl_SI.ts \
   qt/locale/syscoin_sq.ts \
+  qt/locale/syscoin_sr@latin.ts \
   qt/locale/syscoin_sr.ts \
   qt/locale/syscoin_sv.ts \
+  qt/locale/syscoin_ta.ts \
   qt/locale/syscoin_th_TH.ts \
   qt/locale/syscoin_tr_TR.ts \
   qt/locale/syscoin_tr.ts \
@@ -78,6 +85,7 @@ QT_TS = \
   qt/locale/syscoin_vi.ts \
   qt/locale/syscoin_vi_VN.ts \
   qt/locale/syscoin_zh_CN.ts \
+  qt/locale/syscoin_zh_HK.ts \
   qt/locale/syscoin_zh.ts \
   qt/locale/syscoin_zh_TW.ts
 
@@ -88,6 +96,7 @@ QT_FORMS_UI = \
   qt/forms/editaddressdialog.ui \
   qt/forms/helpmessagedialog.ui \
   qt/forms/intro.ui \
+  qt/forms/modaloverlay.ui \
   qt/forms/openuridialog.ui \
   qt/forms/optionsdialog.ui \
   qt/forms/overviewpage.ui \
@@ -117,6 +126,7 @@ QT_MOC_CPP = \
   qt/moc_intro.cpp \
   qt/moc_macdockiconhandler.cpp \
   qt/moc_macnotificationhandler.cpp \
+  qt/moc_modaloverlay.cpp \
   qt/moc_notificator.cpp \
   qt/moc_openuridialog.cpp \
   qt/moc_optionsdialog.cpp \
@@ -184,6 +194,7 @@ SYSCOIN_QT_H = \
   qt/intro.h \
   qt/macdockiconhandler.h \
   qt/macnotificationhandler.h \
+  qt/modaloverlay.h \
   qt/networkstyle.h \
   qt/notificator.h \
   qt/openuridialog.h \
@@ -224,7 +235,9 @@ RES_ICONS = \
   qt/res/icons/about.png \
   qt/res/icons/about_qt.png \
   qt/res/icons/syscoin.ico \
+  qt/res/icons/syscoin_testnet.ico \
   qt/res/icons/syscoin.png \
+  qt/res/icons/chevron.png \
   qt/res/icons/clock1.png \
   qt/res/icons/clock2.png \
   qt/res/icons/clock3.png \
@@ -245,6 +258,10 @@ RES_ICONS = \
   qt/res/icons/eye_minus.png \
   qt/res/icons/eye_plus.png \
   qt/res/icons/filesave.png \
+  qt/res/icons/fontbigger.png \
+  qt/res/icons/fontsmaller.png \
+  qt/res/icons/hd_disabled.png \
+  qt/res/icons/hd_enabled.png \
   qt/res/icons/history.png \
   qt/res/icons/info.png \
   qt/res/icons/key.png \
@@ -259,6 +276,7 @@ RES_ICONS = \
   qt/res/icons/synced.png \
   qt/res/icons/transaction0.png \
   qt/res/icons/transaction2.png \
+  qt/res/icons/transaction_abandoned.png \
   qt/res/icons/transaction_conflicted.png \
   qt/res/icons/tx_inout.png \
   qt/res/icons/tx_input.png \
@@ -277,6 +295,7 @@ SYSCOIN_QT_CPP = \
   qt/csvmodelwriter.cpp \
   qt/guiutil.cpp \
   qt/intro.cpp \
+  qt/modaloverlay.cpp \
   qt/networkstyle.cpp \
   qt/notificator.cpp \
   qt/optionsdialog.cpp \
@@ -375,7 +394,7 @@ endif
 if ENABLE_ZMQ
 qt_syscoin_qt_LDADD += $(LIBSYSCOIN_ZMQ) $(ZMQ_LIBS)
 endif
-qt_syscoin_qt_LDADD += $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_CRYPTO) $(LIBUNIVALUE) $(LIBLEVELDB) $(LIBMEMENV) \
+qt_syscoin_qt_LDADD += $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_CONSENSUS) $(LIBSYSCOIN_CRYPTO) $(LIBUNIVALUE) $(LIBLEVELDB) $(LIBMEMENV) \
   $(BOOST_LIBS) $(QT_LIBS) $(QT_DBUS_LIBS) $(QR_LIBS) $(PROTOBUF_LIBS) $(BDB_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS) $(MINIUPNPC_LIBS) $(LIBSECP256K1) \
   $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS)
 qt_syscoin_qt_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(QT_LDFLAGS) $(LIBTOOL_APP_LDFLAGS)
@@ -386,19 +405,20 @@ QT_QM=$(QT_TS:.ts=.qm)
 
 SECONDARY: $(QT_QM)
 
-qt/syscoinstrings.cpp: $(libsyscoin_server_a_SOURCES) $(libsyscoin_wallet_a_SOURCES)
+$(srcdir)/qt/syscoinstrings.cpp: $(libsyscoin_server_a_SOURCES) $(libsyscoin_wallet_a_SOURCES)
 	@test -n $(XGETTEXT) || echo "xgettext is required for updating translations"
-	$(AM_V_GEN) cd $(srcdir); XGETTEXT=$(XGETTEXT) ../share/qt/extract_strings_qt.py $^
+	$(AM_V_GEN) cd $(srcdir); XGETTEXT=$(XGETTEXT) PACKAGE_NAME="$(PACKAGE_NAME)" COPYRIGHT_HOLDERS="$(COPYRIGHT_HOLDERS)" COPYRIGHT_HOLDERS_SUBSTITUTION="$(COPYRIGHT_HOLDERS_SUBSTITUTION)" $(PYTHON) ../share/qt/extract_strings_qt.py $^
 
-translate: qt/syscoinstrings.cpp $(QT_FORMS_UI) $(QT_FORMS_UI) $(SYSCOIN_QT_CPP) $(SYSCOIN_QT_H) $(SYSCOIN_MM)
+translate: $(srcdir)/qt/syscoinstrings.cpp $(QT_FORMS_UI) $(QT_FORMS_UI) $(SYSCOIN_QT_CPP) $(SYSCOIN_QT_H) $(SYSCOIN_MM)
 	@test -n $(LUPDATE) || echo "lupdate is required for updating translations"
-	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(LUPDATE) $^ -locations relative -no-obsolete -ts qt/locale/syscoin_en.ts
+	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(LUPDATE) $^ -locations relative -no-obsolete -ts $(srcdir)/qt/locale/syscoin_en.ts
 
 $(QT_QRC_LOCALE_CPP): $(QT_QRC_LOCALE) $(QT_QM)
 	@test -f $(RCC)
-	@test -f $(@D)/$(<F) || cp -f $< $(@D)
-	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(RCC) -name syscoin_locale $(@D)/$(<F) | \
+	@cp -f $< $(@D)/temp_$(<F)
+	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(RCC) -name syscoin_locale $(@D)/temp_$(<F) | \
 	  $(SED) -e '/^\*\*.*Created:/d' -e '/^\*\*.*by:/d' > $@
+	@rm $(@D)/temp_$(<F)
 
 $(QT_QRC_CPP): $(QT_QRC) $(QT_FORMS_H) $(RES_ICONS) $(RES_IMAGES) $(RES_MOVIES) $(PROTOBUF_H)
 	@test -f $(RCC)
@@ -420,11 +440,11 @@ ui_%.h: %.ui
 	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(UIC) -o $@ $< || (echo "Error creating $@"; false)
 
 %.moc: %.cpp
-	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(MOC) $(QT_INCLUDES) $(MOC_DEFS) $< | \
+	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(MOC) $(DEFAULT_INCLUDES) $(QT_INCLUDES) $(MOC_DEFS) $< | \
 	  $(SED) -e '/^\*\*.*Created:/d' -e '/^\*\*.*by:/d' > $@
 
 moc_%.cpp: %.h
-	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(MOC) $(QT_INCLUDES) $(MOC_DEFS) $< | \
+	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(MOC) $(DEFAULT_INCLUDES) $(QT_INCLUDES) $(MOC_DEFS) $< | \
 	  $(SED) -e '/^\*\*.*Created:/d' -e '/^\*\*.*by:/d' > $@
 
 %.qm: %.ts

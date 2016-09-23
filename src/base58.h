@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2014 The Syscoin Core developers
+// Copyright (c) 2009-2015 The Syscoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -164,7 +164,7 @@ public:
     CSyscoinExtKeyBase() {}
 };
 
-typedef CSyscoinExtKeyBase<CExtKey, 74, CChainParams::EXT_SECRET_KEY> CSyscoinExtKey;
-typedef CSyscoinExtKeyBase<CExtPubKey, 74, CChainParams::EXT_PUBLIC_KEY> CSyscoinExtPubKey;
+typedef CSyscoinExtKeyBase<CExtKey, BIP32_EXTKEY_SIZE, CChainParams::EXT_SECRET_KEY> CSyscoinExtKey;
+typedef CSyscoinExtKeyBase<CExtPubKey, BIP32_EXTKEY_SIZE, CChainParams::EXT_PUBLIC_KEY> CSyscoinExtPubKey;
 
 #endif // SYSCOIN_BASE58_H
