@@ -43,7 +43,6 @@ SYSCOIN_TESTS =\
   test/syscoin_escrow_tests.cpp \
   test/test_syscoin_services.cpp \
   test/test_syscoin_services.h \
-  test/auxpow_tests.cpp \
   test/arith_uint256_tests.cpp \
   test/scriptnum10.h \
   test/addrman_tests.cpp \
