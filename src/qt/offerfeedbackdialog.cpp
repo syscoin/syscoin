@@ -6,7 +6,7 @@
 #include "platformstyle.h"
 #include "ui_interface.h"
 #include <QMessageBox>
-#include "server.h"
+#include "rpc/server.h"
 #include "walletmodel.h"
 using namespace std;
 
