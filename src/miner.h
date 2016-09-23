@@ -148,6 +148,10 @@ private:
     uint64_t nBlockWeight;
     uint64_t nBlockSize;
     uint64_t nBlockTx;
+	// SYSCOIN
+	uint64_t nSysBlockTx;
+	CAmount nSysRegenFees;
+
     uint64_t nBlockSigOpsCost;
     CAmount nFees;
     CTxMemPool::setEntries inBlock;

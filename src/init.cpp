@@ -43,7 +43,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <memory>
-
+// SYSCOIN services
+#include "alias.h"
+#include "offer.h"
+#include "cert.h"
+#include "escrow.h"
+#include "message.h"
 #ifndef WIN32
 #include <signal.h>
 #endif
@@ -491,23 +496,19 @@ std::string HelpMessage(HelpMessageMode mode)
 
 std::string LicenseInfo()
 {
-    const std::string URL_SOURCE_CODE = "<https://github.com/syscoin/syscoin>";
-    const std::string URL_WEBSITE = "<https://syscoincore.org>";
-
-    return CopyrightHolders(strprintf(_("Copyright (C) %i-%i"), 2009, COPYRIGHT_YEAR) + " ") + "\n" +
+    // todo: remove urls from translations on next change
+	// SYSCOIN eula
+    return FormatParagraph(strprintf(_("Copyright (C) 2009-%i The Syscoin Core Developers"), COPYRIGHT_YEAR)) + "\n" +
            "\n" +
-           strprintf(_("Please contribute if you find %s useful. "
-                       "Visit %s for further information about the software."),
-               PACKAGE_NAME, URL_WEBSITE) +
+           FormatParagraph(_("This is experimental software.")) + "\n" +
            "\n" +
-           strprintf(_("The source code is available from %s."),
-               URL_SOURCE_CODE) +
+           FormatParagraph(_("Distributed under the MIT software license, see the accompanying file COPYING or <http://www.opensource.org/licenses/mit-license.php>.")) + "\n" +
            "\n" +
+           FormatParagraph(_("This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit <https://www.openssl.org/> and cryptographic software written by Eric Young and UPnP software written by Thomas Bernard.")) + "\n" +
            "\n" +
-           _("This is experimental software.") + "\n" +
-           strprintf(_("Distributed under the MIT software license, see the accompanying file %s or %s"), "COPYING", "<https://opensource.org/licenses/MIT>") + "\n" +
+           FormatParagraph(_("Syscoin is open source software produced by a global network of developers. By downloading, distributing and using Syscoin and the Syscoin network you release the developers involved in the Syscoin Project past, present, and future from any and all liability. You are responsible for your creations on the Syscoin network. You agree that the developers of the Syscoin Project carry no responsibility for the actions/data or entities of *any* definition created on the network by yourself or others on the network to which you may be exposed.")) + "\n" +
            "\n" +
-           strprintf(_("This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit %s and cryptographic software written by Eric Young and UPnP software written by Thomas Bernard."), "<https://www.openssl.org>") +
+           FormatParagraph(_("The developers of the Syscoin Project do not have the power to modify data on the Syscoin network, it is backed by an immutable blockchain, which you further acknowledge through use of Syscoin, the Syscoin network, and Syscoin services. If you do not agree to these terms, please refrain from using Syscoin and its related services.")) +
            "\n";
 }
 
@@ -1302,11 +1303,22 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 delete pcoinsdbview;
                 delete pcoinscatcher;
                 delete pblocktree;
+				// SYSCOIN service db's
+				delete paliasdb;
+                delete pofferdb;
+                delete pcertdb;
+				delete pescrowdb;
+				delete pmessagedb;
 
                 pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, fReindex);
                 pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex || fReindexChainState);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
                 pcoinsTip = new CCoinsViewCache(pcoinscatcher);
+                paliasdb = new CAliasDB(nCoinCacheUsage*2, false, fReindex);
+                pofferdb = new COfferDB(nCoinCacheUsage*2, false, fReindex);
+                pcertdb = new CCertDB(nCoinCacheUsage*2, false, fReindex);
+				pescrowdb = new CEscrowDB(nCoinCacheUsage*2, false, fReindex);
+				pmessagedb = new CMessageDB(nCoinCacheUsage*2, false, fReindex);
 
                 if (fReindex) {
                     pblocktree->WriteReindexing(true);

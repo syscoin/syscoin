@@ -29,17 +29,19 @@ ReceiveCoinsDialog::ReceiveCoinsDialog(const PlatformStyle *_platformStyle, QWid
     platformStyle(_platformStyle)
 {
     ui->setupUi(this);
+	// SYSCOIN
+	QString theme = GUIUtil::getThemeName();
 
-    if (!_platformStyle->getImagesOnButtons()) {
+    if (!platformStyle->getImagesOnButtons()) {
         ui->clearButton->setIcon(QIcon());
         ui->receiveButton->setIcon(QIcon());
         ui->showRequestButton->setIcon(QIcon());
         ui->removeRequestButton->setIcon(QIcon());
     } else {
-        ui->clearButton->setIcon(_platformStyle->SingleColorIcon(":/icons/remove"));
-        ui->receiveButton->setIcon(_platformStyle->SingleColorIcon(":/icons/receiving_addresses"));
-        ui->showRequestButton->setIcon(_platformStyle->SingleColorIcon(":/icons/edit"));
-        ui->removeRequestButton->setIcon(_platformStyle->SingleColorIcon(":/icons/remove"));
+        ui->clearButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/emove"));
+        ui->receiveButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/receiving_addresses"));
+        ui->showRequestButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/edit"));
+        ui->removeRequestButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/remove"));
     }
 
     // context menu actions

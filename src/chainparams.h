@@ -43,10 +43,13 @@ struct CCheckpointData {
 class CChainParams
 {
 public:
+	// SYSCOIN allow old SYSCOIN address scheme
     enum Base58Type {
         PUBKEY_ADDRESS,
+        PUBKEY_ADDRESS_SYS,
         SCRIPT_ADDRESS,
         SECRET_KEY,
+        SECRET_KEY_SYS,
         EXT_PUBLIC_KEY,
         EXT_SECRET_KEY,
 

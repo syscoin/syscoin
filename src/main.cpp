@@ -1090,6 +1090,31 @@ bool CheckTransaction(const CTransaction& tx, CValidationState &state)
                 return state.DoS(10, false, REJECT_INVALID, "bad-txns-prevout-null");
     }
 
+	// SYSCOIN tx structure check
+    if (tx.nVersion != SYSCOIN_TX_VERSION)
+        return true;
+
+    vector<vector<unsigned char> > vvch;
+    int op;
+    int nOut;
+	string err = "";
+	bool found = false;
+   if(DecodeOfferTx(tx, op, nOut, vvch)
+	|| DecodeCertTx(tx, op, nOut, vvch)
+	|| DecodeAliasTx(tx, op, nOut, vvch)
+	|| DecodeMessageTx(tx, op, nOut, vvch)
+	|| DecodeEscrowTx(tx, op, nOut, vvch)) 
+   {
+	   found = true;
+   }
+   if(!found)
+   {
+	   err = error("Unknown syscoin transaction type!");
+   }
+    if(err != "")
+	{
+		return state.DoS(10,error(err.c_str()));
+	}
     return true;
 }
 
@@ -1112,7 +1137,112 @@ std::string FormatStateMessage(const CValidationState &state)
         state.GetDebugMessage().empty() ? "" : ", "+state.GetDebugMessage(),
         state.GetRejectCode());
 }
-
+// SYSCOIN
+bool CheckSyscoinInputs(const CTransaction& tx, const CCoinsViewCache& inputs, int nHeight=0)
+{
+	vector<vector<unsigned char> > vvchArgs;
+	int op;
+	int nOut;	
+	bool fJustCheck = true;
+	if(nHeight == 0)
+		nHeight = chainActive.Height();
+	string errorMessage;
+	if(tx.nVersion == GetSyscoinTxVersion())
+	{
+		if(tx.nVersion == SYSCOIN_TX_VERSION)
+		{
+			bool good = true;
+			if(DecodeCertTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckCertInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage);			
+			}
+			if(DecodeEscrowTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckEscrowInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage);		
+			}
+			if(DecodeAliasTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckAliasInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage);
+			}
+			if(DecodeOfferTx(tx, op, nOut, vvchArgs))
+			{	
+				good = CheckOfferInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage);	 
+			}
+			if(DecodeMessageTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckMessageInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage);		
+			}
+			if(fDebug && !errorMessage.empty())
+				LogPrintf("%s\n", errorMessage.c_str());
+			// remove tx's that don't pass our check
+			if(!good)
+			{
+				return false;
+			}
+		}
+	}
+	return true;	
+	
+}
+bool AddSyscoinServicesToDB(const CBlock& block, const CCoinsViewCache& inputs, int nHeight)
+{
+	vector<vector<unsigned char> > vvchArgs;
+	int op;
+	int nOut;	
+	bool fJustCheck = false;
+	string errorMessage;
+	// first pass check cert/escrow/alias inputs which are dependent to other services, second pass do the rest
+	for (unsigned int i = 0; i < block.vtx.size(); i++)
+    {
+        const CTransaction &tx = block.vtx[i];
+		if(tx.nVersion == GetSyscoinTxVersion())
+		{	
+			bool good = true;
+			// always do alias first as its dependency to others
+			if(DecodeAliasTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckAliasInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage, &block);
+			}
+			if(DecodeCertTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckCertInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage, &block);			
+			}
+			if(DecodeEscrowTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckEscrowInputs(tx,  op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage, &block);		
+			}
+			if(DecodeMessageTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckMessageInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage, &block);		
+			}
+			if(fDebug && !errorMessage.empty())
+				LogPrintf("%s\n", errorMessage.c_str());
+			if(!good)
+			{
+				return false;
+			}	
+		}
+	}
+	for (unsigned int i = 0; i < block.vtx.size(); i++)
+    {
+        const CTransaction &tx = block.vtx[i];
+		if(tx.nVersion == GetSyscoinTxVersion())
+		{		
+			bool good = true;
+			if(DecodeOfferTx(tx, op, nOut, vvchArgs))
+			{
+				good = CheckOfferInputs(tx, op, nOut, vvchArgs, inputs, fJustCheck, nHeight, errorMessage, &block);		
+			}	
+			if(fDebug && !errorMessage.empty())
+				LogPrintf("%s\n", errorMessage.c_str());
+			if(!good)
+			{
+				return false;
+			}
+		}
+	}
+	return true;
+}
 bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const CTransaction& tx, bool fLimitFree,
                               bool* pfMissingInputs, bool fOverrideMempoolLimit, const CAmount& nAbsurdFee,
                               std::vector<uint256>& vHashTxnToUncache)
@@ -1504,7 +1634,6 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const C
             }
             return false;
         }
-
         // Check again against just the consensus-critical mandatory script
         // verification flags, in case of bugs in the standard flags that cause
         // transactions to pass as valid when they're actually invalid. For
@@ -1519,7 +1648,9 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const C
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
         }
-
+		// SYSCOIN
+        if (!CheckSyscoinInputs(tx, view))
+			return false;
         // Remove conflicting transactions from the mempool
         BOOST_FOREACH(const CTxMemPool::txiter it, allConflicting)
         {
@@ -1626,7 +1757,44 @@ bool GetTransaction(const uint256 &hash, CTransaction &txOut, const Consensus::P
 
 
 
+//////////////////////////////////////////////////////////////////////////////
+//
+// CBlock and CBlockIndex
+//
+// SYSCOIN check header auxpow proof of work
+bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params)
+{
+    if (!block.nVersion.IsLegacy() && block.nVersion.GetChainId() != params.nAuxpowChainId)
+        return error("%s : block does not have our chain ID"
+                     " (got %d, expected %d, full nVersion %d)",
+                     __func__, block.nVersion.GetChainId(),
+                     params.nAuxpowChainId, block.nVersion.GetFullVersion());
 
+    /* If there is no auxpow, just check the block hash.  */
+    if (!block.auxpow)
+    {
+        if (block.nVersion.IsAuxpow())
+            return error("%s : no auxpow on block with auxpow version",
+                         __func__);
+
+        if (!CheckProofOfWork(block.GetHash(), block.nBits, params))
+            return error("%s : non-AUX proof of work failed", __func__);
+
+        return true;
+    }
+
+    /* We have auxpow.  Check it.  */
+
+    if (!block.nVersion.IsAuxpow())
+        return error("%s : auxpow on block with non-auxpow version", __func__);
+
+    if (!block.auxpow->check(block.GetHash(), block.nVersion.GetChainId(), params))
+        return error("%s : AUX POW is not valid", __func__);
+    if (!CheckProofOfWork(block.auxpow->getParentBlockHash(), block.nBits, params))
+        return error("%s : AUX proof of work failed", __func__);
+
+    return true;
+}
 //////////////////////////////////////////////////////////////////////////////
 //
 // CBlock and CBlockIndex
@@ -1653,7 +1821,12 @@ bool WriteBlockToDisk(const CBlock& block, CDiskBlockPos& pos, const CMessageHea
     return true;
 }
 
-bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, const Consensus::Params& consensusParams)
+
+/* Generic implementation of block reading that can handle
+   both a block and its header.  */
+// SYSCOIN: block header template's for auxpow integration
+template<typename T>
+static bool ReadBlockOrHeader(T& block, const CDiskBlockPos& pos, const Consensus::Params& consensusParams)
 {
     block.SetNull();
 
@@ -1670,16 +1843,16 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, const Consensus:
         return error("%s: Deserialize or I/O error - %s at %s", __func__, e.what(), pos.ToString());
     }
 
-    // Check the header
-    if (!CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
+    // SYSCOIN Check the header
+    if (!CheckProofOfWork(block, consensusParams))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
     return true;
 }
-
-bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams)
+template<typename T>
+static bool ReadBlockOrHeader(T& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams)
 {
-    if (!ReadBlockFromDisk(block, pindex->GetBlockPos(), consensusParams))
+    if (!ReadBlockOrHeader(block, pindex->GetBlockPos(), consensusParams))
         return false;
     if (block.GetHash() != pindex->GetBlockHash())
         return error("ReadBlockFromDisk(CBlock&, CBlockIndex*): GetHash() doesn't match index for %s at %s",
@@ -1687,17 +1860,143 @@ bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex, const Consensus
     return true;
 }
 
+bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, const Consensus::Params& consensusParams)
+{
+    return ReadBlockOrHeader(block, pos, consensusParams);
+}
+
+bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams)
+{
+    return ReadBlockOrHeader(block, pindex, consensusParams);
+}
+
+bool ReadBlockHeaderFromDisk(CBlockHeader& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams)
+{
+    return ReadBlockOrHeader(block, pindex, consensusParams);
+}
+
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
 {
-    int halvings = nHeight / consensusParams.nSubsidyHalvingInterval;
-    // Force block reward to zero when right shift is undefined.
-    if (halvings >= 64)
-        return 0;
+	if(nHeight == 0)
+		return 2.5*COIN;
+	if(nHeight == 1)
+	{
+		std::string chain = ChainNameFromCommandLine();
+		if (chain == CBaseChainParams::MAIN || chain == CBaseChainParams::REGTEST)
+		{
+			// SYSCOIN snapshot for old chain based on block 880440 + 15 mill dev fund
+			return 459200578 * COIN + 15000000 * COIN;
+		}
+	}
+	CAmount nSubsidy = 0;
+    if(nHeight <= 525601)
+		nSubsidy = 54.13*COIN;
+    else if(nHeight <= 1051202)
+		nSubsidy = 28.69*COIN;  
+    else if(nHeight <= 1576803)
+		nSubsidy = 29.55*COIN;  
+    else if(nHeight <= 2102404)
+		nSubsidy = 30.44*COIN;  
+    else if(nHeight <= 2628005)
+		nSubsidy = 31.35*COIN;  
+    else if(nHeight <= 3153606)
+		nSubsidy = 16.15*COIN;  
+    else if(nHeight <= 3679207)
+		nSubsidy = 16.39*COIN;  
+    else if(nHeight <= 4204808)
+		nSubsidy = 16.63*COIN;  
+    else if(nHeight <= 4730409)
+		nSubsidy = 16.88*COIN;  
+    else if(nHeight <= 5256010)
+		nSubsidy = 17.14*COIN;  
+    else if(nHeight <= 5781611)
+		nSubsidy = 17.39*COIN;  
+    else if(nHeight <= 6307212)
+		nSubsidy = 17.65*COIN;  
+    else if(nHeight <= 6832813)
+		nSubsidy = 17.92*COIN;  
+    else if(nHeight <= 7358414)
+		nSubsidy = 9.09*COIN;  
+    else if(nHeight <= 7884015)
+		nSubsidy = 9.16*COIN;  
+    else if(nHeight <= 8409616)
+		nSubsidy = 9.23*COIN;  
+    else if(nHeight <= 8935217)
+		nSubsidy = 9.30*COIN;  
+    else if(nHeight <= 9460818)
+		nSubsidy =  9.37*COIN;
+   else if(nHeight <= 9986419)
+		nSubsidy =  9.44*COIN; 
+   else if(nHeight <= 10512020)
+		nSubsidy = 9.51*COIN;	
+   else if(nHeight <= 11037621)
+		nSubsidy = 9.58*COIN;	
+   else if(nHeight <= 11563222)
+		nSubsidy = 9.65*COIN;	
+   else if(nHeight <= 12088823)
+		nSubsidy = 9.73*COIN;	
+   else if(nHeight <= 12614424)
+		nSubsidy = 9.80*COIN;
+   else if(nHeight <= 13140025)
+		nSubsidy = 9.87*COIN;
+   else if(nHeight <= 13665626)
+		nSubsidy = 9.95*COIN;
+   else if(nHeight <= 14191227)
+		nSubsidy = 10.02*COIN;
+   else if(nHeight <= 14716828)
+		nSubsidy = 10.10*COIN;
+   else if(nHeight <= 15242429)
+		nSubsidy = 10.17*COIN;
+   else if(nHeight <= 15768030)
+		nSubsidy = 10.25*COIN;
+   else if(nHeight <= 16293631)
+		nSubsidy = 10.33*COIN;
+   else if(nHeight <= 16819232)
+		nSubsidy = 10.40*COIN;
+   else if(nHeight <= 17344833)
+		nSubsidy = 10.48*COIN;
+   else if(nHeight <= 17870434)
+		nSubsidy = 10.56*COIN;
+   else if(nHeight <= 18396035)
+		nSubsidy = 10.64*COIN;
+   else if(nHeight <= 18921636)
+		nSubsidy = 10.72*COIN;
+   else if(nHeight <= 19447237)
+		nSubsidy = 10.80*COIN;
+   else if(nHeight <= 19972838)
+		nSubsidy = 10.88*COIN;
+   else if(nHeight <= 20498439)
+		nSubsidy = 10.96*COIN;
+   else if(nHeight <= 21024040)
+		nSubsidy = 11.04*COIN;
+   else if(nHeight <= 21549641)
+		nSubsidy = 11.13*COIN;
+   else if(nHeight <= 22075242)
+		nSubsidy = 11.21*COIN;
+   else if(nHeight <= 22600843)
+		nSubsidy = 11.29*COIN;
+   else if(nHeight <= 23126444)
+		nSubsidy = 11.38*COIN;
+   else if(nHeight <= 23652045)
+		nSubsidy = 11.46*COIN;
+   else if(nHeight <= 24177646)
+		nSubsidy = 11.55*COIN;
+   else if(nHeight <= 24703247)
+		nSubsidy = 11.64*COIN;
+   else if(nHeight <= 25228848)
+		nSubsidy = 11.72*COIN;
+   else if(nHeight <= 25754449)
+		nSubsidy = 11.82*COIN;
+   else if(nHeight <= 26280050)
+		nSubsidy = 11.90*COIN;
+   else if(nHeight <= 26805651)
+		nSubsidy = 11.99*COIN;
+   else if(nHeight <= 27331252)
+		nSubsidy = 12.08*COIN;
+   else
+		nSubsidy = 0;
+	return nSubsidy;
 
-    CAmount nSubsidy = 50 * COIN;
-    // Subsidy is cut in half every 210,000 blocks which will occur approximately every 4 years.
-    nSubsidy >>= halvings;
-    return nSubsidy;
 }
 
 bool IsInitialBlockDownload()
@@ -2138,7 +2437,134 @@ static bool ApplyTxInUndo(const CTxInUndo& undo, CCoinsViewCache& view, const CO
 
     return fClean;
 }
+// SYSCOIN disconnect service related blocks
+bool DisconnectAlias(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	
+	string opName = aliasFromOp(op);
+	vector<CAliasIndex> vtxPos;
+	paliasdb->ReadAlias(vvchArgs[0], vtxPos);
+	CAliasIndex foundAlias = vtxPos.back();
+	while (vtxPos.back().txHash == tx.GetHash())	
+		vtxPos.pop_back();
+	
+	CPubKey PubKey(foundAlias.vchPubKey);
+	CSyscoinAddress address(PubKey.GetID());
 
+	if(!paliasdb->WriteAlias(vvchArgs[0], vchFromString(address.ToString()), vtxPos))
+		return error("DisconnectBlock() : failed to write to alias DB");
+	if(fDebug)
+		LogPrintf("DISCONNECTED ALIAS TXN: alias=%s op=%s hash=%s  height=%d\n",
+		stringFromVch(vvchArgs[0]).c_str(),
+		aliasFromOp(op).c_str(),
+		tx.GetHash().ToString().c_str(),
+		pindex->nHeight);
+
+	return true;
+}
+
+bool DisconnectOffer(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+    string opName = offerFromOp(op);
+	
+	COffer theOffer(tx);
+	if (theOffer.IsNull())
+		return false;
+
+    vector<COffer> vtxPos;
+    pofferdb->ReadOffer(vvchArgs[0], vtxPos);  
+	while (vtxPos.back().txHash == tx.GetHash())	
+		vtxPos.pop_back();
+		
+
+    // write new offer state to db
+
+	if(!pofferdb->WriteOffer(vvchArgs[0], vtxPos))
+		return error("DisconnectOffer() : failed to write to offer DB");
+	
+	if(fDebug)
+		LogPrintf("DISCONNECTED offer TXN: offer=%s op=%s hash=%s  height=%d\n",
+			stringFromVch(vvchArgs[0]).c_str(),
+			opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);
+
+	return true;
+}
+
+bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	string opName = certFromOp(op);
+
+	// make sure a DB record exists for this cert
+	vector<CCert> vtxPos;
+	pcertdb->ReadCert(vvchArgs[0], vtxPos);
+	while (vtxPos.back().txHash == tx.GetHash())	
+		vtxPos.pop_back();
+		
+
+
+	// write new offer state to db
+
+	if(!pcertdb->WriteCert(vvchArgs[0], vtxPos))
+		return error("DisconnectCertificate() : failed to write to offer DB");
+	if(fDebug)
+		LogPrintf("DISCONNECTED CERT TXN: cert=%s op=%s hash=%s height=%d\n",
+		   stringFromVch(vvchArgs[0]).c_str(),
+			opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);
+
+	return true;
+}
+
+bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	string opName = escrowFromOp(op);
+	
+	
+	// make sure a DB record exists for this cert
+	vector<CEscrow> vtxPos;
+	pescrowdb->ReadEscrow(vvchArgs[0], vtxPos);
+	while (vtxPos.back().txHash == tx.GetHash())	
+		vtxPos.pop_back();
+
+
+	// write new escrow state to db
+
+	if(!pescrowdb->WriteEscrow(vvchArgs[0], vtxPos))
+		return error("DisconnectEscrow() : failed to write to escrow DB");
+	
+	if(fDebug)
+		LogPrintf("DISCONNECTED ESCROW TXN: escrow=%s op=%s hash=%s height=%d\n",
+		   stringFromVch(vvchArgs[0]).c_str(),
+			opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);
+
+	return true;
+}
+
+bool DisconnectMessage(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	string opName = messageFromOp(op);
+
+	// make sure a DB record exists for this cert
+	vector<CMessage> vtxPos;
+	pmessagedb->ReadMessage(vvchArgs[0], vtxPos);
+	while (vtxPos.back().txHash == tx.GetHash())	
+		vtxPos.pop_back();
+
+
+	// write new message state to db
+
+	if(!pmessagedb->WriteMessage(vvchArgs[0], vtxPos))
+		return error("DisconnectMessage() : failed to write to message DB");
+	
+	if(fDebug)
+		LogPrintf("DISCONNECTED MESSAGE TXN: message=%s op=%s hash=%s height=%d\n",
+		   stringFromVch(vvchArgs[0]).c_str(),
+		   	opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);
+
+	return true;
+}
 bool DisconnectBlock(const CBlock& block, CValidationState& state, const CBlockIndex* pindex, CCoinsViewCache& view, bool* pfClean)
 {
     assert(pindex->GetBlockHash() == view.GetBestBlock());
@@ -2160,7 +2586,34 @@ bool DisconnectBlock(const CBlock& block, CValidationState& state, const CBlockI
 
     // undo transactions in reverse order
     for (int i = block.vtx.size() - 1; i >= 0; i--) {
+
         const CTransaction &tx = block.vtx[i];
+		// SYSCOIN disconnect syscoin related block
+		if (tx.nVersion == SYSCOIN_TX_VERSION) {
+			vector<vector<unsigned char> > vvchArgs;
+			int op, nOut;
+			if(DecodeAliasTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectAlias(pindex, tx, op, vvchArgs);	
+			}
+			if(DecodeOfferTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectOffer(pindex, tx, op, vvchArgs); 
+			}
+			if(DecodeCertTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectCertificate(pindex, tx, op, vvchArgs);				
+			}
+			if(DecodeEscrowTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectEscrow(pindex, tx, op, vvchArgs);	
+			}
+			if(DecodeMessageTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectMessage(pindex, tx, op, vvchArgs);	
+			}
+		}
+		
         uint256 hash = tx.GetHash();
 
         // Check that all outputs are available and match the outputs in the block itself
@@ -2272,11 +2725,11 @@ public:
     int64_t EndTime(const Consensus::Params& params) const { return std::numeric_limits<int64_t>::max(); }
     int Period(const Consensus::Params& params) const { return params.nMinerConfirmationWindow; }
     int Threshold(const Consensus::Params& params) const { return params.nRuleChangeActivationThreshold; }
-
+	// SYSCOIN getbaseversion
     bool Condition(const CBlockIndex* pindex, const Consensus::Params& params) const
     {
-        return ((pindex->nVersion & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS) &&
-               ((pindex->nVersion >> bit) & 1) != 0 &&
+        return ((pindex->nVersion.GetBaseVersion() & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS) &&
+               ((pindex->nVersion.GetBaseVersion() >> bit) & 1) != 0 &&
                ((ComputeBlockVersion(pindex->pprev, params) >> bit) & 1) == 0;
     }
 };
@@ -2339,20 +2792,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
     // two in the chain that violate it. This prevents exploiting the issue against nodes during their
     // initial block download.
-    bool fEnforceBIP30 = (!pindex->phashBlock) || // Enforce on CreateNewBlock invocations which don't have a hash.
-                          !((pindex->nHeight==91842 && pindex->GetBlockHash() == uint256S("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
-                           (pindex->nHeight==91880 && pindex->GetBlockHash() == uint256S("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")));
-
-    // Once BIP34 activated it was not possible to create new duplicate coinbases and thus other than starting
-    // with the 2 existing duplicate coinbase pairs, not possible to create overwriting txs.  But by the
-    // time BIP34 activated, in each of the existing pairs the duplicate coinbase had overwritten the first
-    // before the first had been spent.  Since those coinbases are sufficiently buried its no longer possible to create further
-    // duplicate transactions descending from the known pairs either.
-    // If we're on the known chain at height greater than where BIP34 activated, we can save the db accesses needed for the BIP30 check.
-    CBlockIndex *pindexBIP34height = pindex->pprev->GetAncestor(chainparams.GetConsensus().BIP34Height);
-    //Only continue to enforce if we're below BIP34 activation height or the block hash at that height doesn't correspond.
-    fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == chainparams.GetConsensus().BIP34Hash));
-
+	// SYSCOIN
+    bool fEnforceBIP30 = true;
     if (fEnforceBIP30) {
         BOOST_FOREACH(const CTransaction& tx, block.vtx) {
             const CCoins* coins = view.AccessCoins(tx.GetHash());
@@ -2362,9 +2803,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         }
     }
 
-    // BIP16 didn't become active until Apr 1 2012
-    int64_t nBIP16SwitchTime = 1333238400;
-    bool fStrictPayToScriptHash = (pindex->GetBlockTime() >= nBIP16SwitchTime);
+    // SYSCOIN
+    bool fStrictPayToScriptHash = true;
 
     unsigned int flags = fStrictPayToScriptHash ? SCRIPT_VERIFY_P2SH : SCRIPT_VERIFY_NONE;
 
@@ -2400,6 +2840,9 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     std::vector<uint256> vOrphanErase;
     std::vector<int> prevheights;
+	// SYSCOIN inflate when high demand for syscoin services
+	uint64_t nSysBlockTx = 0;
+	CAmount nSysRegenFees = 0;
     CAmount nFees = 0;
     int nInputs = 0;
     int64_t nSigOpsCost = 0;
@@ -2412,7 +2855,17 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
         const CTransaction &tx = block.vtx[i];
-
+		// SYSCOIN inflate and regenerate based on opreturn value set when creating the service(user)
+		if(tx.nVersion == GetSyscoinTxVersion())
+		{
+			nSysBlockTx++;
+			if(nSysBlockTx >= 5)
+			{
+				int nOut = GetSyscoinDataOutput(tx);
+				if (nOut != -1)
+					nSysRegenFees += tx.vout[nOut].nValue*2;
+			}
+		}
         nInputs += tx.vin.size();
 
         if (!tx.IsCoinBase())
@@ -2465,6 +2918,9 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults, txdata[i], nScriptCheckThreads ? &vChecks : NULL))
                 return error("ConnectBlock(): CheckInputs on %s failed with %s",
                     tx.GetHash().ToString(), FormatStateMessage(state));
+			// SYSCOIN
+			if (!CheckSyscoinInputs(tx, view, pindex->nHeight))
+				return error("ConnectBlock(): CheckSyscoinInputs on %s failed",tx.GetHash().ToString());	
             control.Add(vChecks);
         }
 
@@ -2480,7 +2936,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     int64_t nTime3 = GetTimeMicros(); nTimeConnect += nTime3 - nTime2;
     LogPrint("bench", "      - Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin) [%.2fs]\n", (unsigned)block.vtx.size(), 0.001 * (nTime3 - nTime2), 0.001 * (nTime3 - nTime2) / block.vtx.size(), nInputs <= 1 ? 0 : 0.001 * (nTime3 - nTime2) / (nInputs-1), nTimeConnect * 0.000001);
 
-    CAmount blockReward = nFees + GetBlockSubsidy(pindex->nHeight, chainparams.GetConsensus());
+	// SYSCOIN Add Syscoin dynamic inflation based on service demand
+    CAmount blockReward = nSysRegenFees + nFees + GetBlockSubsidy(pindex->nHeight, chainparams.GetConsensus());
     if (block.vtx[0].GetValueOut() > blockReward)
         return state.DoS(100,
                          error("ConnectBlock(): coinbase pays too much (actual=%d vs limit=%d)",
@@ -2700,7 +3157,8 @@ void static UpdateTip(CBlockIndex *pindexNew, const CChainParams& chainParams) {
         for (int i = 0; i < 100 && pindex != NULL; i++)
         {
             int32_t nExpectedVersion = ComputeBlockVersion(pindex->pprev, chainParams.GetConsensus());
-            if (pindex->nVersion > VERSIONBITS_LAST_OLD_BLOCK_VERSION && (pindex->nVersion & ~nExpectedVersion) != 0)
+            // SYSCOIN getbaseversion
+			if (pindex->nVersion.GetBaseVersion() > VERSIONBITS_LAST_OLD_BLOCK_VERSION && (pindex->nVersion & ~nExpectedVersion) != 0)
                 ++nUpgraded;
             pindex = pindex->pprev;
         }
@@ -2716,8 +3174,9 @@ void static UpdateTip(CBlockIndex *pindexNew, const CChainParams& chainParams) {
             }
         }
     }
+	// SYSCOIN getbaseversion
     LogPrintf("%s: new best=%s height=%d version=0x%08x log2_work=%.8g tx=%lu date='%s' progress=%f cache=%.1fMiB(%utx)", __func__,
-      chainActive.Tip()->GetBlockHash().ToString(), chainActive.Height(), chainActive.Tip()->nVersion,
+      chainActive.Tip()->GetBlockHash().ToString(), chainActive.Height(), chainActive.Tip()->nVersion.GetBaseVersion(),
       log(chainActive.Tip()->nChainWork.getdouble())/log(2.0), (unsigned long)chainActive.Tip()->nChainTx,
       DateTimeStrFormat("%Y-%m-%d %H:%M:%S", chainActive.Tip()->GetBlockTime()),
       Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), chainActive.Tip()), pcoinsTip->DynamicMemoryUsage() * (1.0 / (1<<20)), pcoinsTip->GetCacheSize());
@@ -2833,7 +3292,10 @@ bool static ConnectTip(CValidationState& state, const CChainParams& chainparams,
 
     for(unsigned int i=0; i < pblock->vtx.size(); i++)
         txChanged.emplace_back(pblock->vtx[i], pindexNew, i);
-
+	// SYSCOIN update syscoin db
+	CCoinsViewCache view(pcoinsTip);
+	if (!AddSyscoinServicesToDB(*pblock, view, pindexNew->nHeight))
+		return error("ConnectTip(): AddSyscoinServicesToDB on %s failed", pindexNew->GetBlockHash().ToString());
     int64_t nTime6 = GetTimeMicros(); nTimePostConnect += nTime6 - nTime5; nTimeTotal += nTime6 - nTime1;
     LogPrint("bench", "  - Connect postprocess: %.2fms [%.2fs]\n", (nTime6 - nTime5) * 0.001, nTimePostConnect * 0.000001);
     LogPrint("bench", "- Connect block: %.2fms [%.2fs]\n", (nTime6 - nTime1) * 0.001, nTimeTotal * 0.000001);
@@ -3213,6 +3675,11 @@ CBlockIndex* AddToBlockIndex(const CBlockHeader& block)
         pindexNew->BuildSkip();
     }
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
+    // SYSCOIN: Add AuxPoW
+    if (block.nVersion.IsAuxpow()) {
+        pindexNew->pauxpow = block.auxpow;
+        assert(NULL != pindexNew->pauxpow.get());
+    }
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
     if (pindexBestHeader == NULL || pindexBestHeader->nChainWork < pindexNew->nChainWork)
         pindexBestHeader = pindexNew;
@@ -3362,7 +3829,8 @@ bool FindUndoPos(CValidationState &state, int nFile, CDiskBlockPos &pos, unsigne
 bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW)
 {
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
+	// SYSCOIN check auxpow first then fallback to normal check
+    if (fCheckPOW && !CheckProofOfWork(block, consensusParams))
         return state.DoS(50, false, REJECT_INVALID, "high-hash", false, "proof of work failed");
 
     return true;
@@ -3527,9 +3995,10 @@ bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& sta
 
     // Reject outdated version blocks when 95% (75% on testnet) of the network has upgraded:
     // check for version 2, 3 and 4 upgrades
-    if((block.nVersion < 2 && nHeight >= consensusParams.BIP34Height) ||
-       (block.nVersion < 3 && nHeight >= consensusParams.BIP66Height) ||
-       (block.nVersion < 4 && nHeight >= consensusParams.BIP65Height))
+	// SYSCOIN use GetBaseVersion() because of CBlockVersion
+    if((block.nVersion.GetBaseVersion() < 2 && nHeight >= consensusParams.BIP34Height) ||
+       (block.nVersion.GetBaseVersion() < 3 && nHeight >= consensusParams.BIP66Height) ||
+       (block.nVersion.GetBaseVersion() < 4 && nHeight >= consensusParams.BIP65Height))
             return state.Invalid(false, REJECT_OBSOLETE, strprintf("bad-version(0x%08x)", block.nVersion),
                                  strprintf("rejected nVersion=0x%08x block", block.nVersion));
 

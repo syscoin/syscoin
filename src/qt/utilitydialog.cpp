@@ -38,6 +38,8 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
     ui->setupUi(this);
 
     QString version = tr(PACKAGE_NAME) + " " + tr("version") + " " + QString::fromStdString(FormatFullVersion());
+	// SYSCOIN
+	QString sysversion = tr("Syscoin Client") + " " + tr("version") + " " + QString::fromStdString(SYSCOIN_CLIENT_VERSION);
     /* On x86 add a bit specifier to the version so that users can distinguish between
      * 32 and 64 bit builds. On other architectures, 32/64 bit may be more ambigious.
      */
@@ -67,6 +69,9 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
         ui->aboutMessage->setText(version + "<br><br>" + licenseInfoHTML);
         ui->aboutMessage->setWordWrap(true);
         ui->helpMessage->setVisible(false);
+		// SYSCOIN
+		QString theme = GUIUtil::getThemeName();
+		ui->aboutLogo->setPixmap(QPixmap(":/images/" + theme + "/about"));
     } else {
         setWindowTitle(tr("Command-line options"));
         QString header = tr("Usage:") + "\n" +

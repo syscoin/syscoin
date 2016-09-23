@@ -5,7 +5,8 @@
 #include "networkstyle.h"
 
 #include "guiconstants.h"
-
+// SYSCOIN 
+#include "guiutil.h"
 #include <QApplication>
 
 static const struct {
@@ -26,8 +27,12 @@ NetworkStyle::NetworkStyle(const QString &_appName, const int iconColorHueShift,
     appName(_appName),
     titleAddText(qApp->translate("SplashScreen", _titleAddText))
 {
+	// SYSCOIN
+	QString theme = GUIUtil::getThemeName();
     // load pixmap
-    QPixmap pixmap(":/icons/syscoin");
+    QPixmap pixmap(":/icons/" + theme + "/syscoin");
+	// SYSCOIN
+	QPixmap splashImagePixmap(":/images/" + theme + "/splash");
 
     if(iconColorHueShift != 0 && iconColorSaturationReduction != 0)
     {

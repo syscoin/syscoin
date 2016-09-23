@@ -40,6 +40,14 @@ public:
         ProxyPortTor,           // int
         DisplayUnit,            // SyscoinUnits::Unit
         ThirdPartyTxUrls,       // QString
+		// SYSCOIN
+		Theme,                  // QString
+		DefaultOfferAlias,		// QString
+		DefaultMessageAlias,	// QString
+		DefaultCertAlias,		// QString
+		DefaultPegAlias,		// QString
+		DefaultBuyOfferAlias,	// QString
+		SafeSearch,				// QString
         Language,               // QString
         CoinControlFeatures,    // bool
         ThreadsScriptVerif,     // int

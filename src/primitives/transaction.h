@@ -10,7 +10,8 @@
 #include "script/script.h"
 #include "serialize.h"
 #include "uint256.h"
-
+// SYSCOIN
+#include "alias.h"
 static const int SERIALIZE_TRANSACTION_NO_WITNESS = 0x40000000;
 
 static const int WITNESS_SCALE_FACTOR = 4;
@@ -146,7 +147,20 @@ public:
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(nValue);
-        READWRITE(*(CScriptBase*)(&scriptPubKey));
+		// SYSCOIN
+		uint64_t nHeight;
+		if(scriptPubKey.IsUnspendable() && IsInSys21Fork(scriptPubKey, nHeight))
+		{
+			if((nType & SER_GETHASH) || IsSysServiceExpired(nHeight))
+			{
+				CScript tmp = CScript() << OP_RETURN;
+				READWRITE(*(CScriptBase*)(&tmp));
+			}
+			else
+				READWRITE(*(CScriptBase*)(&scriptPubKey));
+		}
+		else
+			READWRITE(*(CScriptBase*)(&scriptPubKey));
     }
 
     void SetNull()

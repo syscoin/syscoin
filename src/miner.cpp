@@ -29,7 +29,9 @@
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <queue>
-
+// SYSCOIN need constant SYSCOIN_TX_VERSION
+extern int GetSyscoinTxVersion();
+extern int GetSyscoinDataOutput(const CTransaction& tx);
 using namespace std;
 
 //////////////////////////////////////////////////////////////////////////////
@@ -117,6 +119,9 @@ void BlockAssembler::resetBlock()
     // These counters do not include coinbase tx
     nBlockTx = 0;
     nFees = 0;
+	// SYSCOIN 
+	nSysRegenFees = 0;
+	nSysBlockTx = 0;
 
     lastFewTxs = 0;
     blockFinished = false;
@@ -132,6 +137,9 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
         return NULL;
     pblock = &pblocktemplate->block; // pointer for convenience
 
+    // SYSCOIN auxpow initialise the block version.
+    pblock->nVersion.SetBaseVersion(ComputeBlockVersion(pindexPrev, chainparams.GetConsensus()));
+
     // Add dummy coinbase tx as first transaction
     pblock->vtx.push_back(CTransaction());
     pblocktemplate->vTxFees.push_back(-1); // updated at end
@@ -141,11 +149,11 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     CBlockIndex* pindexPrev = chainActive.Tip();
     nHeight = pindexPrev->nHeight + 1;
 
-    pblock->nVersion = ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
+	// SYSCOIN setbaseversion
     if (chainparams.MineBlocksOnDemand())
-        pblock->nVersion = GetArg("-blockversion", pblock->nVersion);
+        pblock->nVersion.SetBaseVersion(GetArg("-blockversion", pblock->nVersion));
 
     pblock->nTime = GetAdjustedTime();
     const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
@@ -168,7 +176,8 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     nLastBlockTx = nBlockTx;
     nLastBlockSize = nBlockSize;
     nLastBlockWeight = nBlockWeight;
-    LogPrintf("CreateNewBlock(): total size %u txs: %u fees: %ld sigops %d\n", nBlockSize, nBlockTx, nFees, nBlockSigOpsCost);
+	// SYSCOIN
+	LogPrintf("CreateNewBlock(): total size %u txs: %u fees: %ld systxs: %u sysfees: %ld sigops %d\n", nBlockSize, nBlockTx, nFees, nSysBlockTx, nSysRegenFees, nBlockSigOpsCost);
 
     // Create coinbase transaction.
     CMutableTransaction coinbaseTx;
@@ -176,7 +185,8 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     coinbaseTx.vin[0].prevout.SetNull();
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = scriptPubKeyIn;
-    coinbaseTx.vout[0].nValue = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
+	 // SYSCOIN Compute final coinbase transaction. Add Syscoin dynamic inflation based on service demand
+    coinbaseTx.vout[0].nValue = nSysRegenFees + nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
     pblock->vtx[0] = coinbaseTx;
     pblocktemplate->vchCoinbaseCommitment = GenerateCoinbaseCommitment(*pblock, pindexPrev, chainparams.GetConsensus());
@@ -319,6 +329,18 @@ void BlockAssembler::AddToBlock(CTxMemPool::txiter iter)
     ++nBlockTx;
     nBlockSigOpsCost += iter->GetSigOpCost();
     nFees += iter->GetFee();
+	// SYSCOIN inflate and regenerate based on opreturn value set when creating the service(user)
+	if(iter->GetTx().nVersion == GetSyscoinTxVersion())
+	{
+		nSysBlockTx++;
+		if(nSysBlockTx >= 5)
+		{
+			int nOut = GetSyscoinDataOutput(iter->GetTx());
+			if (nOut != -1)
+				nSysRegenFees += tx.vout[nOut].nValue*2;
+		}
+	}
+
     inBlock.insert(iter);
 
     bool fPrintPriority = GetBoolArg("-printpriority", DEFAULT_PRINTPRIORITY);

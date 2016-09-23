@@ -80,6 +80,8 @@ UniValue getinfo(const UniValue& params, bool fHelp)
 
     UniValue obj(UniValue::VOBJ);
     obj.push_back(Pair("version", CLIENT_VERSION));
+	// SYSCOIN
+	obj.push_back(Pair("sysversion", SYSCOIN_CLIENT_VERSION));
     obj.push_back(Pair("protocolversion", PROTOCOL_VERSION));
 #ifdef ENABLE_WALLET
     if (pwalletMain) {
@@ -190,7 +192,14 @@ UniValue validateaddress(const UniValue& params, bool fHelp)
     {
         CTxDestination dest = address.Get();
         string currentAddress = address.ToString();
-        ret.push_back(Pair("address", currentAddress));
+		// SYSCOIN v1 addy compatibility
+		CSyscoinAddress v1addr;
+		v1addr.Set(dest, true);
+		string addressStr = params[0].get_str();
+		if(addressStr[0] == 'S')
+			ret.push_back(Pair("address", v1addr.ToString()));
+		else
+			ret.push_back(Pair("address", currentAddress));
 
         CScript scriptPubKey = GetScriptForDestination(dest);
         ret.push_back(Pair("scriptPubKey", HexStr(scriptPubKey.begin(), scriptPubKey.end())));
@@ -315,7 +324,14 @@ UniValue createmultisig(const UniValue& params, bool fHelp)
     CSyscoinAddress address(innerID);
 
     UniValue result(UniValue::VOBJ);
-    result.push_back(Pair("address", address.ToString()));
+	// SYSCOIN v1 addy by default
+    CTxDestination dest = address.Get();
+	CSyscoinAddress v1addr;
+	v1addr.Set(dest, true);
+	CSyscoinAddress v2addr;
+	v2addr.Set(dest);
+    result.push_back(Pair("address", v1addr.ToString()));
+	result.push_back(Pair("v2address", v2addr.ToString()));
     result.push_back(Pair("redeemScript", HexStr(inner.begin(), inner.end())));
 
     return result;

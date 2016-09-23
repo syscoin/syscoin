@@ -75,6 +75,12 @@ OptionsDialog::OptionsDialog(QWidget *parent, bool enableWallet) :
     if (!enableWallet) {
         ui->tabWidget->removeTab(ui->tabWidget->indexOf(ui->tabWallet));
     }
+    /* Display elements init */
+    // SYSCOIN Theme selector
+    ui->theme->addItem(tr("shade"), QVariant(""));
+	ui->theme->addItem(tr("solid"), QVariant("1"));
+	ui->theme->addItem(tr("white"), QVariant("2"));
+	ui->defaultPegAlias->setPlaceholderText("sysrates.peg");
 
     /* Display elements init */
     QDir translations(":translations");
@@ -169,6 +175,8 @@ void OptionsDialog::setModel(OptionsModel *_model)
     connect(ui->connectSocks, SIGNAL(clicked(bool)), this, SLOT(showRestartWarning()));
     connect(ui->connectSocksTor, SIGNAL(clicked(bool)), this, SLOT(showRestartWarning()));
     /* Display */
+	// SYSCOIN
+	connect(ui->theme, SIGNAL(valueChanged(int)), this, SLOT(showRestartWarning()));
     connect(ui->lang, SIGNAL(valueChanged()), this, SLOT(showRestartWarning()));
     connect(ui->thirdPartyTxUrls, SIGNAL(textChanged(const QString &)), this, SLOT(showRestartWarning()));
 }
@@ -203,7 +211,15 @@ void OptionsDialog::setMapper()
     mapper->addMapping(ui->minimizeOnClose, OptionsModel::MinimizeOnClose);
 #endif
 
-    /* Display */
+   /* Display */
+	// SYSCOIN
+	mapper->addMapping(ui->theme, OptionsModel::Theme);
+	mapper->addMapping(ui->defaultOfferAlias, OptionsModel::DefaultOfferAlias);
+	mapper->addMapping(ui->defaultMessageAlias, OptionsModel::DefaultMessageAlias);
+	mapper->addMapping(ui->defaultCertAlias, OptionsModel::DefaultCertAlias);
+	mapper->addMapping(ui->defaultPegAlias, OptionsModel::DefaultPegAlias);
+	mapper->addMapping(ui->defaultBuyOfferAlias, OptionsModel::DefaultBuyOfferAlias);
+	mapper->addMapping(ui->safeSearch, OptionsModel::SafeSearch);
     mapper->addMapping(ui->lang, OptionsModel::Language);
     mapper->addMapping(ui->unit, OptionsModel::DisplayUnit);
     mapper->addMapping(ui->thirdPartyTxUrls, OptionsModel::ThirdPartyTxUrls);

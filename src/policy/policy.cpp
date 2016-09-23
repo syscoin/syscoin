@@ -13,7 +13,8 @@
 #include "utilstrencodings.h"
 
 #include <boost/foreach.hpp>
-
+// SYSCOIN need constant SYSCOIN_TX_VERSION
+extern int GetSyscoinTxVersion();
     /**
      * Check transaction inputs to mitigate two
      * potential denial-of-service attacks:
@@ -46,8 +47,9 @@ bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType, const bool w
             return false;
         if (m < 1 || m > n)
             return false;
+	// SYSCOIN check for size of sys tx, normal tx size is checked in isstandardtx now
     } else if (whichType == TX_NULL_DATA &&
-               (!fAcceptDatacarrier || scriptPubKey.size() > nMaxDatacarrierBytes))
+               (!fAcceptDatacarrier || scriptPubKey.size() > nMaxDatacarrierBytes*40))
           return false;
 
     else if (!witnessEnabled && (whichType == TX_WITNESS_V0_KEYHASH || whichType == TX_WITNESS_V0_SCRIPTHASH))
@@ -58,7 +60,8 @@ bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType, const bool w
 
 bool IsStandardTx(const CTransaction& tx, std::string& reason, const bool witnessEnabled)
 {
-    if (tx.nVersion > CTransaction::MAX_STANDARD_VERSION || tx.nVersion < 1) {
+	// SYSCOIN check for syscoin or bitcoin tx
+    if ((tx.nVersion > CTransaction::CURRENT_VERSION || tx.nVersion < 1) && tx.nVersion != GetSyscoinTxVersion()) {
         reason = "version";
         return false;
     }
@@ -101,7 +104,17 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const bool witnes
         }
 
         if (whichType == TX_NULL_DATA)
+		{
+			// SYSCOIN if not syscoin tx and opreturn size is bigger than maxcarrier bytes, return false
+			// we need this because if it is a sys tx then we allow 40x maxcarrier bytes.
+			if(tx.nVersion != GetSyscoinTxVersion() && txout.scriptPubKey.size() > nMaxDatacarrierBytes)
+			{
+				reason = "scriptpubkey";
+				return false;
+			}
+
             nDataOut++;
+		}
         else if ((whichType == TX_MULTISIG) && (!fIsBareMultisigStd)) {
             reason = "bare-multisig";
             return false;

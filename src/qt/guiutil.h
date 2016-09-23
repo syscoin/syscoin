@@ -48,14 +48,20 @@ namespace GUIUtil
     bool parseSyscoinURI(const QUrl &uri, SendCoinsRecipient *out);
     bool parseSyscoinURI(QString uri, SendCoinsRecipient *out);
     QString formatSyscoinURI(const SendCoinsRecipient &info);
-
+	// SYSCOIN
+	QString formatBitcoinURI(const SendCoinsRecipient &info);
     // Returns true if given address+amount meets "dust" definition
     bool isDust(const QString& address, const CAmount& amount);
 
     // HTML escaping for rich text controls
     QString HtmlEscape(const QString& str, bool fMultiLine=false);
     QString HtmlEscape(const std::string& str, bool fMultiLine=false);
+	// SYSCOIN
+    /** Load global CSS theme */
+    QString loadStyleSheet();
 
+    /** Return name of current CSS theme */
+    QString getThemeName();
     /** Copy a field of the currently selected entry of a view to the clipboard. Does nothing if nothing
         is selected.
        @param[in] column  Data column to extract from the model

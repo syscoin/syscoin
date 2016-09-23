@@ -143,6 +143,21 @@ void OptionsModel::Init(bool resetSettings)
         addOverriddenOption("-onion");
 
     // Display
+	// SYSCOIN
+    if (!settings.contains("theme"))
+        settings.setValue("theme", "");
+    if (!settings.contains("defaultOfferAlias"))
+        settings.setValue("defaultOfferAlias", "");
+    if (!settings.contains("defaultMessageAlias"))
+        settings.setValue("defaultMessageAlias", "");
+    if (!settings.contains("defaultCertAlias"))
+        settings.setValue("defaultCertAlias", "");
+    if (!settings.contains("defaultPegAlias"))
+        settings.setValue("defaultPegAlias", "sysrates.peg");
+    if (!settings.contains("defaultBuyOfferAlias"))
+        settings.setValue("defaultBuyOfferAlias", "");
+    if (!settings.contains("safesearch"))
+        settings.setValue("safesearch", "Yes");
     if (!settings.contains("language"))
         settings.setValue("language", "");
     if (!SoftSetArg("-lang", settings.value("language").toString().toStdString()))
@@ -247,6 +262,21 @@ QVariant OptionsModel::data(const QModelIndex & index, int role) const
             return settings.value("nThreadsScriptVerif");
         case Listen:
             return settings.value("fListen");
+        // SYSCOIN
+		case Theme:
+            return settings.value("theme");  
+        case DefaultOfferAlias:
+            return settings.value("defaultOfferAlias");   
+        case DefaultCertAlias:
+            return settings.value("defaultCertAlias");  
+        case DefaultMessageAlias:
+            return settings.value("defaultMessageAlias");
+        case DefaultPegAlias:
+            return settings.value("defaultPegAlias");
+        case DefaultBuyOfferAlias:
+            return settings.value("defaultBuyOfferAlias");
+       case SafeSearch:
+            return settings.value("safesearch");
         default:
             return QVariant();
         }
@@ -370,6 +400,46 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
             if (settings.value("language") != value) {
                 settings.setValue("language", value);
                 setRestartRequired(true);
+            }
+            break;
+		// SYSCOIN
+        case Theme:
+            if (settings.value("theme") != value) {
+                settings.setValue("theme", value);
+                setRestartRequired(true);
+            }
+            break; 
+        case DefaultOfferAlias:
+            if (settings.value("defaultOfferAlias") != value) {
+                settings.setValue("defaultOfferAlias", value);
+            }
+            break; 
+        case DefaultCertAlias:
+            if (settings.value("defaultCertAlias") != value) {
+                settings.setValue("defaultCertAlias", value);
+            }
+            break; 
+        case DefaultMessageAlias:
+            if (settings.value("defaultMessageAlias") != value) {
+                settings.setValue("defaultMessageAlias", value);
+            }
+            break;
+        case DefaultPegAlias:
+            if (settings.value("defaultPegAlias") != value) {
+				if(value == "")
+					settings.setValue("defaultPegAlias", "sysrates.peg");
+				else
+					settings.setValue("defaultPegAlias", value);
+            }
+            break;
+        case DefaultBuyOfferAlias:
+            if (settings.value("defaultBuyOfferAlias") != value) {
+				settings.setValue("defaultBuyOfferAlias", value);
+            }
+            break;
+        case SafeSearch:
+            if (settings.value("safesearch") != value) {
+				settings.setValue("safesearch", value);
             }
             break;
         case CoinControlFeatures:

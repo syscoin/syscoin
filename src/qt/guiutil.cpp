@@ -132,10 +132,12 @@ void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent)
 #if QT_VERSION >= 0x040700
     // We don't want translators to use own addresses in translations
     // and this is the only place, where this address is supplied.
-    widget->setPlaceholderText(QObject::tr("Enter a Syscoin address (e.g. %1)").arg(
+	// SYSCOIN
+    widget->setPlaceholderText(QObject::tr("Enter a Syscoin address (e.g. %1 or johnsmith)").arg(
         QString::fromStdString(DummyAddress(Params()))));
 #endif
-    widget->setValidator(new SyscoinAddressEntryValidator(parent));
+	// SYSCOIN can be an alias, so this check is invalid
+    // widget->setValidator(new SyscoinAddressEntryValidator(parent));
     widget->setCheckValidator(new SyscoinAddressCheckValidator(parent));
 }
 
@@ -148,6 +150,35 @@ void setupAmountWidget(QLineEdit *widget, QWidget *parent)
     widget->setAlignment(Qt::AlignRight|Qt::AlignVCenter);
 }
 
+// SYSCOIN Open CSS when configured
+// Return name of current UI-theme or default theme if no theme was found
+QString getThemeName()
+{
+    QSettings settings;
+    QString theme = settings.value("theme", "").toString();
+
+    if(!theme.isEmpty()){
+        return theme;
+    }
+    return QString("shade");  
+}
+
+// Open CSS when configured
+QString loadStyleSheet()
+{
+    QString styleSheet;
+    QSettings settings;
+    QString cssName;
+    QString theme = getThemeName();
+    cssName = QString(":/css/") + theme; 
+   
+    QFile qFile(cssName);      
+    if (qFile.open(QFile::ReadOnly)) {
+        styleSheet = QLatin1String(qFile.readAll());
+    }
+        
+    return styleSheet;
+}
 bool parseSyscoinURI(const QUrl &uri, SendCoinsRecipient *out)
 {
     // return if URI is not valid or is no syscoin: URI
@@ -222,7 +253,34 @@ bool parseSyscoinURI(QString uri, SendCoinsRecipient *out)
     QUrl uriInstance(uri);
     return parseSyscoinURI(uriInstance, out);
 }
+// SYSCOIN
+QString formatBitcoinURI(const SendCoinsRecipient &info)
+{
+    QString ret = QString("bitcoin:%1").arg(info.address);
+    int paramCount = 0;
 
+    if (info.amount)
+    {
+        ret += QString("?amount=%1").arg(SyscoinUnits::format(SyscoinUnits::SYS, info.amount, false, SyscoinUnits::separatorNever));
+        paramCount++;
+    }
+
+    if (!info.label.isEmpty())
+    {
+        QString lbl(QUrl::toPercentEncoding(info.label));
+        ret += QString("%1label=%2").arg(paramCount == 0 ? "?" : "&").arg(lbl);
+        paramCount++;
+    }
+
+    if (!info.message.isEmpty())
+    {
+        QString msg(QUrl::toPercentEncoding(info.message));
+        ret += QString("%1message=%2").arg(paramCount == 0 ? "?" : "&").arg(msg);
+        paramCount++;
+    }
+
+    return ret;
+}
 QString formatSyscoinURI(const SendCoinsRecipient &info)
 {
     QString ret = QString("syscoin:%1").arg(info.address);

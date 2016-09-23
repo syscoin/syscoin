@@ -28,13 +28,22 @@ JSON_TEST_FILES = \
   test/data/base58_keys_invalid.json \
   test/data/tx_invalid.json \
   test/data/tx_valid.json \
-  test/data/sighash.json
+  test/data/sighash.json \
+  test/data/utxo.json
 
 RAW_TEST_FILES =
 
 GENERATED_TEST_FILES = $(JSON_TEST_FILES:.json=.json.h) $(RAW_TEST_FILES:.raw=.raw.h)
 
 SYSCOIN_TESTS =\
+  test/syscoin_snapshot_tests.cpp \
+  test/syscoin_alias_tests.cpp \
+  test/syscoin_offer_tests.cpp \
+  test/syscoin_cert_tests.cpp \
+  test/syscoin_message_tests.cpp \
+  test/syscoin_escrow_tests.cpp \
+  test/test_syscoin_services.cpp \
+  test/test_syscoin_services.h \
   test/arith_uint256_tests.cpp \
   test/scriptnum10.h \
   test/addrman_tests.cpp \
@@ -103,7 +112,7 @@ endif
 test_test_syscoin_SOURCES = $(SYSCOIN_TESTS) $(JSON_TEST_FILES) $(RAW_TEST_FILES)
 test_test_syscoin_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) -I$(builddir)/test/ $(TESTDEFS)
 test_test_syscoin_LDADD = $(LIBSYSCOIN_SERVER) $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_CONSENSUS) $(LIBSYSCOIN_CRYPTO) $(LIBUNIVALUE) $(LIBLEVELDB) $(LIBMEMENV) \
-  $(BOOST_LIBS) $(BOOST_UNIT_TEST_FRAMEWORK_LIB) $(LIBSECP256K1)
+  $(BOOST_LIBS) $(BOOST_UNIT_TEST_FRAMEWORK_LIB) $(LIBSECP256K1) $(LIBCRYPTOPP)
 test_test_syscoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 if ENABLE_WALLET
 test_test_syscoin_LDADD += $(LIBSYSCOIN_WALLET)

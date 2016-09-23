@@ -1,4 +1,4 @@
-DIST_SUBDIRS = secp256k1 univalue
+DIST_SUBDIRS = secp256k1 univalue cryptopp
 
 AM_LDFLAGS = $(PTHREAD_CFLAGS) $(LIBTOOL_LDFLAGS) $(HARDENED_LDFLAGS)
 AM_CXXFLAGS = $(HARDENED_CXXFLAGS)
@@ -14,6 +14,11 @@ else
 LIBUNIVALUE = $(UNIVALUE_LIBS)
 endif
 
+$(LIBCRYPTOPP): 
+	@echo "Building LibCryptoPP ..." && $(MAKE) -C $(@D) $(@F) CXX="$(CXX)" \
+	  CC="$(CC)" \
+          OPT="$(AM_CXXFLAGS) $(PIE_FLAGS) $(CXXFLAGS) $(AM_CPPFLAGS) $(CPPFLAGS)"
+          
 SYSCOIN_CONFIG_INCLUDES=-I$(builddir)/config
 SYSCOIN_INCLUDES=-I$(builddir) -I$(builddir)/obj $(BDB_CPPFLAGS) $(BOOST_CPPFLAGS) $(LEVELDB_CPPFLAGS) $(CRYPTO_CFLAGS) $(SSL_CFLAGS)
 
@@ -28,6 +33,7 @@ LIBSYSCOIN_UTIL=libsyscoin_util.a
 LIBSYSCOIN_CRYPTO=crypto/libsyscoin_crypto.a
 LIBSYSCOINQT=qt/libsyscoinqt.a
 LIBSECP256K1=secp256k1/libsecp256k1.la
+LIBCRYPTOPP=cryptopp/libcryptopp.a
 
 if ENABLE_ZMQ
 LIBSYSCOIN_ZMQ=libsyscoin_zmq.a
@@ -45,6 +51,7 @@ $(LIBSECP256K1): $(wildcard secp256k1/src/*) $(wildcard secp256k1/include/*)
 # Make is not made aware of per-object dependencies to avoid limiting building parallelization
 # But to build the less dependent modules first, we manually select their order here:
 EXTRA_LIBRARIES += \
+  $(LIBCRYPTOPP) \
   $(LIBSYSCOIN_CRYPTO) \
   $(LIBSYSCOIN_UTIL) \
   $(LIBSYSCOIN_COMMON) \
@@ -71,6 +78,14 @@ endif
 .PHONY: FORCE check-symbols check-security
 # syscoin core #
 SYSCOIN_CORE_H = \
+  alias.h \
+  offer.h \
+  message.h \
+  cert.h \
+  escrow.h \
+  feedback.h \
+  messagecrypter.h \
+  auxpow.h \
   addrdb.h \
   addrman.h \
   base58.h \
@@ -113,6 +128,9 @@ SYSCOIN_CORE_H = \
   policy/policy.h \
   policy/rbf.h \
   pow.h \
+  primitives/block.h \
+  primitives/pureheader.h \
+  primitives/transaction.h \  
   protocol.h \
   random.h \
   reverselock.h \
@@ -121,6 +139,7 @@ SYSCOIN_CORE_H = \
   rpc/server.h \
   rpc/register.h \
   scheduler.h \
+  script/interpreter.h \  
   script/sigcache.h \
   script/sign.h \
   script/standard.h \
@@ -164,6 +183,14 @@ libsyscoin_util_a-clientversion.$(OBJEXT): obj/build.h
 libsyscoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(MINIUPNPC_CPPFLAGS) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libsyscoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_server_a_SOURCES = \
+  alias.cpp \
+  offer.cpp \
+  message.cpp \
+  cert.cpp \
+  escrow.cpp \
+  messagecrypter.cpp \
+  addrman.cpp \
+  auxpow.cpp \
   addrman.cpp \
   addrdb.cpp \
   bloom.cpp \
@@ -260,6 +287,8 @@ libsyscoin_consensus_a_SOURCES = \
   prevector.h \
   primitives/block.cpp \
   primitives/block.h \
+  primitives/pureheader.cpp \
+  primitives/pureheader.h \
   primitives/transaction.cpp \
   primitives/transaction.h \
   pubkey.cpp \
@@ -296,6 +325,8 @@ libsyscoin_common_a_SOURCES = \
   netbase.cpp \
   protocol.cpp \
   scheduler.cpp \
+  script/interpreter.cpp \
+  script/script.cpp \
   script/sign.cpp \
   script/standard.cpp \
   $(SYSCOIN_CORE_H)
@@ -357,7 +388,8 @@ syscoind_LDADD = \
   $(LIBSYSCOIN_CRYPTO) \
   $(LIBLEVELDB) \
   $(LIBMEMENV) \
-  $(LIBSECP256K1)
+  $(LIBSECP256K1) \
+  $(LIBCRYPTOPP)
 
 syscoind_LDADD += $(BOOST_LIBS) $(BDB_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS)
 
@@ -446,6 +478,7 @@ EXTRA_DIST = $(CTAES_DIST)
 clean-local:
 	-$(MAKE) -C secp256k1 clean
 	-$(MAKE) -C univalue clean
+	-$(MAKE) -C cryptopp clean
 	-rm -f leveldb/*/*.gcda leveldb/*/*.gcno leveldb/helpers/memenv/*.gcda leveldb/helpers/memenv/*.gcno
 	-rm -f config.h
 	-rm -rf test/__pycache__
