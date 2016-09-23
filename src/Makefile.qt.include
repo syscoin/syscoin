@@ -523,7 +523,7 @@ RES_IMAGES = \
   qt/res/images/shade/shade_overview.png \
   qt/res/images/shade/shade_splash.png \
   qt/res/images/shade/shade_logo_horizontal.png \
-  qt/res/images/shade/shade_logo_horizontal_big.png \  
+  qt/res/images/shade/shade_logo_horizontal_big.png \
   qt/res/images/shade/shade_downArrow.png \
   qt/res/images/shade/shade_downArrow_small.png \
   qt/res/images/shade/shade_upArrow_small.png \

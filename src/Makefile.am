@@ -130,7 +130,7 @@ SYSCOIN_CORE_H = \
   pow.h \
   primitives/block.h \
   primitives/pureheader.h \
-  primitives/transaction.h \  
+  primitives/transaction.h \
   protocol.h \
   random.h \
   reverselock.h \
@@ -139,7 +139,7 @@ SYSCOIN_CORE_H = \
   rpc/server.h \
   rpc/register.h \
   scheduler.h \
-  script/interpreter.h \  
+  script/interpreter.h \
   script/sigcache.h \
   script/sign.h \
   script/standard.h \
