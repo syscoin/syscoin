@@ -103,13 +103,18 @@ public:
  */
 class CSyscoinAddress : public CBase58Data {
 public:
+	// SYSCOIN
+	bool isAlias;
+	unsigned char safetyLevel;
+	int64_t nExpireHeight;
+	bool safeSearch;
+	std::string aliasName;
     bool Set(const CKeyID &id);
     bool Set(const CScriptID &id);
     bool Set(const CTxDestination &dest);
     bool IsValid() const;
     bool IsValid(const CChainParams &params) const;
 
-	// SYSCOIN support old sys
     bool Set(const CKeyID &id, bool oldSys = false);
     bool Set(const CScriptID &id);
     bool Set(const CTxDestination &dest, bool oldSys = false);
