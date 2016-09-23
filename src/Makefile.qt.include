@@ -106,7 +106,7 @@ QT_FORMS_UI = \
   qt/forms/sendcoinsdialog.ui \
   qt/forms/sendcoinsentry.ui \
   qt/forms/signverifymessagedialog.ui \
-  qt/forms/transactiondescdialog.ui
+  qt/forms/transactiondescdialog.ui \
   qt/forms/aliaslistpage.ui \
   qt/forms/editaliasdialog.ui \
   qt/forms/newmessagedialog.ui \
