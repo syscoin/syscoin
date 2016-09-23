@@ -1420,14 +1420,14 @@ void CreateFeeRecipient(CScript& scriptPubKey, const vector<unsigned char>& data
  	vector<unsigned char> vchHash = CScriptNum(hash.GetCheapHash()).getvch();
     vector<unsigned char> vchHashRand = vchFromValue(HexStr(vchHash));
 	scriptPubKey << vchHashRand;
-
-	CRecipient recp = {scriptPubKey, 0.02*COIN, false};
+	CAmount minFee = AmountFromValue(0.02);
+	CRecipient recp = {scriptPubKey, minFee, false};
 	recipient = recp;
 	CTxOut txout(0,	recipient.scriptPubKey);
     size_t nSize = txout.GetSerializeSize(SER_DISK,0)+148u;
 	CAmount fee = 3*minRelayTxFee.GetFee(nSize);
 	// minimum of 0.02 COIN fees for data
-	recipient.nAmount = fee > 0.02*COIN? fee: 0.02*COIN;
+	recipient.nAmount = fee > minFee? fee: minFee;
 }
 UniValue aliasnew(const UniValue& params, bool fHelp) {
 	if (fHelp || 2 > params.size() || 5 < params.size())
@@ -2175,6 +2175,8 @@ UniValue importalias(const UniValue& params, bool fHelp) {
 		CTransaction tx;
 		if (GetSyscoinTransaction(theAlias.nHeight, theAlias.txHash, tx, Params().GetConsensus()))
 		{
+			CBlock block;
+            ReadBlockFromDisk(block, chainActive[theAlias.nHeight], Params().GetConsensus());
 			int posInBlock;
 			for (posInBlock = 0; posInBlock < (int)block.vtx.size(); posInBlock++)
 			{
