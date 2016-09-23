@@ -304,7 +304,7 @@ SYSCOIN_QT_H = \
   qt/walletmodel.h \
   qt/walletmodeltransaction.h \
   qt/walletview.h \
-  qt/winshutdownmonitor.h
+  qt/winshutdownmonitor.h \
   qt/aliasview.h \
   qt/certview.h \
   qt/offerview.h \
