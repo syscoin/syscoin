@@ -2175,15 +2175,11 @@ UniValue importalias(const UniValue& params, bool fHelp) {
 		CTransaction tx;
 		if (GetSyscoinTransaction(theAlias.nHeight, theAlias.txHash, tx, Params().GetConsensus()))
 		{
-            CBlock block;
-            if(ReadBlockFromDisk(block, chainActive[theAlias.nHeight], Params().GetConsensus()))
+			int posInBlock;
+			for (posInBlock = 0; posInBlock < (int)block.vtx.size(); posInBlock++)
 			{
-				int posInBlock;
-				for (posInBlock = 0; posInBlock < (int)block.vtx.size(); posInBlock++)
-				{
-					pwalletMain->SyncTransaction(tx, &block, posInBlock);
-				}
-			}
+				pwalletMain->SyncTransaction(tx, chainActive[theAlias.nHeight], posInBlock);
+			}	
 		}
 	}
 	UniValue res(UniValue::VARR);

@@ -109,11 +109,6 @@ public:
 	int64_t nExpireHeight;
 	bool safeSearch;
 	std::string aliasName;
-    bool Set(const CKeyID &id);
-    bool Set(const CScriptID &id);
-    bool Set(const CTxDestination &dest);
-    bool IsValid() const;
-    bool IsValid(const CChainParams &params) const;
 
     bool Set(const CKeyID &id, bool oldSys = false);
     bool Set(const CScriptID &id);

@@ -217,8 +217,8 @@ public:
         nChainTx = 0;
         nStatus = 0;
         nSequenceId = 0;
-
-        nVersion       = 0;
+		// SYSCOIN
+        nVersion.SetNull();
         hashMerkleRoot = uint256();
         nTime          = 0;
         nBits          = 0;
