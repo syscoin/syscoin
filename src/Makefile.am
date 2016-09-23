@@ -14,10 +14,6 @@ else
 LIBUNIVALUE = $(UNIVALUE_LIBS)
 endif
 
-$(LIBCRYPTOPP): 
-	@echo "Building LibCryptoPP ..." && $(MAKE) -C $(@D) $(@F) CXX="$(CXX)" \
-	  CC="$(CC)" \
-          OPT="$(AM_CXXFLAGS) $(PIE_FLAGS) $(CXXFLAGS) $(AM_CPPFLAGS) $(CPPFLAGS)"
           
 SYSCOIN_CONFIG_INCLUDES=-I$(builddir)/config
 SYSCOIN_INCLUDES=-I$(builddir) -I$(builddir)/obj $(BDB_CPPFLAGS) $(BOOST_CPPFLAGS) $(LEVELDB_CPPFLAGS) $(CRYPTO_CFLAGS) $(SSL_CFLAGS)
@@ -48,6 +44,11 @@ endif
 $(LIBSECP256K1): $(wildcard secp256k1/src/*) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
 
+$(LIBCRYPTOPP): 
+	@echo "Building LibCryptoPP ..." && $(MAKE) -C $(@D) $(@F) CXX="$(CXX)" \
+	  CC="$(CC)" \
+          OPT="$(AM_CXXFLAGS) $(PIE_FLAGS) $(CXXFLAGS) $(AM_CPPFLAGS) $(CPPFLAGS)"
+          
 # Make is not made aware of per-object dependencies to avoid limiting building parallelization
 # But to build the less dependent modules first, we manually select their order here:
 EXTRA_LIBRARIES += \
