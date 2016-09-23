@@ -5,7 +5,7 @@
 
 #include "wallet/wallet.h"
 #include "base58.h"
-#include "rpcserver.h"
+#include "server.h"
 #include <QFont>
 using namespace std;
 

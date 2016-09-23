@@ -17,7 +17,7 @@
 #include <QLabel>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
-#include "rpcserver.h"
+#include "server.h"
 using namespace std;
 extern const CRPCTable tableRPC;
 AliasImportDialog::AliasImportDialog(const PlatformStyle *platformStyle, const QModelIndex &idx, QWidget *parent) :

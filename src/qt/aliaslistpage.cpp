@@ -19,7 +19,7 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include "main.h"
-#include "rpcserver.h"
+#include "server.h"
 #include "stardelegate.h"
 #include <QSettings>
 using namespace std;

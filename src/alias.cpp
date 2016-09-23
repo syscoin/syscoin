@@ -13,7 +13,7 @@
 #include "util.h"
 #include "random.h"
 #include "wallet/wallet.h"
-#include "rpcserver.h"
+#include "server.h"
 #include "base58.h"
 #include "txmempool.h"
 #include "txdb.h"

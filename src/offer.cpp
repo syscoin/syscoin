@@ -8,7 +8,7 @@
 #include "util.h"
 #include "random.h"
 #include "base58.h"
-#include "rpcserver.h"
+#include "server.h"
 #include "wallet/wallet.h"
 #include "consensus/validation.h"
 #include "chainparams.h"

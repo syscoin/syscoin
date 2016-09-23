@@ -2,7 +2,7 @@
 #include "utiltime.h"
 #include "util.h"
 #include "amount.h"
-#include "rpcserver.h"
+#include "server.h"
 #include "feedback.h"
 #include <memory>
 #include <string>

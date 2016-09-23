@@ -9,7 +9,7 @@
 #include <QDataWidgetMapper>
 #include <QMessageBox>
 #include <QStringList>
-#include "rpcserver.h"
+#include "server.h"
 using namespace std;
 
 

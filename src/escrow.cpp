@@ -7,7 +7,7 @@
 #include "core_io.h"
 #include "util.h"
 #include "base58.h"
-#include "rpcserver.h"
+#include "server.h"
 #include "wallet/wallet.h"
 #include "policy/policy.h"
 #include "script/script.h"

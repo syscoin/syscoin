@@ -23,7 +23,7 @@
 #include <QRegExp>
 #include <QStringList>
 #include <QDesktopServices>
-#include "rpcserver.h"
+#include "server.h"
 #include "alias.h"
 #include "walletmodel.h"
 #include <QSettings>

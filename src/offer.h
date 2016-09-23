@@ -1,7 +1,7 @@
 #ifndef OFFER_H
 #define OFFER_H
 
-#include "rpcserver.h"
+#include "server.h"
 #include "dbwrapper.h"
 #include "feedback.h"
 

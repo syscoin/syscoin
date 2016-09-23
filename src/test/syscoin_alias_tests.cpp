@@ -1,6 +1,6 @@
 #include "test/test_syscoin_services.h"
 #include "utiltime.h"
-#include "rpcserver.h"
+#include "server.h"
 #include "alias.h"
 #include <boost/test/unit_test.hpp>
 BOOST_GLOBAL_FIXTURE( SyscoinTestingSetup );

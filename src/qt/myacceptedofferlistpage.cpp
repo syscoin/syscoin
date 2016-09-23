@@ -14,7 +14,7 @@
 #include "syscoingui.h"
 #include "csvmodelwriter.h"
 #include "guiutil.h"
-#include "rpcserver.h"
+#include "server.h"
 #include "util.h"
 #include "utilmoneystr.h"
 using namespace std;

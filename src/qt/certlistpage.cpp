@@ -14,7 +14,7 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include "main.h"
-#include "rpcserver.h"
+#include "server.h"
 #include <QStandardItemModel>
 #include "qcomboboxdelegate.h"
 #include <boost/algorithm/string.hpp>

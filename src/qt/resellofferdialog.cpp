@@ -7,7 +7,7 @@
 #include <QDataWidgetMapper>
 #include <QMessageBox>
 #include <QStringList>
-#include "rpcserver.h"
+#include "server.h"
 #include "walletmodel.h"
 using namespace std;
 extern const CRPCTable tableRPC;

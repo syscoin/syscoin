@@ -1,7 +1,7 @@
 #ifndef ALIAS_H
 #define ALIAS_H
 
-#include "rpcserver.h"
+#include "server.h"
 #include "dbwrapper.h"
 #include "script/script.h"
 #include "serialize.h"

@@ -8,7 +8,7 @@
 #include "ui_interface.h"
 #include <QDataWidgetMapper>
 #include <QMessageBox>
-#include "rpcserver.h"
+#include "server.h"
 #include <QSettings>
 using namespace std;
 

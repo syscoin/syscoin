@@ -7,7 +7,7 @@
 #include "base58.h"
 
 #include <QFont>
-#include "rpcserver.h"
+#include "server.h"
 using namespace std;
 
 
