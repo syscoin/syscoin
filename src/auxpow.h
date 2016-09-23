@@ -33,7 +33,7 @@ private:
 
 public:
     uint256 hashBlock;
-
+	std::vector<uint256> vMerkleBranch;
     /* An nIndex == -1 means that hashBlock (in nonzero) refers to the earliest
      * block in the chain we know this or any in-wallet dependency conflicts
      * with. Older clients interpret nIndex == -1 as unconfirmed for backward
@@ -61,7 +61,8 @@ public:
 
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
-        std::vector<uint256> vMerkleBranch; // For compatibility with older versions.
+        // SYSCOIN
+		// std::vector<uint256> vMerkleBranch; // For compatibility with older versions.
         READWRITE(*(CTransaction*)this);
         nVersion = this->nVersion;
         READWRITE(hashBlock);
