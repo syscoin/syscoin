@@ -356,11 +356,11 @@ SYSCOIN_QT_H = \
   
 RES_ICONS = \
   qt/res/icons/syscoin.ico \
+  qt/res/icons/syscoin_testnet.ico \
   qt/res/icons/shade/add.png \
   qt/res/icons/shade/address-book.png \
   qt/res/icons/shade/about.png \
   qt/res/icons/shade/about_qt.png \
-  qt/res/icons/shade/syscoin_testnet.ico \
   qt/res/icons/shade/syscoin.png \
   qt/res/icons/shade/chevron.png \
   qt/res/icons/shade/clock1.png \
@@ -413,7 +413,6 @@ RES_ICONS = \
   qt/res/icons/solid/address-book.png \
   qt/res/icons/solid/about.png \
   qt/res/icons/solid/about_qt.png \
-  qt/res/icons/solid/syscoin_testnet.ico \
   qt/res/icons/solid/syscoin.png \
   qt/res/icons/solid/chevron.png \
   qt/res/icons/solid/clock1.png \
@@ -466,7 +465,6 @@ RES_ICONS = \
   qt/res/icons/white/address-book.png \
   qt/res/icons/white/about.png \
   qt/res/icons/white/about_qt.png \
-  qt/res/icons/white/syscoin_testnet.ico \
   qt/res/icons/white/syscoin.png \
   qt/res/icons/white/chevron.png \
   qt/res/icons/white/clock1.png \
