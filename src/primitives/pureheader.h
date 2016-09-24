@@ -8,7 +8,7 @@
 
 #include "serialize.h"
 #include "uint256.h"
-
+#include "versionbits.h"
 /**
  * Encapsulate a block version.  This takes care of building it up
  * from a base version, the modifier flags (like auxpow) and
