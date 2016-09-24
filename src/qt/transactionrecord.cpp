@@ -174,10 +174,6 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const CWallet *
     CAmount nNet = nCredit - nDebit;
     uint256 hash = wtx.GetHash();
     std::map<std::string, std::string> mapValue = wtx.mapValue;
-	// SYSCOIN Check if tx is a syscoin service
-    vector<vector<unsigned char> > vvchArgs;
-    int op, nOut;
-	op = 0;
     if (nNet > 0 || wtx.IsCoinBase())
     {
         //
