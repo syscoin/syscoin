@@ -618,7 +618,7 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
             case THRESHOLD_LOCKED_IN:
                 // Ensure bit is set in block version
 				// SYSCOIN
-                pblock->nVersion.SetBaseVersion(pblock->nVersion.GetBaseVersion() |= VersionBitsMask(consensusParams, pos));
+                pblock->nVersion.SetBaseVersion(pblock->nVersion.GetBaseVersion() | VersionBitsMask(consensusParams, pos));
                 // FALL THROUGH to get vbavailable set...
             case THRESHOLD_STARTED:
             {
