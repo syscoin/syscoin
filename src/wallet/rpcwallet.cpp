@@ -461,7 +461,7 @@ void SendMoneySyscoin(const vector<CRecipient> &vecSend, CAmount nValue, bool fS
 			throw runtime_error(errorMessage.c_str());
 	}
 	
-    if (!pwalletMain->CommitTransaction(wtxNew, reservekey))
+    if (!pwalletMain->CommitTransaction(wtxNew, reservekey, g_connman.get()))
         throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("The Syscoin input (alias, certificate, offer, escrow) you are trying to use for this transaction is invalid or not confirmed yet! Please wait a block and try again..."));
 }
 static void SendMoney(const CTxDestination &address, CAmount nValue, bool fSubtractFeeFromAmount, CWalletTx& wtxNew)
@@ -2719,7 +2719,58 @@ extern UniValue dumpwallet(const UniValue& params, bool fHelp);
 extern UniValue importwallet(const UniValue& params, bool fHelp);
 extern UniValue importprunedfunds(const UniValue& params, bool fHelp);
 extern UniValue removeprunedfunds(const UniValue& params, bool fHelp);
+// SYSCOIN service rpc functions
+extern UniValue aliasnew(const UniValue& params, bool fHelp);
+extern UniValue aliasupdate(const UniValue& params, bool fHelp);
+extern UniValue aliaslist(const UniValue& params, bool fHelp);
+extern UniValue aliasaffiliates(const UniValue& params, bool fHelp);
+extern UniValue aliasinfo(const UniValue& params, bool fHelp);
+extern UniValue aliashistory(const UniValue& params, bool fHelp);
+extern UniValue aliasfilter(const UniValue& params, bool fHelp);
+extern UniValue generatepublickey(const UniValue& params, bool fHelp);
+extern UniValue importalias(const UniValue& params, bool fHelp);
 
+extern UniValue offernew(const UniValue& params, bool fHelp);
+extern UniValue offerupdate(const UniValue& params, bool fHelp);
+extern UniValue offeraccept(const UniValue& params, bool fHelp);
+extern UniValue offeracceptfeedback(const UniValue& params, bool fHelp);
+extern UniValue offerlink(const UniValue& params, bool fHelp);
+extern UniValue offeraddwhitelist(const UniValue& params, bool fHelp);
+extern UniValue offerremovewhitelist(const UniValue& params, bool fHelp);
+extern UniValue offerclearwhitelist(const UniValue& params, bool fHelp);
+extern UniValue offerwhitelist(const UniValue& params, bool fHelp);
+extern UniValue offerinfo(const UniValue& params, bool fHelp);
+extern UniValue offerlist(const UniValue& params, bool fHelp);
+extern UniValue offeracceptlist(const UniValue& params, bool fHelp);
+extern UniValue offeracceptinfo(const UniValue& params, bool fHelp);
+extern UniValue offerhistory(const UniValue& params, bool fHelp);
+extern UniValue offerfilter(const UniValue& params, bool fHelp);
+
+extern UniValue certupdate(const UniValue& params, bool fHelp);
+extern UniValue certnew(const UniValue& params, bool fHelp);
+extern UniValue certtransfer(const UniValue& params, bool fHelp);
+extern UniValue certinfo(const UniValue& params, bool fHelp);
+extern UniValue certlist(const UniValue& params, bool fHelp);
+extern UniValue certhistory(const UniValue& params, bool fHelp);
+extern UniValue certfilter(const UniValue& params, bool fHelp);
+extern UniValue generateescrowmultisig(const UniValue& params, bool fHelp);
+extern UniValue escrownew(const UniValue& params, bool fHelp);
+extern UniValue escrowrelease(const UniValue& params, bool fHelp);
+extern UniValue escrowcomplete(const UniValue& params, bool fHelp);
+extern UniValue escrowclaimrelease(const UniValue& params, bool fHelp);
+extern UniValue escrowrefund(const UniValue& params, bool fHelp);
+extern UniValue escrowclaimrefund(const UniValue& params, bool fHelp);
+extern UniValue escrowinfo(const UniValue& params, bool fHelp);
+extern UniValue escrowlist(const UniValue& params, bool fHelp);
+extern UniValue escrowhistory(const UniValue& params, bool fHelp);
+extern UniValue escrowfilter(const UniValue& params, bool fHelp);
+extern UniValue escrowfeedback(const UniValue& params, bool fHelp);
+
+extern UniValue messagenew(const UniValue& params, bool fHelp);
+extern UniValue messageinfo(const UniValue& params, bool fHelp);
+extern UniValue messagelist(const UniValue& params, bool fHelp);
+extern UniValue messagesentlist(const UniValue& params, bool fHelp);
+extern UniValue messagehistory(const UniValue& params, bool fHelp);
 static const CRPCCommand commands[] =
 { //  category              name                        actor (function)           okSafeMode
     //  --------------------- ------------------------    -----------------------    ----------
