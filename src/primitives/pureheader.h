@@ -90,7 +90,7 @@ public:
      * Extract the full version.  Used for RPC results and debug prints.
      * @return The full version.
      */
-    inline int32_t GetFullVersion() const
+    inline int32_t GetFullVersion()
     {
         return nAuxPowVersion | nBaseVersion;
     }
