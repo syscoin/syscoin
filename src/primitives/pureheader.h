@@ -25,8 +25,10 @@ private:
     /** Bits above are reserved for the auxpow chain ID.  */
     static const int32_t VERSION_CHAIN_START = (1 << 16);
 
-    /** The version as integer.  Should not be accessed directly.  */
-    int32_t nVersion;
+    // used for chainid and auxpow detection
+    int32_t nAuxPowVersion;
+	// used for versionbits detection using softfork selection bits
+	int32_t nBaseVersion;
 
 public:
 
@@ -39,12 +41,12 @@ public:
 
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
-        READWRITE(this->nVersion);
+        READWRITE(GetFullVersion());
     }
 
     inline void SetNull()
     {
-        nVersion = 0;
+        nAuxPowVersion = nBaseVersion = 0;
     }
 
     /**
@@ -53,24 +55,25 @@ public:
      */
     inline int32_t GetBaseVersion() const
     {
-        return nVersion % VERSION_AUXPOW;
+        return nBaseVersion;
     }
 
     /**
      * Set the base version (apart from chain ID and auxpow flag) to
-     * the one given.  This should only be called when auxpow is not yet
-     * set, to initialise a block!
+     * the one given. This ideally passes in the versionbits from ComputeBlockVersion
      * @param nBaseVersion The base version.
      */
-    void SetBaseVersion(int32_t nBaseVersion);
-
+    inline void SetBaseVersion(int32_t nVersion)
+    {
+        return nBaseVersion = nVersion;
+    }
     /**
      * Extract the chain ID.
      * @return The chain ID encoded in the version.
      */
     inline int32_t GetChainId() const
     {
-        return nVersion / VERSION_CHAIN_START;
+        return nAuxPowVersion / VERSION_CHAIN_START;
     }
 
     /**
@@ -79,8 +82,8 @@ public:
      */
     inline void SetChainId(int32_t chainId)
     {
-        nVersion %= VERSION_CHAIN_START;
-        nVersion |= chainId * VERSION_CHAIN_START;
+        nAuxPowVersion %= VERSION_CHAIN_START;
+        nAuxPowVersion |= chainId * VERSION_CHAIN_START;
     }
 
     /**
@@ -89,7 +92,7 @@ public:
      */
     inline int32_t GetFullVersion() const
     {
-        return nVersion;
+        return nAuxPowVersion | nBaseVersion;
     }
 
     /**
@@ -98,7 +101,7 @@ public:
      */
     inline bool IsAuxpow() const
     {
-        return nVersion & VERSION_AUXPOW;
+        return nAuxPowVersion & VERSION_AUXPOW;
     }
 
     /**
@@ -108,9 +111,9 @@ public:
     inline void SetAuxpow (bool auxpow)
     {
         if (auxpow)
-            nVersion |= VERSION_AUXPOW;
+            nAuxPowVersion |= VERSION_AUXPOW;
         else
-            nVersion &= ~VERSION_AUXPOW;
+            nAuxPowVersion &= ~VERSION_AUXPOW;
     }
 
     /**
@@ -119,7 +122,7 @@ public:
      */
     inline bool IsLegacy() const
     {
-        return nVersion == 1;
+        return GetFullVersion() == 1;
     }
 
 };
