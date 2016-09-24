@@ -243,8 +243,7 @@ SyscoinGUI::SyscoinGUI(const PlatformStyle *_platformStyle, const NetworkStyle *
 
     // Subscribe to notifications from core
     subscribeToCoreSignals();
-	// SYSCOIN
-    modalOverlay = new ModalOverlay(this->platformStyle, this->centralWidget());
+    modalOverlay = new ModalOverlay(this->centralWidget());
 #ifdef ENABLE_WALLET
     if(enableWallet)
         connect(walletFrame, SIGNAL(requestedSyncWarningInfo()), this, SLOT(showModalOverlay()));
