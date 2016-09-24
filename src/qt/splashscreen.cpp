@@ -50,15 +50,20 @@ SplashScreen::SplashScreen(Qt::WindowFlags f, const NetworkStyle *networkStyle) 
     QString font            = QApplication::font().toString();
 
     // create a bitmap according to device pixelratio
-    QSize splashSize(480*devicePixelRatio,320*devicePixelRatio);
-    pixmap = QPixmap(splashSize);
+	// SYSCOIN
+   /* QSize splashSize(480*devicePixelRatio,320*devicePixelRatio);
+    pixmap = QPixmap(splashSize);*/
+    pixmap     = networkStyle->getSplashImage();
+    QPixmap fixedScalePixmap = pixmap.scaled(QSize(352*devicePixelRatio,146*devicePixelRatio),  Qt::KeepAspectRatio);
+    pixmap = fixedScalePixmap;
+
 
 #if QT_VERSION > 0x050100
     // change to HiDPI if it makes sense
     pixmap.setDevicePixelRatio(devicePixelRatio);
 #endif
 
-    QPainter pixPaint(&pixmap);
+   /* QPainter pixPaint(&pixmap);
     pixPaint.setPen(QColor(100,100,100));
 
     // draw a slightly radial gradient
@@ -122,7 +127,7 @@ SplashScreen::SplashScreen(Qt::WindowFlags f, const NetworkStyle *networkStyle) 
     pixPaint.end();
 
     // Set window title
-    setWindowTitle(titleText + " " + titleAddText);
+    setWindowTitle(titleText + " " + titleAddText);*/
 
     // Resize window and move to center of desktop, disallow resizing
     QRect r(QPoint(), QSize(pixmap.size().width()/devicePixelRatio,pixmap.size().height()/devicePixelRatio));
@@ -144,8 +149,9 @@ void SplashScreen::slotFinish(QWidget *mainWin)
 
     /* If the window is minimized, hide() will be ignored. */
     /* Make sure we de-minimize the splashscreen window before hiding */
-    if (isMinimized())
-        showNormal();
+	// SYSCOIN
+   /* if (isMinimized())
+        showNormal();*/
     hide();
 }
 
