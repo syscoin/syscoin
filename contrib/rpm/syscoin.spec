@@ -336,9 +336,9 @@ if [ `%{_sbindir}/sestatus |grep -c "disabled"` -eq 0 ]; then
 for selinuxvariant in %{selinux_variants}; do
 	%{_sbindir}/semodule -s ${selinuxvariant} -i %{_datadir}/selinux/${selinuxvariant}/syscoin.pp &> /dev/null || :
 done
-%{_sbindir}/semanage port -a -t syscoin_port_t -p tcp 8332
+%{_sbindir}/semanage port -a -t syscoin_port_t -p tcp 8370
 %{_sbindir}/semanage port -a -t syscoin_port_t -p tcp 8369
-%{_sbindir}/semanage port -a -t syscoin_port_t -p tcp 18332
+%{_sbindir}/semanage port -a -t syscoin_port_t -p tcp 18370
 %{_sbindir}/semanage port -a -t syscoin_port_t -p tcp 18369
 %{_sbindir}/fixfiles -R syscoin-server restore &> /dev/null || :
 %{_sbindir}/restorecon -R %{_localstatedir}/lib/syscoin || :
@@ -355,9 +355,9 @@ fi
 # SELinux
 if [ $1 -eq 0 ]; then
 	if [ `%{_sbindir}/sestatus |grep -c "disabled"` -eq 0 ]; then
-	%{_sbindir}/semanage port -d -p tcp 8332
+	%{_sbindir}/semanage port -d -p tcp 8370
 	%{_sbindir}/semanage port -d -p tcp 8369
-	%{_sbindir}/semanage port -d -p tcp 18332
+	%{_sbindir}/semanage port -d -p tcp 18370
 	%{_sbindir}/semanage port -d -p tcp 18369
 	for selinuxvariant in %{selinux_variants}; do
 		%{_sbindir}/semodule -s ${selinuxvariant} -r syscoin &> /dev/null || :
