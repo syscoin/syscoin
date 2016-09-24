@@ -4006,8 +4006,8 @@ bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& sta
     if((block.nVersion.GetBaseVersion() < 2 && nHeight >= consensusParams.BIP34Height) ||
        (block.nVersion.GetBaseVersion() < 3 && nHeight >= consensusParams.BIP66Height) ||
        (block.nVersion.GetBaseVersion() < 4 && nHeight >= consensusParams.BIP65Height))
-            return state.Invalid(false, REJECT_OBSOLETE, strprintf("bad-version(0x%08x)", block.nVersion),
-                                 strprintf("rejected nVersion=0x%08x block", block.nVersion));
+            return state.Invalid(false, REJECT_OBSOLETE, strprintf("bad-version(0x%08x)", block.nVersion.GetBaseVersion()),
+                                 strprintf("rejected nVersion=0x%08x block", block.nVersion.GetBaseVersion()));
 
     return true;
 }
