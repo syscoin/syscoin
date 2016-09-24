@@ -10,14 +10,16 @@
 #include "utilstrencodings.h"
 // SYSCOIN fix setbaseversion to only set base and not chain bits
 void CBlockVersion::SetBaseVersion(int32_t nBaseVersion)
-{
-	int32_t nBaseVersion = GetBaseVersion();
+{/
 	if(IsAuxpow())
 	{
 		const int32_t nChainId = Params ().GetConsensus ().nAuxpowChainId;
 		nVersion = nBaseVersion | (nChainId * VERSION_CHAIN_START);
 		SetAuxpow(true);
 	}
+	else
+		nVersion = nBaseVersion;
+
 }
 
 uint256 CPureBlockHeader::GetHash() const
