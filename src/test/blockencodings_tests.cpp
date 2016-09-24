@@ -27,7 +27,7 @@ static CBlock BuildBlockTestCase() {
 
     block.vtx.resize(3);
     block.vtx[0] = tx;
-    block.nVersion = 42;
+    block.nVersion.SetBaseVersion(42);
     block.hashPrevBlock = GetRandHash();
     block.nBits = 0x207fffff;
 
@@ -256,7 +256,7 @@ BOOST_AUTO_TEST_CASE(EmptyBlockRoundTripTest)
     CBlock block;
     block.vtx.resize(1);
     block.vtx[0] = coinbase;
-    block.nVersion = 42;
+    block.nVersion.SetBaseVersion(42);
     block.hashPrevBlock = GetRandHash();
     block.nBits = 0x207fffff;
 
