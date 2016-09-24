@@ -61,11 +61,11 @@ public:
     /**
      * Set the base version (apart from chain ID and auxpow flag) to
      * the one given. This ideally passes in the versionbits from ComputeBlockVersion
-     * @param nBaseVersion The base version.
+     * @param nVersion The base version.
      */
     inline void SetBaseVersion(int32_t nVersion)
     {
-        return nBaseVersion = nVersion;
+        nBaseVersion = nVersion;
     }
     /**
      * Extract the chain ID.
@@ -108,13 +108,7 @@ public:
      * Set the auxpow flag.  This is used for testing.
      * @param auxpow Whether to mark auxpow as true.
      */
-    inline void SetAuxpow (bool auxpow)
-    {
-        if (auxpow)
-            nAuxPowVersion |= VERSION_AUXPOW;
-        else
-            nAuxPowVersion &= ~VERSION_AUXPOW;
-    }
+    void SetAuxpow (bool auxpow);
 
     /**
      * Check whether this is a "legacy" block without chain ID.

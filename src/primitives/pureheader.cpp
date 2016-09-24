@@ -8,20 +8,19 @@
 #include "chainparams.h"
 #include "hash.h"
 #include "utilstrencodings.h"
-// SYSCOIN fix setbaseversion to only set base and not chain bits
-void CBlockVersion::SetBaseVersion(int32_t nBaseVersion)
+void CPureBlockHeader::SetAuxpow (bool auxpow)
 {
-	if(IsAuxpow())
+    if (auxpow)
 	{
-		const int32_t nChainId = Params ().GetConsensus ().nAuxpowChainId;
-		nVersion = nBaseVersion | (nChainId * VERSION_CHAIN_START);
-		SetAuxpow(true);
+        nAuxPowVersion |= VERSION_AUXPOW;
+		SetChainId(Params ().GetConsensus ().nAuxpowChainId);
 	}
-	else
-		nVersion = nBaseVersion;
-
+    else
+	{
+        nAuxPowVersion &= ~VERSION_AUXPOW;
+		SetChainId(0);
+	}
 }
-
 uint256 CPureBlockHeader::GetHash() const
 {
     return SerializeHash(*this);
