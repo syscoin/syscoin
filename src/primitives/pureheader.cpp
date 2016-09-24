@@ -8,6 +8,11 @@
 #include "chainparams.h"
 #include "hash.h"
 #include "utilstrencodings.h"
+#include "versionbits.h"
+int32_t CBlockVersion::GetBaseVersion() const
+{
+    return nVersion & VERSIONBITS_TOP_MASK;
+}
 void CBlockVersion::SetAuxpow(bool auxpow)
     {
         if (auxpow)

@@ -8,7 +8,7 @@
 
 #include "serialize.h"
 #include "uint256.h"
-#include "versionbits.h"
+
 /**
  * Encapsulate a block version.  This takes care of building it up
  * from a base version, the modifier flags (like auxpow) and
@@ -51,10 +51,7 @@ public:
      * Extract the base version (without modifiers and chain ID).
      * @return The base version./
      */
-    inline int32_t GetBaseVersion() const
-    {
-        return nVersion & VERSIONBITS_TOP_MASK;
-    }
+    int32_t GetBaseVersion() const;
 
     /**
      * Set the base version (apart from chain ID and auxpow flag) to
