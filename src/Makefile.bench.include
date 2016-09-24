@@ -1,4 +1,4 @@
-
+bin_PROGRAMS += bench/bench_syscoin
 BENCH_SRCDIR = bench
 BENCH_BINARY = bench/bench_syscoin$(EXEEXT)
 
@@ -17,18 +17,23 @@ bench_bench_syscoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 bench_bench_syscoin_LDADD = \
   $(LIBSYSCOIN_SERVER) \
   $(LIBSYSCOIN_COMMON) \
-  $(LIBUNIVALUE) \
   $(LIBSYSCOIN_UTIL) \
-  $(LIBSYSCOIN_WALLET) \
-  $(LIBSYSCOIN_ZMQ) \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_CRYPTO) \
   $(LIBLEVELDB) \
   $(LIBMEMENV) \
   $(LIBSECP256K1) \
-  $(LIBCRYPTOPP)
+  $(LIBUNIVALUE)
 
-bench_bench_syscoin_LDADD += $(BOOST_LIBS) $(BDB_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS)
+if ENABLE_ZMQ
+bench_bench_syscoin_LDADD += $(LIBSYSCOIN_ZMQ) $(ZMQ_LIBS)
+endif
+
+if ENABLE_WALLET
+bench_bench_syscoin_LDADD += $(LIBSYSCOIN_WALLET)
+endif
+
+bench_bench_syscoin_LDADD += $(BOOST_LIBS) $(BDB_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS)
 bench_bench_syscoin_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS)
 
 CLEAN_SYSCOIN_BENCH = bench/*.gcda bench/*.gcno
