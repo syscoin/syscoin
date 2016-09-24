@@ -13,7 +13,7 @@
 using namespace std;
 
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 NewWhitelistDialog::NewWhitelistDialog(const QString &offerGUID, QWidget *parent) :
     QDialog(parent),
     ui(new Ui::NewWhitelistDialog), model(0)

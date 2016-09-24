@@ -14,7 +14,7 @@ using namespace std;
 const QString OfferAcceptTableModel::Offer = "O";
 
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 struct OfferAcceptTableEntry
 {
     enum Type {

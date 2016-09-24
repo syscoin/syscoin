@@ -19,7 +19,7 @@
 #include "utilmoneystr.h"
 using namespace std;
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 
 #include <QSortFilterProxyModel>
 #include <QClipboard>

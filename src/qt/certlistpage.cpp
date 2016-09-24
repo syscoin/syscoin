@@ -20,7 +20,7 @@
 #include <boost/algorithm/string.hpp>
 #include <QSettings>
 using namespace std;
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 extern bool getCategoryList(vector<string>& categoryList);
 CertListPage::CertListPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),

@@ -10,7 +10,7 @@
 #include "walletmodel.h"
 using namespace std;
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow, QWidget *parent) :
     QDialog(parent),
 	walletModel(model),

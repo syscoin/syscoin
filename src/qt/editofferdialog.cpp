@@ -17,7 +17,7 @@
 #include <boost/algorithm/string.hpp>
 using namespace std;
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const vector<unsigned char> &vchCurrency, float &nFee, const unsigned int &nHeightToFind, vector<string>& rateList, int &precision);
 extern bool getCategoryList(vector<string>& categoryList);
 extern vector<unsigned char> vchFromString(const std::string &str);

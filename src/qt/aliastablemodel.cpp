@@ -14,7 +14,7 @@ using namespace std;
 const QString AliasTableModel::Alias = "A";
 
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 struct AliasTableEntry
 {
     enum Type {

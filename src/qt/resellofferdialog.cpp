@@ -10,7 +10,7 @@
 #include "rpc/server.h"
 #include "walletmodel.h"
 using namespace std;
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 ResellOfferDialog::ResellOfferDialog(QModelIndex *idx, WalletModel* model, QWidget *parent) :
     QDialog(parent),
 	walletModel(model),

@@ -15,7 +15,7 @@
 #include <QSettings>
 using namespace std;
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 extern bool getCategoryList(vector<string>& categoryList);
 EditCertDialog::EditCertDialog(Mode mode, QWidget *parent) :
     QDialog(parent),

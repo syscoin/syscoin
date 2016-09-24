@@ -26,7 +26,7 @@ using namespace std;
 
 
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 MyWhitelistOfferDialog::MyWhitelistOfferDialog(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),
     ui(new Ui::MyWhitelistOfferDialog),

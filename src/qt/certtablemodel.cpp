@@ -13,7 +13,7 @@ using namespace std;
 const QString CertTableModel::Cert = "C";
 
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 struct CertTableEntry
 {
     enum Type {

@@ -15,7 +15,7 @@ using namespace std;
 
 
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 struct EscrowTableEntry
 {
     enum Type {

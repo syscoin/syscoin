@@ -29,7 +29,7 @@
 #include <QSettings>
 using namespace std;
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 
 AcceptandPayOfferListPage::AcceptandPayOfferListPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent), platformStyle(platformStyle),

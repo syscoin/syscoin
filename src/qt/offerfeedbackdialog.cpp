@@ -10,7 +10,7 @@
 #include "walletmodel.h"
 using namespace std;
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 OfferFeedbackDialog::OfferFeedbackDialog(WalletModel* model, const QString &offerStr, const QString &acceptStr, QWidget *parent) :
     QDialog(parent),
 	walletModel(model),

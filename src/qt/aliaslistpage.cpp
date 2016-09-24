@@ -25,7 +25,7 @@
 using namespace std;
 
 
-extern const CRPCTable tableRPC;
+extern CRPCTable tableRPC;
 
 AliasListPage::AliasListPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QDialog(parent),
