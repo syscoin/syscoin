@@ -146,14 +146,14 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     CBlockIndex* pindexPrev = chainActive.Tip();
     nHeight = pindexPrev->nHeight + 1;
 
-	// SYSCOIN auxpow initialise the block version.
-    pblock->nVersion.SetBaseVersion(ComputeBlockVersion(pindexPrev, chainparams.GetConsensus()));
+	// SYSCOIN
+    pblock->nVersion.SetGenesisVersion(ComputeBlockVersion(pindexPrev, chainparams.GetConsensus()));
 
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
-	// SYSCOIN setbaseversion
+	// SYSCOIN
     if (chainparams.MineBlocksOnDemand())
-        pblock->nVersion.SetBaseVersion(GetArg("-blockversion", pblock->nVersion.GetBaseVersion()));
+        pblock->nVersion.SetGenesisVersion(GetArg("-blockversion", pblock->nVersion.GetFullVersion()));
 
     pblock->nTime = GetAdjustedTime();
     const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
