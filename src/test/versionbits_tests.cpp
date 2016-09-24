@@ -73,7 +73,7 @@ public:
             pindex->pprev = vpblock.size() > 0 ? vpblock.back() : NULL;
             pindex->nTime = nTime;
 			// SYSCOIN
-            pindex->nVersion.SetGenesisVersion(nVersion);
+            pindex->nVersion.SetBaseVersion(nVersion);
             pindex->BuildSkip();
             vpblock.push_back(pindex);
         }
