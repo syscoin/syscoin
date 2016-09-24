@@ -9,18 +9,31 @@
 #include "hash.h"
 #include "utilstrencodings.h"
 void CBlockVersion::SetAuxpow(bool auxpow)
+    {
+        if (auxpow)
+		{
+            nVersion |= VERSION_AUXPOW;
+			SetChainId(Params ().GetConsensus ().nAuxpowChainId);
+		}
+        else
+		{
+            nVersion &= ~VERSION_AUXPOW;
+			SetChainId(0);
+		}
+    }
+// SYSCOIN fix setbaseversion to only set base and not chain bits
+void CBlockVersion::SetBaseVersion(int32_t nBaseVersion)
 {
-    if (auxpow)
+	if(IsAuxpow())
 	{
-        nAuxPowVersion |= VERSION_AUXPOW;
-		SetChainId(Params ().GetConsensus ().nAuxpowChainId);
+		nVersion = nBaseVersion;
+		SetAuxpow(true);
 	}
-    else
-	{
-        nAuxPowVersion &= ~VERSION_AUXPOW;
-		SetChainId(0);
-	}
+	else
+		nVersion = nBaseVersion;
+
 }
+
 uint256 CPureBlockHeader::GetHash() const
 {
     return SerializeHash(*this);

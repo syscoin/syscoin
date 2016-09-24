@@ -25,10 +25,8 @@ private:
     /** Bits above are reserved for the auxpow chain ID.  */
     static const int32_t VERSION_CHAIN_START = (1 << 16);
 
-    // used for chainid and auxpow detection
-    int32_t nAuxPowVersion;
-	// used for versionbits detection using softfork selection bits
-	int32_t nBaseVersion;
+    /** The version as integer.  Should not be accessed directly.  */
+    int32_t nVersion;
 
 public:
 
@@ -41,12 +39,12 @@ public:
 
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
-        READWRITE(GetFullVersion());
+        READWRITE(this->nVersion);
     }
 
     inline void SetNull()
     {
-        nAuxPowVersion = nBaseVersion = 0;
+        nVersion = 0;
     }
 
     /**
@@ -55,25 +53,24 @@ public:
      */
     inline int32_t GetBaseVersion() const
     {
-        return nBaseVersion;
+        return nVersion & VERSIONBITS_TOP_MASK;
     }
 
     /**
      * Set the base version (apart from chain ID and auxpow flag) to
-     * the one given. This ideally passes in the versionbits from ComputeBlockVersion
-     * @param nVersion The base version.
+     * the one given.  This should only be called when auxpow is not yet
+     * set, to initialise a block!
+     * @param nBaseVersion The base version.
      */
-    inline void SetBaseVersion(int32_t nVersion)
-    {
-        nBaseVersion = nVersion;
-    }
+    void SetBaseVersion(int32_t nBaseVersion);
+
     /**
      * Extract the chain ID.
      * @return The chain ID encoded in the version.
      */
     inline int32_t GetChainId() const
     {
-        return nAuxPowVersion / VERSION_CHAIN_START;
+        return nVersion / VERSION_CHAIN_START;
     }
 
     /**
@@ -82,17 +79,17 @@ public:
      */
     inline void SetChainId(int32_t chainId)
     {
-        nAuxPowVersion %= VERSION_CHAIN_START;
-        nAuxPowVersion |= chainId * VERSION_CHAIN_START;
+        nVersion %= VERSION_CHAIN_START;
+        nVersion |= chainId * VERSION_CHAIN_START;
     }
 
     /**
      * Extract the full version.  Used for RPC results and debug prints.
      * @return The full version.
      */
-    inline int32_t GetFullVersion()
+    inline int32_t GetFullVersion() const
     {
-        return nAuxPowVersion | nBaseVersion;
+        return nVersion;
     }
 
     /**
@@ -101,14 +98,14 @@ public:
      */
     inline bool IsAuxpow() const
     {
-        return nAuxPowVersion & VERSION_AUXPOW;
+        return nVersion & VERSION_AUXPOW;
     }
 
     /**
      * Set the auxpow flag.  This is used for testing.
      * @param auxpow Whether to mark auxpow as true.
      */
-    void SetAuxpow (bool auxpow);
+    void SetAuxpow(bool auxpow);
 
     /**
      * Check whether this is a "legacy" block without chain ID.
@@ -116,7 +113,7 @@ public:
      */
     inline bool IsLegacy() const
     {
-        return GetFullVersion() == 1;
+        return nVersion == 1;
     }
 
 };
