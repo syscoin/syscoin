@@ -421,6 +421,8 @@ syscoin_tx_SOURCES += syscoin-tx-res.rc
 endif
 
 syscoin_tx_LDADD = \
+  $(LIBSYSCOIN_SERVER) \
+  $(LIBSYSCOIN_COMMON) \
   $(LIBUNIVALUE) \
   $(LIBSYSCOIN_COMMON) \
   $(LIBSYSCOIN_UTIL) \
