@@ -3691,7 +3691,8 @@ CWalletKey::CWalletKey(int64_t nExpires)
     nTimeCreated = (nExpires ? GetTime() : 0);
     nTimeExpires = nExpires;
 }
-
+// SYSCOIN
+/*
 int CMerkleTx::SetMerkleBranch(const CBlockIndex* pindex, int posInBlock)
 {
     AssertLockHeld(cs_main);
@@ -3740,4 +3741,4 @@ bool CMerkleTx::AcceptToMemoryPool(bool fLimitFree, CAmount nAbsurdFee)
 {
     CValidationState state;
     return ::AcceptToMemoryPool(mempool, state, *this, fLimitFree, NULL, false, nAbsurdFee);
-}
+}*/
