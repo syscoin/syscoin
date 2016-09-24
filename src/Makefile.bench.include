@@ -1,4 +1,4 @@
-bin_PROGRAMS += bench/bench_syscoin
+
 BENCH_SRCDIR = bench
 BENCH_BINARY = bench/bench_syscoin$(EXEEXT)
 
