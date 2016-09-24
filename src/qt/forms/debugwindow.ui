@@ -551,8 +551,8 @@
            </property>
            <property name="icon">
             <iconset resource="../syscoin.qrc">
-             <normaloff>:/icons/prompticon</normaloff>
-             <disabledoff>:/icons/prompticon</disabledoff>:/icons/prompticon</iconset>
+             <normaloff>:/icons/shade/prompticon</normaloff>
+             <disabledoff>:/icons/shade/prompticon</disabledoff>:/icons/prompticon</iconset>
            </property>
            <property name="iconSize">
             <size>
