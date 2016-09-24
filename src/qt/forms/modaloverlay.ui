@@ -90,8 +90,8 @@ QLabel { color: rgb(40,40,40);  }</string>
                </property>
                <property name="icon">
                 <iconset>
-                 <normaloff>:/icons/warning</normaloff>
-                 <disabledoff>:/icons/warning</disabledoff>:/icons/warning</iconset>
+                 <normaloff>:/icons/shade/warning</normaloff>
+                 <disabledoff>:/icons/shade/warning</disabledoff>:/icons/warning</iconset>
                </property>
                <property name="iconSize">
                 <size>

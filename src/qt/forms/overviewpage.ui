@@ -61,7 +61,7 @@
             <item>
              <widget class="QPushButton" name="labelWalletStatus">
               <property name="enabled">
-               <bool>true</bool>
+               <bool>false</bool>
               </property>
               <property name="maximumSize">
                <size>
@@ -74,11 +74,6 @@
               </property>
               <property name="text">
                <string/>
-              </property>
-              <property name="icon">
-               <iconset resource="../syscoin.qrc">
-                <normaloff>:/icons/warning</normaloff>
-                <disabledoff>:/icons/warning</disabledoff>:/icons/warning</iconset>
               </property>
               <property name="iconSize">
                <size>
@@ -126,7 +121,7 @@
                <string>Unconfirmed transactions to watch-only addresses</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -151,7 +146,7 @@
                <string>Total of transactions that have yet to be confirmed, and do not yet count toward the spendable balance</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -176,7 +171,7 @@
                <string>Mined balance in watch-only addresses that has not yet matured</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -234,7 +229,7 @@
                <string>Mined balance that has not yet matured</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -279,7 +274,7 @@
                <string>Your current total balance</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -304,7 +299,7 @@
                <string>Current total balance in watch-only addresses</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -346,7 +341,7 @@
                <string>Your current spendable balance</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -371,7 +366,7 @@
                <string>Your current balance in watch-only addresses</string>
               </property>
               <property name="text">
-               <string notr="true">0.000 000 00 SYS</string>
+               <string notr="true">0.000 000 00 BTC</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -432,22 +427,15 @@
           <item>
            <layout class="QHBoxLayout" name="horizontalLayout_2">
             <item>
-             <widget class="QLabel" name="label_4">
-              <property name="font">
-               <font>
-                <weight>75</weight>
-                <bold>true</bold>
-               </font>
-              </property>
-              <property name="text">
-               <string>Recent transactions</string>
-              </property>
-             </widget>
-            </item>
-            <item>
              <widget class="QPushButton" name="labelTransactionsStatus">
               <property name="enabled">
-               <bool>true</bool>
+               <bool>false</bool>
+              </property>
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
               </property>
               <property name="maximumSize">
                <size>
@@ -461,11 +449,6 @@
               <property name="text">
                <string/>
               </property>
-              <property name="icon">
-               <iconset resource="../syscoin.qrc">
-                <normaloff>:/icons/warning</normaloff>
-                <disabledoff>:/icons/warning</disabledoff>:/icons/warning</iconset>
-              </property>
               <property name="iconSize">
                <size>
                 <width>24</width>
@@ -474,6 +457,19 @@
               </property>
               <property name="flat">
                <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="label_4">
+              <property name="font">
+               <font>
+                <weight>75</weight>
+                <bold>true</bold>
+               </font>
+              </property>
+              <property name="text">
+               <string>Recent transactions</string>
               </property>
              </widget>
             </item>

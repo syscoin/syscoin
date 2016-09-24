@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>AddressBookPage</class>
- <widget class="QWidget" name="AddressBookPage">
+ <class>MyAliasListPage</class>
+ <widget class="QWidget" name="MyAliasListPage">
   <property name="geometry">
    <rect>
     <x>0</x>
@@ -9,6 +9,9 @@
     <width>760</width>
     <height>380</height>
    </rect>
+  </property>
+  <property name="windowTitle">
+   <string>My Aliases</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -27,7 +30,7 @@
       <enum>Qt::CustomContextMenu</enum>
      </property>
      <property name="toolTip">
-      <string>Right-click to edit address or label</string>
+      <string/>
      </property>
      <property name="tabKeyNavigation">
       <bool>false</bool>
@@ -52,41 +55,78 @@
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
-      <widget class="QPushButton" name="newAddress">
+      <widget class="QPushButton" name="newAlias">
        <property name="toolTip">
-        <string>Create a new address</string>
+        <string>Create a new alias</string>
        </property>
        <property name="text">
-        <string>&amp;New</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&amp;New Alias</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="copyAddress">
+      <widget class="QPushButton" name="copyAlias">
        <property name="toolTip">
-        <string>Copy the currently selected address to the system clipboard</string>
+        <string>Copy the currently selected alias to the system clipboard</string>
        </property>
        <property name="text">
-        <string>&amp;Copy</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&amp;Copy Alias ID</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="deleteAddress">
+      <widget class="QPushButton" name="editButton">
        <property name="toolTip">
-        <string>Delete the currently selected address from the list</string>
+        <string>Edit selected alias</string>
        </property>
        <property name="text">
-        <string>&amp;Delete</string>
+        <string>Edit</string>
        </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="transferButton">
+       <property name="toolTip">
+        <string>Transfer selected alias</string>
+       </property>
+       <property name="text">
+        <string>Transfer</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="refreshButton">
+       <property name="maximumSize">
+        <size>
+         <width>16777215</width>
+         <height>48</height>
+        </size>
+       </property>
+       <property name="toolTip">
+        <string>Refresh alias list</string>
+       </property>
+       <property name="text">
+        <string>&amp;Refresh</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="newPubKey">
+       <property name="toolTip">
+        <string>Create a new public key used for transferring aliases</string>
+       </property>
+       <property name="text">
+        <string>New Public Key</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="whitelistButton">
+       <property name="toolTip">
+        <string>Open list of affiliates associated with this alias</string>
+       </property>
+       <property name="text">
+        <string>Affiliations</string>
        </property>
       </widget>
      </item>
@@ -104,6 +144,13 @@
       </spacer>
      </item>
      <item>
+      <widget class="QPushButton" name="importButton">
+       <property name="text">
+        <string>&amp;Import</string>
+       </property>
+      </widget>
+     </item>
+     <item>
       <widget class="QPushButton" name="exportButton">
        <property name="toolTip">
         <string>Export the data in the current tab to a file</string>
@@ -111,24 +158,18 @@
        <property name="text">
         <string>&amp;Export</string>
        </property>
-       <property name="autoDefault">
-        <bool>false</bool>
-       </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="closeButton">
+      <widget class="QDialogButtonBox" name="buttonBox">
        <property name="sizePolicy">
-        <sizepolicy hsizetype="Minimum" vsizetype="Minimum">
+        <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
          <horstretch>0</horstretch>
          <verstretch>0</verstretch>
         </sizepolicy>
        </property>
-       <property name="text">
-        <string>C&amp;lose</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+       <property name="standardButtons">
+        <set>QDialogButtonBox::Ok</set>
        </property>
       </widget>
      </item>

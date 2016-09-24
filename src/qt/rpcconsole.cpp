@@ -51,15 +51,15 @@ const int CONSOLE_HISTORY = 50;
 const int INITIAL_TRAFFIC_GRAPH_MINS = 30;
 const QSize FONT_RANGE(4, 40);
 const char fontSizeSettingsKey[] = "consoleFontSize";
-
+// SYSCOIN
 const struct {
     const char *url;
     const char *source;
 } ICON_MAPPING[] = {
-    {"cmd-request", ":/icons/tx_input"},
-    {"cmd-reply", ":/icons/tx_output"},
-    {"cmd-error", ":/icons/tx_output"},
-    {"misc", ":/icons/tx_inout"},
+    {"cmd-request", "tx_input"},
+    {"cmd-reply", "tx_output"},
+    {"cmd-error", "tx_output"},
+    {"misc", "tx_inout"},
     {NULL, NULL}
 };
 
@@ -358,11 +358,13 @@ RPCConsole::RPCConsole(const PlatformStyle *_platformStyle, QWidget *parent) :
     ui->openDebugLogfileButton->setToolTip(ui->openDebugLogfileButton->toolTip().arg(tr(PACKAGE_NAME)));
 
     if (platformStyle->getImagesOnButtons()) {
-        ui->openDebugLogfileButton->setIcon(platformStyle->SingleColorIcon(":/icons/export"));
+		// SYSCOIN
+        ui->openDebugLogfileButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/export"));
     }
-    ui->clearButton->setIcon(platformStyle->SingleColorIcon(":/icons/remove"));
-    ui->fontBiggerButton->setIcon(platformStyle->SingleColorIcon(":/icons/fontbigger"));
-    ui->fontSmallerButton->setIcon(platformStyle->SingleColorIcon(":/icons/fontsmaller"));
+	// SYSCOIN
+    ui->clearButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/remove"));
+    ui->fontBiggerButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/fontbigger"));
+    ui->fontSmallerButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/fontsmaller"));
 
     // Install event filter for up and down arrow
     ui->lineEdit->installEventFilter(this);

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>AddressBookPage</class>
- <widget class="QWidget" name="AddressBookPage">
+ <class>CertListPage</class>
+ <widget class="QWidget" name="CertListPage">
   <property name="geometry">
    <rect>
     <x>0</x>
@@ -9,6 +9,9 @@
     <width>760</width>
     <height>380</height>
    </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Certificates</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -22,12 +25,50 @@
     </widget>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="horizontalLayout_2">
+     <item>
+      <widget class="QLineEdit" name="lineEditCertSearch"/>
+     </item>
+     <item>
+      <widget class="QComboBox" name="categoryEdit">
+       <property name="minimumSize">
+        <size>
+         <width>100</width>
+         <height>0</height>
+        </size>
+       </property>
+       <property name="editable">
+        <bool>true</bool>
+       </property>
+       <item>
+        <property name="text">
+         <string>All Categories</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="searchCert">
+       <property name="maximumSize">
+        <size>
+         <width>16777215</width>
+         <height>48</height>
+        </size>
+       </property>
+       <property name="text">
+        <string>Search</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <widget class="QTableView" name="tableView">
      <property name="contextMenuPolicy">
       <enum>Qt::CustomContextMenu</enum>
      </property>
      <property name="toolTip">
-      <string>Right-click to edit address or label</string>
+      <string/>
      </property>
      <property name="tabKeyNavigation">
       <bool>false</bool>
@@ -50,43 +91,38 @@
     </widget>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="horizontalLayout_3">
+     <item>
+      <spacer name="horizontalSpacer_2">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QLabel" name="labelPage">
+       <property name="text">
+        <string/>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
-      <widget class="QPushButton" name="newAddress">
+      <widget class="QPushButton" name="copyCert">
        <property name="toolTip">
-        <string>Create a new address</string>
+        <string>Copy the currently selected cert to the system clipboard</string>
        </property>
        <property name="text">
-        <string>&amp;New</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="copyAddress">
-       <property name="toolTip">
-        <string>Copy the currently selected address to the system clipboard</string>
-       </property>
-       <property name="text">
-        <string>&amp;Copy</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="deleteAddress">
-       <property name="toolTip">
-        <string>Delete the currently selected address from the list</string>
-       </property>
-       <property name="text">
-        <string>&amp;Delete</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&amp;Copy Certificate ID</string>
        </property>
       </widget>
      </item>
@@ -104,31 +140,16 @@
       </spacer>
      </item>
      <item>
-      <widget class="QPushButton" name="exportButton">
-       <property name="toolTip">
-        <string>Export the data in the current tab to a file</string>
-       </property>
+      <widget class="QToolButton" name="prevButton">
        <property name="text">
-        <string>&amp;Export</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&lt;&lt;</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="closeButton">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Minimum" vsizetype="Minimum">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
+      <widget class="QToolButton" name="nextButton">
        <property name="text">
-        <string>C&amp;lose</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&gt;&gt;</string>
        </property>
       </widget>
      </item>

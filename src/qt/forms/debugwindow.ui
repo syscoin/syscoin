@@ -439,10 +439,6 @@
            <property name="toolTip">
             <string>Decrease font size</string>
            </property>
-           <property name="icon">
-            <iconset resource="../syscoin.qrc">
-             <normaloff>:/icons/fontsmaller</normaloff>:/icons/fontsmaller</iconset>
-           </property>
            <property name="iconSize">
             <size>
              <width>24</width>
@@ -470,10 +466,6 @@
            </property>
            <property name="text">
             <string/>
-           </property>
-           <property name="icon">
-            <iconset resource="../syscoin.qrc">
-             <normaloff>:/icons/fontbigger</normaloff>:/icons/fontbigger</iconset>
            </property>
            <property name="iconSize">
             <size>
@@ -505,10 +497,6 @@
            </property>
            <property name="text">
             <string/>
-           </property>
-           <property name="icon">
-            <iconset resource="../syscoin.qrc">
-             <normaloff>:/icons/remove</normaloff>:/icons/remove</iconset>
            </property>
            <property name="shortcut">
             <string notr="true">Ctrl+L</string>

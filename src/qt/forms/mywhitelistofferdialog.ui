@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>AddressBookPage</class>
- <widget class="QWidget" name="AddressBookPage">
+ <class>MyWhitelistOfferDialog</class>
+ <widget class="QWidget" name="MyWhitelistOfferDialog">
   <property name="geometry">
    <rect>
     <x>0</x>
@@ -9,6 +9,9 @@
     <width>760</width>
     <height>380</height>
    </rect>
+  </property>
+  <property name="windowTitle">
+   <string>My Offer Affiliates</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -27,7 +30,7 @@
       <enum>Qt::CustomContextMenu</enum>
      </property>
      <property name="toolTip">
-      <string>Right-click to edit address or label</string>
+      <string/>
      </property>
      <property name="tabKeyNavigation">
       <bool>false</bool>
@@ -52,41 +55,18 @@
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
-      <widget class="QPushButton" name="newAddress">
+      <widget class="QPushButton" name="refreshButton">
+       <property name="maximumSize">
+        <size>
+         <width>16777215</width>
+         <height>48</height>
+        </size>
+       </property>
        <property name="toolTip">
-        <string>Create a new address</string>
+        <string>Refresh your affiliate list for this offer</string>
        </property>
        <property name="text">
-        <string>&amp;New</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="copyAddress">
-       <property name="toolTip">
-        <string>Copy the currently selected address to the system clipboard</string>
-       </property>
-       <property name="text">
-        <string>&amp;Copy</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="deleteAddress">
-       <property name="toolTip">
-        <string>Delete the currently selected address from the list</string>
-       </property>
-       <property name="text">
-        <string>&amp;Delete</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&amp;Refresh</string>
        </property>
       </widget>
      </item>
@@ -111,24 +91,18 @@
        <property name="text">
         <string>&amp;Export</string>
        </property>
-       <property name="autoDefault">
-        <bool>false</bool>
-       </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="closeButton">
+      <widget class="QDialogButtonBox" name="buttonBox">
        <property name="sizePolicy">
-        <sizepolicy hsizetype="Minimum" vsizetype="Minimum">
+        <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
          <horstretch>0</horstretch>
          <verstretch>0</verstretch>
         </sizepolicy>
        </property>
-       <property name="text">
-        <string>C&amp;lose</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+       <property name="standardButtons">
+        <set>QDialogButtonBox::Ok</set>
        </property>
       </widget>
      </item>

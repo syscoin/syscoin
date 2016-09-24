@@ -243,8 +243,8 @@ SyscoinGUI::SyscoinGUI(const PlatformStyle *_platformStyle, const NetworkStyle *
 
     // Subscribe to notifications from core
     subscribeToCoreSignals();
-
-    modalOverlay = new ModalOverlay(this->centralWidget());
+	// SYSCOIN
+    modalOverlay = new ModalOverlay(this->platformStyle, this->centralWidget());
 #ifdef ENABLE_WALLET
     if(enableWallet)
         connect(walletFrame, SIGNAL(requestedSyncWarningInfo()), this, SLOT(showModalOverlay()));
@@ -1111,7 +1111,9 @@ bool SyscoinGUI::handlePaymentRequest(const SendCoinsRecipient& recipient)
 
 void SyscoinGUI::setHDStatus(int hdEnabled)
 {
-    labelWalletHDStatusIcon->setPixmap(platformStyle->SingleColorIcon(hdEnabled ? ":/icons/hd_enabled" : ":/icons/hd_disabled").pixmap(STATUSBAR_ICONSIZE,STATUSBAR_ICONSIZE));
+	// SYSCOIN
+	QString theme = GUIUtil::getThemeName();
+    labelWalletHDStatusIcon->setPixmap(platformStyle->SingleColorIcon(hdEnabled ? ":/icons/" + theme + "/hd_enabled" : ":/icons/" + theme + "/hd_disabled").pixmap(STATUSBAR_ICONSIZE,STATUSBAR_ICONSIZE));
     labelWalletHDStatusIcon->setToolTip(hdEnabled ? tr("HD key generation is <b>enabled</b>") : tr("HD key generation is <b>disabled</b>"));
 
     // eventually disable the QLabel to set its opacity to 50% 

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>AddressBookPage</class>
- <widget class="QWidget" name="AddressBookPage">
+ <class>MyOfferListPage</class>
+ <widget class="QWidget" name="MyOfferListPage">
   <property name="geometry">
    <rect>
     <x>0</x>
@@ -9,6 +9,9 @@
     <width>760</width>
     <height>380</height>
    </rect>
+  </property>
+  <property name="windowTitle">
+   <string>My Offers</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -22,12 +25,30 @@
     </widget>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="horizontalLayout_3">
+     <item>
+      <widget class="QCheckBox" name="soldOutCheck">
+       <property name="text">
+        <string>Show Sold Out/ Expired Offers</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QCheckBox" name="showDigitalOffers">
+       <property name="text">
+        <string>Show Digital Offers Only</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <widget class="QTableView" name="tableView">
      <property name="contextMenuPolicy">
       <enum>Qt::CustomContextMenu</enum>
      </property>
      <property name="toolTip">
-      <string>Right-click to edit address or label</string>
+      <string/>
      </property>
      <property name="tabKeyNavigation">
       <bool>false</bool>
@@ -52,41 +73,58 @@
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
-      <widget class="QPushButton" name="newAddress">
+      <widget class="QPushButton" name="newOffer">
        <property name="toolTip">
-        <string>Create a new address</string>
+        <string>Create a new offer</string>
        </property>
        <property name="text">
-        <string>&amp;New</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&amp;New Offer</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="copyAddress">
+      <widget class="QPushButton" name="copyOffer">
        <property name="toolTip">
-        <string>Copy the currently selected address to the system clipboard</string>
+        <string>Copy the currently selected offer to the system clipboard</string>
        </property>
        <property name="text">
-        <string>&amp;Copy</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+        <string>&amp;Copy Offer ID</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="deleteAddress">
+      <widget class="QPushButton" name="editButton">
        <property name="toolTip">
-        <string>Delete the currently selected address from the list</string>
+        <string>Edit selected offer</string>
        </property>
        <property name="text">
-        <string>&amp;Delete</string>
+        <string>Edit</string>
        </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="whitelistButton">
+       <property name="toolTip">
+        <string>Manage affiliates for this offer</string>
+       </property>
+       <property name="text">
+        <string>&amp;Manage Affiliates</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="refreshButton">
+       <property name="maximumSize">
+        <size>
+         <width>16777215</width>
+         <height>48</height>
+        </size>
+       </property>
+       <property name="toolTip">
+        <string>Refresh your list of offers</string>
+       </property>
+       <property name="text">
+        <string>&amp;Refresh</string>
        </property>
       </widget>
      </item>
@@ -111,24 +149,18 @@
        <property name="text">
         <string>&amp;Export</string>
        </property>
-       <property name="autoDefault">
-        <bool>false</bool>
-       </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="closeButton">
+      <widget class="QDialogButtonBox" name="buttonBox">
        <property name="sizePolicy">
-        <sizepolicy hsizetype="Minimum" vsizetype="Minimum">
+        <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
          <horstretch>0</horstretch>
          <verstretch>0</verstretch>
         </sizepolicy>
        </property>
-       <property name="text">
-        <string>C&amp;lose</string>
-       </property>
-       <property name="autoDefault">
-        <bool>false</bool>
+       <property name="standardButtons">
+        <set>QDialogButtonBox::Ok</set>
        </property>
       </widget>
      </item>
