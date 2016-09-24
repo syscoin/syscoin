@@ -949,9 +949,11 @@ UniValue getauxblock(const UniValue& params, bool fHelp)
     if (!coinbaseScript->reserveScript.size())
         throw JSONRPCError(RPC_INTERNAL_ERROR, "No coinbase script available (mining requires a wallet)");
 
-    if (vNodes.empty() && !Params().MineBlocksOnDemand())
-        throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED,
-                           "Syscoin is not connected!");
+    if(!g_connman)
+        throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
+
+    if (g_connman->GetNodeCount(CConnman::CONNECTIONS_ALL) == 0 && !Params().MineBlocksOnDemand())
+        throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Syscoin is not connected!");
 
     if (IsInitialBlockDownload() && !Params().MineBlocksOnDemand())
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD,
@@ -991,7 +993,7 @@ UniValue getauxblock(const UniValue& params, bool fHelp)
             }
 
             // Create new block with nonce = 0 and extraNonce = 1
-            pblocktemplate = CreateNewBlock(Params(), coinbaseScript->reserveScript);
+            pblocktemplate =  BlockAssembler(Params()).CreateNewBlock(coinbaseScript->reserveScript);
             if (!pblocktemplate)
                 throw JSONRPCError(RPC_OUT_OF_MEMORY, "out of memory");
 
@@ -1069,7 +1071,7 @@ UniValue getauxblock(const UniValue& params, bool fHelp)
     CValidationState state;
     submitblock_StateCatcher sc(block.GetHash());
     RegisterValidationInterface(&sc);
-    bool fAccepted = ProcessNewBlock(state, Params(), NULL, &block, true, NULL);
+    bool fAccepted = ProcessNewBlock(state, Params(), NULL, &block, true, NULL, g_connman.get());
     UnregisterValidationInterface(&sc);
     if (fBlockPresent)
     {
