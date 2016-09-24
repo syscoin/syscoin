@@ -47,7 +47,14 @@
 #include <boost/filesystem/fstream.hpp>
 #include <boost/math/distributions/poisson.hpp>
 #include <boost/thread.hpp>
-
+// SYSCOIN
+#include "auxpow.h"
+#include "offer.h"
+#include "cert.h"
+#include "alias.h"
+#include "message.h"
+#include "escrow.h"
+#include "base58.h"
 using namespace std;
 
 #if defined(NDEBUG)
@@ -3158,7 +3165,7 @@ void static UpdateTip(CBlockIndex *pindexNew, const CChainParams& chainParams) {
         {
             int32_t nExpectedVersion = ComputeBlockVersion(pindex->pprev, chainParams.GetConsensus());
             // SYSCOIN getbaseversion
-			if (pindex->nVersion.GetBaseVersion() > VERSIONBITS_LAST_OLD_BLOCK_VERSION && (pindex->nVersion & ~nExpectedVersion) != 0)
+			if (pindex->nVersion.GetBaseVersion() > VERSIONBITS_LAST_OLD_BLOCK_VERSION && (pindex->nVersion.GetBaseVersion() & ~nExpectedVersion) != 0)
                 ++nUpgraded;
             pindex = pindex->pprev;
         }
