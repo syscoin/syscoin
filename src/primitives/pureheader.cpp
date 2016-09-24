@@ -8,7 +8,7 @@
 #include "chainparams.h"
 #include "hash.h"
 #include "utilstrencodings.h"
-void CPureBlockHeader::SetAuxpow (bool auxpow)
+void CBlockVersion::SetAuxpow(bool auxpow)
 {
     if (auxpow)
 	{
