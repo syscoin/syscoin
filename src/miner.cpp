@@ -147,7 +147,7 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     nHeight = pindexPrev->nHeight + 1;
 
 	// SYSCOIN auxpow initialise the block version.
-    pblock->nVersion.SetBaseVersion(ComputeBlockVersion(pindexPrev, chainparams.GetConsensus()).GetBaseVersion());
+    pblock->nVersion.SetBaseVersion(ComputeBlockVersion(pindexPrev, chainparams.GetConsensus()));
 
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
