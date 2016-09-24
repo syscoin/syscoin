@@ -10,7 +10,7 @@
 #include "utilstrencodings.h"
 // SYSCOIN fix setbaseversion to only set base and not chain bits
 void CBlockVersion::SetBaseVersion(int32_t nBaseVersion)
-{/
+{
 	if(IsAuxpow())
 	{
 		const int32_t nChainId = Params ().GetConsensus ().nAuxpowChainId;
