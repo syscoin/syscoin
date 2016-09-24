@@ -138,7 +138,7 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     pblock = &pblocktemplate->block; // pointer for convenience
 
     // SYSCOIN auxpow initialise the block version.
-    pblock->nVersion.SetBaseVersion(ComputeBlockVersion(pindexPrev, chainparams.GetConsensus()));
+    pblock->nVersion.SetBaseVersion(ComputeBlockVersion(pindexPrev, chainparams.GetConsensus()).GetBaseVersion());
 
     // Add dummy coinbase tx as first transaction
     pblock->vtx.push_back(CTransaction());
@@ -153,7 +153,7 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     // -blockversion=N to test forking scenarios
 	// SYSCOIN setbaseversion
     if (chainparams.MineBlocksOnDemand())
-        pblock->nVersion.SetBaseVersion(GetArg("-blockversion", pblock->nVersion));
+        pblock->nVersion.SetBaseVersion(GetArg("-blockversion", pblock->nVersion.GetBaseVersion()));
 
     pblock->nTime = GetAdjustedTime();
     const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
