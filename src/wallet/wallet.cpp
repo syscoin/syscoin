@@ -2349,7 +2349,7 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 set<pair<const CWalletTx*,unsigned int> > setCoins;
                 CAmount nValueIn = 0;
 				// SYSCOIN add input credit to current coin selection
-                if ((nValueToSelect-nWtxinCredit) > 0 && !SelectCoins(nValueToSelect-nWtxinCredit, setCoins, nValueIn, coinControl))
+                if ((nValueToSelect-nWtxinCredit) > 0 && !SelectCoins(vAvailableCoins, nValueToSelect-nWtxinCredit, setCoins, nValueIn, coinControl))
                 {
                     strFailReason = _("Insufficient funds");
                     return false;
