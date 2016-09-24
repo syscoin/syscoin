@@ -337,7 +337,7 @@ void BlockAssembler::AddToBlock(CTxMemPool::txiter iter)
 		{
 			int nOut = GetSyscoinDataOutput(iter->GetTx());
 			if (nOut != -1)
-				nSysRegenFees += tx.vout[nOut].nValue*2;
+				nSysRegenFees += iter->GetTx().vout[nOut].nValue*2;
 		}
 	}
 
