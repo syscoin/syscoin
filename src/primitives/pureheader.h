@@ -93,16 +93,6 @@ public:
     }
 
     /**
-     * Set the genesis block version.  This must be a literal write
-     * through, to get the correct historic version.
-     * @param nGenesisVersion The version to set.
-     */
-    inline void SetGenesisVersion(int32_t nGenesisVersion)
-    {
-        nVersion = nGenesisVersion;
-    }
-
-    /**
      * Check if the auxpow flag is set in the version.
      * @return True iff this block version is marked as auxpow.
      */
