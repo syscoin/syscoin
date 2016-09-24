@@ -164,6 +164,7 @@ static bool rest_headers(HTTPRequest* req,
 
 	// SYSCOIN pass in consensus to getblockheader for auxpow
 	const CChainParams& chainparams = Params();
+	CDataStream ssHeader(SER_NETWORK, PROTOCOL_VERSION);
     BOOST_FOREACH(const CBlockIndex *pindex, headers) {
         ssHeader << pindex->GetBlockHeader(chainparams.GetConsensus());
     }
