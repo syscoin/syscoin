@@ -462,7 +462,7 @@ RES_ICONS = \
   qt/res/solid/icon/tx_output.png \
   qt/res/solid/icon/tx_mined.png \
   qt/res/solid/icon/warning.png \
-  qt/res/solid/icon/verify.png \ 
+  qt/res/solid/icon/verify.png \
   qt/res/white/icon/add.png \
   qt/res/white/icon/address-book.png \
   qt/res/white/icon/about.png \
