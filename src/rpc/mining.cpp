@@ -1008,6 +1008,7 @@ UniValue getauxblock(const UniValue& params, bool fHelp)
             CBlock* pblock = &pblocktemplate->block;
             IncrementExtraNonce(pblock, pindexPrev, nExtraNonce);
             pblock->nVersion.SetAuxpow(true);
+			pblock->nVersion.SetChainId(Params ().GetConsensus ().nAuxpowChainId);
 
             // Save
             mapNewBlock[pblock->GetHash()] = pblock;

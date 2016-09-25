@@ -22,14 +22,10 @@ void CBlockVersion::SetAuxpow(bool auxpow)
         if (auxpow)
 		{
             nVersion |= VERSION_AUXPOW;
-			int32_t currentChainId = GetChainId();
-			if(currentChainId == 0)
-				SetChainId(Params ().GetConsensus ().nAuxpowChainId);
 		}
         else
 		{
             nVersion &= ~VERSION_AUXPOW;
-			SetChainId(0);
 		}
     }
 // SYSCOIN fix setbaseversion to only set base and not chain bits
