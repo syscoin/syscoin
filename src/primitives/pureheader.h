@@ -75,12 +75,7 @@ public:
      * Set the chain ID.
      * @param ch The chain ID to set.
      */
-    inline void SetChainId(int32_t chainId)
-    {
-        int32_t chaindIdVersion = chainId * VERSION_CHAIN_START;
-		SetAuxpow(IsAuxpow());
-		nVersion |= chaindIdVersion | GetBaseVersion();
-    }
+    void SetChainId(int32_t chainId);
 
     /**
      * Extract the full version.  Used for RPC results and debug prints.
