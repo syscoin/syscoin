@@ -1506,7 +1506,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 						"<currency> The currency code that you want your offer to be in ie: USD.\n"
 						"<cert. guid> Set this to the guid of a certificate you wish to sell\n"
 						"<exclusive resell> set to 1 if you only want those who control the affiliate's who are able to resell this offer via offerlink. Defaults to 1.\n"
-						"<paymentOptions> 1 to accept SYS only, 2 for BTC only and 3 to accept BTC or SYS. Defaults to 1.\n"
+						"<paymentOptions> 1 to accept SYS only, 2 for BTC only and 3 to accept BTC or SYS. Levae empty for default. Defaults to 1.\n"
 						"<geolocation> set to your geolocation. Defaults to empty. \n"
 						"<safe search> set to No if this offer should only show in the search when safe search is not selected. Defaults to Yes (offer shows with or without safe search selected in search lists).\n"
 						"<private> set to 1 if this offer should be private not be searchable. Defaults to 0.\n"						
@@ -1559,7 +1559,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	{
 		bExclusiveResell = atoi(params[9].get_str().c_str()) == 1? true: false;
 	}
-	if(params.size() >= 11)
+	if(params.size() >= 11 && !params[10].get_str())
 	{
 		paymentOptions = atoi(params[10].get_str().c_str());
 

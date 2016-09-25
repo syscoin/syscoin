@@ -623,9 +623,9 @@ BOOST_AUTO_TEST_CASE (generate_offersafesearch)
 	// make sure alias doesn't expire 
 	AliasUpdate("node2", "selleralias15", "changeddata2", "privdata2");
 	// offer is safe to search
-	string offerguidsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "Yes");
+	string offerguidsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "", "location", "Yes");
 	// not safe to search
-	string offerguidnotsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
+	string offerguidnotsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "", "location", "No");
 	// should include result in both safe search mode on and off
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "On"), true);
 	BOOST_CHECK_EQUAL(OfferFilter("node1", offerguidsafe, "Off"), true);
@@ -665,9 +665,9 @@ BOOST_AUTO_TEST_CASE (generate_offerban)
 	// make sure alias doesn't expire 
 	AliasUpdate("node2", "selleralias15", "changeddata2", "privdata2");
 	// offer is safe to search
-	string offerguidsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "Yes");
+	string offerguidsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "", "location", "Yes");
 	// not safe to search
-	string offerguidnotsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "0", "location", "No");
+	string offerguidnotsafe = OfferNew("node2", "selleralias15", "category", "title", "100", "10.00", "description", "USD", "nocert", true, "", "location", "No");
 	// can't ban on any other node than one that created sysban
 	BOOST_CHECK_THROW(OfferBan("node2",offerguidnotsafe,SAFETY_LEVEL1), runtime_error);
 	BOOST_CHECK_THROW(OfferBan("node3",offerguidsafe,SAFETY_LEVEL1), runtime_error);
