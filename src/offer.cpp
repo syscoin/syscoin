@@ -1559,7 +1559,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	{
 		bExclusiveResell = atoi(params[9].get_str().c_str()) == 1? true: false;
 	}
-	if(params.size() >= 11 && !params[10].get_str())
+	if(params.size() >= 11 && !params[10].get_str().empty())
 	{
 		paymentOptions = atoi(params[10].get_str().c_str());
 
