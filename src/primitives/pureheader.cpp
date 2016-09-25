@@ -22,7 +22,9 @@ void CBlockVersion::SetAuxpow(bool auxpow)
         if (auxpow)
 		{
             nVersion |= VERSION_AUXPOW;
-			SetChainId(Params ().GetConsensus ().nAuxpowChainId);
+			int32_t currentChainId = GetChainId();
+			if(currentChainId == 0)
+				SetChainId(Params ().GetConsensus ().nAuxpowChainId);
 		}
         else
 		{
