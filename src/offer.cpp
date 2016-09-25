@@ -2105,7 +2105,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		nCommission = atoi(params[14].get_str());
 	}
 	unsigned char paymentOptions = PAYMENTOPTION_SYS;
-	if(params.size() >= 16 && !params[15].get_str() && params[15].get_str() != "NONE")
+	if(params.size() >= 16 && !params[15].get_str().empty() && params[15].get_str() != "NONE")
 	{
 		paymentOptions = atoi(params[15].get_str().c_str());
 
