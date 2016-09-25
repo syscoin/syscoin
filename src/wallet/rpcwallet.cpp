@@ -396,7 +396,7 @@ void SendMoneySyscoin(const vector<CRecipient> &vecSend, CAmount nValue, bool fS
         throw runtime_error("Invalid amount");
 
     if (nValue > curBalance)
-        throw runtime_error("Insufficient funds. Amount requested %f, wallet balance %f", ValueFromAmount(nValue).get_real(), ValueFromAmount(curBalance).get_real());
+        throw runtime_error(strprintf("Insufficient funds. Amount requested %f, wallet balance %f", ValueFromAmount(nValue).get_real(), ValueFromAmount(curBalance).get_real()));
 
     // Create and send the transaction
     CReserveKey reservekey(pwalletMain);
