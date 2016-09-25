@@ -1298,7 +1298,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					CPubKey aliasPubKey(alias.vchPubKey);
 					CSyscoinAddress aliasaddy(aliasPubKey.GetID());
 					CTxDestination aliasDest = aliasaddy.Get();
-					if(aliasDest.Get() != payDest)
+					if(aliasDest != payDest)
 					{
 						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 122 - " + _("Payment destination does not match merchant address");
 						return true;
