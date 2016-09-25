@@ -1559,7 +1559,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	{
 		bExclusiveResell = atoi(params[9].get_str().c_str()) == 1? true: false;
 	}
-	if(params.size() >= 11 && !params[10].get_str().empty())
+	if(params.size() >= 11 && params[10].get_str() != "NONE")
 	{
 		paymentOptions = atoi(params[10].get_str().c_str());
 
@@ -2105,7 +2105,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		nCommission = atoi(params[14].get_str());
 	}
 	unsigned char paymentOptions = PAYMENTOPTION_SYS;
-	if(params.size() >= 16 && !params[15].get_str().empty())
+	if(params.size() >= 16 && params[15].get_str() != "NONE")
 	{
 		paymentOptions = atoi(params[15].get_str().c_str());
 
