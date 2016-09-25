@@ -77,10 +77,9 @@ public:
      */
     inline void SetChainId(int32_t chainId)
     {
-		int32_t auxVersion = GetAuxVersion();
-        auxVersion %= VERSION_CHAIN_START;
-        auxVersion |= chainId * VERSION_CHAIN_START;
-		nVersion = auxVersion | GetBaseVersion();
+        int32_t chaindIdVersion = chainId * VERSION_CHAIN_START;
+		SetAuxpow(IsAuxpow());
+		nVersion |= chaindIdVersion | GetBaseVersion();
     }
 
     /**
