@@ -13,6 +13,10 @@ int32_t CBlockVersion::GetBaseVersion() const
 {
     return nVersion & VERSIONBITS_TOP_MASK;
 }
+int32_t CBlockVersion::GetAuxVersion() const
+{
+    return nVersion & ~VERSIONBITS_TOP_MASK;
+}
 void CBlockVersion::SetAuxpow(bool auxpow)
     {
         if (auxpow)

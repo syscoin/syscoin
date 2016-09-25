@@ -52,6 +52,7 @@ public:
      * @return The base version./
      */
     int32_t GetBaseVersion() const;
+	int32_t GetAuxVersion()  const;
 
     /**
      * Set the base version (apart from chain ID and auxpow flag) to
@@ -60,24 +61,26 @@ public:
      * @param nBaseVersion The base version.
      */
     void SetBaseVersion(int32_t nBaseVersion);
-
+	
     /**
      * Extract the chain ID.
      * @return The chain ID encoded in the version.
      */
     inline int32_t GetChainId() const
     {
-        return nVersion / VERSION_CHAIN_START;
+        return GetAuxVersion() / VERSION_CHAIN_START;
     }
 
     /**
-     * Set the chain ID.  This is used for the test suite.
+     * Set the chain ID.
      * @param ch The chain ID to set.
      */
     inline void SetChainId(int32_t chainId)
     {
-        nVersion %= VERSION_CHAIN_START;
-        nVersion |= chainId * VERSION_CHAIN_START;
+		int32_t auxVersion = GetAuxVersion();
+        auxVersion %= VERSION_CHAIN_START;
+        auxVersion |= chainId * VERSION_CHAIN_START;
+		nVersion = auxVersion | GetBaseVersion();
     }
 
     /**

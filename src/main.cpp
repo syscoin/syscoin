@@ -1771,11 +1771,6 @@ bool GetTransaction(const uint256 &hash, CTransaction &txOut, const Consensus::P
 // SYSCOIN check header auxpow proof of work
 bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params)
 {
-    if (!block.nVersion.IsLegacy() && block.nVersion.GetChainId() != params.nAuxpowChainId)
-        return error("%s : block does not have our chain ID"
-                     " (got %d, expected %d, full nVersion %d)",
-                     __func__, block.nVersion.GetChainId(),
-                     params.nAuxpowChainId, block.nVersion.GetFullVersion());
 
     /* If there is no auxpow, just check the block hash.  */
     if (!block.auxpow)
@@ -1791,7 +1786,11 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
     }
 
     /* We have auxpow.  Check it.  */
-
+    if (!block.nVersion.IsLegacy() && block.nVersion.GetChainId() != params.nAuxpowChainId)
+        return error("%s : block does not have our chain ID"
+                     " (got %d, expected %d, full nVersion %d)",
+                     __func__, block.nVersion.GetChainId(),
+                     params.nAuxpowChainId, block.nVersion.GetFullVersion());
     if (!block.nVersion.IsAuxpow())
         return error("%s : auxpow on block with non-auxpow version", __func__);
 
