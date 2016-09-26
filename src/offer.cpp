@@ -2460,7 +2460,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	{
 		vecSend.push_back(paymentRecipient);
 		vecSend.push_back(acceptRecipient);
-		if(!copyOffer.vchLinkOffer.empty() && !foundEntry.IsNull())
+		if(!copyOffer.vchLinkOffer.empty())
 			vecSend.push_back(paymentCommissionRecipient);
 	}
 

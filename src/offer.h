@@ -290,7 +290,7 @@ public:
 		float fMarkup = nCommission - fDiscount;
 		
 		// add commission , subtract discount
-		fMarkup = price*(fMarkup / 100);
+		fMarkup = (float)price*(fMarkup / 100.0f);
 		price = price + fMarkup;
 		return price;
 	}
