@@ -1165,11 +1165,10 @@ const UniValue FindOfferAccept(const string& node, const string& offerguid, cons
 	BOOST_CHECK(r.type() == UniValue::VARR);
 	const UniValue &arrayValue = r.get_array();
 	for(int i=0;i<arrayValue.size();i++)
-	{
-		const UniValue& accept = arrayValue[i];				
-		const UniValue& acceptObj = accept.get_obj();
+	{		
+		const UniValue& acceptObj = arrayValue[i].get_obj();
 		const string &acceptvalueguid = find_value(acceptObj, "id").get_str();
-		const string &offervalueguid = find_value(acceptObj.get_obj(), "offer").get_str();
+		const string &offervalueguid = find_value(acceptObj, "offer").get_str();
 		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
 		{
 			ret = acceptObj;
@@ -1189,10 +1188,9 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 	const UniValue &arrayValue = r.get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
-		const UniValue& accept = arrayValue[i];				
-		const UniValue& acceptObj = accept.get_obj();
+		const UniValue& acceptObj = arrayValue[i].get_obj();
 		const string &acceptvalueguid = find_value(acceptObj, "id").get_str();
-		const string &offervalueguid = find_value(acceptObj.get_obj(), "offer").get_str();
+		const string &offervalueguid = find_value(acceptObj, "offer").get_str();
 		
 		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
 		{
