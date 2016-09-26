@@ -763,8 +763,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 							errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4048 - " + _("Feedback must leave a message");
 							return true;
 						}
-						else if(serializedEscrow.feedback[0].nRating < 0 || serializedEscrow.feedback[0].nRating > 5 ||
-							serializedEscrow.feedback[1].nRating < 0 || serializedEscrow.feedback[1].nRating > 5)
+						else if(serializedEscrow.feedback[0].nRating > 5 || serializedEscrow.feedback[1].nRating > 5)
 						{
 							errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4049 - " + _("Invalid rating, must be less than or equal to 5 and greater than or equal to 0");
 							return true;
@@ -1156,7 +1155,6 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 
 	CScript scriptPubKeyAlias, scriptPubKeyAliasOrig;
 	COfferLinkWhitelistEntry foundEntry;
-	bool bWhitelist = false;
 	if(!theOffer.vchLinkOffer.empty())
 	{
 	
@@ -2027,7 +2025,6 @@ UniValue escrowcomplete(const UniValue& params, bool fHelp) {
     CTransaction fundingTx;
 	if (!GetSyscoinTransaction(vtxPos.front().nHeight, vtxPos.front().txHash, fundingTx, Params().GetConsensus()))
 		throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4121 - " + _("Failed to find escrow transaction"));
-	bool foundWhitelistAlias = false;
 	for (unsigned int i = 0; i < fundingTx.vin.size(); i++) {
 		vector<vector<unsigned char> > vvchIn;
 		int opIn;
@@ -2265,14 +2262,12 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	CRecipient recipientFee;
 	CreateRecipient(redeemScriptPubKey, recipientFee);
 	
-	CAmount nExpectedCommissionAmount = nCommission*escrow.nQty;
 	CAmount nExpectedAmount = theOffer.GetPrice(foundEntry)*escrow.nQty; 
 	CAmount nEscrowFee = GetEscrowArbiterFee(nExpectedAmount);
 	CAmount nEscrowTotal =  nExpectedAmount + nEscrowFee + recipientFee.nAmount;
 	// if we can't get it in this blockchain, try full raw tx decode (bitcoin input raw tx)
 	if (!escrow.escrowInputTx.empty())
 	{
-		nExpectedCommissionAmount = convertSyscoinToCurrencyCode(theOffer.vchAliasPeg, vchFromString("BTC"), nCommission, theOffer.nHeight, precision)*escrow.nQty;
 		nExpectedAmount = convertSyscoinToCurrencyCode(theOffer.vchAliasPeg, vchFromString("BTC"), theOffer.GetPrice(foundEntry), theOffer.nHeight, precision)*escrow.nQty; 
 		nEscrowFee = GetEscrowArbiterFee(nExpectedAmount);
 		nEscrowTotal =  nExpectedAmount + nEscrowFee + recipientFee.nAmount;
@@ -2573,7 +2568,6 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 	string strEscrowScriptPubKey = HexStr(fundingTx.vout[nOutMultiSig].scriptPubKey.begin(), fundingTx.vout[nOutMultiSig].scriptPubKey.end());
 	// decode rawTx and check it pays enough and it pays to buyer appropriately
 	// check that right amount is going to be sent to buyer
-	bool foundBuyerPayment = false;
 	UniValue arrayDecodeParams(UniValue::VARR);
 
 	arrayDecodeParams.push_back(HexStr(escrow.rawTx));
@@ -3153,7 +3147,6 @@ UniValue escrowlist(const UniValue& params, bool fHelp) {
     CTransaction tx, dbtx;
 
     vector<unsigned char> vchValue;
-    uint64_t nHeight;
 	int pending = 0;
     BOOST_FOREACH(PAIRTYPE(const uint256, CWalletTx)& item, pwalletMain->mapWallet)
     {

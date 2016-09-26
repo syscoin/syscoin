@@ -954,26 +954,26 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 
 	string offeracceptstr = "offeraccept " + aliasname + " " + offerguid + " " + qty + " " + pay_message;
 
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, offeracceptstr));
+	BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, offeracceptstr));
 	const UniValue &arr = r.get_array();
 	string acceptguid = arr[1].get_str();
 
-	GenerateBlocks(10, node);
-	const UniValue &acceptSellerValue = FindOfferAccept(sellernode, rootofferguid.empty()? offerguid: rootofferguid, acceptguid);
-	CAmount nSellerTotal = find_value(acceptValue, "systotal").get_int64();
-	BOOST_CHECK(find_value(acceptValue, "pay_message").get_str() == pay_message);
+	GenerateBlocks(10, buyernode);
+	const UniValue &acceptSellerValue = FindOfferAccept(ownernode, rootofferguid.empty()? offerguid: rootofferguid, acceptguid);
+	CAmount nSellerTotal = find_value(acceptSellerValue, "systotal").get_int64();
+	BOOST_CHECK(find_value(acceptSellerValue, "pay_message").get_str() == pay_message);
 	
 	
 	BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, "offerinfo " + offerguid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "quantity").get_str(),sTargetQty);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
-
+	CAmount nCommission = 0;
 	if(!rootofferguid.empty() && !resellernode.empty())
 	{
 		// now get the accept from the resellernode
 		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, offerguid, acceptguid);
-		CAmount nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
+		nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
 		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
 		GenerateBlocks(5, "node1");
