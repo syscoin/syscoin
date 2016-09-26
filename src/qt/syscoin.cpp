@@ -365,6 +365,11 @@ void SyscoinApplication::createWindow(const NetworkStyle *networkStyle)
 void SyscoinApplication::createSplashScreen(const NetworkStyle *networkStyle)
 {
     SplashScreen *splash = new SplashScreen(0, networkStyle);
+    // SYSCOIN make window translucent modal w/no background
+    splash->setWindowFlags(Qt::Widget | Qt::FramelessWindowHint);
+    splash->setParent(0); // Create TopLevel-Widget
+    splash->setAttribute(Qt::WA_TranslucentBackground, true);
+
     // We don't hold a direct pointer to the splash screen after creation, so use
     // Qt::WA_DeleteOnClose to make sure that the window will be deleted eventually.
     splash->setAttribute(Qt::WA_DeleteOnClose);
