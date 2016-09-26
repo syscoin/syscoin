@@ -340,8 +340,6 @@ BOOST_AUTO_TEST_CASE (generate_offerupdate_editcurrency)
 
 	// linked offer with root and linked offer changing currencies
 
-	// escrow offer with currency updated before release
-
 	// directbtc
 
 
@@ -423,9 +421,10 @@ BOOST_AUTO_TEST_CASE (generate_cert_linkedaccept)
 	OfferAccept("node1", "node3", "node3alias", lofferguid, "1", "message", "node2");
 	GenerateBlocks(5, "node1");
 	GenerateBlocks(5, "node3");
+	// cert does not get transferred, need to do it manually after the sale
 	BOOST_CHECK_NO_THROW(r = CallRPC("node3", "certinfo " + certguid));
-	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
-	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "alias").get_str(), "node3alias");
+	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");	
+	BOOST_CHECK(find_value(r.get_obj(), "alias").get_str() == "node1alias");
 }
 BOOST_AUTO_TEST_CASE (generate_offeracceptfeedback)
 {

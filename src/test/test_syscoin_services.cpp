@@ -975,8 +975,9 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	const UniValue &arr = r.get_array();
 	string acceptguid = arr[1].get_str();
 
-	GenerateBlocks(5, buyernode);
 	GenerateBlocks(5, ownernode);
+	GenerateBlocks(5, buyernode);
+	
 	const UniValue &acceptSellerValue = FindOfferAccept(ownernode, rootofferguid.empty()? offerguid: rootofferguid, acceptguid);
 	CAmount nSellerTotal = find_value(acceptSellerValue, "systotal").get_int64();
 	BOOST_CHECK(find_value(acceptSellerValue, "pay_message").get_str() == pay_message);
