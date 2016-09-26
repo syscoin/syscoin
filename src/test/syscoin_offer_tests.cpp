@@ -320,7 +320,7 @@ BOOST_AUTO_TEST_CASE (generate_offerupdate_editcurrency)
 
 	OfferUpdate("node1", "selleraliascurrency", offerguid, "category", "titlenew", "90", "0.00001000", "descriptionnew", "BTC");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
-	CAmount nOfferPrice = find_value(r.get_obj(), "sysprice").get_int64();
+	nOfferPrice = find_value(r.get_obj(), "sysprice").get_int64();
 	// accept and confirm payment is accurate with btc
 	acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "4", "message");
 	acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
