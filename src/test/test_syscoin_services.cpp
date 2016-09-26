@@ -1161,7 +1161,7 @@ void OfferClearWhitelist(const string& node, const string& offer)
 const UniValue FindOfferAccept(const string& node, const string& offerguid, const string& acceptguid, bool nocheck)
 {
 	UniValue r, ret;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + offerguid));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + acceptguid));
 	BOOST_CHECK(r.type() == UniValue::VARR);
 	const UniValue &arrayValue = r.get_array();
 	for(int i=0;i<arrayValue.size();i++)
