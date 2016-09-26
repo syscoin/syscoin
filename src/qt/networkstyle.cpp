@@ -38,7 +38,8 @@ NetworkStyle::NetworkStyle(const QString &_appName, const int iconColorHueShift,
     {
         // generate QImage from QPixmap
         QImage img = pixmap.toImage();
-
+		// SYSCOIN
+		QImage splashImageImg = splashImagePixmap.toImage();
         int h,s,l,a;
 
         // traverse though lines
@@ -75,13 +76,19 @@ NetworkStyle::NetworkStyle(const QString &_appName, const int iconColorHueShift,
         //convert back to QPixmap
 #if QT_VERSION >= 0x040700
         pixmap.convertFromImage(img);
+		// SYSOIN
+		splashImagePixmap.convertFromImage(splashImageImg);
 #else
         pixmap = QPixmap::fromImage(img);
+		// SYSCOIN
+		splashImagePixmap = QPixmap::fromImage(splashImageImg);
 #endif
     }
 
     appIcon             = QIcon(pixmap);
     trayAndWindowIcon   = QIcon(pixmap.scaled(QSize(256,256)));
+	// SYSCOIN
+	splashImage         = splashImagePixmap;
 }
 
 const NetworkStyle *NetworkStyle::instantiate(const QString &networkId)
