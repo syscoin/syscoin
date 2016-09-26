@@ -1273,7 +1273,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					CPubKey aliasLinkPubKey(linkAlias.vchPubKey);
 					CSyscoinAddress aliaslinkaddy(aliasLinkPubKey.GetID());
 					CTxDestination linkDest = aliaslinkaddy.Get();
-					if(linkDest!= payDest)
+					if(!(linkDest == payDest))
 					{
 						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 122 - " + _("Payment destination does not match merchant address");
 						return true;
@@ -1281,7 +1281,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					CPubKey aliasPubKey(alias.vchPubKey);
 					CSyscoinAddress aliasaddy(aliasPubKey.GetID());
 					CTxDestination aliasDest = aliasaddy.Get();
-					if(aliasDest != commissionDest)
+					if(!(aliasDest == commissionDest))
 					{
 						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 122 - " + _("Commission destination does not match affiliate address");
 						return true;
@@ -1298,7 +1298,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					CPubKey aliasPubKey(alias.vchPubKey);
 					CSyscoinAddress aliasaddy(aliasPubKey.GetID());
 					CTxDestination aliasDest = aliasaddy.Get();
-					if(aliasDest != payDest)
+					if(!(aliasDest == payDest))
 					{
 						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 122 - " + _("Payment destination does not match merchant address");
 						return true;
@@ -1315,7 +1315,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 			CPubKey aliasPubKey(alias.vchPubKey);
 			CSyscoinAddress aliasaddy(aliasPubKey.GetID());
 			CTxDestination aliasDest = aliasaddy.Get();
-			if(aliasDest != dest)
+			if(!(aliasDest == dest))
 			{
 				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 122 - " + _("Payment destination does not match merchant address");
 				return true;
