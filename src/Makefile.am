@@ -187,7 +187,6 @@ libsyscoin_server_a_SOURCES = \
   cert.cpp \
   escrow.cpp \
   messagecrypter.cpp \
-  addrman.cpp \
   auxpow.cpp \
   addrman.cpp \
   addrdb.cpp \
@@ -448,7 +447,7 @@ if GLIBC_BACK_COMPAT
 endif
 
 libsyscoinconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)
-libsyscoinconsensus_la_LIBADD = $(LIBSECP256K1)
+libsyscoinconsensus_la_LIBADD = $(LIBSECP256K1) $(BOOST_LIBS)
 libsyscoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) -DBUILD_SYSCOIN_INTERNAL $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libsyscoinconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
