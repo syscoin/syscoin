@@ -966,7 +966,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	
 	string rootofferguid = find_value(r.get_obj(), "offerlink_guid").get_str();
 	int nQtyToAccept = atoi(qty.c_str());
-	CAmount nTotal = find_value(r.get_obj(), "sysprice").get_int64();
+	CAmount nTotal = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
 	string sTargetQty = boost::to_string(nCurrentQty - nQtyToAccept);
 
 	string offeracceptstr = "offeraccept " + aliasname + " " + offerguid + " " + qty + " " + pay_message;

@@ -284,41 +284,49 @@ BOOST_AUTO_TEST_CASE (generate_offerupdate_editcurrency)
 
 	// generate a good offer
 	string offerguid = OfferNew("node1", "selleraliascurrency", "category", "title", "100", "0.05", "description", "USD");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
+	CAmount nOfferPrice = find_value(r.get_obj(), "sysprice").get_int64();
 	// accept and confirm payment is accurate with usd
 	string acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "2", "message");
 	UniValue acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
 	CAmount nTotal = find_value(acceptRet, "systotal").get_int64();
 	// 2690.1 SYS/USD
-	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(2*0.05*2690.1));
+	BOOST_CHECK_EQUAL(nTotal, nOfferPrice*2);
 
 	// perform a valid update
 	OfferUpdate("node1", "selleraliascurrency", offerguid, "category", "titlenew", "90", "0.15", "descriptionnew", "CAD");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
+	nOfferPrice = find_value(r.get_obj(), "sysprice").get_int64();
 	// accept and confirm payment is accurate with cad
 	acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "3", "message");
 	acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
 	nTotal = find_value(acceptRet, "systotal").get_int64();
 	// 2698.0 SYS/CAD
-	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(3*0.15*2698.0));
+	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(3*nOfferPrice));
 
 	AliasUpdate("node1", "selleraliascurrency", "changeddata2", "privdata2");
 	AliasUpdate("node2", "buyeraliascurrency", "changeddata2", "privdata2");
 
 
 	OfferUpdate("node1", "selleraliascurrency", offerguid, "category", "titlenew", "90", "1.00", "descriptionnew", "SYS");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
+	nOfferPrice = find_value(r.get_obj(), "sysprice").get_int64();
 	// accept and confirm payment is accurate with sys
 	acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "3", "message");
 	acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
 	nTotal = find_value(acceptRet, "systotal").get_int64();
 	// 1 SYS/SYS
-	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(3));
+	BOOST_CHECK_EQUAL(nTotal, nOfferPrice*3);
 
 	OfferUpdate("node1", "selleraliascurrency", offerguid, "category", "titlenew", "90", "0.00001000", "descriptionnew", "BTC");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
+	CAmount nOfferPrice = find_value(r.get_obj(), "sysprice").get_int64();
 	// accept and confirm payment is accurate with btc
 	acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "4", "message");
 	acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
 	nTotal = find_value(acceptRet, "systotal").get_int64();
 	// 100000.0 SYS/BTC
-	BOOST_CHECK_EQUAL(nTotal + COIN, AmountFromValue(4*0.00001000*100000.0));
+	BOOST_CHECK_EQUAL(nTotal, nOfferPrice*4);
 
 	// try to update currency and accept in same block, ensure payment uses old currency not new
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "offerupdate sysrates.peg selleraliascurrency " + offerguid + " category title 90 0.2 desc EUR"));
@@ -331,12 +339,14 @@ BOOST_AUTO_TEST_CASE (generate_offerupdate_editcurrency)
 	acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
 	nTotal = find_value(acceptRet, "systotal").get_int64();
 	// still used BTC conversion amount
-	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(10*0.00001000*100000.0));
+	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(10*nOfferPrice));
 	// 2695.2 SYS/EUR
 	acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "1", "message");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "offerinfo " + offerguid));
+	nOfferPrice = find_value(r.get_obj(), "sysprice").get_int64();
 	acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
 	nTotal = find_value(acceptRet, "systotal").get_int64();
-	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(1*0.2*2695.2));
+	BOOST_CHECK_EQUAL(nTotal, AmountFromValue(nOfferPrice));
 
 	// linked offer with root and linked offer changing currencies
 
