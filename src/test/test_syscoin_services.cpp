@@ -980,8 +980,8 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 		GenerateBlocks(5, "node2");
 		GenerateBlocks(5, "node3");
 
-		BOOST_CHECK(find_value(acceptValue, "ismine").get_str() == "false");
-		BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "true");
+		BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "false");
+		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 	}
 	BOOST_CHECK_EQUAL(nSellerTotal+nCommission, nTotal);
 	return acceptguid;
