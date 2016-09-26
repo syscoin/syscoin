@@ -616,10 +616,9 @@ const string OfferLink(const string& node, const string& alias, const string& gu
 
 	string exmode = "ON";
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == linkedguid);
-	string commissionwithpct = commission + "%";
 	BOOST_CHECK(find_value(r.get_obj(), "offerlink_guid").get_str() == guid);
 	BOOST_CHECK(find_value(r.get_obj(), "offerlink").get_str() == "true");
-	BOOST_CHECK(find_value(r.get_obj(), "commission").get_str() == commissionwithpct);
+	BOOST_CHECK(find_value(r.get_obj(), "commission").get_str() == commission);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
 	// linked offers always exclusive resell mode, cant resell a resell offere
 	BOOST_CHECK(find_value(r.get_obj(), "exclusive_resell").get_str() == exmode);
@@ -976,7 +975,8 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	const UniValue &arr = r.get_array();
 	string acceptguid = arr[1].get_str();
 
-	GenerateBlocks(10, buyernode);
+	GenerateBlocks(5, buyernode);
+	GenerateBlocks(5, ownernode);
 	const UniValue &acceptSellerValue = FindOfferAccept(ownernode, rootofferguid.empty()? offerguid: rootofferguid, acceptguid);
 	CAmount nSellerTotal = find_value(acceptSellerValue, "systotal").get_int64();
 	BOOST_CHECK(find_value(acceptSellerValue, "pay_message").get_str() == pay_message);
