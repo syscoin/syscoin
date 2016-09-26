@@ -363,7 +363,6 @@ RES_ICONS = \
   qt/res/icons/shade/about.png \
   qt/res/icons/shade/about_qt.png \
   qt/res/icons/shade/syscoin.png \
-  qt/res/icons/shade/chevron.png \
   qt/res/icons/shade/clock1.png \
   qt/res/icons/shade/clock2.png \
   qt/res/icons/shade/clock3.png \
@@ -384,11 +383,12 @@ RES_ICONS = \
   qt/res/icons/shade/eye_minus.png \
   qt/res/icons/shade/eye_plus.png \
   qt/res/icons/shade/filesave.png \
+  qt/res/icons/shade/history.png \
   qt/res/icons/shade/fontbigger.png \
   qt/res/icons/shade/fontsmaller.png \
   qt/res/icons/shade/hd_disabled.png \
   qt/res/icons/shade/hd_enabled.png \
-  qt/res/icons/shade/history.png \
+  qt/res/icons/shade/chevron.png \
   qt/res/icons/shade/info.png \
   qt/res/icons/shade/key.png \
   qt/res/icons/shade/lock_closed.png \
@@ -410,12 +410,26 @@ RES_ICONS = \
   qt/res/icons/shade/tx_mined.png \
   qt/res/icons/shade/warning.png \
   qt/res/icons/shade/verify.png \
+  qt/res/icons/shade/thumbsup.png \
+  qt/res/icons/shade/alias.png \
+  qt/res/icons/shade/cart.png \
+  qt/res/icons/shade/cert.png \
+  qt/res/icons/shade/data.png \
+  qt/res/icons/shade/details.png \
+  qt/res/icons/shade/editsys.png \
+  qt/res/icons/shade/escrow.png \
+  qt/res/icons/shade/escrow1.png \
+  qt/res/icons/shade/mail.png \
+  qt/res/icons/shade/mailin.png \
+  qt/res/icons/shade/mailout.png \
+  qt/res/icons/shade/message.png \
+  qt/res/icons/shade/search.png \
+  qt/res/icons/shade/refresh.png \
   qt/res/icons/solid/add.png \
   qt/res/icons/solid/address-book.png \
   qt/res/icons/solid/about.png \
   qt/res/icons/solid/about_qt.png \
   qt/res/icons/solid/syscoin.png \
-  qt/res/icons/solid/chevron.png \
   qt/res/icons/solid/clock1.png \
   qt/res/icons/solid/clock2.png \
   qt/res/icons/solid/clock3.png \
@@ -436,12 +450,13 @@ RES_ICONS = \
   qt/res/icons/solid/eye_minus.png \
   qt/res/icons/solid/eye_plus.png \
   qt/res/icons/solid/filesave.png \
+  qt/res/icons/solid/history.png \
+  qt/res/icons/solid/info.png \
   qt/res/icons/solid/fontbigger.png \
   qt/res/icons/solid/fontsmaller.png \
   qt/res/icons/solid/hd_disabled.png \
   qt/res/icons/solid/hd_enabled.png \
-  qt/res/icons/solid/history.png \
-  qt/res/icons/solid/info.png \
+  qt/res/icons/solid/chevron.png \
   qt/res/icons/solid/key.png \
   qt/res/icons/solid/lock_closed.png \
   qt/res/icons/solid/lock_open.png \
@@ -462,12 +477,26 @@ RES_ICONS = \
   qt/res/icons/solid/tx_mined.png \
   qt/res/icons/solid/warning.png \
   qt/res/icons/solid/verify.png \
+  qt/res/icons/solid/thumbsup.png \
+  qt/res/icons/solid/alias.png \
+  qt/res/icons/solid/cart.png \
+  qt/res/icons/solid/cert.png \
+  qt/res/icons/solid/data.png \
+  qt/res/icons/solid/details.png \
+  qt/res/icons/solid/editsys.png \
+  qt/res/icons/solid/escrow.png \
+  qt/res/icons/solid/escrow1.png \
+  qt/res/icons/solid/mail.png \
+  qt/res/icons/solid/mailin.png \
+  qt/res/icons/solid/mailout.png \
+  qt/res/icons/solid/message.png \
+  qt/res/icons/solid/search.png \
+  qt/res/icons/solid/refresh.png \
   qt/res/icons/white/add.png \
   qt/res/icons/white/address-book.png \
   qt/res/icons/white/about.png \
   qt/res/icons/white/about_qt.png \
   qt/res/icons/white/syscoin.png \
-  qt/res/icons/white/chevron.png \
   qt/res/icons/white/clock1.png \
   qt/res/icons/white/clock2.png \
   qt/res/icons/white/clock3.png \
@@ -488,12 +517,13 @@ RES_ICONS = \
   qt/res/icons/white/eye_minus.png \
   qt/res/icons/white/eye_plus.png \
   qt/res/icons/white/filesave.png \
-  qt/res/icons/white/fontbigger.png \
-  qt/res/icons/white/fontsmaller.png \
-  qt/res/icons/white/hd_disabled.png \
-  qt/res/icons/white/hd_enabled.png \
   qt/res/icons/white/history.png \
   qt/res/icons/white/info.png \
+  qt/res/icons/solid/fontbigger.png \
+  qt/res/icons/solid/fontsmaller.png \
+  qt/res/icons/solid/hd_disabled.png \
+  qt/res/icons/solid/hd_enabled.png \
+  qt/res/icons/solid/chevron.png \
   qt/res/icons/white/key.png \
   qt/res/icons/white/lock_closed.png \
   qt/res/icons/white/lock_open.png \
@@ -513,7 +543,22 @@ RES_ICONS = \
   qt/res/icons/white/tx_output.png \
   qt/res/icons/white/tx_mined.png \
   qt/res/icons/white/warning.png \
-  qt/res/icons/white/verify.png
+  qt/res/icons/white/verify.png \
+  qt/res/icons/white/thumbsup.png \
+  qt/res/icons/white/alias.png \
+  qt/res/icons/white/cart.png \
+  qt/res/icons/white/cert.png \
+  qt/res/icons/white/data.png \
+  qt/res/icons/white/details.png \
+  qt/res/icons/white/editsys.png \
+  qt/res/icons/white/escrow.png \
+  qt/res/icons/white/escrow1.png \
+  qt/res/icons/white/mail.png \
+  qt/res/icons/white/mailin.png \
+  qt/res/icons/white/mailout.png \
+  qt/res/icons/white/message.png \
+  qt/res/icons/white/search.png \
+  qt/res/icons/white/refresh.png
 
 SYSCOIN_QT_CPP = \
   qt/bantablemodel.cpp \
