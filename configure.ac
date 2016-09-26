@@ -232,7 +232,7 @@ AC_ARG_WITH([libs],
   [AS_HELP_STRING([--with-libs],
   [build libraries (default=yes)])],
   [build_syscoin_libs=$withval],
-  [build_syscoin_libs=yes])
+  [build_syscoin_libs=no])
 
 AC_ARG_WITH([daemon],
   [AS_HELP_STRING([--with-daemon],
@@ -993,7 +993,7 @@ if test x$syscoin_enable_qt != xno; then
   AC_MSG_CHECKING([whether to build test_syscoin-qt])
   if test x$use_gui_tests$syscoin_enable_qt_test = xyesyes; then
     AC_MSG_RESULT([yes])
-    BUILD_TEST_QT="yes"
+    BUILD_TEST_QT="no"
   else
     AC_MSG_RESULT([no])
   fi
