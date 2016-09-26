@@ -232,7 +232,7 @@ QT_MOC_CPP = \
   qt/moc_starrating.cpp \
   qt/moc_certlistpage.cpp \
   qt/moc_qcomboboxdelegate.cpp
-  
+
 SYSCOIN_MM = \
   qt/macdockiconhandler.mm \
   qt/macnotificationhandler.mm
@@ -354,7 +354,7 @@ SYSCOIN_QT_H = \
   qt/stardelegate.h \
   qt/stareditor.h \
   qt/starrating.h
-  
+
 RES_ICONS = \
   qt/res/icons/syscoin.ico \
   qt/res/icons/syscoin_testnet.ico \
@@ -618,7 +618,7 @@ SYSCOIN_QT_CPP += \
   qt/stardelegate.cpp \
   qt/stareditor.cpp \
   qt/starrating.cpp \
-  qt/certlistpage.cpp  
+  qt/certlistpage.cpp
 endif
 
 RES_IMAGES = \
@@ -669,7 +669,7 @@ RES_IMAGES = \
   qt/res/images/white/white_qtreeview_selected.png \
   qt/res/images/white/white_walletFrame_bg.png \
   qt/res/images/white/white_walletFrame.png \
-  qt/res/images/white/white_imageplaceholder.png   
+  qt/res/images/white/white_imageplaceholder.png
 
 RES_CSS = \
   qt/res/css/shade.css \
