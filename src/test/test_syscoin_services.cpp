@@ -679,6 +679,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
 	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
+	BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "offerinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == guid);
@@ -692,6 +693,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
+	BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "offerinfo " + guid));
@@ -706,6 +708,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
+	BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	return guid;
@@ -749,6 +752,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
+	BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	if(currency != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
@@ -765,6 +769,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
+	BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	if(currency != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
@@ -781,6 +786,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "category").get_str() == category);
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
+	BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	if(currency != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
@@ -932,19 +938,18 @@ void EscrowFeedback(const string& node, const string& escrowguid, const string& 
 	BOOST_CHECK_EQUAL(foundFeedback, 2); 
 }
 // offeraccept <alias> <guid> [quantity] [message]
-const string OfferAccept(const string& ownernode, const string& node, const string& aliasname, const string& offerguid, const string& qty, const string& pay_message, const string& resellernode) {
+const string OfferAccept(const string& ownernode, const string& buyernode, const string& aliasname, const string& offerguid, const string& qty, const string& pay_message, const string& resellernode) {
 
 	CreateSysRatesIfNotExist();
 
 	UniValue r;
 	
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
+	BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, "offerinfo " + offerguid));
 	int nCurrentQty = atoi(find_value(r.get_obj(), "quantity").get_str().c_str());
 	
 	string rootofferguid = find_value(r.get_obj(), "offerlink_guid").get_str();
-	const string &commissionstr = find_value(r.get_obj(), "commission").get_str();
 	int nQtyToAccept = atoi(qty.c_str());
-	CAmount offertotal = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
+	CAmount nTotal = find_value(r.get_obj(), "sysprice").get_int64();
 	string sTargetQty = boost::to_string(nCurrentQty - nQtyToAccept);
 
 	string offeracceptstr = "offeraccept " + aliasname + " " + offerguid + " " + qty + " " + pay_message;
@@ -954,23 +959,12 @@ const string OfferAccept(const string& ownernode, const string& node, const stri
 	string acceptguid = arr[1].get_str();
 
 	GenerateBlocks(10, node);
-	const UniValue &acceptValue = FindOfferAccept(node, offerguid, acceptguid);
-	// if this accept is part of an escrow then we don't change qty
-	string escrowlink = find_value(acceptValue.get_obj(), "escrowlink").get_str();
-	if(!escrowlink.empty())
-		sTargetQty = boost::to_string(nCurrentQty);
-	// if this accept is buying a linked offer then we don't change qty (happens when root offer accept is done)
-	if(!rootofferguid.empty())
-		sTargetQty = boost::to_string(nCurrentQty);
-	
-	BOOST_CHECK(find_value(acceptValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
-	BOOST_CHECK_NO_THROW(r = CallRPC(resellernode.empty()? ownernode: resellernode, "offerinfo " + offerguid));
-	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
-	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "quantity").get_str(),sTargetQty);
-	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
+	const UniValue &acceptSellerValue = FindOfferAccept(sellernode, rootofferguid.empty()? offerguid: rootofferguid, acceptguid);
+	CAmount nSellerTotal = find_value(acceptValue, "systotal").get_int64();
+	BOOST_CHECK(find_value(acceptValue, "pay_message").get_str() == pay_message);
 	
 	
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
+	BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, "offerinfo " + offerguid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "quantity").get_str(),sTargetQty);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
@@ -979,40 +973,17 @@ const string OfferAccept(const string& ownernode, const string& node, const stri
 	{
 		// now get the accept from the resellernode
 		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, offerguid, acceptguid);
-		CAmount nTotal = find_value(acceptReSellerValue, "systotal").get_int64();
-		BOOST_CHECK_EQUAL(find_value(acceptReSellerValue, "quantity").get_str(), qty.c_str());
-		const string &discountstr = find_value(acceptReSellerValue, "offer_discount_percentage").get_str();
-		BOOST_CHECK_EQUAL(nTotal, offertotal);
+		CAmount nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
 		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
-		// now get the linked accept from the sellernode
-		int discount = atoi(discountstr.c_str());
-		int commission = atoi(commissionstr.c_str());
 		GenerateBlocks(5, "node1");
 		GenerateBlocks(5, "node2");
 		GenerateBlocks(5, "node3");
 
-		// set tgt qty to the correct qty after deducting qty because the second accept should change qty of offer
-		sTargetQty = boost::to_string(nCurrentQty - nQtyToAccept);
-
-		BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
-		string sQtyOfferAfter = find_value(r.get_obj(), "quantity").get_str();
-		// the second accept should update qty
-		BOOST_CHECK_EQUAL(sTargetQty, sQtyOfferAfter);
-
-		const UniValue &acceptSellerValue = FindOfferLinkedAccept(node, rootofferguid, acceptguid);
-		BOOST_CHECK_EQUAL(find_value(acceptSellerValue, "quantity").get_str(), qty.c_str());
-
-		BOOST_CHECK(find_value(acceptSellerValue, "linkofferaccept").get_str() == acceptguid);
-		nTotal = find_value(acceptSellerValue, "systotal").get_int64();
-		if(commission != 0 || discount != 0)
-			BOOST_CHECK(nTotal != offertotal);
-		float calculatedTotal = GetPriceOfOffer(nTotal, discount, commission);
-		CAmount calculatedTotalAmount(calculatedTotal);
-		
-		BOOST_CHECK_EQUAL(calculatedTotalAmount/COIN, offertotal/COIN);
-		BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "false");
+		BOOST_CHECK(find_value(acceptValue, "ismine").get_str() == "false");
+		BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "true");
 	}
+	BOOST_CHECK_EQUAL(nSellerTotal+nCommission, nTotal);
 	return acceptguid;
 }
 const string EscrowNew(const string& node, const string& buyeralias, const string& offerguid, const string& qty, const string& message, const string& arbiteralias, const string& selleralias)
@@ -1171,16 +1142,18 @@ void OfferClearWhitelist(const string& node, const string& offer)
 const UniValue FindOfferAccept(const string& node, const string& offerguid, const string& acceptguid, bool nocheck)
 {
 	UniValue r, ret;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
-	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
-	const string &offervalueguid = find_value(r.get_obj(), "offer").get_str();
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + offerguid));
+	BOOST_CHECK(r.type() == UniValue::VARR);
+	const UniValue &arrayValue = r.get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
-		const string &acceptvalueguid = find_value(arrayValue[i].get_obj(), "id").get_str();
-		
+		const UniValue& accept = arrayValue[i];				
+		const UniValue& acceptObj = accept.get_obj();
+		const string &acceptvalueguid = find_value(acceptObj, "id").get_str();
+		const string &offervalueguid = find_value(acceptObj.get_obj(), "offer").get_str();
 		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
 		{
-			ret = arrayValue[i].get_obj();
+			ret = acceptObj;
 			break;
 		}
 
@@ -1192,18 +1165,20 @@ const UniValue FindOfferAccept(const string& node, const string& offerguid, cons
 const UniValue FindOfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid,const string& accepttxid, bool nocheck)
 {
 	UniValue r, ret;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
-	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
-	const string &offervalueguid = find_value(r.get_obj(), "offer").get_str();
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + offerguid));
+	BOOST_CHECK(r.type() == UniValue::VARR);
+	const UniValue &arrayValue = r.get_array();
 	for(int i=0;i<arrayValue.size();i++)
 	{
-		const UniValue& arrayObj = arrayValue[i].get_obj();
-		const string &acceptvalueguid = find_value(arrayObj, "id").get_str();
+		const UniValue& accept = arrayValue[i];				
+		const UniValue& acceptObj = accept.get_obj();
+		const string &acceptvalueguid = find_value(acceptObj, "id").get_str();
+		const string &offervalueguid = find_value(acceptObj.get_obj(), "offer").get_str();
 		
 		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
 		{
-			const UniValue &arrayBuyerFeedbackObject = find_value(arrayObj, "buyer_feedback");
-			const UniValue &arraySellerFeedbackObject  = find_value(arrayObj, "seller_feedback");
+			const UniValue &arrayBuyerFeedbackObject = find_value(acceptObj, "buyer_feedback");
+			const UniValue &arraySellerFeedbackObject  = find_value(acceptObj, "seller_feedback");
 			if(arrayBuyerFeedbackObject.type() == UniValue::VARR)
 			{
 				const UniValue &arrayBuyerFeedbackValue = arrayBuyerFeedbackObject.get_array();
@@ -1240,25 +1215,6 @@ const UniValue FindOfferAcceptFeedback(const string& node, const string& offergu
 		BOOST_CHECK(!ret.isNull());
 	return ret;
 }
-const UniValue FindOfferLinkedAccept(const string& node, const string& offerguid, const string& acceptguid)
-{
-	UniValue r, ret;
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offerguid));
-	const string &offervalueguid = find_value(r.get_obj(), "offer").get_str();
-	const UniValue &arrayValue = find_value(r.get_obj(), "accepts").get_array();
-	for(int i=0;i<arrayValue.size();i++)
-	{
-		const string &linkedacceptguid = find_value(arrayValue[i].get_obj(), "linkofferaccept").get_str();
-		if(linkedacceptguid == acceptguid && offervalueguid == offerguid)
-		{
-			ret = arrayValue[i].get_obj();
-			break;
-		}
-
-	}
-	BOOST_CHECK(!ret.isNull());
-	return ret;
-}
 // not that this is for escrow dealing with non-linked offers
 void EscrowClaimRelease(const string& node, const string& guid)
 {
@@ -1278,85 +1234,6 @@ void EscrowClaimRelease(const string& node, const string& guid)
 	// release doesn't alter qty
 	BOOST_CHECK_EQUAL(nQtyOfferBefore, nQtyOfferAfter);
 	
-}
-float GetPriceOfOffer(const float nPrice, const int nDiscountPct, const int nCommission){
-	float price = nPrice;
-	float fDiscount = nDiscountPct;
-	if(nDiscountPct < -99 || nDiscountPct > 99)
-		fDiscount = 0;
-	// fMarkup is a percentage, commission minus discount
-	float fMarkup = nCommission - fDiscount;
-	
-	// add commission , subtract discount
-	fMarkup = price*(fMarkup / 100);
-	price = price + fMarkup;
-	return price;
-}
-// not that this is for escrow dealing with linked offers
-void EscrowClaimReleaseLink(const string& node, const string& guid, const string& resellernode)
-{
-	UniValue r;
-
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "escrowinfo " + guid));
-	string offer = find_value(r.get_obj(), "offer").get_str();
-
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offer));
-	int nQtyOfferBefore = atoi(find_value(r.get_obj(), "quantity").get_str().c_str());
-
-	BOOST_CHECK_NO_THROW(CallRPC(node, "escrowrelease " + guid));
-
-
-	GenerateBlocks(5, "node1");
-	GenerateBlocks(5, "node2");
-	GenerateBlocks(5, "node3");
-
-
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "escrowinfo " + guid));
-	const string &acceptguid = find_value(r.get_obj(), "offeracceptlink").get_str();
-	const string &offerguid = find_value(r.get_obj(), "offer").get_str();
-	const string &pay_message = find_value(r.get_obj(), "pay_message").get_str();
-	// check that you as the seller who claims the release can see the payment message
-	BOOST_CHECK(pay_message != string("Encrypted for owner of offer"));
-	CAmount escrowtotal = find_value(r.get_obj(), "systotal").get_int64();
-	BOOST_CHECK_NO_THROW(r = CallRPC(resellernode, "offerinfo " + offerguid));
-	BOOST_CHECK(find_value(r.get_obj(), "offerlink").get_str() == "true");
-	const string &rootofferguid = find_value(r.get_obj(), "offerlink_guid").get_str();
-	const string &commissionstr = find_value(r.get_obj(), "commission").get_str();
-	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
-
-	const UniValue &acceptValue = FindOfferAccept(node, offerguid, acceptguid);
-
-	CAmount nTotal = find_value(acceptValue, "systotal").get_int64();
-	BOOST_CHECK_EQUAL(nTotal, escrowtotal);
-	BOOST_CHECK(find_value(acceptValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
-	// now get the accept from the resellernode
-	const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, offerguid, acceptguid);
-	nTotal = find_value(acceptReSellerValue, "systotal").get_int64();
-	const string &discountstr = find_value(acceptReSellerValue, "offer_discount_percentage").get_str();
-	BOOST_CHECK_EQUAL(nTotal, escrowtotal);
-	BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
-	// now get the linked accept from the sellernode
-	int discount = atoi(discountstr.c_str());
-	int commission = atoi(commissionstr.c_str());
-	GenerateBlocks(5, "node1");
-	GenerateBlocks(5, "node2");
-	GenerateBlocks(5, "node3");
-
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + offer));
-	int nQtyOfferAfter = atoi(find_value(r.get_obj(), "quantity").get_str().c_str());
-	// claim release doesn't alter qty
-	BOOST_CHECK_EQUAL(nQtyOfferBefore, nQtyOfferAfter);
-
-	const UniValue &acceptSellerValue = FindOfferLinkedAccept(node, rootofferguid, acceptguid);
-	nTotal = find_value(acceptSellerValue, "systotal").get_int64();
-	if(commission != 0 || discount != 0)
-		BOOST_CHECK(nTotal != escrowtotal);
-	float calculatedTotal = GetPriceOfOffer(nTotal, discount, commission);
-	CAmount calculatedTotalAmount(calculatedTotal);
-	
-	BOOST_CHECK_EQUAL(calculatedTotalAmount/COIN, escrowtotal/COIN);
-	BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "true");
-	BOOST_CHECK(find_value(acceptSellerValue, "pay_message").get_str() == pay_message);
 }
 BasicSyscoinTestingSetup::BasicSyscoinTestingSetup()
 {
