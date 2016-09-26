@@ -892,6 +892,16 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 							errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 82a - " + _("Commission cannot be negative");
 							theOffer.vchLinkOffer.clear();	
 						}
+						else if (!linkOffer.vchLinkOffer.empty())
+						{
+							errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 83 - " + _("Cannot link to an offer that is already linked to another offer");
+							theOffer.vchLinkOffer.clear();	
+						}
+						else if(linkOffer.sCategory.size() > 0 && boost::algorithm::starts_with(stringFromVch(linkOffer.sCategory), "wanted"))
+						{
+							errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 83a - " + _("Cannot link to a wanted offer");
+							theOffer.vchLinkOffer.clear();
+						}
 						else if(!theOffer.vchCert.empty() && theCert.vchAlias != linkOffer.vchAlias)
 						{
 							errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 74 - " + _("Cannot update this offer because the certificate alias does not match the linked offer alias");
@@ -951,6 +961,25 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				{
 					errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 73 - " + _("Linked offer not found. It may be expired");
 					theOffer.vchLinkOffer.clear();
+				}
+				// make sure alias exists in the root offer affiliate list if root offer is in exclusive mode
+				if (linkOffer.linkWhitelist.bExclusiveResell)
+				{
+					if(!linkOffer.linkWhitelist.GetLinkEntryByHash(theOffer.vchAlias, entry))
+					{
+						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 81 - " + _("Cannot find this alias in the parent offer affiliate list");
+						theOffer.vchLinkOffer.clear();	
+					}
+					else if(theOffer.nCommission <= -entry.nDiscountPct)
+					{
+						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 82 - " + _("This resold offer must be of higher price than the original offer including any discount");
+						theOffer.vchLinkOffer.clear();	
+					}
+				}	
+				else if(theOffer.nCommission < 0)
+				{
+					errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 82a - " + _("Commission cannot be negative");
+					theOffer.vchLinkOffer.clear();	
 				}
 				if (!linkOffer.vchLinkOffer.empty())
 				{
