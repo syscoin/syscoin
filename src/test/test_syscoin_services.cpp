@@ -682,7 +682,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	if(paymentoptions != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	else
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "1");
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "SYS");
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "true");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "offerinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == guid);
@@ -699,7 +699,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	if(paymentoptions != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	else
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "1");
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "SYS");
 	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "offerinfo " + guid));
@@ -717,7 +717,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	if(paymentoptions != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	else
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "1");
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "SYS");
 	BOOST_CHECK(find_value(r.get_obj(), "geolocation").get_str() == geolocation);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	return guid;
@@ -764,7 +764,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	if(paymentoptions != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	else
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "1");
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "SYS");
 	if(currency != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
@@ -784,7 +784,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	if(paymentoptions != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	else
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "1");
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "SYS");
 	if(currency != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
@@ -804,7 +804,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	if(paymentoptions != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == paymentoptions);
 	else
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "1");
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions_display").get_str() == "SYS");
 	if(currency != "NONE")
 		BOOST_CHECK(find_value(r.get_obj(), "currency").get_str() == currency);
 	BOOST_CHECK(find_value(r.get_obj(), "price").get_str() == price);
