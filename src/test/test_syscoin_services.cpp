@@ -968,12 +968,12 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	int nQtyToAccept = atoi(qty.c_str());
 	CAmount nTotal = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
 	string sTargetQty = boost::to_string(nCurrentQty - nQtyToAccept);
-	CAmount nCOmmission = 0;
+	CAmount nCommission = 0;
 	if(!rootofferguid.empty())
 	{
 		BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, "offerinfo " + rootofferguid));
 		CAmount nTotalRoot = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
-		nCOmmission = nTotal-nTotalRoot;
+		nCommission = nTotal-nTotalRoot;
 	}
 	string offeracceptstr = "offeraccept " + aliasname + " " + offerguid + " " + qty + " " + pay_message;
 
