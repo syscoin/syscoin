@@ -1051,11 +1051,14 @@ UniValue generateescrowmultisig(const UniValue& params, bool fHelp) {
 	CSyscoinAddress sellerAddress = CSyscoinAddress(stringFromVch(selleralias.vchAlias));
     CSyscoinExtPubKey sellerExtendedAddress(sellerAddress.ToString());
     CExtPubKey sellerExtendedPubKey = sellerExtendedAddress.GetKey();
-	CExtPubKey newSellerKey;
-	sellerExtendedPubKey.Derive(newSellerKey, 0x80000000);
 	std::vector<unsigned char> vchNewSellerPubKey(sellerExtendedPubKey.pubkey.begin(), sellerExtendedPubKey.pubkey.end());
 
-	LogPrintf("vchNewSellerPubKey %s\n", stringFromVch(vchNewSellerPubKey));
+	LogPrintf("vchNewSellerPubKey %s sellerAddress %s sellerExtendedAddress %s\n", stringFromVch(vchNewSellerPubKey), sellerAddress.ToString(), sellerExtendedAddress.ToString());
+	CExtPubKey newSellerKey;
+	sellerExtendedPubKey.Derive(newSellerKey, 0x80000000);
+	std::vector<unsigned char> vchNewSellerPubKey1(sellerExtendedPubKey.pubkey.begin(), sellerExtendedPubKey.pubkey.end());
+
+	LogPrintf("vchNewSellerPubKey1 %s\n", stringFromVch(vchNewSellerPubKey1));
 	CPubKey ArbiterPubKey(arbiteralias.vchPubKey);
 	CPubKey SellerPubKey(selleralias.vchPubKey);
 	CPubKey BuyerPubKey(buyeralias.vchPubKey);
