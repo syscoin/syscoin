@@ -3097,7 +3097,7 @@ UniValue offeracceptinfo(const UniValue& params, bool fHelp) {
 				"List offer purchases. Parameter is the offer you want all purchase information for");
 	CTransaction offerTx, acceptTx, aliasTx, linkTx, linkAliasTx;
 	COffer theOffer, linkOffer;
-	CAliasIndex alias, linkAlias;
+	CAliasIndex alias;
 	vector<COffer> vtxPos, vtxLinkPos, vtxAliasLinkPos;
     vector<unsigned char> vchOffer;
     vchOffer = vchFromValue(params[0]);	
@@ -3121,7 +3121,7 @@ UniValue offeracceptinfo(const UniValue& params, bool fHelp) {
 		if(!GetTxAndVtxOfOffer( theOffer.vchLinkOffer, linkOffer, linkTx, vtxLinkPos, true))
 			throw runtime_error("failed to read linked offer transaction from disk");
 
-		if(!GetTxOfAlias(linkOffer.vchAlias, linkAlias, linkAliasTx, true))
+		if(!GetTxOfAlias(linkOffer.vchAlias, alias, linkAliasTx, true))
 			throw runtime_error("Could not find the alias associated with this linked offer");
 		// if you don't own this offer check the linked offer
 		if(!ismine)

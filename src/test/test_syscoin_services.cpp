@@ -993,7 +993,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	if(!rootofferguid.empty() && !resellernode.empty())
 	{
 		// now get the accept from the resellernode
-		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, rootofferguid, acceptguid);
+		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, offerguid, acceptguid);
 		nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
 		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
