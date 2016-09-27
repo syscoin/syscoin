@@ -1048,15 +1048,16 @@ UniValue generateescrowmultisig(const UniValue& params, bool fHelp) {
 		
 		selleralias = theLinkedAlias;
 	}
-    CSyscoinExtPubKey sellerExtendedAddress(selleralias.ToString());
+	CPubKey SellerPubKey(selleralias.vchPubKey);
+    CSyscoinExtPubKey sellerExtendedAddress(SellerPubKey);
     CExtPubKey sellerExtendedPubKey = sellerExtendedAddress.GetKey();
 	CExtPubKey newSellerKey;
-	sellerExtendedPubKey.Derive(newSellerKey, BIP32_HARDENED_KEY_LIMIT);
+	sellerExtendedPubKey.Derive(newSellerKey, 0x80000000);
 	std::vector<unsigned char> vchNewSellerPubKey(sellerExtendedPubKey.pubkey.begin(), sellerExtendedPubKey.pubkey.end());
 
 	LogPrintf("vchNewSellerPubKey %s\n", stringFromVch(vchNewSellerPubKey));
 	CPubKey ArbiterPubKey(arbiteralias.vchPubKey);
-	CPubKey SellerPubKey(selleralias.vchPubKey);
+	
 	CPubKey BuyerPubKey(buyeralias.vchPubKey);
 	CScript scriptArbiter = GetScriptForDestination(ArbiterPubKey.GetID());
 	CScript scriptSeller = GetScriptForDestination(SellerPubKey.GetID());
