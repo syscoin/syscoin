@@ -19,8 +19,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
 #include <boost/thread.hpp>
-// SYSCOIN need constant SYSCOIN_TX_VERSION
-extern int GetSyscoinTxVersion();
+
 using namespace std;
 
 static uint64_t nAccountingEntryNumber = 0;
@@ -376,8 +375,10 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CValidationState state;
             if (!(CheckTransaction(wtx, state) && (wtx.GetHash() == hash) && state.IsValid()))
 			{
-				if(wtx.nVersion != GetSyscoinTxVersion())
-					strErr = "Error reading wallet database. CheckTransaction failed, validation state: " + FormatStateMessage(state);
+				// SYSCOIN
+				if(wtx.nVersion == GetSyscoinTxVersion())
+					return true;
+				strErr = "Error reading wallet database. CheckTransaction failed, validation state: " + FormatStateMessage(state);
                 return false;
 			}
 			// SYSCOIN don't need this
