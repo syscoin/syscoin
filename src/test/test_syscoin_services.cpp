@@ -981,7 +981,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	const UniValue &acceptSellerValue = FindOfferAccept(ownernode, offerguid, acceptguid);
 	CAmount nSellerTotal = find_value(acceptSellerValue, "systotal").get_int64();
 	float discount = atof(find_value(acceptSellerValue, "offer_discount_percentage").get_str().c_str());
-	nSellerTotal = nSellerTotal + nSellerTotal*(discount/100);
+	nTotal = (100-discount)/100 * nTotal;
 	BOOST_CHECK(find_value(acceptSellerValue, "pay_message").get_str() == pay_message);
 	
 	
@@ -993,7 +993,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	if(!rootofferguid.empty() && !resellernode.empty())
 	{
 		// now get the accept from the resellernode
-		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, offerguid, acceptguid);
+		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, rootofferguid, acceptguid);
 		nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
 		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
