@@ -1048,7 +1048,7 @@ UniValue generateescrowmultisig(const UniValue& params, bool fHelp) {
 		
 		selleralias = theLinkedAlias;
 	}
-	CSyscoinAddress sellerAddress = CSyscoinAddress(stringFromVch(selleralias.vchAlias))
+	CSyscoinAddress sellerAddress = CSyscoinAddress(stringFromVch(selleralias.vchAlias));
     CSyscoinExtPubKey sellerExtendedAddress(sellerAddress.ToString());
     CExtPubKey sellerExtendedPubKey = sellerExtendedAddress.GetKey();
 	CExtPubKey newSellerKey;
