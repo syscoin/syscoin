@@ -19,7 +19,8 @@
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
 #include <boost/thread.hpp>
-
+// SYSCOIN need constant SYSCOIN_TX_VERSION
+extern int GetSyscoinTxVersion();
 using namespace std;
 
 static uint64_t nAccountingEntryNumber = 0;
@@ -57,7 +58,6 @@ bool CWalletDB::ErasePurpose(const string& strPurpose)
 bool CWalletDB::WriteTx(const CWalletTx& wtx)
 {
     nWalletDBUpdated++;
-	wtx.UpdateHash();
     return Write(std::make_pair(std::string("tx"), wtx.GetHash()), wtx);
 }
 
@@ -374,11 +374,14 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CWalletTx wtx;
             ssValue >> wtx;
             CValidationState state;
-            if (!(CheckTransaction(wtx, state) && (wtx.GetHash() == hash) && state.IsValid()))
+			// SYSCOIN
+            if (!(CheckTransaction(wtx, state) && state.IsValid()))
 			{
-				// SYSCOIN error reporting
-				strErr = strprintf("Error reading wallet database. CheckTransaction failed, validation state: %s, wtx hash %s, hash %s, state validity %d", FormatStateMessage(state), wtx.GetHash().GetHex(), hash.GetHex(), state.IsValid());
-                return false;
+				if(wtx.GetHash() != hash && wtx.nVersion != GetSyscoinTxVersion())
+				{
+					strErr = strprintf("Error reading wallet database. CheckTransaction failed, validation state: %s, wtx hash %s, hash %s, state validity %d", FormatStateMessage(state), wtx.GetHash().GetHex(), hash.GetHex(), state.IsValid());
+					return false;
+				}
 			}
 			// SYSCOIN don't need this
             // Undo serialize changes in 31600
