@@ -2939,7 +2939,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 
 			// NON-LINKED merchant
 			CAmount priceAtTimeOfAccept = theOfferAccept.nPrice;
-			if(theOfferAccept.nPrice != priceAtTimeOfAccept)
+			if(theOffer.GetPrice() != priceAtTimeOfAccept)
 				discountApplied = true;
 			// NON-LINKED buyer
 			if(!ismine)
@@ -2963,7 +2963,7 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 					{
 						commissionPaid = false;
 						priceAtTimeOfAccept = theOfferAccept.nPrice;
-						if(theOfferAccept.nPrice != priceAtTimeOfAccept)
+						if(linkOffer.GetPrice() != priceAtTimeOfAccept)
 							discountApplied = true;
 					}
 					// You are the buyer
