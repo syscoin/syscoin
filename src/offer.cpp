@@ -1137,6 +1137,34 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 90 - " + _("Cannot find alias for this offer. It may be expired");
 				return true;
 			}
+			// trying to purchase a cert
+			if(!myPriceOffer.vchCert.empty())
+			{
+				CTransaction txCert;
+				if (!GetTxOfCert( myPriceOffer.vchCert, theCert, txCert))
+				{
+					errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 91 - " + _("Cannot sell an expired certificate");
+					return true;
+				}
+				else if(!theOfferAccept.txBTCId.IsNull())
+				{
+					errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 92 - " + _("Cannot purchase certificates with Bitcoins");
+					return true;
+				}
+				else if(myPriceOffer.vchLinkOffer.empty())
+				{
+					if(theCert.vchAlias != myPriceOffer.vchAlias)
+					{
+						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 94 - " + _("Cannot purchase this offer because the certificate has been transferred or it is linked to another offer");
+						return true;
+					}
+				}
+			}
+			else if (theOfferAccept.vchMessage.size() <= 0)
+			{
+				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 95 - " + _("Offer payment message cannot be empty");
+				return true;
+			}	
 			if(!myPriceOffer.vchLinkOffer.empty())
 			{
 				if(!GetTxAndVtxOfOffer( myPriceOffer.vchLinkOffer, linkOffer, linkedTx, offerVtxPos))
@@ -1179,35 +1207,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 					errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 111a - " + _("Linked offer alias does not exist on the root offer affiliate list and toot offer is set to exclusive mode. You cannot accept this offer. Please contact the affiliate and ask him to get the root offer merchant to put the affiliate on his affiliate list for this offer");
 					return true;
 				}
-			}
-			// trying to purchase a cert
-			if(!myPriceOffer.vchCert.empty())
-			{
-				CTransaction txCert;
-				if (!GetTxOfCert( myPriceOffer.vchCert, theCert, txCert))
-				{
-					errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 91 - " + _("Cannot sell an expired certificate");
-					return true;
-				}
-				else if(!theOfferAccept.txBTCId.IsNull())
-				{
-					errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 92 - " + _("Cannot purchase certificates with Bitcoins");
-					return true;
-				}
-				else if(myPriceOffer.vchLinkOffer.empty())
-				{
-					if(theCert.vchAlias != myPriceOffer.vchAlias)
-					{
-						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 94 - " + _("Cannot purchase this offer because the certificate has been transferred or it is linked to another offer");
-						return true;
-					}
-				}
-			}
-			else if (theOfferAccept.vchMessage.size() <= 0)
-			{
-				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 95 - " + _("Offer payment message cannot be empty");
-				return true;
-			}		
+			}	
 			if(myPriceOffer.sCategory.size() > 0 && boost::algorithm::starts_with(stringFromVch(myPriceOffer.sCategory), "wanted"))
 			{
 				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 105 - " + _("Cannot purchase a wanted offer");
