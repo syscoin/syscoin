@@ -1049,7 +1049,7 @@ UniValue generateescrowmultisig(const UniValue& params, bool fHelp) {
 		selleralias = theLinkedAlias;
 	}
 	CSyscoinAddress sellerAddress = CSyscoinAddress(stringFromVch(selleralias.vchAlias));
-    CSyscoinExtPubKey sellerExtendedAddress(sellerAddress.ToString());
+    CSyscoinExtPubKey sellerExtendedAddress(stringFromVch(selleralias.vchPubKey));
     CExtPubKey sellerExtendedPubKey = sellerExtendedAddress.GetKey();
 	std::vector<unsigned char> vchNewSellerPubKey(sellerExtendedPubKey.pubkey.begin(), sellerExtendedPubKey.pubkey.end());
 
