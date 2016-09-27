@@ -2445,7 +2445,13 @@ static bool ApplyTxInUndo(const CTxInUndo& undo, CCoinsViewCache& view, const CO
 }
 // SYSCOIN disconnect service related blocks
 bool DisconnectAlias(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
-	
+	if(fDebug)
+		LogPrintf("DISCONNECTED ALIAS TXN: alias=%s op=%s hash=%s  height=%d\n",
+		stringFromVch(vvchArgs[0]).c_str(),
+		aliasFromOp(op).c_str(),
+		tx.GetHash().ToString().c_str(),
+		pindex->nHeight);
+
 	string opName = aliasFromOp(op);
 	vector<CAliasIndex> vtxPos;
 	if(!paliasdb)
@@ -2462,18 +2468,19 @@ bool DisconnectAlias(const CBlockIndex *pindex, const CTransaction &tx, int op, 
 
 	if(!paliasdb->WriteAlias(vvchArgs[0], vchFromString(address.ToString()), vtxPos))
 		return error("DisconnectBlock() : failed to write to alias DB");
-	if(fDebug)
-		LogPrintf("DISCONNECTED ALIAS TXN: alias=%s op=%s hash=%s  height=%d\n",
-		stringFromVch(vvchArgs[0]).c_str(),
-		aliasFromOp(op).c_str(),
-		tx.GetHash().ToString().c_str(),
-		pindex->nHeight);
+
 
 	return true;
 }
 
 bool DisconnectOffer(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
-    string opName = offerFromOp(op);
+	if(fDebug)
+		LogPrintf("DISCONNECTED offer TXN: offer=%s op=%s hash=%s  height=%d\n",
+			stringFromVch(vvchArgs[0]).c_str(),
+			opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);    
+	string opName = offerFromOp(op);
 	
 	COffer theOffer(tx);
 	vector<COffer> vtxPos;
@@ -2494,17 +2501,18 @@ bool DisconnectOffer(const CBlockIndex *pindex, const CTransaction &tx, int op, 
 	if(!pofferdb->WriteOffer(vvchArgs[0], vtxPos))
 		return error("DisconnectOffer() : failed to write to offer DB");
 	
-	if(fDebug)
-		LogPrintf("DISCONNECTED offer TXN: offer=%s op=%s hash=%s  height=%d\n",
-			stringFromVch(vvchArgs[0]).c_str(),
-			opName.c_str(),
-			tx.GetHash().ToString().c_str(),
-			pindex->nHeight);
 
 	return true;
 }
 
 bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	
+	if(fDebug)
+		LogPrintf("DISCONNECTED CERT TXN: cert=%s op=%s hash=%s height=%d\n",
+		   stringFromVch(vvchArgs[0]).c_str(),
+			opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);	
 	string opName = certFromOp(op);
 
 	// make sure a DB record exists for this cert
@@ -2524,12 +2532,7 @@ bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, in
 
 	if(!pcertdb->WriteCert(vvchArgs[0], vtxPos))
 		return error("DisconnectCertificate() : failed to write to offer DB");
-	if(fDebug)
-		LogPrintf("DISCONNECTED CERT TXN: cert=%s op=%s hash=%s height=%d\n",
-		   stringFromVch(vvchArgs[0]).c_str(),
-			opName.c_str(),
-			tx.GetHash().ToString().c_str(),
-			pindex->nHeight);
+
 
 	return true;
 }
@@ -2565,6 +2568,13 @@ bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op,
 }
 
 bool DisconnectMessage(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	
+	if(fDebug)
+		LogPrintf("DISCONNECTED MESSAGE TXN: message=%s op=%s hash=%s height=%d\n",
+		   stringFromVch(vvchArgs[0]).c_str(),
+		   	opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);	
 	string opName = messageFromOp(op);
 
 	// make sure a DB record exists for this msg
@@ -2582,12 +2592,6 @@ bool DisconnectMessage(const CBlockIndex *pindex, const CTransaction &tx, int op
 	if(!pmessagedb->WriteMessage(vvchArgs[0], vtxPos))
 		return error("DisconnectMessage() : failed to write to message DB");
 	
-	if(fDebug)
-		LogPrintf("DISCONNECTED MESSAGE TXN: message=%s op=%s hash=%s height=%d\n",
-		   stringFromVch(vvchArgs[0]).c_str(),
-		   	opName.c_str(),
-			tx.GetHash().ToString().c_str(),
-			pindex->nHeight);
 
 	return true;
 }
