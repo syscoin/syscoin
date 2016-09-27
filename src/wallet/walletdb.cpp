@@ -376,7 +376,7 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             if (!(CheckTransaction(wtx, state) && (wtx.GetHash() == hash) && state.IsValid()))
 			{
 				// SYSCOIN error reporting
-				strErr = sprintf("Error reading wallet database. CheckTransaction failed, validation state: %s, wtx hash %s, hash %s, state validity %d", FormatStateMessage(state), wtx.GetHash().GetHex(), hash.GetHex(), state.IsValid());
+				strErr = strprintf("Error reading wallet database. CheckTransaction failed, validation state: %s, wtx hash %s, hash %s, state validity %d", FormatStateMessage(state), wtx.GetHash().GetHex(), hash.GetHex(), state.IsValid());
                 return false;
 			}
 			// SYSCOIN don't need this
