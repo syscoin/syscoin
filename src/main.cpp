@@ -2445,6 +2445,7 @@ static bool ApplyTxInUndo(const CTxInUndo& undo, CCoinsViewCache& view, const CO
 }
 // SYSCOIN disconnect service related blocks
 bool DisconnectAlias(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	string opName = aliasFromOp(op);
 	if(fDebug)
 		LogPrintf("DISCONNECTED ALIAS TXN: alias=%s op=%s hash=%s  height=%d\n",
 		stringFromVch(vvchArgs[0]).c_str(),
@@ -2452,7 +2453,7 @@ bool DisconnectAlias(const CBlockIndex *pindex, const CTransaction &tx, int op, 
 		tx.GetHash().ToString().c_str(),
 		pindex->nHeight);
 
-	string opName = aliasFromOp(op);
+	
 	vector<CAliasIndex> vtxPos;
 	if(!paliasdb)
 		return false;
@@ -2474,13 +2475,14 @@ bool DisconnectAlias(const CBlockIndex *pindex, const CTransaction &tx, int op, 
 }
 
 bool DisconnectOffer(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
+	string opName = offerFromOp(op);
 	if(fDebug)
 		LogPrintf("DISCONNECTED offer TXN: offer=%s op=%s hash=%s  height=%d\n",
 			stringFromVch(vvchArgs[0]).c_str(),
 			opName.c_str(),
 			tx.GetHash().ToString().c_str(),
 			pindex->nHeight);    
-	string opName = offerFromOp(op);
+	
 	
 	COffer theOffer(tx);
 	vector<COffer> vtxPos;
@@ -2506,14 +2508,14 @@ bool DisconnectOffer(const CBlockIndex *pindex, const CTransaction &tx, int op, 
 }
 
 bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
-	
+	string opName = certFromOp(op);
 	if(fDebug)
 		LogPrintf("DISCONNECTED CERT TXN: cert=%s op=%s hash=%s height=%d\n",
 		   stringFromVch(vvchArgs[0]).c_str(),
 			opName.c_str(),
 			tx.GetHash().ToString().c_str(),
 			pindex->nHeight);	
-	string opName = certFromOp(op);
+	
 
 	// make sure a DB record exists for this cert
 	vector<CCert> vtxPos;
@@ -2539,7 +2541,12 @@ bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, in
 
 bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
 	string opName = escrowFromOp(op);
-	
+	if(fDebug)
+		LogPrintf("DISCONNECTED ESCROW TXN: escrow=%s op=%s hash=%s height=%d\n",
+		   stringFromVch(vvchArgs[0]).c_str(),
+			opName.c_str(),
+			tx.GetHash().ToString().c_str(),
+			pindex->nHeight);	
 	
 	// make sure a DB record exists for this escrow
 	vector<CEscrow> vtxPos;
@@ -2557,25 +2564,20 @@ bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op,
 	if(!pescrowdb->WriteEscrow(vvchArgs[0], vtxPos))
 		return error("DisconnectEscrow() : failed to write to escrow DB");
 	
-	if(fDebug)
-		LogPrintf("DISCONNECTED ESCROW TXN: escrow=%s op=%s hash=%s height=%d\n",
-		   stringFromVch(vvchArgs[0]).c_str(),
-			opName.c_str(),
-			tx.GetHash().ToString().c_str(),
-			pindex->nHeight);
+
 
 	return true;
 }
 
 bool DisconnectMessage(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
-	
+	string opName = messageFromOp(op);
 	if(fDebug)
 		LogPrintf("DISCONNECTED MESSAGE TXN: message=%s op=%s hash=%s height=%d\n",
 		   stringFromVch(vvchArgs[0]).c_str(),
 		   	opName.c_str(),
 			tx.GetHash().ToString().c_str(),
 			pindex->nHeight);	
-	string opName = messageFromOp(op);
+	
 
 	// make sure a DB record exists for this msg
 	vector<CMessage> vtxPos;
