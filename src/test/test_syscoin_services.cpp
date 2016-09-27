@@ -968,7 +968,13 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	int nQtyToAccept = atoi(qty.c_str());
 	CAmount nTotal = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
 	string sTargetQty = boost::to_string(nCurrentQty - nQtyToAccept);
-
+	CAmount nCOmmission = 0;
+	if(!rootofferguid.empty())
+	{
+		BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, "offerinfo " + rootofferguid));
+		CAmount nTotalRoot = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
+		nCOmmission = nTotal-nTotalRoot;
+	}
 	string offeracceptstr = "offeraccept " + aliasname + " " + offerguid + " " + qty + " " + pay_message;
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, offeracceptstr));
@@ -989,19 +995,17 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "quantity").get_str(),sTargetQty);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
-	CAmount nCommission = 0;
 	if(!rootofferguid.empty() && !resellernode.empty())
 	{
 		// now get the accept from the resellernode
 		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, offerguid, acceptguid);
-		nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
 		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
 		GenerateBlocks(5, "node1");
 		GenerateBlocks(5, "node2");
 		GenerateBlocks(5, "node3");
 
-		BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "false");
+		BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "true");
 		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 	}
 	BOOST_CHECK_EQUAL(nSellerTotal+nCommission, nTotal);
