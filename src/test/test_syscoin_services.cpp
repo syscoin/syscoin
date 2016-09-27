@@ -968,13 +968,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	int nQtyToAccept = atoi(qty.c_str());
 	CAmount nTotal = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
 	string sTargetQty = boost::to_string(nCurrentQty - nQtyToAccept);
-	CAmount nCommission = 0;
-	if(!rootofferguid.empty())
-	{
-		BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, "offerinfo " + rootofferguid));
-		CAmount nTotalRoot = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
-		nCommission = nTotal-nTotalRoot;
-	}
+
 	string offeracceptstr = "offeraccept " + aliasname + " " + offerguid + " " + qty + " " + pay_message;
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(buyernode, offeracceptstr));
@@ -1008,7 +1002,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 		BOOST_CHECK(find_value(acceptSellerValue, "ismine").get_str() == "true");
 		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
 	}
-	BOOST_CHECK_EQUAL(nSellerTotal+nCommission, nTotal);
+	BOOST_CHECK_EQUAL(nSellerTotal, nTotal);
 	return acceptguid;
 }
 const string EscrowNew(const string& node, const string& buyeralias, const string& offerguid, const string& qty, const string& message, const string& arbiteralias, const string& selleralias)
