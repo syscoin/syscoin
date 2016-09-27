@@ -995,7 +995,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 		nSellerTotal = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
 		// now get the accept from the resellernode
 		const UniValue &acceptReSellerValue = FindOfferAcceptList(resellernode, offerguid, acceptguid);
-		nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
+		CAmount nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
 		nSellerTotal += nCommission;
 		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
 		GenerateBlocks(5, "node1");
