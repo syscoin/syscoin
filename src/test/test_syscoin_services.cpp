@@ -991,9 +991,12 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_str() == "false");
 	if(!rootofferguid.empty() && !resellernode.empty())
 	{
+		BOOST_CHECK_NO_THROW(r = CallRPC(resellernode, "offerinfo " + rootofferguid));
+		nSellerTotal = find_value(r.get_obj(), "sysprice").get_int64()*nQtyToAccept;
 		// now get the accept from the resellernode
-		const UniValue &acceptReSellerValue = FindOfferAccept(resellernode, offerguid, acceptguid);
-		BOOST_CHECK(find_value(acceptReSellerValue, "ismine").get_str() == "true");
+		const UniValue &acceptReSellerValue = FindOfferAcceptList(resellernode, offerguid, acceptguid);
+		nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
+		nSellerTotal += nCommission;
 		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
 		GenerateBlocks(5, "node1");
 		GenerateBlocks(5, "node2");
@@ -1162,6 +1165,28 @@ const UniValue FindOfferAccept(const string& node, const string& offerguid, cons
 {
 	UniValue r, ret;
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptinfo " + offerguid));
+	BOOST_CHECK(r.type() == UniValue::VARR);
+	const UniValue &arrayValue = r.get_array();
+	for(int i=0;i<arrayValue.size();i++)
+	{		
+		const UniValue& acceptObj = arrayValue[i].get_obj();
+		const string &acceptvalueguid = find_value(acceptObj, "id").get_str();
+		const string &offervalueguid = find_value(acceptObj, "offer").get_str();
+		if(acceptvalueguid == acceptguid && offervalueguid == offerguid)
+		{
+			ret = acceptObj;
+			break;
+		}
+
+	}
+	if(!nocheck)
+		BOOST_CHECK(!ret.isNull());
+	return ret;
+}
+const UniValue FindOfferAcceptList(const string& node, const string& offerguid, const string& acceptguid, bool nocheck)
+{
+	UniValue r, ret;
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offeracceptlist " + acceptguid));
 	BOOST_CHECK(r.type() == UniValue::VARR);
 	const UniValue &arrayValue = r.get_array();
 	for(int i=0;i<arrayValue.size();i++)

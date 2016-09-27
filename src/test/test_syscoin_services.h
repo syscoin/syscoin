@@ -33,6 +33,7 @@ void CreateSysBanIfNotExist();
 void CreateSysCategoryIfNotExist();
 void OfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid, const string& feedback, const string& rating, const char& user, const bool israting);
 const UniValue FindOfferAccept(const string& node, const string& offerguid, const string& acceptguid, bool nocheck=false);
+const UniValue FindOfferAcceptList(const string& node, const string& offerguid, const string& acceptguid, bool nocheck=false);
 const UniValue FindOfferAcceptFeedback(const string& node, const string& offerguid, const string& acceptguid,const string& accepttxid, bool nocheck=false);
 const string OfferNew(const string& node, const string& aliasname, const string& category, const string& title, const string& qty, const string& price, const string& description, const string& currency, const string& certguid="nocert", const bool exclusiveResell=true, const string& paymentoptions="NONE", const string& geolocation="location", const string& safesearch="Yes");
 void OfferUpdate(const string& node, const string& aliasname, const string& offerguid, const string& category, const string& title, const string& qty, const string& price, const string& description, const string& currency="NONE", const bool isPrivate=false, const string& certguid="nocert", const bool exclusiveResell=true, const string& geolocation="newlocation", string safesearch="Yes", string paymentoptions="NONE");
@@ -40,7 +41,6 @@ bool OfferFilter(const string& node, const string& regex, const string& safesear
 void OfferAddWhitelist(const string& node,const string& offer, const string& aliasname, const string& discount);
 void OfferRemoveWhitelist(const string& node, const string& offer, const string& aliasname);
 void OfferClearWhitelist(const string& node, const string& offer);
-const UniValue FindOfferLinkedAccept(const string& node, const string& offerguid, const string& acceptguid);
 void EscrowFeedback(const string& node, const string& escrowguid, const string& feedbackprimary, const string& ratingprimary, char userprimary,const  string& feedbacksecondary, const string& ratingsecondary, char usersecondary, const bool israting);
 const string OfferLink(const string& node, const string& alias, const string& guid, const string& commission, const string& newdescription);
 const string OfferAccept(const string& ownernode, const string& node, const string& aliasname, const string& offerguid, const string& qty, const string& message,const string& resellernode="");
