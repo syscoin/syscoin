@@ -374,14 +374,11 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CWalletTx wtx;
             ssValue >> wtx;
             CValidationState state;
-			// SYSCOIN
-            if (!(CheckTransaction(wtx, state) && state.IsValid()))
+            if (!(CheckTransaction(wtx, state) && (wtx.GetHash() == hash) && state.IsValid()))
 			{
-				if(wtx.GetHash() != hash && wtx.nVersion != GetSyscoinTxVersion())
-				{
-					strErr = strprintf("Error reading wallet database. CheckTransaction failed, validation state: %s, wtx hash %s, hash %s, state validity %d", FormatStateMessage(state), wtx.GetHash().GetHex(), hash.GetHex(), state.IsValid());
-					return false;
-				}
+				if(wtx.nVersion != GetSyscoinTxVersion())
+					strErr = "Error reading wallet database. CheckTransaction failed, validation state: " + FormatStateMessage(state);
+                return false;
 			}
 			// SYSCOIN don't need this
             // Undo serialize changes in 31600
