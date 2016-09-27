@@ -1048,11 +1048,11 @@ UniValue generateescrowmultisig(const UniValue& params, bool fHelp) {
 		
 		selleralias = theLinkedAlias;
 	}
-	CSyscoinAddress sellerAddress = CSyscoinAddress(stringFromVch(selleralias.vchSellerAlias))
+	CSyscoinAddress sellerAddress = CSyscoinAddress(stringFromVch(selleralias.vchAlias))
     CSyscoinExtPubKey sellerExtendedAddress(sellerAddress.ToString());
     CExtPubKey sellerExtendedPubKey = sellerExtendedAddress.GetKey();
 	CExtPubKey newSellerKey;
-	sellerExtendedPubKey.Derive(newSellerKey, BIP32_HARDENED_KEY_LIMIT);
+	sellerExtendedPubKey.Derive(newSellerKey, 0x80000000);
 	std::vector<unsigned char> vchNewSellerPubKey(sellerExtendedPubKey.pubkey.begin(), sellerExtendedPubKey.pubkey.end());
 
 	LogPrintf("vchNewSellerPubKey %s\n", stringFromVch(vchNewSellerPubKey));
