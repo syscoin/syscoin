@@ -2448,9 +2448,13 @@ bool DisconnectAlias(const CBlockIndex *pindex, const CTransaction &tx, int op, 
 	
 	string opName = aliasFromOp(op);
 	vector<CAliasIndex> vtxPos;
+	if(!paliasdb)
+		return false;
 	paliasdb->ReadAlias(vvchArgs[0], vtxPos);
+	if(vtxPos.empty())
+		return true;
 	CAliasIndex foundAlias = vtxPos.back();
-	while (vtxPos.back().txHash == tx.GetHash())	
+	while (!vtxPos.empty() && vtxPos.back().txHash == tx.GetHash())	
 		vtxPos.pop_back();
 	
 	CPubKey PubKey(foundAlias.vchPubKey);
@@ -2472,12 +2476,16 @@ bool DisconnectOffer(const CBlockIndex *pindex, const CTransaction &tx, int op, 
     string opName = offerFromOp(op);
 	
 	COffer theOffer(tx);
+	vector<COffer> vtxPos;
 	if (theOffer.IsNull())
 		return false;
 
-    vector<COffer> vtxPos;
-    pofferdb->ReadOffer(vvchArgs[0], vtxPos);  
-	while (vtxPos.back().txHash == tx.GetHash())	
+	if(!pofferdb)
+		return false;
+	pofferdb->ReadOffer(vvchArgs[0], vtxPos);  
+	if(vtxPos.empty())
+		return true;
+	while (!vtxPos.empty() && vtxPos.back().txHash == tx.GetHash())	
 		vtxPos.pop_back();
 		
 
@@ -2501,8 +2509,13 @@ bool DisconnectCertificate(const CBlockIndex *pindex, const CTransaction &tx, in
 
 	// make sure a DB record exists for this cert
 	vector<CCert> vtxPos;
-	pcertdb->ReadCert(vvchArgs[0], vtxPos);
-	while (vtxPos.back().txHash == tx.GetHash())	
+
+	if(!pcertdb)
+		return false;
+	pcertdb->ReadCert(vvchArgs[0], vtxPos);  
+	if(vtxPos.empty())
+		return true;
+	while (!vtxPos.empty() && vtxPos.back().txHash == tx.GetHash())	
 		vtxPos.pop_back();
 		
 
@@ -2525,12 +2538,16 @@ bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op,
 	string opName = escrowFromOp(op);
 	
 	
-	// make sure a DB record exists for this cert
+	// make sure a DB record exists for this escrow
 	vector<CEscrow> vtxPos;
-	pescrowdb->ReadEscrow(vvchArgs[0], vtxPos);
-	while (vtxPos.back().txHash == tx.GetHash())	
-		vtxPos.pop_back();
 
+	if(!pescrowdb)
+		return false;
+	pescrowdb->ReadEscrow(vvchArgs[0], vtxPos);  
+	if(vtxPos.empty())
+		return true;
+	while (!vtxPos.empty() && vtxPos.back().txHash == tx.GetHash())	
+		vtxPos.pop_back();
 
 	// write new escrow state to db
 
@@ -2550,13 +2567,16 @@ bool DisconnectEscrow(const CBlockIndex *pindex, const CTransaction &tx, int op,
 bool DisconnectMessage(const CBlockIndex *pindex, const CTransaction &tx, int op, vector<vector<unsigned char> > &vvchArgs ) {
 	string opName = messageFromOp(op);
 
-	// make sure a DB record exists for this cert
+	// make sure a DB record exists for this msg
 	vector<CMessage> vtxPos;
-	pmessagedb->ReadMessage(vvchArgs[0], vtxPos);
-	while (vtxPos.back().txHash == tx.GetHash())	
+
+	if(!pmessagedb)
+		return false;
+	pmessagedb->ReadMessage(vvchArgs[0], vtxPos);  
+	if(vtxPos.empty())
+		return true;
+	while (!vtxPos.empty() && vtxPos.back().txHash == tx.GetHash())	
 		vtxPos.pop_back();
-
-
 	// write new message state to db
 
 	if(!pmessagedb->WriteMessage(vvchArgs[0], vtxPos))
