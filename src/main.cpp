@@ -2620,32 +2620,6 @@ bool DisconnectBlock(const CBlock& block, CValidationState& state, const CBlockI
     for (int i = block.vtx.size() - 1; i >= 0; i--) {
 
         const CTransaction &tx = block.vtx[i];
-		// SYSCOIN disconnect syscoin related block
-		if (tx.nVersion == SYSCOIN_TX_VERSION) {
-			vector<vector<unsigned char> > vvchArgs;
-			int op, nOut;
-			if(DecodeAliasTx(tx, op, nOut, vvchArgs))
-			{
-				DisconnectAlias(pindex, tx, op, vvchArgs);	
-			}
-			if(DecodeOfferTx(tx, op, nOut, vvchArgs))
-			{
-				DisconnectOffer(pindex, tx, op, vvchArgs); 
-			}
-			if(DecodeCertTx(tx, op, nOut, vvchArgs))
-			{
-				DisconnectCertificate(pindex, tx, op, vvchArgs);				
-			}
-			if(DecodeEscrowTx(tx, op, nOut, vvchArgs))
-			{
-				DisconnectEscrow(pindex, tx, op, vvchArgs);	
-			}
-			if(DecodeMessageTx(tx, op, nOut, vvchArgs))
-			{
-				DisconnectMessage(pindex, tx, op, vvchArgs);	
-			}
-		}
-		
         uint256 hash = tx.GetHash();
 
         // Check that all outputs are available and match the outputs in the block itself
@@ -3267,6 +3241,31 @@ bool static DisconnectTip(CValidationState& state, const CChainParams& chainpara
     // 0-confirmed or conflicted:
     BOOST_FOREACH(const CTransaction &tx, block.vtx) {
         SyncWithWallets(tx, pindexDelete->pprev);
+		// SYSCOIN disconnect syscoin related block
+		if (tx.nVersion == SYSCOIN_TX_VERSION) {
+			vector<vector<unsigned char> > vvchArgs;
+			int op, nOut;
+			if(DecodeAliasTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectAlias(pindexDelete, tx, op, vvchArgs);	
+			}
+			if(DecodeOfferTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectOffer(pindexDelete, tx, op, vvchArgs); 
+			}
+			if(DecodeCertTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectCertificate(pindexDelete, tx, op, vvchArgs);				
+			}
+			if(DecodeEscrowTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectEscrow(pindexDelete, tx, op, vvchArgs);	
+			}
+			if(DecodeMessageTx(tx, op, nOut, vvchArgs))
+			{
+				DisconnectMessage(pindexDelete, tx, op, vvchArgs);	
+			}
+		}
     }
     return true;
 }
