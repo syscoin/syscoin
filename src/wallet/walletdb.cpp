@@ -57,6 +57,7 @@ bool CWalletDB::ErasePurpose(const string& strPurpose)
 bool CWalletDB::WriteTx(const CWalletTx& wtx)
 {
     nWalletDBUpdated++;
+	wtx.UpdateHash();
     return Write(std::make_pair(std::string("tx"), wtx.GetHash()), wtx);
 }
 
