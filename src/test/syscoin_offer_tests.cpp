@@ -333,10 +333,10 @@ BOOST_AUTO_TEST_CASE (generate_offerupdate_editcurrency)
 	// still used BTC conversion amount
 	BOOST_CHECK(abs(nTotal - AmountFromValue(10*0.00001000*100000.0)) <= COIN);
 	// 2695.2 SYS/EUR
-	acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "1", "message");
+	acceptguid = OfferAccept("node1", "node2", "buyeraliascurrency", offerguid, "3", "message");
 	acceptRet = FindOfferAccept("node2", offerguid, acceptguid);
 	nTotal = find_value(acceptRet, "systotal").get_int64();
-	BOOST_CHECK(abs(nTotal - AmountFromValue(1*0.2*2695.2)) <= COIN);
+	BOOST_CHECK(abs(nTotal - AmountFromValue(3*0.2*2695.2)) <= COIN);
 
 	// linked offer with root and linked offer changing currencies
 
