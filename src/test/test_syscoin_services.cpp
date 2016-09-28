@@ -1043,7 +1043,7 @@ const string EscrowNew(const string& node, const string& buyeralias, const strin
 	BOOST_CHECK(find_value(r.get_obj(), "systotal").get_int64() == nTotal);
 	BOOST_CHECK(find_value(r.get_obj(), "arbiter").get_str() == arbiteralias);
 	BOOST_CHECK(find_value(r.get_obj(), "seller").get_str() == selleralias);
-	BOOST_CHECK(find_value(r.get_obj(), "pay_message").get_str() != pay_message);
+	BOOST_CHECK(find_value(r.get_obj(), "pay_message").get_str() != message);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "escrowinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "escrow").get_str() == guid);
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
