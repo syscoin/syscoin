@@ -58,10 +58,11 @@ BOOST_AUTO_TEST_CASE (generate_certoffernew)
 	GenerateBlocks(5, "node3");
 
 	AliasNew("node1", "node1alias", "node1aliasdata");
+	AliasNew("node1", "node1aalias", "node1aliasdata");
 	AliasNew("node2", "node2alias", "node2aliasdata");
 
 	string certguid1  = CertNew("node1", "node1alias", "title", "data");
-	string certguid1a = CertNew("node1", "node1alias", "title", "data");
+	string certguid1a = CertNew("node1", "node1aalias", "title", "data");
 	string certguid2  = CertNew("node2", "node2alias", "title", "data");
 
 	// generate a good cert offer
@@ -86,9 +87,8 @@ BOOST_AUTO_TEST_CASE (generate_certoffernew)
 	// generate a cert offer if accepting BTC OR SYS
 	OfferNew("node1", "node1alias", "category", "title", "1", "0.05", "description", "USD", certguid1a, "0", "3");
 
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew node1alias category title 1 0.05 description USD " + certguid1a + " 0 1"), runtime_error);
-	// should fail: generate a cert offer using different public keys for cert and alias
-	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew node1alias category title 1 0.05 description USD " + certguid1a + " 0 0 1"), runtime_error);
+	// should fail: generate a cert offer using different alias for cert and offer
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew node1alias category title 1 0.05 description USD " + certguid1a), runtime_error);
 
 
 }
