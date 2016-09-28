@@ -1689,8 +1689,8 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
 	vector<CAliasIndex> aliasVtxPos;
 	CTransaction selleraliastx, buyeraliastx, arbiteraliastx, reselleraliastx;
 	bool isExpired;
-	CSyscoinAddress sellerAddress, buyerAddress, arbiterAddress;
-	CPubKey sellerKey, buyerKey, arbiterKey;
+	CSyscoinAddress sellerAddress, buyerAddress, arbiterAddress, resellerAddress;
+	CPubKey sellerKey, buyerKey, arbiterKey, resellerKey;
 	if(GetTxAndVtxOfAlias(escrow.vchSellerAlias, sellerAlias, selleraliastx, aliasVtxPos, isExpired, true))
 	{
 		sellerKey = CPubKey(sellerAlias.vchPubKey);
@@ -1749,7 +1749,9 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
 		linkOffer.GetOfferFromList(offerLinkVtxPos);
 
 		if(GetTxAndVtxOfAlias(theOffer.vchAlias, resellerAlias, reselleraliastx, aliasVtxPos, isExpired, true))
-		{		
+		{
+			resellerKey = CPubKey(resellerAlias.vchPubKey);
+			resellerAddress = CSyscoinAddress(resellerKey.GetID());
 		}
 
 		linkOffer.linkWhitelist.GetLinkEntryByHash(theOffer.vchAlias, foundEntry);
