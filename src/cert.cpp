@@ -1069,8 +1069,9 @@ UniValue certinfo(const UniValue& params, bool fHelp) {
     oCert.push_back(Pair("title", stringFromVch(ca.vchTitle)));
 	string strData = stringFromVch(ca.vchData);
 	string strDecrypted = "";
-	if(ca.bPrivate)
+	if(ca.bPrivate && !ca.vchData.empty())
 	{
+		strData = _("Encrypted for owner of certificate private data");
 		if(DecryptMessage(alias.vchPubKey, ca.vchData, strDecrypted))
 			strData = strDecrypted;		
 	}
@@ -1194,9 +1195,9 @@ UniValue certlist(const UniValue& params, bool fHelp) {
 		if(!IsSyscoinTxMine(aliastx, "alias"))
 			continue;
 		string strDecrypted = "";
-		if(cert.bPrivate)
+		if(cert.bPrivate && !cert.vchData.empty())
 		{
-			strData = "Encrypted for owner of certificate private data";
+			strData = _("Encrypted for owner of certificate private data");
 			if(DecryptMessage(theAlias.vchPubKey, cert.vchData, strDecrypted))
 				strData = strDecrypted;	
 		}
@@ -1278,9 +1279,9 @@ UniValue certhistory(const UniValue& params, bool fHelp) {
 				theAlias.nHeight = txPos2.nHeight;
 				theAlias.GetAliasFromList(aliasVtxPos);
 			}
-			if(txPos2.bPrivate)
+			if(txPos2.bPrivate && !txPos2.vchData.empty())
 			{
-				strData = "Encrypted for owner of certificate private data";
+				strData = _("Encrypted for owner of certificate private data");
 				if(DecryptMessage(theAlias.vchPubKey, txPos2.vchData, strDecrypted))
 					strData = strDecrypted;
 
@@ -1368,9 +1369,9 @@ UniValue certfilter(const UniValue& params, bool fHelp) {
 			theAlias.nHeight = txCert.nHeight;
 			theAlias.GetAliasFromList(aliasVtxPos);
 		}
-		if(txCert.bPrivate)
+		if(txCert.bPrivate && !txCert.vchData.empty())
 		{
-			strData = string("Encrypted for owner of certificate");
+			strData = _("Encrypted for owner of certificate private data");
 			if(DecryptMessage(theAlias.vchPubKey, txCert.vchData, strDecrypted))
 				strData = strDecrypted;
 			

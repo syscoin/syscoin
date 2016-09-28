@@ -563,13 +563,12 @@ UniValue messageinfo(const UniValue& params, bool fHelp) {
 
 	oMessage.push_back(Pair("subject", stringFromVch(ca.vchSubject)));
 	string strDecrypted = "";
+	string strData = _("Encrypted for recipient of message");
 	if(DecryptMessage(aliasTo.vchPubKey, ca.vchMessageTo, strDecrypted))
-		oMessage.push_back(Pair("message", strDecrypted));
+		strData = strDecrypted;
 	else if(DecryptMessage(aliasFrom.vchPubKey, ca.vchMessageFrom, strDecrypted))
-		oMessage.push_back(Pair("message", strDecrypted));
-	else
-		oMessage.push_back(Pair("message", stringFromVch(ca.vchMessageTo)));
-
+		strData = strDecrypted;
+	oMessage.push_back(Pair("message", strData));
     oMessage.push_back(Pair("txid", ca.txHash.GetHex()));
     oMessage.push_back(Pair("height", sHeight));
 	
@@ -649,7 +648,7 @@ UniValue messagelist(const UniValue& params, bool fHelp) {
 
 		oName.push_back(Pair("subject", stringFromVch(message.vchSubject)));
 		string strDecrypted = "";
-		string strData = string("Encrypted for owner of message");
+		string strData = _("Encrypted for recipient of message");
 		if(DecryptMessage(aliasTo.vchPubKey, message.vchMessageTo, strDecrypted))
 			strData = strDecrypted;
 		else if(DecryptMessage(aliasFrom.vchPubKey, message.vchMessageFrom, strDecrypted))
@@ -751,7 +750,7 @@ UniValue messagesentlist(const UniValue& params, bool fHelp) {
 
 		oName.push_back(Pair("subject", stringFromVch(message.vchSubject)));
 		string strDecrypted = "";
-		string strData = string("Encrypted for owner of message");
+		string strData = _("Encrypted for recipient of message");
 		if(DecryptMessage(aliasTo.vchPubKey, message.vchMessageTo, strDecrypted))
 			strData = strDecrypted;
 		else if(DecryptMessage(aliasFrom.vchPubKey, message.vchMessageFrom, strDecrypted))
@@ -827,7 +826,7 @@ UniValue messagehistory(const UniValue& params, bool fHelp) {
 
 			oMessage.push_back(Pair("subject", stringFromVch(txPos2.vchSubject)));
 			string strDecrypted = "";
-			string strData = string("Encrypted for owner of message");
+			string strData = _("Encrypted for recipient of message");
 			if(DecryptMessage(aliasTo.vchPubKey, txPos2.vchMessageTo, strDecrypted))
 				strData = strDecrypted;
 			else if(DecryptMessage(aliasFrom.vchPubKey, txPos2.vchMessageFrom, strDecrypted))

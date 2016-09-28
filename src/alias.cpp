@@ -1789,7 +1789,7 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("value", stringFromVch(alias.vchPublicValue)));
 			string strPrivateValue = "";
 			if(!alias.vchPrivateValue.empty())
-				strPrivateValue = "Encrypted for alias owner";
+				strPrivateValue = _("Encrypted for alias owner");
 			string strDecrypted = "";
 			if(DecryptMessage(alias.vchPubKey, alias.vchPrivateValue, strDecrypted))
 				strPrivateValue = strDecrypted;		
@@ -1797,7 +1797,7 @@ UniValue aliaslist(const UniValue& params, bool fHelp) {
 
 			string strPrivateKey = "";
 			if(!alias.vchPrivateKey.empty())
-				strPrivateKey = "Encrypted for alias owner";
+				strPrivateKey = _("Encrypted for alias owner");
 			string strDecryptedKey = "";
 			if(DecryptMessage(alias.vchPubKey, alias.vchPrivateKey, strDecryptedKey))
 				strPrivateKey = strDecryptedKey;		
@@ -1973,7 +1973,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("value", stringFromVch(alias.vchPublicValue)));
 		string strPrivateValue = "";
 		if(!alias.vchPrivateValue.empty())
-			strPrivateValue = "Encrypted for alias owner";
+			strPrivateValue = _("Encrypted for alias owner");
 		string strDecrypted = "";
 		if(DecryptMessage(alias.vchPubKey, alias.vchPrivateValue, strDecrypted))
 			strPrivateValue = strDecrypted;		
@@ -1981,7 +1981,7 @@ UniValue aliasinfo(const UniValue& params, bool fHelp) {
 
 		string strPrivateKey = "";
 		if(!alias.vchPrivateKey.empty())
-			strPrivateKey = "Encrypted for alias owner";
+			strPrivateKey = _("Encrypted for alias owner");
 		string strDecryptedKey = "";
 		if(DecryptMessage(alias.vchPubKey, alias.vchPrivateKey, strDecryptedKey))
 			strPrivateKey = strDecryptedKey;		
@@ -2077,7 +2077,7 @@ UniValue aliashistory(const UniValue& params, bool fHelp) {
 			oName.push_back(Pair("value", stringFromVch(txPos2.vchPublicValue)));
 			string strPrivateValue = "";
 			if(!txPos2.vchPrivateValue.empty())
-				strPrivateValue = "Encrypted for alias owner";
+				strPrivateValue = _("Encrypted for alias owner");
 			string strDecrypted = "";
 			if(DecryptMessage(txPos2.vchPubKey, txPos2.vchPrivateValue, strDecrypted))
 				strPrivateValue = strDecrypted;		
@@ -2085,7 +2085,7 @@ UniValue aliashistory(const UniValue& params, bool fHelp) {
 
 			string strPrivateKey = "";
 			if(!txPos2.vchPrivateKey.empty())
-				strPrivateKey = "Encrypted for alias owner";
+				strPrivateKey = _("Encrypted for alias owner");
 			string strDecryptedKey = "";
 			if(DecryptMessage(txPos2.vchPubKey, txPos2.vchPrivateKey, strDecryptedKey))
 				strPrivateKey = strDecryptedKey;		
@@ -2249,7 +2249,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 		oName.push_back(Pair("value", stringFromVch(txName.vchPublicValue)));
 		string strPrivateValue = "";
 		if(!alias.vchPrivateValue.empty())
-			strPrivateValue = "Encrypted for alias owner";
+			strPrivateValue = _("Encrypted for alias owner");
 		string strDecrypted = "";
 		if(DecryptMessage(txName.vchPubKey, alias.vchPrivateValue, strDecrypted))
 			strPrivateValue = strDecrypted;		
@@ -2257,7 +2257,7 @@ UniValue aliasfilter(const UniValue& params, bool fHelp) {
 
 		string strPrivateKey = "";
 		if(!txName.vchPrivateKey.empty())
-			strPrivateKey = "Encrypted for alias owner";
+			strPrivateKey = _("Encrypted for alias owner");
 		string strDecryptedKey = "";
 		if(DecryptMessage(txName.vchPubKey, txName.vchPrivateKey, strDecryptedKey))
 			strPrivateKey = strDecryptedKey;		

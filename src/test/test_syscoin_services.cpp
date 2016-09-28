@@ -306,14 +306,14 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "value").get_str(), pubdata);
-	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() != privdata);
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 0);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "value").get_str(), pubdata);
-	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() != privdata);
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 0);
@@ -338,7 +338,7 @@ void AliasTransfer(const string& node, const string& aliasname, const string& to
 	r = CallRPC(node, "aliasinfo " + aliasname);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
-	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() != privdata);
 	// check xferred right person and data changed
 	r = CallRPC(tonode, "aliasinfo " + aliasname);
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
@@ -377,14 +377,14 @@ void AliasUpdate(const string& node, const string& aliasname, const string& pubd
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
-	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() != privdata);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 0);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode2, "aliasinfo " + aliasname));
 	BOOST_CHECK(find_value(r.get_obj(), "name").get_str() == aliasname);
 	BOOST_CHECK(find_value(r.get_obj(), "value").get_str() == pubdata);
 	BOOST_CHECK(find_value(r.get_obj(), "ismine").get_bool() == false);
 	BOOST_CHECK(find_value(r.get_obj(), "safesearch").get_str() == safesearch);
-	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() == "Encrypted for alias owner");
+	BOOST_CHECK(find_value(r.get_obj(), "privatevalue").get_str() != privdata);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_int(), 0);
 }
 bool AliasFilter(const string& node, const string& regex, const string& safesearch)
@@ -997,7 +997,7 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 		const UniValue &acceptReSellerValue = FindOfferAcceptList(resellernode, offerguid, acceptguid);
 		CAmount nCommission = find_value(acceptReSellerValue, "systotal").get_int64();
 		nSellerTotal += nCommission;
-		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() == string("Encrypted for owner of offer"));
+		BOOST_CHECK(find_value(acceptReSellerValue, "pay_message").get_str() != pay_message);
 		GenerateBlocks(5, "node1");
 		GenerateBlocks(5, "node2");
 		GenerateBlocks(5, "node3");
@@ -1043,7 +1043,7 @@ const string EscrowNew(const string& node, const string& buyeralias, const strin
 	BOOST_CHECK(find_value(r.get_obj(), "systotal").get_int64() == nTotal);
 	BOOST_CHECK(find_value(r.get_obj(), "arbiter").get_str() == arbiteralias);
 	BOOST_CHECK(find_value(r.get_obj(), "seller").get_str() == selleralias);
-	BOOST_CHECK(find_value(r.get_obj(), "pay_message").get_str() == string("Encrypted for owner of offer"));
+	BOOST_CHECK(find_value(r.get_obj(), "pay_message").get_str() != pay_message);
 	BOOST_CHECK_NO_THROW(r = CallRPC(otherNode1, "escrowinfo " + guid));
 	BOOST_CHECK(find_value(r.get_obj(), "escrow").get_str() == guid);
 	BOOST_CHECK(find_value(r.get_obj(), "offer").get_str() == offerguid);
