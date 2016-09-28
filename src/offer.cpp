@@ -1757,6 +1757,7 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 	newOffer.vchOffer = vchOffer;
 	newOffer.vchAlias = alias.vchAlias;
 	newOffer.sDescription = vchDesc;
+	newOffer.paymentOptions = linkOffer.paymentOptions;
 	newOffer.SetPrice(linkOffer.GetPrice());
 	newOffer.nCommission = commissionInteger;
 	newOffer.vchLinkOffer = vchLinkOffer;
