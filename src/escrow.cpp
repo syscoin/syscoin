@@ -456,9 +456,9 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 					errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4015 - " + _("Alias input mismatch");
 					return error(errorMessage.c_str());
 				}
-				if(prevOp != OP_ESCROW_ACTIVATE && prevOp != OP_ESCROW_RELEASE)
+				if(prevOp == OP_ESCROW_COMPLETE)
 				{
-					errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4016 - " + _("Can only release an activated or released escrow");
+					errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4016 - " + _("Can only an active escrow");
 					return error(errorMessage.c_str());
 				}	
 				// Check input
@@ -545,9 +545,9 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				if(vvchArgs[1] == vchFromString("1"))
 				{
-					if(prevOp != OP_ESCROW_REFUND)
+					if(prevOp == OP_ESCROW_COMPLETE)
 					{
-						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4030 - " + _("Can only complete refund on a refunded escrow");
+						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4030 - " + _("Can only refund an active escrow");
 						return error(errorMessage.c_str());
 					}
 					if(theEscrow.op != OP_ESCROW_COMPLETE)
@@ -630,7 +630,12 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				if(op == OP_ESCROW_REFUND)
 				{
-					if(vvchArgs[1] == vchFromString("0") && (serializedEscrow.vchLinkAlias != theEscrow.vchSellerAlias && serializedEscrow.vchLinkAlias != theEscrow.vchArbiterAlias))
+					if(theEscrow.op == OP_ESCROW_COMPLETE)
+					{
+						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4041 - " + _("Can only refund an active escrow");
+						return true;
+					}
+					else if(vvchArgs[1] == vchFromString("0") && (serializedEscrow.vchLinkAlias != theEscrow.vchSellerAlias && serializedEscrow.vchLinkAlias != theEscrow.vchArbiterAlias))
 					{
 						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4041 - " + _("Only arbiter or seller can initiate an escrow refund");
 						return true;
@@ -649,7 +654,12 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				else if(op == OP_ESCROW_RELEASE)
 				{
-					if(serializedEscrow.vchLinkAlias != theEscrow.vchBuyerAlias && serializedEscrow.vchLinkAlias != theEscrow.vchArbiterAlias)
+					if(theEscrow.op == OP_ESCROW_COMPLETE)
+					{
+						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4041 - " + _("Can only release an active escrow");
+						return true;
+					}
+					else if(serializedEscrow.vchLinkAlias != theEscrow.vchBuyerAlias && serializedEscrow.vchLinkAlias != theEscrow.vchArbiterAlias)
 					{
 						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4043 - " + _("Only buyer or arbiter can initiate an escrow release");
 						return true;
