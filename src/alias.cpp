@@ -280,9 +280,7 @@ CAmount convertCurrencyCodeToSyscoin(const vector<unsigned char> &vchAliasPeg, c
 	{
 		if(getCurrencyToSYSFromAlias(vchAliasPeg, vchCurrencyCode, nRate, nHeight, rateList, precision) == "")
 		{
-			float roundPrice = boost::lexical_cast<float>(strprintf("%.*f", precision, nPrice));
-			float roundRate = boost::lexical_cast<float>(strprintf("%.*f", precision, nRate));
-			sysPrice = CAmount(roundPrice*roundRate*COIN);
+			sysPrice = AmountFromValue(nPrice*nRate);
 		}
 	}
 	catch(...)
@@ -304,8 +302,7 @@ CAmount convertSyscoinToCurrencyCode(const vector<unsigned char> &vchAliasPeg, c
 	{
 		if(getCurrencyToSYSFromAlias(vchAliasPeg, vchCurrencyCode, nRate, nHeight, rateList, precision) == "")
 		{
-			float roundRate = boost::lexical_cast<float>(strprintf("%.*f", precision, nRate));
-			currencyPrice = CAmount(nPrice/roundRate);
+			currencyPrice = CAmount(nPrice/nRate);
 		}
 	}
 	catch(...)
