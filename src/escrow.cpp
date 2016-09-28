@@ -1369,12 +1369,12 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	}
 
 	CAliasIndex sellerAlias, buyerAlias, arbiterAlias, resellerAlias;
-	vector<CAliasIndex> aliasVtxPos, aliasBuyerVtxPos, aliasArbiterVtxPos, aliasResellerVtxPos;
+	vector<CAliasIndex> aliasVtxPos;
 	CTransaction selleraliastx, buyeraliastx, arbiteraliastx, reselleraliastx;
 	bool isExpired;
 	CSyscoinAddress arbiterAddress, sellerAddress, buyerAddress, resellerAddress;
 	CPubKey arbiterKey;
-	if(GetTxAndVtxOfAlias(escrow.vchArbiterAlias, arbiterAlias, arbiteraliastx, aliasArbiterVtxPos, isExpired, true))
+	if(GetTxAndVtxOfAlias(escrow.vchArbiterAlias, arbiterAlias, arbiteraliastx, aliasVtxPos, isExpired, true))
 	{
 		arbiterKey = CPubKey(arbiterAlias.vchPubKey);
 		arbiterAddress = CSyscoinAddress(arbiterKey.GetID());
@@ -1382,7 +1382,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 
 	aliasVtxPos.clear();
 	CPubKey buyerKey;
-	if(GetTxAndVtxOfAlias(escrow.vchBuyerAlias, buyerAlias, buyeraliastx, aliasBuyerVtxPos, isExpired, true))
+	if(GetTxAndVtxOfAlias(escrow.vchBuyerAlias, buyerAlias, buyeraliastx, aliasVtxPos, isExpired, true))
 	{
 		buyerKey = CPubKey(buyerAlias.vchPubKey);
 		buyerAddress = CSyscoinAddress(buyerKey.GetID());
@@ -1442,7 +1442,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 		linkOffer.nHeight = vtxPos.front().nAcceptHeight;
 		linkOffer.GetOfferFromList(offerLinkVtxPos);
 
-		if(GetTxAndVtxOfAlias(theOffer.vchAlias, resellerAlias, reselleraliastx, aliasResellerVtxPos, isExpired, true))
+		if(GetTxAndVtxOfAlias(theOffer.vchAlias, resellerAlias, reselleraliastx, aliasVtxPos, isExpired, true))
 		{		
 			CPubKey resellerKey = CPubKey(resellerAlias.vchPubKey);
 			resellerAddress = CSyscoinAddress(resellerKey.GetID());
@@ -1686,23 +1686,25 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
         throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4099 - " + _("Could not find a escrow with this key"));
 
 	CAliasIndex sellerAlias, buyerAlias, arbiterAlias, resellerAlias;
-	vector<CAliasIndex> aliasVtxPos, aliasBuyerVtxPos, aliasArbiterVtxPos, aliasResellerVtxPos;
+	vector<CAliasIndex> aliasVtxPos;
 	CTransaction selleraliastx, buyeraliastx, arbiteraliastx, reselleraliastx;
 	bool isExpired;
-	CSyscoinAddress sellerAddress;
-	CPubKey sellerKey;
+	CSyscoinAddress sellerAddress, buyerAddress, arbiterAddress;
+	CPubKey sellerKey, buyerKey, arbiterKey;
 	if(GetTxAndVtxOfAlias(escrow.vchSellerAlias, sellerAlias, selleraliastx, aliasVtxPos, isExpired, true))
 	{
 		sellerKey = CPubKey(sellerAlias.vchPubKey);
 		sellerAddress = CSyscoinAddress(sellerKey.GetID());
 	}
-	if(GetTxAndVtxOfAlias(escrow.vchBuyerAlias, buyerAlias, buyeraliastx, aliasBuyerVtxPos, isExpired, true))
+	if(GetTxAndVtxOfAlias(escrow.vchBuyerAlias, buyerAlias, buyeraliastx, aliasVtxPos, isExpired, true))
 	{
-
+		buyerKey = CPubKey(buyerAlias.vchPubKey);
+		buyerAddress = CSyscoinAddress(buyerKey.GetID());
 	}
-	if(GetTxAndVtxOfAlias(escrow.vchArbiterAlias, arbiterAlias, arbiteraliastx, aliasArbiterVtxPos, isExpired, true))
+	if(GetTxAndVtxOfAlias(escrow.vchArbiterAlias, arbiterAlias, arbiteraliastx, aliasVtxPos, isExpired, true))
 	{
-
+		arbiterKey = CPubKey(arbiterAlias.vchPubKey);
+		arbiterAddress = CSyscoinAddress(arbiterKey.GetID());
 	}
     CTransaction fundingTx;
 	if (!GetSyscoinTransaction(vtxPos.front().nHeight,vtxPos.front().txHash, fundingTx, Params().GetConsensus()))
@@ -1746,7 +1748,7 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
 		linkOffer.nHeight = vtxPos.front().nAcceptHeight;
 		linkOffer.GetOfferFromList(offerLinkVtxPos);
 
-		if(GetTxAndVtxOfAlias(theOffer.vchAlias, resellerAlias, reselleraliastx, aliasResellerVtxPos, isExpired, true))
+		if(GetTxAndVtxOfAlias(theOffer.vchAlias, resellerAlias, reselleraliastx, aliasVtxPos, isExpired, true))
 		{		
 		}
 
@@ -2003,7 +2005,7 @@ UniValue escrowcomplete(const UniValue& params, bool fHelp) {
 		throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4121 - " + _("Failed to find escrow transaction"));
 
 	CAliasIndex sellerAlias, buyerAlias, arbiterAlias, resellerAlias;
-	vector<CAliasIndex> aliasVtxPos, aliasBuyerVtxPos, aliasArbiterVtxPos, aliasResellerVtxPos;
+	vector<CAliasIndex> aliasVtxPos;
 	CTransaction selleraliastx, buyeraliastx, arbiteraliastx, reselleraliastx;
 	bool isExpired;
 	CSyscoinAddress arbiterAddress, sellerAddress, buyerAddress;
@@ -2138,7 +2140,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 		}
 	}	
 	CAliasIndex sellerAlias, buyerAlias, arbiterAlias, resellerAlias;
-	vector<CAliasIndex> aliasVtxPos, aliasBuyerVtxPos, aliasArbiterVtxPos, aliasResellerVtxPos;
+	vector<CAliasIndex> aliasVtxPos;
 	CTransaction selleraliastx, buyeraliastx, arbiteraliastx, reselleraliastx;
 	bool isExpired;
 	CSyscoinAddress arbiterAddress, sellerAddress, buyerAddress;
@@ -2421,7 +2423,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
         throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4135 - " + _("Could not find a escrow with this key"));
 
 	CAliasIndex sellerAlias, buyerAlias, arbiterAlias, resellerAlias;
-	vector<CAliasIndex> aliasVtxPos, aliasBuyerVtxPos, aliasArbiterVtxPos, aliasResellerVtxPos;
+	vector<CAliasIndex> aliasVtxPos;
 	CTransaction selleraliastx, buyeraliastx, arbiteraliastx, reselleraliastx;
 	bool isExpired;
 	CSyscoinAddress arbiterAddress, sellerAddress, buyerAddress;
