@@ -770,7 +770,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	if(paymentoptions != "NONE")
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi));
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi);
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == 1);
 	if(currency != "NONE")
@@ -790,7 +790,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	if(paymentoptions != "NONE")
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi));
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi);
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == 1);
 	if(currency != "NONE")
@@ -810,7 +810,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	if(paymentoptions != "NONE")
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi));
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi);
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == 1);
 	if(currency != "NONE")
