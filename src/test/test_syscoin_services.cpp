@@ -602,7 +602,7 @@ const string OfferLink(const string& node, const string& alias, const string& gu
 		otherNode1 = "node1";
 		otherNode2 = "node2";
 	}
-	int commissioni = atoi(commission);
+	int commissioni = atoi(commission.c_str());
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + guid));
 	const string &olddescription = find_value(r.get_obj(), "description").get_str();
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerlink " + alias + " " + guid + " " + commission + " " + newdescription));
@@ -655,8 +655,8 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 		otherNode1 = "node1";
 		otherNode2 = "node2";
 	}
-	int qtyi = atoi(qty);
-	float pricef = atof(price);
+	int qtyi = atoi(qty.c_str());
+	float pricef = atof(price.c_str());
 	CreateSysRatesIfNotExist();
 	UniValue r;
 	string exclusivereselltmp =  exclusiveResell? "1": "0";
@@ -738,10 +738,10 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	}
 	
 	CreateSysRatesIfNotExist();
-	int qtyi = atoi(qty);
-	int commissionii = atoi(commission);
-	int paymentoptionsi = atoi(paymentoptions);
-	float pricef = atof(price);
+	int qtyi = atoi(qty.c_str());
+	int commissioni = atoi(commission.c_str());
+	int paymentoptionsi = atoi(paymentoptions.c_str());
+	float pricef = atof(price.c_str());
 	UniValue r;
 	string exclusivereselltmp = exclusiveResell? "1": "0";
 	string privatestr = isPrivate ? "1" : "0";
