@@ -298,7 +298,7 @@ void ManageEscrowDialog::on_releaseButton_clicked()
              QMessageBox::Yes|QMessageBox::Cancel,
              QMessageBox::Cancel);
 		if(retval == QMessageBox::Cancel)
-			return false;
+			return;
 	}
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrelease");
@@ -338,7 +338,7 @@ void ManageEscrowDialog::on_refundButton_clicked()
              QMessageBox::Yes|QMessageBox::Cancel,
              QMessageBox::Cancel);
 		if(retval == QMessageBox::Cancel)
-			return false;
+			return;
 	}
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrefund");
