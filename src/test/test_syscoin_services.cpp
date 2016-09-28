@@ -744,8 +744,8 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	float pricef = atof(price);
 	UniValue r;
 	string exclusivereselltmp = exclusiveResell? "1": "0";
-	int privatei = isPrivate ? 1 : 0;
-	string offerupdatestr = "offerupdate sysrates.peg " + aliasname + " " + offerguid + " " + category + " " + title + " " + qtyi + " " + pricef + " " + description + " " + currency + " " + privatei + " " + certguid + " " + exclusivereselltmp + " " + geolocation + " " + safesearch;
+	string privatestr = isPrivate ? "1" : "0";
+	string offerupdatestr = "offerupdate sysrates.peg " + aliasname + " " + offerguid + " " + category + " " + title + " " + qtyi + " " + pricef + " " + description + " " + currency + " " + privatestr + " " + certguid + " " + exclusivereselltmp + " " + geolocation + " " + safesearch;
 	if(commission != "NONE")
 		offerupdatestr += " " + commission;
 	if(paymentoptions != "NONE")
