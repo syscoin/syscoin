@@ -2133,12 +2133,12 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	}
 	if(params.size() >= 15 && !params[14].get_str().empty())
 	{
-		nCommission = boost::lexical_cast<int>(params[13].get_str());
+		nCommission = boost::lexical_cast<int>(params[14].get_str());
 	}
 	unsigned char paymentOptions = PAYMENTOPTION_SYS;
 	if(params.size() >= 16 && !params[15].get_str().empty() && params[15].get_str() != "NONE")
 	{
-		paymentOptions = boost::lexical_cast<unsigned char>(params[14].get_str());
+		paymentOptions = boost::lexical_cast<unsigned char>(params[15].get_str());
 
 	}
 	try {
