@@ -626,6 +626,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	GenerateBlocks(5, "node3");
 
 	string aliasexpirepubkey = AliasNew("node1", "aliasexpire", "somedata");
+	AliasNew("node2", "aliasexpire1", "somedata");
 	string aliasexpirenode2pubkey = AliasNew("node2", "aliasexpirenode2", "somedata");
 	
 	GenerateBlocks(50);
@@ -733,7 +734,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasexpired)
 	// should fail: xfer an cert with expired alias
 	BOOST_CHECK_THROW(CallRPC("node1", "certtransfer " + certguid + " aliasexpire2"), runtime_error);
 	// should fail: xfer an cert to an expired alias even though transferring cert is good
-	BOOST_CHECK_THROW(CallRPC("node1", "certtransfer " + certgoodguid + " aliasexpire"), runtime_error);
+	BOOST_CHECK_THROW(CallRPC("node1", "certtransfer " + certgoodguid + " aliasexpire1"), runtime_error);
 
 
 	// should pass: confirm that the transferring cert is good by transferring to a good alias
