@@ -90,6 +90,9 @@ BOOST_AUTO_TEST_CASE (generate_certoffernew)
 	// should fail: generate a cert offer using different alias for cert and offer
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew node1alias category title 1 0.05 description USD " + certguid1a), runtime_error);
 
+	// should fail: generate a cert offer with invalid payment option
+	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew node1alias category title 1 0.05 description USD " + certguid1a + " 1 0"), runtime_error);
+
 
 }
 BOOST_AUTO_TEST_CASE (generate_offerwhitelists)
