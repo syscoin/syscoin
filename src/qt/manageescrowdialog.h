@@ -35,6 +35,8 @@ private:
 	WalletModel* walletModel;
     Ui::ManageEscrowDialog *ui;
 	QString escrow;
+	QString refundWarningStr;
+	QString releaseWarningStr;
 };
 
 #endif // MANAGEESCROWDIALOG_H

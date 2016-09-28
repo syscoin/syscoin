@@ -17,6 +17,7 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
     ui(new Ui::ManageEscrowDialog), escrow(escrow)
 {
     ui->setupUi(this);
+	refundWarningStr = releaseWarningStr = "";
 	QString theme = GUIUtil::getThemeName();  
 	ui->aboutEscrow->setPixmap(QPixmap(":/images/" + theme + "/escrow"));
 	QString buyer, seller, arbiter, status, offertitle, total;
@@ -71,10 +72,13 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 		{
 			ui->manageInfo2->setText(tr("You are the <b>merchant</b> of the offer held in escrow. The payment of coins have been released to you, you may claim them now. After claiming, please return to this dialog and provide feedback for this escrow transaction. You may also refund the coins back to the buyer."));
 			ui->releaseButton->setText(tr("Claim Payment"));
+			refundWarningStr = tr("Warning: Payment has already been released, are you sure you wish to refund payment back to the buyer?");
 		}
 		else if(escrowType == Arbiter)
 		{
 			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow. The escrow has been released to the merchant. You may re-release this escrow if there are any problems claiming the coins by the merchant. If you were the one to release the coins you will recieve a commission as soon as the merchant claims his payment. You may leave feedback after the money is claimed by the merchant."));
+			releaseWarningStr = tr("Warning: Payment has already been released, are you sure you wish to re-release payment to the merchant?");
+			refundWarningStr = tr("Warning: Payment has already been released, are you sure you wish to refund payment back to the buyer?");
 		}
 	}
 	else if(status == "escrow refunded")
@@ -83,6 +87,7 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 		{
 			ui->manageInfo2->setText(tr("You are the <b>buyer</b> of the offer held in escrow. The coins have been refunded back to you, you may claim them now. After claiming, please return to this dialog and provide feedback for this escrow transaction. You may also release the coins to the merchant."));
 			ui->refundButton->setText(tr("Claim Refund"));
+			releaseWarningStr = tr("Warning: Payment has already been refunded, are you sure you wish to release payment to the merchant?");
 		}
 		else if(escrowType == Seller)
 		{
@@ -94,6 +99,8 @@ ManageEscrowDialog::ManageEscrowDialog(WalletModel* model, const QString &escrow
 		else if(escrowType == Arbiter)
 		{
 			ui->manageInfo2->setText(tr("You are the <b>arbiter</b> of the offer held in escrow. The escrow has been refunded back to the buyer. You may re-issue a refund if there are any problems claiming the coins by the buyer. If you were the one to refund the coins you will recieve a commission as soon as the buyer claims his refund. You may leave feedback after the money is claimed by the buyer. You may also release the coins to the merchant."));
+			releaseWarningStr = tr("Warning: Payment has already been refunded, are you sure you wish to release payment to the merchant?");
+			refundWarningStr = tr("Warning: Payment has already been refunded, are you sure you wish to re-refund payment back to the buyer?");	
 		}
 	}
 	else if(status == "complete")
@@ -285,6 +292,14 @@ void ManageEscrowDialog::on_releaseButton_clicked()
 		onLeaveFeedback();
 		return;
 	}
+	if (releaseWarningStr.size() > 0) {
+		QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Escrow Release"),
+             releaseWarningStr,
+             QMessageBox::Yes|QMessageBox::Cancel,
+             QMessageBox::Cancel);
+		if(retval == QMessageBox::Cancel)
+			return false;
+	}
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrelease");
 	params.push_back(escrow.toStdString());
@@ -317,6 +332,14 @@ void ManageEscrowDialog::on_refundButton_clicked()
     {
 		return;
     }
+	if (refundWarningStr.size() > 0) {
+		QMessageBox::StandardButton retval = QMessageBox::question(this, tr("Confirm Escrow Refund"),
+             refundWarningStr,
+             QMessageBox::Yes|QMessageBox::Cancel,
+             QMessageBox::Cancel);
+		if(retval == QMessageBox::Cancel)
+			return false;
+	}
 	UniValue params(UniValue::VARR);
 	string strMethod = string("escrowrefund");
 	params.push_back(escrow.toStdString());
