@@ -1121,12 +1121,8 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 			throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4064 - " + _("Could not find decode raw BTC transaction"));
 
 	unsigned int nQty = 1;
-
-	try {
-		nQty = params[2].get_int();
-	} catch (std::exception &e) {
-		throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4064 - " + _("Invalid quantity value. Quantity must be less than 4294967296."));
-	}
+	nQty = params[2].get_int();
+	
 
     if (vchMessage.size() <= 0)
         vchMessage = vchFromString("ESCROW");
