@@ -602,7 +602,6 @@ const string OfferLink(const string& node, const string& alias, const string& gu
 		otherNode1 = "node1";
 		otherNode2 = "node2";
 	}
-	int commissioni = atoi(commission);
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerinfo " + guid));
 	const string &olddescription = find_value(r.get_obj(), "description").get_str();
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "offerlink " + alias + " " + guid + " " + commission + " " + newdescription));
@@ -655,8 +654,6 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 		otherNode1 = "node1";
 		otherNode2 = "node2";
 	}
-	int qtyi = atoi(qty);
-	float pricef = atof(price);
 	CreateSysRatesIfNotExist();
 	UniValue r;
 	string exclusivereselltmp =  exclusiveResell? "1": "0";
@@ -738,18 +735,12 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	}
 	
 	CreateSysRatesIfNotExist();
-	int qtyi = atoi(qty);
-	int commissionii = atoi(commission);
-	int paymentoptionsi = atoi(paymentoptions);
-	float pricef = atof(price);
+
 	UniValue r;
 	string exclusivereselltmp = exclusiveResell? "1": "0";
-	int privatei = isPrivate ? 1 : 0;
-	string offerupdatestr = "offerupdate sysrates.peg " + aliasname + " " + offerguid + " " + category + " " + title + " " + qtyi + " " + pricef + " " + description + " " + currency + " " + privatei + " " + certguid + " " + exclusivereselltmp + " " + geolocation + " " + safesearch;
-	if(commission != "NONE")
-		offerupdatestr += " " + commission;
-	if(paymentoptions != "NONE")
-		offerupdatestr += " " + paymentoptions;
+	string privatetmp = isPrivate ? "1" : "0";
+	string offerupdatestr = "offerupdate sysrates.peg " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency + " " + privatetmp + " " + certguid + " " + exclusivereselltmp + " " + geolocation + " " + safesearch + " " + commission + " " + paymentoptions;
+	
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, offerupdatestr));
 	// ensure mempool blocks second tx until it confirms
@@ -770,7 +761,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	if(paymentoptions != "NONE")
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi));
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == atoi(paymentoptions.c_str()));
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == 1);
 	if(currency != "NONE")
@@ -790,7 +781,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	if(paymentoptions != "NONE")
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi));
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == atoi(paymentoptions.c_str()));
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == 1);
 	if(currency != "NONE")
@@ -810,7 +801,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	BOOST_CHECK(find_value(r.get_obj(), "quantity").get_str() == qty);
 	BOOST_CHECK(find_value(r.get_obj(), "description").get_str() == description);
 	if(paymentoptions != "NONE")
-		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == paymentoptionsi));
+		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == atoi(paymentoptions.c_str()));
 	else
 		BOOST_CHECK(find_value(r.get_obj(), "paymentoptions").get_int() == 1);
 	if(currency != "NONE")

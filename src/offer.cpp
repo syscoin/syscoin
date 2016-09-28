@@ -2142,21 +2142,23 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	{
 		strSafeSearch = params[13].get_str();
 	}
-	if(params.size() >= 15 )
+	if(params.size() >= 15 && !params[14].get_str().empty() && params[14].get_str() != "NONE")
 	{
 		nCommission = params[14].get_int();
 	}
 	unsigned char paymentOptions = PAYMENTOPTION_SYS;
-	if(params.size() >= 16  )
+	if(params.size() >= 16 && !params[15].get_str().empty() && params[15].get_str() != "NONE")
 	{
 		paymentOptions = params[15].get_int();
 
 	}
-	
-	nQty = params[5].get_int();
-	fPrice = params[6].get_real();
+	try {
+		nQty = params[5].get_int();
+		fPrice = params[6].get_real();
 
-	
+	} catch (std::exception &e) {
+		throw runtime_error("SYSCOIN_OFFER_RPC_ERROR ERRCODE: 158 - " + _("Invalid price and/or quantity values. Quantity must be less than 4294967296 and greater than or equal to -1"));
+	}
 
 	CAliasIndex alias;
 	CTransaction aliastx;
@@ -2231,9 +2233,9 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		}
 	}
 
-	if(params.size() >= 15)
+	if(params[14].get_str() != "NONE")
 		theOffer.paymentOptions = paymentOptions;
-	if(params.size() >= 16)
+	if(params[15].get_str() != "NONE")
 		theOffer.nCommission = nCommission;
 	theOffer.vchAlias = alias.vchAlias;
 	theOffer.safeSearch = strSafeSearch == "Yes"? true: false;
@@ -2301,7 +2303,11 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	int64_t nHeight = chainActive.Tip()->nHeight;
 	unsigned int nQty = 1;
 	if (params.size() >= 3) {
-		nQty = params[2].get_int();
+		try {
+			nQty = params[2].get_int();
+		} catch (std::exception &e) {
+			throw runtime_error("SYSCOIN_OFFER_RPC_ERROR ERRCODE: 167 - " + _("Quantity must be less than 4294967296"));
+		}
 	}
 
 	// this is a syscoin txn
