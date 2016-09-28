@@ -1534,7 +1534,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 }
 
 UniValue offernew(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() < 8 || params.size() > 14)
+	if (fHelp || params.size() < 7 || params.size() > 14)
 		throw runtime_error(
 		"offernew <aliaspeg> <alias> <category> <title> <quantity> <price> <description> <currency> [cert. guid] [exclusive resell=1] [paymentOptions=1] [geolocation=''] [safe search=Yes] [private='0']\n"
 						"<aliaspeg> Alias peg you wish to use, leave empty to use sysrates.peg.\n"	
@@ -1580,11 +1580,11 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	int nQty;
 
 	try {
-		nQty =  params[4].get_int();
+		nQty =  boost::lexical_cast<int>(params[4].get_str());
 	} catch (std::exception &e) {
 		throw runtime_error("SYSCOIN_OFFER_RPC_ERROR ERRCODE: 135 - " + _("Invalid quantity value, must be less than 4294967296 and greater than or equal to -1"));
 	}
-	fPrice = params[5].get_real();
+	fPrice = boost::lexical_cast<float>(params[5].get_str());
 	vchDesc = vchFromValue(params[6]);
 	CScript scriptPubKeyOrig;
 	CScript scriptPubKey;
@@ -1598,11 +1598,11 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 
 	if(params.size() >= 10)
 	{
-		bExclusiveResell = params[9].get_int() == 1? true: false;
+		bExclusiveResell = boost::lexical_cast<int>(params[9].get_str()) == 1? true: false;
 	}
 	if(params.size() >= 11 && !params[10].get_str().empty() && params[10].get_str() != "NONE")
 	{
-		paymentOptions = params[10].get_int();
+		paymentOptions = boost::lexical_cast<unsigned char>(params[10].get_str());
 
 	}	
 	string strGeoLocation = "";
@@ -1616,7 +1616,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 		strSafeSearch = params[12].get_str();
 	}
 	bool bPrivate = false;
-	if (params.size() >= 14) bPrivate = params[13].get_int() == 1? true: false;
+	if (params.size() >= 14) bPrivate = boost::lexical_cast<int>(params[13].get_str()) == 1? true: false;
 
 	int precision = 2;
 	CAmount nPricePerUnit = convertCurrencyCodeToSyscoin(vchAliasPeg, vchCurrency, fPrice, chainActive.Tip()->nHeight, precision);
@@ -1725,7 +1725,7 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 	if (vchLinkOffer.empty() || !GetTxOfOffer( vchLinkOffer, linkOffer, tx, true))
 		throw runtime_error("SYSCOIN_OFFER_RPC_ERROR ERRCODE: 140 - " + _("Could not find an offer with this guid"));
 
-	int commissionInteger = params[2].get_int();
+	int commissionInteger = boost::lexical_cast<int>(params[2].get_str());
 	if(params.size() >= 4)
 	{
 
@@ -1821,7 +1821,7 @@ UniValue offeraddwhitelist(const UniValue& params, bool fHelp) {
 	int nDiscountPctInteger = 0;
 	
 	if(params.size() >= 3)
-		nDiscountPctInteger = params[2].get_int();
+		nDiscountPctInteger = boost::lexical_cast<int>(params[2].get_str());
 
 	CWalletTx wtx;
 
@@ -2131,11 +2131,11 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	int nCommission = 0;
 	if (params.size() >= 8) vchDesc = vchFromValue(params[7]);
 	if (params.size() >= 9) sCurrencyCode = vchFromValue(params[8]);
-	if (params.size() >= 10) bPrivate = params[9].get_int() == 1? true: false;
+	if (params.size() >= 10) bPrivate = boost::lexical_cast<int>(params[9].get_str()) == 1? true: false;
 	if (params.size() >= 11) vchCert = vchFromValue(params[10]);
 	if(vchCert == vchFromString("nocert"))
 		vchCert.clear();
-	if (params.size() >= 12) bExclusiveResell = params[11].get_int() == 1? true: false;
+	if (params.size() >= 12) bExclusiveResell = boost::lexical_cast<int>(params[11].get_str()) == 1? true: false;
 	if (params.size() >= 13) vchGeoLocation = vchFromValue(params[12]);
 	string strSafeSearch = "Yes";
 	if(params.size() >= 14)
@@ -2144,17 +2144,17 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	}
 	if(params.size() >= 15 && !params[14].get_str().empty() && params[14].get_str() != "NONE")
 	{
-		nCommission = params[14].get_int();
+		nCommission = boost::lexical_cast<int>(params[14].get_str());
 	}
 	unsigned char paymentOptions = PAYMENTOPTION_SYS;
 	if(params.size() >= 16 && !params[15].get_str().empty() && params[15].get_str() != "NONE")
 	{
-		paymentOptions = params[15].get_int();
+		paymentOptions = boost::lexical_cast<unsigned char>(params[15].get_str());
 
 	}
 	try {
-		nQty = params[5].get_int();
-		fPrice = params[6].get_real();
+		nQty = boost::lexical_cast<int>(params[5].get_str());
+		fPrice = boost::lexical_cast<float>(params[6].get_str());
 
 	} catch (std::exception &e) {
 		throw runtime_error("SYSCOIN_OFFER_RPC_ERROR ERRCODE: 158 - " + _("Invalid price and/or quantity values. Quantity must be less than 4294967296 and greater than or equal to -1"));
@@ -2304,7 +2304,7 @@ UniValue offeraccept(const UniValue& params, bool fHelp) {
 	unsigned int nQty = 1;
 	if (params.size() >= 3) {
 		try {
-			nQty = params[2].get_int();
+			nQty = boost::lexical_cast<unsigned int>(params[2].get_str());
 		} catch (std::exception &e) {
 			throw runtime_error("SYSCOIN_OFFER_RPC_ERROR ERRCODE: 167 - " + _("Quantity must be less than 4294967296"));
 		}
@@ -2600,7 +2600,7 @@ UniValue offeracceptfeedback(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchAcceptRand = vchFromValue(params[1]);
 	vector<unsigned char> vchFeedback = vchFromValue(params[2]);
 	try {
-		nRating = params[3].get_int();
+		nRating = boost::lexical_cast<int>(params[3].get_str());
 		if(nRating < 0 || nRating > 5)
 			throw runtime_error("SYSCOIN_OFFER_RPC_ERROR ERRCODE: 187 - " + _("Invalid rating value, must be less than or equal to 5 and greater than or equal to 0"));
 

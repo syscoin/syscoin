@@ -1123,7 +1123,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	unsigned int nQty = 1;
 
 	try {
-		nQty = params[2].get_int();
+		nQty = boost::lexical_cast<unsigned int>(params[2].get_str());
 	} catch (std::exception &e) {
 		throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4064 - " + _("Invalid quantity value. Quantity must be less than 4294967296."));
 	}
@@ -2717,7 +2717,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	if(params.size() > 2)
 	{
 		try {
-			nRatingPrimary = params[2].get_int();
+			nRatingPrimary = boost::lexical_cast<int>(params[2].get_str());
 
 		} catch (std::exception &e) {
 			throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4147 - " + _("Invalid primary rating value"));
@@ -2728,7 +2728,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	if(params.size() > 4)
 	{
 		try {
-			nRatingSecondary = params[4].get_int();
+			nRatingSecondary = boost::lexical_cast<int>(params[4].get_str());
 
 		} catch (std::exception &e) {
 			throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4148 - " + _("Invalid secondary rating value"));
