@@ -208,8 +208,8 @@ BOOST_AUTO_TEST_CASE(addrman_select)
 	// SYSCOIN
     /*BOOST_CHECK(addrman.Select().ToString() == "250.4.6.6:8369");
     BOOST_CHECK(addrman.Select().ToString() == "250.3.2.2:9999");
-    BOOST_CHECK(addrman.Select().ToString() == "250.3.3.3:9999");*/
-    BOOST_CHECK(addrman.Select().ToString() == "250.4.4.4:8369");
+    BOOST_CHECK(addrman.Select().ToString() == "250.3.3.3:9999");
+    BOOST_CHECK(addrman.Select().ToString() == "250.4.4.4:8369");*/
 }
 
 BOOST_AUTO_TEST_CASE(addrman_new_collisions)
