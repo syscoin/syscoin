@@ -3037,7 +3037,6 @@ UniValue escrowinfo(const UniValue& params, bool fHelp) {
 	if(!DecryptMessage(theSellerAlias.vchPubKey, ca.vchPaymentMessage, strMessage))
 		strMessage = string("Encrypted for owner of offer");
 	oEscrow.push_back(Pair("pay_message", strMessage));
-	oEscrow.push_back(Pair("rawpay_message", stringFromVch(ca.vchPaymentMessage)));
 	int expired_block = ca.nHeight + GetEscrowExpirationDepth();
 	int expired = 0;
     if(expired_block < chainActive.Tip()->nHeight && ca.op == OP_ESCROW_COMPLETE)
