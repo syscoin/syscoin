@@ -1048,17 +1048,6 @@ UniValue generateescrowmultisig(const UniValue& params, bool fHelp) {
 		
 		selleralias = theLinkedAlias;
 	}
-	CSyscoinAddress sellerAddress = CSyscoinAddress(stringFromVch(selleralias.vchAlias));
-    CSyscoinExtPubKey sellerExtendedAddress(stringFromVch(selleralias.vchPubKey));
-    CExtPubKey sellerExtendedPubKey = sellerExtendedAddress.GetKey();
-	std::vector<unsigned char> vchNewSellerPubKey(sellerExtendedPubKey.pubkey.begin(), sellerExtendedPubKey.pubkey.end());
-
-	LogPrintf("vchNewSellerPubKey %s sellerAddress %s sellerExtendedAddress %s\n", stringFromVch(vchNewSellerPubKey), sellerAddress.ToString(), sellerExtendedAddress.ToString());
-	CExtPubKey newSellerKey;
-	sellerExtendedPubKey.Derive(newSellerKey, 0x80000000);
-	std::vector<unsigned char> vchNewSellerPubKey1(sellerExtendedPubKey.pubkey.begin(), sellerExtendedPubKey.pubkey.end());
-
-	LogPrintf("vchNewSellerPubKey1 %s\n", stringFromVch(vchNewSellerPubKey1));
 	CPubKey ArbiterPubKey(arbiteralias.vchPubKey);
 	CPubKey SellerPubKey(selleralias.vchPubKey);
 	CPubKey BuyerPubKey(buyeralias.vchPubKey);
@@ -1071,7 +1060,7 @@ UniValue generateescrowmultisig(const UniValue& params, bool fHelp) {
 	// standard 2 of 3 multisig
 	arrayParams.push_back(2);
 	arrayOfKeys.push_back(HexStr(arbiteralias.vchPubKey));
-	arrayOfKeys.push_back(HexStr(vchNewSellerPubKey));
+	arrayOfKeys.push_back(HexStr(selleralias.vchPubKey));
 	arrayOfKeys.push_back(HexStr(buyeralias.vchPubKey));
 	arrayParams.push_back(arrayOfKeys);
 	UniValue resCreate;
