@@ -1837,26 +1837,26 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
 			// check arb fee is paid to arbiter or buyer
 			if(!foundFeePayment)
 			{
-				if(arbiterAddress.aliasName == payoutAddress.aliasName && iVout == nEscrowFee)
+				if(stringFromVch(arbiterAlias.vchName) == payoutAddress.aliasName && iVout == nEscrowFee)
 					foundFeePayment = true;
 			}
 			if(!foundFeePayment)
 			{
-				if(buyerAddress.aliasName == payoutAddress.aliasName && iVout == nEscrowFee)
+				if(stringFromVch(buyerAlias.vchName) == payoutAddress.aliasName && iVout == nEscrowFee)
 					foundFeePayment = true;
 			}	
 			if(!theOffer.vchLinkOffer.empty())
 			{
 				if(!foundCommissionPayment)
 				{
-					if(resellerAddress.aliasName == payoutAddress.aliasName && iVout == nExpectedCommissionAmount)
+					if(stringFromVch(resellerAlias.vchName) == payoutAddress.aliasName && iVout == nExpectedCommissionAmount)
 					{
 						foundCommissionPayment = true;
 					}
 				}
 				if(!foundSellerPayment)
 				{
-					if(sellerAddress.aliasName == payoutAddress.aliasName && iVout == (nExpectedAmount-nExpectedCommissionAmount))
+					if(stringFromVch(sellerAlias.vchName) == payoutAddress.aliasName && iVout == (nExpectedAmount-nExpectedCommissionAmount))
 					{
 						foundSellerPayment = true;
 					}
@@ -1864,7 +1864,7 @@ UniValue escrowclaimrelease(const UniValue& params, bool fHelp) {
 			}
 			else if(!foundSellerPayment)
 			{
-				if(sellerAddress.aliasName == payoutAddress.aliasName && iVout == nExpectedAmount)
+				if(stringFromVch(sellerAlias.vchName) == payoutAddress.aliasName && iVout == nExpectedAmount)
 				{
 					foundSellerPayment = true;
 				}
@@ -2560,7 +2560,7 @@ UniValue escrowclaimrefund(const UniValue& params, bool fHelp) {
 			CSyscoinAddress payoutAddress(strAddress);
 			if(!foundRefundPayment)
 			{
-				if(buyerAddress.aliasName == payoutAddress.aliasName && iVout >= nExpectedAmount)
+				if(stringFromVch(buyerAlias.vchName) == payoutAddress.aliasName && iVout >= nExpectedAmount)
 					foundRefundPayment = true;
 			}	
 		}
