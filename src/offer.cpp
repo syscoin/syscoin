@@ -3018,7 +3018,8 @@ UniValue offeracceptlist(const UniValue& params, bool fHelp) {
 
 			int precision = 2;
 			CAmount nPricePerUnit = convertSyscoinToCurrencyCode(theOffer.vchAliasPeg, theOffer.sCurrencyCode, priceAtTimeOfAccept, theOfferAccept.nAcceptHeight, precision);
-			oOfferAccept.push_back(Pair("systotal", priceAtTimeOfAccept * theOfferAccept.nQty));
+			CAmount sysTotal = priceAtTimeOfAccept * theOfferAccept.nQty;
+			oOfferAccept.push_back(Pair("systotal", sysTotal));
 			oOfferAccept.push_back(Pair("sysprice", priceAtTimeOfAccept));
 			oOfferAccept.push_back(Pair("price", strprintf("%.*f", precision, ValueFromAmount(nPricePerUnit).get_real()))); 	
 			oOfferAccept.push_back(Pair("total", strprintf("%.*f", precision, ValueFromAmount(nPricePerUnit).get_real() * theOfferAccept.nQty )));
@@ -3201,7 +3202,8 @@ UniValue offeracceptinfo(const UniValue& params, bool fHelp) {
 
 		int precision = 2;
 		CAmount nPricePerUnit = convertSyscoinToCurrencyCode(theOffer.vchAliasPeg, theOffer.sCurrencyCode, priceAtTimeOfAccept, theOfferAccept.nAcceptHeight, precision);
-		oOfferAccept.push_back(Pair("systotal", priceAtTimeOfAccept * theOfferAccept.nQty));
+		CAmount sysTotal = priceAtTimeOfAccept * theOfferAccept.nQty;
+		oOfferAccept.push_back(Pair("systotal", sysTotal));
 		oOfferAccept.push_back(Pair("sysprice", priceAtTimeOfAccept));
 		oOfferAccept.push_back(Pair("price", strprintf("%.*f", precision, ValueFromAmount(nPricePerUnit).get_real()))); 	
 		oOfferAccept.push_back(Pair("total", strprintf("%.*f", precision, ValueFromAmount(nPricePerUnit).get_real() * theOfferAccept.nQty )));
