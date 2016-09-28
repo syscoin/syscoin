@@ -860,6 +860,8 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4057 - " + _("Escrow already exists");
 				return true;
 			}
+			if(theEscrow.nQty <= 0)
+				theEscrow.nQty = 1;
 			vector<COffer> myVtxPos;
 			// make sure offer is still valid and then deduct qty
 			if (GetTxAndVtxOfOffer( theEscrow.vchOffer, dbOffer, txOffer, myVtxPos))
@@ -1119,8 +1121,6 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 			throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4064 - " + _("Could not find decode raw BTC transaction"));
 
 	unsigned int nQty = 1;
-	if(atof(params[2].get_str().c_str()) < 0)
-		throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4063 - " + _("Invalid quantity value, must be greater than 0"));
 
 	try {
 		nQty = boost::lexical_cast<unsigned int>(params[2].get_str());
@@ -2717,7 +2717,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	if(params.size() > 2)
 	{
 		try {
-			nRatingPrimary = atoi(params[2].get_str());
+			nRatingPrimary = boost::lexical_cast<int>(params[2].get_str());
 
 		} catch (std::exception &e) {
 			throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4147 - " + _("Invalid primary rating value"));
@@ -2728,7 +2728,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	if(params.size() > 4)
 	{
 		try {
-			nRatingSecondary = atoi(params[4].get_str());
+			nRatingSecondary = boost::lexical_cast<int>(params[4].get_str());
 
 		} catch (std::exception &e) {
 			throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4148 - " + _("Invalid secondary rating value"));

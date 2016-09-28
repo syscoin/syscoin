@@ -1490,7 +1490,7 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 		strSafeSearch = params[3].get_str();
 	}
 	if(params.size() >= 5)
-		nRenewal = atoi(params[4].get_str());
+		nRenewal = boost::lexical_cast<unsigned char>(params[4].get_str());
 	
 	vchPrivateValue = vchFromString(strPrivateValue);
 
@@ -1608,7 +1608,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	}
 	if(params.size() >= 6)
 	{
-		nRenewal = atoi(params[5].get_str());
+		nRenewal = boost::lexical_cast<unsigned char>(params[5].get_str());
 	}
 	EnsureWalletIsUnlocked();
 	CTransaction tx;
