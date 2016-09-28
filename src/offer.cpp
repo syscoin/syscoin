@@ -668,7 +668,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 
 			break;
 		case OP_OFFER_UPDATE:
-			if(theOffer.paymentOptions != PAYMENTOPTION_BTC && theOffer.paymentOptions != PAYMENTOPTION_SYS && theOffer.paymentOptions != PAYMENTOPTION_SYSBTC)
+			if(theOffer.paymentOptions > 0 && theOffer.paymentOptions != PAYMENTOPTION_BTC && theOffer.paymentOptions != PAYMENTOPTION_SYS && theOffer.paymentOptions != PAYMENTOPTION_SYSBTC)
 			{
 				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 19 - " + _("Invalid payment option");
 				return error(errorMessage.c_str());
