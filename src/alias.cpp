@@ -24,6 +24,7 @@
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/xpressive/xpressive_dynamic.hpp>
 #include <boost/foreach.hpp>
+#include <boost/lexical_cast.hpp>
 #include <boost/thread.hpp>
 #include <boost/algorithm/hex.hpp>
 #include <boost/algorithm/string/find.hpp>
