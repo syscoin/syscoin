@@ -603,6 +603,11 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 
 		switch (op) {
 		case OP_OFFER_ACTIVATE:
+			if(theOffer.paymentOptions != PAYMENTOPTION_BTC && theOffer.paymentOptions != PAYMENTOPTION_SYS && theOffer.paymentOptions != PAYMENTOPTION_SYSBTC)
+			{
+				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 19 - " + _("Invalid payment option");
+				return error(errorMessage.c_str());
+			}
 			if(!theOffer.accept.IsNull())
 			{
 				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 19 - " + _("Cannot have accept information on offer activation");
@@ -663,6 +668,11 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 
 			break;
 		case OP_OFFER_UPDATE:
+			if(theOffer.paymentOptions != PAYMENTOPTION_BTC && theOffer.paymentOptions != PAYMENTOPTION_SYS && theOffer.paymentOptions != PAYMENTOPTION_SYSBTC)
+			{
+				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 19 - " + _("Invalid payment option");
+				return error(errorMessage.c_str());
+			}
 			if(!theOffer.accept.IsNull())
 			{
 				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 34 - " + _("Cannot have accept information on offer update");
@@ -2131,7 +2141,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	{
 		strSafeSearch = params[13].get_str();
 	}
-	if(params.size() >= 15 && !params[14].get_str().empty())
+	if(params.size() >= 15 && !params[14].get_str().empty() && params[14].get_str() != "NONE")
 	{
 		nCommission = boost::lexical_cast<int>(params[14].get_str());
 	}
@@ -2222,9 +2232,10 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		}
 	}
 
-	if(paymentOptions > 0)
+	if(params[14].get_str() != "NONE")
 		theOffer.paymentOptions = paymentOptions;
-	theOffer.nCommission = nCommission;
+	if(params[15].get_str() != "NONE")
+		theOffer.nCommission = nCommission;
 	theOffer.vchAlias = alias.vchAlias;
 	theOffer.safeSearch = strSafeSearch == "Yes"? true: false;
 	theOffer.nQty = nQty;

@@ -722,7 +722,7 @@ const string OfferNew(const string& node, const string& aliasname, const string&
 	return guid;
 }
 
-void OfferUpdate(const string& node, const string& aliasname, const string& offerguid, const string& category, const string& title, const string& qty, const string& price, const string& description, const string& currency, const bool isPrivate, const string& certguid, const bool exclusiveResell, const string& geolocation, string safesearch, string paymentoptions) {
+void OfferUpdate(const string& node, const string& aliasname, const string& offerguid, const string& category, const string& title, const string& qty, const string& price, const string& description, const string& currency, const bool isPrivate, const string& certguid, const bool exclusiveResell, const string& geolocation, string safesearch, string commission, string paymentoptions) {
 
 	string otherNode1 = "node2";
 	string otherNode2 = "node3";
@@ -739,7 +739,7 @@ void OfferUpdate(const string& node, const string& aliasname, const string& offe
 	UniValue r;
 	string exclusivereselltmp = exclusiveResell? "1": "0";
 	string privatetmp = isPrivate ? "1" : "0";
-	string offerupdatestr = "offerupdate sysrates.peg " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency + " " + privatetmp + " " + certguid + " " + exclusivereselltmp + " " + geolocation + " " + safesearch + " " + paymentoptions;
+	string offerupdatestr = "offerupdate sysrates.peg " + aliasname + " " + offerguid + " " + category + " " + title + " " + qty + " " + price + " " + description + " " + currency + " " + privatetmp + " " + certguid + " " + exclusivereselltmp + " " + geolocation + " " + safesearch + " " + commission + " " + paymentoptions;
 	
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, offerupdatestr));
