@@ -702,7 +702,7 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 
 	if(params.size() >= 4)
 	{
-		bPrivate = boost::lexical_cast<int>(params[3].get_str()) == 1? true: false;
+		bPrivate = params[3].get_int() == 1? true: false;
 	}
 	string strSafeSearch = "Yes";
 	if(params.size() >= 5)
@@ -807,7 +807,7 @@ UniValue certupdate(const UniValue& params, bool fHelp) {
 	vector<unsigned char> vchCat = vchFromString("certificates");
 	if(params.size() >= 7)
 		vchCat = vchFromValue(params[6]);
-	bool bPrivate = boost::lexical_cast<int>(params[4].get_str()) == 1? true: false;
+	bool bPrivate = params[4].get_int() == 1? true: false;
 	string strSafeSearch = "Yes";
 	if(params.size() >= 6)
 	{
