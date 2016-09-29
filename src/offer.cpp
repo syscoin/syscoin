@@ -2233,9 +2233,9 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 		}
 	}
 
-	if(params[14].get_str() != "NONE")
+	if(params.size() >= 15 && params[14].get_str() != "NONE")
 		theOffer.paymentOptions = paymentOptions;
-	if(params[15].get_str() != "NONE")
+	if(params.size() >= 16 && params[15].get_str() != "NONE")
 		theOffer.nCommission = nCommission;
 	theOffer.vchAlias = alias.vchAlias;
 	theOffer.safeSearch = strSafeSearch == "Yes"? true: false;
