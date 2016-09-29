@@ -1602,7 +1602,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	}
 	if(params.size() >= 11 && !params[10].get_str().empty() && params[10].get_str() != "NONE")
 	{
-		paymentOptions = boost::lexical_cast<unsigned char>(params[10].get_str());
+		paymentOptions = boost::lexical_cast<int>(params[10].get_str());
 
 	}	
 	string strGeoLocation = "";
@@ -2149,7 +2149,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 	unsigned char paymentOptions = PAYMENTOPTION_SYS;
 	if(params.size() >= 16 && !params[15].get_str().empty() && params[15].get_str() != "NONE")
 	{
-		paymentOptions = boost::lexical_cast<unsigned char>(params[15].get_str());
+		paymentOptions = boost::lexical_cast<int>(params[15].get_str());
 
 	}
 	try {

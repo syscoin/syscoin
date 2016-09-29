@@ -83,9 +83,9 @@ BOOST_AUTO_TEST_CASE (generate_certoffernew)
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew node1alias category title 1 0.05 description USD " + certguid2), runtime_error);	
 
 	// generate a cert offer if accepting only BTC
-	OfferNew("node1", "node1aalias", "category", "title", "1", "0.05", "description", "USD", certguid1a, "0", "2");
+	OfferNew("node1", "node1aalias", "category", "title", "1", "0.05", "description", "USD", certguid1a, false, "2");
 	// generate a cert offer if accepting BTC OR SYS
-	OfferNew("node1", "node1aalias", "category", "title", "1", "0.05", "description", "USD", certguid1a, "0", "3");
+	OfferNew("node1", "node1aalias", "category", "title", "1", "0.05", "description", "USD", certguid1a, false, "3");
 
 	// should fail: generate a cert offer using different alias for cert and offer
 	BOOST_CHECK_THROW(r = CallRPC("node1", "offernew node1alias category title 1 0.05 description USD " + certguid1a), runtime_error);
