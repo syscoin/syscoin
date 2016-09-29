@@ -283,7 +283,7 @@ CAmount convertCurrencyCodeToSyscoin(const vector<unsigned char> &vchAliasPeg, c
 			float fTotal = nPrice*nRate;
 			CAmount nTotal = fTotal;
 			if(nTotal != fTotal)
-				sysPrice = AmountFromValue(strprintf("%.*f", precision, nPrice*nRate)); 
+				sysPrice = AmountFromValue(strprintf("%.*f", 8, nPrice*nRate)); 
 			else
 				sysPrice = nTotal;
 

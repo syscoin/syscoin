@@ -291,7 +291,7 @@ public:
 		int lMarkup = 100 + nMarkup;
 		// price * 1.05 for example would be if markup was 5%, price *0.95 if markup was -5 % meaning discount bigger than commission
 		// multiplying price by 100 is ok because sys coin cap is under 1 billion and int64 max range is 9223372036854775807 (9*10^18)
-		// 900 million coins is 9*10^8 (add factor of 8 for COIN) making it 9*10^16, we multiple by 10^2 which makes it 9*10^18, within the limits of int64
+		// 900 million coins is 9*10^8 (add factor of 8 for COIN) making it 9*10^16, we multiplied by 10^2 which makes it 9*10^18, within the limits of int64
 		price = (price*lMarkup) / 100;
 		return price;
 	}
