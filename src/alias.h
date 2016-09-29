@@ -209,7 +209,7 @@ void GetAliasFromAddress(const std::string& strAddress, std::string& strAlias, u
 CAmount convertCurrencyCodeToSyscoin(const std::vector<unsigned char> &vchAliasPeg, const std::vector<unsigned char> &vchCurrencyCode, const float &nPrice, const unsigned int &nHeight, int &precision);
 CAmount convertSyscoinToCurrencyCode(const std::vector<unsigned char> &vchAliasPeg, const std::vector<unsigned char> &vchCurrencyCode, const CAmount &nPrice, const unsigned int &nHeight, int &precision);
 unsigned int QtyOfPendingAcceptsInMempool(const std::vector<unsigned char>& vchToFind);
-std::string getCurrencyToSYSFromAlias(const std::vector<unsigned char> &vchAliasPeg, const std::vector<unsigned char> &vchCurrency, float &nFee, const unsigned int &nHeightToFind, std::vector<std::string>& rateList, int &precision);
+std::string getCurrencyToSYSFromAlias(const std::vector<unsigned char> &vchAliasPeg, const std::vector<unsigned char> &vchCurrency, double &nFee, const unsigned int &nHeightToFind, std::vector<std::string>& rateList, int &precision);
 std::string aliasFromOp(int op);
 std::string GenerateSyscoinGuid();
 bool IsAliasOp(int op);

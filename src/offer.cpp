@@ -540,7 +540,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 	vector<COffer> offerVtxPos;
 	string category;
 	int precision = 2;
-	float nRate;
+	double nRate;
 	string retError = "";
 	// just check is for the memory pool inclusion, here we can stop bad transactions from entering before we get to include them in a block	
 	if(fJustCheck)

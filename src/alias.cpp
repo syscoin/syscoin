@@ -274,7 +274,7 @@ unsigned int QtyOfPendingAcceptsInMempool(const vector<unsigned char>& vchToFind
 CAmount convertCurrencyCodeToSyscoin(const vector<unsigned char> &vchAliasPeg, const vector<unsigned char> &vchCurrencyCode, const float &nPrice, const unsigned int &nHeight, int &precision)
 {
 	CAmount sysPrice = 0;
-	float nRate;
+	double nRate;
 	vector<string> rateList;
 	try
 	{
@@ -296,7 +296,7 @@ CAmount convertCurrencyCodeToSyscoin(const vector<unsigned char> &vchAliasPeg, c
 CAmount convertSyscoinToCurrencyCode(const vector<unsigned char> &vchAliasPeg, const vector<unsigned char> &vchCurrencyCode, const CAmount &nPrice, const unsigned int &nHeight, int &precision)
 {
 	CAmount currencyPrice = 0;
-	float nRate;
+	double nRate;
 	vector<string> rateList;
 	try
 	{
@@ -314,7 +314,7 @@ CAmount convertSyscoinToCurrencyCode(const vector<unsigned char> &vchAliasPeg, c
 		currencyPrice = 0;
 	return currencyPrice;
 }
-string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const vector<unsigned char> &vchCurrency, float &nFee, const unsigned int &nHeightToFind, vector<string>& rateList, int &precision)
+string getCurrencyToSYSFromAlias(const vector<unsigned char> &vchAliasPeg, const vector<unsigned char> &vchCurrency, double &nFee, const unsigned int &nHeightToFind, vector<string>& rateList, int &precision)
 {
 	string currencyCodeToFind = stringFromVch(vchCurrency);
 	// check for alias existence in DB
