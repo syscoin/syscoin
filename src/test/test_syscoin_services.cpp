@@ -980,8 +980,10 @@ const string OfferAccept(const string& ownernode, const string& buyernode, const
 	
 	const UniValue &acceptSellerValue = FindOfferAccept(ownernode, offerguid, acceptguid);
 	CAmount nSellerTotal = find_value(acceptSellerValue, "systotal").get_int64();
-	float discount = atof(find_value(acceptSellerValue, "offer_discount_percentage").get_str().c_str());
-	nTotal = (100-discount)/100 * nTotal;
+	int discount = atoi(find_value(acceptSellerValue, "offer_discount_percentage").get_str().c_str());
+	int lMarkup = 100 - discount;
+	nTotal = (nTotal*lMarkup) / 100;
+
 	BOOST_CHECK(find_value(acceptSellerValue, "pay_message").get_str() == pay_message);
 	
 	

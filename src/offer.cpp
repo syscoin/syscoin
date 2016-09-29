@@ -603,6 +603,11 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 
 		switch (op) {
 		case OP_OFFER_ACTIVATE:
+			if(theOffer.nPrice > (MAX_MONEY/10))
+			{
+				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 72 - " + _("Offer price cannot be more than 90 million SYS");
+				return true;
+			}
 			if(theOffer.paymentOptions != PAYMENTOPTION_BTC && theOffer.paymentOptions != PAYMENTOPTION_SYS && theOffer.paymentOptions != PAYMENTOPTION_SYSBTC)
 			{
 				errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 19 - " + _("Invalid payment option");
@@ -861,6 +866,11 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 									
 					// user can't update safety level after creation
 					theOffer.safetyLevel = dbOffer.safetyLevel;
+					if(theOffer.nPrice > (MAX_MONEY/10))
+					{
+						errorMessage = "SYSCOIN_OFFER_CONSENSUS_ERROR: ERRCODE: 72 - " + _("Offer price cannot be more than 90 million SYS");
+						return true;
+					}
 					if(!theOffer.vchCert.empty())
 					{
 						CTransaction txCert;
