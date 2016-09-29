@@ -1490,13 +1490,13 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 
 	string strPrivateValue = params.size()>=3?params[2].get_str():"";
 	string strSafeSearch = "Yes";
-	unsigned char nRenewal = 1;
+	int nRenewal = 1;
 	if(params.size() >= 4)
 	{
 		strSafeSearch = params[3].get_str();
 	}
 	if(params.size() >= 5)
-		nRenewal = boost::lexical_cast<unsigned char>(params[4].get_str());
+		nRenewal = boost::lexical_cast<int>(params[4].get_str());
 	
 	vchPrivateValue = vchFromString(strPrivateValue);
 
@@ -1595,7 +1595,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	string strPrivateValue = params.size()>=3 && params[2].get_str().size() > 0?params[2].get_str():"";
 	vchPrivateValue = vchFromString(strPrivateValue);
 	vector<unsigned char> vchPubKeyByte;
-	unsigned char nRenewal = 1;
+	int nRenewal = 1;
 	CWalletTx wtx;
 	CAliasIndex updateAlias;
 	const CWalletTx* wtxIn;
@@ -1614,7 +1614,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	}
 	if(params.size() >= 6)
 	{
-		nRenewal = boost::lexical_cast<unsigned char>(params[5].get_str());
+		nRenewal = boost::lexical_cast<int>(params[5].get_str());
 	}
 	EnsureWalletIsUnlocked();
 	CTransaction tx;
