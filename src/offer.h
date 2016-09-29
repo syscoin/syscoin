@@ -288,11 +288,9 @@ public:
 			nDiscount = 0;
 		// nMarkup is a percentage, commission minus discount
 		char nMarkup = nCommission - nDiscount;
-		// round markup to 2 decimals to avoid floating point precision errors
-		float fMarkup = 1 + nMarkup/100.0f;
-		fMarkup = ((int)(fMarkup * 100 + .5) / 100.0);
+		int lMarkup = 100 + nMarkup;
 		// price * 1.05 for example would be if markup was 5%, price *0.95 if markup was -5 % meaning discount bigger than commission
-		price = price*fMarkup;
+		price = (price*lMarkup) / 100;
 		return price;
 	}
 
