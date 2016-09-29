@@ -292,7 +292,7 @@ public:
 		float fMarkup = 1 + nMarkup/100.0f;
 		fMarkup = roundf(fMarkup * 100) / 100;
 		// price * 1.05 for example would be if markup was 5%, price *0.95 if markup was -5 % meaning discount bigger than commission
-		price = price*nMarkup;
+		price = price*fMarkup;
 		return price;
 	}
 
