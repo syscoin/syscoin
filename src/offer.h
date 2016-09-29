@@ -123,7 +123,7 @@ public:
         return *this;
     }
 
-    inlinefriend bool operator!=(const COfferLinkWhitelistEntry &a, const COfferLinkWhitelistEntry &b) {
+    inline friend bool operator!=(const COfferLinkWhitelistEntry &a, const COfferLinkWhitelistEntry &b) {
         return !(a == b);
     }
     
