@@ -58,7 +58,7 @@ public:
 		READWRITE(vchMessage);
 	}
 
-    friend bool operator==(const COfferAccept &a, const COfferAccept &b) {
+    inline friend bool operator==(const COfferAccept &a, const COfferAccept &b) {
         return (
 		a.vchAcceptRand == b.vchAcceptRand
         && a.txHash == b.txHash
@@ -73,7 +73,7 @@ public:
         );
     }
 
-    COfferAccept operator=(const COfferAccept &b) {
+    inline COfferAccept operator=(const COfferAccept &b) {
 		vchAcceptRand = b.vchAcceptRand;
         txHash = b.txHash;
         nHeight = b.nHeight;
@@ -87,12 +87,12 @@ public:
         return *this;
     }
 
-    friend bool operator!=(const COfferAccept &a, const COfferAccept &b) {
+    inline friend bool operator!=(const COfferAccept &a, const COfferAccept &b) {
         return !(a == b);
     }
 
-    void SetNull() { vchMessage.clear(); feedback.clear(); vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerAlias.clear();}
-    bool IsNull() const { return (vchMessage.empty() && feedback.empty() && vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 && nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerAlias.empty()); }
+    inline void SetNull() { vchMessage.clear(); feedback.clear(); vchAcceptRand.clear(); nHeight = nAcceptHeight = nPrice = nQty = 0; txHash.SetNull(); txBTCId.SetNull(); vchBuyerAlias.clear();}
+    inline bool IsNull() const { return (vchMessage.empty() && feedback.empty() && vchAcceptRand.empty() && txHash.IsNull() && nHeight == 0 && nAcceptHeight == 0 && nPrice == 0 && nQty == 0 && txBTCId.IsNull() && vchBuyerAlias.empty()); }
 
 };
 class COfferLinkWhitelistEntry {
@@ -110,25 +110,25 @@ public:
 		READWRITE(VARINT(nDiscountPct));
 	}
 
-    friend bool operator==(const COfferLinkWhitelistEntry &a, const COfferLinkWhitelistEntry &b) {
+    inline friend bool operator==(const COfferLinkWhitelistEntry &a, const COfferLinkWhitelistEntry &b) {
         return (
            a.aliasLinkVchRand == b.aliasLinkVchRand
 		&& a.nDiscountPct == b.nDiscountPct
         );
     }
 
-    COfferLinkWhitelistEntry operator=(const COfferLinkWhitelistEntry &b) {
+    inline COfferLinkWhitelistEntry operator=(const COfferLinkWhitelistEntry &b) {
     	aliasLinkVchRand = b.aliasLinkVchRand;
 		nDiscountPct = b.nDiscountPct;
         return *this;
     }
 
-    friend bool operator!=(const COfferLinkWhitelistEntry &a, const COfferLinkWhitelistEntry &b) {
+    inlinefriend bool operator!=(const COfferLinkWhitelistEntry &a, const COfferLinkWhitelistEntry &b) {
         return !(a == b);
     }
     
-    void SetNull() { aliasLinkVchRand.clear(); nDiscountPct = 0;}
-    bool IsNull() const { return (aliasLinkVchRand.empty() && nDiscountPct == 0); }
+    inline void SetNull() { aliasLinkVchRand.clear(); nDiscountPct = 0;}
+    inline bool IsNull() const { return (aliasLinkVchRand.empty() && nDiscountPct == 0); }
 
 };
 class COfferLinkWhitelist {
@@ -146,7 +146,7 @@ public:
 		READWRITE(bExclusiveResell);
 
 	}
-    bool GetLinkEntryByHash(const std::vector<unsigned char> &ahash, COfferLinkWhitelistEntry &entry) {
+    inline bool GetLinkEntryByHash(const std::vector<unsigned char> &ahash, COfferLinkWhitelistEntry &entry) {
     	entry.SetNull();
 		for(unsigned int i=0;i<entries.size();i++) {
     		if(entries[i].aliasLinkVchRand == ahash) {
@@ -156,7 +156,7 @@ public:
     	}
     	return false;
     }
-    bool RemoveWhitelistEntry(const std::vector<unsigned char> &ahash) {
+    inline bool RemoveWhitelistEntry(const std::vector<unsigned char> &ahash) {
     	for(unsigned int i=0;i<entries.size();i++) {
     		if(entries[i].aliasLinkVchRand == ahash) {
     			return entries.erase(entries.begin()+i) != entries.end();
@@ -164,7 +164,7 @@ public:
     	}
     	return false;
     }	
-    void PutWhitelistEntry(const COfferLinkWhitelistEntry &theEntry) {
+    inline void PutWhitelistEntry(const COfferLinkWhitelistEntry &theEntry) {
     	for(unsigned int i=0;i<entries.size();i++) {
     		COfferLinkWhitelistEntry entry = entries[i];
     		if(theEntry.aliasLinkVchRand == entry.aliasLinkVchRand) {
@@ -174,7 +174,7 @@ public:
     	}
     	entries.push_back(theEntry);
     }
-    friend bool operator==(const COfferLinkWhitelist &a, const COfferLinkWhitelist &b) {
+    inline friend bool operator==(const COfferLinkWhitelist &a, const COfferLinkWhitelist &b) {
         return (
            a.entries == b.entries
 		&& a.bExclusiveResell == b.bExclusiveResell
@@ -182,18 +182,18 @@ public:
         );
     }
 
-    COfferLinkWhitelist operator=(const COfferLinkWhitelist &b) {
+    inline COfferLinkWhitelist operator=(const COfferLinkWhitelist &b) {
     	entries = b.entries;
 		bExclusiveResell = b.bExclusiveResell;
         return *this;
     }
 
-    friend bool operator!=(const COfferLinkWhitelist &a, const COfferLinkWhitelist &b) {
+    inline friend bool operator!=(const COfferLinkWhitelist &a, const COfferLinkWhitelist &b) {
         return !(a == b);
     }
     
-    void SetNull() { entries.clear();}
-    bool IsNull() const { return (entries.empty());}
+    inline void SetNull() { entries.clear();}
+    inline bool IsNull() const { return (entries.empty());}
 
 };
 class COffer {
@@ -232,7 +232,7 @@ public:
         UnserializeFromTx(tx);
     }
 	// clear everything but the necessary information for an offer to prepare it to go into a txn
-	void ClearOffer()
+	inline void ClearOffer()
 	{
 		accept.SetNull();
 		linkWhitelist.SetNull();
@@ -278,7 +278,7 @@ public:
 	
 				
 	}
-	CAmount GetPrice(const COfferLinkWhitelistEntry& entry=COfferLinkWhitelistEntry()){
+	inline CAmount GetPrice(const COfferLinkWhitelistEntry& entry=COfferLinkWhitelistEntry()){
 		COfferLinkWhitelistEntry  myentry;
 		CAmount price = nPrice;
 		linkWhitelist.GetLinkEntryByHash(entry.aliasLinkVchRand, myentry);
@@ -290,16 +290,16 @@ public:
 		char nMarkup = nCommission - nDiscount;
 		// round markup to 2 decimals to avoid floating point precision errors
 		float fMarkup = 1 + nMarkup/100.0f;
-		fMarkup = roundf(fMarkup * 100) / 100;
+		fMarkup = ((int)(fMarkup * 100 + .5) / 100.0);
 		// price * 1.05 for example would be if markup was 5%, price *0.95 if markup was -5 % meaning discount bigger than commission
 		price = price*fMarkup;
 		return price;
 	}
 
-	void SetPrice(CAmount price){
+	inline void SetPrice(CAmount price){
 		nPrice = price;
 	}
-    void PutToOfferList(std::vector<COffer> &offerList) {
+    inline void PutToOfferList(std::vector<COffer> &offerList) {
         for(unsigned int i=0;i<offerList.size();i++) {
             COffer o = offerList[i];
             if(o.txHash == txHash && o.accept.vchAcceptRand == accept.vchAcceptRand) {
@@ -310,7 +310,7 @@ public:
         offerList.push_back(*this);
     }
 
-    bool GetOfferFromList(std::vector<COffer> &offerList) {
+   inline bool GetOfferFromList(std::vector<COffer> &offerList) {
         if(offerList.size() == 0) return false;
 		COffer myOffer = offerList.front();
 		if(nHeight <= 0)
@@ -330,23 +330,8 @@ public:
         *this = myOffer;
         return true;
     }
-	std::string GetPaymentOptionsString()
-	{
-		if(paymentOptions == PAYMENTOPTION_SYS)
-		{
-			return std::string("SYS");
-		}
-		else if(paymentOptions  == PAYMENTOPTION_BTC)
-		{
-			return std::string("BTC");
-		}
-		else if(paymentOptions == PAYMENTOPTION_SYSBTC)
-		{
-			return std::string("SYS+BTC");
-		}
-		return "";
-	}
-    friend bool operator==(const COffer &a, const COffer &b) {
+	std::string GetPaymentOptionsString();
+    inline friend bool operator==(const COffer &a, const COffer &b) {
         return (
          a.sCategory==b.sCategory
         && a.sTitle == b.sTitle 
@@ -374,7 +359,7 @@ public:
         );
     }
 
-    COffer operator=(const COffer &b) {
+    inline COffer operator=(const COffer &b) {
         sCategory = b.sCategory;
         sTitle = b.sTitle;
         sDescription = b.sDescription;
@@ -402,12 +387,12 @@ public:
         return *this;
     }
 
-    friend bool operator!=(const COffer &a, const COffer &b) {
+    inline friend bool operator!=(const COffer &a, const COffer &b) {
         return !(a == b);
     }
     
-    void SetNull() { vchOffer.clear(); safetyLevel = nHeight = nPrice = nQty = nSold = paymentOptions = 0; safeSearch = true; txHash.SetNull(); bPrivate = false; accept.SetNull(); vchAliasPeg.clear(); sTitle.clear(); sDescription.clear();vchLinkOffer.clear();vchLinkAlias.clear();linkWhitelist.SetNull();sCurrencyCode.clear();offerLinks.clear();nCommission=0;vchAlias.clear();vchCert.clear();vchGeoLocation.clear();}
-    bool IsNull() const { return (vchOffer.empty() && safetyLevel == 0 && safeSearch && vchAlias.empty() && txHash.IsNull() && nHeight == 0 && nPrice == 0 && nQty == 0 && nSold ==0 && linkWhitelist.IsNull() && sTitle.empty() && sDescription.empty() && vchAliasPeg.empty() && offerLinks.empty() && vchGeoLocation.empty() && nCommission == 0 && bPrivate == false && paymentOptions == 0 && sCurrencyCode.empty() && vchLinkOffer.empty() && vchLinkAlias.empty() && vchCert.empty() ); }
+    inline void SetNull() { vchOffer.clear(); safetyLevel = nHeight = nPrice = nQty = nSold = paymentOptions = 0; safeSearch = true; txHash.SetNull(); bPrivate = false; accept.SetNull(); vchAliasPeg.clear(); sTitle.clear(); sDescription.clear();vchLinkOffer.clear();vchLinkAlias.clear();linkWhitelist.SetNull();sCurrencyCode.clear();offerLinks.clear();nCommission=0;vchAlias.clear();vchCert.clear();vchGeoLocation.clear();}
+    inline bool IsNull() const { return (vchOffer.empty() && safetyLevel == 0 && safeSearch && vchAlias.empty() && txHash.IsNull() && nHeight == 0 && nPrice == 0 && nQty == 0 && nSold ==0 && linkWhitelist.IsNull() && sTitle.empty() && sDescription.empty() && vchAliasPeg.empty() && offerLinks.empty() && vchGeoLocation.empty() && nCommission == 0 && bPrivate == false && paymentOptions == 0 && sCurrencyCode.empty() && vchLinkOffer.empty() && vchLinkAlias.empty() && vchCert.empty() ); }
 
     bool UnserializeFromTx(const CTransaction &tx);
 	bool UnserializeFromData(const std::vector<unsigned char> &vchData, const std::vector<unsigned char> &vchHash);

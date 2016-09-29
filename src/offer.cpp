@@ -3625,3 +3625,19 @@ bool GetAcceptByHash(std::vector<COffer> &offerList, COfferAccept &ca, COffer &o
     }
 	return false;
 }
+std::string COffer::GetPaymentOptionsString()
+{
+	if(paymentOptions == PAYMENTOPTION_SYS)
+	{
+		return std::string("SYS");
+	}
+	else if(paymentOptions  == PAYMENTOPTION_BTC)
+	{
+		return std::string("BTC");
+	}
+	else if(paymentOptions == PAYMENTOPTION_SYSBTC)
+	{
+		return std::string("SYS+BTC");
+	}
+	return "";
+}
