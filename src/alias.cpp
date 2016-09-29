@@ -286,9 +286,9 @@ CAmount convertCurrencyCodeToSyscoin(const vector<unsigned char> &vchAliasPeg, c
 			if(myprecision < 8)
 				myprecision += 1;
 			if(nTotal != fTotal)
-				sysPrice = AmountFromValue(strprintf("%.*f", myprecision, nPrice*nRate)); 
+				sysPrice = AmountFromValue(strprintf("%.*f", myprecision, fTotal)); 
 			else
-				sysPrice = nTotal;
+				sysPrice = fCAmount(fTotal);
 
 		}
 	}
