@@ -458,7 +458,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				if(prevOp == OP_ESCROW_COMPLETE)
 				{
-					errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4016 - " + _("Can only an active escrow");
+					errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4016 - " + _("Can only release an active escrow");
 					return error(errorMessage.c_str());
 				}	
 				// Check input
@@ -545,9 +545,9 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				if(vvchArgs[1] == vchFromString("1"))
 				{
-					if(prevOp == OP_ESCROW_COMPLETE)
+					if(prevOp != OP_ESCROW_REFUND || vvchPrevArgs[1] != vchFromString("0"))
 					{
-						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4030 - " + _("Can only refund an active escrow");
+						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4030 - " + _("Can only claim a refunded escrow");
 						return error(errorMessage.c_str());
 					}
 					if(theEscrow.op != OP_ESCROW_COMPLETE)
@@ -559,9 +559,9 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, int nOut, const vector<ve
 				}
 				else
 				{
-					if(prevOp != OP_ESCROW_ACTIVATE)
+					if(prevOp == OP_ESCROW_COMPLETE)
 					{
-						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4032 - " + _("Can only refund an activated escrow");
+						errorMessage = "SYSCOIN_ESCROW_CONSENSUS_ERROR: ERRCODE: 4032 - " + _("Can only refund an active escrow");
 						return error(errorMessage.c_str());
 					}
 					if(theEscrow.op != OP_ESCROW_REFUND)
