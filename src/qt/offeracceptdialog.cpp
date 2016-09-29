@@ -39,28 +39,26 @@ OfferAcceptDialog::OfferAcceptDialog(WalletModel* model, const PlatformStyle *pl
 		ui->cancelButton->setIcon(platformStyle->SingleColorIcon(":/icons/" + theme + "/quit"));
 	}
 	ui->aboutShade->setPixmap(QPixmap(":/images/" + theme + "/about_horizontal"));
-	int precision, sysprecision;
+	int btcprecision, sysprecision;
 	double dblPrice = qstrPrice.toDouble();
 	string strCurrencyCode = currencyCode.toStdString();
 	string strAliasPeg = aliaspeg.toStdString();
 	ui->acceptBtcButton->setEnabled(false);
 	ui->acceptBtcButton->setVisible(false);
-	convertCurrencyCodeToSyscoin(vchFromString(strAliasPeg), vchFromString("SYS"), 0, chainActive.Tip()->nHeight, sysprecision);
-	CAmount iPrice = convertCurrencyCodeToSyscoin(vchFromString(strAliasPeg), vchFromString(strCurrencyCode), dblPrice, chainActive.Tip()->nHeight, precision);
-	string strPrice = strprintf("%.*f", sysprecision, ValueFromAmount(iPrice).get_real()*quantity.toUInt() );
-	price = QString::fromStdString(strPrice);
+	CAmount sysPrice = convertCurrencyCodeToSyscoin(vchFromString(strAliasPeg), vchFromString(strCurrencyCode), dblPrice, chainActive.Tip()->nHeight, sysprecision);
+	CAmount btcPrice = convertSyscoinToCurrencyCode(vchFromString(strAliasPeg), vchFromString("BTC"), sysPrice, chainActive.Tip()->nHeight, btcprecision);
+	strBTCPrice = QString::fromStdString(strprintf("%.*f", btcprecision, ValueFromAmount(btcPrice).get_real()*quantity.toUInt()));
+	strSYSPrice = QString::fromStdString(strprintf("%.*f", sysprecision, ValueFromAmount(sysPrice).get_real()*quantity.toUInt()));
 	ui->escrowDisclaimer->setText(tr("<font color='blue'>Enter an arbiter that is mutally trusted between yourself and the merchant.</font>"));
 	if(paymentOptions == PAYMENTOPTION_BTC || paymentOptions == PAYMENTOPTION_SYSBTC)
 	{
-		string strfPrice = strprintf("%f", dblPrice*quantity.toUInt());
-		fprice = QString::fromStdString(strfPrice);
 		ui->acceptBtcButton->setEnabled(true);
 		ui->acceptBtcButton->setVisible(true);
-		ui->acceptMessage->setText(tr("Are you sure you want to purchase <b>%1</b> of <b>%2</b> from merchant <b>%3</b>? You will be charged <b>%4 SYS (%5 BTC)</b>").arg(quantity).arg(title).arg(sellerAlias).arg(price).arg(fprice));
+		ui->acceptMessage->setText(tr("Are you sure you want to purchase <b>%1</b> of <b>%2</b> from merchant <b>%3</b>? You will be charged <b>%4 %5 (%6 BTC)</b>").arg(quantity).arg(title).arg(sellerAlias).arg(qstrPrice).arg(currencyCode).arg(strBTCPrice));
 	}
 	else
 	{
-		ui->acceptMessage->setText(tr("Are you sure you want to purchase <b>%1</b> of <b>%2</b> from merchant <b>%3</b>? You will be charged <b>%4 SYS</b>").arg(quantity).arg(title).arg(sellerAlias).arg(price));
+		ui->acceptMessage->setText(tr("Are you sure you want to purchase <b>%1</b> of <b>%2</b> from merchant <b>%3</b>? You will be charged <b>%4 %5 (%6 SYS)</b>").arg(quantity).arg(title).arg(sellerAlias).arg(qstrPrice).arg(currencyCode).arg(strSYSPrice));
 	}
 		
 	connect(ui->checkBox,SIGNAL(clicked(bool)),SLOT(onEscrowCheckBoxChanged(bool)));
@@ -104,7 +102,7 @@ void OfferAcceptDialog::acceptBTCPayment()
 {
 	if(!walletModel)
 		return;
-	OfferAcceptDialogBTC dlg(walletModel, platformStyle, this->alias, this->offer, this->quantity, this->notes, this->title, this->currency, this->fprice, this->seller, this->address, this);
+	OfferAcceptDialogBTC dlg(walletModel, platformStyle, this->alias, this->offer, this->quantity, this->notes, this->title, this->currency, this->strBTCPrice, this->seller, this->address, this);
 	if(dlg.exec())
 	{
 		this->offerPaid = dlg.getPaymentStatus();
@@ -162,7 +160,7 @@ void OfferAcceptDialog::acceptOffer()
 				QString offerAcceptTXID = QString::fromStdString(strResult);
 				if(offerAcceptTXID != QString(""))
 				{
-					OfferPayDialog dlg(platformStyle, this->title, this->quantity, this->price, "SYS", this);
+					OfferPayDialog dlg(platformStyle, this->title, this->quantity, this->strSYSPrice, "SYS", this);
 					dlg.exec();
 					this->offerPaid = true;
 					OfferAcceptDialog::accept();
@@ -230,7 +228,7 @@ void OfferAcceptDialog::acceptEscrow()
 				QString escrowTXID = QString::fromStdString(strResult);
 				if(escrowTXID != QString(""))
 				{
-					OfferEscrowDialog dlg(platformStyle, this->title, this->quantity, this->price, this);
+					OfferEscrowDialog dlg(platformStyle, this->title, this->quantity, this->strSYSPrice, "SYS", this);
 					dlg.exec();
 					this->offerPaid = true;
 					OfferAcceptDialog::accept();

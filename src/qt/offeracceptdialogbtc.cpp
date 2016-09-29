@@ -420,7 +420,7 @@ void OfferAcceptDialogBTC::acceptEscrow()
 				QString escrowTXID = QString::fromStdString(strResult);
 				if(escrowTXID != QString(""))
 				{
-					OfferEscrowDialog dlg(platformStyle, this->title, this->quantity, this->price, this);
+					OfferEscrowDialog dlg(platformStyle, this->title, this->quantity, this->price, "BTC", this);
 					dlg.exec();
 					this->offerPaid = true;
 					OfferAcceptDialogBTC::accept();
