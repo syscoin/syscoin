@@ -280,8 +280,7 @@ CAmount convertCurrencyCodeToSyscoin(const vector<unsigned char> &vchAliasPeg, c
 	{
 		if(getCurrencyToSYSFromAlias(vchAliasPeg, vchCurrencyCode, nRate, nHeight, rateList, precision) == "")
 		{
-			float nValue =  boost::lexical_cast<double>(strprintf("%.*f", precision, nPrice*nRate)); 
-			sysPrice = CAmount(nValue*COIN);
+			sysPrice = AmountFromValue(strprintf("%.*f", precision, nPrice*nRate)); 
 		}
 	}
 	catch(...)
