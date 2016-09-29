@@ -1534,7 +1534,7 @@ bool CheckOfferInputs(const CTransaction &tx, int op, int nOut, const vector<vec
 }
 
 UniValue offernew(const UniValue& params, bool fHelp) {
-	if (fHelp || params.size() < 7 || params.size() > 14)
+	if (fHelp || params.size() < 8 || params.size() > 14)
 		throw runtime_error(
 		"offernew <aliaspeg> <alias> <category> <title> <quantity> <price> <description> <currency> [cert. guid] [exclusive resell=1] [paymentOptions=1] [geolocation=''] [safe search=Yes] [private='0']\n"
 						"<aliaspeg> Alias peg you wish to use, leave empty to use sysrates.peg.\n"	
