@@ -21,7 +21,7 @@ extern CRPCTable tableRPC;
 OfferAcceptDialog::OfferAcceptDialog(WalletModel* model, const PlatformStyle *platformStyle, QString aliaspeg, QString alias, QString offer, QString quantity, QString notes, QString title, QString currencyCode, QString qstrPrice, QString sellerAlias, QString address, unsigned char paymentOptions, QWidget *parent) :
     QDialog(parent),
 	walletModel(model),
-    ui(new Ui::OfferAcceptDialog), platformStyle(platformStyle), aliaspeg(aliaspeg), alias(alias), offer(offer), notes(notes), quantity(quantity), title(title), currency(currencyCode), seller(sellerAlias), address(address)
+    ui(new Ui::OfferAcceptDialog), platformStyle(platformStyle), aliaspeg(aliaspeg), qstrPrice(qstrPrice), alias(alias), offer(offer), notes(notes), quantity(quantity), title(title), currency(currencyCode), seller(sellerAlias), address(address)
 {
     ui->setupUi(this);
 	QString theme = GUIUtil::getThemeName();  
@@ -160,7 +160,7 @@ void OfferAcceptDialog::acceptOffer()
 				QString offerAcceptTXID = QString::fromStdString(strResult);
 				if(offerAcceptTXID != QString(""))
 				{
-					OfferPayDialog dlg(platformStyle, this->title, this->quantity, this->strSYSPrice, "SYS", this);
+					OfferPayDialog dlg(platformStyle, this->title, this->quantity, this->qstrPrice, currency, this);
 					dlg.exec();
 					this->offerPaid = true;
 					OfferAcceptDialog::accept();
@@ -228,7 +228,7 @@ void OfferAcceptDialog::acceptEscrow()
 				QString escrowTXID = QString::fromStdString(strResult);
 				if(escrowTXID != QString(""))
 				{
-					OfferEscrowDialog dlg(platformStyle, this->title, this->quantity, this->strSYSPrice, "SYS", this);
+					OfferEscrowDialog dlg(platformStyle, this->title, this->quantity, this->qstrPrice, this->currency, this);
 					dlg.exec();
 					this->offerPaid = true;
 					OfferAcceptDialog::accept();
