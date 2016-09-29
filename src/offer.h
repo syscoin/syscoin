@@ -283,15 +283,16 @@ public:
 		CAmount price = nPrice;
 		linkWhitelist.GetLinkEntryByHash(entry.aliasLinkVchRand, myentry);
 		
-		float fDiscount = myentry.nDiscountPct;
+		char nDiscount = myentry.nDiscountPct;
 		if(myentry.nDiscountPct > 99)
-			fDiscount = 0;
-		// fMarkup is a percentage, commission minus discount
-		float fMarkup = nCommission - fDiscount;
-		
-		// add commission , subtract discount
-		fMarkup = (float)price*(fMarkup / 100.0f);
-		price = price + fMarkup;
+			nDiscount = 0;
+		// nMarkup is a percentage, commission minus discount
+		char nMarkup = nCommission - nDiscount;
+		// round markup to 2 decimals to avoid floating point precision errors
+		float fMarkup = 1 + nMarkup/100.0f;
+		fMarkup = roundf(fMarkup * 100) / 100;
+		// price * 1.05 for example would be if markup was 5%, price *0.95 if markup was -5 % meaning discount bigger than commission
+		price = price*nMarkup;
 		return price;
 	}
 
