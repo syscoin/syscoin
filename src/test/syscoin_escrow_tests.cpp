@@ -107,8 +107,6 @@ BOOST_AUTO_TEST_CASE (generate_escrowrelease_invalid)
 	// seller cant release buyers funds
 	BOOST_CHECK_THROW(CallRPC("node2", "escrowrelease " + guid), runtime_error);
 	EscrowRelease("node1", guid);
-	// try to refund already released escrow
-	BOOST_CHECK_THROW(CallRPC("node2", "escrowrefund " + guid), runtime_error);
 	// cant release already released escrow
 	BOOST_CHECK_THROW(CallRPC("node1", "escrowrelease " + guid), runtime_error);
 	// noone other than seller can claim release
