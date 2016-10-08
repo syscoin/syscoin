@@ -363,7 +363,7 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
             "  },\n"
             "  \"coinbasevalue\" : n,               (numeric) maximum allowable input to coinbase transaction, including the generation award and transaction fees (in Satoshis)\n"
             "  \"coinbasetxn\" : { ... },           (json object) information for coinbase transaction\n"
-            "  \"_target\" : \"xxxx\",               (string) The hash _target\n"
+            "  \"_target\" : \"xxxx\",               (string) The hash target\n" // SYSCOIN reverting to _target standardization
             "  \"mintime\" : xxx,                   (numeric) The minimum timestamp appropriate for next block time in seconds since epoch (Jan 1 1970 GMT)\n"
             "  \"mutable\" : [                      (array of string) list of ways the block template may be changed \n"
             "     \"value\"                         (string) A way the block template may be changed, e.g. 'time', 'transactions', 'prevblock'\n"
@@ -822,7 +822,7 @@ UniValue getauxblock(const UniValue& params, bool fHelp)
             "  \"coinbasevalue\"      (numeric) value of the block's coinbase\n"
             "  \"bits\"               (string) compressed target of the block\n"
             "  \"height\"             (numeric) height of the block\n"
-            "  \"_target\"            (string) _target in reversed byte order, deprecated\n"
+            "  \"_target\"            (string) _target in reversed byte order, deprecated\n" // SYSCOIN reverting to _target standardization
             "}\n"
             "\nResult (with arguments):\n"
             "xxxxx        (boolean) whether the submitted block was correct\n"
@@ -920,7 +920,7 @@ UniValue getauxblock(const UniValue& params, bool fHelp)
         result.push_back(Pair("coinbasevalue", (int64_t)block.vtx[0].vout[0].nValue));
         result.push_back(Pair("bits", strprintf("%08x", block.nBits)));
         result.push_back(Pair("height", static_cast<int64_t> (pindexPrev->nHeight + 1)));
-        result.push_back(Pair("_target", HexStr(BEGIN(target), END(target))));
+        result.push_back(Pair("_target", HexStr(BEGIN(target), END(target)))); // SYSCOIN reverting to _target standardization
 
         return result;
     }
