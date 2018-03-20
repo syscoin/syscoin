@@ -1,0 +1,68 @@
+LITECOIND=syscoind
+S1_FLAGS=
+S2_FLAGS=
+S1=$(LITECOIND) -datadir=C:\sys\nodefarm\1 -daemon=1 $(S1_FLAGS)
+S2=$(LITECOIND) -datadir=C:\sys\nodefarm\2 -daemon=1 $(S2_FLAGS)
+
+start1:
+	$(S1)
+start2:
+	$(S2)
+generate-true:
+	$(S2) setgenerate true
+validate:
+	$(S2) validateaddress TeaJwkRKLDWMZobWcN5r3HUPp2fQUJiuWs	
+generate-false:
+	$(S1) setgenerate false
+aliasinfo:
+	$(S1) aliasinfo test2
+aliaslist:
+	$(S2) aliaslist	
+listtransactions:
+	$(S1) listtransactions
+	$(S2) listtransactions		
+getinfo:
+	$(S1) getinfo
+	$(S2) getinfo
+getbalance:
+	$(S1) getbalance
+	$(S2) getbalance	
+aliasnew1:
+	$(S1) aliasnew test1
+aliasnew2:
+	$(S2) aliasnew test2
+aliasactivate1:
+	$(S1) aliasactivate test1 8550ef0d9efff13c blah
+aliasactivate2:
+	$(S2) aliasactivate test2 5a7f51e076de709600 blah2
+aliasupdate1:
+	$(S1) aliasupdate test1
+aliasupdate2:
+	$(S2) aliasupdate test2
+aliastransfer1:
+	$(S1) aliasupdate test1 blah 
+aliastransfer2:
+	$(S2) aliasupdate test8 test2 test1
+getmininginfo: 
+	$(S1) getmininginfo
+	$(S2) getmininginfo
+sendto1:
+	$(S2) sendtoaddress TjSgRSrJxg6BCEEMmSaLpJ74rEvCR8WBPv 50000
+sendto2:
+	$(S1) sendtoaddress TZJzJzmLe6kGwJ9QyZYsiiFccpMFJYmxxA 50000
+sendtotest1:
+	$(S2) sendtoaddress test1 95827
+sendtotest2:
+	$(S1) sendtoaddress test2 1000		
+getaccountaddress:
+	$(S1) getaccountaddress ""
+	$(S2) getaccountaddress ""
+
+stop:
+	$(S1) stop
+	$(S2) stop
+
+clean:
+	rm -rf 1/cakenet
+	rm -rf 2/cakenet
+	tar zxvf syscoin.tgz

@@ -1,0 +1,16 @@
+cd Syscoin-Qt.app/Contents/Frameworks
+
+install_name_tool -id @executable_path/../Frameworks/libboost_chrono-mt.dylib libboost_chrono-mt.dylib 
+install_name_tool -change /opt/local/lib/libboost_system-mt.dylib @executable_path/../Frameworks/libboost_system-mt.dylib libboost_chrono-mt.dylib 
+
+install_name_tool -id @executable_path/../Frameworks/libboost_filesystem-mt.dylib libboost_filesystem-mt.dylib 
+install_name_tool -change /opt/local/lib/libboost_system-mt.dylib @executable_path/../Frameworks/libboost_system-mt.dylib libboost_filesystem-mt.dylib 
+
+install_name_tool -id @executable_path/../Frameworks/libboost_program_options-mt.dylib libboost_program_options-mt.dylib
+
+install_name_tool -id @executable_path/../Frameworks/libboost_system-mt.dylib libboost_system-mt.dylib
+
+install_name_tool -id @executable_path/../Frameworks/libboost_thread-mt.dylib libboost_thread-mt.dylib
+install_name_tool -change /opt/local/lib/libboost_system-mt.dylib @executable_path/../Frameworks/libboost_system-mt.dylib libboost_thread-mt.dylib
+
+cd ../../../

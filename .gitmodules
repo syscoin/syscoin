@@ -1,0 +1,3 @@
+[submodule "test/rpc-commands/node_modules/node-syscoin"]
+	path = test/rpc-commands/node_modules/node-syscoin
+	url = https://github.com/syscoin/node-syscoin

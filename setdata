@@ -1,0 +1,1 @@
+bzip2 -c -9 $1 | base64 -w 0 | xargs -I XX syscoind setdata XX

@@ -1,23 +1,15 @@
-// Copyright (c) 2012-2015 The Syscoin Core developers
-// Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
-
-#include "wallet/wallet.h"
-#include "wallet/walletdb.h"
-
-#include "test/test_syscoin.h"
-
-#include <stdint.h>
-
-#include <boost/foreach.hpp>
 #include <boost/test/unit_test.hpp>
 
-extern CWallet* pwalletMain;
+#include <boost/foreach.hpp>
 
-BOOST_FIXTURE_TEST_SUITE(accounting_tests, TestingSetup)
+#include "init.h"
+#include "wallet.h"
+#include "walletdb.h"
+
+BOOST_AUTO_TEST_SUITE(accounting_tests)
 
 static void
-GetResults(CWalletDB& walletdb, std::map<CAmount, CAccountingEntry>& results)
+GetResults(CWalletDB& walletdb, std::map<int64, CAccountingEntry>& results)
 {
     std::list<CAccountingEntry> aes;
 
@@ -36,26 +28,24 @@ BOOST_AUTO_TEST_CASE(acc_orderupgrade)
     std::vector<CWalletTx*> vpwtx;
     CWalletTx wtx;
     CAccountingEntry ae;
-    std::map<CAmount, CAccountingEntry> results;
-
-    LOCK(pwalletMain->cs_wallet);
+    std::map<int64, CAccountingEntry> results;
 
     ae.strAccount = "";
     ae.nCreditDebit = 1;
     ae.nTime = 1333333333;
     ae.strOtherAccount = "b";
     ae.strComment = "";
-    pwalletMain->AddAccountingEntry(ae, walletdb);
+    walletdb.WriteAccountingEntry(ae);
 
     wtx.mapValue["comment"] = "z";
-    pwalletMain->AddToWallet(wtx, false, &walletdb);
+    pwalletMain->AddToWallet(wtx);
     vpwtx.push_back(&pwalletMain->mapWallet[wtx.GetHash()]);
     vpwtx[0]->nTimeReceived = (unsigned int)1333333335;
     vpwtx[0]->nOrderPos = -1;
 
     ae.nTime = 1333333336;
     ae.strOtherAccount = "c";
-    pwalletMain->AddAccountingEntry(ae, walletdb);
+    walletdb.WriteAccountingEntry(ae);
 
     GetResults(walletdb, results);
 
@@ -71,7 +61,7 @@ BOOST_AUTO_TEST_CASE(acc_orderupgrade)
     ae.nTime = 1333333330;
     ae.strOtherAccount = "d";
     ae.nOrderPos = pwalletMain->IncOrderPosNext();
-    pwalletMain->AddAccountingEntry(ae, walletdb);
+    walletdb.WriteAccountingEntry(ae);
 
     GetResults(walletdb, results);
 
@@ -85,22 +75,14 @@ BOOST_AUTO_TEST_CASE(acc_orderupgrade)
 
 
     wtx.mapValue["comment"] = "y";
-    {
-        CMutableTransaction tx(wtx);
-        --tx.nLockTime;  // Just to change the hash :)
-        *static_cast<CTransaction*>(&wtx) = CTransaction(tx);
-    }
-    pwalletMain->AddToWallet(wtx, false, &walletdb);
+    --wtx.nLockTime;  // Just to change the hash :)
+    pwalletMain->AddToWallet(wtx);
     vpwtx.push_back(&pwalletMain->mapWallet[wtx.GetHash()]);
     vpwtx[1]->nTimeReceived = (unsigned int)1333333336;
 
     wtx.mapValue["comment"] = "x";
-    {
-        CMutableTransaction tx(wtx);
-        --tx.nLockTime;  // Just to change the hash :)
-        *static_cast<CTransaction*>(&wtx) = CTransaction(tx);
-    }
-    pwalletMain->AddToWallet(wtx, false, &walletdb);
+    --wtx.nLockTime;  // Just to change the hash :)
+    pwalletMain->AddToWallet(wtx);
     vpwtx.push_back(&pwalletMain->mapWallet[wtx.GetHash()]);
     vpwtx[2]->nTimeReceived = (unsigned int)1333333329;
     vpwtx[2]->nOrderPos = -1;
@@ -121,7 +103,7 @@ BOOST_AUTO_TEST_CASE(acc_orderupgrade)
     ae.nTime = 1333333334;
     ae.strOtherAccount = "e";
     ae.nOrderPos = -1;
-    pwalletMain->AddAccountingEntry(ae, walletdb);
+    walletdb.WriteAccountingEntry(ae);
 
     GetResults(walletdb, results);
 

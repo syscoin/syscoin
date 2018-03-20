@@ -1,10 +1,5 @@
-// Copyright (c) 2011-2014 The Syscoin Core developers
-// Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
-
-#ifndef SYSCOIN_QT_MACNOTIFICATIONHANDLER_H
-#define SYSCOIN_QT_MACNOTIFICATIONHANDLER_H
-
+#ifndef MACNOTIFICATIONHANDLER_H
+#define MACNOTIFICATIONHANDLER_H
 #include <QObject>
 
 /** Macintosh-specific notification handler (supports UserNotificationCenter and Growl).
@@ -27,4 +22,4 @@ public:
 };
 
 
-#endif // SYSCOIN_QT_MACNOTIFICATIONHANDLER_H
+#endif // MACNOTIFICATIONHANDLER_H

@@ -1,5 +1,9 @@
-Building Syscoin
+Building SysCoin
 
-See doc/build-*.md for instructions on building syscoind,
+See doc/readme-qt.rst for instructions on building SysCoin-Qt,
+the intended-for-end-users, nice-graphical-interface, reference
+implementation of SysCoin.
+
+See doc/build-*.txt for instructions on building syscoind,
 the intended-for-services, no-graphical-interface, reference
-implementation of Syscoin.
+implementation of SysCoin.

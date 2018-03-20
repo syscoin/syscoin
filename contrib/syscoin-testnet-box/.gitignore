@@ -1,0 +1,13 @@
+# testnet-box blockchains
+*.log
+*.dat
+*.pid
+
+aliases/
+offers/
+certificates/
+chainstate/
+database/
+offers/
+testnet/*
+cakenet/*

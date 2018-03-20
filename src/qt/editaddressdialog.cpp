@@ -1,7 +1,3 @@
-// Copyright (c) 2011-2014 The Syscoin Core developers
-// Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
-
 #include "editaddressdialog.h"
 #include "ui_editaddressdialog.h"
 
@@ -13,10 +9,7 @@
 
 EditAddressDialog::EditAddressDialog(Mode mode, QWidget *parent) :
     QDialog(parent),
-    ui(new Ui::EditAddressDialog),
-    mapper(0),
-    mode(mode),
-    model(0)
+    ui(new Ui::EditAddressDialog), mapper(0), mode(mode), model(0)
 {
     ui->setupUi(this);
 

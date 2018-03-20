@@ -1,17 +1,12 @@
-// Copyright (c) 2011-2015 The Syscoin Core developers
-// Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
-
-#ifndef SYSCOIN_QT_EDITADDRESSDIALOG_H
-#define SYSCOIN_QT_EDITADDRESSDIALOG_H
+#ifndef EDITADDRESSDIALOG_H
+#define EDITADDRESSDIALOG_H
 
 #include <QDialog>
-
-class AddressTableModel;
 
 namespace Ui {
     class EditAddressDialog;
 }
+class AddressTableModel;
 
 QT_BEGIN_NAMESPACE
 class QDataWidgetMapper;
@@ -31,7 +26,7 @@ public:
         EditSendingAddress
     };
 
-    explicit EditAddressDialog(Mode mode, QWidget *parent);
+    explicit EditAddressDialog(Mode mode, QWidget *parent = 0);
     ~EditAddressDialog();
 
     void setModel(AddressTableModel *model);
@@ -40,7 +35,7 @@ public:
     QString getAddress() const;
     void setAddress(const QString &address);
 
-public Q_SLOTS:
+public slots:
     void accept();
 
 private:
@@ -54,4 +49,4 @@ private:
     QString address;
 };
 
-#endif // SYSCOIN_QT_EDITADDRESSDIALOG_H
+#endif // EDITADDRESSDIALOG_H

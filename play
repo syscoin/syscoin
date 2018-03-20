@@ -1,0 +1,1 @@
+echo $1 | base64 -w 0 | xargs -I XX echo XX

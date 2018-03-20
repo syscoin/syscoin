@@ -1,0 +1,1 @@
+syscoind getrawtransaction $1 | xargs -I XX syscoind decoderawtransaction XX | grep -E '"data"' | grep -E -o ': ".*"' | sed -E 's/[": ]//g' | base64 -d | bzip2 -d > $2

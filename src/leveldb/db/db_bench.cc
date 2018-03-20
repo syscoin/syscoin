@@ -128,7 +128,7 @@ class RandomGenerator {
     pos_ = 0;
   }
 
-  Slice Generate(size_t len) {
+  Slice Generate(int len) {
     if (pos_ + len > data_.size()) {
       pos_ = 0;
       assert(len < data_.size());
@@ -139,11 +139,11 @@ class RandomGenerator {
 };
 
 static Slice TrimSpace(Slice s) {
-  size_t start = 0;
+  int start = 0;
   while (start < s.size() && isspace(s[start])) {
     start++;
   }
-  size_t limit = s.size();
+  int limit = s.size();
   while (limit > start && isspace(s[limit-1])) {
     limit--;
   }
@@ -399,7 +399,7 @@ class Benchmark {
     heap_counter_(0) {
     std::vector<std::string> files;
     Env::Default()->GetChildren(FLAGS_db, &files);
-    for (size_t i = 0; i < files.size(); i++) {
+    for (int i = 0; i < files.size(); i++) {
       if (Slice(files[i]).starts_with("heap-")) {
         Env::Default()->DeleteFile(std::string(FLAGS_db) + "/" + files[i]);
       }
@@ -431,7 +431,7 @@ class Benchmark {
         benchmarks = sep + 1;
       }
 
-      // Reset parameters that may be overridden below
+      // Reset parameters that may be overriddden bwlow
       num_ = FLAGS_num;
       reads_ = (FLAGS_reads < 0 ? FLAGS_num : FLAGS_reads);
       value_size_ = FLAGS_value_size;
@@ -811,6 +811,7 @@ class Benchmark {
 
   void SeekRandom(ThreadState* thread) {
     ReadOptions options;
+    std::string value;
     int found = 0;
     for (int i = 0; i < reads_; i++) {
       Iterator* iter = db_->NewIterator(options);

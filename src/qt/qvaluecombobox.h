@@ -1,9 +1,5 @@
-// Copyright (c) 2011-2015 The Syscoin Core developers
-// Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
-
-#ifndef SYSCOIN_QT_QVALUECOMBOBOX_H
-#define SYSCOIN_QT_QVALUECOMBOBOX_H
+#ifndef QVALUECOMBOBOX_H
+#define QVALUECOMBOBOX_H
 
 #include <QComboBox>
 #include <QVariant>
@@ -24,14 +20,14 @@ public:
     /** Specify model role to use as ordinal value (defaults to Qt::UserRole) */
     void setRole(int role);
 
-Q_SIGNALS:
+signals:
     void valueChanged();
 
 private:
     int role;
 
-private Q_SLOTS:
+private slots:
     void handleSelectionChanged(int idx);
 };
 
-#endif // SYSCOIN_QT_QVALUECOMBOBOX_H
+#endif // QVALUECOMBOBOX_H
