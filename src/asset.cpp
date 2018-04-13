@@ -655,7 +655,7 @@ UniValue assetnew(const UniValue& params, bool fHelp) {
 						+ HelpRequiringPassphrase());
     vector<unsigned char> vchName = vchFromString(params[0].get_str());
 	string strName = stringFromVch(vchName);
-	boost::algorithm::to_lower(strName);
+	boost::algorithm::to_upper(strName);
 	vector<unsigned char> vchAlias = vchFromValue(params[1]);
 	vector<unsigned char> vchPubData = vchFromString(params[2].get_str());
 	string strCategory = "assets";

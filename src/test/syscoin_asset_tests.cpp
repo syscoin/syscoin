@@ -328,15 +328,15 @@ BOOST_AUTO_TEST_CASE(generate_assetuppercase)
 	printf("Running generate_assetuppercase...\n");
 	UniValue r;
 	AliasNew("node1", "jagassetuppercase", "data");
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "assetnew UPPERCASE jagassetuppercase data assets 8 false 1 1 0 false ''"));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "assetnew changetouppercase jagassetuppercase data assets 8 false 1 1 0 false ''"));
 	UniValue arr = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "signrawtransaction " + arr[0].get_str()));
 	string hex_str = find_value(r.get_obj(), "hex").get_str();
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscoinsendrawtransaction " + hex_str));
 
 	GenerateBlocks(5);
-	BOOST_CHECK_THROW(r = CallRPC("node1", "assetinfo UPPERCASE false"), runtime_error);
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "assetinfo uppercase false"));
+	BOOST_CHECK_THROW(r = CallRPC("node1", "assetinfo changetouppercase false"), runtime_error);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "assetinfo CHANGETOUPPERCASE false"));
 }
 BOOST_AUTO_TEST_CASE(generate_asset_collect_interest)
 {
