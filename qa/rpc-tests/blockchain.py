@@ -1,5 +1,5 @@
-#!/usr/bin/env python2
-# Copyright (c) 2014-2015 The Bitcoin Core developers
+#!/usr/bin/env python3
+# Copyright (c) 2014-2016 The syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -10,10 +10,9 @@
 
 from decimal import Decimal
 
-from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_framework import syscoinTestFramework
 from test_framework.authproxy import JSONRPCException
 from test_framework.util import (
-    initialize_chain,
     assert_equal,
     assert_raises,
     assert_is_hex_string,
@@ -23,7 +22,7 @@ from test_framework.util import (
 )
 
 
-class BlockchainTest(SyscoinTestFramework):
+class BlockchainTest(syscoinTestFramework):
     """
     Test blockchain-related RPC calls:
 
@@ -32,13 +31,13 @@ class BlockchainTest(SyscoinTestFramework):
 
     """
 
-    def setup_chain(self):
-        print("Initializing test directory " + self.options.tmpdir)
-        initialize_chain(self.options.tmpdir)
+    def __init__(self):
+        super().__init__()
+        self.setup_clean_chain = False
+        self.num_nodes = 1
 
     def setup_network(self, split=False):
-        self.nodes = start_nodes(2, self.options.tmpdir)
-        connect_nodes_bi(self.nodes, 0, 1)
+        self.nodes = start_nodes(self.num_nodes, self.options.tmpdir)
         self.is_network_split = False
         self.sync_all()
 
@@ -51,13 +50,38 @@ class BlockchainTest(SyscoinTestFramework):
         node = self.nodes[0]
         res = node.gettxoutsetinfo()
 
-        assert_equal(res[u'total_amount'], Decimal('98214.28571450'))
-        assert_equal(res[u'transactions'], 200)
-        assert_equal(res[u'height'], 200)
-        assert_equal(res[u'txouts'], 200)
-        assert_equal(res[u'bytes_serialized'], 14273),
-        assert_equal(len(res[u'bestblock']), 64)
-        assert_equal(len(res[u'hash_serialized']), 64)
+        assert_equal(res['total_amount'], Decimal('98214.28571450'))
+        assert_equal(res['transactions'], 200)
+        assert_equal(res['height'], 200)
+        assert_equal(res['txouts'], 200)
+        size = res['disk_size']
+        assert size > 6400
+        assert size < 64000
+        assert_equal(len(res['bestblock']), 64)
+        assert_equal(len(res['hash_serialized_2']), 64)
+
+        print("Test that gettxoutsetinfo() works for blockchain with just the genesis block")
+        b1hash = node.getblockhash(1)
+        node.invalidateblock(b1hash)
+
+        res2 = node.gettxoutsetinfo()
+        assert_equal(res2['transactions'], 0)
+        assert_equal(res2['total_amount'], Decimal('0'))
+        assert_equal(res2['height'], 0)
+        assert_equal(res2['txouts'], 0)
+        assert_equal(res2['bestblock'], node.getblockhash(0))
+        assert_equal(len(res2['hash_serialized_2']), 64)
+
+        print("Test that gettxoutsetinfo() returns the same result after invalidate/reconsider block")
+        node.reconsiderblock(b1hash)
+
+        res3 = node.gettxoutsetinfo()
+        assert_equal(res['total_amount'], res3['total_amount'])
+        assert_equal(res['transactions'], res3['transactions'])
+        assert_equal(res['height'], res3['height'])
+        assert_equal(res['txouts'], res3['txouts'])
+        assert_equal(res['bestblock'], res3['bestblock'])
+        assert_equal(res['hash_serialized_2'], res3['hash_serialized_2'])
 
     def _test_getblockheader(self):
         node = self.nodes[0]
@@ -82,6 +106,7 @@ class BlockchainTest(SyscoinTestFramework):
         assert isinstance(header['mediantime'], int)
         assert isinstance(header['nonce'], int)
         assert isinstance(header['version'], int)
+        assert isinstance(int(header['versionHex'], 16), int)
         assert isinstance(header['difficulty'], Decimal)
 
 if __name__ == '__main__':

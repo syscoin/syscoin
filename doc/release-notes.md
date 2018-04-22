@@ -1,97 +1,122 @@
-Syscoin Core version 0.12.1 is now available from:
+Syscoin Core version 3
+==========================
 
-  <https://www.syscoin.org/downloads/>
+Release is now available from:
+
+  <https://www.syscoin.org/downloads/#wallets>
+
+This is a new minor version release, bringing various bugfixes and other
+improvements.
+
+Please report bugs using the issue tracker at github:
+
+  <https://github.com/syscoin/syscoin/issues>
 
 
+Upgrading and downgrading
+=========================
 
-
-Older releases
+How to Upgrade
 --------------
 
-Syscoin was previously known as Darkcoin.
+If you are running an older version, shut it down. Wait until it has completely
+shut down (which might take a few minutes for older versions), then run the
+installer (on Windows) or just copy over /Applications/Syscoin-Qt (on Mac) or
+syscoind/syscoin-qt (on Linux).
 
-Darkcoin tree 0.8.x was a fork of Litecoin tree 0.8, original name was XCoin
-which was first released on Jan/18/2014.
+Downgrade warning
+-----------------
 
-### Downgrade to a version < 0.12.0
+### Downgrade to a version < 3
 
-Because release 0.12.0 and later will obfuscate the chainstate on every
-fresh sync or reindex, the chainstate is not backwards-compatible with
-pre-0.12 versions of Syscoin Core or other software.
+Because release 0.12.2.2 included the [per-UTXO fix](release-notes/syscoin/release-notes-0.12.2.2.md#per-utxo-fix)
+which changed the structure of the internal database, you will have to reindex
+the database if you decide to use any pre-0.12.2.2 version.
 
-If you want to downgrade after you have done a reindex with 0.12.0 or later,
-you will need to reindex when you first start Syscoin Core version 0.11 or
-earlier.
+Wallet forward or backward compatibility was not affected.
+
+### Downgrade to 0.12.2.2
+
+Downgrading to 0.12.2.2 does not require any additional actions, should be
+fully compatible.
 
 Notable changes
 ===============
 
-Example item
----------------------------------------
+InstantSend fixes
+-----------------
 
-Example text.
+Coin selection could work slightly incorrect in some edge cases which could
+lead to a creation of an InstantSend transaction which only the local wallet
+would consider to be a good candidate for a lock. Such txes was not locked by
+the network but they were creating a confusion on the user side giving an
+impression of a slightly higher InstantSend failure rate.
 
-0.12.1 Change log
-=================
+Another issue fixed in this release is that masternodes could vote for a tx
+that is not going to be accepted to the mempool sometimes. This could lead to
+a situation when user funds would be locked even though InstantSend transaction
+would not show up on the receiving side.
 
-Detailed release notes follow. This overview includes changes that affect
-behavior, not code moves, refactors and string updates. For convenience in locating
-the code changes and accompanying discussion, both the pull request and
-git merge commit are mentioned.
+Fix -liquidityprovider option
+-----------------------------
 
-### RPC and REST
+Turned out that liquidityprovider mixing mode practically stopped working after
+recent improvements in the PrivateSend mixing algorithm due to a suboptimal
+looping which occurs only in this mode (due to a huge number of rounds). To fix
+the issue a small part of the mixing algorithm was reverted to a pre-0.12.2 one
+for this mode only. Regular users were not affected by the issue in any way and
+will continue to use the improved one just like before.
 
-Asm script outputs replacements for OP_NOP2 and OP_NOP3
--------------------------------------------------------
+Other improvements and bug fixes
+--------------------------------
 
-OP_NOP2 has been renamed to OP_CHECKLOCKTIMEVERIFY by [BIP 
-65](https://github.com/syscoin/bips/blob/master/bip-0065.mediawiki)
+This release also fixes a few crashes and compatibility issues.
 
-OP_NOP3 has been renamed to OP_CHECKSEQUENCEVERIFY by [BIP 
-112](https://github.com/syscoin/bips/blob/master/bip-0112.mediawiki)
 
-The following outputs are affected by this change:
-- RPC `getrawtransaction` (in verbose mode)
-- RPC `decoderawtransaction`
-- RPC `decodescript`
-- REST `/rest/tx/` (JSON format)
-- REST `/rest/block/` (JSON format when including extended tx details)
-- `syscoin-tx -json`
+3.0 Change log
+===================
 
-### ZMQ
+See detailed [change log](https://github.com/syscoin/syscoin/compare/v0.12.2.2...syscoin:v0.12.2.3) below.
 
-Each ZMQ notification now contains an up-counting sequence number that allows
-listeners to detect lost notifications.
-The sequence number is always the last element in a multi-part ZMQ notification and
-therefore backward compatible.
-Each message type has its own counter.
-(https://github.com/syscoin/syscoin/pull/7762)
+### Backports:
+- [`068b20bc7`](https://github.com/syscoin/syscoin/commit/068b20bc7) Merge #8256: BUG: bitcoin-qt crash
+- [`f71ab1daf`](https://github.com/syscoin/syscoin/commit/f71ab1daf) Merge #11847: Fixes compatibility with boost 1.66 (#1836)
 
-### Configuration and command-line options
+### PrivateSend:
+- [`fa5fc418a`](https://github.com/syscoin/syscoin/commit/fa5fc418a) Fix -liquidityprovider option (#1829)
+- [`d261575b4`](https://github.com/syscoin/syscoin/commit/d261575b4) Skip existing masternode conections on mixing (#1833)
+- [`21a10057d`](https://github.com/syscoin/syscoin/commit/21a10057d) Protect CKeyHolderStorage via mutex (#1834)
+- [`476888683`](https://github.com/syscoin/syscoin/commit/476888683) Avoid reference leakage in CKeyHolderStorage::AddKey (#1840)
 
-### Block and transaction handling
+### InstantSend:
+- [`d6e2aa843`](https://github.com/syscoin/syscoin/commit/d6e2aa843) Swap iterations and fUseInstantSend parameters in ApproximateBestSubset (#1819)
+- [`c9bafe154`](https://github.com/syscoin/syscoin/commit/c9bafe154) Vote on IS only if it was accepted to mempool (#1826)
 
-### P2P protocol and network code
-
-### Validation
-
-### Build system
-
-### Wallet
-
-### GUI
-
-### Tests and QA
-
-### Miscellaneous
+### Other:
+- [`ada41c3af`](https://github.com/syscoin/syscoin/commit/ada41c3af) Fix crash on exit when -createwalletbackups=0 (#1810)
+- [`63e0e30e3`](https://github.com/syscoin/syscoin/commit/63e0e30e3) bump version to 0.12.2.3 (#1827)
 
 Credits
 =======
 
 Thanks to everyone who directly contributed to this release:
 
+- Alexander Block
+- lodgepole
+- UdjinM6
 
-As well as everyone that helped translating on [Transifex](https://www.transifex.com/projects/p/syscoin/).
+As well as Bitcoin Core Developers and everyone that submitted issues,
+reviewed pull requests or helped translating on
+[Transifex](https://www.transifex.com/projects/p/syscoin/).
+
+
+Older releases
+==============
+
+Syscoin was previously known as Darkcoin.
+
+Darkcoin tree 0.8.x was a fork of Litecoin tree 0.8, original name was XCoin
+which was first released on Jan/18/2014.
 
 Darkcoin tree 0.9.x was the open source implementation of masternodes based on
 the 0.8.x tree and was first released on Mar/13/2014.
@@ -99,15 +124,20 @@ the 0.8.x tree and was first released on Mar/13/2014.
 Darkcoin tree 0.10.x used to be the closed source implementation of Darksend
 which was released open source on Sep/25/2014.
 
-Syscoin Core tree 0.11.x was a fork of Syscoin Core tree 0.9, Darkcoin was rebranded
-to Syscoin.
+Syscoin Core tree 0.11.x was a fork of Bitcoin Core tree 0.9,
+Darkcoin was rebranded to Syscoin.
 
-Syscoin Core tree 0.12.0.x was a fork of Syscoin Core tree 0.10.
+Syscoin Core tree 0.12.0.x was a fork of Bitcoin Core tree 0.10.
 
-These release are considered obsolete. Old changelogs can be found here:
+Syscoin Core tree 0.12.1.x was a fork of Bitcoin Core tree 0.12.
 
-- [v0.12.0](release-notes/syscoin/release-notes-0.12.0.md) released ???/??/2015
-- [v0.11.2](release-notes/syscoin/release-notes-0.11.2.md) released Mar/25/2015
+These release are considered obsolete. Old release notes can be found here:
+
+- [v0.12.2.2](release-notes/syscoin/release-notes-0.12.2.2.md) released Dec/17/2017
+- [v0.12.2](release-notes/syscoin/release-notes-0.12.2.md) released Nov/08/2017
+- [v0.12.1](release-notes/syscoin/release-notes-0.12.1.md) released Feb/06/2017
+- [v0.12.0](release-notes/syscoin/release-notes-0.12.0.md) released Jun/15/2015
+- [v0.11.2](release-notes/syscoin/release-notes-0.11.2.md) released Mar/04/2015
 - [v0.11.1](release-notes/syscoin/release-notes-0.11.1.md) released Feb/10/2015
 - [v0.11.0](release-notes/syscoin/release-notes-0.11.0.md) released Jan/15/2015
 - [v0.10.x](release-notes/syscoin/release-notes-0.10.0.md) released Sep/25/2014

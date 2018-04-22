@@ -1,11 +1,7 @@
-Syscoin Core
-=============
+Syscoin Core 3
+=====================
 
-Setup
----------------------
-Syscoin Core is the original Syscoin client and it builds the backbone of the network. It downloads and, by default, stores the entire history of Syscoin transactions (which is currently more than 100 GBs); depending on the speed of your computer and network connection, the synchronization process can take anywhere from a few hours to a day or more.
-
-To download Syscoin Core, visit [syscoincore.org](https://syscoincore.org/en/releases/).
+This is the official reference wallet for Syscoin digital currency and comprises the backbone of the Syscoin peer-to-peer network. You can [download Syscoin Core](https://www.syscoin.org/downloads/) or [build it yourself](#building) using the guides below.
 
 Running
 ---------------------
@@ -24,35 +20,33 @@ Unpack the files into a directory, and then run syscoin-qt.exe.
 
 ### OS X
 
-Drag Syscoin-Core to your applications folder, and then run Syscoin-Core.
+Drag Syscoin-Qt to your applications folder, and then run Syscoin-Qt.
 
 ### Need Help?
 
-* See the documentation at the [Syscoin Wiki](https://en.syscoin.it/wiki/Main_Page)
+* See the [Syscoin documentation](https://syscoin.atlassian.net/wiki/display/DOC)
 for help and more information.
-* Ask for help on [#syscoin](http://webchat.freenode.net?channels=syscoin) on Freenode. If you don't have an IRC client use [webchat here](http://webchat.freenode.net?channels=syscoin).
-* Ask for help on the [SyscoinTalk](https://syscointalk.org/) forums, in the [Technical Support board](https://syscointalk.org/index.php?board=4.0).
+* Ask for help on [Syscoin Nation Discord](http://syscoinchat.org)
+* Ask for help on the [Syscoin Forum](https://syscoin.org/forum)
 
 Building
 ---------------------
-The following are developer notes on how to build Syscoin on your native platform. They are not complete guides, but include notes on the necessary libraries, compile flags, etc.
+The following are developer notes on how to build Syscoin Core on your native platform. They are not complete guides, but include notes on the necessary libraries, compile flags, etc.
 
-- [Dependencies](dependencies.md)
 - [OS X Build Notes](build-osx.md)
 - [Unix Build Notes](build-unix.md)
 - [Windows Build Notes](build-windows.md)
 - [OpenBSD Build Notes](build-openbsd.md)
-- [NetBSD Build Notes](build-netbsd.md)
 - [Gitian Building Guide](gitian-building.md)
 
 Development
 ---------------------
-The Syscoin repo's [root README](/README.md) contains relevant information on the development process and automated testing.
+The Syscoin Core repo's [root README](/README.md) contains relevant information on the development process and automated testing.
 
 - [Developer Notes](developer-notes.md)
 - [Release Notes](release-notes.md)
 - [Release Process](release-process.md)
-- [Source Code Documentation (External Link)](https://dev.visucore.com/syscoin/doxygen/)
+- Source Code Documentation ***TODO***
 - [Translation Process](translation_process.md)
 - [Translation Strings Policy](translation_strings_policy.md)
 - [Travis CI](travis-ci.md)
@@ -63,14 +57,12 @@ The Syscoin repo's [root README](/README.md) contains relevant information on th
 - [Benchmarking](benchmarking.md)
 
 ### Resources
-* Discuss on the [SyscoinTalk](https://syscointalk.org/) forums, in the [Development & Technical Discussion board](https://syscointalk.org/index.php?board=6.0).
-* Discuss project-specific development on #syscoin-core-dev on Freenode. If you don't have an IRC client use [webchat here](http://webchat.freenode.net/?channels=syscoin-core-dev).
-* Discuss general Syscoin development on #syscoin-dev on Freenode. If you don't have an IRC client use [webchat here](http://webchat.freenode.net/?channels=syscoin-dev).
+* Discuss on the [Syscoin Forum](https://syscoin.org/forum), in the Development & Technical Discussion board.
+* Discuss on [Syscoin Nation Discord](http://syscoinchat.org)
 
 ### Miscellaneous
 - [Assets Attribution](assets-attribution.md)
 - [Files](files.md)
-- [Fuzz-testing](fuzzing.md)
 - [Reduce Traffic](reduce-traffic.md)
 - [Tor Support](tor.md)
 - [Init Scripts (systemd/upstart/openrc)](init.md)

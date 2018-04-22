@@ -1,5 +1,5 @@
-#!/usr/bin/env python2
-# Copyright (c) 2014-2015 The Bitcoin Core developers
+#!/usr/bin/env python3
+# Copyright (c) 2014-2016 The syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -13,11 +13,16 @@
 # but less mature coinbase spends are NOT.
 #
 
-from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_framework import syscoinTestFramework
 from test_framework.util import *
 
 # Create one-input, one-output, no-fee transaction:
-class MempoolSpendCoinbaseTest(SyscoinTestFramework):
+class MempoolSpendCoinbaseTest(syscoinTestFramework):
+
+    def __init__(self):
+        super().__init__()
+        self.num_nodes = 1
+        self.setup_clean_chain = False
 
     def setup_network(self):
         # Just need one node for this test

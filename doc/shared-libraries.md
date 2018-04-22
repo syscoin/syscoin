@@ -33,17 +33,15 @@ The interface is defined in the C header `syscoinconsensus.h` located in  `src/s
 - `syscoinconsensus_SCRIPT_FLAGS_VERIFY_NULLDUMMY` - Enforce NULLDUMMY ([BIP147](https://github.com/syscoin/bips/blob/master/bip-0147.mediawiki))
 - `syscoinconsensus_SCRIPT_FLAGS_VERIFY_CHECKLOCKTIMEVERIFY` - Enable CHECKLOCKTIMEVERIFY ([BIP65](https://github.com/syscoin/bips/blob/master/bip-0065.mediawiki))
 - `syscoinconsensus_SCRIPT_FLAGS_VERIFY_CHECKSEQUENCEVERIFY` - Enable CHECKSEQUENCEVERIFY ([BIP112](https://github.com/syscoin/bips/blob/master/bip-0112.mediawiki))
-- `syscoinconsensus_SCRIPT_FLAGS_VERIFY_WITNESS` - Enable WITNESS ([BIP141](https://github.com/syscoin/bips/blob/master/bip-0141.mediawiki))
 
 ##### Errors
 - `syscoinconsensus_ERR_OK` - No errors with input parameters *(see the return value of `syscoinconsensus_verify_script` for the verification status)*
 - `syscoinconsensus_ERR_TX_INDEX` - An invalid index for `txTo`
 - `syscoinconsensus_ERR_TX_SIZE_MISMATCH` - `txToLen` did not match with the size of `txTo`
 - `syscoinconsensus_ERR_DESERIALIZE` - An error deserializing `txTo`
-- `syscoinconsensus_ERR_AMOUNT_REQUIRED` - Input amount is required if WITNESS is used
 
 ### Example Implementations
-- [NSyscoin](https://github.com/NicolasDorier/NSyscoin/blob/master/NSyscoin/Script.cs#L814) (.NET Bindings)
+- [Nsyscoin](https://github.com/NicolasDorier/Nsyscoin/blob/master/Nsyscoin/Script.cs#L814) (.NET Bindings)
 - [node-libsyscoinconsensus](https://github.com/bitpay/node-libsyscoinconsensus) (Node.js Bindings)
 - [java-libsyscoinconsensus](https://github.com/dexX7/java-libsyscoinconsensus) (Java Bindings)
 - [syscoinconsensus-php](https://github.com/Bit-Wasp/syscoinconsensus-php) (PHP Bindings)

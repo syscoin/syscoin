@@ -1,7 +1,7 @@
 Translations
 ============
 
-The Syscoin-Core project has been designed to support multiple localisations. This makes adding new phrases, and completely new languages easily achievable. For managing all application translations, Syscoin-Core makes use of the Transifex online translation management tool.
+The Syscoin Core project has been designed to support multiple localisations. This makes adding new phrases, and completely new languages easily achievable. For managing all application translations, Syscoin Core makes use of the Transifex online translation management tool.
 
 ### Helping to translate (using Transifex)
 Transifex is setup to monitor the GitHub repo for updates, and when code containing new translations is found, Transifex will process any changes. It may take several hours after a pull-request has been merged, to appear in the Transifex web interface.
@@ -40,6 +40,7 @@ git add src/qt/syscoinstrings.cpp src/qt/locale/syscoin_en.ts
 git commit
 ```
 
+
 ### Creating a Transifex account
 Visit the [Transifex Signup](https://www.transifex.com/signup/) page to create an account. Take note of your username and password, as they will be required to configure the command-line tool.
 
@@ -52,7 +53,7 @@ The client it used to fetch updated translations. If you are having problems, or
 
 `pip install transifex-client`
 
-Setup your Transifex client config as follows. Please *ignore the token field*.
+Setup your transifex client config as follows. Please *ignore the token field*.
 
 ```ini
 nano ~/.transifexrc
@@ -106,6 +107,4 @@ To create a new language template, you will need to edit the languages manifest 
 **Note:** that the language translation file **must end in `.qm`** (the compiled extension), and not `.ts`.
 
 ### Questions and general assistance
-The Syscoin-Core translation maintainers include *tcatm, seone, Diapolo, wumpus and luke-jr*. You can find them, and others, in the Freenode IRC chatroom - `irc.freenode.net #syscoin-core-dev`.
-
-If you are a translator, you should also subscribe to the mailing list, https://groups.google.com/forum/#!forum/syscoin-translators. Announcements will be posted during application pre-releases to notify translators to check for updates.
+Check official forum at [https://www.syscoin.org/forum/topic/syscoin-worldwide-collaboration.88/](https://www.syscoin.org/forum/topic/syscoin-worldwide-collaboration.88/).

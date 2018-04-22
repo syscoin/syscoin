@@ -1,4 +1,4 @@
-dnl Copyright (c) 2013-2015 The Syscoin Core developers
+dnl Copyright (c) 2013-2015 The Bitcoin Core developers
 dnl Distributed under the MIT software license, see the accompanying
 dnl file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,7 +12,7 @@ AC_DEFUN([SYSCOIN_FIND_BDB48],[
     bdbpath=X
     bdb48path=X
     bdbdirlist=
-    for _vn in 4.8 48 4 5 5.3 ''; do
+    for _vn in 4.8 48 4 5 ''; do
       for _pfx in b lib ''; do
         bdbdirlist="$bdbdirlist ${_pfx}db${_vn}"
       done
@@ -64,7 +64,7 @@ AC_DEFUN([SYSCOIN_FIND_BDB48],[
   
   if test "x$BDB_LIBS" = "x"; then
     # TODO: Ideally this could find the library version and make sure it matches the headers being used
-    for searchlib in db_cxx-4.8 db_cxx db4_cxx; do
+    for searchlib in db_cxx-4.8 db_cxx; do
       AC_CHECK_LIB([$searchlib],[main],[
         BDB_LIBS="-l${searchlib}"
         break

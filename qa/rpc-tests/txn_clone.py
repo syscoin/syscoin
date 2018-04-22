@@ -1,5 +1,5 @@
-#!/usr/bin/env python2
-# Copyright (c) 2014-2015 The Bitcoin Core developers
+#!/usr/bin/env python3
+# Copyright (c) 2014-2016 The syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,10 +7,15 @@
 # Test proper accounting with an equivalent malleability clone
 #
 
-from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_framework import syscoinTestFramework
 from test_framework.util import *
 
-class TxnMallTest(SyscoinTestFramework):
+class TxnMallTest(syscoinTestFramework):
+
+    def __init__(self):
+        super().__init__()
+        self.num_nodes = 4
+        self.setup_clean_chain = False
 
     def add_options(self, parser):
         parser.add_option("--mineblock", dest="mine_block", default=False, action="store_true",
@@ -21,7 +26,7 @@ class TxnMallTest(SyscoinTestFramework):
         return super(TxnMallTest, self).setup_network(True)
 
     def run_test(self):
-        # All nodes should start with 12,500 SYS:
+        # All nodes should start with 12,500 DASH:
         starting_balance = 12500
         for i in range(4):
             assert_equal(self.nodes[i].getbalance(), starting_balance)
@@ -53,18 +58,12 @@ class TxnMallTest(SyscoinTestFramework):
         clone_inputs = [{"txid":rawtx1["vin"][0]["txid"],"vout":rawtx1["vin"][0]["vout"]}]
         clone_outputs = {rawtx1["vout"][0]["scriptPubKey"]["addresses"][0]:rawtx1["vout"][0]["value"],
                          rawtx1["vout"][1]["scriptPubKey"]["addresses"][0]:rawtx1["vout"][1]["value"]}
-        clone_raw = self.nodes[0].createrawtransaction(clone_inputs, clone_outputs)
+        clone_locktime = rawtx1["locktime"]
+        clone_raw = self.nodes[0].createrawtransaction(clone_inputs, clone_outputs, clone_locktime)
 
-        # 3 hex manipulations on the clone are required
-
-        # manipulation 1. sequence is at version+#inputs+input+sigstub
-        posseq = 2*(4+1+36+1)
-        seqbe = '%08x' % rawtx1["vin"][0]["sequence"]
-        clone_raw = clone_raw[:posseq] + seqbe[6:8] + seqbe[4:6] + seqbe[2:4] + seqbe[0:2] + clone_raw[posseq + 8:]
-
-        # manipulation 2. createrawtransaction randomizes the order of its outputs, so swap them if necessary.
+        # createrawtransaction randomizes the order of its outputs, so swap them if necessary.
         # output 0 is at version+#inputs+input+sigstub+sequence+#outputs
-        # 400 SYS serialized is 00902f5009000000
+        # 400 DASH serialized is 00902f5009000000
         pos0 = 2*(4+1+36+1+4+1)
         hex400 = "00902f5009000000"
         output_len = 16 + 2 + 2 * int("0x" + clone_raw[pos0 + 16 : pos0 + 16 + 2], 0)
@@ -73,11 +72,6 @@ class TxnMallTest(SyscoinTestFramework):
             output0 = clone_raw[pos0 : pos0 + output_len]
             output1 = clone_raw[pos0 + output_len : pos0 + 2 * output_len]
             clone_raw = clone_raw[:pos0] + output1 + output0 + clone_raw[pos0 + 2 * output_len:]
-
-        # manipulation 3. locktime is after outputs
-        poslt = pos0 + 2 * output_len
-        ltbe = '%08x' % rawtx1["locktime"]
-        clone_raw = clone_raw[:poslt] + ltbe[6:8] + ltbe[4:6] + ltbe[2:4] + ltbe[0:2] + clone_raw[poslt + 8:]
 
         # Use a different signature hash type to sign.  This creates an equivalent but malleated clone.
         # Don't send the clone anywhere yet
@@ -92,7 +86,7 @@ class TxnMallTest(SyscoinTestFramework):
         tx1 = self.nodes[0].gettransaction(txid1)
         tx2 = self.nodes[0].gettransaction(txid2)
 
-        # Node0's balance should be starting balance, plus 500SYS for another
+        # Node0's balance should be starting balance, plus 500DASH for another
         # matured block, minus tx1 and tx2 amounts, and minus transaction fees:
         expected = starting_balance + fund_foo_tx["fee"] + fund_bar_tx["fee"]
         if self.options.mine_block: expected += 500
@@ -136,7 +130,7 @@ class TxnMallTest(SyscoinTestFramework):
         assert_equal(tx1_clone["confirmations"], 2)
         assert_equal(tx2["confirmations"], 1)
 
-        # Check node0's total balance; should be same as before the clone, + 100000 SYS for 2 matured,
+        # Check node0's total balance; should be same as before the clone, + 1000 DASH for 2 matured,
         # less possible orphaned matured subsidy
         expected += 1000
         if (self.options.mine_block): 

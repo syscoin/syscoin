@@ -1,4 +1,4 @@
-Syscoin Core 0.12.1
+Syscoin Core 3
 =====================
 
 Intro

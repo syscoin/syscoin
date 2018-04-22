@@ -1,5 +1,5 @@
-#!/usr/bin/env python2
-# Copyright (c) 2014-2015 The Bitcoin Core developers
+#!/usr/bin/env python3
+# Copyright (c) 2014-2015 The syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,10 +7,15 @@
 
 # Add python-syscoinrpc to module search path:
 
-from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_framework import syscoinTestFramework
 from test_framework.util import *
 
-class KeyPoolTest(SyscoinTestFramework):
+class KeyPoolTest(syscoinTestFramework):
+
+    def __init__(self):
+        super().__init__()
+        self.setup_clean_chain = True
+        self.num_nodes = 1
 
     def run_test(self):
         nodes = self.nodes
@@ -23,7 +28,7 @@ class KeyPoolTest(SyscoinTestFramework):
         nodes[0].encryptwallet('test')
         syscoind_processes[0].wait()
         # Restart node 0
-        nodes[0] = start_node(0, self.options.tmpdir, ['-usehd=1'])
+        nodes[0] = start_node(0, self.options.tmpdir, ['-usehd=1'], redirect_stderr=True)
         # Keep creating keys
         addr = nodes[0].getnewaddress()
         addr_data = nodes[0].validateaddress(addr)
@@ -98,12 +103,8 @@ class KeyPoolTest(SyscoinTestFramework):
         assert_equal(wi['keypoolsize_hd_internal'], 100)
         assert_equal(wi['keypoolsize'], 100)
 
-    def setup_chain(self):
-        print("Initializing test directory "+self.options.tmpdir)
-        initialize_chain_clean(self.options.tmpdir, 1)
-
     def setup_network(self):
-        self.nodes = start_nodes(1, self.options.tmpdir, [['-usehd=1']])
+        self.nodes = start_nodes(1, self.options.tmpdir, [['-usehd=1']], redirect_stderr=True)
 
 if __name__ == '__main__':
     KeyPoolTest().main()
