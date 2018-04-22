@@ -1,18 +1,17 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2014-2017 The Syscoin Core developers
+// Copyright (c) 2009-2015 The Syscoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_PRIMITIVES_BLOCK_H
 #define SYSCOIN_PRIMITIVES_BLOCK_H
-// SYSCOIN auxpow
-#include "auxpow.h"
+
 #include "primitives/transaction.h"
 #include "primitives/pureheader.h"
 #include "serialize.h"
 #include "uint256.h"
 // SYSCOIN for auxpow
+#include "auxpow.h"
 #include <boost/shared_ptr.hpp>
 /** Nodes collect new transactions into a block, hash them into a hash tree,
  * and scan through nonce values to make the block's hash satisfy proof-of-work
@@ -22,18 +21,15 @@
  * of the block.
  */
  // SYSCOIN depends on pureblockheader for auxpow
- // SYSCOIN depends on pureblockheader for auxpow
 class CBlockHeader : public CPureBlockHeader
 {
 public:
-
 	// auxpow (if this is a merge-minded block)
 	boost::shared_ptr<CAuxPow> auxpow;
-
-	CBlockHeader()
-	{
-		SetNull();
-	}
+    CBlockHeader()
+    {
+        SetNull();
+    }
 
 	ADD_SERIALIZE_METHODS;
 
@@ -65,6 +61,11 @@ public:
 	* @param apow Pointer to the auxpow to use or NULL.
 	*/
 	void SetAuxpow(CAuxPow* apow);
+
+    int64_t GetBlockTime() const
+    {
+        return (int64_t)nTime;
+    }
 };
 
 
@@ -72,7 +73,7 @@ class CBlock : public CBlockHeader
 {
 public:
     // network and disk
-    std::vector<CTransaction> vtx;
+    std::vector<CTransactionRef> vtx;
 
     // memory only
     mutable CTxOut txoutMasternode; // masternode payment
@@ -93,7 +94,7 @@ public:
     ADD_SERIALIZE_METHODS;
 
     template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
+    inline void SerializationOp(Stream& s, Operation ser_action) {
         READWRITE(*(CBlockHeader*)this);
         READWRITE(vtx);
     }
@@ -143,8 +144,9 @@ struct CBlockLocator
     ADD_SERIALIZE_METHODS;
 
     template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
-        if (!(nType & SER_GETHASH))
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        int nVersion = s.GetVersion();
+        if (!(s.GetType() & SER_GETHASH))
             READWRITE(nVersion);
         READWRITE(vHave);
     }

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 The Dash Core developers
+// Copyright (c) 2014-2017 The Syscoin Core developers
 // Copyright (c) 2015-2017 The Syscoin Core developers
 
 /*
@@ -95,7 +95,7 @@
  *          -> DAO
  *              -> COMPANY, COMMITTEE, FOUNDATION, ..
  *              -> GROUP1 (CORE)
- *                  - USER : EVAN DUFFIELD
+ *                  - USER : EVAN satoshiIELD
  *                      -> CONTRACT1 (INTERNAL CONTRACT)
  *                      -> PROJECT1
  *              -> PROJECT1
