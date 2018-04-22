@@ -57,6 +57,7 @@ string certFromOp(int op) {
 bool CCert::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
         CDataStream dsCert(vchData, SER_NETWORK, PROTOCOL_VERSION);
+		dsCert << vchData;
         dsCert >> *this;
 
 		vector<unsigned char> vchCertData;

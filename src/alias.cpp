@@ -693,7 +693,8 @@ void GetAddress(const CAliasIndex& alias, CSyscoinAddress* address,CScript& scri
 }
 bool CAliasIndex::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
-        CDataStream dsAlias(vchData, SER_NETWORK, PROTOCOL_VERSION);
+        CDataStream dsAlias(SER_NETWORK, PROTOCOL_VERSION);
+		dsAlias << vchData;
         dsAlias >> *this;
 
 		vector<unsigned char> vchAliasData;

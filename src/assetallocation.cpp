@@ -47,7 +47,8 @@ string assetAllocationFromOp(int op) {
 }
 bool CAssetAllocation::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
-        CDataStream dsAsset(vchData, SER_NETWORK, PROTOCOL_VERSION);
+        CDataStream dsAsset(SER_NETWORK, PROTOCOL_VERSION);
+		dsAsset << vchData;
         dsAsset >> *this;
 
 		vector<unsigned char> vchAssetData;
