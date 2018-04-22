@@ -49,7 +49,7 @@ class CAliasUnprunable
 
 	ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
+    inline void SerializationOp(Stream& s, Operation ser_action) {
 		READWRITE(vchGUID);
 		READWRITE(VARINT(nExpireTime));
 	}
@@ -84,7 +84,7 @@ public:
 
 	ADD_SERIALIZE_METHODS;
 	template <typename Stream, typename Operation>
-	inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
+	inline void SerializationOp(Stream& s, Operation ser_action) {
 		READWRITE(aliasLinkVchRand);
 		READWRITE(VARINT(nDiscountPct));
 	}
@@ -123,7 +123,7 @@ public:
 
 	ADD_SERIALIZE_METHODS;
 	template <typename Stream, typename Operation>
-	inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
+	inline void SerializationOp(Stream& s, Operation ser_action) {
 		READWRITE(entries);
 	}
 	bool GetLinkEntryByHash(const std::vector<unsigned char> &ahash, COfferLinkWhitelistEntry &entry) const;
@@ -189,9 +189,10 @@ public:
 		vchAddress.clear();
 		offerWhitelist.SetNull();
 	}
+
 	ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
-	inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {        
+	inline void SerializationOp(Stream& s, Operation ser_action) {        
 		READWRITE(txHash);
 		READWRITE(VARINT(nHeight));
 		READWRITE(vchPublicValue);
