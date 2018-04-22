@@ -75,7 +75,7 @@ endif
 
 .PHONY: FORCE check-symbols check-security
 # syscoin core #
-SYSCOIN_CORE_H = \  
+SYSCOIN_CORE_H = \ 
   alias.h \
   offer.h \
   cert.h \
