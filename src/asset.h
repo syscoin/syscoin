@@ -15,7 +15,6 @@ class CWalletTx;
 class CTransaction;
 class CReserveKey;
 class CCoinsViewCache;
-class CCoins;
 class CBlock;
 class CAliasIndex;
 

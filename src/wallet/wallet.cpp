@@ -2869,6 +2869,7 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
     std::vector<COutput> vCoins(vAvailableCoins);
 	// SYSCOIN
 	std::set<std::pair<const CWalletTx*, uint32_t> > setPresetCoins;
+	uint256 blockhash;
 	if (coinControl && coinControl->HasSelected())
 	{
 		LOCK2(cs_main, mempool.cs);
@@ -2892,7 +2893,7 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 				continue;
 			if (mempool.mapNextTx.find(outpoint) != mempool.mapNextTx.end())
 				continue;
-			if (!GetSyscoinTransaction(coins->nHeight, outpoint.hash, tx, hashBlock, Params().GetConsensus()))
+			if (!GetTransaction(coins->nHeight, outpoint.hash, tx, blockhash, Params().GetConsensus()))
 				continue;
 			nValueRet += coins->vout[outpoint.n].nValue;
 			CWalletTx *wtx = new CWalletTx(pwalletMain, tx);

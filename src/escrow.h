@@ -12,7 +12,6 @@ class CWalletTx;
 class CTransaction;
 class CReserveKey;
 class CCoinsViewCache;
-class CCoins;
 class CBlock;
 bool CheckEscrowInputs(const CTransaction &tx, int op,const std::vector<std::vector<unsigned char> > &vvchArgs, const std::vector<std::vector<unsigned char> > &vvchAliasArgs, bool fJustCheck, int nHeight, std::string &errorMessage, bool bSanityCheck=false);
 bool DecodeEscrowTx(const CTransaction& tx, int& op, std::vector<std::vector<unsigned char> >& vvch);

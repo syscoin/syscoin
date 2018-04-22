@@ -46,47 +46,6 @@ mapAliasRegistrationsType mapAliasRegistrations;
 mapAliasRegistrationsDataType mapAliasRegistrationData;
 extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl* coinControl, bool fUseInstantSend=false, bool transferAlias=false);
 unsigned int MAX_ALIAS_UPDATES_PER_BLOCK = 10;
-bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut, const Consensus::Params& consensusParams)
-{
-	if(nHeight < 0 || nHeight > chainActive.Height())
-		return false;
-	CBlockIndex *pindexSlow = NULL; 
-	LOCK(cs_main);
-	pindexSlow = chainActive[nHeight];
-    if (pindexSlow) {
-        CBlock block;
-        if (ReadBlockFromDisk(block, pindexSlow, consensusParams)) {
-            BOOST_FOREACH(const CTransaction &tx, block.vtx) {
-                if (tx.GetHash() == hash) {
-                    txOut = tx;
-                    return true;
-                }
-            }
-        }
-    }
-	return false;
-}
-bool GetSyscoinTransaction(int nHeight, const uint256 &hash, CTransaction &txOut, uint256 &hashBlock, const Consensus::Params& consensusParams)
-{
-	if(nHeight < 0 || nHeight > chainActive.Height())
-		return false;
-	CBlockIndex *pindexSlow = NULL; 
-	LOCK(cs_main);
-	pindexSlow = chainActive[nHeight];
-    if (pindexSlow) {
-        CBlock block;
-        if (ReadBlockFromDisk(block, pindexSlow, consensusParams)) {
-            BOOST_FOREACH(const CTransaction &tx, block.vtx) {
-                if (tx.GetHash() == hash) {
-                    txOut = tx;
-					hashBlock = pindexSlow->GetBlockHash();
-                    return true;
-                }
-            }
-        }
-    }
-	return false;
-}
 uint64_t GetAliasExpiration(const CAliasIndex& alias) {
 	// dont prune by default, set nHeight to future time
 	uint64_t nTime = chainActive.Tip()->GetMedianTimePast() + 1;
@@ -306,17 +265,18 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 		errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5002 - " + _("Too many outputs for this Syscoin transaction");
 		return error(errorMessage.c_str());
 	}
-	const CCoins *pprevCoins;
-	int prevOutputIndex = 0;
+	const Coin pprevCoins;
 	if(fJustCheck || op != OP_ALIAS_ACTIVATE)
 	{
 		// Strict check - bug disallowed
 		for (unsigned int i = 0; i < tx.vin.size(); i++) {
 			vector<vector<unsigned char> > vvch;
 			int pop;
-			const CCoins *prevCoins = GetUTXOCoins(tx.vin[i].prevout);
+			Coin prevCoins;
+			if (!GetUTXOCoin(tx.vin[i].prevout, prevCoins))
+				continue;
 			// ensure inputs are unspent when doing consensus check to add to block
-			if(!prevCoins || !IsSyscoinScript(prevCoins->vout[tx.vin[i].prevout.n].scriptPubKey, pop, vvch))
+			if(!prevCoins.IsSpent() || !IsSyscoinScript(prevCoins.out.scriptPubKey, pop, vvch))
 			{
 				continue;
 			}
@@ -324,7 +284,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 				prevOp = pop;
 				vvchPrevArgs = vvch;
 				pprevCoins = prevCoins;
-				prevOutputIndex = tx.vin[i].prevout.n;
 				break;
 			}
 		}
@@ -334,9 +293,11 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			for (unsigned int i = 0; i < tx.vin.size(); i++) {
 				vector<vector<unsigned char> > vvch;
 				int pop;
-				const CCoins *prevCoins = GetUTXOCoins(tx.vin[i].prevout);
+				Coin prevCoins;
+				if (!GetUTXOCoin(tx.vin[i].prevout, prevCoins))
+					continue;
 				// ensure inputs are unspent when doing consensus check to add to block
-				if (!prevCoins || !IsSyscoinScript(prevCoins->vout[tx.vin[i].prevout.n].scriptPubKey, pop, vvch))
+				if (!prevCoins.IsSpent() || !IsSyscoinScript(prevCoins.out.scriptPubKey, pop, vvch))
 				{
 					continue;
 				}
@@ -479,7 +440,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 		if (op == OP_ALIAS_UPDATE)
 		{
 			CTxDestination aliasDest;
-			if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || !pprevCoins->IsAvailable(prevOutputIndex) || !ExtractDestination(pprevCoins->vout[prevOutputIndex].scriptPubKey, aliasDest))
+			if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || !ExtractDestination(pprevCoins.out.scriptPubKey, aliasDest))
 			{
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Cannot extract destination of alias input");
 				bDestCheckFailed = true;
@@ -968,9 +929,11 @@ bool DecodeAliasTx(const CTransaction& tx, int& op,
 bool FindAliasInTx(const CTransaction& tx, vector<vector<unsigned char> >& vvch) {
 	int op;
 	for (unsigned int i = 0; i < tx.vin.size(); i++) {
-		const CCoins *prevCoins = GetUTXOCoins(tx.vin[i].prevout);
+		Coin prevCoins;
+		if (!GetUTXOCoin(tx.vin[i].prevout, prevCoins))
+			continue;
 		// ensure inputs are unspent when doing consensus check to add to block
-		if (prevCoins && DecodeAliasScript(prevCoins->vout[tx.vin[i].prevout.n].scriptPubKey, op, vvch)) {
+		if (!prevCoins.IsSpent() && DecodeAliasScript(prevCoins.out.scriptPubKey, op, vvch)) {
 			return true;
 		}
 	}

@@ -18,5 +18,6 @@ UniValue RPCConvertNamedValues(const std::string& strMethod, const std::vector<s
  * as well as objects and arrays.
  */
 UniValue ParseNonRFCJSONValue(const std::string& strVal);
-
+extern UniValue getaddressbalance(const UniValue& params, bool fHelp);
+extern UniValue getaddressutxos(const UniValue& params, bool fHelp);
 #endif // SYSCOIN_RPCCLIENT_H
