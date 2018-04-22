@@ -31,6 +31,10 @@
  * Copyright year (2009-this)
  * Todo: update this when changing our copyright comments in the source
  */
+#define BUILD_VERSION(maj, min, rev, build) \
+    DO_STRINGIZE(maj) "." DO_STRINGIZE(min) "." DO_STRINGIZE(rev) "." DO_STRINGIZE(build)
+#define BUILD_DASH_VERSION(maj, min, rev) \
+    DO_STRINGIZE(maj) "." DO_STRINGIZE(min) "." DO_STRINGIZE(rev)
 #define COPYRIGHT_YEAR 2018
 #define SYSCOIN_VERSION BUILD_VERSION(CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_REVISION, CLIENT_VERSION_BUILD)
 #define DASH_VERSION BUILD_DASH_VERSION(DASH_VERSION_MAJOR, DASH_VERSION_MINOR, DASH_VERSION_REVISION)
