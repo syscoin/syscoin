@@ -1193,7 +1193,7 @@ UniValue aliasnewfund(const UniValue& params, bool fHelp) {
 	CMutableTransaction tx;
 	if (!DecodeHexTx(tx, hexstring))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5500 - " + _("Could not send raw transaction: Cannot decode transaction from hex string"));
-
+	CTransaction txIn(tx);
 	// if addresses are passed in use those, otherwise use whatever is in the wallet
 	UniValue addresses(UniValue::VOBJ);
 	if(params.size() > 1)
@@ -1631,8 +1631,9 @@ UniValue syscoindecoderawtransaction(const UniValue& params, bool fHelp) {
 		"Decode raw syscoin transaction (serialized, hex-encoded) and display information pertaining to the service that is included in the transactiion data output(OP_RETURN)\n"
 				"<hexstring> The transaction hex string.\n");
 	string hexstring = params[0].get_str();
-	CTransaction rawTx;
-	DecodeHexTx(rawTx,hexstring);
+	CMutableTransaction tx;
+	DecodeHexTx(tx,hexstring);
+	CTransaction rawTx(tx);
 	if(rawTx.IsNull())
 	{
 		throw runtime_error("SYSCOIN_RPC_ERROR: ERRCODE: 5512 - " + _("Could not decode transaction"));
@@ -1711,9 +1712,10 @@ UniValue syscoinsendrawtransaction(const UniValue& params, bool fHelp) {
 	bool fInstantSend = false;
 	if (params.size() > 2)
 		fInstantSend = params[2].get_bool();
-	CTransaction tx;
-	if (!DecodeHexTx(tx, hexstring))
+	CMutableTransaction txIn;
+	if (!DecodeHexTx(txIn, hexstring))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5513 - " + _("Could not send raw transaction: Cannot decode transaction from hex string"));
+	CTransaction tx(txIn);
 	if (tx.vin.size() <= 0)
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5514 - " + _("Could not send raw transaction: Inputs are empty"));
 	if (tx.vout.size() <= 0)
@@ -2166,7 +2168,7 @@ UniValue aliaspay(const UniValue& params, bool fHelp) {
 	SendMoneySyscoin(theAlias.vchAlias, vchFromString(""), recipient, vecSend, wtx, &coinControl, fUseInstantSend);
 	
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue aliasaddscript(const UniValue& params, bool fHelp) {
@@ -2261,7 +2263,7 @@ UniValue aliasupdatewhitelist(const UniValue& params, bool fHelp) {
 	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, &coinControl);
 
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue aliasclearwhitelist(const UniValue& params, bool fHelp) {
@@ -2318,7 +2320,7 @@ UniValue aliasclearwhitelist(const UniValue& params, bool fHelp) {
 	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, &coinControl);
 
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 bool DoesAliasExist(const string &strAddress) {

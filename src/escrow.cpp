@@ -1107,7 +1107,7 @@ UniValue escrowbid(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue escrowaddshipping(const UniValue& params, bool fHelp) {
@@ -1183,7 +1183,7 @@ UniValue escrowaddshipping(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(bidderalias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue escrownew(const UniValue& params, bool fHelp) {
@@ -1454,7 +1454,7 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(buyeralias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	res.push_back(stringFromVch(vchEscrow));
 	return res;
 }
@@ -1537,7 +1537,7 @@ UniValue escrowacknowledge(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 
 }
@@ -1800,7 +1800,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 
@@ -1891,7 +1891,7 @@ UniValue escrowcompleterelease(const UniValue& params, bool fHelp) {
 		throw runtime_error(find_value(objError, "message").get_str());
 	}
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue escrowrefund(const UniValue& params, bool fHelp) {
@@ -1996,7 +1996,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 
@@ -2090,7 +2090,7 @@ UniValue escrowcompleterefund(const UniValue& params, bool fHelp) {
 		throw runtime_error(find_value(objError, "message").get_str());
 	}
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue escrowfeedback(const UniValue& params, bool fHelp) {
@@ -2270,7 +2270,7 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue escrowinfo(const UniValue& params, bool fHelp) {

@@ -828,7 +828,7 @@ UniValue assetallocationsend(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue assetallocationcollectinterest(const UniValue& params, bool fHelp) {
@@ -900,7 +900,7 @@ UniValue assetallocationcollectinterest(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue assetallocationinfo(const UniValue& params, bool fHelp) {

@@ -747,7 +747,7 @@ UniValue assetnew(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;	
 	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	res.push_back(stringFromVch(newAsset.vchAsset));
 	return res;
 }
@@ -845,7 +845,7 @@ UniValue assetupdate(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;	
 	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
  	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 
@@ -926,7 +926,7 @@ UniValue assettransfer(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue assetsend(const UniValue& params, bool fHelp) {
@@ -1066,7 +1066,7 @@ UniValue assetsend(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 

@@ -872,7 +872,7 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	coinControl.fAllowWatchOnly = false;
 	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	res.push_back(stringFromVch(vchOffer));
 	return res;
 }
@@ -967,7 +967,7 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	res.push_back(stringFromVch(vchOffer));
 	return res;
 }
@@ -1166,7 +1166,7 @@ UniValue offerupdate(const UniValue& params, bool fHelp) {
 
 	SendMoneySyscoin(offerAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 
