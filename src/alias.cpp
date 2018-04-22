@@ -14,7 +14,7 @@
 #include "util.h"
 #include "random.h"
 #include "wallet/wallet.h"
-#include "rpc/server.h"
+#include "rpc/client.h"
 #include "base58.h"
 #include "txmempool.h"
 #include "txdb.h"
@@ -1009,7 +1009,7 @@ void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 	CRecipient recp = {scriptPubKey, recipient.nAmount, false};
 	recipient = recp;
 	CTxOut txout(recipient.nAmount, scriptPubKey);
-	size_t nSize = txout.GetSerializeSize(SER_DISK, 0) + 148u;
+	size_t nSize = GetSerializeSize(txout, SER_DISK, 0) + 148u;
 	CAmount nFee = 3 * minRelayTxFee.GetFee(nSize);
 	recipient.nAmount = nFee;
 }
@@ -1028,7 +1028,7 @@ CAmount GetDataFee(const CScript& scriptPubKey)
 	CAmount nFee = 0;
 	CRecipient recp = {scriptPubKey, 0, false};
 	CTxOut txout(0, scriptPubKey);
-    size_t nSize = txout.GetSerializeSize(SER_DISK,0)+148u;
+    size_t nSize = GetSerializeSize(txout, SER_DISK,0)+148u;
 	nFee = 1000 * 3 * minRelayTxFee.GetFee(nSize);
 	recp.nAmount = nFee;
 	return recp.nAmount;
@@ -1135,7 +1135,7 @@ UniValue SyscoinListReceived(bool includeempty=true)
 	pwalletMain->AvailableCoins(vecOutputs, false, NULL, includeempty, ALL_COINS, false, true);
 	BOOST_FOREACH(const COutput& out, vecOutputs) {
 		CTxDestination address;
-		if (!ExtractDestination(out.tx->vout[out.i].scriptPubKey, address))
+		if (!ExtractDestination(out.tx->tx->vout[out.i].scriptPubKey, address))
 			continue;
 
 		CSyscoinAddress sysAddress(address);
@@ -1190,10 +1190,10 @@ UniValue aliasnewfund(const UniValue& params, bool fHelp) {
 			+ HelpRequiringPassphrase());
 	EnsureWalletIsUnlocked();
 	const string &hexstring = params[0].get_str();
-	CTransaction txIn;
-	if (!DecodeHexTx(txIn, hexstring))
+	CMutableTransaction tx;
+	if (!DecodeHexTx(tx, hexstring))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5500 - " + _("Could not send raw transaction: Cannot decode transaction from hex string"));
-	CMutableTransaction tx(txIn);
+
 	// if addresses are passed in use those, otherwise use whatever is in the wallet
 	UniValue addresses(UniValue::VOBJ);
 	if(params.size() > 1)
@@ -1483,11 +1483,11 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 		// add the registration input to the alias activation transaction
 		CCoinsViewCache view(pcoinsTip);
 		
-		const CCoins* pcoin = view.AccessCoins(regOut.hash);
-		if (!pcoin) {
+		Coin pcoin = view.AccessCoin(regOut);
+		if (pcoin.IsSpent()) {
 			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5508 - " + _("Cannot find alias registration transaction, please ensure it has confirmed or re-submit the registration transaction again"));
 		}
-		tx.vin.push_back(CTxIn(regOut, pcoin->vout[regOut.n].scriptPubKey));
+		tx.vin.push_back(CTxIn(regOut, pcoin.out.scriptPubKey));
 		for (unsigned int i = 0; i<MAX_ALIAS_UPDATES_PER_BLOCK; i++)
 		{
 			vecSend.push_back(recipient);
@@ -1500,11 +1500,11 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 			{
 				throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 5509 - " + _("This transaction requires a witness but not enough outputs found for witness alias: ") + stringFromVch(vchWitness));
 			}
-			const CCoins* pcoinW = view.AccessCoins(aliasOutPointWitness.hash);
-			if (!pcoinW) {
+			Coin pcoinW = view.AccessCoin(aliasOutPointWitness);
+			if (pcoinW.IsSpent()) {
 				throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5510 - " + _("Cannot find witness transaction"));
 			}
-			tx.vin.push_back(CTxIn(aliasOutPointWitness, pcoinW->vout[aliasOutPointWitness.n].scriptPubKey));
+			tx.vin.push_back(CTxIn(aliasOutPointWitness, pcoinW.out.scriptPubKey));
 		}
 	}
 	else
@@ -1622,7 +1622,7 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	
 	SendMoneySyscoin(vchAlias, vchWitness, recipient, vecSend, wtx, &coinControl, false, transferAlias);
 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(wtx));
+	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue syscoindecoderawtransaction(const UniValue& params, bool fHelp) {
