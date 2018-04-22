@@ -155,7 +155,7 @@ public:
 		uint64_t nTime;
 		if (scriptPubKey.IsUnspendable() && GetTimeToPrune(scriptPubKey, nTime))
 		{
-			if ((nType & SER_GETHASH) || IsSysServiceExpired(nTime))
+			if ((s.GetType() & SER_GETHASH) || IsSysServiceExpired(nTime))
 			{
 				CScript tmp = CScript() << OP_RETURN;
 				READWRITE(*(CScriptBase*)(&tmp));
