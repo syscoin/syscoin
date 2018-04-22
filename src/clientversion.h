@@ -31,6 +31,21 @@
  * Copyright year (2009-this)
  * Todo: update this when changing our copyright comments in the source
  */
+#endif //HAVE_CONFIG_H
+ /**
+ * Converts the parameter X to a string after macro replacement on X has been performed.
+ * Don't merge these into one macro!
+ */
+#define STRINGIZE(X) DO_STRINGIZE(X)
+#define DO_STRINGIZE(X) #X
+// Check that required client information is defined
+#if !defined(CLIENT_VERSION_MAJOR) || !defined(CLIENT_VERSION_MINOR) || !defined(CLIENT_VERSION_REVISION) || !defined(CLIENT_VERSION_BUILD) || !defined(CLIENT_VERSION_IS_RELEASE) || !defined(COPYRIGHT_YEAR)
+#error Client version information missing: version is not defined by syscoin-config.h or in any other way
+#endif
+
+#if !defined(DASH_VERSION_MAJOR) || !defined(DASH_VERSION_MINOR) || !defined(DASH_VERSION_REVISION) 
+#error Dash version information missing: version is not defined by syscoin-config.h or in any other way
+#endif
 #define BUILD_VERSION(maj, min, rev, build) \
     DO_STRINGIZE(maj) "." DO_STRINGIZE(min) "." DO_STRINGIZE(rev) "." DO_STRINGIZE(build)
 #define BUILD_DASH_VERSION(maj, min, rev) \
@@ -38,14 +53,7 @@
 #define COPYRIGHT_YEAR 2018
 #define SYSCOIN_VERSION BUILD_VERSION(CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_REVISION, CLIENT_VERSION_BUILD)
 #define DASH_VERSION BUILD_DASH_VERSION(DASH_VERSION_MAJOR, DASH_VERSION_MINOR, DASH_VERSION_REVISION)
-#endif //HAVE_CONFIG_H
 
-/**
- * Converts the parameter X to a string after macro replacement on X has been performed.
- * Don't merge these into one macro!
- */
-#define STRINGIZE(X) DO_STRINGIZE(X)
-#define DO_STRINGIZE(X) #X
 
 //! Copyright string used in Windows .rc files
 #define COPYRIGHT_STR "2009-" STRINGIZE(COPYRIGHT_YEAR) " The Syscoin Core Developers, 2014-" STRINGIZE(COPYRIGHT_YEAR) " " COPYRIGHT_HOLDERS_FINAL
