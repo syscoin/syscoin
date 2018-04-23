@@ -526,7 +526,7 @@ void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsign
 		if (!errorMessage.empty())
 			throw runtime_error(errorMessage.c_str());
 
-		if (DecodeCertTx(wtxNew, op, vvch))
+		if (DecodeCertTx(*wtxNew.tx, op, vvch))
 		{
 			CheckCertInputs(*wtxNew.tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedCerts, errorMessage, true);
 			if (!errorMessage.empty())
