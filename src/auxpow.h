@@ -83,7 +83,7 @@ public:
 	/**
 	* Actually compute the Merkle branch.  This is used for unit tests when
 	* constructing an auxpow.  It is not needed for actual production, since
-	* we do not care in the Namecoin client how the auxpow is constructed
+	* we do not care in the Syscoin client how the auxpow is constructed
 	* by a miner.
 	*/
 	void InitMerkleBranch(const CBlock& block, int posInBlock);
