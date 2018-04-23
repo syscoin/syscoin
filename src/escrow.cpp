@@ -1346,9 +1346,9 @@ UniValue escrownew(const JSONRPCRequest& request) {
 	CScript redeemScript;
 	try
 	{
-		JSONRPCRequest request;
-		request.params = arrayParams;
-		resCreate = createmultisig(request);
+		JSONRPCRequest request1;
+		request1.params = arrayParams;
+		resCreate = createmultisig(request1);
 	}
 	catch (UniValue& objError)
 	{
@@ -1677,9 +1677,9 @@ UniValue escrowcreaterawtransaction(const JSONRPCRequest& request) {
 	UniValue resCreate;
 	try
 	{
-		JSONRPCRequest request;
-		request.params = arrayCreateParams;
-		resCreate = createrawtransaction(request);
+		JSONRPCRequest request1;
+		request1.params = arrayCreateParams;
+		resCreate = createrawtransaction(request1);
 	}
 	catch (UniValue& objError)
 	{
@@ -1896,9 +1896,9 @@ UniValue escrowcompleterelease(const JSONRPCRequest& request) {
 	{
 		// broadcast the payment transaction to syscoin network if not external transaction
 		if (!extPayment) {
-			JSONRPCRequest request;
-			request.params = sendParams;
-			returnRes = sendrawtransaction(request);
+			JSONRPCRequest request1;
+			request1.params = sendParams;
+			returnRes = sendrawtransaction(request1);
 		}
 	}
 	catch (UniValue& objError)
@@ -2100,9 +2100,9 @@ UniValue escrowcompleterefund(const JSONRPCRequest& request) {
 	{
 		// broadcast the payment transaction to syscoin network if not external transaction
 		if (!extPayment) {
-			JSONRPCRequest request;
-			request.params = sendParams;
-			returnRes = sendrawtransaction(request);
+			JSONRPCRequest request1;
+			request1.params = sendParams;
+			returnRes = sendrawtransaction(request1);
 		}
 	}
 	catch (UniValue& objError)
