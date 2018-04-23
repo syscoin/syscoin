@@ -976,7 +976,7 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 	for (auto& arrivalTime : arrivalTimesSet)
 	{
 		// ensure mempool has this transaction and it is not yet mined, get the transaction in question
-		const CTransaction txRef = mempool.get(arrivalTime.first);
+		const CTransactionRef txRef = mempool.get(arrivalTime.first);
 		const CTransaction &tx = *txRef;
 		if (txRef.IsNull())
 			continue;
