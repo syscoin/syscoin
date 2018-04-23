@@ -210,7 +210,7 @@ public:
     void CheckAndRemove();
 
     bool GetBlockPayee(int nBlockHeight, CScript& payeeRet) const;
-	bool GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeight);
+	bool GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeight) const;
     bool IsTransactionValid(const CTransaction& txNew, int nBlockHeight, const CAmount &nFee, CAmount& nTotalRewardWithMasternodes) const;
     bool IsScheduled(const masternode_info_t& mnInfo, int nNotBlockHeight) const;
 
