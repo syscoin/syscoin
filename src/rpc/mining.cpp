@@ -37,6 +37,7 @@
 #include <univalue.h>
 #include "rpc/mining.h"
 // SYSCOIN
+extern CWallet* pwalletMain;
 bool EnsureWalletIsAvailable(bool avoidException);
 /**
  * Return average network hashes per second based on the last 'lookup' blocks,
@@ -154,6 +155,9 @@ UniValue generateBlocks(std::shared_ptr<CReserveScript> coinbaseScript, int nGen
 
 UniValue generate(const JSONRPCRequest& request)
 {
+	if (!EnsureWalletIsAvailable(request.fHelp)) {
+		return NullUniValue;
+	}
     if (request.fHelp || request.params.size() < 1 || request.params.size() > 2)
         throw std::runtime_error(
             "generate nblocks ( maxtries )\n"
@@ -175,17 +179,17 @@ UniValue generate(const JSONRPCRequest& request)
     }
 
 	std::shared_ptr<CReserveScript> coinbase_script;
-	pwallet->GetScriptForMining(coinbase_script);
+	pwalletMain->GetScriptForMining(coinbase_script);
 
     // If the keypool is exhausted, no script is returned at all.  Catch this.
-    if (!coinbaseScript)
+    if (!coinbase_script)
         throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, "Error: Keypool ran out, please call keypoolrefill first");
 
     //throw an error if no script was provided
-    if (coinbaseScript->reserveScript.empty())
+    if (coinbase_script->reserveScript.empty())
         throw JSONRPCError(RPC_INTERNAL_ERROR, "No coinbase script available (mining requires a wallet)");
 
-    return generateBlocks(coinbaseScript, nGenerate, nMaxTries, true);
+    return generateBlocks(coinbase_script, nGenerate, nMaxTries, true);
 }
 
 UniValue generatetoaddress(const JSONRPCRequest& request)
@@ -211,9 +215,10 @@ UniValue generatetoaddress(const JSONRPCRequest& request)
         nMaxTries = request.params[2].get_int();
     }
 
-    CSyscoinAddress address(request.params[1].get_str());
-    if (!address.IsValid())
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
+	CTxDestination destination = DecodeDestination(request.params[1].get_str());
+	if (!IsValidDestination(destination)) {
+		throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
+	}
 
 	std::shared_ptr<CReserveScript> coinbaseScript = std::make_shared<CReserveScript>();
 	coinbaseScript->reserveScript = GetScriptForDestination(destination);
@@ -1122,7 +1127,7 @@ UniValue getauxblock(const JSONRPCRequest& request)
 		);
 
 	std::shared_ptr<CReserveScript> coinbaseScript;
-	pwallet->GetScriptForMining(coinbaseScript);
+	pwalletMain->GetScriptForMining(coinbaseScript);
 
 	// If the keypool is exhausted, no script is returned at all.  Catch this.
 	if (!coinbaseScript)
