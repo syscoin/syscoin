@@ -977,6 +977,7 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 	{
 		// ensure mempool has this transaction and it is not yet mined, get the transaction in question
 		CTransaction txRef = mempool.get(arrivalTime.first);
+		const Transaction &tx = *txRef;
 		if (!txRef)
 			continue;
 		// if this tx arrived within the minimum latency period flag it as potentially conflicting
@@ -985,7 +986,7 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 		}
 		const uint256& txHash = txRef.GetHash();
 		// get asset allocation object from this tx, if for some reason it doesn't have it, just skip (shouldn't happen)
-		CAssetAllocation assetallocation(*txRef);
+		CAssetAllocation assetallocation(tx);
 		if (assetallocation.IsNull())
 			continue;
 
