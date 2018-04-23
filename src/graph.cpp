@@ -8,15 +8,16 @@ using namespace boost;
 using namespace std;
 typedef typename std::vector<int> container;
 extern CCriticalSection cs_main;
-bool OrderBasedOnArrivalTime(std::vector<CTransaction>& blockVtx) {
+bool OrderBasedOnArrivalTime(std::vector<CTransactionRef>& blockVtx) {
 	std::vector<vector<unsigned char> > vvchArgs;
 	std::vector<vector<unsigned char> > vvchAliasArgs;
-	std::vector<CTransaction> orderedVtx;
+	std::vector<CTransactionRef> orderedVtx;
 	int op;
 	// order the arrival times in ascending order using a map
 	std::multimap<int64_t, int> orderedIndexes;
 	for (unsigned int n = 0; n < blockVtx.size(); n++) {
-		const CTransaction& tx = blockVtx[n];
+		const CTransactionRef txRef = blockVtx[n];
+		const CTransaction &tx = *txRef;
 		if (tx.nVersion == SYSCOIN_TX_VERSION)
 		{
 			if (DecodeAssetAllocationTx(tx, op, vvchArgs))
@@ -64,7 +65,7 @@ bool OrderBasedOnArrivalTime(std::vector<CTransaction>& blockVtx) {
 			}
 		}
 		// add normal tx's to orderedvtx, 
-		orderedVtx.push_back(tx);
+		orderedVtx.push_back(txRef);
 	}
 	for (auto& orderedIndex : orderedIndexes) {
 		orderedVtx.push_back(blockVtx[orderedIndex.second]);
@@ -77,13 +78,14 @@ bool OrderBasedOnArrivalTime(std::vector<CTransaction>& blockVtx) {
 	blockVtx = orderedVtx;
 	return true;
 }
-bool CreateGraphFromVTX(const std::vector<CTransaction>& blockVtx, Graph &graph, std::vector<vertex_descriptor> &vertices, IndexMap &mapTxIndex) {
+bool CreateGraphFromVTX(const std::vector<CTransactionRef>& blockVtx, Graph &graph, std::vector<vertex_descriptor> &vertices, IndexMap &mapTxIndex) {
 	AliasMap mapAliasIndex;
 	std::vector<vector<unsigned char> > vvchArgs;
 	std::vector<vector<unsigned char> > vvchAliasArgs;
 	int op;
 	for (unsigned int n = 0; n< blockVtx.size(); n++) {
-		const CTransaction& tx = blockVtx[n];
+		const CTransactionRef txRef = blockVtx[n];
+		const CTransaction &tx = *txRef;
 		if (tx.nVersion == SYSCOIN_TX_VERSION)
 		{
 			if (DecodeAssetAllocationTx(tx, op, vvchArgs))
@@ -132,9 +134,7 @@ bool CreateGraphFromVTX(const std::vector<CTransaction>& blockVtx, Graph &graph,
 	return mapTxIndex.size() > 0;
 }
 // remove cycles in a graph and create a DAG, modify the blockVtx passed in to remove conflicts, the conflicts should be added back to the end of this vtx after toposort
-void GraphRemoveCycles(const std::vector<CTransaction>& blockVtx, std::vector<int> &conflictedIndexes, Graph& graph, const std::vector<vertex_descriptor> &vertices, IndexMap &mapTxIndex) {
-	std::vector<CTransaction> newVtx;
-	std::vector<CTransaction> orderedVtx;
+void GraphRemoveCycles(const std::vector<CTransactionRef>& blockVtx, std::vector<int> &conflictedIndexes, Graph& graph, const std::vector<vertex_descriptor> &vertices, IndexMap &mapTxIndex) {
 	sorted_vector<int> clearedVertices;
 	cycle_visitor<sorted_vector<int> > visitor(clearedVertices);
 	hawick_circuits(graph, visitor);
@@ -159,8 +159,8 @@ void GraphRemoveCycles(const std::vector<CTransaction>& blockVtx, std::vector<in
 	// block gives us the transactions in order by time so we want to ensure we preserve it
 	std::sort(conflictedIndexes.begin(), conflictedIndexes.end());
 }
-bool DAGTopologicalSort(std::vector<CTransaction>& blockVtx, const std::vector<int> &conflictedIndexes, const Graph& graph, const IndexMap &mapTxIndex) {
-	std::vector<CTransaction> newVtx;
+bool DAGTopologicalSort(std::vector<CTransactionRef>& blockVtx, const std::vector<int> &conflictedIndexes, const Graph& graph, const IndexMap &mapTxIndex) {
+	std::vector<CTransactionRef> newVtx;
 	container c;
 	try
 	{
@@ -200,10 +200,11 @@ bool DAGTopologicalSort(std::vector<CTransaction>& blockVtx, const std::vector<i
 	std::vector<vector<unsigned char> > vvchArgs;
 	int op;
 	for (unsigned int vOut = 1; vOut< blockVtx.size(); vOut++) {
-		const CTransaction& tx = blockVtx[vOut];
+		const CTransactionRef& txRef = blockVtx[vOut];
+		const CTransaction& tx = *txRef;
 		if (!DecodeAssetAllocationTx(tx, op, vvchArgs))
 		{
-			newVtx.push_back(blockVtx[vOut]);
+			newVtx.push_back(txRef);
 		}
 	}
 	if (blockVtx.size() != newVtx.size())
