@@ -2178,9 +2178,9 @@ UniValue aliaspay(const JSONRPCRequest& request) {
     // Check funds
 	UniValue balanceParams(UniValue::VARR);
 	balanceParams.push_back(strFrom);
-	JSONRPCRequest request;
-	request.params = balanceParams;
-	const UniValue &resBalance = aliasbalance(request);
+	JSONRPCRequest request1;
+	request1.params = balanceParams;
+	const UniValue &resBalance = aliasbalance(request1);
 	CAmount nBalance = AmountFromValue(find_value(resBalance.get_obj(), "balance"));
     if (totalAmount > nBalance)
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Alias has insufficient funds");
