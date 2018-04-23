@@ -16,7 +16,10 @@ bool OrderBasedOnArrivalTime(std::vector<CTransactionRef>& blockVtx) {
 	// order the arrival times in ascending order using a map
 	std::multimap<int64_t, int> orderedIndexes;
 	for (unsigned int n = 0; n < blockVtx.size(); n++) {
-		const CTransaction &tx = *blockVtx[n];
+		const CTransactionRef txRef = *blockVtx[n];
+		if (!txRef)
+			continue;
+		const CTransaction &tx = *txRef;
 		if (tx.nVersion == SYSCOIN_TX_VERSION)
 		{
 			if (DecodeAssetAllocationTx(tx, op, vvchArgs))
@@ -64,10 +67,10 @@ bool OrderBasedOnArrivalTime(std::vector<CTransactionRef>& blockVtx) {
 			}
 		}
 		// add normal tx's to orderedvtx, 
-		orderedVtx.push_back(blockVtx[n]);
+		orderedVtx.emplace_back(txRef);
 	}
 	for (auto& orderedIndex : orderedIndexes) {
-		orderedVtx.push_back(blockVtx[orderedIndex.second]);
+		orderedVtx.emplace_back(blockVtx[orderedIndex.second]);
 	}
 	if (blockVtx.size() != orderedVtx.size())
 	{
@@ -84,6 +87,8 @@ bool CreateGraphFromVTX(const std::vector<CTransactionRef>& blockVtx, Graph &gra
 	int op;
 	for (unsigned int n = 0; n< blockVtx.size(); n++) {
 		const CTransactionRef txRef = blockVtx[n];
+		if (!txRef)
+			continue;
 		const CTransaction &tx = *txRef;
 		if (tx.nVersion == SYSCOIN_TX_VERSION)
 		{
@@ -170,7 +175,7 @@ bool DAGTopologicalSort(std::vector<CTransactionRef>& blockVtx, const std::vecto
 		return false;
 	}
 	// add coinbase
-	newVtx.push_back(blockVtx[0]);
+	newVtx.emplace_back(blockVtx[0]);
 
 	// add sys tx's to newVtx in reverse sorted order
 	reverse(c.begin(), c.end());
@@ -184,7 +189,7 @@ bool DAGTopologicalSort(std::vector<CTransactionRef>& blockVtx, const std::vecto
 		for (auto& nIndex : vecTx) {
 			if (nIndex >= blockVtx.size())
 				continue;
-			newVtx.push_back(blockVtx[nIndex]);
+			newVtx.emplace_back(blockVtx[nIndex]);
 		}
 	}
 
@@ -192,7 +197,7 @@ bool DAGTopologicalSort(std::vector<CTransactionRef>& blockVtx, const std::vecto
 	for (auto& nIndex : conflictedIndexes) {
 		if (nIndex >= blockVtx.size())
 			continue;
-		newVtx.push_back(blockVtx[nIndex]);
+		newVtx.emplace_back(blockVtx[nIndex]);
 	}
 	
 	// add non-sys and other sys tx's to end of newVtx
@@ -203,7 +208,7 @@ bool DAGTopologicalSort(std::vector<CTransactionRef>& blockVtx, const std::vecto
 		const CTransaction& tx = *txRef;
 		if (!DecodeAssetAllocationTx(tx, op, vvchArgs))
 		{
-			newVtx.push_back(txRef);
+			newVtx.emplace_back(txRef);
 		}
 	}
 	if (blockVtx.size() != newVtx.size())
