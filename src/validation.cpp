@@ -1245,13 +1245,13 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 				if (!pool.exists(hash))
 					return state.DoS(0, false, REJECT_INSUFFICIENTFEE, "mempool full");
 			}
-			std::packaged_task<void()> t([&pool, chainHeight, tx, nFees, hash, plTxnReplaced, fromPeer]() {
+			std::packaged_task<void()> t([&pool, chainHeight, tx, nFees, hash, coins_to_uncache, fromPeer]() {
 				CValidationState vstate;
 				CCoinsViewCache &vview = *pcoinsTip;
 
 				if (!CheckInputs(tx, vstate, vview, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, true)) {
 					LogPrint("mempool", "%s: %s %s\n", "CheckInputs Error", hash.ToString(), vstate.GetRejectReason());
-					BOOST_FOREACH(const COutPoint& hashTx, plTxnReplaced)
+					BOOST_FOREACH(const COutPoint& hashTx, coins_to_uncache)
 						pcoinsTip->Uncache(hashTx);
 					pool.removeRecursive(tx, MemPoolRemovalReason::UNKNOWN);
 					int nDos = 0;
@@ -1269,7 +1269,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 
 				if (!CheckSyscoinInputs(tx, vstate, true, chainHeight, nFees, CBlock())) {
 					LogPrint("mempool", "%s: %s %s\n", "CheckSyscoinInputs Frror", hash.ToString(), vstate.GetRejectReason());
-					BOOST_FOREACH(const COutPoint& hashTx, plTxnReplaced)
+					BOOST_FOREACH(const COutPoint& hashTx, coins_to_uncache)
 						pcoinsTip->Uncache(hashTx);
 					pool.removeRecursive(tx, MemPoolRemovalReason::UNKNOWN);
 					int nDos = 0;
