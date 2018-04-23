@@ -34,7 +34,8 @@
 
 #include <boost/shared_ptr.hpp>
 #include <boost/thread.hpp>
-
+// SYSCOIN
+#include <auxpow.h> // contains CMerkleTx
 extern CWallet* pwalletMain;
 
 /**

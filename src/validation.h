@@ -507,6 +507,13 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, const Co
 
 /** Check a block is completely valid from start to finish (only works on top of our current best block, with cs_main held) */
 bool TestBlockValidity(CValidationState& state, const CChainParams& chainparams, const CBlock& block, CBlockIndex* pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
+/**
+* Check proof-of-work of a block header, taking auxpow into account.
+* @param block The block header.
+* @param params Consensus parameters.
+* @return True iff the PoW is correct.
+*/
+bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params);
 
 /** RAII wrapper for VerifyDB: Verify consistency of the block and coin databases */
 class CVerifyDB {
