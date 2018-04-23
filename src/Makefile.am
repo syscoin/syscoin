@@ -340,7 +340,7 @@ crypto_libsyscoin_crypto_a_SOURCES = \
   crypto/sha512.cpp \
   crypto/sha512.h
 
-  if USE_ASM
+if USE_ASM
 crypto_libsyscoin_crypto_a_SOURCES += crypto/sha256_sse4.cpp
 endif
 
