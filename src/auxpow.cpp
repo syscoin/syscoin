@@ -43,7 +43,7 @@ void CMerkleTx::InitMerkleBranch(const CBlock& block, int posInBlock)
 	vMerkleBranch = BlockMerkleBranch(block, nIndex);
 }
 
-int CMerkleTx::GetDepthInMainChain(const CBlockIndex* &pindexRet) const
+int CMerkleTx::GetDepthInMainChain(const CBlockIndex* &pindexRet, bool enableIX) const
 {
 	int nResult;
 
