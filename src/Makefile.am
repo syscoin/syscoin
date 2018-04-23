@@ -340,6 +340,9 @@ crypto_libsyscoin_crypto_a_SOURCES = \
   crypto/sha512.cpp \
   crypto/sha512.h
 
+  if USE_ASM
+crypto_libsyscoin_crypto_a_SOURCES += crypto/sha256_sse4.cpp
+endif
 
 # consensus: shared between all executables that validate any consensus rules.
 libsyscoin_consensus_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
