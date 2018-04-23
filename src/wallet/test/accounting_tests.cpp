@@ -68,7 +68,7 @@ BOOST_AUTO_TEST_CASE(acc_orderupgrade)
 	ae.nOrderPos = pwalletMain->IncOrderPosNext();
 	pwalletMain->AddAccountingEntry(ae);
 
-	GetResults(*pwalletMain->, results);
+	GetResults(*pwalletMain, results);
 
 	BOOST_CHECK(results.size() == 3);
 	BOOST_CHECK(pwalletMain->nOrderPosNext == 4);
@@ -116,7 +116,7 @@ BOOST_AUTO_TEST_CASE(acc_orderupgrade)
 	ae.nTime = 1333333334;
 	ae.strOtherAccount = "e";
 	ae.nOrderPos = -1;
-	pwalletMain->.AddAccountingEntry(ae);
+	pwalletMain->AddAccountingEntry(ae);
 
 	GetResults(*pwalletMain, results);
 
