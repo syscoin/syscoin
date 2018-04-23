@@ -178,12 +178,9 @@ UniValue generatetoaddress(const JSONRPCRequest& request)
 		throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
 	}
 
-	if (!IsValidDestination(address.Get())) {
-		throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
-	}
 
 	std::shared_ptr<CReserveScript> coinbaseScript = std::make_shared<CReserveScript>();
-	coinbaseScript->reserveScript = GetScriptForDestination(destination);
+	coinbaseScript->reserveScript = GetScriptForDestination(address.Get());
 
     return generateBlocks(coinbaseScript, nGenerate, nMaxTries, false);
 }
