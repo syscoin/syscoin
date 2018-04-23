@@ -302,9 +302,9 @@ void CMasternode::UpdateLastPaid(const CBlockIndex *pindex, int nMaxBlocksToScan
     if(!pindex) return;
 
     const CBlockIndex *BlockReading = pindex;
-	// SYSCOIN
+	
 	const CChainParams& chainparams = Params();
-    CScript mnpayee = const CChainParams& chainparams = Params();GetScriptForDestination(pubKeyCollateralAddress.GetID());
+    CScript mnpayee = GetScriptForDestination(pubKeyCollateralAddress.GetID());
     // LogPrint("mnpayments", "CMasternode::UpdateLastPaidBlock -- searching for block with payment to %s\n", outpoint.ToStringShort());
 
     LOCK(cs_mapMasternodeBlocks);
