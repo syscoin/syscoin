@@ -552,7 +552,7 @@ bool CMasternodeBlockPayees::HasPayeeWithVotes(const CScript& payeeIn, int nVote
 
     for (const auto& payee : vecPayees) {
         if (payee.GetVoteCount() >= nVotesReq && payee.GetPayee() == payeeIn) {
-			payeeOut = payeeIn;
+			payeeOut = payee;
             return true;
         }
     }
@@ -596,13 +596,7 @@ bool CMasternodeBlockPayees::IsTransactionValid(const CTransaction& txNew, const
 
         if (payee.GetVoteCount() >= MNPAYMENTS_SIGNATURES_REQUIRED) {
 			if (bFoundFee && bFoundPayment)
-				return true;
-            
-            if (payee.GetPayee() == txout.scriptPubKey && nMasternodePayment == txout.nValue) {
-                LogPrint("mnpayments", "CMasternodeBlockPayees::IsTransactionValid -- Found required payment\n");
-                return true;
-            }
-            
+				return true;           
 
             CTxDestination address1;
             ExtractDestination(payeeScript, address1);
