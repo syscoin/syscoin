@@ -2888,7 +2888,7 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 				continue;
 			if (mempool.mapNextTx.find(outpoint) != mempool.mapNextTx.end())
 				continue;
-			if (!GetTransaction(coin.nHeight, outpoint.hash, tx, blockhash, Params().GetConsensus()))
+			if (!GetTransaction(outpoint.hash, tx, blockhash, Params().GetConsensus()))
 				continue;
 			nValueRet += coin.out.nValue;
 			CWalletTx *wtx = new CWalletTx(pwalletMain, MakeTransactionRef(std::move(tx)));
