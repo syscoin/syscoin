@@ -436,7 +436,7 @@ bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payeeRet) con
 bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeightBlock) const
 {
 	if (mapMasternodeBlocks.count(nBlockHeight)) {
-		return mapMasternodeBlocks[nBlockHeight].GetBestPayee(payee, nStartHeightBlock);
+		return mapMasternodeBlocks[nBlockHeight].GetBestPayee(payee);
 	}
 
 	return false;
