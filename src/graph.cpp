@@ -15,7 +15,7 @@ bool OrderBasedOnArrivalTime(std::vector<CTransactionRef>& blockVtx) {
 	int op;
 	// order the arrival times in ascending order using a map
 	std::multimap<int64_t, int> orderedIndexes;
-	for (unsigned int n = 0; n < blockVtx.size(); n++) {
+	for (unsigned int n = 1; n < blockVtx.size(); n++) {
 		const CTransactionRef txRef = blockVtx[n];
 		if (!txRef)
 			continue;
@@ -85,7 +85,7 @@ bool CreateGraphFromVTX(const std::vector<CTransactionRef>& blockVtx, Graph &gra
 	std::vector<vector<unsigned char> > vvchArgs;
 	std::vector<vector<unsigned char> > vvchAliasArgs;
 	int op;
-	for (unsigned int n = 0; n< blockVtx.size(); n++) {
+	for (unsigned int n = 1; n< blockVtx.size(); n++) {
 		const CTransactionRef txRef = blockVtx[n];
 		if (!txRef)
 			continue;
