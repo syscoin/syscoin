@@ -435,11 +435,10 @@ bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payeeRet) con
 }
 bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeightBlock) const
 {
-	if (mapMasternodeBlocks.count(nBlockHeight)) {
-		return mapMasternodeBlocks[nBlockHeight].GetBestPayee(payee, nStartHeightBlock);
-	}
+	LOCK(cs_mapMasternodeBlocks);
 
-	return false;
+	auto it = mapMasternodeBlocks.find(nBlockHeight);
+	return it != mapMasternodeBlocks.end() && it->second.GetBestPayee(payeeRet, nStartHeightBlock);
 }
 // Is this masternode scheduled to get paid soon?
 // -- Only look ahead up to 8 blocks to allow for propagation of the latest 2 blocks of votes
