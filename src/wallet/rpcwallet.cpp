@@ -377,7 +377,7 @@ CAmount GetCoinControlInputTotal(const CCoinControl* coinControl)
 	coinControl->ListSelected(vInputs);
 	BOOST_FOREACH(const COutPoint& outpoint, vInputs)
 	{
-		view.AccessCoin(outpoint, coin);
+		coin = view.AccessCoin(outpoint);
 		if (coin.IsSpent())
 			continue;
 		nValueRet += coin.out.nValue;
