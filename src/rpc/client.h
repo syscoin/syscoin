@@ -7,7 +7,7 @@
 #define SYSCOIN_RPCCLIENT_H
 
 #include <univalue.h>
-
+class JSONRPCRequest;
 /** Convert positional arguments to command-specific RPC representation */
 UniValue RPCConvertValues(const std::string& strMethod, const std::vector<std::string>& strParams);
 
