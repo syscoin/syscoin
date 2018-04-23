@@ -61,11 +61,6 @@ public:
 	* @param apow Pointer to the auxpow to use or NULL.
 	*/
 	void SetAuxpow(CAuxPow* apow);
-
-    int64_t GetBlockTime() const
-    {
-        return (int64_t)nTime;
-    }
 };
 
 
