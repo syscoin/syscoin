@@ -110,12 +110,9 @@ static void GenerateGenesisBlock(CBlockHeader &genesisBlock, uint256 &phash)
 		uint256 hash = genesisBlock.GetHash();
 		if (UintToArith256(hash) <= bnTarget) {
 			phash = hash;
+			break;
 		}
 		nOnce++;
-		if (nOnce == 0) {
-			printf("NONCE WRAPPED, incrementing time\n");
-			++genesisBlock.nTime;
-		}
 	}
 	printf("genesis.nTime = %u \n", genesisBlock.nTime);
 	printf("genesis.nNonce = %u \n", genesisBlock.nNonce);
