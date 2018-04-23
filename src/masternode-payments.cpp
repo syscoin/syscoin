@@ -46,7 +46,6 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &nFe
     // we are still using budgets, but we have no data about them anymore,
     // all we know is predefined budget cycle and window
 
-    const Consensus::Params& consensusParams = Params().GetConsensus();
 
 
     // superblocks started
@@ -119,8 +118,7 @@ bool IsBlockPayeeValid(const CTransaction& txNew, int nBlockHeight, const CAmoun
     // we are still using budgets, but we have no data about them anymore,
     // we can only check masternode payments
 
-    const Consensus::Params& consensusParams = Params().GetConsensus();
-
+  
 
     // superblocks started
     // SEE IF THIS IS A VALID SUPERBLOCK

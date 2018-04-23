@@ -324,7 +324,7 @@ void static SyscoinMiner(const CChainParams& chainparams, CConnman& connman)
 			CBlockIndex* pindexPrev = chainActive.Tip();
 			if (!pindexPrev) break;
 
-			std::unique_ptr<CBlockTemplate> pblocktemplate(CreateNewBlock(chainparams, coinbaseScript->reserveScript));
+			std::unique_ptr<CBlockTemplate> pblocktemplate = BlockAssembler(chainparams).CreateNewBlock(coinbaseScript->reserveScript);
 			if (!pblocktemplate.get())
 			{
 				LogPrintf("SyscoinMiner -- Keypool ran out, please call keypoolrefill before restarting the mining thread\n");
