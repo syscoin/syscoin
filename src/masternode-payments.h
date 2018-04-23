@@ -43,8 +43,8 @@ class CMasternodePayee
 private:
     CScript scriptPubKey;
     std::vector<uint256> vecVoteHashes;
-
 public:
+	int nStartHeight;
     CMasternodePayee() :
         scriptPubKey(),
         vecVoteHashes(),
