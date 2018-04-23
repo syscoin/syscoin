@@ -602,18 +602,18 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 	// but during runtime fLoaded should be true so it should check UTXO in correct state
 	if (!fLoaded)
 		return true;
-	string statusRpc = "";
+	std::string statusRpc = "";
 	if (fJustCheck && (IsInitialBlockDownload() || RPCIsInWarmup(&statusRpc)))
 		return true;
-	vector<vector<unsigned char> > vvchArgs;
-	vector<vector<unsigned char> > vvchAliasArgs;
+	std::vector<std::vector<unsigned char> > vvchArgs;
+	std::vector<std::vector<unsigned char> > vvchAliasArgs;
 	sorted_vector<CAssetAllocationTuple> revertedAssetAllocations;
-	sorted_vector<vector<unsigned char> > revertedOffers;
-	sorted_vector<vector<unsigned char> > revertedCerts;
+	sorted_vector<std::vector<unsigned char> > revertedOffers;
+	sorted_vector<std::vector<unsigned char> > revertedCerts;
 	int op;
 	if (nHeight == 0)
 		nHeight = chainActive.Height();
-	string errorMessage;
+	std::string errorMessage;
 	bool good = false;
 
 	CAmount nDescrepency;
@@ -1504,7 +1504,7 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
 	the chain ID is correct.  Legacy blocks are not allowed since
 	the merge-mining start, which is checked in AcceptBlockHeader
 	where the height is known.  */
-	if (!block.IsLegacy() && params.fStrictChainId
+	if (!block.IsLegacy()
 		&& block.GetChainId() != params.nAuxpowChainId)
 		return error("%s : block does not have our chain ID"
 			" (got %d, expected %d, full nVersion %d)",
