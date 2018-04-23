@@ -15,6 +15,7 @@
 #include "random.h"
 #include "wallet/wallet.h"
 #include "rpc/client.h"
+#include "rpc/server.h"
 #include "base58.h"
 #include "txmempool.h"
 #include "txdb.h"
@@ -265,14 +266,13 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 		errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5002 - " + _("Too many outputs for this Syscoin transaction");
 		return error(errorMessage.c_str());
 	}
-	const Coin pprevCoins;
+	Coin prevCoins;
 	if(fJustCheck || op != OP_ALIAS_ACTIVATE)
 	{
 		// Strict check - bug disallowed
 		for (unsigned int i = 0; i < tx.vin.size(); i++) {
 			vector<vector<unsigned char> > vvch;
 			int pop;
-			Coin prevCoins;
 			if (!GetUTXOCoin(tx.vin[i].prevout, prevCoins))
 				continue;
 			// ensure inputs are unspent when doing consensus check to add to block
@@ -283,7 +283,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			if (IsAliasOp(pop) && (op == OP_ALIAS_ACTIVATE || (vvchArgs.size() > 1 && vvchArgs[0] == vvch[0] && vvchArgs[1] == vvch[1]))) {
 				prevOp = pop;
 				vvchPrevArgs = vvch;
-				pprevCoins = prevCoins;
 				break;
 			}
 		}
@@ -440,7 +439,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 		if (op == OP_ALIAS_UPDATE)
 		{
 			CTxDestination aliasDest;
-			if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || !ExtractDestination(pprevCoins.out.scriptPubKey, aliasDest))
+			if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || prevCoins.IsSpent() || !ExtractDestination(pprevCoins.out.scriptPubKey, aliasDest))
 			{
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Cannot extract destination of alias input");
 				bDestCheckFailed = true;
