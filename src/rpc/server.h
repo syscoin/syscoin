@@ -178,51 +178,52 @@ public:
 
 extern CRPCTable tableRPC;
 // SYSCOIN service rpc functions
-extern UniValue aliasnew(const UniValue& params, bool fHelp);
-extern UniValue aliasnewfund(const UniValue& params, bool fHelp);
-extern UniValue aliasupdate(const UniValue& params, bool fHelp);
-extern UniValue aliasinfo(const UniValue& params, bool fHelp);
-extern UniValue aliasbalance(const UniValue& params, bool fHelp);
-extern UniValue prunesyscoinservices(const UniValue& params, bool fHelp);
-extern UniValue aliaspay(const UniValue& params, bool fHelp);
-extern UniValue aliasaddscript(const UniValue& params, bool fHelp);
-extern UniValue aliasupdatewhitelist(const UniValue& params, bool fHelp);
-extern UniValue aliasclearwhitelist(const UniValue& params, bool fHelp);
-extern UniValue aliaswhitelist(const UniValue& params, bool fHelp);
-extern UniValue syscoinlistreceivedbyaddress(const UniValue& params, bool fHelp);
-extern UniValue sendrawtransaction(const UniValue& params, bool fHelp);
-extern UniValue syscoinsendrawtransaction(const UniValue& params, bool fHelp);
-extern UniValue syscoindecoderawtransaction(const UniValue& params, bool fHelp);
-extern UniValue offernew(const UniValue& params, bool fHelp);
-extern UniValue offerupdate(const UniValue& params, bool fHelp);
-extern UniValue offerlink(const UniValue& params, bool fHelp);
-extern UniValue offerinfo(const UniValue& params, bool fHelp);
+extern UniValue aliasnew(const JSONRPCRequest& request);
+extern UniValue aliasnewfund(const JSONRPCRequest& request);
+extern UniValue aliasupdate(const JSONRPCRequest& request);
+extern UniValue aliasinfo(const JSONRPCRequest& request);
+extern UniValue aliasbalance(const JSONRPCRequest& request);
+extern UniValue prunesyscoinservices(const JSONRPCRequest& request);
+extern UniValue aliaspay(const JSONRPCRequest& request);
+extern UniValue aliasaddscript(const JSONRPCRequest& request);
+extern UniValue aliasupdatewhitelist(const JSONRPCRequest& request);
+extern UniValue aliasclearwhitelist(const JSONRPCRequest& request);
+extern UniValue aliaswhitelist(const JSONRPCRequest& request);
+extern UniValue syscoinlistreceivedbyaddress(const JSONRPCRequest& request);
+extern UniValue sendrawtransaction(const JSONRPCRequest& request);
+extern UniValue createrawtransaction(const JSONRPCRequest& request);
+extern UniValue syscoinsendrawtransaction(const JSONRPCRequest& request);
+extern UniValue syscoindecoderawtransaction(const JSONRPCRequest& request);
+extern UniValue offernew(const JSONRPCRequest& request);
+extern UniValue offerupdate(const JSONRPCRequest& request);
+extern UniValue offerlink(const JSONRPCRequest& request);
+extern UniValue offerinfo(const JSONRPCRequest& request);
 
-extern UniValue certupdate(const UniValue& params, bool fHelp);
-extern UniValue certnew(const UniValue& params, bool fHelp);
-extern UniValue certtransfer(const UniValue& params, bool fHelp);
-extern UniValue certinfo(const UniValue& params, bool fHelp);
+extern UniValue certupdate(const JSONRPCRequest& request);
+extern UniValue certnew(const JSONRPCRequest& request);
+extern UniValue certtransfer(const JSONRPCRequest& request);
+extern UniValue certinfo(const JSONRPCRequest& request);
 
-extern UniValue escrownew(const UniValue& params, bool fHelp);
-extern UniValue escrowbid(const UniValue& params, bool fHelp);
-extern UniValue escrowcreaterawtransaction(const UniValue& params, bool fHelp);
-extern UniValue escrowrelease(const UniValue& params, bool fHelp);
-extern UniValue escrowcompleterelease(const UniValue& params, bool fHelp);
-extern UniValue escrowrefund(const UniValue& params, bool fHelp);
-extern UniValue escrowcompleterefund(const UniValue& params, bool fHelp);
-extern UniValue escrowinfo(const UniValue& params, bool fHelp);
-extern UniValue escrowfeedback(const UniValue& params, bool fHelp);
-extern UniValue escrowacknowledge(const UniValue& params, bool fHelp);
+extern UniValue escrownew(const JSONRPCRequest& request);
+extern UniValue escrowbid(const JSONRPCRequest& request);
+extern UniValue escrowcreaterawtransaction(const JSONRPCRequest& request);
+extern UniValue escrowrelease(const JSONRPCRequest& request);
+extern UniValue escrowcompleterelease(const JSONRPCRequest& request);
+extern UniValue escrowrefund(const JSONRPCRequest& request);
+extern UniValue escrowcompleterefund(const JSONRPCRequest& request);
+extern UniValue escrowinfo(const JSONRPCRequest& request);
+extern UniValue escrowfeedback(const JSONRPCRequest& request);
+extern UniValue escrowacknowledge(const JSONRPCRequest& request);
 
-extern UniValue assetnew(const UniValue& params, bool fHelp);
-extern UniValue assetupdate(const UniValue& params, bool fHelp);
-extern UniValue assettransfer(const UniValue& params, bool fHelp);
-extern UniValue assetsend(const UniValue& params, bool fHelp);
-extern UniValue assetinfo(const UniValue& params, bool fHelp);
-extern UniValue assetallocationsend(const UniValue& params, bool fHelp);
-extern UniValue assetallocationcollectinterest(const UniValue& params, bool fHelp);
-extern UniValue assetallocationinfo(const UniValue& params, bool fHelp);
-extern UniValue assetallocationsenderstatus(const UniValue& params, bool fHelp);
+extern UniValue assetnew(const JSONRPCRequest& request);
+extern UniValue assetupdate(const JSONRPCRequest& request);
+extern UniValue assettransfer(const JSONRPCRequest& request);
+extern UniValue assetsend(const JSONRPCRequest& request);
+extern UniValue assetinfo(const JSONRPCRequest& request);
+extern UniValue assetallocationsend(const JSONRPCRequest& request);
+extern UniValue assetallocationcollectinterest(const JSONRPCRequest& request);
+extern UniValue assetallocationinfo(const JSONRPCRequest& request);
+extern UniValue assetallocationsenderstatus(const JSONRPCRequest& request);
 /**
  * Utilities: convert hex-encoded Values
  * (throws error if not hex).

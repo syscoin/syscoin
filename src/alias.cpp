@@ -1118,7 +1118,9 @@ UniValue SyscoinListReceived(bool includeempty=true)
 		balanceParams.push_back(strAddress);
 		param.push_back(Pair("addresses", balanceParams));
 		paramsBalance.push_back(param);
-		const UniValue &resBalance = getaddressbalance(paramsBalance, false);
+		JSONRPCRequest request;
+		request.params = paramsBalance;
+		const UniValue &resBalance = getaddressbalance(request);
 		UniValue obj(UniValue::VOBJ);
 		obj.push_back(Pair("address", strAddress));
 		const CAmount& nBalance = AmountFromValue(find_value(resBalance.get_obj(), "balance"));
@@ -1156,7 +1158,9 @@ UniValue SyscoinListReceived(bool includeempty=true)
 		balanceParams.push_back(strAddress);
 		param.push_back(Pair("addresses", balanceParams));
 		paramsBalance.push_back(param);
-		const UniValue &resBalance = getaddressbalance(paramsBalance, false);
+		JSONRPCRequest request;
+		request.params = paramsBalance;
+		const UniValue &resBalance = getaddressbalance(request);
 		UniValue obj(UniValue::VOBJ);
 		obj.push_back(Pair("address", strAddress));
 		const CAmount& nBalance = AmountFromValue(find_value(resBalance.get_obj(), "balance"));
@@ -1171,7 +1175,8 @@ UniValue SyscoinListReceived(bool includeempty=true)
 	}
 	return ret;
 }
-UniValue aliasnewfund(const UniValue& params, bool fHelp) {
+UniValue aliasnewfund(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || 1 > params.size() || 2 < params.size())
 		throw runtime_error(
 			"aliasnewfund\n"
@@ -1189,6 +1194,7 @@ UniValue aliasnewfund(const UniValue& params, bool fHelp) {
 			+ HelpExampleRpc("aliasnewfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}")
 			+ HelpRequiringPassphrase());
 	EnsureWalletIsUnlocked();
+	
 	const string &hexstring = params[0].get_str();
 	CMutableTransaction tx;
 	if (!DecodeHexTx(tx, hexstring))
@@ -1211,7 +1217,9 @@ UniValue aliasnewfund(const UniValue& params, bool fHelp) {
 
 	UniValue paramsUTXO(UniValue::VARR);
 	paramsUTXO.push_back(addresses);
-	const UniValue &resUTXOs = getaddressutxos(paramsUTXO, false);
+	JSONRPCRequest request;
+	request.params = paramsUTXO;
+	const UniValue &resUTXOs = getaddressutxos(request);
 	UniValue utxoArray(UniValue::VARR);
 	if (resUTXOs.isArray())
 		utxoArray = resUTXOs.get_array();
@@ -1306,7 +1314,8 @@ UniValue aliasnewfund(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(tx));
 	return res;
 }
-UniValue aliasnew(const UniValue& params, bool fHelp) {
+UniValue aliasnew(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || 8 != params.size())
 		throw runtime_error(
 			"aliasnew [aliasname] [public value] [accept_transfers_flags=3] [expire_timestamp] [address] [encryption_privatekey] [encryption_publickey] [witness]\n"
@@ -1518,7 +1527,8 @@ UniValue aliasnew(const UniValue& params, bool fHelp) {
 	res.push_back(strAddress);
 	return res;
 }
-UniValue aliasupdate(const UniValue& params, bool fHelp) {
+UniValue aliasupdate(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || 8 != params.size())
 		throw runtime_error(
 			"aliasupdate [aliasname] [public value] [address] [accept_transfers_flags=3] [expire_timestamp] [encryption_privatekey] [encryption_publickey] [witness]\n"
@@ -1625,7 +1635,8 @@ UniValue aliasupdate(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue syscoindecoderawtransaction(const UniValue& params, bool fHelp) {
+UniValue syscoindecoderawtransaction(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || 1 != params.size())
 		throw runtime_error("syscoindecoderawtransaction <hexstring>\n"
 		"Decode raw syscoin transaction (serialized, hex-encoded) and display information pertaining to the service that is included in the transactiion data output(OP_RETURN)\n"
@@ -1694,7 +1705,8 @@ void AliasTxToJSON(const int op, const vector<unsigned char> &vchData, const vec
 		entry.push_back(Pair("renewal", alias.nExpireTime));
 
 }
-UniValue syscoinsendrawtransaction(const UniValue& params, bool fHelp) {
+UniValue syscoinsendrawtransaction(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() < 1 || params.size() > 3)
 		throw runtime_error("syscoinsendrawtransaction \"hexstring\" ( allowhighfees instantsend )\n"
 			"\nSubmits raw transaction (serialized, hex-encoded) to local node and network.\n"
@@ -1727,7 +1739,9 @@ UniValue syscoinsendrawtransaction(const UniValue& params, bool fHelp) {
 	UniValue returnRes;
 	try
 	{
-		returnRes = sendrawtransaction(arraySendParams, false);
+		JSONRPCRequest request;
+		request.params = arraySendParams;
+		returnRes = sendrawtransaction(request);
 	}
 	catch (UniValue& objError)
 	{
@@ -1773,7 +1787,7 @@ string GenerateSyscoinGuid()
 	vector<unsigned char> vchGuidRand = CScriptNum(rand).getvch();
 	return HexStr(vchGuidRand);
 }
-UniValue prunesyscoinservices(const UniValue& params, bool fHelp)
+UniValue prunesyscoinservices(const JSONRPCRequest& request)
 {
 	int servicesCleaned = 0;
 	CleanupSyscoinServiceDatabases(servicesCleaned);
@@ -1781,8 +1795,9 @@ UniValue prunesyscoinservices(const UniValue& params, bool fHelp)
 	res.push_back(Pair("services_cleaned", servicesCleaned));
 	return res;
 }
-UniValue aliasbalance(const UniValue& params, bool fHelp)
+UniValue aliasbalance(const JSONRPCRequest& request)
 {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 1)
         throw runtime_error(
             "aliasbalance \"alias\"\n"
@@ -1807,7 +1822,9 @@ UniValue aliasbalance(const UniValue& params, bool fHelp)
 	utxoParams.push_back(strAddressFrom);
 	param.push_back(Pair("addresses", utxoParams));
 	paramsUTXO.push_back(param);
-	const UniValue &resUTXOs = getaddressutxos(paramsUTXO, false);
+	JSONRPCRequest request;
+	request.params = paramsUTXO;
+	const UniValue &resUTXOs = getaddressutxos(request);
 	UniValue utxoArray(UniValue::VARR);
 	if (resUTXOs.isArray())
 		utxoArray = resUTXOs.get_array();
@@ -1861,7 +1878,9 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 	utxoParams.push_back(strAddressFrom);
 	param.push_back(Pair("addresses", utxoParams));
 	paramsUTXO.push_back(param);
-	const UniValue &resUTXOs = getaddressutxos(paramsUTXO, false);
+	JSONRPCRequest request;
+	request.params = paramsUTXO;
+	const UniValue &resUTXOs = getaddressutxos(request);
 	UniValue utxoArray(UniValue::VARR);
 	if (resUTXOs.isArray())
 		utxoArray = resUTXOs.get_array();
@@ -1957,7 +1976,8 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
  * @param  fHelp  [description]
  * @return        [description]
  */
-UniValue aliasinfo(const UniValue& params, bool fHelp) {
+UniValue aliasinfo(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || 1 > params.size())
 		throw runtime_error("aliasinfo <aliasname>\n"
 				"Show values of an alias.\n");
@@ -2030,7 +2050,9 @@ unsigned int aliasunspent(const vector<unsigned char> &vchAlias, COutPoint& outp
 	utxoParams.push_back(strAddressFrom);
 	param.push_back(Pair("addresses", utxoParams));
 	paramsUTXO.push_back(param);
-	const UniValue &resUTXOs = getaddressutxos(paramsUTXO, false);
+	JSONRPCRequest request;
+	request.params = paramsUTXO;
+	const UniValue &resUTXOs = getaddressutxos(request);
 	UniValue utxoArray(UniValue::VARR);
 	if (resUTXOs.isArray())
 		utxoArray = resUTXOs.get_array();
@@ -2061,8 +2083,8 @@ unsigned int aliasunspent(const vector<unsigned char> &vchAlias, COutPoint& outp
 	}
 	return count;
 }
-UniValue aliaspay(const UniValue& params, bool fHelp) {
-
+UniValue aliaspay(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() < 2 || params.size() > 4)
         throw runtime_error(
             "aliaspay aliasfrom {\"address\":amount,...} (instantsend subtractfeefromamount)\n"
@@ -2156,7 +2178,9 @@ UniValue aliaspay(const UniValue& params, bool fHelp) {
     // Check funds
 	UniValue balanceParams(UniValue::VARR);
 	balanceParams.push_back(strFrom);
-	const UniValue &resBalance = aliasbalance(balanceParams, false);
+	JSONRPCRequest request;
+	request.params = balanceParams;
+	const UniValue &resBalance = aliasbalance(request);
 	CAmount nBalance = AmountFromValue(find_value(resBalance.get_obj(), "balance"));
     if (totalAmount > nBalance)
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Alias has insufficient funds");
@@ -2171,7 +2195,8 @@ UniValue aliaspay(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue aliasaddscript(const UniValue& params, bool fHelp) {
+UniValue aliasaddscript(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || 1 != params.size())
 		throw runtime_error("aliasaddscript redeemscript\n"
 				"Add redeemscript to local wallet for signing smart contract based alias transactions.\n");
@@ -2182,7 +2207,8 @@ UniValue aliasaddscript(const UniValue& params, bool fHelp) {
 	res.push_back(Pair("result", "success"));
 	return res;
 }
-UniValue aliasupdatewhitelist(const UniValue& params, bool fHelp) {
+UniValue aliasupdatewhitelist(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 3)
 		throw runtime_error(
 			"aliasupdatewhitelist [owner alias] [{\"alias\":\"aliasname\",\"discount_percentage\":n},...] [witness]\n"
@@ -2266,7 +2292,8 @@ UniValue aliasupdatewhitelist(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue aliasclearwhitelist(const UniValue& params, bool fHelp) {
+UniValue aliasclearwhitelist(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 2)
 		throw runtime_error(
 			"aliasclearwhitelist [owner alias] [witness]\n"
@@ -2329,8 +2356,9 @@ bool DoesAliasExist(const string &strAddress) {
 	DecodeBase58(strAddress, vchAddress);
 	return paliasdb->ReadAddress(vchAddress, vchMyAlias);
 }
-UniValue syscoinlistreceivedbyaddress(const UniValue& params, bool fHelp)
+UniValue syscoinlistreceivedbyaddress(const JSONRPCRequest& request)
 {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 0)
 		throw runtime_error(
 			"syscoinlistreceivedbyaddress\n"
@@ -2352,7 +2380,8 @@ UniValue syscoinlistreceivedbyaddress(const UniValue& params, bool fHelp)
 
 	return SyscoinListReceived();
 }
-UniValue aliaswhitelist(const UniValue& params, bool fHelp) {
+UniValue aliaswhitelist(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 1)
 		throw runtime_error("aliaswhitelist <alias>\n"
 			"List all affiliates for this alias.\n");

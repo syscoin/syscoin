@@ -496,7 +496,8 @@ bool CheckCertInputs(const CTransaction &tx, int op, const vector<vector<unsigne
 
 
 
-UniValue certnew(const UniValue& params, bool fHelp) {
+UniValue certnew(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 5)
         throw runtime_error(
 			"certnew [alias] [title] [public value] [category=certificates] [witness]\n"
@@ -579,7 +580,8 @@ UniValue certnew(const UniValue& params, bool fHelp) {
 	return res;
 }
 
-UniValue certupdate(const UniValue& params, bool fHelp) {
+UniValue certupdate(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 5)
         throw runtime_error(
 			"certupdate [guid] [title] [public value] [category=certificates] [witness]\n"
@@ -676,7 +678,8 @@ UniValue certupdate(const UniValue& params, bool fHelp) {
 }
 
 
-UniValue certtransfer(const UniValue& params, bool fHelp) {
+UniValue certtransfer(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
  if (fHelp || params.size() != 5)
         throw runtime_error(
 			"certtransfer [guid] [alias] [public value] [accessflags=2] [witness]\n"
@@ -781,7 +784,8 @@ UniValue certtransfer(const UniValue& params, bool fHelp) {
 }
 
 
-UniValue certinfo(const UniValue& params, bool fHelp) {
+UniValue certinfo(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || 1 > params.size())
         throw runtime_error("certinfo <guid>\n"
                 "Show stored values of a single certificate and its .\n");

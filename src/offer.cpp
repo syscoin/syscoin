@@ -702,7 +702,8 @@ bool CheckOfferInputs(const CTransaction &tx, int op, const vector<vector<unsign
 	}
 	return true;
 }
-UniValue offernew(const UniValue& params, bool fHelp) {
+UniValue offernew(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 17)
 		throw runtime_error(
 			"offernew [alias] [category] [title] [quantity] [price] [description] [currency] [cert. guid] [payment options=SYS] [private=false] [units=1] [offertype=BUYNOW] [auction_expires=0] [auction_reserve=0] [auction_require_witness=false] [auction_deposit=0] [witness]\n"
@@ -878,7 +879,8 @@ UniValue offernew(const UniValue& params, bool fHelp) {
 	return res;
 }
 
-UniValue offerlink(const UniValue& params, bool fHelp) {
+UniValue offerlink(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 5)
 		throw runtime_error(
 			"offerlink [alias] [guid] [commission] [description] [witness]\n"
@@ -972,7 +974,8 @@ UniValue offerlink(const UniValue& params, bool fHelp) {
 	res.push_back(stringFromVch(vchOffer));
 	return res;
 }
-UniValue offerupdate(const UniValue& params, bool fHelp) {
+UniValue offerupdate(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 18)
 		throw runtime_error(
 			"offerupdate [alias] [guid] [category] [title] [quantity] [price] [description] [currency] [private=false] [cert. guid] [commission] [paymentOptions] [offerType=BUYNOW] [auction_expires] [auction_reserve] [auction_require_witness] [auction_deposit] [witness]\n"
@@ -1191,7 +1194,9 @@ void COfferDB::WriteOfferIndexHistory(const COffer& offer, const int &op) {
 		GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "offerhistory");
 	}
 }
-UniValue offerinfo(const UniValue& params, bool fHelp) {
+UniValue offerinfo(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
+	UniValue &params = request.params;
 	if (fHelp || 1 > params.size())
 		throw runtime_error("offerinfo <guid>\n"
 				"Show offer details\n");

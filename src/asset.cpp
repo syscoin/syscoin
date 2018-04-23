@@ -646,7 +646,8 @@ bool CheckAssetInputs(const CTransaction &tx, int op, const vector<vector<unsign
     return true;
 }
 
-UniValue assetnew(const UniValue& params, bool fHelp) {
+UniValue assetnew(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 11)
         throw runtime_error(
 			"assetnew [symbol] [alias] [public value] [category=assets] [precision=8] [use_inputranges] [supply] [max_supply] [interest_rate] [can_adjust_interest_rate] [witness]\n"
@@ -753,7 +754,8 @@ UniValue assetnew(const UniValue& params, bool fHelp) {
 	return res;
 }
 
-UniValue assetupdate(const UniValue& params, bool fHelp) {
+UniValue assetupdate(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 6)
         throw runtime_error(
 			"assetupdate [asset] [public value] [category=assets] [supply] [interest_rate] [witness]\n"
@@ -850,7 +852,8 @@ UniValue assetupdate(const UniValue& params, bool fHelp) {
 	return res;
 }
 
-UniValue assettransfer(const UniValue& params, bool fHelp) {
+UniValue assettransfer(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
  if (fHelp || params.size() != 3)
         throw runtime_error(
 			"assettransfer [asset] [alias] [witness]\n"
@@ -930,7 +933,8 @@ UniValue assettransfer(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue assetsend(const UniValue& params, bool fHelp) {
+UniValue assetsend(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 5)
 		throw runtime_error(
 			"assetsend [asset] [aliasfrom] ( [{\"aliasto\":\"aliasname\",\"amount\":amount},...] or [{\"aliasto\":\"aliasname\",\"ranges\":[{\"start\":index,\"end\":index},...]},...] ) [memo] [witness]\n"
@@ -1071,7 +1075,8 @@ UniValue assetsend(const UniValue& params, bool fHelp) {
 	return res;
 }
 
-UniValue assetinfo(const UniValue& params, bool fHelp) {
+UniValue assetinfo(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || 2 != params.size())
         throw runtime_error("assetinfo <asset> <getinputs>\n"
                 "Show stored values of a single asset and its. Set getinputs to true if you want to get the allocation inputs, if applicable.\n");

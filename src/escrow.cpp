@@ -1035,7 +1035,8 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, const vector<vector<unsig
 	}
     return true;
 }
-UniValue escrowbid(const UniValue& params, bool fHelp) {
+UniValue escrowbid(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 5)
 		throw runtime_error(
 			"escrowbid [alias] [escrow] [bid_in_payment_option] [bid_in_offer_currency] [witness]\n"
@@ -1111,7 +1112,8 @@ UniValue escrowbid(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue escrowaddshipping(const UniValue& params, bool fHelp) {
+UniValue escrowaddshipping(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 3)
 		throw runtime_error(
 			"escrowaddshipping [escrow] [shipping amount] [witness]\n"
@@ -1187,7 +1189,8 @@ UniValue escrowaddshipping(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue escrownew(const UniValue& params, bool fHelp) {
+UniValue escrownew(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 16)
         throw runtime_error(
 			"escrownew [getamountandaddress] [alias] [arbiter alias] [offer] [quantity] [buynow] [total_in_payment_option] [shipping amount] [network fee] [arbiter fee] [witness fee] [extTx] [payment option] [bid_in_payment_option] [bid_in_offer_currency] [witness]\n"
@@ -1343,7 +1346,9 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	CScript redeemScript;
 	try
 	{
-		resCreate = createmultisig(arrayParams, false);
+		JSONRPCRequest request;
+		request.params = arrayParams;
+		resCreate = createmultisig(request);
 	}
 	catch (UniValue& objError)
 	{
@@ -1459,7 +1464,8 @@ UniValue escrownew(const UniValue& params, bool fHelp) {
 	res.push_back(stringFromVch(vchEscrow));
 	return res;
 }
-UniValue escrowacknowledge(const UniValue& params, bool fHelp) {
+UniValue escrowacknowledge(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 2)
 		throw runtime_error(
 			"escrowacknowledge [escrow guid] [witness]\n"
@@ -1542,7 +1548,8 @@ UniValue escrowacknowledge(const UniValue& params, bool fHelp) {
 	return res;
 
 }
-UniValue escrowcreaterawtransaction(const UniValue& params, bool fHelp) {
+UniValue escrowcreaterawtransaction(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 4)
 		throw runtime_error(
 			"escrowcreaterawtransaction [type] [escrow guid] [{\"txid\":\"id\",\"vout\":n, \"satoshis\":n},...] [user role]\n"
@@ -1670,7 +1677,9 @@ UniValue escrowcreaterawtransaction(const UniValue& params, bool fHelp) {
 	UniValue resCreate;
 	try
 	{
-		resCreate = createrawtransaction(arrayCreateParams, false);
+		JSONRPCRequest request;
+		request.params = arrayCreateParams;
+		resCreate = createrawtransaction(request);
 	}
 	catch (UniValue& objError)
 	{
@@ -1699,7 +1708,8 @@ UniValue escrowcreaterawtransaction(const UniValue& params, bool fHelp) {
 	res.push_back(ValueFromAmount(nBalance));
 	return res;
 }
-UniValue escrowrelease(const UniValue& params, bool fHelp) {
+UniValue escrowrelease(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 4)
         throw runtime_error(
 			"escrowrelease [escrow guid] [user role] [rawtx] [witness]\n"
@@ -1805,7 +1815,8 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	return res;
 }
 
-UniValue escrowcompleterelease(const UniValue& params, bool fHelp) {
+UniValue escrowcompleterelease(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 3)
         throw runtime_error(
 			"escrowcompleterelease [escrow guid] [rawtx] [witness]\n"
@@ -1884,8 +1895,11 @@ UniValue escrowcompleterelease(const UniValue& params, bool fHelp) {
 	try
 	{
 		// broadcast the payment transaction to syscoin network if not external transaction
-		if (!extPayment)
-			returnRes = sendrawtransaction(sendParams, false);
+		if (!extPayment) {
+			JSONRPCRequest request;
+			request.params = sendParams;
+			returnRes = sendrawtransaction(request);
+		}
 	}
 	catch (UniValue& objError)
 	{
@@ -1895,7 +1909,8 @@ UniValue escrowcompleterelease(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue escrowrefund(const UniValue& params, bool fHelp) {
+UniValue escrowrefund(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 4)
 		throw runtime_error(
 			"escrowrefund [escrow guid] [user role] [rawtx] [witness]\n"
@@ -2001,7 +2016,8 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	return res;
 }
 
-UniValue escrowcompleterefund(const UniValue& params, bool fHelp) {
+UniValue escrowcompleterefund(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
 	if (fHelp || params.size() != 3)
 		throw runtime_error(
 			"escrowcompleterefund [escrow guid] [rawtx] [witness]\n"
@@ -2083,8 +2099,11 @@ UniValue escrowcompleterefund(const UniValue& params, bool fHelp) {
 	try
 	{
 		// broadcast the payment transaction to syscoin network if not external transaction
-		if (!extPayment)
-			returnRes = sendrawtransaction(sendParams, false);
+		if (!extPayment) {
+			JSONRPCRequest request;
+			request.params = sendParams;
+			returnRes = sendrawtransaction(request);
+		}
 	}
 	catch (UniValue& objError)
 	{
@@ -2094,7 +2113,8 @@ UniValue escrowcompleterefund(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue escrowfeedback(const UniValue& params, bool fHelp) {
+UniValue escrowfeedback(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || params.size() != 6)
         throw runtime_error(
 			"escrowfeedback [escrow guid] [userfrom] [feedback] [rating] [userto] [witness]\n"
@@ -2274,7 +2294,8 @@ UniValue escrowfeedback(const UniValue& params, bool fHelp) {
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
-UniValue escrowinfo(const UniValue& params, bool fHelp) {
+UniValue escrowinfo(const JSONRPCRequest& request) {
+	UniValue &params = request.params;
     if (fHelp || 1 != params.size())
         throw runtime_error("escrowinfo <guid>\n"
                 "Show stored values of a single escrow\n");
