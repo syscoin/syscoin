@@ -1365,11 +1365,11 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
 {
     return AcceptToMemoryPoolWithTime(pool, false, state, tx, fLimitFree, pfMissingInputs, GetTime(), plTxnReplaced, fOverrideMempoolLimit, nAbsurdFee, fDryRun);
 }
-bool AcceptToMemoryPoolConcurrent(CTxMemPool& pool, bool bMultiThreaded, CValidationState &state, const CTransactionRef &tx, bool fLimitFree,
+bool AcceptToMemoryPoolConcurrent(CTxMemPool& pool, CValidationState &state, const CTransactionRef &tx, bool fLimitFree,
 	bool* pfMissingInputs, std::list<CTransactionRef>* plTxnReplaced,
 	bool fOverrideMempoolLimit, const CAmount nAbsurdFee, bool fDryRun, NodeId fromPeer)
 {
-	return AcceptToMemoryPoolWithTime(pool, bMultiThreaded, state, tx, fLimitFree, pfMissingInputs, GetTime(), plTxnReplaced, fOverrideMempoolLimit, nAbsurdFee, fDryRun, fromPeer);
+	return AcceptToMemoryPoolWithTime(pool, true, state, tx, fLimitFree, pfMissingInputs, GetTime(), plTxnReplaced, fOverrideMempoolLimit, nAbsurdFee, fDryRun, fromPeer);
 }
 bool GetTimestampIndex(const unsigned int &high, const unsigned int &low, std::vector<uint256> &hashes)
 {
