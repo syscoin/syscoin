@@ -526,7 +526,7 @@ bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet) const
 
     return (nVotes > -1);
 }
-bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet, int& nStartHeight) const
+bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet, int& nStartHeightBlock) const
 {
 	LOCK(cs_vecPayees);
 
@@ -540,7 +540,7 @@ bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet, int& nStartHeight) 
 		if (payee.GetVoteCount() > nVotes) {
 			payeeRet = payee.GetPayee();
 			nVotes = payee.GetVoteCount();
-			nStartHeight = payee.nStartHeight;
+			nStartHeightBlock = payee.nStartHeight;
 		}
 	}
 
