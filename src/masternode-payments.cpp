@@ -40,8 +40,8 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &nFe
 {
     strErrorRet = "";
 
-	bool isBlockRewardValueMet = (block.vtx[0].GetValueOut() <= blockReward + nFee);
-	if (fDebug) LogPrintf("block.vtx[0].GetValueOut() %lld <= blockReward %lld\n", block.vtx[0].GetValueOut(), blockReward + nFee);
+	bool isBlockRewardValueMet = (block.vtx[0]->GetValueOut() <= blockReward + nFee);
+	if (fDebug) LogPrintf("block.vtx[0].GetValueOut() %lld <= blockReward %lld\n", block.vtx[0]->GetValueOut(), blockReward + nFee);
 
     // we are still using budgets, but we have no data about them anymore,
     // all we know is predefined budget cycle and window
@@ -52,7 +52,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &nFe
     // superblocks started
 
 	CAmount nSuperblockMaxValue = blockReward + nFee + CSuperblock::GetPaymentsLimit(nBlockHeight);
-	bool isSuperblockMaxValueMet = (block.vtx[0].GetValueOut() <= nSuperblockMaxValue);
+	bool isSuperblockMaxValueMet = (block.vtx[0]->GetValueOut() <= nSuperblockMaxValue);
 
     LogPrint("gobject", "block.vtx[0]->GetValueOut() %lld <= nSuperblockMaxValue %lld\n", block.vtx[0]->GetValueOut(), nSuperblockMaxValue);
 
@@ -68,7 +68,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &nFe
         }
         if(!isBlockRewardValueMet) {
             strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded block reward, only regular blocks are allowed at this height",
-				nBlockHeight, block.vtx[0].GetValueOut(), blockReward + nFee);
+				nBlockHeight, block.vtx[0]->GetValueOut(), blockReward + nFee);
         }
         // it MUST be a regular block otherwise
         return isBlockRewardValueMet;
@@ -158,7 +158,7 @@ bool IsBlockPayeeValid(const CTransaction& txNew, int nBlockHeight, const CAmoun
     return true;
 }
 
-void FillBlockPayments(CMutableTransaction& txNew, int nBlockHeight, const CAmount &nFee, const CAmount &blockReward, CTxOut& txoutMasternodeRet, std::vector<CTxOut>& voutSuperblockRet)
+void FillBlockPayments(CMutableTransaction& txNew, int nBlockHeight, const CAmount &nFee, CAmount &blockReward, CTxOut& txoutMasternodeRet, std::vector<CTxOut>& voutSuperblockRet)
 {
     // only create superblocks if spork is enabled AND if superblock is actually triggered
     // (height should be validated inside)
@@ -503,7 +503,7 @@ void CMasternodeBlockPayees::AddPayee(const CMasternodePaymentVote& vote)
             return;
         }
     }
-    CMasternodePayee payeeNew(vote.payee, nVoteHash);
+	CMasternodePayee payeeNew(vote.payee, nVoteHash, vote.nStartHeight);
     vecPayees.push_back(payeeNew);
 }
 
