@@ -100,41 +100,26 @@ static CBlock CreateGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits
 }
 // This will figure out a valid hash and Nonce if you're
 // creating a different genesis block:
-static void GenerateGenesisBlock(CBlockHeader &genesisBlock, uint256 *phash)
+static void GenerateGenesisBlock(CBlockHeader &genesisBlock, uint256 &phash)
 {
-	// Write the first 76 bytes of the block header to a double-SHA256 state.
-	genesisBlock.nTime = time(NULL);
-	CHash256 hasher;
-	CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
-	ss << genesisBlock;
-	assert(ss.size() == 80);
-	hasher.Write((unsigned char*)&ss[0], 76);
-	arith_uint256 hashTarget = arith_uint256().SetCompact(genesisBlock.nBits);
+	arith_uint256 bnTarget;
+	bnTarget.SetCompact(genesisBlock.nBits);
+	uint32_t nOnce = 0;
 	while (true) {
-
-
-		// Write the last 4 bytes of the block header (the nonce) to a copy of
-		// the double-SHA256 state, and compute the result.
-		CHash256(hasher).Write((unsigned char*)&genesisBlock.nNonce, 4).Finalize((unsigned char*)phash);
-
-		// Return the nonce if the hash has at least some zero bits,
-		// check if it has enough to reach the target
-		if (((uint16_t*)phash)[15] == 0 && UintToArith256(*phash) <= hashTarget)
-			break;
-		genesisBlock.nNonce++;
-		if (genesisBlock.nNonce == 0) {
+		genesisBlock.nNonce = nOnce;
+		uint256 hash = genesisBlock.GetHash();
+		if (UintToArith256(hash) <= bnTarget) {
+			phash = hash;
+		}
+		nOnce++;
+		if (nOnce == 0) {
 			printf("NONCE WRAPPED, incrementing time\n");
 			++genesisBlock.nTime;
 		}
-		// If nothing found after trying for a while, return -1
-		if ((genesisBlock.nNonce & 0xfff) == 0)
-			printf("nonce %08X: hash = %s (target = %s)\n",
-				genesisBlock.nNonce, (*phash).ToString().c_str(),
-				hashTarget.ToString().c_str());
 	}
 	printf("genesis.nTime = %u \n", genesisBlock.nTime);
 	printf("genesis.nNonce = %u \n", genesisBlock.nNonce);
-	printf("Generate hash = %s\n", (*phash).ToString().c_str());
+	printf("Generate hash = %s\n", phash.ToString().c_str());
 	printf("genesis.hashMerkleRoot = %s\n", genesisBlock.hashMerkleRoot.ToString().c_str());
 }
 
@@ -181,7 +166,7 @@ public:
         consensus.nSubsidyHalvingInterval = 525600; // Note: actual number of blocks per calendar year with DGW v3 is ~200700 (for example 449750 - 249050)
 		consensus.nSeniorityInterval = 43800 * 4; // seniority increases every 4
 		consensus.nTotalSeniorityIntervals = 9;
-        consensus.nMasternodePaymentsStartBlock = 1; // not true, but it's ok as long as it's less then nMasternodePaymentsIncreaseBlock
+        consensus.nMasternodePaymentsStartBlock = 2; // not true, but it's ok as long as it's less then nMasternodePaymentsIncreaseBlock
         consensus.nMasternodePaymentsIncreaseBlock = 2; // actual historical value
         consensus.nMasternodePaymentsIncreasePeriod = 576*30; // 17280 - actual historical value
         consensus.nInstantSendConfirmationsRequired = 6;
@@ -324,8 +309,8 @@ public:
         consensus.nSubsidyHalvingInterval = 525600;
 		consensus.nSeniorityInterval = 60 * 24; // seniority increases every day
 		consensus.nTotalSeniorityIntervals = 9;
-        consensus.nMasternodePaymentsStartBlock = 0; // not true, but it's ok as long as it's less then nMasternodePaymentsIncreaseBlock
-        consensus.nMasternodePaymentsIncreaseBlock = 1;
+        consensus.nMasternodePaymentsStartBlock = 2; // not true, but it's ok as long as it's less then nMasternodePaymentsIncreaseBlock
+        consensus.nMasternodePaymentsIncreaseBlock = 2;
         consensus.nMasternodePaymentsIncreasePeriod = 10;
         consensus.nInstantSendConfirmationsRequired = 2;
         consensus.nInstantSendKeepLock = 6;
@@ -592,7 +577,7 @@ public:
 		consensus.nTotalSeniorityIntervals = 9;;
 
         consensus.nSubsidyHalvingInterval = 150;
-        consensus.nMasternodePaymentsStartBlock = 0;
+        consensus.nMasternodePaymentsStartBlock = 2;
         consensus.nMasternodePaymentsIncreaseBlock = 350;
         consensus.nMasternodePaymentsIncreasePeriod = 10;
         consensus.nInstantSendConfirmationsRequired = 2;
