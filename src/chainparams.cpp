@@ -298,7 +298,7 @@ public:
         nPoolMaxTransactions = 3;
         nFulfilledRequestExpireTime = 60*60; // fulfilled requests expire in 1 hour
 
-        strSporkAddress = "Xgtyuk76vhuFW2iT7UAiHgNdWXCf3J34wh";
+        strSporkAddress = "SSQEoqCdCTRL9qZfgWfoj6tVsBQysxQ2dN";
 
     }
 };
@@ -543,7 +543,7 @@ public:
         nPoolMaxTransactions = 3;
         nFulfilledRequestExpireTime = 5*60; // fulfilled requests expire in 5 minutes
 
-        strSporkAddress = "SSQEoqCdCTRL9qZfgWfoj6tVsBQysxQ2dN";
+        strSporkAddress = "TCSJVL68KFq9FdbfxB2KhTcWp6rHD7vePs";
 
 		
     }
