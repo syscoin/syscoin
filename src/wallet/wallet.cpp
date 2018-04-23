@@ -40,7 +40,7 @@
 #include <boost/thread.hpp>
 // SYSCOIN services
 #include "alias.h"
-vector<CWalletTx*> mapWtxToDelete;
+std::vector<CWalletTx*> mapWtxToDelete;
 CWallet* pwalletMain = NULL;
 /** Transaction fee set by the user */
 CFeeRate payTxFee(DEFAULT_TRANSACTION_FEE);
@@ -1445,7 +1445,7 @@ int CWallet::GetRealOutpointPrivateSendRounds(const COutPoint& outpoint, int nRo
         if (mdwi == mDenomWtxes.end()) {
             // not known yet, let's add it
             LogPrint("privatesend", "GetRealOutpointPrivateSendRounds INSERTING %s\n", hash.ToString());
-            mDenomWtxes[hash] = CMutableTransaction(*wtx);
+            mDenomWtxes[hash] = CMutableTransaction(*wtx->tx);
         } else if(mDenomWtxes[hash].vout[nout].nRounds != -10) {
             // found and it's not an initial value, just return it
             return mDenomWtxes[hash].vout[nout].nRounds;
@@ -1975,14 +1975,14 @@ bool CWalletTx::RelayWalletTransaction(CConnman* connman, const std::string& str
             LogPrintf("Relaying wtx %s\n", hash.ToString());
 
             if (strCommand == NetMsgType::TXLOCKREQUEST) {
-                if (instantsend.ProcessTxLockRequest((CTxLockRequest)*this, *connman)) {
-                    instantsend.AcceptLockRequest((CTxLockRequest)*this);
+                if (instantsend.ProcessTxLockRequest((CTxLockRequest)*this->tx, *connman)) {
+                    instantsend.AcceptLockRequest((CTxLockRequest)*this->tx);
                 } else {
-                    instantsend.RejectLockRequest((CTxLockRequest)*this);
+                    instantsend.RejectLockRequest((CTxLockRequest)*this->tx);
                 }
             }
             if (connman) {
-                connman->RelayTransaction((CTransaction)*this);
+                connman->RelayTransaction((CTransaction)*this->tx);
                 return true;
             }
         }
