@@ -111,7 +111,7 @@ void WalletTxToJSON(const CWalletTx& wtx, UniValue& entry)
     std::string rbfStatus = "no";
     if (confirms <= 0) {
         LOCK(mempool.cs);
-        RBFTransactionState rbfState = IsRBFOptIn(wtx, mempool);
+        RBFTransactionState rbfState = IsRBFOptIn(*wtx.tx, mempool);
         if (rbfState == RBF_TRANSACTIONSTATE_UNKNOWN)
             rbfStatus = "unknown";
         else if (rbfState == RBF_TRANSACTIONSTATE_REPLACEABLE_BIP125)
@@ -371,19 +371,16 @@ CAmount GetCoinControlInputTotal(const CCoinControl* coinControl)
 		return 0;
 	LOCK(cs_main);
 	CCoinsViewCache view(pcoinsTip);
-	const CCoins *coins;
+	Coins coin;
 	CAmount nValueRet = 0;
 	std::vector<COutPoint> vInputs;
 	coinControl->ListSelected(vInputs);
 	BOOST_FOREACH(const COutPoint& outpoint, vInputs)
 	{
-		coins = view.AccessCoins(outpoint.hash);
-		if (coins == NULL)
+		view.AccessCoin(outpoint, coin);
+		if (coin.IsSpent())
 			continue;
-		// Clearly invalid input, fail
-		if (coins->vout.size() <= outpoint.n)
-			return false;
-		nValueRet += coins->vout[outpoint.n].nValue;
+		nValueRet += coin.out.nValue;
 	}
 	return nValueRet;
 }
@@ -469,7 +466,9 @@ void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsign
 		{
 			UniValue param(UniValue::VARR);
 			param.push_back(stringFromVch(vchAlias));
-			const UniValue &result = aliasbalance(param, false);
+			JSONRPCRequest request;
+			request.params = param;
+			const UniValue &result = aliasbalance(request);
 			CAmount nBalance = AmountFromValue(find_value(result.get_obj(), "balance"));
 
 			// account for transfer balance output
@@ -511,64 +510,64 @@ void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsign
 	vector<vector<unsigned char> > vvch;
 	vector<vector<unsigned char> > vvchAlias;
 	int op;
-	if (wtxNew.nVersion == SYSCOIN_TX_VERSION) {
+	if (wtxNew.tx->nVersion == SYSCOIN_TX_VERSION) {
 		if (!DecodeAliasTx(wtxNew, op, vvchAlias))
 		{
-			if (!FindAliasInTx(wtxNew, vvchAlias)) {
+			if (!FindAliasInTx(*wtxNew.tx, vvchAlias)) {
 				throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9001 - " + _("Cannot find alias input to this transaction"));
 			}
 			// it is assumed if no alias output is found, then it is for another service so this would be an alias update
 			op = OP_ALIAS_UPDATE;
 		}
-		CheckAliasInputs(wtxNew, op, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, bCheckDestError, true);
+		CheckAliasInputs(*wtxNew.tx, op, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, bCheckDestError, true);
 		if (!errorMessage.empty())
 			throw runtime_error(errorMessage.c_str());
-		CheckAliasInputs(wtxNew, op, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, bCheckDestError, true);
+		CheckAliasInputs(*wtxNew.tx, op, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, bCheckDestError, true);
 		if (!errorMessage.empty())
 			throw runtime_error(errorMessage.c_str());
 
 		if (DecodeCertTx(wtxNew, op, vvch))
 		{
-			CheckCertInputs(wtxNew, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedCerts, errorMessage, true);
+			CheckCertInputs(*wtxNew.tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedCerts, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
-			CheckCertInputs(wtxNew, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedCerts, errorMessage, true);
-			if (!errorMessage.empty())
-				throw runtime_error(errorMessage.c_str());
-		}
-		if (DecodeAssetTx(wtxNew, op, vvch))
-		{
-			CheckAssetInputs(wtxNew, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
-			if (!errorMessage.empty())
-				throw runtime_error(errorMessage.c_str());
-			CheckAssetInputs(wtxNew, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
+			CheckCertInputs(*wtxNew.tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedCerts, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
 		}
-		if (DecodeAssetAllocationTx(wtxNew, op, vvch))
+		if (DecodeAssetTx(*wtxNew.tx, op, vvch))
 		{
-			CheckAssetAllocationInputs(wtxNew, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
+			CheckAssetInputs(*wtxNew.tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
-			CheckAssetAllocationInputs(wtxNew, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
+			CheckAssetInputs(*wtxNew.tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
 		}
-		if (DecodeEscrowTx(wtxNew, op, vvch))
+		if (DecodeAssetAllocationTx(*wtxNew.tx, op, vvch))
 		{
-			CheckEscrowInputs(wtxNew, op, vvch, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, true);
+			CheckAssetAllocationInputs(*wtxNew.tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
-			CheckEscrowInputs(wtxNew, op, vvch, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, true);
+			CheckAssetAllocationInputs(*wtxNew.tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
 		}
-		if (DecodeOfferTx(wtxNew, op, vvch))
+		if (DecodeEscrowTx(*wtxNew.tx, op, vvch))
 		{
-			CheckOfferInputs(wtxNew, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedOffers, errorMessage, true);
+			CheckEscrowInputs(*wtxNew.tx, op, vvch, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
-			CheckOfferInputs(wtxNew, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedOffers, errorMessage, true);
+			CheckEscrowInputs(*wtxNew.tx, op, vvch, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, true);
+			if (!errorMessage.empty())
+				throw runtime_error(errorMessage.c_str());
+		}
+		if (DecodeOfferTx(*wtxNew.tx, op, vvch))
+		{
+			CheckOfferInputs(*wtxNew.tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedOffers, errorMessage, true);
+			if (!errorMessage.empty())
+				throw runtime_error(errorMessage.c_str());
+			CheckOfferInputs(*wtxNew.tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedOffers, errorMessage, true);
 			if (!errorMessage.empty())
 				throw runtime_error(errorMessage.c_str());
 
@@ -1055,7 +1054,7 @@ UniValue getbalance(const JSONRPCRequest& request)
         for (std::map<uint256, CWalletTx>::iterator it = pwalletMain->mapWallet.begin(); it != pwalletMain->mapWallet.end(); ++it)
         {
             const CWalletTx& wtx = (*it).second;
-            if (!CheckFinalTx(wtx) || wtx.GetBlocksToMaturity() > 0 || wtx.GetDepthInMainChain() < 0)
+            if (!CheckFinalTx(*wtx.tx) || wtx.GetBlocksToMaturity() > 0 || wtx.GetDepthInMainChain() < 0)
                 continue;
 
             CAmount allFee;
@@ -1660,24 +1659,25 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
                 WalletTxToJSON(wtx, entry);
             entry.push_back(Pair("abandoned", wtx.isAbandoned()));
 			// SYSCOIN
-			if (wtx.nVersion == SYSCOIN_TX_VERSION && (IsSyscoinScript(wtx.vout[s.vout].scriptPubKey, op, vvchArgs) || (wtx.vout[s.vout].scriptPubKey[0] == OP_RETURN && DecodeAndParseSyscoinTx(wtx, op, vvchArgs, type))))
+			const CTransaction& tx = *wtx.tx;
+			if (tx.nVersion == SYSCOIN_TX_VERSION && (IsSyscoinScript(tx.vout[s.vout].scriptPubKey, op, vvchArgs) || (tx.vout[s.vout].scriptPubKey[0] == OP_RETURN && DecodeAndParseSyscoinTx(tx, op, vvchArgs, type))))
 			{
 				int aliasOp;
 				vector<vector<unsigned char> > aliasVvch;
 				UniValue oAssetAllocationReceiversArray(UniValue::VARR);
 				string aliasName = "";
-				if (mapSysTx.find(wtx.GetHash()) != mapSysTx.end())
+				if (mapSysTx.find(tx.GetHash()) != mapSysTx.end())
 					continue;
-				mapSysTx[wtx.GetHash()] = true;
+				mapSysTx[tx.GetHash()] = true;
 				string strResponseEnglish = "";
 				string strResponseGUID = "";
-				strResponse = GetSyscoinTransactionDescription(wtx, op, strResponseEnglish, type, strResponseGUID);
+				strResponse = GetSyscoinTransactionDescription(tx, op, strResponseEnglish, type, strResponseGUID);
 				entry.push_back(Pair("systx", strResponse));
 				entry.push_back(Pair("systype", strResponseEnglish));
 				entry.push_back(Pair("sysguid", strResponseGUID));
 				{
 					LOCK(cs_main);
-					if (!FindAliasInTx(wtx, aliasVvch)) {
+					if (!FindAliasInTx(tx, aliasVvch)) {
 						continue;
 					}
 				}
@@ -1685,7 +1685,7 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 
 				entry.push_back(Pair("sysalias", aliasName));
 				if (op == OP_ASSET_ALLOCATION_SEND || op == OP_ASSET_SEND) {
-					CAssetAllocation assetallocation(wtx);
+					CAssetAllocation assetallocation(tx);
 					if (!assetallocation.IsNull()) {
 						if (!assetallocation.listSendingAllocationAmounts.empty()) {
 							for (auto& amountTuple : assetallocation.listSendingAllocationAmounts) {
@@ -1750,24 +1750,25 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
                 if (fLong)
                     WalletTxToJSON(wtx, entry);
 				// SYSCOIN
-				if (wtx.nVersion == SYSCOIN_TX_VERSION && (IsSyscoinScript(wtx.vout[r.vout].scriptPubKey, op, vvchArgs) || (wtx.vout[r.vout].scriptPubKey[0] == OP_RETURN && DecodeAndParseSyscoinTx(wtx, op, vvchArgs, type))))
+				const CTransaction& tx = *wtx.tx;
+				if (tx.nVersion == SYSCOIN_TX_VERSION && (IsSyscoinScript(tx.vout[r.vout].scriptPubKey, op, vvchArgs) || (tx.vout[r.vout].scriptPubKey[0] == OP_RETURN && DecodeAndParseSyscoinTx(tx, op, vvchArgs, type))))
 				{
 					int aliasOp;
 					vector<vector<unsigned char> > aliasVvch;
 					UniValue oAssetAllocationReceiversArray(UniValue::VARR);
 					string aliasName = "";
-					if (mapSysTx.find(wtx.GetHash()) != mapSysTx.end())
+					if (mapSysTx.find(tx.GetHash()) != mapSysTx.end())
 						continue;
-					mapSysTx[wtx.GetHash()] = true;
+					mapSysTx[tx.GetHash()] = true;
 					string strResponseEnglish = "";
 					string strResponseGUID = "";
-					strResponse = GetSyscoinTransactionDescription(wtx, op, strResponseEnglish, type, strResponseGUID);
+					strResponse = GetSyscoinTransactionDescription(tx, op, strResponseEnglish, type, strResponseGUID);
 					entry.push_back(Pair("systx", strResponse));
 					entry.push_back(Pair("systype", strResponseEnglish));
 					entry.push_back(Pair("sysguid", strResponseGUID));
 					{
 						LOCK(cs_main);
-						if (!FindAliasInTx(wtx, aliasVvch)) {
+						if (!FindAliasInTx(tx, aliasVvch)) {
 							continue;
 						}
 					}
@@ -1775,7 +1776,7 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 
 					entry.push_back(Pair("sysalias", aliasName));
 					if (op == OP_ASSET_ALLOCATION_SEND || op == OP_ASSET_SEND) {
-						CAssetAllocation assetallocation(wtx);
+						CAssetAllocation assetallocation(tx);
 						if (!assetallocation.IsNull()) {
 							if (!assetallocation.listSendingAllocationAmounts.empty()) {
 								for (auto& amountTuple : assetallocation.listSendingAllocationAmounts) {
