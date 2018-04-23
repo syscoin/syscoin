@@ -977,7 +977,7 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 	{
 		// ensure mempool has this transaction and it is not yet mined, get the transaction in question
 		CTransaction txRef = mempool.get(arrivalTime.first);
-		const Transaction &tx = *txRef;
+		const CTransaction &tx = *txRef;
 		if (!txRef)
 			continue;
 		// if this tx arrived within the minimum latency period flag it as potentially conflicting
