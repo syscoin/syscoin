@@ -267,7 +267,6 @@ public:
 		pchMessageStart[3] = 0xd9;
         vAlertPubKey = ParseHex("048240a8748a80a286b270ba126705ced4f2ce5a7847b3610ea3c06513150dade2a8512ed5ea86320824683fc0818f0ac019214973e677acd1244f6d0571fc5103");
 		nDefaultPort = 8369;
-		nMaxTipAge = 6 * 60 * 60; // ~144 blocks behind -> 2 x fork detection time, was 24 * 60 * 60 in syscoin
 		nPruneAfterHeight = 1000000;
 		uint256 hash;
 		genesis = CreateGenesisBlock(1521568250, 6206162, 0x1e0ffff0, 1, 8.88 * COIN);
@@ -318,13 +317,6 @@ public:
 
         strSporkAddress = "Xgtyuk76vhuFW2iT7UAiHgNdWXCf3J34wh";
 
-		checkpointData = (CCheckpointData) {
-			boost::assign::map_list_of
-			(0, uint256S("0x0000006086e066c3e9df26340d6324982c031e1e8d37f66c2f4cb5d76a3db7da")),
-				0,
-				0,
-				0
-		};
 
 		chainTxData = ChainTxData{
 			0,
@@ -452,19 +444,9 @@ public:
 
         strSporkAddress = "yjPtiKh2uwk3bDutTEA2q9mCtXyiZRWn55";
 
-		checkpointData = (CCheckpointData) {
-			boost::assign::map_list_of
-			(0, uint256S("0x00000d070aa618e6549464d948b37e92df680312a38e22f4c14fa9e0c3ab494f")),
-				0,
-				0,
-				0
-		};
+		
 
-		chainTxData = ChainTxData{
-			0,
-			0,
-			0
-		};
+		
 
     }
 };
@@ -555,16 +537,21 @@ public:
         vSeeds.clear();
         //vSeeds.push_back(CDNSSeedData("syscoinevo.org",  "devnet-seed.syscoinevo.org"));
 
-        // Testnet Syscoin addresses start with 'y'
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,140);
-        // Testnet Syscoin script addresses start with '8' or '9'
-        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,19);
-        // Testnet private keys start with '9' or 'c' (Syscoin defaults)
-        base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
-        // Testnet Syscoin BIP32 pubkeys start with 'tpub' (Syscoin defaults)
-        base58Prefixes[EXT_PUBLIC_KEY] = boost::assign::list_of(0x04)(0x35)(0x87)(0xCF).convert_to_container<std::vector<unsigned char> >();
-        // Testnet Syscoin BIP32 prvkeys start with 'tprv' (Syscoin defaults)
-        base58Prefixes[EXT_SECRET_KEY] = boost::assign::list_of(0x04)(0x35)(0x83)(0x94).convert_to_container<std::vector<unsigned char> >();
+		base58Prefixes[PUBKEY_ADDRESS_SYS] = std::vector<unsigned char>(1, 65);
+		base58Prefixes[SCRIPT_ADDRESS_SYS] = std::vector<unsigned char>(1, 196);
+		base58Prefixes[SECRET_KEY_SYS] = std::vector<unsigned char>(1, 239);
+
+		base58Prefixes[PUBKEY_ADDRESS_BTC] = std::vector<unsigned char>(1, 111);
+		base58Prefixes[SCRIPT_ADDRESS_BTC] = std::vector<unsigned char>(1, 196);
+		base58Prefixes[SECRET_KEY_BTC] = std::vector<unsigned char>(1, 239);
+
+		base58Prefixes[PUBKEY_ADDRESS_ZEC] = { 0x1C,0xB8 };
+		base58Prefixes[SCRIPT_ADDRESS_ZEC] = { 0x1C,0xBD };
+		base58Prefixes[SECRET_KEY_ZEC] = std::vector<unsigned char>(1, 239);
+		// Regtest Syscoin BIP32 pubkeys start with 'tpub' (Syscoin defaults)
+		base58Prefixes[EXT_PUBLIC_KEY] = boost::assign::list_of(0x04)(0x35)(0x87)(0xCF).convert_to_container<std::vector<unsigned char> >();
+		// Regtest Syscoin BIP32 prvkeys start with 'tprv' (Syscoin defaults)
+		base58Prefixes[EXT_SECRET_KEY] = boost::assign::list_of(0x04)(0x35)(0x83)(0x94).convert_to_container<std::vector<unsigned char> >();
 
         // Testnet Syscoin BIP44 coin type is '1' (All coin's testnet default)
         nExtCoinType = 1;
@@ -581,19 +568,7 @@ public:
 
         strSporkAddress = "yjPtiKh2uwk3bDutTEA2q9mCtXyiZRWn55";
 
-		checkpointData = (CCheckpointData) {
-			boost::assign::map_list_of
-			(0, uint256S("0x000008ca1832a4baf228eb1553c03d3a2c8e02399550dd6ea8d65cec3ef23d2e")),
-				0,
-				0,
-				0
-		};
-
-        chainTxData = ChainTxData{
-            devnetGenesis.GetBlockTime(), // * UNIX timestamp of devnet genesis block
-            2,                            // * we only have 2 coinbase transactions when a devnet is started up
-            0.01                          // * estimated number of transactions per second
-        };
+		
     }
 };
 static CDevNetParams *devNetParams;
@@ -605,7 +580,7 @@ static CDevNetParams *devNetParams;
 class CRegTestParams : public CChainParams {
 public:
     CRegTestParams() {
-        strNetworkID = "regtest"		
+		strNetworkID = "regtest";
 		consensus.nSeniorityInterval = 60; // seniority increases every hour
 		consensus.nTotalSeniorityIntervals = 9;;
 
@@ -689,16 +664,7 @@ public:
         // privKey: cP4EKFyJsHT39LDqgdcB43Y3YXjNyjb5Fuas1GQSeAtjnZWmZEQK
         strSporkAddress = "yj949n1UH6fDhw6HtVE5VMj2iSTaSWBMcW";
 
-        checkpointData = (CCheckpointData){
-            boost::assign::map_list_of
-            ( 0, uint256S("0x000008ca1832a4baf228eb1553c03d3a2c8e02399550dd6ea8d65cec3ef23d2e"))
-        };
-
-        chainTxData = ChainTxData{
-            0,
-            0,
-            0
-        };
+   
 
 		base58Prefixes[PUBKEY_ADDRESS_SYS] = std::vector<unsigned char>(1, 65);
 		base58Prefixes[SCRIPT_ADDRESS_SYS] = std::vector<unsigned char>(1, 196);
