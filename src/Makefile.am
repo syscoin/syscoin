@@ -70,7 +70,7 @@ if BUILD_SYSCOIND
 endif
 
 if BUILD_SYSCOIN_UTILS
-  bin_PROGRAMS += syscoin-cli syscoin-tx
+  bin_PROGRAMS += syscoin-cli
 endif
 
 .PHONY: FORCE check-symbols check-security
