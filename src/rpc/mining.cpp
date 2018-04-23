@@ -36,6 +36,8 @@
 
 #include <univalue.h>
 #include "rpc/mining.h"
+// SYSCOIN
+bool EnsureWalletIsAvailable(bool avoidException);
 /**
  * Return average network hashes per second based on the last 'lookup' blocks,
  * or from the last difficulty change if 'lookup' is nonpositive.
@@ -1122,7 +1124,7 @@ UniValue getauxblock(const JSONRPCRequest& request)
 			+ HelpExampleRpc("getauxblock", "")
 		);
 
-	std::shared_ptr<CReserveScript> coinbaseScript;
+	boost::shared_ptr<CReserveScript> coinbaseScript;
 	GetMainSignals().ScriptForMining(coinbaseScript);
 
 	// If the keypool is exhausted, no script is returned at all.  Catch this.
