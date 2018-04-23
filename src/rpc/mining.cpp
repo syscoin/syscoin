@@ -1117,15 +1117,13 @@ UniValue createauxblock(const JSONRPCRequest& request)
 			+ HelpExampleCli("createauxblock", "\"address\"")
 			+ HelpExampleRpc("createauxblock", "\"address\"")
 		);
-
-	// Check coinbase payout address
-	const CTxDestination coinbaseScript
-		= DecodeDestination(request.params[0].get_str());
-	if (!IsValidDestination(coinbaseScript)) {
+	CSyscoinAddress address(request.params[0].get_str());
+	bool isValid = address.IsValid();
+	if (!isValid) {
 		throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
 			"Error: Invalid coinbase payout address");
 	}
-	const CScript scriptPubKey = GetScriptForDestination(coinbaseScript);
+	const CScript scriptPubKey = GetScriptForDestination(address.Get());
 
 	return AuxMiningCreateBlock(scriptPubKey);
 }
