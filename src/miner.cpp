@@ -164,10 +164,6 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = scriptPubKeyIn;
 
-	if (!OrderBasedOnArrivalTime(pblock->vtx))
-	{
-		throw std::runtime_error("OrderBasedOnArrivalTime failed!");
-	}
 	// SYSCOIN
 	CAmount nTotalRewardWithMasternodes;
 	CAmount blockReward = GetBlockSubsidy(nHeight, Params().GetConsensus(), nTotalRewardWithMasternodes);
@@ -184,6 +180,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
 
     pblock->vtx[0] = MakeTransactionRef(std::move(coinbaseTx));
     pblocktemplate->vTxFees[0] = -nFees;
+
+	if (!OrderBasedOnArrivalTime(pblock->vtx))
+	{
+		throw std::runtime_error("OrderBasedOnArrivalTime failed!");
+	}
 
     // Fill in header
     pblock->hashPrevBlock  = pindexPrev->GetBlockHash();
