@@ -103,14 +103,11 @@ static bool SignStep(const BaseSignatureCreator& creator, const CScript& scriptP
 bool ProduceSignature(const BaseSignatureCreator& creator, const CScript& fromPubKeyIn, CScript& scriptSig)
 {
 	// SYSCOIN
-	CScript script;
 	CScript fromPubKeyOut;
-	if (RemoveSyscoinScript(fromPubKeyIn, fromPubKeyOut))
-		script = fromPubKeyOut;
-	else
-		script = fromPubKeyIn;
+	RemoveSyscoinScript(fromPubKeyIn, fromPubKeyOut);
+		
     txnouttype whichType;
-    if (!SignStep(creator, fromPubKey, scriptSig, whichType))
+    if (!SignStep(creator, fromPubKeyOut, scriptSig, whichType))
         return false;
 
     if (whichType == TX_SCRIPTHASH)
@@ -129,7 +126,7 @@ bool ProduceSignature(const BaseSignatureCreator& creator, const CScript& fromPu
     }
 
     // Test solution
-    return VerifyScript(scriptSig, fromPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, creator.Checker());
+    return VerifyScript(scriptSig, fromPubKeyOut, STANDARD_SCRIPT_VERIFY_FLAGS, creator.Checker());
 }
 
 bool SignSignature(const CKeyStore &keystore, const CScript& fromPubKey, CMutableTransaction& txTo, unsigned int nIn, int nHashType)
