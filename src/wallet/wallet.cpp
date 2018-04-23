@@ -2888,10 +2888,10 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 				continue;
 			if (mempool.mapNextTx.find(outpoint) != mempool.mapNextTx.end())
 				continue;
-			if (!GetTransaction(outpoint.hash, tx, blockhash, Params().GetConsensus()))
+			if (!GetTransaction(outpoint.hash, tx, Params().GetConsensus(), blockhash, true))
 				continue;
 			nValueRet += coin.out.nValue;
-			CWalletTx *wtx = new CWalletTx(pwalletMain, tx));
+			CWalletTx *wtx = new CWalletTx(pwalletMain, tx);
 			wtx->nIndex = coin.nHeight;
 			wtx->hashBlock = hashBlock;
 			mapWtxToDelete.push_back(wtx);
