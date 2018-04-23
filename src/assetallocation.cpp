@@ -693,8 +693,8 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, int op, const vector<vec
     return true;
 }
 UniValue assetallocationsend(const JSONRPCRequest& request) {
-	UniValue &params = request.params;
-	if (fHelp || params.size() != 5)
+	const UniValue &params = request.params;
+	if (params.fHelp || params.size() != 5)
 		throw runtime_error(
 			"assetallocationsend [asset] [aliasfrom] ( [{\"aliasto\":\"aliasname\",\"amount\":amount},...] or [{\"aliasto\":\"aliasname\",\"ranges\":[{\"start\":index,\"end\":index},...]},...] ) [memo] [witness]\n"
 			"Send an asset allocation you own to another alias. Maximimum recipients is 250.\n"
@@ -834,8 +834,8 @@ UniValue assetallocationsend(const JSONRPCRequest& request) {
 	return res;
 }
 UniValue assetallocationcollectinterest(const JSONRPCRequest& request) {
-	UniValue &params = request.params;
-	if (fHelp || params.size() != 3)
+	const UniValue &params = request.params;
+	if (params.fHelp || params.size() != 3)
 		throw runtime_error(
 			"assetallocationcollectinterest [asset] [alias] [witness]\n"
 			"Collect interest on this asset allocation if an interest rate is set on this asset.\n"
@@ -907,8 +907,8 @@ UniValue assetallocationcollectinterest(const JSONRPCRequest& request) {
 	return res;
 }
 UniValue assetallocationinfo(const JSONRPCRequest& request) {
-	UniValue &params = request.params;
-    if (fHelp || 3 != params.size())
+	const UniValue &params = request.params;
+    if (params.fHelp || 3 != params.size())
         throw runtime_error("assetallocationinfo <asset> <alias> <getinputs>\n"
                 "Show stored values of a single asset allocation. Set getinputs to true if you want to get the allocation inputs, if applicable.\n");
 
@@ -1031,8 +1031,8 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 	return lookForTxHash.IsNull()? ZDAG_STATUS_OK: ZDAG_NOT_FOUND;
 }
 UniValue assetallocationsenderstatus(const JSONRPCRequest& request) {
-	UniValue &params = request.params;
-	if (fHelp || 3 != params.size())
+	const UniValue &params = request.params;
+	if (params.fHelp || 3 != params.size())
 		throw runtime_error("assetallocationsenderstatus <asset> <sender> <txid>\n"
 			"Show status as it pertains to any current Z-DAG conflicts or warnings related to a sender or sender/txid combination of an asset allocation transfer. Leave txid empty if you are not checking for a specific transfer.\n"
 			"Return value is in the status field and can represent 3 levels(0, 1 or 2)\n"
