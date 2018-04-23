@@ -21,6 +21,7 @@
 #include <algorithm>
 // SYSCOIN 
 #include "instantx.h"
+typedef std::vector<unsigned char> valtype;
 /* Moved from wallet.cpp.  CMerkleTx is necessary for auxpow, independent
 of an enabled (or disabled) wallet.  Always include the code.  */
 
@@ -91,7 +92,7 @@ CAuxPow::check(const uint256& hashAuxBlock, int nChainId,
 	if (nIndex != 0)
 		return error("AuxPow is not a generate");
 
-	if (params.fStrictChainId && parentBlock.GetChainId() == nChainId)
+	if (parentBlock.GetChainId() == nChainId)
 		return error("Aux POW parent has our chain ID");
 
 	if (vChainMerkleBranch.size() > 30)
