@@ -975,17 +975,17 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 		minLatency = 1000;
 	for (auto& arrivalTime : arrivalTimesSet)
 	{
-		CTransaction tx;
 		// ensure mempool has this transaction and it is not yet mined, get the transaction in question
-		if (!mempool.lookup(arrivalTime.first, tx))
+		CTransaction txRef = mempool.get(arrivalTime.first);
+		if (!txRef)
 			continue;
 		// if this tx arrived within the minimum latency period flag it as potentially conflicting
 		if (abs(arrivalTime.second - lastArrivalTime.second) < minLatency) {
 			return ZDAG_MINOR_CONFLICT_OK;
 		}
-		const uint256& txHash = tx.GetHash();
+		const uint256& txHash = txRef.GetHash();
 		// get asset allocation object from this tx, if for some reason it doesn't have it, just skip (shouldn't happen)
-		CAssetAllocation assetallocation(tx);
+		CAssetAllocation assetallocation(*txRef);
 		if (assetallocation.IsNull())
 			continue;
 
