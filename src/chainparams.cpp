@@ -286,7 +286,7 @@ public:
         // Syscoin BIP44 coin type is '5'
         nExtCoinType = 5;
 
-        vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_main, pnSeed6_main + ARRAYLEN(pnSeed6_main));
+        //vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_main, pnSeed6_main + ARRAYLEN(pnSeed6_main));
 
         fMiningRequiresPeers = true;
         fDefaultConsistencyChecks = false;
@@ -299,7 +299,17 @@ public:
         nFulfilledRequestExpireTime = 60*60; // fulfilled requests expire in 1 hour
 
         strSporkAddress = "SSQEoqCdCTRL9qZfgWfoj6tVsBQysxQ2dN";
+		checkpointData = {
+			{
+				{ 0, uint256S("00000cd4b4e6a465c66094bc7d18e828f0b8d56e6afc571fbe9e25e48338d441") },
+			}
+		};
 
+		chainTxData = ChainTxData{
+			0,
+			0,
+			0
+		};
     }
 };
 static CMainParams mainParams;
@@ -421,7 +431,17 @@ public:
 
         strSporkAddress = "TXgVDiV1amUYfL8xUETVZ2nzAnPax1nEEs";
 
-		
+		checkpointData = {
+			{
+				{ 0, uint256S("000007510081c30331afdee1453991ef18663c13e14ff9caa1ae5b30fa8c35bc") },
+			}
+		};
+
+		chainTxData = ChainTxData{
+			0,
+			0,
+			0
+		};
 
 		
 
@@ -545,7 +565,17 @@ public:
 
         strSporkAddress = "TCSJVL68KFq9FdbfxB2KhTcWp6rHD7vePs";
 
-		
+		checkpointData = {
+			{
+				{ 0, uint256S("000008ca1832a4baf228eb1553c03d3a2c8e02399550dd6ea8d65cec3ef23d2e") },
+			}
+		};
+
+		chainTxData = ChainTxData{
+			0,
+			0,
+			0
+		};
     }
 };
 static CDevNetParams *devNetParams;
@@ -661,7 +691,17 @@ public:
 
         // Regtest Syscoin BIP44 coin type is '1' (All coin's testnet default)
         nExtCoinType = 1;
+		checkpointData = {
+			{
+				{ 0, uint256S("0000140aa52b536eed2f54cb9590a959672c131bb5de1d934024d6c25c64df4f") },
+			}
+		};
 
+		chainTxData = ChainTxData{
+			0,
+			0,
+			0
+		};
    }
 
     void UpdateBIP9Parameters(Consensus::DeploymentPos d, int64_t nStartTime, int64_t nTimeout)
