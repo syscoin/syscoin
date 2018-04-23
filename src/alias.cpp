@@ -1217,9 +1217,9 @@ UniValue aliasnewfund(const JSONRPCRequest& request) {
 
 	UniValue paramsUTXO(UniValue::VARR);
 	paramsUTXO.push_back(addresses);
-	JSONRPCRequest request;
-	request.params = paramsUTXO;
-	const UniValue &resUTXOs = getaddressutxos(request);
+	JSONRPCRequest request1;
+	request1.params = paramsUTXO;
+	const UniValue &resUTXOs = getaddressutxos(request1);
 	UniValue utxoArray(UniValue::VARR);
 	if (resUTXOs.isArray())
 		utxoArray = resUTXOs.get_array();
@@ -1822,9 +1822,9 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 	utxoParams.push_back(strAddressFrom);
 	param.push_back(Pair("addresses", utxoParams));
 	paramsUTXO.push_back(param);
-	JSONRPCRequest request;
-	request.params = paramsUTXO;
-	const UniValue &resUTXOs = getaddressutxos(request);
+	JSONRPCRequest request1;
+	request1.params = paramsUTXO;
+	const UniValue &resUTXOs = getaddressutxos(request1);
 	UniValue utxoArray(UniValue::VARR);
 	if (resUTXOs.isArray())
 		utxoArray = resUTXOs.get_array();
