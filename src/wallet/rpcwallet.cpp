@@ -371,7 +371,7 @@ CAmount GetCoinControlInputTotal(const CCoinControl* coinControl)
 		return 0;
 	LOCK(cs_main);
 	CCoinsViewCache view(pcoinsTip);
-	Coins coin;
+	Coin coin;
 	CAmount nValueRet = 0;
 	std::vector<COutPoint> vInputs;
 	coinControl->ListSelected(vInputs);
@@ -511,7 +511,7 @@ void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsign
 	vector<vector<unsigned char> > vvchAlias;
 	int op;
 	if (wtxNew.tx->nVersion == SYSCOIN_TX_VERSION) {
-		if (!DecodeAliasTx(wtxNew, op, vvchAlias))
+		if (!DecodeAliasTx(*wtxNew.tx, op, vvchAlias))
 		{
 			if (!FindAliasInTx(*wtxNew.tx, vvchAlias)) {
 				throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9001 - " + _("Cannot find alias input to this transaction"));
@@ -2225,7 +2225,7 @@ UniValue gettransaction(const JSONRPCRequest& request)
     ListTransactions(wtx, "*", 0, false, details, filter);
     entry.push_back(Pair("details", details));
 
-    std::string strHex = EncodeHexTx(static_cast<CTransaction>(wtx));
+    std::string strHex = EncodeHexTx(*wtx.tx);
     entry.push_back(Pair("hex", strHex));
 
     return entry;
@@ -3176,7 +3176,7 @@ UniValue setbip69enabled(const JSONRPCRequest& request)
 }
 UniValue getauxblock(const JSONRPCRequest& request)
 {
-	if (!EnsureWalletIsAvailable(pwalletMain, request.fHelp)) {
+	if (!EnsureWalletIsAvailable(request.fHelp)) {
 		return NullUniValue;
 	}
 
