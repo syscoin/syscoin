@@ -102,57 +102,54 @@ UniValue getnetworkhashps(const JSONRPCRequest& request)
     return GetNetworkHashPS(request.params.size() > 0 ? request.params[0].get_int() : 120, request.params.size() > 1 ? request.params[1].get_int() : -1);
 }
 
-UniValue generateBlocks(boost::shared_ptr<CReserveScript> coinbaseScript, int nGenerate, uint64_t nMaxTries, bool keepScript)
+UniValue generateBlocks(std::shared_ptr<CReserveScript> coinbaseScript, int nGenerate, uint64_t nMaxTries, bool keepScript)
 {
-    static const int nInnerLoopCount = 0x10000;
-    int nHeightStart = 0;
-    int nHeightEnd = 0;
-    int nHeight = 0;
+	static const int nInnerLoopCount = 0x10000;
+	int nHeightEnd = 0;
+	int nHeight = 0;
 
-    {   // Don't keep cs_main locked
-        LOCK(cs_main);
-        nHeightStart = chainActive.Height();
-        nHeight = nHeightStart;
-        nHeightEnd = nHeightStart+nGenerate;
-    }
-    unsigned int nExtraNonce = 0;
-    UniValue blockHashes(UniValue::VARR);
-    while (nHeight < nHeightEnd)
-    {
-        std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler(Params()).CreateNewBlock(coinbaseScript->reserveScript));
-        if (!pblocktemplate.get())
-            throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
-        CBlock *pblock = &pblocktemplate->block;
-        {
-            LOCK(cs_main);
-            IncrementExtraNonce(pblock, chainActive.Tip(), nExtraNonce);
-        }
-		// SYSCOIN AUXPOW
+	{   // Don't keep cs_main locked
+		LOCK(cs_main);
+		nHeight = chainActive.Height();
+		nHeightEnd = nHeight + nGenerate;
+	}
+	unsigned int nExtraNonce = 0;
+	UniValue blockHashes(UniValue::VARR);
+	while (nHeight < nHeightEnd)
+	{
+		std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler(Params()).CreateNewBlock(coinbaseScript->reserveScript));
+		if (!pblocktemplate.get())
+			throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
+		CBlock *pblock = &pblocktemplate->block;
+		{
+			LOCK(cs_main);
+			IncrementExtraNonce(pblock, chainActive.Tip(), nExtraNonce);
+		}
 		CAuxPow::initAuxPow(*pblock);
 		CPureBlockHeader& miningHeader = pblock->auxpow->parentBlock;
-        while (nMaxTries > 0 && pblock->nNonce < nInnerLoopCount && !CheckProofOfWork(miningHeader.GetHash(), pblock->nBits, Params().GetConsensus())) {
-            ++miningHeader.nNonce;
-            --nMaxTries;
-        }
-        if (nMaxTries == 0) {
-            break;
-        }
-        if (miningHeader.nNonce == nInnerLoopCount) {
-            continue;
-        }
-        std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(*pblock);
-        if (!ProcessNewBlock(Params(), shared_pblock, true, NULL))
-            throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
-        ++nHeight;
-        blockHashes.push_back(pblock->GetHash().GetHex());
+		while (nMaxTries > 0 && miningHeader.nNonce < nInnerLoopCount && !CheckProofOfWork(miningHeader.GetHash(), pblock->nBits, Params().GetConsensus())) {
+			++miningHeader.nNonce;
+			--nMaxTries;
+		}
+		if (nMaxTries == 0) {
+			break;
+		}
+		if (miningHeader.nNonce == nInnerLoopCount) {
+			continue;
+		}
+		std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(*pblock);
+		if (!ProcessNewBlock(Params(), shared_pblock, true, nullptr))
+			throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
+		++nHeight;
+		blockHashes.push_back(pblock->GetHash().GetHex());
 
-        //mark script as important because it was used at least for one coinbase output if the script came from the wallet
-        if (keepScript)
-        {
-            coinbaseScript->KeepScript();
-        }
-    }
-    return blockHashes;
+		//mark script as important because it was used at least for one coinbase output if the script came from the wallet
+		if (keepScript)
+		{
+			coinbaseScript->KeepScript();
+		}
+	}
+	return blockHashes;
 }
 
 UniValue generate(const JSONRPCRequest& request)
@@ -177,8 +174,8 @@ UniValue generate(const JSONRPCRequest& request)
         nMaxTries = request.params[1].get_int();
     }
 
-    boost::shared_ptr<CReserveScript> coinbaseScript;
-    GetMainSignals().ScriptForMining(coinbaseScript);
+	std::shared_ptr<CReserveScript> coinbase_script;
+	pwallet->GetScriptForMining(coinbase_script);
 
     // If the keypool is exhausted, no script is returned at all.  Catch this.
     if (!coinbaseScript)
@@ -218,8 +215,8 @@ UniValue generatetoaddress(const JSONRPCRequest& request)
     if (!address.IsValid())
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
 
-    boost::shared_ptr<CReserveScript> coinbaseScript(new CReserveScript());
-    coinbaseScript->reserveScript = GetScriptForDestination(address.Get());
+	std::shared_ptr<CReserveScript> coinbaseScript = std::make_shared<CReserveScript>();
+	coinbaseScript->reserveScript = GetScriptForDestination(destination);
 
     return generateBlocks(coinbaseScript, nGenerate, nMaxTries, false);
 }
@@ -1124,8 +1121,8 @@ UniValue getauxblock(const JSONRPCRequest& request)
 			+ HelpExampleRpc("getauxblock", "")
 		);
 
-	boost::shared_ptr<CReserveScript> coinbaseScript;
-	GetMainSignals().ScriptForMining(coinbaseScript);
+	std::shared_ptr<CReserveScript> coinbaseScript;
+	pwallet->GetScriptForMining(coinbaseScript);
 
 	// If the keypool is exhausted, no script is returned at all.  Catch this.
 	if (!coinbaseScript)
