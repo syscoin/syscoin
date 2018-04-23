@@ -2014,7 +2014,7 @@ CAmount CWalletTx::GetDebit(const isminefilter& filter) const
             debit += nDebitCached;
         else
         {
-            nDebitCached = pwallet->GetDebit(*this, ISMINE_SPENDABLE);
+            nDebitCached = pwallet->GetDebit(*this->tx, ISMINE_SPENDABLE);
             fDebitCached = true;
             debit += nDebitCached;
         }
@@ -2025,7 +2025,7 @@ CAmount CWalletTx::GetDebit(const isminefilter& filter) const
             debit += nWatchDebitCached;
         else
         {
-            nWatchDebitCached = pwallet->GetDebit(*this, ISMINE_WATCH_ONLY);
+            nWatchDebitCached = pwallet->GetDebit(*this->tx, ISMINE_WATCH_ONLY);
             fWatchDebitCached = true;
             debit += nWatchDebitCached;
         }
@@ -2047,7 +2047,7 @@ CAmount CWalletTx::GetCredit(const isminefilter& filter) const
             credit += nCreditCached;
         else
         {
-            nCreditCached = pwallet->GetCredit(*this, ISMINE_SPENDABLE);
+            nCreditCached = pwallet->GetCredit(*this->tx, ISMINE_SPENDABLE);
             fCreditCached = true;
             credit += nCreditCached;
         }
@@ -2072,7 +2072,7 @@ CAmount CWalletTx::GetImmatureCredit(bool fUseCache) const
     {
         if (fUseCache && fImmatureCreditCached)
             return nImmatureCreditCached;
-        nImmatureCreditCached = pwallet->GetCredit(*this, ISMINE_SPENDABLE);
+        nImmatureCreditCached = pwallet->GetCredit(*this->tx, ISMINE_SPENDABLE);
         fImmatureCreditCached = true;
         return nImmatureCreditCached;
     }
@@ -2116,7 +2116,7 @@ CAmount CWalletTx::GetImmatureWatchOnlyCredit(const bool& fUseCache) const
     {
         if (fUseCache && fImmatureWatchCreditCached)
             return nImmatureWatchCreditCached;
-        nImmatureWatchCreditCached = pwallet->GetCredit(*this, ISMINE_WATCH_ONLY);
+        nImmatureWatchCreditCached = pwallet->GetCredit(*this->tx, ISMINE_WATCH_ONLY);
         fImmatureWatchCreditCached = true;
         return nImmatureWatchCreditCached;
     }
@@ -2236,7 +2236,7 @@ CAmount CWalletTx::GetChange() const
 {
     if (fChangeCached)
         return nChangeCached;
-    nChangeCached = pwallet->GetChange(*this);
+    nChangeCached = pwallet->GetChange(*this->tx);
     fChangeCached = true;
     return nChangeCached;
 }
@@ -2253,7 +2253,7 @@ bool CWalletTx::InMempool() const
 bool CWalletTx::IsTrusted() const
 {
     // Quick answer in most cases
-    if (!CheckFinalTx(*this))
+    if (!CheckFinalTx(*this->tx))
         return false;
     int nDepth = GetDepthInMainChain();
     if (nDepth >= 1)
@@ -2582,7 +2582,7 @@ void CWallet::AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed, 
             const uint256& wtxid = it->first;
             const CWalletTx* pcoin = &(*it).second;
 
-            if (!CheckFinalTx(*pcoin))
+            if (!CheckFinalTx(*pcoin->tx))
                 continue;
 
             if (fOnlyConfirmed && !pcoin->IsTrusted())
@@ -2615,10 +2615,10 @@ void CWallet::AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed, 
 					if (!coinControl || !coinControl->IsSelected(COutPoint((*it).first, i)))
 					{
 						CTxDestination sysdestination;
-						if (pcoin->vout.size() >= i && ExtractDestination(pcoin->tx->vout[i].scriptPubKey, sysdestination))
+						if (pcoin->tx->vout.size() >= i && ExtractDestination(pcoin->tx->vout[i].scriptPubKey, sysdestination))
 						{
 							int op;
-							vector<vector<unsigned char> > vvchArgs;
+							std::vector<std::vector<unsigned char> > vvchArgs;
 							if (IsSyscoinScript(pcoin->tx->vout[i].scriptPubKey, op, vvchArgs))
 								continue;
 							CSyscoinAddress address = CSyscoinAddress(sysdestination);
@@ -2768,7 +2768,7 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
 			if (pcoin->tx->vout.size() >= i && ExtractDestination(pcoin->tx->vout[i].scriptPubKey, sysdestination))
 			{
 				int op;
-				vector<vector<unsigned char> > vvchArgs;
+				std::vector<std::vector<unsigned char> > vvchArgs;
 				if (IsSyscoinScript(pcoin->tx->vout[i].scriptPubKey, op, vvchArgs))
 					continue;
 				CSyscoinAddress address = CSyscoinAddress(sysdestination);
@@ -2875,7 +2875,7 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 		LOCK2(cs_main, mempool.cs);
 		// add all coin control inputs to setCoinsRet based on UTXO db lookup, txindex must be enabled for nodes that are supporting wallet-less spending based on alias UTXOs.
 		CCoinsViewCache view(pcoinsTip);
-		const CCoins *coins;
+		Coin coin;
 		CTransaction tx;
 		uint256 hashBlock;
 		std::vector<COutPoint> vInputs;
@@ -2883,24 +2883,19 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 			coinControl->ListSelected(vInputs);
 		BOOST_FOREACH(const COutPoint& outpoint, vInputs)
 		{
-			coins = view.AccessCoins(outpoint.hash);
-			if (coins == NULL)
-				continue;
-			// Clearly invalid input, fail
-			if (coins->vout.size() <= outpoint.n)
-				return false;
-			if (!coins->IsAvailable(outpoint.n))
+			coin = view.AccessCoin(outpoint);
+			if (coin.IsSpent())
 				continue;
 			if (mempool.mapNextTx.find(outpoint) != mempool.mapNextTx.end())
 				continue;
-			if (!GetTransaction(coins->nHeight, outpoint.hash, tx, blockhash, Params().GetConsensus()))
+			if (!GetTransaction(coin.out.nHeight, outpoint.hash, tx, blockhash, Params().GetConsensus()))
 				continue;
-			nValueRet += coins->vout[outpoint.n].nValue;
-			CWalletTx *wtx = new CWalletTx(pwalletMain, tx);
-			wtx->nIndex = coins->nHeight;
+			nValueRet += coin.out.nValue;
+			CWalletTx *wtx = new CWalletTx(pwalletMain, MakeTransactionRef(std::move(tx)));
+			wtx->nIndex = coin.out.nHeight;
 			wtx->hashBlock = hashBlock;
 			mapWtxToDelete.push_back(wtx);
-			setPresetCoins.insert(make_pair(wtx, outpoint.n));
+			setPresetCoins.insert(std::make_pair(wtx, outpoint.n));
 		}
 	}
     // coin control -> return all selected outputs (we want all selected to go into the transaction for sure)
@@ -2963,7 +2958,7 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 			if (pcoin->tx->nVersion == SYSCOIN_TX_VERSION)
 			{
 				int op;
-				vector<vector<unsigned char> > vvchArgs;
+				std::vector<std::vector<unsigned char> > vvchArgs;
 				if (pcoin->tx->vout.size() >= outpoint.n && IsSyscoinScript(pcoin->tx->vout[outpoint.n].scriptPubKey, op, vvchArgs))
 					continue;
 
@@ -2973,8 +2968,8 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
                 return false;
             nValueFromPresetInputs += pcoin->tx->vout[outpoint.n].nValue;
 			// SYSCOIN
-			if (!setPresetCoins.count(make_pair(pcoin, outpoint.n)))
-				setPresetCoins.insert(make_pair(pcoin, outpoint.n));
+			if (!setPresetCoins.count(std::make_pair(pcoin, outpoint.n)))
+				setPresetCoins.insert(std::make_pair(pcoin, outpoint.n));
         } else
             return false; // TODO: Allow non-wallet inputs
     }
@@ -3693,11 +3688,11 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
 							int nLastIndex = setCoins.size() - 1;
 							if (nLastIndex < 0)
 								nLastIndex = 0;
-							std::set<pair<const CWalletTx*, unsigned int> >::iterator it = setCoins.begin();
+							std::set<std::pair<const CWalletTx*, unsigned int> >::iterator it = setCoins.begin();
 							std::advance(it, nLastIndex);
 							if (ExtractDestination(it->first->vout[it->second].scriptPubKey, payDest))
 							{
-								address = CSyscoinAddress(payDest);
+								CSyscoinAddress address(payDest);
 								// if not paying from an alias fall back to pay to new change address
 								if (!DoesAliasExist(address.ToString()))
 								{
@@ -4563,7 +4558,7 @@ CAmount CWallet::GetAccountBalance(CWalletDB& walletdb, const std::string& strAc
     for (std::map<uint256, CWalletTx>::iterator it = mapWallet.begin(); it != mapWallet.end(); ++it)
     {
         const CWalletTx& wtx = (*it).second;
-        if (!CheckFinalTx(wtx) || wtx.GetBlocksToMaturity() > 0 || wtx.GetDepthInMainChain(fAddLockConf) < 0)
+        if (!CheckFinalTx(*wtx.tx) || wtx.GetBlocksToMaturity() > 0 || wtx.GetDepthInMainChain(fAddLockConf) < 0)
             continue;
 
         CAmount nReceived, nSent, nFee;
