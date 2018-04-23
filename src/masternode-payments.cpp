@@ -526,11 +526,11 @@ bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet) const
 
     return (nVotes > -1);
 }
-bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet, int& nStartHeight)
+bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet, int& nStartHeight) const
 {
 	LOCK(cs_vecPayees);
 
-	if (!vecPayees.size()) {
+	if (vecPayees.empty()) {
 		LogPrint("mnpayments", "CMasternodeBlockPayees::GetBestPayee -- ERROR: couldn't find any payee\n");
 		return false;
 	}
