@@ -10,6 +10,7 @@
 #include "checkpoints.h"
 #include "coins.h"
 #include "consensus/validation.h"
+#include "core_io.h"
 #include "instantx.h"
 #include "validation.h"
 #include "policy/policy.h"
