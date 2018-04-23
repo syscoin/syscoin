@@ -1684,13 +1684,13 @@ UniValue escrowcreaterawtransaction(const UniValue& params, bool fHelp) {
 	// if this is called prior to escrowcompleterelease, then it probably has been signed already, so apply the existing inputs signatures to the escrow creation transaction
 	// and pass the new raw transaction to the next person to sign and call the escrowcompleterelease with the final raw tx.
 	if (!escrow.scriptSigs.empty()) {
-		CTransaction rawTx;
-		DecodeHexTx(rawTx, createEscrowSpendingTx);
-		CMutableTransaction rawTxm(rawTx);
+		CMutableTransaction rawTxm;
+		DecodeHexTx(rawTxm, createEscrowSpendingTx);
 		for (int i = 0; i < escrow.scriptSigs.size(); i++) {
 			if (rawTxm.vin.size() >= i)
 				rawTxm.vin[i].scriptSig = CScript(escrow.scriptSigs[i].begin(), escrow.scriptSigs[i].end());
 		}
+		CTransaction rawTx(rawTxm);
 		strRawTx = EncodeHexTx(rawTxm);
 	}
 
@@ -1755,7 +1755,7 @@ UniValue escrowrelease(const UniValue& params, bool fHelp) {
 	else
 		throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4529 - " + _("Invalid role"));
 
-	CTransaction signedTx;
+	CMutableTransaction signedTx;
 	DecodeHexTx(signedTx, rawtx);
 	escrow.ClearEscrow();
 	for (int i = 0; i < signedTx.vin.size(); i++) {
@@ -1816,7 +1816,7 @@ UniValue escrowcompleterelease(const UniValue& params, bool fHelp) {
     // gather & validate inputs
     vector<unsigned char> vchEscrow = vchFromValue(params[0]);
 	string rawTx = params[1].get_str();
-	CTransaction myRawTx;
+	CMutableTransaction myRawTx;
 	DecodeHexTx(myRawTx,rawTx);
 	vector<unsigned char> vchWitness;
 	vchWitness = vchFromValue(params[2]);
@@ -1951,7 +1951,7 @@ UniValue escrowrefund(const UniValue& params, bool fHelp) {
 	else
 		throw runtime_error("SYSCOIN_ESCROW_RPC_ERROR: ERRCODE: 4533 - " + _("Invalid role"));
 
-	CTransaction signedTx;
+	CMutableTransaction signedTx;
 	DecodeHexTx(signedTx, rawtx);
 	escrow.ClearEscrow();
 	for (int i = 0; i < signedTx.vin.size(); i++) {
@@ -2012,7 +2012,7 @@ UniValue escrowcompleterefund(const UniValue& params, bool fHelp) {
 	// gather & validate inputs
 	vector<unsigned char> vchEscrow = vchFromValue(params[0]);
 	string rawTx = params[1].get_str();
-	CTransaction myRawTx;
+	CMutableTransaction myRawTx;
 	DecodeHexTx(myRawTx, rawTx);
 	vector<unsigned char> vchWitness;
 	vchWitness = vchFromValue(params[2]);
