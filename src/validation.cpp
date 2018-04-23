@@ -1502,8 +1502,7 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
 	the chain ID is correct.  Legacy blocks are not allowed since
 	the merge-mining start, which is checked in AcceptBlockHeader
 	where the height is known.  */
-	if (!block.IsLegacy()
-		&& block.GetChainId() != params.nAuxpowChainId)
+	if (block.GetChainId() != params.nAuxpowChainId)
 		return error("%s : block does not have our chain ID"
 			" (got %d, expected %d, full nVersion %d)",
 			__func__, block.GetChainId(),
@@ -2318,7 +2317,7 @@ void ThreadScriptCheck() {
 // Protected by cs_main
 VersionBitsCache versionbitscache;
 
-int32_t ComputeBlockVersion(const CBlockIndex* pindexPrev, const Consensus::Params& params, bool fAssumeMasternodeIsUpgraded)
+int32_t ComputeBlockVersion(const CBlockIndex* pindexPrev, const Consensus::Params& params)
 {
     LOCK(cs_main);
     int32_t nVersion = VERSIONBITS_TOP_BITS;
@@ -2326,23 +2325,6 @@ int32_t ComputeBlockVersion(const CBlockIndex* pindexPrev, const Consensus::Para
     for (int i = 0; i < (int)Consensus::MAX_VERSION_BITS_DEPLOYMENTS; i++) {
         Consensus::DeploymentPos pos = Consensus::DeploymentPos(i);
         ThresholdState state = VersionBitsState(pindexPrev, params, pos, versionbitscache);
-        const struct BIP9DeploymentInfo& vbinfo = VersionBitsDeploymentInfo[pos];
-        if (vbinfo.check_mn_protocol && state == THRESHOLD_STARTED && !fAssumeMasternodeIsUpgraded) {
-            CScript payee;
-            masternode_info_t mnInfo;
-            if (!mnpayments.GetBlockPayee(pindexPrev->nHeight + 1, payee)) {
-                // no votes for this block
-                continue;
-            }
-            if (!mnodeman.GetMasternodeInfo(payee, mnInfo)) {
-                // unknown masternode
-                continue;
-            }
-            if (mnInfo.nProtocolVersion < DIP0001_PROTOCOL_VERSION) {
-                // masternode is not upgraded yet
-                continue;
-            }
-        }
         if (state == THRESHOLD_LOCKED_IN || state == THRESHOLD_STARTED) {
             nVersion |= VersionBitsMask(params, (Consensus::DeploymentPos)i);
         }
@@ -2990,7 +2972,7 @@ void static UpdateTip(CBlockIndex *pindexNew, const CChainParams& chainParams) {
         for (int i = 0; i < 100 && pindex != NULL; i++)
         {
 			// SYSCOIN getbaseversion
-			const int32_t nExpectedVersion = ComputeBlockVersion(pindex->pprev, chainParams.GetConsensus(), true);
+			const int32_t nExpectedVersion = ComputeBlockVersion(pindex->pprev, chainParams.GetConsensus());
 			if (pindex->GetBaseVersion() > VERSIONBITS_LAST_OLD_BLOCK_VERSION && (pindex->GetBaseVersion() & ~nExpectedVersion) != 0)
                 ++nUpgraded;
             pindex = pindex->pprev;
