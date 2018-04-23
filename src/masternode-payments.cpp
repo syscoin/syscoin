@@ -222,8 +222,8 @@ void CMasternodePayments::FillBlockPayee(CMutableTransaction& txNew, int nBlockH
     txoutMasternodeRet = CTxOut();
 
     CScript payee;
-	int nStartHeight = 0;
-    if(!GetBlockPayee(nBlockHeight, payee, nStartHeight)) {
+	int nStartHeightBlock = 0;
+    if(!GetBlockPayee(nBlockHeight, payee, nStartHeightBlock)) {
         // no masternode detected...
         int nCount = 0;
         masternode_info_t mnInfo;
@@ -234,14 +234,14 @@ void CMasternodePayments::FillBlockPayee(CMutableTransaction& txNew, int nBlockH
         }
         // fill payee with locally calculated winner and hope for the best
         payee = GetScriptForDestination(mnInfo.pubKeyCollateralAddress.GetID());
-		nStartHeight = 0;
+		nStartHeightBlock = 0;
     }
 
 	// miner takes 25% of the reward and half fees
 	txNew.vout[0].nValue = ((blockReward*0.25) + (nFee / 2));
 	// masternode takes 75% of reward, add/remove some reward depending on seniority and half fees.
 	CAmount nTotalReward;
-	blockReward = GetBlockSubsidy(nBlockHeight, Params().GetConsensus(), nTotalReward, false, true, nStartHeight);
+	blockReward = GetBlockSubsidy(nBlockHeight, Params().GetConsensus(), nTotalReward, false, true, nStartHeightBlock);
 
     // ... and masternode
     txoutMasternodeRet = CTxOut(blockReward, payee);
@@ -433,10 +433,10 @@ bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payeeRet) con
     auto it = mapMasternodeBlocks.find(nBlockHeight);
     return it != mapMasternodeBlocks.end() && it->second.GetBestPayee(payeeRet);
 }
-bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeight) const
+bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeightBlock) const
 {
 	if (mapMasternodeBlocks.count(nBlockHeight)) {
-		return mapMasternodeBlocks[nBlockHeight].GetBestPayee(payee, nStartHeight);
+		return mapMasternodeBlocks[nBlockHeight].GetBestPayee(payee, nStartHeightBlock);
 	}
 
 	return false;
