@@ -190,7 +190,7 @@ extern UniValue aliasupdatewhitelist(const UniValue& params, bool fHelp);
 extern UniValue aliasclearwhitelist(const UniValue& params, bool fHelp);
 extern UniValue aliaswhitelist(const UniValue& params, bool fHelp);
 extern UniValue syscoinlistreceivedbyaddress(const UniValue& params, bool fHelp);
-
+extern UniValue sendrawtransaction(const UniValue& params, bool fHelp);
 extern UniValue syscoinsendrawtransaction(const UniValue& params, bool fHelp);
 extern UniValue syscoindecoderawtransaction(const UniValue& params, bool fHelp);
 extern UniValue offernew(const UniValue& params, bool fHelp);
