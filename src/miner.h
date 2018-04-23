@@ -31,8 +31,6 @@ struct CBlockTemplate
     std::vector<CAmount> vTxFees;
     std::vector<int64_t> vTxSigOps;
 };
-/** Run the miner threads */
-void GenerateSyscoins(bool fGenerate, int nThreads, const CChainParams& chainparams, CConnman& connman);
 
 // Container for tracking updates to ancestor feerate as we include (parent)
 // transactions in a block
