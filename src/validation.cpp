@@ -709,7 +709,7 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			good = true;
 			for (unsigned int i = 0; i < sortedBlock.vtx.size(); i++)
 			{
-				const CTransaction &tx = sortedBlock.vtx[i];
+				const CTransaction &tx = *sortedBlock.vtx[i];
 				if (tx.nVersion == SYSCOIN_TX_VERSION)
 				{
 					bool bDestCheckFailed = false;
@@ -1251,9 +1251,8 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 
 				if (!CheckInputs(tx, vstate, vview, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, true)) {
 					LogPrint("mempool", "%s: %s %s\n", "CheckInputs Error", hash.ToString(), vstate.GetRejectReason());
-					BOOST_FOREACH(const uint256& hashTx, plTxnReplaced) {
+					BOOST_FOREACH(const COutPoint& hashTx, plTxnReplaced)
 						pcoinsTip->Uncache(hashTx);
-					}
 					pool.removeRecursive(tx, MemPoolRemovalReason::UNKNOWN);
 					int nDos = 0;
 					if (vstate.IsInvalid(nDos) && nDos > 0 && fromPeer >= 0)
@@ -1270,9 +1269,8 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 
 				if (!CheckSyscoinInputs(tx, vstate, true, chainHeight, nFees, CBlock())) {
 					LogPrint("mempool", "%s: %s %s\n", "CheckSyscoinInputs Frror", hash.ToString(), vstate.GetRejectReason());
-					BOOST_FOREACH(const uint256& hashTx, vHashTxnToUncache) {
+					BOOST_FOREACH(const COutPoint& hashTx, plTxnReplaced)
 						pcoinsTip->Uncache(hashTx);
-					}
 					pool.removeRecursive(tx, MemPoolRemovalReason::UNKNOWN);
 					int nDos = 0;
 					if (vstate.IsInvalid(nDos) && nDos > 0 && fromPeer >= 0)
@@ -1943,7 +1941,7 @@ bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsVi
             for (unsigned int i = 0; i < tx.vin.size(); i++) {
                 const COutPoint &prevout = tx.vin[i].prevout;
                 const Coin& coin = inputs.AccessCoin(prevout);
-				if (coins.IsSpent()) {
+				if (coin.IsSpent()) {
 					return state.Invalid(false, REJECT_INVALID, "undefined-coins");
 				}
                 // We very carefully only pass in things to CScriptCheck which
@@ -2238,7 +2236,7 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
 							scriptOut = scriptPubKeyOut;
 						else
 							scriptOut = prevout.scriptPubKey;
-                        std::vector<unsigned char> hashBytes(scriptOutbegin()+3, scriptOut.begin()+23);
+                        std::vector<unsigned char> hashBytes(scriptOut.begin()+3, scriptOut.begin()+23);
 
                         // undo spending activity
                         addressIndex.push_back(std::make_pair(CAddressIndexKey(1, uint160(hashBytes), pindex->nHeight, i, hash, j, true), prevout.nValue * -1));
@@ -2760,7 +2758,7 @@ static bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockInd
 	}
 
     std::string strError = "";
-    if (!IsBlockValueValid(block, pindex->nHeight, blockReward, strError)) {
+    if (!IsBlockValueValid(block, pindex->nHeight, nFees, blockReward, strError)) {
         return state.DoS(0, error("ConnectBlock(SYS): %s", strError), REJECT_INVALID, "bad-cb-amount");
     }
 
@@ -5029,7 +5027,7 @@ bool LoadMempool(void)
             CValidationState state;
             if (nTime + nExpiryTimeout > nNow) {
                 LOCK(cs_main);
-                AcceptToMemoryPoolWithTime(mempool, state, tx, true, NULL, nTime);
+                AcceptToMemoryPoolWithTime(mempool, false, state, tx, true, NULL, nTime);
                 if (state.IsValid()) {
                     ++count;
                 } else {
