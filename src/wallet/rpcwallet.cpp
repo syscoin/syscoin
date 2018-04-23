@@ -14,7 +14,7 @@
 #include "net.h"
 #include "policy/rbf.h"
 #include "rpc/server.h"
-#include "rpc/mining.h""
+#include "rpc/mining.h"
 #include "timedata.h"
 #include "util.h"
 #include "utilmoneystr.h"
