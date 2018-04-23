@@ -101,7 +101,7 @@ public:
 
     void AddPayee(const CMasternodePaymentVote& vote);
     bool GetBestPayee(CScript& payeeRet) const;
-	bool GetBestPayee(CScript& payeeRet, int &nStartHeight) const;
+	bool GetBestPayee(CScript& payeeRet, int &nStartHeight);
     bool HasPayeeWithVotes(const CScript& payeeIn, int nVotesReq, CMasternodePayee& payee) const;
 
     bool IsTransactionValid(const CTransaction& txNew, const CAmount &nFee, const int64_t &nHeight, CAmount& nTotalRewardWithMasternodes) const;
@@ -210,7 +210,7 @@ public:
     void CheckAndRemove();
 
     bool GetBlockPayee(int nBlockHeight, CScript& payeeRet) const;
-	bool GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeight) const;
+	bool GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeight);
     bool IsTransactionValid(const CTransaction& txNew, int nBlockHeight, const CAmount &nFee, CAmount& nTotalRewardWithMasternodes) const;
     bool IsScheduled(const masternode_info_t& mnInfo, int nNotBlockHeight) const;
 

@@ -433,7 +433,7 @@ bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payeeRet) con
     auto it = mapMasternodeBlocks.find(nBlockHeight);
     return it != mapMasternodeBlocks.end() && it->second.GetBestPayee(payeeRet);
 }
-bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeight) const
+bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payee, int &nStartHeight)
 {
 	if (mapMasternodeBlocks.count(nBlockHeight)) {
 		return mapMasternodeBlocks[nBlockHeight].GetBestPayee(payee, nStartHeight);
@@ -526,7 +526,7 @@ bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet) const
 
     return (nVotes > -1);
 }
-bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet, int& nStartHeight) const
+bool CMasternodeBlockPayees::GetBestPayee(CScript& payeeRet, int& nStartHeight)
 {
 	LOCK(cs_vecPayees);
 
