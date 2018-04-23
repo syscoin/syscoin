@@ -64,7 +64,7 @@ bool OrderBasedOnArrivalTime(std::vector<CTransactionRef>& blockVtx) {
 			}
 		}
 		// add normal tx's to orderedvtx, 
-		orderedVtx.push_back(txRef);
+		orderedVtx.push_back(blockVtx[n]);
 	}
 	for (auto& orderedIndex : orderedIndexes) {
 		orderedVtx.push_back(blockVtx[orderedIndex.second]);
