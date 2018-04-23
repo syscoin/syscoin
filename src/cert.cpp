@@ -498,7 +498,7 @@ bool CheckCertInputs(const CTransaction &tx, int op, const vector<vector<unsigne
 
 UniValue certnew(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 5)
+    if (request.fHelp || params.size() != 5)
         throw runtime_error(
 			"certnew [alias] [title] [public value] [category=certificates] [witness]\n"
 						"<alias> An alias you own.\n"
@@ -582,7 +582,7 @@ UniValue certnew(const JSONRPCRequest& request) {
 
 UniValue certupdate(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 5)
+    if (request.fHelp || params.size() != 5)
         throw runtime_error(
 			"certupdate [guid] [title] [public value] [category=certificates] [witness]\n"
 						"Perform an update on an certificate you control.\n"
@@ -680,7 +680,7 @@ UniValue certupdate(const JSONRPCRequest& request) {
 
 UniValue certtransfer(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
- if (params.fHelp || params.size() != 5)
+ if (request.fHelp || params.size() != 5)
         throw runtime_error(
 			"certtransfer [guid] [alias] [public value] [accessflags=2] [witness]\n"
 						"Transfer a certificate you own to another alias.\n"
@@ -786,7 +786,7 @@ UniValue certtransfer(const JSONRPCRequest& request) {
 
 UniValue certinfo(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || 1 > params.size())
+    if (request.fHelp || 1 > params.size())
         throw runtime_error("certinfo <guid>\n"
                 "Show stored values of a single certificate and its .\n");
 

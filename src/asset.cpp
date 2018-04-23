@@ -648,7 +648,7 @@ bool CheckAssetInputs(const CTransaction &tx, int op, const vector<vector<unsign
 
 UniValue assetnew(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 11)
+    if (request.fHelp || params.size() != 11)
         throw runtime_error(
 			"assetnew [symbol] [alias] [public value] [category=assets] [precision=8] [use_inputranges] [supply] [max_supply] [interest_rate] [can_adjust_interest_rate] [witness]\n"
 						"<symbol> symbol of asset in uppercase, 1 characters miniumum, 8 characters max.\n"
@@ -756,7 +756,7 @@ UniValue assetnew(const JSONRPCRequest& request) {
 
 UniValue assetupdate(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 6)
+    if (request.fHelp || params.size() != 6)
         throw runtime_error(
 			"assetupdate [asset] [public value] [category=assets] [supply] [interest_rate] [witness]\n"
 						"Perform an update on an asset you control.\n"
@@ -854,7 +854,7 @@ UniValue assetupdate(const JSONRPCRequest& request) {
 
 UniValue assettransfer(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
- if (params.fHelp || params.size() != 3)
+ if (request.fHelp || params.size() != 3)
         throw runtime_error(
 			"assettransfer [asset] [alias] [witness]\n"
 						"Transfer a asset allocation you own to another alias.\n"
@@ -935,7 +935,7 @@ UniValue assettransfer(const JSONRPCRequest& request) {
 }
 UniValue assetsend(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (params.fHelp || params.size() != 5)
+	if (request.fHelp || params.size() != 5)
 		throw runtime_error(
 			"assetsend [asset] [aliasfrom] ( [{\"aliasto\":\"aliasname\",\"amount\":amount},...] or [{\"aliasto\":\"aliasname\",\"ranges\":[{\"start\":index,\"end\":index},...]},...] ) [memo] [witness]\n"
 			"Send an asset you own to another alias as an asset allocation. Maximimum recipients is 250.\n"
@@ -1077,7 +1077,7 @@ UniValue assetsend(const JSONRPCRequest& request) {
 
 UniValue assetinfo(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || 2 != params.size())
+    if (request.fHelp || 2 != params.size())
         throw runtime_error("assetinfo <asset> <getinputs>\n"
                 "Show stored values of a single asset and its. Set getinputs to true if you want to get the allocation inputs, if applicable.\n");
 

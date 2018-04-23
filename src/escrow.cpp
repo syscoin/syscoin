@@ -1037,7 +1037,7 @@ bool CheckEscrowInputs(const CTransaction &tx, int op, const vector<vector<unsig
 }
 UniValue escrowbid(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (params.fHelp || params.size() != 5)
+	if (request.fHelp || params.size() != 5)
 		throw runtime_error(
 			"escrowbid [alias] [escrow] [bid_in_payment_option] [bid_in_offer_currency] [witness]\n"
 			"<alias> An alias you own.\n"
@@ -1114,7 +1114,7 @@ UniValue escrowbid(const JSONRPCRequest& request) {
 }
 UniValue escrowaddshipping(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (params.fHelp || params.size() != 3)
+	if (request.fHelp || params.size() != 3)
 		throw runtime_error(
 			"escrowaddshipping [escrow] [shipping amount] [witness]\n"
 			"<escrow> Escrow GUID to add shipping to.\n"
@@ -1191,7 +1191,7 @@ UniValue escrowaddshipping(const JSONRPCRequest& request) {
 }
 UniValue escrownew(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 16)
+    if (request.fHelp || params.size() != 16)
         throw runtime_error(
 			"escrownew [getamountandaddress] [alias] [arbiter alias] [offer] [quantity] [buynow] [total_in_payment_option] [shipping amount] [network fee] [arbiter fee] [witness fee] [extTx] [payment option] [bid_in_payment_option] [bid_in_offer_currency] [witness]\n"
 				"<getamountandaddress> True or false. Get deposit and total escrow amount aswell as escrow address for funding. If buynow is false pass bid amount in bid_in_payment_option to get total needed to complete escrow. If buynow is true amount is calculated based on offer price and quantity.\n"
@@ -1466,7 +1466,7 @@ UniValue escrownew(const JSONRPCRequest& request) {
 }
 UniValue escrowacknowledge(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (params.fHelp || params.size() != 2)
+	if (request.fHelp || params.size() != 2)
 		throw runtime_error(
 			"escrowacknowledge [escrow guid] [witness]\n"
 			"Acknowledge escrow payment as seller of offer.\n"
@@ -1550,7 +1550,7 @@ UniValue escrowacknowledge(const JSONRPCRequest& request) {
 }
 UniValue escrowcreaterawtransaction(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (params.fHelp || params.size() != 4)
+	if (request.fHelp || params.size() != 4)
 		throw runtime_error(
 			"escrowcreaterawtransaction [type] [escrow guid] [{\"txid\":\"id\",\"vout\":n, \"satoshis\":n},...] [user role]\n"
 			"Creates raw transaction for escrow refund or release, sign the output raw transaction and pass it via the rawtx parameter to escrowrelease. Type is 'refund' or 'release'. Third parameter is array of input (txid, vout, amount) pairs to be used to fund escrow payment. User role represents either 'seller', 'buyer' or 'arbiter', represents who signed for the payment of the escrow. 'seller' or 'arbiter' is valid for type 'refund' (if you are the buyer during refund leave this empty), while 'buyer' or 'arbiter' is valid for type 'release' (if you are the seller during release leave this empty). You only need to provide this parameter when calling escrowrelease or escrowrefund. \n"
@@ -1710,7 +1710,7 @@ UniValue escrowcreaterawtransaction(const JSONRPCRequest& request) {
 }
 UniValue escrowrelease(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 4)
+    if (request.fHelp || params.size() != 4)
         throw runtime_error(
 			"escrowrelease [escrow guid] [user role] [rawtx] [witness]\n"
 			"Releases escrow funds to seller. User role represents either 'buyer' or 'arbiter'. Third parameter (rawtx) is the signed response from escrowcreaterawtransaction. You must sign this transaction externally prior to passing in.\n"
@@ -1817,7 +1817,7 @@ UniValue escrowrelease(const JSONRPCRequest& request) {
 
 UniValue escrowcompleterelease(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 3)
+    if (request.fHelp || params.size() != 3)
         throw runtime_error(
 			"escrowcompleterelease [escrow guid] [rawtx] [witness]\n"
                          "Completes an escrow release by creating the escrow complete release transaction on syscoin blockchain.\n"
@@ -1911,7 +1911,7 @@ UniValue escrowcompleterelease(const JSONRPCRequest& request) {
 }
 UniValue escrowrefund(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (params.fHelp || params.size() != 4)
+	if (request.fHelp || params.size() != 4)
 		throw runtime_error(
 			"escrowrefund [escrow guid] [user role] [rawtx] [witness]\n"
 			"Refunds escrow funds to buyer. User role represents either 'seller' or 'arbiter'. Third parameter (rawtx) is the signed response from escrowcreaterawtransaction. You must sign this transaction externally prior to passing in.\n"
@@ -2018,7 +2018,7 @@ UniValue escrowrefund(const JSONRPCRequest& request) {
 
 UniValue escrowcompleterefund(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (params.fHelp || params.size() != 3)
+	if (request.fHelp || params.size() != 3)
 		throw runtime_error(
 			"escrowcompleterefund [escrow guid] [rawtx] [witness]\n"
 			"Completes an escrow refund by creating the escrow complete refund transaction on syscoin blockchain.\n"
@@ -2115,7 +2115,7 @@ UniValue escrowcompleterefund(const JSONRPCRequest& request) {
 }
 UniValue escrowfeedback(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || params.size() != 6)
+    if (request.fHelp || params.size() != 6)
         throw runtime_error(
 			"escrowfeedback [escrow guid] [userfrom] [feedback] [rating] [userto] [witness]\n"
                         "Send feedback for primary and secondary users in escrow, depending on who you are. Ratings are numbers from 1 to 5. User From and User To is either 'buyer', 'seller', 'reseller', or 'arbiter'.\n"
@@ -2296,7 +2296,7 @@ UniValue escrowfeedback(const JSONRPCRequest& request) {
 }
 UniValue escrowinfo(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-    if (params.fHelp || 1 != params.size())
+    if (request.fHelp || 1 != params.size())
         throw runtime_error("escrowinfo <guid>\n"
                 "Show stored values of a single escrow\n");
 
