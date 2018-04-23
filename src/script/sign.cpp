@@ -104,8 +104,9 @@ bool ProduceSignature(const BaseSignatureCreator& creator, const CScript& fromPu
 {
 	// SYSCOIN
 	CScript fromPubKeyOut;
-	RemoveSyscoinScript(fromPubKeyIn, fromPubKeyOut);
-		
+	if (!RemoveSyscoinScript(fromPubKeyIn, fromPubKeyOut))
+		fromPubKeyOut = fromPubKeyIn;
+
     txnouttype whichType;
     if (!SignStep(creator, fromPubKeyOut, scriptSig, whichType))
         return false;

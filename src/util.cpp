@@ -24,7 +24,7 @@
 #include <pthread.h>
 #include <pthread_np.h>
 #endif
-
+#include <thread>
 
 #ifndef WIN32
 // for posix_fallocate
