@@ -214,6 +214,7 @@ extern UniValue escrowcompleterefund(const JSONRPCRequest& request);
 extern UniValue escrowinfo(const JSONRPCRequest& request);
 extern UniValue escrowfeedback(const JSONRPCRequest& request);
 extern UniValue escrowacknowledge(const JSONRPCRequest& request);
+extern UniValue createmultisig(const JSONRPCRequest& request);
 
 extern UniValue assetnew(const JSONRPCRequest& request);
 extern UniValue assetupdate(const JSONRPCRequest& request);
