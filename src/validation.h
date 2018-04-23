@@ -344,6 +344,12 @@ bool AcceptToMemoryPoolWithTime(CTxMemPool& pool, bool bMultiThreaded, CValidati
                         bool* pfMissingInputs, int64_t nAcceptTime, std::list<CTransactionRef>* plTxnReplaced = NULL,
                         bool fOverrideMempoolLimit=false, const CAmount nAbsurdFee=0, bool fDryRun=false, NodeId fromPeer = -1);
 // SYSCOIN
+inline CBlockIndex* LookupBlockIndex(const uint256& hash)
+{
+	AssertLockHeld(cs_main);
+	BlockMap::const_iterator it = mapBlockIndex.find(hash);
+	return it == mapBlockIndex.end() ? nullptr : it->second;
+}
 bool CheckSyscoinInputs(const CTransaction& tx, CValidationState &state, bool fJustCheck, int nHeight, const CAmount& nFees, const CBlock& block);
 bool GetUTXOCoin(const COutPoint& outpoint, Coin& coin);
 int GetUTXOHeight(const COutPoint& outpoint);
