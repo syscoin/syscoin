@@ -91,7 +91,7 @@ SYSCOIN_CORE_H = \
   thread_pool/mpmc_bounded_queue.hpp \
   thread_pool/thread_pool.hpp \
   thread_pool/thread_pool_options.hpp \
-  thread_pool/worker.hpp \  
+  thread_pool/worker.hpp \
   addrdb.h \
   activemasternode.h \
   addressindex.h \
