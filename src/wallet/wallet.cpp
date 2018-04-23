@@ -2058,7 +2058,7 @@ CAmount CWalletTx::GetCredit(const isminefilter& filter) const
             credit += nWatchCreditCached;
         else
         {
-            nWatchCreditCached = pwallet->GetCredit(*this, ISMINE_WATCH_ONLY);
+            nWatchCreditCached = pwallet->GetCredit(*this->tx, ISMINE_WATCH_ONLY);
             fWatchCreditCached = true;
             credit += nWatchCreditCached;
         }
@@ -2888,11 +2888,11 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 				continue;
 			if (mempool.mapNextTx.find(outpoint) != mempool.mapNextTx.end())
 				continue;
-			if (!GetTransaction(coin.out.nHeight, outpoint.hash, tx, blockhash, Params().GetConsensus()))
+			if (!GetTransaction(coin.nHeight, outpoint.hash, tx, blockhash, Params().GetConsensus()))
 				continue;
 			nValueRet += coin.out.nValue;
 			CWalletTx *wtx = new CWalletTx(pwalletMain, MakeTransactionRef(std::move(tx)));
-			wtx->nIndex = coin.out.nHeight;
+			wtx->nIndex = coin.nHeight;
 			wtx->hashBlock = hashBlock;
 			mapWtxToDelete.push_back(wtx);
 			setPresetCoins.insert(std::make_pair(wtx, outpoint.n));
@@ -3690,7 +3690,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
 								nLastIndex = 0;
 							std::set<std::pair<const CWalletTx*, unsigned int> >::iterator it = setCoins.begin();
 							std::advance(it, nLastIndex);
-							if (ExtractDestination(it->first->vout[it->second].scriptPubKey, payDest))
+							if (ExtractDestination(it->first->tx->vout[it->second].scriptPubKey, payDest))
 							{
 								CSyscoinAddress address(payDest);
 								// if not paying from an alias fall back to pay to new change address
