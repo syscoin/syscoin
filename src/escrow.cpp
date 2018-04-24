@@ -166,8 +166,7 @@ string escrowFromOp(int op) {
 }
 bool CEscrow::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
-        CDataStream dsEscrow(SER_NETWORK, PROTOCOL_VERSION);
-		dsEscrow << vchData;
+        CDataStream dsEscrow(vchData, SER_NETWORK, PROTOCOL_VERSION);
         dsEscrow >> *this;
 
 		vector<unsigned char> vchEscrowData;

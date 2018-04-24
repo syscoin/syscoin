@@ -149,8 +149,7 @@ string offerFromOp(int op) {
 }
 bool COffer::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
-        CDataStream dsOffer(SER_NETWORK, PROTOCOL_VERSION);
-		dsOffer << vchData;
+        CDataStream dsOffer(vchData, SER_NETWORK, PROTOCOL_VERSION);
         dsOffer >> *this;
 
 		vector<unsigned char> vchOfferData;
