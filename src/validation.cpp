@@ -2493,7 +2493,7 @@ static bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockInd
                 prevheights[j] = view.AccessCoin(tx.vin[j].prevout).nHeight;
             }
 
-            if (!SequenceLocks(tx, STANDARD_LOCKTIME_VERIFY_FLAGS, &prevheights, *pindex)) {
+            if (!SequenceLocks(tx, LOCKTIME_VERIFY_SEQUENCE, &prevheights, *pindex)) {
                 return state.DoS(100, error("%s: contains a non-BIP68-final transaction", __func__),
                                  REJECT_INVALID, "bad-txns-nonfinal");
             }
