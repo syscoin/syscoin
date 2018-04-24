@@ -348,7 +348,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     minRelayTxFee = CFeeRate(1234);
     // dust:
 	// SYSCOIN
-    t.vout[0]ss.nValue = 54 - 1;
+    t.vout[0].nValue = 54 - 1;
     BOOST_CHECK(!IsStandardTx(t, reason));
     // not dust:
     t.vout[0].nValue = 54;
