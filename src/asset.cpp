@@ -1042,7 +1042,9 @@ UniValue assetsend(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	return syscointxfund_helper(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
+	UniValue res = syscointxfund_helper(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
+	res.push_back(stringFromVch(newAsset.vchAsset));
+	return res;
 }
 
 UniValue assetinfo(const JSONRPCRequest& request) {
