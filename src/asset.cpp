@@ -14,7 +14,7 @@
 #include "rpc/server.h"
 #include "wallet/wallet.h"
 #include "chainparams.h"
-#include "coincontrol.h"
+#include "wallet/coincontrol.h"
 #include <boost/algorithm/hex.hpp>
 #include <boost/algorithm/string/case_conv.hpp> // for to_upper()
 #include <boost/foreach.hpp>

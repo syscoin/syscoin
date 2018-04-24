@@ -17,7 +17,7 @@
 #include "policy/policy.h"
 #include "script/script.h"
 #include "chainparams.h"
-#include "coincontrol.h"
+#include "wallet/coincontrol.h"
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/hex.hpp>

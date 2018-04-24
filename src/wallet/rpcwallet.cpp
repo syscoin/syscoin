@@ -34,7 +34,7 @@ using namespace std;
 #include "offer.h"
 #include "escrow.h"
 #include "assetallocation.h"
-#include "coincontrol.h"
+#include "wallet/coincontrol.h"
 extern bool DecodeAliasTx(const CTransaction& tx, int& op, vector<vector<unsigned char> >& vvch);
 extern bool DecodeOfferTx(const CTransaction& tx, int& op, vector<vector<unsigned char> >& vvch);
 extern bool DecodeCertTx(const CTransaction& tx, int& op, vector<vector<unsigned char> >& vvch);
