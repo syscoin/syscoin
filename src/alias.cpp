@@ -276,7 +276,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			if (!GetUTXOCoin(tx.vin[i].prevout, prevCoins))
 				continue;
 			// ensure inputs are unspent when doing consensus check to add to block
-			if(!prevCoins.IsSpent() || !IsSyscoinScript(prevCoins.out.scriptPubKey, pop, vvch))
+			if(prevCoins.IsSpent() || !IsSyscoinScript(prevCoins.out.scriptPubKey, pop, vvch))
 			{
 				continue;
 			}
@@ -296,7 +296,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 				if (!GetUTXOCoin(tx.vin[i].prevout, prevCoins))
 					continue;
 				// ensure inputs are unspent when doing consensus check to add to block
-				if (!prevCoins.IsSpent() || !IsSyscoinScript(prevCoins.out.scriptPubKey, pop, vvch))
+				if (prevCoins.IsSpent() || !IsSyscoinScript(prevCoins.out.scriptPubKey, pop, vvch))
 				{
 					continue;
 				}
