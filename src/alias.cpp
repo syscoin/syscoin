@@ -1047,17 +1047,13 @@ bool CheckParam(const UniValue& params, const unsigned int index)
 }
 
 void CAliasDB::WriteAliasIndex(const CAliasIndex& alias, const int &op) {
-	// TODO: Remove this check upon bm web, and remove is_mine
-	if (pwalletMain) {
-		UniValue oName(UniValue::VOBJ);
-		oName.push_back(Pair("_id", stringFromVch(alias.vchAlias)));
-		CSyscoinAddress address(EncodeBase58(alias.vchAddress));
-		oName.push_back(Pair("address", address.ToString()));
-		oName.push_back(Pair("is_mine", IsMine(*pwalletMain, address.Get())));
-		oName.push_back(Pair("expires_on", alias.nExpireTime));
-		GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "alias");
-		WriteAliasIndexHistory(alias, op);
-	}
+	UniValue oName(UniValue::VOBJ);
+	oName.push_back(Pair("_id", stringFromVch(alias.vchAlias)));
+	CSyscoinAddress address(EncodeBase58(alias.vchAddress));
+	oName.push_back(Pair("address", address.ToString()));
+	oName.push_back(Pair("expires_on", alias.nExpireTime));
+	GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "alias");
+	WriteAliasIndexHistory(alias, op);
 }
 void CAliasDB::WriteAliasIndexHistory(const CAliasIndex& alias, const int &op) {
 	UniValue oName(UniValue::VOBJ);
@@ -1212,8 +1208,6 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("Cannot find alias used to fund this transaction: ") + stringFromVch(vchAlias));
 		strAddress = EncodeBase58(alias.vchAddress);
 	}
-	UniValue paramsAddresses(UniValue::VARR);
-	paramsAddresses.push_back(strAddress);
 
 	// vouts to the payees
 	for (const auto& recipient : vecSend)
@@ -1224,10 +1218,17 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 			txNew.vout.push_back(txout);
 		}
 	}
+	const string &strAddressFrom = EncodeBase58(theAlias.vchAddress);
+
+	UniValue paramObj(UniValue::VOBJ);
+	UniValue paramArr(UniValue::VARR);
+	paramArr.push_back(strAddress);
+	paramObj.push_back(Pair("addresses", paramArr));
+
 
 	UniValue paramsFund(UniValue::VARR);
 	paramsFund.push_back(EncodeHexTx(txNew));
-	paramsFund.push_back(paramsAddresses);
+	paramsFund.push_back(paramObj);
 	paramsFund.push_back(transferAlias);
 	JSONRPCRequest request;
 	request.params = paramsFund;
