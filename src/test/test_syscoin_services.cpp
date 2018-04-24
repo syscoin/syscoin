@@ -360,16 +360,16 @@ void GenerateBlocks(int nBlocks, const string& node)
 	  }
 	  if(!r.isObject())
 	  {
-		  MilliSleep(10);
+		  MilliSleep(50);
 		  continue;
 	  }
 	  height = find_value(r.get_obj(), "blocks").get_int();
 	  timeoutCounter++;
-	  if (timeoutCounter > 100) {
+	  if (timeoutCounter > 1000) {
 		  printf("Error: Timeout on getinfo for %s, height %d vs newHeight %d!\n", otherNode1.c_str(), height, newHeight);
 		  break;
 	  }
-	  MilliSleep(10);
+	  MilliSleep(50);
   }
   if(!otherNode1.empty())
 	BOOST_CHECK(height >= newHeight);
