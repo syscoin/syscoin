@@ -1673,6 +1673,7 @@ UniValue aliasnew(const JSONRPCRequest& request) {
 	}
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(tx));
+	return res;
 }
 UniValue aliasupdate(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
