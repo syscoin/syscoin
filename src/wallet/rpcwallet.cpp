@@ -368,18 +368,13 @@ UniValue getaddressesbyaccount(const JSONRPCRequest& request)
 // SYSCOIN: Send service transactions
 CAmount GetCoinControlInputTotal(const CCoinControl& coinControl)
 {
-	if (coinControl == NULL)
-		return 0;
-	LOCK(cs_main);
-	CCoinsViewCache view(pcoinsTip);
 	Coin coin;
 	CAmount nValueRet = 0;
 	std::vector<COutPoint> vInputs;
 	coinControl.ListSelected(vInputs);
 	BOOST_FOREACH(const COutPoint& outpoint, vInputs)
 	{
-		coin = view.AccessCoin(outpoint);
-		if (coin.IsSpent())
+		if (!GetUTXOCoin(outpoint, coin))
 			continue;
 		nValueRet += coin.out.nValue;
 	}

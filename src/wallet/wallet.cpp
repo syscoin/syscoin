@@ -2871,9 +2871,7 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 	uint256 blockhash;
 	if (coinControl && coinControl->HasSelected())
 	{
-		LOCK2(cs_main, mempool.cs);
 		// add all coin control inputs to setCoinsRet based on UTXO db lookup, txindex must be enabled for nodes that are supporting wallet-less spending based on alias UTXOs.
-		CCoinsViewCache view(pcoinsTip);
 		Coin coin;
 		CTransactionRef tx;
 		uint256 hashBlock;
@@ -2882,8 +2880,7 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
 			coinControl->ListSelected(vInputs);
 		BOOST_FOREACH(const COutPoint& outpoint, vInputs)
 		{
-			coin = view.AccessCoin(outpoint);
-			if (coin.IsSpent())
+			if (!GetUTXOCoin(outpoint, coin))
 				continue;
 			if (mempool.mapNextTx.find(outpoint) != mempool.mapNextTx.end())
 				continue;
