@@ -280,7 +280,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			{
 				continue;
 			}
-			if (IsAliasOp(pop) && (op == OP_ALIAS_ACTIVATE || (vvchArgs.size() > 1 && vvchArgs[0] == vvch[0] && vvchArgs[1] == vvch[1]))) {
+			if (op == OP_ALIAS_ACTIVATE || (vvchArgs.size() > 1 && vvchArgs[0] == vvch[0] && vvchArgs[1] == vvch[1])) {
 				prevOp = pop;
 				vvchPrevArgs = vvch;
 				break;
@@ -301,7 +301,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 					continue;
 				}
 				// match 4th element in scriptpubkey of alias update with witness input scriptpubkey, if names match then sig is provided
-				if (IsAliasOp(pop) && vvchArgs[3] == vvch[0]) {
+				if (vvchArgs[3] == vvch[0]) {
 					bWitnessSigFound = true;
 					break;
 				}
