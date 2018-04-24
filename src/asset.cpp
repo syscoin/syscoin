@@ -740,7 +740,9 @@ UniValue assetnew(const JSONRPCRequest& request) {
 	CreateFeeRecipient(scriptData, data, fee);
 	vecSend.push_back(fee);
 
-	return syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
+	UniValue res = syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
+	res.push_back(stringFromVch(newAsset.vchAsset));
+	return res;
 }
 
 UniValue assetupdate(const JSONRPCRequest& request) {
@@ -1042,9 +1044,7 @@ UniValue assetsend(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	UniValue res = syscointxfund_helper(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
-	res.push_back(stringFromVch(newAsset.vchAsset));
-	return res;
+	return syscointxfund_helper(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 UniValue assetinfo(const JSONRPCRequest& request) {
