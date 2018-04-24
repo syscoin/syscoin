@@ -136,9 +136,8 @@ UniValue generateBlocks(std::shared_ptr<CReserveScript> coinbaseScript, int nGen
 		if (miningHeader.nNonce == nInnerLoopCount) {
 			continue;
 		}
-		// SYSCOIN deal with memory corruption on CBlock on serializesize
-		CBlock tmpBlock = *pblock;
-		if (!ProcessNewBlock(Params(), tmpBlock, true, nullptr))
+		std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(*pblock);
+		if (!ProcessNewBlock(Params(), shared_pblock, true, nullptr))
 			throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
 		++nHeight;
 		blockHashes.push_back(pblock->GetHash().GetHex());
