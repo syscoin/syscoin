@@ -1183,31 +1183,26 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 		if (GetUTXOCoin(aliasOutPointWitness, pcoinW))
 			txNew.vin.push_back(CTxIn(aliasOutPointWitness, pcoinW.out.scriptPubKey));
 	}
-	unsigned int unspentcount = 0;
-	string strAddress = "";
-	// if alias inputs used, need to ensure new alias utxo's are created as prev ones need to be used for proof of ownership
-	// also no need to set an an address for syscointxfund as it will use wallet (for aliasnew)
-	if (!vchAlias.empty() && !aliasRecipient.scriptPubKey.empty()) {
-		COutPoint aliasOutPoint;
-		unspentcount = aliasunspent(vchAlias, aliasOutPoint);
-		// for the alias utxo (1 per transaction is used)
-		if (unspentcount <= 1 || transferAlias)
-		{
-			for (unsigned int i = 0; i < transferAlias? 1: MAX_ALIAS_UPDATES_PER_BLOCK; i++)
-				vecSend.push_back(aliasRecipient);
-		}
-		Coin pcoin;
-		if (GetUTXOCoin(aliasOutPoint, pcoin))
-			txNew.vin.push_back(CTxIn(aliasOutPoint, pcoin.out.scriptPubKey));
 
+	COutPoint aliasOutPoint;
+	unsigned int unspentcount = aliasunspent(vchAlias, aliasOutPoint);
+	// for the alias utxo (1 per transaction is used)
+	if (unspentcount <= 1 || transferAlias)
+	{
+		for (unsigned int i = 0; i < transferAlias? 1: MAX_ALIAS_UPDATES_PER_BLOCK; i++)
+			vecSend.push_back(aliasRecipient);
 	}
+	Coin pcoin;
+	if (GetUTXOCoin(aliasOutPoint, pcoin))
+		txNew.vin.push_back(CTxIn(aliasOutPoint, pcoin.out.scriptPubKey));
+
 	// set an address for syscointxfund so it uses that address to fund (alias passed in)
-	else {
-		CAliasIndex alias;
-		if (!GetAlias(vchAlias, alias))
-			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("Cannot find alias used to fund this transaction: ") + stringFromVch(vchAlias));
-		strAddress = EncodeBase58(alias.vchAddress);
-	}
+
+	CAliasIndex alias;
+	if (!GetAlias(vchAlias, alias))
+		throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("Cannot find alias used to fund this transaction: ") + stringFromVch(vchAlias));
+	string strAddress = EncodeBase58(alias.vchAddress);
+	
 
 	// vouts to the payees
 	for (const auto& recipient : vecSend)
@@ -1228,6 +1223,7 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 	paramsFund.push_back(EncodeHexTx(txNew));
 	paramsFund.push_back(paramObj);
 	paramsFund.push_back(transferAlias);
+	
 	JSONRPCRequest request;
 	request.params = paramsFund;
 	return syscointxfund(request);
