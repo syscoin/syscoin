@@ -80,27 +80,19 @@ unsigned int static KimotoGravityWell(const CBlockIndex* pindexLast, const Conse
 }
 
 unsigned int static DarkGravityWave(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params) {
+	if (params.fPowNoRetargeting)
+		return pindexLast->nBits;
     /* current difficulty formula, syscoin - DarkGravity v3, written by Evan satoshiield - evan@syscoin.org */
     const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
-    int64_t nPastBlocks = 24;
-
-    // make sure we have at least (nPastBlocks + 1) blocks, otherwise just return powLimit
-    if (!pindexLast || pindexLast->nHeight < nPastBlocks) {
-        return bnPowLimit.GetCompact();
+    
+	
+    // make sure we have at least 600 blocks, otherwise just return powLimit
+    if (!pindexLast || pindexLast->nHeight <= 600) {
+		return UintToArith256(Params(CBaseChainParams::REGTEST).GetConsensus().powLimit).GetCompact();
     }
 
-    if (params.fPowAllowMinDifficultyBlocks && (
-        // testnet ...
-        (params.hashDevnetGenesisBlock.IsNull() && pindexLast->nChainWork >= UintToArith256(uint256S("0x000000000000000000000000000000000000000000000000003e9ccfe0e03e01"))) ||
-        // or devnet
-        !params.hashDevnetGenesisBlock.IsNull())) {
-        // NOTE: 000000000000000000000000000000000000000000000000003e9ccfe0e03e01 is the work of the "wrong" chain,
-        // so this rule activates there immediately and new blocks with high diff from that chain are going
-        // to be rejected by updated nodes. Note, that old nodes are going to reject blocks from updated nodes
-        // after the "right" chain reaches this amount of work too. This is a temporary condition which should
-        // be removed when we decide to hard-fork testnet again.
-        // TODO: remove "testnet+work OR devnet" part on next testnet hard-fork
-        // Special difficulty rule for testnet/devnet:
+    if (params.fPowAllowMinDifficultyBlocks)
+    {
         // If the new block's timestamp is more than 2* 2.5 minutes
         // then allow mining of a min-difficulty block.
         if (pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing*2)
