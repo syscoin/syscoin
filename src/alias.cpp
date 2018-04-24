@@ -1492,7 +1492,7 @@ UniValue aliasnew(const JSONRPCRequest& request) {
 		// add the registration input to the alias activation transaction
 		CCoinsViewCache view(pcoinsTip);
 		
-		Coin &pcoin = view.AccessCoin(regOut);
+		const Coin &pcoin = view.AccessCoin(regOut);
 		if (pcoin.IsSpent()) {
 			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5508 - " + _("Cannot find alias registration transaction, please ensure it has confirmed or re-submit the registration transaction again"));
 		}
@@ -1509,7 +1509,7 @@ UniValue aliasnew(const JSONRPCRequest& request) {
 			{
 				throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 5509 - " + _("This transaction requires a witness but not enough outputs found for witness alias: ") + stringFromVch(vchWitness));
 			}
-			Coin &pcoinW = view.AccessCoin(aliasOutPointWitness);
+			const Coin &pcoinW = view.AccessCoin(aliasOutPointWitness);
 			if (pcoinW.IsSpent()) {
 				throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5510 - " + _("Cannot find witness transaction"));
 			}
