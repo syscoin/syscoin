@@ -1260,7 +1260,7 @@ UniValue aliasnewfund(const JSONRPCRequest& request) {
 			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
 			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
 			const CScript& scriptPubKey = CScript(data.begin(), data.end());
-			const CAmount &nValue = AmountFromValue(find_value(utxoObj, "satoshis"));
+			const CAmount &nValue = find_value(utxoObj, "satoshis");
 			// look for non alias inputs
 			if (DecodeAliasScript(scriptPubKey, op, vvch))
 				continue;
@@ -1844,7 +1844,7 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 		const int& nOut = find_value(utxoObj, "outputIndex").get_int();
 		const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
 		const CScript& scriptPubKey = CScript(data.begin(), data.end());
-		const CAmount &nValue = AmountFromValue(find_value(utxoObj, "satoshis"));
+		const CAmount &nValue = find_value(utxoObj, "satoshis");
 		const int& nHeight = find_value(utxoObj, "height").get_int();
 		if (DecodeAliasScript(scriptPubKey, op, vvch))
 			continue;
@@ -1900,7 +1900,7 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 		const int& nOut = find_value(utxoObj, "outputIndex").get_int();
 		const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
 		const CScript& scriptPubKey = CScript(data.begin(), data.end());
-		const CAmount &nValue = AmountFromValue(find_value(utxoObj, "satoshis"));
+		const CAmount &nValue = find_value(utxoObj, "satoshis");
 		const COutPoint &outPointToCheck = COutPoint(txid, nOut);
 		if (DecodeAliasScript(scriptPubKey, op, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) {
 			continue;
@@ -1933,7 +1933,7 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
 			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
 			const CScript& scriptPubKey = CScript(data.begin(), data.end());
-			const CAmount &nValue = AmountFromValue(find_value(utxoObj, "satoshis"));
+			const CAmount &nValue = find_value(utxoObj, "satoshis");
 			const COutPoint &outPointToCheck = COutPoint(txid, nOut);
 
 			if (DecodeAliasScript(scriptPubKey, op, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) {
