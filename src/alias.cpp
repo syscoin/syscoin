@@ -1173,7 +1173,7 @@ UniValue SyscoinListReceived(bool includeempty=true)
 	}
 	return ret;
 }
-UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, bool transferAlias = false) {
+UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, bool transferAlias) {
 	CMutableTransaction txNew;
 	if (!vchWitness.empty())
 	{
