@@ -1629,7 +1629,7 @@ UniValue aliasupdate(const JSONRPCRequest& request) {
 	if(newAddress.ToString() != EncodeBase58(copyAlias.vchAddress))
 		transferAlias = true;
 	
-	SendMoneySyscoin(vchAlias, vchWitness, recipient, vecSend, wtx, &coinControl, false, transferAlias);
+	SendMoneySyscoin(vchAlias, vchWitness, recipient, vecSend, wtx, coinControl, false, transferAlias);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
@@ -2188,7 +2188,7 @@ UniValue aliaspay(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchFromString(""), recipient, vecSend, wtx, &coinControl, fUseInstantSend);
+	SendMoneySyscoin(theAlias.vchAlias, vchFromString(""), recipient, vecSend, wtx, coinControl, fUseInstantSend);
 	
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
