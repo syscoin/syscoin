@@ -2144,7 +2144,6 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 	else
 		return;
 
-	unsigned int currentAliasInputCount = aliasInputCount;
 	int op;
 	vector<vector<unsigned char> > vvch;
 	bool bIsFunded = false;
