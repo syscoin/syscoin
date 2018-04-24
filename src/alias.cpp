@@ -1395,7 +1395,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	sorted_vector<CAssetAllocationTuple> revertedAssetAllocations;
 	sorted_vector<vector<unsigned char> > revertedOffers;
 	sorted_vector<vector<unsigned char> > revertedCerts;
-	vector<vector<unsigned char> > vvch;
 	vector<vector<unsigned char> > vvchAlias;
 	if (!DecodeAliasTx(tx, op, vvchAlias))
 	{
@@ -2261,7 +2260,7 @@ UniValue aliaspay_helper(const vector<unsigned char> &vchAlias, vector<CRecipien
 
 	// now create the transaction and fake sign with enough funding from alias utxo's (if coinControl specified fAllowOtherInputs(true) then and only then are wallet inputs are allowed)
 	// actual signing happens in signrawtransaction outside of this function call after the wtxNew raw transaction is returned back to it
-	if (!pwalletMain->CreateTransaction(vecSend, wtxNew2, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, fUseInstantSend)) {
+	if (!pwalletMain->CreateTransaction(vecSend, wtxNew2, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, instantsend)) {
 		throw runtime_error(strError);
 	}
 	UniValue res(UniValue::VARR);
