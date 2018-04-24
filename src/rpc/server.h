@@ -179,8 +179,8 @@ public:
 extern CRPCTable tableRPC;
 // SYSCOIN service rpc functions
 extern UniValue aliasnew(const JSONRPCRequest& request);
-extern UniValue aliasnewfund(const JSONRPCRequest& request);
-extern UniValue syscoinnewfund(const JSONRPCRequest& request);
+extern UniValue syscointxfund(const JSONRPCRequest& request);
+
 extern UniValue aliasupdate(const JSONRPCRequest& request);
 extern UniValue aliasinfo(const JSONRPCRequest& request);
 extern UniValue aliasbalance(const JSONRPCRequest& request);

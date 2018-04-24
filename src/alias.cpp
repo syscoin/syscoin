@@ -1174,7 +1174,7 @@ UniValue SyscoinListReceived(bool includeempty=true)
 	return ret;
 }
 UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, bool transferAlias = false) {
-	CTransaction txNew;
+	CMutableTransaction txNew;
 	if (!vchWitness.empty())
 	{
 		COutPoint aliasOutPointWitness;
@@ -1185,7 +1185,7 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 		}
 		Coin pcoinW;
 		if (GetUTXOCoin(aliasOutPointWitness, pcoinW))
-			txNew.vin.insert(CTxIn(aliasOutPointWitness, pcoinW.out.scriptPubKey));
+			txNew.vin.push_back(CTxIn(aliasOutPointWitness, pcoinW.out.scriptPubKey));
 	}
 	unsigned int unspentcount = 0;
 	string strAddress = "";
@@ -1202,7 +1202,7 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 		}
 		Coin pcoin;
 		if (GetUTXOCoin(aliasOutPoint, pcoin))
-			txNew.vin.insert(CTxIn(aliasOutPoint, pcoin.out.scriptPubKey));
+			txNew.vin.push_back(CTxIn(aliasOutPoint, pcoin.out.scriptPubKey));
 
 	}
 	// set an address for syscointxfund so it uses that address to fund (alias passed in)

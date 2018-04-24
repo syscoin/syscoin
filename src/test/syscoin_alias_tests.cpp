@@ -44,7 +44,7 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasdata)
 	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew jag2 " + baddata + " 3 0 " + newaddress + " '' '' ''"));
 	UniValue varray = r.get_array();
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscoinnewfund " + varray[0].get_str()));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscointxfund " + varray[0].get_str()));
 	varray = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "signrawtransaction " + varray[0].get_str()));
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "syscoinsendrawtransaction " + find_value(r.get_obj(), "hex").get_str()));
@@ -52,7 +52,7 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasdata)
 	// activation should fail
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew jag2 " + baddata + " 3 0 " + newaddress + " '' '' ''"));
 	varray = r.get_array();
-	BOOST_CHECK_THROW(r = CallRPC("node1", "syscoinnewfund " + varray[0].get_str()), runtime_error);
+	BOOST_CHECK_THROW(r = CallRPC("node1", "syscointxfund " + varray[0].get_str()), runtime_error);
 
 	// override registration with different address
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getnewaddress", false, false));
@@ -60,7 +60,7 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasdata)
 	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew jag2 pub 3 0 " + newaddress + " '' '' ''"));
 	UniValue varray1 = r.get_array();
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscoinnewfund " + varray1[0].get_str()));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscointxfund " + varray1[0].get_str()));
 	UniValue varray2 = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "signrawtransaction " + varray2[0].get_str()));
 	BOOST_CHECK(find_value(r.get_obj(), "complete").get_bool());
@@ -72,7 +72,7 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasdata)
 	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew jag2 pub 3 0 " + newaddress + " '' '' ''"));
 	UniValue varray3 = r.get_array();
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscoinnewfund " + varray3[0].get_str()));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscointxfund " + varray3[0].get_str()));
 	UniValue varray4 = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "signrawtransaction " + varray4[0].get_str()));
 	BOOST_CHECK(find_value(r.get_obj(), "complete").get_bool());
@@ -81,7 +81,7 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasdata)
 	// activate
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew jag2 pub 3 0 " + newaddress + " '' '' ''"));
 	UniValue varray5 = r.get_array();
-	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscoinnewfund " + varray5[0].get_str()));
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscointxfund " + varray5[0].get_str()));
 	UniValue varray6 = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "signrawtransaction " + varray6[0].get_str()));
 	BOOST_CHECK(find_value(r.get_obj(), "complete").get_bool());
