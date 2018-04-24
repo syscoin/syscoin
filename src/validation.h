@@ -350,7 +350,7 @@ inline CBlockIndex* LookupBlockIndex(const uint256& hash)
 	BlockMap::const_iterator it = mapBlockIndex.find(hash);
 	return it == mapBlockIndex.end() ? nullptr : it->second;
 }
-bool CheckSyscoinInputs(const CTransaction& tx, CValidationState &state, bool fJustCheck, int nHeight, const CAmount& nFees, const CBlock& block);
+bool CheckSyscoinInputs(const CTransaction& tx, CValidationState &state, bool fJustCheck, int nHeight, const CBlock& block);
 bool GetUTXOCoin(const COutPoint& outpoint, Coin& coin);
 int GetUTXOHeight(const COutPoint& outpoint);
 int GetUTXOConfirmations(const COutPoint& outpoint);

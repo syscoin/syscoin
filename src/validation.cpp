@@ -596,7 +596,7 @@ void LimitMempoolSize(CTxMemPool& pool, size_t limit, unsigned long age) {
         pcoinsTip->Uncache(removed);
 }
 // SYSCOIN
-bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJustCheck, int nHeight, const CAmount& nFees, const CBlock& block)
+bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJustCheck, int nHeight, const CBlock& block)
 {
 	// Ensure that we don't fail on verifydb which loads recent UTXO and will fail if the input is already spent, 
 	// but during runtime fLoaded should be true so it should check UTXO in correct state
@@ -618,14 +618,6 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 
 	CAmount nDescrepency;
 	if (block.vtx.empty() && tx.nVersion == SYSCOIN_TX_VERSION) {
-		const CAmount nExpectedFee = ::minRelayTxFee.GetFee(tx.GetTotalSize()*1.5);
-		if (nFees > nExpectedFee)
-			nDescrepency = nFees - nExpectedFee;
-		else
-			nDescrepency = nExpectedFee - nFees;
-		if ((nDescrepency - (tx.vin.size() + 1)) < 0) {
-			return state.DoS(100, false, REJECT_INVALID, strprintf("fees-not-correct nFees %s vs nExpectedFee %s", ValueFromAmount(nFees).write().c_str(), ValueFromAmount(nExpectedFee).write().c_str()));
-		}
 		{
 			LOCK(cs_main);
 			bool bDestCheckFailed = false;
@@ -1268,7 +1260,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 					return;
 				}
 
-				if (!CheckSyscoinInputs(tx, vstate, true, chainHeight, nFees, CBlock())) {
+				if (!CheckSyscoinInputs(tx, vstate, true, chainHeight,  CBlock())) {
 					LogPrint("mempool", "%s: %s %s\n", "CheckSyscoinInputs Frror", hash.ToString(), vstate.GetRejectReason());
 					BOOST_FOREACH(const COutPoint& hashTx, coins_to_uncache)
 						pcoinsTip->Uncache(hashTx);
@@ -1296,7 +1288,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 			if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, true)) {
 				return false;
 			}
-			if (!CheckSyscoinInputs(tx, state, true, chainHeight, nFees, CBlock())) {
+			if (!CheckSyscoinInputs(tx, state, true, chainHeight, CBlock())) {
 				return false;
 			}
 			// Remove conflicting transactions from the mempool
@@ -2572,19 +2564,6 @@ static bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockInd
             
 
             nFees += view.GetValueIn(tx)-tx.GetValueOut();
-			// SYSCOIN
-			if (tx.nVersion == SYSCOIN_TX_VERSION)
-			{
-				const CAmount nExpectedFee = ::minRelayTxFee.GetFee(tx.GetTotalSize()*1.5);
-				CAmount nDescrepency;
-				if (nFees > nExpectedFee)
-					nDescrepency = nFees - nExpectedFee;
-				else
-					nDescrepency = nExpectedFee - nFees;
-				if ((nDescrepency - (tx.vin.size() + 1)) < 0) {
-					return error("ConnectBlock: fees not correct for Syscoin transaction nFees %s vs nExpectedFee %s", ValueFromAmount(nFees).write().c_str(), ValueFromAmount(nExpectedFee).write().c_str());
-				}
-			}
             std::vector<CScriptCheck> vChecks;
             bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
             if (!CheckInputs(tx, state, view, fScriptChecks, STANDARD_SCRIPT_VERIFY_FLAGS, fCacheResults, fCacheResults, nScriptCheckThreads ? &vChecks : NULL))
@@ -2656,7 +2635,7 @@ static bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockInd
         vPos.push_back(std::make_pair(tx.GetHash(), pos));
         pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
     }
-	if (!CheckSyscoinInputs(*block.vtx[0], state, fJustCheck, pindex->nHeight, nFees, block))
+	if (!CheckSyscoinInputs(*block.vtx[0], state, fJustCheck, pindex->nHeight, block))
 		return error("ConnectBlock(): CheckSyscoinInputs on block %s failed\n",
 			block.GetHash().ToString());
     int64_t nTime3 = GetTimeMicros(); nTimeConnect += nTime3 - nTime2;

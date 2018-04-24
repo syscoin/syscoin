@@ -1299,7 +1299,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	if (nCurrentAmount < nDesiredAmount || bSendAll) {
 		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 		// min fee based on bytes + 1 change output
-		CAmount nFees = ::minRelayTxFee.GetFee(nBytes*1.5) + (3 * minRelayTxFee.GetFee(200u));
+		CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + (3 * minRelayTxFee.GetFee(200u));
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
 		if (params.size() > 1) {
 			// fund with alias inputs first
