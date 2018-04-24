@@ -647,6 +647,13 @@ UniValue sendtoaddress(const JSONRPCRequest& request)
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     CSyscoinAddress address(request.params[0].get_str());
+	// SYSCOIN
+	vector<unsigned char> vchPubKey;
+	string strAddress;
+	if (GetAddressFromAlias(params[0].get_str(), strAddress, vchPubKey))
+	{
+		address = CSyscoinAddress(strAddress);
+	}
     if (!address.IsValid())
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Syscoin address");
 
