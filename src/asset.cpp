@@ -25,7 +25,7 @@
 #include <chrono>
 using namespace std::chrono;
 using namespace std;
-extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl* coinControl, bool fUseInstantSend=false, bool transferAlias=false);
+extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend=false, bool transferAlias=false);
 bool IsAssetOp(int op) {
     return op == OP_ASSET_ACTIVATE
         || op == OP_ASSET_UPDATE
@@ -746,7 +746,7 @@ UniValue assetnew(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;	
-	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	res.push_back(stringFromVch(newAsset.vchAsset));
@@ -845,7 +845,7 @@ UniValue assetupdate(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;	
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
  	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
@@ -927,7 +927,7 @@ UniValue assettransfer(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
@@ -1068,7 +1068,7 @@ UniValue assetsend(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;

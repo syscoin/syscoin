@@ -366,7 +366,7 @@ UniValue getaddressesbyaccount(const JSONRPCRequest& request)
     return ret;
 }
 // SYSCOIN: Send service transactions
-CAmount GetCoinControlInputTotal(const CCoinControl* coinControl)
+CAmount GetCoinControlInputTotal(const CCoinControl& coinControl)
 {
 	if (coinControl == NULL)
 		return 0;
@@ -375,7 +375,7 @@ CAmount GetCoinControlInputTotal(const CCoinControl* coinControl)
 	Coin coin;
 	CAmount nValueRet = 0;
 	std::vector<COutPoint> vInputs;
-	coinControl->ListSelected(vInputs);
+	coinControl.ListSelected(vInputs);
 	BOOST_FOREACH(const COutPoint& outpoint, vInputs)
 	{
 		coin = view.AccessCoin(outpoint);
@@ -408,7 +408,7 @@ When to pay with this method:
 3b) use total amount + required amount from 2a (if non zero) to find outputs in alias balance, if not enough balance throw error
 3c) transaction completely funded
 4) if transaction completely funded, try to sign and send to network*/
-void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl* coinControl, bool fUseInstantSend = false, bool transferAlias = false)
+void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend = false, bool transferAlias = false)
 {
 	CReserveKey reservekey(pwalletMain);
 	CAmount nFeeRequired;
@@ -424,7 +424,7 @@ void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsign
 		{
 			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("This transaction requires a witness but not enough outputs found for witness alias: ") + stringFromVch(vchWitness));
 		}
-		coinControl->Select(aliasOutPointWitness);
+		coinControl.Select(aliasOutPointWitness);
 	}
 	COutPoint aliasOutPoint;
 	int numResults = 0;
@@ -439,14 +439,14 @@ void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsign
 				vecSend.push_back(aliasRecipient);
 		}
 		if (!aliasOutPoint.IsNull())
-			coinControl->Select(aliasOutPoint);
+			coinControl.Select(aliasOutPoint);
 	}
 
 	CWalletTx wtxNew1, wtxNew2;
 	// get total output required
 	// if aliasRecipient.scriptPubKey.empty() then it is not a syscoin tx, so don't set tx flag for syscoin tx in createtransaction()
 	// this is because aliasRecipient means an alias utxo was used to create a transaction, common to every syscoin service transaction, aliaspay doesn't use an alias utxo it just sends money from address to address but uses alias outputs to fund it and sign externally using zero knowledge auth.
-	if (!pwalletMain->CreateTransaction(vecSend, wtxNew1, reservekey, nFeeRequired, nChangePosRet, strError, coinControl, false, ALL_COINS, fUseInstantSend, !aliasRecipient.scriptPubKey.empty())) {
+	if (!pwalletMain->CreateTransaction(vecSend, wtxNew1, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, fUseInstantSend, !aliasRecipient.scriptPubKey.empty())) {
 		throw runtime_error(strError);
 	}
 
@@ -491,14 +491,14 @@ void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsign
 			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("The Syscoin Alias does not have enough funds to complete this transaction. You need to deposit the following amount of coins in order for the transaction to succeed: ") + ValueFromAmount(nFeeRequired).write());
 		BOOST_FOREACH(const COutPoint& outpoint, outPoints)
 		{
-			if (!coinControl->IsSelected(outpoint))
-				coinControl->Select(outpoint);
+			if (!coinControl.IsSelected(outpoint))
+				coinControl.Select(outpoint);
 		}
 	}
 
 	// now create the transaction and fake sign with enough funding from alias utxo's (if coinControl specified fAllowOtherInputs(true) then and only then are wallet inputs are allowed)
 	// actual signing happens in signrawtransaction outside of this function call after the wtxNew raw transaction is returned back to it
-	if (!pwalletMain->CreateTransaction(vecSend, wtxNew, reservekey, nFeeRequired, nChangePosRet, strError, coinControl, false, ALL_COINS, fUseInstantSend, !aliasRecipient.scriptPubKey.empty())) {
+	if (!pwalletMain->CreateTransaction(vecSend, wtxNew, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, fUseInstantSend, !aliasRecipient.scriptPubKey.empty())) {
 		throw runtime_error(strError);
 	}
 	// run a check on the inputs without putting them into the db, just to ensure it will go into the mempool without issues

@@ -27,7 +27,7 @@
 #include <boost/range/adaptor/reversed.hpp>
 using namespace std;
 extern CScript _createmultisig_redeemScript(const UniValue& params);
-extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl* coinControl, bool fUseInstantSend=false, bool transferAlias=false);
+extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend=false, bool transferAlias=false);
 void PutToEscrowList(std::vector<CEscrow> &escrowList, CEscrow& index) {
 	int i = escrowList.size() - 1;
 	BOOST_REVERSE_FOREACH(CEscrow &o, escrowList) {
@@ -1106,7 +1106,7 @@ UniValue escrowbid(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
@@ -1183,7 +1183,7 @@ UniValue escrowaddshipping(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(bidderalias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(bidderalias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
@@ -1457,7 +1457,7 @@ UniValue escrownew(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(buyeralias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(buyeralias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	res.push_back(stringFromVch(vchEscrow));
@@ -1541,7 +1541,7 @@ UniValue escrowacknowledge(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
@@ -1807,7 +1807,7 @@ UniValue escrowrelease(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
@@ -1887,7 +1887,7 @@ UniValue escrowcompleterelease(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue returnRes;
 	UniValue sendParams(UniValue::VARR);
 	sendParams.push_back(rawTx);
@@ -2008,7 +2008,7 @@ UniValue escrowrefund(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
@@ -2091,7 +2091,7 @@ UniValue escrowcompleterefund(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(buyerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(buyerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue returnRes;
 	UniValue sendParams(UniValue::VARR);
 	sendParams.push_back(rawTx);
@@ -2288,7 +2288,7 @@ UniValue escrowfeedback(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;

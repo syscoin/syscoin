@@ -45,7 +45,7 @@ typedef map<vector<unsigned char>, COutPoint > mapAliasRegistrationsType;
 typedef map<vector<unsigned char>, vector<unsigned char> > mapAliasRegistrationsDataType;
 mapAliasRegistrationsType mapAliasRegistrations;
 mapAliasRegistrationsDataType mapAliasRegistrationData;
-extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl* coinControl, bool fUseInstantSend=false, bool transferAlias=false);
+extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend=false, bool transferAlias=false);
 unsigned int MAX_ALIAS_UPDATES_PER_BLOCK = 10;
 uint64_t GetAliasExpiration(const CAliasIndex& alias) {
 	// dont prune by default, set nHeight to future time
@@ -2285,7 +2285,7 @@ UniValue aliasupdatewhitelist(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, coinControl);
 
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
@@ -2343,7 +2343,7 @@ UniValue aliasclearwhitelist(const JSONRPCRequest& request) {
 	CCoinControl coinControl;
 	coinControl.fAllowOtherInputs = false;
 	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, &coinControl);
+	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, coinControl);
 
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(*wtx.tx));
