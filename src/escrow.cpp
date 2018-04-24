@@ -1439,7 +1439,7 @@ UniValue escrownew(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	UniValue &res = syscointxfund_helper(buyeralias.vchAlias, vchWitness, aliasRecipient, vecSend);
+	UniValue res = syscointxfund_helper(buyeralias.vchAlias, vchWitness, aliasRecipient, vecSend);
 	res.push_back(stringFromVch(vchEscrow));
 	return res;
 }
@@ -1851,7 +1851,7 @@ UniValue escrowcompleterelease(const JSONRPCRequest& request) {
 
 
 
-	const UniValue &res = syscointxfund_helper(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend);
+	const UniValue res = syscointxfund_helper(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend);
 	UniValue returnRes;
 	UniValue sendParams(UniValue::VARR);
 	sendParams.push_back(rawTx);
