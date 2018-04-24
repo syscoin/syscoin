@@ -1254,6 +1254,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 					BOOST_FOREACH(const COutPoint& hashTx, coins_to_uncache)
 						pcoinsTip->Uncache(hashTx);
 					pool.removeRecursive(tx, MemPoolRemovalReason::UNKNOWN);
+					pool.ClearPrioritisation(hash);
 					int nDos = 0;
 					if (vstate.IsInvalid(nDos) && nDos > 0 && fromPeer >= 0)
 					{
@@ -1272,6 +1273,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 					BOOST_FOREACH(const COutPoint& hashTx, coins_to_uncache)
 						pcoinsTip->Uncache(hashTx);
 					pool.removeRecursive(tx, MemPoolRemovalReason::UNKNOWN);
+					pool.ClearPrioritisation(hash);
 					int nDos = 0;
 					if (vstate.IsInvalid(nDos) && nDos > 0 && fromPeer >= 0)
 					{
@@ -2491,7 +2493,7 @@ static bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockInd
                 prevheights[j] = view.AccessCoin(tx.vin[j].prevout).nHeight;
             }
 
-            if (!SequenceLocks(tx, nLockTimeFlags, &prevheights, *pindex)) {
+            if (!SequenceLocks(tx, STANDARD_LOCKTIME_VERIFY_FLAGS, &prevheights, *pindex)) {
                 return state.DoS(100, error("%s: contains a non-BIP68-final transaction", __func__),
                                  REJECT_INVALID, "bad-txns-nonfinal");
             }
@@ -2559,16 +2561,15 @@ static bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockInd
 
             }
 
-            if (fStrictPayToScriptHash)
-            {
-                // Add in sigops done by pay-to-script-hash inputs;
-                // this is to prevent a "rogue miner" from creating
-                // an incredibly-expensive-to-validate block.
-                nSigOps += GetP2SHSigOpCount(tx, view);
-                if (nSigOps > MaxBlockSigOps(fDIP0001Active_context))
-                    return state.DoS(100, error("ConnectBlock(): too many sigops"),
-                                     REJECT_INVALID, "bad-blk-sigops");
-            }
+           
+            // Add in sigops done by pay-to-script-hash inputs;
+            // this is to prevent a "rogue miner" from creating
+            // an incredibly-expensive-to-validate block.
+            nSigOps += GetP2SHSigOpCount(tx, view);
+            if (nSigOps > MaxBlockSigOps(fDIP0001Active_context))
+                return state.DoS(100, error("ConnectBlock(): too many sigops"),
+                                    REJECT_INVALID, "bad-blk-sigops");
+            
 
             nFees += view.GetValueIn(tx)-tx.GetValueOut();
 			// SYSCOIN
