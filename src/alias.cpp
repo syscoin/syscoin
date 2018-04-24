@@ -1218,8 +1218,6 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 			txNew.vout.push_back(txout);
 		}
 	}
-	const string &strAddressFrom = EncodeBase58(theAlias.vchAddress);
-
 	UniValue paramObj(UniValue::VOBJ);
 	UniValue paramArr(UniValue::VARR);
 	paramArr.push_back(strAddress);
