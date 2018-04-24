@@ -32,7 +32,7 @@
 
 using namespace std::chrono;
 using namespace std;
-extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend=false, bool transferAlias=false);
+
 bool IsOfferOp(int op) {
 	return op == OP_OFFER_ACTIVATE
         || op == OP_OFFER_UPDATE;
@@ -868,14 +868,7 @@ UniValue offernew(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	res.push_back(stringFromVch(vchOffer));
-	return res;
+	return syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 UniValue offerlink(const JSONRPCRequest& request) {
@@ -963,13 +956,7 @@ UniValue offerlink(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
+	UniValue &res = syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
 	res.push_back(stringFromVch(vchOffer));
 	return res;
 }
@@ -1167,10 +1154,7 @@ UniValue offerupdate(const JSONRPCRequest& request) {
 	coinControl.fAllowWatchOnly = false;
 
 
-	SendMoneySyscoin(offerAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(offerAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 void COfferDB::WriteOfferIndex(const COffer& offer, const int &op) {

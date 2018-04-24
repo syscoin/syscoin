@@ -274,6 +274,7 @@ static const CRPCCommand vRPCCommands[] =
   // SYSCOIN rpc functions
 	{ "wallet", "aliasnew",          &aliasnew,          false ,  {}},
 	{ "wallet", "aliasnewfund",          &aliasnewfund,          false ,  {}},
+	{ "wallet", "syscoinnewfund",          &syscoinnewfund,          false ,{} },
 	{ "wallet", "aliasupdate",       &aliasupdate,       false ,  {}},
 	{ "wallet", "aliasinfo",         &aliasinfo,         false ,  {}},
 	{ "wallet", "aliasbalance",      &aliasbalance,         false ,  {}},

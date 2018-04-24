@@ -27,7 +27,6 @@
 #include <boost/range/adaptor/reversed.hpp>
 using namespace std;
 extern CScript _createmultisig_redeemScript(const UniValue& params);
-extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend=false, bool transferAlias=false);
 void PutToEscrowList(std::vector<CEscrow> &escrowList, CEscrow& index) {
 	int i = escrowList.size() - 1;
 	BOOST_REVERSE_FOREACH(CEscrow &o, escrowList) {
@@ -1103,13 +1102,7 @@ UniValue escrowbid(const JSONRPCRequest& request) {
 
 
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 UniValue escrowaddshipping(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -1179,14 +1172,7 @@ UniValue escrowaddshipping(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(bidderalias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(bidderalias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 UniValue escrownew(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -1453,13 +1439,7 @@ UniValue escrownew(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(buyeralias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
+	UniValue &res = syscointxfund_helper(buyeralias.vchAlias, vchWitness, aliasRecipient, vecSend);
 	res.push_back(stringFromVch(vchEscrow));
 	return res;
 }
@@ -1537,14 +1517,7 @@ UniValue escrowacknowledge(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend);
 
 }
 UniValue escrowcreaterawtransaction(const JSONRPCRequest& request) {
@@ -1804,14 +1777,7 @@ UniValue escrowrelease(const JSONRPCRequest& request) {
 	CreateFeeRecipient(scriptData, data, fee);
 	vecSend.push_back(fee);
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 UniValue escrowcompleterelease(const JSONRPCRequest& request) {
@@ -1884,10 +1850,8 @@ UniValue escrowcompleterelease(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
+
+	const UniValue &res = syscointxfund_helper(sellerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend);
 	UniValue returnRes;
 	UniValue sendParams(UniValue::VARR);
 	sendParams.push_back(rawTx);
@@ -1904,8 +1868,6 @@ UniValue escrowcompleterelease(const JSONRPCRequest& request) {
 	{
 		throw runtime_error(find_value(objError, "message").get_str());
 	}
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue escrowrefund(const JSONRPCRequest& request) {
@@ -2005,14 +1967,7 @@ UniValue escrowrefund(const JSONRPCRequest& request) {
 	CreateFeeRecipient(scriptData, data, fee);
 	vecSend.push_back(fee);
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 UniValue escrowcompleterefund(const JSONRPCRequest& request) {
@@ -2088,10 +2043,7 @@ UniValue escrowcompleterefund(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(buyerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
+	const UniValue& res = syscointxfund_helper(buyerAliasLatest.vchAlias, vchWitness, aliasRecipient, vecSend);
 	UniValue returnRes;
 	UniValue sendParams(UniValue::VARR);
 	sendParams.push_back(rawTx);
@@ -2108,8 +2060,6 @@ UniValue escrowcompleterefund(const JSONRPCRequest& request) {
 	{
 		throw runtime_error(find_value(objError, "message").get_str());
 	}
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
 	return res;
 }
 UniValue escrowfeedback(const JSONRPCRequest& request) {
@@ -2284,14 +2234,7 @@ UniValue escrowfeedback(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 UniValue escrowinfo(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;

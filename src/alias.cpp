@@ -45,7 +45,6 @@ typedef map<vector<unsigned char>, COutPoint > mapAliasRegistrationsType;
 typedef map<vector<unsigned char>, vector<unsigned char> > mapAliasRegistrationsDataType;
 mapAliasRegistrationsType mapAliasRegistrations;
 mapAliasRegistrationsDataType mapAliasRegistrationData;
-extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend=false, bool transferAlias=false);
 unsigned int MAX_ALIAS_UPDATES_PER_BLOCK = 10;
 uint64_t GetAliasExpiration(const CAliasIndex& alias) {
 	// dont prune by default, set nHeight to future time
@@ -1174,25 +1173,86 @@ UniValue SyscoinListReceived(bool includeempty=true)
 	}
 	return ret;
 }
-UniValue aliasnewfund(const JSONRPCRequest& request) {
+UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, bool transferAlias = false) {
+	CTransaction txNew;
+	if (!vchWitness.empty())
+	{
+		COutPoint aliasOutPointWitness;
+		aliasunspent(vchWitness, aliasOutPointWitness);
+		if (aliasOutPointWitness.IsNull())
+		{
+			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("This transaction requires a witness but not enough outputs found for witness alias: ") + stringFromVch(vchWitness));
+		}
+		Coin pcoinW;
+		if (GetUTXOCoin(aliasOutPointWitness, pcoinW))
+			txNew.vin.insert(CTxIn(aliasOutPointWitness, pcoinW.out.scriptPubKey));
+	}
+	unsigned int unspentcount = 0;
+	string strAddress = "";
+	// if alias inputs used, need to ensure new alias utxo's are created as prev ones need to be used for proof of ownership
+	// also no need to set an an address for syscointxfund as it will use wallet (for aliasnew)
+	if (!vchAlias.empty() && !aliasRecipient.scriptPubKey.empty()) {
+		COutPoint aliasOutPoint;
+		unspentcount = aliasunspent(vchAlias, aliasOutPoint);
+		// for the alias utxo (1 per transaction is used)
+		if (unspentcount <= 1 || transferAlias)
+		{
+			for (unsigned int i = 0; i < transferAlias? 1: MAX_ALIAS_UPDATES_PER_BLOCK; i++)
+				vecSend.push_back(aliasRecipient);
+		}
+		Coin pcoin;
+		if (GetUTXOCoin(aliasOutPoint, pcoin))
+			txNew.vin.insert(CTxIn(aliasOutPoint, pcoin.out.scriptPubKey));
+
+	}
+	// set an address for syscointxfund so it uses that address to fund (alias passed in)
+	else {
+		CAliasIndex alias;
+		if (GetAlias(vchAlias, alias))
+			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("Cannot find alias used to fund this transaction: ") + stringFromVch(vchAlias));
+		strAddress = EncodeBase58(alias.vchAddress);
+	}
+	UniValue paramsAddresses(UniValue::VARR);
+	paramsAddresses.push_back(strAddress);
+
+	// vouts to the payees
+	for (const auto& recipient : vecSend)
+	{
+		CTxOut txout(recipient.nAmount, recipient.scriptPubKey);
+		if (!txout.IsDust(dustRelayFee))
+		{
+			txNew.vout.push_back(txout);
+		}
+	}
+
+	UniValue paramsFund(UniValue::VARR);
+	paramsFund.push_back(EncodeHexTx(txNew));
+	paramsFund.push_back(paramsAddresses);
+	paramsFund.push_back(transferAlias);
+	JSONRPCRequest request;
+	request.params = paramsFund;
+	return syscointxfund(request);
+}
+UniValue syscointxfund(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (request.fHelp || 1 > params.size() || 2 < params.size())
+	if (request.fHelp || 1 > params.size() || 3 < params.size())
 		throw runtime_error(
-			"aliasnewfund\n"
-			"\nFunds a new alias transaction with inputs used from wallet or an array of addresses specified.\n"
+			"syscointxfund\n"
+			"\nFunds a new syscoin transaction with inputs used from wallet or an array of addresses specified.\n"
 			"\nArguments:\n"
-			"  \"hexstring\" (string, required) The raw aliasnew transaction output\n"
+			"  \"hexstring\" (string, required) The raw syscoin transaction output given from rpc (ie: aliasnew, aliasupdate)\n"
 			"  \"addresses (object, optional) \"\n"
 			"    [\n"
-			"      \"address\"  (array, string) Address used to fund this aliasnew transaction. Leave empty to use wallet. Last address gets sent the change.\n"
+			"      \"address\"  (array, string) Address used to fund this transaction. Leave empty to use wallet. Last address gets sent the change.\n"
 			"      ,...\n"
 			"    ]\n"
+			"   \"sendall\" (boolean, optional) If addresses were specified, send all funds found in those addresses.\n"
 			"}\n"
 			"\nExamples:\n"
-			+ HelpExampleCli("aliasnewfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}'")
-			+ HelpExampleRpc("aliasnewfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}")
+			+ HelpExampleCli("syscointxfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}' true")
+			+ HelpExampleRpc("syscointxfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]} false")
 			+ HelpRequiringPassphrase());
-	EnsureWalletIsUnlocked();
+	
 	
 	const string &hexstring = params[0].get_str();
 	CMutableTransaction tx;
@@ -1204,6 +1264,7 @@ UniValue aliasnewfund(const JSONRPCRequest& request) {
 	if(params.size() > 1)
 		addresses = params[1].get_obj();
 	else {
+		EnsureWalletIsUnlocked();
 		UniValue addressArray(UniValue::VARR);
 		UniValue receivedList = SyscoinListReceived(false);
 		UniValue recevedListArray = receivedList.get_array();
@@ -1213,7 +1274,9 @@ UniValue aliasnewfund(const JSONRPCRequest& request) {
 		}
 		addresses.push_back(Pair("addresses", addressArray));
 	}
-
+	bool bSendAll = false;
+	if (params.size() > 2)
+		bSendAll = params[2].get_bool();
 	UniValue paramsUTXO(UniValue::VARR);
 	paramsUTXO.push_back(addresses);
 	JSONRPCRequest request1;
@@ -1227,12 +1290,6 @@ UniValue aliasnewfund(const JSONRPCRequest& request) {
 
 	// add total output amount of transaction to desired amount
 	CAmount nDesiredAmount = txIn.GetValueOut();
-	std::map<string, int> mapOutputs;
-	for (std::vector<CTxIn>::const_iterator it(txIn.vin.begin()); it != txIn.vin.end(); ++it)
-	{
-		const string& strOut = strprintf("%s%s", (*it).prevout.hash.GetHex(), (*it).prevout.n);
-		mapOutputs[strOut] = 1;
-	}
 	CAmount nCurrentAmount = 0;
 	{
 		LOCK(cs_main);
@@ -1243,45 +1300,83 @@ UniValue aliasnewfund(const JSONRPCRequest& request) {
 
 	
 	int op;
-	bool bFunded = false;
 	vector<vector<unsigned char> > vvch;
-	if (nCurrentAmount < nDesiredAmount) {
+	if (nCurrentAmount < nDesiredAmount || bSendAll) {
 		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 		// min fee based on bytes + 1 change output
 		CAmount nFees = ::minRelayTxFee.GetFee(nBytes*1.5) + (3 * minRelayTxFee.GetFee(200u));
-		for (unsigned int i = 0; i < utxoArray.size(); i++)
-		{
-			// add 200 bytes of fees to account for every input added to this transaction
-			nFees += 3 * minRelayTxFee.GetFee(200u);
-			const UniValue& utxoObj = utxoArray[i].get_obj();
-			const string &strTxid = find_value(utxoObj, "txid").get_str();
-			const uint256& txid = uint256S(strTxid);
-			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
-			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
-			const CScript& scriptPubKey = CScript(data.begin(), data.end());
-			const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
-			// look for non alias inputs
-			if (DecodeAliasScript(scriptPubKey, op, vvch))
-				continue;
-			if (mapOutputs.find(strprintf("%s%s", strTxid, nOut)) != mapOutputs.end())
-				continue;
+		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
+		if (params.size() > 1) {
+			// fund with alias inputs first
+			for (unsigned int i = 0; i < utxoArray.size(); i++)
 			{
-				LOCK(mempool.cs);
-				if (mempool.mapNextTx.find(COutPoint(txid, nOut)) != mempool.mapNextTx.end())
+				const UniValue& utxoObj = utxoArray[i].get_obj();
+				const string &strTxid = find_value(utxoObj, "txid").get_str();
+				const uint256& txid = uint256S(strTxid);
+				const int& nOut = find_value(utxoObj, "outputIndex").get_int();
+				const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
+				const CScript& scriptPubKey = CScript(data.begin(), data.end());
+				const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
+				const CTxIn txIn(txid, nOut, scriptPubKey);
+				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
-			}
-			if (pwalletMain->IsLockedCoin(txid, nOut))
-				continue;
-			tx.vin.push_back(CTxIn(txid, nOut, scriptPubKey));
-			nCurrentAmount += nValue;
-			if (nCurrentAmount >= (nDesiredAmount + nFees)) {
-				bFunded = true;
-				break;
+				// look for alias inputs only, if not selecting all
+				if (!DecodeAliasScript(scriptPubKey, op, vvch) && !bSendAll)
+					continue;
+				{
+					LOCK(mempool.cs);
+					if (mempool.mapNextTx.find(COutPoint(txid, nOut)) != mempool.mapNextTx.end())
+						continue;
+				}
+				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
+					continue;
+				// add 200 bytes of fees to account for every input added to this transaction
+				nFees += 3 * minRelayTxFee.GetFee(200u);
+				tx.vin.push_back(txIn);
+				nCurrentAmount += nValue;
+				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
+					if (!bSendAll)
+						break;
+				}
 			}
 		}
-		if (!bFunded)
-			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Insufficient funds for alias creation transaction"));
+		// if after selecting alias inputs we are still not funded, we need to select alias balances to fund this transaction
+		if (nCurrentAmount < (nDesiredAmount + nFees)) {
+			for (unsigned int i = 0; i < utxoArray.size(); i++)
+			{
+				const UniValue& utxoObj = utxoArray[i].get_obj();
+				const string &strTxid = find_value(utxoObj, "txid").get_str();
+				const uint256& txid = uint256S(strTxid);
+				const int& nOut = find_value(utxoObj, "outputIndex").get_int();
+				const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
+				const CScript& scriptPubKey = CScript(data.begin(), data.end());
+				const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
+				const CTxIn txIn(txid, nOut, scriptPubKey);
+				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
+					continue;
+				// look for non alias inputs
+				if (DecodeAliasScript(scriptPubKey, op, vvch))
+					continue;
+				{
+					LOCK(mempool.cs);
+					if (mempool.mapNextTx.find(COutPoint(txid, nOut)) != mempool.mapNextTx.end())
+						continue;
+				}
+				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
+					continue;
+				// add 200 bytes of fees to account for every input added to this transaction
+				nFees += 3 * minRelayTxFee.GetFee(200u);
+				tx.vin.push_back(txIn);
+				nCurrentAmount += nValue;
+				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
+					if (!bSendAll)
+						break;
+				}
+			}
+		}
 		const CAmount &nChange = nCurrentAmount - nDesiredAmount - nFees;
+		if(nChange < 0)
+			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Insufficient funds for alias creation transaction"));
 		// if addresses were passed in, send change back to the last address as policy
 		if (params.size() > 1) {
 			tx.vout.push_back(CTxOut(nChange, tx.vin.back().scriptSig));
@@ -1297,22 +1392,79 @@ UniValue aliasnewfund(const JSONRPCRequest& request) {
 	bool fJustCheck = true;
 	string errorMessage = "";
 	bool bCheckDestError = false;
-	if (DecodeAliasTx(tx, op, vvch))
+	sorted_vector<CAssetAllocationTuple> revertedAssetAllocations;
+	sorted_vector<vector<unsigned char> > revertedOffers;
+	sorted_vector<vector<unsigned char> > revertedCerts;
+	vector<vector<unsigned char> > vvch;
+	vector<vector<unsigned char> > vvchAlias;
+	if (!DecodeAliasTx(tx, op, vvchAlias))
 	{
-		CheckAliasInputs(tx, op, vvch, fJustCheck, chainActive.Tip()->nHeight, errorMessage, bCheckDestError, true);
+		if (!FindAliasInTx(tx, vvchAlias)) {
+			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9001 - " + _("Cannot find alias input to this transaction"));
+		}
+		// it is assumed if no alias output is found, then it is for another service so this would be an alias update
+		op = OP_ALIAS_UPDATE;
+	}
+	CheckAliasInputs(tx, op, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, bCheckDestError, true);
+	if (!errorMessage.empty())
+		throw runtime_error(errorMessage.c_str());
+	CheckAliasInputs(tx, op, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, bCheckDestError, true);
+	if (!errorMessage.empty())
+		throw runtime_error(errorMessage.c_str());
+
+	if (DecodeCertTx(tx, op, vvch))
+	{
+		CheckCertInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedCerts, errorMessage, true);
 		if (!errorMessage.empty())
 			throw runtime_error(errorMessage.c_str());
-		CheckAliasInputs(tx, op, vvch, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, bCheckDestError, true);
+		CheckCertInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedCerts, errorMessage, true);
 		if (!errorMessage.empty())
 			throw runtime_error(errorMessage.c_str());
 	}
-	else
-		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + _("Could not decode alias transaction"));
+	if (DecodeAssetTx(tx, op, vvch))
+	{
+		CheckAssetInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+		CheckAssetInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+	}
+	if (DecodeAssetAllocationTx(tx, op, vvch))
+	{
+		CheckAssetAllocationInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+		CheckAssetAllocationInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+	}
+	if (DecodeEscrowTx(tx, op, vvch))
+	{
+		CheckEscrowInputs(tx, op, vvch, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+		CheckEscrowInputs(tx, op, vvch, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+	}
+	if (DecodeOfferTx(tx, op, vvch))
+	{
+		CheckOfferInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedOffers, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+		CheckOfferInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedOffers, errorMessage, true);
+		if (!errorMessage.empty())
+			throw runtime_error(errorMessage.c_str());
+
+	}
+
 	// pass back new raw transaction
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(tx));
 	return res;
 }
+
 UniValue aliasnew(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
 	if (request.fHelp || 8 != params.size())
@@ -1520,11 +1672,8 @@ UniValue aliasnew(const JSONRPCRequest& request) {
 	for (auto& recp : vecSend) {
 		tx.vout.push_back(CTxOut(recp.nAmount, recp.scriptPubKey));
 	}
-	
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(tx));
-	res.push_back(strAddress);
-	return res;
 }
 UniValue aliasupdate(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -1628,11 +1777,7 @@ UniValue aliasupdate(const JSONRPCRequest& request) {
 	bool transferAlias = false;
 	if(newAddress.ToString() != EncodeBase58(copyAlias.vchAddress))
 		transferAlias = true;
-	
-	SendMoneySyscoin(vchAlias, vchWitness, recipient, vecSend, wtx, coinControl, false, transferAlias);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(vchAlias, vchWitness, recipient, vecSend, transferAlias);
 }
 UniValue syscoindecoderawtransaction(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -1859,116 +2004,6 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 	res.push_back(Pair("balance", ValueFromAmount(nAmount)));
     return  res;
 }
-void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmount &nAmount, vector<COutPoint>& outPoints, const unsigned int aliasInputCount, const COutPoint& aliasOutPoint, CAmount &nRequiredAmount, bool bSelectAll)
-{
-	nRequiredAmount = 0;
-	int numResults = 0;
-	CAmount nCurrentAmount = 0;
-	CAmount nDesiredAmount = nAmount;
-	outPoints.clear();
-	CAliasIndex theAlias;
-	if (!GetAlias(vchAlias, theAlias))
-		return;
-
-	const string &strAddressFrom = EncodeBase58(theAlias.vchAddress);
-	UniValue paramsUTXO(UniValue::VARR);
-	UniValue param(UniValue::VOBJ);
-	UniValue utxoParams(UniValue::VARR);
-	utxoParams.push_back(strAddressFrom);
-	param.push_back(Pair("addresses", utxoParams));
-	paramsUTXO.push_back(param);
-	JSONRPCRequest request;
-	request.params = paramsUTXO;
-	const UniValue &resUTXOs = getaddressutxos(request);
-	UniValue utxoArray(UniValue::VARR);
-	if (resUTXOs.isArray())
-		utxoArray = resUTXOs.get_array();
-	else
-		return;
-	
-	unsigned int currentAliasInputCount = aliasInputCount;
-	int op;
-	vector<vector<unsigned char> > vvch;
-	bool bIsFunded = false;
-	CAmount nFeeRequired = 0;
-	// try to fund via normal balances first
-	for (unsigned int i = 0; i<utxoArray.size(); i++)
-	{
-		const UniValue& utxoObj = utxoArray[i].get_obj();
-		const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
-		const int& nOut = find_value(utxoObj, "outputIndex").get_int();
-		const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
-		const CScript& scriptPubKey = CScript(data.begin(), data.end());
-		const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
-		const COutPoint &outPointToCheck = COutPoint(txid, nOut);
-		if (DecodeAliasScript(scriptPubKey, op, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) {
-			continue;
-		}
-
-		{
-			LOCK(mempool.cs);
-			if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
-				continue;
-		}
-		// add min fee for every input
-		nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
-		outPoints.push_back(outPointToCheck);
-		nCurrentAmount += nValue;
-		if (nCurrentAmount >= (nDesiredAmount + nFeeRequired)) {
-			bIsFunded = true;
-			if (!bSelectAll)
-				break;
-		}
-		else
-			bIsFunded = false;
-
-	}
-	// then try to fund with alias inputs
-	if (!bIsFunded || bSelectAll) {
-		for (unsigned int i = 0; i < utxoArray.size(); i++)
-		{
-			const UniValue& utxoObj = utxoArray[i].get_obj();
-			const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
-			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
-			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
-			const CScript& scriptPubKey = CScript(data.begin(), data.end());
-			const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
-			const COutPoint &outPointToCheck = COutPoint(txid, nOut);
-
-			if (DecodeAliasScript(scriptPubKey, op, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) {
-				currentAliasInputCount--;
-				// if this outpoint is same as the alias input that was added we cannot add it again so skip
-				if (outPointToCheck == aliasOutPoint)
-					continue;
-				// ensure that we keep atleast 1 alias input unless we are selecting all (for transfer)
-				if (currentAliasInputCount <= 1 && !bSelectAll)
-					continue;
-				{
-					LOCK(mempool.cs);
-					if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
-						continue;
-				}
-				// add min fee for every input
-				nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
-				outPoints.push_back(outPointToCheck);
-				nCurrentAmount += nValue;
-				if (nCurrentAmount >= (nDesiredAmount + nFeeRequired)) {
-					bIsFunded = true;
-					if (!bSelectAll)
-						break;
-				}
-				else
-					bIsFunded = false;
-			}
-
-		}
-	}
-	if (!bIsFunded) {
-		nRequiredAmount = (nDesiredAmount + nFeeRequired) - nCurrentAmount;
-		if (nRequiredAmount < 0)
-			nRequiredAmount = 0;
-	}
-}
 /**
  * [aliasinfo description]
  * @param  params [description]
@@ -2082,6 +2117,157 @@ unsigned int aliasunspent(const vector<unsigned char> &vchAlias, COutPoint& outp
 	}
 	return count;
 }
+void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmount &nAmount, vector<COutPoint>& outPoints, CAmount &nRequiredAmount)
+{
+	nRequiredAmount = 0;
+	int numResults = 0;
+	CAmount nCurrentAmount = 0;
+	CAmount nDesiredAmount = nAmount;
+	outPoints.clear();
+	CAliasIndex theAlias;
+	if (!GetAlias(vchAlias, theAlias))
+		return;
+
+	const string &strAddressFrom = EncodeBase58(theAlias.vchAddress);
+	UniValue paramsUTXO(UniValue::VARR);
+	UniValue param(UniValue::VOBJ);
+	UniValue utxoParams(UniValue::VARR);
+	utxoParams.push_back(strAddressFrom);
+	param.push_back(Pair("addresses", utxoParams));
+	paramsUTXO.push_back(param);
+	JSONRPCRequest request;
+	request.params = paramsUTXO;
+	const UniValue &resUTXOs = getaddressutxos(request);
+	UniValue utxoArray(UniValue::VARR);
+	if (resUTXOs.isArray())
+		utxoArray = resUTXOs.get_array();
+	else
+		return;
+
+	unsigned int currentAliasInputCount = aliasInputCount;
+	int op;
+	vector<vector<unsigned char> > vvch;
+	bool bIsFunded = false;
+	CAmount nFeeRequired = 0;
+	// try to fund via normal balances first
+	for (unsigned int i = 0; i<utxoArray.size(); i++)
+	{
+		const UniValue& utxoObj = utxoArray[i].get_obj();
+		const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
+		const int& nOut = find_value(utxoObj, "outputIndex").get_int();
+		const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
+		const CScript& scriptPubKey = CScript(data.begin(), data.end());
+		const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
+		const COutPoint &outPointToCheck = COutPoint(txid, nOut);
+		if (DecodeAliasScript(scriptPubKey, op, vvch))
+			continue;
+		if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
+			continue;
+		{
+			LOCK(mempool.cs);
+			if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
+				continue;
+		}
+		// add min fee for every input
+		nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
+		outPoints.push_back(outPointToCheck);
+		nCurrentAmount += nValue;
+		if (nCurrentAmount >= (nDesiredAmount + nFeeRequired)) {
+			bIsFunded = true;
+			break;
+		}
+		else
+			bIsFunded = false;
+
+	}
+	// then try to fund with alias inputs
+	if (!bIsFunded) {
+		for (unsigned int i = 0; i < utxoArray.size(); i++)
+		{
+			const UniValue& utxoObj = utxoArray[i].get_obj();
+			const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
+			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
+			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
+			const CScript& scriptPubKey = CScript(data.begin(), data.end());
+			const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
+			const COutPoint &outPointToCheck = COutPoint(txid, nOut);
+
+			if (DecodeAliasScript(scriptPubKey, op, vvch)) {
+				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
+					continue;
+				{
+					LOCK(mempool.cs);
+					if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
+						continue;
+				}
+				// add min fee for every input
+				nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
+				outPoints.push_back(outPointToCheck);
+				nCurrentAmount += nValue;
+				if (nCurrentAmount >= (nDesiredAmount + nFeeRequired)) {
+					bIsFunded = true;
+					break;
+				}
+				else
+					bIsFunded = false;
+			}
+
+		}
+	}
+	if (!bIsFunded) {
+		nRequiredAmount = (nDesiredAmount + nFeeRequired) - nCurrentAmount;
+		if (nRequiredAmount < 0)
+			nRequiredAmount = 0;
+	}
+}
+UniValue aliaspay_helper(const vector<unsigned char> &vchAlias, vector<CRecipient> &vecSend, bool instantsend) {
+	CWalletTx wtxNew1, wtxNew2;
+	CReserveKey reservekey(pwalletMain);
+	CAmount nFeeRequired;
+	std::string strError;
+	int nChangePosRet = -1;
+	CCoinControl coinControl;
+	coinControl.fAllowOtherInputs = false;
+	coinControl.fAllowWatchOnly = false;
+	// get total output required
+	// if aliasRecipient.scriptPubKey.empty() then it is not a syscoin tx, so don't set tx flag for syscoin tx in createtransaction()
+	// this is because aliasRecipient means an alias utxo was used to create a transaction, common to every syscoin service transaction, aliaspay doesn't use an alias utxo it just sends money from address to address but uses alias outputs to fund it and sign externally using zero knowledge auth.
+	if (!pwalletMain->CreateTransaction(vecSend, wtxNew1, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, instantsend)) {
+		throw runtime_error(strError);
+	}
+
+
+	CAmount nOutputTotal = 0;
+	BOOST_FOREACH(const CRecipient& recp, vecSend)
+	{
+		nOutputTotal += recp.nAmount;
+	}
+	// account for 1 change output
+	nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
+	CAmount nTotal = nOutputTotal + nFeeRequired;
+	if (nTotal > 0)
+	{
+		vector<COutPoint> outPoints;
+		// select just get enough outputs to fund nTotal
+		aliasselectpaymentcoins(vchAlias, nTotal, outPoints, nFeeRequired);
+		if (nFeeRequired > 0)
+			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("The Syscoin Alias does not have enough funds to complete this transaction. You need to deposit the following amount of coins in order for the transaction to succeed: ") + ValueFromAmount(nFeeRequired).write());
+		BOOST_FOREACH(const COutPoint& outpoint, outPoints)
+		{
+			if (!coinControl.IsSelected(outpoint))
+				coinControl.Select(outpoint);
+		}
+	}
+
+	// now create the transaction and fake sign with enough funding from alias utxo's (if coinControl specified fAllowOtherInputs(true) then and only then are wallet inputs are allowed)
+	// actual signing happens in signrawtransaction outside of this function call after the wtxNew raw transaction is returned back to it
+	if (!pwalletMain->CreateTransaction(vecSend, wtxNew2, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, fUseInstantSend)) {
+		throw runtime_error(strError);
+	}
+	UniValue res(UniValue::VARR);
+	res.push_back(EncodeHexTx(*wtxNew2.tx));
+	return res;
+}
 UniValue aliaspay(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
     if (request.fHelp || params.size() < 2 || params.size() > 4)
@@ -2184,15 +2370,7 @@ UniValue aliaspay(const JSONRPCRequest& request) {
     if (totalAmount > nBalance)
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Alias has insufficient funds");
 
-	CRecipient recipient;
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(theAlias.vchAlias, vchFromString(""), recipient, vecSend, wtx, coinControl, fUseInstantSend);
-	
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return aliaspay_helper(theAlias.vchAlias, vecSend, fUseInstantSend);
 }
 UniValue aliasaddscript(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -2282,14 +2460,7 @@ UniValue aliasupdatewhitelist(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 	vecSend.push_back(recipient);
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, coinControl);
-
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(copyAlias.vchAlias, vchWitness, recipient, vecSend);
 }
 UniValue aliasclearwhitelist(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -2340,14 +2511,7 @@ UniValue aliasclearwhitelist(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 	vecSend.push_back(recipient);
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(copyAlias.vchAlias, vchWitness, recipient, vecSend, wtx, coinControl);
-
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(copyAlias.vchAlias, vchWitness, recipient, vecSend);
 }
 bool DoesAliasExist(const string &strAddress) {
 	vector<unsigned char> vchMyAlias;

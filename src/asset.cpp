@@ -25,7 +25,6 @@
 #include <chrono>
 using namespace std::chrono;
 using namespace std;
-extern void SendMoneySyscoin(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, CWalletTx& wtxNew, CCoinControl& coinControl, bool fUseInstantSend=false, bool transferAlias=false);
 bool IsAssetOp(int op) {
     return op == OP_ASSET_ACTIVATE
         || op == OP_ASSET_UPDATE
@@ -741,16 +740,7 @@ UniValue assetnew(const JSONRPCRequest& request) {
 	CreateFeeRecipient(scriptData, data, fee);
 	vecSend.push_back(fee);
 
-	
-	
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;	
-	SendMoneySyscoin(vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	res.push_back(stringFromVch(newAsset.vchAsset));
-	return res;
+	return syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 UniValue assetupdate(const JSONRPCRequest& request) {
@@ -842,13 +832,7 @@ UniValue assetupdate(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 	
 	
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;	
-	SendMoneySyscoin(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
- 	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(theAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 UniValue assettransfer(const JSONRPCRequest& request) {
@@ -923,14 +907,7 @@ UniValue assettransfer(const JSONRPCRequest& request) {
 	CreateFeeRecipient(scriptData, data, fee);
 	vecSend.push_back(fee);
 	
-	
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 UniValue assetsend(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -1065,13 +1042,7 @@ UniValue assetsend(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	SendMoneySyscoin(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend, wtx, coinControl);
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtx.tx));
-	return res;
+	return syscointxfund_helper(fromAlias.vchAlias, vchWitness, aliasRecipient, vecSend);
 }
 
 UniValue assetinfo(const JSONRPCRequest& request) {
