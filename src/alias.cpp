@@ -1204,7 +1204,7 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 	// set an address for syscointxfund so it uses that address to fund (alias passed in)
 	else {
 		CAliasIndex alias;
-		if (GetAlias(vchAlias, alias))
+		if (!GetAlias(vchAlias, alias))
 			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("Cannot find alias used to fund this transaction: ") + stringFromVch(vchAlias));
 		strAddress = EncodeBase58(alias.vchAddress);
 	}
