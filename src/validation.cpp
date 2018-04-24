@@ -619,7 +619,6 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 	CAmount nDescrepency;
 	if (block.vtx.empty() && tx.nVersion == SYSCOIN_TX_VERSION) {
 		{
-			LOCK(cs_main);
 			bool bDestCheckFailed = false;
 			if (!DecodeAliasTx(tx, op, vvchAliasArgs))
 			{
