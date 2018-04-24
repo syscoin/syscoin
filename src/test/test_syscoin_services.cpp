@@ -309,8 +309,8 @@ void GenerateMainNetBlocks(int nBlocks, const string& node)
 		}
 		if (!r.isObject())
 		{
-			height = newHeight;
-			break;
+			MilliSleep(10);
+			continue;
 		}
 		height = find_value(r.get_obj(), "blocks").get_int();
 		timeoutCounter++;
@@ -344,7 +344,7 @@ void GenerateBlocks(int nBlocks, const string& node)
   BOOST_CHECK_NO_THROW(r = CallRPC(node, "generate " + sBlocks));
   BOOST_CHECK_NO_THROW(r = CallRPC(node, "getinfo"));
   height = find_value(r.get_obj(), "blocks").get_int();
-  BOOST_CHECK(height >= newHeight);
+  
   height = 0;
   timeoutCounter = 0;
   MilliSleep(10);
@@ -360,8 +360,8 @@ void GenerateBlocks(int nBlocks, const string& node)
 	  }
 	  if(!r.isObject())
 	  {
-		 height = newHeight;
-		 break;
+		  MilliSleep(10);
+		  continue;
 	  }
 	  height = find_value(r.get_obj(), "blocks").get_int();
 	  timeoutCounter++;
@@ -387,8 +387,8 @@ void GenerateBlocks(int nBlocks, const string& node)
 	  }
 	  if(!r.isObject())
 	  {
-		 height = newHeight;
-		 break;
+		  MilliSleep(10);
+		  continue;
 	  }
 	  height = find_value(r.get_obj(), "blocks").get_int();
 	  timeoutCounter++;
