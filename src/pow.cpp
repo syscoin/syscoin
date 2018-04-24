@@ -84,7 +84,7 @@ unsigned int static DarkGravityWave(const CBlockIndex* pindexLast, const CBlockH
 		return pindexLast->nBits;
     /* current difficulty formula, syscoin - DarkGravity v3, written by Evan satoshiield - evan@syscoin.org */
     const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
-    
+	int64_t nPastBlocks = 24;
 	
     // make sure we have at least 600 blocks, otherwise just return powLimit
     if (!pindexLast || pindexLast->nHeight <= 600) {
