@@ -500,7 +500,7 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& in
 
 bool GetUTXOCoin(const COutPoint& outpoint, Coin& coin)
 {
-    TRY_LOCK(cs_main, mainLock);
+    LOCK(cs_main);
     if (!pcoinsTip->GetCoin(outpoint, coin))
         return false;
     if (coin.IsSpent())
@@ -1248,7 +1248,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 					int nDos = 0;
 					if (vstate.IsInvalid(nDos) && nDos > 0 && fromPeer >= 0)
 					{
-						TRY_LOCK(cs_main, mainLock);
+						LOCK(cs_main);
 						// Punish peer that gave us an invalid signature
 						Misbehaving(fromPeer, nDos);
 					}
@@ -1267,7 +1267,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, bool bMultiThreaded, CValidation
 					int nDos = 0;
 					if (vstate.IsInvalid(nDos) && nDos > 0 && fromPeer >= 0)
 					{
-						TRY_LOCK(cs_main, mainLock);
+						LOCK(cs_main);
 						// Punish peer that gave us an invalid syscoin transaction
 						Misbehaving(fromPeer, nDos);
 					}
