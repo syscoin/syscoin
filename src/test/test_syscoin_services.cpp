@@ -405,12 +405,13 @@ void GenerateBlocks(int nBlocks, const string& node)
 }
 void GenerateSpendableCoins() {
 	UniValue r;
+	
+	const string &sBlocks = strprintf("%d", 101);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "generate " + sBlocks));
 	MilliSleep(1000);
-	GenerateBlocks(101, "node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "generate " + sBlocks));
 	MilliSleep(1000);
-	GenerateBlocks(101, "node2");
-	MilliSleep(1000);
-	GenerateBlocks(101, "node3");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node3", "generate " + sBlocks));
 	MilliSleep(1000);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getnewaddress", false, false));
 	string newaddress = r.get_str();
