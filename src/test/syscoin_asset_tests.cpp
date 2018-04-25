@@ -282,9 +282,7 @@ BOOST_AUTO_TEST_CASE(generate_range_stress_subtract2)
 BOOST_AUTO_TEST_CASE(generate_big_assetdata)
 {
 	ECC_Start();
-	GenerateSpendableCoins("node1");
-	GenerateSpendableCoins("node2");
-	GenerateSpendableCoins("node3");
+	GenerateSpendableCoins();
 	printf("Running generate_big_assetdata...\n");
 	GenerateBlocks(5);
 	AliasNew("node1", "jagassetbig1", "data");
