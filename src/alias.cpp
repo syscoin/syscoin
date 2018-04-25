@@ -1315,6 +1315,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + (3 * minRelayTxFee.GetFee(200u));
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
 		if (params.size() > 1) {
+			LOCK(mempool.cs);
 			// fund with alias inputs first
 			for (unsigned int i = 0; i < utxoArray.size(); i++)
 			{
@@ -1331,11 +1332,10 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					continue;
 				// look for alias inputs only, if not selecting all
 				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
-					{
-						LOCK(mempool.cs);
-						if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
-							continue;
-					}
+					
+					if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
+						continue;
+					
 					if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 						continue;
 					if (!IsOutpointMature(outPoint))
@@ -1353,6 +1353,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		}
 		// if after selecting alias inputs we are still not funded, we need to select alias balances to fund this transaction
 		if (nCurrentAmount < (nDesiredAmount + nFees)) {
+			LOCK(mempool.cs);
 			for (unsigned int i = 0; i < utxoArray.size(); i++)
 			{
 				const UniValue& utxoObj = utxoArray[i].get_obj();
@@ -1369,11 +1370,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				// look for non alias inputs
 				if (DecodeAliasScript(scriptPubKey, aliasOp, vvch))
 					continue;
-				{
-					LOCK(mempool.cs);
-					if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
-						continue;
-				}
+				if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
+					continue;
+				
 				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 					continue;
 				if (!IsOutpointMature(outPoint))
@@ -1984,31 +1983,30 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 		res.push_back(Pair("balance", ValueFromAmount(nAmount)));
 		return  res;
 	}
-
-  	int op;
-	vector<vector<unsigned char> > vvch;
-    for (unsigned int i = 0;i<utxoArray.size();i++)
-    {
-		const UniValue& utxoObj = utxoArray[i].get_obj();
-		const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
-		const int& nOut = find_value(utxoObj, "outputIndex").get_int();
-		const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
-		const CScript& scriptPubKey = CScript(data.begin(), data.end());
-		const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
-		const int& nHeight = find_value(utxoObj, "height").get_int();
-		const COutPoint outPoint(txid, nOut);
-		if (DecodeAliasScript(scriptPubKey, op, vvch))
-			continue;
+	{
+		LOCK(mempool.cs);
+		int op;
+		vector<vector<unsigned char> > vvch;
+		for (unsigned int i = 0; i < utxoArray.size(); i++)
 		{
-			LOCK(mempool.cs);
+			const UniValue& utxoObj = utxoArray[i].get_obj();
+			const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
+			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
+			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
+			const CScript& scriptPubKey = CScript(data.begin(), data.end());
+			const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
+			const int& nHeight = find_value(utxoObj, "height").get_int();
+			const COutPoint outPoint(txid, nOut);
+			if (DecodeAliasScript(scriptPubKey, op, vvch))
+				continue;
 			if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
 				continue;
+			if (!IsOutpointMature(outPoint))
+				continue;
+			nAmount += nValue;
+
 		}
-		if (!IsOutpointMature(outPoint))
-			continue;
-		nAmount += nValue;
-		
-    }
+	}
 	UniValue res(UniValue::VOBJ);
 	res.push_back(Pair("balance", ValueFromAmount(nAmount)));
     return  res;
@@ -2103,26 +2101,28 @@ unsigned int aliasunspent(const vector<unsigned char> &vchAlias, COutPoint& outp
 		return 0;
 	unsigned int count = 0;
 	CAmount nCurrentAmount = 0;
-	for (unsigned int i = 0; i<utxoArray.size(); i++)
 	{
-		const UniValue& utxoObj = utxoArray[i].get_obj();
-		const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
-		const int& nOut = find_value(utxoObj, "outputIndex").get_int();
-		const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
-		const CScript& scriptPubKey = CScript(data.begin(), data.end());
-		int op;
-		vector<vector<unsigned char> > vvch;
-		if (!DecodeAliasScript(scriptPubKey, op, vvch) || vvch.size() <= 1 || vvch[0] != theAlias.vchAlias || vvch[1] != theAlias.vchGUID)
-			continue;
-		const COutPoint &outPointToCheck = COutPoint(txid, nOut);
+		LOCK(mempool.cs);
+		for (unsigned int i = 0; i < utxoArray.size(); i++)
 		{
-			LOCK(mempool.cs);
+			const UniValue& utxoObj = utxoArray[i].get_obj();
+			const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
+			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
+			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
+			const CScript& scriptPubKey = CScript(data.begin(), data.end());
+			int op;
+			vector<vector<unsigned char> > vvch;
+			if (!DecodeAliasScript(scriptPubKey, op, vvch) || vvch.size() <= 1 || vvch[0] != theAlias.vchAlias || vvch[1] != theAlias.vchGUID)
+				continue;
+			const COutPoint &outPointToCheck = COutPoint(txid, nOut);
+
 			if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
 				continue;
+
+			if (outpoint.IsNull())
+				outpoint = outPointToCheck;
+			count++;
 		}
-		if(outpoint.IsNull())
-			outpoint = outPointToCheck;
-		count++;
 	}
 	return count;
 }
