@@ -1402,67 +1402,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
 		}
 	}
-	bool fJustCheck = true;
-	string errorMessage = "";
-	bool bCheckDestError = false;
-	sorted_vector<CAssetAllocationTuple> revertedAssetAllocations;
-	sorted_vector<vector<unsigned char> > revertedOffers;
-	sorted_vector<vector<unsigned char> > revertedCerts;
-	CheckAliasInputs(tx, op, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, bCheckDestError, true);
-	if (!errorMessage.empty())
-		throw runtime_error(errorMessage.c_str());
-	CheckAliasInputs(tx, op, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, bCheckDestError, true);
-	if (!errorMessage.empty())
-		throw runtime_error(errorMessage.c_str());
-	if(bCheckDestError)
-		throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9002 - " + _("Alias input is from the wrong address"));
-	if (DecodeCertTx(tx, op, vvch))
-	{
-		CheckCertInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedCerts, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-		CheckCertInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedCerts, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-	}
-	if (DecodeAssetTx(tx, op, vvch))
-	{
-		CheckAssetInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-		CheckAssetInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-	}
-	if (DecodeAssetAllocationTx(tx, op, vvch))
-	{
-		CheckAssetAllocationInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedAssetAllocations, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-		CheckAssetAllocationInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedAssetAllocations, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-	}
-	if (DecodeEscrowTx(tx, op, vvch))
-	{
-		CheckEscrowInputs(tx, op, vvch, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-		CheckEscrowInputs(tx, op, vvch, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-	}
-	if (DecodeOfferTx(tx, op, vvch))
-	{
-		CheckOfferInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedOffers, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-		CheckOfferInputs(tx, op, vvch, vvchAlias[0], !fJustCheck, chainActive.Tip()->nHeight + 1, revertedOffers, errorMessage, true);
-		if (!errorMessage.empty())
-			throw runtime_error(errorMessage.c_str());
-
-	}
-
+	CValidationState state;
+	if(!CheckSyscoinInputs(tx, state, true, 0, CBlock()))
+		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
 	// pass back new raw transaction
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(tx));
