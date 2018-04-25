@@ -541,6 +541,7 @@ BOOST_AUTO_TEST_CASE(generate_asset_collect_interest_every_block)
 	UniValue balance = find_value(r.get_obj(), "balance");
 	BOOST_CHECK_EQUAL(AssetAmountFromValue(balance, 8, false), 5000 * COIN);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "interest_claim_height").get_int(), find_value(r.get_obj(), "height").get_int());
+
 	// 10 hours later
 	// calc interest expect 5000 (1 + 0.05 / 60) ^ (60(10)) = ~8248
 	for (int i = 0; i <= 60*10; i+=25) {

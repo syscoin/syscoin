@@ -1403,6 +1403,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
 		}
 	}
+	// call this twice, with fJustCheck and !fJustCheck both with bSanity enabled so it doesn't actually write out to the databases just does the checks
 	if (!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
 	if (!CheckSyscoinInputs(tx, state, false, 0, CBlock(), true))
