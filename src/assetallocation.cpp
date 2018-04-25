@@ -225,7 +225,7 @@ bool RevertAssetAllocation(const CAssetAllocationTuple &assetAllocationToRemove,
 // calculate annual interest on an asset allocation
 CAmount GetAssetAllocationInterest(CAssetAllocation & assetAllocation, const int& nHeight, string& errorMessage) {
 	// need to do one more average balance calculation since the last update to this asset allocation
-	if (!AccumulateInterestSinceLastClaim(assetAllocation, nHeight)) {
+	if (!AccumulateInterestSinceLastClaim(assetAllocation, nHeight) && !fUnitTest) {
 		errorMessage = _("Not enough blocks in-between interest claims");
 		return 0;
 	}
