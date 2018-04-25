@@ -226,13 +226,11 @@ bool RevertAssetAllocation(const CAssetAllocationTuple &assetAllocationToRemove,
 CAmount GetAssetAllocationInterest(CAssetAllocation & assetAllocation, const int& nHeight, string& errorMessage) {
 	// need to do one more average balance calculation since the last update to this asset allocation
 	if (!AccumulateInterestSinceLastClaim(assetAllocation, nHeight)) {
-		if (!fUnitTest) {
-			errorMessage = _("Not enough blocks in-between interest claims");
-			return 0;
-		}
+		errorMessage = _("Not enough blocks in-between interest claims");
+		return 0;
 	}
 	const int &nInterestClaimBlockThreshold = fUnitTest ? 1 : ONE_MONTH_IN_BLOCKS;
-	if (!fUnitTest && ((nHeight - assetAllocation.nLastInterestClaimHeight) < nInterestClaimBlockThreshold || assetAllocation.nLastInterestClaimHeight == 0)) {
+	if ((nHeight - assetAllocation.nLastInterestClaimHeight) < nInterestClaimBlockThreshold || assetAllocation.nLastInterestClaimHeight == 0) {
 		errorMessage = _("Not enough blocks have passed since the last claim, please wait some more time...");
 		return 0;
 	}
