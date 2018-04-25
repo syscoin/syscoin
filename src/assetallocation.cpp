@@ -225,15 +225,14 @@ bool RevertAssetAllocation(const CAssetAllocationTuple &assetAllocationToRemove,
 // calculate annual interest on an asset allocation
 CAmount GetAssetAllocationInterest(CAssetAllocation & assetAllocation, const int& nHeight, string& errorMessage) {
 	// need to do one more average balance calculation since the last update to this asset allocation
-	if (!fUnitTest) {
-		if (!AccumulateInterestSinceLastClaim(assetAllocation, nHeight)) {
-			errorMessage = _("Not enough blocks in-between interest claims");
-			return 0;
-		}
-		if ((nHeight - assetAllocation.nLastInterestClaimHeight) < ONE_MONTH_IN_BLOCKS || assetAllocation.nLastInterestClaimHeight == 0) {
-			errorMessage = _("Not enough blocks have passed since the last claim, please wait some more time...");
-			return 0;
-		}
+	if (!AccumulateInterestSinceLastClaim(assetAllocation, nHeight)) {
+		errorMessage = _("Not enough blocks in-between interest claims");
+		return 0;
+	}
+	const int &nInterestClaimBlockThreshold = fUnitTest ? 1 : ONE_MONTH_IN_BLOCKS;
+	if (!fUnitTest && ((nHeight - assetAllocation.nLastInterestClaimHeight) < nInterestClaimBlockThreshold || assetAllocation.nLastInterestClaimHeight == 0)) {
+		errorMessage = _("Not enough blocks have passed since the last claim, please wait some more time...");
+		return 0;
 	}
 	const int &nInterestBlockTerm = fUnitTest? ONE_HOUR_IN_BLOCKS: ONE_YEAR_IN_BLOCKS;
 	const int &nBlockDifference = nHeight - assetAllocation.nLastInterestClaimHeight;
@@ -270,7 +269,7 @@ bool ApplyAssetAllocationInterest(CAsset& asset, CAssetAllocation & assetAllocat
 // keep track of average balance within the interest claim period
 bool AccumulateInterestSinceLastClaim(CAssetAllocation & assetAllocation, const int& nHeight) {
 	const int &nBlocksSinceLastUpdate = (nHeight - assetAllocation.nHeight);
-	if (nBlocksSinceLastUpdate <= 0)
+	if (nBlocksSinceLastUpdate <= 0 && !fUnitTest)
 		return false;
 	// formula is 1/N * (blocks since last update * previous balance/interest rate) where N is the number of blocks in the total time period
 	assetAllocation.nAccumulatedBalanceSinceLastInterestClaim += assetAllocation.nBalance*nBlocksSinceLastUpdate;
