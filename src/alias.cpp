@@ -1190,7 +1190,10 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 	// for the alias utxo (1 per transaction is used)
 	if (unspentcount <= 1 || transferAlias)
 	{
-		for (unsigned int i = 0; i < transferAlias? 1: MAX_ALIAS_UPDATES_PER_BLOCK; i++)
+		unsigned int iterations = MAX_ALIAS_UPDATES_PER_BLOCK;
+		if (transferAlias)
+			iterations = 1;
+		for (unsigned int i = 0; i < iterations; i++)
 			vecSend.push_back(aliasRecipient);
 	}
 	Coin pcoin;
