@@ -10,7 +10,6 @@
 #include "asset.h"
 #include "assetallocation.h"
 #include "init.h"
-#include "validation.h"
 #include "util.h"
 #include "random.h"
 #include "wallet/wallet.h"
@@ -34,6 +33,7 @@
 #include <boost/algorithm/string/find.hpp>
 #include <boost/assign/list_of.hpp>
 #include "instantx.h"
+#include "validation.h"
 using namespace std;
 CAliasDB *paliasdb = NULL;
 COfferDB *pofferdb = NULL;
