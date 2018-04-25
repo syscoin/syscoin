@@ -664,6 +664,8 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 						LogPrintf("%s\n", errorMessage.c_str());
 				}
 			}
+			else
+				return state.DoS(100, false, REJECT_INVALID, "syscoin-inputs-error");
 		}
 	}
 	else if (!block.vtx.empty()) {
@@ -677,6 +679,8 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			GraphRemoveCycles(sortedBlock.vtx, conflictedIndexes, graph, vertices, mapTxIndex);
 			if (!sortedBlock.vtx.empty()) {
 				if (!DAGTopologicalSort(sortedBlock.vtx, conflictedIndexes, graph, mapTxIndex)) {
+					if (fDebug)
+						LogPrintf("CheckSyscoinInputs: Toposort failed");
 					return true;
 				}
 			}
@@ -695,6 +699,8 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 				if (!DecodeAliasTx(tx, op, vvchAliasArgs))
 				{
 					if (!FindAliasInTx(tx, vvchAliasArgs)) {
+						if (fDebug)
+							LogPrintf("CheckSyscoinInputs: FindAliasInTx failed");
 						return true;
 					}
 					// it is assumed if no alias output is found, then it is for another service so this would be an alias update
@@ -749,11 +755,6 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 					break;
 				}
 			}
-		}
-		
-		if (!good)
-		{
-			return state.DoS(100, false, REJECT_INVALID, "syscoin-inputs-error");
 		}
 	}
 
