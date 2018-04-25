@@ -268,7 +268,7 @@ CPPFLAGS="$CPPFLAGS -DHAVE_BUILD_INFO -D__STDC_FORMAT_MACROS"
 
 AC_ARG_WITH([utils],
   [AS_HELP_STRING([--with-utils],
-  [build syscoin-cli syscoin-tx (default=no)])],
+  [build syscoin-cli syscoin-tx (default=yes)])],
   [build_syscoin_utils=$withval],
   [build_syscoin_utils=yes])
 
