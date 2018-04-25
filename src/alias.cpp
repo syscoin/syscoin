@@ -1010,7 +1010,7 @@ void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 	recipient = recp;
 	CTxOut txout(recipient.nAmount, scriptPubKey);
 	size_t nSize = GetSerializeSize(txout, SER_DISK, 0) + 148u;
-	CAmount nFee = CWallet::GetMinimumFee(nSize, nTxConfirmTarget, mempool);
+	nFee = 3 * minRelayTxFee.GetFee(nSize);
 	recipient.nAmount = nFee;
 }
 void CreateFeeRecipient(CScript& scriptPubKey, const vector<unsigned char>& data, CRecipient& recipient)
