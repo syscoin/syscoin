@@ -1301,7 +1301,13 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	int op, aliasOp;
 	vector<vector<unsigned char> > vvch;
 	vector<vector<unsigned char> > vvchAlias;
-	FindAliasInTx(tx, vvchAlias);
+	if (!DecodeAliasTx(tx, op, vvchAlias))
+	{
+		FindAliasInTx(tx, vvchAlias);
+		// it is assumed if no alias output is found, then it is for another service so this would be an alias update
+		op = OP_ALIAS_UPDATE;
+
+	}
 
 	if (nCurrentAmount < nDesiredAmount || bSendAll) {
 		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);

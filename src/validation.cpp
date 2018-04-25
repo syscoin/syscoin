@@ -632,10 +632,8 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
 			if (!errorMessage.empty())
 				return state.DoS(0, false, REJECT_INVALID, errorMessage.c_str());
-			if (bDestCheckFailed && !fJustCheck)
-				return state.DoS(0, false, REJECT_INVALID, "alias-destination-check-failure");
-
-			if (good)
+	
+			if (good && (!bDestCheckFailed || fJustCheck))
 			{
 
 				if (DecodeCertTx(tx, op, vvchArgs))
@@ -712,7 +710,7 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 						return state.DoS(100, false, REJECT_INVALID, "no-alias-input-found");
 					}
 					// it is assumed if no alias output is found, then it is for another service so this would be an alias update
-					op = OP_ALIAS_ACTIVATE;
+					op = OP_ALIAS_UPDATE;
 				}
 				errorMessage.clear();
 				good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
