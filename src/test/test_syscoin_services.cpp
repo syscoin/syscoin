@@ -839,7 +839,7 @@ string AliasTransfer(const string& node, const string& aliasname, const string& 
 	// new balance is 0
 	BOOST_CHECK_EQUAL(balanceAfter , 0);
 	// balance stays with old address
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasbalance " + oldaddress));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "getaddressbalance \"{\\\"addresses\\\": [\\\"" + oldaddress + "\\\"]}\""));
 	CAmount newBalanceFrom = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK(abs(newBalanceFrom - balanceBefore) < COIN);
 
@@ -857,7 +857,7 @@ string AliasTransfer(const string& node, const string& aliasname, const string& 
 	BOOST_CHECK_EQUAL(balanceAfter, 0);
 
 
-	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasbalance " + oldaddress));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "getaddressbalance \"{\\\"addresses\\\": [\\\"" + oldaddress + "\\\"]}\""));
 	newBalanceFrom = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK(abs(newBalanceFrom - balanceBefore) < COIN);
 
