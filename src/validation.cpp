@@ -500,12 +500,8 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& in
 
 bool GetUTXOCoin(const COutPoint& outpoint, Coin& coin)
 {
-    LOCK(cs_main);
-    if (!pcoinsTip->GetCoin(outpoint, coin))
-        return false;
-    if (coin.IsSpent())
-        return false;
-    return true;
+    TRY_LOCK(cs_main, mainLock);
+	return pcoinsTip->GetCoin(outpoint, coin);
 }
 
 int GetUTXOHeight(const COutPoint& outpoint)
@@ -518,11 +514,9 @@ int GetUTXOHeight(const COutPoint& outpoint)
 int GetUTXOConfirmations(const COutPoint& outpoint)
 {
     // -1 means UTXO is yet unknown or already spent
-    LOCK(cs_main);
     int nPrevoutHeight = GetUTXOHeight(outpoint);
     return (nPrevoutHeight > -1 && chainActive.Tip()) ? chainActive.Height() - nPrevoutHeight + 1 : -1;
 }
-
 
 bool CheckTransaction(const CTransaction& tx, CValidationState &state, bool fCheckDuplicateInputs)
 {

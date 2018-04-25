@@ -330,5 +330,6 @@ void GetAddress(const CAliasIndex &alias, CSyscoinAddress* address, CScript& scr
 std::string GetSyscoinTransactionDescription(const CTransaction& tx, const int op, std::string& responseEnglish, const char &type, std::string& responseGUID);
 bool BuildAliasIndexerHistoryJson(const CAliasIndex& alias, UniValue& oName);
 bool DoesAliasExist(const std::string &strAddress);
+bool IsOutpointMature(const COutPoint& outpoint);
 UniValue syscointxfund_helper(const std::vector<unsigned char> &vchAlias, const std::vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, std::vector<CRecipient> &vecSend, bool transferAlias = false);
 #endif // ALIAS_H

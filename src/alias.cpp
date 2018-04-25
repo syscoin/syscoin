@@ -1308,7 +1308,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		op = OP_ALIAS_UPDATE;
 
 	}
-
+	int nHeightTip = chainActive.Height();
 	if (nCurrentAmount < nDesiredAmount || bSendAll) {
 		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 		// min fee based on bytes + 1 change output
@@ -1328,13 +1328,14 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				const CTxIn txIn(txid, nOut, scriptPubKey);
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
-				
 				// look for alias inputs only, if not selecting all
 				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
 					if (mempool.exists(txid))
 						continue;
 
 					if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
+						continue;
+					if (!IsOutpointMature(COutPoint(txid, nOut))
 						continue;
 					// add 200 bytes of fees to account for every input added to this transaction
 					nFees += 3 * minRelayTxFee.GetFee(200u);
@@ -1368,6 +1369,8 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (mempool.exists(txid))
 					continue;
 				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
+					continue;
+				if (!IsOutpointMature(COutPoint(txid, nOut))
 					continue;
 				// add 200 bytes of fees to account for every input added to this transaction
 				nFees += 3 * minRelayTxFee.GetFee(200u);
@@ -1992,7 +1995,8 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 
 		if (mempool.exists(txid))
 			continue;
-		
+		if (!IsOutpointMature(COutPoint(txid, nOut))
+			continue;
 		nAmount += nValue;
 		
     }
@@ -2155,6 +2159,8 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 		if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 			continue;
 		if (mempool.exists(txid))
+			continue;
+		if (!IsOutpointMature(outPointToCheck))
 			continue;
 		// add min fee for every input
 		nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
@@ -2664,4 +2670,20 @@ string GetSyscoinTransactionDescription(const CTransaction& tx, const int op, st
 		return "";
 	}
 	return strResponse + " " + responseGUID;
+}
+bool IsOutpointMature(const COutPoint& outpoint)
+{
+	Coin coin;
+	GetUTXOCoin(output, coin);
+	if (coin.IsSpent())
+		return false;
+	if (coin.IsCoinBase()) {
+		if (coin.nHeight > -1 && chainActive.Tip()) {
+			return (chainActive.Height() - coin.nHeight) > COINBASE_MATURITY;
+		}
+		// don't have chainActive or coin height is neg 1 or less
+		return false;
+	}
+	// not a coinbase so assume it is mature
+	return true;
 }
