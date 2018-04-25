@@ -213,6 +213,7 @@ bool IsSyscoinDataOutput(const CTxOut& out) {
 
 
 bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsigned char> > &vvchArgs, bool fJustCheck, int nHeight, string &errorMessage, bool &bDestCheckFailed, bool bSanityCheck) {
+	bDestCheckFailed = true;
 	if (!paliasdb)
 		return false;
 	if (tx.IsCoinBase() && !fJustCheck && !bSanityCheck)
@@ -441,7 +442,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || prevCoins.IsSpent() || !ExtractDestination(prevCoins.out.scriptPubKey, aliasDest))
 			{
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Cannot extract destination of alias input");
-				bDestCheckFailed = true;
 				if (!theAliasNull)
 					theAlias = dbAlias;
 			}
@@ -451,16 +451,17 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 				if (EncodeBase58(dbAlias.vchAddress) != prevaddy.ToString())
 				{
 					errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
-					bDestCheckFailed = true;
 					if (!theAliasNull)
 						theAlias = dbAlias;
 				}
+				else
+					bDestCheckFailed = false;
+
 			}
 
 			if (dbAlias.vchGUID != vvchArgs[1] || dbAlias.vchAlias != vvchArgs[0])
 			{
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5020 - " + _("Cannot edit this alias, guid mismatch");
-				bDestCheckFailed = true;
 				if (!theAliasNull)
 					theAlias = dbAlias;
 					
@@ -1406,7 +1407,8 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	CheckAliasInputs(tx, op, vvchAlias, !fJustCheck, chainActive.Tip()->nHeight + 1, errorMessage, bCheckDestError, true);
 	if (!errorMessage.empty())
 		throw runtime_error(errorMessage.c_str());
-
+	if(bCheckDestError)
+		throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9002 - " + _("Alias input is from the wrong address"));
 	if (DecodeCertTx(tx, op, vvch))
 	{
 		CheckCertInputs(tx, op, vvch, vvchAlias[0], fJustCheck, chainActive.Tip()->nHeight, revertedCerts, errorMessage, true);

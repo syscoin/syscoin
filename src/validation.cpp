@@ -630,10 +630,10 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			}
 			errorMessage.clear();
 			good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
-			if (fDebug && !errorMessage.empty())
-				LogPrintf("%s\n", errorMessage.c_str());
+			if (!errorMessage.empty() || bDestCheckFailed)
+				return state.DoS(0, false, REJECT_INVALID, errorMessage.c_str());
 
-			if (!bDestCheckFailed && vvchArgs.empty() && good)
+			if (good)
 			{
 
 				if (DecodeCertTx(tx, op, vvchArgs))
