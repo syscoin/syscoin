@@ -213,7 +213,7 @@ bool IsSyscoinDataOutput(const CTxOut& out) {
 }
 
 
-bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsigned char> > &vvchArgs, bool fJustCheck, int nHeight, string &errorMessage, bool &bDestCheckFailed, bool bSanityCheck) {
+bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsigned char> > &vvchArgs, bool fJustCheck, int nHeight, string &errorMessage, bool bSanityCheck) {
 	if (!paliasdb)
 		return false;
 	if (tx.IsCoinBase() && !fJustCheck && !bSanityCheck)
@@ -227,7 +227,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 	if (vvchArgs.size() < 4)
 		return true;
 	
-	bDestCheckFailed = true;
+
 	int prevOp = 0;
 	vector<vector<unsigned char> > vvchPrevArgs;
 
@@ -597,7 +597,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5030 - " + _("Trying to create an alias with an address of an alias that isn't expired");
 				return true;
 			}
-			bDestCheckFailed = false;
 		}
 		if (!theAliasNull)
 		{
@@ -1404,7 +1403,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
 		}
 	}
-	if(!CheckSyscoinInputs(tx, state, true, 0, CBlock()))
+	if(!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
 	// pass back new raw transaction
 	UniValue res(UniValue::VARR);

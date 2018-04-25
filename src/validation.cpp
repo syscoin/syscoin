@@ -588,7 +588,7 @@ void LimitMempoolSize(CTxMemPool& pool, size_t limit, unsigned long age) {
         pcoinsTip->Uncache(removed);
 }
 // SYSCOIN
-bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJustCheck, int nHeight, const CBlock& block)
+bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJustCheck, int nHeight, const CBlock& block, bool bSanity)
 {
 	// Ensure that we don't fail on verifydb which loads recent UTXO and will fail if the input is already spent, 
 	// but during runtime fLoaded should be true so it should check UTXO in correct state
@@ -621,7 +621,7 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 
 			}
 			errorMessage.clear();
-			good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
+			good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bSanity);
 			if (!errorMessage.empty())
 				return state.DoS(100, false, REJECT_INVALID, errorMessage);
 	
@@ -630,7 +630,7 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 				if (DecodeAssetAllocationTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
-					good = CheckAssetAllocationInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
+					good = CheckAssetAllocationInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage, bSanity);
 					if (fDebug && !errorMessage.empty())
 						LogPrintf("%s\n", errorMessage.c_str());
 
@@ -638,28 +638,28 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 				else if (DecodeEscrowTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
-					good = CheckEscrowInputs(tx, op, vvchArgs, vvchAliasArgs, fJustCheck, nHeight, errorMessage);
+					good = CheckEscrowInputs(tx, op, vvchArgs, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bSanity);
 					if (fDebug && !errorMessage.empty())
 						LogPrintf("%s\n", errorMessage.c_str());
 				}
 				else if (DecodeOfferTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
-					good = CheckOfferInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedOffers, errorMessage);
+					good = CheckOfferInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedOffers, errorMessage, bSanity);
 					if (fDebug && !errorMessage.empty())
 						LogPrintf("%s\n", errorMessage.c_str());
 				}
 				else if (DecodeAssetTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
-					good = CheckAssetInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
+					good = CheckAssetInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage, bSanity);
 					if (fDebug && !errorMessage.empty())
 						LogPrintf("%s\n", errorMessage.c_str());
 				}
 				else if (DecodeCertTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
-					good = CheckCertInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedCerts, errorMessage);
+					good = CheckCertInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedCerts, errorMessage, bSanity);
 					if (fDebug && !errorMessage.empty())
 						LogPrintf("%s\n", errorMessage.c_str());
 				}
@@ -694,7 +694,6 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			const CTransaction &tx = *sortedBlock.vtx[i];
 			if (tx.nVersion == SYSCOIN_TX_VERSION)
 			{
-				bool bDestCheckFailed = false;
 				good = false;
 				if (!DecodeAliasTx(tx, op, vvchAliasArgs))
 				{
@@ -707,7 +706,7 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 					op = OP_ALIAS_UPDATE;
 				}
 				errorMessage.clear();
-				good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
+				good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage);
 				if (fDebug && !errorMessage.empty())
 					LogPrintf("%s\n", errorMessage.c_str());
 
