@@ -1321,7 +1321,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				const CTxIn txIn(txid, nOut, scriptPubKey);
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
-				i
+				
 				// look for alias inputs only, if not selecting all
 				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
 					if (mempool.exists(txid))
