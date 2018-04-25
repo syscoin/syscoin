@@ -1335,7 +1335,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 
 					if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 						continue;
-					if (!IsOutpointMature(COutPoint(txid, nOut))
+					if (!IsOutpointMature(COutPoint(txid, nOut)))
 						continue;
 					// add 200 bytes of fees to account for every input added to this transaction
 					nFees += 3 * minRelayTxFee.GetFee(200u);
@@ -1370,7 +1370,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					continue;
 				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 					continue;
-				if (!IsOutpointMature(COutPoint(txid, nOut))
+				if (!IsOutpointMature(COutPoint(txid, nOut)))
 					continue;
 				// add 200 bytes of fees to account for every input added to this transaction
 				nFees += 3 * minRelayTxFee.GetFee(200u);
@@ -1995,7 +1995,7 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 
 		if (mempool.exists(txid))
 			continue;
-		if (!IsOutpointMature(COutPoint(txid, nOut))
+		if (!IsOutpointMature(COutPoint(txid, nOut)))
 			continue;
 		nAmount += nValue;
 		
