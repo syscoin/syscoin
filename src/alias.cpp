@@ -1399,7 +1399,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		}
 		std::vector<UniValue> values = addressValues.getValues();
 		CSyscoinAddress addressLast(values.back().get_str());
-		if(!addressLast.IsValid)
+		if(!addressLast.IsValid())
 			throw runtime_error("Change address is not valid");
 		tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(addressLast.Get())));
 	}
