@@ -628,26 +628,13 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			if (good && errorMessage.empty() && (!bDestCheckFailed || fJustCheck))
 			{
 
-				if (DecodeCertTx(tx, op, vvchArgs))
-				{
-					errorMessage.clear();
-					good = CheckCertInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedCerts, errorMessage);
-					if (fDebug && !errorMessage.empty())
-						LogPrintf("%s\n", errorMessage.c_str());
-				}
-				else if (DecodeAssetTx(tx, op, vvchArgs))
-				{
-					errorMessage.clear();
-					good = CheckAssetInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
-					if (fDebug && !errorMessage.empty())
-						LogPrintf("%s\n", errorMessage.c_str());
-				}
-				else if (DecodeAssetAllocationTx(tx, op, vvchArgs))
+				if (DecodeAssetAllocationTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
 					good = CheckAssetAllocationInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
 					if (fDebug && !errorMessage.empty())
 						LogPrintf("%s\n", errorMessage.c_str());
+
 				}
 				else if (DecodeEscrowTx(tx, op, vvchArgs))
 				{
@@ -660,6 +647,20 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 				{
 					errorMessage.clear();
 					good = CheckOfferInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedOffers, errorMessage);
+					if (fDebug && !errorMessage.empty())
+						LogPrintf("%s\n", errorMessage.c_str());
+				}
+				else if (DecodeAssetTx(tx, op, vvchArgs))
+				{
+					errorMessage.clear();
+					good = CheckAssetInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
+					if (fDebug && !errorMessage.empty())
+						LogPrintf("%s\n", errorMessage.c_str());
+				}
+				else if (DecodeCertTx(tx, op, vvchArgs))
+				{
+					errorMessage.clear();
+					good = CheckCertInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedCerts, errorMessage);
 					if (fDebug && !errorMessage.empty())
 						LogPrintf("%s\n", errorMessage.c_str());
 				}
@@ -709,23 +710,9 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 				if (fDebug && !errorMessage.empty())
 					LogPrintf("%s\n", errorMessage.c_str());
 
-				if (!bDestCheckFailed && errorMessage.empty() && !vvchAliasArgs.empty() && good)
+				if (!vvchAliasArgs.empty() && good)
 				{
-					if (DecodeCertTx(tx, op, vvchArgs))
-					{
-						errorMessage.clear();
-						good = CheckCertInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedCerts, errorMessage);
-						if (fDebug && !errorMessage.empty())
-							LogPrintf("%s\n", errorMessage.c_str());
-					}
-					else if (DecodeAssetTx(tx, op, vvchArgs))
-					{
-						errorMessage.clear();
-						good = CheckAssetInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
-						if (fDebug && !errorMessage.empty())
-							LogPrintf("%s\n", errorMessage.c_str());
-					}
-					else if (DecodeAssetAllocationTx(tx, op, vvchArgs))
+					if (DecodeAssetAllocationTx(tx, op, vvchArgs))
 					{
 						errorMessage.clear();
 						good = CheckAssetAllocationInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
@@ -744,6 +731,20 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 					{
 						errorMessage.clear();
 						good = CheckOfferInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedOffers, errorMessage);
+						if (fDebug && !errorMessage.empty())
+							LogPrintf("%s\n", errorMessage.c_str());
+					}
+					else if (DecodeAssetTx(tx, op, vvchArgs))
+					{
+						errorMessage.clear();
+						good = CheckAssetInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage);
+						if (fDebug && !errorMessage.empty())
+							LogPrintf("%s\n", errorMessage.c_str());
+					}
+					else if (DecodeCertTx(tx, op, vvchArgs))
+					{
+						errorMessage.clear();
+						good = CheckCertInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedCerts, errorMessage);
 						if (fDebug && !errorMessage.empty())
 							LogPrintf("%s\n", errorMessage.c_str());
 					}
