@@ -2674,16 +2674,17 @@ string GetSyscoinTransactionDescription(const CTransaction& tx, const int op, st
 bool IsOutpointMature(const COutPoint& outpoint)
 {
 	Coin coin;
-	GetUTXOCoin(output, coin);
+	GetUTXOCoin(outpoint, coin);
 	if (coin.IsSpent())
 		return false;
-	if (coin.IsCoinBase()) {
-		if (coin.nHeight > -1 && chainActive.Tip()) {
-			return (chainActive.Height() - coin.nHeight) > COINBASE_MATURITY;
-		}
-		// don't have chainActive or coin height is neg 1 or less
-		return false;
-	}
-	// not a coinbase so assume it is mature
-	return true;
+	int numConfirmationsNeeded = 2;
+	if (coin.IsCoinBase())
+		numConfirmationsNeeded = COINBASE_MATURITY;
+
+	if (coin.nHeight > -1 && chainActive.Tip())
+		return (chainActive.Height() - coin.nHeight) >= numConfirmationsNeeded;
+	
+	// don't have chainActive or coin height is neg 1 or less
+	return false;
+
 }
