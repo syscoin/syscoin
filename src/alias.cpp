@@ -1322,11 +1322,10 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				// look for alias inputs only, if not selecting all
 				if (!DecodeAliasScript(scriptPubKey, op, vvch) && !bSendAll)
 					continue;
-				{
-					LOCK(mempool.cs);
-					if (mempool.mapNextTx.find(COutPoint(txid, nOut)) != mempool.mapNextTx.end())
-						continue;
-				}
+				
+				if (mempool.exists(txid))
+					continue;
+				
 				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 					continue;
 				// add 200 bytes of fees to account for every input added to this transaction
@@ -1356,11 +1355,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				// look for non alias inputs
 				if (DecodeAliasScript(scriptPubKey, op, vvch))
 					continue;
-				{
-					LOCK(mempool.cs);
-					if (mempool.mapNextTx.find(COutPoint(txid, nOut)) != mempool.mapNextTx.end())
-						continue;
-				}
+			
+				if (mempool.exists(txid))
+					continue;
 				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 					continue;
 				// add 200 bytes of fees to account for every input added to this transaction
@@ -1991,11 +1988,10 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 		const int& nHeight = find_value(utxoObj, "height").get_int();
 		if (DecodeAliasScript(scriptPubKey, op, vvch))
 			continue;
-		{
-			LOCK(mempool.cs);
-			if (mempool.mapNextTx.find(COutPoint(txid, nOut)) != mempool.mapNextTx.end())
-				continue;
-		}
+
+		if (mempool.exists(txid))
+			continue;
+		
 		nAmount += nValue;
 		
     }
@@ -2105,11 +2101,8 @@ unsigned int aliasunspent(const vector<unsigned char> &vchAlias, COutPoint& outp
 		if (!DecodeAliasScript(scriptPubKey, op, vvch) || vvch.size() <= 1 || vvch[0] != theAlias.vchAlias || vvch[1] != theAlias.vchGUID)
 			continue;
 		const COutPoint &outPointToCheck = COutPoint(txid, nOut);
-		{
-			LOCK(mempool.cs);
-			if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
-				continue;
-		}
+		if (mempool.exists(txid))
+			continue;
 		if(outpoint.IsNull())
 			outpoint = outPointToCheck;
 		count++;
@@ -2161,11 +2154,8 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 			continue;
 		if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 			continue;
-		{
-			LOCK(mempool.cs);
-			if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
-				continue;
-		}
+		if (mempool.exists(txid))
+			continue;
 		// add min fee for every input
 		nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
 		outPoints.push_back(outPointToCheck);
@@ -2193,11 +2183,8 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 			if (DecodeAliasScript(scriptPubKey, op, vvch)) {
 				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 					continue;
-				{
-					LOCK(mempool.cs);
-					if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
-						continue;
-				}
+				if (mempool.exists(txid))
+					continue;
 				// add min fee for every input
 				nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
 				outPoints.push_back(outPointToCheck);
