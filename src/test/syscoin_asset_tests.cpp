@@ -282,7 +282,7 @@ BOOST_AUTO_TEST_CASE(generate_range_stress_subtract2)
 BOOST_AUTO_TEST_CASE(generate_big_assetdata)
 {
 	ECC_Start();
-	MilliSleep(1000);
+	Sleep(1000);
 	GenerateSpendableCoins("node1");
 	GenerateSpendableCoins("node2");
 	GenerateSpendableCoins("node3");
