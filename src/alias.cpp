@@ -1395,12 +1395,12 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	if (params.size() > 1) {
 		UniValue addressValues = find_value(addresses, "addresses");
 		if (!addressValues.isArray()) {
-			throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Addresses is expected to be an array");
+			throw runtime_error("Addresses is expected to be an array");
 		}
 		std::vector<UniValue> values = addressValues.getValues();
 		CSyscoinAddress addressLast(values.back().get_str());
 		if(!addressLast.IsValid)
-			throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Change address is not valid");
+			throw runtime_error("Change address is not valid");
 		tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(addressLast.Get())));
 	}
 	// else create new change address in this wallet
