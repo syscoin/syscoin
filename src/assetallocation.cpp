@@ -942,7 +942,6 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 	std::set<std::pair<uint256, int64_t>, Comparator> arrivalTimesSet(
 		arrivalTimes.begin(), arrivalTimes.end(), compFunctor);
 
-	LOCK(cs_main);
 	// go through arrival times and check that balances don't overrun the POW balance
 	CAmount nRealtimeBalanceRequired = 0;
 	pair<uint256, int64_t> lastArrivalTime;
@@ -959,9 +958,10 @@ int DetectPotentialAssetAllocationSenderConflicts(const CAssetAllocationTuple& a
 	{
 		// ensure mempool has this transaction and it is not yet mined, get the transaction in question
 		const CTransactionRef txRef = mempool.get(arrivalTime.first);
-		const CTransaction &tx = *txRef;
 		if (!txRef)
 			continue;
+		const CTransaction &tx = *txRef;
+
 		// if this tx arrived within the minimum latency period flag it as potentially conflicting
 		if (abs(arrivalTime.second - lastArrivalTime.second) < minLatency) {
 			return ZDAG_MINOR_CONFLICT_OK;
