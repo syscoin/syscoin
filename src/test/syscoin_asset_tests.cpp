@@ -357,8 +357,8 @@ BOOST_AUTO_TEST_CASE(generate_asset_collect_interest)
 	UniValue balance = find_value(r.get_obj(), "balance");
 	BOOST_CHECK_EQUAL(AssetAmountFromValue(balance, 8, false), 5000 * COIN);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "interest_claim_height").get_int(), find_value(r.get_obj(), "height").get_int());
-	// 10 hours later
-	GenerateBlocks(60 * 10);
+	// 10 hours later ( 4 extra created in assetsend)
+	GenerateBlocks((60 * 10) - 4);
 	// calc interest expect 5000 (1 + 0.05 / 60) ^ (60(10)) = ~8248
 	AssetClaimInterest("node1", guid, "jagassetcollectionreceiver");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "assetallocationinfo " + guid + " jagassetcollectionreceiver false"));
@@ -393,7 +393,7 @@ BOOST_AUTO_TEST_CASE(generate_asset_collect_interest_checktotalsupply)
 	BOOST_CHECK_EQUAL(AssetAmountFromValue(maxsupply, 8, false), 100 * COIN);
 
 	// 1 hour later
-	GenerateBlocks(60);
+	GenerateBlocks(60 - 4);
 	// calc interest expect 20 (1 + 0.1 / 60) ^ (60(1)) = ~22.13 and 30 (1 + 0.1 / 60) ^ (60(1)) = ~33.26
 	AssetClaimInterest("node1", guid, "jagassetcollectioncheckreceiver");
 	AssetClaimInterest("node1", guid, "jagassetcollectioncheckreceiver1");
@@ -467,7 +467,7 @@ BOOST_AUTO_TEST_CASE(generate_asset_collect_interest_average_balance)
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "interest_claim_height").get_int(), claimheight);
 
 	// 1 hour later send 1k more
-	GenerateBlocks((60 * 1) - 1);
+	GenerateBlocks(60 - 5);
 
 	// total interest (1000*180 + 4000*120 + 5000*60) / 360 = 2666.67 - average balance over 6hrs, calculate interest on that balance and apply it to 5k
 	// formula is  ((averagebalance*pow((1 + ((double)asset.fInterestRate / 60)), (60*6)))) - averagebalance;
@@ -514,7 +514,7 @@ BOOST_AUTO_TEST_CASE(generate_asset_collect_interest_update_with_average_balance
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "interest_claim_height").get_int(), claimheight);
 
 	// 1 hour later send 1k more
-	GenerateBlocks((60 * 1) - 11);
+	GenerateBlocks(60  - 15);
 
 	// at the end set rate to 50% but this shouldn't affect the result since we set this rate recently
 	AssetUpdate("node1", guid, "pub", "''", "0.5");
