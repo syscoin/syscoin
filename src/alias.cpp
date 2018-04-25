@@ -1388,20 +1388,20 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				}
 			}
 		}
-		const CAmount &nChange = nCurrentAmount - nDesiredAmount - nFees;
-		if(nChange < 0)
-			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Insufficient funds for alias creation transaction"));
-		// if addresses were passed in, send change back to the last address as policy
-		if (params.size() > 1) {
-			tx.vout.push_back(CTxOut(nChange, tx.vin.back().scriptSig));
-		}
-		// else create new change address in this wallet
-		else {
-			CReserveKey reservekey(pwalletMain);
-			CPubKey vchPubKey;
-			reservekey.GetReservedKey(vchPubKey, true);
-			tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
-		}
+	}
+	const CAmount &nChange = nCurrentAmount - nDesiredAmount - nFees;
+	if (nChange < 0)
+		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Insufficient funds for alias creation transaction"));
+	// if addresses were passed in, send change back to the last address as policy
+	if (params.size() > 1) {
+		tx.vout.push_back(CTxOut(nChange, tx.vin.back().scriptSig));
+	}
+	// else create new change address in this wallet
+	else {
+		CReserveKey reservekey(pwalletMain);
+		CPubKey vchPubKey;
+		reservekey.GetReservedKey(vchPubKey, true);
+		tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
 	}
 	// call this twice, with fJustCheck and !fJustCheck both with bSanity enabled so it doesn't actually write out to the databases just does the checks
 	if (!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
