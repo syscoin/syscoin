@@ -626,7 +626,10 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 					return state.DoS(100, false, REJECT_INVALID, "no-alias-input-found-mempool");
 				}
 				// it is assumed if no alias output is found, then it is for another service so this would be an alias update
-				op = OP_ALIAS_UPDATE;
+				if (vvchAliasArgs.size() > 1)
+					op = OP_ALIAS_UPDATE;
+				else
+					op = OP_ALIAS_ACTIVATE;
 			}
 			errorMessage.clear();
 			good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
@@ -710,7 +713,10 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 						return state.DoS(100, false, REJECT_INVALID, "no-alias-input-found");
 					}
 					// it is assumed if no alias output is found, then it is for another service so this would be an alias update
-					op = OP_ALIAS_UPDATE;
+					if (vvchAliasArgs.size() > 1)
+						op = OP_ALIAS_UPDATE;
+					else
+						op = OP_ALIAS_ACTIVATE;
 				}
 				errorMessage.clear();
 				good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
