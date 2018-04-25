@@ -631,41 +631,34 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 				{
 					errorMessage.clear();
 					good = CheckAssetAllocationInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage, bSanity);
-					if (fDebug && !errorMessage.empty())
-						LogPrintf("%s\n", errorMessage.c_str());
 
 				}
 				else if (DecodeEscrowTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
 					good = CheckEscrowInputs(tx, op, vvchArgs, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bSanity);
-					if (fDebug && !errorMessage.empty())
-						LogPrintf("%s\n", errorMessage.c_str());
 				}
 				else if (DecodeOfferTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
 					good = CheckOfferInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedOffers, errorMessage, bSanity);
-					if (fDebug && !errorMessage.empty())
-						LogPrintf("%s\n", errorMessage.c_str());
 				}
 				else if (DecodeAssetTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
 					good = CheckAssetInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage, bSanity);
-					if (fDebug && !errorMessage.empty())
-						LogPrintf("%s\n", errorMessage.c_str());
 				}
 				else if (DecodeCertTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
 					good = CheckCertInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedCerts, errorMessage, bSanity);
-					if (fDebug && !errorMessage.empty())
-						LogPrintf("%s\n", errorMessage.c_str());
 				}
 			}
 			else
 				return state.DoS(100, false, REJECT_INVALID, "syscoin-inputs-error");
+
+			if (!good || !errorMessage.empty())
+				return state.DoS(100, false, REJECT_INVALID, errorMessage);
 		}
 	}
 	else if (!block.vtx.empty()) {
