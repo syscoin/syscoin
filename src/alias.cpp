@@ -1298,11 +1298,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		nCurrentAmount = view.GetValueIn(txIn);
 	}
 	int op, aliasOp;
-	vector<vector<unsigned char> > vvch, vvchAlias;
-	CAliasIndex theAlias;
-	if (FindAliasInTx(tx, vvchAlias)) {
-		GetAlias(vvchAlias, theAlias);
-	}
+	vector<vector<unsigned char> > vvch;
+	vector<vector<unsigned char> > vvchAlias;
+	FindAliasInTx(tx, vvchAlias);
 
 	if (nCurrentAmount < nDesiredAmount || bSendAll) {
 		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
@@ -1325,7 +1323,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					continue;
 				i
 				// look for alias inputs only, if not selecting all
-				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) || bSendAll) {
+				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
 					if (mempool.exists(txid))
 						continue;
 
