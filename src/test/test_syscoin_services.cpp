@@ -737,7 +737,7 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 		strAddress = newaddress;
 	UniValue r;
 	// registration
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers +  " " + expireTime + " " + newaddress + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers +  " " + expireTime + " " + strAddress + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
 	UniValue varray = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "syscointxfund " + varray[0].get_str()));
 	varray = r.get_array();
@@ -745,7 +745,7 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "syscoinsendrawtransaction " + find_value(r.get_obj(), "hex").get_str()));
 	GenerateBlocks(5, node);
 	// activation
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers + " " + expireTime + " " + newaddress + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers + " " + expireTime + " " + strAddress + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
 	UniValue varray1 = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "syscointxfund " + varray1[0].get_str()));
 	varray1 = r.get_array();
@@ -767,7 +767,7 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 		BOOST_CHECK(find_value(r.get_obj(), "_id").get_str() == aliasname);
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "publicvalue").get_str(), pubdata);
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_bool(), false);
-		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str() , aliasAddress.ToString());
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str() , strAddress);
 
 	}
 	if(!otherNode2.empty())
@@ -776,7 +776,7 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 		BOOST_CHECK(find_value(r.get_obj(), "_id").get_str() == aliasname);
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "publicvalue").get_str(), pubdata);
 		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "expired").get_bool(), false);
-		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str() , aliasAddress.ToString());
+		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str() , strAddress);
 		
 	}
 	return aliasAddress.ToString();
