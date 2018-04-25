@@ -616,7 +616,6 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 	std::string errorMessage;
 	bool good = false;
 
-	CAmount nDescrepency;
 	if (block.vtx.empty() && tx.nVersion == SYSCOIN_TX_VERSION) {
 		{
 			bool bDestCheckFailed = false;
