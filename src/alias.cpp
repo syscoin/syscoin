@@ -213,7 +213,6 @@ bool IsSyscoinDataOutput(const CTxOut& out) {
 
 
 bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsigned char> > &vvchArgs, bool fJustCheck, int nHeight, string &errorMessage, bool &bDestCheckFailed, bool bSanityCheck) {
-	bDestCheckFailed = true;
 	if (!paliasdb)
 		return false;
 	if (tx.IsCoinBase() && !fJustCheck && !bSanityCheck)
@@ -227,6 +226,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 	if (vvchArgs.size() < 4)
 		return true;
 	
+	bDestCheckFailed = true;
 	int prevOp = 0;
 	vector<vector<unsigned char> > vvchPrevArgs;
 
