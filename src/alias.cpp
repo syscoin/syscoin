@@ -1171,6 +1171,7 @@ UniValue SyscoinListReceived(bool includeempty=true)
 }
 UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, bool transferAlias) {
 	CMutableTransaction txNew;
+	txNew.nVersion = SYSCOIN_TX_VERSION;
 	if (!vchWitness.empty())
 	{
 		COutPoint aliasOutPointWitness;
@@ -1251,7 +1252,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	
 	const string &hexstring = params[0].get_str();
 	CMutableTransaction tx;
-	if (!DecodeHexTx(tx, hexstring))
+	if (!DecodeHexTx(tx, hexstring) || tx.nVersion != SYSCOIN_TX_VERSION)
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5500 - " + _("Could not send raw transaction: Cannot decode transaction from hex string"));
 	CTransaction txIn(tx);
 	// if addresses are passed in use those, otherwise use whatever is in the wallet
