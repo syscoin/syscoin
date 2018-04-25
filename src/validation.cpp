@@ -1235,7 +1235,8 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const C
 				return state.DoS(0, false, REJECT_INSUFFICIENTFEE, "mempool full");
 		}
 	}
-    
+	if (!fDryRun)
+		GetMainSignals().SyncTransaction(tx, NULL);
 
     return true;
 }
