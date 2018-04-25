@@ -1308,12 +1308,11 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		op = OP_ALIAS_UPDATE;
 
 	}
-	int nHeightTip = chainActive.Height();
+	const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
+	// min fee based on bytes + 1 change output
+	const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
+	CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + outputFee;
 	if (nCurrentAmount < nDesiredAmount || bSendAll) {
-		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
-		// min fee based on bytes + 1 change output
-		const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
-		CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + outputFee;
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
 		if (params.size() > 1) {
 			LOCK(mempool.cs);
