@@ -34,6 +34,7 @@
 #include <boost/assign/list_of.hpp>
 #include "instantx.h"
 #include "validation.h"
+#include "consensus/validation.h"
 using namespace std;
 CAliasDB *paliasdb = NULL;
 COfferDB *pofferdb = NULL;
