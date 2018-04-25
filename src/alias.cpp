@@ -1001,7 +1001,7 @@ void CreateAliasRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 {
 	CRecipient recp = { scriptPubKey, recipient.nAmount, false };
 	recipient = recp;
-	CAmount nFee = minRelayTxFee.GetFee(3000);
+	CAmount nFee = CWallet::GetMinimumFee(3000, nTxConfirmTarget, mempool);
 	recipient.nAmount = nFee;
 }
 void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
@@ -1010,7 +1010,7 @@ void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 	recipient = recp;
 	CTxOut txout(recipient.nAmount, scriptPubKey);
 	size_t nSize = GetSerializeSize(txout, SER_DISK, 0) + 148u;
-	CAmount nFee = 3 * minRelayTxFee.GetFee(nSize);
+	CAmount nFee = CWallet::GetMinimumFee(nSize, nTxConfirmTarget, mempool);
 	recipient.nAmount = nFee;
 }
 void CreateFeeRecipient(CScript& scriptPubKey, const vector<unsigned char>& data, CRecipient& recipient)
@@ -1029,7 +1029,7 @@ CAmount GetDataFee(const CScript& scriptPubKey)
 	CRecipient recp = {scriptPubKey, 0, false};
 	CTxOut txout(0, scriptPubKey);
     size_t nSize = GetSerializeSize(txout, SER_DISK,0)+148u;
-	nFee = 1000 * 3 * minRelayTxFee.GetFee(nSize);
+	nFee = CWallet::GetMinimumFee(nSize, nTxConfirmTarget, mempool);
 	recp.nAmount = nFee;
 	return recp.nAmount;
 }
@@ -1776,9 +1776,7 @@ UniValue aliasupdate(const JSONRPCRequest& request) {
 	
 	vecSend.push_back(fee);
 	vecSend.push_back(recipient);
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
+	
 	bool transferAlias = false;
 	if(newAddress.ToString() != EncodeBase58(copyAlias.vchAddress))
 		transferAlias = true;
