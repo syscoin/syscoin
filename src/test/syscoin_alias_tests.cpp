@@ -176,9 +176,10 @@ BOOST_AUTO_TEST_CASE (generate_aliasmultiupdate)
 	BOOST_CHECK(hex_str.empty());
 
 
-	// get 10 more utxo's because on transfer it may only transfer 1
+	// get 10 more utxo's because on transfer it will send 2 over
 	AliasUpdate("node2", "jagmultiupdate", "changedata3");
-
+	// on this one it should create 10 more
+	AliasUpdate("node2", "jagmultiupdate", "changedata3");
 
 	// after transfer it can't update alias even though there are utxo's available from old owner
 	hex_str = AliasUpdate("node1", "jagmultiupdate", "changedata3");
@@ -208,9 +209,16 @@ BOOST_AUTO_TEST_CASE (generate_aliasmultiupdate)
 
 	GenerateBlocks(10, "node2");
 	GenerateBlocks(10, "node2");
-	// transfer sends utxo's to new owner
+	// transfer sends 2 utxo's to new owner
 	hex_str = AliasTransfer("node2", "jagmultiupdate", "node1", "changeddata7");
 	BOOST_CHECK(hex_str.empty());
+
+	// get 10 more utxo's because on transfer it will send 2 over
+	AliasUpdate("node1", "jagmultiupdate", "changedata3");
+	// on this one it should create 10 more
+	AliasUpdate("node1", "jagmultiupdate", "changedata3");
+
+
 	// ensure can't update after transfer
 	hex_str = AliasTransfer("node2", "jagmultiupdate", "node1", "changedata8");
 	BOOST_CHECK(!hex_str.empty());
