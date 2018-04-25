@@ -622,12 +622,11 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			}
 			errorMessage.clear();
 			good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
-			if (fDebug && !errorMessage.empty())
-				LogPrintf("%s\n", errorMessage.c_str());
+			if (!errorMessage.empty())
+				return state.DoS(100, false, REJECT_INVALID, errorMessage);
 	
-			if (good && errorMessage.empty() && (!bDestCheckFailed || fJustCheck))
+			if (good)
 			{
-
 				if (DecodeAssetAllocationTx(tx, op, vvchArgs))
 				{
 					errorMessage.clear();
@@ -665,10 +664,6 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 						LogPrintf("%s\n", errorMessage.c_str());
 				}
 			}
-		}
-		if (!good)
-		{
-			return state.DoS(100, false, REJECT_INVALID, "syscoin-inputs-error-mempool");
 		}
 	}
 	else if (!block.vtx.empty()) {

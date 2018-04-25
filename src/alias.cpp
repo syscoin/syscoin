@@ -387,20 +387,41 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 		}
 
 	}
-	if (!fJustCheck) {
-		CAliasIndex dbAlias;
-		string strName = stringFromVch(vvchArgs[0]);
-		boost::algorithm::to_lower(strName);
-		vchAlias = vchFromString(strName);
-		// get the alias from the DB
-		if (!GetAlias(vchAlias, dbAlias))
+
+	CAliasIndex dbAlias;
+	string strName = stringFromVch(vvchArgs[0]);
+	boost::algorithm::to_lower(strName);
+	vchAlias = vchFromString(strName);
+	// get the alias from the DB
+	if (!GetAlias(vchAlias, dbAlias))
+	{
+		if (op == OP_ALIAS_UPDATE)
 		{
-			if (op == OP_ALIAS_UPDATE)
+			errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5016 - " + _("Failed to read from alias DB");
+			return true;
+		}
+	}
+	if (fJustCheck) {
+		if (op == OP_ALIAS_UPDATE) {
+			CTxDestination aliasDest;
+			if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || prevCoins.IsSpent() || !ExtractDestination(prevCoins.out.scriptPubKey, aliasDest))
 			{
-				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5016 - " + _("Failed to read from alias DB");
-				return true;
+				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Cannot extract destination of alias input");
+				return error(errorMessage.c_str());
+			}
+			else
+			{
+				CSyscoinAddress prevaddy(aliasDest);
+				if (EncodeBase58(dbAlias.vchAddress) != prevaddy.ToString())
+				{
+					errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
+					return error(errorMessage.c_str());
+
+				}
 			}
 		}
+	}
+	else {
 		// whitelist alias updates don't update expiry date
 		if (!vchData.empty() && theAlias.offerWhitelist.entries.empty() && theAlias.nExpireTime > 0)
 		{
@@ -438,27 +459,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			user2 = EncodeBase58(theAlias.vchAddress);
 		if (op == OP_ALIAS_UPDATE)
 		{
-			CTxDestination aliasDest;
-			if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || prevCoins.IsSpent() || !ExtractDestination(prevCoins.out.scriptPubKey, aliasDest))
-			{
-				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Cannot extract destination of alias input");
-				if (!theAliasNull)
-					theAlias = dbAlias;
-			}
-			else
-			{
-				CSyscoinAddress prevaddy(aliasDest);
-				if (EncodeBase58(dbAlias.vchAddress) != prevaddy.ToString())
-				{
-					errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
-					if (!theAliasNull)
-						theAlias = dbAlias;
-				}
-				else
-					bDestCheckFailed = false;
-
-			}
-
 			if (dbAlias.vchGUID != vvchArgs[1] || dbAlias.vchAlias != vvchArgs[0])
 			{
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5020 - " + _("Cannot edit this alias, guid mismatch");
