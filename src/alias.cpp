@@ -1297,10 +1297,13 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		// get value of inputs
 		nCurrentAmount = view.GetValueIn(txIn);
 	}
+	int op, aliasOp;
+	vector<vector<unsigned char> > vvch, vvchAlias;
+	CAliasIndex theAlias;
+	if (FindAliasInTx(tx, vvchAlias)) {
+		GetAlias(vvchAlias, theAlias);
+	}
 
-	
-	int op;
-	vector<vector<unsigned char> > vvch;
 	if (nCurrentAmount < nDesiredAmount || bSendAll) {
 		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 		// min fee based on bytes + 1 change output
@@ -1320,22 +1323,22 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				const CTxIn txIn(txid, nOut, scriptPubKey);
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
+				i
 				// look for alias inputs only, if not selecting all
-				if (!DecodeAliasScript(scriptPubKey, op, vvch) && !bSendAll)
-					continue;
-				
-				if (mempool.exists(txid))
-					continue;
-				
-				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
-					continue;
-				// add 200 bytes of fees to account for every input added to this transaction
-				nFees += 3 * minRelayTxFee.GetFee(200u);
-				tx.vin.push_back(txIn);
-				nCurrentAmount += nValue;
-				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
-					if (!bSendAll)
-						break;
+				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) || bSendAll) {
+					if (mempool.exists(txid))
+						continue;
+
+					if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
+						continue;
+					// add 200 bytes of fees to account for every input added to this transaction
+					nFees += 3 * minRelayTxFee.GetFee(200u);
+					tx.vin.push_back(txIn);
+					nCurrentAmount += nValue;
+					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
+						if (!bSendAll)
+							break;
+					}
 				}
 			}
 		}
@@ -1392,15 +1395,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	sorted_vector<CAssetAllocationTuple> revertedAssetAllocations;
 	sorted_vector<vector<unsigned char> > revertedOffers;
 	sorted_vector<vector<unsigned char> > revertedCerts;
-	vector<vector<unsigned char> > vvchAlias;
-	if (!DecodeAliasTx(tx, op, vvchAlias))
-	{
-		if (!FindAliasInTx(tx, vvchAlias)) {
-			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9001 - " + _("Cannot find alias input to this transaction"));
-		}
-		// it is assumed if no alias output is found, then it is for another service so this would be an alias update
-		op = OP_ALIAS_UPDATE;
-	}
 	CheckAliasInputs(tx, op, vvchAlias, fJustCheck, chainActive.Tip()->nHeight, errorMessage, bCheckDestError, true);
 	if (!errorMessage.empty())
 		throw runtime_error(errorMessage.c_str());
@@ -2142,7 +2136,6 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 	vector<vector<unsigned char> > vvch;
 	bool bIsFunded = false;
 	CAmount nFeeRequired = 0;
-	// try to fund via normal balances first
 	for (unsigned int i = 0; i<utxoArray.size(); i++)
 	{
 		const UniValue& utxoObj = utxoArray[i].get_obj();
@@ -2152,7 +2145,7 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 		const CScript& scriptPubKey = CScript(data.begin(), data.end());
 		const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
 		const COutPoint &outPointToCheck = COutPoint(txid, nOut);
-		if (DecodeAliasScript(scriptPubKey, op, vvch))
+		if (DecodeAliasScript(scriptPubKey, op, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) 
 			continue;
 		if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 			continue;
@@ -2169,37 +2162,6 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 		else
 			bIsFunded = false;
 
-	}
-	// then try to fund with alias inputs
-	if (!bIsFunded) {
-		for (unsigned int i = 0; i < utxoArray.size(); i++)
-		{
-			const UniValue& utxoObj = utxoArray[i].get_obj();
-			const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
-			const int& nOut = find_value(utxoObj, "outputIndex").get_int();
-			const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
-			const CScript& scriptPubKey = CScript(data.begin(), data.end());
-			const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
-			const COutPoint &outPointToCheck = COutPoint(txid, nOut);
-
-			if (DecodeAliasScript(scriptPubKey, op, vvch)) {
-				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
-					continue;
-				if (mempool.exists(txid))
-					continue;
-				// add min fee for every input
-				nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
-				outPoints.push_back(outPointToCheck);
-				nCurrentAmount += nValue;
-				if (nCurrentAmount >= (nDesiredAmount + nFeeRequired)) {
-					bIsFunded = true;
-					break;
-				}
-				else
-					bIsFunded = false;
-			}
-
-		}
 	}
 	if (!bIsFunded) {
 		nRequiredAmount = (nDesiredAmount + nFeeRequired) - nCurrentAmount;
