@@ -853,14 +853,14 @@ string AliasTransfer(const string& node, const string& aliasname, const string& 
 	// check xferred right person and data changed
 	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasbalance " + aliasname));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasinfo " + aliasname));
+	
 	BOOST_CHECK_EQUAL(balanceAfter, 0);
 
 
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "getaddressbalance \"{\\\"addresses\\\": [\\\"" + oldaddress + "\\\"]}\""));
+	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "getaddressbalance \"{\\\"addresses\\\": [\\\"" + oldaddress + "\\\"]}\""));
 	newBalanceFrom = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK(abs(newBalanceFrom - balanceBefore) < COIN);
-
+	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasinfo " + aliasname));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "publicvalue").get_str() , newpubdata);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "encryption_publickey").get_str() , encryptionkey);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "encryption_privatekey").get_str() , encryptionprivkey);
