@@ -412,7 +412,7 @@ void GenerateSpendableCoins(const string& node) {
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "getinfo"));
 	GenerateBlocks(10, node);
 	BOOST_CHECK_THROW(CallRPC(node, "sendtoaddress " + newaddress + " " + find_value(r.get_obj(), "balance").write()), runtime_error);
-	GenerateBlocks(91, node);
+	GenerateBlocks(10, node);
 }
 void SetSysMocktime(const int64_t& expiryTime) {
 	BOOST_CHECK(expiryTime > 0);
