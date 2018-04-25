@@ -1192,7 +1192,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const C
 		if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, true)) {
 			return false;
 		}
-		if (!CheckSyscoinInputs(tx, state, true, chainHeight, CBlock())) {
+		if (!CheckSyscoinInputs(tx, state, true, chainActive.nHeight(), CBlock())) {
 			return false;
 		}
 		// Remove conflicting transactions from the mempool
