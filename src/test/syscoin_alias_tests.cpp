@@ -241,7 +241,7 @@ BOOST_AUTO_TEST_CASE (generate_sendmoneytoalias)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasinfo sendnode2"));
 	string node2address = find_value(r.get_obj(), "address").get_str();
 	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress sendnode2 1.335"), runtime_error);
-	GenerateBlocks(1);
+	GenerateBlocks(5);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasinfo sendnode3"));
 	string node3address = find_value(r.get_obj(), "address").get_str();
 
@@ -252,7 +252,7 @@ BOOST_AUTO_TEST_CASE (generate_sendmoneytoalias)
 	// after expiry can still send money to it
 	GenerateBlocks(101);	
 	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress sendnode2 1.335"), runtime_error);
-	GenerateBlocks(1);
+	GenerateBlocks(5);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasbalance sendnode2"));
 	balanceBefore += 1.335*COIN;
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
