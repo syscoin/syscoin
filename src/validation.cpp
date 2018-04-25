@@ -633,7 +633,9 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 			}
 			errorMessage.clear();
 			good = CheckAliasInputs(tx, op, vvchAliasArgs, fJustCheck, nHeight, errorMessage, bDestCheckFailed);
-			if (!errorMessage.empty() || bDestCheckFailed)
+			if(bDestCheckFailed)
+				return state.DoS(0, false, REJECT_INVALID, "alias-destination-check-failure");
+			if (!errorMessage.empty())
 				return state.DoS(0, false, REJECT_INVALID, errorMessage.c_str());
 
 			if (good)
