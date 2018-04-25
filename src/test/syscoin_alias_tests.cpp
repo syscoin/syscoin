@@ -460,11 +460,20 @@ BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 	hex_str = AliasUpdate("node2", "jagnode1", "changeddata5");
 	BOOST_CHECK(hex_str.empty());
 	// rexfer alias
+
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnode1"));
+	// used for when setting multisig alias back to normal alias
+	string oldAddressStr = find_value(r, "address").get_str();
+
 	hex_str = AliasTransfer("node2", "jagnode1", "node3", "changeddata5");
 	BOOST_CHECK(hex_str.empty());
 	// xfer an alias to another alias is prohibited
 	hex_str = AliasTransfer("node2", "jagnode1", "node1", "changeddata5");
 	BOOST_CHECK(!hex_str.empty());
+
+	// can create an alias on old address
+	AliasNew("node1", "newaliasname", "changeddata1", "''", oldAddressStr);
+
 }
 BOOST_AUTO_TEST_CASE (generate_aliasbalance)
 {

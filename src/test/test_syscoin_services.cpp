@@ -702,7 +702,7 @@ bool DoesRangeContain(const string& parentRange, const string& childRange) {
 
 	return doesRangeContain(vecParentRanges, vecChildRanges);
 }
-string AliasNew(const string& node, const string& aliasname, const string& pubdata, string witness)
+string AliasNew(const string& node, const string& aliasname, const string& pubdata, string witness, string newaddress)
 {
 	string otherNode1, otherNode2;
 	GetOtherNodes(node, otherNode1, otherNode2);
@@ -731,10 +731,13 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 	string strEncryptionPrivateKeyHex = HexStr(vchPrivEncryptionKey);
 	string acceptTransfers = "3";
 	string expireTime = "0";
-
+	string strAddress = aliasAddress.ToString();
+		
+	if(newaddress != "''")
+		strAddress = newaddress;
 	UniValue r;
 	// registration
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers +  " " + expireTime + " " + aliasAddress.ToString() + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers +  " " + expireTime + " " + newaddress + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
 	UniValue varray = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "syscointxfund " + varray[0].get_str()));
 	varray = r.get_array();
@@ -742,7 +745,7 @@ string AliasNew(const string& node, const string& aliasname, const string& pubda
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "syscoinsendrawtransaction " + find_value(r.get_obj(), "hex").get_str()));
 	GenerateBlocks(5, node);
 	// activation
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers + " " + expireTime + " " + aliasAddress.ToString() + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasnew " + aliasname + " " + pubdata + " " + acceptTransfers + " " + expireTime + " " + newaddress + " " + strEncryptionPrivateKeyHex + " " + HexStr(vchPubEncryptionKey) + " " + witness));
 	UniValue varray1 = r.get_array();
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "syscointxfund " + varray1[0].get_str()));
 	varray1 = r.get_array();
@@ -784,6 +787,7 @@ string AliasTransfer(const string& node, const string& aliasname, const string& 
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasinfo " + aliasname));
 
 	string oldvalue = find_value(r.get_obj(), "publicvalue").get_str();
+	string oldaddress = find_value(r.get_obj(), "address").get_str();
 	int nAcceptTransferFlags = find_value(r.get_obj(), "accepttransferflags").get_int();
 	string expires = "0";
 	string encryptionkey = find_value(r.get_obj(), "encryption_publickey").get_str();
@@ -832,8 +836,14 @@ string AliasTransfer(const string& node, const string& aliasname, const string& 
 
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasbalance " + aliasname));
 	CAmount balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
+	// new balance is 0
+	BOOST_CHECK_EQUAL(balanceAfter , 0);
+	// balance stays with old address
+	BOOST_CHECK_NO_THROW(r = CallRPC(node, "aliasbalance " + oldaddress));
+	CAmount newBalanceFrom = AmountFromValue(find_value(r.get_obj(), "balance"));
+	BOOST_CHECK(abs(newBalanceFrom - balanceBefore) < COIN));
 
-	BOOST_CHECK(balanceAfter >= (balanceBefore-COIN));
+	BOOST_CHECK_EQUAL(balanceAfter, 0);
 	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasinfo " + aliasname));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "publicvalue").get_str() , newpubdata);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "encryption_publickey").get_str() , encryptionkey);
@@ -844,11 +854,20 @@ string AliasTransfer(const string& node, const string& aliasname, const string& 
 	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasbalance " + aliasname));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasinfo " + aliasname));
-	BOOST_CHECK(balanceAfter >= (balanceBefore-COIN));
+	BOOST_CHECK_EQUAL(balanceAfter, 0);
+
+
+	BOOST_CHECK_NO_THROW(r = CallRPC(tonode, "aliasbalance " + oldaddress));
+	newBalanceFrom = AmountFromValue(find_value(r.get_obj(), "balance"));
+	BOOST_CHECK(abs(newBalanceFrom - balanceBefore) < COIN));
+
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "publicvalue").get_str() , newpubdata);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "encryption_publickey").get_str() , encryptionkey);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "encryption_privatekey").get_str() , encryptionprivkey);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str() , aliasAddress.ToString());
+	// fund new alias with some money
+	BOOST_CHECK_THROW(CallRPC(node, "sendtoaddress " + aliasname + " 10"), runtime_error);
+	GenerateBlocks(5, node);
 	return "";
 }
 string AliasUpdate(const string& node, const string& aliasname, const string& pubdata, string addressStr, string witness)
