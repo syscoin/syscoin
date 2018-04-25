@@ -1274,6 +1274,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		}
 		addresses.push_back(Pair("addresses", addressArray));
 	}
+	CValidationState state;
 	bool bSendAll = false;
 	if (params.size() > 2)
 		bSendAll = params[2].get_bool();
@@ -1402,7 +1403,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
 		}
 	}
-	CValidationState state;
 	if(!CheckSyscoinInputs(tx, state, true, 0, CBlock()))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
 	// pass back new raw transaction
