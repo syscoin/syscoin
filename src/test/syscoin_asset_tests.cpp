@@ -954,13 +954,16 @@ BOOST_AUTO_TEST_CASE(generate_assetpruning)
 
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasinfo jagprunealias1"));
 
-	// shouldn't be pruned
-	BOOST_CHECK_NO_THROW(CallRPC("node2", "assetinfo " + guid + " false"));
+	// should be pruned because alias is expired
+	BOOST_CHECK_THROW(CallRPC("node2", "assetinfo " + guid + " false"), runtime_error);
 
 	// stop node3
 	StopNode("node3");
 	
 	AliasNew("node1", "jagprunealias1", "changeddata1");
+	// now asset should be alive again
+	BOOST_CHECK_NO_THROW(CallRPC("node2", "assetinfo " + guid + " false"));
+
 	AssetUpdate("node1", guid);
 
 	// stop and start node1
