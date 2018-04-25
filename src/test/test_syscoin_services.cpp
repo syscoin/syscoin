@@ -406,6 +406,8 @@ void GenerateBlocks(int nBlocks, const string& node)
 void GenerateSpendableCoins() {
 	UniValue r;
 	GenerateBlocks(101, "node1");
+	GenerateBlocks(10, "node2");
+	GenerateBlocks(10, "node3");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getnewaddress", false, false));
 	string newaddress = r.get_str();
 	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
