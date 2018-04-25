@@ -866,8 +866,8 @@ string AliasTransfer(const string& node, const string& aliasname, const string& 
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "encryption_privatekey").get_str() , encryptionprivkey);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str() , aliasAddress.ToString());
 	// fund new alias with some money
-	BOOST_CHECK_THROW(CallRPC(node, "sendtoaddress " + aliasname + " 10"), runtime_error);
-	GenerateBlocks(5, node);
+	BOOST_CHECK_THROW(CallRPC(tonode, "sendtoaddress " + aliasname + " 10"), runtime_error);
+	GenerateBlocks(5, tonode);
 	return "";
 }
 string AliasUpdate(const string& node, const string& aliasname, const string& pubdata, string addressStr, string witness)
