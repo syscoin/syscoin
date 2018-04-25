@@ -179,6 +179,9 @@ BOOST_AUTO_TEST_CASE (generate_aliasmultiupdate)
 	hex_str = AliasUpdate("node1", "jagmultiupdate", "changedata3");
 	BOOST_CHECK(!hex_str.empty());
 
+	// get 10 more utxo's because on transfer it may only transfer 1
+	AliasUpdate("node2", "jagmultiupdate", "changedata3");
+
 	// new owner can update
 	for (unsigned int i = 0; i < MAX_ALIAS_UPDATES_PER_BLOCK; i++)
 	{
