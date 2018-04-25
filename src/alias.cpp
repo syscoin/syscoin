@@ -1010,8 +1010,7 @@ void CreateRecipient(const CScript& scriptPubKey, CRecipient& recipient)
 	recipient = recp;
 	CTxOut txout(recipient.nAmount, scriptPubKey);
 	size_t nSize = GetSerializeSize(txout, SER_DISK, 0) + 148u;
-	nFee = 3 * minRelayTxFee.GetFee(nSize);
-	recipient.nAmount = nFee;
+	recipient.nAmount = 3 * minRelayTxFee.GetFee(nSize);
 }
 void CreateFeeRecipient(CScript& scriptPubKey, const vector<unsigned char>& data, CRecipient& recipient)
 {
