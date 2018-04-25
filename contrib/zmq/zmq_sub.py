@@ -1,13 +1,11 @@
 #!/usr/bin/env python
-# Copyright (c) 2014-2016 The Syscoin Core developers
-# Distributed under the MIT software license, see the accompanying
-# file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+import array
 import binascii
 import zmq
 import struct
 
-port = 28332
+port = 28370
 
 zmqContext = zmq.Context()
 zmqSubSocket = zmqContext.socket(zmq.SUB)
@@ -17,6 +15,7 @@ zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"hashtxlock")
 zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"rawblock")
 zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"rawtx")
 zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"rawtxlock")
+zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"alias")
 zmqSubSocket.connect("tcp://127.0.0.1:%i" % port)
 
 try:
@@ -24,7 +23,7 @@ try:
         msg = zmqSubSocket.recv_multipart()
         topic = str(msg[0].decode("utf-8"))
         body = msg[1]
-        sequence = "Unknown"
+        sequence = "Unknown";
 
         if len(msg[-1]) == 4:
           msgSequence = struct.unpack('<I', msg[-1])[-1]
@@ -48,6 +47,9 @@ try:
         elif topic == "rawtxlock":
             print('- RAW TX LOCK ('+sequence+') -')
             print(binascii.hexlify(body).decode("utf-8"))
+        elif topic == "alias":
+            print('- ALIAS ('+sequence+') -')
+            print(body.decode("utf-8"))
 
 except KeyboardInterrupt:
     zmqContext.destroy()

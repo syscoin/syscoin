@@ -11,48 +11,29 @@ Before running the tests, the following must be installed.
 
 Unix
 ----
-The python3-zmq library is required. On Ubuntu or Debian it can be installed via:
+The python-zmq library is required. On Ubuntu or Debian it can be installed via: 
 ```
-sudo apt-get install python3-zmq
-```
-
-OS X
-------
-```
-pip3 install pyzmq
+sudo apt-get install python-zmq
 ```
 
 Running tests
 =============
 
-You can run any single test by calling
+You can run any single test by calling `qa/pull-tester/rpc-tests.py <testname>`.
 
-    qa/pull-tester/rpc-tests.py <testname>
+Or you can run any combination of tests by calling `qa/pull-tester/rpc-tests.py <testname1> <testname2> <testname3> ...`
 
-Or you can run any combination of tests by calling
+Run the regression test suite with `qa/pull-tester/rpc-tests.py`
 
-    qa/pull-tester/rpc-tests.py <testname1> <testname2> <testname3> ...
+Run all possible tests with `qa/pull-tester/rpc-tests.py -extended`
 
-Run the regression test suite with
-
-    qa/pull-tester/rpc-tests.py
-
-Run all possible tests with
-
-    qa/pull-tester/rpc-tests.py -extended
-
-By default, tests will be run in parallel. To specify how many jobs to run,
-append `-parallel=n` (default n=4).
-
-If you want to create a basic coverage report for the rpc test suite, append `--coverage`.
-
-Possible options, which apply to each individual test run:
+Possible options:
 
 ```
   -h, --help            show this help message and exit
-  --nocleanup           Leave dashds and test.* datadir on exit or error
-  --noshutdown          Don't stop dashds after the test execution
-  --srcdir=SRCDIR       Source directory containing dashd/dash-cli
+  --nocleanup           Leave syscoinds and test.* datadir on exit or error
+  --noshutdown          Don't stop syscoinds after the test execution
+  --srcdir=SRCDIR       Source directory containing syscoind/syscoin-cli
                         (default: ../../src)
   --tmpdir=TMPDIR       Root directory for datadirs
   --tracerpc            Print out all RPC calls as they are made
@@ -66,7 +47,7 @@ output (example: `PYTHON_DEBUG=1 qa/pull-tester/rpc-tests.py wallet`).
 A 200-block -regtest blockchain and wallets for four nodes
 is created the first time a regression test is run and
 is stored in the cache/ directory. Each node has 25 mature
-blocks (25*500=12500 DASH) in its wallet.
+blocks (25*500=12500 SYS) in its wallet.
 
 After the first run, the cache/ blockchain and wallets are
 copied into a temporary directory and used as the initial
@@ -77,7 +58,7 @@ to recover with:
 
 ```bash
 rm -rf cache
-killall dashd
+killall syscoind
 ```
 
 Writing tests

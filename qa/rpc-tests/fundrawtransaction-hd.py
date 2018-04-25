@@ -1,21 +1,20 @@
-#!/usr/bin/env python3
-# Copyright (c) 2014-2015 The syscoin Core developers
+#!/usr/bin/env python2
+# Copyright (c) 2014-2015 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-from test_framework.test_framework import syscoinTestFramework
+from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import *
 
 # Create one-input, one-output, no-fee transaction:
-class RawTransactionsTest(syscoinTestFramework):
+class RawTransactionsTest(SyscoinTestFramework):
 
-    def __init__(self):
-        super().__init__()
-        self.setup_clean_chain = True
-        self.num_nodes = 4
+    def setup_chain(self):
+        print("Initializing test directory "+self.options.tmpdir)
+        initialize_chain_clean(self.options.tmpdir, 4)
 
     def setup_network(self, split=False):
-        self.nodes = start_nodes(4, self.options.tmpdir, [['-usehd=1']] * self.num_nodes, redirect_stderr=True)
+        self.nodes = start_nodes(4, self.options.tmpdir, [['-usehd=1'], ['-usehd=1'], ['-usehd=1'], ['-usehd=1']])
 
         connect_nodes_bi(self.nodes,0,1)
         connect_nodes_bi(self.nodes,1,2)
@@ -26,7 +25,7 @@ class RawTransactionsTest(syscoinTestFramework):
         self.sync_all()
 
     def run_test(self):
-        print("Mining blocks...")
+        print "Mining blocks..."
 
         min_relay_tx_fee = self.nodes[0].getnetworkinfo()['relayfee']
         # This test is not meant to test fee estimation and we'd like
@@ -417,7 +416,7 @@ class RawTransactionsTest(syscoinTestFramework):
         mSigObj = self.nodes[2].addmultisigaddress(2, [addr1Obj['pubkey'], addr2Obj['pubkey']])
 
 
-        # send 12 DASH to msig addr
+        # send 12 SYS to msig addr
         txId = self.nodes[0].sendtoaddress(mSigObj, 12)
         self.sync_all()
         self.nodes[1].generate(1)
@@ -442,11 +441,10 @@ class RawTransactionsTest(syscoinTestFramework):
         # locked wallet test
         self.nodes[1].encryptwallet("test")
         self.nodes.pop(1)
-        stop_node(self.nodes[0], 0)
-        stop_node(self.nodes[1], 2)
-        stop_node(self.nodes[2], 3)
+        stop_nodes(self.nodes)
+        wait_syscoinds()
 
-        self.nodes = start_nodes(4, self.options.tmpdir, [['-usehd=1']] * self.num_nodes, redirect_stderr=True)
+        self.nodes = start_nodes(4, self.options.tmpdir, [['-usehd=1'], ['-usehd=1'], ['-usehd=1'], ['-usehd=1']])
         # This test is not meant to test fee estimation and we'd like
         # to be sure all txs are sent at a consistent desired feerate
         for node in self.nodes:
