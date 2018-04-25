@@ -1312,7 +1312,8 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	if (nCurrentAmount < nDesiredAmount || bSendAll) {
 		const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 		// min fee based on bytes + 1 change output
-		CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + (3 * minRelayTxFee.GetFee(200u));
+		const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
+		CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + outputFee;
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
 		if (params.size() > 1) {
 			LOCK(mempool.cs);
@@ -1341,7 +1342,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					if (!IsOutpointMature(outPoint))
 						continue;
 					// add 200 bytes of fees to account for every input added to this transaction
-					nFees += 3 * minRelayTxFee.GetFee(200u);
+					nFees += outputFee;
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1378,7 +1379,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (!IsOutpointMature(outPoint))
 					continue;
 				// add 200 bytes of fees to account for every input added to this transaction
-				nFees += 3 * minRelayTxFee.GetFee(200u);
+				nFees += outputFee;
 				tx.vin.push_back(txIn);
 				nCurrentAmount += nValue;
 				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -2155,6 +2156,7 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 	vector<vector<unsigned char> > vvch;
 	bool bIsFunded = false;
 	CAmount nFeeRequired = 0;
+	const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
 	for (unsigned int i = 0; i<utxoArray.size(); i++)
 	{
 		const UniValue& utxoObj = utxoArray[i].get_obj();
@@ -2176,7 +2178,7 @@ void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmoun
 		if (!IsOutpointMature(outPointToCheck))
 			continue;
 		// add min fee for every input
-		nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
+		nFeeRequired += outputFee;
 		outPoints.push_back(outPointToCheck);
 		nCurrentAmount += nValue;
 		if (nCurrentAmount >= (nDesiredAmount + nFeeRequired)) {
@@ -2215,8 +2217,9 @@ UniValue aliaspay_helper(const vector<unsigned char> &vchAlias, vector<CRecipien
 	{
 		nOutputTotal += recp.nAmount;
 	}
+	const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
 	// account for 1 change output
-	nFeeRequired += 3 * minRelayTxFee.GetFee(200u);
+	nFeeRequired += outputFee;
 	CAmount nTotal = nOutputTotal + nFeeRequired;
 	if (nTotal > 0)
 	{
