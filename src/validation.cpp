@@ -631,7 +631,6 @@ bool CheckSyscoinInputs(const CTransaction& tx, CValidationState& state, bool fJ
 				{
 					errorMessage.clear();
 					good = CheckAssetAllocationInputs(tx, op, vvchArgs, vvchAliasArgs[0], fJustCheck, nHeight, revertedAssetAllocations, errorMessage, bSanity);
-
 				}
 				else if (DecodeEscrowTx(tx, op, vvchArgs))
 				{

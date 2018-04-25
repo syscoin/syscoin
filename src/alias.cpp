@@ -1403,7 +1403,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
 		}
 	}
-	if(!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
+	if (!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
+		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
+	if (!CheckSyscoinInputs(tx, state, false, 0, CBlock(), true))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
 	// pass back new raw transaction
 	UniValue res(UniValue::VARR);
