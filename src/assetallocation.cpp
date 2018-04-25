@@ -229,8 +229,9 @@ CAmount GetAssetAllocationInterest(CAssetAllocation & assetAllocation, const int
 		errorMessage = _("Not enough blocks in-between interest claims");
 		return 0;
 	}
-	if (assetAllocation.nLastInterestClaimHeight >= nHeight || assetAllocation.nLastInterestClaimHeight == 0) {
-		errorMessage = _("Last interest claim block height is invalid");
+	const int &nInterestClaimBlockThreshold = fUnitTest ? 1 : ONE_MONTH_IN_BLOCKS;
+	if ((nHeight - assetAllocation.nLastInterestClaimHeight) < nInterestClaimBlockThreshold || assetAllocation.nLastInterestClaimHeight == 0) {
+		errorMessage = _("Not enough blocks have passed since the last claim, please wait some more time...");
 		return 0;
 	}
 	const int &nInterestBlockTerm = fUnitTest? ONE_HOUR_IN_BLOCKS: ONE_YEAR_IN_BLOCKS;
@@ -617,13 +618,6 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, int op, const vector<vec
 					}
 					if (!bBalanceOverrun) {
 						receiverAllocation.txHash = tx.GetHash();
-						if (dbAsset.fInterestRate > 0) {
-							// accumulate balances as sender/receiver allocations balances are adjusted
-							if (receiverAllocation.nHeight > 0) {
-								AccumulateInterestSinceLastClaim(receiverAllocation, nHeight);
-							}
-							AccumulateInterestSinceLastClaim(theAssetAllocation, nHeight);
-						}
 						receiverAllocation.fInterestRate = dbAsset.fInterestRate;
 						receiverAllocation.nHeight = nHeight;
 						receiverAllocation.vchMemo = theAssetAllocation.vchMemo;

@@ -538,11 +538,6 @@ bool CheckAssetInputs(const CTransaction &tx, int op, const vector<vector<unsign
 						}
 
 						receiverAllocation.txHash = tx.GetHash();
-						if (theAsset.fInterestRate > 0) {
-							if (receiverAllocation.nHeight > 0) {
-								AccumulateInterestSinceLastClaim(receiverAllocation, nHeight);
-							}
-						}
 						receiverAllocation.fInterestRate = theAsset.fInterestRate;
 						receiverAllocation.nHeight = nHeight;
 						receiverAllocation.vchMemo = theAssetAllocation.vchMemo;
