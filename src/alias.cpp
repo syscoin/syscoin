@@ -596,6 +596,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5030 - " + _("Trying to create an alias with an address of an alias that isn't expired");
 				return true;
 			}
+			bDestCheckFailed = false;
 		}
 		if (!theAliasNull)
 		{
@@ -626,8 +627,6 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			}
 		}
 	}
-	if(op == OP_ALIAS_ACTIVATE)
-		bDestCheckFailed = false;
 
 	return true;
 }
