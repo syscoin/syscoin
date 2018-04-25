@@ -403,16 +403,24 @@ void GenerateBlocks(int nBlocks, const string& node)
   height = 0;
   timeoutCounter = 0;
 }
-void GenerateSpendableCoins(const string& node) {
+void GenerateSpendableCoins() {
 	UniValue r;
-	GenerateBlocks(101, node);
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "getnewaddress", false, false));
+	GenerateBlocks(101, "node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getnewaddress", false, false));
 	string newaddress = r.get_str();
 	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
-	BOOST_CHECK_NO_THROW(r = CallRPC(node, "getinfo"));
-	GenerateBlocks(10, node);
-	BOOST_CHECK_THROW(CallRPC(node, "sendtoaddress " + newaddress + " " + find_value(r.get_obj(), "balance").write()), runtime_error);
-	GenerateBlocks(91, node);
+	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress " + newaddress + " " + find_value(r.get_obj(), "balance").write()), runtime_error);
+	GenerateBlocks(10, "node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "getnewaddress", false, false));
+	newaddress = r.get_str();
+	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
+	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress " + newaddress + " 100000"), runtime_error);
+	GenerateBlocks(10, "node1");
+	BOOST_CHECK_NO_THROW(r = CallRPC("node3", "getnewaddress", false, false));
+	newaddress = r.get_str();
+	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
+	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress " + newaddress + " 100000"), runtime_error);
+	GenerateBlocks(10, "node1");
 }
 void SetSysMocktime(const int64_t& expiryTime) {
 	BOOST_CHECK(expiryTime > 0);
