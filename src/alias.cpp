@@ -1327,7 +1327,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 34*FEE (for change output)
 	unsigned int nCalculatedBytes = 10 + 34;
 	CAmount nFees = GetFee(nCalculatedBytes);
-	for (auto& vin : txIn_t.vin) {
+	for (auto& vin : tx.vin) {
 		Coin coin;
 		if (!GetUTXOCoin(vin.prevout, coin))
 			continue;
@@ -1342,7 +1342,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes, fUseInstantSend);
 	}
-	for (auto& vout : txIn_t.vout) {
+	for (auto& vout : tx.vout) {
 		const unsigned int nBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
 		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes);
