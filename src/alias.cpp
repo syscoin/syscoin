@@ -1325,14 +1325,14 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 
 	}
 	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 33*FEE (for change output)
-	CAmount nFees = GetFees(10 + txIn.vin.size()) + GetFees(33);
+	CAmount nFees = GetFee(10 + txIn.vin.size()) + GetFee(33);
 	for (auto& vin : txIn.vin) {
 		const unsigned int nBytes = ::GetSerializeSize(vin, SER_NETWORK, PROTOCOL_VERSION);
-		nFees += GetFees(nBytes, fUseInstantSend);
+		nFees += GetFee(nBytes, fUseInstantSend);
 	}
 	for (auto& vout : txIn.vout) {
 		const unsigned int nBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
-		nFees += GetFees(nBytes);
+		nFees += GetFee(nBytes);
 	}
 	if ((nCurrentAmount < (nDesiredAmount + nFees)) || bSendAll) {
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
