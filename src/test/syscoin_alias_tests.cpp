@@ -578,7 +578,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	GenerateBlocks(5, "node2");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node3", "aliasbalance jagnodebalance2"));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK_EQUAL(balanceAfter, 22.1*COIN);
+	BOOST_CHECK(abs(balanceBefore - 22.1) < COIN);
 
 	// edit and balance should remain the same
 	hex_str = AliasUpdate("node3", "jagnodebalance2", "pubdata1");

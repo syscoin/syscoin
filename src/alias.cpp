@@ -1234,6 +1234,13 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 	request.params = paramsFund;
 	return syscointxfund(request);
 }
+CAmount GetFee(const size_t nBytes, const bool fUseInstantSend = false) {
+
+	CAmount nFee = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool)
+	if (fUseInstantSend)
+		nFee = std::max(nFee, CTxLockRequest::MIN_FEE);
+	return nFee;
+}
 UniValue syscointxfund(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
 	if (request.fHelp || 1 > params.size() || 4 < params.size())
@@ -1254,7 +1261,8 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			+ HelpExampleCli("syscointxfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}' true false")
 			+ HelpExampleRpc("syscointxfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]} false true")
 			+ HelpRequiringPassphrase());
-	
+	if (!pwalletMain)
+		throw runtime_error("No Wallet found!");
 	const string &hexstring = params[0].get_str();
 	CMutableTransaction tx;
 	if (!DecodeHexTx(tx, hexstring))
@@ -1315,12 +1323,16 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		op = OP_ALIAS_UPDATE;
 
 	}
-	const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
-	// min fee based on bytes + 1 change output
-	CAmount inputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
-	if (fUseInstantSend)
-		inputFee = std::max(inputFee, CTxLockRequest::MIN_FEE);
-	CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
+	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 33*FEE (for change output)
+	CAmount nFees = GetFees(10 + txIn.vin.size()) + GetFees(33);
+	for (auto& vin : txIn.vin) {
+		const unsigned int nBytes = ::GetSerializeSize(vin, SER_NETWORK, PROTOCOL_VERSION);
+		nFees += GetFees(nBytes, fUseInstantSend);
+	}
+	for (auto& vout : txIn.vout) {
+		const unsigned int nBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
+		nFees += GetFees(nBytes);
+	}
 	if ((nCurrentAmount < (nDesiredAmount + nFees)) || bSendAll) {
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
 		if (tx.nVersion == SYSCOIN_TX_VERSION && params.size() > 1 && !fUseInstantSend) {
@@ -1349,8 +1361,15 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						continue;
 					if (!IsOutpointMature(outPoint))
 						continue;
-					// add 200 bytes of fees to account for every input added to this transaction
-					nFees += inputFee;
+					CScript scriptSigRes;
+					if (!ProduceSignature(DummySignatureCreator(pwalletMain), scriptPubKey, scriptSigRes))
+					{
+						throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
+						return false;
+					}
+					const int nBytesScripSig = ::GetSerializeSize(scriptSigRes, SER_NETWORK, PROTOCOL_VERSION);
+					// add fees to account for every input added to this transaction
+					nFees += GetFee(nBytesScripSig);
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1386,8 +1405,16 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					continue;
 				if (!IsOutpointMature(outPoint, fUseInstantSend))
 					continue;
-				// add 200 bytes of fees to account for every input added to this transaction
-				nFees += inputFee;
+
+				CScript scriptSigRes;
+				if (!ProduceSignature(DummySignatureCreator(pwalletMain), scriptPubKey, scriptSigRes))
+				{
+					throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
+					return false;
+				}
+				const int nBytesScripSig = ::GetSerializeSize(scriptSigRes, SER_NETWORK, PROTOCOL_VERSION);
+				// add fees to account for every input added to this transaction
+				nFees += GetFee(nBytesScripSig, fUseInstantSend);
 				tx.vin.push_back(txIn);
 				nCurrentAmount += nValue;
 				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
