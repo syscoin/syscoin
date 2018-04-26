@@ -656,7 +656,7 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	GenerateBlocks(5);
 	GenerateBlocks(5, "node2");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasbalance jagnodemultisig1"));
-	balanceBefore = 19*COIN;
+	CAmount balanceBefore = 19*COIN;
 	CAmount balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnodemultisig1"));
 	BOOST_CHECK_EQUAL(balanceAfter, 19*COIN);
