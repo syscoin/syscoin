@@ -1356,11 +1356,12 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	}
 	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 34*FEE (for change output)
 	CAmount nFees = GetFee(10 + 34);
-	int numSigs;
+	
 	for (auto& vin : tx.vin) {
 		Coin coin;
 		if (!GetUTXOCoin(vin.prevout, coin))
 			continue;
+		int numSigs = 0;
 		CCountSigsVisitor(*pwalletMain, numSigs).Process(coin.out.scriptPubKey);
 		nFees += GetFee(numSigs*150, fUseInstantSend);
 	}
@@ -1396,6 +1397,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						continue;
 					if (!IsOutpointMature(outPoint))
 						continue;
+					int numSigs = 0;
 					CCountSigsVisitor(*pwalletMain, numSigs).Process(scriptPubKey);
 					// add fees to account for every input added to this transaction
 					nFees += GetFee(numSigs*150, fUseInstantSend);
@@ -1434,7 +1436,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					continue;
 				if (!IsOutpointMature(outPoint, fUseInstantSend))
 					continue;
-				
+				int numSigs = 0;
 				CCountSigsVisitor(*pwalletMain, numSigs).Process(scriptPubKey);
 				// add fees to account for every input added to this transaction
 				nFees += GetFee(numSigs*150, fUseInstantSend);
