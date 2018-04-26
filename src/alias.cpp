@@ -1247,7 +1247,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			"      ,...\n"
 			"    ]\n"
 			"   \"sendall\" (boolean, optional) If addresses were specified, send all funds found in those addresses.\n"
-			"	\"instantsend\" (boolean, optional, default=false) Use InstantSend to send this transaction. \n
+			"	\"instantsend\" (boolean, optional, default=false) Use InstantSend to send this transaction. \n"
 			"}\n"
 			"\nExamples:\n"
 			+ HelpExampleCli("syscointxfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}' true false")
