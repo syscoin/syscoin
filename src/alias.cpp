@@ -1338,7 +1338,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			return false;
 		}
 		const CTxIn txInSigned(uint256(), vin.prevout.n, scriptSigRes);
-		const unsigned int nBytes = ::GetSerializeSize(scriptSigRes, SER_NETWORK, PROTOCOL_VERSION)+1;
+		const unsigned int nBytes = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
 		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes, fUseInstantSend);
 	}
