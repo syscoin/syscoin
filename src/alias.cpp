@@ -1242,6 +1242,32 @@ CAmount GetFee(const size_t nBytes, const bool fUseInstantSend = false) {
 		nFee = std::max(nFee, CTxLockRequest::MIN_FEE);
 	return nFee;
 }
+
+class CCountSigsVisitor : public boost::static_visitor<void> {
+private:
+	const CKeyStore &keystore;
+	int nNumSigs;
+
+public:
+	CAffectedKeysVisitor(const CKeyStore &keystoreIn, int &numSigs) : keystore(keystoreIn), nNumSigs(0) {}
+
+	void Process(const CScript &script) {
+		txnouttype type;
+		std::vector<CTxDestination> vDest;
+		int nRequired;
+		if (ExtractDestinations(script, type, vDest, nRequired)) {
+			nNumSigs += nRequired;
+		}
+	}
+
+	void operator()(const CKeyID &keyId) {
+		numSigs++;
+	}
+
+	void operator()(const CScriptID &scriptId) {}
+
+	void operator()(const CNoDestination &none) {}
+};
 UniValue syscointxfund(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
 	if (request.fHelp || 1 > params.size() || 4 < params.size())
@@ -1326,8 +1352,13 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	}
 	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 34*FEE (for change output)
 	CAmount nFees = GetFee(10 + 34);
+	int numSigs;
 	for (auto& vin : tx.vin) {
-		nFees += GetFee(150, fUseInstantSend);
+		Coin coin;
+		if (!GetUTXOCoin(vin.prevout, coin))
+			continue;
+		CCountSigsVisitor(*pwalletMain, numSigs).Process(coin.out.scriptPubKey);
+		nFees += GetFee(numSigs*150, fUseInstantSend);
 	}
 	for (auto& vout : tx.vout) {
 		const unsigned int nBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
@@ -1361,9 +1392,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						continue;
 					if (!IsOutpointMature(outPoint))
 						continue;
-				
+					CCountSigsVisitor(*pwalletMain, numSigs).Process(scriptPubKey);
 					// add fees to account for every input added to this transaction
-					nFees += GetFee(150, fUseInstantSend);
+					nFees += GetFee(numSigs*150, fUseInstantSend);
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1399,9 +1430,10 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					continue;
 				if (!IsOutpointMature(outPoint, fUseInstantSend))
 					continue;
-
+				
+				CCountSigsVisitor(*pwalletMain, numSigs).Process(scriptPubKey);
 				// add fees to account for every input added to this transaction
-				nFees += GetFee(150, fUseInstantSend);
+				nFees += GetFee(numSigs*150, fUseInstantSend);
 				tx.vin.push_back(txIn);
 				nCurrentAmount += nValue;
 				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
