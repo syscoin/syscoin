@@ -578,14 +578,14 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	GenerateBlocks(5, "node2");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node3", "aliasbalance jagnodebalance2"));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK_EQUAL(balanceAfter, 12.1*COIN+10*COIN+balanceAfterTransfer);
+	BOOST_CHECK_EQUAL(balanceAfter, 12.1*COIN-10*COIN)+balanceAfterTransfer);
 
 	// edit and balance should remain the same
 	hex_str = AliasUpdate("node3", "jagnodebalance2", "pubdata1");
 	BOOST_CHECK(hex_str.empty());
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasbalance jagnodebalance2"));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(abs((12.1*COIN+10*COIN+balanceAfterTransfer) -  balanceAfter) < COIN);
+	BOOST_CHECK(abs((12.1*COIN-10*COIN+balanceAfterTransfer) -  balanceAfter) < COIN);
 
 
 	// get sender address to use later
@@ -603,7 +603,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	// check sender
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getaddressbalance \"{\\\"addresses\\\": [\\\"" + senderaddress + "\\\"]}\""));
 	balanceAfterTransfer = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(balanceAfterTransfer >= (12.1*COIN + 10*COIN + balanceAfterTransfer) - COIN);
+	BOOST_CHECK(balanceAfterTransfer >= (12.1*COIN - 10*COIN + balanceAfterTransfer) - COIN);
 
 }
 BOOST_AUTO_TEST_CASE (generate_multisigalias)
