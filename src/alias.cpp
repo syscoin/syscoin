@@ -1328,7 +1328,16 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	unsigned int nCalculatedBytes = 10 + 34;
 	CAmount nFees = GetFee(nCalculatedBytes);
 	for (auto& vin : txIn_t.vin) {
-		const unsigned int nBytes = ::GetSerializeSize(vin, SER_NETWORK, PROTOCOL_VERSION)+1;
+		Coin coin;
+		if (!GetUTXOCoin(vin.prevout, coin))
+			continue;
+		CScript scriptSigRes;
+		if (!ProduceSignature(DummySignatureCreator(pwalletMain), coin.out.scriptPubKey, scriptSigRes))
+		{
+			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
+			return false;
+		}
+		const unsigned int nBytes = ::GetSerializeSize(scriptSigRes, SER_NETWORK, PROTOCOL_VERSION)+1;
 		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes, fUseInstantSend);
 	}
@@ -1365,13 +1374,15 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						continue;
 					if (!IsOutpointMature(outPoint))
 						continue;
+					
 					CScript scriptSigRes;
 					if (!ProduceSignature(DummySignatureCreator(pwalletMain), scriptPubKey, scriptSigRes))
 					{
 						throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 						return false;
 					}
-					const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION)+1;
+					const CTxIn txInSigned(txid, nOut, scriptSigRes);
+					const int nBytesScriptSig = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
 					nCalculatedBytes += nBytesScriptSig;
 					// add fees to account for every input added to this transaction
 					nFees += GetFee(nBytesScriptSig);
@@ -1417,7 +1428,8 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 					return false;
 				}
-				const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION)+1;
+				const CTxIn txInSigned(txid, nOut, scriptSigRes);
+				const int nBytesScriptSig = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
 				nCalculatedBytes += nBytesScriptSig;
 				// add fees to account for every input added to this transaction
 				nFees += GetFee(nBytesScriptSig, fUseInstantSend);
@@ -1455,7 +1467,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		tx.vout.push_back(changeOut);
 	}
 	const int nTXSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
-	if (nTXSize > nCalculatedBytes || ((nCalculatedBytes - nTXSize) > tx.vin.size())) {
+	if (nTXSize != nCalculatedBytes) {
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Transaction was calculated to be the wrong expected size: ") + strprintf("Calculated size %d vs Expected size %d, # Inputs %d # Outputs %d", nCalculatedBytes, nTXSize, tx.vin.size(), tx.vout.size()));
 	}
 	if (tx.nVersion == SYSCOIN_TX_VERSION) {
