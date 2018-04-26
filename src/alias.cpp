@@ -1324,11 +1324,11 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		op = OP_ALIAS_UPDATE;
 
 	}
-	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 33*FEE (for change output)
-	unsigned int nCalculatedBytes = 10 + txIn_t.vin.size() + 33;
+	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 34*FEE (for change output)
+	unsigned int nCalculatedBytes = 10 + 34;
 	CAmount nFees = GetFee(nCalculatedBytes);
 	for (auto& vin : txIn_t.vin) {
-		const unsigned int nBytes = ::GetSerializeSize(vin, SER_NETWORK, PROTOCOL_VERSION);
+		const unsigned int nBytes = ::GetSerializeSize(vin, SER_NETWORK, PROTOCOL_VERSION)+1;
 		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes, fUseInstantSend);
 	}
@@ -1455,7 +1455,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		tx.vout.push_back(changeOut);
 	}
 	const int nTXSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
-	if (nTXSize != nCalculatedBytes) {
+	if (nTXSize > nCalculatedBytes || ((nCalculatedBytes - nTXSize) > tx.vin.size())) {
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Transaction was calculated to be the wrong expected size: ") + strprintf("Calculated size %d vs Expected size %d, # Inputs %d # Outputs %d", nCalculatedBytes, nTXSize, tx.vin.size(), tx.vout.size()));
 	}
 	if (tx.nVersion == SYSCOIN_TX_VERSION) {
