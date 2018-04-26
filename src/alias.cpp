@@ -1249,22 +1249,26 @@ private:
 	int nNumSigs;
 
 public:
-	CAffectedKeysVisitor(const CKeyStore &keystoreIn, int &numSigs) : keystore(keystoreIn), nNumSigs(0) {}
+	CCountSigsVisitor(const CKeyStore &keystoreIn, int &numSigs) : keystore(keystoreIn), nNumSigs(0) {}
 
 	void Process(const CScript &script) {
 		txnouttype type;
 		std::vector<CTxDestination> vDest;
 		int nRequired;
 		if (ExtractDestinations(script, type, vDest, nRequired)) {
-			nNumSigs += nRequired;
+			BOOST_FOREACH(const CTxDestination &dest, vDest)
+				boost::apply_visitor(*this, dest);
 		}
 	}
-
 	void operator()(const CKeyID &keyId) {
-		numSigs++;
+		nNumSigs++;
 	}
 
-	void operator()(const CScriptID &scriptId) {}
+	void operator()(const CScriptID &scriptId) {
+		CScript script;
+		if (keystore.GetCScript(scriptId, script))
+			Process(script);
+	}
 
 	void operator()(const CNoDestination &none) {}
 };
