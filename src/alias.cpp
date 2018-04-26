@@ -1331,9 +1331,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		if (!GetUTXOCoin(vin.prevout, coin))
 			continue;
 		CScript scriptSigRes;
-		if (!ProduceSignature(DummySignatureCreator(pwalletMain), coin.out.scriptPubKey, scriptSigRes))
-			continue;
-		
+		ProduceSignature(DummySignatureCreator(pwalletMain), coin.out.scriptPubKey, scriptSigRes);
 		const CTxIn txInSigned(uint256(), vin.prevout.n, scriptSigRes);
 		const unsigned int nBytes = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
 		nFees += GetFee(nBytes, fUseInstantSend);
