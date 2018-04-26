@@ -450,6 +450,7 @@ BOOST_AUTO_TEST_CASE (generate_alias_offerexpiry_resync)
 BOOST_AUTO_TEST_CASE (generate_aliastransfer)
 {
 	printf("Running generate_aliastransfer...\n");
+	GenerateBlocks(5, "node1");
 	GenerateBlocks(5, "node2");
 	GenerateBlocks(5, "node3");
 	UniValue r;
