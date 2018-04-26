@@ -1237,7 +1237,7 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 }
 CAmount GetFee(const size_t nBytes, const bool fUseInstantSend = false) {
 
-	CAmount nFee = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool)
+	CAmount nFee = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool);
 	if (fUseInstantSend)
 		nFee = std::max(nFee, CTxLockRequest::MIN_FEE);
 	return nFee;
