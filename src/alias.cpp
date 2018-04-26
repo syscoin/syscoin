@@ -1325,8 +1325,8 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 
 	}
 	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 33*FEE (for change output)
-	CAmount nFees = GetFee(10 + txIn_t.vin.size()) + GetFee(33);
-	unsigned int nCalculatedBytes = 10 + txIn_t.vin.size();
+	unsigned int nCalculatedBytes = 10 + txIn_t.vin.size() + 33;
+	CAmount nFees = GetFee(nCalculatedBytes);
 	for (auto& vin : txIn_t.vin) {
 		const unsigned int nBytes = ::GetSerializeSize(vin, SER_NETWORK, PROTOCOL_VERSION);
 		nCalculatedBytes += nBytes;
@@ -1445,8 +1445,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			throw runtime_error("Change address is not valid");
 		CTxOut changeOut(nChange, GetScriptForDestination(addressLast.Get()));
 		tx.vout.push_back(changeOut);
-		const int nBytesScript = ::GetSerializeSize(changeOut, SER_NETWORK, PROTOCOL_VERSION);
-		nCalculatedBytes += nBytesScript;
 	}
 	// else create new change address in this wallet
 	else {
@@ -1455,8 +1453,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		reservekey.GetReservedKey(vchPubKey, true);
 		CTxOut changeOut(nChange, GetScriptForDestination(vchPubKey.GetID()));
 		tx.vout.push_back(changeOut);
-		const int nBytesScript = ::GetSerializeSize(changeOut, SER_NETWORK, PROTOCOL_VERSION);
-		nCalculatedBytes += nBytesScript;
 	}
 	const int nTXSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
 	if (nTXSize != nCalculatedBytes) {
