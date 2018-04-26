@@ -1371,7 +1371,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 						return false;
 					}
-					const int nBytesScriptSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
+					const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 					nCalculatedBytes += nBytesScriptSig;
 					// add fees to account for every input added to this transaction
 					nFees += GetFee(nBytesScriptSig);
@@ -1417,7 +1417,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 					return false;
 				}
-				const int nBytesScriptSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
+				const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 				nCalculatedBytes += nBytesScriptSig;
 				// add fees to account for every input added to this transaction
 				nFees += GetFee(nBytesScriptSig, fUseInstantSend);
@@ -1429,10 +1429,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				}
 			}
 		}
-	}
-	const int nTXSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
-	if (nTXSize != nCalculatedBytes) {
-		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Transaction was calculated to be the wrong expected size: ") + strprintf("Calculated size %d vs Expected size %d, # Inputs %d # Outputs %d", nCalculatedBytes, nTXSize, tx.vin.size(), tx.vout.size()));
 	}
 	const CAmount &nChange = nCurrentAmount - nDesiredAmount - nFees;
 	if (nChange < 0)
@@ -1447,14 +1443,24 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		CSyscoinAddress addressLast(values.back().get_str());
 		if(!addressLast.IsValid())
 			throw runtime_error("Change address is not valid");
-		tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(addressLast.Get())));
+		CTxOut changeOut(nChange, GetScriptForDestination(addressLast.Get()));
+		tx.vout.push_back(changeOut);
+		const int nBytesScript = ::GetSerializeSize(changeOut, SER_NETWORK, PROTOCOL_VERSION);
+		nCalculatedBytes += nBytesScript;
 	}
 	// else create new change address in this wallet
 	else {
 		CReserveKey reservekey(pwalletMain);
 		CPubKey vchPubKey;
 		reservekey.GetReservedKey(vchPubKey, true);
-		tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
+		CTxOut changeOut(nChange, GetScriptForDestination(vchPubKey.Get()));
+		tx.vout.push_back(changeOut);
+		const int nBytesScript = ::GetSerializeSize(changeOut, SER_NETWORK, PROTOCOL_VERSION);
+		nCalculatedBytes += nBytesScript;
+	}
+	const int nTXSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
+	if (nTXSize != nCalculatedBytes) {
+		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Transaction was calculated to be the wrong expected size: ") + strprintf("Calculated size %d vs Expected size %d, # Inputs %d # Outputs %d", nCalculatedBytes, nTXSize, tx.vin.size(), tx.vout.size()));
 	}
 	if (tx.nVersion == SYSCOIN_TX_VERSION) {
 		// call this twice, with fJustCheck and !fJustCheck both with bSanity enabled so it doesn't actually write out to the databases just does the checks
