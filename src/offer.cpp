@@ -868,7 +868,9 @@ UniValue offernew(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 
 
-	return syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
+	UniValue res = syscointxfund_helper(vchAlias, vchWitness, aliasRecipient, vecSend);
+	res.push_back(stringFromVch(vchOffer));
+	return res;
 }
 
 UniValue offerlink(const JSONRPCRequest& request) {
