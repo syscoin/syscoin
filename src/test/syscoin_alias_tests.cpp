@@ -555,10 +555,19 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	CAmount balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK_EQUAL(balanceBefore, balanceAfter);
 
-	// transfer alias to someone else and balance should be same
+	// get sender address to use later
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnodebalance2"));
+	string senderaddress = find_value(r.get_obj(), "address").get_str();
+
+	// transfer alias to someone else and balance should be same on sender and receiver does not get your balance
 	string hex_str = AliasTransfer("node2", "jagnodebalance2", "node3", "changeddata4");
 	BOOST_CHECK(hex_str.empty());
+	// check receiver
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasbalance jagnodebalance2"));
+	CAmount balanceAfterTransfer = AmountFromValue(find_value(r.get_obj(), "balance"));
+	BOOST_CHECK_EQUAL(balanceAfterTransfer , 0);
+	// check sender
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getaddressbalance \"{\\\"addresses\\\": [\\\"" + senderaddress + "\\\"]}\""));
 	CAmount balanceAfterTransfer = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK(balanceAfterTransfer >= (balanceBefore-COIN));
 
@@ -577,12 +586,23 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK(abs((12.1*COIN+balanceAfterTransfer) -  balanceAfter) < COIN);
 
+
+	// get sender address to use later
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnodebalance2"));
+	senderaddress = find_value(r.get_obj(), "address").get_str();
+
 	// transfer again and balance is same
 	hex_str = AliasTransfer("node3", "jagnodebalance2", "node2", "changeddata4");
 	BOOST_CHECK(hex_str.empty());
+
+	// check receiver
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasbalance jagnodebalance2"));
-	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(balanceAfter >= (12.1*COIN+balanceAfterTransfer)-COIN);
+	balanceAfterTransfer = AmountFromValue(find_value(r.get_obj(), "balance"));
+	BOOST_CHECK_EQUAL(balanceAfterTransfer, 0);
+	// check sender
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getaddressbalance \"{\\\"addresses\\\": [\\\"" + senderaddress + "\\\"]}\""));
+	CAmount balanceAfterTransfer = AmountFromValue(find_value(r.get_obj(), "balance"));
+	BOOST_CHECK(balanceAfterTransfer >= (12.1*COIN + balanceAfterTransfer) - COIN);
 
 }
 BOOST_AUTO_TEST_CASE (generate_multisigalias)
