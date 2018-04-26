@@ -1337,6 +1337,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 			return false;
 		}
+		const CTxIn txInSigned(uint256(), vin.prevout.n, scriptSigRes);
 		const unsigned int nBytes = ::GetSerializeSize(scriptSigRes, SER_NETWORK, PROTOCOL_VERSION)+1;
 		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes, fUseInstantSend);
