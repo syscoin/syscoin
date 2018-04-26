@@ -36,6 +36,7 @@
 #include "validation.h"
 #include "consensus/validation.h"
 #include "spork.h"
+#include "script/sign.h"
 using namespace std;
 CAliasDB *paliasdb = NULL;
 COfferDB *pofferdb = NULL;
@@ -1367,7 +1368,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 						return false;
 					}
-					const int nBytesScripSig = ::GetSerializeSize(scriptSigRes, SER_NETWORK, PROTOCOL_VERSION);
+					const int nBytesScripSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
 					// add fees to account for every input added to this transaction
 					nFees += GetFee(nBytesScripSig);
 					tx.vin.push_back(txIn);
@@ -1412,7 +1413,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 					return false;
 				}
-				const int nBytesScripSig = ::GetSerializeSize(scriptSigRes, SER_NETWORK, PROTOCOL_VERSION);
+				const int nBytesScripSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
 				// add fees to account for every input added to this transaction
 				nFees += GetFee(nBytesScripSig, fUseInstantSend);
 				tx.vin.push_back(txIn);
