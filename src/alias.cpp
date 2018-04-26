@@ -1246,10 +1246,10 @@ CAmount GetFee(const size_t nBytes, const bool fUseInstantSend = false) {
 class CCountSigsVisitor : public boost::static_visitor<void> {
 private:
 	const CKeyStore &keystore;
-	int nNumSigs;
+	int &nNumSigs;
 
 public:
-	CCountSigsVisitor(const CKeyStore &keystoreIn, int &numSigs) : keystore(keystoreIn), nNumSigs(0) {}
+	CCountSigsVisitor(const CKeyStore &keystoreIn, int &numSigs) : keystore(keystoreIn), nNumSigs(numSigs) {}
 
 	void Process(const CScript &script) {
 		txnouttype type;
