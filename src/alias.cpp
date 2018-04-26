@@ -1415,7 +1415,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					continue;
 
 				CScript scriptSigRes;
-				ProduceSignature(DummySignatureCreator(pwalletMain), scriptPubKey, scriptSigRes));
+				ProduceSignature(DummySignatureCreator(pwalletMain), scriptPubKey, scriptSigRes);
 			
 				const CTxIn txInSigned(txid, nOut, scriptSigRes);
 				const int nBytesScriptSig = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
