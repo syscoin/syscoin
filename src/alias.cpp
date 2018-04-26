@@ -1296,7 +1296,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	// add total output amount of transaction to desired amount
 	CAmount nDesiredAmount = txIn.GetValueOut();
 	if (fUseInstantSend && nDesiredAmount > sporkManager.GetSporkValue(SPORK_5_INSTANTSEND_MAX_VALUE)*COIN) {
-		throw runtime_error(_("InstantSend doesn't support sending values that high yet. Transactions are currently limited to %1 SYS.") + sporkManager.GetSporkValue(SPORK_5_INSTANTSEND_MAX_VALUE));
+		throw runtime_error(_("InstantSend doesn't support sending values that high yet. Transactions are currently limited to 100000 SYS."));
 	}
 	CAmount nCurrentAmount = 0;
 	{
