@@ -1371,7 +1371,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 						return false;
 					}
-					const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
+					const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION)+1;
 					nCalculatedBytes += nBytesScriptSig;
 					// add fees to account for every input added to this transaction
 					nFees += GetFee(nBytesScriptSig);
@@ -1417,7 +1417,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 					return false;
 				}
-				const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
+				const int nBytesScriptSig = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION)+1;
 				nCalculatedBytes += nBytesScriptSig;
 				// add fees to account for every input added to this transaction
 				nFees += GetFee(nBytesScriptSig, fUseInstantSend);
