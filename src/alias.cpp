@@ -1268,7 +1268,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	CMutableTransaction tx;
 	if (!DecodeHexTx(tx, hexstring))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5500 - " + _("Could not send raw transaction: Cannot decode transaction from hex string"));
-	CTransaction txIn(tx);
+	CTransaction txIn_t(tx);
 	// if addresses are passed in use those, otherwise use whatever is in the wallet
 	UniValue addresses(UniValue::VOBJ);
 	if(params.size() > 1)
@@ -1303,7 +1303,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5501 - " + _("No funds found in addresses provided"));
 
 	// add total output amount of transaction to desired amount
-	CAmount nDesiredAmount = txIn.GetValueOut();
+	CAmount nDesiredAmount = txIn_t.GetValueOut();
 	if (fUseInstantSend && nDesiredAmount > sporkManager.GetSporkValue(SPORK_5_INSTANTSEND_MAX_VALUE)*COIN) {
 		throw runtime_error(_("InstantSend doesn't support sending values that high yet. Transactions are currently limited to 100000 SYS."));
 	}
@@ -1312,7 +1312,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		LOCK(cs_main);
 		CCoinsViewCache view(pcoinsTip);
 		// get value of inputs
-		nCurrentAmount = view.GetValueIn(txIn);
+		nCurrentAmount = view.GetValueIn(txIn_t);
 	}
 	int op, aliasOp;
 	vector<vector<unsigned char> > vvch;
@@ -1325,13 +1325,16 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 
 	}
 	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 33*FEE (for change output)
-	CAmount nFees = GetFee(10 + txIn.vin.size()) + GetFee(33);
-	for (auto& vin : txIn.vin) {
+	CAmount nFees = GetFee(10 + txIn_t.vin.size()) + GetFee(33);
+	unsigned int nCalculatedBytes = 0;
+	for (auto& vin : txIn_t.vin) {
 		const unsigned int nBytes = ::GetSerializeSize(vin, SER_NETWORK, PROTOCOL_VERSION);
+		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes, fUseInstantSend);
 	}
-	for (auto& vout : txIn.vout) {
+	for (auto& vout : txIn_t.vout) {
 		const unsigned int nBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
+		nCalculatedBytes += nBytes;
 		nFees += GetFee(nBytes);
 	}
 	if ((nCurrentAmount < (nDesiredAmount + nFees)) || bSendAll) {
@@ -1368,9 +1371,10 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 						return false;
 					}
-					const int nBytesScripSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
+					const int nBytesScriptSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
+					nCalculatedBytes += nBytesScriptSig;
 					// add fees to account for every input added to this transaction
-					nFees += GetFee(nBytesScripSig);
+					nFees += GetFee(nBytesScriptSig);
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1413,9 +1417,10 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Signing transaction failed"));
 					return false;
 				}
-				const int nBytesScripSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
+				const int nBytesScriptSig = ::GetSerializeSize(*(CScriptBase*)(&scriptSigRes), SER_NETWORK, PROTOCOL_VERSION);
+				nCalculatedBytes += nBytesScriptSig;
 				// add fees to account for every input added to this transaction
-				nFees += GetFee(nBytesScripSig, fUseInstantSend);
+				nFees += GetFee(nBytesScriptSig, fUseInstantSend);
 				tx.vin.push_back(txIn);
 				nCurrentAmount += nValue;
 				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1424,6 +1429,10 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				}
 			}
 		}
+	}
+	const int nTXSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
+	if (nTXSize != nCalculatedBytes) {
+		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5502 - " + _("Transaction was calculated to be the wrong expected size: ") + strprintf("Calculated size %d vs Expected size %d", nCalculatedBytes, nTXSize));
 	}
 	const CAmount &nChange = nCurrentAmount - nDesiredAmount - nFees;
 	if (nChange < 0)
