@@ -1453,7 +1453,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		CReserveKey reservekey(pwalletMain);
 		CPubKey vchPubKey;
 		reservekey.GetReservedKey(vchPubKey, true);
-		CTxOut changeOut(nChange, GetScriptForDestination(vchPubKey.Get()));
+		CTxOut changeOut(nChange, GetScriptForDestination(vchPubKey));
 		tx.vout.push_back(changeOut);
 		const int nBytesScript = ::GetSerializeSize(changeOut, SER_NETWORK, PROTOCOL_VERSION);
 		nCalculatedBytes += nBytesScript;
