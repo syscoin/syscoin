@@ -585,7 +585,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	BOOST_CHECK(hex_str.empty());
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasbalance jagnodebalance2"));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK_EQUAL(balanceAfter, 22.1*COIN);
+	BOOST_CHECK(abs(balanceBefore - 22.1) < COIN);
 
 
 	// get sender address to use later
