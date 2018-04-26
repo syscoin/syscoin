@@ -2156,7 +2156,6 @@ UniValue aliaspay(const JSONRPCRequest& request) {
 			+ HelpExampleRpc("aliaspay", "\"senderalias\", {\"Sa8H1Mq4pd6z3N4xFzxvVah9AWzZyykJiJ\":0.01,\"SkbcpmjqkERwvPPqke3puu9k9bCdHLaVoP\":0.02}, false, \"testing\"")
         );
 
-    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     string strFrom = params[0].get_str();
 	CAliasIndex theAlias;
