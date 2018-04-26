@@ -124,10 +124,9 @@ public:
 
 class CTxLockRequest
 {
-private:
-    static const CAmount MIN_FEE            = 0.001 * COIN;
 
 public:
+	static const CAmount MIN_FEE = 0.001 * COIN;
     static const int WARN_MANY_INPUTS       = 100;
 
     CTransactionRef tx;
