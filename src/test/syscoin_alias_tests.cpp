@@ -570,7 +570,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	// check sender
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getaddressbalance \"{\\\"addresses\\\": [\\\"" + senderaddress + "\\\"]}\""));
 	balanceAfterTransfer = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(balanceAfterTransfer >= (balanceBefore-COIN));
+	BOOST_CHECK(abs(balanceBefore - balanceAfterTransfer) < COIN);
 
 	// send money to alias and balance updates
 	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress jagnodebalance2 12.1"), runtime_error);
@@ -585,7 +585,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	BOOST_CHECK(hex_str.empty());
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasbalance jagnodebalance2"));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(abs((22.1*COIN) - balanceAfter) < COIN);
+	BOOST_CHECK_EQUAL(balanceAfter, 22.1*COIN);
 
 
 	// get sender address to use later
@@ -603,7 +603,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	// check sender
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "getaddressbalance \"{\\\"addresses\\\": [\\\"" + senderaddress + "\\\"]}\""));
 	balanceAfterTransfer = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(balanceAfterTransfer >= (12.1*COIN - 10*COIN + balanceAfterTransfer) - 2*COIN);
+	BOOST_CHECK(abs(22.1*COIN - balanceAfterTransfer) < COIN);
 
 }
 BOOST_AUTO_TEST_CASE (generate_multisigalias)
@@ -656,10 +656,10 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	GenerateBlocks(5);
 	GenerateBlocks(5, "node2");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasbalance jagnodemultisig1"));
-	CAmount balanceBefore = 19*COIN;
+	CAmount balanceBefore = 9*COIN;
 	CAmount balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnodemultisig1"));
-	BOOST_CHECK_EQUAL(balanceAfter, 19*COIN);
+	BOOST_CHECK_EQUAL(balanceAfter, 9*COIN);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str(), addressStr);
 	hex_str = AliasUpdate("node2", "jagnodemultisig1", "''", addressStr);
 	BOOST_CHECK(hex_str != "");
