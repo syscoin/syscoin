@@ -659,7 +659,7 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	CAmount balanceBefore = 9*COIN;
 	CAmount balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnodemultisig1"));
-	BOOST_CHECK_EQUAL(balanceAfter, 9*COIN);
+	BOOST_CHECK(abs(balanceBefore - balanceAfter) < COIN);
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str(), addressStr);
 	hex_str = AliasUpdate("node2", "jagnodemultisig1", "''", addressStr);
 	BOOST_CHECK(hex_str != "");
@@ -689,7 +689,7 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasbalance jagnodemultisig1"));
 	balanceBefore += 8*COIN;
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK_EQUAL(balanceBefore, balanceAfter);
+	BOOST_CHECK(abs(balanceBefore - balanceAfter) < COIN);
 	// create 2 of 3
 	BOOST_CHECK_NO_THROW(resCreate = CallRPC("node1", "createmultisig 2 \"[\\\"jagnodemultisig1\\\",\\\"jagnodemultisig2\\\", \\\"jagnodemultisig3\\\"]\""));	
 	redeemScript_value = find_value(resCreate, "redeemScript");
@@ -718,7 +718,7 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasbalance jagnodemultisig1"));
 	balanceBefore += 7*COIN;
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK_EQUAL(balanceBefore, balanceAfter);
+	BOOST_CHECK(abs(balanceBefore - balanceAfter) < COIN);
 
 	// no multisig so update as normal
 	hex_str = AliasUpdate("node2", "jagnodemultisig1");
@@ -733,7 +733,7 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasbalance jagnodemultisig1"));
 	balanceBefore += 6*COIN;
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK_EQUAL(balanceBefore, balanceAfter);
+	BOOST_CHECK(abs(balanceBefore - balanceAfter) < COIN);
 }
 BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfermultisig)
 {
