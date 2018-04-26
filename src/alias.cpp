@@ -1340,7 +1340,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
 				// look for alias inputs only, if not selecting all
-				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvchAlias.size() > 1 && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
+				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvchAlias.size() > 0 && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
 					
 					if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
 						continue;
