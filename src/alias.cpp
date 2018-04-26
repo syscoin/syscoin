@@ -2210,7 +2210,6 @@ UniValue aliaspay(const JSONRPCRequest& request) {
         vecSend.push_back(recipient);
     }
 
-    EnsureWalletIsUnlocked();
     // Check funds
 	UniValue balanceParams(UniValue::VARR);
 	balanceParams.push_back(strFrom);
