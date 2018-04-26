@@ -2111,7 +2111,8 @@ UniValue aliaspay_helper(const string strFromAddress, vector<CRecipient> &vecSen
 	UniValue paramsFund(UniValue::VARR);
 	paramsFund.push_back(EncodeHexTx(txNew));
 	paramsFund.push_back(paramObj);
-	paramsFund.push_back(false);
+	bool bSendAll = false;
+	paramsFund.push_back(bSendAll);
 	paramsFund.push_back(fUseInstantSend);
 
 	JSONRPCRequest request;
