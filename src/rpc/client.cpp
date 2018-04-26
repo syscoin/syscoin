@@ -173,6 +173,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
 	{ "aliasnew", 3, "expire_timestamp" },
 	{ "syscointxfund", 1, "addresses" },
 	{ "syscointxfund", 2, "sendall" },
+	{ "syscointxfund", 3, "instantsend" },
+	{ "aliasbalance", 1, "instantsend" },
 	{ "aliasupdate", 3, "accept_transfers_flags" },
 	{ "aliasupdate", 4, "expire_timestamp" },
 	{ "certtransfer", 3, "accessflags" },

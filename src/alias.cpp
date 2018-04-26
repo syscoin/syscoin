@@ -1235,7 +1235,7 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 }
 UniValue syscointxfund(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (request.fHelp || 1 > params.size() || 3 < params.size())
+	if (request.fHelp || 1 > params.size() || 4 < params.size())
 		throw runtime_error(
 			"syscointxfund\n"
 			"\nFunds a new syscoin transaction with inputs used from wallet or an array of addresses specified.\n"
@@ -1247,16 +1247,16 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			"      ,...\n"
 			"    ]\n"
 			"   \"sendall\" (boolean, optional) If addresses were specified, send all funds found in those addresses.\n"
+			"	\"instantsend\" (boolean, optional, default=false) Use InstantSend to send this transaction. \n
 			"}\n"
 			"\nExamples:\n"
-			+ HelpExampleCli("syscointxfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}' true")
-			+ HelpExampleRpc("syscointxfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]} false")
+			+ HelpExampleCli("syscointxfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}' true false")
+			+ HelpExampleRpc("syscointxfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]} false true")
 			+ HelpRequiringPassphrase());
-	
 	
 	const string &hexstring = params[0].get_str();
 	CMutableTransaction tx;
-	if (!DecodeHexTx(tx, hexstring) || tx.nVersion != SYSCOIN_TX_VERSION)
+	if (!DecodeHexTx(tx, hexstring))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5500 - " + _("Could not send raw transaction: Cannot decode transaction from hex string"));
 	CTransaction txIn(tx);
 	// if addresses are passed in use those, otherwise use whatever is in the wallet
@@ -1278,6 +1278,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	bool bSendAll = false;
 	if (params.size() > 2)
 		bSendAll = params[2].get_bool();
+	bool fUseInstantSend = false;
+	if (params.size() > 3)
+		fUseInstantSend = params[3].get_bool();
 	UniValue paramsUTXO(UniValue::VARR);
 	paramsUTXO.push_back(addresses);
 	JSONRPCRequest request1;
@@ -1291,6 +1294,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 
 	// add total output amount of transaction to desired amount
 	CAmount nDesiredAmount = txIn.GetValueOut();
+	if (fUseInstantSend && nDesiredAmount > sporkManager.GetSporkValue(SPORK_5_INSTANTSEND_MAX_VALUE)*COIN) {
+		throw runtime_error(_("InstantSend doesn't support sending values that high yet. Transactions are currently limited to %1 SYS."), sporkManager.GetSporkValue(SPORK_5_INSTANTSEND_MAX_VALUE));
+	}
 	CAmount nCurrentAmount = 0;
 	{
 		LOCK(cs_main);
@@ -1310,11 +1316,13 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	}
 	const unsigned int nBytes = ::GetSerializeSize(txIn, SER_NETWORK, PROTOCOL_VERSION);
 	// min fee based on bytes + 1 change output
-	const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
-	CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + outputFee;
+	CAmount inputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
+	if (fUseInstantSend)
+		inputFee = std::max(inputFee, CTxLockRequest::MIN_FEE);
+	CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
 	if ((nCurrentAmount < (nDesiredAmount + nFees)) || bSendAll) {
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
-		if (params.size() > 1) {
+		if (params.size() > 1 && !fUseInstantSend) {
 			LOCK(mempool.cs);
 			// fund with alias inputs first
 			for (unsigned int i = 0; i < utxoArray.size(); i++)
@@ -1341,7 +1349,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					if (!IsOutpointMature(outPoint))
 						continue;
 					// add 200 bytes of fees to account for every input added to this transaction
-					nFees += outputFee;
+					nFees += inputFee;
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1375,10 +1383,10 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				
 				if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
 					continue;
-				if (!IsOutpointMature(outPoint))
+				if (!IsOutpointMature(outPoint, fUseInstantSend))
 					continue;
 				// add 200 bytes of fees to account for every input added to this transaction
-				nFees += outputFee;
+				nFees += inputFee;
 				tx.vin.push_back(txIn);
 				nCurrentAmount += nValue;
 				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1410,11 +1418,13 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		reservekey.GetReservedKey(vchPubKey, true);
 		tx.vout.push_back(CTxOut(nChange, GetScriptForDestination(vchPubKey.GetID())));
 	}
-	// call this twice, with fJustCheck and !fJustCheck both with bSanity enabled so it doesn't actually write out to the databases just does the checks
-	if (!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
-		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
-	if (!CheckSyscoinInputs(tx, state, false, 0, CBlock(), true))
-		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
+	if (tx.nVersion == SYSCOIN_TX_VERSION) {
+		// call this twice, with fJustCheck and !fJustCheck both with bSanity enabled so it doesn't actually write out to the databases just does the checks
+		if (!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
+			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
+		if (!CheckSyscoinInputs(tx, state, false, 0, CBlock(), true))
+			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
+	}
 	// pass back new raw transaction
 	UniValue res(UniValue::VARR);
 	res.push_back(EncodeHexTx(tx));
@@ -1897,14 +1907,18 @@ UniValue prunesyscoinservices(const JSONRPCRequest& request)
 UniValue aliasbalance(const JSONRPCRequest& request)
 {
 	const UniValue &params = request.params;
-    if (request.fHelp || params.size() != 1)
+    if (request.fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
             "aliasbalance \"alias\"\n"
             "\nReturns the total amount received by the given alias in transactions.\n"
             "\nArguments:\n"
             "1. \"alias\"  (string, required) The syscoin alias for transactions.\n"
+			"2. \"instantsend\"  (boolean, optional) Check for balance available to instant send. Default is false.\n"
        );
 	vector<unsigned char> vchAlias = vchFromValue(params[0]);
+	bool fUseInstantSend = false;
+	if (params.size() > 1)
+		fUseInstantSend = params[1].get_bool();
 	CAmount nAmount = 0;
 	CAliasIndex theAlias;
 	if (!GetAlias(vchAlias, theAlias))
@@ -1951,7 +1965,7 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 				continue;
 			if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
 				continue;
-			if (!IsOutpointMature(outPoint))
+			if (!IsOutpointMature(outPoint, fUseInstantSend))
 				continue;
 			nAmount += nValue;
 
@@ -2076,124 +2090,32 @@ unsigned int aliasunspent(const vector<unsigned char> &vchAlias, COutPoint& outp
 	}
 	return count;
 }
-void aliasselectpaymentcoins(const vector<unsigned char> &vchAlias, const CAmount &nAmount, vector<COutPoint>& outPoints, CAmount &nRequiredAmount)
-{
-	nRequiredAmount = 0;
-	int numResults = 0;
-	CAmount nCurrentAmount = 0;
-	CAmount nDesiredAmount = nAmount;
-	outPoints.clear();
-	CAliasIndex theAlias;
-	if (!GetAlias(vchAlias, theAlias))
-		return;
+UniValue aliaspay_helper(const string strFromAddress, vector<CRecipient> &vecSend, bool fUseInstantSend) {
+	CMutableTransaction txNew;
+	// vouts to the payees
+	for (const auto& recipient : vecSend)
+	{
+		CTxOut txout(recipient.nAmount, recipient.scriptPubKey);
+		if (!txout.IsDust(dustRelayFee))
+		{
+			txNew.vout.push_back(txout);
+		}
+	}
+	UniValue paramObj(UniValue::VOBJ);
+	UniValue paramArr(UniValue::VARR);
+	paramArr.push_back(strFromAddress);
+	paramObj.push_back(Pair("addresses", paramArr));
 
-	const string &strAddressFrom = EncodeBase58(theAlias.vchAddress);
-	UniValue paramsUTXO(UniValue::VARR);
-	UniValue param(UniValue::VOBJ);
-	UniValue utxoParams(UniValue::VARR);
-	utxoParams.push_back(strAddressFrom);
-	param.push_back(Pair("addresses", utxoParams));
-	paramsUTXO.push_back(param);
+
+	UniValue paramsFund(UniValue::VARR);
+	paramsFund.push_back(EncodeHexTx(txNew));
+	paramsFund.push_back(paramObj);
+	paramsFund.push_back(false);
+	paramsFund.push_back(fUseInstantSend);
+
 	JSONRPCRequest request;
-	request.params = paramsUTXO;
-	const UniValue &resUTXOs = getaddressutxos(request);
-	UniValue utxoArray(UniValue::VARR);
-	if (resUTXOs.isArray())
-		utxoArray = resUTXOs.get_array();
-	else
-		return;
-
-	int op;
-	vector<vector<unsigned char> > vvch;
-	bool bIsFunded = false;
-	CAmount nFeeRequired = 0;
-	const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
-	for (unsigned int i = 0; i<utxoArray.size(); i++)
-	{
-		const UniValue& utxoObj = utxoArray[i].get_obj();
-		const uint256& txid = uint256S(find_value(utxoObj, "txid").get_str());
-		const int& nOut = find_value(utxoObj, "outputIndex").get_int();
-		const std::vector<unsigned char> &data(ParseHex(find_value(utxoObj, "script").get_str()));
-		const CScript& scriptPubKey = CScript(data.begin(), data.end());
-		const CAmount &nValue = find_value(utxoObj, "satoshis").get_int64();
-		const COutPoint &outPointToCheck = COutPoint(txid, nOut);
-		if (DecodeAliasScript(scriptPubKey, op, vvch) && vvch.size() > 1 && vvch[0] == theAlias.vchAlias && vvch[1] == theAlias.vchGUID) 
-			continue;
-		if (pwalletMain && pwalletMain->IsLockedCoin(txid, nOut))
-			continue;
-		{
-			LOCK(mempool.cs);
-			if (mempool.mapNextTx.find(outPointToCheck) != mempool.mapNextTx.end())
-				continue;
-		}
-		if (!IsOutpointMature(outPointToCheck))
-			continue;
-		// add min fee for every input
-		nFeeRequired += outputFee;
-		outPoints.push_back(outPointToCheck);
-		nCurrentAmount += nValue;
-		if (nCurrentAmount >= (nDesiredAmount + nFeeRequired)) {
-			bIsFunded = true;
-			break;
-		}
-		else
-			bIsFunded = false;
-
-	}
-	if (!bIsFunded) {
-		nRequiredAmount = (nDesiredAmount + nFeeRequired) - nCurrentAmount;
-		if (nRequiredAmount < 0)
-			nRequiredAmount = 0;
-	}
-}
-UniValue aliaspay_helper(const vector<unsigned char> &vchAlias, vector<CRecipient> &vecSend, bool instantsend) {
-	CWalletTx wtxNew1, wtxNew2;
-	CReserveKey reservekey(pwalletMain);
-	CAmount nFeeRequired;
-	std::string strError;
-	int nChangePosRet = -1;
-	CCoinControl coinControl;
-	coinControl.fAllowOtherInputs = false;
-	coinControl.fAllowWatchOnly = false;
-	// get total output required
-	// if aliasRecipient.scriptPubKey.empty() then it is not a syscoin tx, so don't set tx flag for syscoin tx in createtransaction()
-	// this is because aliasRecipient means an alias utxo was used to create a transaction, common to every syscoin service transaction, aliaspay doesn't use an alias utxo it just sends money from address to address but uses alias outputs to fund it and sign externally using zero knowledge auth.
-	if (!pwalletMain->CreateTransaction(vecSend, wtxNew1, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, instantsend)) {
-		throw runtime_error(strError);
-	}
-
-
-	CAmount nOutputTotal = 0;
-	BOOST_FOREACH(const CRecipient& recp, vecSend)
-	{
-		nOutputTotal += recp.nAmount;
-	}
-	const CAmount &outputFee = CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
-	// account for 1 change output
-	nFeeRequired += outputFee;
-	CAmount nTotal = nOutputTotal + nFeeRequired;
-	if (nTotal > 0)
-	{
-		vector<COutPoint> outPoints;
-		// select just get enough outputs to fund nTotal
-		aliasselectpaymentcoins(vchAlias, nTotal, outPoints, nFeeRequired);
-		if (nFeeRequired > 0)
-			throw runtime_error("SYSCOIN_RPC_ERROR ERRCODE: 9000 - " + _("The Syscoin Alias does not have enough funds to complete this transaction. You need to deposit the following amount of coins in order for the transaction to succeed: ") + ValueFromAmount(nFeeRequired).write());
-		BOOST_FOREACH(const COutPoint& outpoint, outPoints)
-		{
-			if (!coinControl.IsSelected(outpoint))
-				coinControl.Select(outpoint);
-		}
-	}
-
-	// now create the transaction and fake sign with enough funding from alias utxo's (if coinControl specified fAllowOtherInputs(true) then and only then are wallet inputs are allowed)
-	// actual signing happens in signrawtransaction outside of this function call after the wtxNew raw transaction is returned back to it
-	if (!pwalletMain->CreateTransaction(vecSend, wtxNew2, reservekey, nFeeRequired, nChangePosRet, strError, &coinControl, false, ALL_COINS, instantsend)) {
-		throw runtime_error(strError);
-	}
-	UniValue res(UniValue::VARR);
-	res.push_back(EncodeHexTx(*wtxNew2.tx));
-	return res;
+	request.params = paramsFund;
+	return syscointxfund(request);
 }
 UniValue aliaspay(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -2238,7 +2160,7 @@ UniValue aliaspay(const JSONRPCRequest& request) {
 	CAliasIndex theAlias;
 	if (!GetAlias(vchFromString(strFrom), theAlias))
 		throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5519 - " + _("Invalid fromalias"));
-
+	string strFromAddress = EncodeBase58(theAlias.vchAddress);
     UniValue sendTo = params[1].get_obj();
 
 	bool fUseInstantSend = false;
@@ -2290,6 +2212,7 @@ UniValue aliaspay(const JSONRPCRequest& request) {
     // Check funds
 	UniValue balanceParams(UniValue::VARR);
 	balanceParams.push_back(strFrom);
+	balanceParams.push_back(fUseInstantSend);
 	JSONRPCRequest request1;
 	request1.params = balanceParams;
 	const UniValue &resBalance = aliasbalance(request1);
@@ -2297,7 +2220,7 @@ UniValue aliaspay(const JSONRPCRequest& request) {
     if (totalAmount > nBalance)
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Alias has insufficient funds");
 
-	return aliaspay_helper(theAlias.vchAlias, vecSend, fUseInstantSend);
+	return aliaspay_helper(strFromAddress, vecSend, fUseInstantSend);
 }
 UniValue aliasaddscript(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -2638,7 +2561,7 @@ string GetSyscoinTransactionDescription(const CTransaction& tx, const int op, st
 	}
 	return strResponse + " " + responseGUID;
 }
-bool IsOutpointMature(const COutPoint& outpoint)
+bool IsOutpointMature(const COutPoint& outpoint, bool fUseInstantSend)
 {
 	Coin coin;
 	GetUTXOCoin(outpoint, coin);
@@ -2647,6 +2570,8 @@ bool IsOutpointMature(const COutPoint& outpoint)
 	int numConfirmationsNeeded = 2;
 	if (coin.IsCoinBase())
 		numConfirmationsNeeded = COINBASE_MATURITY;
+	if (fUseInstantSend)
+		numConfirmationsNeeded = Params().GetConsensus().nInstantSendConfirmationsRequired;
 
 	if (coin.nHeight > -1 && chainActive.Tip())
 		return (chainActive.Height() - coin.nHeight) >= numConfirmationsNeeded;
