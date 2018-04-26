@@ -1327,14 +1327,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	// # vin (with IX)*FEE + # vout*FEE + (10 + # vin)*FEE + 34*FEE (for change output)
 	CAmount nFees = GetFee(10 + 34);
 	for (auto& vin : tx.vin) {
-		Coin coin;
-		if (!GetUTXOCoin(vin.prevout, coin))
-			continue;
-		CScript scriptSigRes;
-		ProduceSignature(DummySignatureCreator(pwalletMain), coin.out.scriptPubKey, scriptSigRes);
-		const CTxIn txInSigned(uint256(), vin.prevout.n, scriptSigRes);
-		const unsigned int nBytes = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
-		nFees += GetFee(nBytes, fUseInstantSend);
+		nFees += GetFee(150, fUseInstantSend);
 	}
 	for (auto& vout : tx.vout) {
 		const unsigned int nBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
@@ -1368,14 +1361,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						continue;
 					if (!IsOutpointMature(outPoint))
 						continue;
-					
-					CScript scriptSigRes;
-					ProduceSignature(DummySignatureCreator(pwalletMain), scriptPubKey, scriptSigRes);
-						
-					const CTxIn txInSigned(txid, nOut, scriptSigRes);
-					const int nBytesScriptSig = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
+				
 					// add fees to account for every input added to this transaction
-					nFees += GetFee(nBytesScriptSig);
+					nFees += GetFee(150, fUseInstantSend);
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1412,13 +1400,8 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (!IsOutpointMature(outPoint, fUseInstantSend))
 					continue;
 
-				CScript scriptSigRes;
-				ProduceSignature(DummySignatureCreator(pwalletMain), scriptPubKey, scriptSigRes);
-			
-				const CTxIn txInSigned(txid, nOut, scriptSigRes);
-				const int nBytesScriptSig = ::GetSerializeSize(txInSigned, SER_NETWORK, PROTOCOL_VERSION)+1;
 				// add fees to account for every input added to this transaction
-				nFees += GetFee(nBytesScriptSig, fUseInstantSend);
+				nFees += GetFee(150, fUseInstantSend);
 				tx.vin.push_back(txIn);
 				nCurrentAmount += nValue;
 				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
