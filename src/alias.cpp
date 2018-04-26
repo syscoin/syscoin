@@ -1308,7 +1308,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	int op, aliasOp;
 	vector<vector<unsigned char> > vvch;
 	vector<vector<unsigned char> > vvchAlias;
-	if (!DecodeAliasTx(tx, op, vvchAlias))
+	if (tx.nVersion == SYSCOIN_TX_VERSION && !DecodeAliasTx(tx, op, vvchAlias))
 	{
 		FindAliasInTx(tx, vvchAlias);
 		// it is assumed if no alias output is found, then it is for another service so this would be an alias update
@@ -1323,7 +1323,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	CAmount nFees = CWallet::GetMinimumFee(nBytes, nTxConfirmTarget, mempool) + CWallet::GetMinimumFee(200u, nTxConfirmTarget, mempool);
 	if ((nCurrentAmount < (nDesiredAmount + nFees)) || bSendAll) {
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
-		if (params.size() > 1 && !fUseInstantSend) {
+		if (tx.nVersion == SYSCOIN_TX_VERSION && params.size() > 1 && !fUseInstantSend) {
 			LOCK(mempool.cs);
 			// fund with alias inputs first
 			for (unsigned int i = 0; i < utxoArray.size(); i++)
@@ -1340,7 +1340,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
 				// look for alias inputs only, if not selecting all
-				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
+				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvchAlias.size() > 1 && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
 					
 					if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
 						continue;
