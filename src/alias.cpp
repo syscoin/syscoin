@@ -35,6 +35,7 @@
 #include "instantx.h"
 #include "validation.h"
 #include "consensus/validation.h"
+#include "spork.h"
 using namespace std;
 CAliasDB *paliasdb = NULL;
 COfferDB *pofferdb = NULL;
