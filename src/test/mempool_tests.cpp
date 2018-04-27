@@ -431,8 +431,7 @@ BOOST_AUTO_TEST_CASE(MempoolAncestorIndexingTest)
 
 BOOST_AUTO_TEST_CASE(MempoolSizeLimitTest)
 {
-	// SYSCOIN
-    CTxMemPool pool(CFeeRate(10000));
+    CTxMemPool pool(CFeeRate(1000));
     TestMemPoolEntryHelper entry;
     entry.dPriority = 10.0;
 
@@ -479,8 +478,8 @@ BOOST_AUTO_TEST_CASE(MempoolSizeLimitTest)
     BOOST_CHECK(!pool.exists(tx1.GetHash()));
     BOOST_CHECK(!pool.exists(tx2.GetHash()));
     BOOST_CHECK(!pool.exists(tx3.GetHash()));
-	// SYSCOIN
-    CFeeRate maxFeeRateRemoved(250000, ::GetSerializeSize(CTransaction(tx3), SER_NETWORK, PROTOCOL_VERSION) + ::GetSerializeSize(CTransaction(tx2), SER_NETWORK, PROTOCOL_VERSION));
+
+    CFeeRate maxFeeRateRemoved(25000, ::GetSerializeSize(CTransaction(tx3), SER_NETWORK, PROTOCOL_VERSION) + ::GetSerializeSize(CTransaction(tx2), SER_NETWORK, PROTOCOL_VERSION));
     BOOST_CHECK_EQUAL(pool.GetMinFee(1).GetFeePerK(), maxFeeRateRemoved.GetFeePerK() + 1000);
 
     CMutableTransaction tx4 = CMutableTransaction();
