@@ -1401,7 +1401,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					// if we have more than 1 unspent alias output it means we aren't funding any more (we create 10 once we have 1 or less left)
 					// so that means we shouldn't spend all our alias outputs otherwise we will have an unusable alias with 0 alias outputs left
 					// this ensures that the last alias output will be preserved
-					if (unspentcount > 1 && unspentindex >= unspentcount)
+					if (unspentcount > 1 && unspentindex >= (unspentcount-1))
 						break;
 					int numSigs = 0;
 					CCountSigsVisitor(*pwalletMain, numSigs).Process(scriptPubKey);
