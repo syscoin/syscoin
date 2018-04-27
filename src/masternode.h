@@ -29,7 +29,7 @@ static const int MASTERNODE_POSE_BAN_MAX_SCORE          = 5;
 // sentinel version before implementation of nSentinelVersion in CMasternodePing
 #define DEFAULT_SENTINEL_VERSION 0x010001
 // daemon version before implementation of nDaemonVersion in CMasternodePing
-#define DEFAULT_DAEMON_VERSION 120200
+#define DEFAULT_DAEMON_VERSION 130000
 
 class CMasternodePing
 {
@@ -60,20 +60,8 @@ public:
         if (!(s.GetType() & SER_GETHASH)) {
             READWRITE(vchSig);
         }
-        if(ser_action.ForRead() && s.size() == 0) {
-            // TODO: drop this after migration to 70209
-            fSentinelIsCurrent = false;
-            nSentinelVersion = DEFAULT_SENTINEL_VERSION;
-            nDaemonVersion = DEFAULT_DAEMON_VERSION;
-            return;
-        }
         READWRITE(fSentinelIsCurrent);
         READWRITE(nSentinelVersion);
-        if(ser_action.ForRead() && s.size() == 0) {
-            // TODO: drop this after migration to 70209
-            nDaemonVersion = DEFAULT_DAEMON_VERSION;
-            return;
-        }
         if (!(s.GetType() & SER_NETWORK)) {
             READWRITE(nDaemonVersion);
         }
@@ -408,8 +396,8 @@ public:
 
         CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
         // adding dummy values here to match old hashing format
-        ss << masternodeOutpoint1 << uint8_t{} << 0xffffffff;
-        ss << masternodeOutpoint2 << uint8_t{} << 0xffffffff;
+        ss << masternodeOutpoint1;
+        ss << masternodeOutpoint2;
         ss << addr;
         ss << nonce;
         ss << nBlockHeight;

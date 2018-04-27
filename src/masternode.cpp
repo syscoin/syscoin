@@ -588,7 +588,7 @@ uint256 CMasternodeBroadcast::GetHash() const
     // Note: doesn't match serialization
 
     CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
-    ss << outpoint << uint8_t{} << 0xffffffff; // adding dummy values here to match old hashing format
+    ss << outpoint;
     ss << pubKeyCollateralAddress;
     ss << sigTime;
     return ss.GetHash();
@@ -596,15 +596,7 @@ uint256 CMasternodeBroadcast::GetHash() const
 
 uint256 CMasternodeBroadcast::GetSignatureHash() const
 {
-    // TODO: replace with "return SerializeHash(*this);" after migration to 70209
-    CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
-    ss << outpoint;
-    ss << addr;
-    ss << pubKeyCollateralAddress;
-    ss << pubKeyMasternode;
-    ss << sigTime;
-    ss << nProtocolVersion;
-    return ss.GetHash();
+    return SerializeHash(*this);
 }
 
 bool CMasternodeBroadcast::Sign(const CKey& keyCollateralAddress)
@@ -670,22 +662,9 @@ void CMasternodeBroadcast::Relay(CConnman& connman) const
 
 uint256 CMasternodePing::GetHash() const
 {
-    CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
     if (sporkManager.IsSporkActive(SPORK_6_NEW_SIGS)) {
-        // TODO: replace with "return SerializeHash(*this);" after migration to 70209
-        ss << masternodeOutpoint;
-        ss << blockHash;
-        ss << sigTime;
-        ss << fSentinelIsCurrent;
-        ss << nSentinelVersion;
-        ss << nDaemonVersion;
-    } else {
-        // Note: doesn't match serialization
-
-        ss << masternodeOutpoint << uint8_t{} << 0xffffffff; // adding dummy values here to match old hashing format
-        ss << sigTime;
-    }
-    return ss.GetHash();
+        return SerializeHash(*this);
+    } 
 }
 
 uint256 CMasternodePing::GetSignatureHash() const
