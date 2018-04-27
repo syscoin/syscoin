@@ -1367,6 +1367,11 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	if (nCurrentAmount < (nDesiredAmount + nFees)) {
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
 		if (tx.nVersion == SYSCOIN_TX_VERSION && params.size() > 1 && !fUseInstantSend) {
+			COutPoint aliasOutPoint;
+			unsigned int unspentcount = 0;
+			if(!vvchAlias.empty())
+				unspentcount = aliasunspent(vvchAlias[0], aliasOutPoint);
+			unsigned int unspentindex = 0;
 			LOCK(mempool.cs);
 			// fund with alias inputs first
 			for (unsigned int i = 0; i < utxoArray.size(); i++)
@@ -1392,6 +1397,12 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 						continue;
 					if (!IsOutpointMature(outPoint))
 						continue;
+					unspentindex++;
+					// if we have more than 1 unspent alias output it means we aren't funding any more (we create 10 once we have 1 or less left)
+					// so that means we shouldn't spend all our alias outputs otherwise we will have an unusable alias with 0 alias outputs left
+					// this ensures that the last alias output will be preserved
+					if (unspentcount > 1 && unspentindex >= unspentcount)
+						break;
 					int numSigs = 0;
 					CCountSigsVisitor(*pwalletMain, numSigs).Process(scriptPubKey);
 					// add fees to account for every input added to this transaction
@@ -1470,9 +1481,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 	if (tx.nVersion == SYSCOIN_TX_VERSION) {
 		// call this twice, with fJustCheck and !fJustCheck both with bSanity enabled so it doesn't actually write out to the databases just does the checks
 		if (!CheckSyscoinInputs(tx, state, true, 0, CBlock(), true))
-			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
+			throw runtime_error(FormatStateMessage(state));
 		if (!CheckSyscoinInputs(tx, state, false, 0, CBlock(), true))
-			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5503 - " + FormatStateMessage(state));
+			throw runtime_error(FormatStateMessage(state));
 	}
 	// pass back new raw transaction
 	UniValue res(UniValue::VARR);
