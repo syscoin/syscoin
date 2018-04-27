@@ -631,17 +631,9 @@ bool CMasternodeBroadcast::CheckSignature(int& nDos) const
         uint256 hash = GetSignatureHash();
 
         if (!CHashSigner::VerifyHash(hash, pubKeyCollateralAddress, vchSig, strError)) {
-            // maybe it's in old format
-            std::string strMessage = addr.ToString(false) + boost::lexical_cast<std::string>(sigTime) +
-                            pubKeyCollateralAddress.GetID().ToString() + pubKeyMasternode.GetID().ToString() +
-                            boost::lexical_cast<std::string>(nProtocolVersion);
-
-            if (!CMessageSigner::VerifyMessage(pubKeyCollateralAddress, vchSig, strMessage, strError)){
-                // nope, not in old format either
-                LogPrintf("CMasternodeBroadcast::CheckSignature -- Got bad Masternode announce signature, error: %s\n", strError);
-                nDos = 100;
-                return false;
-            }
+            LogPrintf("CMasternodeBroadcast::CheckSignature -- Got bad Masternode announce signature, error: %s\n", strError);
+            nDos = 100;
+            return false;          
         }
     } 
 
