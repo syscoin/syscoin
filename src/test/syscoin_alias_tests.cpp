@@ -176,9 +176,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasmultiupdate)
 	BOOST_CHECK(hex_str.empty());
 
 
-	// get 10 more utxo's because on transfer it will send 2 over
-	AliasUpdate("node2", "jagmultiupdate", "changedata3");
-	// on this one it should create 10 more
+	// get 10 more utxo's because on transfer it sends only 1 to receiver
 	AliasUpdate("node2", "jagmultiupdate", "changedata3");
 
 	// after transfer it can't update alias even though there are utxo's available from old owner
@@ -214,9 +212,7 @@ BOOST_AUTO_TEST_CASE (generate_aliasmultiupdate)
 	hex_str = AliasTransfer("node2", "jagmultiupdate", "node1", "changeddata7");
 	BOOST_CHECK(hex_str.empty());
 
-	// get 10 more utxo's because on transfer it will send 2 over
-	AliasUpdate("node1", "jagmultiupdate", "changedata3");
-	// on this one it should create 10 more
+	// get 10 more utxo's because on transfer
 	AliasUpdate("node1", "jagmultiupdate", "changedata3");
 
 
@@ -685,6 +681,11 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	GenerateBlocks(5);
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnodemultisig1"));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str(), addressStr);
+
+
+	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress jagnodemultisig1 1"), runtime_error);
+	GenerateBlocks(5);
+
 	// ensure only one signature is needed
 	BOOST_CHECK_NO_THROW(CallRPC("node1", "aliasaddscript " + redeemScript));
 	hex_str = AliasUpdate("node1", "jagnodemultisig1");
