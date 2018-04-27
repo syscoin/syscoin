@@ -1472,16 +1472,17 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 				entry.push_back(Pair("systx", strResponse));
 				entry.push_back(Pair("systype", strResponseEnglish));
 				entry.push_back(Pair("sysguid", strResponseGUID));
-				{
-					LOCK(cs_main);
-					if (!FindAliasInTx(tx, aliasVvch)) {
-						continue;
-					}
-				}
-				aliasName = stringFromVch(aliasVvch[0]);
-
-				entry.push_back(Pair("sysalias", aliasName));
 				if (op == OP_ASSET_ALLOCATION_SEND || op == OP_ASSET_SEND) {
+					for (auto& vin : tx.vin) {
+						if (!pwalletMain || !pwalletMain->mapWallet.count(vin.prevout.hash)) break;
+						if (DecodeAliasScript(pwalletMain->mapWallet[vin.prevout.hash].vout[vin.prevout.n].scriptPubKey, aliasOp, aliasVvch)) {
+							break;
+						}
+					}
+					if (aliasVvch.empty())
+						continue;
+					aliasName = stringFromVch(aliasVvch[0]);
+
 					CAssetAllocation assetallocation(tx);
 					if (!assetallocation.IsNull()) {
 						if (!assetallocation.listSendingAllocationAmounts.empty()) {
@@ -1507,8 +1508,9 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 					}
 				}
 				entry.push_back(Pair("sysallocations", oAssetAllocationReceiversArray));
+				entry.push_back(Pair("sysalias", aliasName));
 			}
-            ret.push_back(entry);
+			ret.push_back(entry);
         }
     }
 
@@ -1563,16 +1565,17 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 					entry.push_back(Pair("systx", strResponse));
 					entry.push_back(Pair("systype", strResponseEnglish));
 					entry.push_back(Pair("sysguid", strResponseGUID));
-					{
-						LOCK(cs_main);
-						if (!FindAliasInTx(tx, aliasVvch)) {
-							continue;
-						}
-					}
-					aliasName = stringFromVch(aliasVvch[0]);
-
-					entry.push_back(Pair("sysalias", aliasName));
 					if (op == OP_ASSET_ALLOCATION_SEND || op == OP_ASSET_SEND) {
+						for (auto& vin : tx.vin) {
+							if (!pwalletMain || !pwalletMain->mapWallet.count(vin.prevout.hash)) break;
+							if (DecodeAliasScript(pwalletMain->mapWallet[vin.prevout.hash].vout[vin.prevout.n].scriptPubKey, aliasOp, aliasVvch)) {
+								break;
+							}
+						}
+						if (aliasVvch.empty())
+							continue;
+						aliasName = stringFromVch(aliasVvch[0]);
+
 						CAssetAllocation assetallocation(tx);
 						if (!assetallocation.IsNull()) {
 							if (!assetallocation.listSendingAllocationAmounts.empty()) {
@@ -1598,13 +1601,13 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 						}
 					}
 					entry.push_back(Pair("sysallocations", oAssetAllocationReceiversArray));
+					entry.push_back(Pair("sysalias", aliasName));
 				}
-                ret.push_back(entry);
+				ret.push_back(entry);
             }
         }
     }
 }
-
 void AcentryToJSON(const CAccountingEntry& acentry, const std::string& strAccount, UniValue& ret)
 {
     bool fAllAccounts = (strAccount == std::string("*"));
