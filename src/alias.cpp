@@ -1172,7 +1172,7 @@ UniValue SyscoinListReceived(bool includeempty=true)
 	}
 	return ret;
 }
-UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend, bool transferAlias) {
+UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vector<unsigned char> &vchWitness, const CRecipient &aliasRecipient, vector<CRecipient> &vecSend) {
 	CMutableTransaction txNew;
 	txNew.nVersion = SYSCOIN_TX_VERSION;
 	if (!vchWitness.empty())
@@ -1226,7 +1226,6 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 	UniValue paramsFund(UniValue::VARR);
 	paramsFund.push_back(EncodeHexTx(txNew));
 	paramsFund.push_back(paramObj);
-	paramsFund.push_back(transferAlias);
 	
 	JSONRPCRequest request;
 	request.params = paramsFund;
@@ -1271,7 +1270,7 @@ public:
 };
 UniValue syscointxfund(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
-	if (request.fHelp || 1 > params.size() || 4 < params.size())
+	if (request.fHelp || 1 > params.size() || 3 < params.size())
 		throw runtime_error(
 			"syscointxfund\n"
 			"\nFunds a new syscoin transaction with inputs used from wallet or an array of addresses specified.\n"
@@ -1282,12 +1281,11 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			"      \"address\"  (array, string) Address used to fund this transaction. Leave empty to use wallet. Last address gets sent the change.\n"
 			"      ,...\n"
 			"    ]\n"
-			"   \"sendall\" (boolean, optional) If addresses were specified, send all funds found in those addresses.\n"
 			"	\"instantsend\" (boolean, optional, default=false) Use InstantSend to send this transaction. \n"
 			"}\n"
 			"\nExamples:\n"
-			+ HelpExampleCli("syscointxfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}' true false")
-			+ HelpExampleRpc("syscointxfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]} false true")
+			+ HelpExampleCli("syscointxfund", " <hexstring> '{\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]}' false")
+			+ HelpExampleRpc("syscointxfund", " <hexstring> {\"addresses\": [\"175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W\"]} true")
 			+ HelpRequiringPassphrase());
 	if (!pwalletMain)
 		throw runtime_error("No Wallet found!");
@@ -1312,12 +1310,9 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 		addresses.push_back(Pair("addresses", addressArray));
 	}
 	CValidationState state;
-	bool bSendAll = false;
-	if (params.size() > 2)
-		bSendAll = params[2].get_bool();
 	bool fUseInstantSend = false;
-	if (params.size() > 3)
-		fUseInstantSend = params[3].get_bool();
+	if (params.size() > 2)
+		fUseInstantSend = params[2].get_bool();
 	UniValue paramsUTXO(UniValue::VARR);
 	paramsUTXO.push_back(addresses);
 	JSONRPCRequest request1;
@@ -1360,13 +1355,16 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 			continue;
 		int numSigs = 0;
 		CCountSigsVisitor(*pwalletMain, numSigs).Process(coin.out.scriptPubKey);
-		nFees += GetFee(numSigs*150, fUseInstantSend);
+		if(tx.nVersion == SYSCOIN_TX_VERSION && params.size() > 1)
+			nFees += GetFee(numSigs*150);
+		else
+			nFees += GetFee(numSigs * 150, fUseInstantSend);
 	}
 	for (auto& vout : tx.vout) {
 		const unsigned int nBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
 		nFees += GetFee(nBytes);
 	}
-	if ((nCurrentAmount < (nDesiredAmount + nFees)) || bSendAll) {
+	if (nCurrentAmount < (nDesiredAmount + nFees)) {
 		// only look for alias inputs if addresses were passed in, if looking through wallet we do not want to fund via alias inputs as we may end up spending alias inputs inadvertently
 		if (tx.nVersion == SYSCOIN_TX_VERSION && params.size() > 1 && !fUseInstantSend) {
 			LOCK(mempool.cs);
@@ -1385,7 +1383,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
 				// look for alias inputs only, if not selecting all
-				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvchAlias.size() > 0 && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1]) || bSendAll) {
+				if ((DecodeAliasScript(scriptPubKey, aliasOp, vvch) && vvchAlias.size() > 0 && vvch.size() > 1 && vvch[0] == vvchAlias[0] && vvch[1] == vvchAlias[1])) {
 					
 					if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
 						continue;
@@ -1401,7 +1399,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
-						if (!bSendAll)
 							break;
 					}
 				}
@@ -1424,7 +1421,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
 				// look for non alias inputs
-				if (DecodeAliasScript(scriptPubKey, aliasOp, vvch) && !bSendAll)
+				if (DecodeAliasScript(scriptPubKey, aliasOp, vvch))
 					continue;
 				if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
 					continue;
@@ -1440,7 +1437,6 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				tx.vin.push_back(txIn);
 				nCurrentAmount += nValue;
 				if (nCurrentAmount >= (nDesiredAmount + nFees)) {
-					if (!bSendAll)
 						break;
 				}
 			}
@@ -1792,10 +1788,7 @@ UniValue aliasupdate(const JSONRPCRequest& request) {
 	vecSend.push_back(fee);
 	vecSend.push_back(recipient);
 	
-	bool transferAlias = false;
-	if(newAddress.ToString() != EncodeBase58(copyAlias.vchAddress))
-		transferAlias = true;
-	return syscointxfund_helper(vchAlias, vchWitness, recipient, vecSend, transferAlias);
+	return syscointxfund_helper(vchAlias, vchWitness, recipient, vecSend);
 }
 UniValue syscoindecoderawtransaction(const JSONRPCRequest& request) {
 	const UniValue &params = request.params;
@@ -2163,8 +2156,6 @@ UniValue aliaspay_helper(const string strFromAddress, vector<CRecipient> &vecSen
 	UniValue paramsFund(UniValue::VARR);
 	paramsFund.push_back(EncodeHexTx(txNew));
 	paramsFund.push_back(paramObj);
-	bool bSendAll = false;
-	paramsFund.push_back(bSendAll);
 	paramsFund.push_back(fUseInstantSend);
 
 	JSONRPCRequest request;
