@@ -1191,12 +1191,9 @@ UniValue syscointxfund_helper(const vector<unsigned char> &vchAlias, const vecto
 	COutPoint aliasOutPoint;
 	unsigned int unspentcount = aliasunspent(vchAlias, aliasOutPoint);
 	// for the alias utxo (1 per transaction is used)
-	if (unspentcount <= 1 || transferAlias)
+	if (unspentcount <= 1)
 	{
-		unsigned int iterations = MAX_ALIAS_UPDATES_PER_BLOCK;
-		if (transferAlias)
-			iterations = 1;
-		for (unsigned int i = 0; i < iterations; i++)
+		for (unsigned int i = 0; i < MAX_ALIAS_UPDATES_PER_BLOCK; i++)
 			vecSend.push_back(aliasRecipient);
 	}
 	Coin pcoin;
@@ -1400,7 +1397,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 					int numSigs = 0;
 					CCountSigsVisitor(*pwalletMain, numSigs).Process(scriptPubKey);
 					// add fees to account for every input added to this transaction
-					nFees += GetFee(numSigs*150, fUseInstantSend);
+					nFees += GetFee(numSigs*150);
 					tx.vin.push_back(txIn);
 					nCurrentAmount += nValue;
 					if (nCurrentAmount >= (nDesiredAmount + nFees)) {
@@ -1427,7 +1424,7 @@ UniValue syscointxfund(const JSONRPCRequest& request) {
 				if (std::find(tx.vin.begin(), tx.vin.end(), txIn) != tx.vin.end())
 					continue;
 				// look for non alias inputs
-				if (DecodeAliasScript(scriptPubKey, aliasOp, vvch))
+				if (DecodeAliasScript(scriptPubKey, aliasOp, vvch) && !bSendAll)
 					continue;
 				if (mempool.mapNextTx.find(outPoint) != mempool.mapNextTx.end())
 					continue;

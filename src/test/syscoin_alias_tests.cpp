@@ -579,14 +579,14 @@ BOOST_AUTO_TEST_CASE (generate_aliasbalancewithtransfer)
 	GenerateBlocks(5, "node3");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node3", "aliasbalance jagnodebalance2"));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(abs(balanceAfter - 22.1) < COIN);
+	BOOST_CHECK(abs(balanceAfter - 22.1*COIN) < COIN);
 
 	// edit and balance should remain the same
 	hex_str = AliasUpdate("node3", "jagnodebalance2", "pubdata1");
 	BOOST_CHECK(hex_str.empty());
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "aliasbalance jagnodebalance2"));
 	balanceAfter = AmountFromValue(find_value(r.get_obj(), "balance"));
-	BOOST_CHECK(abs(balanceAfter - 22.1) < COIN);
+	BOOST_CHECK(abs(balanceAfter - 22.1*COIN) < COIN);
 
 
 	// get sender address to use later
@@ -703,6 +703,10 @@ BOOST_AUTO_TEST_CASE (generate_multisigalias)
 	BOOST_CHECK_EQUAL(tmp, "");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasinfo jagnodemultisig1"));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "address").get_str(), addressStr);
+
+	BOOST_CHECK_THROW(CallRPC("node1", "sendtoaddress jagnodemultisig1 1"), runtime_error);
+	GenerateBlocks(5);
+
 	// 2 sigs needed, remove redeemScript to make it a normal alias
 	BOOST_CHECK_NO_THROW(CallRPC("node3", "aliasaddscript " + redeemScript));
 	hex_str = AliasUpdate("node3", "jagnodemultisig1", "''", oldAddressStr);
