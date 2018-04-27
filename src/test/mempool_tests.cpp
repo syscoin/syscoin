@@ -431,7 +431,8 @@ BOOST_AUTO_TEST_CASE(MempoolAncestorIndexingTest)
 
 BOOST_AUTO_TEST_CASE(MempoolSizeLimitTest)
 {
-    CTxMemPool pool(CFeeRate(1000));
+	// SYSCOIN
+    CTxMemPool pool(CFeeRate(10000));
     TestMemPoolEntryHelper entry;
     entry.dPriority = 10.0;
 
