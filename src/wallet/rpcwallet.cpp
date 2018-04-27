@@ -1475,7 +1475,7 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 				if (op == OP_ASSET_ALLOCATION_SEND || op == OP_ASSET_SEND) {
 					for (auto& vin : tx.vin) {
 						if (!pwalletMain || !pwalletMain->mapWallet.count(vin.prevout.hash)) break;
-						if (DecodeAliasScript(pwalletMain->mapWallet[vin.prevout.hash].vout[vin.prevout.n].scriptPubKey, aliasOp, aliasVvch)) {
+						if (DecodeAliasScript(pwalletMain->mapWallet[vin.prevout.hash].tx->vout[vin.prevout.n].scriptPubKey, aliasOp, aliasVvch)) {
 							break;
 						}
 					}
@@ -1568,7 +1568,7 @@ void ListTransactions(const CWalletTx& wtx, const std::string& strAccount, int n
 					if (op == OP_ASSET_ALLOCATION_SEND || op == OP_ASSET_SEND) {
 						for (auto& vin : tx.vin) {
 							if (!pwalletMain || !pwalletMain->mapWallet.count(vin.prevout.hash)) break;
-							if (DecodeAliasScript(pwalletMain->mapWallet[vin.prevout.hash].vout[vin.prevout.n].scriptPubKey, aliasOp, aliasVvch)) {
+							if (DecodeAliasScript(pwalletMain->mapWallet[vin.prevout.hash].tx->vout[vin.prevout.n].scriptPubKey, aliasOp, aliasVvch)) {
 								break;
 							}
 						}
