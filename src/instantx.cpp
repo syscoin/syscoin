@@ -1070,13 +1070,8 @@ bool CTxLockVote::CheckSignature() const
         uint256 hash = GetSignatureHash();
 
         if (!CHashSigner::VerifyHash(hash, infoMn.pubKeyMasternode, vchMasternodeSignature, strError)) {
-            // could be a signature in old format
-            std::string strMessage = txHash.ToString() + outpoint.ToStringShort();
-            if(!CMessageSigner::VerifyMessage(infoMn.pubKeyMasternode, vchMasternodeSignature, strMessage, strError)) {
-                // nope, not in old format either
-                LogPrintf("CTxLockVote::CheckSignature -- VerifyMessage() failed, error: %s\n", strError);
-                return false;
-            }
+            LogPrintf("CTxLockVote::CheckSignature -- VerifyMessage() failed, error: %s\n", strError);
+            return false;
         }
     } 
 

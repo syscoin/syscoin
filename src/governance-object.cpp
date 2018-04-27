@@ -296,14 +296,8 @@ bool CGovernanceObject::CheckSignature(const CPubKey& pubKeyMasternode) const
         uint256 hash = GetSignatureHash();
 
         if (!CHashSigner::VerifyHash(hash, pubKeyMasternode, vchSig, strError)) {
-            // could be an old object
-            std::string strMessage = GetSignatureMessage();
-
-            if (!CMessageSigner::VerifyMessage(pubKeyMasternode, vchSig, strMessage, strError)) {
-                // nope, not in old format either
-                LogPrintf("CGovernance::CheckSignature -- VerifyMessage() failed, error: %s\n", strError);
-                return false;
-            }
+            LogPrintf("CGovernance::CheckSignature -- VerifyMessage() failed, error: %s\n", strError);
+            return false;
         }
     } 
 

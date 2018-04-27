@@ -181,19 +181,9 @@ bool CGovernanceVote::CheckSignature(const CPubKey& pubKeyMasternode) const
 
     if (sporkManager.IsSporkActive(SPORK_6_NEW_SIGS)) {
         uint256 hash = GetSignatureHash();
-
         if (!CHashSigner::VerifyHash(hash, pubKeyMasternode, vchSig, strError)) {
-            // could be a signature in old format
-            std::string strMessage = masternodeOutpoint.ToStringShort() + "|" + nParentHash.ToString() + "|" +
-                boost::lexical_cast<std::string>(nVoteSignal) + "|" +
-                boost::lexical_cast<std::string>(nVoteOutcome) + "|" +
-                boost::lexical_cast<std::string>(nTime);
-
-            if(!CMessageSigner::VerifyMessage(pubKeyMasternode, vchSig, strMessage, strError)) {
-                // nope, not in old format either
-                LogPrint("gobject", "CGovernanceVote::IsValid -- VerifyMessage() failed, error: %s\n", strError);
-                return false;
-            }
+            LogPrint("gobject", "CGovernanceVote::IsValid -- VerifyMessage() failed, error: %s\n", strError);
+            return false;  
         }
     } 
     return true;

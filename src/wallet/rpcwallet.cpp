@@ -2800,7 +2800,7 @@ UniValue listunspent(const JSONRPCRequest& request)
     assert(pwalletMain != NULL);
     LOCK2(cs_main, pwalletMain->cs_wallet);
 	// SYSCOIN include sys outputs
-    pwalletMain->AvailableCoins(vecOutputs, !include_unsafe, NULL, true, true);
+    pwalletMain->AvailableCoins(vecOutputs, !include_unsafe, NULL, true, ALL_COINS, false, true);
     BOOST_FOREACH(const COutput& out, vecOutputs) {
         if (out.nDepth < nMinDepth || out.nDepth > nMaxDepth)
             continue;

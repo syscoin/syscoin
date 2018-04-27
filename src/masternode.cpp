@@ -707,14 +707,9 @@ bool CMasternodePing::CheckSignature(const CPubKey& pubKeyMasternode, int &nDos)
         uint256 hash = GetSignatureHash();
 
         if (!CHashSigner::VerifyHash(hash, pubKeyMasternode, vchSig, strError)) {
-            std::string strMessage = CTxIn(masternodeOutpoint).ToString() + blockHash.ToString() +
-                        boost::lexical_cast<std::string>(sigTime);
-
-            if (!CMessageSigner::VerifyMessage(pubKeyMasternode, vchSig, strMessage, strError)) {
-                LogPrintf("CMasternodePing::CheckSignature -- Got bad Masternode ping signature, masternode=%s, error: %s\n", masternodeOutpoint.ToStringShort(), strError);
-                nDos = 33;
-                return false;
-            }
+            LogPrintf("CMasternodePing::CheckSignature -- Got bad Masternode ping signature, masternode=%s, error: %s\n", masternodeOutpoint.ToStringShort(), strError);
+            nDos = 33;
+            return false;
         }
     } 
 
