@@ -661,7 +661,9 @@ void CMasternodeBroadcast::Relay(CConnman& connman) const
 
 uint256 CMasternodePing::GetHash() const
 {
+	CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
     if (sporkManager.IsSporkActive(SPORK_6_NEW_SIGS)) {
+		
 		ss << masternodeOutpoint;
 		ss << blockHash;
 		ss << sigTime;
@@ -669,6 +671,7 @@ uint256 CMasternodePing::GetHash() const
 		ss << nSentinelVersion;
 		ss << nDaemonVersion;
     } 
+	return ss.GetHash();
 }
 
 uint256 CMasternodePing::GetSignatureHash() const
