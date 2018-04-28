@@ -596,7 +596,14 @@ uint256 CMasternodeBroadcast::GetHash() const
 
 uint256 CMasternodeBroadcast::GetSignatureHash() const
 {
-    return SerializeHash(*this);
+	CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
+	ss << outpoint;
+	ss << addr;
+	ss << pubKeyCollateralAddress;
+	ss << pubKeyMasternode;
+	ss << sigTime;
+	ss << nProtocolVersion;
+	return ss.GetHash();
 }
 
 bool CMasternodeBroadcast::Sign(const CKey& keyCollateralAddress)
@@ -655,7 +662,12 @@ void CMasternodeBroadcast::Relay(CConnman& connman) const
 uint256 CMasternodePing::GetHash() const
 {
     if (sporkManager.IsSporkActive(SPORK_6_NEW_SIGS)) {
-        return SerializeHash(*this);
+		ss << masternodeOutpoint;
+		ss << blockHash;
+		ss << sigTime;
+		ss << fSentinelIsCurrent;
+		ss << nSentinelVersion;
+		ss << nDaemonVersion;
     } 
 }
 
