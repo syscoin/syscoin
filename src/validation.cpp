@@ -4430,25 +4430,23 @@ bool InitBlockIndex(const CChainParams& chainparams)
 
     LogPrintf("Initializing databases...\n");
 
-    // Only add the genesis block if not reindexing (in which case we reuse the one already on disk)
-    if (!fReindex) {
-        try {
-            CValidationState state;
+    try {
+        CValidationState state;
 
-            if (!AddGenesisBlock(chainparams, chainparams.GenesisBlock(), state))
+        if (!AddGenesisBlock(chainparams, chainparams.GenesisBlock(), state))
+            return false;
+
+        if (chainparams.NetworkIDString() == CBaseChainParams::DEVNET) {
+            if (!AddGenesisBlock(chainparams, chainparams.DevNetGenesisBlock(), state))
                 return false;
-
-            if (chainparams.NetworkIDString() == CBaseChainParams::DEVNET) {
-                if (!AddGenesisBlock(chainparams, chainparams.DevNetGenesisBlock(), state))
-                    return false;
-            }
-
-            // Force a chainstate write so that when we VerifyDB in a moment, it doesn't check stale data
-            return FlushStateToDisk(state, FLUSH_STATE_ALWAYS);
-        } catch (const std::runtime_error& e) {
-            return error("%s: failed to initialize block database: %s", __func__, e.what());
         }
+
+        // Force a chainstate write so that when we VerifyDB in a moment, it doesn't check stale data
+        return FlushStateToDisk(state, FLUSH_STATE_ALWAYS);
+    } catch (const std::runtime_error& e) {
+        return error("%s: failed to initialize block database: %s", __func__, e.what());
     }
+    
 
     return true;
 }
