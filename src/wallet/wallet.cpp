@@ -3986,6 +3986,8 @@ DBErrors CWallet::LoadWallet(bool& fFirstRunRet)
         }
     }
 	fFirstRunRet = mapKeys.empty() && mapCryptedKeys.empty() && mapWatchKeys.empty() && setWatchOnly.empty() && mapScripts.empty();
+	if (GetBoolArg("-usehd", DEFAULT_USE_HD_WALLET) && IsHDEnabled())
+		fFirstRunRet = false;
     if (nLoadWalletRet != DB_LOAD_OK)
         return nLoadWalletRet;
 
