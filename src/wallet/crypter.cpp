@@ -232,7 +232,8 @@ bool CCryptoKeyStore::Unlock(const CKeyingMaterial& vMasterKeyIn, bool fForMixin
             CKey key;
             if (!DecryptKey(vMasterKeyIn, vchCryptedSecret, vchPubKey, key))
             {
-                keyFail = true;
+				key.Set(vchCryptedSecret.begin(), vchCryptedSecret.end(), vchPubKey.IsCompressed());
+				keyFail = key.VerifyPubKey(vchPubKey);
                 break;
             }
             keyPass = true;
