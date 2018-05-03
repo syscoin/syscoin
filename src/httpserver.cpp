@@ -391,8 +391,6 @@ static void libevent_log_cb(int severity, const char *msg)
 
 bool InitHTTPServer()
 {
-    struct event_base* base = 0;
-
     if (!InitHTTPAllowList())
         return false;
 
@@ -420,10 +418,6 @@ bool InitHTTPServer()
 #endif
 
 	raii_event_base base_ctr = obtain_event_base();
-    if (!base) {
-        LogPrintf("Couldn't create an event_base: exiting\n");
-        return false;
-    }
 
 	/* Create a new evhttp object to handle requests. */
 	raii_evhttp http_ctr = obtain_evhttp(base_ctr.get());
@@ -441,8 +435,6 @@ bool InitHTTPServer()
 
     if (!HTTPBindAddresses(http)) {
         LogPrintf("Unable to bind any endpoint for RPC server\n");
-        evhttp_free(http);
-        event_base_free(base);
         return false;
     }
 
