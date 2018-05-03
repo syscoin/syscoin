@@ -12,6 +12,7 @@
 #include "sync.h"
 #include "ui_interface.h"
 
+#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,8 +26,11 @@
 #include <event2/http.h>
 #include <event2/thread.h>
 #include <event2/buffer.h>
+#include <event2/bufferevent.h>
 #include <event2/util.h>
 #include <event2/keyvalq_struct.h>
+
+#include <support/events.h>
 
 #ifdef EVENT__HAVE_NETINET_IN_H
 #include <netinet/in.h>
@@ -416,19 +420,20 @@ bool InitHTTPServer()
     evthread_use_pthreads();
 #endif
 
-    base = event_base_new(); // XXX RAII
+	raii_event_base base_ctr = obtain_event_base();
     if (!base) {
         LogPrintf("Couldn't create an event_base: exiting\n");
         return false;
     }
 
-    /* Create a new evhttp object to handle requests. */
-    http = evhttp_new(base); // XXX RAII
-    if (!http) {
-        LogPrintf("couldn't create evhttp. Exiting.\n");
-        event_base_free(base);
-        return false;
-    }
+	/* Create a new evhttp object to handle requests. */
+	raii_evhttp http_ctr = obtain_evhttp(base_ctr.get());
+	struct evhttp* http = http_ctr.get();
+	if (!http) {
+		LogPrintf("couldn't create evhttp. Exiting.\n");
+		return false;
+	}
+
 
     evhttp_set_timeout(http, GetArg("-rpcservertimeout", DEFAULT_HTTP_SERVER_TIMEOUT));
     evhttp_set_max_headers_size(http, MAX_HEADERS_SIZE);
@@ -447,13 +452,15 @@ bool InitHTTPServer()
     LogPrintf("HTTP: creating work queue of depth %d\n", workQueueDepth);
 
     workQueue = new WorkQueue<HTTPClosure>(workQueueDepth);
-    eventBase = base;
-    eventHTTP = http;
+	// transfer ownership to eventBase/HTTP via .release()
+	eventBase = base_ctr.release();
+	eventHTTP = http_ctr.release();
     return true;
 }
 
 std::thread threadHTTP;
 std::future<bool> threadResult;
+static std::vector<std::thread> g_thread_http_workers;
 
 bool StartHTTPServer()
 {
@@ -464,10 +471,9 @@ bool StartHTTPServer()
     threadResult = task.get_future();
     threadHTTP = std::thread(std::move(task), eventBase, eventHTTP);
 
-    for (int i = 0; i < rpcThreads; i++) {
-        std::thread rpc_worker(HTTPWorkQueueRun, workQueue);
-        rpc_worker.detach();
-    }
+	for (int i = 0; i < rpcThreads; i++) {
+		g_thread_http_workers.emplace_back(HTTPWorkQueueRun, workQueue);
+	}
     return true;
 }
 
@@ -489,16 +495,15 @@ void InterruptHTTPServer()
 void StopHTTPServer()
 {
     LogPrint("http", "Stopping HTTP server\n");
-    if (workQueue) {
-        LogPrint("http", "Waiting for HTTP worker threads to exit\n");
-#ifndef WIN32
-        // ToDo: Disabling WaitExit() for Windows platforms is an ugly workaround for the wallet not
-        // closing during a repair-restart. It doesn't hurt, though, because threadHTTP.timed_join
-        // below takes care of this and sends a loopbreak.
-        workQueue->WaitExit();
-#endif        
-        delete workQueue;
-    }
+	if (workQueue) {
+		LogPrint(BCLog::HTTP, "Waiting for HTTP worker threads to exit\n");
+		for (auto& thread : g_thread_http_workers) {
+			thread.join();
+		}
+		g_thread_http_workers.clear();
+		delete workQueue;
+		workQueue = nullptr;
+	}
     if (eventBase) {
         LogPrint("http", "Waiting for HTTP event thread to exit\n");
         // Give event loop a few seconds to exit (to send back last RPC responses), then break it
@@ -515,11 +520,11 @@ void StopHTTPServer()
     }
     if (eventHTTP) {
         evhttp_free(eventHTTP);
-        eventHTTP = 0;
+        eventHTTP = nullptr;
     }
     if (eventBase) {
         event_base_free(eventBase);
-        eventBase = 0;
+        eventBase = nullptr;
     }
     LogPrint("http", "Stopped HTTP server\n");
 }
@@ -606,24 +611,36 @@ void HTTPRequest::WriteHeader(const std::string& hdr, const std::string& value)
     assert(headers);
     evhttp_add_header(headers, hdr.c_str(), value.c_str());
 }
-
 /** Closure sent to main thread to request a reply to be sent to
- * a HTTP request.
- * Replies must be sent in the main loop in the main http thread,
- * this cannot be done from worker threads.
- */
+* a HTTP request.
+* Replies must be sent in the main loop in the main http thread,
+* this cannot be done from worker threads.
+*/
 void HTTPRequest::WriteReply(int nStatus, const std::string& strReply)
 {
-    assert(!replySent && req);
-    // Send event to main http thread to send reply message
-    struct evbuffer* evb = evhttp_request_get_output_buffer(req);
-    assert(evb);
-    evbuffer_add(evb, strReply.data(), strReply.size());
-    HTTPEvent* ev = new HTTPEvent(eventBase, true,
-        std::bind(evhttp_send_reply, req, nStatus, (const char*)NULL, (struct evbuffer *)NULL));
-    ev->trigger(0);
-    replySent = true;
-    req = 0; // transferred back to main thread
+	assert(!replySent && req);
+	// Send event to main http thread to send reply message
+	struct evbuffer* evb = evhttp_request_get_output_buffer(req);
+	assert(evb);
+	evbuffer_add(evb, strReply.data(), strReply.size());
+	auto req_copy = req;
+	HTTPEvent* ev = new HTTPEvent(eventBase, true, [req_copy, nStatus] {
+		evhttp_send_reply(req_copy, nStatus, nullptr, nullptr);
+		// Re-enable reading from the socket. This is the second part of the libevent
+		// workaround above.
+		if (event_get_version_number() >= 0x02010600 && event_get_version_number() < 0x02020001) {
+			evhttp_connection* conn = evhttp_request_get_connection(req_copy);
+			if (conn) {
+				bufferevent* bev = evhttp_connection_get_bufferevent(conn);
+				if (bev) {
+					bufferevent_enable(bev, EV_READ | EV_WRITE);
+				}
+			}
+		}
+	});
+	ev->trigger(nullptr);
+	replySent = true;
+	req = nullptr; // transferred back to main thread
 }
 
 CService HTTPRequest::GetPeer()
