@@ -232,7 +232,7 @@ bool CCryptoKeyStore::Unlock(const CKeyingMaterial& vMasterKeyIn, bool fForMixin
             CKey key;
             if (!DecryptKey(vMasterKeyIn, vchCryptedSecret, vchPubKey, key))
             {
-               // keyFail = true;
+                keyFail = true;
                 break;
             }
             keyPass = true;
