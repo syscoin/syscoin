@@ -4891,7 +4891,7 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
 
 		// Top up the keypool
 		CPubKey newKey;
-		if (!walletInstance->GetKeyFromPool(newKey, false)) {
+		if (!walletInstance->GetAccountPubkey(newKey, "", true)) {
 			InitError(_("Unable to generate initial keys") += "\n");
 			return NULL;
 		}
