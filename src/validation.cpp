@@ -498,7 +498,7 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& in
 
 bool GetUTXOCoin(const COutPoint& outpoint, Coin& coin)
 {
-    TRY_LOCK(cs_main, mainLock);
+    LOCK(cs_main);
 	return pcoinsTip->GetCoin(outpoint, coin);
 }
 
