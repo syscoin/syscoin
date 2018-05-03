@@ -391,7 +391,6 @@ static void libevent_log_cb(int severity, const char *msg)
 
 bool InitHTTPServer()
 {
-    struct evhttp* http = 0;
     struct event_base* base = 0;
 
     if (!InitHTTPAllowList())
@@ -496,7 +495,7 @@ void StopHTTPServer()
 {
     LogPrint("http", "Stopping HTTP server\n");
 	if (workQueue) {
-		LogPrint(BCLog::HTTP, "Waiting for HTTP worker threads to exit\n");
+		LogPrint("http", "Waiting for HTTP worker threads to exit\n");
 		for (auto& thread : g_thread_http_workers) {
 			thread.join();
 		}
