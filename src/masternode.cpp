@@ -676,7 +676,7 @@ CMasternodePing::CMasternodePing(const COutPoint& outpoint)
     masternodeOutpoint = outpoint;
     blockHash = chainActive[chainActive.Height() - 12]->GetBlockHash();
     sigTime = GetAdjustedTime();
-    nDaemonVersion = CLIENT_VERSION;
+    nDaemonVersion = CLIENT_MASTERNODE_VERSION;
 }
 
 bool CMasternodePing::Sign(const CKey& keyMasternode, const CPubKey& pubKeyMasternode)

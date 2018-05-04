@@ -1652,7 +1652,7 @@ void CMasternodeMan::WarnMasternodeDaemonUpdates()
     int nUpdatedMasternodes{0};
 
     for (const auto& mnpair : mapMasternodes) {
-        if (mnpair.second.lastPing.nDaemonVersion > CLIENT_VERSION) {
+        if (mnpair.second.lastPing.nDaemonVersion > CLIENT_MASTERNODE_VERSION) {
             ++nUpdatedMasternodes;
         }
     }
