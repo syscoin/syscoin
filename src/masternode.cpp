@@ -316,8 +316,12 @@ void CMasternode::UpdateLastPaid(const CBlockIndex *pindex, int nMaxBlocksToScan
             mnpayments.mapMasternodeBlocks[BlockReading->nHeight].HasPayeeWithVotes(mnpayee, 2, payee))
         {
             CBlock block;
-            if(!ReadBlockFromDisk(block, BlockReading, Params().GetConsensus()))
-                continue; // shouldn't really happen
+			if (!ReadBlockFromDisk(block, BlockReading, Params().GetConsensus())) {
+				if (BlockReading->pprev == NULL) { assert(BlockReading); break; }
+				BlockReading = BlockReading->pprev;
+				LogPrint("mnpayments", "CMasternode::UpdateLastPaidBlock -- Could not read block from disk\n");
+				continue; // shouldn't really happen
+			}
 
 			const CAmount & nMasternodePayment = GetBlockSubsidy(BlockReading->nHeight, chainparams.GetConsensus(), nTotal, false, true, payee.nStartHeight);
 
