@@ -435,15 +435,11 @@ bool CMasternodePaymentVote::Sign()
 
 bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payeeRet) const
 {
-    LOCK(cs_mapMasternodeBlocks);
-
     auto it = mapMasternodeBlocks.find(nBlockHeight);
     return it != mapMasternodeBlocks.end() && it->second.GetBestPayee(payeeRet);
 }
 bool CMasternodePayments::GetBlockPayee(int nBlockHeight, CScript& payeeRet, int &nStartHeightBlock) const
 {
-	LOCK(cs_mapMasternodeBlocks);
-
 	auto it = mapMasternodeBlocks.find(nBlockHeight);
 	return it != mapMasternodeBlocks.end() && it->second.GetBestPayee(payeeRet, nStartHeightBlock);
 }
