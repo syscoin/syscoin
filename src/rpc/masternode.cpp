@@ -526,12 +526,7 @@ UniValue masternodelist(const JSONRPCRequest& request)
     }
 
     if (strMode == "full" || strMode == "json" || strMode == "lastpaidtime" || strMode == "lastpaidblock") {
-        CBlockIndex* pindex = NULL;
-        {
-            LOCK(cs_main);
-            pindex = chainActive.Tip();
-        }
-        mnodeman.UpdateLastPaid(pindex);
+        mnodeman.UpdateLastPaid(chainActive.Tip());
     }
 
     UniValue obj(UniValue::VOBJ);
