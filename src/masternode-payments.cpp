@@ -428,7 +428,9 @@ bool CMasternodePaymentVote::Sign()
             LogPrintf("CMasternodePaymentVote::Sign -- VerifyHash() failed, error: %s\n", strError);
             return false;
         }
+		LogPrint("mnpayments", "CMasternodePayments::Sign -- signed, vote=%s\n", ToString());
     }
+	
 
     return true;
 }
@@ -908,8 +910,8 @@ bool CMasternodePaymentVote::CheckSignature(const CPubKey& pubKeyMasternode, int
             if(masternodeSync.IsMasternodeListSynced() && nBlockHeight > nValidationHeight) {
                 nDos = 20;
             }
-            return error("CMasternodePaymentVote::CheckSignature -- Got bad Masternode payment signature, masternode=%s, error: %s",
-                        masternodeOutpoint.ToStringShort(), strError);
+            return error("CMasternodePaymentVote::CheckSignature -- Got bad Masternode payment signature, vote=%s, error: %s",
+                        ToString(), strError);
             
         }
     } 
@@ -920,8 +922,7 @@ bool CMasternodePaymentVote::CheckSignature(const CPubKey& pubKeyMasternode, int
 std::string CMasternodePaymentVote::ToString() const
 {
     std::ostringstream info;
-
-    info << masternodeOutpoint.ToStringShort() <<
+	    info << masternodeOutpoint.ToStringShort() <<
             ", " << nBlockHeight <<
             ", " << ScriptToAsmStr(payee) <<
             ", " << (int)vchSig.size();
