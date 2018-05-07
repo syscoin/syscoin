@@ -125,7 +125,6 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasname)
 BOOST_AUTO_TEST_CASE(generate_alias_notyours)
 {
 	printf("Running generate_alias_notyours...\n");
-	UniValue r;
 	GenerateBlocks(5);
 	// 64 bytes long
 	string goodname = "sfsdfdfsdsfsfsdfdfsdsfdsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdsfsdfdd";
