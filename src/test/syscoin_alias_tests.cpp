@@ -122,20 +122,6 @@ BOOST_AUTO_TEST_CASE (generate_big_aliasname)
 	AliasNew("node1", goodname, gooddata);
 	BOOST_CHECK_THROW(CallRPC("node1", "aliasnew " + badname + " 3d 3 0 '' '' '' ''"), runtime_error);
 }
-BOOST_AUTO_TEST_CASE(generate_alias_notyours)
-{
-	printf("Running generate_alias_notyours...\n");
-	GenerateBlocks(5);
-	// 64 bytes long
-	string goodname = "sfsdfdfsdsfsfsdfdfsdsfdsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdsfsdfdd";
-	// 256 bytes long
-	string gooddata = "SfsddfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsfDsdsdsdsfsfsdsfsdsfdsfsdsfdsfsdsfsdSfsdfdfsdsfSfsdfdfsdsDfdfdd";
-	// create address on node2 and try to create alias on that address on node1 (non owner)
-	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "getnewaddress", false, false));
-	string newaddress = r.get_str();
-	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
-	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasnew jagnotyours " + gooddata + " 3 0 " + newaddress + " '' '' ''"), runtime_error);
-}
 BOOST_AUTO_TEST_CASE (generate_aliasupdate)
 {
 	printf("Running generate_aliasupdate...\n");
