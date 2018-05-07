@@ -420,21 +420,11 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 			return error(errorMessage.c_str());
 		}
 		CSyscoinAddress prevaddy(aliasDest);
-		if (op == OP_ALIAS_UPDATE) {
-			if (EncodeBase58(dbAlias.vchAddress) != prevaddy.ToString())
-			{
-				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
-				return error(errorMessage.c_str());
+		if (EncodeBase58(dbAlias.vchAddress) != prevaddy.ToString())
+		{
+			errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
+			return error(errorMessage.c_str());
 
-			}
-		}
-		else if(op == OP_ALIAS_ACTIVATE){
-			if (EncodeBase58(theAlias.vchAddress) != prevaddy.ToString())
-			{
-				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
-				return error(errorMessage.c_str());
-
-			}
 		}
 		
 	}
