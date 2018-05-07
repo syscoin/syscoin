@@ -428,7 +428,7 @@ bool CMasternodePaymentVote::Sign()
             LogPrintf("CMasternodePaymentVote::Sign -- VerifyHash() failed, error: %s\n", strError);
             return false;
         }
-		LogPrint("mnpayments", "CMasternodePayments::Sign -- signed, vote=%s\n", ToString());
+		LogPrint("mnpayments", "CMasternodePayments::Sign -- signed, signaturehash=%s, hash=%s, vote=%s\n", hash.GetHex(), GetHash().GetHex(), ToString());
     }
 	
 
@@ -910,8 +910,8 @@ bool CMasternodePaymentVote::CheckSignature(const CPubKey& pubKeyMasternode, int
             if(masternodeSync.IsMasternodeListSynced() && nBlockHeight > nValidationHeight) {
                 nDos = 20;
             }
-            return error("CMasternodePaymentVote::CheckSignature -- Got bad Masternode payment signature, vote=%s, error: %s",
-                        ToString(), strError);
+            return error("CMasternodePaymentVote::CheckSignature -- Got bad Masternode payment signature, signaturehash=%s, hash=%s, vote=%s, error: %s",
+                        hash.GetHex(), GetHash().GetHex(), ToString(), strError);
             
         }
     } 
