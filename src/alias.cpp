@@ -406,27 +406,21 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 	}
 	if (fJustCheck) {
 		CTxDestination aliasDest;
-		if (vvchPrevArgs.size() <= 0) {
-			errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Alias input not found");
-		}
-		if (OP == OP_ALIAS_UPDATE) {
-			if (vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1]) {
-				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Input parameters of this alias do not match with the updating alias parameters");
-			}
-		}
-		if (prevCoins.IsSpent() || !ExtractDestination(prevCoins.out.scriptPubKey, aliasDest))
+		if (vvchPrevArgs.size() <= 0 || vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1] || prevCoins.IsSpent() || !ExtractDestination(prevCoins.out.scriptPubKey, aliasDest))
 		{
 			errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Cannot extract destination of alias input");
 			return error(errorMessage.c_str());
 		}
-		CSyscoinAddress prevaddy(aliasDest);
-		if (EncodeBase58(dbAlias.vchAddress) != prevaddy.ToString())
+		else
 		{
-			errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
-			return error(errorMessage.c_str());
+			CSyscoinAddress prevaddy(aliasDest);
+			if (EncodeBase58(dbAlias.vchAddress) != prevaddy.ToString())
+			{
+				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5019 - " + _("You are not the owner of this alias");
+				return error(errorMessage.c_str());
 
+			}
 		}
-		
 	}
 	else {
 		// whitelist alias updates don't update expiry date
