@@ -409,7 +409,7 @@ bool CheckAliasInputs(const CTransaction &tx, int op, const vector<vector<unsign
 		if (vvchPrevArgs.size() <= 0) {
 			errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Alias input not found");
 		}
-		if (OP == OP_ALIAS_UPDATE) {
+		if (op == OP_ALIAS_UPDATE) {
 			if (vvchPrevArgs[0] != vvchArgs[0] || vvchPrevArgs[1] != vvchArgs[1]) {
 				errorMessage = "SYSCOIN_ALIAS_CONSENSUS_ERROR: ERRCODE: 5018 - " + _("Input parameters of this alias do not match with the updating alias parameters");
 			}
