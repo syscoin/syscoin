@@ -135,7 +135,17 @@ BOOST_AUTO_TEST_CASE(generate_alias_notyours)
 	BOOST_CHECK_NO_THROW(r = CallRPC("node2", "getnewaddress", false, false));
 	string newaddress = r.get_str();
 	newaddress.erase(std::remove(newaddress.begin(), newaddress.end(), '\n'), newaddress.end());
-	BOOST_CHECK_THROW(r = CallRPC("node1", "aliasnew jagnotyours " + gooddata + " 3 0 " + newaddress + " '' '' ''"), runtime_error);
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew jagnotyours " + gooddata + " 3 0 " + newaddress + " '' '' ''"));
+	UniValue varray = r.get_array();
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "syscointxfund " + varray[0].get_str()));
+	varray = r.get_array();
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "signrawtransaction " + varray[0].get_str()));
+	BOOST_CHECK_NO_THROW(CallRPC("node1", "syscoinsendrawtransaction " + find_value(r.get_obj(), "hex").get_str()));
+	GenerateBlocks(5);
+	// activation should fail
+	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "aliasnew jagnotyours " + gooddata + " 3 0 " + newaddress + " '' '' ''"));
+	varray = r.get_array();
+	BOOST_CHECK_THROW(r = CallRPC("node1", "syscointxfund " + varray[0].get_str()), runtime_error);
 }
 BOOST_AUTO_TEST_CASE (generate_aliasupdate)
 {
