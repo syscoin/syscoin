@@ -371,8 +371,8 @@ void CMasternodePayments::ProcessMessage(CNode* pfrom, const std::string& strCom
 
 			// Avoid processing same vote multiple times
 			if (!res.second) {
-				LogPrint("mnpayments", "MASTERNODEPAYMENTVOTE -- hash=%s, nBlockHeight=%d/%d seen\n",
-					nHash.ToString(), vote.nBlockHeight, nCachedBlockHeight);
+				LogPrint("mnpayments", "MASTERNODEPAYMENTVOTE -- hash=%s, nBlockHeight=%d/%d vote=%s, seen\n",
+					nHash.ToString(), vote.nBlockHeight, nCachedBlockHeight, vote.ToString());
 				return;
 			}
 
@@ -385,8 +385,8 @@ void CMasternodePayments::ProcessMessage(CNode* pfrom, const std::string& strCom
         ExtractDestination(vote.payee, address1);
         CSyscoinAddress address2(address1);
 
-        LogPrint("mnpayments", "MASTERNODEPAYMENTVOTE -- vote: address=%s, nBlockHeight=%d, nHeight=%d, prevout=%s, hash=%s new\n",
-                    address2.ToString(), vote.nBlockHeight, nCachedBlockHeight, vote.masternodeOutpoint.ToStringShort(), nHash.ToString());
+		LogPrint("mnpayments", "MASTERNODEPAYMENTVOTE -- hash=%s, nBlockHeight=%d/%d vote=%s, new\n",
+			nHash.ToString(), vote.nBlockHeight, nCachedBlockHeight, vote.ToString());
 
         if(AddOrUpdatePaymentVote(vote)){
             vote.Relay(connman);
