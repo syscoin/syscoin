@@ -47,6 +47,7 @@ CZMQNotificationInterface* CZMQNotificationInterface::Create()
 	factories["pubofferrecord"] = CZMQAbstractNotifier::Create<CZMQPublishRawSyscoinNotifier>;
 	factories["pubofferhistory"] = CZMQAbstractNotifier::Create<CZMQPublishRawSyscoinNotifier>;
     factories["pubescrowrecord"] = CZMQAbstractNotifier::Create<CZMQPublishRawSyscoinNotifier>;
+    factories["pubescrowbid"] = CZMQAbstractNotifier::Create<CZMQPublishRawSyscoinNotifier>;
 	factories["pubescrowfeedback"] = CZMQAbstractNotifier::Create<CZMQPublishRawSyscoinNotifier>;
 	factories["pubcertrecord"] = CZMQAbstractNotifier::Create<CZMQPublishRawSyscoinNotifier>;
 	factories["pubcerthistory"] = CZMQAbstractNotifier::Create<CZMQPublishRawSyscoinNotifier>;
