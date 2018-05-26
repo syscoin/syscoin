@@ -1994,6 +1994,9 @@ UniValue aliasbalance(const JSONRPCRequest& request)
 		return  res;
 	}
 
+	// cs_main is locked in IsOutpointMature / GetUTXOCoin so we need to lock here too
+	LOCK(cs_main);
+
 	const string &strAddressFrom = EncodeBase58(theAlias.vchAddress);
 	UniValue paramsUTXO(UniValue::VARR);
 	UniValue param(UniValue::VOBJ);
