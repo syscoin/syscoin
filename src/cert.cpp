@@ -97,21 +97,18 @@ void CCert::Serialize( vector<unsigned char> &vchData) {
 
 }
 void CCertDB::WriteCertIndex(const CCert& cert, const int& op) {
-	if (IsArgSet("-zmqpubcertrecord")) {
-		UniValue oName(UniValue::VOBJ);
-		if (BuildCertIndexerJson(cert, oName)) {
-			GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "certrecord");
-		}
+	UniValue oName(UniValue::VOBJ);
+	if (BuildCertIndexerJson(cert, oName)) {
+		GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "certrecord");
 	}
+
 	WriteCertIndexHistory(cert, op);
 }
 void CCertDB::WriteCertIndexHistory(const CCert& cert, const int &op) {
-	if (IsArgSet("-zmqpubcerthistory")) {
-		UniValue oName(UniValue::VOBJ);
-		if (BuildCertIndexerHistoryJson(cert, oName)) {
-			oName.push_back(Pair("op", certFromOp(op)));
-			GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "certhistory");
-		}
+	UniValue oName(UniValue::VOBJ);
+	if (BuildCertIndexerHistoryJson(cert, oName)) {
+		oName.push_back(Pair("op", certFromOp(op)));
+		GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "certhistory");
 	}
 }
 	
@@ -265,7 +262,7 @@ bool RevertCert(const std::vector<unsigned char>& vchCert, const int op, const u
 		}
 	}
 	// write the state back to previous state
-	else if (!pcertdb->WriteCert(dbCert, op, INT64_MAX, false, false))
+	else if (!pcertdb->WriteCert(dbCert, op, INT64_MAX, false))
 	{
 		errorMessage = "SYSCOIN_CERTIFICATE_CONSENSUS_ERROR: ERRCODE: 3001 - " + _("Failed to write to cert DB");
 		return error(errorMessage.c_str());

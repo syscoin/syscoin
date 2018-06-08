@@ -947,21 +947,20 @@ UniValue getaddressbalance(const JSONRPCRequest& request)
             "getaddressbalance\n"
             "\nReturns the balance for an address(es) (requires addressindex to be enabled).\n"
             "\nArguments:\n"
-            "1. {\n"
+            "{\n"
             "  \"addresses\"\n"
             "    [\n"
             "      \"address\"  (string) The base58check encoded address\n"
             "      ,...\n"
             "    ]\n"
             "}\n"
-			"2. separated_output(boolean) If set to true, will return balances of the addresses passed in as an array instead of the summed balance. Default is false.\n"
             "\nResult:\n"
             "{\n"
             "  \"balance\"  (string) The current balance in satoshis\n"
             "  \"received\"  (string) The total number of satoshis received (including change)\n"
             "}\n"
             "\nExamples:\n"
-            + HelpExampleCli("getaddressbalance", "'{\"addresses\": [\"XwnLY9Tf7Zsef8gMGL2fhWA9ZmMjt4KPwg\"]}' true")
+            + HelpExampleCli("getaddressbalance", "'{\"addresses\": [\"XwnLY9Tf7Zsef8gMGL2fhWA9ZmMjt4KPwg\"]}'")
             + HelpExampleRpc("getaddressbalance", "{\"addresses\": [\"XwnLY9Tf7Zsef8gMGL2fhWA9ZmMjt4KPwg\"]}")
         );
 
@@ -970,9 +969,6 @@ UniValue getaddressbalance(const JSONRPCRequest& request)
     if (!getAddressesFromParams(request.params, addresses)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
     }
-	bool bSeperatedBalances = false;
-	if (request.params.size() > 1)
-		bSeperatedBalances = request.params[1].get_bool();
 
     std::vector<std::pair<CAddressIndexKey, CAmount> > addressIndex;
 
@@ -981,40 +977,22 @@ UniValue getaddressbalance(const JSONRPCRequest& request)
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "No information available for address");
         }
     }
-	if (!bSeperatedBalances) {
-		CAmount balance = 0;
-		CAmount received = 0;
 
-		for (std::vector<std::pair<CAddressIndexKey, CAmount> >::const_iterator it = addressIndex.begin(); it != addressIndex.end(); it++) {
-			if (it->second > 0) {
-				received += it->second;
-			}
-			balance += it->second;
-		}
+    CAmount balance = 0;
+    CAmount received = 0;
 
-		UniValue result(UniValue::VOBJ);
-		result.push_back(Pair("balance", ValueFromAmount(balance)));
-		result.push_back(Pair("received", ValueFromAmount(received)));
+    for (std::vector<std::pair<CAddressIndexKey, CAmount> >::const_iterator it=addressIndex.begin(); it!=addressIndex.end(); it++) {
+        if (it->second > 0) {
+            received += it->second;
+        }
+        balance += it->second;
+    }
 
-		return result;
-	}
-	else {
-		UniValue result(UniValue::VARR);
-		CAmount balance = 0;
-		CAmount received = 0;
-		for (std::vector<std::pair<CAddressIndexKey, CAmount> >::const_iterator it = addressIndex.begin(); it != addressIndex.end(); it++) {
-			if (it->second > 0) {
-				received = it->second;
-			}
-			balance = it->second;
-			UniValue resultObj(UniValue::VOBJ);
-			resultObj.push_back(Pair("balance", ValueFromAmount(balance)));
-			resultObj.push_back(Pair("received", ValueFromAmount(received)));
-			result.push_back(resultObj);
-		}
-		
-		return result;
-	}
+    UniValue result(UniValue::VOBJ);
+    result.push_back(Pair("balance", ValueFromAmount(balance)));
+    result.push_back(Pair("received", ValueFromAmount(received)));
+
+    return result;
 
 }
 
