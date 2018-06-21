@@ -2036,7 +2036,7 @@ string GenerateSyscoinGuid()
 UniValue prunesyscoinservices(const JSONRPCRequest& request)
 {
 	const UniValue &params = request.params;
-	if (request.fHelp || params.size() > 0)
+	if (request.fHelp || params.size() != 0)
 		throw runtime_error(
 			"prunesyscoinservices\n"
 			"\nPrune expired Syscoin service data from the internal database.\n"
