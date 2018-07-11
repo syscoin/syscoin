@@ -148,15 +148,13 @@ string offerFromOp(int op) {
 }
 bool COffer::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
-        CDataStream dsOffer(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsOffer >> *this;
-
-		vector<unsigned char> vchOfferData;
-		Serialize(vchOfferData);
-		const uint256 &calculatedHash = Hash(vchOfferData.begin(), vchOfferData.end());
-		const vector<unsigned char> &vchRandOffer = vchFromValue(calculatedHash.GetHex());
-		if(vchRandOffer != vchHash)
-		{
+		CDataStream dsOffer(vchData, SER_NETWORK, PROTOCOL_VERSION);
+		dsOffer >> *this;
+		vector<unsigned char> vchSerializedData;
+		Serialize(vchSerializedData);
+		const uint256 &calculatedHash = Hash(vchSerializedData.begin(), vchSerializedData.end());
+		const vector<unsigned char> &vchRand = vchFromValue(calculatedHash.GetHex());
+		if (vchRand != vchHash) {
 			SetNull();
 			return false;
 		}
@@ -846,7 +844,7 @@ UniValue offernew(const JSONRPCRequest& request) {
 	newOffer.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
 
-    vector<unsigned char> vchHashOffer = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashOffer = vchFromString(hash.GetHex());
 	CSyscoinAddress aliasAddress;
 	GetAddress(alias, &aliasAddress, scriptPubKeyOrig);
 	scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_OFFER) << CScript::EncodeOP_N(OP_OFFER_ACTIVATE) << vchHashOffer << OP_2DROP << OP_DROP;
@@ -934,7 +932,7 @@ UniValue offerlink(const JSONRPCRequest& request) {
 	newOffer.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
 
-    vector<unsigned char> vchHashOffer = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashOffer = vchFromString(hash.GetHex());
 	CSyscoinAddress aliasAddress;
 	GetAddress(alias, &aliasAddress, scriptPubKeyOrig);
 	scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_OFFER) << CScript::EncodeOP_N(OP_OFFER_ACTIVATE) << vchHashOffer << OP_2DROP << OP_DROP;
@@ -1134,7 +1132,7 @@ UniValue offerupdate(const JSONRPCRequest& request) {
 	theOffer.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
 
-    vector<unsigned char> vchHashOffer = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashOffer = vchFromString(hash.GetHex());
 	scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_OFFER) << CScript::EncodeOP_N(OP_OFFER_UPDATE) << vchHashOffer << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyOrig;
 
@@ -1212,17 +1210,14 @@ bool BuildOfferJson(const COffer& theOffer, UniValue& oOffer)
 
 	bool expired = false;
 
-	int64_t expired_time;
-	expired = 0;
 
-	expired_time = 0;
 	vector<unsigned char> vchCert;
 	if(!theOffer.vchCert.empty())
 		vchCert = theOffer.vchCert;
 	oOffer.push_back(Pair("_id", stringFromVch(theOffer.vchOffer)));
 	oOffer.push_back(Pair("cert", stringFromVch(vchCert)));
 	oOffer.push_back(Pair("txid", theOffer.txHash.GetHex()));
-	expired_time =  GetOfferExpiration(theOffer);
+	int64_t expired_time =  GetOfferExpiration(theOffer);
     if(expired_time <= chainActive.Tip()->GetMedianTimePast())
 	{
 		expired = true;

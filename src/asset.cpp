@@ -49,19 +49,16 @@ string assetFromOp(int op) {
 }
 bool CAsset::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
-        CDataStream dsAsset(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsAsset >> *this;
-
-		vector<unsigned char> vchAssetData;
-		Serialize(vchAssetData);
-		const uint256 &calculatedHash = Hash(vchAssetData.begin(), vchAssetData.end());
-		const vector<unsigned char> &vchRandAsset = vchFromValue(calculatedHash.GetHex());
-		if(vchRandAsset != vchHash)
-		{
+		CDataStream dsAsset(vchData, SER_NETWORK, PROTOCOL_VERSION);
+		dsAsset >> *this;
+		vector<unsigned char> vchSerializedData;
+		Serialize(vchSerializedData);
+		const uint256 &calculatedHash = Hash(vchSerializedData.begin(), vchSerializedData.end());
+		const vector<unsigned char> &vchRand = vchFromValue(calculatedHash.GetHex());
+		if (vchRand != vchHash) {
 			SetNull();
 			return false;
 		}
-
     } catch (std::exception &e) {
 		SetNull();
         return false;
@@ -222,7 +219,7 @@ bool CheckAssetInputs(const CTransaction &tx, int op, const vector<vector<unsign
 	int nDataOut;
 	if(!GetSyscoinData(tx, vchData, vchHash, nDataOut) || (op != OP_ASSET_SEND &&!theAsset.UnserializeFromData(vchData, vchHash)) || (op == OP_ASSET_SEND && !theAssetAllocation.UnserializeFromData(vchData, vchHash)))
 	{
-		errorMessage = "SYSCOIN_ASSET_CONSENSUS_ERROR ERRCODE: 2000 - " + _("Cannot unserialize data inside of this transaction relating to a asset");
+		errorMessage = "SYSCOIN_ASSET_CONSENSUS_ERROR ERRCODE: 2000 - " + _("Cannot unserialize data inside of this transaction relating to an asset");
 		return true;
 	}
 
@@ -724,7 +721,7 @@ UniValue assetnew(const JSONRPCRequest& request) {
 	newAsset.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
  	
-    vector<unsigned char> vchHashAsset = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashAsset = vchFromString(hash.GetHex());
 
     scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_ASSET) << CScript::EncodeOP_N(OP_ASSET_ACTIVATE) << vchHashAsset << OP_2DROP << OP_DROP;
     scriptPubKey += scriptPubKeyOrig;
@@ -818,7 +815,7 @@ UniValue assetupdate(const JSONRPCRequest& request) {
 	theAsset.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
  	
-    vector<unsigned char> vchHashAsset = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashAsset = vchFromString(hash.GetHex());
     scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_ASSET) << CScript::EncodeOP_N(OP_ASSET_UPDATE) << vchHashAsset << OP_2DROP << OP_DROP;
     scriptPubKey += scriptPubKeyOrig;
 
@@ -894,7 +891,7 @@ UniValue assettransfer(const JSONRPCRequest& request) {
 	theAsset.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
  	
-    vector<unsigned char> vchHashAsset = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashAsset = vchFromString(hash.GetHex());
     scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_ASSET) << CScript::EncodeOP_N(OP_ASSET_TRANSFER) << vchHashAsset << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyOrig;
     // send the asset pay txn
@@ -1029,8 +1026,10 @@ UniValue assetsend(const JSONRPCRequest& request) {
 	vector<unsigned char> data;
 	theAssetAllocation.Serialize(data);
 	uint256 hash = Hash(data.begin(), data.end());
+	vector<unsigned char> vchHashAsset = vchFromString(hash.GetHex());
+	if(!theAssetAllocation.UnserializeFromData(data, vchHashAsset))
+		throw runtime_error("SYSCOIN_ASSET_RPC_ERROR: ERRCODE: 2510 - " + _("Could not unserialize asset allocation data"));
 
-	vector<unsigned char> vchHashAsset = vchFromValue(hash.GetHex());
 	scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_ASSET) << CScript::EncodeOP_N(OP_ASSET_SEND) << vchHashAsset << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyFromOrig;
 	// send the asset pay txn
@@ -1086,7 +1085,15 @@ bool BuildAssetJson(const CAsset& asset, const bool bGetInputs, UniValue& oAsset
 			nTime = pindex->GetMedianTimePast();
 		}
 	}
+	bool expired = false;
 	oAsset.push_back(Pair("time", nTime));
+	int64_t expired_time = GetAssetExpiration(asset);
+	if (expired_time <= chainActive.Tip()->GetMedianTimePast())
+	{
+		expired = true;
+	}
+	oAsset.push_back(Pair("expires_on", expired_time));
+	oAsset.push_back(Pair("expired", expired));
 	oAsset.push_back(Pair("publicvalue", stringFromVch(asset.vchPubData)));
 	oAsset.push_back(Pair("category", stringFromVch(asset.sCategory)));
 	oAsset.push_back(Pair("alias", stringFromVch(asset.vchAlias)));
@@ -1390,4 +1397,38 @@ UniValue listassets(const JSONRPCRequest& request) {
 	if (!passetdb->ScanAssets(count, from, options, oRes))
 		throw runtime_error("SYSCOIN_ASSET_RPC_ERROR: ERRCODE: 2512 - " + _("Scan failed"));
 	return oRes;
+}
+uint64_t GetAssetExpiration(const CAsset& asset) {
+	// dont prune by default, set nHeight to future time
+	uint64_t nTime = chainActive.Tip()->GetMedianTimePast() + 1;
+	CAliasUnprunable aliasUnprunable;
+	// if service alias exists in unprunable db (this should always exist for any alias that ever existed) then get the last expire height set for this alias and check against it for pruning
+	if (paliasdb && paliasdb->ReadAliasUnprunable(asset.vchAlias, aliasUnprunable) && !aliasUnprunable.IsNull())
+		nTime = aliasUnprunable.nExpireTime;
+	return nTime;
+}
+bool CAssetDB::CleanupDatabase(int &servicesCleaned)
+{
+	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
+	pcursor->SeekToFirst();
+	CAsset asset;
+	pair<string, vector<unsigned char> > keyTuple;
+	while (pcursor->Valid()) {
+		boost::this_thread::interruption_point();
+		try {
+			if (pcursor->GetKey(keyTuple) && keyTuple.first == "asseti") {
+				if (!GetAsset(keyTuple.second, asset) || chainActive.Tip()->GetMedianTimePast() >= GetAssetExpiration(asset))
+				{
+					servicesCleaned++;
+					EraseAsset(keyTuple.second, true);
+				}
+
+			}
+			pcursor->Next();
+		}
+		catch (std::exception &e) {
+			return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+		}
+	}
+	return true;
 }

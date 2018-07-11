@@ -56,19 +56,16 @@ string certFromOp(int op) {
 }
 bool CCert::UnserializeFromData(const vector<unsigned char> &vchData, const vector<unsigned char> &vchHash) {
     try {
-        CDataStream dsCert(vchData, SER_NETWORK, PROTOCOL_VERSION);
-        dsCert >> *this;
-
-		vector<unsigned char> vchCertData;
-		Serialize(vchCertData);
-		const uint256 &calculatedHash = Hash(vchCertData.begin(), vchCertData.end());
-		const vector<unsigned char> &vchRandCert = vchFromValue(calculatedHash.GetHex());
-		if(vchRandCert != vchHash)
-		{
+		CDataStream dsCert(vchData, SER_NETWORK, PROTOCOL_VERSION);
+		dsCert >> *this;
+		vector<unsigned char> vchSerializedData;
+		Serialize(vchSerializedData);
+		const uint256 &calculatedHash = Hash(vchSerializedData.begin(), vchSerializedData.end());
+		const vector<unsigned char> &vchRand = vchFromValue(calculatedHash.GetHex());
+		if (vchRand != vchHash) {
 			SetNull();
 			return false;
 		}
-
     } catch (std::exception &e) {
 		SetNull();
         return false;
@@ -550,7 +547,7 @@ UniValue certnew(const JSONRPCRequest& request) {
 	newCert.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
  	
-    vector<unsigned char> vchHashCert = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashCert = vchFromString(hash.GetHex());
 
     scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_CERT) << CScript::EncodeOP_N(OP_CERT_ACTIVATE) << vchHashCert << OP_2DROP << OP_DROP;
     scriptPubKey += scriptPubKeyOrig;
@@ -643,7 +640,7 @@ UniValue certupdate(const JSONRPCRequest& request) {
 	theCert.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
  	
-    vector<unsigned char> vchHashCert = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashCert = vchFromString(hash.GetHex());
     scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_CERT) << CScript::EncodeOP_N(OP_CERT_UPDATE) << vchHashCert << OP_2DROP << OP_DROP;
     scriptPubKey += scriptPubKeyOrig;
 
@@ -742,7 +739,7 @@ UniValue certtransfer(const JSONRPCRequest& request) {
 	theCert.Serialize(data);
     uint256 hash = Hash(data.begin(), data.end());
  	
-    vector<unsigned char> vchHashCert = vchFromValue(hash.GetHex());
+    vector<unsigned char> vchHashCert = vchFromString(hash.GetHex());
     scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_CERT) << CScript::EncodeOP_N(OP_CERT_TRANSFER) << vchHashCert << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyOrig;
     // send the cert pay txn
@@ -842,7 +839,6 @@ bool BuildCertIndexerJson(const CCert& cert, UniValue& oCert)
 	oCert.push_back(Pair("height", (int)cert.nHeight));
 	oCert.push_back(Pair("category", stringFromVch(cert.sCategory)));
 	oCert.push_back(Pair("alias", stringFromVch(cert.vchAlias)));
-	oCert.push_back(Pair("expires_on", GetCertExpiration(cert)));
 	return true;
 }
 void CertTxToJSON(const int op, const std::vector<unsigned char> &vchData, const std::vector<unsigned char> &vchHash, UniValue &entry)

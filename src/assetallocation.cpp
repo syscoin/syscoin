@@ -50,13 +50,11 @@ bool CAssetAllocation::UnserializeFromData(const vector<unsigned char> &vchData,
     try {
         CDataStream dsAsset(vchData, SER_NETWORK, PROTOCOL_VERSION);
         dsAsset >> *this;
-
-		vector<unsigned char> vchAssetData;
-		Serialize(vchAssetData);
-		const uint256 &calculatedHash = Hash(vchAssetData.begin(), vchAssetData.end());
-		const vector<unsigned char> &vchRandAsset = vchFromValue(calculatedHash.GetHex());
-		if(vchRandAsset != vchHash)
-		{
+		vector<unsigned char> vchSerializedData;
+		Serialize(vchSerializedData);
+		const uint256 &calculatedHash = Hash(vchSerializedData.begin(), vchSerializedData.end());
+		const vector<unsigned char> &vchRand = vchFromValue(calculatedHash.GetHex());
+		if (vchRand != vchHash) {
 			SetNull();
 			return false;
 		}
@@ -315,7 +313,7 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, int op, const vector<vec
 	int nDataOut;
 	if(!GetSyscoinData(tx, vchData, vchHash, nDataOut) || !theAssetAllocation.UnserializeFromData(vchData, vchHash))
 	{
-		errorMessage = "SYSCOIN_ASSET_ALLOCATION_CONSENSUS_ERROR ERRCODE: 1001 - " + _("Cannot unserialize data inside of this transaction relating to a assetallocation");
+		errorMessage = "SYSCOIN_ASSET_ALLOCATION_CONSENSUS_ERROR ERRCODE: 1001 - " + _("Cannot unserialize data inside of this transaction relating to an assetallocation");
 		return true;
 	}
 
@@ -416,16 +414,13 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, int op, const vector<vec
 				errorMessage = "SYSCOIN_ASSET_CONSENSUS_ERROR: ERRCODE: 2039 - " + _("Failed to write to asset DB");
 				return error(errorMessage.c_str());
 			}
+			if (!bSanityCheck && strResponseEnglish != "") {
+				paliasdb->WriteAliasIndexTxHistory(user1, user2, user3, tx.GetHash(), nHeight, strResponseEnglish, assetAllocationTuple.ToString());
+			}
 		}
 		if(bSanityCheck)
 			theAssetAllocation = dbAssetAllocation;
-		else {
-			if (fJustCheck) {
-				if (strResponseEnglish != "") {
-					paliasdb->WriteAliasIndexTxHistory(user1, user2, user3, tx.GetHash(), nHeight, strResponseEnglish, assetAllocationTuple.ToString());
-				}
-			}
-		}
+
 	}
 	else if (op == OP_ASSET_ALLOCATION_SEND)
 	{
@@ -835,7 +830,9 @@ UniValue assetallocationsend(const JSONRPCRequest& request) {
 	theAssetAllocation.Serialize(data);
 	uint256 hash = Hash(data.begin(), data.end());
 
-	vector<unsigned char> vchHashAsset = vchFromValue(hash.GetHex());
+	vector<unsigned char> vchHashAsset = vchFromString(hash.GetHex());
+	if (!theAssetAllocation.UnserializeFromData(data, vchHashAsset))
+		throw runtime_error("SYSCOIN_ASSET_ALLOCATION_RPC_ERROR: ERRCODE: 1504 - " + _("Could not unserialize asset allocation data"));
 	scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_ASSET_ALLOCATION) << CScript::EncodeOP_N(OP_ASSET_ALLOCATION_SEND) << vchHashAsset << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyFromOrig;
 	// send the asset pay txn
@@ -903,7 +900,7 @@ UniValue assetallocationcollectinterest(const JSONRPCRequest& request) {
 	theAssetAllocation.Serialize(data);
 	uint256 hash = Hash(data.begin(), data.end());
 
-	vector<unsigned char> vchHashAsset = vchFromValue(hash.GetHex());
+	vector<unsigned char> vchHashAsset = vchFromString(hash.GetHex());
 	scriptPubKey << CScript::EncodeOP_N(OP_SYSCOIN_ASSET_ALLOCATION) << CScript::EncodeOP_N(OP_ASSET_COLLECT_INTEREST) << vchHashAsset << OP_2DROP << OP_DROP;
 	scriptPubKey += scriptPubKeyFromOrig;
 	// send the asset pay txn
@@ -1091,6 +1088,14 @@ bool BuildAssetAllocationJson(CAssetAllocation& assetallocation, const CAsset& a
     oAssetAllocation.push_back(Pair("txid", assetallocation.txHash.GetHex()));
     oAssetAllocation.push_back(Pair("height", (int)assetallocation.nHeight));
 	oAssetAllocation.push_back(Pair("alias", stringFromVch(assetallocation.vchAlias)));
+	bool expired = false;
+	int64_t expired_time = GetAssetAllocationExpiration(assetallocation);
+	if (expired_time <= chainActive.Tip()->GetMedianTimePast())
+	{
+		expired = true;
+	}
+	oAssetAllocation.push_back(Pair("expires_on", expired_time));
+	oAssetAllocation.push_back(Pair("expired", expired));
 	oAssetAllocation.push_back(Pair("balance", ValueFromAssetAmount(assetallocation.nBalance, asset.nPrecision, asset.bUseInputRanges)));
 	oAssetAllocation.push_back(Pair("interest_claim_height", (int)assetallocation.nLastInterestClaimHeight));
 	oAssetAllocation.push_back(Pair("memo", stringFromVch(assetallocation.vchMemo)));
@@ -1454,4 +1459,38 @@ UniValue listassetallocations(const JSONRPCRequest& request) {
 	if (!passetallocationdb->ScanAssetAllocations(count, from, options, oRes))
 		throw runtime_error("SYSCOIN_ASSET_ALLOCATION_RPC_ERROR: ERRCODE: 1510 - " + _("Scan failed"));
 	return oRes;
+}
+uint64_t GetAssetAllocationExpiration(const CAssetAllocation& assetallocation) {
+	// dont prune by default, set nHeight to future time
+	uint64_t nTime = chainActive.Tip()->GetMedianTimePast() + 1;
+	CAliasUnprunable aliasUnprunable;
+	// if service alias exists in unprunable db (this should always exist for any alias that ever existed) then get the last expire height set for this alias and check against it for pruning
+	if (paliasdb && paliasdb->ReadAliasUnprunable(assetallocation.vchAlias, aliasUnprunable) && !aliasUnprunable.IsNull())
+		nTime = aliasUnprunable.nExpireTime;
+	return nTime;
+}
+bool CAssetAllocationDB::CleanupDatabase(int &servicesCleaned)
+{
+	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
+	pcursor->SeekToFirst();
+	CAssetAllocation assetallocation;
+	pair<string, CAssetAllocationTuple > keyTuple;
+	while (pcursor->Valid()) {
+		boost::this_thread::interruption_point();
+		try {
+			if (pcursor->GetKey(keyTuple) && keyTuple.first == "assetallocationi") {
+				if (!GetAssetAllocation(keyTuple.second, assetallocation) || chainActive.Tip()->GetMedianTimePast() >= GetAssetAllocationExpiration(assetallocation))
+				{
+					servicesCleaned++;
+					EraseAssetAllocation(keyTuple.second, true);
+				}
+
+			}
+			pcursor->Next();
+		}
+		catch (std::exception &e) {
+			return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+		}
+	}
+	return true;
 }

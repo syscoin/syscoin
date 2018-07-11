@@ -63,7 +63,6 @@ BOOST_AUTO_TEST_CASE(generate_asset_allocation_send)
 
 	// wait for 1 second as required by unit test
 	MilliSleep(1000);
-
 	// second send
 	string txid2 = AssetAllocationTransfer(true, "node1", guid, "jagassetallocationsend1", "\"[{\\\"aliasto\\\":\\\"jagassetallocationsend2\\\",\\\"amount\\\":0.13}]\"", "allocationsendmemo");
 	BOOST_CHECK_NO_THROW(r = CallRPC("node1", "assetallocationinfo " + guid + " jagassetallocationsend2 false"));
