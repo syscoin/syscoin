@@ -1370,9 +1370,12 @@ bool CAssetDB::ScanAssets(const int count, const int from, const UniValue& oOpti
 			vchAsset = vchFromValue(assetObj);
 		}
 
-		const UniValue &alias = find_value(oOptions, "owner");
-		if (alias.isStr()) {
-			vchAliasOrAddress = vchFromValue(alias);
+		UniValue owner = find_value(oOptions, "owner");
+		if (owner.isNull()) {
+			owner = find_value(oOptions, "alias");
+		}
+		if (owner.isStr()) {
+			vchAliasOrAddress = vchFromValue(owner);
 		}
 
 		const UniValue &startblock = find_value(oOptions, "startblock");
@@ -1449,6 +1452,7 @@ UniValue listassets(const JSONRPCRequest& request) {
 			"	   \"asset\":guid					(string) Asset GUID to filter.\n"
 			"      \"owner\":string					(string) Alias or address to filter.\n"
 			"      \"startblock\":block 			(number) Earliest block to filter from. Block number is the block at which the transaction would have confirmed.\n"
+			"      \"alias\":string                 (string) DEPRECATED:  Alias to filter.\n"
 			"    }\n"
 			+ HelpExampleCli("listassets", "0")
 			+ HelpExampleCli("listassets", "10 10")
