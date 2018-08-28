@@ -40,9 +40,6 @@ endif
 if BUILD_SYSCOIN_LIBS
 LIBSYSCOINCONSENSUS=libsyscoinconsensus.la
 endif
-if ENABLE_WALLET
-LIBSYSCOIN_WALLET=libsyscoin_wallet.a
-endif
 
 $(LIBSECP256K1): $(wildcard secp256k1/src/*) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
@@ -56,7 +53,6 @@ EXTRA_LIBRARIES += \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_SERVER) \
   $(LIBSYSCOIN_CLI) \
-  $(LIBSYSCOIN_WALLET) \
   $(LIBSYSCOIN_ZMQ)
 
 lib_LTLIBRARIES = $(LIBSYSCOINCONSENSUS)
@@ -76,14 +72,8 @@ endif
 .PHONY: FORCE check-symbols check-security
 # syscoin core #
 SYSCOIN_CORE_H = \
-  alias.h \
-  offer.h \
-  cert.h \
   ranges.h \
   graph.h \
-  asset.h \
-  assetallocation.h \
-  escrow.h \
   feedback.h \
   auxpow.h \
   thread_pool/fixed_function.hpp \
@@ -121,10 +111,6 @@ SYSCOIN_CORE_H = \
   core_io.h \
   core_memusage.h \
   cuckoocache.h \
-  privatesend.h \
-  privatesend-client.h \
-  privatesend-server.h \
-  privatesend-util.h \
   dsnotificationinterface.h \
   governance.h \
   governance-classes.h \
@@ -200,12 +186,6 @@ SYSCOIN_CORE_H = \
   validation.h \
   validationinterface.h \
   versionbits.h \
-  wallet/coincontrol.h \
-  wallet/crypter.h \
-  wallet/db.h \
-  wallet/rpcwallet.h \
-  wallet/wallet.h \
-  wallet/walletdb.h \
   warnings.h \
   zmq/zmqabstractnotifier.h \
   zmq/zmqconfig.h \
@@ -223,14 +203,8 @@ libsyscoin_util_a-clientversion.$(OBJEXT): obj/build.h
 libsyscoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(MINIUPNPC_CPPFLAGS) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libsyscoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_server_a_SOURCES = \
-  alias.cpp \
-  offer.cpp \
-  cert.cpp \
   ranges.cpp \
   graph.cpp \
-  asset.cpp \
-  assetallocation.cpp \
-  escrow.cpp \
   auxpow.cpp \
   activemasternode.cpp \
   addrman.cpp \
@@ -302,22 +276,7 @@ libsyscoin_zmq_a_SOURCES = \
 endif
 
 
-# wallet: shared between syscoind and syscoin-qt, but only linked
-# when wallet enabled
-libsyscoin_wallet_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
-libsyscoin_wallet_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-libsyscoin_wallet_a_SOURCES = \
-  keepass.cpp \
-  privatesend-client.cpp \
-  privatesend-util.cpp \
-  wallet/crypter.cpp \
-  wallet/db.cpp \
-  wallet/rpcdump.cpp \
-  wallet/rpcwallet.cpp \
-  wallet/wallet.cpp \
-  wallet/walletdb.cpp \
-  policy/rbf.cpp \
-  $(SYSCOIN_CORE_H)
+
 
 # crypto primitives library
 crypto_libsyscoin_crypto_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_CONFIG_INCLUDES) $(PIC_FLAGS)
@@ -540,8 +499,6 @@ CLEANFILES += primitives/*.gcda primitives/*.gcno
 CLEANFILES += script/*.gcda script/*.gcno
 CLEANFILES += support/*.gcda support/*.gcno
 CLEANFILES += univalue/*.gcda univalue/*.gcno
-CLEANFILES += wallet/*.gcda wallet/*.gcno
-CLEANFILES += wallet/test/*.gcda wallet/test/*.gcno
 CLEANFILES += zmq/*.gcda zmq/*.gcno
 
 DISTCLEANFILES = obj/build.h
