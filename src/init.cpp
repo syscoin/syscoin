@@ -42,27 +42,21 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
-#ifdef ENABLE_WALLET
-#include "wallet/wallet.h"
-#endif
+
 
 #include "activemasternode.h"
 #include "dsnotificationinterface.h"
 #include "flat-database.h"
 #include "governance.h"
 #include "instantx.h"
-#ifdef ENABLE_WALLET
-#include "keepass.h"
-#endif
+
 #include "masternode-payments.h"
 #include "masternode-sync.h"
 #include "masternodeman.h"
 #include "masternodeconfig.h"
 #include "messagesigner.h"
 #include "netfulfilledman.h"
-#ifdef ENABLE_WALLET
-#include "privatesend-client.h"
-#endif // ENABLE_WALLET
+
 #include "privatesend-server.h"
 #include "spork.h"
 #include "warnings.h"
@@ -71,12 +65,6 @@
 #include <stdio.h>
 #include <memory>
 // SYSCOIN services
-#include "alias.h"
-#include "offer.h"
-#include "cert.h"
-#include "escrow.h"
-#include "asset.h"
-#include "assetallocation.h"
 #include "thread_pool/thread_pool.hpp"
 #ifndef WIN32
 #include <signal.h>

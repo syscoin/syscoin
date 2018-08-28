@@ -53,7 +53,6 @@ EXTRA_LIBRARIES += \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_SERVER) \
   $(LIBSYSCOIN_CLI) \
-  $(LIBSYSCOIN_WALLET) \
   $(LIBSYSCOIN_ZMQ)
 
 lib_LTLIBRARIES = $(LIBSYSCOINCONSENSUS)
@@ -125,6 +124,7 @@ SYSCOIN_CORE_H = \
   httprpc.h \
   httpserver.h \
   indirectmap.h \
+  init.h \
   instantx.h \
   key.h \
   keepass.h \
@@ -217,6 +217,7 @@ libsyscoin_server_a_SOURCES = \
   dsnotificationinterface.cpp \
   httprpc.cpp \
   httpserver.cpp \
+  init.cpp \
   instantx.cpp \
   dbwrapper.cpp \
   governance.cpp \
