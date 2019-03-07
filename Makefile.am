@@ -11,6 +11,16 @@ endif
 
 export PYTHONPATH
 
+BUILD_DIR := .
+
+#copy_bins: $(BUILD_DIR)/src/bin/linux/
+#	cp -a $(BUILD_DIR)/src/bin/linux/ $(BUILD_DIR)/bin
+
+#$(BUILD_DIR)/bin: $(BUILD_DIR)/src/bin/linux/
+#	cp -a $^ $@
+
+copy_bins : $(shell rsync -avr $(BUILD_DIR)/src/bin/linux/ $(BUILD_DIR)/bin)
+
 if BUILD_SYSCOIN_LIBS
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libsyscoinconsensus.pc
@@ -88,7 +98,7 @@ $(OSX_APP)/Contents/PkgInfo:
 
 $(OSX_APP)/Contents/Resources/empty.lproj:
 	$(MKDIR_P) $(@D)
-	@touch $@ 
+	@touch $@
 
 $(OSX_APP)/Contents/Info.plist: $(OSX_PLIST)
 	$(MKDIR_P) $(@D)
@@ -305,4 +315,3 @@ clean-docs:
 clean-local: clean-docs
 	rm -rf coverage_percent.txt test_syscoin.coverage/ total.coverage/ test/tmp/ cache/ $(OSX_APP)
 	rm -rf test/functional/__pycache__ test/functional/test_framework/__pycache__ test/cache
-
