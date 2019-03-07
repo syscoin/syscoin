@@ -11,15 +11,13 @@ endif
 
 export PYTHONPATH
 
-BUILD_DIR := .
-
 #copy_bins: $(BUILD_DIR)/src/bin/linux/
 #	cp -a $(BUILD_DIR)/src/bin/linux/ $(BUILD_DIR)/bin
 
 #$(BUILD_DIR)/bin: $(BUILD_DIR)/src/bin/linux/
 #	cp -a $^ $@
 
-copy_bins : $(shell rsync -avr $(BUILD_DIR)/src/bin/linux/ $(BUILD_DIR)/bin)
+copy_bins : $(shell rsync -avr ./src/bin/linux/ ./bin)
 
 if BUILD_SYSCOIN_LIBS
 pkgconfigdir = $(libdir)/pkgconfig
