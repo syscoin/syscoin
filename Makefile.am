@@ -11,13 +11,7 @@ endif
 
 export PYTHONPATH
 
-#copy_bins: $(BUILD_DIR)/src/bin/linux/
-#	cp -a $(BUILD_DIR)/src/bin/linux/ $(BUILD_DIR)/bin
-
-#$(BUILD_DIR)/bin: $(BUILD_DIR)/src/bin/linux/
-#	cp -a $^ $@
-
-copy_bins : $(shell rsync -avr ./src/bin/linux/ ./bin)
+copy_bins: $(shell rsync -avr ./src/bin/linux/ ./bin)
 
 if BUILD_SYSCOIN_LIBS
 pkgconfigdir = $(libdir)/pkgconfig
@@ -165,9 +159,13 @@ endif
 if TARGET_DARWIN
 appbundle: $(OSX_APP_BUILT)
 deploy: $(OSX_DMG)
+del_prevbin: $(shell rm -rf ./bin)
+copy_osx_bins: $(shell rsync -avr ./src/bin/osx/ ./bin)
 endif
 if TARGET_WINDOWS
 deploy: $(SYSCOIN_WIN_INSTALLER)
+del_prevbin: $(shell rm -rf ./bin)
+copy_bins: $(shell rsync -avr ./src/bin/win64/ ./bin)
 endif
 
 $(SYSCOIN_QT_BIN): FORCE
