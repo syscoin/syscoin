@@ -1695,15 +1695,26 @@ UniValue aliasnew(const JSONRPCRequest& request) {
 	bool foundRegistration = mapAliasRegistrationData.count(vchAlias) > 0;
 	if (strAddress.empty() && !foundRegistration)
 	{
-		// generate new address in this wallet if not passed in
-		CKey privKey;
-		privKey.MakeNewKey(true);
-		CPubKey pubKey = privKey.GetPubKey();
-		vector<unsigned char> vchPubKey(pubKey.begin(), pubKey.end());
-		CSyscoinAddress addressAlias(pubKey.GetID());
-		strAddress = addressAlias.ToString();
-		if (pwalletMain && !pwalletMain->AddKeyPubKey(privKey, pubKey))
-			throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5506 - " + _("Error adding key to wallet"));
+		if (pwalletMain && pwalletMain->IsHDEnabled()) {
+			// use a new address from the wallet's hd key pool if not passed in
+			CPubKey pubKey;
+			if (!pwalletMain->GetKeyFromPool(pubKey, false))
+				throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5523 - " + _("Keypool ran out, please call keypoolrefill first"));
+
+			CSyscoinAddress addressAlias = CSyscoinAddress(pubKey.GetID());
+			strAddress = addressAlias.ToString();
+		}
+		else {
+			// generate new address in this wallet if not passed in
+			CKey privKey;
+			privKey.MakeNewKey(true);
+			CPubKey pubKey = privKey.GetPubKey();
+			vector<unsigned char> vchPubKey(pubKey.begin(), pubKey.end());
+			CSyscoinAddress addressAlias(pubKey.GetID());
+			strAddress = addressAlias.ToString();
+			if (pwalletMain && !pwalletMain->AddKeyPubKey(privKey, pubKey))
+				throw runtime_error("SYSCOIN_ALIAS_RPC_ERROR: ERRCODE: 5506 - " + _("Error adding key to wallet"));
+		}
 	}
 	CScript scriptPubKeyOrig;
 	DecodeBase58(strAddress, newAlias.vchAddress);
