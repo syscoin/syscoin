@@ -239,6 +239,7 @@ extern UniValue assetallocationinfo(const JSONRPCRequest& request);
 extern UniValue assetallocationsenderstatus(const JSONRPCRequest& request);
 extern UniValue listassetallocationtransactions(const JSONRPCRequest& request);
 extern UniValue listassetallocations(const JSONRPCRequest& request);
+extern UniValue dumpassetallocations(const JSONRPCRequest& request);
 extern UniValue tpstestinfo(const JSONRPCRequest& request);
 extern UniValue tpstestadd(const JSONRPCRequest& request);
 extern UniValue tpstestsetenabled(const JSONRPCRequest& request);

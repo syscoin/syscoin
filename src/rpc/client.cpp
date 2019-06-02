@@ -237,6 +237,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
 	{ "listassetallocations", 0, "count" },
 	{ "listassetallocations", 1, "from" },
 	{ "listassetallocations", 2, "options" },
+    { "dumpassetallocations", 0, "guids" },
 	{ "assetnew", 4, "precision" },
 	{ "assetnew", 5, "use_inputranges" },
 	{ "assetnew", 8, "interest_rate" },

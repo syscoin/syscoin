@@ -1681,3 +1681,106 @@ UniValue listassetallocations(const JSONRPCRequest& request) {
 		throw runtime_error("SYSCOIN_ASSET_ALLOCATION_RPC_ERROR: ERRCODE: 1510 - " + _("Scan failed"));
 	return oRes;
 }
+bool BuildAssetDumpJson(const CAsset& asset, UniValue& oAsset)
+{
+	CAliasIndex dbAlias;
+	vector<unsigned char> vchAddress = asset.vchAliasOrAddress;
+	if(!paliasdb->ReadAlias(asset.vchAliasOrAddress, dbAlias)){
+		if(!paliasdb->ReadAddress(asset.vchAliasOrAddress, vchAddress)){
+			LogPrintf("Cannot find address from ReadAddress, trying to resolve %s as a Syscoin address...\n", stringFromVch(asset.vchAliasOrAddress).c_str());
+			vchAddress = asset.vchAliasOrAddress;
+		}
+	}
+	else{
+		vchAddress = vchFromString(EncodeBase58(dbAlias.vchAddress));
+	}
+	oAsset.push_back(Pair("symbol", stringFromVch(asset.vchSymbol)));
+	oAsset.push_back(Pair("publicvalue", stringFromVch(asset.vchPubData)));	
+	oAsset.push_back(Pair("address", stringFromVch(vchAddress)));
+	oAsset.push_back(Pair("balance", ValueFromAssetAmount(asset.nBalance, asset.nPrecision, asset.bUseInputRanges)));
+	oAsset.push_back(Pair("total_supply", ValueFromAssetAmount(asset.nTotalSupply, asset.nPrecision, asset.bUseInputRanges)));
+	oAsset.push_back(Pair("max_supply", ValueFromAssetAmount(asset.nMaxSupply, asset.nPrecision, asset.bUseInputRanges)));
+	oAsset.push_back(Pair("precision", (int)asset.nPrecision));
+	return true;
+}
+bool BuildAssetAllocationDumpJson(CAssetAllocation& assetallocation, UniValue& oAssetAllocation)
+{
+	CAliasIndex dbAlias;
+	vector<unsigned char> vchAddress = assetallocation.vchAliasOrAddress;
+	if(!paliasdb->ReadAlias(assetallocation.vchAliasOrAddress, dbAlias)){
+		if(!paliasdb->ReadAddress(assetallocation.vchAliasOrAddress, vchAddress)){
+			LogPrintf("Cannot find address from ReadAddress, trying to resolve %s as a Syscoin address...\n", stringFromVch(assetallocation.vchAliasOrAddress).c_str());
+			vchAddress = assetallocation.vchAliasOrAddress;
+		}
+	}
+	else{
+		vchAddress = vchFromString(EncodeBase58(dbAlias.vchAddress));
+	}
+	// prune values below 0.1 COINS
+	if(assetallocation.nBalance <= 0.1*COIN)
+		return false;
+	oAssetAllocation.push_back(Pair("address", stringFromVch(vchAddress)));
+	oAssetAllocation.push_back(Pair("balance", ValueFromAmount(assetallocation.nBalance)));
+
+	return true;
+}
+bool CAssetAllocationDB::DumpAssetAllocations(std::vector<unsigned char>vchAsset, UniValue& oRes) {
+	boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
+	pcursor->SeekToFirst();
+	CAssetAllocation txPos;
+	pair<string, vector<unsigned char> > key;
+	while (pcursor->Valid()) {
+		boost::this_thread::interruption_point();
+		try {
+			if (pcursor->GetKey(key) && key.first == "assetallocationi") {
+				pcursor->GetValue(txPos);
+				if (vchAsset != txPos.vchAsset)
+				{
+					pcursor->Next();
+					continue;
+				}
+				UniValue oAssetAllocation(UniValue::VOBJ);
+				if (!BuildAssetAllocationDumpJson(txPos, oAssetAllocation)) 
+				{
+					pcursor->Next();
+					continue;
+				}
+				oRes.push_back(oAssetAllocation);
+			}
+			pcursor->Next();
+		}
+		catch (std::exception &e) {
+			return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+		}
+	}
+	return true;
+}
+UniValue dumpassetallocations(const JSONRPCRequest& request) {
+	const UniValue &params = request.params;
+	if (request.fHelp || 3 < params.size())
+		throw runtime_error("dumpassetallocations [asset,...]\n"
+			"Dump all asset allocations of an array of asset guids.\n"
+			"\"assets\"				(array) Array of Asset GUID to filter.\n"
+			"    }\n"
+			+ HelpExampleCli("dumpassetallocations", "[\"31dc0be2d4ec9d5a\", \"e23e5b9150691d74\"]") 
+		);
+	UniValue oAllRes(UniValue::VARR);
+	UniValue arrayGuids = params[0].get_array();
+	CAsset dbAsset;
+	for(unsigned i =0;i<arrayGuids.size();i++){
+		const std::string & guid = arrayGuids[i].get_str();
+		UniValue oRes(UniValue::VARR);
+		if(!GetAsset(vchFromString(guid), dbAsset))
+			continue;
+		UniValue oAsset(UniValue::VOBJ);
+		if(!BuildAssetDumpJson(dbAsset, oAsset))
+			continue;	
+		
+		if (!passetallocationdb->DumpAssetAllocations(vchFromString(guid), oRes))
+			throw runtime_error("SYSCOIN_ASSET_ALLOCATION_RPC_ERROR: ERRCODE: 1510 - " + _("Scan failed"));
+		LogPrintf("Dumped %s entries for asset %s\n", oRes.size(), guid.c_str());
+		oAsset.push_back(std::make_pair("allocations", oRes));
+		oAllRes.push_back(oAsset);
+	}
+	return oAllRes;
+}

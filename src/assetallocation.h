@@ -222,6 +222,7 @@ public:
 	}
 	void WriteAssetAllocationIndex(const CAssetAllocation& assetAllocationTuple, const CAsset& asset, const CAmount& nSenderBalance, const CAmount& nAmount, const std::string& strSender, const std::string& strReceiver);
 	bool ScanAssetAllocations(const int count, const int from, const UniValue& oOptions, UniValue& oRes);
+	bool DumpAssetAllocations(std::vector<unsigned char>vchGuid, UniValue& oRes);
 };
 class CAssetAllocationTransactionsDB : public CDBWrapper {
 public:
