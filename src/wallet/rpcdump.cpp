@@ -766,7 +766,7 @@ UniValue dumpwallet(const JSONRPCRequest& request)
     std::sort(vKeyBirth.begin(), vKeyBirth.end());
 
     // produce output
-    file << strprintf("# Wallet dump created by Syscoin Core %s\n", CLIENT_BUILD);
+    file << strprintf("# Wallet dump created by Syscoin 3 Core %s\n", CLIENT_BUILD);
     file << strprintf("# * Created on %s\n", EncodeDumpTime(GetTime()));
     file << strprintf("# * Best block at time of backup was %i (%s),\n", chainActive.Height(), chainActive.Tip()->GetBlockHash().ToString());
     file << strprintf("#   mined on %s\n", EncodeDumpTime(chainActive.Tip()->GetBlockTime()));
@@ -822,13 +822,70 @@ UniValue dumpwallet(const JSONRPCRequest& request)
         }
         obj.push_back(Pair("hdaccounts", int(hdChainCurrent.CountAccounts())));
     }
+    if (pwalletMain->GetHDChain(hdChainCurrent))
+    {
+
+        if (!pwalletMain->GetDecryptedHDChain(hdChainCurrent))
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Cannot decrypt HD chain");
+
+        for (size_t i = 0; i < hdChainCurrent.CountAccounts(); ++i)
+        {
+            CHDAccount acc;
+            if(hdChainCurrent.GetAccount(i, acc)) {
+                for(size_t j =0;j<acc.nExternalChainCounter;j++){
+                    CExtKey childKey;
+                    CHDPubKey hdPubKey;
+                    hdChainCurrent.DeriveChildExtKey(i, false, j, childKey);
+                    const CPubKey &pubKey = childKey.key.GetPubKey();
+                    const CKeyID &keyid = pubKey.GetID();
+                    hdPubKey.extPubKey = childKey.Neuter();
+                    hdPubKey.hdchainID = hdChainCurrent.GetID();
+                    hdPubKey.nAccountIndex = i;
+                    hdPubKey.nChangeIndex = 0;
+                    std::string strAddr = CSyscoinAddress(keyid).ToString();
+                    file << strprintf("%s %s ", CSyscoinSecret(childKey.key).ToString(), EncodeDumpTime(GetTime()));
+                    if (pwalletMain->mapAddressBook.count(keyid)) {
+                        file << strprintf("label=%s", EncodeDumpString(pwalletMain->mapAddressBook[keyid].name));
+                    } else if (setKeyPool.count(keyid)) {
+                        file << "reserve=1";
+                    } else {
+                        file << "change=1";
+                    }
+                    file << strprintf(" # addr=%s%s\n", strAddr, (pwalletMain->mapHdPubKeys.count(keyid) ? " hdkeypath="+hdPubKey.GetKeyPath() : ""));                  
+
+                }
+                for(size_t j =0;j<acc.nInternalChainCounter;j++){
+                    CExtKey childKey;
+                    CHDPubKey hdPubKey;
+                    hdChainCurrent.DeriveChildExtKey(i, true, j, childKey);
+                    const CPubKey &pubKey = childKey.key.GetPubKey();
+                    const CKeyID &keyid = pubKey.GetID();
+                    hdPubKey.extPubKey = childKey.Neuter();
+                    hdPubKey.hdchainID = hdChainCurrent.GetID();
+                    hdPubKey.nAccountIndex = i;
+                    hdPubKey.nChangeIndex = 1;
+                    std::string strAddr = CSyscoinAddress(keyid).ToString();
+                    file << strprintf("%s %s ", CSyscoinSecret(childKey.key).ToString(), EncodeDumpTime(GetTime()));
+                    if (pwalletMain->mapAddressBook.count(keyid)) {
+                        file << strprintf("label=%s", EncodeDumpString(pwalletMain->mapAddressBook[keyid].name));
+                    } else if (setKeyPool.count(keyid)) {
+                        file << "reserve=1";
+                    } else {
+                        file << "change=1";
+                    }
+                    file << strprintf(" # addr=%s%s\n", strAddr, (pwalletMain->mapHdPubKeys.count(keyid) ? " hdkeypath="+hdPubKey.GetKeyPath() : ""));                  
+
+                }              
+            } 
+        }
+    }
 
     for (std::vector<std::pair<int64_t, CKeyID> >::const_iterator it = vKeyBirth.begin(); it != vKeyBirth.end(); it++) {
         const CKeyID &keyid = it->second;
         std::string strTime = EncodeDumpTime(it->first);
         std::string strAddr = CSyscoinAddress(keyid).ToString();
         CKey key;
-        if (pwalletMain->GetKey(keyid, key)) {
+        if (pwalletMain->GetKey(keyid, key) && !pwalletMain->mapHdPubKeys.count(keyid)) {
             file << strprintf("%s %s ", CSyscoinSecret(key).ToString(), strTime);
             if (pwalletMain->mapAddressBook.count(keyid)) {
                 file << strprintf("label=%s", EncodeDumpString(pwalletMain->mapAddressBook[keyid].name));
