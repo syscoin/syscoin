@@ -33,13 +33,7 @@
 
 #include <mutex>
 #include <condition_variable>
-// SYSCOIN snapshot
-#include <ostream>
-#include <boost/iostreams/device/file.hpp>
-#include <boost/iostreams/stream.hpp>
-#include "script/standard.h"
-#include "base58.h"
-namespace io = boost::iostreams;
+
 struct CUpdatedBlock
 {
     uint256 hash;
@@ -964,12 +958,6 @@ static void ApplyStats(CCoinsStats &stats, CHashWriter& ss, const uint256& hash,
 //! Calculate statistics about the unspent transaction output set
 static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats)
 {
-    // SYSCOIN snapshot code
-	CTxDestination address;
-	io::stream_buffer<io::file_sink> buf("utxo.json");
-	std::ostream ta(&buf);
-	ta << "[";
-	std::map<std::string, CAmount> mapAddressToAmount;
     std::unique_ptr<CCoinsViewCursor> pcursor(view->Cursor());
 
     CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
@@ -991,11 +979,6 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats)
                 outputs.clear();
             }
             prevkey = key.hash;
-            // SYSCOIN snapshot
-            if (ExtractDestination(coin.out.scriptPubKey, address))
-                mapAddressToAmount[CSyscoinAddress(address).ToString()] += coin.out.nValue;
-            else
-                LogPrintf("Could not extract address for pubkey %s\n", HexStr(coin.out.scriptPubKey).c_str());
             outputs[key.n] = std::move(coin);
         } else {
             return error("%s: unable to read value", __func__);
@@ -1007,15 +990,6 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats)
     }
     stats.hashSerialized = ss.GetHash();
     stats.nDiskSize = view->EstimateSize();
-    // SYSCOIN snapshot
-	for (auto iter = mapAddressToAmount.begin(); iter != mapAddressToAmount.end(); ) {
-		ta << "[\"" << iter->first << "\"," << iter->second;
-		if (++iter != mapAddressToAmount.end())
-			ta << "]," << std::endl;
-		else
-			ta << "]" << std::endl;
-	}
-	ta << "]";
     return true;
 }
 
