@@ -659,7 +659,7 @@ bool CAssetAllocationDB::ScanAssetAllocations(const int count, const int from, c
                     jsonRequest.params = requestParam;
                     const UniValue &convertedAddressValue = convertaddress(jsonRequest);
                     const std::string & v4address = find_value(convertedAddressValue.get_obj(), "v4address").get_str();
-                    const CTxDestination &dest = DecodeDestination(v4address);                   
+                    const CTxDestination &dest = DecodeDestination(v4address);
                     UniValue detail = DescribeAddress(dest);
                     if(find_value(detail.get_obj(), "iswitness").get_bool() == false)
                         throw runtime_error("SYSCOIN_ASSET_ALLOCATION_RPC_ERROR: ERRCODE: 2501 - " + _("Address must be a segwit based address"));

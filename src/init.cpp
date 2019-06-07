@@ -2108,7 +2108,7 @@ bool AppInitMain(InitInterfaces& interfaces)
 	const std::string& rpcuser = gArgs.GetArg("-rpcuser", "");
 	const std::string& rpcpassword = gArgs.GetArg("-rpcpassword", "");
 	StartRelayerNode(exePath, relayerPID, rpcport, rpcuser, rpcpassword, wsport);
-    
+
     for (const auto& client : interfaces.chain_clients) {
         client->start(scheduler);
     }

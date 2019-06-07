@@ -45,7 +45,7 @@ UniValue convertaddress(const JSONRPCRequest& request)
             }
             }.ToString());
     }
-    
+ 
     UniValue ret(UniValue::VOBJ);
     CTxDestination dest = DecodeDestination(request.params[0].get_str());
 
@@ -993,7 +993,7 @@ UniValue listassetindex(const JSONRPCRequest& request) {
                  "    \"total_supply\": (numeric) The total supply of this asset\n"
                  "    \"max_supply\":   (numeric) The maximum supply of this asset\n"
                  "    \"update_flag\":  (numeric) The flag in decimal \n"
-                 "    \"precision\":    (numeric) The precision of this asset \n"   
+                 "    \"precision\":    (numeric) The precision of this asset \n"
                  "  },\n"
                  "  ...\n"
                  "]\n"

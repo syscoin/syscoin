@@ -53,11 +53,11 @@ void StartNodes()
 	InitNodeURLMap();
 	StopNodes();
     if (boost::filesystem::exists(boost::filesystem::system_complete("node1/regtest")))
-        boost::filesystem::remove_all(boost::filesystem::system_complete("node1/regtest")); 
+        boost::filesystem::remove_all(boost::filesystem::system_complete("node1/regtest"));
     if (boost::filesystem::exists(boost::filesystem::system_complete("node2/regtest")))
-        boost::filesystem::remove_all(boost::filesystem::system_complete("node2/regtest"));  
+        boost::filesystem::remove_all(boost::filesystem::system_complete("node2/regtest"));
     if (boost::filesystem::exists(boost::filesystem::system_complete("node3/regtest")))
-        boost::filesystem::remove_all(boost::filesystem::system_complete("node3/regtest"));                     
+        boost::filesystem::remove_all(boost::filesystem::system_complete("node3/regtest"));
 	node1LastBlock = 0;
 	node2LastBlock = 0;
 	node3LastBlock = 0;
@@ -1081,27 +1081,24 @@ string AssetSend(const string& node, const string& guid, const string& inputs, c
 	}
 	BOOST_CHECK_NO_THROW(r = CallRPC(node, "syscoindecoderawtransaction " + hex_str, bRegtest));
 	BOOST_CHECK_EQUAL(find_value(r.get_obj(), "txtype").get_str(), "assetsend");
-	if (!theAssetAllocation.listSendingAllocationAmounts.empty())
-		BOOST_CHECK_EQUAL(find_value(r.get_obj(), "allocations").get_array().size(), theAssetAllocation.listSendingAllocationAmounts.size());
-	
-	for (unsigned int idx = 0; idx < receivers.size(); idx++) {
-		const UniValue& receiver = receivers[idx];
-		BOOST_CHECK(receiver.isObject());
-      
-		UniValue receiverObj = receiver.get_obj();
+    if (!theAssetAllocation.listSendingAllocationAmounts.empty())
+        BOOST_CHECK_EQUAL(find_value(r.get_obj(), "allocations").get_array().size(), theAssetAllocation.listSendingAllocationAmounts.size());
+
+    for (unsigned int idx = 0; idx < receivers.size(); idx++) {
+        const UniValue& receiver = receivers[idx];
+        BOOST_CHECK(receiver.isObject());
+
+        UniValue receiverObj = receiver.get_obj();
         string strAddress = find_value(receiverObj, "address").get_str();
-        
-		BOOST_CHECK_NO_THROW(r = CallRPC(node, "listassetindexallocations " + strAddress, bRegtest ));
-		BOOST_CHECK(FindAssetGUIDFromAssetIndexResults(r, guid));
 
-
-	}
-	if(newfromamount > 0){
-		BOOST_CHECK_NO_THROW(r = CallRPC(node, "listassetindexassets " + fromAddress, bRegtest ));
-		BOOST_CHECK(FindAssetGUIDFromAssetIndexResults(r, guid));
-	}		
-	return hex_str;
-
+        BOOST_CHECK_NO_THROW(r = CallRPC(node, "listassetindexallocations " + strAddress, bRegtest ));
+        BOOST_CHECK(FindAssetGUIDFromAssetIndexResults(r, guid));
+    }
+    if(newfromamount > 0){
+        BOOST_CHECK_NO_THROW(r = CallRPC(node, "listassetindexassets " + fromAddress, bRegtest ));
+        BOOST_CHECK(FindAssetGUIDFromAssetIndexResults(r, guid));
+    }
+    return hex_str;
 }
 
 BasicSyscoinTestingSetup::BasicSyscoinTestingSetup()

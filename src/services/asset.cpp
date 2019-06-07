@@ -808,14 +808,14 @@ bool CAssetIndexDB::ScanAssetIndex(int64_t page, const UniValue& oOptions, UniVa
             requestParam.push_back(addressObj.get_str());
             JSONRPCRequest jsonRequest;
             jsonRequest.params = requestParam;
-            const UniValue &convertedAddressValue = convertaddress(jsonRequest);     
-            const std::string & v4address = find_value(convertedAddressValue.get_obj(), "v4address").get_str();              
+            const UniValue &convertedAddressValue = convertaddress(jsonRequest);
+            const std::string & v4address = find_value(convertedAddressValue.get_obj(), "v4address").get_str();
             const CTxDestination &dest = DecodeDestination(v4address);
             UniValue detail = DescribeAddress(dest);
             if(find_value(detail.get_obj(), "iswitness").get_bool() == false)
                 throw runtime_error("SYSCOIN_ASSET_RPC_ERROR: ERRCODE: 2501 - " + _("Address must be a segwit based address"));
             string witnessProgramHex = find_value(detail.get_obj(), "witness_program").get_str();
-            unsigned char witnessVersion = (unsigned char)find_value(detail.get_obj(), "witness_version").get_int();   
+            unsigned char witnessVersion = (unsigned char)find_value(detail.get_obj(), "witness_version").get_int();
             assetTuple = CAssetAllocationTuple(nAsset, CWitnessAddress(witnessVersion, ParseHex(witnessProgramHex)));
         }
     }
