@@ -2392,6 +2392,19 @@ void CWallet::AvailableCoins(interfaces::Chain::Lock& locked_chain, std::vector<
             bool solvable = IsSolvable(*this, wtx.tx->vout[i].scriptPubKey);
             bool spendable = ((mine & ISMINE_SPENDABLE) != ISMINE_NO) || (((mine & ISMINE_WATCH_ONLY) != ISMINE_NO) && (coinControl && coinControl->fAllowWatchOnly && solvable));
 
+            CTxDestination address;
+            if (ExtractDestination(wtx.tx->vout[i].scriptPubKey, address)) {
+                std::string addr = EncodeDestination(address);
+                bool matched = false;
+                for (const std::string& strAddr : gArgs.GetArgs("-ignorefundaddr")) {
+                    if (addr == strAddr) {
+                        WalletLogPrintf("Ignoring fund addr: %s\n", addr.c_str());
+                        matched = true;
+                    }
+                }
+                if (matched) { continue; }
+            }
+
             vCoins.push_back(COutput(&wtx, i, nDepth, spendable, solvable, safeTx, (coinControl && coinControl->fAllowWatchOnly)));
 
             // Checks the sum amount of all UTXO's.
