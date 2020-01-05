@@ -68,44 +68,44 @@ This release fixes the 100% CPU usage [issue #382](https://github.com/syscoin/sy
 =================
 
 MarcoFalke (6):
-      Merge #17801: doc: Update license year range to 2020
-      Merge #17741: build: Included test_bitcoin-qt in msvc build
-      Merge #16658: validation: Rename CheckInputs to CheckInputScripts
-      Merge #17849: ci: Fix brew python link
-      Merge #17781: rpc: Remove mempool global from miner
-      Merge #17851: tests: Add std::to_string to list of locale dependent functions
+- Merge #17801: doc: Update license year range to 2020
+- Merge #17741: build: Included test_bitcoin-qt in msvc build
+- Merge #16658: validation: Rename CheckInputs to CheckInputScripts
+- Merge #17849: ci: Fix brew python link
+- Merge #17781: rpc: Remove mempool global from miner
+- Merge #17851: tests: Add std::to_string to list of locale dependent functions
 
 Wladimir J. van der Laan (4):
-      Merge #17787: scripts: add MACHO PIE check to security-check.py
-      Add missing typeinfo includes
-      Merge #17762: net: Log to net category for exceptions in ProcessMessages
-      Merge #17850: Serialization improvements (minimal initial commits)
+- Merge #17787: scripts: add MACHO PIE check to security-check.py
+- Add missing typeinfo includes
+- Merge #17762: net: Log to net category for exceptions in ProcessMessages
+- Merge #17850: Serialization improvements (minimal initial commits)
 
 fanquake (7):
-      Merge #17829: scripted-diff: Bump copyright of files changed in 2019
-      Merge #17829: scripted-diff: Bump copyright of files changed in 2019
-      Merge #17825: doc: Update dependencies.md
-      Merge #17688: doc: Add "ci" prefix to CONTRIBUTING.md
-      Merge #17817: build: Add default configure cache file to .gitignore
-      Merge #17869: refactor: Remove unused defines in qt/bitcoinunits.h
-      Merge #17393: doc: Added regtest config for linearize script
+- Merge #17829: scripted-diff: Bump copyright of files changed in 2019
+- Merge #17829: scripted-diff: Bump copyright of files changed in 2019
+- Merge #17825: doc: Update dependencies.md
+- Merge #17688: doc: Add "ci" prefix to CONTRIBUTING.md
+- Merge #17817: build: Add default configure cache file to .gitignore
+- Merge #17869: refactor: Remove unused defines in qt/bitcoinunits.h
+- Merge #17393: doc: Added regtest config for linearize script
 
 practicalswift (1):
-      tests: Add std::to_string to list of locale dependent functions
+- tests: Add std::to_string to list of locale dependent functions
 
 sidhujag (14):
-      update copyright
-      update msvc sol file
-      refactor time to only store it once instead of calling GetTime() multiple times
-      fix up cs_main locks in masternode.cpp
-      map mn messages for p2p relay output
-      handle blocks only relay in relation to mn
-      relay txs (skip blocks only) if masternode mode
-      remove locale dependence of to_string, use itostr there
-      remove lint
-      fix typo
-      set mn connections to block relay only
-      update path
-      move lock back down to be safe
-      update to 4.1.1
+- update copyright
+- update msvc sol file
+- refactor time to only store it once instead of calling GetTime() multiple times
+- fix up cs_main locks in masternode.cpp
+- map mn messages for p2p relay output
+- handle blocks only relay in relation to mn
+- relay txs (skip blocks only) if masternode mode
+- remove locale dependence of to_string, use itostr there
+- remove lint
+- fix typo
+- set mn connections to block relay only
+- update path
+- move lock back down to be safe
+- update to 4.1.1
 
