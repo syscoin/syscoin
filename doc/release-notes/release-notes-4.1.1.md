@@ -10,7 +10,7 @@ Please report bugs using the issue tracker at GitHub:
   <https://github.com/syscoin/syscoin/issues>
 
 
-Upgrade Instructions: https://syscoin.readme.io/v4.1.0/docs/syscoin-41-upgrade-guide
+Upgrade Instructions: https://syscoin.readme.io/v4.1.1/docs/syscoin-41-upgrade-guide
 Basic upgrade instructions below:
 
 How to Upgrade
@@ -20,7 +20,7 @@ If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), uninstall it, on linux run `make uninstall` and on windows/osx uninstall through the installer/package manager. Then run the
 installer (on Windows) or just copy over `/Applications/Syscoin-Qt` (on Mac)
 or `syscoind`/`syscoin-qt` (on Linux). IMPORTANT: YOU SHOULD UNINSTALL PREVIOUS VERSION
-If you are upgrading from a version older than 4.1.0, PLEASE READ: https://syscoin.readme.io/v4.1.0/docs/syscoin-41-upgrade-guide
+If you are upgrading from a version older than 4.1.0, PLEASE READ: https://syscoin.readme.io/v4.1.1/docs/syscoin-41-upgrade-guide
 
 Upgrading directly from a version of Syscoin Core that has reached its EOL is
 possible, but might take some time if the datadir needs to be migrated.  Old
@@ -41,7 +41,7 @@ was incremented and thus .node requirement was removed, however if the .node fil
 exist, it will not run the [relayer](https://github.com/Syscoin/relayer) and as a
 result Syscoin will not get the Ethereum block headers needed for consensus 
 validation of Syscoin Mint transactions. 
-See: https://syscoin.readme.io/v4.1.0/docs/syscoin-41-upgrade-guide
+See: https://syscoin.readme.io/v4.1.1/docs/syscoin-41-upgrade-guide
 
 Syscoin Core should also work on most other Unix-like systems but is not
 as frequently tested on them. Geth is an Ethereum client that runs inside of Syscoin.
@@ -64,7 +64,7 @@ Notable changes
 
 This release fixes the 100% CPU usage [issue #382](https://github.com/syscoin/syscoin/issues/382)
 
-4.1.0 change log
+4.1.1 change log
 =================
 
 MarcoFalke (6):
