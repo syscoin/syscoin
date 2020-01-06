@@ -83,7 +83,6 @@ Wladimir J. van der Laan (4):
 
 fanquake (7):
 - Merge #17829: scripted-diff: Bump copyright of files changed in 2019
-- Merge #17829: scripted-diff: Bump copyright of files changed in 2019
 - Merge #17825: doc: Update dependencies.md
 - Merge #17688: doc: Add "ci" prefix to CONTRIBUTING.md
 - Merge #17817: build: Add default configure cache file to .gitignore
