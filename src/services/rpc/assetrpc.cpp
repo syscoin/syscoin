@@ -114,13 +114,13 @@ CAmount AssetAmountFromValue(UniValue& value, int precision)
         throw JSONRPCError(RPC_TYPE_ERROR, "Precision must be between 0 and 8");
     if (!value.isNum() && !value.isStr())
         throw JSONRPCError(RPC_TYPE_ERROR, "Amount is not a number or string");
-    if (value.isStr() && value.get_str() == "-1") {
+    if ((value.isNum() && value.get_real() == double(-1)) || (value.isStr() && value.get_str() == "-1")) {
         value.setInt((int64_t)(MAX_ASSET / ((int)pow(10, precision))));
     }
     CAmount amount;
     if (!ParseFixedPoint(value.getValStr(), precision, &amount))
         throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount");
-    if (amount > 0 && !AssetRange(amount))
+    if (amount < 0 || !AssetRange(amount))
         throw JSONRPCError(RPC_TYPE_ERROR, "Amount out of range");
     return amount;
 }

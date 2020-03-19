@@ -448,6 +448,8 @@ UniValue assetnew(const JSONRPCRequest& request) {
          boost::erase_all(strContract, "0x");  // strip 0x in hex str if exist
 
     uint32_t precision = params[4].get_uint();
+    if(precision < 0 || precision > 8)
+        throw JSONRPCError(RPC_TYPE_ERROR, "Precision must be between 0 and 8");
     string vchWitness;
     UniValue param4 = params[5];
     UniValue param5 = params[6];
