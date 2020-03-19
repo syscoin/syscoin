@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,13 +12,12 @@
 #include <functional>
 #include <memory>
 
-extern CCriticalSection cs_main;
+extern RecursiveMutex cs_main;
 class BlockValidationState;
 class CBlock;
 class CBlockIndex;
 struct CBlockLocator;
 class CConnman;
-class CReserveScript;
 class CValidationInterface;
 class uint256;
 class CScheduler;
@@ -89,14 +88,37 @@ protected:
      *
      * Called on a background thread.
      */
-    virtual void TransactionAddedToMempool(const CTransactionRef &ptxn) {}
+    // SYSCOIN
+    virtual void TransactionAddedToMempool(const CTransactionRef &ptxn, bool fBlock) {}
     /**
      * Notifies listeners of a transaction leaving mempool.
      *
-     * This only fires for transactions which leave mempool because of expiry,
-     * size limiting, reorg (changes in lock times/coinbase maturity), or
-     * replacement. This does not include any transactions which are included
-     * in BlockConnectedDisconnected either in block->vtx or in txnConflicted.
+     * This notification fires for transactions that are removed from the
+     * mempool for the following reasons:
+     *
+     * - EXPIRY (expired from mempool after -mempoolexpiry hours)
+     * - SIZELIMIT (removed in size limiting if the mempool exceeds -maxmempool megabytes)
+     * - REORG (removed during a reorg)
+     * - CONFLICT (removed because it conflicts with in-block transaction)
+     * - REPLACED (removed due to RBF replacement)
+     *
+     * This does not fire for transactions that are removed from the mempool
+     * because they have been included in a block. Any client that is interested
+     * in transactions removed from the mempool for inclusion in a block can learn
+     * about those transactions from the BlockConnected notification.
+     *
+     * Transactions that are removed from the mempool because they conflict
+     * with a transaction in the new block will have
+     * TransactionRemovedFromMempool events fired *before* the BlockConnected
+     * event is fired. If multiple blocks are connected in one step, then the
+     * ordering could be:
+     *
+     * - TransactionRemovedFromMempool(tx1 from block A)
+     * - TransactionRemovedFromMempool(tx2 from block A)
+     * - TransactionRemovedFromMempool(tx1 from block B)
+     * - TransactionRemovedFromMempool(tx2 from block B)
+     * - BlockConnected(A)
+     * - BlockConnected(B)
      *
      * Called on a background thread.
      */
@@ -107,7 +129,7 @@ protected:
      *
      * Called on a background thread.
      */
-    virtual void BlockConnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex *pindex, const std::vector<CTransactionRef> &txnConflicted) {}
+    virtual void BlockConnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex *pindex) {}
     /**
      * Notifies listeners of a block being disconnected
      *
@@ -173,9 +195,10 @@ public:
 
 
     void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, bool fInitialDownload);
-    void TransactionAddedToMempool(const CTransactionRef &);
+    // SYSCOIN
+    void TransactionAddedToMempool(const CTransactionRef &, bool fBlock);
     void TransactionRemovedFromMempool(const CTransactionRef &);
-    void BlockConnected(const std::shared_ptr<const CBlock> &, const CBlockIndex *pindex, const std::shared_ptr<const std::vector<CTransactionRef>> &);
+    void BlockConnected(const std::shared_ptr<const CBlock> &, const CBlockIndex *pindex);
     void BlockDisconnected(const std::shared_ptr<const CBlock> &, const CBlockIndex* pindex);
     void ChainStateFlushed(const CBlockLocator &);
     void BlockChecked(const CBlock&, const BlockValidationState&);

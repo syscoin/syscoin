@@ -35,6 +35,7 @@ cache:
     - $TRAVIS_BUILD_DIR/depends/built
     - $TRAVIS_BUILD_DIR/depends/sdk-sources
     - $TRAVIS_BUILD_DIR/ci/scratch/.ccache
+    - $TRAVIS_BUILD_DIR/releases/$HOST
     # macOS
     - $HOME/Library/Caches/Homebrew
     - /usr/local/Homebrew
@@ -82,18 +83,20 @@ jobs:
         - set -o errexit; source ./ci/lint/06_script.sh
 
     - stage: test
-      name: 'ARM  [GOAL: install]  [bionic]'
+      name: 'ARM  [GOAL: install]  [buster]'
       arch: arm64
       env: >-
         FILE_ENV="./ci/test/00_setup_env_arm.sh"
         QEMU_USER_CMD=""  # Can run the tests natively without qemu
 
-    - stage: test
-      name: 'S390x  [GOAL: install]  [bionic]'
-      arch: s390x
-      env: >-
-        FILE_ENV="./ci/test/00_setup_env_s390x.sh"
-        QEMU_USER_CMD=""  # Can run the tests natively without qemu
+# s390 build was disabled temporarily because of disk space issues on the Travis VM
+#
+#    - stage: test
+#      name: 'S390x  [GOAL: install]  [buster]  [unit tests, functional tests]'
+#      arch: s390x
+#      env: >-
+#        FILE_ENV="./ci/test/00_setup_env_s390x.sh"
+#        QEMU_USER_CMD=""  # Can run the tests natively without qemu
 
     - stage: test
       name: 'Win64  [GOAL: deploy]  [no gui, no functional tests]'
@@ -101,17 +104,12 @@ jobs:
         FILE_ENV="./ci/test/00_setup_env_win64.sh"
 
     - stage: test
-      name: '32-bit + dash  [GOAL: install]  [gui]'
+      name: '32-bit + dash  [GOAL: install]  [CentOS 7]  [gui]'
       env: >-
-        FILE_ENV="./ci/test/00_setup_env_i686.sh"
+        FILE_ENV="./ci/test/00_setup_env_i686_centos.sh"
 
     - stage: test
-      name: 'x86_64 Linux  [GOAL: install]  [CentOS 7]  [no depends, only system libs]'
-      env: >-
-        FILE_ENV="./ci/test/00_setup_env_native_centos.sh"
-
-    - stage: test
-      name: 'x86_64 Linux  [GOAL: install]  [bionic]  [uses qt5 dev package and some depends packages] [unsigned char]'
+      name: 'x86_64 Linux  [GOAL: install]  [bionic]  [previous releases, uses qt5 dev package and some depends packages] [unsigned char]'
       env: >-
         FILE_ENV="./ci/test/00_setup_env_native_qt5.sh"
 
@@ -130,11 +128,6 @@ jobs:
       name: 'x86_64 Linux  [GOAL: install]  [bionic]  [no depends, only system libs, valgrind]'
       env: >-
         FILE_ENV="./ci/test/00_setup_env_native_valgrind.sh"
-
-    - stage: test
-      name: 'x86_64 Linux  [GOAL: install]  [bionic]  [no depends, only system libs, sanitizers: fuzzer,address,undefined]'
-      env: >-
-        FILE_ENV="./ci/test/00_setup_env_native_fuzz.sh"
 
     - stage: test
       name: 'x86_64 Linux  [GOAL: install]  [bionic]  [no wallet]'

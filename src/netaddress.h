@@ -39,14 +39,12 @@ class CNetAddr
         explicit CNetAddr(const struct in_addr& ipv4Addr);
         void SetIP(const CNetAddr& ip);
 
-    private:
         /**
          * Set raw IPv4 or IPv6 address (in network byte order)
          * @note Only NET_IPV4 and NET_IPV6 are allowed for network.
          */
         void SetRaw(Network network, const uint8_t *data);
 
-    public:
         bool SetInternal(const std::string& name);
 
         bool SetSpecial(const std::string &strName); // for Tor addresses
@@ -67,6 +65,7 @@ class CNetAddr
         bool IsRFC4862() const; // IPv6 autoconfig (FE80::/64)
         bool IsRFC6052() const; // IPv6 well-known prefix for IPv4-embedded address (64:FF9B::/96)
         bool IsRFC6145() const; // IPv6 IPv4-translated address (::FFFF:0:0:0/96) (actually defined in RFC2765)
+        bool IsHeNet() const;   // IPv6 Hurricane Electric - https://he.net (2001:0470::/36)
         bool IsTor() const;
         bool IsLocal() const;
         bool IsRoutable() const;
@@ -78,7 +77,19 @@ class CNetAddr
         unsigned int GetByte(int n) const;
         uint64_t GetHash() const;
         bool GetInAddr(struct in_addr* pipv4Addr) const;
-        std::vector<unsigned char> GetGroup() const;
+        uint32_t GetNetClass() const;
+
+        //! For IPv4, mapped IPv4, SIIT translated IPv4, Teredo, 6to4 tunneled addresses, return the relevant IPv4 address as a uint32.
+        uint32_t GetLinkedIPv4() const;
+        //! Whether this address has a linked IPv4 address (see GetLinkedIPv4()).
+        bool HasLinkedIPv4() const;
+
+        // The AS on the BGP path to the node we use to diversify
+        // peers in AddrMan bucketing based on the AS infrastructure.
+        // The ip->AS mapping depends on how asmap is constructed.
+        uint32_t GetMappedAS(const std::vector<bool> &asmap) const;
+
+        std::vector<unsigned char> GetGroup(const std::vector<bool> &asmap) const;
         int GetReachabilityFrom(const CNetAddr *paddrPartner = nullptr) const;
 
         explicit CNetAddr(const struct in6_addr& pipv6Addr, const uint32_t scope = 0);

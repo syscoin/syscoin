@@ -1,4 +1,4 @@
-// Copyright (c) 2018 The Bitcoin Core developers
+// Copyright (c) 2018-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -38,7 +38,7 @@
 namespace interfaces {
 namespace {
 
-class LockImpl : public Chain::Lock, public UniqueLock<CCriticalSection>
+class LockImpl : public Chain::Lock, public UniqueLock<RecursiveMutex>
 {
     Optional<int> getHeight() override
     {
@@ -164,19 +164,18 @@ public:
             UnregisterValidationInterface(this);
         }
     }
-    void TransactionAddedToMempool(const CTransactionRef& tx) override
+    // SYSCOIN
+    void TransactionAddedToMempool(const CTransactionRef& tx, bool fBlock) override
     {
-        m_notifications->TransactionAddedToMempool(tx);
+        m_notifications->TransactionAddedToMempool(tx, fBlock);
     }
     void TransactionRemovedFromMempool(const CTransactionRef& tx) override
     {
         m_notifications->TransactionRemovedFromMempool(tx);
     }
-    void BlockConnected(const std::shared_ptr<const CBlock>& block,
-        const CBlockIndex* index,
-        const std::vector<CTransactionRef>& tx_conflicted) override
+    void BlockConnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* index) override
     {
-        m_notifications->BlockConnected(*block, tx_conflicted, index->nHeight);
+        m_notifications->BlockConnected(*block, index->nHeight);
     }
     void BlockDisconnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* index) override
     {
@@ -367,8 +366,9 @@ public:
     void requestMempoolTransactions(Notifications& notifications) override
     {
         LOCK2(::cs_main, ::mempool.cs);
+        // SYSCOIN
         for (const CTxMemPoolEntry& entry : ::mempool.mapTx) {
-            notifications.TransactionAddedToMempool(entry.GetSharedTx());
+            notifications.TransactionAddedToMempool(entry.GetSharedTx(), true);
         }
     }
     NodeContext& m_node;

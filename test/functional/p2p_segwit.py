@@ -31,7 +31,7 @@ from test_framework.messages import (
     msg_inv,
     msg_tx,
     msg_block,
-    msg_witness_tx,
+    msg_no_witness_tx,
     ser_uint256,
     ser_vector,
     sha256,
@@ -123,9 +123,10 @@ def test_transaction_acceptance(node, p2p, tx, with_witness, accepted, reason=No
     - use the getrawmempool rpc to check for acceptance."""
     reason = [reason] if reason else []
     with node.assert_debug_log(expected_msgs=reason):
-        p2p.send_message(msg_witness_tx(tx) if with_witness else msg_tx(tx))
+        p2p.send_message(msg_tx(tx) if with_witness else msg_no_witness_tx(tx))
         p2p.sync_with_ping()
         assert_equal(tx.hash in node.getrawmempool(), accepted)
+
 
 def test_witness_block(node, p2p, block, accepted, with_witness=True, reason=None):
     """Send a block to the node and check that it's accepted
@@ -143,6 +144,11 @@ class TestP2PConn(P2PInterface):
     def __init__(self):
         super().__init__()
         self.getdataset = set()
+
+    # Avoid sending out msg_getdata in the mininode thread as a reply to invs.
+    # They are not needed and would only lead to races because we send msg_getdata out in the test thread
+    def on_inv(self, message):
+        pass
 
     def on_getdata(self, message):
         for inv in message.inv:
@@ -185,9 +191,9 @@ class SegWitTest(SyscoinTestFramework):
         self.num_nodes = 3
         # This test tests SegWit both pre and post-activation, so use the normal BIP9 activation.
         self.extra_args = [
-            ["-whitelist=127.0.0.1", "-acceptnonstdtxn=1", "-segwitheight={}".format(SEGWIT_HEIGHT)],
-            ["-whitelist=127.0.0.1", "-acceptnonstdtxn=0", "-segwitheight={}".format(SEGWIT_HEIGHT)],
-            ["-whitelist=127.0.0.1", "-acceptnonstdtxn=1", "-segwitheight=-1"]
+            ["-acceptnonstdtxn=1", "-segwitheight={}".format(SEGWIT_HEIGHT), "-whitelist=noban@127.0.0.1"],
+            ["-acceptnonstdtxn=0", "-segwitheight={}".format(SEGWIT_HEIGHT)],
+            ["-acceptnonstdtxn=1", "-segwitheight=-1"],
         ]
         self.supports_cli = False
 
@@ -298,9 +304,9 @@ class SegWitTest(SyscoinTestFramework):
 
         # Check that serializing it with or without witness is the same
         # This is a sanity check of our testing framework.
-        assert_equal(msg_tx(tx).serialize(), msg_witness_tx(tx).serialize())
+        assert_equal(msg_no_witness_tx(tx).serialize(), msg_tx(tx).serialize())
 
-        self.test_node.send_message(msg_witness_tx(tx))
+        self.test_node.send_message(msg_tx(tx))
         self.test_node.sync_with_ping()  # make sure the tx was processed
         assert tx.hash in self.nodes[0].getrawmempool()
         # Save this transaction for later

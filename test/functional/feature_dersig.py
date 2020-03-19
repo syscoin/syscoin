@@ -36,13 +36,15 @@ def unDERify(tx):
     tx.vin[0].scriptSig = CScript(newscript)
 
 
-
 class BIP66Test(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [['-whitelist=127.0.0.1', '-par=1']]  # Use only one script thread to get the exact log msg for testing
+        self.extra_args = [[
+            '-whitelist=noban@127.0.0.1',
+            '-par=1',  # Use only one script thread to get the exact log msg for testing
+        ]]
         self.setup_clean_chain = True
-        self.rpc_timeout = 120
+        self.rpc_timeout = 240
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()

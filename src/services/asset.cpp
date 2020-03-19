@@ -18,20 +18,17 @@ extern CTxDestination DecodeDestination(const std::string& str);
 extern UniValue ValueFromAmount(const CAmount& amount);
 extern UniValue DescribeAddress(const CTxDestination& dest);
 extern CAmount AmountFromValue(const UniValue& value);
-extern UniValue convertaddress(const JSONRPCRequest& request);
 extern AssetBalanceMap mempoolMapAssetBalances;
-extern ArrivalTimesMapImpl arrivalTimesMap;
-extern CCriticalSection cs_assetallocationmempoolbalance;
-extern CCriticalSection cs_assetallocationarrival;
-extern std::vector<std::pair<uint256, uint32_t> >  vecToRemoveFromMempool;
-extern CCriticalSection cs_assetallocationmempoolremovetx;
+extern ArrivalTimesSetImpl arrivalTimesSet;
+extern RecursiveMutex cs_assetallocationmempoolbalance;
+extern RecursiveMutex cs_assetallocationarrival;
+extern ArrivalTimesSet setToRemoveFromMempool;
+extern RecursiveMutex cs_assetallocationmempoolremovetx;
 
 std::unique_ptr<CAssetDB> passetdb;
 std::unique_ptr<CAssetAllocationDB> passetallocationdb;
 std::unique_ptr<CAssetAllocationMempoolDB> passetallocationmempooldb;
 std::unique_ptr<CAssetIndexDB> passetindexdb;
-
-
 using namespace std;
 
 int GetSyscoinDataOutput(const CTransaction& tx) {
@@ -311,7 +308,6 @@ bool FlushSyscoinDBs() {
 	 {
         if (passetallocationmempooldb != nullptr)
         {
-            ResyncAssetAllocationStates();
             {
                 LOCK(cs_assetallocationmempoolbalance);
                 LogPrintf("Flushing Asset Allocation Mempool Balances...size %d\n", mempoolMapAssetBalances.size());
@@ -323,21 +319,21 @@ bool FlushSyscoinDBs() {
             }
             {
                 LOCK(cs_assetallocationarrival);
-                LogPrintf("Flushing Asset Allocation Arrival Times...size %d\n", arrivalTimesMap.size());
-                if(!passetallocationmempooldb->WriteAssetAllocationMempoolArrivalTimes(arrivalTimesMap)){
+                LogPrintf("Flushing Asset Allocation Arrival Times...size %d\n", arrivalTimesSet.size());
+                if(!passetallocationmempooldb->WriteAssetAllocationMempoolArrivalTimes(arrivalTimesSet)){
                     LogPrintf("Failed to write to asset allocation mempool arrival time database!\n");
                     ret = false; 
                 }
-                arrivalTimesMap.clear();
+                arrivalTimesSet.clear();
             }
             {
                 LOCK(cs_assetallocationmempoolremovetx);
-                LogPrintf("Flushing Asset Allocation Mempool Removal Transactions...size %d\n", vecToRemoveFromMempool.size());
-                if(!passetallocationmempooldb->WriteAssetAllocationMempoolToRemoveVector(vecToRemoveFromMempool)){
+                LogPrintf("Flushing Asset Allocation Mempool Removal Transactions...size %d\n", setToRemoveFromMempool.size());
+                if(!passetallocationmempooldb->WriteAssetAllocationMempoolToRemoveSet(setToRemoveFromMempool)){
                     LogPrintf("Failed to write to asset allocation mempool to remove database!\n");
                     ret = false; 
                 }
-                vecToRemoveFromMempool.clear();
+                setToRemoveFromMempool.clear();
             }           
             if (!passetallocationmempooldb->Flush()) {
                 LogPrintf("Failed to write to asset allocation mempool database!\n");
@@ -359,6 +355,20 @@ bool FlushSyscoinDBs() {
      }
 	return ret;
 }
+COutPoint FindAssetOwnerOutPoint(const CCoinsViewCache &inputs, const CTransaction& tx, const CWitnessAddress &witnessAddressToMatch) {
+	CTxDestination dest;
+	int witnessversion;
+	std::vector<unsigned char> witnessprogram;
+	for (unsigned int i = 0; i < tx.vin.size(); i++) {
+		const Coin& prevCoins = inputs.AccessCoin(tx.vin[i].prevout);
+		if (prevCoins.IsSpent() || prevCoins.IsCoinBase()) {
+			continue;
+		}
+		if (prevCoins.out.scriptPubKey.IsWitnessProgram(witnessversion, witnessprogram) && witnessAddressToMatch.vchWitnessProgram == witnessprogram && witnessAddressToMatch.nVersion == (unsigned char)witnessversion)
+			return tx.vin[i].prevout;
+	}
+	return COutPoint();
+}
 bool FindAssetOwnerInTx(const CCoinsViewCache &inputs, const CTransaction& tx, const CWitnessAddress &witnessAddressToMatch) {
 	CTxDestination dest;
 	int witnessversion;
@@ -373,29 +383,31 @@ bool FindAssetOwnerInTx(const CCoinsViewCache &inputs, const CTransaction& tx, c
 	}
 	return false;
 }
+
 bool FindAssetOwnerInTx(const CCoinsViewCache &inputs, const CTransaction& tx, const CWitnessAddress &witnessAddressToMatch, const COutPoint& lockedOutpoint) {
     if (lockedOutpoint.IsNull()){
 		return FindAssetOwnerInTx(inputs, tx, witnessAddressToMatch);
     }
+    if(tx.vin.empty())
+        return false;
 	CTxDestination dest;
     int witnessversion;
     bool foundOutPoint = false;
     bool foundOwner = false;
     std::vector<unsigned char> witnessprogram;
-	for (unsigned int i = 0; i < tx.vin.size(); i++) {
-		const Coin& prevCoins = inputs.AccessCoin(tx.vin[i].prevout);
-		if (prevCoins.IsSpent() || prevCoins.IsCoinBase()) {
-			continue;
-		}
-        if (lockedOutpoint == tx.vin[i].prevout){
-            foundOutPoint = true;
-        }
-        if(prevCoins.out.scriptPubKey.IsWitnessProgram(witnessversion, witnessprogram) && witnessAddressToMatch.vchWitnessProgram == witnessprogram && witnessAddressToMatch.nVersion == (unsigned char)witnessversion){
-            foundOwner = true;
-        }
-        if(foundOwner && foundOutPoint)
-            return true;
-	}
+    const Coin& prevCoins = inputs.AccessCoin(tx.vin[0].prevout);
+    if (prevCoins.IsSpent() || prevCoins.IsCoinBase()) {
+        return false;
+    }
+    if (lockedOutpoint == tx.vin[0].prevout){
+        foundOutPoint = true;
+    }
+    if(prevCoins.out.scriptPubKey.IsWitnessProgram(witnessversion, witnessprogram) && witnessAddressToMatch.vchWitnessProgram == witnessprogram && witnessAddressToMatch.nVersion == (unsigned char)witnessversion){
+        foundOwner = true;
+    }
+    if(foundOwner && foundOutPoint)
+        return true;
+	
 	return false;
 }
 
@@ -409,11 +421,14 @@ bool IsAssetAllocationTx(const int &nVersion){
     return nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN || nVersion == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION ||
         nVersion == SYSCOIN_TX_VERSION_ALLOCATION_SEND || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_LOCK;
 }
+bool IsZdagTx(const int &nVersion){
+    return nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_SEND;
+}
 bool IsSyscoinTx(const int &nVersion){
     return IsAssetTx(nVersion) || IsAssetAllocationTx(nVersion) || IsSyscoinMintTx(nVersion);
 }
 #ifdef ENABLE_WALLET
-bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, UniValue& output, CWallet* const pwallet, const isminefilter* filter_ismine){
+bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, UniValue& output, const CWallet* const pwallet, const isminefilter* filter_ismine){
     vector<vector<unsigned char> > vvch;
     bool found = false;
     if(IsSyscoinMintTx(rawTx.nVersion)){
@@ -440,7 +455,7 @@ bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, UniValue& output){
 }
 // TODO cleanup, this is to support disable-wallet build make sure to wrap around ENABLE_WALLET
 #ifdef ENABLE_WALLET
-bool SysTxToJSON(const CTransaction& tx, UniValue& output, CWallet* const pwallet, const isminefilter* filter_ismine)
+bool SysTxToJSON(const CTransaction& tx, UniValue& output, const CWallet* const pwallet, const isminefilter* filter_ismine)
 {
     bool found = false;
     if (IsAssetTx(tx.nVersion) && tx.nVersion != SYSCOIN_TX_VERSION_ASSET_SEND)
@@ -459,12 +474,18 @@ bool SysTxToJSON(const CTransaction& tx, UniValue& output)
         found = AssetAllocationTxToJSON(tx, output);
     return found;
 }
-int GenerateSyscoinGuid()
+int32_t GenerateSyscoinGuid(const COutPoint& outPoint)
 {
-    int rand = 0;
-    while(rand <= SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN)
-	    rand = GetRand(std::numeric_limits<int>::max());
-    return rand;
+    const arith_uint256 &txidArith = UintToArith256(outPoint.hash);
+    int32_t low32 = (int32_t)txidArith.GetLow64();
+    low32 += outPoint.n;
+    if(low32 < 0){
+        low32 *= -1;
+    }
+    if(low32 <= SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN*10){
+        low32 = SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN*10;
+    }
+    return low32;
 }
 
 bool IsOutpointMature(const COutPoint& outpoint)
@@ -495,56 +516,50 @@ void CMintSyscoin::Serialize( vector<unsigned char> &vchData) {
     vchData = vector<unsigned char>(dsMint.begin(), dsMint.end());
 
 }
-bool WriteAssetIndexTXID(const uint32_t& nAsset, const uint256& txid){
-    uint32_t page;
-    if(!passetindexdb->ReadAssetPage(nAsset, page)){
-        page = 0;
-        if(!passetindexdb->WriteAssetPage(nAsset, page)){
-           LogPrint(BCLog::SYS, "Failed to write asset page\n");   
-           return false; 
-        }              
-    }
-    std::vector<uint256> TXIDS;
-    passetindexdb->ReadIndexTXIDs(nAsset, page, TXIDS);
-    // new page needed
-    if(((int)TXIDS.size()) >= fAssetIndexPageSize){
+bool WriteAssetIndexTXID(const uint32_t& nAsset, const uint256& txid){	
+    uint32_t page;	
+    if(!passetindexdb->ReadAssetPage(nAsset, page)){	
+        page = 0;	
+        if(!passetindexdb->WriteAssetPage(nAsset, page)){	
+           LogPrint(BCLog::SYS, "Failed to write asset page\n");   	
+           return false; 	
+        }              	
+    }	
+    std::vector<uint256> TXIDS;	
+    passetindexdb->ReadIndexTXIDs(nAsset, page, TXIDS);	
+    // new page needed	
+    if(((int)TXIDS.size()) >= 25){	
 
-        TXIDS.clear();
-        page++;
-        if(!passetindexdb->WriteAssetPage(nAsset, page)){
-            LogPrint(BCLog::SYS, "Failed to write asset page\n");
-            return false;
-        }
-    }
-    TXIDS.push_back(txid);
-    if(!passetindexdb->WriteIndexTXIDs(nAsset, page, TXIDS)){
-        LogPrint(BCLog::SYS, "Failed to write asset index txids\n");
-        return false;
-    }
-    return true;
-}
-bool CAssetDB::WriteAssetIndex(const CTransaction& tx, const uint256& txid, const CAsset& dbAsset, const int& nHeight, const uint256& blockhash) {
-	if (fZMQAsset || fAssetIndex) {
-        if(!fAssetIndexGuids.empty() && std::find(fAssetIndexGuids.begin(),fAssetIndexGuids.end(),dbAsset.nAsset) == fAssetIndexGuids.end()){
-            LogPrint(BCLog::SYS, "Asset cannot be indexed because it is not set in -assetindexguids list\n");
-            return true;
-        }
-		UniValue oName(UniValue::VOBJ);
-        // assetsends write allocation indexes
-        if(tx.nVersion != SYSCOIN_TX_VERSION_ASSET_SEND && AssetTxToJSON(tx, nHeight, blockhash, oName)){
-            if(fZMQAsset)
-                GetMainSignals().NotifySyscoinUpdate(oName.write().c_str(), "assetrecord");
-            if(fAssetIndex)
-            {
-                WriteAssetIndexTXID(dbAsset.nAsset, txid);
-                if(!passetindexdb->WritePayload(txid, oName)){
-                    LogPrint(BCLog::SYS, "Failed to write asset index payload\n");
-                    return false;
-                }
-            }
-        }
-	}
-    return true;
+        TXIDS.clear();	
+        page++;	
+        if(!passetindexdb->WriteAssetPage(nAsset, page)){	
+            LogPrint(BCLog::SYS, "Failed to write asset page\n");	
+            return false;	
+        }	
+    }	
+    TXIDS.push_back(txid);	
+    if(!passetindexdb->WriteIndexTXIDs(nAsset, page, TXIDS)){	
+        LogPrint(BCLog::SYS, "Failed to write asset index txids\n");	
+        return false;	
+    }	
+    return true;	
+}	
+bool CAssetDB::WriteAssetIndex(const CTransaction& tx, const uint256& txid, const CAsset& dbAsset, const int& nHeight, const uint256& blockhash) {	
+	if (fAssetIndex) {	
+		UniValue oName(UniValue::VOBJ);	
+        // assetsends write allocation indexes	
+        if(tx.nVersion != SYSCOIN_TX_VERSION_ASSET_SEND && AssetTxToJSON(tx, nHeight, blockhash, oName)){	
+            if(fAssetIndex)	
+            {	
+                WriteAssetIndexTXID(dbAsset.nAsset, txid);	
+                if(!passetindexdb->WritePayload(txid, oName)){	
+                    LogPrint(BCLog::SYS, "Failed to write asset index payload\n");	
+                    return false;	
+                }	
+            }	
+        }	
+	}	
+    return true;	
 }
 bool GetAsset(const uint32_t &nAsset,
         CAsset& txPos) {
@@ -667,38 +682,36 @@ bool CAssetDB::Flush(const AssetMap &mapAssets){
     CDBBatch batch(*this);
     std::map<std::string, std::vector<uint32_t> > mapGuids;
     std::vector<uint32_t> emptyVec;
-    if(fAssetIndex){
-        for (const auto &key : mapAssets) {
-            if(!fAssetIndexGuids.empty() && std::find(fAssetIndexGuids.begin(), fAssetIndexGuids.end(), key.first) == fAssetIndexGuids.end())
-                continue;
-            const string& witnessStr = key.second.witnessAddress.ToString();
-            auto it = mapGuids.emplace(std::piecewise_construct,  std::forward_as_tuple(std::move(witnessStr)),  std::forward_as_tuple(std::move(emptyVec)));
-            
-            std::vector<uint32_t> &assetGuids = it.first->second;
-            // if wasn't found and was added to the map
-            if(it.second)
-                ReadAssetsByAddress(key.second.witnessAddress, assetGuids);
-            // erase asset address association
-            if (key.second.IsNull()) {
-                auto itVec = std::find(assetGuids.begin(), assetGuids.end(),  key.first);
-                if(itVec != assetGuids.end()){
-                    assetGuids.erase(itVec);  
-                    // ensure we erase only the ones that are actually being cleared
-                    if(assetGuids.empty())
-                        assetGuids.emplace_back(0);
-                }
-            }
-            else{
-                // add asset address association
-                auto itVec = std::find(assetGuids.begin(), assetGuids.end(),  key.first);
-                if(itVec == assetGuids.end()){
-                    // if we had the special erase flag we remove that and add the real guid
-                    if(assetGuids.size() == 1 && assetGuids[0] == 0)
-                        assetGuids.clear();
-                    assetGuids.emplace_back(key.first);
-                }
-            }      
-        }
+    if(fAssetIndex){	
+        for (const auto &key : mapAssets) {	
+            const string& witnessStr = key.second.witnessAddress.ToString();	
+            auto it = mapGuids.emplace(std::piecewise_construct,  std::forward_as_tuple(std::move(witnessStr)),  std::forward_as_tuple(std::move(emptyVec)));	
+
+            std::vector<uint32_t> &assetGuids = it.first->second;	
+            // if wasn't found and was added to the map	
+            if(it.second)	
+                ReadAssetsByAddress(key.second.witnessAddress, assetGuids);	
+            // erase asset address association	
+            if (key.second.IsNull()) {	
+                auto itVec = std::find(assetGuids.begin(), assetGuids.end(),  key.first);	
+                if(itVec != assetGuids.end()){	
+                    assetGuids.erase(itVec);  	
+                    // ensure we erase only the ones that are actually being cleared	
+                    if(assetGuids.empty())	
+                        assetGuids.emplace_back(0);	
+                }	
+            }	
+            else{	
+                // add asset address association	
+                auto itVec = std::find(assetGuids.begin(), assetGuids.end(),  key.first);	
+                if(itVec == assetGuids.end()){	
+                    // if we had the special erase flag we remove that and add the real guid	
+                    if(assetGuids.size() == 1 && assetGuids[0] == 0)	
+                        assetGuids.clear();	
+                    assetGuids.emplace_back(key.first);	
+                }	
+            }      	
+        }	
     }
     for (const auto &key : mapAssets) {
 		if (key.second.IsNull()) {
@@ -709,20 +722,18 @@ bool CAssetDB::Flush(const AssetMap &mapAssets){
 			write++;
 			batch.Write(key.first, key.second);
 		}
-        if(fAssetIndex){
-            if(!fAssetIndexGuids.empty() && std::find(fAssetIndexGuids.begin(), fAssetIndexGuids.end(), key.first) == fAssetIndexGuids.end())
-                continue;
-            auto it = mapGuids.find(key.second.witnessAddress.ToString());
-            if(it == mapGuids.end())
-                continue;
-            const std::vector<uint32_t>& assetGuids = it->second;
-            // check for special clearing flag before batch erase
-            if(assetGuids.size() == 1 && assetGuids[0] == 0)
-                batch.Erase(key.second.witnessAddress);   
-            else
-                batch.Write(key.second.witnessAddress, assetGuids); 
-            // we have processed this address so don't process again
-            mapGuids.erase(it);        
+        if(fAssetIndex){	
+            auto it = mapGuids.find(key.second.witnessAddress.ToString());	
+            if(it == mapGuids.end())	
+                continue;	
+            const std::vector<uint32_t>& assetGuids = it->second;	
+            // check for special clearing flag before batch erase	
+            if(assetGuids.size() == 1 && assetGuids[0] == 0)	
+                batch.Erase(key.second.witnessAddress);   	
+            else	
+                batch.Write(key.second.witnessAddress, assetGuids); 	
+            // we have processed this address so don't process again	
+            mapGuids.erase(it);        	
         }
     }
     LogPrint(BCLog::SYS, "Flushing %d assets (erased %d, written %d)\n", mapAssets.size(), erase, write);
@@ -802,78 +813,77 @@ bool CAssetDB::ScanAssets(const uint32_t count, const uint32_t from, const UniVa
 	}
 	return true;
 }
-bool CAssetIndexDB::ScanAssetIndex(uint32_t page, const UniValue& oOptions, UniValue& oRes) {
-    CAssetAllocationTuple assetTuple;
-    uint32_t nAsset = 0;
-    if (!oOptions.isNull()) {
-        const UniValue &assetObj = find_value(oOptions, "asset_guid");
-        if (assetObj.isNum()) {
+bool CAssetIndexDB::ScanAssetIndex(uint32_t page, const UniValue& oOptions, UniValue& oRes) {	
+    CAssetAllocationTuple assetTuple;	
+    uint32_t nAsset = 0;	
+    if (!oOptions.isNull()) {	
+        const UniValue &assetObj = find_value(oOptions, "asset_guid");	
+        if (assetObj.isNum()) {	
 
-            nAsset = assetObj.get_uint();
-        }
-        else{
-            LogPrint(BCLog::SYS, "ScanAssetIndex: failed, asset guid is not a number\n");
-            return false;
-        }
+            nAsset = assetObj.get_uint();	
+        }	
+        else{	
+            LogPrint(BCLog::SYS, "ScanAssetIndex: failed, asset guid is not a number\n");	
+            return false;	
+        }	
 
-        const UniValue &addressObj = find_value(oOptions, "address");
-        if (addressObj.isStr()) {
-            assetTuple = CAssetAllocationTuple(nAsset, DescribeWitnessAddress(addressObj.get_str()));
-        }
-    }
-    else{
-        LogPrint(BCLog::SYS, "ScanAssetIndex: failed, options are not found\n");
-        return false;
-    }
-    vector<uint256> vecTX;
-    uint32_t pageFound;
-    bool scanAllocation = !assetTuple.IsNull();
-    if(scanAllocation){
-        if(!ReadAssetAllocationPage(nAsset, pageFound))
-            return true;
-    }
-    else{
-        if(!ReadAssetPage(nAsset, pageFound))
-            return true;
-    }
-    if(pageFound < page){
-        LogPrint(BCLog::SYS, "ScanAssetIndex: failed, no entries found in the page table pageFound %d vs %d page\n",pageFound, page);
-        return false;
-    }
-    // order by highest page first
-    page = pageFound - page;
-    if(scanAllocation){
-        if(!ReadIndexTXIDs(assetTuple, page, vecTX)){
-            LogPrint(BCLog::SYS, "ScanAssetIndex: failed, cannot read TXIDs of allocation\n");
-            return false;
-        }
-    }
-    else{
-        if(!ReadIndexTXIDs(nAsset, page, vecTX)){
-            LogPrint(BCLog::SYS, "ScanAssetIndex: failed, cannot read TXIDs of asset\n");
-            return false;
-        }
-    }
-    for(const uint256& txid: vecTX){
-        UniValue oObj(UniValue::VOBJ);
-        if(!ReadPayload(txid, oObj))
-            continue;
-           
-        oRes.push_back(oObj);
-    }
-    
-    return true;
+        const UniValue &addressObj = find_value(oOptions, "address");	
+        if (addressObj.isStr()) {	
+            assetTuple = CAssetAllocationTuple(nAsset, DescribeWitnessAddress(addressObj.get_str()));	
+        }	
+    }	
+    else{	
+        LogPrint(BCLog::SYS, "ScanAssetIndex: failed, options are not found\n");	
+        return false;	
+    }	
+    vector<uint256> vecTX;	
+    uint32_t pageFound;	
+    bool scanAllocation = !assetTuple.IsNull();	
+    if(scanAllocation){	
+        if(!ReadAssetAllocationPage(nAsset, pageFound))	
+            return true;	
+    }	
+    else{	
+        if(!ReadAssetPage(nAsset, pageFound))	
+            return true;	
+    }	
+    if(pageFound < page){	
+        LogPrint(BCLog::SYS, "ScanAssetIndex: failed, no entries found in the page table pageFound %d vs %d page\n",pageFound, page);	
+        return false;	
+    }	
+    // order by highest page first	
+    page = pageFound - page;	
+    if(scanAllocation){	
+        if(!ReadIndexTXIDs(assetTuple, page, vecTX)){	
+            LogPrint(BCLog::SYS, "ScanAssetIndex: failed, cannot read TXIDs of allocation\n");	
+            return false;	
+        }	
+    }	
+    else{	
+        if(!ReadIndexTXIDs(nAsset, page, vecTX)){	
+            LogPrint(BCLog::SYS, "ScanAssetIndex: failed, cannot read TXIDs of asset\n");	
+            return false;	
+        }	
+    }	
+    for(const uint256& txid: vecTX){	
+        UniValue oObj(UniValue::VOBJ);	
+        if(!ReadPayload(txid, oObj))	
+            continue;	
+
+        oRes.push_back(oObj);	
+    }	
+
+    return true;	
+}	
+bool CAssetIndexDB::FlushErase(const std::vector<uint256> &vecTXIDs){	
+    if(vecTXIDs.empty() || !fAssetIndex)	
+        return true;	
+
+    CDBBatch batch(*this);	
+    for (const uint256 &txid : vecTXIDs) {	
+        // erase payload	
+        batch.Erase(txid);	
+    }	
+    LogPrint(BCLog::SYS, "Flushing %d asset index removals\n", vecTXIDs.size());	
+    return WriteBatch(batch);	
 }
-bool CAssetIndexDB::FlushErase(const std::vector<uint256> &vecTXIDs){
-    if(vecTXIDs.empty() || !fAssetIndex)
-        return true;
-
-    CDBBatch batch(*this);
-    for (const uint256 &txid : vecTXIDs) {
-        // erase payload
-        batch.Erase(txid);
-    }
-    LogPrint(BCLog::SYS, "Flushing %d asset index removals\n", vecTXIDs.size());
-    return WriteBatch(batch);
-}
-

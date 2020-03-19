@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2016-2019 The Bitcoin Core developers
+# Copyright (c) 2016-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test label RPCs.
@@ -155,7 +155,7 @@ class Label:
         if self.receive_address is not None:
             assert self.receive_address in self.addresses
         for address in self.addresses:
-            test_address(node, address, label=self.name, labels=[self.name])
+            test_address(node, address, labels=[self.name])
         assert self.name in node.listlabels()
         assert_equal(
             node.getaddressesbylabel(self.name),

@@ -62,8 +62,7 @@ Currently, the following notifications are supported:
     -zmqpubhashblock=address
     -zmqpubrawblock=address
     -zmqpubrawtx=address
-    -zmqpubassetallocation=address
-    -zmqpubassetrecord=address
+    -zmqpubrawmempooltx=address
     -pubwalletstatus=address
     -pubethstatus=address
     -pubnetworkstatus=address
@@ -79,6 +78,7 @@ The option to set the PUB socket's outbound message high water mark
     -zmqpubhashblockhwm=n
     -zmqpubrawblockhwm=n
     -zmqpubrawtxhwm=n
+    -zmqpubrawmempooltxhwm=n
 
 The high water mark value must be an integer greater than or equal to 0.
 

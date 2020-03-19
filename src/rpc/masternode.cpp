@@ -81,7 +81,7 @@ UniValue masternode(const JSONRPCRequest& request)
                     {
                         {"command", RPCArg::Type::STR, RPCArg::Optional::NO, "(count|current|genkey|outputs|initialize|start-<mode>|status|list|list-conf|winner|winners"}
                     },
-                    RPCResults{},
+                    RPCResult{RPCResult::Type::NONE, "", ""},
                     RPCExamples{
                         HelpExampleCli("masternode", "list")
                         + HelpExampleRpc("masternode", "list")
@@ -463,7 +463,7 @@ UniValue masternodelist(const JSONRPCRequest& request)
                     {"mode", RPCArg::Type::STR, "json", "The mode to run list in"},
                     {"filter", RPCArg::Type::STR, "", "FIlter results. Partial match by outpoint by default in all modes; additional matches in some modes are also available"} 
                 },
-                RPCResults{},
+                RPCResult{RPCResult::Type::NONE, "", ""},
                 RPCExamples{
                     HelpExampleCli("masternodelist", "")
                     + HelpExampleRpc("masternodelist", "")
@@ -654,7 +654,7 @@ UniValue masternodebroadcast(const JSONRPCRequest& request)
                     {
                         {"command", RPCArg::Type::STR, RPCArg::Optional::NO, "The command to execute (create-name|create-all|decode|relay)"}
                     },
-                    RPCResults{},
+                    RPCResult{RPCResult::Type::NONE, "", ""},
                     RPCExamples{
                         HelpExampleCli("masternodebroadcast", "decode \"message\"")
                         + HelpExampleRpc("masternodebroadcast", "decode, \"message\"")
@@ -874,7 +874,7 @@ UniValue sentinelping(const JSONRPCRequest& request)
                     {"version", RPCArg::Type::NUM, RPCArg::Optional::NO, "Sentinel Version"}
                 },
                 RPCResult{
-                    "true|false      (boolean) Ping result\n"
+                    RPCResult::Type::NUM, "", "Ping result"
                 },
                 RPCExamples{
                     HelpExampleCli("sentinelping", "1000000")
@@ -897,13 +897,9 @@ static const CRPCCommand commands[] =
     { "governance",            "voteraw",                          &voteraw,                       {"masternode-tx-hash","tx_index","governancehash","vote-signal","vote","time","vote-sig"} },  
     { "governance",            "masternodelist",                   &masternodelist,                {"mode","filter"} },
     { "governance",            "sentinelping",                     &sentinelping,                  {"version"} }, 
-};
-static const CRPCCommand commandsWallet[] =
-{ //  category              name                                actor (function)                argNames
-    //  --------------------- ------------------------          -----------------------         ----------
-    { "governancewallet",            "gobject",                          &gobject,                       {} },
-    { "governancewallet",            "masternode",                       &masternode,                    {"command","data"} },
-    { "governancewallet",            "masternodebroadcast",              &masternodebroadcast,           {"command","data"} },
+    { "governance",            "masternodebroadcast",              &masternodebroadcast,           {"command","data"} },
+    { "governance",            "masternode",                       &masternode,                    {"command","data"} },
+    { "governance",            "gobject",                          &gobject,                       {} },
 };
 // clang-format on
 void RegisterGovernanceRPCCommands(CRPCTable &t)
@@ -911,10 +907,3 @@ void RegisterGovernanceRPCCommands(CRPCTable &t)
     for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++)
         t.appendCommand(commands[vcidx].name, &commands[vcidx]);
 }
-#ifdef ENABLE_WALLET
-void RegisterGovernanceWalletRPCCommands(interfaces::Chain& chain, std::vector<std::unique_ptr<interfaces::Handler>>& handlers)
-{
-    for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commandsWallet); vcidx++)
-        handlers.emplace_back(chain.handleRpc(commandsWallet[vcidx]));
-}
-#endif

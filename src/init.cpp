@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -49,12 +49,15 @@
 #include <txdb.h>
 #include <txmempool.h>
 #include <ui_interface.h>
+#include <util/asmap.h>
 #include <util/moneystr.h>
 #include <util/system.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
-#include <util/validation.h>
 #include <validation.h>
+#include <hash.h>
+
+
 #include <validationinterface.h>
 #include <walletinitinterface.h>
 
@@ -72,6 +75,7 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/split.hpp>
+#include <boost/signals2/signal.hpp>
 #include <boost/thread.hpp>
 
 #if ENABLE_ZMQ
@@ -97,21 +101,17 @@
 #include <util/executable_path/include/boost/detail/executable_path_internals.hpp>
 std::string exePath = "";
 extern AssetBalanceMap mempoolMapAssetBalances;
-extern ArrivalTimesMapImpl arrivalTimesMap; 
-extern CCriticalSection cs_assetallocationmempoolbalance;
-extern CCriticalSection cs_assetallocationarrival;
-extern std::vector<std::pair<uint256, uint32_t> >  vecToRemoveFromMempool;
-extern CCriticalSection cs_assetallocationmempoolremovetx;
+extern ArrivalTimesSetImpl arrivalTimesSet; 
+extern RecursiveMutex cs_assetallocationmempoolbalance;
+extern RecursiveMutex cs_assetallocationarrival;
+extern ArrivalTimesSet setToRemoveFromMempool;
+extern RecursiveMutex cs_assetallocationmempoolremovetx;
 static CDSNotificationInterface* pdsNotificationInterface = NULL;
 
 static bool fFeeEstimatesInitialized = false;
 static const bool DEFAULT_PROXYRANDOMIZE = true;
 static const bool DEFAULT_REST_ENABLE = false;
 static const bool DEFAULT_STOPAFTERBLOCKIMPORT = false;
-
-// Dump addresses to banlist.dat every 15 minutes (900s)
-static constexpr int DUMP_BANS_INTERVAL = 60 * 15;
-
 
 #ifdef WIN32
 // Win32 LevelDB doesn't use filedescriptors, and the ones used for
@@ -123,6 +123,8 @@ static constexpr int DUMP_BANS_INTERVAL = 60 * 15;
 #endif
 
 static const char* FEE_ESTIMATES_FILENAME="fee_estimates.dat";
+
+static const char* DEFAULT_ASMAP_FILENAME="ip_asn.map";
 
 /**
  * The PID file facilities.
@@ -196,7 +198,6 @@ NODISCARD static bool CreatePidFile()
 static std::unique_ptr<ECCVerifyHandle> globalVerifyHandle;
 
 static boost::thread_group threadGroup;
-static CScheduler scheduler;
 
 void Interrupt(NodeContext& node)
 {
@@ -217,7 +218,7 @@ void Interrupt(NodeContext& node)
 void Shutdown(NodeContext& node)
 {
     LogPrintf("%s: In progress...\n", __func__);
-    static CCriticalSection cs_Shutdown;
+    static RecursiveMutex cs_Shutdown;
     TRY_LOCK(cs_Shutdown, lockShutdown);
     if (!lockShutdown)
         return;
@@ -247,16 +248,14 @@ void Shutdown(NodeContext& node)
     // using the other before destroying them.
     if (node.peer_logic) UnregisterValidationInterface(node.peer_logic.get());
     if (node.connman) node.connman->Stop();
-    if (g_txindex) g_txindex->Stop();
     if (g_auxpow_miner != nullptr) {
         g_auxpow_miner.reset();
     }
-    ForEachBlockFilterIndex([](BlockFilterIndex& index) { index.Stop(); });
-
     StopTorControl();
 
     // After everything has been shut down, but before things get flushed, stop the
     // CScheduler/checkqueue threadGroup
+    if (node.scheduler) node.scheduler->stop();
     threadGroup.interrupt_all();
     threadGroup.join_all();
 
@@ -265,8 +264,6 @@ void Shutdown(NodeContext& node)
     node.peer_logic.reset();
     node.connman.reset();
     node.banman.reset();
-    g_txindex.reset();
-    DestroyAllBlockFilterIndexes();
 
     if (::mempool.IsLoaded() && gArgs.GetArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL)) {
         DumpMempool(::mempool);
@@ -299,13 +296,21 @@ void Shutdown(NodeContext& node)
     // CValidationInterface callbacks, flush them...
     GetMainSignals().FlushBackgroundCallbacks();
 
+    // Stop and delete all indexes only after flushing background callbacks.
+    if (g_txindex) {
+        g_txindex->Stop();
+        g_txindex.reset();
+    }
+    ForEachBlockFilterIndex([](BlockFilterIndex& index) { index.Stop(); });
+    DestroyAllBlockFilterIndexes();
+
     // Any future callbacks will be dropped. This should absolutely be safe - if
     // missing a callback results in an unrecoverable situation, unclean shutdown
     // would too. The only reason to do the above flushes is to let the wallet catch
     // up with our current chain to avoid any strange pruning edge cases and make
     // next startup faster by avoiding rescan.
     // SYSCOIN
-    arrivalTimesMap.clear();
+    arrivalTimesSet.clear();
     FlushSyscoinDBs();
     passetdb.reset();
     passetallocationdb.reset();
@@ -351,6 +356,7 @@ void Shutdown(NodeContext& node)
     // SYSCOIN
 	StopRelayerNode(relayerPID);
     StopGethNode(gethPID);
+    node.scheduler.reset();
     LogPrintf("%s: done\n", __func__);
 }
 
@@ -471,9 +477,7 @@ void SetupServerArgs()
     gArgs.AddArg("-mnconf=<file>", strprintf("Specify masternode configuration file (default: %s)", "masternode.conf"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-mnconflock=<n>", strprintf("Lock masternodes from masternode configuration file (default: %u)", 1), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-masternodeprivkey=<n>", "Set the masternode private key", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    gArgs.AddArg("-assetindex=<n>", strprintf("Index Syscoin Assets for historical information (0-1, default: 0)"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    gArgs.AddArg("-assetindexpagesize=<n>", strprintf("Page size of results for Asset index, should match the paging mechanism of the consuming client. (10-1000, default: 25). Used in conjunction with -assetindex=1."), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    gArgs.AddArg("-assetindexguids=<guid>", strprintf("Whitelist Assets to index, comma separated. Used in conjunction with -assetindex=1. Leave empty for all."), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    gArgs.AddArg("-assetindex=<n>", strprintf("Index Syscoin Assets for historical information (0-1, default: 0)"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);	
     gArgs.AddArg("-sysxasset=<n>", strprintf("SYSX Asset Guid specified when running unit tests (default: %u)", defaultChainParams->GetConsensus().nSYSXAsset), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-tpstest", strprintf("TPSTest for unittest. Leave false"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-sporkkey=<key>", strprintf("Private key for use with sporks"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -485,6 +489,7 @@ void SetupServerArgs()
                  ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 
     gArgs.AddArg("-addnode=<ip>", "Add a node to connect to and attempt to keep the connection open (see the `addnode` RPC command help for more info). This option can be specified multiple times to add multiple nodes.", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
+    gArgs.AddArg("-asmap=<file>", strprintf("Specify asn mapping used for bucketing of the peers (default: %s). Relative paths will be prefixed by the net-specific datadir location.", DEFAULT_ASMAP_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     gArgs.AddArg("-banscore=<n>", strprintf("Threshold for disconnecting misbehaving peers (default: %u)", DEFAULT_BANSCORE_THRESHOLD), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     gArgs.AddArg("-bantime=<n>", strprintf("Number of seconds to keep misbehaving peers from reconnecting (default: %u)", DEFAULT_MISBEHAVING_BANTIME), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     gArgs.AddArg("-bind=<addr>", "Bind to given address and always listen on it. Use [host]:port notation for IPv6", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
@@ -512,7 +517,7 @@ void SetupServerArgs()
     gArgs.AddArg("-timeout=<n>", strprintf("Specify connection timeout in milliseconds (minimum: 1, default: %d)", DEFAULT_CONNECT_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     gArgs.AddArg("-peertimeout=<n>", strprintf("Specify p2p connection timeout in seconds. This option determines the amount of time a peer may be inactive before the connection to it is dropped. (minimum: 1, default: %d)", DEFAULT_PEER_CONNECT_TIMEOUT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
     gArgs.AddArg("-torcontrol=<ip>:<port>", strprintf("Tor control port to use if onion listening enabled (default: %s)", DEFAULT_TOR_CONTROL), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    gArgs.AddArg("-torpassword=<pass>", "Tor control port password (default: empty)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    gArgs.AddArg("-torpassword=<pass>", "Tor control port password (default: empty)", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
 #ifdef USE_UPNP
 #if USE_UPNP
     gArgs.AddArg("-upnp", "Use UPnP to map the listening port (default: 1 when listening and no -proxy)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
@@ -525,7 +530,7 @@ void SetupServerArgs()
     gArgs.AddArg("-whitebind=<[permissions@]addr>", "Bind to given address and whitelist peers connecting to it. "
         "Use [host]:port notation for IPv6. Allowed permissions are bloomfilter (allow requesting BIP37 filtered blocks and transactions), "
         "noban (do not ban for misbehavior), "
-        "forcerelay (relay even non-standard transactions), "
+        "forcerelay (relay transactions that are already in the mempool; implies relay), "
         "relay (relay even in -blocksonly mode), "
         "and mempool (allow requesting BIP35 mempool contents). "
         "Specify multiple permissions separated by commas (default: noban,mempool,relay). Can be specified multiple times.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
@@ -541,29 +546,29 @@ void SetupServerArgs()
     gArgs.AddArg("-zmqpubwalletstatus=<address>", "Enable publish wallet status (when wallet loads and is ready) in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubethstatus=<address>", "Enable publish Ethereum status updates in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubnetworkstatus=<address>", "Enable publish network updates when a peer is connected or disconnected in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
-    gArgs.AddArg("-zmqpubassetallocation=<address>", "Enable publish raw asset allocation payload in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
-    gArgs.AddArg("-zmqpubassetrecord=<address>", "Enable publish raw asset payload in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubwalletrawtx=<address>", "Enable publish all wallet related transactions in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubhashblock=<address>", "Enable publish hash block in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubhashtx=<address>", "Enable publish hash transaction in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubrawblock=<address>", "Enable publish raw block in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubrawtx=<address>", "Enable publish raw transaction in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
+    gArgs.AddArg("-zmqpubrawmempooltx=<address>", "Enable publish raw transaction in <address> when entering mempool only", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubhashblockhwm=<n>", strprintf("Set publish hash block outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubhashtxhwm=<n>", strprintf("Set publish hash transaction outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubrawblockhwm=<n>", strprintf("Set publish raw block outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubrawtxhwm=<n>", strprintf("Set publish raw transaction outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
+    gArgs.AddArg("-zmqpubrawmempooltxhwm=<n>", strprintf("Set publish raw mempool transaction outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
 #else
     // SYSCOIN
     hidden_args.emplace_back("-zmqpubwalletstatus=<address>");
     hidden_args.emplace_back("-zmqpubethstatus=<address>");
     hidden_args.emplace_back("-zmqpubnetworkstatus=<address>");
-    hidden_args.emplace_back("-zmqpubassetallocation=<address>");
-    hidden_args.emplace_back("-zmqpubassetrecord=<address>");
     hidden_args.emplace_back("-zmqpubwalletrawtx=<address>");
     hidden_args.emplace_back("-zmqpubhashblock=<address>");
     hidden_args.emplace_back("-zmqpubhashtx=<address>");
     hidden_args.emplace_back("-zmqpubrawblock=<address>");
     hidden_args.emplace_back("-zmqpubrawtx=<address>");
+    hidden_args.emplace_back("-zmqpubrawmempooltx=<address>");
+    hidden_args.emplace_back("-zmqpubrawmempoolhwm=<n>");
     hidden_args.emplace_back("-zmqpubhashblockhwm=<n>");
     hidden_args.emplace_back("-zmqpubhashtxhwm=<n>");
     hidden_args.emplace_back("-zmqpubrawblockhwm=<n>");
@@ -616,8 +621,8 @@ void SetupServerArgs()
     gArgs.AddArg("-datacarriersize", strprintf("Maximum size of data in data carrier transactions we relay and mine (default: %u)", MAX_OP_RETURN_RELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     gArgs.AddArg("-minrelaytxfee=<amt>", strprintf("Fees (in %s/kB) smaller than this are considered zero fee for relaying, mining and transaction creation (default: %s)",
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
-    gArgs.AddArg("-whitelistforcerelay", strprintf("Add 'forcerelay' permission to whitelisted inbound peers with default permissions. This will relay transactions even if the transactions were already in the mempool or violate local relay policy. (default: %d)", DEFAULT_WHITELISTFORCERELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
-    gArgs.AddArg("-whitelistrelay", strprintf("Add 'relay' permission to whitelisted inbound peers with default permissions. The will accept relayed transactions even when not relaying transactions (default: %d)", DEFAULT_WHITELISTRELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
+    gArgs.AddArg("-whitelistforcerelay", strprintf("Add 'forcerelay' permission to whitelisted inbound peers with default permissions. This will relay transactions even if the transactions were already in the mempool. (default: %d)", DEFAULT_WHITELISTFORCERELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
+    gArgs.AddArg("-whitelistrelay", strprintf("Add 'relay' permission to whitelisted inbound peers with default permissions. This will accept relayed transactions even when not relaying transactions (default: %d)", DEFAULT_WHITELISTRELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
 
 
     gArgs.AddArg("-blockmaxweight=<n>", strprintf("Set maximum BIP141 block weight (default: %d)", DEFAULT_BLOCK_MAX_WEIGHT), ArgsManager::ALLOW_ANY, OptionsCategory::BLOCK_CREATION);
@@ -626,15 +631,15 @@ void SetupServerArgs()
 
     gArgs.AddArg("-rest", strprintf("Accept public REST requests (default: %u)", DEFAULT_REST_ENABLE), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     gArgs.AddArg("-rpcallowip=<ip>", "Allow JSON-RPC connections from specified source. Valid for <ip> are a single IP (e.g. 1.2.3.4), a network/netmask (e.g. 1.2.3.4/255.255.255.0) or a network/CIDR (e.g. 1.2.3.4/24). This option can be specified multiple times", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    gArgs.AddArg("-rpcauth=<userpw>", "Username and HMAC-SHA-256 hashed password for JSON-RPC connections. The field <userpw> comes in the format: <USERNAME>:<SALT>$<HASH>. A canonical python script is included in share/rpcauth. The client then connects normally using the rpcuser=<USERNAME>/rpcpassword=<PASSWORD> pair of arguments. This option can be specified multiple times", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    gArgs.AddArg("-rpcbind=<addr>[:port]", "Bind to given address to listen for JSON-RPC connections. Do not expose the RPC server to untrusted networks such as the public internet! This option is ignored unless -rpcallowip is also passed. Port is optional and overrides -rpcport. Use [host]:port notation for IPv6. This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
+    gArgs.AddArg("-rpcauth=<userpw>", "Username and HMAC-SHA-256 hashed password for JSON-RPC connections. The field <userpw> comes in the format: <USERNAME>:<SALT>$<HASH>. A canonical python script is included in share/rpcauth. The client then connects normally using the rpcuser=<USERNAME>/rpcpassword=<PASSWORD> pair of arguments. This option can be specified multiple times", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
+    gArgs.AddArg("-rpcbind=<addr>[:port]", "Bind to given address to listen for JSON-RPC connections. Do not expose the RPC server to untrusted networks such as the public internet! This option is ignored unless -rpcallowip is also passed. Port is optional and overrides -rpcport. Use [host]:port notation for IPv6. This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
     gArgs.AddArg("-rpccookiefile=<loc>", "Location of the auth cookie. Relative paths will be prefixed by a net-specific datadir location. (default: data dir)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    gArgs.AddArg("-rpcpassword=<pw>", "Password for JSON-RPC connections", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    gArgs.AddArg("-rpcpassword=<pw>", "Password for JSON-RPC connections", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
     gArgs.AddArg("-rpcport=<port>", strprintf("Listen for JSON-RPC connections on <port> (default: %u, testnet: %u, regtest: %u)", defaultBaseParams->RPCPort(), testnetBaseParams->RPCPort(), regtestBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
     gArgs.AddArg("-rpcserialversion", strprintf("Sets the serialization of raw transaction or block hex returned in non-verbose mode, non-segwit(0) or segwit(1) (default: %d)", DEFAULT_RPC_SERIALIZE_VERSION), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     gArgs.AddArg("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     gArgs.AddArg("-rpcthreads=<n>", strprintf("Set the number of threads to service RPC calls (default: %d)", DEFAULT_HTTP_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    gArgs.AddArg("-rpcuser=<user>", "Username for JSON-RPC connections", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    gArgs.AddArg("-rpcuser=<user>", "Username for JSON-RPC connections", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
     gArgs.AddArg("-rpcwhitelist=<whitelist>", "Set a whitelist to filter incoming RPC calls for a specific user. The field <whitelist> comes in the format: <USERNAME>:<rpc 1>,<rpc 2>,...,<rpc n>. If multiple whitelists are set for a given user, they are set-intersected. See -rpcwhitelistdefault documentation for information on default whitelist behavior.", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     gArgs.AddArg("-rpcwhitelistdefault", "Sets default behavior for rpc whitelisting. Unless rpcwhitelistdefault is set to 0, if any -rpcwhitelist is set, the rpc server acts as if all rpc users are subject to empty-unless-otherwise-specified whitelists. If rpcwhitelistdefault is set to 1 and no -rpcwhitelist is set, rpc server acts as if all rpc users are subject to empty whitelists.", ArgsManager::ALLOW_BOOL, OptionsCategory::RPC);
     gArgs.AddArg("-rpcworkqueue=<n>", strprintf("Set the depth of the work queue to service RPC calls (default: %d)", DEFAULT_HTTP_WORKQUEUE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
@@ -800,8 +805,8 @@ static void ThreadImport(std::vector<fs::path> vImportFiles)
     BlockValidationState state;
     // SYSCOIN
 	const int stopatblocknumber = gArgs.GetArg("-stopatblock", 0);
-    if (!ActivateBestChain(state, chainparams) && stopatblocknumber == 0) {
-        LogPrintf("Failed to connect best block (%s)\n", FormatStateMessage(state));
+    if (!ActivateBestChain(state, chainparams)) {
+        LogPrintf("Failed to connect best block (%s)\n", state.ToString());
         StartShutdown();
         return;
     }
@@ -992,8 +997,8 @@ bool AppInitBasicSetup(char* argv[])
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
 #ifdef WIN32
-    // Enable Data Execution Prevention (DEP)
-    SetProcessDEPPolicy(PROCESS_DEP_ENABLE);
+    // Enable heap terminate-on-corruption
+    HeapSetInformation(nullptr, HeapEnableTerminationOnCorruption, nullptr, 0);
 #endif
 
     if (!SetupNetworking())
@@ -1336,6 +1341,9 @@ bool AppInitMain(NodeContext& node)
         LogPrintf("Config file: %s (not found, skipping)\n", config_file_path.string());
     }
 
+    // Log the config arguments to debug.log
+    gArgs.LogArgs();
+
     LogPrintf("Using at most %i automatic connections (%i file descriptors available)\n", nMaxConnections, nFD);
 
     // Warn about relative -datadir path.
@@ -1380,16 +1388,19 @@ bool AppInitMain(NodeContext& node)
         if (!sporkManager.SetPrivKey(gArgs.GetArg("-sporkkey", "")))
             return InitError(_("Unable to sign spork message, wrong key?").translated);
     }
+    assert(!node.scheduler);
+    node.scheduler = MakeUnique<CScheduler>();
+
     // Start the lightweight task scheduler thread
-    CScheduler::Function serviceLoop = std::bind(&CScheduler::serviceQueue, &scheduler);
+    CScheduler::Function serviceLoop = [&node]{ node.scheduler->serviceQueue(); };
     threadGroup.create_thread(std::bind(&TraceThread<CScheduler::Function>, "scheduler", serviceLoop));
 
     // Gather some entropy once per minute.
-    scheduler.scheduleEvery([]{
+    node.scheduler->scheduleEvery([]{
         RandAddPeriodic();
-    }, 60000);
+    }, std::chrono::minutes{1});
 
-    GetMainSignals().RegisterBackgroundSignalScheduler(scheduler);
+    GetMainSignals().RegisterBackgroundSignalScheduler(*node.scheduler);
 
     // Create client interfaces for wallets that are supposed to be loaded
     // according to -wallet and -disablewallet options. This only constructs
@@ -1440,8 +1451,12 @@ bool AppInitMain(NodeContext& node)
     node.banman = MakeUnique<BanMan>(GetDataDir() / "banlist.dat", &uiInterface, gArgs.GetArg("-bantime", DEFAULT_MISBEHAVING_BANTIME));
     assert(!node.connman);
     node.connman = std::unique_ptr<CConnman>(new CConnman(GetRand(std::numeric_limits<uint64_t>::max()), GetRand(std::numeric_limits<uint64_t>::max())));
+    // Make mempool generally available in the node context. For example the connection manager, wallet, or RPC threads,
+    // which are all started after this, may use it from the node context.
+    assert(!node.mempool);
+    node.mempool = &::mempool;
 
-    node.peer_logic.reset(new PeerLogicValidation(node.connman.get(), node.banman.get(), scheduler));
+    node.peer_logic.reset(new PeerLogicValidation(node.connman.get(), node.banman.get(), *node.scheduler, *node.mempool));
     RegisterValidationInterface(node.peer_logic.get());
 
     // sanitize comments per BIP-0014, format user agent and check total size
@@ -1482,7 +1497,7 @@ bool AppInitMain(NodeContext& node)
     SetReachable(NET_ONION, false);
     if (proxyArg != "" && proxyArg != "0") {
         CService proxyAddr;
-        if (!Lookup(proxyArg.c_str(), proxyAddr, 9050, fNameLookup)) {
+        if (!Lookup(proxyArg, proxyAddr, 9050, fNameLookup)) {
             return InitError(strprintf(_("Invalid -proxy address or hostname: '%s'").translated, proxyArg));
         }
 
@@ -1506,7 +1521,7 @@ bool AppInitMain(NodeContext& node)
             SetReachable(NET_ONION, false);
         } else {
             CService onionProxy;
-            if (!Lookup(onionArg.c_str(), onionProxy, 9050, fNameLookup)) {
+            if (!Lookup(onionArg, onionProxy, 9050, fNameLookup)) {
                 return InitError(strprintf(_("Invalid -onion address or hostname: '%s'").translated, onionArg));
             }
             proxyType addrOnion = proxyType(onionProxy, proxyRandomize);
@@ -1525,10 +1540,35 @@ bool AppInitMain(NodeContext& node)
 
     for (const std::string& strAddr : gArgs.GetArgs("-externalip")) {
         CService addrLocal;
-        if (Lookup(strAddr.c_str(), addrLocal, GetListenPort(), fNameLookup) && addrLocal.IsValid())
+        if (Lookup(strAddr, addrLocal, GetListenPort(), fNameLookup) && addrLocal.IsValid())
             AddLocal(addrLocal, LOCAL_MANUAL);
         else
             return InitError(ResolveErrMsg("externalip", strAddr));
+    }
+
+    // Read asmap file if configured
+    if (gArgs.IsArgSet("-asmap")) {
+        fs::path asmap_path = fs::path(gArgs.GetArg("-asmap", ""));
+        if (asmap_path.empty()) {
+            asmap_path = DEFAULT_ASMAP_FILENAME;
+        }
+        if (!asmap_path.is_absolute()) {
+            asmap_path = GetDataDir() / asmap_path;
+        }
+        if (!fs::exists(asmap_path)) {
+            InitError(strprintf(_("Could not find asmap file %s").translated, asmap_path));
+            return false;
+        }
+        std::vector<bool> asmap = CAddrMan::DecodeAsmap(asmap_path);
+        if (asmap.size() == 0) {
+            InitError(strprintf(_("Could not parse asmap file %s").translated, asmap_path));
+            return false;
+        }
+        const uint256 asmap_version = SerializeHash(asmap);
+        node.connman->SetAsmap(std::move(asmap));
+        LogPrintf("Using asmap version %s for IP bucketing\n", asmap_version.ToString());
+    } else {
+        LogPrintf("Using /16 prefix for IP bucketing\n");
     }
 
 #if ENABLE_ZMQ
@@ -1608,8 +1648,8 @@ bool AppInitMain(NodeContext& node)
                 passetallocationdb.reset();
                 passetallocationmempooldb.reset();
                 pethereumtxrootsdb.reset();
-                pethereumtxmintdb.reset();
                 passetindexdb.reset();
+                pethereumtxmintdb.reset();
                 pblockindexdb.reset();
 				plockedoutpointsdb.reset();
 				plockedoutpointsdb.reset(new CLockedOutpointsDB(nCoinDBCache * 16, false, fReset));
@@ -1622,18 +1662,18 @@ bool AppInitMain(NodeContext& node)
                 }
                 {
                     LOCK(cs_assetallocationarrival);
-                    passetallocationmempooldb->ReadAssetAllocationMempoolArrivalTimes(arrivalTimesMap);
+                    passetallocationmempooldb->ReadAssetAllocationMempoolArrivalTimes(arrivalTimesSet);
                 }
                 {
                     LOCK(cs_assetallocationmempoolremovetx);
-                    passetallocationmempooldb->ReadAssetAllocationMempoolToRemoveVector(vecToRemoveFromMempool);
+                    passetallocationmempooldb->ReadAssetAllocationMempoolToRemoveSet(setToRemoveFromMempool);
                 }           
                 // we don't need to ever reset the txroots db because it is an external chain not related to syscoin chain
                 pethereumtxrootsdb.reset(new CEthereumTxRootsDB(nCoinDBCache*16, false, false));
                 pethereumtxmintdb.reset(new CEthereumMintedTxDB(nCoinDBCache, false, fReset || fReindexChainState));
                 pblockindexdb.reset(new CBlockIndexDB(nCoinDBCache, false, fReset || fReindexChainState));
-                fAssetIndex = gArgs.GetBoolArg("-assetindex", false);
-                if(fAssetIndex)
+                fAssetIndex = gArgs.GetBoolArg("-assetindex", false);	
+                if(fAssetIndex)	
                     passetindexdb.reset(new CAssetIndexDB(nCoinDBCache*16, false, fReset));
                 // new CBlockTreeDB tries to delete the existing file, which
                 // fails if it's still open from the previous loop. Close it first:
@@ -1803,11 +1843,6 @@ bool AppInitMain(NodeContext& node)
         return false;
     }
 
-    // Now that the chain state is loaded, make mempool generally available in the node context. For example the
-    // connection manager, wallet, or RPC threads, which are all started after this, may use it from the node context.
-    assert(!node.mempool);
-    node.mempool = &::mempool;
-
     fs::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
     CAutoFile est_filein(fsbridge::fopen(est_path, "rb"), SER_DISK, CLIENT_VERSION);
     // Allowed to fail as this file IS missing on first startup.
@@ -1898,26 +1933,11 @@ bool AppInitMain(NodeContext& node)
     fGethSynced = fUnitTest;
     
     fTPSTest = gArgs.GetBoolArg("-tpstest", false);
-    fZMQAssetAllocation = gArgs.IsArgSet("-zmqpubassetallocation");
-    fZMQAsset = gArgs.IsArgSet("-zmqpubassetrecord");
     fZMQWalletStatus = gArgs.IsArgSet("-zmqpubwalletstatus");
     fZMQEthStatus = gArgs.IsArgSet("-zmqpubethstatus");
     fZMQNetworkStatus = gArgs.IsArgSet("-zmqpubnetworkstatus");
     fZMQWalletRawTx = gArgs.IsArgSet("-zmqpubwalletrawtx");
 
-    fAssetIndexPageSize = gArgs.GetArg("-assetindexpagesize", 25);
-    if(fAssetIndexPageSize < 10 || fAssetIndexPageSize > 1000){
-        return InitError(_("Asset index page size is invalid, must be between 10 and 1000.").translated);
-    }
-    if (gArgs.IsArgSet("-assetindexguids")) {
-        const std::vector<std::string> &assetguidsStr = gArgs.GetArgs("-assetindexguids");
-        for(const std::string& guidStr: assetguidsStr){
-            uint32_t guid;
-            if(!ParseUInt32(guidStr, &guid))
-                return InitError(_("Could not parse Asset GUID").translated);
-            fAssetIndexGuids.push_back(guid);
-        }
-    }
      //lite mode disables all masternode functionality
     fLiteMode = gArgs.GetBoolArg("-litemode", false);
 
@@ -1995,13 +2015,13 @@ bool AppInitMain(NodeContext& node)
     // ********************************************************* Step 11d: schedule Syscoin-specific tasks
 
     if (!fLiteMode) {
-        scheduler.scheduleEvery(std::bind(&CNetFulfilledRequestManager::DoMaintenance, std::ref(netfulfilledman)), 60*1000);
-        scheduler.scheduleEvery(std::bind(&CMasternodeSync::DoMaintenance, std::ref(masternodeSync), std::ref(*g_rpc_node->connman)), MASTERNODE_SYNC_TICK_SECONDS*1000);
-        scheduler.scheduleEvery(std::bind(&CMasternodeMan::DoMaintenance, std::ref(mnodeman), std::ref(*g_rpc_node->connman)), 60*1000);
-        scheduler.scheduleEvery(std::bind(&CActiveMasternode::DoMaintenance, std::ref(activeMasternode), std::ref(*g_rpc_node->connman)), MASTERNODE_MIN_MNP_SECONDS*1000);
+        node.scheduler->scheduleEvery(std::bind(&CNetFulfilledRequestManager::DoMaintenance, std::ref(netfulfilledman)), std::chrono::minutes{1});
+        node.scheduler->scheduleEvery(std::bind(&CMasternodeSync::DoMaintenance, std::ref(masternodeSync), std::ref(*g_rpc_node->connman)), std::chrono::seconds{MASTERNODE_SYNC_TICK_SECONDS});
+        node.scheduler->scheduleEvery(std::bind(&CMasternodeMan::DoMaintenance, std::ref(mnodeman), std::ref(*g_rpc_node->connman)), std::chrono::minutes{1});
+        node.scheduler->scheduleEvery(std::bind(&CActiveMasternode::DoMaintenance, std::ref(activeMasternode), std::ref(*g_rpc_node->connman)), std::chrono::seconds{MASTERNODE_MIN_MNP_SECONDS});
 
-        scheduler.scheduleEvery(std::bind(&CMasternodePayments::DoMaintenance, std::ref(mnpayments)), 60*1000);
-        scheduler.scheduleEvery(std::bind(&CGovernanceManager::DoMaintenance, std::ref(governance), std::ref(*g_rpc_node->connman)), 60 * 5*1000);
+        node.scheduler->scheduleEvery(std::bind(&CMasternodePayments::DoMaintenance, std::ref(mnpayments)), std::chrono::minutes{1});
+        node.scheduler->scheduleEvery(std::bind(&CGovernanceManager::DoMaintenance, std::ref(governance), std::ref(*g_rpc_node->connman)), std::chrono::minutes{5});
     }
     // ********************************************************* Step 12: start node
 
@@ -2046,7 +2066,7 @@ bool AppInitMain(NodeContext& node)
 
     for (const std::string& strBind : gArgs.GetArgs("-bind")) {
         CService addrBind;
-        if (!Lookup(strBind.c_str(), addrBind, GetListenPort(), false)) {
+        if (!Lookup(strBind, addrBind, GetListenPort(), false)) {
             return InitError(ResolveErrMsg("bind", strBind));
         }
         connOptions.vBinds.push_back(addrBind);
@@ -2075,7 +2095,7 @@ bool AppInitMain(NodeContext& node)
             connOptions.m_specified_outgoing = connect;
         }
     }
-    if (!node.connman->Start(scheduler, connOptions)) {
+    if (!node.connman->Start(*node.scheduler, connOptions)) {
         return false;
     }
 
@@ -2086,16 +2106,16 @@ bool AppInitMain(NodeContext& node)
     uiInterface.InitMessage(_("Done loading").translated);
 
     for (const auto& client : node.chain_clients) {
-        client->start(scheduler);
+        client->start(*node.scheduler);
     }
 
     BanMan* banman = node.banman.get();
-    scheduler.scheduleEvery([banman]{
+    node.scheduler->scheduleEvery([banman]{
         banman->DumpBanlist();
-    }, DUMP_BANS_INTERVAL * 1000);
+    }, DUMP_BANS_INTERVAL);
 
     // SYSCOIN
-    MilliSleep(1000);
+    UninterruptibleSleep(std::chrono::milliseconds{1000});
     int wsport = gArgs.GetArg("-gethwebsocketport", 8646);
     int ethrpcport = gArgs.GetArg("-gethrpcport", 8645);
     bGethTestnet = gArgs.GetBoolArg("-gethtestnet", false);

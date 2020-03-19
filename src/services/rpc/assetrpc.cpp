@@ -13,7 +13,6 @@
 #include <policy/rbf.h>
 #include <chrono>
 #include <consensus/validation.h>
-#include <util/validation.h>
 using namespace std;
 extern std::string exePath;
 extern std::string EncodeDestination(const CTxDestination& dest);
@@ -22,79 +21,22 @@ extern UniValue ValueFromAmount(const CAmount& amount);
 extern std::string EncodeHexTx(const CTransaction& tx, const int serializeFlags = 0);
 extern bool DecodeHexTx(CMutableTransaction& tx, const std::string& hex_tx, bool try_no_witness = false, bool try_witness = true);
 extern std::unordered_set<std::string> assetAllocationConflicts;
-extern CCriticalSection cs_assetallocationconflicts;
-extern CCriticalSection cs_assetallocationarrival;
-extern CCriticalSection cs_setethstatus;
-extern ArrivalTimesMapImpl arrivalTimesMap;
+extern RecursiveMutex cs_assetallocationconflicts;
+extern RecursiveMutex cs_assetallocationarrival;
+extern RecursiveMutex cs_setethstatus;
+extern ArrivalTimesSetImpl arrivalTimesSet;
+extern RecursiveMutex cs_assetallocationmempoolremovetx;
+extern ArrivalTimesSet setToRemoveFromMempool;
 // SYSCOIN service rpc functions
 extern UniValue sendrawtransaction(const JSONRPCRequest& request);
 extern std::vector<std::pair<uint256, int64_t> > vecTPSTestReceivedTimesMempool;
 using namespace std;
-UniValue convertaddress(const JSONRPCRequest& request)
-{
 
-    RPCHelpMan{"convertaddress",
-        "\nConvert between Syscoin 3 and Syscoin 4 formats. This should only be used with addressed based on compressed private keys only. P2WPKH can be shown as P2PKH in Syscoin 3.\n",
-        {
-            {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The syscoin address to get the information of."}
-        },
-        RPCResult{
-            "{\n"
-            "  \"v3address\" : \"address\",        (string) The syscoin 3 address validated\n"
-            "  \"v4address\" : \"address\",        (string) The syscoin 4 address validated\n"
-            "}\n"
-        },
-        RPCExamples{
-            HelpExampleCli("convertaddress", "\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"")
-            + HelpExampleRpc("convertaddress", "\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"")
-        }
-    }.Check(request);
-    
-    UniValue ret(UniValue::VOBJ);
-    CTxDestination dest = DecodeDestination(request.params[0].get_str());
-    // Make sure the destination is valid
-    if (!IsValidDestination(dest)) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
-    }
-    std::string currentV4Address = "";
-    std::string currentV3Address = "";
-    CTxDestination v4Dest;
-    if (auto witness_id = boost::get<WitnessV0KeyHash>(&dest)) {
-        v4Dest = dest;
-        currentV4Address =  EncodeDestination(v4Dest);
-        currentV3Address =  EncodeDestination(PKHash(*witness_id));
-    }
-    else if (auto key_id = boost::get<PKHash>(&dest)) {
-        v4Dest = WitnessV0KeyHash(*key_id);
-        currentV4Address =  EncodeDestination(v4Dest);
-        currentV3Address =  EncodeDestination(*key_id);
-    }
-    else if (auto script_id = boost::get<ScriptHash>(&dest)) {
-        v4Dest = *script_id;
-        currentV4Address =  EncodeDestination(v4Dest);
-        currentV3Address =  currentV4Address;
-    }
-    else if (boost::get<WitnessV0ScriptHash>(&dest)) {
-        v4Dest = dest;
-        currentV4Address =  EncodeDestination(v4Dest);
-        currentV3Address =  currentV4Address;
-    } 
-
-    ret.pushKV("v3address", currentV3Address);
-    ret.pushKV("v4address", currentV4Address); 
-    return ret;
-}
 CWitnessAddress DescribeWitnessAddress(const std::string& strAddress){
     string witnessProgramHex = "";
     unsigned char witnessVersion = 0;
     if(strAddress != "burn"){
-        UniValue requestParam(UniValue::VARR);
-        requestParam.push_back(strAddress);
-        JSONRPCRequest jsonRequest;
-        jsonRequest.params = requestParam;
-        const UniValue &convertedAddressValue = convertaddress(jsonRequest);
-        const std::string & v4address = find_value(convertedAddressValue.get_obj(), "v4address").get_str();
-        const CTxDestination &dest = DecodeDestination(v4address);
+        const CTxDestination &dest = DecodeDestination(strAddress);
         UniValue detail = DescribeAddress(dest);
         if(find_value(detail.get_obj(), "iswitness").get_bool() == false)
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Address must be a segwit based address");
@@ -302,10 +244,10 @@ UniValue assetallocationbalance(const JSONRPCRequest& request) {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The address of the allocation owner"}
         },
         RPCResult{
-        "{\n"
-        "  \"amount\": xx        (numeric) The balance of a single asset allocation.\n"
-        "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "amount", "The balance of a single asset allocation"},
+            }},
         RPCExamples{
             HelpExampleCli("assetallocationbalance","\"asset_guid\" \"address\"")
             + HelpExampleRpc("assetallocationbalance", "\"asset_guid\", \"address\"")
@@ -342,11 +284,11 @@ UniValue assetallocationbalances(const JSONRPCRequest& request) {
             }
         },
         RPCResult{
-        "{\n"
-        "  \"address1\": xx,       (numeric) The balance of a single asset allocation.\n"
-        "  \"address2\": xx        (numeric) The balance of a single asset allocation.\n"
-        "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "address1", "The balance of a single asset allocation."},
+                {RPCResult::Type::NUM, "address2", "The balance of a single asset allocation."},
+            }},
         RPCExamples{
             HelpExampleCli("assetallocationbalances","\"asset_guid\" \"[\\\"address1\\\",\\\"address2\\\"]\"")
             + HelpExampleRpc("assetallocationbalances", "\"asset_guid\", \"[\\\"address1\\\",\\\"address2\\\"]\"")
@@ -384,16 +326,16 @@ UniValue assetallocationinfo(const JSONRPCRequest& request) {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The address of the owner"}
         },
         RPCResult{
-            "{\n"
-            "    \"asset_allocation\":   (string) The unique key for this allocation\n"
-            "    \"asset_guid\":         (string) The guid of the asset\n"
-            "    \"symbol\":             (string) The asset symbol\n"
-            "    \"address\":            (string) The address of the owner of this allocation\n"
-            "    \"balance\":            (numeric) The current balance\n"
-            "    \"balance_zdag\":       (numeric) The zdag balance\n"
-            "    \"locked_outpoint\":    (string) The locked UTXO if applicable for this allocation\n"
-            "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "asset_allocation", "The unique key for this allocation"},
+                {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+                {RPCResult::Type::STR, "symbol", "The asset symbol"},
+                {RPCResult::Type::STR, "address", "The address of the owner of this allocation"},
+                {RPCResult::Type::NUM, "balance", "The current balance"},
+                {RPCResult::Type::NUM, "balance_zdag", "The zdag balance"},
+                {RPCResult::Type::STR, "locked_outpoint", "The locked UTXO if applicable for this allocation"},
+            }},
         RPCExamples{
             HelpExampleCli("assetallocationinfo", "\"assetguid\" \"address\"")
             + HelpExampleRpc("assetallocationinfo", "\"assetguid\", \"address\"")
@@ -420,78 +362,76 @@ UniValue assetallocationinfo(const JSONRPCRequest& request) {
 		oAssetAllocation.clear();
     return oAssetAllocation;
 }
-UniValue listassetindexallocations(const JSONRPCRequest& request) {
-    const UniValue &params = request.params;
-    RPCHelpMan{"listassetindexallocations",
-        "\nReturn a list of asset allocations an address is associated with.\n",
-        {
-            {"address", RPCArg::Type::NUM, RPCArg::Optional::NO, "Address to find assets associated with."}
+UniValue listassetindexallocations(const JSONRPCRequest& request) {	
+    const UniValue &params = request.params;	
+    RPCHelpMan{"listassetindexallocations",	
+        "\nReturn a list of asset allocations an address is associated with.\n",	
+        {	
+            {"address", RPCArg::Type::NUM, RPCArg::Optional::NO, "Address to find assets associated with."}	
         },
         RPCResult{
-            "[\n"
-            "  {\n"
-            "    \"asset_allocation\":   (string) The unique key for this allocation\n"
-            "    \"asset_guid\":         (string) The guid of the asset\n"
-            "    \"symbol\":             (string) The asset symbol\n"
-            "    \"address\":            (string) The address of the owner of this allocation\n"
-            "    \"balance\":            (numeric) The current balance\n"
-            "    \"balance_zdag\":       (numeric) The zdag balance\n"
-            "    \"locked_outpoint\":    (string) The locked UTXO if applicable for this allocation\n"
-            "  },\n"
-            "  ...\n"
-            "]\n"
+            RPCResult::Type::ARR, "", "",
+            {
+                {RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::STR, "asset_allocation", "The unique key for this allocation"},
+                    {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+                    {RPCResult::Type::STR, "symbol", "The asset symbol"},
+                    {RPCResult::Type::STR, "address", "The address of the owner of this allocation"},
+                    {RPCResult::Type::NUM, "balance", "The current balance"},
+                    {RPCResult::Type::NUM, "balance_zdag", "The zdag balance"},
+                    {RPCResult::Type::STR, "locked_outpoint", "The locked UTXO if applicable for this allocation"},
+                }},
+            }
         },
-        RPCExamples{
-            HelpExampleCli("listassetindexallocations", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")
-            + HelpExampleRpc("listassetindexallocations", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")
-        }
-    }.Check(request);
-    if(!fAssetIndex){
-        throw JSONRPCError(RPC_MISC_ERROR, "You must reindex syscoin with -assetindex enabled");
-    }       
+        RPCExamples{	
+            HelpExampleCli("listassetindexallocations", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")	
+            + HelpExampleRpc("listassetindexallocations", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")	
+        }	
+    }.Check(request);	
+    if(!fAssetIndex){	
+        throw JSONRPCError(RPC_MISC_ERROR, "You must reindex syscoin with -assetindex enabled");	
+    }       	
 
 
-    string strAddressFrom = params[0].get_str();
+    string strAddressFrom = params[0].get_str();	
 
-    const CWitnessAddress &witnessAddress = DescribeWitnessAddress(strAddressFrom);
+    const CWitnessAddress &witnessAddress = DescribeWitnessAddress(strAddressFrom);	
 
-    UniValue oAssetAllocation(UniValue::VOBJ);
-    UniValue oRes(UniValue::VARR);
-    std::vector<uint32_t> assetGuids;
-    passetallocationdb->ReadAssetsByAddress(witnessAddress, assetGuids);
-    
+    UniValue oAssetAllocation(UniValue::VOBJ);	
+    UniValue oRes(UniValue::VARR);	
+    std::vector<uint32_t> assetGuids;	
+    passetallocationdb->ReadAssetsByAddress(witnessAddress, assetGuids);	
 
-    for(const uint32_t& guid: assetGuids){
-        UniValue oAssetAllocation(UniValue::VOBJ);
-        const CAssetAllocationTuple assetAllocationTuple(guid, witnessAddress);
-        CAssetAllocationDBEntry txPos;
-        if (passetallocationdb == nullptr || !passetallocationdb->ReadAssetAllocation(assetAllocationTuple, txPos))
-            continue;
-        CAsset theAsset;
-        if (!GetAsset(guid, theAsset))
-           continue;
 
-        if(BuildAssetAllocationJson(txPos, theAsset, oAssetAllocation)){
-            oRes.push_back(oAssetAllocation);
-        }
-    }
-    return oRes;
+    for(const uint32_t& guid: assetGuids){	
+        UniValue oAssetAllocation(UniValue::VOBJ);	
+        const CAssetAllocationTuple assetAllocationTuple(guid, witnessAddress);	
+        CAssetAllocationDBEntry txPos;	
+        if (passetallocationdb == nullptr || !passetallocationdb->ReadAssetAllocation(assetAllocationTuple, txPos))	
+            continue;	
+        CAsset theAsset;	
+        if (!GetAsset(guid, theAsset))	
+           continue;	
+
+        if(BuildAssetAllocationJson(txPos, theAsset, oAssetAllocation)){	
+            oRes.push_back(oAssetAllocation);	
+        }	
+    }	
+    return oRes;	
 }
 // recursive procedure to loop through all arrival times and related arrival times to find all senders
-int CheckActorsInTransactionGraph(const uint256& lookForTxHash, ActorSet& actorSet, std::set<uint256> &setTXIDs){
-    if(setTXIDs.find(lookForTxHash) != setTXIDs.end())
-        return ZDAG_STATUS_OK;
-    setTXIDs.emplace(lookForTxHash);
+int CheckActorsInTransactionGraph(const uint256& lookForTxHash, std::string& sender){
+    LOCK(cs_main);
+    LOCK(mempool.cs);
     ActorSet actorSetSender;
     {
-        LOCK(cs_main);
-        LOCK(mempool.cs);
         CTxMemPool::setEntries setAncestors;
         const CTransactionRef &txRef = mempool.get(lookForTxHash);
         if (!txRef)
             return ZDAG_NOT_FOUND;
-        if(!IsAssetAllocationTx(txRef->nVersion))
-            return ZDAG_STATUS_OK;
+        if(txRef->nVersion != SYSCOIN_TX_VERSION_ALLOCATION_SEND)
+            return ZDAG_NOT_FOUND;
         // the zdag tx or any others from this sender should be under MTU of IP packet
         if(GetSerializeSize(txRef, PROTOCOL_VERSION) > 1100){
             return ZDAG_WARNING_RBF;
@@ -500,8 +440,11 @@ int CheckActorsInTransactionGraph(const uint256& lookForTxHash, ActorSet& actorS
         if(mempool.existsConflicts(*txRef))
             return ZDAG_MAJOR_CONFLICT;        
 
-        // get actors for this transaction, irrelevant to ancestors in case the double spend is happening on the same utxo
-        GetActorsFromSyscoinTx(txRef, true, false, actorSetSender);
+        // get sender
+        sender = GetSenderOfZdagTx(*txRef);
+        if(sender.empty())
+            return ZDAG_MAJOR_CONFLICT;
+
         // check this transaction isn't RBF enabled
         RBFTransactionState rbfState = IsRBFOptIn(*txRef, mempool, setAncestors);
         if (rbfState == RBFTransactionState::UNKNOWN) {
@@ -514,45 +457,48 @@ int CheckActorsInTransactionGraph(const uint256& lookForTxHash, ActorSet& actorS
             // check if any ancestor inputs are dbl spent, reject if so
             if(mempool.existsConflicts(*ancestorTxRef))
                 return ZDAG_MAJOR_CONFLICT;
-            const uint256& ancestorTxHash = it->GetSharedTx()->GetHash();
-            if(IsAssetAllocationTx(ancestorTxRef->nVersion)){
-                if(setTXIDs.find(ancestorTxHash) == setTXIDs.end()){
-                    setTXIDs.emplace(ancestorTxHash);  
-                    GetActorsFromSyscoinTx(ancestorTxRef, true, false, actorSet);
-                }
-            }
+
         }  
-    }  
-    std::string actorToCheck = *actorSetSender.begin();
-    
-    const ArrivalTimesMap& arrivalTimes = arrivalTimesMap[actorToCheck];
-	if(arrivalTimes.empty())
-		return ZDAG_STATUS_OK;
-    for(const auto &arrivalTime: arrivalTimes){
-        int status = CheckActorsInTransactionGraph(arrivalTime.first, actorSet, setTXIDs);
-        if(status != ZDAG_STATUS_OK){
-            return status;
+    } 
+    {
+        LOCK(cs_assetallocationarrival);
+        auto arrivalTimesIt = arrivalTimesSet.find(sender);
+        if(arrivalTimesIt == arrivalTimesSet.end())
+            return ZDAG_MAJOR_CONFLICT;
+        const ArrivalTimesSet& arrivalTimes = arrivalTimesIt->second;
+        // its in mempool and its an asset tx, it should exist in arrival times or it wasn't put in due to a conflict
+        if(arrivalTimes.find(lookForTxHash) == arrivalTimes.end())
+            return ZDAG_MAJOR_CONFLICT;
+        // ensure non of the neighbouring sender tx's are not RBF either
+        for(const auto& arrivalTime: arrivalTimes){
+            // already checked this one
+            if(arrivalTime == lookForTxHash)
+                continue;
+            const CTransactionRef &txRefArrival = mempool.get(arrivalTime);
+            if (!txRefArrival)
+                return ZDAG_NOT_FOUND;
+            RBFTransactionState rbfState = IsRBFOptIn(*txRefArrival, mempool);
+            if (rbfState == RBFTransactionState::UNKNOWN) {
+                return ZDAG_NOT_FOUND;
+            } else if (rbfState == RBFTransactionState::REPLACEABLE_BIP125) {
+                return ZDAG_WARNING_RBF;
+            }         
         }
     }
-    actorSet.emplace(actorToCheck);
     return ZDAG_STATUS_OK;
 }
 int VerifyTransactionGraph(const uint256& lookForTxHash) {
-    ActorSet actorSet;
-    std::set<uint256> setTXID;
-    int status = CheckActorsInTransactionGraph(lookForTxHash, actorSet, setTXID);
+    std::string sender;    
+    int status = CheckActorsInTransactionGraph(lookForTxHash, sender);
     if(status != ZDAG_STATUS_OK){
         return status;
     }
     {
         LOCK(cs_assetallocationconflicts);
-        // check all involved senders to ensure they are not flagged
-        for(const auto& actor: actorSet){
-            auto it = assetAllocationConflicts.find(actor);
-            if (it != assetAllocationConflicts.end()){
-                LogPrint(BCLog::SYS, "VerifyTransactionGraph: Actor Conflict %s\n", actor);
-                return ZDAG_MAJOR_CONFLICT;
-            }
+        auto it = assetAllocationConflicts.find(sender);
+        if (it != assetAllocationConflicts.end()){
+            LogPrint(BCLog::SYS, "VerifyTransactionGraph: Actor Conflict %s\n", sender);
+            return ZDAG_MAJOR_CONFLICT;
         }
     }
 	return ZDAG_STATUS_OK;
@@ -571,10 +517,10 @@ UniValue assetallocationverifyzdag(const JSONRPCRequest& request) {
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id of the ZDAG transaction."}
         },
         RPCResult{
-            "{\n"
-            "  \"status\":      (numeric) The status level of the transaction\n"
-            "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "status", "The status level of the transaction"},
+            }}, 
         RPCExamples{
             HelpExampleCli("assetallocationverifyzdag", "\"txid\"")
             + HelpExampleRpc("assetallocationverifyzdag", "\"txid\"")
@@ -608,18 +554,19 @@ UniValue listassetallocations(const JSONRPCRequest& request) {
                 }
             },
             RPCResult{
-            "[\n"
-            "  {\n"
-            "    \"asset_allocation\":   (string) The unique key for this allocation\n"
-            "    \"asset_guid\":         (string) The guid of the asset\n"
-            "    \"symbol\":             (string) The asset symbol\n"
-            "    \"address\":            (string) The address of the owner of this allocation\n"
-            "    \"balance\":            (numeric) The current balance\n"
-            "    \"balance_zdag\":       (numeric) The zdag balance\n"
-            "    \"locked_outpoint\":    (string) The locked UTXO if applicable for this allocation\n"
-            "  }\n"
-            "  ...\n"
-            "]\n"
+                RPCResult::Type::ARR, "", "",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR, "asset_allocation", "The unique key for this allocation"},
+                        {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+                        {RPCResult::Type::STR, "symbol", "The asset symbol"},
+                        {RPCResult::Type::STR, "address", "The address of the owner of this allocation"},
+                        {RPCResult::Type::NUM, "balance", "The current balance"},
+                        {RPCResult::Type::NUM, "balance_zdag", "The zdag balance"},
+                        {RPCResult::Type::STR, "locked_outpoint", "The locked UTXO if applicable for this allocation"},
+                    }},
+                }
             },
             RPCExamples{
                 HelpExampleCli("listassetallocations", "0")
@@ -670,7 +617,7 @@ UniValue listassetallocationmempoolbalances(const JSONRPCRequest& request) {
                 }
                 }
         },
-        RPCResults{},
+        RPCResult{RPCResult::Type::NONE, "", ""},
         RPCExamples{
             HelpExampleCli("listassetallocationmempoolbalances", "0")
             + HelpExampleCli("listassetallocationmempoolbalances", "10 10")
@@ -709,24 +656,25 @@ UniValue syscoindecoderawtransaction(const JSONRPCRequest& request) {
         {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction hex string."}
     },
     RPCResult{
-    "{\n"
-    "  \"txtype\" : \"txtype\",         (string) The syscoin transaction type\n"
-    "  \"asset_guid\" : n,              (numeric) The asset guid\n"
-    "  \"symbol\" : \"symbol\",         (string) The asset symbol\n"
-    "  \"txid\" : \"id\",               (string) The transaction id\n"
-    "  \"height\" : n,                  (numeric) The blockheight of the transaction \n"
-    "  \"sender\" : \"address\",        (string) The address of the sender\n"
-    "  \"allocations\" : [              (array of json objects)\n"
-    "    {\n"
-    "      \"address\": \"address\",    (string) The address of the receiver\n"
-    "      \"amount\" : n,              (numeric) The amount of the transaction\n"
-    "    },\n"
-    "    ...\n"
-    "  ]\n"
-    "  \"total\" : n,                   (numeric) The total amount in this transaction\n"
-    "  \"confirmed\" : true|false       (boolean) If the transaction is confirmed\n"
-    "}\n"
-    },
+        RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR, "txtype", "The syscoin transaction type"},
+            {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+            {RPCResult::Type::STR, "symbol", "The asset symbol"},
+            {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            {RPCResult::Type::NUM, "height", "The blockheight of the transaction"},
+            {RPCResult::Type::STR, "sender", "The address of the sender"},
+            {RPCResult::Type::ARR, "allocations", "(array of json receiver objects)",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                            {RPCResult::Type::STR, "address", "The address of the receiver"},
+                            {RPCResult::Type::NUM, "amount", "The amount of the transaction"},
+                    }},
+                }},
+            {RPCResult::Type::NUM, "total", "The total amount in this transaction"},
+            {RPCResult::Type::BOOL, "confirmed", "If the transaction is confirmed"},
+        }}, 
     RPCExamples{
         HelpExampleCli("syscoindecoderawtransaction", "\"hexstring\"")
         + HelpExampleRpc("syscoindecoderawtransaction", "\"hexstring\"")
@@ -766,10 +714,10 @@ UniValue addressbalance(const JSONRPCRequest& request) {
         {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Address to holding the balance"}
     },
     RPCResult{
-    "{\n"
-    "  \"amount\": xx            (numeric) Syscoin balance of the address\n"
-    "}\n"
-    },
+        RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::NUM, "amount", "Syscoin balance of the addressn"},
+        }},  
     RPCExamples{
         HelpExampleCli("addressbalance", "\"sysrt1qea3v4dj5kjxjgtysdxd3mszjz56530ugw467dq\"")
         + HelpExampleRpc("addressbalance", "\"sysrt1qea3v4dj5kjxjgtysdxd3mszjz56530ugw467dq\"")
@@ -788,19 +736,20 @@ UniValue assetinfo(const JSONRPCRequest& request) {
             {"asset_guid", RPCArg::Type::NUM, RPCArg::Optional::NO, "The asset guid"}
         },
         RPCResult{
-            "{\n"
-            "  \"asset_guid\":          (numeric) The asset guid\n"
-            "  \"txid\":         (string) The transaction id that created this asset\n"
-            "  \"public_value\":  (string) The public value attached to this asset\n"
-            "  \"address\":      (string) The address that controls this asset\n"
-            "  \"contract\":     (string) The ethereum contract address\n"
-            "  \"balance\":      (numeric) The current balance\n"
-            "  \"total_supply\": (numeric) The total supply of this asset\n"
-            "  \"max_supply\":   (numeric) The maximum supply of this asset\n"
-            "  \"update_flag\":  (numeric) The flag in decimal \n"
-            "  \"precision\":    (numeric) The precision of this asset \n"   
-            "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+                {RPCResult::Type::STR, "symbol", "The asset symbol"},
+                {RPCResult::Type::STR_HEX, "txid", "The transaction id that created this asset"},
+                {RPCResult::Type::STR, "public_value", "The public value attached to this asset"},
+                {RPCResult::Type::STR, "address", "The address that controls this asset"},
+                {RPCResult::Type::STR_HEX, "contract", "The ethereum contract address"},
+                {RPCResult::Type::NUM, "balance", "The current balance"},
+                {RPCResult::Type::NUM, "total_supply", "The total supply of this asset"},
+                {RPCResult::Type::NUM, "max_supply", "The maximum supply of this asset"},
+                {RPCResult::Type::NUM, "update_flag", "The flag in decimal"},
+                {RPCResult::Type::NUM, "precision", "The precision of this asset"},
+            }},
         RPCExamples{
             HelpExampleCli("assetinfo", "\"assetguid\"")
             + HelpExampleRpc("assetinfo", "\"assetguid\"")
@@ -839,22 +788,23 @@ UniValue listassets(const JSONRPCRequest& request) {
                 }
             },
             RPCResult{
-            "[\n"
-            "  {\n"
-            "    \"asset_guid\":   (numeric) The asset guid\n"
-            "    \"symbol\":       (string) The asset symbol\n"
-            "    \"txid\":         (string) The transaction id that created this asset\n"
-            "    \"public_value\":  (string) The public value attached to this asset\n"
-            "    \"address\":      (string) The address that controls this asset\n"
-            "    \"contract\":     (string) The ethereum contract address\n"
-            "    \"balance\":      (numeric) The current balance\n"
-            "    \"total_supply\": (numeric) The total supply of this asset\n"
-            "    \"max_supply\":   (numeric) The maximum supply of this asset\n"
-            "    \"update_flag\":  (numeric) The flag in decimal \n"
-            "    \"precision\":    (numeric) The precision of this asset \n"   
-            "  },\n"
-            "  ...\n"
-            "]\n"
+                RPCResult::Type::ARR, "", "",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+                        {RPCResult::Type::STR, "symbol", "The asset symbol"},
+                        {RPCResult::Type::STR_HEX, "txid", "The transaction id that created this asset"},
+                        {RPCResult::Type::STR, "public_value", "The public value attached to this asset"},
+                        {RPCResult::Type::STR, "address", "The address that controls this asset"},
+                        {RPCResult::Type::STR_HEX, "contract", "The ethereum contract address"},
+                        {RPCResult::Type::NUM, "balance", "The current balance"},
+                        {RPCResult::Type::NUM, "total_supply", "The total supply of this asset"},
+                        {RPCResult::Type::NUM, "max_supply", "The maximum supply of this asset"},
+                        {RPCResult::Type::NUM, "update_flag", "The flag in decimal"},
+                        {RPCResult::Type::NUM, "precision", "The precision of this asset"},
+                    }},
+                }
             },
             RPCExamples{
             HelpExampleCli("listassets", "0")
@@ -893,10 +843,10 @@ UniValue getblockhashbytxid(const JSONRPCRequest& request)
             {"txid", RPCArg::Type::STR, RPCArg::Optional::NO, "A transaction that is in the block."}
         },
         RPCResult{
-        "{\n"
-        "  \"hex\": \"hexstring\"     (string) The block hash that contains the txid\n"
-        "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "hex", "The block hash that contains the txid"},
+            }},
         RPCExamples{
             HelpExampleCli("getblockhashbytxid", "dfc7eac24fa89b0226c64885f7bedaf132fc38e8980b5d446d76707027254490")
             + HelpExampleRpc("getblockhashbytxid", "dfc7eac24fa89b0226c64885f7bedaf132fc38e8980b5d446d76707027254490")
@@ -926,8 +876,7 @@ UniValue syscoingetspvproof(const JSONRPCRequest& request)
         {"txid", RPCArg::Type::STR, RPCArg::Optional::NO, "A transaction that is in the block"}
     },
     RPCResult{
-    "\"proof\"         (string) JSON representation of merkle proof (transaction index, siblings and block header and some other information useful for moving coins/assets to another chain)\n"
-    },
+        RPCResult::Type::STR, "proof", "JSON representation of merkle proof (transaction index, siblings and block header and some other information useful for moving coins/assets to another chain)"},
     RPCExamples{
         HelpExampleCli("syscoingetspvproof", "dfc7eac24fa89b0226c64885f7bedaf132fc38e8980b5d446d76707027254490")
         + HelpExampleRpc("syscoingetspvproof", "dfc7eac24fa89b0226c64885f7bedaf132fc38e8980b5d446d76707027254490")
@@ -982,149 +931,122 @@ UniValue syscoingetspvproof(const JSONRPCRequest& request)
     res.__pushKV("index", nIndex);    
     return res;
 }
-UniValue listassetindex(const JSONRPCRequest& request) {
-    const UniValue &params = request.params;
-    RPCHelpMan{"listassetindex",
-    "\nScan through asset index and return paged results of historical asset transactions. Requires assetindex config parameter enabled and optional assetindexpagesize which is 25 by default.\n",
-    {
-        {"page", RPCArg::Type::NUM, "0", "Return specific page number of transactions. Lower page number means more recent transactions."},
-        {"options", RPCArg::Type::ARR, RPCArg::Optional::NO, "A json object with options to filter results", 
-            {
-                {"asset_guid", RPCArg::Type::NUM, RPCArg::Optional::NO, "Asset GUID to filter."},
-                {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Address to filter.  Leave empty to scan globally through asset"}
-            }
-        }
-    }, 
+UniValue listassetindex(const JSONRPCRequest& request) {	
+    const UniValue &params = request.params;	
+    RPCHelpMan{"listassetindex",	
+    "\nScan through asset index and return paged results of historical asset transactions. Requires assetindex config parameter enabled and optional assetindexpagesize which is 25 by default.\n",	
+    {	
+        {"page", RPCArg::Type::NUM, "0", "Return specific page number of transactions. Lower page number means more recent transactions."},	
+        {"options", RPCArg::Type::ARR, RPCArg::Optional::NO, "A json object with options to filter results", 	
+            {	
+                {"asset_guid", RPCArg::Type::NUM, RPCArg::Optional::NO, "Asset GUID to filter."},	
+                {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Address to filter.  Leave empty to scan globally through asset"}	
+            }	
+        }	
+    }, 	
 
-    	
-    RPCResult{        
-            "If address option was omitted and transactions for asset is requested"
-            "[\n"
-            "  {\n"
-            "    \"txtype\":       (string) The asset transaction type. One of 'assetactivate', 'assetupdate', or 'assettransfer'\n"
-            "    \"asset_guid\":   (numeric) The asset guid\n"
-            "    \"symbol\":       (string) The asset symbol\n"
-            "    \"txid\":         (string) The transaction id that created this asset\n"
-            "    \"height\":       (numeric) The height at which the transaction was confirmed\n"
-            "    \"public_value\":  (string) The public value attached to this asset. Only returned value was changed.\n"
-            "    \"sender\":        (string) The address that controls this asset\n"
-            "    \"contract\":     (string) The ethereum contract address. Only returned if value was changed.\n"
-            "    \"balance\":      (numeric) The current balance. Only exists if supply was changed.\n"
-            "    \"update_flag\":  (numeric) The flag in decimal. Only exists if value was changed.\n"
-            "    \"total_supply\": (numeric) The total supply of this asset. Only exists for 'assetactivate' txtype.\n"
-            "    \"max_supply\":   (numeric) The maximum supply of this asset. Only exists for 'assetactivate' txtype.\n"
-            "    \"precision\":    (numeric) The precision of this asset. Only exists for 'assetactivate' txtype.\n"
-            "    \"blockhash\":    (string) Block hash that confirmed this transaction. Empty if not confirmed.\n"   
-            "  },\n"
-            "  ...\n"
-            "]\n"
-            "If address is included and transactions for asset allocation is requested"
-            "[\n"
-            "  {\n"
-            "    \"txtype\":            (string) The asset allocation transaction type. One of 'assetsend', 'assetallocationsend', 'assetallocationburntoethereum', 'assetallocationburntoethereum', 'assetallocationburntosyscoin', 'assetallocationmint', or 'assetallocationlock'\n"
-            "    \"asset_allocation\":  (string) The unique key for this allocation\n"
-            "    \"asset_guid\":        (numeric) The asset guid\n"
-            "    \"symbol\":            (string) The asset symbol\n"
-            "    \"txid\":              (string) The transaction id that created this asset\n"
-            "    \"height\":            (numeric) The height at which the transaction was confirmed\n"
-            "    \"sender\":            (string) The address that controls this asset allocation\n"
-            "    \"allocations\" : [    (array of json objects)\n"
-            "      {\n"
-            "        \"address\": \"address\",    (string) The address of the receiver\n"
-            "        \"amount\" : n,              (numeric) The amount of the transaction\n"
-            "      },\n"
-            "      ...\n"
-            "    ]\n"           
-            "    \"total\":             (numeric) The total amount of asset sent.\n"
-            "    \"blockhash\":         (string) Block hash that confirmed this transaction. Empty if not confirmed.\n"
-            "    \"ethereum_destination\":   (string) Destination ethereum address for moving over the bridge from sys to eth. Only exists for 'assetallocationburntoethereum' txtype.\n"
-            "    \"ethereum_contract\":      (string) Destination ethereum smart contract for moving over the bridge from sys to eth. Only exists for 'assetallocationburntoethereum' txtype.\n"
-            "    \"locked_outpoint\":        (string) The txid+output index pair locking this asset allocation to an outpoint for future transactions. Only exists for 'assetallocationlock' txtype.\n"  
-            "  },\n"
-            "  ...\n"
-            "]\n"            
-    },
-    RPCExamples{
-        HelpExampleCli("listassetindex", "0 '{\"asset_guid\":92922}'")
-        + HelpExampleCli("listassetindex", "2 '{\"asset_guid\":92922, \"address\":\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"}'")
-        + HelpExampleRpc("listassetindex", "0, '{\"asset_guid\":92922}'")
-        + HelpExampleRpc("listassetindex", "2, '{\"asset_guid\":92922, \"address\":\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"}'")
-    }
-}.Check(request);
-    if(!fAssetIndex){
-        throw JSONRPCError(RPC_MISC_ERROR, "You must start syscoin with -assetindex enabled");
-    }
-    UniValue options;
-    uint32_t page = params[0].get_uint();
-   
-    options = params[1];
-    
-    UniValue oRes(UniValue::VARR);
-    if (!passetindexdb->ScanAssetIndex(page, options, oRes))
-        throw JSONRPCError(RPC_MISC_ERROR, "Scan failed");
-    return oRes;
-}
-UniValue listassetindexassets(const JSONRPCRequest& request) {
-    const UniValue &params = request.params;
-    RPCHelpMan{"listassetindexassets",
-        "\nReturn a list of assets an address is associated with.\n",
+    RPCResult{
+        RPCResult::Type::ARR, "", "",
         {
-            {"address", RPCArg::Type::NUM, RPCArg::Optional::NO, "Address to find assets associated with."}
+            {RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+                {RPCResult::Type::STR, "symbol", "The asset symbol"},
+                {RPCResult::Type::STR_HEX, "txid", "The transaction id that created this asset"},
+                {RPCResult::Type::STR, "public_value", "The public value attached to this asset"},
+                {RPCResult::Type::STR, "address", "The address that controls this asset"},
+                {RPCResult::Type::STR_HEX, "contract", "The ethereum contract address"},
+                {RPCResult::Type::NUM, "balance", "The current balance"},
+                {RPCResult::Type::NUM, "total_supply", "The total supply of this asset"},
+                {RPCResult::Type::NUM, "max_supply", "The maximum supply of this asset"},
+                {RPCResult::Type::NUM, "update_flag", "The flag in decimal"},
+                {RPCResult::Type::NUM, "precision", "The precision of this asset"},
+            }},
+        }
+    },
+   	
+    RPCExamples{	
+        HelpExampleCli("listassetindex", "0 '{\"asset_guid\":92922}'")	
+        + HelpExampleCli("listassetindex", "2 '{\"asset_guid\":92922, \"address\":\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"}'")	
+        + HelpExampleRpc("listassetindex", "0, '{\"asset_guid\":92922}'")	
+        + HelpExampleRpc("listassetindex", "2, '{\"asset_guid\":92922, \"address\":\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"}'")	
+    }	
+}.Check(request);	
+    if(!fAssetIndex){	
+        throw JSONRPCError(RPC_MISC_ERROR, "You must start syscoin with -assetindex enabled");	
+    }	
+    UniValue options;	
+    uint32_t page = params[0].get_uint();	
+
+    options = params[1];	
+
+    UniValue oRes(UniValue::VARR);	
+    if (!passetindexdb->ScanAssetIndex(page, options, oRes))	
+        throw JSONRPCError(RPC_MISC_ERROR, "Scan failed");	
+    return oRes;	
+}	
+UniValue listassetindexassets(const JSONRPCRequest& request) {	
+    const UniValue &params = request.params;	
+    RPCHelpMan{"listassetindexassets",	
+        "\nReturn a list of assets an address is associated with.\n",	
+        {	
+            {"address", RPCArg::Type::NUM, RPCArg::Optional::NO, "Address to find assets associated with."}	
         },
         RPCResult{
-            "[\n"
-            "  {\n"
-            "    \"asset_guid\":   (numeric) The asset guid\n"
-            "    \"symbol\":       (string) The asset symbol\n"
-            "    \"txid\":         (string) The transaction id that created this asset\n"
-            "    \"public_value\":  (string) The public value attached to this asset\n"
-            "    \"address\":      (string) The address that controls this asset\n"
-            "    \"contract\":     (string) The ethereum contract address\n"
-            "    \"balance\":      (numeric) The current balance\n"
-            "    \"total_supply\": (numeric) The total supply of this asset\n"
-            "    \"max_supply\":   (numeric) The maximum supply of this asset\n"
-            "    \"update_flag\":  (numeric) The flag in decimal \n"
-            "    \"precision\":    (numeric) The precision of this asset \n"
-            "  },\n"
-            "  ...\n"
-            "]\n"
-        },
-        RPCExamples{
-            HelpExampleCli("listassetindexassets", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")
-            + HelpExampleRpc("listassetindexassets", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")
-        }
-    }.Check(request);
-    if(!fAssetIndex){
-        throw JSONRPCError(RPC_MISC_ERROR, "You must reindex syscoin with -assetindex enabled");
-    }  
+            RPCResult::Type::ARR, "", "",
+            {
+                {RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+                    {RPCResult::Type::STR, "symbol", "The asset symbol"},
+                    {RPCResult::Type::STR_HEX, "txid", "The transaction id that created this asset"},
+                    {RPCResult::Type::STR, "public_value", "The public value attached to this asset"},
+                    {RPCResult::Type::STR, "address", "The address that controls this asset"},
+                    {RPCResult::Type::STR_HEX, "contract", "The ethereum contract address"},
+                    {RPCResult::Type::NUM, "balance", "The current balance"},
+                    {RPCResult::Type::NUM, "total_supply", "The total supply of this asset"},
+                    {RPCResult::Type::NUM, "max_supply", "The maximum supply of this asset"},
+                    {RPCResult::Type::NUM, "update_flag", "The flag in decimal"},
+                    {RPCResult::Type::NUM, "precision", "The precision of this asset"},
+                }},
+            }
+        },	
+        RPCExamples{	
+            HelpExampleCli("listassetindexassets", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")	
+            + HelpExampleRpc("listassetindexassets", "sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7")	
+        }	
+    }.Check(request);	
+    if(!fAssetIndex){	
+        throw JSONRPCError(RPC_MISC_ERROR, "You must reindex syscoin with -assetindex enabled");	
+    }  	
 
-    UniValue oRes(UniValue::VARR);
-    std::vector<uint32_t> assetGuids;
-    const CWitnessAddress &witnessAddress = DescribeWitnessAddress(params[0].get_str());
-    passetdb->ReadAssetsByAddress(witnessAddress, assetGuids);
-    
-    for(const uint32_t& guid: assetGuids){
-        UniValue oAsset(UniValue::VOBJ);
-        CAsset theAsset;
-        if (!GetAsset(guid, theAsset))
-           continue;
+    UniValue oRes(UniValue::VARR);	
+    std::vector<uint32_t> assetGuids;	
+    const CWitnessAddress &witnessAddress = DescribeWitnessAddress(params[0].get_str());	
+    passetdb->ReadAssetsByAddress(witnessAddress, assetGuids);	
 
-        // equality: catch case where asset is transferred
-        if(theAsset.witnessAddress == witnessAddress && BuildAssetJson(theAsset, oAsset)){
-            oRes.push_back(oAsset);
-        }
-    }
-    return oRes;
+    for(const uint32_t& guid: assetGuids){	
+        UniValue oAsset(UniValue::VOBJ);	
+        CAsset theAsset;	
+        if (!GetAsset(guid, theAsset))	
+           continue;	
+
+        // equality: catch case where asset is transferred	
+        if(theAsset.witnessAddress == witnessAddress && BuildAssetJson(theAsset, oAsset)){	
+            oRes.push_back(oAsset);	
+        }	
+    }	
+    return oRes;	
 }
 UniValue syscoinstopgeth(const JSONRPCRequest& request) {
     RPCHelpMan{"syscoinstopgeth",
     "\nStops Geth and the relayer from running.\n",
-    {},
+    {},       
     RPCResult{
-    "{\n"
-    "    \"status\": xx     (string) Result\n"
-    "}\n"
-    },
+        RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR, "status", "Result"},
+        }},
     RPCExamples{
         HelpExampleCli("syscoinstopgeth", "")
         + HelpExampleRpc("syscoinstopgeth", "")
@@ -1143,10 +1065,10 @@ UniValue syscoinstartgeth(const JSONRPCRequest& request) {
     "\nStarts Geth and the relayer.\n",
     {},
     RPCResult{
-    "{\n"
-    "    \"status\": xx     (string) Result\n"
-    "}\n"
-    },
+        RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR, "status", "Result"},
+        }},
     RPCExamples{
         HelpExampleCli("syscoinstartgeth", "")
         + HelpExampleRpc("syscoinstartgeth", "")
@@ -1177,10 +1099,10 @@ UniValue syscoinsetethstatus(const JSONRPCRequest& request) {
             {"highest_block", RPCArg::Type::NUM, RPCArg::Optional::NO, "What the highest block height on Ethereum is found to be.  Usually coupled with syncing_status of 'syncing'.  Set to 0 if sync_status is 'synced'"}
         },
         RPCResult{
-        "{\n"
-        "    \"status\": xx     (string) Result\n"
-        "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "status", "Result"},
+            }},
         RPCExamples{
             HelpExampleCli("syscoinsetethstatus", "\"syncing\" 7000000")
             + HelpExampleCli("syscoinsetethstatus", "\"synced\" 0")
@@ -1257,10 +1179,10 @@ UniValue syscoinsetethheaders(const JSONRPCRequest& request) {
             }
         },
         RPCResult{
-        "{\n"
-        "    \"status\": xx     (string) Result\n"
-        "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "status", "Result"},
+            }},
         RPCExamples{
             HelpExampleCli("syscoinsetethheaders", "\"[[7043888,\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\",\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\",\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\"],...]\"")
             + HelpExampleRpc("syscoinsetethheaders", "\"[[7043888,\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\",\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\",\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\"],...]\"")
@@ -1302,10 +1224,10 @@ UniValue syscoinclearethheaders(const JSONRPCRequest& request) {
         "\nClears Ethereum headers in Syscoin.\n",
         {},
         RPCResult{
-        "{\n"
-        "    \"status\": xx     (string) Result\n"
-        "}\n"
-        },
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "status", "Result"},
+            }}, 
         RPCExamples{
             HelpExampleCli("syscoinclearethheaders", "")
             + HelpExampleRpc("syscoinclearethheaders", "")
@@ -1324,11 +1246,11 @@ UniValue syscoingettxroots(const JSONRPCRequest& request)
         {"height", RPCArg::Type::NUM, RPCArg::Optional::NO, "The block height to lookup."}
     },
     RPCResult{
-        "{\n"
-        "  \"txroot\" : \"hash\",        (string) The transaction merkle root\n"
-        "  \"receiptroot\" : \"hash\",        (string) The receipt merkle root\n"
-        "}\n"
-    },
+        RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR_HEX, "txroot", "The transaction merkle root"},
+            {RPCResult::Type::STR_HEX, "receiptroot", "The receipt merkle root"},
+        }},
     RPCExamples{
         HelpExampleCli("syscoingettxroots", "23232322")
         + HelpExampleRpc("syscoingettxroots", "23232322")
@@ -1359,26 +1281,27 @@ UniValue syscoincheckmint(const JSONRPCRequest& request)
         {"bridge_transfer_id", RPCArg::Type::NUM, RPCArg::Optional::NO, "Ethereum Bridge Transfer ID used to burn funds to move to Syscoin."}
     },
     RPCResult{
-        "{\n"
-        "  \"txtype\" : \"txtype\",         (string) The syscoin transaction type\n"
-        "  \"asset_guid\" : n,              (numeric) The asset guid\n"
-        "  \"symbol\" : \"symbol\",         (string) The asset symbol\n"
-        "  \"txid\" : \"id\",               (string) The transaction id\n"
-        "  \"height\" : n,                  (numeric) The blockheight of the transaction \n"
-        "  \"sender\" : \"address\",        (string) The address of the sender\n"
-        "  \"allocations\" : [              (array of json objects)\n"
-        "    {\n"
-        "      \"address\": \"address\",    (string) The address of the receiver\n"
-        "      \"amount\" : n,              (numeric) The amount of the transaction\n"
-        "    },\n"
-        "    ...\n"
-        "  ]\n"
-        "  \"total\" : n,                   (numeric) The total amount in this transaction\n"
-        "  \"confirmed\" : true|false       (boolean) If the transaction is confirmed\n"
-        "  \"spv_proof\"                    (object) Ethereum SPV Proofs for transaction and receipt\n"
-        "  \"in_active_chain\": b,          (bool) Whether block found with syscoin transaction is in the active chain or not\n"
-        "}\n"
-    },
+        RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR, "txtype", "The syscoin transaction type"},
+            {RPCResult::Type::NUM, "asset_guid", "The guid of the asset"},
+            {RPCResult::Type::STR, "symbol", "The asset symbol"},
+            {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            {RPCResult::Type::NUM, "height", "The blockheight of the transaction"},
+            {RPCResult::Type::STR, "sender", "The address of the sender"},
+            {RPCResult::Type::ARR, "allocations", "(array of json receiver objects)",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                            {RPCResult::Type::STR, "address", "The address of the receiver"},
+                            {RPCResult::Type::NUM, "amount", "The amount of the transaction"},
+                    }},
+                }},
+            {RPCResult::Type::NUM, "total", "The total amount in this transaction"},
+            {RPCResult::Type::BOOL, "confirmed", "If the transaction is confirmed"},
+            {RPCResult::Type::STR, "spv_proof", "Ethereum SPV Proofs for transaction and receipt"},
+            {RPCResult::Type::BOOL, "in_active_chain", "Whether block found with syscoin transaction is in the active chain or not"},
+        }}, 
     RPCExamples{
         HelpExampleCli("syscoincheckmint", "1221")
         + HelpExampleRpc("syscoincheckmint", "1221")
@@ -1466,9 +1389,13 @@ CAmount getAuxFee(const std::string &public_data, const CAmount& nAmount, const 
             return -1;
         // case where amount is in between the bounds
         if(nAmount >= nBoundAmount && nAmount < nNextBoundAmount){
-            return (nAmount - nBoundAmount) * nRate + nAccumulatedFee;    
+            break;    
         }
         nBoundAmount = nNextBoundAmount - nBoundAmount;
+        // must be last bound
+        if(nBoundAmount <= 0){
+            return (nAmount - nNextBoundAmount) * nRate + nAccumulatedFee;
+        }
         nAccumulatedFee += (nBoundAmount * nRate);
     }
     return (nAmount - nBoundAmount) * nRate + nAccumulatedFee;    
@@ -1480,7 +1407,6 @@ static const CRPCCommand commands[] =
     { "syscoin",            "syscoingettxroots",                &syscoingettxroots,             {"height"} },
     { "syscoin",            "getblockhashbytxid",               &getblockhashbytxid,            {"txid"} },
     { "syscoin",            "syscoingetspvproof",               &syscoingetspvproof,            {"txid"} },
-    { "syscoin",            "convertaddress",                   &convertaddress,                {"address"} },
     { "syscoin",            "syscoindecoderawtransaction",      &syscoindecoderawtransaction,   {}},
     { "syscoin",            "addressbalance",                   &addressbalance,                {}},
     { "syscoin",            "assetinfo",                        &assetinfo,                     {"asset_guid"}},
@@ -1491,8 +1417,8 @@ static const CRPCCommand commands[] =
     { "syscoin",            "assetallocationverifyzdag",        &assetallocationverifyzdag,     {"txid"} },
     { "syscoin",            "listassetallocations",             &listassetallocations,          {"count","from","options"} },
     { "syscoin",            "listassetallocationmempoolbalances",             &listassetallocationmempoolbalances,          {"count","from","options"} },
-    { "syscoin",            "listassetindex",                   &listassetindex,                {"page","options"} },
-    { "syscoin",            "listassetindexassets",             &listassetindexassets,          {"address"} },
+    { "syscoin",            "listassetindex",                   &listassetindex,                {"page","options"} },	
+    { "syscoin",            "listassetindexassets",             &listassetindexassets,          {"address"} },	
     { "syscoin",            "listassetindexallocations",        &listassetindexallocations,     {"address"} },
     { "syscoin",            "tpstestinfo",                      &tpstestinfo,                   {} },
     { "syscoin",            "tpstestadd",                       &tpstestadd,                    {"starttime","rawtxs"} },

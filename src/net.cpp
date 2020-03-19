@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -48,8 +48,8 @@ static_assert(MINIUPNPC_API_VERSION >= 10, "miniUPnPc API version >= 10 assumed"
 #include <masternodesync.h>
 #include <masternodeman.h>
 #include <rpc/server.h>
-// Dump addresses to peers.dat every 15 minutes (900s)
-static constexpr int DUMP_PEERS_INTERVAL = 15 * 60;
+// How often to dump addresses to peers.dat
+static constexpr std::chrono::minutes DUMP_PEERS_INTERVAL{15};
 
 /** Number of DNS seeds to query when the number of connections is low. */
 static constexpr int DNSSEEDS_TO_QUERY_AT_ONCE = 3;
@@ -87,7 +87,7 @@ static const uint64_t RANDOMIZER_ID_LOCALHOSTNONCE = 0xd93e69e2bbfa5735ULL; // S
 bool fDiscover = true;
 bool fListen = true;
 bool g_relay_txes = !DEFAULT_BLOCKSONLY;
-CCriticalSection cs_mapLocalHost;
+RecursiveMutex cs_mapLocalHost;
 std::map<CNetAddr, LocalServiceInfo> mapLocalHost GUARDED_BY(cs_mapLocalHost);
 static bool vfLimited[NET_MAX] GUARDED_BY(cs_mapLocalHost) = {};
 std::string strSubVersion;
@@ -412,7 +412,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
             if (hSocket == INVALID_SOCKET) {
                 return nullptr;
             }
-            connected = ConnectThroughProxy(proxy, addrConnect.ToStringIP(), addrConnect.GetPort(), hSocket, nConnectTimeout, &proxyConnectionFailed);
+            connected = ConnectThroughProxy(proxy, addrConnect.ToStringIP(), addrConnect.GetPort(), hSocket, nConnectTimeout, proxyConnectionFailed);
         } else {
             // no proxy needed (none set for target network)
             hSocket = CreateSocket(addrConnect);
@@ -434,7 +434,8 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
         std::string host;
         int port = default_port;
         SplitHostPort(std::string(pszDest), port, host);
-        connected = ConnectThroughProxy(proxy, host, port, hSocket, nConnectTimeout, nullptr);
+        bool proxyConnectionFailed;
+        connected = ConnectThroughProxy(proxy, host, port, hSocket, nConnectTimeout, proxyConnectionFailed);
     }
     if (!connected) {
         CloseSocket(hSocket);
@@ -499,12 +500,13 @@ void CNode::SetAddrLocal(const CService& addrLocalIn) {
 
 #undef X
 #define X(name) stats.name = name
-void CNode::copyStats(CNodeStats &stats)
+void CNode::copyStats(CNodeStats &stats, const std::vector<bool> &m_asmap)
 {
     stats.nodeid = this->GetId();
     X(nServices);
     X(addr);
     X(addrBind);
+    stats.m_mapped_as = addr.GetMappedAS(m_asmap);
     if (m_tx_relay != nullptr) {
         LOCK(m_tx_relay->cs_filter);
         stats.fRelayTxes = m_tx_relay->fRelayTxes;
@@ -555,9 +557,9 @@ void CNode::copyStats(CNodeStats &stats)
     }
 
     // Raw ping time is in microseconds, but show it to user as whole seconds (Syscoin users should be well used to small numbers with many decimal places by now :)
-    stats.dPingTime = (((double)nPingUsecTime) / 1e6);
-    stats.dMinPing  = (((double)nMinPingUsecTime) / 1e6);
-    stats.dPingWait = (((double)nPingUsecWait) / 1e6);
+    stats.m_ping_usec = nPingUsecTime;
+    stats.m_min_ping_usec  = nMinPingUsecTime;
+    stats.m_ping_wait_usec = nPingUsecWait;
 
     // Leave string empty if addrLocal invalid (not filled in yet)
     CService addrLocalUnlocked = GetAddrLocal();
@@ -716,6 +718,19 @@ CNetMessage V1TransportDeserializer::GetMessage(const CMessageHeader::MessageSta
     // reset the network deserializer (prepare for the next message)
     Reset();
     return msg;
+}
+
+void V1TransportSerializer::prepareForTransport(CSerializedNetMsg& msg, std::vector<unsigned char>& header) {
+    // create dbl-sha256 checksum
+    uint256 hash = Hash(msg.data.begin(), msg.data.end());
+
+    // create header
+    CMessageHeader hdr(Params().MessageStart(), msg.command.c_str(), msg.data.size());
+    memcpy(hdr.pchChecksum, hash.begin(), CMessageHeader::CHECKSUM_SIZE);
+
+    // serialize header
+    header.reserve(CMessageHeader::HEADER_SIZE);
+    CVectorWriter{SER_NETWORK, INIT_PROTO_VERSION, header, 0, hdr};
 }
 
 size_t CConnman::SocketSendData(CNode *pnode) const EXCLUSIVE_LOCKS_REQUIRED(pnode->cs_vSend)
@@ -1628,7 +1643,7 @@ void CConnman::ThreadDNSAddressSeed()
                 continue;
             }
             unsigned int nMaxIPs = 256; // Limits number of IPs learned from a DNS seed
-            if (LookupHost(host.c_str(), vIPs, nMaxIPs, true)) {
+            if (LookupHost(host, vIPs, nMaxIPs, true)) {
                 for (const CNetAddr& ip : vIPs) {
                     int nOneDay = 24*3600;
                     CAddress addr = CAddress(CService(ip, Params().GetDefaultPort()), requiredServiceBits);
@@ -1710,7 +1725,7 @@ int CConnman::GetExtraOutboundCount()
     {
         LOCK(cs_vNodes);
         for (const CNode* pnode : vNodes) {
-            if (!pnode->fInbound && !pnode->m_manual_connection && !pnode->fFeeler && !pnode->fDisconnect && !pnode->fOneShot && pnode->fSuccessfullyConnected) {
+            if (!pnode->fMasternode && !pnode->fInbound && !pnode->m_manual_connection && !pnode->fFeeler && !pnode->fDisconnect && !pnode->fOneShot && pnode->fSuccessfullyConnected) {
                 ++nOutbound;
             }
         }
@@ -1788,7 +1803,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
                     // but inbound and addnode peers do not use our outbound slots.  Inbound peers
                     // also have the added issue that they're attacker controlled and could be used
                     // to prevent us from connecting to particular hosts if we used them here.
-                    setConnected.insert(pnode->addr.GetGroup());
+                    setConnected.insert(pnode->addr.GetGroup(addrman.m_asmap));
                     if (pnode->m_tx_relay == nullptr) {
                         nOutboundBlockRelay++;
                     } else if (!pnode->fFeeler) {
@@ -1836,7 +1851,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
             }
 
             // Require outbound connections, other than feelers, to be to distinct network groups
-            if (!fFeeler && setConnected.count(addr.GetGroup())) {
+            if (!fFeeler && setConnected.count(addr.GetGroup(addrman.m_asmap))) {
                 break;
             }
 
@@ -1967,7 +1982,7 @@ std::vector<AddedNodeInfo> CConnman::GetAddedNodeInfo()
     }
 
     for (const std::string& strAddNode : lAddresses) {
-        CService service(LookupNumeric(strAddNode.c_str(), Params().GetDefaultPort()));
+        CService service(LookupNumeric(strAddNode, Params().GetDefaultPort()));
         AddedNodeInfo addedNode{strAddNode, CService(), false, false};
         if (service.IsValid()) {
             // strAddNode is an IP:port
@@ -2405,7 +2420,7 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
     threadMessageHandler = std::thread(&TraceThread<std::function<void()> >, "msghand", std::function<void()>(std::bind(&CConnman::ThreadMessageHandler, this)));
 
     // Dump network addresses
-    scheduler.scheduleEvery(std::bind(&CConnman::DumpAddresses, this), DUMP_PEERS_INTERVAL * 1000);
+    scheduler.scheduleEvery([this] { DumpAddresses(); }, DUMP_PEERS_INTERVAL);
 
     return true;
 }
@@ -2602,7 +2617,7 @@ void CConnman::GetNodeStats(std::vector<CNodeStats>& vstats)
     vstats.reserve(vNodes.size());
     for (CNode* pnode : vNodes) {
         vstats.emplace_back();
-        pnode->copyStats(vstats.back());
+        pnode->copyStats(vstats.back(), addrman.m_asmap);
     }
 }
 
@@ -2812,6 +2827,7 @@ CNode::CNode(NodeId idIn, ServiceFlags nLocalServicesIn, int nMyStartingHeightIn
     }
 
     m_deserializer = MakeUnique<V1TransportDeserializer>(V1TransportDeserializer(Params().MessageStart(), SER_NETWORK, INIT_PROTO_VERSION));
+    m_serializer = MakeUnique<V1TransportSerializer>(V1TransportSerializer());
 }
 
 CNode::~CNode()
@@ -2827,16 +2843,12 @@ bool CConnman::NodeFullyConnected(const CNode* pnode)
 void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
 {
     size_t nMessageSize = msg.data.size();
-    size_t nTotalSize = nMessageSize + CMessageHeader::HEADER_SIZE;
     LogPrint(BCLog::NET, "sending %s (%d bytes) peer=%d\n",  SanitizeString(msg.command), nMessageSize, pnode->GetId());
 
+    // make sure we use the appropriate network transport format
     std::vector<unsigned char> serializedHeader;
-    serializedHeader.reserve(CMessageHeader::HEADER_SIZE);
-    uint256 hash = Hash(msg.data.data(), msg.data.data() + nMessageSize);
-    CMessageHeader hdr(Params().MessageStart(), msg.command.c_str(), nMessageSize);
-    memcpy(hdr.pchChecksum, hash.begin(), CMessageHeader::CHECKSUM_SIZE);
-
-    CVectorWriter{SER_NETWORK, INIT_PROTO_VERSION, serializedHeader, 0, hdr};
+    pnode->m_serializer->prepareForTransport(msg, serializedHeader);
+    size_t nTotalSize = nMessageSize + serializedHeader.size();
 
     size_t nBytesSent = 0;
     {
@@ -2935,7 +2947,7 @@ CSipHasher CConnman::GetDeterministicRandomizer(uint64_t id) const
 
 uint64_t CConnman::CalculateKeyedNetGroup(const CAddress& ad) const
 {
-    std::vector<unsigned char> vchNetGroup(ad.GetGroup());
+    std::vector<unsigned char> vchNetGroup(ad.GetGroup(addrman.m_asmap));
 
     return GetDeterministicRandomizer(RANDOMIZER_ID_NETGROUP).Write(vchNetGroup.data(), vchNetGroup.size()).Finalize();
 }

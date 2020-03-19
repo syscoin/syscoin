@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2018-2019 The Bitcoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 export LC_ALL=C
 KNOWN_VIOLATIONS=(
@@ -19,6 +22,7 @@ KNOWN_VIOLATIONS=(
     "src/test/blockchain_tests.cpp.*std::to_string"
     "src/test/dbwrapper_tests.cpp:.*snprintf"
     "src/test/denialofservice_tests.cpp.*std::to_string"
+    "src/test/fuzz/locale.cpp"
     "src/test/fuzz/parse_numbers.cpp:.*atoi"
     "src/test/key_tests.cpp.*std::to_string"
     "src/test/net_tests.cpp.*std::to_string"

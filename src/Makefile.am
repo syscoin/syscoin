@@ -207,9 +207,8 @@ SYSCOIN_CORE_H = \
   random.h \
   randomenv.h \
   reverse_iterator.h \
-  reverselock.h \
-  rpc/auxpow_miner.h \
   rpc/blockchain.h \
+  rpc/auxpow_miner.h \
   rpc/client.h \
   rpc/mining.h \
   rpc/protocol.h \
@@ -241,6 +240,7 @@ SYSCOIN_CORE_H = \
   txmempool.h \
   ui_interface.h \
   undo.h \
+  util/asmap.h \
   util/bip32.h \
   util/bytevectorhash.h \
   util/check.h \
@@ -250,6 +250,7 @@ SYSCOIN_CORE_H = \
   util/system.h \
   util/macros.h \
   util/memory.h \
+  util/message.h \
   util/moneystr.h \
   util/rbf.h \
   util/settings.h \
@@ -258,7 +259,6 @@ SYSCOIN_CORE_H = \
   util/time.h \
   util/translation.h \
   util/url.h \
-  util/validation.h \
   util/executable_path/include/boost/executable_path.hpp \
   util/executable_path/include/boost/detail/executable_path_internals.hpp \
   util/vector.h \
@@ -274,7 +274,6 @@ SYSCOIN_CORE_H = \
   wallet/fees.h \
   wallet/ismine.h \
   wallet/load.h \
-  wallet/psbtwallet.h \
   wallet/rpcwallet.h \
   wallet/scriptpubkeyman.h \
   wallet/wallet.h \
@@ -431,7 +430,6 @@ libsyscoin_wallet_a_SOURCES = \
   wallet/feebumper.cpp \
   wallet/fees.cpp \
   wallet/load.cpp \
-  wallet/psbtwallet.cpp \
   wallet/rpcdump.cpp \
   wallet/rpcwallet.cpp \
   wallet/scriptpubkeyman.cpp \
@@ -597,11 +595,13 @@ libsyscoin_util_a_SOURCES = \
   support/cleanse.cpp \
   sync.cpp \
   threadinterrupt.cpp \
+  util/asmap.cpp \
   util/bip32.cpp \
   util/bytevectorhash.cpp \
   util/error.cpp \
   util/fees.cpp \
   util/system.cpp \
+  util/message.cpp \
   util/moneystr.cpp \
   util/rbf.cpp \
   util/settings.cpp \
@@ -611,7 +611,6 @@ libsyscoin_util_a_SOURCES = \
   util/string.cpp \
   util/time.cpp \
   util/url.cpp \
-  util/validation.cpp \
   util/executable_path/src/executable_path.cpp \
   util/executable_path/src/detail/executable_path_internals_bsd.cpp \
   util/executable_path/src/detail/executable_path_internals_common.cpp \
@@ -650,8 +649,6 @@ if TARGET_WINDOWS
 syscoind_SOURCES += syscoind-res.rc
 endif
 
-# Libraries below may be listed more than once to resolve circular dependencies (see
-# https://eli.thegreenplace.net/2013/07/09/library-order-in-static-linking#circular-dependency)
 syscoind_LDADD = \
   $(LIBSYSCOIN_SERVER) \
   $(LIBSYSCOIN_WALLET) \
@@ -805,6 +802,11 @@ clean-local:
 	$(AM_V_GEN) $(WINDRES) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(CPPFLAGS) -DWINDRES_PREPROC -i $< -o $@
 
 check-symbols: $(bin_PROGRAMS)
+if TARGET_DARWIN
+	@echo "Checking macOS dynamic libraries..."
+	$(AM_V_at) OTOOL=$(OTOOL) $(PYTHON) $(top_srcdir)/contrib/devtools/symbol-check.py $(bin_PROGRAMS)
+endif
+
 if GLIBC_BACK_COMPAT
 	@echo "Checking glibc back compat..."
 	$(AM_V_at) READELF=$(READELF) CPPFILT=$(CPPFILT) $(PYTHON) $(top_srcdir)/contrib/devtools/symbol-check.py $(bin_PROGRAMS)
@@ -817,6 +819,7 @@ if HARDEN
 endif
 
 if EMBEDDED_LEVELDB
+include Makefile.crc32c.include
 include Makefile.leveldb.include
 endif
 

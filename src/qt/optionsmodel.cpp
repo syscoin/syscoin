@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -245,9 +245,8 @@ void OptionsModel::SetPruneEnabled(bool prune, bool force)
 {
     QSettings settings;
     settings.setValue("bPrune", prune);
-    // Convert prune size from GB to MiB:
-    const uint64_t nPruneSizeMiB = (settings.value("nPruneSize").toInt() * GB_BYTES) >> 20;
-    std::string prune_val = prune ? std::to_string(nPruneSizeMiB) : "0";
+    const int64_t prune_target_mib = PruneGBtoMiB(settings.value("nPruneSize").toInt());
+    std::string prune_val = prune ? std::to_string(prune_target_mib) : "0";
     if (force) {
         m_node.forceSetArg("-prune", prune_val);
         return;

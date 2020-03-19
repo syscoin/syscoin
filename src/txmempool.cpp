@@ -18,12 +18,14 @@
 #include <util/moneystr.h>
 #include <util/time.h>
 #include <validationinterface.h>
-
+// SYSCOIN
+#include <services/assetconsensus.h>
+extern ArrivalTimesSet setToRemoveFromMempool;
 CTxMemPoolEntry::CTxMemPoolEntry(const CTransactionRef& _tx, const CAmount& _nFee,
                                  int64_t _nTime, unsigned int _entryHeight,
                                  bool _spendsCoinbase, int64_t _sigOpsCost, LockPoints lp)
     : tx(_tx), nFee(_nFee), nTxWeight(GetTransactionWeight(*tx)), nUsageSize(RecursiveDynamicUsage(tx)), nTime(_nTime), entryHeight(_entryHeight),
-    spendsCoinbase(_spendsCoinbase), sigOpCost(_sigOpsCost), lockPoints(lp)
+    spendsCoinbase(_spendsCoinbase), sigOpCost(_sigOpsCost), lockPoints(lp), m_epoch(0)
 {
     nCountWithDescendants = 1;
     nSizeWithDescendants = GetTxSize();
@@ -122,8 +124,6 @@ void CTxMemPool::UpdateTransactionsFromBlock(const std::vector<uint256> &vHashes
     // setMemPoolChildren will be updated, an assumption made in
     // UpdateForDescendants.
     for (const uint256 &hash : reverse_iterate(vHashesToUpdate)) {
-        // we cache the in-mempool children to avoid duplicate updates
-        setEntries setChildren;
         // calculate children from mapNextTx
         txiter it = mapTx.find(hash);
         if (it == mapTx.end()) {
@@ -132,17 +132,21 @@ void CTxMemPool::UpdateTransactionsFromBlock(const std::vector<uint256> &vHashes
         auto iter = mapNextTx.lower_bound(COutPoint(hash, 0));
         // First calculate the children, and update setMemPoolChildren to
         // include them, and update their setMemPoolParents to include this tx.
-        for (; iter != mapNextTx.end() && iter->first->hash == hash; ++iter) {
-            const uint256 &childHash = iter->second->GetHash();
-            txiter childIter = mapTx.find(childHash);
-            assert(childIter != mapTx.end());
-            // We can skip updating entries we've encountered before or that
-            // are in the block (which are already accounted for).
-            if (setChildren.insert(childIter).second && !setAlreadyIncluded.count(childHash)) {
-                UpdateChild(it, childIter, true);
-                UpdateParent(childIter, it, true);
+        // we cache the in-mempool children to avoid duplicate updates
+        {
+            const auto epoch = GetFreshEpoch();
+            for (; iter != mapNextTx.end() && iter->first->hash == hash; ++iter) {
+                const uint256 &childHash = iter->second->GetHash();
+                txiter childIter = mapTx.find(childHash);
+                assert(childIter != mapTx.end());
+                // We can skip updating entries we've encountered before or that
+                // are in the block (which are already accounted for).
+                if (!visited(childIter) && !setAlreadyIncluded.count(childHash)) {
+                    UpdateChild(it, childIter, true);
+                    UpdateParent(childIter, it, true);
+                }
             }
-        }
+        } // release epoch guard for UpdateForDescendants
         UpdateForDescendants(it, mapMemPoolDescendantsToUpdate, setAlreadyIncluded);
     }
 }
@@ -151,7 +155,6 @@ bool CTxMemPool::CalculateMemPoolAncestors(const CTxMemPoolEntry &entry, setEntr
 {
     setEntries parentHashes;
     const CTransaction &tx = entry.GetTx();
-
     if (fSearchForParents) {
         // Get parents of this transaction that are in the mempool
         // GetMemPoolParents() is only valid for entries in the mempool, so we
@@ -325,7 +328,7 @@ void CTxMemPoolEntry::UpdateAncestorState(int64_t modifySize, CAmount modifyFee,
 }
 
 CTxMemPool::CTxMemPool(CBlockPolicyEstimator* estimator)
-    : nTransactionsUpdated(0), minerPolicyEstimator(estimator)
+    : nTransactionsUpdated(0), minerPolicyEstimator(estimator), m_epoch(0), m_has_epoch_guard(false)
 {
     _clear(); //lock free clear
 
@@ -350,10 +353,15 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 {
     nTransactionsUpdated += n;
 }
-
+// SYSCOIN
 void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate)
 {
-    NotifyEntryAdded(entry.GetSharedTx());
+    AssetBalanceMap mapAssetAllocationBalances;
+    addUnchecked(entry, setAncestors, validFeeEstimate, false, "", mapAssetAllocationBalances);
+}
+// SYSCOIN
+void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate, const bool &fSyscoinDuplicate, const std::string& fSyscoinSender, const AssetBalanceMap &mapAssetAllocationBalances)
+{
     // Add to memory pool without checking anything.
     // Used by AcceptToMemoryPool(), which DOES do
     // all the appropriate checks.
@@ -380,6 +388,12 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
         mapNextTx.insert(std::make_pair(&tx.vin[i].prevout, &tx));
         setParentTransactions.insert(tx.vin[i].prevout.hash);
     }
+    // SYSCOIN
+    if(!fSyscoinDuplicate){
+        AddZDAGTx(MakeTransactionRef(tx), mapAssetAllocationBalances);
+    } else {
+        SetZDAGConflict(tx.GetHash(), fSyscoinSender);
+    }
     // Don't bother worrying about child transactions of this one.
     // Normal case of a new transaction arriving is that there can't be any
     // children, because such children would be orphans.
@@ -405,14 +419,18 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
 void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
 {
     CTransactionRef ptx = it->GetSharedTx();
-    NotifyEntryRemoved(ptx, reason);
-    if (reason != MemPoolRemovalReason::BLOCK && reason != MemPoolRemovalReason::CONFLICT) {
+    if (reason != MemPoolRemovalReason::BLOCK) {
+        // Notify clients that a transaction has been removed from the mempool
+        // for any reason except being included in a block. Clients interested
+        // in transactions included in blocks can subscribe to the BlockConnected
+        // notification.
         GetMainSignals().TransactionRemovedFromMempool(ptx);
     }
 
     const uint256 hash = it->GetTx().GetHash();
     for (const CTxIn& txin : it->GetTx().vin)
         mapNextTx.erase(txin.prevout);
+        
 
     if (vTxHashes.size() > 1) {
         vTxHashes[it->vTxHashesIdx] = std::move(vTxHashes.back());
@@ -426,6 +444,8 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     totalTxSize -= it->GetTxSize();
     cachedInnerUsage -= it->DynamicMemoryUsage();
     cachedInnerUsage -= memusage::DynamicUsage(mapLinks[it].parents) + memusage::DynamicUsage(mapLinks[it].children);
+    // SYSCOIN
+    RemoveZDAGTx(ptx);
     mapLinks.erase(it);
     mapTx.erase(it);
     nTransactionsUpdated++;
@@ -544,11 +564,10 @@ bool CTxMemPool::existsConflicts(const CTransaction &tx)
     }
     return false;
 }
-bool CTxMemPool::removeConflicts(const CTransaction &tx)
+void CTxMemPool::removeConflicts(const CTransaction &tx)
 {
     // Remove transactions which depend on inputs of tx, recursively
     AssertLockHeld(cs);
-    bool bRemoved = false;
     for (const CTxIn &txin : tx.vin) {
         auto it = mapNextTx.find(txin.prevout);
         if (it != mapNextTx.end()) {
@@ -557,6 +576,36 @@ bool CTxMemPool::removeConflicts(const CTransaction &tx)
             {
                 ClearPrioritisation(txConflict.GetHash());
                 removeRecursive(txConflict, MemPoolRemovalReason::CONFLICT);
+            }
+        }
+    }
+}
+bool CTxMemPool::removeSyscoinConflicts(const CTransaction &tx)
+{
+    // Remove transactions which depend on inputs of tx, recursively
+    AssertLockHeld(cs);
+    bool bRemoved = false;
+    txiter thisit = mapTx.find(tx.GetHash());
+    assert(thisit != mapTx.end());
+    for (const CTxIn &txin : tx.vin) {
+        auto itConflict = mapNextTx.find(txin.prevout);
+        if (itConflict != mapNextTx.end()) {
+            const CTransaction &txConflict = *itConflict->second;
+            if (txConflict != tx)
+            {
+                txiter conflictit = mapTx.find(txConflict.GetHash());
+                assert(conflictit != mapTx.end());
+                // if conflicting transaction was received after the transaction in question then remove conflicting tx
+                // otherwise the transaction is question is removed
+                // idea is to keep the oldest transaction in event of conflict
+                if(conflictit->GetTime() >= thisit->GetTime()){
+                    ClearPrioritisation(txConflict.GetHash());
+                    removeRecursive(txConflict, MemPoolRemovalReason::CONFLICT);
+                }
+                else {
+                    ClearPrioritisation(tx.GetHash());
+                    removeRecursive(tx, MemPoolRemovalReason::CONFLICT);
+                }
                 bRemoved = true;
             }
         }
@@ -952,6 +1001,16 @@ int CTxMemPool::Expire(std::chrono::seconds time)
         toremove.insert(mapTx.project<0>(it));
         it++;
     }
+    // SYSCOIN expire zdag conflicts after 300 seconds
+    const std::chrono::seconds timeZdagConflicts = std::chrono::seconds(GetTime()) - std::chrono::seconds(300);
+    for(const auto& toRemove: setToRemoveFromMempool){
+        txiter mempoolTxToRemove = mapTx.find(toRemove);
+        if (mempoolTxToRemove != mapTx.end()) {
+            if(mempoolTxToRemove->GetTime() <= timeZdagConflicts){
+                toremove.insert(mapTx.project<0>(mempoolTxToRemove));
+            }
+        }
+    }
     setEntries stage;
     for (txiter removeit : toremove) {
         CalculateDescendants(removeit, stage);
@@ -1122,6 +1181,25 @@ void CTxMemPool::SetIsLoaded(bool loaded)
 {
     LOCK(cs);
     m_is_loaded = loaded;
+}
+
+
+CTxMemPool::EpochGuard CTxMemPool::GetFreshEpoch() const
+{
+    return EpochGuard(*this);
+}
+CTxMemPool::EpochGuard::EpochGuard(const CTxMemPool& in) : pool(in)
+{
+    assert(!pool.m_has_epoch_guard);
+    ++pool.m_epoch;
+    pool.m_has_epoch_guard = true;
+}
+
+CTxMemPool::EpochGuard::~EpochGuard()
+{
+    // prevents stale results being used
+    ++pool.m_epoch;
+    pool.m_has_epoch_guard = false;
 }
 
 SaltedTxidHasher::SaltedTxidHasher() : k0(GetRand(std::numeric_limits<uint64_t>::max())), k1(GetRand(std::numeric_limits<uint64_t>::max())) {}

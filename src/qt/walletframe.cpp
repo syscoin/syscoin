@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -37,6 +37,10 @@ WalletFrame::~WalletFrame()
 void WalletFrame::setClientModel(ClientModel *_clientModel)
 {
     this->clientModel = _clientModel;
+
+    for (auto i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i) {
+        i.value()->setClientModel(_clientModel);
+    }
 }
 
 bool WalletFrame::addWallet(WalletModel *walletModel)
@@ -46,7 +50,6 @@ bool WalletFrame::addWallet(WalletModel *walletModel)
     if (mapWalletViews.count(walletModel) > 0) return false;
 
     WalletView *walletView = new WalletView(platformStyle, this);
-    walletView->setSyscoinGUI(gui);
     walletView->setClientModel(clientModel);
     walletView->setWalletModel(walletModel);
     walletView->showOutOfSyncWarning(bOutOfSync);
@@ -62,6 +65,14 @@ bool WalletFrame::addWallet(WalletModel *walletModel)
     mapWalletViews[walletModel] = walletView;
 
     connect(walletView, &WalletView::outOfSyncWarningClicked, this, &WalletFrame::outOfSyncWarningClicked);
+    connect(walletView, &WalletView::transactionClicked, gui, &SyscoinGUI::gotoHistoryPage);
+    connect(walletView, &WalletView::coinsSent, gui, &SyscoinGUI::gotoHistoryPage);
+    connect(walletView, &WalletView::message, [this](const QString& title, const QString& message, unsigned int style) {
+        gui->message(title, message, style);
+    });
+    connect(walletView, &WalletView::encryptionStatusChanged, gui, &SyscoinGUI::updateWalletStatus);
+    connect(walletView, &WalletView::incomingTransaction, gui, &SyscoinGUI::incomingTransaction);
+    connect(walletView, &WalletView::hdEnabledStatusChanged, gui, &SyscoinGUI::updateWalletStatus);
 
     return true;
 }

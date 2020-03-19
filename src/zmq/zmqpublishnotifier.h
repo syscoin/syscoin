@@ -52,6 +52,11 @@ public:
     bool NotifyTransaction(const CTransaction &transaction) override;
 };
 // SYSCOIN
+class CZMQPublishRawMempoolTransactionNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyTransactionMempool(const CTransaction &transaction) override;
+};
 class CZMQPublishRawSyscoinNotifier : public CZMQAbstractPublishNotifier
 {
 public:

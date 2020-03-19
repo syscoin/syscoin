@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <amount.h>
 #include <arith_uint256.h>
 #include <compressor.h>
 #include <consensus/merkle.h>
@@ -13,19 +14,25 @@
 #include <netbase.h>
 #include <policy/settings.h>
 #include <pow.h>
+#include <protocol.h>
 #include <pubkey.h>
 #include <rpc/util.h>
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <serialize.h>
+#include <streams.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
+#include <time.h>
 #include <uint256.h>
+#include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/system.h>
 #include <util/time.h>
+#include <version.h>
 
 #include <cassert>
+#include <chrono>
 #include <limits>
 #include <vector>
 
@@ -53,10 +60,18 @@ void test_one_input(const std::vector<uint8_t>& buffer)
     // We cannot assume a specific value of std::is_signed<char>::value:
     // ConsumeIntegral<char>() instead of casting from {u,}int8_t.
     const char ch = fuzzed_data_provider.ConsumeIntegral<char>();
+    const bool b = fuzzed_data_provider.ConsumeBool();
 
     const Consensus::Params& consensus_params = Params().GetConsensus();
     (void)CheckProofOfWork(u256, u32, consensus_params);
-    (void)CompressAmount(u64);
+    if (u64 <= MAX_MONEY) {
+        const uint64_t compressed_money_amount = CompressAmount(u64);
+        assert(u64 == DecompressAmount(compressed_money_amount));
+        static const uint64_t compressed_money_amount_max = CompressAmount(MAX_MONEY - 1);
+        assert(compressed_money_amount <= compressed_money_amount_max);
+    } else {
+        (void)CompressAmount(u64);
+    }
     static const uint256 u256_min(uint256S("0000000000000000000000000000000000000000000000000000000000000000"));
     static const uint256 u256_max(uint256S("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
     const std::vector<uint256> v256{u256, u256_min, u256_max};
@@ -65,11 +80,19 @@ void test_one_input(const std::vector<uint8_t>& buffer)
     (void)DecompressAmount(u64);
     (void)FormatISO8601Date(i64);
     (void)FormatISO8601DateTime(i64);
+    // FormatMoney(i) not defined when i == std::numeric_limits<int64_t>::min()
+    if (i64 != std::numeric_limits<int64_t>::min()) {
+        int64_t parsed_money;
+        if (ParseMoney(FormatMoney(i64), parsed_money)) {
+            assert(parsed_money == i64);
+        }
+    }
     (void)GetSizeOfCompactSize(u64);
     (void)GetSpecialScriptSize(u32);
     // (void)GetVirtualTransactionSize(i64, i64); // function defined only for a subset of int64_t inputs
     // (void)GetVirtualTransactionSize(i64, i64, u32); // function defined only for a subset of int64_t/uint32_t inputs
     (void)HexDigit(ch);
+    (void)MoneyRange(i64);
     (void)i64tostr(i64);
     (void)IsDigit(ch);
     (void)IsSpace(ch);
@@ -95,6 +118,16 @@ void test_one_input(const std::vector<uint8_t>& buffer)
     (void)SipHashUint256(u64, u64, u256);
     (void)SipHashUint256Extra(u64, u64, u256, u32);
     (void)ToLower(ch);
+    (void)ToUpper(ch);
+    // ValueFromAmount(i) not defined when i == std::numeric_limits<int64_t>::min()
+    if (i64 != std::numeric_limits<int64_t>::min()) {
+        int64_t parsed_money;
+        if (ParseMoney(ValueFromAmount(i64).getValStr(), parsed_money)) {
+            assert(parsed_money == i64);
+        }
+    }
+    const std::chrono::seconds seconds{i64};
+    assert(count_seconds(seconds) == i64);
 
     const arith_uint256 au256 = UintToArith256(u256);
     assert(ArithToUint256(au256) == u256);
@@ -123,5 +156,75 @@ void test_one_input(const std::vector<uint8_t>& buffer)
         (void)GetKeyForDestination(store, destination);
         (void)GetScriptForDestination(destination);
         (void)IsValidDestination(destination);
+    }
+
+    {
+        CDataStream stream(SER_NETWORK, INIT_PROTO_VERSION);
+
+        uint256 deserialized_u256;
+        stream << u256;
+        stream >> deserialized_u256;
+        assert(u256 == deserialized_u256 && stream.empty());
+
+        uint160 deserialized_u160;
+        stream << u160;
+        stream >> deserialized_u160;
+        assert(u160 == deserialized_u160 && stream.empty());
+
+        uint64_t deserialized_u64;
+        stream << u64;
+        stream >> deserialized_u64;
+        assert(u64 == deserialized_u64 && stream.empty());
+
+        int64_t deserialized_i64;
+        stream << i64;
+        stream >> deserialized_i64;
+        assert(i64 == deserialized_i64 && stream.empty());
+
+        uint32_t deserialized_u32;
+        stream << u32;
+        stream >> deserialized_u32;
+        assert(u32 == deserialized_u32 && stream.empty());
+
+        int32_t deserialized_i32;
+        stream << i32;
+        stream >> deserialized_i32;
+        assert(i32 == deserialized_i32 && stream.empty());
+
+        uint16_t deserialized_u16;
+        stream << u16;
+        stream >> deserialized_u16;
+        assert(u16 == deserialized_u16 && stream.empty());
+
+        int16_t deserialized_i16;
+        stream << i16;
+        stream >> deserialized_i16;
+        assert(i16 == deserialized_i16 && stream.empty());
+
+        uint8_t deserialized_u8;
+        stream << u8;
+        stream >> deserialized_u8;
+        assert(u8 == deserialized_u8 && stream.empty());
+
+        int8_t deserialized_i8;
+        stream << i8;
+        stream >> deserialized_i8;
+        assert(i8 == deserialized_i8 && stream.empty());
+
+        char deserialized_ch;
+        stream << ch;
+        stream >> deserialized_ch;
+        assert(ch == deserialized_ch && stream.empty());
+
+        bool deserialized_b;
+        stream << b;
+        stream >> deserialized_b;
+        assert(b == deserialized_b && stream.empty());
+    }
+
+    {
+        const ServiceFlags service_flags = (ServiceFlags)u64;
+        (void)HasAllDesirableServiceFlags(service_flags);
+        (void)MayHaveUsefulAddressDB(service_flags);
     }
 }

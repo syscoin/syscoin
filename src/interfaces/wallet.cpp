@@ -19,7 +19,6 @@
 #include <wallet/fees.h>
 #include <wallet/ismine.h>
 #include <wallet/load.h>
-#include <wallet/psbtwallet.h>
 #include <wallet/rpcwallet.h>
 #include <wallet/wallet.h>
 
@@ -119,19 +118,24 @@ public:
     }
     bool getPubKey(const CScript& script, const CKeyID& address, CPubKey& pub_key) override
     {
-        const SigningProvider* provider = m_wallet->GetSigningProvider(script);
+        std::unique_ptr<SigningProvider> provider = m_wallet->GetSolvingProvider(script);
         if (provider) {
             return provider->GetPubKey(address, pub_key);
         }
         return false;
     }
+    // SYSCOIN
     bool getPrivKey(const CScript& script, const CKeyID& address, CKey& key) override
     {
-        const SigningProvider* provider = m_wallet->GetSigningProvider(script);
+        std::unique_ptr<SigningProvider> provider = m_wallet->GetSolvingProvider(script);
         if (provider) {
             return provider->GetKey(address, key);
         }
         return false;
+    }
+    SigningResult signMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) override
+    {
+        return m_wallet->SignMessage(message, pkhash, str_sig);
     }
     bool isSpendable(const CTxDestination& dest) override { return m_wallet->IsMine(dest) & ISMINE_SPENDABLE; }
     bool haveWatchOnly() override
@@ -180,7 +184,6 @@ public:
         }
         return result;
     }
-    void learnRelatedScripts(const CPubKey& key, OutputType type) override { m_wallet->GetLegacyScriptPubKeyMan()->LearnRelatedScripts(key, type); }
     bool addDestData(const CTxDestination& dest, const std::string& key, const std::string& value) override
     {
         LOCK(m_wallet->cs_wallet);
@@ -362,9 +365,9 @@ public:
         bool& complete,
         int sighash_type = 1 /* SIGHASH_ALL */,
         bool sign = true,
-        bool bip32derivs = false) override
+        bool bip32derivs = false) const override
     {
-        return FillPSBT(m_wallet.get(), psbtx, complete, sighash_type, sign, bip32derivs);
+        return m_wallet->FillPSBT(psbtx, complete, sighash_type, sign, bip32derivs);
     }
     WalletBalances getBalances() override
     {
@@ -469,7 +472,7 @@ public:
     }
     unsigned int getConfirmTarget() override { return m_wallet->m_confirm_target; }
     bool hdEnabled() override { return m_wallet->IsHDEnabled(); }
-    bool canGetAddresses() override { return m_wallet->CanGetAddresses(); }
+    bool canGetAddresses() const override { return m_wallet->CanGetAddresses(); }
     bool IsWalletFlagSet(uint64_t flag) override { return m_wallet->IsWalletFlagSet(flag); }
     OutputType getDefaultAddressType() override { return m_wallet->m_default_address_type; }
     OutputType getDefaultChangeType() override { return m_wallet->m_default_change_type; }
@@ -525,7 +528,6 @@ public:
         g_rpc_chain = &m_chain;
         // SYSCOIN
         RegisterAssetWalletRPCCommands(m_chain, m_rpc_handlers);
-        RegisterGovernanceWalletRPCCommands(m_chain, m_rpc_handlers);
         return RegisterWalletRPCCommands(m_chain, m_rpc_handlers);
     }
     bool verify() override { return VerifyWallets(m_chain, m_wallet_filenames); }

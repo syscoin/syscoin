@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -13,7 +13,7 @@
 #include <util/strencodings.h>
 #include <util/threadnames.h>
 
-
+#include <system_error>
 #include <map>
 #include <set>
 
@@ -60,6 +60,11 @@ struct CLockLocation {
             mutexName, sourceFile, itostr(sourceLine), (fTry ? " (TRY)" : ""), m_thread_name);
     }
 
+    std::string Name() const
+    {
+        return mutexName;
+    }
+
 private:
     bool fTry;
     std::string mutexName;
@@ -75,7 +80,7 @@ typedef std::set<std::pair<void*, void*> > InvLockOrders;
 struct LockData {
     // Very ugly hack: as the global constructs and destructors run single
     // threaded, we use this boolean to know whether LockData still exists,
-    // as DeleteLock can get called by global CCriticalSection destructors
+    // as DeleteLock can get called by global RecursiveMutex destructors
     // after LockData disappears.
     bool available;
     LockData() : available(true) {}
@@ -153,6 +158,18 @@ static void pop_lock()
 void EnterCritical(const char* pszName, const char* pszFile, int nLine, void* cs, bool fTry)
 {
     push_lock(cs, CLockLocation(pszName, pszFile, nLine, fTry, util::ThreadGetInternalName()));
+}
+
+void CheckLastCritical(void* cs, std::string& lockname, const char* guardname, const char* file, int line)
+{
+    if (!g_lockstack.empty()) {
+        const auto& lastlock = g_lockstack.back();
+        if (lastlock.first == cs) {
+            lockname = lastlock.second.Name();
+            return;
+        }
+    }
+    throw std::system_error(EPERM, std::generic_category(), strprintf("%s:%s %s was not most recent critical section locked", file, line, guardname));
 }
 
 void LeaveCritical()

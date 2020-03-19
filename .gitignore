@@ -91,7 +91,8 @@ src/qt/syscoin-qt.includes
 *.qm
 Makefile
 !depends/Makefile
-syscoin-qt
+src/qt/syscoin-qt
+src/syscoin-qt
 Syscoin-Qt.app
 background.tiff*
 
@@ -108,6 +109,9 @@ qrc_*.cpp
 # Mac specific
 .DS_Store
 build
+
+# Previous releases
+releases
 
 #lcov
 *.gcno

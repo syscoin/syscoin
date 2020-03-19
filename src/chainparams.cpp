@@ -132,10 +132,10 @@ public:
         // BIP147) are deployed together with P2SH.
 
         // The best chain should have at least this much work.
-        consensus.nMinimumChainWork = uint256S("0x0000000000000000000000000000000000000000007eb1d72f664e35d28964e4");
+        consensus.nMinimumChainWork = uint256S("0x000000000000000000000000000000000000000000f4667e38d26078471315f0");
 
         // By default assume that the signatures in ancestors of this block are valid.
-        consensus.defaultAssumeValid = uint256S("0x385caed1bb2da6dc36a550d4b2f168474ca328b492c8d631a04617c92a1bd3b3"); // 288481
+        consensus.defaultAssumeValid = uint256S("0x4c332acd53ca99ab78fb80a3dacffe234674674e0b682350c492d7fe839d128e"); // 419800
         consensus.nAuxpowChainId = 0x1000;
         consensus.nAuxpowStartHeight = 1;
         consensus.fStrictChainId = true;
@@ -145,6 +145,7 @@ public:
         consensus.vchSYSXERC20Manager = ParseHex("FF957eA28b537b34E0c6E6B50c6c938668DD28a0");
         consensus.vchTokenFreezeMethod = ParseHex("aabab1db49e504b5156edf3f99042aeecb9607a08f392589571cd49743aaba8d");
         consensus.nBridgeStartBlock = 348000;
+        consensus.nDeterministicAssetStartBlock = 448000;
         /**
          * The message start string is designed to be unlikely to occur in normal data.
          * The characters are rarely used upper ASCII, not valid as UTF-8, and produce
@@ -188,6 +189,7 @@ public:
         strSporkAddress = "SSZvS59ddqG87koeUPu1J8ivg5yJsQiWGN";    
         nFulfilledRequestExpireTime = 60*60; // fulfilled requests expire in 1 hour
         m_is_test_chain = false;
+        m_is_mockable_chain = false;
 
         checkpointData = {
             {
@@ -201,14 +203,18 @@ public:
                 { 240000, uint256S("0x906918ba0cbfbd6e4e4e00d7d47d08bef3e409f47b59cb5bd3303f5276b88f0f")},
                 { 280000, uint256S("0x651375427865345d37a090ca561c1ed135c6b8dafa591a59f2abf1eb26dfd538")},
                 { 292956, uint256S("0xae6dca1b9dd7adcb8a11c8ea7f9fe72bb47ff6e4156e1d172e2a8612b18a319d")},
+                { 350000, uint256S("0x02501c7feba858c83e005acbf0505a892081288dcf7a8a37bd4fc47d7c24c799")},
+                { 390000, uint256S("0x8654451a7ed5286ba5c830cdf6e65cbbd7a77f650216541bfbe50af04933741b")},
+                { 391285, uint256S("76d13e8f08c2b7027251484078f734f91c485727031be6b4c21c42d5e103d0ad")},
+                { 419800, uint256S("4c332acd53ca99ab78fb80a3dacffe234674674e0b682350c492d7fe839d128e")},
             }
         };
 
         chainTxData = ChainTxData{
-            // Data from rpc: getchaintxstats 4096 0000000000000000000f1c54590ee18d15ec70e68c8cd4cfbadb1b4f11697eee
-            /* nTime    */ 0,
-            /* nTxCount */ 0,
-            /* dTxRate  */ 0
+            // Data from rpc: getchaintxstats 43200 83460c100beedfdc467142fef347fc8369adc4a7feecbdc0462048f3493385f2 
+            /* nTime    */ 1584566854,
+            /* nTxCount */ 495978,
+            /* dTxRate  */ 0.01962572570795198 
         };
     }
 };
@@ -265,6 +271,7 @@ public:
         consensus.vchSYSXERC20Manager = ParseHex("443d9a14fb6ba2A45465bEC3767186f404Ccea25");
         consensus.vchTokenFreezeMethod = ParseHex("aabab1db49e504b5156edf3f99042aeecb9607a08f392589571cd49743aaba8d");
         consensus.nBridgeStartBlock = 1000;
+        consensus.nDeterministicAssetStartBlock = 125000;
         pchMessageStart[0] = 0xce;
         pchMessageStart[1] = 0xe2;
         pchMessageStart[2] = 0xca;
@@ -310,6 +317,8 @@ public:
         // privKey: cU52TqHDWJg6HoL3keZHBvrJgsCLsduRvDFkPyZ5EmeMwoEHshiT
         strSporkAddress = "TCGpumHyMXC5BmfkaAQXwB7Bf4kbkhM9BX";
         nFulfilledRequestExpireTime = 5*60; // fulfilled requests expire in 5 minutes
+        m_is_mockable_chain = false;
+
         checkpointData = {
             {
                 {360, uint256S("0x00000c04c5926f539074420b40088d4b099d748d07795df891ca391799b6e54c")},
@@ -380,6 +389,7 @@ public:
         consensus.vchSYSXERC20Manager = ParseHex("443d9a14fb6ba2A45465bEC3767186f404Ccea25");
         consensus.vchTokenFreezeMethod = ParseHex("aabab1db49e504b5156edf3f99042aeecb9607a08f392589571cd49743aaba8d");
         consensus.nBridgeStartBlock = 100;
+        consensus.nDeterministicAssetStartBlock = 100;
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;
         pchMessageStart[2] = 0xb5;
@@ -409,7 +419,10 @@ public:
         // privKey: cPPpaK9LCXjGGXVJUqcrtEMVQw5tALMuN3WsVuPCWFf9tswYYDvY
         strSporkAddress = "TCSJVL68KFq9FdbfxB2KhTcWp6rHD7vePs";
         nFulfilledRequestExpireTime = 5*60; // fulfilled requests expire in 5 minutes
+        m_is_mockable_chain = true;
        /* 
+        
+
         checkpointData = {
             {
                 {0, uint256S("0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206")},

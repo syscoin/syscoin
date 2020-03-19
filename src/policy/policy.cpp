@@ -67,7 +67,7 @@ bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType)
         if (m < 1 || m > n)
             return false;
     } else if (whichType == TX_NULL_DATA &&
-               (!fAcceptDatacarrier || scriptPubKey.size() > nMaxDatacarrierBytes * 200 )) {
+               (!fAcceptDatacarrier || scriptPubKey.size() > nMaxDatacarrierBytes * 100 )) {
                    LogPrintf("IsStandard: too big\n");
           return false;
     }
@@ -77,7 +77,8 @@ bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType)
 
 bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeRate& dust_relay_fee, std::string& reason)
 {
-    if(!IsSyscoinTx(tx.nVersion)){
+    const bool &isSysTx = IsSyscoinTx(tx.nVersion);
+    if(!isSysTx){
         if (tx.nVersion > CTransaction::MAX_STANDARD_VERSION || tx.nVersion < 1) {
             reason = "version";
             return false;
@@ -87,7 +88,6 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         reason = "version";
         return false;
     }
-
     // Extremely large transactions with lots of inputs can cost the network
     // almost as much to process as they cost the sender in fees, because
     // computing signature hashes is O(ninputs*txsize). Limiting transactions
@@ -97,7 +97,6 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         reason = "tx-size";
         return false;
     }
-
     for (const CTxIn& txin : tx.vin)
     {
         // Biggest 'standard' txin is a 15-of-15 P2SH multisig with compressed
@@ -116,7 +115,6 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
             return false;
         }
     }
-
     unsigned int nDataOut = 0;
     txnouttype whichType;
     for (const CTxOut& txout : tx.vout) {
@@ -127,8 +125,8 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
 
         if (whichType == TX_NULL_DATA){
             // SYSCOIN if not syscoin tx and opreturn size is bigger than maxcarrier bytes, return false
-            // we need this because if it is a sys tx then we allow 200x maxcarrier bytes.
-            if (!IsSyscoinTx(tx.nVersion) && txout.scriptPubKey.size() > nMaxDatacarrierBytes)
+            // we need this because if it is a sys tx then we allow 100x maxcarrier bytes.
+            if (!isSysTx && txout.scriptPubKey.size() > nMaxDatacarrierBytes)
             {
                 reason = "scriptpubkey";
                 return false;

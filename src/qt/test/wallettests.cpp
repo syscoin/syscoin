@@ -1,3 +1,7 @@
+// Copyright (c) 2015-2019 The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 #include <qt/test/wallettests.h>
 #include <qt/test/util.h>
 
@@ -139,10 +143,9 @@ void TestGUI(interfaces::Node& node)
     bool firstRun;
     wallet->LoadWallet(firstRun);
     {
-        auto spk_man = wallet->GetLegacyScriptPubKeyMan();
+        auto spk_man = wallet->GetOrCreateLegacyScriptPubKeyMan();
         auto locked_chain = wallet->chain().lock();
-        LOCK(wallet->cs_wallet);
-        AssertLockHeld(spk_man->cs_wallet);
+        LOCK2(wallet->cs_wallet, spk_man->cs_KeyStore);
         wallet->SetAddressBook(GetDestinationForKey(test.coinbaseKey.GetPubKey(), wallet->m_default_address_type), "", "receive");
         spk_man->AddKeyPubKey(test.coinbaseKey, test.coinbaseKey.GetPubKey());
         wallet->SetLastBlockProcessed(105, ::ChainActive().Tip()->GetBlockHash());

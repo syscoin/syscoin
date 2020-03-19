@@ -27,8 +27,7 @@ public:
 static const CRPCConvertParam vRPCConvertParams[] =
 {
     { "setmocktime", 0, "timestamp" },
-    { "generate", 0, "nblocks" },
-    { "generate", 1, "maxtries" },
+    { "mockscheduler", 0, "delta_time" },
     { "utxoupdatepsbt", 1, "descriptors" },
     { "generatetoaddress", 0, "nblocks" },
     { "generatetoaddress", 2, "maxtries" },
@@ -178,7 +177,6 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "voteraw", 1, "tx_index" },
     { "voteraw", 5, "time" },
     { "sendfrom", 2, "amount" },
-    { "convertaddresswallet", 2, "rescan" },
     { "assetallocationlock", 0, "asset_guid" },
     { "assetallocationlock", 3, "output_index" },
     { "assetallocationsend", 0, "asset_guid" },
@@ -227,8 +225,6 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "tpstestsetenabled", 0, "enabled" },
     { "syscoinsetethstatus", 1, "highestBlock" },
     { "syscoinsetethheaders", 0, "headers" },
-    { "listassetindex", 0, "page" },
-    { "listassetindex", 1, "options" },
 };
 // clang-format on
 

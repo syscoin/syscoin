@@ -909,12 +909,8 @@ void RPCConsole::on_lineEdit_returnPressed()
 
         cmdBeforeBrowsing = QString();
 
-        WalletModel* wallet_model{nullptr};
 #ifdef ENABLE_WALLET
-        const int wallet_index = ui->WalletSelector->currentIndex();
-        if (wallet_index > 0) {
-            wallet_model = ui->WalletSelector->itemData(wallet_index).value<WalletModel*>();
-        }
+        WalletModel* wallet_model = ui->WalletSelector->currentData().value<WalletModel*>();
 
         if (m_last_wallet_model != wallet_model) {
             if (wallet_model) {
@@ -1116,9 +1112,9 @@ void RPCConsole::updateNodeDetail(const CNodeCombinedStats *stats)
     ui->peerBytesSent->setText(GUIUtil::formatBytes(stats->nodeStats.nSendBytes));
     ui->peerBytesRecv->setText(GUIUtil::formatBytes(stats->nodeStats.nRecvBytes));
     ui->peerConnTime->setText(GUIUtil::formatDurationStr(GetSystemTimeInSeconds() - stats->nodeStats.nTimeConnected));
-    ui->peerPingTime->setText(GUIUtil::formatPingTime(stats->nodeStats.dPingTime));
-    ui->peerPingWait->setText(GUIUtil::formatPingTime(stats->nodeStats.dPingWait));
-    ui->peerMinPing->setText(GUIUtil::formatPingTime(stats->nodeStats.dMinPing));
+    ui->peerPingTime->setText(GUIUtil::formatPingTime(stats->nodeStats.m_ping_usec));
+    ui->peerPingWait->setText(GUIUtil::formatPingTime(stats->nodeStats.m_ping_wait_usec));
+    ui->peerMinPing->setText(GUIUtil::formatPingTime(stats->nodeStats.m_min_ping_usec));
     ui->timeoffset->setText(GUIUtil::formatTimeOffset(stats->nodeStats.nTimeOffset));
     ui->peerVersion->setText(QString("%1").arg(QString::number(stats->nodeStats.nVersion)));
     ui->peerSubversion->setText(QString::fromStdString(stats->nodeStats.cleanSubVer));
@@ -1243,7 +1239,7 @@ void RPCConsole::unbanSelectedNode()
         QString strNode = nodes.at(i).data().toString();
         CSubNet possibleSubnet;
 
-        LookupSubNet(strNode.toStdString().c_str(), possibleSubnet);
+        LookupSubNet(strNode.toStdString(), possibleSubnet);
         if (possibleSubnet.IsValid() && m_node.unban(possibleSubnet))
         {
             clientModel->getBanTableModel()->refresh();

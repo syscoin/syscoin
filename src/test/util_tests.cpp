@@ -1,14 +1,18 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <util/system.h>
 
 #include <clientversion.h>
+#include <hash.h> // For Hash()
+#include <key.h> // For CKey
 #include <optional.h>
 #include <sync.h>
 #include <test/util/setup_common.h>
 #include <test/util/str.h>
+#include <uint256.h>
+#include <util/message.h> // For MessageSign(), MessageVerify(), MESSAGE_MAGIC
 #include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/string.h>
@@ -16,6 +20,7 @@
 #include <util/spanparsing.h>
 #include <util/vector.h>
 
+#include <array>
 #include <stdint.h>
 #include <thread>
 #include <univalue.h>
@@ -38,7 +43,7 @@ BOOST_FIXTURE_TEST_SUITE(util_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(util_criticalsection)
 {
-    CCriticalSection cs;
+    RecursiveMutex cs;
 
     do {
         LOCK(cs);
@@ -338,6 +343,27 @@ BOOST_AUTO_TEST_CASE(util_ParseParameters)
     BOOST_CHECK(testArgs.m_settings.command_line_options["ccc"].front().get_str() == "argument");
     BOOST_CHECK(testArgs.m_settings.command_line_options["ccc"].back().get_str() == "multiple");
     BOOST_CHECK(testArgs.GetArgs("-ccc").size() == 2);
+}
+
+BOOST_AUTO_TEST_CASE(util_ParseInvalidParameters)
+{
+    TestArgsManager test;
+    test.SetupArgs({{"-registered", ArgsManager::ALLOW_ANY}});
+
+    const char* argv[] = {"ignored", "-registered"};
+    std::string error;
+    BOOST_CHECK(test.ParseParameters(2, (char**)argv, error));
+    BOOST_CHECK_EQUAL(error, "");
+
+    argv[1] = "-unregistered";
+    BOOST_CHECK(!test.ParseParameters(2, (char**)argv, error));
+    BOOST_CHECK_EQUAL(error, "Invalid parameter -unregistered");
+
+    // Make sure registered parameters prefixed with a chain name trigger errors.
+    // (Previously, they were accepted and ignored.)
+    argv[1] = "-test.registered";
+    BOOST_CHECK(!test.ParseParameters(2, (char**)argv, error));
+    BOOST_CHECK_EQUAL(error, "Invalid parameter -test.registered");
 }
 
 static void TestParse(const std::string& str, bool expected_bool, int64_t expected_int)
@@ -835,7 +861,8 @@ struct ArgsMergeTestingSetup : public BasicTestingSetup {
     void ForEachMergeSetup(Fn&& fn)
     {
         ActionList arg_actions = {};
-        ForEachNoDup(arg_actions, SET, SECTION_NEGATE, [&] {
+        // command_line_options do not have sections. Only iterate over SET and NEGATE
+        ForEachNoDup(arg_actions, SET, NEGATE, [&] {
             ActionList conf_actions = {};
             ForEachNoDup(conf_actions, SET, SECTION_NEGATE, [&] {
                 for (bool soft_set : {false, true}) {
@@ -995,7 +1022,7 @@ BOOST_FIXTURE_TEST_CASE(util_ArgsMerge, ArgsMergeTestingSetup)
     // Results file is formatted like:
     //
     //   <input> || <IsArgSet/IsArgNegated/GetArg output> | <GetArgs output> | <GetUnsuitable output>
-    BOOST_CHECK_EQUAL(out_sha_hex, "b835eef5977d69114eb039a976201f8c7121f34fe2b7ea2b73cafb516e5c9dc8");
+    BOOST_CHECK_EQUAL(out_sha_hex, "8fd4877bb8bf337badca950ede6c917441901962f160e52514e06a60dea46cde");
 }
 
 // Similar test as above, but for ArgsManager::GetChainName function.
@@ -1172,6 +1199,12 @@ BOOST_AUTO_TEST_CASE(util_ParseMoney)
     BOOST_CHECK(ParseMoney("0.00000001", ret));
     BOOST_CHECK_EQUAL(ret, COIN/100000000);
 
+    // Parsing amount that can not be represented in ret should fail
+    BOOST_CHECK(!ParseMoney("0.000000001", ret));
+
+    // Parsing empty string should fail
+    BOOST_CHECK(!ParseMoney("", ret));
+
     // Attempted 63 bit overflow should fail
     BOOST_CHECK(!ParseMoney("92233720368.54775808", ret));
 
@@ -1300,7 +1333,7 @@ BOOST_AUTO_TEST_CASE(util_time_GetTime)
     SetMockTime(111);
     // Check that mock time does not change after a sleep
     for (const auto& num_sleep : {0, 1}) {
-        MilliSleep(num_sleep);
+        UninterruptibleSleep(std::chrono::milliseconds{num_sleep});
         BOOST_CHECK_EQUAL(111, GetTime()); // Deprecated time getter
         BOOST_CHECK_EQUAL(111, GetTime<std::chrono::seconds>().count());
         BOOST_CHECK_EQUAL(111000, GetTime<std::chrono::milliseconds>().count());
@@ -1311,7 +1344,7 @@ BOOST_AUTO_TEST_CASE(util_time_GetTime)
     // Check that system time changes after a sleep
     const auto ms_0 = GetTime<std::chrono::milliseconds>();
     const auto us_0 = GetTime<std::chrono::microseconds>();
-    MilliSleep(1);
+    UninterruptibleSleep(std::chrono::milliseconds{1});
     BOOST_CHECK(ms_0 < GetTime<std::chrono::milliseconds>());
     BOOST_CHECK(us_0 < GetTime<std::chrono::microseconds>());
 }
@@ -2001,6 +2034,111 @@ BOOST_AUTO_TEST_CASE(test_tracked_vector)
     BOOST_CHECK_EQUAL(v8[0].copies, 0);
     BOOST_CHECK_EQUAL(v8[1].copies, 1);
     BOOST_CHECK_EQUAL(v8[2].copies, 0);
+}
+
+BOOST_AUTO_TEST_CASE(message_sign)
+{
+    const std::array<unsigned char, 32> privkey_bytes = {
+        // just some random data
+        // derived address from this private key: 15CRxFdyRpGZLW9w8HnHvVduizdL5jKNbs
+        0xD9, 0x7F, 0x51, 0x08, 0xF1, 0x1C, 0xDA, 0x6E,
+        0xEE, 0xBA, 0xAA, 0x42, 0x0F, 0xEF, 0x07, 0x26,
+        0xB1, 0xF8, 0x98, 0x06, 0x0B, 0x98, 0x48, 0x9F,
+        0xA3, 0x09, 0x84, 0x63, 0xC0, 0x03, 0x28, 0x66
+    };
+
+    const std::string message = "Trust no one";
+
+    const std::string expected_signature =
+        "IPojfrX2dfPnH26UegfbGQQLrdK844DlHq5157/P6h57WyuS/Qsl+h/WSVGDF4MUi4rWSswW38oimDYfNNUBUOk=";
+
+    CKey privkey;
+    std::string generated_signature;
+
+    BOOST_REQUIRE_MESSAGE(!privkey.IsValid(),
+        "Confirm the private key is invalid");
+
+    BOOST_CHECK_MESSAGE(!MessageSign(privkey, message, generated_signature),
+        "Sign with an invalid private key");
+
+    privkey.Set(privkey_bytes.begin(), privkey_bytes.end(), true);
+
+    BOOST_REQUIRE_MESSAGE(privkey.IsValid(),
+        "Confirm the private key is valid");
+
+    BOOST_CHECK_MESSAGE(MessageSign(privkey, message, generated_signature),
+        "Sign with a valid private key");
+
+    BOOST_CHECK_EQUAL(expected_signature, generated_signature);
+}
+
+BOOST_AUTO_TEST_CASE(message_verify)
+{
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            "invalid address",
+            "signature should be irrelevant",
+            "message too"),
+        MessageVerificationResult::ERR_INVALID_ADDRESS);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            "3B5fQsEXEaV8v6U3ejYc8XaKXAkyQj2MjV",
+            "signature should be irrelevant",
+            "message too"),
+        MessageVerificationResult::ERR_ADDRESS_NO_KEY);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            "1KqbBpLy5FARmTPD4VZnDDpYjkUvkr82Pm",
+            "invalid signature, not in base64 encoding",
+            "message should be irrelevant"),
+        MessageVerificationResult::ERR_MALFORMED_SIGNATURE);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            "1KqbBpLy5FARmTPD4VZnDDpYjkUvkr82Pm",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "message should be irrelevant"),
+        MessageVerificationResult::ERR_PUBKEY_NOT_RECOVERED);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            "15CRxFdyRpGZLW9w8HnHvVduizdL5jKNbs",
+            "IPojfrX2dfPnH26UegfbGQQLrdK844DlHq5157/P6h57WyuS/Qsl+h/WSVGDF4MUi4rWSswW38oimDYfNNUBUOk=",
+            "I never signed this"),
+        MessageVerificationResult::ERR_NOT_SIGNED);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            "15CRxFdyRpGZLW9w8HnHvVduizdL5jKNbs",
+            "IPojfrX2dfPnH26UegfbGQQLrdK844DlHq5157/P6h57WyuS/Qsl+h/WSVGDF4MUi4rWSswW38oimDYfNNUBUOk=",
+            "Trust no one"),
+        MessageVerificationResult::OK);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            "11canuhp9X2NocwCq7xNrQYTmUgZAnLK3",
+            "IIcaIENoYW5jZWxsb3Igb24gYnJpbmsgb2Ygc2Vjb25kIGJhaWxvdXQgZm9yIGJhbmtzIAaHRtbCeDZINyavx14=",
+            "Trust me"),
+        MessageVerificationResult::OK);
+}
+
+BOOST_AUTO_TEST_CASE(message_hash)
+{
+    const std::string unsigned_tx = "...";
+    const std::string prefixed_message =
+        std::string(1, (char)MESSAGE_MAGIC.length()) +
+        MESSAGE_MAGIC +
+        std::string(1, (char)unsigned_tx.length()) +
+        unsigned_tx;
+
+    const uint256 signature_hash = Hash(unsigned_tx.begin(), unsigned_tx.end());
+    const uint256 message_hash1 = Hash(prefixed_message.begin(), prefixed_message.end());
+    const uint256 message_hash2 = MessageHash(unsigned_tx);
+
+    BOOST_CHECK_EQUAL(message_hash1, message_hash2);
+    BOOST_CHECK_NE(message_hash1, signature_hash);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

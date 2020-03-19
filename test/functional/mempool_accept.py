@@ -8,6 +8,7 @@ from io import BytesIO
 import math
 
 from test_framework.test_framework import SyscoinTestFramework
+from test_framework.key import ECKey
 from test_framework.messages import (
     BIP125_SEQUENCE_NUMBER,
     COIN,
@@ -15,11 +16,15 @@ from test_framework.messages import (
     CTransaction,
     CTxOut,
     MAX_BLOCK_BASE_SIZE,
+    MAX_MONEY,
 )
 from test_framework.script import (
     hash160,
     CScript,
     OP_0,
+    OP_2,
+    OP_3,
+    OP_CHECKMULTISIG,
     OP_EQUAL,
     OP_HASH160,
     OP_RETURN,
@@ -35,7 +40,7 @@ class MempoolAcceptanceTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.extra_args = [[
-            '-txindex',
+            '-txindex','-permitbaremultisig=0',
         ]] * self.num_nodes
         self.supports_cli = False
 
@@ -216,7 +221,7 @@ class MempoolAcceptanceTest(SyscoinTestFramework):
         # The following two validations prevent overflow of the output amounts (see CVE-2010-5139).
         self.log.info('A transaction with too large output value')
         tx.deserialize(BytesIO(hex_str_to_bytes(raw_tx_reference)))
-        tx.vout[0].nValue = 21000000 * COIN + 1
+        tx.vout[0].nValue = MAX_MONEY + 1
         self.check_mempool_result(
             result_expected=[{'txid': tx.rehash(), 'allowed': False, 'reject-reason': 'bad-txns-vout-toolarge'}],
             rawtxs=[tx.serialize().hex()],
@@ -225,7 +230,7 @@ class MempoolAcceptanceTest(SyscoinTestFramework):
         self.log.info('A transaction with too large sum of output values')
         tx.deserialize(BytesIO(hex_str_to_bytes(raw_tx_reference)))
         tx.vout = [tx.vout[0]] * 2
-        tx.vout[0].nValue = 21000000 * COIN
+        tx.vout[0].nValue = MAX_MONEY
         self.check_mempool_result(
             result_expected=[{'txid': tx.rehash(), 'allowed': False, 'reject-reason': 'bad-txns-txouttotal-toolarge'}],
             rawtxs=[tx.serialize().hex()],
@@ -259,6 +264,15 @@ class MempoolAcceptanceTest(SyscoinTestFramework):
         tx.vout[0].scriptPubKey = CScript([OP_0])  # Some non-standard script
         self.check_mempool_result(
             result_expected=[{'txid': tx.rehash(), 'allowed': False, 'reject-reason': 'scriptpubkey'}],
+            rawtxs=[tx.serialize().hex()],
+        )
+        tx.deserialize(BytesIO(hex_str_to_bytes(raw_tx_reference)))
+        key = ECKey()
+        key.generate()
+        pubkey = key.get_pubkey().get_bytes()
+        tx.vout[0].scriptPubKey = CScript([OP_2, pubkey, pubkey, pubkey, OP_3, OP_CHECKMULTISIG])  # Some bare multisig script (2-of-3)
+        self.check_mempool_result(
+            result_expected=[{'txid': tx.rehash(), 'allowed': False, 'reject-reason': 'bare-multisig'}],
             rawtxs=[tx.serialize().hex()],
         )
         tx.deserialize(BytesIO(hex_str_to_bytes(raw_tx_reference)))

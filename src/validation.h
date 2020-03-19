@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -154,7 +154,7 @@ struct BlockHasher
     size_t operator()(const uint256& hash) const { return ReadLE64(hash.begin()); }
 };
 
-extern CCriticalSection cs_main;
+extern RecursiveMutex cs_main;
 extern CBlockPolicyEstimator feeEstimator;
 extern CTxMemPool mempool;
 typedef std::unordered_map<uint256, CBlockIndex*, BlockHasher> BlockMap;
@@ -400,7 +400,8 @@ bool UndoReadFromDisk(CBlockUndo& blockundo, const CBlockIndex* pindex);
 bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
 
 /** Check a block is completely valid from start to finish (only works on top of our current best block) */
-bool TestBlockValidity(BlockValidationState& state, const CChainParams& chainparams, const CBlock& block, CBlockIndex* pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+// SYSCOIN
+bool TestBlockValidity(BlockValidationState& state, const CChainParams& chainparams, const CBlock& block, CBlockIndex* pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true, CTransaction* txMissingInput = nullptr, CTransaction* syscoinTxFailed = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 /** Check whether witness commitments are required for a block, and whether to enforce NULLDUMMY (BIP 147) rules.
  *  Note that transaction witness validation rules are always enforced when P2SH is enforced. */
@@ -564,6 +565,15 @@ public:
     void InitCache() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
+enum class CoinsCacheSizeState
+{
+    //! The coins cache is in immediate need of a flush.
+    CRITICAL = 2,
+    //! The cache is at >= 90% capacity.
+    LARGE = 1,
+    OK = 0
+};
+
 /**
  * CChainState stores and provides an API to update our local knowledge of the
  * current best chain.
@@ -585,7 +595,7 @@ private:
      * Every received block is assigned a unique and increasing identifier, so we
      * know which one to give priority in case of a fork.
      */
-    CCriticalSection cs_nBlockSequenceId;
+    RecursiveMutex cs_nBlockSequenceId;
     /** Blocks loaded from disk are assigned id 0, so start the counter at 1. */
     int32_t nBlockSequenceId = 1;
     /** Decreasing counter (used by subsequent preciousblock calls). */
@@ -597,7 +607,7 @@ private:
      * the ChainState CriticalSection
      * A lock that must be held when modifying this ChainState - held in ActivateBestChain()
      */
-    CCriticalSection m_cs_chainstate;
+    RecursiveMutex m_cs_chainstate;
 
     /**
      * Whether this chainstate is undergoing initial block download.
@@ -722,10 +732,9 @@ public:
 
     // Block (dis)connection on a given view:
     // SYSCOIN
-    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, std::unordered_set<std::string> &actorSet);
-    // SYSCOIN
+    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                      CCoinsViewCache& view, const CChainParams& chainparams, std::unordered_set<std::string> &actorSet, bool fJustCheck = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                      CCoinsViewCache& view, const CChainParams& chainparams, bool fJustCheck = false, CTransaction* txMissingInput = nullptr, CTransaction* syscoinTxFailed = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     // Apply the effects of a block disconnection on the UTXO set.
     bool DisconnectTip(BlockValidationState& state, const CChainParams& chainparams, DisconnectedBlockTransactions* disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, ::mempool.cs);
@@ -756,6 +765,17 @@ public:
 
     /** Update the chain tip based on database information, i.e. CoinsTip()'s best block. */
     bool LoadChainTip(const CChainParams& chainparams) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    //! Dictates whether we need to flush the cache to disk or not.
+    //!
+    //! @return the state of the size of the coins cache.
+    CoinsCacheSizeState GetCoinsCacheSizeState(const CTxMemPool& tx_pool)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    CoinsCacheSizeState GetCoinsCacheSizeState(
+        const CTxMemPool& tx_pool,
+        size_t max_coins_cache_size_bytes,
+        size_t max_mempool_size_bytes) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 private:
     bool ActivateBestChainStep(BlockValidationState& state, const CChainParams& chainparams, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, ::mempool.cs);

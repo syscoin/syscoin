@@ -101,8 +101,7 @@ BASE_SCRIPTS = [
     'rpc_txoutproof.py',
     'wallet_listreceivedby.py',
     'wallet_abandonconflict.py',
-    # FIXME: Enable once we activate BIP9.
-    #'feature_csv_activation.py',
+    'feature_csv_activation.py',
     'rpc_rawtransaction.py',
     'wallet_address_types.py',
     'feature_bip68_sequence.py',
@@ -159,6 +158,7 @@ BASE_SCRIPTS = [
     'feature_assumevalid.py',
     'example_test.py',
     'wallet_txn_doublespend.py',
+    'feature_backwards_compatibility.py',
     'wallet_txn_clone.py --mineblock',
     'feature_notifications.py',
     'rpc_getblockfilter.py',
@@ -176,6 +176,7 @@ BASE_SCRIPTS = [
     'wallet_balance.py',
     'feature_nulldummy.py',
     'mempool_accept.py',
+    'mempool_expiry.py',
     'wallet_import_rescan.py',
     'wallet_import_with_label.py',
     'rpc_bind.py --ipv4',
@@ -196,6 +197,7 @@ BASE_SCRIPTS = [
     'wallet_fallbackfee.py',
     'rpc_dumptxoutset.py',
     'feature_minchainwork.py',
+    'rpc_estimatefee.py',
     'rpc_getblockstats.py',
     'wallet_create_tx.py',
     'p2p_fingerprint.py',
@@ -206,6 +208,7 @@ BASE_SCRIPTS = [
     'p2p_dos_header_tree.py',
     'p2p_unrequested_blocks.py',
     'feature_includeconf.py',
+    'feature_asmap.py',
     'rpc_deriveaddresses.py',
     'rpc_deriveaddresses.py --usecli',
     'rpc_scantxoutset.py',
@@ -215,9 +218,12 @@ BASE_SCRIPTS = [
     'feature_blocksdir.py',
     'feature_config_args.py',
     'rpc_getaddressinfo_labels_purpose_deprecation.py',
+    'rpc_getaddressinfo_label_deprecation.py',
+    'rpc_getdescriptorinfo.py',
     'rpc_help.py',
     'feature_help.py',
     'feature_shutdown.py',
+    'framework_test_script.py',
     # Don't append tests at the end to avoid merge conflicts
     # Put them in a random line within the section that fits their approximate run-time
 
@@ -616,7 +622,7 @@ class TestResult():
 def check_script_prefixes():
     """Check that test scripts start with one of the allowed name prefixes."""
 
-    good_prefixes_re = re.compile("(example|feature|interface|mempool|mining|p2p|rpc|wallet|tool|auxpow)_")
+    good_prefixes_re = re.compile("^(example|feature|interface|mempool|mining|p2p|rpc|wallet|tool|framework_test|auxpow)_")
     bad_script_names = [script for script in ALL_SCRIPTS if good_prefixes_re.match(script) is None]
 
     if bad_script_names:

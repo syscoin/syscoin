@@ -1,8 +1,8 @@
 AC_PREREQ([2.69])
 define(_CLIENT_VERSION_MAJOR, 4)
 define(_CLIENT_VERSION_MINOR, 1)
-define(_CLIENT_VERSION_REVISION, 2)
-define(_CLIENT_VERSION_BUILD, 1)
+define(_CLIENT_VERSION_REVISION, 3)
+define(_CLIENT_VERSION_BUILD, 0)
 define(_CLIENT_VERSION_RC, 0)
 define(_CLIENT_VERSION_IS_RELEASE, true)
 define(_COPYRIGHT_YEAR, 2020)
@@ -36,14 +36,14 @@ dnl faketime breaks configure and is only needed for make. Disable it here.
 unset FAKETIME
 
 dnl Automake init set-up and checks
-AM_INIT_AUTOMAKE([no-define subdir-objects foreign])
+AM_INIT_AUTOMAKE([1.13 no-define subdir-objects foreign])
 
 dnl faketime messes with timestamps and causes configure to be re-run.
 dnl --disable-maintainer-mode can be used to bypass this.
 AM_MAINTAINER_MODE([enable])
 
 dnl make the compilation flags quiet unless V=1 is used
-m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
+AM_SILENT_RULES([yes])
 
 dnl Compiler checks (here before libtool).
 if test "x${CXXFLAGS+set}" = "xset"; then
@@ -261,6 +261,13 @@ AC_ARG_ENABLE([gprof],
     [enable_gprof=$enableval],
     [enable_gprof=no])
 
+dnl Pass compiler & liner flags that make builds deterministic
+AC_ARG_ENABLE([determinism],
+    [AS_HELP_STRING([--enable-determinism],
+                    [Enable compilation flags that make builds deterministic (default is no)])],
+    [enable_determinism=$enableval],
+    [enable_determinism=no])
+
 dnl Turn warnings into errors
 AC_ARG_ENABLE([werror],
     [AS_HELP_STRING([--enable-werror],
@@ -328,6 +335,7 @@ if test "x$enable_werror" = "xyes"; then
   AX_CHECK_COMPILE_FLAG([-Werror=switch],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=switch"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Werror=thread-safety-analysis],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=thread-safety-analysis"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Werror=date-time],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=date-time"],,[[$CXXFLAG_WERROR]])
+  AX_CHECK_COMPILE_FLAG([-Werror=return-type],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=return-type"],,[[$CXXFLAG_WERROR]])
 fi
 
 if test "x$CXXFLAGS_overridden" = "xno"; then
@@ -352,7 +360,7 @@ if test "x$CXXFLAGS_overridden" = "xno"; then
   AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough],[NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-implicit-fallthrough"],,[[$CXXFLAG_WERROR]])
 fi
 
-enable_hwcrc32=no
+enable_sse42=no
 enable_sse41=no
 enable_avx2=no
 enable_shani=no
@@ -362,6 +370,8 @@ if test "x$use_asm" = "xyes"; then
 dnl Check for optional instruction set support. Enabling these does _not_ imply that all code will
 dnl be compiled with them, rather that specific objects/libs may use them after checking for runtime
 dnl compatibility.
+
+dnl x86
 AX_CHECK_COMPILE_FLAG([-msse4.2],[[SSE42_CXXFLAGS="-msse4.2"]],,[[$CXXFLAG_WERROR]])
 AX_CHECK_COMPILE_FLAG([-msse4.1],[[SSE41_CXXFLAGS="-msse4.1"]],,[[$CXXFLAG_WERROR]])
 AX_CHECK_COMPILE_FLAG([-mavx -mavx2],[[AVX2_CXXFLAGS="-mavx -mavx2"]],,[[$CXXFLAG_WERROR]])
@@ -369,7 +379,7 @@ AX_CHECK_COMPILE_FLAG([-msse4 -msha],[[SHANI_CXXFLAGS="-msse4 -msha"]],,[[$CXXFL
 
 TEMP_CXXFLAGS="$CXXFLAGS"
 CXXFLAGS="$CXXFLAGS $SSE42_CXXFLAGS"
-AC_MSG_CHECKING(for assembler crc32 support)
+AC_MSG_CHECKING(for SSE4.2 intrinsics)
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
     #include <stdint.h>
     #if defined(_MSC_VER)
@@ -384,7 +394,7 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
     l = _mm_crc32_u64(l, 0);
     return l;
   ]])],
- [ AC_MSG_RESULT(yes); enable_hwcrc32=yes],
+ [ AC_MSG_RESULT(yes); enable_sse42=yes],
  [ AC_MSG_RESULT(no)]
 )
 CXXFLAGS="$TEMP_CXXFLAGS"
@@ -436,6 +446,24 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 )
 CXXFLAGS="$TEMP_CXXFLAGS"
 
+# ARM
+AX_CHECK_COMPILE_FLAG([-march=armv8-a+crc+crypto],[[ARM_CRC_CXXFLAGS="-march=armv8-a+crc+crypto"]],,[[$CXXFLAG_WERROR]])
+
+TEMP_CXXFLAGS="$CXXFLAGS"
+CXXFLAGS="$CXXFLAGS $ARM_CRC_CXXFLAGS"
+AC_MSG_CHECKING(for ARM CRC32 intrinsics)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+    #include <arm_acle.h>
+    #include <arm_neon.h>
+  ]],[[
+    __crc32cb(0, 0); __crc32ch(0, 0); __crc32cw(0, 0); __crc32cd(0, 0);
+    vmull_p64(0, 0);
+  ]])],
+ [ AC_MSG_RESULT(yes); enable_arm_crc=yes; ],
+ [ AC_MSG_RESULT(no)]
+)
+CXXFLAGS="$TEMP_CXXFLAGS"
+
 fi
 
 CPPFLAGS="$CPPFLAGS -DHAVE_BUILD_INFO -D__STDC_FORMAT_MACROS"
@@ -480,29 +508,24 @@ use_pkgconfig=yes
 case $host in
   *mingw*)
 
-     #pkgconfig does more harm than good with MinGW
+     dnl pkgconfig does more harm than good with MinGW
      use_pkgconfig=no
 
      TARGET_OS=windows
-     AC_CHECK_LIB([mingwthrd],      [main],, AC_MSG_ERROR(libmingwthrd missing))
-     AC_CHECK_LIB([kernel32],      [main],, AC_MSG_ERROR(libkernel32 missing))
-     AC_CHECK_LIB([user32],      [main],, AC_MSG_ERROR(libuser32 missing))
-     AC_CHECK_LIB([gdi32],      [main],, AC_MSG_ERROR(libgdi32 missing))
-     AC_CHECK_LIB([comdlg32],      [main],, AC_MSG_ERROR(libcomdlg32 missing))
-     AC_CHECK_LIB([winspool],      [main],, AC_MSG_ERROR(libwinspool missing))
-     AC_CHECK_LIB([winmm],      [main],, AC_MSG_ERROR(libwinmm missing))
-     AC_CHECK_LIB([shell32],      [main],, AC_MSG_ERROR(libshell32 missing))
-     AC_CHECK_LIB([comctl32],      [main],, AC_MSG_ERROR(libcomctl32 missing))
-     AC_CHECK_LIB([ole32],      [main],, AC_MSG_ERROR(libole32 missing))
-     AC_CHECK_LIB([oleaut32],      [main],, AC_MSG_ERROR(liboleaut32 missing))
-     AC_CHECK_LIB([uuid],      [main],, AC_MSG_ERROR(libuuid missing))
-     AC_CHECK_LIB([rpcrt4],      [main],, AC_MSG_ERROR(librpcrt4 missing))
-     AC_CHECK_LIB([advapi32],      [main],, AC_MSG_ERROR(libadvapi32 missing))
-     AC_CHECK_LIB([ws2_32],      [main],, AC_MSG_ERROR(libws2_32 missing))
-     AC_CHECK_LIB([mswsock],      [main],, AC_MSG_ERROR(libmswsock missing))
-     AC_CHECK_LIB([shlwapi],      [main],, AC_MSG_ERROR(libshlwapi missing))
-     AC_CHECK_LIB([iphlpapi],      [main],, AC_MSG_ERROR(libiphlpapi missing))
-     AC_CHECK_LIB([crypt32],      [main],, AC_MSG_ERROR(libcrypt32 missing))
+     AC_CHECK_LIB([kernel32], [GetModuleFileNameA],, AC_MSG_ERROR(libkernel32 missing))
+     AC_CHECK_LIB([user32],   [main],, AC_MSG_ERROR(libuser32 missing))
+     AC_CHECK_LIB([gdi32],    [main],, AC_MSG_ERROR(libgdi32 missing))
+     AC_CHECK_LIB([comdlg32], [main],, AC_MSG_ERROR(libcomdlg32 missing))
+     AC_CHECK_LIB([winmm],    [main],, AC_MSG_ERROR(libwinmm missing))
+     AC_CHECK_LIB([shell32],  [SHGetSpecialFolderPathW],, AC_MSG_ERROR(libshell32 missing))
+     AC_CHECK_LIB([comctl32], [main],, AC_MSG_ERROR(libcomctl32 missing))
+     AC_CHECK_LIB([ole32],    [CoCreateInstance],, AC_MSG_ERROR(libole32 missing))
+     AC_CHECK_LIB([oleaut32], [main],, AC_MSG_ERROR(liboleaut32 missing))
+     AC_CHECK_LIB([uuid],     [main],, AC_MSG_ERROR(libuuid missing))
+     AC_CHECK_LIB([advapi32], [CryptAcquireContextW],, AC_MSG_ERROR(libadvapi32 missing))
+     AC_CHECK_LIB([ws2_32],   [WSAStartup],, AC_MSG_ERROR(libws2_32 missing))
+     AC_CHECK_LIB([shlwapi],  [PathRemoveFileSpecW],, AC_MSG_ERROR(libshlwapi missing))
+     AC_CHECK_LIB([iphlpapi], [GetAdaptersAddresses],, AC_MSG_ERROR(libiphlpapi missing))
 
      dnl -static is interpreted by libtool, where it has a different meaning.
      dnl In libtool-speak, it's -all-static.
@@ -519,7 +542,6 @@ case $host in
      fi
 
      CPPFLAGS="$CPPFLAGS -D_MT -DWIN32 -D_WINDOWS -DBOOST_THREAD_USE_LIB -D_WIN32_WINNT=0x0601"
-     LEVELDB_TARGET_FLAGS="-DOS_WINDOWS"
      if test "x$CXXFLAGS_overridden" = "xno"; then
        CXXFLAGS="$CXXFLAGS -w"
      fi
@@ -535,7 +557,6 @@ case $host in
      ;;
   *darwin*)
      TARGET_OS=darwin
-     LEVELDB_TARGET_FLAGS="-DOS_MACOSX"
      if  test x$cross_compiling != xyes; then
        BUILD_OS=darwin
        AC_PATH_PROGS([RSVG_CONVERT], [rsvg-convert rsvg],rsvg-convert)
@@ -587,35 +608,9 @@ case $host in
    *android*)
      dnl make sure android stays above linux for hosts like *linux-android*
      TARGET_OS=android
-     LEVELDB_TARGET_FLAGS="-DOS_ANDROID"
      ;;
    *linux*)
      TARGET_OS=linux
-     LEVELDB_TARGET_FLAGS="-DOS_LINUX"
-     ;;
-   *kfreebsd*)
-     LEVELDB_TARGET_FLAGS="-DOS_KFREEBSD"
-     ;;
-   *freebsd*)
-     LEVELDB_TARGET_FLAGS="-DOS_FREEBSD"
-     ;;
-   *openbsd*)
-     LEVELDB_TARGET_FLAGS="-DOS_OPENBSD"
-     ;;
-   *netbsd*)
-     LEVELDB_TARGET_FLAGS="-DOS_NETBSD"
-     ;;
-   *dragonfly*)
-     LEVELDB_TARGET_FLAGS="-DOS_DRAGONFLYBSD"
-     ;;
-   *solaris*)
-     LEVELDB_TARGET_FLAGS="-DOS_SOLARIS"
-     ;;
-   *hpux*)
-     LEVELDB_TARGET_FLAGS="-DOS_HPUX"
-     ;;
-   *)
-     AC_MSG_ERROR(Cannot build leveldb for $host. Please file a bug report.)
      ;;
 esac
 
@@ -684,17 +679,11 @@ if test x$ac_cv_sys_large_files != x &&
   CPPFLAGS="$CPPFLAGS -D_LARGE_FILES=$ac_cv_sys_large_files"
 fi
 
-AX_CHECK_LINK_FLAG([[-Wl,--large-address-aware]], [LDFLAGS="$LDFLAGS -Wl,--large-address-aware"])
-
 AX_GCC_FUNC_ATTRIBUTE([visibility])
 AX_GCC_FUNC_ATTRIBUTE([dllexport])
 AX_GCC_FUNC_ATTRIBUTE([dllimport])
 
 if test x$use_glibc_compat != xno; then
-
-  dnl glibc absorbed clock_gettime in 2.17. librt (its previous location) is safe to link
-  dnl in anyway for back-compat.
-  AC_CHECK_LIB([rt],[clock_gettime],, AC_MSG_ERROR(librt missing))
 
   dnl __fdelt_chk's params and return type have changed from long unsigned int to long int.
   dnl See which one is present here.
@@ -777,6 +766,12 @@ if test x$TARGET_OS = xdarwin; then
   AX_CHECK_LINK_FLAG([[-Wl,-dead_strip]], [LDFLAGS="$LDFLAGS -Wl,-dead_strip"])
   AX_CHECK_LINK_FLAG([[-Wl,-dead_strip_dylibs]], [LDFLAGS="$LDFLAGS -Wl,-dead_strip_dylibs"])
   AX_CHECK_LINK_FLAG([[-Wl,-bind_at_load]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-bind_at_load"])
+fi
+
+if test x$enable_determinism = xyes; then
+  if test x$TARGET_OS = xwindows; then
+    AX_CHECK_LINK_FLAG([[-Wl,--no-insert-timestamp]], [LDFLAGS="$LDFLAGS -Wl,--no-insert-timestamp"])
+  fi
 fi
 
 AC_CHECK_HEADERS([endian.h sys/endian.h byteswap.h stdio.h stdlib.h unistd.h strings.h sys/types.h sys/stat.h sys/select.h sys/prctl.h sys/sysctl.h vm/vm_param.h sys/vmmeter.h sys/resources.h])
@@ -891,11 +886,6 @@ if test "x$use_thread_local" = xyes || { test "x$use_thread_local" = xauto && te
           dnl https://gist.github.com/jamesob/fe9a872051a88b2025b1aa37bfa98605
           AC_MSG_RESULT(no)
           ;;
-        *darwin*)
-          dnl TODO enable thread_local on later versions of Darwin where it is
-          dnl supported (per https://stackoverflow.com/a/29929949)
-          AC_MSG_RESULT(no)
-          ;;
         *freebsd*)
           dnl FreeBSD's implementation of thread_local is also buggy (per
           dnl https://groups.google.com/d/msg/bsdmailinglist/22ncTZAbDp4/Dii_pII5AwAJ)
@@ -942,11 +932,10 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <unistd.h>
 AC_MSG_CHECKING(for sysctl)
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>
   #include <sys/sysctl.h>]],
- [[ static const int name[2] = {CTL_KERN, KERN_VERSION};
-    #ifdef __linux__
+ [[ #ifdef __linux__
     #error "Don't use sysctl on Linux, it's deprecated even when it works"
     #endif
-    sysctl(name, 2, nullptr, nullptr, nullptr, 0); ]])],
+    sysctl(nullptr, 2, nullptr, nullptr, nullptr, 0); ]])],
  [ AC_MSG_RESULT(yes); AC_DEFINE(HAVE_SYSCTL, 1,[Define this symbol if the BSD sysctl() is available]) ],
  [ AC_MSG_RESULT(no)]
 )
@@ -954,7 +943,10 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>
 AC_MSG_CHECKING(for sysctl KERN_ARND)
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>
   #include <sys/sysctl.h>]],
- [[ static const int name[2] = {CTL_KERN, KERN_ARND};
+ [[ #ifdef __linux__
+    #error "Don't use sysctl on Linux, it's deprecated even when it works"
+    #endif
+    static int name[2] = {CTL_KERN, KERN_ARND};
     sysctl(name, 2, nullptr, nullptr, nullptr, 0); ]])],
  [ AC_MSG_RESULT(yes); AC_DEFINE(HAVE_SYSCTL_ARND, 1,[Define this symbol if the BSD sysctl(KERN_ARND) is available]) ],
  [ AC_MSG_RESULT(no)]
@@ -966,6 +958,72 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <stdint.h>
  [[ static_assert(std::is_same<int8_t, char>::value, ""); ]])],
  [ AC_MSG_RESULT(yes); AC_DEFINE(CHAR_EQUALS_INT8, 1,[Define this symbol if type char equals int8_t]) ],
  [ AC_MSG_RESULT(no)]
+)
+
+dnl LevelDB platform checks
+AC_MSG_CHECKING(for fdatasync)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <unistd.h>]],
+ [[ fdatasync(0); ]])],
+ [ AC_MSG_RESULT(yes); HAVE_FDATASYNC=1 ],
+ [ AC_MSG_RESULT(no); HAVE_FDATASYNC=0 ]
+)
+
+AC_MSG_CHECKING(for F_FULLFSYNC)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <fcntl.h>]],
+ [[ fcntl(0, F_FULLFSYNC, 0); ]])],
+ [ AC_MSG_RESULT(yes); HAVE_FULLFSYNC=1 ],
+ [ AC_MSG_RESULT(no); HAVE_FULLFSYNC=0 ]
+)
+
+AC_MSG_CHECKING(for O_CLOEXEC)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <fcntl.h>]],
+ [[ open("", O_CLOEXEC); ]])],
+ [ AC_MSG_RESULT(yes); HAVE_O_CLOEXEC=1 ],
+ [ AC_MSG_RESULT(no); HAVE_O_CLOEXEC=0 ]
+)
+
+dnl crc32c platform checks
+AC_MSG_CHECKING(for __builtin_prefetch)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[ ]], [[
+  char data = 0;
+  const char* address = &data;
+  __builtin_prefetch(address, 0, 0);
+  ]])],
+ [ AC_MSG_RESULT(yes); HAVE_BUILTIN_PREFETCH=1 ],
+ [ AC_MSG_RESULT(no); HAVE_BUILTIN_PREFETCH=0 ]
+)
+
+AC_MSG_CHECKING(for _mm_prefetch)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <xmmintrin.h>]], [[
+  char data = 0;
+  const char* address = &data;
+  _mm_prefetch(address, _MM_HINT_NTA);
+  ]])],
+ [ AC_MSG_RESULT(yes); HAVE_MM_PREFETCH=1 ],
+ [ AC_MSG_RESULT(no); HAVE_MM_PREFETCH=0 ]
+)
+
+AC_MSG_CHECKING(for strong getauxval support in the system headers)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+    #include <arm_acle.h>
+    #include <arm_neon.h>
+    #include <sys/auxv.h>
+  ]], [[
+    getauxval(AT_HWCAP);
+  ]])],
+ [ AC_MSG_RESULT(yes); HAVE_STRONG_GETAUXVAL=1 ],
+ [ AC_MSG_RESULT(no); HAVE_STRONG_GETAUXVAL=0 ]
+)
+
+AC_MSG_CHECKING(for weak getauxval support in the compiler)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+    unsigned long getauxval(unsigned long type) __attribute__((weak));
+    #define AT_HWCAP 16
+  ]], [[
+    getauxval(AT_HWCAP);
+  ]])],
+ [ AC_MSG_RESULT(yes); HAVE_WEAK_GETAUXVAL=1 ],
+ [ AC_MSG_RESULT(no); HAVE_WEAK_GETAUXVAL=0 ]
 )
 
 dnl Check for reduced exports
@@ -1085,7 +1143,6 @@ fi
 AX_BOOST_SYSTEM
 AX_BOOST_FILESYSTEM
 AX_BOOST_THREAD
-AX_BOOST_CHRONO
 
 dnl Boost 1.56 through 1.62 allow using std::atomic instead of its own atomic
 dnl counter implementations. In 1.63 and later the std::atomic approach is default.
@@ -1152,7 +1209,7 @@ fi
 
 if test x$use_boost = xyes; then
 
-BOOST_LIBS="$BOOST_LDFLAGS $BOOST_SYSTEM_LIB $BOOST_FILESYSTEM_LIB $BOOST_THREAD_LIB $BOOST_CHRONO_LIB"
+BOOST_LIBS="$BOOST_LDFLAGS $BOOST_SYSTEM_LIB $BOOST_FILESYSTEM_LIB $BOOST_THREAD_LIB"
 
 
 dnl If boost (prior to 1.57) was built without c++11, it emulated scoped enums
@@ -1189,57 +1246,6 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([[
   [AC_MSG_RESULT(mismatched); BOOST_CPPFLAGS="$BOOST_CPPFLAGS -DBOOST_NO_SCOPED_ENUMS -DBOOST_NO_CXX11_SCOPED_ENUMS"], [AC_MSG_RESULT(ok)])
 LIBS="$TEMP_LIBS"
 CPPFLAGS="$TEMP_CPPFLAGS"
-
-dnl Boost >= 1.50 uses sleep_for rather than the now-deprecated sleep, however
-dnl it was broken from 1.50 to 1.52 when backed by nanosleep. Use sleep_for if
-dnl a working version is available, else fall back to sleep. sleep was removed
-dnl after 1.56.
-dnl If neither is available, abort.
-TEMP_LIBS="$LIBS"
-LIBS="$BOOST_LIBS $LIBS"
-TEMP_CPPFLAGS="$CPPFLAGS"
-CPPFLAGS="$CPPFLAGS $BOOST_CPPFLAGS"
-AC_LINK_IFELSE([AC_LANG_PROGRAM([[
-  #include <boost/thread/thread.hpp>
-  #include <boost/version.hpp>
-  ]],[[
-  #if BOOST_VERSION >= 105000 && (!defined(BOOST_HAS_NANOSLEEP) || BOOST_VERSION >= 105200)
-      boost::this_thread::sleep_for(boost::chrono::milliseconds(0));
-  #else
-   choke me
-  #endif
-  ]])],
-  [boost_sleep=yes;
-     AC_DEFINE(HAVE_WORKING_BOOST_SLEEP_FOR, 1, [Define this symbol if boost sleep_for works])],
-  [boost_sleep=no])
-LIBS="$TEMP_LIBS"
-CPPFLAGS="$TEMP_CPPFLAGS"
-
-if test x$boost_sleep != xyes; then
-TEMP_LIBS="$LIBS"
-LIBS="$BOOST_LIBS $LIBS"
-TEMP_CPPFLAGS="$CPPFLAGS"
-CPPFLAGS="$CPPFLAGS $BOOST_CPPFLAGS"
-AC_LINK_IFELSE([AC_LANG_PROGRAM([[
-  #include <boost/version.hpp>
-  #include <boost/thread.hpp>
-  #include <boost/date_time/posix_time/posix_time_types.hpp>
-  ]],[[
-  #if BOOST_VERSION <= 105600
-      boost::this_thread::sleep(boost::posix_time::milliseconds(0));
-  #else
-   choke me
-  #endif
-  ]])],
-  [boost_sleep=yes; AC_DEFINE(HAVE_WORKING_BOOST_SLEEP, 1, [Define this symbol if boost sleep works])],
-  [boost_sleep=no])
-LIBS="$TEMP_LIBS"
-CPPFLAGS="$TEMP_CPPFLAGS"
-fi
-
-if test x$boost_sleep != xyes; then
-  AC_MSG_ERROR(No working boost sleep implementation found.)
-fi
 
 fi
 
@@ -1529,11 +1535,13 @@ AM_CONDITIONAL([USE_QRCODE], [test x$use_qr = xyes])
 AM_CONDITIONAL([USE_LCOV],[test x$use_lcov = xyes])
 AM_CONDITIONAL([GLIBC_BACK_COMPAT],[test x$use_glibc_compat = xyes])
 AM_CONDITIONAL([HARDEN],[test x$use_hardening = xyes])
-AM_CONDITIONAL([ENABLE_HWCRC32],[test x$enable_hwcrc32 = xyes])
+AM_CONDITIONAL([ENABLE_SSE42],[test x$enable_sse42 = xyes])
 AM_CONDITIONAL([ENABLE_SSE41],[test x$enable_sse41 = xyes])
 AM_CONDITIONAL([ENABLE_AVX2],[test x$enable_avx2 = xyes])
 AM_CONDITIONAL([ENABLE_SHANI],[test x$enable_shani = xyes])
+AM_CONDITIONAL([ENABLE_ARM_CRC],[test x$enable_arm_crc = xyes])
 AM_CONDITIONAL([USE_ASM],[test x$use_asm = xyes])
+AM_CONDITIONAL([WORDS_BIGENDIAN],[test x$ac_cv_c_bigendian = xyes])
 
 AC_DEFINE(CLIENT_VERSION_MAJOR, _CLIENT_VERSION_MAJOR, [Major version])
 AC_DEFINE(CLIENT_VERSION_MINOR, _CLIENT_VERSION_MINOR, [Minor version])
@@ -1580,18 +1588,25 @@ AC_SUBST(SSE42_CXXFLAGS)
 AC_SUBST(SSE41_CXXFLAGS)
 AC_SUBST(AVX2_CXXFLAGS)
 AC_SUBST(SHANI_CXXFLAGS)
+AC_SUBST(ARM_CRC_CXXFLAGS)
 AC_SUBST(LIBTOOL_APP_LDFLAGS)
 AC_SUBST(USE_UPNP)
 AC_SUBST(USE_QRCODE)
 AC_SUBST(BOOST_LIBS)
 AC_SUBST(TESTDEFS)
-AC_SUBST(LEVELDB_TARGET_FLAGS)
 AC_SUBST(MINIUPNPC_CPPFLAGS)
 AC_SUBST(MINIUPNPC_LIBS)
 AC_SUBST(EVENT_LIBS)
 AC_SUBST(EVENT_PTHREADS_LIBS)
 AC_SUBST(ZMQ_LIBS)
 AC_SUBST(QR_LIBS)
+AC_SUBST(HAVE_FDATASYNC)
+AC_SUBST(HAVE_FULLFSYNC)
+AC_SUBST(HAVE_O_CLOEXEC)
+AC_SUBST(HAVE_BUILTIN_PREFETCH)
+AC_SUBST(HAVE_MM_PREFETCH)
+AC_SUBST(HAVE_STRONG_GETAUXVAL)
+AC_SUBST(HAVE_WEAK_GETAUXVAL)
 AC_CONFIG_FILES([Makefile src/Makefile doc/man/Makefile share/setup.nsi share/qt/Info.plist test/config.ini])
 AC_CONFIG_FILES([contrib/devtools/split-debug.sh],[chmod +x contrib/devtools/split-debug.sh])
 AM_COND_IF([HAVE_DOXYGEN], [AC_CONFIG_FILES([doc/Doxyfile])])

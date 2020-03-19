@@ -31,7 +31,6 @@ extern interfaces::Chain* g_rpc_chain;
 void RegisterWalletRPCCommands(interfaces::Chain& chain, std::vector<std::unique_ptr<interfaces::Handler>>& handlers);
 // SYSCOIN
 void RegisterAssetWalletRPCCommands(interfaces::Chain& chain, std::vector<std::unique_ptr<interfaces::Handler>>& handlers);
-void RegisterGovernanceWalletRPCCommands(interfaces::Chain& chain, std::vector<std::unique_ptr<interfaces::Handler>>& handlers);
 /**
  * Figures out what wallet, if any, to use for a JSONRPCRequest.
  *
@@ -43,7 +42,7 @@ std::shared_ptr<CWallet> GetWalletForJSONRPCRequest(const JSONRPCRequest& reques
 std::string HelpRequiringPassphrase(const CWallet*);
 void EnsureWalletIsUnlocked(const CWallet*);
 bool EnsureWalletIsAvailable(const CWallet*, bool avoidException);
-LegacyScriptPubKeyMan& EnsureLegacyScriptPubKeyMan(CWallet& wallet);
+LegacyScriptPubKeyMan& EnsureLegacyScriptPubKeyMan(CWallet& wallet, bool also_create = false);
 
 UniValue getaddressinfo(const JSONRPCRequest& request);
 UniValue signrawtransactionwithwallet(const JSONRPCRequest& request);

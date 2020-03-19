@@ -1,4 +1,4 @@
-// Copyright (c) 2018 The Bitcoin Core developers
+// Copyright (c) 2018-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -217,9 +217,10 @@ public:
     {
     public:
         virtual ~Notifications() {}
-        virtual void TransactionAddedToMempool(const CTransactionRef& tx) {}
+        // SYSCOIN
+        virtual void TransactionAddedToMempool(const CTransactionRef& tx, bool fBlock) {}
         virtual void TransactionRemovedFromMempool(const CTransactionRef& ptx) {}
-        virtual void BlockConnected(const CBlock& block, const std::vector<CTransactionRef>& tx_conflicted, int height) {}
+        virtual void BlockConnected(const CBlock& block, int height) {}
         virtual void BlockDisconnected(const CBlock& block, int height) {}
         virtual void UpdatedBlockTip() {}
         virtual void ChainStateFlushed(const CBlockLocator& locator) {}

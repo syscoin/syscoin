@@ -1,17 +1,20 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_NET_PROCESSING_H
 #define SYSCOIN_NET_PROCESSING_H
 
-#include <net.h>
-#include <validationinterface.h>
 #include <consensus/params.h>
+#include <net.h>
 #include <sync.h>
-extern CCriticalSection cs_main;
-// SYSCOIN
+#include <validationinterface.h>
+
+class CTxMemPool;
+
+extern RecursiveMutex cs_main;
+
 /** Default for -maxorphantx, maximum number of orphan transactions kept in memory */
 static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 1000;
 /** Default number of orphan+recently-replaced txn to keep around for block reconstruction */
@@ -22,16 +25,18 @@ class PeerLogicValidation final : public CValidationInterface, public NetEventsI
 private:
     CConnman* const connman;
     BanMan* const m_banman;
+    CTxMemPool& m_mempool;
 
     bool CheckIfBanned(CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 public:
-    PeerLogicValidation(CConnman* connman, BanMan* banman, CScheduler& scheduler);
+    PeerLogicValidation(CConnman* connman, BanMan* banman, CScheduler& scheduler, CTxMemPool& pool);
 
     /**
      * Overridden from CValidationInterface.
      */
-    void BlockConnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected, const std::vector<CTransactionRef>& vtxConflicted) override;
+    void BlockConnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override;
+    void BlockDisconnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex* pindex) override;
     /**
      * Overridden from CValidationInterface.
      */

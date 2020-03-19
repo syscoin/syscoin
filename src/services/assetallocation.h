@@ -8,6 +8,7 @@
 #include <dbwrapper.h>
 #include <primitives/transaction.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <txmempool.h>
 #include <services/witnessaddress.h>
 #ifdef ENABLE_WALLET
@@ -70,12 +71,11 @@ public:
 		return (nAsset == 0 && witnessAddress.IsNull());
 	}
 };
-typedef std::unordered_map<std::string, CAmount> AssetBalanceMap;
-typedef std::vector<std::pair<uint256, std::pair<uint32_t, int64_t> > > ArrivalTimesMap;
-typedef std::unordered_map<std::string, ArrivalTimesMap> ArrivalTimesMapImpl;
+typedef std::unordered_set<uint256, SaltedTxidHasher> ArrivalTimesSet;
+typedef std::unordered_map<std::string, ArrivalTimesSet> ArrivalTimesSetImpl;
 typedef std::vector<std::pair<CWitnessAddress, CAmount > > RangeAmountTuples;
 typedef std::unordered_set<std::string> ActorSet;
-static ArrivalTimesMap emptyArrivalTimes;
+static ArrivalTimesSet emptyArrivalTimes;
 static const int ONE_YEAR_IN_BLOCKS = 525600;
 static const int ONE_HOUR_IN_BLOCKS = 60;
 static const int ONE_MONTH_IN_BLOCKS = 43800;
@@ -167,15 +167,15 @@ public:
     bool ReadAssetAllocation(const CAssetAllocationTuple& assetAllocationTuple, CAssetAllocationDBEntry& assetallocation) {
         return Read(assetAllocationTuple, assetallocation);
     }
-    bool ReadAssetsByAddress(const CWitnessAddress &address, std::vector<uint32_t> &assetGuids){
-        return Read(address, assetGuids);
-    }
-    bool ExistsAssetsByAddress(const CWitnessAddress &address){
-        return Exists(address);
+	bool ReadAssetsByAddress(const CWitnessAddress &address, std::vector<uint32_t> &assetGuids){	
+        return Read(address, assetGuids);	
     }	
-    bool Flush(const AssetAllocationMap &mapAssetAllocations);
-	bool WriteAssetAllocationIndex(const CTransaction &tx, const uint256& txHash, const CAsset& dbAsset, const int &nHeight, const uint256& blockhash);
+    bool ExistsAssetsByAddress(const CWitnessAddress &address){	
+        return Exists(address);	
+    }	
+	bool WriteAssetAllocationIndex(const CTransaction &tx, const uint256& txHash, const CAsset& dbAsset, const int &nHeight, const uint256& blockhash);	
     bool WriteMintIndex(const CTransaction& tx, const uint256& txHash, const CMintSyscoin& mintSyscoin, const int &nHeight, const uint256& blockhash);
+    bool Flush(const AssetAllocationMap &mapAssetAllocations);
 	bool ScanAssetAllocations(const uint32_t count, const uint32_t from, const UniValue& oOptions, UniValue& oRes);
 };
 
@@ -190,16 +190,16 @@ public:
     bool ReadAssetAllocationMempoolBalances(AssetBalanceMap &valueMap) {
         return Read(std::string("assetallocationtxbalance"), valueMap);
     }
-    bool WriteAssetAllocationMempoolArrivalTimes(const ArrivalTimesMapImpl &valueMap) {
+    bool WriteAssetAllocationMempoolArrivalTimes(const ArrivalTimesSetImpl &valueMap) {
         return Write(std::string("assetallocationtxarrival"), valueMap, true);
     }
-    bool ReadAssetAllocationMempoolArrivalTimes(ArrivalTimesMapImpl &valueMap) {
+    bool ReadAssetAllocationMempoolArrivalTimes(ArrivalTimesSetImpl &valueMap) {
         return Read(std::string("assetallocationtxarrival"), valueMap);
     }
-	bool WriteAssetAllocationMempoolToRemoveVector(const std::vector<std::pair<uint256, uint32_t> >  &valueMap) {
+	bool WriteAssetAllocationMempoolToRemoveSet(const ArrivalTimesSet  &valueMap) {
         return Write(std::string("assetallocationtxmempool"), valueMap, true);
     }
-    bool ReadAssetAllocationMempoolToRemoveVector(std::vector<std::pair<uint256, uint32_t> >  &valueMap) {
+    bool ReadAssetAllocationMempoolToRemoveSet(ArrivalTimesSet  &valueMap) {
         return Read(std::string("assetallocationtxmempool"), valueMap);
     } 	  
     bool ScanAssetAllocationMempoolBalances(const uint32_t count, const uint32_t from, const UniValue& oOptions, UniValue& oRes);
@@ -209,7 +209,7 @@ bool GetAssetAllocation(const CAssetAllocationTuple& assetAllocationTuple,CAsset
 bool BuildAssetAllocationJson(const CAssetAllocationDBEntry& assetallocation, const CAsset& asset, UniValue& oName);
 bool AssetAllocationTxToJSON(const CTransaction &tx, const CAsset& dbAsset, const int& nHeight, const uint256& blockhash, UniValue &entry, CAssetAllocation& assetallocation);
 #ifdef ENABLE_WALLET
-bool AssetAllocationTxToJSON(const CTransaction &tx, UniValue &entry, CWallet* const pwallet, const isminefilter* filter_ismine);
+bool AssetAllocationTxToJSON(const CTransaction &tx, UniValue &entry, const CWallet* const pwallet, const isminefilter* filter_ismine);
 #endif
 void GetActorsFromSyscoinTx(const CTransactionRef& txRef, bool bJustSender, bool bGetAddress, ActorSet& actorSet);
 void GetActorsFromAssetTx(const CAsset& theAsset, const CAssetAllocation& theAssetAllocation, int nVersion, bool bJustSender, bool bGetAddress, ActorSet& actorSet);
@@ -217,6 +217,7 @@ void GetActorsFromAssetAllocationTx(const CAssetAllocation &theAssetAllocation, 
 void GetActorsFromMintTx(const CMintSyscoin& theMintSyscoin, bool bJustSender, bool bGetAddress, ActorSet& actorSet);
 bool AssetAllocationTxToJSON(const CTransaction &tx, UniValue &entry);
 bool WriteAssetIndexForAllocation(const CAssetAllocation& assetallocation, const uint256& txid, const UniValue& oName);
-bool WriteAssetIndexForAllocation(const CMintSyscoin& mintSyscoin, const uint256& txid, const UniValue& oName);
+bool WriteAssetIndexForAllocation(const CMintSyscoin& mintSyscoin, const uint256& txid, const UniValue& oName);	
 bool WriteAssetAllocationIndexTXID(const CAssetAllocationTuple& allocationTuple, const uint256& txid);
+std::string GetSenderOfZdagTx(const CTransaction &tx);
 #endif // SYSCOIN_SERVICES_ASSETALLOCATION_H

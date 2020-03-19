@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
 # Copyright (c) 2018 Daniel Kraft
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -9,4 +10,6 @@
 # Example:
 #   contrib/auxpow/getwork-wrapper.sh http://user:pass@localhost:port/ 1234
 export LC_ALL=C
+
+PYTHONPATH="test/functional/test_framework"
 contrib/auxpow/getwork-wrapper.py --backend-url="$1" --port="$2"

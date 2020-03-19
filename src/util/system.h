@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2018 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -43,8 +43,6 @@ extern bool fUnitTest;
 extern bool bGethTestnet;
 extern bool fTPSTest;
 extern bool fTPSTestEnabled;
-extern bool fZMQAssetAllocation;
-extern bool fZMQAsset;
 extern bool fZMQWalletStatus;
 extern bool fZMQEthStatus;
 extern bool fZMQNetworkStatus;
@@ -59,8 +57,6 @@ extern bool bb;
 extern pid_t gethPID;
 extern pid_t relayerPID;
 extern bool fAssetIndex;
-extern int fAssetIndexPageSize;
-extern std::vector<uint32_t> fAssetIndexGuids; 
 extern std::vector<JSONRPCRequest> vecTPSRawTransactions;
 typedef struct {
     // Values from /proc/meminfo, in KiB or converted to MiB.
@@ -133,6 +129,9 @@ fs::path GetConfigFile(const std::string& confPath);
 #ifdef WIN32
 fs::path GetSpecialFolderPath(int nFolder, bool fCreate = true);
 #endif
+#ifndef WIN32
+std::string ShellEscape(const std::string& arg);
+#endif
 #if HAVE_SYSTEM
 void runCommand(const std::string& strCommand);
 #endif
@@ -197,6 +196,8 @@ public:
          * between mainnet and regtest/testnet won't cause problems due to these
          * parameters by accident. */
         NETWORK_ONLY = 0x200,
+        // This argument's value is sensitive (such as a password).
+        SENSITIVE = 0x400,
     };
 
 protected:
@@ -207,7 +208,7 @@ protected:
         unsigned int m_flags;
     };
 
-    mutable CCriticalSection cs_args;
+    mutable RecursiveMutex cs_args;
     util::Settings m_settings GUARDED_BY(cs_args);
     std::string m_network GUARDED_BY(cs_args);
     std::set<std::string> m_network_only_args GUARDED_BY(cs_args);
@@ -370,6 +371,19 @@ public:
      * Return nullopt for unknown arg.
      */
     Optional<unsigned int> GetArgFlags(const std::string& name) const;
+
+    /**
+     * Log the config file options and the command line arguments,
+     * useful for troubleshooting.
+     */
+    void LogArgs() const;
+
+private:
+    // Helper function for LogArgs().
+    void logArgsPrefix(
+        const std::string& prefix,
+        const std::string& section,
+        const std::map<std::string, std::vector<util::SettingsValue>>& args) const;
 };
 
 extern ArgsManager gArgs;

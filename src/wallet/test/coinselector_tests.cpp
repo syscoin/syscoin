@@ -78,6 +78,7 @@ static void add_coin(CWallet& wallet, const CAmount& nValue, int nAge = 6*24, bo
     if (fIsFromMe)
     {
         wtx->m_amounts[CWalletTx::DEBIT].Set(ISMINE_SPENDABLE, 1);
+        wtx->m_is_cache_empty = false;
     }
     COutput output(wtx.get(), nInput, nAge, true /* spendable */, true /* solvable */, true /* safe */);
     vCoins.push_back(output);
@@ -135,6 +136,7 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
 {
 
     LOCK(testWallet.cs_wallet);
+    testWallet.SetupLegacyScriptPubKeyMan();
 
     // Setup
     std::vector<CInputCoin> utxo_pool;
@@ -184,6 +186,19 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
 
     // Select 11 Cent, not possible
     BOOST_CHECK(!SelectCoinsBnB(GroupCoins(utxo_pool), 11 * CENT, 0.5 * CENT, selection, value_ret, not_input_fees));
+    actual_selection.clear();
+    selection.clear();
+
+    // Cost of change is greater than the difference between target value and utxo sum
+    add_coin(1 * CENT, 1, actual_selection);
+    BOOST_CHECK(SelectCoinsBnB(GroupCoins(utxo_pool), 0.9 * CENT, 0.5 * CENT, selection, value_ret, not_input_fees));
+    BOOST_CHECK_EQUAL(value_ret, 1 * CENT);
+    BOOST_CHECK(equal_sets(selection, actual_selection));
+    actual_selection.clear();
+    selection.clear();
+
+    // Cost of change is less than the difference between target value and utxo sum
+    BOOST_CHECK(!SelectCoinsBnB(GroupCoins(utxo_pool), 0.9 * CENT, 0, selection, value_ret, not_input_fees));
     actual_selection.clear();
     selection.clear();
 
@@ -277,6 +292,7 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
         std::unique_ptr<CWallet> wallet = MakeUnique<CWallet>(m_chain.get(), WalletLocation(), WalletDatabase::CreateMock());
         bool firstRun;
         wallet->LoadWallet(firstRun);
+        wallet->SetupLegacyScriptPubKeyMan();
         LOCK(wallet->cs_wallet);
         add_coin(*wallet, 5 * CENT, 6 * 24, false, 0, true);
         add_coin(*wallet, 3 * CENT, 6 * 24, false, 0, true);
@@ -298,6 +314,7 @@ BOOST_AUTO_TEST_CASE(knapsack_solver_test)
     bool bnb_used;
 
     LOCK(testWallet.cs_wallet);
+    testWallet.SetupLegacyScriptPubKeyMan();
 
     // test multiple times to allow for differences in the shuffle order
     for (int i = 0; i < RUN_TESTS; i++)
@@ -577,6 +594,7 @@ BOOST_AUTO_TEST_CASE(ApproximateBestSubset)
     bool bnb_used;
 
     LOCK(testWallet.cs_wallet);
+    testWallet.SetupLegacyScriptPubKeyMan();
 
     empty_wallet();
 
@@ -595,6 +613,8 @@ BOOST_AUTO_TEST_CASE(ApproximateBestSubset)
 // Tests that with the ideal conditions, the coin selector will always be able to find a solution that can pay the target value
 BOOST_AUTO_TEST_CASE(SelectCoins_test)
 {
+    testWallet.SetupLegacyScriptPubKeyMan();
+
     // Random generator stuff
     std::default_random_engine generator;
     std::exponential_distribution<double> distribution (100);
