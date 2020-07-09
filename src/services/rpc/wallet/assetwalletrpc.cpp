@@ -171,7 +171,7 @@ UniValue syscointxfund(CWallet* const pwallet, const JSONRPCRequest& request) {
     }else {
         auto itSender = mapAssetPrevTxSender.find(strAddress);
         if(itSender != mapAssetPrevTxSender.end()){
-            outPointLastSender = itSender->second;
+            // outPointLastSender = itSender->second;
         }
     }
     {
