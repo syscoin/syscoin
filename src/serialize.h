@@ -890,6 +890,11 @@ template<typename Stream, typename K, typename A> void Unserialize(Stream& is, s
 template<typename Stream, typename K, typename T, typename Pred, typename A> void Serialize(Stream& os, const std::unordered_map<K, T, Pred, A>& m);
 template<typename Stream, typename K, typename T, typename Pred, typename A> void Unserialize(Stream& is, std::unordered_map<K, T, Pred, A>& m);
 
+/**
+ * array
+ */
+template<typename Stream, typename T, std::size_t N> void Serialize(Stream& os, const std::array<T, N>& item);
+template<typename Stream, typename T, std::size_t N> void Unserialize(Stream& is, std::array<T, N>& item);
 
 /**
  * If none of the specialized versions above matched, default to calling member function.
@@ -1255,6 +1260,26 @@ void Unserialize(Stream& is, std::unordered_map<K, T, Pred, A>& m)
         std::pair<K, T> item;
         Unserialize(is, item);
         mi = m.insert(mi, item);
+    }
+}
+
+
+/**
+ * array
+ */
+template<typename Stream, typename T, std::size_t N>
+void Serialize(Stream& os, const std::array<T, N>& item)
+{
+    for (size_t i = 0; i < N; i++) {
+        Serialize(os, item[i]);
+    }
+}
+
+template<typename Stream, typename T, std::size_t N>
+void Unserialize(Stream& is, std::array<T, N>& item)
+{
+    for (size_t i = 0; i < N; i++) {
+        Unserialize(is, item[i]);
     }
 }
 

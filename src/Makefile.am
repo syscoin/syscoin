@@ -25,6 +25,8 @@ SYSCOIN_INCLUDES=-I$(builddir) -I$(srcdir)/secp256k1/include $(BDB_CPPFLAGS) $(B
 SYSCOIN_INCLUDES += $(UNIVALUE_CFLAGS)
 SYSCOIN_INCLUDES += $(LIBCHIABLS_CFLAGS)
 SYSCOIN_INCLUDES += $(LIBCURL_CFLAGS)
+SYSCOIN_INCLUDES += -I$(srcdir)/rust/include
+
 
 
 
@@ -44,6 +46,7 @@ LIBSYSCOIN_CLI=libsyscoin_cli.a
 LIBSYSCOIN_UTIL=libsyscoin_util.a
 LIBSYSCOIN_CRYPTO_BASE=crypto/libsyscoin_crypto_base.a
 LIBSYSCOINQT=qt/libsyscoinqt.a
+LIBRUSTZCASH=$(top_builddir)/target/$(RUST_TARGET)/release/librustzcash.a
 LIBSECP256K1=secp256k1/libsecp256k1.la
 LIBETHEREUM=ethereum/libethereum.a
 LIBSYSCOIN_BLS=libsyscoin_bls.a
@@ -71,6 +74,38 @@ if ENABLE_SHANI
 LIBSYSCOIN_CRYPTO_SHANI = crypto/libsyscoin_crypto_shani.a
 LIBSYSCOIN_CRYPTO += $(LIBSYSCOIN_CRYPTO_SHANI)
 endif
+
+
+RUST_ENV_VARS = RUSTC="$(RUSTC)" TERM=dumb
+RUST_BUILD_OPTS = --lib --release --target $(RUST_TARGET)
+
+rust_verbose = $(rust_verbose_@AM_V@)
+rust_verbose_ = $(rust_verbose_@AM_DEFAULT_V@)
+rust_verbose_1 = --verbose
+
+if ENABLE_ONLINE_RUST
+# Ensure that .cargo/config does not exist
+CARGO_CONFIGURED = $(top_srcdir)/.cargo/.configured-for-online
+$(CARGO_CONFIGURED):
+	$(AM_V_at)rm -f $(top_srcdir)/.cargo/.configured-for-offline $(top_srcdir)/.cargo/config
+	$(AM_V_at)touch $@
+
+else
+# Enable dependency vendoring
+RUST_BUILD_OPTS += --locked --offline
+
+CARGO_CONFIGURED = $(top_srcdir)/.cargo/.configured-for-offline
+$(CARGO_CONFIGURED): $(top_srcdir)/.cargo/config.offline
+	$(AM_V_at)rm -f $(top_srcdir)/.cargo/.configured-for-online
+	$(AM_V_at)cp $< $(top_srcdir)/.cargo/config
+	$(AM_V_at)echo "directory = \"$(RUST_VENDORED_SOURCES)\"" >>$(top_srcdir)/.cargo/config
+	$(AM_V_at)touch $@
+endif
+
+cargo-build: $(CARGO_CONFIGURED)
+	$(RUST_ENV_VARS) $(CARGO) build $(RUST_BUILD_OPTS) $(rust_verbose) --manifest-path $(top_srcdir)/Cargo.toml
+
+$(LIBRUSTZCASH): cargo-build
 
 $(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
@@ -120,6 +155,7 @@ endif
 .PHONY: FORCE check-symbols check-security
 # syscoin core #
 SYSCOIN_CORE_H = \
+  zcash/History.hpp \
   services/asset.h \
   services/assetconsensus.h \
   services/rpc/assetrpc.h \
@@ -409,6 +445,7 @@ endif
 libsyscoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(MINIUPNPC_CPPFLAGS) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libsyscoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_server_a_SOURCES = \
+  zcash/History.cpp \
   services/asset.cpp \
   services/assetconsensus.cpp \
   services/rpc/assetrpc.cpp \
@@ -779,6 +816,7 @@ syscoin_bin_ldadd = \
   $(LIBSYSCOIN_ZMQ) \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_CRYPTO) \
+  $(LIBRUSTZCASH) \
   $(LIBLEVELDB) \
   $(LIBLEVELDB_SSE42) \
   $(LIBMEMENV) \
@@ -817,6 +855,7 @@ syscoin_cli_LDADD = \
   $(LIBSYSCOIN_CLI) \
   $(LIBUNIVALUE) \
   $(LIBSYSCOIN_UTIL) \
+  $(LIBRUSTZCASH) \
   $(LIBSYSCOIN_CRYPTO)
 
 syscoin_cli_LDADD += $(BOOST_LIBS) $(EVENT_LIBS)
@@ -840,6 +879,7 @@ syscoin_tx_LDADD = \
   $(LIBCHIABLS) \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_CRYPTO) \
+  $(LIBRUSTZCASH) \
   $(LIBLEVELDB) \
   $(LIBLEVELDB_SSE42) \
   $(LIBMEMENV) \
@@ -873,7 +913,7 @@ endif
 
 libsyscoinconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)
 libsyscoinconsensus_la_LIBADD = $(LIBSECP256K1)
-libsyscoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_SYSCOIN_INTERNAL $(LEVELDB_CPPFLAGS)
+libsyscoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/rust/include -I$(srcdir)/secp256k1/include -DBUILD_SYSCOIN_INTERNAL $(LEVELDB_CPPFLAGS)
 libsyscoinconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
 endif
@@ -916,7 +956,7 @@ CHIABLS_DIST += chiabls/cmake_modules
 CHIABLS_DIST += chiabls/contrib
 CHIABLS_DIST += chiabls/src
 
-EXTRA_DIST = $(CTAES_DIST) $(CHIABLS_DIST) immer
+EXTRA_DIST = $(CTAES_DIST) $(CHIABLS_DIST) immer rust
 
 
 config/syscoin-config.h: config/stamp-h1
@@ -927,6 +967,7 @@ $(top_srcdir)/$(subdir)/config/syscoin-config.h.in:  $(am__configure_deps)
 	$(AM_V_at)$(MAKE) -C $(top_srcdir) $(subdir)/config/syscoin-config.h.in
 
 clean-local:
+	rm -f $(top_srcdir)/.cargo/config $(top_srcdir)/.cargo/.configured-for-*
 	-$(MAKE) -C secp256k1 clean
 	-$(MAKE) -C univalue clean
 	-rm -f leveldb/*/*.gcda leveldb/*/*.gcno leveldb/helpers/memenv/*.gcda leveldb/helpers/memenv/*.gcno
