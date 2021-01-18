@@ -161,7 +161,7 @@ CQuorumManager::CQuorumManager(CEvoDB& _evoDb, CBLSWorker& _blsWorker, CDKGSessi
 {
 }
 
-void CQuorumManager::UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload)
+void CQuorumManager::UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload) const
 {
     if (!masternodeSync.IsBlockchainSynced()) {
         return;
@@ -172,7 +172,7 @@ void CQuorumManager::UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitial
     }
 }
 
-void CQuorumManager::EnsureQuorumConnections(uint8_t llmqType, const CBlockIndex* pindexNew)
+void CQuorumManager::EnsureQuorumConnections(uint8_t llmqType, const CBlockIndex* pindexNew) const
 {
     const auto& params = Params().GetConsensus().llmqs.at(llmqType);
     auto myProTxHash = activeMasternodeInfo.proTxHash;
@@ -198,12 +198,23 @@ void CQuorumManager::EnsureQuorumConnections(uint8_t llmqType, const CBlockIndex
     }
 }
 
-bool CQuorumManager::BuildQuorumFromCommitment(const CFinalCommitment& qc, const CBlockIndex* pindexQuorum, const uint256& minedBlockHash, std::shared_ptr<CQuorum>& quorum) const
+CQuorumPtr CQuorumManager::BuildQuorumFromCommitment(uint8_t llmqType, const CBlockIndex* pindexQuorum) const
 {
-    std::vector<CDeterministicMNCPtr> members;
+    AssertLockHeld(quorumsCacheCs);
+    assert(pindexQuorum);
+
+    CFinalCommitment qc;
+    const uint256& quorumHash{pindexQuorum->GetBlockHash()};
+    uint256 minedBlockHash;
+    if (!quorumBlockProcessor->GetMinedCommitment(llmqType, quorumHash, qc, minedBlockHash)) {
+        return nullptr;
+    }
     assert(qc.quorumHash == pindexQuorum->GetBlockHash());
+    std::vector<CDeterministicMNCPtr> members;
+    const auto& params = Params().GetConsensus().llmqs.at(llmqType);
+    auto quorum = std::make_shared<CQuorum>(params, blsWorker);
     CLLMQUtils::GetAllQuorumMembers(qc.llmqType, pindexQuorum, members);
-    
+
     quorum->Init(qc, pindexQuorum, minedBlockHash, members);
 
     bool hasValidVvec = false;
@@ -225,7 +236,9 @@ bool CQuorumManager::BuildQuorumFromCommitment(const CFinalCommitment& qc, const
         CQuorum::StartCachePopulatorThread(quorum);
     }
 
-    return true;
+    quorumsCache.emplace(std::make_pair(llmqType, quorumHash), quorum);
+
+    return quorum;
 }
 
 bool CQuorumManager::BuildQuorumContributions(const CFinalCommitment& fqc, std::shared_ptr<CQuorum>& quorum) const
@@ -269,7 +282,7 @@ bool CQuorumManager::HasQuorum(uint8_t llmqType, const uint256& quorumHash)
     return quorumBlockProcessor->HasMinedCommitment(llmqType, quorumHash);
 }
 
-void CQuorumManager::ScanQuorums(uint8_t llmqType, size_t maxCount, std::vector<CQuorumCPtr>& quorums)
+void CQuorumManager::ScanQuorums(uint8_t llmqType, size_t maxCount, std::vector<CQuorumCPtr>& quorums) const
 {
     const CBlockIndex* pindex;
     {
@@ -278,7 +291,7 @@ void CQuorumManager::ScanQuorums(uint8_t llmqType, size_t maxCount, std::vector<
     }
     return ScanQuorums(llmqType, pindex, maxCount, quorums);
 }
-void CQuorumManager::ScanQuorums(uint8_t llmqType, const CBlockIndex* pindexQuorum, size_t maxCount, std::vector<CQuorumCPtr>& result)
+void CQuorumManager::ScanQuorums(uint8_t llmqType, const CBlockIndex* pindexQuorum, size_t maxCount, std::vector<CQuorumCPtr>& result) const
 {
     result.clear();
     auto& params = Params().GetConsensus().llmqs.at(llmqType);
@@ -320,7 +333,7 @@ void CQuorumManager::ScanQuorums(uint8_t llmqType, const CBlockIndex* pindexQuor
 
 }
 
-CQuorumCPtr CQuorumManager::GetQuorum(uint8_t llmqType, const uint256& quorumHash)
+CQuorumCPtr CQuorumManager::GetQuorum(uint8_t llmqType, const uint256& quorumHash) const
 {
     CBlockIndex* pindexQuorum;
     {
@@ -336,7 +349,7 @@ CQuorumCPtr CQuorumManager::GetQuorum(uint8_t llmqType, const uint256& quorumHas
 }
 
 
-CQuorumCPtr CQuorumManager::GetQuorum(uint8_t llmqType, const CBlockIndex* pindexQuorum)
+CQuorumCPtr CQuorumManager::GetQuorum(uint8_t llmqType, const CBlockIndex* pindexQuorum) const
 {
     assert(pindexQuorum);
 
@@ -355,22 +368,6 @@ CQuorumCPtr CQuorumManager::GetQuorum(uint8_t llmqType, const CBlockIndex* pinde
         return it->second;
     }
 
-    CFinalCommitment qc;
-    uint256 minedBlockHash;
-    if (!quorumBlockProcessor->GetMinedCommitment(llmqType, quorumHash, qc, minedBlockHash)) {
-        return nullptr;
-    }
-
-    auto& params = Params().GetConsensus().llmqs.at(llmqType);
-
-    auto quorum = std::make_shared<CQuorum>(params, blsWorker);
-
-    if (!BuildQuorumFromCommitment(qc, pindexQuorum, minedBlockHash, quorum)) {
-        return nullptr;
-    }
-
-    quorumsCache.emplace(std::make_pair(llmqType, quorumHash), quorum);
-
-    return quorum;
+    return BuildQuorumFromCommitment(llmqType, pindexQuorum);
 }
 } // namespace llmq
