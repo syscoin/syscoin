@@ -39,11 +39,50 @@ class AssetNFTTest(SyscoinTestFramework):
         self.sync_mempools()
         self.nodes[1].generate(3)
         self.sync_blocks()
+        beforeBlock = self.nodes[0].getbestblockhash()
         self.nodes[0].assetsend(asset, self.nodes[1].getnewaddress(), 1.1, nftID)
         self.nodes[0].generate(3)
         self.sync_blocks()
         out = self.nodes[1].listunspent(query_options={'assetGuid': nftGuid, 'minimumAmountAsset': 1.1})
         assert_equal(len(out), 1)
+        assetInfo = self.nodes[1].assetinfo(nftGuid)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.1'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+        # send same NFT ID a couple times in same issuance
+        self.nodes[0].assetsendmany(asset,[{'address': self.nodes[1].getnewaddress(),'amount':0.00000001,'NFTID':nftID},{'address': self.nodes[1].getnewaddress(),'amount':0.00000001,'NFTID':nftID}])
+        self.nodes[0].generate(3)
+        self.sync_blocks()
+        out = self.nodes[1].listunspent(query_options={'assetGuid': nftGuid})
+        # should have 3 outputs now one for 1.1 and 2x0.00000001
+        assert_equal(len(out), 3)
+        # check total supply was updated properly
+        assetInfo = self.nodes[0].assetinfo(nftGuid)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.10000002'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        # rollback and ensure disconnect works and accounts for total supply properly
+        self.nodes[0].invalidateblock(beforeBlock)
+        self.nodes[1].invalidateblock(beforeBlock)
+        out = self.nodes[1].listunspent(query_options={'assetGuid': nftGuid})
+        # should have 0 because of rollback
+        assert_equal(len(out), 0)
+        # check total supply was rolled back properly
+        assetInfo = self.nodes[0].assetinfo(nftGuid)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('0'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+        self.nodes[0].reconsiderblock(beforeBlock)
+        self.nodes[1].reconsiderblock(beforeBlock)
+        out = self.nodes[1].listunspent(query_options={'assetGuid': nftGuid})
+        # should have 3 outputs again
+        assert_equal(len(out), 3)
+        # check total supply was updated properly
+        assetInfo = self.nodes[1].assetinfo(nftGuid)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.10000002'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
 
     def basic_overflowassetnft(self):
         asset = self.nodes[0].assetnew('1', 'NFT', 'asset nft description', '0x', 8, 10000, 127, '', {}, {})['asset_guid']
@@ -70,6 +109,7 @@ class AssetNFTTest(SyscoinTestFramework):
         user3 = self.nodes[1].getnewaddress()
         # NFT 0xFFFFFFFF
         user4 = self.nodes[1].getnewaddress()
+        beforeBlock = self.nodes[0].getbestblockhash()
         self.nodes[0].assetsendmany(asset,[{'address': user1,'amount':0.00000001,'NFTID':nftUser1},{'address': user2,'amount':0.4,'NFTID':nftUser2},{'address': user3,'amount':0.5},{'address': user4,'amount':0.6,'NFTID':nftUser4}])
         self.nodes[0].generate(3)
         self.sync_blocks()
@@ -107,6 +147,101 @@ class AssetNFTTest(SyscoinTestFramework):
         assert_equal(len(out), 1)
         assert_equal(out[0]['asset_guid'], nftGuidUser1)
         assert_equal(out[0]['asset_amount'], decimal.Decimal('0.00000001'))
+        # check supply for base asset was updated properly
+        assetInfo = self.nodes[1].assetinfo(nftGuidUser1)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[1].assetinfo(nftGuidUser2)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[0].assetinfo(asset)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[0].assetinfo(nftGuidUser4)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+
+        # rollback and ensure disconnect works and accounts for total supply properly
+        self.nodes[0].invalidateblock(beforeBlock)
+        self.nodes[1].invalidateblock(beforeBlock)
+        out = self.nodes[1].listunspentasset(nftGuidUser1)
+        assert_equal(len(out), 0)
+        out = self.nodes[0].listunspentasset(nftGuidUser1)
+        assert_equal(len(out), 0)
+        out = self.nodes[1].listunspentasset(nftGuidUser2)
+        assert_equal(len(out), 0)
+        out = self.nodes[1].listunspentasset(asset)
+        assert_equal(len(out), 0)
+        out = self.nodes[1].listunspentasset(nftGuidUser4)
+        assert_equal(len(out), 0)
+        # check total supply was rolled back properly
+        assetInfo = self.nodes[0].assetinfo(nftGuidUser1)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('0'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[0].assetinfo(nftGuidUser2)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('0'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[0].assetinfo(asset)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('0'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[0].assetinfo(nftGuidUser4)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('0'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+        self.nodes[0].reconsiderblock(beforeBlock)
+        self.nodes[1].reconsiderblock(beforeBlock)
+        out = self.nodes[0].listunspentasset(nftGuidUser1)
+        assert_equal(len(out), 0)
+        out = self.nodes[1].listunspentasset(nftGuidUser1)
+        assert_equal(len(out), 1)
+        assert_equal(out[0]['asset_guid'], nftGuidUser1)
+        assert_equal(out[0]['asset_amount'], decimal.Decimal('0.00000001'))
+        out = self.nodes[1].listunspentasset(nftGuidUser2)
+        assert_equal(len(out), 1)
+        assert_equal(out[0]['asset_guid'], nftGuidUser2)
+        assert_equal(out[0]['asset_amount'], decimal.Decimal('0.4'))
+        out = self.nodes[1].listunspentasset(asset)
+        assert_equal(len(out), 1)
+        assert_equal(out[0]['asset_guid'], asset)
+        assert_equal(out[0]['asset_amount'], decimal.Decimal('0.5'))
+        out = self.nodes[1].listunspentasset(nftGuidUser4)
+        assert_equal(len(out), 1)
+        assert_equal(out[0]['asset_guid'], nftGuidUser4)
+        assert_equal(out[0]['asset_amount'], decimal.Decimal('0.6'))
+        # check total supply was updated properly
+        assetInfo = self.nodes[0].assetinfo(nftGuidUser1)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[1].assetinfo(nftGuidUser2)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[0].assetinfo(asset)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
+
+        assetInfo = self.nodes[1].assetinfo(nftGuidUser4)
+        assert_equal(assetInfo['asset_guid'], asset)
+        assert_equal(assetInfo['total_supply'], decimal.Decimal('1.50000001'))
+        assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
 
     def basic_zerovalassetnft(self):
         asset = self.nodes[0].assetnew('1', 'NFT', 'asset nft description', '0x', 8, 10000, 127, '', {}, {})['asset_guid']
