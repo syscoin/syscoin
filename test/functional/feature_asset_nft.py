@@ -65,6 +65,7 @@ class AssetNFTTest(SyscoinTestFramework):
         # rollback and ensure disconnect works and accounts for total supply properly
         self.nodes[0].invalidateblock(beforeBlock)
         self.nodes[1].invalidateblock(beforeBlock)
+        self.sync_blocks()
         out = self.nodes[1].listunspent(query_options={'assetGuid': nftGuid})
         # should have 0 because of rollback
         assert_equal(len(out), 0)
@@ -75,6 +76,7 @@ class AssetNFTTest(SyscoinTestFramework):
         assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
         self.nodes[0].reconsiderblock(beforeBlock)
         self.nodes[1].reconsiderblock(beforeBlock)
+        self.sync_blocks()
         out = self.nodes[1].listunspent(query_options={'assetGuid': nftGuid})
         # should have 3 outputs again
         assert_equal(len(out), 3)
@@ -172,6 +174,7 @@ class AssetNFTTest(SyscoinTestFramework):
         # rollback and ensure disconnect works and accounts for total supply properly
         self.nodes[0].invalidateblock(beforeBlock)
         self.nodes[1].invalidateblock(beforeBlock)
+        self.sync_blocks()
         out = self.nodes[1].listunspentasset(nftGuidUser1)
         assert_equal(len(out), 0)
         out = self.nodes[0].listunspentasset(nftGuidUser1)
@@ -204,12 +207,13 @@ class AssetNFTTest(SyscoinTestFramework):
         assert_equal(assetInfo['max_supply'], decimal.Decimal('10000'))
         self.nodes[0].reconsiderblock(beforeBlock)
         self.nodes[1].reconsiderblock(beforeBlock)
+        self.sync_blocks()
         out = self.nodes[0].listunspentasset(nftGuidUser1)
-        assert_equal(len(out), 0)
-        out = self.nodes[1].listunspentasset(nftGuidUser1)
         assert_equal(len(out), 1)
         assert_equal(out[0]['asset_guid'], nftGuidUser1)
         assert_equal(out[0]['asset_amount'], decimal.Decimal('0.00000001'))
+        out = self.nodes[1].listunspentasset(nftGuidUser1)
+        assert_equal(len(out), 0)
         out = self.nodes[1].listunspentasset(nftGuidUser2)
         assert_equal(len(out), 1)
         assert_equal(out[0]['asset_guid'], nftGuidUser2)
