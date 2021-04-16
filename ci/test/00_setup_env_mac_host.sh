@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 #
-# Copyright (c) 2019 The Bitcoin Core developers
+# Copyright (c) 2019-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 export LC_ALL=C.UTF-8
 
-export HOST=x86_64-apple-darwin16
-export BREW_PACKAGES="automake berkeley-db4 libtool boost miniupnpc pkg-config qt qrencode python3 ccache zeromq"
+export HOST=x86_64-apple-darwin18
 export PIP_PACKAGES="zmq"
-export RUN_CI_ON_HOST=true
-export RUN_UNIT_TESTS=false
-export RUN_FUNCTIONAL_TESTS=false
 export GOAL="install"
-export SYSCOIN_CONFIG="--enable-gui --enable-reduce-exports --enable-werror"
-# Run without depends
+export SYSCOIN_CONFIG="--with-gui --enable-reduce-exports --enable-external-signer"
+export CI_OS_NAME="macos"
 export NO_DEPENDS=1
 export OSX_SDK=""
+export CCACHE_SIZE=300M
+export TEST_RUNNER_EXTRA="--exclude feature_block"
+export RUN_SECURITY_TESTS="true"

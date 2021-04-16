@@ -2,12 +2,17 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+# Pattern rule to print variables, e.g. make print-top_srcdir
+print-%:
+	@echo '$*' = '$($*)'
+
 DIST_SUBDIRS = secp256k1 univalue
 
-AM_LDFLAGS = $(PTHREAD_CFLAGS) $(LIBTOOL_LDFLAGS) $(HARDENED_LDFLAGS) $(GPROF_LDFLAGS) $(SANITIZER_LDFLAGS)
+AM_LDFLAGS = $(LIBTOOL_LDFLAGS) $(HARDENED_LDFLAGS) $(GPROF_LDFLAGS) $(SANITIZER_LDFLAGS)
 AM_CXXFLAGS = $(DEBUG_CXXFLAGS) $(HARDENED_CXXFLAGS) $(WARN_CXXFLAGS) $(NOWARN_CXXFLAGS) $(ERROR_CXXFLAGS) $(GPROF_CXXFLAGS) $(SANITIZER_CXXFLAGS)
 AM_CPPFLAGS = $(DEBUG_CPPFLAGS) $(HARDENED_CPPFLAGS)
 AM_LIBTOOLFLAGS = --preserve-dup-deps
+PTHREAD_FLAGS = $(PTHREAD_CFLAGS) $(PTHREAD_LIBS)
 EXTRA_LIBRARIES =
 
 if EMBEDDED_UNIVALUE
@@ -19,10 +24,22 @@ else
 LIBUNIVALUE = $(UNIVALUE_LIBS)
 endif
 
-SYSCOIN_INCLUDES=-I$(builddir) $(BDB_CPPFLAGS) $(BOOST_CPPFLAGS) $(LEVELDB_CPPFLAGS)
+SYSCOIN_INCLUDES=-I$(builddir) -I$(srcdir)/secp256k1/include $(BDB_CPPFLAGS) $(BOOST_CPPFLAGS) $(LEVELDB_CPPFLAGS)
 
-SYSCOIN_INCLUDES += -I$(srcdir)/secp256k1/include
 SYSCOIN_INCLUDES += $(UNIVALUE_CFLAGS)
+SYSCOIN_INCLUDES += $(LIBCHIABLS_CFLAGS)
+SYSCOIN_INCLUDES += $(LIBCURL_CFLAGS)
+
+
+
+if EMBEDDED_CHIABLS
+LIBCHIA = chiabls/build/libchiabls.a
+LIBCHIABLS =$(LIBCURL_LIBS) $(LIBCHIA) -lgmp
+$(LIBCHIA):
+	cd $(srcdir)/chiabls/build && $(MAKE) $(AM_MAKEFLAGS)
+else
+LIBCHIABLS =$(LIBCURL_LIBS) $(LIBCHIABLS_LIBS) -lgmp
+endif
 
 LIBSYSCOIN_SERVER=libsyscoin_server.a
 LIBSYSCOIN_COMMON=libsyscoin_common.a
@@ -33,7 +50,7 @@ LIBSYSCOIN_CRYPTO_BASE=crypto/libsyscoin_crypto_base.a
 LIBSYSCOINQT=qt/libsyscoinqt.a
 LIBSECP256K1=secp256k1/libsecp256k1.la
 LIBETHEREUM=ethereum/libethereum.a
-
+LIBSYSCOIN_BLS=libsyscoin_bls.a
 if ENABLE_ZMQ
 LIBSYSCOIN_ZMQ=libsyscoin_zmq.a
 endif
@@ -74,7 +91,8 @@ EXTRA_LIBRARIES += \
   $(LIBSYSCOIN_WALLET) \
   $(LIBSYSCOIN_WALLET_TOOL) \
   $(LIBSYSCOIN_ZMQ) \
-  $(LIBETHEREUM)
+  $(LIBETHEREUM) \
+  $(LIBSYSCOIN_BLS)
 
 lib_LTLIBRARIES = $(LIBSYSCOINCONSENSUS)
 
@@ -87,45 +105,62 @@ if BUILD_SYSCOIND
   bin_PROGRAMS += syscoind
 endif
 
+if BUILD_SYSCOIN_NODE
+  bin_PROGRAMS += syscoin-node
+endif
+
 if BUILD_SYSCOIN_CLI
   bin_PROGRAMS += syscoin-cli
 endif
+
 if BUILD_SYSCOIN_TX
   bin_PROGRAMS += syscoin-tx
 endif
+
 if ENABLE_WALLET
 if BUILD_SYSCOIN_WALLET
   bin_PROGRAMS += syscoin-wallet
 endif
 endif
 
+if BUILD_SYSCOIN_UTIL
+  bin_PROGRAMS += syscoin-util
+endif
+
 .PHONY: FORCE check-symbols check-security
 # syscoin core #
 SYSCOIN_CORE_H = \
-  services/witnessaddress.h \
   services/asset.h \
-  services/assetallocation.h \
   services/assetconsensus.h \
   services/rpc/assetrpc.h \
   services/rpc/wallet/assetwalletrpc.h \
-  activemasternode.h \
   spork.h \
   dsnotificationinterface.h \
-  governance.h \
-  governanceclasses.h \
-  governanceexceptions.h \
-  governanceobject.h \
-  governancevalidators.h \
-  governancevote.h \
-  governancevotedb.h \
-  masternode.h \
-  masternodepayments.h \
-  masternodesync.h \
-  masternodeman.h \
-  masternodeconfig.h \
+  governance/governance.h \
+  governance/governanceclasses.h \
+  governance/governanceexceptions.h \
+  governance/governanceobject.h \
+  governance/governancevalidators.h \
+  governance/governancevote.h \
+  governance/governancevotedb.h \
+  concurrentqueue.h \
+  ctpl.h \
+  cxxtimer.hpp \
+  evo/cbtx.h \
+  evo/deterministicmns.h \
+  evo/evodb.h \
+  evo/mnauth.h \
+  evo/providertx.h \
+  evo/simplifiedmns.h \
+  evo/specialtx.h \
+  masternode/activemasternode.h \
+  masternode/masternodemeta.h \
+  masternode/masternodepayments.h \
+  masternode/masternodesync.h \
+  masternode/masternodeutils.h \
+  flatdatabase.h \
   messagesigner.h \
   netfulfilledman.h \
-  flatdatabase.h \
   cachemap.h \
   cachemultimap.h \
   addrdb.h \
@@ -134,10 +169,11 @@ SYSCOIN_CORE_H = \
   auxpow.h \
   banman.h \
   base58.h \
+  batchedlogger.h \
   bech32.h \
-  bloom.h \
   blockencodings.h \
   blockfilter.h \
+  bloom.h \
   chain.h \
   chainparams.h \
   chainparamsbase.h \
@@ -151,19 +187,22 @@ SYSCOIN_CORE_H = \
   compat/cpuid.h \
   compat/endian.h \
   compat/sanity.h \
-  compressor.h \
   consensus/consensus.h \
   consensus/tx_check.h \
   consensus/tx_verify.h \
   core_io.h \
   core_memusage.h \
   cuckoocache.h \
+  dbwrapper.h \
+  external_signer.h \
   flatfile.h \
   fs.h \
   httprpc.h \
   httpserver.h \
+  i2p.h \
   index/base.h \
   index/blockfilterindex.h \
+  index/disktxpos.h \
   index/txindex.h \
   indirectmap.h \
   init.h \
@@ -173,10 +212,21 @@ SYSCOIN_CORE_H = \
   interfaces/wallet.h \
   key.h \
   key_io.h \
-  dbwrapper.h \
-  limitedmap.h \
+  llmq/quorums.h \
+  llmq/quorums_blockprocessor.h \
+  llmq/quorums_commitment.h \
+  llmq/quorums_chainlocks.h \
+  llmq/quorums_debug.h \
+  llmq/quorums_dkgsessionhandler.h \
+  llmq/quorums_dkgsessionmgr.h \
+  llmq/quorums_dkgsession.h \
+  llmq/quorums_init.h \
+  llmq/quorums_signing.h \
+  llmq/quorums_signing_shares.h \
+  llmq/quorums_utils.h \
   logging.h \
   logging/timer.h \
+  mapport.h \
   memusage.h \
   merkleblock.h \
   miner.h \
@@ -187,14 +237,15 @@ SYSCOIN_CORE_H = \
   netaddress.h \
   netbase.h \
   netmessagemaker.h \
+  node/blockstorage.h \
   node/coin.h \
   node/coinstats.h \
   node/context.h \
   node/psbt.h \
   node/transaction.h \
+  node/ui_interface.h \
   node/utxo_snapshot.h \
   noui.h \
-  optional.h \
   outputtype.h \
   policy/feerate.h \
   policy/fees.h \
@@ -217,6 +268,7 @@ SYSCOIN_CORE_H = \
   rpc/request.h \
   rpc/server.h \
   rpc/util.h \
+  saltedhasher.h \
   scheduler.h \
   script/descriptor.h \
   script/keyorigin.h \
@@ -225,68 +277,85 @@ SYSCOIN_CORE_H = \
   script/signingprovider.h \
   script/standard.h \
   shutdown.h \
+  signet.h \
   streams.h \
   support/allocators/secure.h \
   support/allocators/zeroafterfree.h \
+  support/allocators/pooled_secure.h \
+  support/allocators/mt_pooled_secure.h \
   support/cleanse.h \
   support/events.h \
   support/lockedpool.h \
   sync.h \
-  threadsafety.h \
   threadinterrupt.h \
+  threadsafety.h \
   timedata.h \
   torcontrol.h \
   txdb.h \
   txmempool.h \
-  ui_interface.h \
+  txorphanage.h \
+  txrequest.h \
   undo.h \
+  unordered_lru_cache.h \
   util/asmap.h \
   util/bip32.h \
   util/bytevectorhash.h \
   util/check.h \
+  util/epochguard.h \
   util/error.h \
   util/fees.h \
-  util/spanparsing.h \
-  util/system.h \
+  util/getuniquepath.h \
+  util/golombrice.h \
+  util/hasher.h \
   util/macros.h \
-  util/memory.h \
   util/message.h \
   util/moneystr.h \
   util/rbf.h \
+  util/readwritefile.h \
   util/settings.h \
+  util/sock.h \
+  util/spanparsing.h \
   util/string.h \
+  util/system.h \
   util/threadnames.h \
   util/time.h \
+  util/tokenpipe.h \
+  util/trace.h \
   util/translation.h \
+  util/ui_change_type.h \
   util/url.h \
-  util/executable_path/include/boost/executable_path.hpp \
-  util/executable_path/include/boost/detail/executable_path_internals.hpp \
   util/vector.h \
   validation.h \
   validationinterface.h \
   versionbits.h \
   versionbitsinfo.h \
-  walletinitinterface.h \
+  wallet/bdb.h \
   wallet/coincontrol.h \
+  wallet/coinselection.h \
+  wallet/context.h \
   wallet/crypter.h \
   wallet/db.h \
+  wallet/dump.h \
+  wallet/external_signer_scriptpubkeyman.h \
   wallet/feebumper.h \
   wallet/fees.h \
   wallet/ismine.h \
   wallet/load.h \
   wallet/rpcwallet.h \
+  wallet/salvage.h \
   wallet/scriptpubkeyman.h \
+  wallet/sqlite.h \
   wallet/wallet.h \
   wallet/walletdb.h \
   wallet/wallettool.h \
   wallet/walletutil.h \
-  wallet/coinselection.h \
+  walletinitinterface.h \
   warnings.h \
   zmq/zmqabstractnotifier.h \
-  zmq/zmqconfig.h\
   zmq/zmqnotificationinterface.h \
   zmq/zmqpublishnotifier.h \
-  zmq/zmqrpc.h
+  zmq/zmqrpc.h \
+  zmq/zmqutil.h
 
 
 obj/build.h: FORCE
@@ -320,65 +389,119 @@ if GLIBC_BACK_COMPAT
   ethereum_libethereum_a_SOURCES += compat/glibc_compat.cpp
 endif
 
+ # BLS
+ libsyscoin_bls_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
+ libsyscoin_bls_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+ libsyscoin_bls_a_SOURCES = \
+  bls/bls.h \
+  bls/bls_batchverifier.h \
+  bls/bls_ies.h \
+  bls/bls_worker.h \
+  bls/bls.cpp \
+  bls/bls_ies.cpp \
+  bls/bls_worker.cpp \
+  chiabls/src/bls.hpp \
+  chiabls/src/bls.cpp \
+  chiabls/src/privatekey.hpp \
+  chiabls/src/privatekey.cpp \
+  chiabls/src/publickey.hpp \
+  chiabls/src/publickey.cpp \
+  chiabls/src/signature.hpp \
+  chiabls/src/signature.cpp \
+  chiabls/src/aggregationinfo.hpp \
+  chiabls/src/aggregationinfo.cpp \
+  chiabls/src/chaincode.hpp \
+  chiabls/src/chaincode.cpp \
+  chiabls/src/extendedprivatekey.hpp \
+  chiabls/src/extendedprivatekey.cpp \
+  chiabls/src/extendedpublickey.hpp \
+  chiabls/src/extendedpublickey.cpp \
+  chiabls/src/util.hpp \
+  $(SYSCOIN_CORE_H)
+
+if GLIBC_BACK_COMPAT
+  libsyscoin_bls_a_SOURCES += compat/glibc_compat.cpp
+endif
+
 # server: shared between syscoind and syscoin-qt
 # Contains code accessing mempool and chain state that is meant to be separated
 # from wallet and gui code (see node/README.md). Shared code should go in
 # libsyscoin_common or libsyscoin_util libraries, instead.
-libsyscoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(MINIUPNPC_CPPFLAGS) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
+libsyscoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(MINIUPNPC_CPPFLAGS) $(NATPMP_CPPFLAGS) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libsyscoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_server_a_SOURCES = \
   services/asset.cpp \
-  services/assetallocation.cpp \
   services/assetconsensus.cpp \
   services/rpc/assetrpc.cpp \
   core_write.cpp \
-  activemasternode.cpp \
   dsnotificationinterface.cpp \
-  governance.cpp \
-  governanceclasses.cpp \
-  governanceobject.cpp \
-  governancevalidators.cpp \
-  governancevote.cpp \
-  governancevotedb.cpp \
-  masternode.cpp \
-  masternodepayments.cpp \
-  masternodesync.cpp \
-  masternodeconfig.cpp \
-  masternodeman.cpp \
+  governance/governance.cpp \
+  governance/governanceclasses.cpp \
+  governance/governanceobject.cpp \
+  governance/governancevalidators.cpp \
+  governance/governancevote.cpp \
+  governance/governancevotedb.cpp \
+  evo/cbtx.cpp \
+  evo/deterministicmns.cpp \
+  evo/evodb.cpp \
+  evo/mnauth.cpp \
+  evo/providertx.cpp \
+  evo/simplifiedmns.cpp \
+  evo/specialtx.cpp \
+  llmq/quorums.cpp \
+  llmq/quorums_blockprocessor.cpp \
+  llmq/quorums_commitment.cpp \
+  llmq/quorums_chainlocks.cpp \
+  llmq/quorums_debug.cpp \
+  llmq/quorums_dkgsessionhandler.cpp \
+  llmq/quorums_dkgsessionmgr.cpp \
+  llmq/quorums_dkgsession.cpp \
+  llmq/quorums_init.cpp \
+  llmq/quorums_signing.cpp \
+  llmq/quorums_signing_shares.cpp \
+  llmq/quorums_utils.cpp \
+  masternode/activemasternode.cpp \
+  masternode/masternodemeta.cpp \
+  masternode/masternodepayments.cpp \
+  masternode/masternodesync.cpp \
+  masternode/masternodeutils.cpp \
   messagesigner.cpp \
-  netfulfilledman.cpp \
-  rpc/masternode.cpp \
-  rpc/governance.cpp \
   spork.cpp \
   addrdb.cpp \
   addrman.cpp \
+  batchedlogger.cpp \
   banman.cpp \
   blockencodings.cpp \
   blockfilter.cpp \
   chain.cpp \
   consensus/tx_verify.cpp \
+  dbwrapper.cpp \
   flatfile.cpp \
   httprpc.cpp \
   httpserver.cpp \
+  i2p.cpp \
   index/base.cpp \
   index/blockfilterindex.cpp \
   index/txindex.cpp \
-  interfaces/chain.cpp \
-  interfaces/node.cpp \
   init.cpp \
-  dbwrapper.cpp \
+  mapport.cpp \
   miner.cpp \
   net.cpp \
+  netfulfilledman.cpp \
   net_processing.cpp \
+  node/blockstorage.cpp \
   node/coin.cpp \
   node/coinstats.cpp \
   node/context.cpp \
+  node/interfaces.cpp \
   node/psbt.cpp \
   node/transaction.cpp \
+  node/ui_interface.cpp \
   noui.cpp \
   policy/fees.cpp \
   policy/rbf.cpp \
   policy/settings.cpp \
+  primitives/transaction.cpp \
   pow.cpp \
   rest.cpp \
   rpc/auxpow_miner.cpp \
@@ -388,13 +511,19 @@ libsyscoin_server_a_SOURCES = \
   rpc/net.cpp \
   rpc/rawtransaction.cpp \
   rpc/server.cpp \
+  rpc/masternode.cpp \
+  rpc/governance.cpp \
+  rpc/rpcevo.cpp \
+  rpc/rpcquorums.cpp \
   script/sigcache.cpp \
   shutdown.cpp \
+  signet.cpp \
   timedata.cpp \
   torcontrol.cpp \
   txdb.cpp \
   txmempool.cpp \
-  ui_interface.cpp \
+  txorphanage.cpp \
+  txrequest.cpp \
   validation.cpp \
   validationinterface.cpp \
   versionbits.cpp \
@@ -414,21 +543,25 @@ libsyscoin_zmq_a_SOURCES = \
   zmq/zmqabstractnotifier.cpp \
   zmq/zmqnotificationinterface.cpp \
   zmq/zmqpublishnotifier.cpp \
-  zmq/zmqrpc.cpp
+  zmq/zmqrpc.cpp \
+  zmq/zmqutil.cpp
 endif
 
 
 # wallet: shared between syscoind and syscoin-qt, but only linked
 # when wallet enabled
-libsyscoin_wallet_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
+libsyscoin_wallet_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(SQLITE_CFLAGS)
 libsyscoin_wallet_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_wallet_a_SOURCES = \
-  interfaces/wallet.cpp \
   wallet/coincontrol.cpp \
+  wallet/context.cpp \
   wallet/crypter.cpp \
   wallet/db.cpp \
+  wallet/dump.cpp \
+  wallet/external_signer_scriptpubkeyman.cpp \
   wallet/feebumper.cpp \
   wallet/fees.cpp \
+  wallet/interfaces.cpp \
   wallet/load.cpp \
   wallet/rpcdump.cpp \
   wallet/rpcwallet.cpp \
@@ -438,9 +571,22 @@ libsyscoin_wallet_a_SOURCES = \
   wallet/walletutil.cpp \
   wallet/coinselection.cpp \
   rpc/governance.cpp \
+  rpc/rawtransaction.cpp \
+  rpc/rpcevo.cpp \
   rpc/masternode.cpp \
+  rpc/auxpow_miner.cpp \
   services/rpc/wallet/assetwalletrpc.cpp \
+  wallet/rpcevo.cpp \
+  wallet/rpcgovernance.cpp \
+  wallet/rpcmasternode.cpp \
   $(SYSCOIN_CORE_H)
+
+if USE_SQLITE
+libsyscoin_wallet_a_SOURCES += wallet/sqlite.cpp
+endif
+if USE_BDB
+libsyscoin_wallet_a_SOURCES += wallet/bdb.cpp wallet/salvage.cpp
+endif
 
 libsyscoin_wallet_tool_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
 libsyscoin_wallet_tool_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
@@ -467,12 +613,16 @@ crypto_libsyscoin_crypto_base_a_SOURCES = \
   crypto/hmac_sha512.h \
   crypto/poly1305.h \
   crypto/poly1305.cpp \
+  crypto/muhash.h \
+  crypto/muhash.cpp \
   crypto/ripemd160.cpp \
   crypto/ripemd160.h \
   crypto/sha1.cpp \
   crypto/sha1.h \
   crypto/sha256.cpp \
   crypto/sha256.h \
+  crypto/sha3.cpp \
+  crypto/sha3.h \
   crypto/sha512.cpp \
   crypto/sha512.h \
   crypto/siphash.cpp \
@@ -543,17 +693,22 @@ libsyscoin_consensus_a_SOURCES = \
 libsyscoin_common_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
 libsyscoin_common_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_common_a_SOURCES = \
+  services/asset.cpp \
+  services/assetconsensus.cpp \
   auxpow.cpp \
   base58.cpp \
   bech32.cpp \
   bloom.cpp \
   chainparams.cpp \
   coins.cpp \
-  compressor.cpp \
   core_read.cpp \
+  core_write.cpp \
+  dbwrapper.cpp \
+  external_signer.cpp \
   key.cpp \
   key_io.cpp \
   merkleblock.cpp \
+  messagesigner.cpp \
   netaddress.cpp \
   netbase.cpp \
   net_permissions.cpp \
@@ -561,8 +716,10 @@ libsyscoin_common_a_SOURCES = \
   policy/feerate.cpp \
   policy/policy.cpp \
   protocol.cpp \
+  saltedhasher.cpp \
   psbt.cpp \
   rpc/rawtransaction_util.cpp \
+  rpc/external_signer.cpp \
   rpc/util.cpp \
   scheduler.cpp \
   script/descriptor.cpp \
@@ -582,8 +739,6 @@ libsyscoin_util_a_SOURCES = \
   support/lockedpool.cpp \
   chainparamsbase.cpp \
   clientversion.cpp \
-  compat/glibc_sanity_fdelt.cpp \
-  compat/glibc_sanity.cpp \
   compat/glibcxx_sanity.cpp \
   compat/strnlen.cpp \
   fs.cpp \
@@ -600,27 +755,26 @@ libsyscoin_util_a_SOURCES = \
   util/bytevectorhash.cpp \
   util/error.cpp \
   util/fees.cpp \
+  util/getuniquepath.cpp \
+  util/hasher.cpp \
+  util/sock.cpp \
   util/system.cpp \
   util/message.cpp \
   util/moneystr.cpp \
   util/rbf.cpp \
+  util/readwritefile.cpp \
   util/settings.cpp \
   util/threadnames.cpp \
   util/spanparsing.cpp \
   util/strencodings.cpp \
   util/string.cpp \
   util/time.cpp \
-  util/url.cpp \
-  util/executable_path/src/executable_path.cpp \
-  util/executable_path/src/detail/executable_path_internals_bsd.cpp \
-  util/executable_path/src/detail/executable_path_internals_common.cpp \
-  util/executable_path/src/detail/executable_path_internals_linux.cpp \
-  util/executable_path/src/detail/executable_path_internals_macintosh.cpp \
-  util/executable_path/src/detail/executable_path_internals_other.cpp \
-  util/executable_path/src/detail/executable_path_internals_qnx.cpp \
-  util/executable_path/src/detail/executable_path_internals_solaris.cpp \
-  util/executable_path/src/detail/executable_path_internals_windows.cpp \
+  util/tokenpipe.cpp \
   $(SYSCOIN_CORE_H)
+
+if USE_LIBEVENT
+libsyscoin_util_a_SOURCES += util/url.cpp
+endif
 
 if GLIBC_BACK_COMPAT
 libsyscoin_util_a_SOURCES += compat/glibc_compat.cpp
@@ -639,22 +793,24 @@ libsyscoin_cli_a_SOURCES = \
 nodist_libsyscoin_util_a_SOURCES = $(srcdir)/obj/build.h
 #
 
-# syscoind binary #
-syscoind_SOURCES = syscoind.cpp
-syscoind_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
-syscoind_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-syscoind_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS)
+# syscoind & syscoin-node binaries #
+syscoin_daemon_sources = syscoind.cpp
+syscoin_bin_cppflags = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
+syscoin_bin_cxxflags = $(AM_CXXFLAGS) $(PIE_FLAGS)
+syscoin_bin_ldflags = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 
 if TARGET_WINDOWS
-syscoind_SOURCES += syscoind-res.rc
+syscoin_daemon_sources += syscoind-res.rc
 endif
-
-syscoind_LDADD = \
-  $(LIBSYSCOIN_SERVER) \
+# SYSCOIN need getauxwork and mempool stuff inside of wallet so server needs linking here for now but order has to be after wallet
+syscoin_bin_ldadd = \
   $(LIBSYSCOIN_WALLET) \
+  $(LIBSYSCOIN_SERVER) \
+  $(LIBSYSCOIN_BLS) \
   $(LIBSYSCOIN_COMMON) \
-  $(LIBUNIVALUE) \
   $(LIBSYSCOIN_UTIL) \
+  $(LIBCHIABLS) \
+  $(LIBUNIVALUE) \
   $(LIBSYSCOIN_ZMQ) \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_CRYPTO) \
@@ -664,16 +820,32 @@ syscoind_LDADD = \
   $(LIBSECP256K1) \
   $(LIBETHEREUM)
 
-syscoind_LDADD += $(BOOST_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS)
+syscoin_bin_ldadd += $(BOOST_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
+
+syscoind_SOURCES = $(syscoin_daemon_sources)
+syscoind_CPPFLAGS = $(syscoin_bin_cppflags)
+syscoind_CXXFLAGS = $(syscoin_bin_cxxflags)
+syscoind_LDFLAGS = $(syscoin_bin_ldflags)
+syscoind_LDADD = $(LIBSYSCOIN_SERVER) $(syscoin_bin_ldadd)
+
+syscoin_node_SOURCES = $(syscoin_daemon_sources)
+syscoin_node_CPPFLAGS = $(syscoin_bin_cppflags)
+syscoin_node_CXXFLAGS = $(syscoin_bin_cxxflags)
+syscoin_node_LDFLAGS = $(syscoin_bin_ldflags)
+syscoin_node_LDADD = $(LIBSYSCOIN_SERVER) $(syscoin_bin_ldadd)
 
 # syscoin-cli binary #
 syscoin_cli_SOURCES = syscoin-cli.cpp
 syscoin_cli_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(EVENT_CFLAGS)
 syscoin_cli_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-syscoin_cli_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS)
+syscoin_cli_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 
 if TARGET_WINDOWS
 syscoin_cli_SOURCES += syscoin-cli-res.rc
+endif
+
+if GLIBC_BACK_COMPAT
+  syscoin_cli_SOURCES += compat/glibc_compat.cpp
 endif
 
 syscoin_cli_LDADD = \
@@ -689,42 +861,61 @@ syscoin_cli_LDADD += $(BOOST_LIBS) $(EVENT_LIBS)
 syscoin_tx_SOURCES = syscoin-tx.cpp
 syscoin_tx_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
 syscoin_tx_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-syscoin_tx_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS)
+syscoin_tx_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 
 if TARGET_WINDOWS
 syscoin_tx_SOURCES += syscoin-tx-res.rc
 endif
 
-syscoin_tx_LDADD = $(syscoind_LDADD)
-#
-
-# syscoin-wallet binary #
-syscoin_wallet_SOURCES = syscoin-wallet.cpp
-syscoin_wallet_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
-syscoin_wallet_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-syscoin_wallet_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS)
-
-if TARGET_WINDOWS
-syscoin_wallet_SOURCES += syscoin-wallet-res.rc
-endif
-
-syscoin_wallet_LDADD = \
-  $(LIBSYSCOIN_WALLET_TOOL) \
-  $(LIBSYSCOIN_WALLET) \
-  $(LIBSYSCOIN_SERVER) \
+syscoin_tx_LDADD = \
+  $(LIBUNIVALUE) \
   $(LIBSYSCOIN_COMMON) \
-  $(LIBSYSCOIN_CONSENSUS) \
+  $(LIBSYSCOIN_BLS) \
   $(LIBSYSCOIN_UTIL) \
+  $(LIBCHIABLS) \
+  $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_CRYPTO) \
-  $(LIBSYSCOIN_ZMQ) \
   $(LIBLEVELDB) \
   $(LIBLEVELDB_SSE42) \
   $(LIBMEMENV) \
   $(LIBSECP256K1) \
-  $(LIBUNIVALUE) \
   $(LIBETHEREUM)
 
-syscoin_wallet_LDADD += $(BOOST_LIBS) $(BDB_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(MINIUPNPC_LIBS) $(ZMQ_LIBS)
+syscoin_tx_LDADD += $(BOOST_LIBS)
+  
+#
+
+# syscoin-wallet binary #
+syscoin_wallet_SOURCES = syscoin-wallet.cpp
+syscoin_wallet_CPPFLAGS = $(syscoin_bin_cppflags)
+syscoin_wallet_CXXFLAGS = $(syscoin_bin_cxxflags)
+syscoin_wallet_LDFLAGS = $(syscoin_bin_ldflags)
+syscoin_wallet_LDADD = $(LIBSYSCOIN_WALLET_TOOL) $(syscoin_bin_ldadd)
+
+if TARGET_WINDOWS
+syscoin_wallet_SOURCES += syscoin-wallet-res.rc
+endif
+#
+
+# syscoin-util binary #
+syscoin_util_SOURCES = syscoin-util.cpp
+syscoin_util_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
+syscoin_util_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+syscoin_util_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
+
+if TARGET_WINDOWS
+syscoin_util_SOURCES += syscoin-util-res.rc
+endif
+
+syscoin_util_LDADD = \
+  $(LIBSYSCOIN_COMMON) \
+  $(LIBSYSCOIN_UTIL) \
+  $(LIBUNIVALUE) \
+  $(LIBSYSCOIN_CONSENSUS) \
+  $(LIBSYSCOIN_CRYPTO) \
+  $(LIBSECP256K1)
+
+syscoin_util_LDADD += $(BOOST_LIBS)
 #
 
 # syscoinconsensus library #
@@ -738,21 +929,9 @@ endif
 
 libsyscoinconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)
 libsyscoinconsensus_la_LIBADD = $(LIBSECP256K1)
-libsyscoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_SYSCOIN_INTERNAL
+libsyscoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_SYSCOIN_INTERNAL $(LEVELDB_CPPFLAGS)
 libsyscoinconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
-endif
-
-# syscoin pre-built binaries #
-dist_bin_SCRIPTS =
-if TARGET_WINDOWS
-  dist_bin_SCRIPTS += bin/win64/sysgeth.nod.exe bin/win64/sysrelayer.nod.exe
-endif
-if TARGET_LINUX
-  dist_bin_SCRIPTS += bin/linux/sysgeth.nod bin/linux/sysrelayer.nod
-endif
-if TARGET_DARWIN
-  dist_bin_SCRIPTS += bin/osx/sysgeth.nod bin/osx/sysrelayer.nod
 endif
 
 #
@@ -768,18 +947,32 @@ CLEANFILES = $(EXTRA_LIBRARIES)
 CLEANFILES += *.gcda *.gcno
 CLEANFILES += compat/*.gcda compat/*.gcno
 CLEANFILES += consensus/*.gcda consensus/*.gcno
+CLEANFILES += crc32c/src/*.gcda crc32c/src/*.gcno
 CLEANFILES += crypto/*.gcda crypto/*.gcno
+CLEANFILES += index/*.gcda index/*.gcno
+CLEANFILES += interfaces/*.gcda interfaces/*.gcno
+CLEANFILES += node/*.gcda node/*.gcno
 CLEANFILES += policy/*.gcda policy/*.gcno
 CLEANFILES += primitives/*.gcda primitives/*.gcno
+CLEANFILES += rpc/*.gcda rpc/*.gcno
 CLEANFILES += script/*.gcda script/*.gcno
 CLEANFILES += support/*.gcda support/*.gcno
 CLEANFILES += univalue/*.gcda univalue/*.gcno
+CLEANFILES += util/*.gcda util/*.gcno
 CLEANFILES += wallet/*.gcda wallet/*.gcno
 CLEANFILES += wallet/test/*.gcda wallet/test/*.gcno
 CLEANFILES += zmq/*.gcda zmq/*.gcno
 CLEANFILES += obj/build.h
 
-EXTRA_DIST = $(CTAES_DIST)
+CHIABLS_DIST = chiabls/CMakeLists.txt
+CHIABLS_DIST += chiabls/README.md
+CHIABLS_DIST += chiabls/build/.configure-custom.sh
+CHIABLS_DIST += chiabls/build/configure
+CHIABLS_DIST += chiabls/cmake_modules
+CHIABLS_DIST += chiabls/contrib
+CHIABLS_DIST += chiabls/src
+
+EXTRA_DIST = $(CTAES_DIST) $(CHIABLS_DIST) immer
 
 
 config/syscoin-config.h: config/stamp-h1
@@ -795,6 +988,8 @@ clean-local:
 	-rm -f leveldb/*/*.gcda leveldb/*/*.gcno leveldb/helpers/memenv/*.gcda leveldb/helpers/memenv/*.gcno
 	-rm -f config.h
 	-rm -rf test/__pycache__
+	-rm -f chiabls/build/*.a chiabls/src/*.o
+	-rm -rf chiabls/build/object_chiablstmp chiabls/build/object_relic_s chiabls/build/object_sodium
 
 .rc.o:
 	@test -f $(WINDRES)
@@ -807,15 +1002,20 @@ if TARGET_DARWIN
 	$(AM_V_at) OTOOL=$(OTOOL) $(PYTHON) $(top_srcdir)/contrib/devtools/symbol-check.py $(bin_PROGRAMS)
 endif
 
+if TARGET_WINDOWS
+	@echo "Checking Windows dynamic libraries..."
+	$(AM_V_at) OBJDUMP=$(OBJDUMP) $(PYTHON) $(top_srcdir)/contrib/devtools/symbol-check.py $(bin_PROGRAMS)
+endif
+
 if GLIBC_BACK_COMPAT
 	@echo "Checking glibc back compat..."
-	$(AM_V_at) READELF=$(READELF) CPPFILT=$(CPPFILT) $(PYTHON) $(top_srcdir)/contrib/devtools/symbol-check.py $(bin_PROGRAMS)
+	$(AM_V_at) CPPFILT=$(CPPFILT) $(PYTHON) $(top_srcdir)/contrib/devtools/symbol-check.py $(bin_PROGRAMS)
 endif
 
 check-security: $(bin_PROGRAMS)
 if HARDEN
 	@echo "Checking binary security..."
-	$(AM_V_at) READELF=$(READELF) OBJDUMP=$(OBJDUMP) OTOOL=$(OTOOL) $(PYTHON) $(top_srcdir)/contrib/devtools/security-check.py $(bin_PROGRAMS)
+	$(AM_V_at) OBJDUMP=$(OBJDUMP) OTOOL=$(OTOOL) $(PYTHON) $(top_srcdir)/contrib/devtools/security-check.py $(bin_PROGRAMS)
 endif
 
 if EMBEDDED_LEVELDB
@@ -824,6 +1024,7 @@ include Makefile.leveldb.include
 endif
 
 include Makefile.test_util.include
+include Makefile.test_fuzz.include
 
 if ENABLE_TESTS
 include Makefile.test.include

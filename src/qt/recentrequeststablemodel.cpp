@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -36,15 +36,17 @@ RecentRequestsTableModel::~RecentRequestsTableModel()
 
 int RecentRequestsTableModel::rowCount(const QModelIndex &parent) const
 {
-    Q_UNUSED(parent);
-
+    if (parent.isValid()) {
+        return 0;
+    }
     return list.length();
 }
 
 int RecentRequestsTableModel::columnCount(const QModelIndex &parent) const
 {
-    Q_UNUSED(parent);
-
+    if (parent.isValid()) {
+        return 0;
+    }
     return columns.length();
 }
 
@@ -81,8 +83,9 @@ QVariant RecentRequestsTableModel::data(const QModelIndex &index, int role) cons
         case Amount:
             if (rec->recipient.amount == 0 && role == Qt::DisplayRole)
                 return tr("(no amount requested)");
+            // SYSCOIN
             else if (role == Qt::EditRole)
-                return SyscoinUnits::format(walletModel->getOptionsModel()->getDisplayUnit(), rec->recipient.amount, false, SyscoinUnits::separatorNever);
+                return SyscoinUnits::format(walletModel->getOptionsModel()->getDisplayUnit(), rec->recipient.amount, 0, false, SyscoinUnits::SeparatorStyle::NEVER);
             else
                 return SyscoinUnits::format(walletModel->getOptionsModel()->getDisplayUnit(), rec->recipient.amount);
         }
@@ -179,7 +182,7 @@ void RecentRequestsTableModel::addNewRequest(const SendCoinsRecipient &recipient
 // called from ctor when loading from wallet
 void RecentRequestsTableModel::addNewRequest(const std::string &recipient)
 {
-    std::vector<char> data(recipient.begin(), recipient.end());
+    std::vector<uint8_t> data(recipient.begin(), recipient.end());
     CDataStream ss(data, SER_DISK, CLIENT_VERSION);
 
     RecentRequestEntry entry;

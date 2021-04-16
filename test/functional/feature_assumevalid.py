@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2019 The Bitcoin Core developers
+# Copyright (c) 2014-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test logic for skipping signature validation on old blocks.
@@ -42,11 +42,10 @@ from test_framework.messages import (
     msg_block,
     msg_headers,
 )
-from test_framework.mininode import P2PInterface
+from test_framework.p2p import P2PInterface
 from test_framework.script import (CScript, OP_TRUE)
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import assert_equal
-
 
 class BaseNode(P2PInterface):
     def send_header_for_blocks(self, new_blocks):
@@ -54,19 +53,20 @@ class BaseNode(P2PInterface):
         headers_message.headers = [CBlockHeader(b) for b in new_blocks]
         self.send_message(headers_message)
 
-
 class AssumeValidTest(SyscoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 3
         self.rpc_timeout = 120
+        # Must set '-dip3params=9000:9000' to create pre-dip3 blocks only
+        self.extra_args = ['-dip3params=9000:9000']
 
     def setup_network(self):
         self.add_nodes(3)
         # Start node0. We don't start the other nodes yet since
         # we need to pre-mine a block with an invalid transaction
         # signature so we can pass in the block hash as assumevalid.
-        self.start_node(0)
+        self.start_node(0, extra_args=self.extra_args)
 
     def send_blocks_until_disconnected(self, p2p_conn):
         """Keep sending blocks to the node until we're disconnected."""
@@ -82,15 +82,17 @@ class AssumeValidTest(SyscoinTestFramework):
     def assert_blockchain_height(self, node, height):
         """Wait until the blockchain is no longer advancing and verify it's reached the expected height."""
         last_height = node.getblock(node.getbestblockhash())['height']
-        timeout = 10
+        timeout = 30
         while True:
-            time.sleep(0.25)
+            time.sleep(1)
+            # SYSCOIN
+            self.bump_mocktime(1)
             current_height = node.getblock(node.getbestblockhash())['height']
             if current_height != last_height:
                 last_height = current_height
                 if timeout < 0:
                     assert False, "blockchain too short after timeout: %d" % current_height
-                timeout - 0.25
+                timeout - 1
                 continue
             elif current_height > height:
                 assert False, "blockchain too long: %d" % current_height
@@ -123,7 +125,7 @@ class AssumeValidTest(SyscoinTestFramework):
         height += 1
 
         # Bury the block 100 deep so the coinbase output is spendable
-        for i in range(100):
+        for _ in range(100):
             block = create_block(self.tip, create_coinbase(height), self.block_time)
             block.solve()
             self.blocks.append(block)
@@ -149,9 +151,9 @@ class AssumeValidTest(SyscoinTestFramework):
         height += 1
 
         # Bury the assumed valid block 2100 deep
-        for i in range(2100):
+        for _ in range(2100):
             block = create_block(self.tip, create_coinbase(height), self.block_time)
-            block.set_base_version(4)
+            block.nVersion = 4
             block.solve()
             self.blocks.append(block)
             self.tip = block.sha256
@@ -160,9 +162,9 @@ class AssumeValidTest(SyscoinTestFramework):
 
         self.nodes[0].disconnect_p2ps()
 
-        # Start node1 and node2 with assumevalid so they accept a block with a bad signature.
-        self.start_node(1, extra_args=["-assumevalid=" + hex(block102.sha256)])
-        self.start_node(2, extra_args=["-assumevalid=" + hex(block102.sha256)])
+        # SYSCOIN Start node1 and node2 with assumevalid so they accept a block with a bad signature.
+        self.start_node(1, extra_args=self.extra_args + ["-assumevalid=" + hex(block102.sha256)])
+        self.start_node(2, extra_args=self.extra_args + ["-assumevalid=" + hex(block102.sha256)])
 
         p2p0 = self.nodes[0].add_p2p_connection(BaseNode())
         p2p1 = self.nodes[1].add_p2p_connection(BaseNode())
@@ -188,6 +190,8 @@ class AssumeValidTest(SyscoinTestFramework):
 
         # Send blocks to node2. Block 102 will be rejected.
         self.send_blocks_until_disconnected(p2p2)
+        # SYSCOIN
+        self.bump_mocktime(5)
         self.assert_blockchain_height(self.nodes[2], 101)
 
 

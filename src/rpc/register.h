@@ -22,8 +22,17 @@ void RegisterRawTransactionRPCCommands(CRPCTable &tableRPC);
 // SYSCOIN
 /** Register Syscoin Asset RPC commands */
 void RegisterAssetRPCCommands(CRPCTable &tableRPC);
+/** Register masternode RPC commands */
+void RegisterMasternodeRPCCommands(CRPCTable &tableRPC);
 /** Register governance RPC commands */
 void RegisterGovernanceRPCCommands(CRPCTable &tableRPC);
+/** Register Evo RPC commands */
+void RegisterEvoRPCCommands(CRPCTable &tableRPC);
+/** Register Quorums RPC commands */
+void RegisterQuorumsRPCCommands(CRPCTable &tableRPC);
+/** Register raw transaction RPC commands */
+void RegisterSignerRPCCommands(CRPCTable &tableRPC);
+
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
 {
     RegisterBlockchainRPCCommands(t);
@@ -33,7 +42,13 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
     RegisterRawTransactionRPCCommands(t);
     // SYSCOIN
     RegisterAssetRPCCommands(t);
+    RegisterMasternodeRPCCommands(t);
     RegisterGovernanceRPCCommands(t);
+    RegisterEvoRPCCommands(t);
+    RegisterQuorumsRPCCommands(t);
+#ifdef ENABLE_EXTERNAL_SIGNER
+    RegisterSignerRPCCommands(t);
+#endif // ENABLE_EXTERNAL_SIGNER
 }
 
 #endif // SYSCOIN_RPC_REGISTER_H

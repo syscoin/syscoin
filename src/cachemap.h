@@ -29,13 +29,9 @@ struct CacheItem
     K key;
     V value;
 
-    ADD_SERIALIZE_METHODS;
-
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action)
+    SERIALIZE_METHODS(CacheItem, obj)
     {
-        READWRITE(key);
-        READWRITE(value);
+        READWRITE(obj.key, obj.value);
     }
 };
 
@@ -113,7 +109,7 @@ public:
             PruneLast();
         }
         listItems.push_front(item_t(key, value));
-        mapIndex.emplace(key, listItems.begin());
+        mapIndex.try_emplace(key, listItems.begin());
         return true;
     }
 
@@ -154,17 +150,18 @@ public:
         RebuildIndex();
         return *this;
     }
-
-    ADD_SERIALIZE_METHODS;
-
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action)
+    template<typename Stream>
+    void Serialize(Stream& s) const
     {
-        READWRITE(nMaxSize);
-        READWRITE(listItems);
-        if(ser_action.ForRead()) {
-            RebuildIndex();
-        }
+        s << nMaxSize;
+        s << listItems;
+    }
+    template<typename Stream>
+    void Unserialize(Stream& s)
+    {
+        s >> nMaxSize;
+        s >> listItems;
+        RebuildIndex();
     }
 
 private:
@@ -182,7 +179,7 @@ private:
     {
         mapIndex.clear();
         for(list_it it = listItems.begin(); it != listItems.end(); ++it) {
-            mapIndex.emplace(it->key, it);
+            mapIndex.try_emplace(it->key, it);
         }
     }
 };

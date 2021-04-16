@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2019 The Bitcoin Core developers
+// Copyright (c) 2015-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,13 +11,16 @@
 #include <node/context.h>
 #include <pubkey.h>
 #include <random.h>
-#include <scheduler.h>
+#include <stdexcept>
 #include <txmempool.h>
+#include <util/check.h>
+#include <util/string.h>
+#include <util/vector.h>
 
 #include <type_traits>
-
-#include <boost/thread.hpp>
-
+#include <vector>
+// SYSCOIN
+#include <consensus/consensus.h>
 /** This is connected to the logger. Can be used to redirect logs to any other log */
 extern const std::function<void(const std::string&)> G_TEST_LOG_FUN;
 
@@ -41,16 +44,16 @@ extern FastRandomContext g_insecure_rand_ctx;
  * Flag to make GetRand in random.h return the same number
  */
 extern bool g_mock_deterministic_tests;
-
+// SYSCOIN
 enum class SeedRand {
     ZEROS, //!< Seed with a compile time constant of zeros
-    SEED,  //!< Call the Seed() helper
+    SEEDRAND,  //!< Call the Seed() helper
 };
 
 /** Seed the given random ctx or use the seed passed in via an environment var */
 void Seed(FastRandomContext& ctx);
 
-static inline void SeedInsecureRand(SeedRand seed = SeedRand::SEED)
+static inline void SeedInsecureRand(SeedRand seed = SeedRand::SEEDRAND)
 {
     if (seed == SeedRand::ZEROS) {
         g_insecure_rand_ctx = FastRandomContext(/* deterministic */ true);
@@ -72,22 +75,28 @@ static constexpr CAmount CENT{1000000};
  */
 struct BasicTestingSetup {
     ECCVerifyHandle globalVerifyHandle;
+    NodeContext m_node;
 
-    explicit BasicTestingSetup(const std::string& chainName = CBaseChainParams::MAIN);
+    explicit BasicTestingSetup(const std::string& chainName = CBaseChainParams::MAIN, const std::vector<const char*>& extra_args = {});
     ~BasicTestingSetup();
-private:
+
     const fs::path m_path_root;
 };
 
-/** Testing setup that configures a complete environment.
- * Included are coins database, script check threads setup.
+/** Testing setup that performs all steps up until right before
+ * ChainstateManager gets initialized. Meant for testing ChainstateManager
+ * initialization behaviour.
  */
-struct TestingSetup : public BasicTestingSetup {
-    NodeContext m_node;
-    boost::thread_group threadGroup;
+struct ChainTestingSetup : public BasicTestingSetup {
 
-    explicit TestingSetup(const std::string& chainName = CBaseChainParams::MAIN);
-    ~TestingSetup();
+    explicit ChainTestingSetup(const std::string& chainName = CBaseChainParams::MAIN, const std::vector<const char*>& extra_args = {});
+    ~ChainTestingSetup();
+};
+
+/** Testing setup that configures a complete environment.
+ */
+struct TestingSetup : public ChainTestingSetup {
+    explicit TestingSetup(const std::string& chainName = CBaseChainParams::MAIN, const std::vector<const char*>& extra_args = {});
 };
 
 /** Identical to TestingSetup, but chain set to regtest */
@@ -96,27 +105,80 @@ struct RegTestingSetup : public TestingSetup {
         : TestingSetup{CBaseChainParams::REGTEST} {}
 };
 
+
 class CBlock;
 struct CMutableTransaction;
 class CScript;
 
-//
-// Testing fixture that pre-creates a
-// 100-block REGTEST-mode block chain
-//
-struct TestChain100Setup : public TestingSetup {
-    TestChain100Setup();
+/**
+ * Testing fixture that pre-creates a 100-block REGTEST-mode block chain
+ */
+struct TestChain100Setup : public RegTestingSetup {
+    // SYSCOIN
+    TestChain100Setup(int count = COINBASE_MATURITY);
 
-    // Create a new block with just given transactions, coinbase paying to
-    // scriptPubKey, and try to add it to the current chain.
+    /**
+     * Create a new block with just given transactions, coinbase paying to
+     * scriptPubKey, and try to add it to the current chain.
+     */
     CBlock CreateAndProcessBlock(const std::vector<CMutableTransaction>& txns,
                                  const CScript& scriptPubKey);
+
+    //! Mine a series of new blocks on the active chain.
+    void mineBlocks(int num_blocks);
+
+    /**
+     * Create a transaction and submit to the mempool.
+     *
+     * @param input_transaction  The transaction to spend
+     * @param input_vout         The vout to spend from the input_transaction
+     * @param input_height       The height of the block that included the input_transaction
+     * @param input_signing_key  The key to spend the input_transaction
+     * @param output_destination Where to send the output
+     * @param output_amount      How much to send
+     */
+    CMutableTransaction CreateValidMempoolTransaction(CTransactionRef input_transaction,
+                                                      int input_vout,
+                                                      int input_height,
+                                                      CKey input_signing_key,
+                                                      CScript output_destination,
+                                                      CAmount output_amount = CAmount(1 * COIN));
 
     ~TestChain100Setup();
 
     std::vector<CTransactionRef> m_coinbase_txns; // For convenience, coinbase transactions
     CKey coinbaseKey; // private/public key needed to spend coinbase transactions
 };
+
+//
+// SYSCOIN Testing fixture that pre-creates a
+// N-block REGTEST-mode block chain
+//
+struct TestChainDIP3Setup : public TestChain100Setup
+{
+    TestChainDIP3Setup() : TestChain100Setup(549) {}
+};
+struct TestChainDIP3BeforeActivationSetup : public TestChain100Setup
+{
+    TestChainDIP3BeforeActivationSetup() : TestChain100Setup(548) {}
+};
+
+/**
+ * Make a test setup that has disk access to the debug.log file disabled. Can
+ * be used in "hot loops", for example fuzzing or benchmarking.
+ */
+template <class T = const BasicTestingSetup>
+std::unique_ptr<T> MakeNoLogFileContext(const std::string& chain_name = CBaseChainParams::REGTEST, const std::vector<const char*>& extra_args = {})
+{
+    const std::vector<const char*> arguments = Cat(
+        {
+            "-nodebuglogfile",
+            "-nodebug",
+        },
+        extra_args);
+
+    return std::make_unique<T>(chain_name, arguments);
+}
 
 class CTxMemPoolEntry;
 
@@ -134,8 +196,8 @@ struct TestMemPoolEntryHelper
         nFee(0), nTime(0), nHeight(1),
         spendsCoinbase(false), sigOpCost(4) { }
 
-    CTxMemPoolEntry FromTx(const CMutableTransaction& tx);
-    CTxMemPoolEntry FromTx(const CTransactionRef& tx);
+    CTxMemPoolEntry FromTx(const CMutableTransaction& tx) const;
+    CTxMemPoolEntry FromTx(const CTransactionRef& tx) const;
 
     // Change the default value
     TestMemPoolEntryHelper &Fee(CAmount _fee) { nFee = _fee; return *this; }
@@ -153,4 +215,23 @@ std::ostream& operator<<(std::ostream& os, const uint256& num);
 namespace merkle_tests {
 std::vector<uint256> BlockMerkleBranch(const CBlock& block, uint32_t position);
 }
+
+/**
+ * BOOST_CHECK_EXCEPTION predicates to check the specific validation error.
+ * Use as
+ * BOOST_CHECK_EXCEPTION(code that throws, exception type, HasReason("foo"));
+ */
+class HasReason
+{
+public:
+    explicit HasReason(const std::string& reason) : m_reason(reason) {}
+    bool operator()(const std::exception& e) const
+    {
+        return std::string(e.what()).find(m_reason) != std::string::npos;
+    };
+
+private:
+    const std::string m_reason;
+};
+
 #endif

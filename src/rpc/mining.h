@@ -1,21 +1,11 @@
-// Copyright (c) 2017 The Bitcoin Core developers
+// Copyright (c) 2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_RPC_MINING_H
 #define SYSCOIN_RPC_MINING_H
 
-#include <script/script.h>
+/** Default max iterations to try in RPC generatetodescriptor, generatetoaddress, and generateblock. */
+static const uint64_t DEFAULT_MAX_TRIES{1000000};
 
-#include <univalue.h>
-
-#include <memory>
-
-class AuxpowMiner;
-/** Generate blocks (mine) */
-UniValue generateBlocks(const CTxMemPool& mempool, const CScript& coinbase_script, int nGenerate, uint64_t nMaxTries);
-
-/** Singleton instance of the AuxpowMiner, created during startup.  */
-extern std::unique_ptr<AuxpowMiner> g_auxpow_miner;
-
-#endif
+#endif // SYSCOIN_RPC_MINING_H

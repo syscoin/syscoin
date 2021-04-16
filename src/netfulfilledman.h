@@ -1,5 +1,4 @@
-// Copyright (c) 2014-2017 The Dash Core developers
-// Copyright (c) 2017-2018 The Bitcoin Core developers
+// Copyright (c) 2014-2019 The Dash Core developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -23,30 +22,30 @@ private:
 
     //keep track of what node has/was asked for and when
     fulfilledreqmap_t mapFulfilledRequests;
-    RecursiveMutex cs_mapFulfilledRequests;
+    mutable RecursiveMutex cs_mapFulfilledRequests;
 
     void RemoveFulfilledRequest(const CService& addr, const std::string& strRequest);
 
 public:
     CNetFulfilledRequestManager() {}
 
-    ADD_SERIALIZE_METHODS;
-
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action) {
-        LOCK(cs_mapFulfilledRequests);
-        READWRITE(mapFulfilledRequests);
+    SERIALIZE_METHODS(CNetFulfilledRequestManager, obj)
+    {
+         LOCK(obj.cs_mapFulfilledRequests);
+         READWRITE(obj.mapFulfilledRequests);
     }
 
     void AddFulfilledRequest(const CService& addr, const std::string& strRequest);
     bool HasFulfilledRequest(const CService& addr, const std::string& strRequest);
+
+    void RemoveAllFulfilledRequests(const CService& addr);
 
     void CheckAndRemove();
     void Clear();
 
     std::string ToString() const;
 
-    void DoMaintenance() { CheckAndRemove(); }
+    void DoMaintenance();
 };
 
-#endif // SYSCOIN_NETFULFILLEDMAN_H
+#endif

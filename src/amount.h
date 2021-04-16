@@ -7,7 +7,10 @@
 #define SYSCOIN_AMOUNT_H
 
 #include <stdint.h>
-
+#include <limits>
+#include <unordered_map>
+// SYSCOIN
+#include <uint256.h>
 /** Amount in satoshis (Can be negative) */
 typedef int64_t CAmount;
 
@@ -23,6 +26,27 @@ static const CAmount COIN = 100000000;
  * for the creation of coins out of thin air modification could lead to a fork.
  * */
 static const CAmount MAX_MONEY = 888000000 * COIN;
+// SYSCOIN
+static const CAmount MAX_ASSET = 1000000000000000000LL - 1LL; // 10^18 - 1 max decimal value that will fit in CAmount
+static const CAmount COST_ASSET = COIN;
 inline bool MoneyRange(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_MONEY); }
+inline bool MoneyRangeAsset(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_ASSET); }
+struct AssetMapOutput {
+    bool bZeroVal;
+    // satoshi amount of all outputs
+    CAmount nAmount;
+    AssetMapOutput(const bool &bZeroValIn, const CAmount &nAmountIn): bZeroVal(bZeroValIn), nAmount(nAmountIn) {}
+    // this is consensus critical, it will ensure input assets and output assets are equal
+    friend bool operator==(const AssetMapOutput& a, const AssetMapOutput& b)
+    {
+        return (a.bZeroVal == b.bZeroVal &&
+                a.nAmount  == b.nAmount);
+    }
 
+    friend bool operator!=(const AssetMapOutput& a, const AssetMapOutput& b)
+    {
+        return !(a == b);
+    }
+};
+typedef std::unordered_map<uint64_t, AssetMapOutput> CAssetsMap;
 #endif //  SYSCOIN_AMOUNT_H

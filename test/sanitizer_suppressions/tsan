@@ -1,24 +1,50 @@
 # ThreadSanitizer suppressions
 # ============================
+#
+# https://github.com/google/sanitizers/wiki/ThreadSanitizerSuppressions
 
-# WalletBatch (unidentified deadlock)
-deadlock:WalletBatch
+# race (TODO fix)
+race:LoadWallet
+race:WalletBatch::WriteHDChain
+race:BerkeleyBatch
+race:BerkeleyDatabase
+race:DatabaseBatch
+race:zmq::*
+race:syscoin-qt
+
+# deadlock (TODO fix)
+deadlock:CChainState::ConnectTip
 
 # Intentional deadlock in tests
-deadlock:TestPotentialDeadLockDetected
-
-# Race due to unprotected calls to thread-unsafe BOOST_TEST_MESSAGE from different threads:
-# * G_TEST_LOG_FUN in the index thread
-# * boost test case invoker (entering a test case) in the main thread
-# TODO: get rid of BOOST_ macros, see also https://github.com/bitcoin/bitcoin/issues/8670
-race:blockfilter_index_initial_sync_invoker
-race:txindex_initial_sync_invoker
-race:validation_block_tests::TestSubscriber
+deadlock:sync_tests::potential_deadlock_detected
 
 # Wildcard for all gui tests, should be replaced with non-wildcard suppressions
 race:src/qt/test/*
+race:src/bench/*
 deadlock:src/qt/test/*
+
+# Race in src/test/main.cpp
+# Can be removed once upgraded to boost test 1.74 in depends
+race:validation_chainstatemanager_tests
 
 # External libraries
 deadlock:libdb
 race:libzmq
+race:CBLSWorker::GenerateContributions
+race:ctpl::thread_pool::push
+race:masternodeSync
+race:CEvoDB::CommitRootTransaction
+race:CDeterministicMNManager:GetListForBlock
+deadlock:CConnman::ForEachNode
+
+# Intermittent issues
+# -------------------
+#
+# Suppressions that follow might only happen intermittently, thus they are not
+# reproducible. Make sure to include a link to a full trace.
+
+# https://github.com/bitcoin/bitcoin/issues/20618
+race:CZMQAbstractPublishNotifier::SendZmqMessage
+
+# https://github.com/bitcoin/bitcoin/pull/20218, https://github.com/bitcoin/bitcoin/pull/20745
+race:epoll_ctl

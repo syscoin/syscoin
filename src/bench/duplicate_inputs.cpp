@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,13 +7,15 @@
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <pow.h>
+#include <test/util/setup_common.h>
 #include <txmempool.h>
 #include <validation.h>
 
 
-
-static void DuplicateInputs(benchmark::State& state)
+static void DuplicateInputs(benchmark::Bench& bench)
 {
+    const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
+
     const CScript SCRIPT_PUB{CScript(OP_TRUE)};
 
     const CChainParams& chainparams = Params();
@@ -35,8 +37,7 @@ static void DuplicateInputs(benchmark::State& state)
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = SCRIPT_PUB;
     // SYSCOIN
-    CAmount nTotalRewardWithMasternodes;
-    coinbaseTx.vout[0].nValue = GetBlockSubsidy(nHeight, chainparams.GetConsensus(), nTotalRewardWithMasternodes);
+    coinbaseTx.vout[0].nValue = GetBlockSubsidy(nHeight, chainparams);
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
 
 
@@ -55,11 +56,11 @@ static void DuplicateInputs(benchmark::State& state)
 
     block.hashMerkleRoot = BlockMerkleRoot(block);
 
-    while (state.KeepRunning()) {
+    bench.run([&] {
         BlockValidationState cvstate{};
         assert(!CheckBlock(block, cvstate, chainparams.GetConsensus(), false, false));
         assert(cvstate.GetRejectReason() == "bad-txns-inputs-duplicate");
-    }
+    });
 }
 
-BENCHMARK(DuplicateInputs, 10);
+BENCHMARK(DuplicateInputs);

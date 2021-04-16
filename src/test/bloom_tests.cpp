@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2019 The Bitcoin Core developers
+// Copyright (c) 2012-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,10 +12,10 @@
 #include <random.h>
 #include <serialize.h>
 #include <streams.h>
-#include <uint256.h>
-#include <util/system.h>
-#include <util/strencodings.h>
 #include <test/util/setup_common.h>
+#include <uint256.h>
+#include <util/strencodings.h>
+#include <util/system.h>
 
 #include <vector>
 
@@ -27,6 +27,7 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize)
 {
     CBloomFilter filter(3, 0.01, 0, BLOOM_UPDATE_ALL);
 
+    BOOST_CHECK_MESSAGE( !filter.contains(ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8")), "Bloom filter should be empty!");
     filter.insert(ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8"));
     BOOST_CHECK_MESSAGE( filter.contains(ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8")), "Bloom filter doesn't contain just-inserted object!");
     // One bit different in first byte
@@ -41,17 +42,11 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize)
     CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
     stream << filter;
 
-    std::vector<unsigned char> vch = ParseHex("03614e9b050000000000000001");
-    std::vector<char> expected(vch.size());
-
-    for (unsigned int i = 0; i < vch.size(); i++)
-        expected[i] = (char)vch[i];
+    std::vector<uint8_t> expected = ParseHex("03614e9b050000000000000001");
 
     BOOST_CHECK_EQUAL_COLLECTIONS(stream.begin(), stream.end(), expected.begin(), expected.end());
 
     BOOST_CHECK_MESSAGE( filter.contains(ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8")), "Bloom filter doesn't contain just-inserted object!");
-    filter.clear();
-    BOOST_CHECK_MESSAGE( !filter.contains(ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8")), "Bloom filter should be empty!");
 }
 
 BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize_with_tweak)
@@ -73,11 +68,7 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize_with_tweak)
     CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
     stream << filter;
 
-    std::vector<unsigned char> vch = ParseHex("03ce4299050000000100008001");
-    std::vector<char> expected(vch.size());
-
-    for (unsigned int i = 0; i < vch.size(); i++)
-        expected[i] = (char)vch[i];
+    std::vector<uint8_t> expected = ParseHex("03ce4299050000000100008001");
 
     BOOST_CHECK_EQUAL_COLLECTIONS(stream.begin(), stream.end(), expected.begin(), expected.end());
 }
@@ -97,11 +88,7 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_key)
     CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
     stream << filter;
 
-    std::vector<unsigned char> vch = ParseHex("038fc16b080000000000000001");
-    std::vector<char> expected(vch.size());
-
-    for (unsigned int i = 0; i < vch.size(); i++)
-        expected[i] = (char)vch[i];
+    std::vector<unsigned char> expected = ParseHex("038fc16b080000000000000001");
 
     BOOST_CHECK_EQUAL_COLLECTIONS(stream.begin(), stream.end(), expected.begin(), expected.end());
 }
@@ -174,7 +161,107 @@ BOOST_AUTO_TEST_CASE(bloom_match)
     filter.insert(COutPoint(uint256S("0x000000d70786e899529d71dbeba91ba216982fb6ba58f3bdaab65e73b7e9260b"), 0));
     BOOST_CHECK_MESSAGE(!filter.IsRelevantAndUpdate(tx), "Simple Bloom filter matched COutPoint for an output we didn't care about");
 }
+// SYSCOIN
+BOOST_AUTO_TEST_CASE(dip2_bloom_match)
+{
+    // ProRegTx from testnet (txid: a446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c5632)
+    CDataStream stream(ParseHex("500000000001012fa52ec38276cc8f5376d6cbb211524851b2feec21f866966bf4ce7b7558ee910000000000feffffff020000000000000000d16a4cce01000000000031e77323502acc4c8d204d2951c6f75cfb79910afaf9deb119e6598aa9bc59b80100000000000000000000000000ffffadf9310947c154a9eed46b864772bd4aeea2165a3206d1ee4e941324af7ca7a4c4f1cf36e20d259e4724e18be0e39471db9f7d88f64748ec17583fbe591538dce8293c801e4d3410d2ed35cfddbf0573c05b33d7f24a0562b21a648d449d00001600145b1c9907188c05144fb19ba71f516bf50aec9b615b0283fd4c816f3f637b06d3d73ea5d94b859ac3f28589c9312ce5b65c05c913000bc317a804000000160014800563f22c7022b1f8b5c371e5361996d78872220247304402202879ffad1d8de66ca7bd1cac8c89551e28369005804a2ca5847a38c2f1e34c94022071109d1a1ad8cebbdb8dad33bbc0984b4f090233b27564ee946e403c55710c4e0121033fc91a933e42becc19bcff709345eff216e0f8d7129b3a91a19b0e520d4b114a00000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction proregtx(deserialize, stream);
+    // ProUpServTx from testnet (txid: ad77a3226c261dd3bee05c4b4cd96a61c147df39a85d2ec1acb17441c195a9e7)
+    stream = CDataStream(ParseHex("51000000011dd439844b6d2d96ded5745743ba6ee44255819f16189e7322408affd5a4491b00000000484730440220506ff294cf06061a61c188553b9a94bad2c10f637c81534d538ee5e2f6aa58aa02203c1a9b6db1c9850a3dbbaa8b5c214c7f71bdabc792ddc6fc97c582b0afc952c501ffffffff0300e1f505000000001976a91434addcf1fa52147886d29b14b2e0507c7f9d20ae88ac00111024010000001976a91434addcf1fa52147886d29b14b2e0507c7f9d20ae88ac0000000000000000d16a4cce0100e7a995c14174b1acc12e5da839df47c1616ad94c4b5ce0bed31d266c22a377ad00000000000000000000ffff0101010103e81976a91434addcf1fa52147886d29b14b2e0507c7f9d20ae88acf1bc5bea7d948122131d095bcf5342151918c6d533ff948b9ddbce0fed12f9b1970c0b0874b09f6a6b005d29848639a4e56971fcf5ccd15235cac9bff9740e83a8cc41ba24c467637756910fbe803633028c0390f0b6a158ca23bd4bf864ad4d6cdc2f5660f800272301a19f407efdf0880c8a74c22afb9d6ba42f137953a88500000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction proupservtx(deserialize, stream);
+    // ProUpRegTx from testnet (txid: 3037bf4e45d1a9d57891ea8baa72b38ad6323bd28945b11325bdd33ebea049b3)
+    stream = CDataStream(ParseHex("5200000001fd1e4f347b86c81e2fa44f7a87e6facea1420cacf47ae53dd4e5474ef7673f6f0000000048473044022022566b464ae1b6ad4cccfaa6042a3fef2b6c4a3ae40a6ff51a816067429e987702201427b420883a28dcbd73910c53323d0d16ea3f2e55ec52b036a1b0a9309644dd01ffffffff0300e1f505000000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac00111024010000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac0000000000000000e76a4ce4010032560c4d2044284472199a98c74d8eb2bebb5ee7db8668e851e4731afdab46a4000099db7ad26768dd82153825144d1d67c01308e0423b70d2bf784e38c37bcb1721834ed4df2f63314aaf96e01f766d39e564837d4c7d1342f6b87467323e249fa462ec8a7b1976a9145a9043d454c4b51a8f7e28aff5503912f4b26c5288acd0fabc0529059eaf7a64ed6c2c9daa9d2f82bd5d11800d5653ca347576bb306f41205d34a688368a7ef70dad9ce20f6e039ca69d83d723e3389a4f2388b3d71e009c23f22cf4fcbbf4e059135717235d85a36eac0d9c9b93bbe5325751882efc24ac00000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction proupregtx(deserialize, stream);
+    // ProUpRevTx from testnet (txid: 70c41a5fea07a80c1297771c43eb58b8f52222b971f61f5c7c2030ec0baf7f9a)
+    stream = CDataStream(ParseHex("5300000001fe1cdb7ae7ace46317e6821c3da38694ff59718902c5a7d52ae960be5bc879c4000000004847304402207dface585852ec6b6ff0fe236a9a017deab588407d7301bacd3ccad72d1a6fcf02206b29fc6b9950f3ff16ba6e49497eeae13ae8818b78a1a49bf819693a0d9148eb01ffffffff0300e1f505000000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac00111024010000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac0000000000000000a76a4ca4010032560c4d2044284472199a98c74d8eb2bebb5ee7db8668e851e4731afdab46a40000899ea2fa9efab2b1f7eedc8788358eac92079283e2f9c07099924d9c9343b265845ff52831c70f1adfb576589d1846a4ea691a3cb2745c34de3bff654cf13403f64b56ff73aa7cc3bc0198d14d12e54004b3bf2d3118295897bd39278be74c914f8e98e8e2b2e555e3c987062ff59186a6139123924077b357710fab85f1078400000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction prouprevtx(deserialize, stream);
 
+    // check collateral outpoint match in ProRegTx
+    CBloomFilter filter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(COutPoint(uint256S("0xb859bca98a59e619b1def9fa0a9179fb5cf7c651294d208d4ccc2a502373e731"), 1));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proregtx), "Bloom filter didn't match collateral outpoint in ProRegTx");
+    // check owner keyid match in ProRegTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(ParseHex("54a9eed46b864772bd4aeea2165a3206d1ee4e94"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proregtx), "Bloom filter didn't match Owner keyid in ProRegTx");
+    // check voting keyid match in ProRegTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(ParseHex("35cfddbf0573c05b33d7f24a0562b21a648d449d"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proregtx), "Bloom filter didn't match Voting keyid in ProRegTx");
+    // check scriptPayout match in ProRegTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(ParseHex("00145b1c9907188c05144fb19ba71f516bf50aec9b61"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proregtx), "Bloom filter didn't match scriptPayout in ProRegTx");
+
+    // check proTxHash match in ProUpServTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(uint256S("0xad77a3226c261dd3bee05c4b4cd96a61c147df39a85d2ec1acb17441c195a9e7"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proupservtx), "Bloom filter didn't match proTxHash in ProUpServTx");
+    // check scriptOperatorPayout match in ProUpServTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(ParseHex("76a91434addcf1fa52147886d29b14b2e0507c7f9d20ae88ac"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proupservtx), "Bloom filter didn't match scriptOperatorPayout in ProUpServTx");
+
+    // check proTxHash match in ProUpRegTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(uint256S("0xa446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c5632"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proupregtx), "Bloom filter didn't match proTxHash in ProUpRegTx");
+    // check voting keyid match in ProUpRegTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(ParseHex("64837d4c7d1342f6b87467323e249fa462ec8a7b"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proupregtx), "Bloom filter didn't match Voting keyid in ProUpRegTx");
+    // check scriptPayout match in ProUpRegTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(ParseHex("76a9145a9043d454c4b51a8f7e28aff5503912f4b26c5288ac"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proupregtx), "Bloom filter didn't match scriptPayout in ProUpRegTx");
+
+    // check proTxHash match in ProUpRevTx
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(uint256S("0xa446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c5632"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(prouprevtx), "Bloom filter didn't match proTxHash in ProUpRevTx");
+
+    // check filter is not matching if it doesn't contain relative data
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    // extend real data with additional byte
+    filter.insert(uint256S("0xa446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c563200"));
+    filter.insert(ParseHex("64837d4c7d1342f6b87467323e249fa462ec8a7b00"));
+    filter.insert(ParseHex("76a9145a9043d454c4b51a8f7e28aff5503912f4b26c5288ac00"));
+    filter.insert(uint256S("0xa446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c563200"));
+    BOOST_CHECK_MESSAGE(!filter.IsRelevantAndUpdate(prouprevtx), "Bloom filter match unrelated data");
+    BOOST_CHECK_MESSAGE(!filter.IsRelevantAndUpdate(proupregtx), "Bloom filter match unrelated data");
+}
+
+BOOST_AUTO_TEST_CASE(dip2_bloom_update)
+{
+    // ProRegTx from testnet (txid: a446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c5632)
+    CDataStream stream(ParseHex("500000000001012fa52ec38276cc8f5376d6cbb211524851b2feec21f866966bf4ce7b7558ee910000000000feffffff020000000000000000d16a4cce01000000000031e77323502acc4c8d204d2951c6f75cfb79910afaf9deb119e6598aa9bc59b80100000000000000000000000000ffffadf9310947c154a9eed46b864772bd4aeea2165a3206d1ee4e941324af7ca7a4c4f1cf36e20d259e4724e18be0e39471db9f7d88f64748ec17583fbe591538dce8293c801e4d3410d2ed35cfddbf0573c05b33d7f24a0562b21a648d449d00001600145b1c9907188c05144fb19ba71f516bf50aec9b615b0283fd4c816f3f637b06d3d73ea5d94b859ac3f28589c9312ce5b65c05c913000bc317a804000000160014800563f22c7022b1f8b5c371e5361996d78872220247304402202879ffad1d8de66ca7bd1cac8c89551e28369005804a2ca5847a38c2f1e34c94022071109d1a1ad8cebbdb8dad33bbc0984b4f090233b27564ee946e403c55710c4e0121033fc91a933e42becc19bcff709345eff216e0f8d7129b3a91a19b0e520d4b114a00000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction proregtx(deserialize, stream);
+    // ProUpServTx from testnet (txid: ad77a3226c261dd3bee05c4b4cd96a61c147df39a85d2ec1acb17441c195a9e7)
+    stream = CDataStream(ParseHex("51000000011dd439844b6d2d96ded5745743ba6ee44255819f16189e7322408affd5a4491b00000000484730440220506ff294cf06061a61c188553b9a94bad2c10f637c81534d538ee5e2f6aa58aa02203c1a9b6db1c9850a3dbbaa8b5c214c7f71bdabc792ddc6fc97c582b0afc952c501ffffffff0300e1f505000000001976a91434addcf1fa52147886d29b14b2e0507c7f9d20ae88ac00111024010000001976a91434addcf1fa52147886d29b14b2e0507c7f9d20ae88ac0000000000000000d16a4cce0100e7a995c14174b1acc12e5da839df47c1616ad94c4b5ce0bed31d266c22a377ad00000000000000000000ffff0101010103e81976a91434addcf1fa52147886d29b14b2e0507c7f9d20ae88acf1bc5bea7d948122131d095bcf5342151918c6d533ff948b9ddbce0fed12f9b1970c0b0874b09f6a6b005d29848639a4e56971fcf5ccd15235cac9bff9740e83a8cc41ba24c467637756910fbe803633028c0390f0b6a158ca23bd4bf864ad4d6cdc2f5660f800272301a19f407efdf0880c8a74c22afb9d6ba42f137953a88500000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction proupservtx(deserialize, stream);
+    // ProUpRegTx from testnet (txid: 3037bf4e45d1a9d57891ea8baa72b38ad6323bd28945b11325bdd33ebea049b3)
+    stream = CDataStream(ParseHex("5200000001fd1e4f347b86c81e2fa44f7a87e6facea1420cacf47ae53dd4e5474ef7673f6f0000000048473044022022566b464ae1b6ad4cccfaa6042a3fef2b6c4a3ae40a6ff51a816067429e987702201427b420883a28dcbd73910c53323d0d16ea3f2e55ec52b036a1b0a9309644dd01ffffffff0300e1f505000000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac00111024010000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac0000000000000000e76a4ce4010032560c4d2044284472199a98c74d8eb2bebb5ee7db8668e851e4731afdab46a4000099db7ad26768dd82153825144d1d67c01308e0423b70d2bf784e38c37bcb1721834ed4df2f63314aaf96e01f766d39e564837d4c7d1342f6b87467323e249fa462ec8a7b1976a9145a9043d454c4b51a8f7e28aff5503912f4b26c5288acd0fabc0529059eaf7a64ed6c2c9daa9d2f82bd5d11800d5653ca347576bb306f41205d34a688368a7ef70dad9ce20f6e039ca69d83d723e3389a4f2388b3d71e009c23f22cf4fcbbf4e059135717235d85a36eac0d9c9b93bbe5325751882efc24ac00000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction proupregtx(deserialize, stream);
+    // ProUpRevTx from testnet (txid: 70c41a5fea07a80c1297771c43eb58b8f52222b971f61f5c7c2030ec0baf7f9a)
+    stream = CDataStream(ParseHex("5300000001fe1cdb7ae7ace46317e6821c3da38694ff59718902c5a7d52ae960be5bc879c4000000004847304402207dface585852ec6b6ff0fe236a9a017deab588407d7301bacd3ccad72d1a6fcf02206b29fc6b9950f3ff16ba6e49497eeae13ae8818b78a1a49bf819693a0d9148eb01ffffffff0300e1f505000000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac00111024010000001976a914844b091b74876f7bc4ff92106d033ef9756e0f7888ac0000000000000000a76a4ca4010032560c4d2044284472199a98c74d8eb2bebb5ee7db8668e851e4731afdab46a40000899ea2fa9efab2b1f7eedc8788358eac92079283e2f9c07099924d9c9343b265845ff52831c70f1adfb576589d1846a4ea691a3cb2745c34de3bff654cf13403f64b56ff73aa7cc3bc0198d14d12e54004b3bf2d3118295897bd39278be74c914f8e98e8e2b2e555e3c987062ff59186a6139123924077b357710fab85f1078400000000"), SER_DISK, CLIENT_VERSION);
+    CTransaction prouprevtx(deserialize, stream);
+
+    // if ProRegTx matches, all related pro txes match too
+    CBloomFilter filter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(COutPoint(uint256S("0xb859bca98a59e619b1def9fa0a9179fb5cf7c651294d208d4ccc2a502373e731"), 1));
+    BOOST_CHECK_MESSAGE(!filter.IsRelevantAndUpdate(proupservtx), "Bloom filter matches without update");
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proregtx), "Bloom filter didn't match collateral outpoint in ProRegTx");
+    BOOST_CHECK_MESSAGE(!filter.IsRelevantAndUpdate(proupregtx), "Bloom filter wasn't updated with proregtx hash");
+
+    // if ProUpRegTx matches, all related pro txes match too
+    filter = CBloomFilter(10, 0.000001, 0, BLOOM_UPDATE_ALL);
+    filter.insert(uint256S("0xa446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c5632"));
+    filter.insert(uint256S("0xad77a3226c261dd3bee05c4b4cd96a61c147df39a85d2ec1acb17441c195a9e7"));
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proupservtx), "Bloom filter matches without update");
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(proupregtx), "Bloom filter didn't match proregtx hash in ProUpRegTx");
+    BOOST_CHECK_MESSAGE(filter.IsRelevantAndUpdate(prouprevtx), "Bloom filter wasn't updated with proregtx hash");
+}
 BOOST_AUTO_TEST_CASE(merkle_block_1)
 {
     CBlock block = getBlock13b8a();
@@ -353,11 +440,7 @@ BOOST_AUTO_TEST_CASE(merkle_block_3_and_serialize)
     CDataStream merkleStream(SER_NETWORK, PROTOCOL_VERSION);
     merkleStream << merkleBlock;
 
-    std::vector<unsigned char> vch = ParseHex("0100000079cda856b143d9db2c1caff01d1aecc8630d30625d10e8b4b8b0000000000000b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f196367291b4d4c86041b8fa45d630100000001b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f19630101");
-    std::vector<char> expected(vch.size());
-
-    for (unsigned int i = 0; i < vch.size(); i++)
-        expected[i] = (char)vch[i];
+    std::vector<uint8_t> expected = ParseHex("0100000079cda856b143d9db2c1caff01d1aecc8630d30625d10e8b4b8b0000000000000b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f196367291b4d4c86041b8fa45d630100000001b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f19630101");
 
     BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), merkleStream.begin(), merkleStream.end());
 }
@@ -489,7 +572,7 @@ BOOST_AUTO_TEST_CASE(rolling_bloom)
             ++nHits;
     }
     // Expect about 100 hits
-    BOOST_CHECK_EQUAL(nHits, 75);
+    BOOST_CHECK_EQUAL(nHits, 75U);
 
     BOOST_CHECK(rb1.contains(data[DATASIZE-1]));
     rb1.reset();
@@ -517,7 +600,7 @@ BOOST_AUTO_TEST_CASE(rolling_bloom)
             ++nHits;
     }
     // Expect about 5 false positives
-    BOOST_CHECK_EQUAL(nHits, 6);
+    BOOST_CHECK_EQUAL(nHits, 6U);
 
     // last-1000-entry, 0.01% false positive:
     CRollingBloomFilter rb2(1000, 0.001);

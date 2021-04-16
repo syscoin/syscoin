@@ -10,7 +10,10 @@
 #endif
 
 #include <QApplication>
+#include <assert.h>
 #include <memory>
+
+#include <interfaces/node.h>
 
 class SyscoinGUI;
 class ClientModel;
@@ -18,14 +21,14 @@ class NetworkStyle;
 class OptionsModel;
 class PaymentServer;
 class PlatformStyle;
+class SplashScreen;
 class WalletController;
 class WalletModel;
 
-namespace interfaces {
-class Handler;
-class Node;
-} // namespace interfaces
-
+QT_BEGIN_NAMESPACE
+// SYSCOIN
+class QStringList;
+QT_END_NAMESPACE
 /** Class encapsulating Syscoin Core startup and shutdown.
  * Allows running startup and shutdown in a different thread from the UI thread.
  */
@@ -38,9 +41,11 @@ public:
 public Q_SLOTS:
     void initialize();
     void shutdown();
+    // SYSCOIN
+    void restart(const QStringList &args);
 
 Q_SIGNALS:
-    void initializeResult(bool success);
+    void initializeResult(bool success, interfaces::BlockAndHeaderTipInfo tip_info);
     void shutdownResult();
     void runawayException(const QString &message);
 
@@ -56,7 +61,7 @@ class SyscoinApplication: public QApplication
 {
     Q_OBJECT
 public:
-    explicit SyscoinApplication(interfaces::Node& node);
+    explicit SyscoinApplication();
     ~SyscoinApplication();
 
 #ifdef ENABLE_WALLET
@@ -74,8 +79,7 @@ public:
     /// Create splash screen
     void createSplashScreen(const NetworkStyle *networkStyle);
     /// Basic initialization, before starting initialization/shutdown thread. Return true on success.
-    // SYSCOIN
-    bool baseInitialize(char* argv[]);
+    bool baseInitialize();
 
     /// Request core initialization
     void requestInitialize();
@@ -91,11 +95,20 @@ public:
     /// Setup platform style
     void setupPlatformStyle();
 
+    interfaces::Node& node() const { assert(m_node); return *m_node; }
+    void setNode(interfaces::Node& node);
+
 public Q_SLOTS:
-    void initializeResult(bool success);
+    void initializeResult(bool success, interfaces::BlockAndHeaderTipInfo tip_info);
     void shutdownResult();
     /// Handle runaway exceptions. Shows a message box with the problem and quits the program.
     void handleRunawayException(const QString &message);
+
+    /**
+     * A helper function that shows a message box
+     * with details about a non-fatal exception.
+     */
+    void handleNonFatalException(const QString& message);
 
 Q_SIGNALS:
     void requestedInitialize();
@@ -105,7 +118,6 @@ Q_SIGNALS:
 
 private:
     QThread *coreThread;
-    interfaces::Node& m_node;
     OptionsModel *optionsModel;
     ClientModel *clientModel;
     SyscoinGUI *window;
@@ -117,6 +129,8 @@ private:
     int returnValue;
     const PlatformStyle *platformStyle;
     std::unique_ptr<QWidget> shutdownWindow;
+    SplashScreen* m_splash = nullptr;
+    interfaces::Node* m_node = nullptr;
 
     void startThread();
 };

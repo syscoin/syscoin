@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2018 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -34,9 +34,8 @@ CFeeRate GetMinimumFeeRate(const CWallet& wallet, const CCoinControl& coin_contr
        4. m_confirm_target (user-set member variable of wallet)
        The first parameter that is set is used.
     */
-   // SYS until we get full blocks we just relay on getrequiredfeerate which is based on the relayminfee
      CFeeRate feerate_needed;
-    /* if (coin_control.m_feerate) { // 1.
+     if (coin_control.m_feerate) { // 1.
         feerate_needed = *(coin_control.m_feerate);
         if (feeCalc) feeCalc->reason = FeeReason::PAYTXFEE;
         // Allow to override automatic min/max check over coin control instance
@@ -50,7 +49,7 @@ CFeeRate GetMinimumFeeRate(const CWallet& wallet, const CCoinControl& coin_contr
         // We will use smart fee estimation
         unsigned int target = coin_control.m_confirm_target ? *coin_control.m_confirm_target : wallet.m_confirm_target;
         // By default estimates are economical iff we are signaling opt-in-RBF
-        bool conservative_estimate = !coin_control.m_signal_bip125_rbf.get_value_or(wallet.m_signal_rbf);
+        bool conservative_estimate = !coin_control.m_signal_bip125_rbf.value_or(wallet.m_signal_rbf);
         // Allow to override the default fee estimate mode over the CoinControl instance
         if (coin_control.m_fee_mode == FeeEstimateMode::CONSERVATIVE) conservative_estimate = true;
         else if (coin_control.m_fee_mode == FeeEstimateMode::ECONOMICAL) conservative_estimate = false;
@@ -70,7 +69,7 @@ CFeeRate GetMinimumFeeRate(const CWallet& wallet, const CCoinControl& coin_contr
             feerate_needed = min_mempool_feerate;
             if (feeCalc) feeCalc->reason = FeeReason::MEMPOOL_MIN;
         }
-    }*/
+    }
 
     // prevent user from paying a fee below the required fee rate
     CFeeRate required_feerate = GetRequiredFeeRate(wallet);

@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,13 +9,17 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 
-std::string FormatMoney(const CAmount& n)
+std::string FormatMoney(const CAmount n)
 {
     // Note: not using straight sprintf here because we do NOT want
     // localized number formatting.
-    int64_t n_abs = (n > 0 ? n : -n);
-    int64_t quotient = n_abs/COIN;
-    int64_t remainder = n_abs%COIN;
+    static_assert(COIN > 1);
+    int64_t quotient = n / COIN;
+    int64_t remainder = n % COIN;
+    if (n < 0) {
+        quotient = -quotient;
+        remainder = -remainder;
+    }
     std::string str = strprintf("%d.%08d", quotient, remainder);
 
     // Right-trim excess zeros before the decimal point:
@@ -31,12 +35,12 @@ std::string FormatMoney(const CAmount& n)
 }
 
 
-bool ParseMoney(const std::string& str, CAmount& nRet)
+bool ParseMoney(const std::string& money_string, CAmount& nRet)
 {
-    if (!ValidAsCString(str)) {
+    if (!ValidAsCString(money_string)) {
         return false;
     }
-
+    const std::string str = TrimString(money_string);
     if (str.empty()) {
         return false;
     }
@@ -44,8 +48,6 @@ bool ParseMoney(const std::string& str, CAmount& nRet)
     std::string strWhole;
     int64_t nUnits = 0;
     const char* p = str.c_str();
-    while (IsSpace(*p))
-        p++;
     for (; *p; p++)
     {
         if (*p == '.')
@@ -60,14 +62,14 @@ bool ParseMoney(const std::string& str, CAmount& nRet)
             break;
         }
         if (IsSpace(*p))
-            break;
+            return false;
         if (!IsDigit(*p))
             return false;
         strWhole.insert(strWhole.end(), *p);
     }
-    for (; *p; p++)
-        if (!IsSpace(*p))
-            return false;
+    if (*p) {
+        return false;
+    }
     if (strWhole.size() > 10) // guard against 63 bit overflow
         return false;
     if (nUnits < 0 || nUnits > COIN)

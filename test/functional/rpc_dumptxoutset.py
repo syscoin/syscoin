@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2019 The Bitcoin Core developers
+# Copyright (c) 2019-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the generation of UTXO snapshots using `dumptxoutset`.
@@ -33,15 +33,17 @@ class DumptxoutsetTest(SyscoinTestFramework):
         assert_equal(out['base_height'], 100)
         assert_equal(out['path'], str(expected_path))
         # Blockhash should be deterministic based on mocked time.
+        # SYSCOIN
         assert_equal(
             out['base_hash'],
-            '6fd417acba2a8738b06fee43330c50d58e6a725046c3d843c8dd7e51d46d1ed6')
+            '4467b30ba5ffd3ef65ededf39e0bdb0e250606741713a07f7e9bf0335b20088d')
 
         with open(str(expected_path), 'rb') as f:
             digest = hashlib.sha256(f.read()).hexdigest()
             # UTXO snapshot hash should be deterministic based on mocked time.
+            # SYSCOIN
             assert_equal(
-                digest, 'be032e5f248264ba08e11099ac09dbd001f6f87ffc68bf0f87043d8146d50664')
+                digest, '8ff350ec4526b110bcb2caf989e1c89f0716030f326b21f02566d6f65d0cc565')
 
         # Specifying a path to an existing file will fail.
         assert_raises_rpc_error(

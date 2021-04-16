@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2019 The Bitcoin Core developers
+# Copyright (c) 2015-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test block processing."""
@@ -26,7 +26,7 @@ from test_framework.messages import (
     uint256_from_compact,
     uint256_from_str,
 )
-from test_framework.mininode import P2PDataStore
+from test_framework.p2p import P2PDataStore
 from test_framework.script import (
     CScript,
     MAX_SCRIPT_ELEMENT_SIZE,
@@ -53,7 +53,7 @@ from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import assert_equal
 from data import invalid_txs
 
-#  Use this class for tests that require behavior other than normal "mininode" behavior.
+#  Use this class for tests that require behavior other than normal p2p behavior.
 #  For now, it is used to serialize a bloated varint (b64).
 class CBrokenBlock(CBlock):
     def initialize(self, base_block):
@@ -82,7 +82,8 @@ class FullBlockTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [['-acceptnonstdtxn=1']]  # This is a consensus block test, we don't care about tx policy
+        # Must set '-dip3params=2000:2000' to create pre-dip3 blocks only
+        self.extra_args = [['-dip3params=2000:2000', '-acceptnonstdtxn=1']]  # This is a consensus block test, we don't care about tx policy
 
     def run_test(self):
         node = self.nodes[0]  # convenience reference to the node
@@ -98,12 +99,6 @@ class FullBlockTest(SyscoinTestFramework):
         self.genesis_hash = int(self.nodes[0].getbestblockhash(), 16)
         self.block_heights[self.genesis_hash] = 0
         self.spendable_outputs = []
-
-        # Activate P2SH at height 432.
-        blocks = []
-        for i in range(500):
-            blocks.append(self.next_block(10000 + i))
-        self.sync_blocks(blocks)
 
         # Create a new block
         b_dup_cb = self.next_block('dup_cb')
@@ -125,13 +120,13 @@ class FullBlockTest(SyscoinTestFramework):
         # Allow the block to mature
         blocks = []
         for i in range(NUM_BUFFER_BLOCKS_TO_GENERATE):
-            blocks.append(self.next_block("maturitybuffer.{}".format(i)))
+            blocks.append(self.next_block(f"maturitybuffer.{i}"))
             self.save_spendable_output()
         self.send_blocks(blocks)
 
         # collect spendable outputs now to avoid cluttering the code later on
         out = []
-        for i in range(NUM_OUTPUTS_TO_COLLECT):
+        for _ in range(NUM_OUTPUTS_TO_COLLECT):
             out.append(self.get_spendable_output())
 
         # Start by building a couple of blocks on top (which output is spent is
@@ -157,8 +152,8 @@ class FullBlockTest(SyscoinTestFramework):
             if template.valid_in_block:
                 continue
 
-            self.log.info("Reject block with invalid tx: %s", TxTemplate.__name__)
-            blockname = "for_invalid.%s" % TxTemplate.__name__
+            self.log.info(f"Reject block with invalid tx: {TxTemplate.__name__}")
+            blockname = f"for_invalid.{TxTemplate.__name__}"
             badblock = self.next_block(blockname)
             badtx = template.get_tx()
             if TxTemplate != invalid_txs.InputMissing:
@@ -353,7 +348,7 @@ class FullBlockTest(SyscoinTestFramework):
         self.log.info("Reject a block with coinbase input script size out of range")
         self.move_tip(15)
         b26 = self.next_block(26, spend=out[6])
-        b26.vtx[0].vin[0].scriptSig = self.set_script_len (b26.vtx[0].vin[0].scriptSig, 1)
+        b26.vtx[0].vin[0].scriptSig = b'\x00'
         b26.vtx[0].rehash()
         # update_block causes the merkle root to get updated, even with no new
         # transactions, and updates the required state.
@@ -367,7 +362,7 @@ class FullBlockTest(SyscoinTestFramework):
         # Now try a too-large-coinbase script
         self.move_tip(15)
         b28 = self.next_block(28, spend=out[6])
-         b28.vtx[0].vin[0].scriptSig = self.set_script_len (b28.vtx[0].vin[0].scriptSig, 101)
+        b28.vtx[0].vin[0].scriptSig = b'\x00' * 101
         b28.vtx[0].rehash()
         b28 = self.update_block(28, [])
         self.send_blocks([b28], success=False, reject_reason='bad-cb-length', reconnect=True)
@@ -379,7 +374,7 @@ class FullBlockTest(SyscoinTestFramework):
         # b30 has a max-sized coinbase scriptSig.
         self.move_tip(23)
         b30 = self.next_block(30)
-        b30.vtx[0].vin[0].scriptSig = self.set_script_len (b30.vtx[0].vin[0].scriptSig, 100)
+        b30.vtx[0].vin[0].scriptSig = b'\x00' * 100
         b30.vtx[0].rehash()
         b30 = self.update_block(30, [])
         self.send_blocks([b30], True)
@@ -512,7 +507,7 @@ class FullBlockTest(SyscoinTestFramework):
             del b39.vtx[-1]
 
         b39 = self.update_block(39, [])
-        self.send_blocks([b39], True)
+        self.send_blocks([b39], success=True, timeout=2440)
         self.save_spendable_output()
 
         # Test sigops in P2SH redeem scripts
@@ -593,7 +588,7 @@ class FullBlockTest(SyscoinTestFramework):
         height = self.block_heights[self.tip.sha256] + 1
         coinbase = create_coinbase(height, self.coinbase_pubkey)
         b44 = CBlock()
-        b44.set_base_version(4)
+        b44.nVersion = 4
         b44.nTime = self.tip.nTime + 1
         b44.hashPrevBlock = self.tip.sha256
         b44.nBits = 0x207fffff
@@ -608,7 +603,7 @@ class FullBlockTest(SyscoinTestFramework):
         self.log.info("Reject a block with a non-coinbase as the first tx")
         non_coinbase = self.create_tx(out[15], 0, 1)
         b45 = CBlock()
-        b45.set_base_version(4)
+        b45.nVersion = 4
         b45.nTime = self.tip.nTime + 1
         b45.hashPrevBlock = self.tip.sha256
         b45.nBits = 0x207fffff
@@ -624,7 +619,7 @@ class FullBlockTest(SyscoinTestFramework):
         self.log.info("Reject a block with no transactions")
         self.move_tip(44)
         b46 = CBlock()
-         b46.set_base_version(4)
+        b46.nVersion = 4
         b46.nTime = b44.nTime + 1
         b46.hashPrevBlock = b44.sha256
         b46.nBits = 0x207fffff
@@ -1149,18 +1144,18 @@ class FullBlockTest(SyscoinTestFramework):
         self.log.info("Test transaction resurrection during a re-org")
         self.move_tip(76)
         b77 = self.next_block(77)
-        tx77 = self.create_and_sign_transaction(out[24], 5 * COIN)
+        tx77 = self.create_and_sign_transaction(out[24], 10 * COIN)
         b77 = self.update_block(77, [tx77])
         self.send_blocks([b77], True)
         self.save_spendable_output()
 
         b78 = self.next_block(78)
-        tx78 = self.create_tx(tx77, 0, 4 * COIN)
+        tx78 = self.create_tx(tx77, 0, 9 * COIN)
         b78 = self.update_block(78, [tx78])
         self.send_blocks([b78], True)
 
         b79 = self.next_block(79)
-        tx79 = self.create_tx(tx78, 0, 3 * COIN)
+        tx79 = self.create_tx(tx78, 0, 8 * COIN)
         b79 = self.update_block(79, [tx79])
         self.send_blocks([b79], True)
 
@@ -1253,15 +1248,14 @@ class FullBlockTest(SyscoinTestFramework):
         b89a = self.update_block("89a", [tx])
         self.send_blocks([b89a], success=False, reject_reason='bad-txns-inputs-missingorspent', reconnect=True)
 
-        self.log.info("Test a re-org of one day's worth of blocks (144 blocks)")
-
+        self.log.info("Test a re-org of one week's worth of blocks (1088 blocks)")
 
         self.move_tip(88)
-        LARGE_REORG_SIZE = 144
+        LARGE_REORG_SIZE = 1088
         blocks = []
         spend = out[32]
         for i in range(89, LARGE_REORG_SIZE + 89):
-            b = self.next_block(i, spend, version=4)
+            b = self.next_block(i, spend)
             tx = CTransaction()
             script_length = MAX_BLOCK_BASE_SIZE - len(b.serialize()) - 69
             script_output = CScript([b'\x00' * script_length])
@@ -1273,33 +1267,33 @@ class FullBlockTest(SyscoinTestFramework):
             self.save_spendable_output()
             spend = self.get_spendable_output()
 
-        self.send_blocks(blocks, True, timeout=1920)
+        self.send_blocks(blocks, True, timeout=2440)
         chain1_tip = i
 
         # now create alt chain of same length
         self.move_tip(88)
         blocks2 = []
         for i in range(89, LARGE_REORG_SIZE + 89):
-            blocks2.append(self.next_block("alt" + str(i), version=4))
+            blocks2.append(self.next_block("alt" + str(i)))
         self.send_blocks(blocks2, False, force_send=True)
 
         # extend alt chain to trigger re-org
-        block = self.next_block("alt" + str(chain1_tip + 1), version=4)
-        self.send_blocks([block], True, timeout=1920)
+        block = self.next_block("alt" + str(chain1_tip + 1))
+        self.send_blocks([block], True, timeout=2440)
 
         # ... and re-org back to the first chain
         self.move_tip(chain1_tip)
-        block = self.next_block(chain1_tip + 1, version=4)
+        block = self.next_block(chain1_tip + 1)
         self.send_blocks([block], False, force_send=True)
-        block = self.next_block(chain1_tip + 2, version=4)
-        self.send_blocks([block], True, timeout=1920)
+        block = self.next_block(chain1_tip + 2)
+        self.send_blocks([block], True, timeout=2440)
 
         self.log.info("Reject a block with an invalid block header version")
         b_v1 = self.next_block('b_v1', version=1)
         self.send_blocks([b_v1], success=False, force_send=True, reject_reason='bad-version(0x00000001)', reconnect=True)
 
         self.move_tip(chain1_tip + 2)
-        b_cb34 = self.next_block('b_cb34', version=4)
+        b_cb34 = self.next_block('b_cb34')
         b_cb34.vtx[0].vin[0].scriptSig = b_cb34.vtx[0].vin[0].scriptSig[:-1]
         b_cb34.vtx[0].rehash()
         b_cb34.hashMerkleRoot = b_cb34.calc_merkle_root()
@@ -1333,7 +1327,7 @@ class FullBlockTest(SyscoinTestFramework):
         tx.rehash()
         return tx
 
-    def next_block(self, number, spend=None, additional_coinbase_value=0, script=CScript([OP_TRUE]), *, version=1):
+    def next_block(self, number, spend=None, additional_coinbase_value=0, script=CScript([OP_TRUE]), *, version=4):
         if self.tip is None:
             base_block_hash = self.genesis_hash
             block_time = int(time.time()) + 1
@@ -1365,12 +1359,12 @@ class FullBlockTest(SyscoinTestFramework):
 
     # save the current tip so it can be spent by a later block
     def save_spendable_output(self):
-        self.log.debug("saving spendable output %s" % self.tip.vtx[0])
+        self.log.debug(f"saving spendable output {self.tip.vtx[0]}")
         self.spendable_outputs.append(self.tip)
 
     # get an output that we previously marked as spendable
     def get_spendable_output(self):
-        self.log.debug("getting spendable output %s" % self.spendable_outputs[0].vtx[0])
+        self.log.debug(f"getting spendable output {self.spendable_outputs[0].vtx[0]}")
         return self.spendable_outputs.pop(0).vtx[0]
 
     # move the tip back to a previous block
@@ -1396,14 +1390,14 @@ class FullBlockTest(SyscoinTestFramework):
         """Add a P2P connection to the node.
 
         Helper to connect and wait for version handshake."""
-        self.nodes[0].add_p2p_connection(P2PDataStore())
+        self.helper_peer = self.nodes[0].add_p2p_connection(P2PDataStore())
         # We need to wait for the initial getheaders from the peer before we
         # start populating our blockstore. If we don't, then we may run ahead
         # to the next subtest before we receive the getheaders. We'd then send
         # an INV for the next block and receive two getheaders - one for the
         # IBD and one for the INV. We'd respond to both and could get
         # unexpectedly disconnected if the DoS score for that error is 50.
-        self.nodes[0].p2p.wait_for_getheaders(timeout=timeout)
+        self.helper_peer.wait_for_getheaders(timeout=timeout)
 
     def reconnect_p2p(self, timeout=60):
         """Tear down and bootstrap the P2P connection to the node.
@@ -1417,19 +1411,11 @@ class FullBlockTest(SyscoinTestFramework):
         """Sends blocks to test node. Syncs and verifies that tip has advanced to most recent block.
 
         Call with success = False if the tip shouldn't advance to the most recent block."""
-        self.nodes[0].p2p.send_blocks_and_test(blocks, self.nodes[0], success=success, reject_reason=reject_reason, force_send=force_send, timeout=timeout, expect_disconnect=reconnect)
+        self.helper_peer.send_blocks_and_test(blocks, self.nodes[0], success=success, reject_reason=reject_reason, force_send=force_send, timeout=timeout, expect_disconnect=reconnect)
 
         if reconnect:
             self.reconnect_p2p(timeout=timeout)
-            
-    def set_script_len(self, script, n):
-        """"Extends or shrinks the script to have length n."""
 
-         cur = len (script)
-        if cur >= n:
-            return script[:n]
-
-         return script + b'\x00' * (n - cur)
 
 if __name__ == '__main__':
     FullBlockTest().main()

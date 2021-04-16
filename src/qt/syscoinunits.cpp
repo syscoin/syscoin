@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,6 +6,13 @@
 
 #include <QStringList>
 
+#include <cassert>
+// SYSCOIN
+#include <primitives/transaction.h>
+#include <services/asset.h>
+#include <rpc/util.h>
+#include <math.h>
+static constexpr auto MAX_DIGITS_SYS = 16;
 SyscoinUnits::SyscoinUnits(QObject *parent):
         QAbstractListModel(parent),
         unitlist(availableUnits())
@@ -94,24 +101,35 @@ int SyscoinUnits::decimals(int unit)
     }
 }
 
-QString SyscoinUnits::format(int unit, const CAmount& nIn, bool fPlus, SeparatorStyle separators)
+QString SyscoinUnits::format(int unit, const CAmount& nIn, const uint64_t &nAsset, bool fPlus, SeparatorStyle separators, bool justify)
 {
-    // Note: not using straight sprintf here because we do NOT want
-    // localized number formatting.
-    if(!valid(unit))
-        return QString(); // Refuse to format invalid unit
+    // SYSCOIN 
+    qint64 coin;
+    int num_decimals;
+    uint8_t nPrecision = 8;
+    if(nAsset > 0 && GetAssetPrecision(GetBaseAssetID(nAsset), nPrecision)) {
+        num_decimals = (int)nPrecision;
+        coin = (qint64)pow(10.0, num_decimals);
+    } else {
+        // Note: not using straight sprintf here because we do NOT want
+        // localized number formatting.
+        if(!valid(unit))
+            return QString(); // Refuse to format invalid unit
+        coin = factor(unit);
+        num_decimals = decimals(unit);
+    }
     qint64 n = (qint64)nIn;
-    qint64 coin = factor(unit);
-    int num_decimals = decimals(unit);
     qint64 n_abs = (n > 0 ? n : -n);
     qint64 quotient = n_abs / coin;
     QString quotient_str = QString::number(quotient);
-
+    if (justify) {
+        quotient_str = quotient_str.rightJustified(MAX_DIGITS_SYS - num_decimals, ' ');
+    }
     // Use SI-style thin space separators as these are locale independent and can't be
     // confused with the decimal marker.
     QChar thin_sp(THIN_SP_CP);
     int q_size = quotient_str.size();
-    if (separators == separatorAlways || (separators == separatorStandard && q_size > 4))
+    if (separators == SeparatorStyle::ALWAYS || (separators == SeparatorStyle::STANDARD && q_size > 4))
         for (int i = 3; i < q_size; i += 3)
             quotient_str.insert(q_size - i, thin_sp);
 
@@ -137,10 +155,10 @@ QString SyscoinUnits::format(int unit, const CAmount& nIn, bool fPlus, Separator
 //
 // Please take care to use formatHtmlWithUnit instead, when
 // appropriate.
-
 QString SyscoinUnits::formatWithUnit(int unit, const CAmount& amount, bool plussign, SeparatorStyle separators)
 {
-    return format(unit, amount, plussign, separators) + QString(" ") + shortName(unit);
+    // SYSCOIN
+    return format(unit, amount, 0, plussign, separators) + QString(" ") + shortName(unit);
 }
 
 QString SyscoinUnits::formatHtmlWithUnit(int unit, const CAmount& amount, bool plussign, SeparatorStyle separators)
@@ -150,6 +168,18 @@ QString SyscoinUnits::formatHtmlWithUnit(int unit, const CAmount& amount, bool p
     return QString("<span style='white-space: nowrap;'>%1</span>").arg(str);
 }
 
+QString SyscoinUnits::formatWithPrivacy(int unit, const CAmount& amount, SeparatorStyle separators, bool privacy)
+{
+    assert(amount >= 0);
+    QString value;
+    // SYSCOIN
+    if (privacy) {
+        value = format(unit, 0, 0, false, separators, true).replace('0', '#');
+    } else {
+        value = format(unit, amount, 0, false, separators, true);
+    }
+    return value + QString(" ") + shortName(unit);
+}
 
 bool SyscoinUnits::parse(int unit, const QString &value, CAmount *val_out)
 {

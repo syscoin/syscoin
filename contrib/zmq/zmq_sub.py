@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2018 The Bitcoin Core developers
+# Copyright (c) 2014-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -13,10 +13,11 @@
                 -zmqpubrawblock=tcp://127.0.0.1:28370 \
                 -zmqpubhashtx=tcp://127.0.0.1:28370 \
                 -zmqpubhashblock=tcp://127.0.0.1:28370 \
-                -zmqpubwalletstatus=tcp://127.0.0.1:28370 \
-                -zmqpubethstatus=tcp://127.0.0.1:28370 \
-                -zmqpubnetworkstatus=tcp://127.0.0.1:28370 \
-                -zmqpubwalletrawtx=tcp://127.0.0.1:28370
+                -zmqpubhashgovernancevote=tcp://127.0.0.1:28370 \
+                -zmqpubhashgovernanceobject=tcp://127.0.0.1:28370 \
+                -zmqpubrawgovernancevote=tcp://127.0.0.1:28370 \
+                -zmqpubrawgovernanceobject=tcp://127.0.0.1:28370 \
+                -zmqpubsequence=tcp://127.0.0.1:28332
 
     We use the asyncio library here.  `self.handle()` installs itself as a
     future at the end of the function.  Since it never returns with the event
@@ -51,18 +52,18 @@ class ZMQHandler():
         self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "hashtx")
         self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "rawblock")
         self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "rawtx")
-        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "assetallocation")
-        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "assetrecord")
+        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "hashgovernancevote")
+        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "hashgovernanceobject")
+        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "rawgovernancevote")
+        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "rawgovernanceobject")
+        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "sequence")
         self.zmqSubSocket.connect("tcp://127.0.0.1:%i" % port)
 
     async def handle(self) :
-        msg = await self.zmqSubSocket.recv_multipart()
-        topic = msg[0]
-        body = msg[1]
+        topic, body, seq = await self.zmqSubSocket.recv_multipart()
         sequence = "Unknown"
-        if len(msg[-1]) == 4:
-          msgSequence = struct.unpack('<I', msg[-1])[-1]
-          sequence = str(msgSequence)
+        if len(seq) == 4:
+            sequence = str(struct.unpack('<I', seq)[-1])
         if topic == b"hashblock":
             print('- HASH BLOCK ('+sequence+') -')
             print(binascii.hexlify(body))
@@ -75,13 +76,24 @@ class ZMQHandler():
         elif topic == b"rawtx":
             print('- RAW TX ('+sequence+') -')
             print(binascii.hexlify(body))
-        elif topic == b"assetallocation":
-            print('- ASSET ALLOCATION TX ('+sequence+') -')
-            print(body.decode("utf-8")) 
-        elif topic == b"rawtx":
-            print('- ASSET TX ('+sequence+') -')
-            print(body.decode("utf-8"))                   
-            
+        elif topic == b"hashgovernancevote":
+            print('- HASH GOVERNANCE VOTE ('+sequence+') -')
+            print(binascii.hexlify(body).decode("utf-8"))
+        elif topic == b"hashgovernanceobject":
+            print('- HASH GOVERNANCE OBJECT ('+sequence+') -')
+            print(binascii.hexlify(body).decode("utf-8"))
+        elif topic == b"rawgovernancevote":
+            print('- RAW GOVERNANCE VOTE ('+sequence+') -')
+            print(binascii.hexlify(body).decode("utf-8"))
+        elif topic == b"rawgovernanceobject":
+            print('- RAW GOVERNANCE OBJECT ('+sequence+') -')
+            print(binascii.hexlify(body).decode("utf-8"))
+        elif topic == b"sequence":
+            hash = binascii.hexlify(body[:32])
+            label = chr(body[32])
+            mempool_sequence = None if len(body) != 32+1+8 else struct.unpack("<Q", body[32+1:])[0]
+            print('- SEQUENCE ('+sequence+') -')
+            print(hash, label, mempool_sequence)
         # schedule ourselves to receive the next message
         asyncio.ensure_future(self.handle())
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -31,7 +31,7 @@ public:
         connect(lineEdit(), &QLineEdit::textEdited, this, &AmountSpinBox::valueChanged);
     }
 
-    QValidator::State validate(QString &text, int &pos) const
+    QValidator::State validate(QString &text, int &pos) const override
     {
         if(text.isEmpty())
             return QValidator::Intermediate;
@@ -41,7 +41,7 @@ public:
         return valid ? QValidator::Intermediate : QValidator::Invalid;
     }
 
-    void fixup(QString &input) const
+    void fixup(QString &input) const override
     {
         bool valid;
         CAmount val;
@@ -56,7 +56,8 @@ public:
 
         if (valid) {
             val = qBound(m_min_amount, val, m_max_amount);
-            input = SyscoinUnits::format(currentUnit, val, false, SyscoinUnits::separatorAlways);
+            // SYSCOIN
+            input = SyscoinUnits::format(currentUnit, val, 0, false, SyscoinUnits::SeparatorStyle::ALWAYS);
             lineEdit()->setText(input);
         }
     }
@@ -68,7 +69,8 @@ public:
 
     void setValue(const CAmount& value)
     {
-        lineEdit()->setText(SyscoinUnits::format(currentUnit, value, false, SyscoinUnits::separatorAlways));
+        // SYSCOIN
+        lineEdit()->setText(SyscoinUnits::format(currentUnit, value, 0, false, SyscoinUnits::SeparatorStyle::ALWAYS));
         Q_EMIT valueChanged();
     }
 
@@ -87,7 +89,7 @@ public:
         m_max_amount = value;
     }
 
-    void stepBy(int steps)
+    void stepBy(int steps) override
     {
         bool valid = false;
         CAmount val = value(&valid);
@@ -102,7 +104,8 @@ public:
         CAmount val = value(&valid);
 
         currentUnit = unit;
-        lineEdit()->setPlaceholderText(SyscoinUnits::format(currentUnit, m_min_amount, false, SyscoinUnits::separatorAlways));
+        // SYSCOIN
+        lineEdit()->setPlaceholderText(SyscoinUnits::format(currentUnit, m_min_amount, 0, false, SyscoinUnits::SeparatorStyle::ALWAYS));
         if(valid)
             setValue(val);
         else
@@ -114,7 +117,7 @@ public:
         singleStep = step;
     }
 
-    QSize minimumSizeHint() const
+    QSize minimumSizeHint() const override
     {
         if(cachedMinimumSizeHint.isEmpty())
         {
@@ -122,7 +125,8 @@ public:
 
             const QFontMetrics fm(fontMetrics());
             int h = lineEdit()->minimumSizeHint().height();
-            int w = GUIUtil::TextWidth(fm, SyscoinUnits::format(SyscoinUnits::SYS, SyscoinUnits::maxMoney(), false, SyscoinUnits::separatorAlways));
+            // SYSCOIN
+            int w = GUIUtil::TextWidth(fm, SyscoinUnits::format(SyscoinUnits::SYS, SyscoinUnits::maxMoney(), 0, false, SyscoinUnits::SeparatorStyle::ALWAYS));
             w += 2; // cursor blinking space
 
             QStyleOptionSpinBox opt;
@@ -175,7 +179,7 @@ private:
     }
 
 protected:
-    bool event(QEvent *event)
+    bool event(QEvent *event) override
     {
         if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease)
         {
@@ -190,7 +194,7 @@ protected:
         return QAbstractSpinBox::event(event);
     }
 
-    StepEnabled stepEnabled() const
+    StepEnabled stepEnabled() const override
     {
         if (isReadOnly()) // Disable steps when AmountSpinBox is read-only
             return StepNone;

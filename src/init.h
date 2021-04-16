@@ -1,16 +1,25 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_INIT_H
 #define SYSCOIN_INIT_H
 
+#include <any>
 #include <memory>
 #include <string>
-#include <util/system.h>
 
+//! Default value for -daemon option
+static constexpr bool DEFAULT_DAEMON = false;
+//! Default value for -daemonwait option
+static constexpr bool DEFAULT_DAEMONWAIT = false;
+
+class ArgsManager;
 struct NodeContext;
+namespace interfaces {
+struct BlockAndHeaderTipInfo;
+}
 namespace boost {
 class thread_group;
 } // namespace boost
@@ -19,22 +28,21 @@ class thread_group;
 void Interrupt(NodeContext& node);
 void Shutdown(NodeContext& node);
 //!Initialize the logging infrastructure
-void InitLogging();
+void InitLogging(const ArgsManager& args);
 //!Parameter interaction: change current parameters depending on various rules
-void InitParameterInteraction();
+void InitParameterInteraction(ArgsManager& args);
 
 /** Initialize syscoin core: Basic context setup.
  *  @note This can be done before daemonization. Do not call Shutdown() if this function fails.
  *  @pre Parameters should be parsed and config file should be read.
  */
-// SYSCOIN
-bool AppInitBasicSetup(char* argv[]);
+bool AppInitBasicSetup(const ArgsManager& args);
 /**
  * Initialization: parameter interaction.
  * @note This can be done before daemonization. Do not call Shutdown() if this function fails.
  * @pre Parameters should be parsed and config file should be read, AppInitBasicSetup should have been called.
  */
-bool AppInitParameterInteraction();
+bool AppInitParameterInteraction(const ArgsManager& args);
 /**
  * Initialization sanity checks: ecc init, sanity checks, dir lock.
  * @note This can be done before daemonization. Do not call Shutdown() if this function fails.
@@ -48,16 +56,20 @@ bool AppInitSanityChecks();
  */
 bool AppInitLockDataDirectory();
 /**
+ * Initialize node and wallet interface pointers. Has no prerequisites or side effects besides allocating memory.
+ */
+bool AppInitInterfaces(NodeContext& node);
+/**
  * Syscoin core main initialization.
  * @note This should only be done after daemonization. Call Shutdown() if this function fails.
  * @pre Parameters should be parsed and config file should be read, AppInitLockDataDirectory should have been called.
  */
-bool AppInitMain(NodeContext& node);
+bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info = nullptr);
 
 /**
- * Setup the arguments for gArgs
+ * Register all arguments with the ArgsManager
  */
-void SetupServerArgs();
+void SetupServerArgs(NodeContext& node);
 
 /** Returns licensing information (for -version) */
 std::string LicenseInfo();

@@ -20,7 +20,6 @@
 class CBlock;
 class CBlockHeader;
 class CBlockIndex;
-class CValidationState;
 class UniValue;
 
 namespace auxpow_tests
@@ -76,11 +75,14 @@ public:
 
   CAuxPow () = default;
 
-  ADD_SERIALIZE_METHODS;
+  CAuxPow (CAuxPow&&) = default;
+  CAuxPow& operator= (CAuxPow&&) = default;
 
-  template<typename Stream, typename Operation>
-    inline void
-    SerializationOp (Stream& s, Operation ser_action)
+  CAuxPow (const CAuxPow&) = delete;
+  void operator= (const CAuxPow&) = delete;
+
+
+  SERIALIZE_METHODS(CAuxPow, obj)
   {
     /* The coinbase Merkle tx' hashBlock field is never actually verified
        or used in the code for an auxpow (and never was).  The parent block
@@ -92,16 +94,8 @@ public:
     /* The index of the parent coinbase tx is always zero.  */
     int nIndex = 0;
 
-    /* Data from the coinbase transaction as Merkle tx.  */
-    READWRITE (coinbaseTx);
-    READWRITE (hashBlock);
-    READWRITE (vMerkleBranch);
-    READWRITE (nIndex);
-
-    /* Additional data for the auxpow itself.  */
-    READWRITE (vChainMerkleBranch);
-    READWRITE (nChainIndex);
-    READWRITE (parentBlock);
+    /* Data from the coinbase transaction READWRITE(obj.key);READWRITE(obj.key);as Merkle tx.  */
+    READWRITE (obj.coinbaseTx, hashBlock, obj.vMerkleBranch, nIndex, obj.vChainMerkleBranch, obj.nChainIndex, obj.parentBlock);
   }
 
   /**
@@ -133,7 +127,7 @@ public:
    * @param h The merkle block height.
    * @return The expected index for the aux hash.
    */
-  static int getExpectedIndex (uint32_t nNonce, int nChainId, unsigned h);
+  static int getExpectedIndex (const uint32_t &nNonce, const int &nChainId, const unsigned &h);
 
   /**
    * Constructs a minimal CAuxPow object for the given block header and

@@ -1,36 +1,32 @@
-// Copyright (c) 2016-2018 The Bitcoin Core developers
+// Copyright (c) 2016-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_WALLET_RPCWALLET_H
 #define SYSCOIN_WALLET_RPCWALLET_H
 
+#include <span.h>
+
+#include <any>
 #include <memory>
 #include <string>
 #include <vector>
 
-class CRPCTable;
+class CRPCCommand;
 class CWallet;
 class JSONRPCRequest;
 class LegacyScriptPubKeyMan;
 class UniValue;
-struct PartiallySignedTransaction;
 class CTransaction;
+struct PartiallySignedTransaction;
+struct WalletContext;
 
-namespace interfaces {
-class Chain;
-class Handler;
-}
-
-//! Pointer to chain interface that needs to be declared as a global to be
-//! accessible loadwallet and createwallet methods. Due to limitations of the
-//! RPC framework, there's currently no direct way to pass in state to RPC
-//! methods without globals.
-extern interfaces::Chain* g_rpc_chain;
-
-void RegisterWalletRPCCommands(interfaces::Chain& chain, std::vector<std::unique_ptr<interfaces::Handler>>& handlers);
+Span<const CRPCCommand> GetWalletRPCCommands();
 // SYSCOIN
-void RegisterAssetWalletRPCCommands(interfaces::Chain& chain, std::vector<std::unique_ptr<interfaces::Handler>>& handlers);
+Span<const CRPCCommand> GetAssetWalletRPCCommands();
+Span<const CRPCCommand> GetEvoWalletRPCCommands();
+Span<const CRPCCommand> GetGovernanceWalletRPCCommands();
+Span<const CRPCCommand> GetMasternodeWalletRPCCommands();
 /**
  * Figures out what wallet, if any, to use for a JSONRPCRequest.
  *
@@ -39,11 +35,12 @@ void RegisterAssetWalletRPCCommands(interfaces::Chain& chain, std::vector<std::u
  */
 std::shared_ptr<CWallet> GetWalletForJSONRPCRequest(const JSONRPCRequest& request);
 
-std::string HelpRequiringPassphrase(const CWallet*);
-void EnsureWalletIsUnlocked(const CWallet*);
-bool EnsureWalletIsAvailable(const CWallet*, bool avoidException);
+void EnsureWalletIsUnlocked(const CWallet&);
+WalletContext& EnsureWalletContext(const std::any& context);
 LegacyScriptPubKeyMan& EnsureLegacyScriptPubKeyMan(CWallet& wallet, bool also_create = false);
 
-UniValue getaddressinfo(const JSONRPCRequest& request);
-UniValue signrawtransactionwithwallet(const JSONRPCRequest& request);
+RPCHelpMan listunspent();
+RPCHelpMan getaddressinfo();
+RPCHelpMan signrawtransactionwithwallet();
+RPCHelpMan sendrawtransaction();
 #endif //SYSCOIN_WALLET_RPCWALLET_H

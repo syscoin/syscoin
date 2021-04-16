@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2019 The Bitcoin Core developers
+# Copyright (c) 2019-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test syscoind aborts if can't disconnect a block.
@@ -11,14 +11,15 @@
 """
 
 from test_framework.test_framework import SyscoinTestFramework
-from test_framework.util import wait_until, get_datadir_path, connect_nodes
+from test_framework.util import get_datadir_path
 import os
 
-class AbortNodeTest(SyscoinTestFramework):
 
+class AbortNodeTest(SyscoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 2
+        self.rpc_timeout = 240
 
     def setup_network(self):
         self.setup_nodes()
@@ -35,14 +36,15 @@ class AbortNodeTest(SyscoinTestFramework):
         # attempt.
         self.nodes[1].generate(3)
         with self.nodes[0].assert_debug_log(["Failed to disconnect block"]):
-            connect_nodes(self.nodes[0], 1)
+            self.connect_nodes(0, 1)
             self.nodes[1].generate(1)
 
             # Check that node0 aborted
             self.log.info("Waiting for crash")
-            wait_until(lambda: self.nodes[0].is_node_stopped(), timeout=200)
+            self.nodes[0].wait_until_stopped(timeout=200)
         self.log.info("Node crashed - now verifying restart fails")
         self.nodes[0].assert_start_raises_init_error()
+
 
 if __name__ == '__main__':
     AbortNodeTest().main()

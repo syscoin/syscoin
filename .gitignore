@@ -5,13 +5,14 @@
 src/syscoin
 src/syscoind
 src/syscoin-cli
+src/syscoin-gui
+src/syscoin-node
 src/syscoin-tx
+src/syscoin-util
 src/syscoin-wallet
-src/test/fuzz
-!src/test/fuzz/*.*
+src/test/fuzz/fuzz
 src/test/test_syscoin
 src/qt/test/test_syscoin-qt
-src/bench/bench_syscoin
 
 # autoreconf
 Makefile.in
@@ -75,6 +76,7 @@ src/qt/syscoin-qt.includes
 *.log
 *.trs
 *.dmg
+*.iso
 
 *.json.h
 *.raw.h
@@ -119,7 +121,10 @@ releases
 /*.info
 test_syscoin.coverage/
 total.coverage/
+fuzz.coverage/
 coverage_percent.txt
+/cov_tool_wrapper.sh
+qa-assets/
 
 #build tests
 linux-coverage-build
@@ -136,6 +141,7 @@ src/qt/node1
 *.tmp
 *.ipch
 *.bin
+test/.mypy_cache/
 
 !src/leveldb*/Makefile
 
@@ -153,3 +159,5 @@ db4/
 osx_volname
 dist/
 *.background.tiff
+
+/guix-build-*

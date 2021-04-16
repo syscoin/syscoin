@@ -41,14 +41,23 @@ bool
 CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
                 const Consensus::Params& params) const
 {
-    if (params.fStrictChainId && parentBlock.GetChainId () == nChainId)
-        return error("Aux POW parent has our chain ID");
+    if (params.fStrictChainId) {
+        const int32_t &nChainIDParent = parentBlock.GetChainId();
+        if(nChainIDParent > 0) {
+            if(nChainIDParent == params.nAuxpowChainId)
+                return error("Aux POW parent has our chain ID");
+        } else {
+            const int32_t &nOldChainIDParent = parentBlock.GetOldChainId();
+            if(nOldChainIDParent == params.nAuxpowOldChainId)
+                return error("Aux POW parent has our old chain ID");
+        }
+    }
 
     if (vChainMerkleBranch.size() > 30)
         return error("Aux POW chain merkle branch too long");
 
     // Check that the chain merkle root is in the coinbase
-    const uint256 nRootHash
+    const uint256 &nRootHash
       = CheckMerkleBranch (hashAuxBlock, vChainMerkleBranch, nChainIndex);
     valtype vchRootHash(nRootHash.begin (), nRootHash.end ());
     std::reverse (vchRootHash.begin (), vchRootHash.end ()); // correct endian
@@ -62,7 +71,7 @@ CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
     if (coinbaseTx->vin.empty())
         return error("Aux POW coinbase has no inputs");
 
-    const CScript script = coinbaseTx->vin[0].scriptSig;
+    const CScript &script = coinbaseTx->vin[0].scriptSig;
 
     // Check that the same work is not submitted twice to our chain.
     //
@@ -101,12 +110,12 @@ CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
     if (script.end() - pc < 8)
         return error("Aux POW missing chain merkle tree size and nonce in parent coinbase");
 
-    const uint32_t nSize = DecodeLE32 (&pc[0]);
-    const unsigned merkleHeight = vChainMerkleBranch.size ();
+    const uint32_t &nSize = DecodeLE32 (&pc[0]);
+    const unsigned &merkleHeight = vChainMerkleBranch.size ();
     if (nSize != (1u << merkleHeight))
         return error("Aux POW merkle branch size does not match parent coinbase");
 
-    const uint32_t nNonce = DecodeLE32 (&pc[4]);
+    const uint32_t &nNonce = DecodeLE32 (&pc[4]);
     if (nChainIndex != getExpectedIndex (nNonce, nChainId, merkleHeight))
         return error("Aux POW wrong index");
 
@@ -114,7 +123,8 @@ CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
 }
 
 int
-CAuxPow::getExpectedIndex (uint32_t nNonce, int nChainId, unsigned h)
+CAuxPow::getExpectedIndex (const uint32_t &nNonce, const int &nChainId,
+                           const unsigned &h)
 {
   // Choose a pseudo-random slot in the chain merkle tree
   // but have it be fixed for a size/nonce/chain combination.
@@ -123,19 +133,19 @@ CAuxPow::getExpectedIndex (uint32_t nNonce, int nChainId, unsigned h)
   // same chain while reducing the chance that two chains clash
   // for the same slot.
 
-  /* This computation can overflow the uint32 used.  This is not an issue,
-     though, since we take the mod against a power-of-two in the end anyway.
-     This also ensures that the computation is, actually, consistent
-     even if done in 64 bits as it was in the past on some systems.
-     Note that h is always <= 30 (enforced by the maximum allowed chain
-     merkle branch length), so that 32 bits are enough for the computation.  */
+  /* Note that h is always <= 30 (enforced by the maximum allowed chain
+     merkle branch length), so that 32 bits are enough for the result.  */
 
-  uint32_t rand = nNonce;
+  const uint32_t mod = (1u << h);
+
+  uint64_t rand = nNonce;
   rand = rand * 1103515245 + 12345;
+  rand %= mod;
   rand += nChainId;
   rand = rand * 1103515245 + 12345;
+  rand %= mod;
 
-  return rand % (1u << h);
+  return rand;
 }
 
 uint256
@@ -149,9 +159,9 @@ CAuxPow::CheckMerkleBranch (uint256 hash,
        it != vMerkleBranch.end (); ++it)
   {
     if (nIndex & 1)
-      hash = Hash (it->begin (), it->end (), hash.begin (), hash.end ());
+      hash = Hash (*it, hash);
     else
-      hash = Hash (hash.begin (), hash.end (), it->begin (), it->end ());
+      hash = Hash (hash, *it);
     nIndex >>= 1;
   }
   return hash;

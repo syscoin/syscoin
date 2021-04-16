@@ -21,15 +21,29 @@ class CConnman;
 class CValidationInterface;
 class uint256;
 class CScheduler;
+// SYSCOIN
+class CGovernanceVote;
+class CGovernanceObject;
+class CDeterministicMNList;
+class CDeterministicMNListDiff;
+enum class MemPoolRemovalReason;
 
-// These functions dispatch to one or all registered wallets
-
-/** Register a wallet to receive updates from core */
-void RegisterValidationInterface(CValidationInterface* pwalletIn);
-/** Unregister a wallet from core */
-void UnregisterValidationInterface(CValidationInterface* pwalletIn);
-/** Unregister all wallets from core */
+/** Register subscriber */
+void RegisterValidationInterface(CValidationInterface* callbacks);
+/** Unregister subscriber. DEPRECATED. This is not safe to use when the RPC server or main message handler thread is running. */
+void UnregisterValidationInterface(CValidationInterface* callbacks);
+/** Unregister all subscribers */
 void UnregisterAllValidationInterfaces();
+
+// Alternate registration functions that release a shared_ptr after the last
+// notification is sent. These are useful for race-free cleanup, since
+// unregistration is nonblocking and can return before the last notification is
+// processed.
+/** Register subscriber */
+void RegisterSharedValidationInterface(std::shared_ptr<CValidationInterface> callbacks);
+/** Unregister subscriber */
+void UnregisterSharedValidationInterface(std::shared_ptr<CValidationInterface> callbacks);
+
 /**
  * Pushes a function to callback onto the notification queue, guaranteeing any
  * callbacks generated prior to now are finished when the function is called.
@@ -88,8 +102,8 @@ protected:
      *
      * Called on a background thread.
      */
-    // SYSCOIN
-    virtual void TransactionAddedToMempool(const CTransactionRef &ptxn, bool fBlock) {}
+    virtual void TransactionAddedToMempool(const CTransactionRef& tx, uint64_t mempool_sequence) {}
+
     /**
      * Notifies listeners of a transaction leaving mempool.
      *
@@ -122,7 +136,7 @@ protected:
      *
      * Called on a background thread.
      */
-    virtual void TransactionRemovedFromMempool(const CTransactionRef &ptx) {}
+    virtual void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) {}
     /**
      * Notifies listeners of a block being connected.
      * Provides a vector of transactions evicted from the mempool as a result.
@@ -164,13 +178,15 @@ protected:
      * Notifies listeners that a block which builds directly on our current tip
      * has been received and connected to the headers tree, though not validated yet */
     virtual void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& block) {};
-    friend void ::RegisterValidationInterface(CValidationInterface*);
-    friend void ::UnregisterValidationInterface(CValidationInterface*);
-    friend void ::UnregisterAllValidationInterfaces();
+    friend class CMainSignals;
+
     // SYSCOIN
-    virtual void NotifySyscoinUpdate(const char *value, const char *topic) {}
     virtual void AcceptedBlockHeader(const CBlockIndex *pindexNew) {}
     virtual void NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload) {}
+    virtual void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) {}
+    virtual void NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& vote) {}
+    virtual void NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject> &object) {}
+    virtual void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {}
 };
 
 struct MainSignalsInstance;
@@ -178,7 +194,7 @@ class CMainSignals {
 private:
     std::unique_ptr<MainSignalsInstance> m_internals;
 
-    friend void ::RegisterValidationInterface(CValidationInterface*);
+    friend void ::RegisterSharedValidationInterface(std::shared_ptr<CValidationInterface>);
     friend void ::UnregisterValidationInterface(CValidationInterface*);
     friend void ::UnregisterAllValidationInterfaces();
     friend void ::CallFunctionInValidationInterfaceQueue(std::function<void ()> func);
@@ -196,18 +212,19 @@ public:
 
     void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, bool fInitialDownload);
     // SYSCOIN
-    void TransactionAddedToMempool(const CTransactionRef &, bool fBlock);
-    void TransactionRemovedFromMempool(const CTransactionRef &);
+    void AcceptedBlockHeader(const CBlockIndex *pindexNew);
+    void NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload);
+    void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload);
+    void TransactionAddedToMempool(const CTransactionRef&, uint64_t mempool_sequence);
+    void TransactionRemovedFromMempool(const CTransactionRef&, MemPoolRemovalReason, uint64_t mempool_sequence);
     void BlockConnected(const std::shared_ptr<const CBlock> &, const CBlockIndex *pindex);
     void BlockDisconnected(const std::shared_ptr<const CBlock> &, const CBlockIndex* pindex);
     void ChainStateFlushed(const CBlockLocator &);
     void BlockChecked(const CBlock&, const BlockValidationState&);
     void NewPoWValidBlock(const CBlockIndex *, const std::shared_ptr<const CBlock>&);
-    void NotifySyscoinUpdate(const char *value, const char *topic);
-    /** Notifies listeners of accepted block header */
-    void AcceptedBlockHeader(const CBlockIndex *);
-    /** Notifies listeners of updated block header tip */
-    void NotifyHeaderTip(const CBlockIndex *, bool fInitialDownload);   
+    void NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& vote);
+    void NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject>& object);
+    void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff);
 };
 
 CMainSignals& GetMainSignals();

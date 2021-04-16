@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -45,6 +45,8 @@ public:
 
     void showOutOfSyncWarning(bool fShow);
 
+    QSize sizeHint() const override { return m_size_hint; }
+
 Q_SIGNALS:
     /** Notify that the user has requested more information about the out-of-sync warning */
     void requestedSyncWarningInfo();
@@ -58,6 +60,8 @@ private:
     bool bOutOfSync;
 
     const PlatformStyle *platformStyle;
+
+    const QSize m_size_hint;
 
 public:
     WalletView* currentWalletView() const;
@@ -80,8 +84,11 @@ public Q_SLOTS:
     /** Show Sign/Verify Message dialog and switch to verify message tab */
     void gotoVerifyMessageTab(QString addr = "");
 
+    /** Load Partially Signed Syscoin Transaction */
+    void gotoLoadPSBT(bool from_clipboard = false);
+
     /** Encrypt the wallet */
-    void encryptWallet(bool status);
+    void encryptWallet();
     /** Backup the wallet */
     void backupWallet();
     /** Change encrypted wallet passphrase */

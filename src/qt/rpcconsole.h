@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2019 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -28,6 +28,7 @@ namespace Ui {
 }
 
 QT_BEGIN_NAMESPACE
+class QDateTime;
 class QMenu;
 class QItemSelection;
 QT_END_NAMESPACE
@@ -46,7 +47,7 @@ public:
         return RPCParseCommandLine(&node, strResult, strCommand, true, pstrFilteredOut, wallet_model);
     }
 
-    void setClientModel(ClientModel *model);
+    void setClientModel(ClientModel *model = nullptr, int bestblock_height = 0, int64_t bestblock_date = 0, double verification_progress = 0.0);
     void addWallet(WalletModel * const walletModel);
     void removeWallet(WalletModel* const walletModel);
 
@@ -62,7 +63,8 @@ public:
         INFO,
         CONSOLE,
         GRAPH,
-        PEERS
+        PEERS,
+        TAB_REPAIR
     };
 
     std::vector<TabTypes> tabs() const { return {TabTypes::INFO, TabTypes::CONSOLE, TabTypes::GRAPH, TabTypes::PEERS}; }
@@ -71,8 +73,8 @@ public:
     QKeySequence tabShortcut(TabTypes tab_type) const;
 
 protected:
-    virtual bool eventFilter(QObject* obj, QEvent *event);
-    void keyPressEvent(QKeyEvent *);
+    virtual bool eventFilter(QObject* obj, QEvent *event) override;
+    void keyPressEvent(QKeyEvent *) override;
 
 private Q_SLOTS:
     void on_lineEdit_returnPressed();
@@ -83,9 +85,9 @@ private Q_SLOTS:
     void on_sldGraphRange_valueChanged(int value);
     /** update traffic statistics */
     void updateTrafficStats(quint64 totalBytesIn, quint64 totalBytesOut);
-    void resizeEvent(QResizeEvent *event);
-    void showEvent(QShowEvent *event);
-    void hideEvent(QHideEvent *event);
+    void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
     /** Show custom context menu on Peers tab */
     void showPeersTableContextMenu(const QPoint& point);
     /** Show custom context menu on Bans tab */
@@ -94,12 +96,19 @@ private Q_SLOTS:
     void showOrHideBanTableIfRequired();
     /** clear the selected node */
     void clearSelectedNode();
+    /** show detailed information on ui about selected node */
+    void updateDetailWidget();
 
 public Q_SLOTS:
     void clear(bool clearHistory = true);
     void fontBigger();
     void fontSmaller();
     void setFontSize(int newSize);
+
+    /** SYSCOIN Wallet repair options */
+    void walletRescan();
+    void walletReindex();
+
     /** Append the message to the message widget */
     void message(int category, const QString &msg) { message(category, msg, false); }
     void message(int category, const QString &message, bool html);
@@ -107,8 +116,8 @@ public Q_SLOTS:
     void setNumConnections(int count);
     /** Set network state shown in the UI */
     void setNetworkActive(bool networkActive);
-    /** SYSCOIN Set number of masternodes shown in the UI */
-    void setMasternodeCount(const QString &strMasternodes); 
+    /** SYSCOIN Update number of masternodes shown in the UI */
+    void updateMasternodeCount();
     /** Set number of blocks and last block date shown in the UI */
     void setNumBlocks(int count, const QDateTime& blockDate, double nVerificationProgress, bool headers);
     /** Set size (number of transactions and memory usage) of the mempool in the UI */
@@ -117,8 +126,6 @@ public Q_SLOTS:
     void browseHistory(int offset);
     /** Scroll console view to end */
     void scrollToEnd();
-    /** Handle selection of peer in peers list */
-    void peerSelected(const QItemSelection &selected, const QItemSelection &deselected);
     /** Handle selection caching before update */
     void peerLayoutAboutToChange();
     /** Handle updated peer information */
@@ -135,13 +142,19 @@ public Q_SLOTS:
 Q_SIGNALS: 
     // For RPC command executor
     void cmdRequest(const QString &command, const WalletModel* wallet_model);
-
+    /** SYSCOIN Get restart command-line parameters and handle restart */
+    void handleRestart(const QStringList &args);
 private:
+    struct TranslatedStrings {
+        const QString yes{tr("Yes")}, no{tr("No")}, to{tr("To")}, from{tr("From")},
+            ban_for{tr("Ban for")}, na{tr("N/A")}, unknown{tr("Unknown")};
+    } const ts;
+
     void startExecutor();
     void setTrafficGraphRange(int mins);
-    /** show detailed information on ui about selected node */
-    void updateNodeDetail(const CNodeCombinedStats *stats);
-
+    // SYSCOIN
+    /** Build parameter list for restart */
+    void buildParameterlist(QString arg);
     enum ColumnWidths
     {
         ADDRESS_COLUMN_WIDTH = 200,
@@ -170,6 +183,11 @@ private:
 
     /** Update UI with latest network info from model. */
     void updateNetworkState();
+
+    /** Helper for the output of a time duration field. Inputs are UNIX epoch times. */
+    QString TimeDurationField(uint64_t time_now, uint64_t time_at_event) const {
+        return time_at_event ? GUIUtil::formatDurationStr(time_now - time_at_event) : tr("Never");
+    }
 
 private Q_SLOTS:
     void updateAlerts(const QString& warnings);

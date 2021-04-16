@@ -1,10 +1,11 @@
-// Copyright (c) 2017-2019 The Bitcoin Core developers
+// Copyright (c) 2017-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_RPC_UTIL_H
 #define SYSCOIN_RPC_UTIL_H
 
+#include <node/coinstats.h>
 #include <node/transaction.h>
 #include <outputtype.h>
 #include <protocol.h>
@@ -18,9 +19,8 @@
 #include <util/check.h>
 
 #include <string>
+#include <variant>
 #include <vector>
-
-#include <boost/variant.hpp>
 
 /**
  * String used to describe UNIX epoch time in documentation, factored out to a
@@ -78,8 +78,15 @@ extern std::vector<unsigned char> ParseHexV(const UniValue& v, std::string strNa
 extern std::vector<unsigned char> ParseHexO(const UniValue& o, std::string strKey);
 
 extern CAmount AmountFromValue(const UniValue& value);
+// SYSCOIN
+extern CAmount AssetAmountFromValue(const UniValue& value, int precision);
+extern UniValue ValueFromAssetAmount(const CAmount& amount,int precision);
+
+using RPCArgList = std::vector<std::pair<std::string, UniValue>>;
 extern std::string HelpExampleCli(const std::string& methodname, const std::string& args);
+extern std::string HelpExampleCliNamed(const std::string& methodname, const RPCArgList& args);
 extern std::string HelpExampleRpc(const std::string& methodname, const std::string& args);
+extern std::string HelpExampleRpcNamed(const std::string& methodname, const RPCArgList& args);
 
 CPubKey HexToPubKey(const std::string& hex_in);
 CPubKey AddrToPubKey(const FillableSigningProvider& keystore, const std::string& addr_in);
@@ -141,9 +148,10 @@ struct RPCArg {
          */
         OMITTED,
     };
-    using Fallback = boost::variant<Optional, /* default value for optional args */ std::string>;
-    const std::string m_name; //!< The name of the arg (can be empty for inner args)
+    using Fallback = std::variant<Optional, /* default value for optional args */ std::string>;
+    const std::string m_names; //!< The name of the arg (can be empty for inner args, can contain multiple aliases separated by | for named request arguments)
     const Type m_type;
+    const bool m_hidden;
     const std::vector<RPCArg> m_inner; //!< Only used for arrays or dicts
     const Fallback m_fallback;
     const std::string m_description;
@@ -156,9 +164,11 @@ struct RPCArg {
         const Fallback fallback,
         const std::string description,
         const std::string oneline_description = "",
-        const std::vector<std::string> type_str = {})
-        : m_name{std::move(name)},
+        const std::vector<std::string> type_str = {},
+        const bool hidden = false)
+        : m_names{std::move(name)},
           m_type{std::move(type)},
+          m_hidden{hidden},
           m_fallback{std::move(fallback)},
           m_description{std::move(description)},
           m_oneline_description{std::move(oneline_description)},
@@ -175,8 +185,9 @@ struct RPCArg {
         const std::vector<RPCArg> inner,
         const std::string oneline_description = "",
         const std::vector<std::string> type_str = {})
-        : m_name{std::move(name)},
+        : m_names{std::move(name)},
           m_type{std::move(type)},
+          m_hidden{false},
           m_inner{std::move(inner)},
           m_fallback{std::move(fallback)},
           m_description{std::move(description)},
@@ -187,6 +198,12 @@ struct RPCArg {
     }
 
     bool IsOptional() const;
+
+    /** Return the first of all aliases */
+    std::string GetFirstName() const;
+
+    /** Return the name, throws when there are aliases */
+    std::string GetName() const;
 
     /**
      * Return the type string of the argument.
@@ -213,6 +230,7 @@ struct RPCResult {
         NUM,
         BOOL,
         NONE,
+        ANY,        //!< Special type to disable type checks (for testing only)
         STR_AMOUNT, //!< Special string to represent a floating point amount
         STR_HEX,    //!< Special string with only hex chars
         OBJ_DYN,    //!< Special dictionary with keys that are not literals
@@ -285,6 +303,8 @@ struct RPCResult {
     std::string ToStringObj() const;
     /** Return the description string, including the result type. */
     std::string ToDescriptionString() const;
+    /** Check whether the result JSON type matches. */
+    bool MatchesType(const UniValue& result) const;
 };
 
 struct RPCResults {
@@ -320,26 +340,25 @@ class RPCHelpMan
 {
 public:
     RPCHelpMan(std::string name, std::string description, std::vector<RPCArg> args, RPCResults results, RPCExamples examples);
+    using RPCMethodImpl = std::function<UniValue(const RPCHelpMan&, const JSONRPCRequest&)>;
+    RPCHelpMan(std::string name, std::string description, std::vector<RPCArg> args, RPCResults results, RPCExamples examples, RPCMethodImpl fun);
 
+    UniValue HandleRequest(const JSONRPCRequest& request) const;
     std::string ToString() const;
+    /** Return the named args that need to be converted from string to another JSON type */
+    UniValue GetArgMap() const;
     /** If the supplied number of args is neither too small nor too high */
     bool IsValidNumArgs(size_t num_args) const;
-    /**
-     * Check if the given request is valid according to this command or if
-     * the user is asking for help information, and throw help when appropriate.
-     */
-    inline void Check(const JSONRPCRequest& request) const {
-        if (request.fHelp || !IsValidNumArgs(request.params.size())) {
-            throw std::runtime_error(ToString());
-        }
-    }
+    std::vector<std::string> GetArgNames() const;
+
+    const std::string m_name;
 
 private:
-    const std::string m_name;
+    const RPCMethodImpl m_fun;
     const std::string m_description;
     const std::vector<RPCArg> m_args;
     const RPCResults m_results;
     const RPCExamples m_examples;
 };
-
+static const std::string HELP_REQUIRING_PASSPHRASE{"\nRequires wallet passphrase to be set with walletpassphrase call if wallet is encrypted.\n"};
 #endif // SYSCOIN_RPC_UTIL_H

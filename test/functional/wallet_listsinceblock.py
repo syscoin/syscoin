@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-# Copyright (c) 2017-2019 The Bitcoin Core developers
+# Copyright (c) 2017-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the listsinceblock RPC."""
 
+from test_framework.address import key_to_p2wpkh
+from test_framework.key import ECKey
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.messages import BIP125_SEQUENCE_NUMBER
 from test_framework.util import (
     assert_array_result,
     assert_equal,
     assert_raises_rpc_error,
-    connect_nodes,
 )
+from test_framework.wallet_util import bytes_to_wif
 
 from decimal import Decimal
 
@@ -26,7 +28,7 @@ class ListSinceBlockTest(SyscoinTestFramework):
     def run_test(self):
         # All nodes are in IBD from genesis, so they'll need the miner (node2) to be an outbound connection, or have
         # only one connection. (See fPreferredDownload in net_processing)
-        connect_nodes(self.nodes[1], 2)
+        self.connect_nodes(1, 2)
         self.nodes[2].generate(101)
         self.sync_all()
 
@@ -36,6 +38,7 @@ class ListSinceBlockTest(SyscoinTestFramework):
         self.test_double_spend()
         self.test_double_send()
         self.double_spends_filtered()
+        self.test_targetconfirmations()
 
     def test_no_blockhash(self):
         self.log.info("Test no blockhash")
@@ -74,6 +77,27 @@ class ListSinceBlockTest(SyscoinTestFramework):
         assert_raises_rpc_error(-8, "blockhash must be hexadecimal string (not 'Z000000000000000000000000000000000000000000000000000000000000000')", self.nodes[0].listsinceblock,
                                 "Z000000000000000000000000000000000000000000000000000000000000000")
 
+    def test_targetconfirmations(self):
+        '''
+        This tests when the value of target_confirmations exceeds the number of
+        blocks in the main chain. In this case, the genesis block hash should be
+        given for the `lastblock` property. If target_confirmations is < 1, then
+        a -8 invalid parameter error is thrown.
+        '''
+        self.log.info("Test target_confirmations")
+        blockhash, = self.nodes[2].generate(1)
+        blockheight = self.nodes[2].getblockheader(blockhash)['height']
+        self.sync_all()
+
+        assert_equal(
+            self.nodes[0].getblockhash(0),
+            self.nodes[0].listsinceblock(blockhash, blockheight + 1)['lastblock'])
+        assert_equal(
+            self.nodes[0].getblockhash(0),
+            self.nodes[0].listsinceblock(blockhash, blockheight + 1000)['lastblock'])
+        assert_raises_rpc_error(-8, "Invalid parameter",
+            self.nodes[0].listsinceblock, blockhash, 0)
+
     def test_reorg(self):
         '''
         `listsinceblock` did not behave correctly when handed a block that was
@@ -111,23 +135,21 @@ class ListSinceBlockTest(SyscoinTestFramework):
         senttx = self.nodes[2].sendtoaddress(self.nodes[0].getnewaddress(), 1)
 
         # generate on both sides
-        lastblockhash = self.nodes[1].generate(6)[5]
-        self.nodes[2].generate(7)
-        self.log.debug('lastblockhash={}'.format(lastblockhash))
+        nodes1_last_blockhash = self.nodes[1].generate(6)[-1]
+        nodes2_first_blockhash = self.nodes[2].generate(7)[0]
+        self.log.debug("nodes[1] last blockhash = {}".format(nodes1_last_blockhash))
+        self.log.debug("nodes[2] first blockhash = {}".format(nodes2_first_blockhash))
 
         self.sync_all(self.nodes[:2])
         self.sync_all(self.nodes[2:])
 
         self.join_network()
 
-        # listsinceblock(lastblockhash) should now include tx, as seen from nodes[0]
-        lsbres = self.nodes[0].listsinceblock(lastblockhash)
-        found = False
-        for tx in lsbres['transactions']:
-            if tx['txid'] == senttx:
-                found = True
-                break
-        assert found
+        # listsinceblock(nodes1_last_blockhash) should now include tx as seen from nodes[0]
+        # and return the block height which listsinceblock now exposes since a5e7795.
+        transactions = self.nodes[0].listsinceblock(nodes1_last_blockhash)['transactions']
+        found = next(tx for tx in transactions if tx['txid'] == senttx)
+        assert_equal(found['blockheight'], self.nodes[0].getblockheader(nodes2_first_blockhash)['height'])
 
     def test_double_spend(self):
         '''
@@ -162,14 +184,21 @@ class ListSinceBlockTest(SyscoinTestFramework):
 
         self.sync_all()
 
+        # share utxo between nodes[1] and nodes[2]
+        eckey = ECKey()
+        eckey.generate()
+        privkey = bytes_to_wif(eckey.get_bytes())
+        address = key_to_p2wpkh(eckey.get_pubkey().get_bytes())
+        self.nodes[2].sendtoaddress(address, 10)
+        self.nodes[2].generate(6)
+        self.sync_all()
+        self.nodes[2].importprivkey(privkey)
+        utxos = self.nodes[2].listunspent()
+        utxo = [u for u in utxos if u["address"] == address][0]
+        self.nodes[1].importprivkey(privkey)
+
         # Split network into two
         self.split_network()
-
-        # share utxo between nodes[1] and nodes[2]
-        utxos = self.nodes[2].listunspent()
-        utxo = utxos[0]
-        privkey = self.nodes[2].dumpprivkey(utxo['address'])
-        self.nodes[1].importprivkey(privkey)
 
         # send from nodes[1] using utxo to nodes[0]
         change = '%.8f' % (float(utxo['amount']) - 1.0003)

@@ -1,21 +1,28 @@
-// Copyright (c) 2019 The Bitcoin Core developers
+// Copyright (c) 2019-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_NODE_CONTEXT_H
 #define SYSCOIN_NODE_CONTEXT_H
 
+#include <cassert>
+#include <functional>
 #include <memory>
 #include <vector>
 
+class ArgsManager;
 class BanMan;
+class CAddrMan;
+class CBlockPolicyEstimator;
 class CConnman;
 class CScheduler;
 class CTxMemPool;
-class PeerLogicValidation;
+class ChainstateManager;
+class PeerManager;
 namespace interfaces {
 class Chain;
 class ChainClient;
+class WalletClient;
 } // namespace interfaces
 
 //! NodeContext struct containing references to chain state and connection
@@ -29,13 +36,22 @@ class ChainClient;
 //! any member functions. It should just be a collection of references that can
 //! be used without pulling in unwanted dependencies or functionality.
 struct NodeContext {
+    std::unique_ptr<CAddrMan> addrman;
     std::unique_ptr<CConnman> connman;
-    CTxMemPool* mempool{nullptr}; // Currently a raw pointer because the memory is not managed by this struct
-    std::unique_ptr<PeerLogicValidation> peer_logic;
+    std::unique_ptr<CTxMemPool> mempool;
+    std::unique_ptr<CBlockPolicyEstimator> fee_estimator;
+    std::unique_ptr<PeerManager> peerman;
+    ChainstateManager* chainman{nullptr}; // Currently a raw pointer because the memory is not managed by this struct
     std::unique_ptr<BanMan> banman;
+    ArgsManager* args{nullptr}; // Currently a raw pointer because the memory is not managed by this struct
     std::unique_ptr<interfaces::Chain> chain;
+    //! List of all chain clients (wallet processes or other client) connected to node.
     std::vector<std::unique_ptr<interfaces::ChainClient>> chain_clients;
+    //! Reference to chain client that should used to load or create wallets
+    //! opened by the gui.
+    interfaces::WalletClient* wallet_client{nullptr};
     std::unique_ptr<CScheduler> scheduler;
+    std::function<void()> rpc_interruption_point = [] {};
 
     //! Declare default constructor and destructor that are not inline, so code
     //! instantiating the NodeContext struct doesn't need to #include class

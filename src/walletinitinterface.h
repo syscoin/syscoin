@@ -1,9 +1,11 @@
-// Copyright (c) 2017-2019 The Bitcoin Core developers
+// Copyright (c) 2017-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_WALLETINITINTERFACE_H
 #define SYSCOIN_WALLETINITINTERFACE_H
+
+class ArgsManager;
 
 struct NodeContext;
 
@@ -12,11 +14,15 @@ public:
     /** Is the wallet component enabled */
     virtual bool HasWalletSupport() const = 0;
     /** Get wallet help string */
-    virtual void AddWalletOptions() const = 0;
+    virtual void AddWalletOptions(ArgsManager& argsman) const = 0;
     /** Check wallet parameter interaction */
     virtual bool ParameterInteraction() const = 0;
     /** Add wallets that should be opened to list of chain clients. */
     virtual void Construct(NodeContext& node) const = 0;
+
+
+    // Syscoin Specific WalletInitInterface
+    virtual void AutoLockMasternodeCollaterals() const = 0;
 
     virtual ~WalletInitInterface() {}
 };

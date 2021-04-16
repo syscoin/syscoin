@@ -8,7 +8,6 @@
 
 #include <serialize.h>
 #include <uint256.h>
-
 /**
  * A block header without auxpow information.  This "intermediate step"
  * in constructing the full header is useful, because it breaks the cyclic
@@ -18,13 +17,25 @@
  */
 class CPureBlockHeader
 {
+public:
+    static const uint32_t CHAINID = 16; // should match params.nAuxpowChainId
+    static const uint32_t OLD_CHAINID = 4096; // should match params.nAuxpowOldChainId
 private:
-
+    /* Mask for dummy bit and versionbits top mask.  */
+    static const int32_t VERSIONAUXPOW_TOP_MASK = (1 << 28) + (1 << 29) + (1 << 30);
     /* Modifiers to the version.  */
     static const int32_t VERSION_AUXPOW = (1 << 8);
-
+    static const uint8_t VERSION_START_BIT = 16;
     /** Bits above are reserved for the auxpow chain ID.  */
-    static const int32_t VERSION_CHAIN_START = (1 << 16);
+    static const int32_t VERSION_CHAIN_START = (1 << VERSION_START_BIT);
+    // mask to get Chain ID from version field, chainid is 16 in SYS so 0x001f mask should be OK
+    static const int32_t MASK_AUXPOW_CHAINID_SHIFTED = (0x001f << VERSION_START_BIT);
+    // mask to get old Chain ID from version field, legacy one is 4096 (2^12) in SYS so 0x1fff mask is needed
+    static const int32_t MASK_OLD_AUXPOW_CHAINID_SHIFTED = (0x1fff << VERSION_START_BIT);
+    // shifted Chain ID in version field
+    static const int32_t VERSION_AUXPOW_CHAINID_SHIFTED = (CHAINID << VERSION_START_BIT);
+    // shifted legaacy Chain ID, 4096 shifted by VERSION_START_BIT
+    static const int32_t VERSION_OLD_AUXPOW_CHAINID_SHIFTED = (OLD_CHAINID << VERSION_START_BIT); 
 
 public:
     // header
@@ -40,17 +51,7 @@ public:
         SetNull();
     }
 
-    ADD_SERIALIZE_METHODS;
-
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action) {
-        READWRITE(this->nVersion);
-        READWRITE(hashPrevBlock);
-        READWRITE(hashMerkleRoot);
-        READWRITE(nTime);
-        READWRITE(nBits);
-        READWRITE(nNonce);
-    }
+    SERIALIZE_METHODS(CPureBlockHeader, obj) { READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce); }
 
     void SetNull()
     {
@@ -88,11 +89,16 @@ public:
     {
         return GetBaseVersion(nVersion);
     }
-    static inline int32_t GetBaseVersion(int32_t ver)
+    inline int32_t GetOldBaseVersion() const
     {
-        return ver % VERSION_AUXPOW;
+        return GetOldBaseVersion(nVersion);
     }
+    static int32_t GetBaseVersion(const int32_t &ver);
+    static int32_t GetOldBaseVersion(const int32_t &ver);
 
+    static inline bool IsValidBaseVersion(const int32_t &nBaseVersion) {
+        return (nBaseVersion & ~VERSIONAUXPOW_TOP_MASK) < VERSION_CHAIN_START;
+    }
     /**
      * Set the base version (apart from chain ID and auxpow flag) to
      * the one given.  This should only be called when auxpow is not yet
@@ -100,22 +106,38 @@ public:
      * @param nBaseVersion The base version.
      * @param nChainId The auxpow chain ID.
      */
-    void SetBaseVersion(int32_t nBaseVersion, int32_t nChainId);
-
+    void SetBaseVersion(int32_t nBaseVersion, const int32_t &nChainId);
+    /**
+     * Set the legacy base version (apart from chain ID and auxpow flag) to
+     * the one given.  This should only be called when auxpow is not yet
+     * set, to initialise a block!
+     * @param nBaseVersion The base version.
+     * @param nChainId The auxpow chain ID.
+     */
+    void SetOldBaseVersion(int32_t nBaseVersion, const int32_t &nChainId);
     /**
      * Extract the chain ID.
      * @return The chain ID encoded in the version.
      */
     inline int32_t GetChainId() const
     {
-        return nVersion / VERSION_CHAIN_START;
+        return GetChainId(nVersion);
     }
-
+    static int32_t GetChainId(const int32_t &ver);
+    /**
+     * Extract the legacy chain ID.
+     * @return The chain ID encoded in the version before versionbits were fixed to work with auxpow
+     */
+    inline int32_t GetOldChainId() const 
+    {
+        return GetOldChainId(nVersion);
+    }
+    static int32_t GetOldChainId(const int& ver);
     /**
      * Set the chain ID.  This is used for the test suite.
-     * @param ch The chain ID to set.
+     * @param chainId The chain ID to set.
      */
-    inline void SetChainId(int32_t chainId)
+    inline void SetChainId(const int32_t &chainId)
     {
         nVersion %= VERSION_CHAIN_START;
         nVersion |= chainId * VERSION_CHAIN_START;

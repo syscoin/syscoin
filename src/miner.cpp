@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -24,11 +24,13 @@
 #include <algorithm>
 #include <utility>
 // SYSCOIN
-#include <masternodepayments.h>
-#include <masternodesync.h>
-#include <services/assetconsensus.h>
-extern ArrivalTimesSet setToRemoveFromMempool;
-extern RecursiveMutex cs_assetallocationmempoolremovetx;
+#include <masternode/masternodepayments.h>
+#include <masternode/masternodesync.h>
+#include <evo/specialtx.h>
+#include <evo/cbtx.h>
+#include <evo/simplifiedmns.h>
+#include <evo/deterministicmns.h>
+#include <llmq/quorums_blockprocessor.h>
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
 {
     int64_t nOldTime = pblock->nTime;
@@ -43,15 +45,27 @@ int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParam
 
     return nNewTime - nOldTime;
 }
+// SYSCOIN
+void RegenerateCommitments(CBlock& block, BlockManager& blockman, const std::vector<unsigned char> &vchExtraData)
+{
+    CMutableTransaction tx{*block.vtx.at(0)};
+    tx.vout.erase(tx.vout.begin() + GetWitnessCommitmentIndex(block));
+    block.vtx.at(0) = MakeTransactionRef(tx);
+    // SYSCOIN
+    GenerateCoinbaseCommitment(block, WITH_LOCK(::cs_main, assert(std::addressof(g_chainman.m_blockman) == std::addressof(blockman)); return blockman.LookupBlockIndex(block.hashPrevBlock)), Params().GetConsensus(), vchExtraData);
+
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+}
 
 BlockAssembler::Options::Options() {
     blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_TX_FEE);
     nBlockMaxWeight = DEFAULT_BLOCK_MAX_WEIGHT;
 }
 
-BlockAssembler::BlockAssembler(const CTxMemPool& mempool, const CChainParams& params, const Options& options)
+BlockAssembler::BlockAssembler(CChainState& chainstate, const CTxMemPool& mempool, const CChainParams& params, const Options& options)
     : chainparams(params),
-      m_mempool(mempool)
+      m_mempool(mempool),
+      m_chainstate(chainstate)
 {
     blockMinFeeRate = options.blockMinFeeRate;
     // Limit weight to between 4K and MAX_BLOCK_WEIGHT-4K for sanity:
@@ -73,8 +87,8 @@ static BlockAssembler::Options DefaultOptions()
     return options;
 }
 
-BlockAssembler::BlockAssembler(const CTxMemPool& mempool, const CChainParams& params)
-    : BlockAssembler(mempool, params, DefaultOptions()) {}
+BlockAssembler::BlockAssembler(CChainState& chainstate, const CTxMemPool& mempool, const CChainParams& params)
+    : BlockAssembler(chainstate, mempool, params, DefaultOptions()) {}
 
 void BlockAssembler::resetBlock()
 {
@@ -90,20 +104,8 @@ void BlockAssembler::resetBlock()
     nFees = 0;
 }
 
-Optional<int64_t> BlockAssembler::m_last_block_num_txs{nullopt};
-Optional<int64_t> BlockAssembler::m_last_block_weight{nullopt};
-
-std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::unordered_set<uint256, SaltedTxidHasher> &txsToRemove)
-{    
-    {
-        LOCK(cs_assetallocationmempoolremovetx);
-        // we should skip setToRemoveFromMempool instead of letting input check below deal with it because zdag state will be inconsistent in the later case
-        // that is meant as a sanity and fallback in case setToRemoveFromMempool misses
-        txsToRemove.reserve(txsToRemove.size() + setToRemoveFromMempool.size());
-        for(const auto& txid: setToRemoveFromMempool){
-            txsToRemove.insert(txid);
-        }
-    }
+std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
+{
     int64_t nTimeStart = GetTimeMicros();
 
     resetBlock();
@@ -112,7 +114,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
 
     if(!pblocktemplate.get())
         return nullptr;
-    pblock = &pblocktemplate->block; // pointer for convenience
+    CBlock* const pblock = &pblocktemplate->block; // pointer for convenience
 
     // Add dummy coinbase tx as first transaction
     pblock->vtx.emplace_back();
@@ -120,19 +122,22 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblocktemplate->vTxSigOpsCost.push_back(-1); // updated at end
 
     LOCK2(cs_main, m_mempool.cs);
-    CBlockIndex* pindexPrev = ::ChainActive().Tip();
+    assert(std::addressof(*::ChainActive().Tip()) == std::addressof(*m_chainstate.m_chain.Tip()));
+    CBlockIndex* pindexPrev = m_chainstate.m_chain.Tip();
     assert(pindexPrev != nullptr);
     nHeight = pindexPrev->nHeight + 1;
-
-    const int32_t nChainId = chainparams.GetConsensus ().nAuxpowChainId;
-    // FIXME: Active version bits after the always-auxpow fork!
-    //const int32_t nVersion = ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
-    const int32_t nVersion = 4;
-    pblock->SetBaseVersion(nVersion, nChainId);
+    bool fDIP0003Active_context = nHeight >= chainparams.GetConsensus().DIP0003Height;
+    if(nHeight >= chainparams.GetConsensus().nUTXOAssetsBlock) {
+        const int32_t nChainId = chainparams.GetConsensus ().nAuxpowChainId;
+        const int32_t nVersion = ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
+        pblock->SetBaseVersion(nVersion, nChainId);
+    } else {
+        pblock->SetOldBaseVersion(4, chainparams.GetConsensus ().nAuxpowOldChainId);
+    }
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
     if (chainparams.MineBlocksOnDemand())
-        pblock->SetBaseVersion(gArgs.GetArg("-blockversion", pblock->GetBaseVersion()), nChainId);
+        pblock->nVersion = gArgs.GetArg("-blockversion", pblock->nVersion);
 
     pblock->nTime = GetAdjustedTime();
     const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
@@ -151,10 +156,9 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // TODO: replace this with a call to main to assess validity of a mempool
     // transaction (which in most cases can be a no-op).
     fIncludeWitness = IsWitnessEnabled(pindexPrev, chainparams.GetConsensus());
-
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
-    addPackageTxs(nPackagesSelected, nDescendantsUpdated, txsToRemove);
+    addPackageTxs(nPackagesSelected, nDescendantsUpdated);
 
     int64_t nTime1 = GetTimeMicros();
 
@@ -167,33 +171,67 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     coinbaseTx.vin[0].prevout.SetNull();
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = scriptPubKeyIn;
-    // SYSCOIN
-    CAmount nTotalRewardWithMasternodes;
-    CAmount blockReward = GetBlockSubsidy(nHeight, Params().GetConsensus(), nTotalRewardWithMasternodes);
+    CAmount blockReward = GetBlockSubsidy(nHeight, Params());
 
     // Compute regular coinbase transaction.
     coinbaseTx.vout[0].nValue = blockReward + nFees;
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
-    if (!chainparams.MineBlocksOnDemand() && nHeight > 1 && !fUnitTest) {
-        if (masternodeSync.IsFailed()) {
-            throw std::runtime_error("Masternode information has failed to sync, please restart your node!");
-        }
-        if (!masternodeSync.IsSynced()) {
-            throw std::runtime_error("Masternode information has not synced, please wait until it finishes before mining!");
-        }
-        if(fLiteMode){
-             throw std::runtime_error("You cannot mine in lite mode, set litemode=0 in your conf file!");
-        }
-        if(fGethSyncStatus != "synced"){
-            throw std::runtime_error("Please wait until Geth is synced to the tip before mining! Use getblockchaininfo to detect Geth sync status.");
+    // SYSCOIN
+    if (!fRegTest && !fSigNet && !chainparams.MineBlocksOnDemand()) {
+        if (!masternodeSync.IsSynced()) {	
+            throw std::runtime_error("Masternode information has not synced, please wait until it finishes before mining!");	
         }
     }
-    // Update coinbase transaction with additional info about masternode and governance payments,
-    // get some info back to pass to getblocktemplate
-    FillBlockPayments(coinbaseTx, nHeight, blockReward, nFees, pblocktemplate->txoutMasternode, pblocktemplate->voutSuperblock);
+    CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
+    BlockValidationState state;
+    if(fDIP0003Active_context) {
+        // Update coinbase transaction with additional info about masternode and governance payments,
+        // get some info back to pass to getblocktemplate
+        coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_COINBASE;
+        CCbTx cbTx;
+        cbTx.nVersion = 2;
+        cbTx.nHeight = nHeight;
+        llmq::CFinalCommitmentTxPayload qc;
+        for (auto& p : chainparams.GetConsensus().llmqs) {
+            // create commitment payload if quorum commitment is needed
+            llmq::CFinalCommitment commitment;
+            if (llmq::quorumBlockProcessor->GetMinableCommitment(p.first, nHeight, commitment)) {
+                coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
+                qc.commitments.push_back(commitment);
+            }
+        }
+        if (coinbaseTx.nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
+            qc.cbTx = cbTx;
+        }
+        // pass qc pointer here because we want to build merkleRootMNList / merkleRootQuorums which depends on qc if qc is valid
+        if (!CalcCbTxMerkleRootMNList(*pblock, pindexPrev, cbTx.merkleRootMNList, state, ::ChainstateActive().CoinsTip(), &qc)) {
+            throw std::runtime_error(strprintf("%s: CalcCbTxMerkleRootMNList failed: %s", __func__, state.ToString()));
+        }
+        if (!CalcCbTxMerkleRootQuorums(*pblock, pindexPrev, cbTx.merkleRootQuorums, state, &qc)) {
+            throw std::runtime_error(strprintf("%s: CalcCbTxMerkleRootQuorums failed: %s", __func__, state.ToString()));
+        }
 
-    pblock->vtx[0] = MakeTransactionRef(std::move(coinbaseTx));
-    pblocktemplate->vchCoinbaseCommitment = GenerateCoinbaseCommitment(*pblock, pindexPrev, chainparams.GetConsensus());
+        if(coinbaseTx.nVersion == SYSCOIN_TX_VERSION_MN_COINBASE) {
+            ds << cbTx;
+        } else {
+            qc.cbTx = cbTx;
+            ds << qc;
+        }
+        // Update coinbase transaction with additional info about masternode and governance payments,
+        // get some info back to pass to getblocktemplate
+        FillBlockPayments(coinbaseTx, nHeight, blockReward, nFees, pblocktemplate->voutMasternodePayments, pblocktemplate->voutSuperblockPayments);
+    }
+
+    
+    pblock->vtx[0] = MakeTransactionRef(coinbaseTx);
+    // SYSCOIN
+    pblocktemplate->vchCoinbaseCommitmentExtra = std::vector<unsigned char>(ds.begin(), ds.end());
+    pblocktemplate->vchCoinbaseCommitment = GenerateCoinbaseCommitment(*pblock, pindexPrev, chainparams.GetConsensus(), pblocktemplate->vchCoinbaseCommitmentExtra);
+    // add coinbase payload if not witness commitment which would append it after witness data, in this case we can assume no witness commitment
+    if(pblocktemplate->vchCoinbaseCommitment.empty() && !pblocktemplate->vchCoinbaseCommitmentExtra.empty()) {
+        SetTxPayload(coinbaseTx, pblocktemplate->vchCoinbaseCommitmentExtra);
+        pblock->vtx[0] = MakeTransactionRef(std::move(coinbaseTx));
+    }
     pblocktemplate->vTxFees[0] = -nFees;
     LogPrintf("CreateNewBlock(): block weight: %u txs: %u fees: %ld sigops %d\n", GetBlockWeight(*pblock), nBlockTx, nFees, nBlockSigOpsCost);
 
@@ -204,52 +242,14 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblock->nNonce         = 0;
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);
 
-    BlockValidationState state;
-    bool bFoundError = false;
-    CTransaction txMissingInput;
-    CTransaction syscoinTxFailed;
-    for(auto &txid:txsToRemove){
-         LogPrintf("CreateNewBlock() txsToRemove size %d txid %s\n", txsToRemove.size(), txid.GetHex().c_str());
+    // BlockValidationState state;
+    assert(std::addressof(::ChainstateActive()) == std::addressof(m_chainstate));
+    if (!TestBlockValidity(state, chainparams, m_chainstate, *pblock, pindexPrev, false, false)) {
+        throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
     }
-    // Do the sanity block check and report back, conflicting input set, non-existent input check or problematic syscoin tx check. 
-    // If problem, remove transactions based on policy for each of the cases and try creating block without it to remove the bottleneck
-    if (!TestBlockValidity(state, chainparams, *pblock, pindexPrev, false, false, &txMissingInput, &syscoinTxFailed)) {
-        if(txMissingInput.IsNull() && syscoinTxFailed.IsNull())
-            throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
-        bFoundError = true;
-        if(!txMissingInput.IsNull()) {
-            // If conflicting inputs, remove one that is newer and keep oldest
-            if(mempool.existsConflicts(txMissingInput)) {
-                LogPrintf("CreateNewBlock(): TestBlockValidity removeSyscoinConflicts existsConflicts\n");
-                if(!mempool.removeSyscoinConflicts(txMissingInput)) {
-                    throw std::runtime_error(strprintf("%s: TestBlockValidity failed: removeSyscoinConflicts failed", __func__));
-                }
-            // tx was missing input(s) then we should remove it, maybe a stranded tx from a dbl spend case where inputs were duplicated but one got mined
-            // and other was left in the mempool, there is no conflict on it that would be caught be setConflicts yet it still fails the HaveInputs check,
-            // so we can safely remove it from our mempool and forget about it, try to create block without it  
-            } else {
-                LogPrintf("CreateNewBlock(): TestBlockValidity removeSyscoinConflicts missing inputs\n");
-                const uint256& txHash = txMissingInput.GetHash();
-                mempool.ClearPrioritisation(txHash);
-                mempool.removeRecursive(txMissingInput, MemPoolRemovalReason::CONFLICT);
-            }
-        }
-        if(!syscoinTxFailed.IsNull()) {
-            LogPrintf("CreateNewBlock(): TestBlockValidity syscoinTxFailed\n");
-            txsToRemove.insert(syscoinTxFailed.GetHash());
-        }
-    }
-    if(bFoundError){
-        {
-            LOCK(cs_assetallocationmempoolremovetx);
-            LogPrint(BCLog::SYS, "CreateNewBlock: CheckSyscoinInputs failed: %s. setToRemoveFromMempool size %d. Removed %d transactions and trying again...\n", state.ToString(), setToRemoveFromMempool.size(), txsToRemove.size());
-        }
-        return CreateNewBlock(scriptPubKeyIn, txsToRemove);
-    }
-    txsToRemove.clear();
     int64_t nTime2 = GetTimeMicros();
 
-    LogPrint(BCLog::BENCH, "CreateNewBlock() packages: %.2fms (%d packages, %d updated descendants), validity: %.2fms (total %.2fms)\n", 0.001 * (nTime1 - nTimeStart), nPackagesSelected, nDescendantsUpdated, 0.001 * (nTime2 - nTime1), 0.001 * (nTime2 - nTimeStart));
+    LogPrint(BCLog::BENCHMARK, "CreateNewBlock() packages: %.2fms (%d packages, %d updated descendants), validity: %.2fms (total %.2fms)\n", 0.001 * (nTime1 - nTimeStart), nPackagesSelected, nDescendantsUpdated, 0.001 * (nTime2 - nTime1), 0.001 * (nTime2 - nTimeStart));
 
     return std::move(pblocktemplate);
 }
@@ -281,23 +281,27 @@ bool BlockAssembler::TestPackage(uint64_t packageSize, int64_t packageSigOpsCost
 // - transaction finality (locktime)
 // - premature witness (in case segwit transactions are added to mempool before
 //   segwit activation)
-bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& package, std::unordered_set<uint256, SaltedTxidHasher> &txsToRemove)
+bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& package) const
 {
+    // SYSCOIN
+    AssertLockHeld(m_mempool.cs);
     for (CTxMemPool::txiter it : package) {
         if (!IsFinalTx(it->GetTx(), nHeight, nLockTimeCutoff))
             return false;
         if (!fIncludeWitness && it->GetTx().HasWitness())
             return false;
-         // SYSCOIN
-        if(txsToRemove.count(it->GetTx().GetHash()) > 0)
-            return false;           
+        // SYSCOIN
+        // If conflicting syscoin related dbl-spent input in this tx, skip it if its newer (prefer first tx based on time)
+        if(!m_mempool.isSyscoinConflictIsFirstSeen(it->GetTx())) {
+            return false;
+        }      
     }
     return true;
 }
 
 void BlockAssembler::AddToBlock(CTxMemPool::txiter iter)
 {
-    pblock->vtx.emplace_back(iter->GetSharedTx());
+    pblocktemplate->block.vtx.emplace_back(iter->GetSharedTx());
     pblocktemplate->vTxFees.push_back(iter->GetFee());
     pblocktemplate->vTxSigOpsCost.push_back(iter->GetSigOpCost());
     nBlockWeight += iter->GetTxWeight();
@@ -377,7 +381,7 @@ void BlockAssembler::SortForBlock(const CTxMemPool::setEntries& package, std::ve
 // Each time through the loop, we compare the best transaction in
 // mapModifiedTxs with the next transaction in the mempool to decide what
 // transaction package to work on next.
-void BlockAssembler::addPackageTxs(int &nPackagesSelected, int &nDescendantsUpdated, std::unordered_set<uint256, SaltedTxidHasher> &txsToRemove)
+void BlockAssembler::addPackageTxs(int &nPackagesSelected, int &nDescendantsUpdated)
 {
     // mapModifiedTx will store sorted packages after they are modified
     // because some of their txs are already in the block
@@ -478,7 +482,7 @@ void BlockAssembler::addPackageTxs(int &nPackagesSelected, int &nDescendantsUpda
         ancestors.insert(iter);
 
         // Test if all tx's are Final
-        if (!TestPackageTransactions(ancestors, txsToRemove)) {
+        if (!TestPackageTransactions(ancestors)) {
             if (fUsingModified) {
                 mapModifiedTx.get<ancestor_score>().erase(modit);
                 failedTx.insert(iter);

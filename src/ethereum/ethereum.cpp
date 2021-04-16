@@ -5,15 +5,17 @@
 #include <arith_uint256.h>
 #include <ethereum/ethereum.h>
 #include <ethereum/sha3.h>
-#include <services/witnessaddress.h>
 #include <logging.h>
 #include <util/strencodings.h>
-
-
+#include <key_io.h>
+#include <math.h>
 int nibblesToTraverse(const std::string &encodedPartialPath, const std::string &path, int pathPtr) {
   std::string partialPath;
+  // typecast as the character
+  uint8_t partialPathInt; 
   char pathPtrInt[2] = {encodedPartialPath[0], '\0'};
-  int partialPathInt = strtol(pathPtrInt, NULL, 10);
+  if(!ParseUInt8(pathPtrInt, &partialPathInt))
+    return -1;
   if(partialPathInt == 0 || partialPathInt == 2){
     partialPath = encodedPartialPath.substr(2);
   }else{
@@ -25,6 +27,26 @@ int nibblesToTraverse(const std::string &encodedPartialPath, const std::string &
     return -1;
   }
 }
+std::string hexToASCII(std::string hex) 
+{ 
+    // initialize the ASCII code string as empty. 
+    std::string ascii = "";
+    uint8_t ch;
+    for (size_t i = 0; i < hex.length(); i += 2) 
+    { 
+        // extract two characters from hex string 
+        std::string part = hex.substr(i, 2); 
+  
+        // change it into base 16 and  
+        // typecast as the character 
+        if(!ParseUInt8FromHex(part, &ch))
+          return ascii;
+  
+        // add this char to final ASCII string 
+        ascii += ch; 
+    } 
+    return ascii; 
+} 
 bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP& parentNodes, const dev::RLP& root) {
     try{
         dev::RLP currentNode;
@@ -32,10 +54,11 @@ bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP&
         dev::RLP nodeKey = root;       
         int pathPtr = 0;
 
-    	const std::string pathString = dev::toHex(path);
+    	  const std::string &pathString = dev::toHex(path);
   
         int nibbles;
         char pathPtrInt[2];
+        uint8_t pathInt;
         for (int i = 0 ; i < len ; i++) {
           currentNode = parentNodes[i];
           if(!nodeKey.payload().contentsEqual(sha3(currentNode.data()).ref().toVector())){
@@ -56,11 +79,11 @@ bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP&
                   return false;
                 }
               }
-          
               pathPtrInt[0] = pathString[pathPtr];
               pathPtrInt[1] = '\0';
-
-              nodeKey = currentNode[strtol(pathPtrInt, NULL, 16)]; //must == sha3(rlp.encode(currentNode[path[pathptr]]))
+              if(!ParseUInt8FromHex(pathPtrInt, &pathInt))
+                return false;
+              nodeKey = currentNode[pathInt]; //must == sha3(rlp.encode(currentNode[path[pathptr]]))
               pathPtr += 1;
               break;
             case 2:
@@ -97,20 +120,17 @@ bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP&
  * expected, or the length of the expected string is not what we expect then return false.
  *
  * @param vchInputExpectedMethodHash The expected method hash
+ * @param nERC20Precision The erc20 precision to know how to convert ethereum's uint256 to a uint64 with truncation of insignifficant bits
+ * @param nLocalPrecision The local precision to know how to convert ethereum's uint256 to a uint64 with truncation of insignifficant bits
  * @param vchInputData The input to parse
- * @param vchAssetContract The ERC20 contract address of the token involved in moving over
  * @param outputAmount The amount burned
  * @param nAsset The asset burned
- * @param nLocalPrecision The local precision to know how to convert ethereum's uint256 to a CAmount (int64) with truncation of insignifficant bits
- * @param witnessAddress The destination witness address for the minting
+ * @param witnessAddress The witness address for the minting
  * @return true if everything is valid
  */
-bool parseEthMethodInputData(const std::vector<unsigned char>& vchInputExpectedMethodHash, const std::vector<unsigned char>& vchInputData, const std::vector<unsigned char>& vchAssetContract, CAmount& outputAmount, uint32_t& nAsset, const uint8_t& nLocalPrecision, CWitnessAddress& witnessAddress) {
-    if(vchAssetContract.empty()){
-      return false;
-    }
-    // total 7 or 8 fields are expected @ 32 bytes each field, 8 fields if witness > 32 bytes
-    if(vchInputData.size() < 228 || vchInputData.size() > 260) {
+bool parseEthMethodInputData(const std::vector<unsigned char>& vchInputExpectedMethodHash, const uint8_t &nERC20Precision, const uint8_t& nLocalPrecision, const std::vector<unsigned char>& vchInputData, CAmount& outputAmount, uint64_t& nAsset, std::string& witnessAddress) {
+    // total 5 to 7 fields are expected @ 32 bytes each field, > 5 fields if address is bigger, bech32 can be up to 91 characters so it will span up to 3 fields and as little as 1 field
+    if(vchInputData.size() < 164 || vchInputData.size() > 228) {
       return false;  
     }
     // method hash is 4 bytes
@@ -126,49 +146,35 @@ bool parseEthMethodInputData(const std::vector<unsigned char>& vchInputExpectedM
     // reverse endian
     std::reverse(vchAmount.begin(), vchAmount.end());
     arith_uint256 outputAmountArith = UintToArith256(uint256(vchAmount));
-    
-    
-    // convert the vch into a uint32_t (nAsset)
-    // should be in position 68 walking backwards
-    nAsset = static_cast<uint32_t>(vchInputData[67]);
-    nAsset |= static_cast<uint32_t>(vchInputData[66]) << 8;
-    nAsset |= static_cast<uint32_t>(vchInputData[65]) << 16;
-    nAsset |= static_cast<uint32_t>(vchInputData[64]) << 24;
-    // start from 100 offset (96 for 3rd field + 4 bytes for function signature) and subtract 20 
-    std::vector<unsigned char>::const_iterator firstContractAddress = vchInputData.begin() + 80;
-    std::vector<unsigned char>::const_iterator lastContractAddress = firstContractAddress + 20;
-    const std::vector<unsigned char> vchERC20ContractAddress(firstContractAddress,lastContractAddress);
-    if(vchERC20ContractAddress != vchAssetContract)
-    {
-      return false;
-    }
-    // get precision
-    int dataPos = 131;
-    const int8_t &nPrecision = static_cast<uint8_t>(vchInputData[dataPos++]);
     // local precision can range between 0 and 8 decimal places, so it should fit within a CAmount
     // we pad zero's if erc20's precision is less than ours so we can accurately get the whole value of the amount transferred
-    if(nLocalPrecision > nPrecision){
-      outputAmountArith *= pow(10, nLocalPrecision-nPrecision);
+    if(nLocalPrecision > nERC20Precision){
+      outputAmountArith *= pow(10.0, nLocalPrecision-nERC20Precision);
     // ensure we truncate decimals to fit within int64 if erc20's precision is more than our asset precision
-    } else if(nLocalPrecision < nPrecision){
-      outputAmountArith /= pow(10, nPrecision-nLocalPrecision);
+    } else if(nLocalPrecision < nERC20Precision){
+      outputAmountArith /= pow(10.0, nERC20Precision-nLocalPrecision);
     }
-    // once we have truncated it is safe to get low 64 bits of the uint256 which should encapsulate the entire value
-    outputAmount = outputAmountArith.GetLow64();
+    outputAmount = (CAmount)outputAmountArith.GetLow64();
+    
+    // convert the vch into a uint64_t (nAsset)
+    // should be in position 68 walking backwards
+    nAsset = static_cast<uint64_t>(vchInputData[67]);
+    nAsset |= static_cast<uint64_t>(vchInputData[66]) << 8;
+    nAsset |= static_cast<uint64_t>(vchInputData[65]) << 16;
+    nAsset |= static_cast<uint64_t>(vchInputData[64]) << 24;
+    nAsset |= static_cast<uint64_t>(vchInputData[63]) << 32;
+    nAsset |= static_cast<uint64_t>(vchInputData[62]) << 40;
+    nAsset |= static_cast<uint64_t>(vchInputData[61]) << 48;
+    nAsset |= static_cast<uint64_t>(vchInputData[60]) << 56;
 
-    // skip data field market (32 bytes) + 31 bytes offset to the varint _byte
-    dataPos += 63;
-    const unsigned char &dataLength = vchInputData[dataPos++] - 1; // // - 1 to account for the version byte
-    // witness programs can extend to 40 bytes, min length is 2 for min witness program
-    if(dataLength > 40 || dataLength < 2){
+    // skip data field marker (32 bytes) + 31 bytes offset to the varint _byte
+    const unsigned char &dataLength = vchInputData[131];
+    // bech32 addresses to 91 chars (sys1 vs bc1), min length is 9 for min witness address https://en.bitcoin.it/wiki/BIP_0173
+    if(dataLength > 91 || dataLength < 9) {
       return false;
     }
 
-    // witness address information starting at position dataPos till the end
-    // get version proceeded by witness program bytes
-    const unsigned char& nVersion = vchInputData[dataPos++];
-    std::vector<unsigned char>::const_iterator firstWitness = vchInputData.begin()+dataPos;
-    std::vector<unsigned char>::const_iterator lastWitness = firstWitness + dataLength; 
-    witnessAddress = CWitnessAddress(nVersion, std::vector<unsigned char>(firstWitness,lastWitness));
-    return witnessAddress.IsValid();
+    // witness address information starting at position 132 till the end
+    witnessAddress = hexToASCII(HexStr(std::vector<unsigned char>(vchInputData.begin()+132, vchInputData.begin()+132 + dataLength)));
+    return true;
 }

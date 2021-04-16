@@ -14,6 +14,9 @@ m4_define([_CHECK_ATOMIC_testbody], [[
   #include <cstdint>
 
   int main() {
+    std::atomic<bool> lock{true};
+    std::atomic_exchange(&lock, false);
+
     std::atomic<int64_t> a{};
 
     int64_t v = 5;
@@ -41,6 +44,5 @@ AC_DEFUN([CHECK_ATOMIC], [
           AC_MSG_FAILURE([cannot figure out how to use std::atomic])
         ])
     ])
-
   AC_LANG_POP
 ])

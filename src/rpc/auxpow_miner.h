@@ -17,7 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-
+extern RecursiveMutex cs_main;
 namespace auxpow_tests
 {
 class AuxpowMinerForTest;
@@ -60,13 +60,13 @@ private:
    * fills in the difficulty target value.
    */
   const CBlock* getCurrentBlock (const CTxMemPool& mempool,
-                                 const CScript& scriptPubKey, uint256& target);
+                                 const CScript& scriptPubKey, uint256& target) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
   /**
    * Looks up a previously constructed block by its (hex-encoded) hash.  If the
    * block is found, it is returned.  Otherwise, a JSONRPCError is thrown.
    */
-  const CBlock* lookupSavedBlock (const std::string& hashHex) const;
+  const CBlock* lookupSavedBlock (const std::string& hashHex) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
   friend class auxpow_tests::AuxpowMinerForTest;
 
@@ -79,7 +79,7 @@ public:
    * to work on with the given address for the block reward and return the
    * necessary information for the miner to construct an auxpow for it.
    */
-  UniValue createAuxBlock (const CScript& scriptPubKey);
+  UniValue createAuxBlock (const CScript& scriptPubKey, const std::any& context);
 
   /**
    * Performs the main work for the "submitauxblock" RPC:  Look up the block
@@ -88,7 +88,7 @@ public:
    * was accepted.
    */
   bool submitAuxBlock (const std::string& hashHex,
-                       const std::string& auxpowHex) const;
+                       const std::string& auxpowHex, const std::any& context) const;
 
   /**
    * Returns the singleton instance of AuxpowMiner that is used for RPCs.

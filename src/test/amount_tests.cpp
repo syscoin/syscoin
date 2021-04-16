@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2019 The Bitcoin Core developers
+// Copyright (c) 2016-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -73,7 +73,8 @@ BOOST_AUTO_TEST_CASE(GetFeeTest)
     BOOST_CHECK(CFeeRate(CAmount(0), 0) == CFeeRate(0));
     BOOST_CHECK(CFeeRate(CAmount(1), 0) == CFeeRate(0));
     // default value
-    BOOST_CHECK(CFeeRate(CAmount(-1), 1000) == CFeeRate(-1));
+    // SYSCOIN
+    BOOST_CHECK(CFeeRate(CAmount(-1), 1000) == CFeeRate(0));
     BOOST_CHECK(CFeeRate(CAmount(0), 1000) == CFeeRate(0));
     BOOST_CHECK(CFeeRate(CAmount(1), 1000) == CFeeRate(1));
     // lost precision (can only resolve satoshis per kB)
@@ -98,7 +99,7 @@ BOOST_AUTO_TEST_CASE(BinaryOperatorTest)
     BOOST_CHECK(a <= a);
     BOOST_CHECK(b >= a);
     BOOST_CHECK(b >= b);
-    // a should be 0.00000002 SYS/kB now
+    // a should be 0.00000002 SYS/kvB now
     a += a;
     BOOST_CHECK(a == b);
 }
@@ -107,7 +108,9 @@ BOOST_AUTO_TEST_CASE(ToStringTest)
 {
     CFeeRate feeRate;
     feeRate = CFeeRate(1);
-    BOOST_CHECK_EQUAL(feeRate.ToString(), "0.00000001 SYS/kB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(), "0.00000001 SYS/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SYS_KVB), "0.00000001 SYS/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SAT_VB), "0.001 sat/vB");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

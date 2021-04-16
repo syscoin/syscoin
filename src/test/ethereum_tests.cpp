@@ -12,25 +12,25 @@
 #include <policy/policy.h>
 #include <services/asset.h>
 #include <univalue.h>
-
+#include <key_io.h>
+#include <util/system.h>
+#include <test/util/setup_common.h>
 extern UniValue read_json(const std::string& jsondata);
 
+BOOST_FIXTURE_TEST_SUITE(ethereum_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_SUITE(ethereum_tests)
 BOOST_AUTO_TEST_CASE(ethereum_parseabidata)
 {
     tfm::format(std::cout,"Running ethereum_parseabidata...\n");
     CAmount outputAmount;
-    uint32_t nAsset = 0;
-    const std::vector<unsigned char> &expectedMethodHash = ParseHex("5f959b69");
-    const std::vector<unsigned char> &expectedVchContract = ParseHex("fe234d3994f95bf7cebd9837c4444f5af63f0a97");
-    const std::vector<unsigned char> &rlpBytes = ParseHex("5f959b690000000000000000000000000000000000000000000000015af1d78b58c40000000000000000000000000000000000000000000000000000000000003acaeec0000000000000000000000000fe234d3994f95bf7cebd9837c4444f5af63f0a97000000000000000000000000000000000000000000000000000000000000001200000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000001500e37ddd289ccd1fb130a91210644810b2415aec400000000000000000000000");
-    CWitnessAddress expectedAddress(0, ParseHex("e37ddd289ccd1fb130a91210644810b2415aec40"));
-    CWitnessAddress address;
-    uint8_t nPrecision = 8;
-    BOOST_CHECK(parseEthMethodInputData(expectedMethodHash, rlpBytes, expectedVchContract, outputAmount, nAsset, nPrecision, address));
-    BOOST_CHECK_EQUAL(outputAmount, 25*COIN);
-    BOOST_CHECK_EQUAL(nAsset, 986377920);
+    uint64_t nAsset = 0;
+    const std::vector<unsigned char> &expectedMethodHash = ParseHex("54c988ff");
+    const std::vector<unsigned char> &rlpBytes = ParseHex("54c988ff00000000000000000000000000000000000000000000000000000002540be400000000000000000000000000000000000000000000000000000000009be8894b0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000002c62637274317130667265323430737939326d716b386b6b377073616561366b74366d3537323570377964636a0000000000000000000000000000000000000000");
+    std::string expectedAddress = "bcrt1q0fre240sy92mqk8kk7psaea6kt6m5725p7ydcj";
+    std::string address;
+    BOOST_CHECK(parseEthMethodInputData(expectedMethodHash, 8, 8, rlpBytes, outputAmount, nAsset, address));
+    BOOST_CHECK_EQUAL(outputAmount, 100*COIN);
+    BOOST_CHECK_EQUAL(nAsset, (uint64_t)2615707979);
     BOOST_CHECK(address == expectedAddress);
 
 }

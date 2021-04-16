@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2019 The Bitcoin Core developers
+// Copyright (c) 2018-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -42,14 +42,14 @@ BOOST_AUTO_TEST_CASE(gcsfilter_test)
 BOOST_AUTO_TEST_CASE(gcsfilter_default_constructor)
 {
     GCSFilter filter;
-    BOOST_CHECK_EQUAL(filter.GetN(), 0);
-    BOOST_CHECK_EQUAL(filter.GetEncoded().size(), 1);
+    BOOST_CHECK_EQUAL(filter.GetN(), 0U);
+    BOOST_CHECK_EQUAL(filter.GetEncoded().size(), 1U);
 
     const GCSFilter::Params& params = filter.GetParams();
-    BOOST_CHECK_EQUAL(params.m_siphash_k0, 0);
-    BOOST_CHECK_EQUAL(params.m_siphash_k1, 0);
+    BOOST_CHECK_EQUAL(params.m_siphash_k0, 0U);
+    BOOST_CHECK_EQUAL(params.m_siphash_k1, 0U);
     BOOST_CHECK_EQUAL(params.m_P, 0);
-    BOOST_CHECK_EQUAL(params.m_M, 1);
+    BOOST_CHECK_EQUAL(params.m_M, 1U);
 }
 
 BOOST_AUTO_TEST_CASE(blockfilter_basic_test)
@@ -97,7 +97,7 @@ BOOST_AUTO_TEST_CASE(blockfilter_basic_test)
     block_undo.vtxundo.back().vprevout.emplace_back(CTxOut(600, included_scripts[4]), 10000, false);
     block_undo.vtxundo.back().vprevout.emplace_back(CTxOut(700, excluded_scripts[3]), 100000, false);
 
-    BlockFilter block_filter(BlockFilterType::BASIC, block, block_undo);
+    BlockFilter block_filter(BlockFilterType::BASIC_FILTER, block, block_undo);
     const GCSFilter& filter = block_filter.GetFilter();
 
     for (const CScript& script : included_scripts) {
@@ -171,7 +171,7 @@ BOOST_AUTO_TEST_CASE(blockfilters_json_test)
         uint256 filter_header_basic;
         BOOST_CHECK(ParseHashStr(test[pos++].get_str(), filter_header_basic));
 
-        BlockFilter computed_filter_basic(BlockFilterType::BASIC, block, block_undo);
+        BlockFilter computed_filter_basic(BlockFilterType::BASIC_FILTER, block, block_undo);
         BOOST_CHECK(computed_filter_basic.GetFilter().GetEncoded() == filter_basic);
 
         uint256 computed_header_basic = computed_filter_basic.ComputeHeader(prev_filter_header_basic);
@@ -181,12 +181,12 @@ BOOST_AUTO_TEST_CASE(blockfilters_json_test)
 
 BOOST_AUTO_TEST_CASE(blockfilter_type_names)
 {
-    BOOST_CHECK_EQUAL(BlockFilterTypeName(BlockFilterType::BASIC), "basic");
+    BOOST_CHECK_EQUAL(BlockFilterTypeName(BlockFilterType::BASIC_FILTER), "basic");
     BOOST_CHECK_EQUAL(BlockFilterTypeName(static_cast<BlockFilterType>(255)), "");
 
     BlockFilterType filter_type;
     BOOST_CHECK(BlockFilterTypeByName("basic", filter_type));
-    BOOST_CHECK_EQUAL(filter_type, BlockFilterType::BASIC);
+    BOOST_CHECK_EQUAL(filter_type, BlockFilterType::BASIC_FILTER);
 
     BOOST_CHECK(!BlockFilterTypeByName("unknown", filter_type));
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2019 The Bitcoin Core developers
+// Copyright (c) 2017-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -43,8 +43,8 @@ static bool CheckFilterLookups(BlockFilterIndex& filter_index, const CBlockIndex
     BOOST_CHECK(filter_index.LookupFilterHashRange(block_index->nHeight, block_index,
                                                    filter_hashes));
 
-    BOOST_CHECK_EQUAL(filters.size(), 1);
-    BOOST_CHECK_EQUAL(filter_hashes.size(), 1);
+    BOOST_CHECK_EQUAL(filters.size(), 1U);
+    BOOST_CHECK_EQUAL(filter_hashes.size(), 1U);
 
     BOOST_CHECK_EQUAL(filter.GetHash(), expected_filter.GetHash());
     BOOST_CHECK_EQUAL(filter_header, expected_filter.ComputeHeader(last_header));
@@ -62,7 +62,7 @@ CBlock BuildChainTestingSetup::CreateBlock(const CBlockIndex* prev,
     const CScript& scriptPubKey)
 {
     const CChainParams& chainparams = Params();
-    std::unique_ptr<CBlockTemplate> pblocktemplate = BlockAssembler(*m_node.mempool, chainparams).CreateNewBlock(scriptPubKey);
+    std::unique_ptr<CBlockTemplate> pblocktemplate = BlockAssembler(::ChainstateActive(), *m_node.mempool, chainparams).CreateNewBlock(scriptPubKey);
     CBlock& block = pblocktemplate->block;
     block.hashPrevBlock = prev->GetBlockHash();
     block.nTime = prev->nTime + 1;
@@ -94,7 +94,7 @@ bool BuildChainTestingSetup::BuildChain(const CBlockIndex* pindex,
         CBlockHeader header = block->GetBlockHeader();
 
         BlockValidationState state;
-        if (!ProcessNewBlockHeaders({header}, state, Params(), &pindex)) {
+        if (!Assert(m_node.chainman)->ProcessNewBlockHeaders({header}, state, Params(), &pindex)) {
             return false;
         }
     }
@@ -104,7 +104,7 @@ bool BuildChainTestingSetup::BuildChain(const CBlockIndex* pindex,
 
 BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
 {
-    BlockFilterIndex filter_index(BlockFilterType::BASIC, 1 << 20, true);
+    BlockFilterIndex filter_index(BlockFilterType::BASIC_FILTER, 1 << 20, true);
 
     uint256 last_header;
 
@@ -171,14 +171,14 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
     uint256 chainA_last_header = last_header;
     for (size_t i = 0; i < 2; i++) {
         const auto& block = chainA[i];
-        BOOST_REQUIRE(ProcessNewBlock(Params(), block, true, nullptr));
+        BOOST_REQUIRE(Assert(m_node.chainman)->ProcessNewBlock(Params(), block, true, nullptr));
     }
     for (size_t i = 0; i < 2; i++) {
         const auto& block = chainA[i];
         const CBlockIndex* block_index;
         {
             LOCK(cs_main);
-            block_index = LookupBlockIndex(block->GetHash());
+            block_index = g_chainman.m_blockman.LookupBlockIndex(block->GetHash());
         }
 
         BOOST_CHECK(filter_index.BlockUntilSyncedToCurrentChain());
@@ -189,14 +189,14 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
     uint256 chainB_last_header = last_header;
     for (size_t i = 0; i < 3; i++) {
         const auto& block = chainB[i];
-        BOOST_REQUIRE(ProcessNewBlock(Params(), block, true, nullptr));
+        BOOST_REQUIRE(Assert(m_node.chainman)->ProcessNewBlock(Params(), block, true, nullptr));
     }
     for (size_t i = 0; i < 3; i++) {
         const auto& block = chainB[i];
         const CBlockIndex* block_index;
         {
             LOCK(cs_main);
-            block_index = LookupBlockIndex(block->GetHash());
+            block_index = g_chainman.m_blockman.LookupBlockIndex(block->GetHash());
         }
 
         BOOST_CHECK(filter_index.BlockUntilSyncedToCurrentChain());
@@ -210,7 +210,7 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
         const CBlockIndex* block_index;
         {
             LOCK(cs_main);
-            block_index = LookupBlockIndex(block->GetHash());
+            block_index = g_chainman.m_blockman.LookupBlockIndex(block->GetHash());
         }
 
         BOOST_CHECK(filter_index.BlockUntilSyncedToCurrentChain());
@@ -220,7 +220,7 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
     // Reorg back to chain A.
      for (size_t i = 2; i < 4; i++) {
          const auto& block = chainA[i];
-         BOOST_REQUIRE(ProcessNewBlock(Params(), block, true, nullptr));
+         BOOST_REQUIRE(Assert(m_node.chainman)->ProcessNewBlock(Params(), block, true, nullptr));
      }
 
      // Check that chain A and B blocks can be retrieved.
@@ -231,14 +231,14 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
 
          {
              LOCK(cs_main);
-             block_index = LookupBlockIndex(chainA[i]->GetHash());
+             block_index = g_chainman.m_blockman.LookupBlockIndex(chainA[i]->GetHash());
          }
          BOOST_CHECK(filter_index.BlockUntilSyncedToCurrentChain());
          CheckFilterLookups(filter_index, block_index, chainA_last_header);
 
          {
              LOCK(cs_main);
-             block_index = LookupBlockIndex(chainB[i]->GetHash());
+             block_index = g_chainman.m_blockman.LookupBlockIndex(chainB[i]->GetHash());
          }
          BOOST_CHECK(filter_index.BlockUntilSyncedToCurrentChain());
          CheckFilterLookups(filter_index, block_index, chainB_last_header);
@@ -255,8 +255,9 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
     BOOST_CHECK(filter_index.LookupFilterRange(0, tip, filters));
     BOOST_CHECK(filter_index.LookupFilterHashRange(0, tip, filter_hashes));
 
-    BOOST_CHECK_EQUAL(filters.size(), tip->nHeight + 1);
-    BOOST_CHECK_EQUAL(filter_hashes.size(), tip->nHeight + 1);
+    assert(tip->nHeight >= 0);
+    BOOST_CHECK_EQUAL(filters.size(), tip->nHeight + 1U);
+    BOOST_CHECK_EQUAL(filter_hashes.size(), tip->nHeight + 1U);
 
     filters.clear();
     filter_hashes.clear();
@@ -269,36 +270,36 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_init_destroy, BasicTestingSetup)
 {
     BlockFilterIndex* filter_index;
 
-    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC_FILTER);
     BOOST_CHECK(filter_index == nullptr);
 
-    BOOST_CHECK(InitBlockFilterIndex(BlockFilterType::BASIC, 1 << 20, true, false));
+    BOOST_CHECK(InitBlockFilterIndex(BlockFilterType::BASIC_FILTER, 1 << 20, true, false));
 
-    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC_FILTER);
     BOOST_CHECK(filter_index != nullptr);
-    BOOST_CHECK(filter_index->GetFilterType() == BlockFilterType::BASIC);
+    BOOST_CHECK(filter_index->GetFilterType() == BlockFilterType::BASIC_FILTER);
 
     // Initialize returns false if index already exists.
-    BOOST_CHECK(!InitBlockFilterIndex(BlockFilterType::BASIC, 1 << 20, true, false));
+    BOOST_CHECK(!InitBlockFilterIndex(BlockFilterType::BASIC_FILTER, 1 << 20, true, false));
 
     int iter_count = 0;
     ForEachBlockFilterIndex([&iter_count](BlockFilterIndex& _index) { iter_count++; });
     BOOST_CHECK_EQUAL(iter_count, 1);
 
-    BOOST_CHECK(DestroyBlockFilterIndex(BlockFilterType::BASIC));
+    BOOST_CHECK(DestroyBlockFilterIndex(BlockFilterType::BASIC_FILTER));
 
     // Destroy returns false because index was already destroyed.
-    BOOST_CHECK(!DestroyBlockFilterIndex(BlockFilterType::BASIC));
+    BOOST_CHECK(!DestroyBlockFilterIndex(BlockFilterType::BASIC_FILTER));
 
-    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC_FILTER);
     BOOST_CHECK(filter_index == nullptr);
 
     // Reinitialize index.
-    BOOST_CHECK(InitBlockFilterIndex(BlockFilterType::BASIC, 1 << 20, true, false));
+    BOOST_CHECK(InitBlockFilterIndex(BlockFilterType::BASIC_FILTER, 1 << 20, true, false));
 
     DestroyAllBlockFilterIndexes();
 
-    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+    filter_index = GetBlockFilterIndex(BlockFilterType::BASIC_FILTER);
     BOOST_CHECK(filter_index == nullptr);
 }
 

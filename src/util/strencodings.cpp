@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -13,7 +13,8 @@
 #include <cstring>
 #include <errno.h>
 #include <limits>
-
+// SYSCOIN
+#include <math.h>
 static const std::string CHARS_ALPHA_NUM = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 static const std::string SAFE_CHARS[] =
@@ -107,39 +108,41 @@ std::vector<unsigned char> ParseHex(const std::string& str)
     return ParseHex(str.c_str());
 }
 
-void SplitHostPort(std::string in, int &portOut, std::string &hostOut) {
+void SplitHostPort(std::string in, uint16_t& portOut, std::string& hostOut)
+{
     size_t colon = in.find_last_of(':');
     // if a : is found, and it either follows a [...], or no other : is in the string, treat it as port separator
     bool fHaveColon = colon != in.npos;
-    bool fBracketed = fHaveColon && (in[0]=='[' && in[colon-1]==']'); // if there is a colon, and in[0]=='[', colon is not 0, so in[colon-1] is safe
-    bool fMultiColon = fHaveColon && (in.find_last_of(':',colon-1) != in.npos);
-    if (fHaveColon && (colon==0 || fBracketed || !fMultiColon)) {
-        int32_t n;
-        if (ParseInt32(in.substr(colon + 1), &n) && n > 0 && n < 0x10000) {
+    bool fBracketed = fHaveColon && (in[0] == '[' && in[colon - 1] == ']'); // if there is a colon, and in[0]=='[', colon is not 0, so in[colon-1] is safe
+    bool fMultiColon = fHaveColon && (in.find_last_of(':', colon - 1) != in.npos);
+    if (fHaveColon && (colon == 0 || fBracketed || !fMultiColon)) {
+        uint16_t n;
+        if (ParseUInt16(in.substr(colon + 1), &n)) {
             in = in.substr(0, colon);
             portOut = n;
         }
     }
-    if (in.size()>0 && in[0] == '[' && in[in.size()-1] == ']')
-        hostOut = in.substr(1, in.size()-2);
-    else
+    if (in.size() > 0 && in[0] == '[' && in[in.size() - 1] == ']') {
+        hostOut = in.substr(1, in.size() - 2);
+    } else {
         hostOut = in;
+    }
 }
 
-std::string EncodeBase64(const unsigned char* pch, size_t len)
+std::string EncodeBase64(Span<const unsigned char> input)
 {
     static const char *pbase64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     std::string str;
-    str.reserve(((len + 2) / 3) * 4);
-    ConvertBits<8, 6, true>([&](int v) { str += pbase64[v]; }, pch, pch + len);
+    str.reserve(((input.size() + 2) / 3) * 4);
+    ConvertBits<8, 6, true>([&](int v) { str += pbase64[v]; }, input.begin(), input.end());
     while (str.size() % 4) str += '=';
     return str;
 }
 
 std::string EncodeBase64(const std::string& str)
 {
-    return EncodeBase64((const unsigned char*)str.data(), str.size());
+    return EncodeBase64(MakeUCharSpan(str));
 }
 
 std::vector<unsigned char> DecodeBase64(const char* p, bool* pf_invalid)
@@ -201,20 +204,24 @@ std::string DecodeBase64(const std::string& str, bool* pf_invalid)
     return std::string((const char*)vchRet.data(), vchRet.size());
 }
 
-std::string EncodeBase32(const unsigned char* pch, size_t len)
+std::string EncodeBase32(Span<const unsigned char> input, bool pad)
 {
     static const char *pbase32 = "abcdefghijklmnopqrstuvwxyz234567";
 
     std::string str;
-    str.reserve(((len + 4) / 5) * 8);
-    ConvertBits<8, 5, true>([&](int v) { str += pbase32[v]; }, pch, pch + len);
-    while (str.size() % 8) str += '=';
+    str.reserve(((input.size() + 4) / 5) * 8);
+    ConvertBits<8, 5, true>([&](int v) { str += pbase32[v]; }, input.begin(), input.end());
+    if (pad) {
+        while (str.size() % 8) {
+            str += '=';
+        }
+    }
     return str;
 }
 
-std::string EncodeBase32(const std::string& str)
+std::string EncodeBase32(const std::string& str, bool pad)
 {
-    return EncodeBase32((const unsigned char*)str.data(), str.size());
+    return EncodeBase32(MakeUCharSpan(str), pad);
 }
 
 std::vector<unsigned char> DecodeBase32(const char* p, bool* pf_invalid)
@@ -276,7 +283,7 @@ std::string DecodeBase32(const std::string& str, bool* pf_invalid)
     return std::string((const char*)vchRet.data(), vchRet.size());
 }
 
-NODISCARD static bool ParsePrechecks(const std::string& str)
+[[nodiscard]] static bool ParsePrechecks(const std::string& str)
 {
     if (str.empty()) // No empty string allowed
         return false;
@@ -303,6 +310,7 @@ bool ParseInt32(const std::string& str, int32_t *out)
         n <= std::numeric_limits<int32_t>::max();
 }
 
+
 bool ParseInt64(const std::string& str, int64_t *out)
 {
     if (!ParsePrechecks(str))
@@ -316,6 +324,30 @@ bool ParseInt64(const std::string& str, int64_t *out)
     return endp && *endp == 0 && !errno &&
         n >= std::numeric_limits<int64_t>::min() &&
         n <= std::numeric_limits<int64_t>::max();
+}
+
+bool ParseUInt8(const std::string& str, uint8_t *out)
+{
+    uint32_t u32;
+    if (!ParseUInt32(str, &u32) || u32 > std::numeric_limits<uint8_t>::max()) {
+        return false;
+    }
+    if (out != nullptr) {
+        *out = static_cast<uint8_t>(u32);
+    }
+    return true;
+}
+
+bool ParseUInt16(const std::string& str, uint16_t* out)
+{
+    uint32_t u32;
+    if (!ParseUInt32(str, &u32) || u32 > std::numeric_limits<uint16_t>::max()) {
+        return false;
+    }
+    if (out != nullptr) {
+        *out = static_cast<uint16_t>(u32);
+    }
+    return true;
 }
 
 bool ParseUInt32(const std::string& str, uint32_t *out)
@@ -333,6 +365,35 @@ bool ParseUInt32(const std::string& str, uint32_t *out)
     // platforms the size of these types may be different.
     return endp && *endp == 0 && !errno &&
         n <= std::numeric_limits<uint32_t>::max();
+}
+
+bool ParseUInt32FromHex(const std::string& str, uint32_t *out)
+{
+    if (!ParsePrechecks(str))
+        return false;
+    if (str.size() >= 1 && str[0] == '-') // Reject negative values, unfortunately strtoul accepts these by default if they fit in the range
+        return false;
+    char *endp = nullptr;
+    errno = 0; // strtoul will not set errno if valid
+    unsigned long int n = strtoul(str.c_str(), &endp, 16);
+    if(out) *out = (uint32_t)n;
+    // Note that strtoul returns a *unsigned long int*, so even if it doesn't report an over/underflow
+    // we still have to check that the returned value is within the range of an *uint32_t*. On 64-bit
+    // platforms the size of these types may be different.
+    return endp && *endp == 0 && !errno &&
+        n <= std::numeric_limits<uint32_t>::max();
+}
+
+bool ParseUInt8FromHex(const std::string& str, uint8_t *out)
+{
+    uint32_t u32;
+    if (!ParseUInt32FromHex(str, &u32) || u32 > std::numeric_limits<uint8_t>::max()) {
+        return false;
+    }
+    if (out != nullptr) {
+        *out = static_cast<uint8_t>(u32);
+    }
+    return true;
 }
 
 bool ParseUInt64(const std::string& str, uint64_t *out)
@@ -406,26 +467,10 @@ std::string FormatParagraph(const std::string& in, size_t width, size_t indent)
     }
     return out.str();
 }
-
-std::string i64tostr(int64_t n)
-{
-    return strprintf("%d", n);
-}
-
 std::string itostr(int n)
 {
     return strprintf("%d", n);
 }
-
-int64_t atoi64(const char* psz)
-{
-#ifdef _MSC_VER
-    return _atoi64(psz);
-#else
-    return strtoll(psz, nullptr, 10);
-#endif
-}
-
 int64_t atoi64(const std::string& str)
 {
 #ifdef _MSC_VER
@@ -559,6 +604,7 @@ bool ParseFixedPoint(const std::string &val, int decimals, int64_t *amount_out)
     return true;
 }
 
+
 std::string ToLower(const std::string& str)
 {
     std::string r;
@@ -578,4 +624,17 @@ std::string Capitalize(std::string str)
     if (str.empty()) return str;
     str[0] = ToUpper(str.front());
     return str;
+}
+
+std::string HexStr(const Span<const uint8_t> s)
+{
+    std::string rv;
+    static constexpr char hexmap[16] = { '0', '1', '2', '3', '4', '5', '6', '7',
+                                         '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };
+    rv.reserve(s.size() * 2);
+    for (uint8_t v: s) {
+        rv.push_back(hexmap[v >> 4]);
+        rv.push_back(hexmap[v & 15]);
+    }
+    return rv;
 }

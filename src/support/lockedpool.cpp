@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2019 The Bitcoin Core developers
+// Copyright (c) 2016-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -10,7 +10,6 @@
 #endif
 
 #ifdef WIN32
-#define WIN32_LEAN_AND_MEAN 1
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -29,7 +28,6 @@
 #endif
 
 LockedPoolManager* LockedPoolManager::_instance = nullptr;
-std::once_flag LockedPoolManager::init_flag;
 
 /*******************************************************************************/
 // Utilities
@@ -48,8 +46,8 @@ Arena::Arena(void *base_in, size_t size_in, size_t alignment_in):
 {
     // Start with one free chunk that covers the entire arena
     auto it = size_to_free_chunk.emplace(size_in, base);
-    chunks_free.emplace(base, it);
-    chunks_free_end.emplace(base + size_in, it);
+    chunks_free.try_emplace(base, it);
+    chunks_free_end.try_emplace(base + size_in, it);
 }
 
 Arena::~Arena()
@@ -67,7 +65,7 @@ void* Arena::alloc(size_t size)
 
     // Pick a large enough free-chunk. Returns an iterator pointing to the first element that is not less than key.
     // This allocation strategy is best-fit. According to "Dynamic Storage Allocation: A Survey and Critical Review",
-    // Wilson et. al. 1995, http://www.scs.stanford.edu/14wi-cs140/sched/readings/wilson.pdf, best-fit and first-fit
+    // Wilson et. al. 1995, https://www.scs.stanford.edu/14wi-cs140/sched/readings/wilson.pdf, best-fit and first-fit
     // policies seem to work well in practice.
     auto size_ptr_it = size_to_free_chunk.lower_bound(size);
     if (size_ptr_it == size_to_free_chunk.end())
@@ -75,7 +73,7 @@ void* Arena::alloc(size_t size)
 
     // Create the used-chunk, taking its space from the end of the free-chunk
     const size_t size_remaining = size_ptr_it->first - size;
-    auto allocated = chunks_used.emplace(size_ptr_it->second + size_remaining, size).first;
+    auto allocated = chunks_used.try_emplace(size_ptr_it->second + size_remaining, size).first;
     chunks_free_end.erase(size_ptr_it->second + size_ptr_it->first);
     if (size_ptr_it->first == size) {
         // whole chunk is used up
@@ -84,7 +82,7 @@ void* Arena::alloc(size_t size)
         // still some memory left in the chunk
         auto it_remaining = size_to_free_chunk.emplace(size_remaining, size_ptr_it->second);
         chunks_free[size_ptr_it->second] = it_remaining;
-        chunks_free_end.emplace(size_ptr_it->second + size_remaining, it_remaining);
+        chunks_free_end.try_emplace(size_ptr_it->second + size_remaining, it_remaining);
     }
     size_to_free_chunk.erase(size_ptr_it);
 
@@ -253,6 +251,11 @@ void *PosixLockedPageAllocator::AllocateLocked(size_t len, bool *lockingSuccess)
     }
     if (addr) {
         *lockingSuccess = mlock(addr, len) == 0;
+#if defined(MADV_DONTDUMP) // Linux
+        madvise(addr, len, MADV_DONTDUMP);
+#elif defined(MADV_NOCORE) // FreeBSD
+        madvise(addr, len, MADV_NOCORE);
+#endif
     }
     return addr;
 }

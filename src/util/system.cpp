@@ -5,7 +5,14 @@
 
 #include <util/system.h>
 
+#ifdef ENABLE_EXTERNAL_SIGNER
+#include <boost/process.hpp>
+#endif // ENABLE_EXTERNAL_SIGNER
+
 #include <chainparamsbase.h>
+#include <sync.h>
+#include <util/check.h>
+#include <util/getuniquepath.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/translation.h>
@@ -17,7 +24,7 @@
 #endif
 
 #ifndef WIN32
-// for posix_fallocate
+// for posix_fallocate, in configure.ac we check if it is present after this
 #ifdef __linux__
 
 #ifdef _POSIX_C_SOURCE
@@ -29,6 +36,7 @@
 #endif // __linux__
 
 #include <algorithm>
+#include <cassert>
 #include <fcntl.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -43,12 +51,6 @@
 #pragma warning(disable:4717)
 #endif
 
-#ifdef _WIN32_IE
-#undef _WIN32_IE
-#endif
-#define _WIN32_IE 0x0501
-
-#define WIN32_LEAN_AND_MEAN 1
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -65,98 +67,46 @@
 
 #include <boost/algorithm/string/replace.hpp>
 #include <thread>
+#include <typeinfo>
+#include <univalue.h>
 // SYSCOIN only features
-#include <boost/algorithm/string.hpp>
-#include <signal.h>
-#include <rpc/server.h>
-#include <util/time.h>
 bool fMasternodeMode = false;
-bool fUnitTest = false;
 bool bGethTestnet = false;
-bool fTPSTest = false;
-bool fTPSTestEnabled = false;
-bool fLiteMode = false;
-bool fZMQWalletStatus = false;
-bool fZMQNetworkStatus = false;
-bool fZMQEthStatus = false;
-bool fZMQWalletRawTx = false;
+bool fDisableGovernance = false;
+bool fRegTest = false;
+bool fSigNet = false;
 bool fAssetIndex = false;
 uint32_t fGethSyncHeight = 0;
 uint32_t fGethCurrentHeight = 0;
 pid_t gethPID = 0;
 pid_t relayerPID = 0;
+int64_t nRandomResetSec = 0;
+int64_t nLastGethHeaderTime = 0;
 std::string fGethSyncStatus = "waiting to sync...";
 bool fGethSynced = false;
 bool fLoaded = false;
-bool bb = true;
-std::vector<JSONRPCRequest> vecTPSRawTransactions;
-#include <typeinfo>
-#include <univalue.h>
+int32_t DEFAULT_MN_COLLATERAL_REQUIRED = 100000;
+int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE = 60 * 60 * 24 * 7; // keep them for a week
+CAmount nMNCollateralRequired = DEFAULT_MN_COLLATERAL_REQUIRED*COIN;
 
 // Application startup time (used for uptime calculation)
 const int64_t nStartupTime = GetTime();
-
 const char * const SYSCOIN_CONF_FILENAME = "syscoin.conf";
+const char * const SYSCOIN_SETTINGS_FILENAME = "settings.json";
 
 ArgsManager gArgs;
-// SYSCOIN
-#ifdef WIN32
-    #include <windows.h>
-    #include <winnt.h>
-    #include <winternl.h>
-    #include <stdio.h>
-    #include <errno.h>
-    #include <assert.h>
-    #include <process.h>
-    pid_t fork(std::string app, std::string arg)
-    {
-        std::string appQuoted = "\"" + app + "\"";
-        PROCESS_INFORMATION pi;
-        STARTUPINFOW si;
-        ZeroMemory(&pi, sizeof(pi));
-        ZeroMemory(&si, sizeof(si));
-        GetStartupInfoW (&si);
-        si.cb = sizeof(si); 
-        size_t start_pos = 0;
-        //Prepare CreateProcess args
-        std::wstring appQuoted_w(appQuoted.length(), L' '); // Make room for characters
-        std::copy(appQuoted.begin(), appQuoted.end(), appQuoted_w.begin()); // Copy string to wstring.
-
-        std::wstring app_w(app.length(), L' '); // Make room for characters
-        std::copy(app.begin(), app.end(), app_w.begin()); // Copy string to wstring.
-
-        std::wstring arg_w(arg.length(), L' '); // Make room for characters
-        std::copy(arg.begin(), arg.end(), arg_w.begin()); // Copy string to wstring.
-
-        std::wstring input = appQuoted_w + L" " + arg_w;
-        wchar_t* arg_concat = const_cast<wchar_t*>( input.c_str() );
-        const wchar_t* app_const = app_w.c_str();
-        LogPrintf("CreateProcessW app %s %s\n",app,arg);
-        int result = CreateProcessW(app_const, arg_concat, NULL, NULL, FALSE, 
-              CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-        if(!result)
-        {
-            LogPrintf("CreateProcess failed (%d)\n", GetLastError());
-            return 0;
-        }
-        pid_t pid = (pid_t)pi.dwProcessId;
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return pid;
-    }
-#endif
+/** Mutex to protect dir_locks. */
+static Mutex cs_dir_locks;
 /** A map that contains all the currently held directory locks. After
  * successful locking, these will be held here until the global destructor
  * cleans them up and thus automatically unlocks them, or ReleaseDirectoryLocks
  * is called.
  */
-static std::map<std::string, std::unique_ptr<fsbridge::FileLock>> dir_locks;
-/** Mutex to protect dir_locks. */
-static std::mutex cs_dir_locks;
+static std::map<std::string, std::unique_ptr<fsbridge::FileLock>> dir_locks GUARDED_BY(cs_dir_locks);
 
 bool LockDirectory(const fs::path& directory, const std::string lockfile_name, bool probe_only)
 {
-    std::lock_guard<std::mutex> ulock(cs_dir_locks);
+    LOCK(cs_dir_locks);
     fs::path pathLockFile = directory / lockfile_name;
 
     // If a lock for this directory already exists in the map, don't try to re-lock it
@@ -167,32 +117,32 @@ bool LockDirectory(const fs::path& directory, const std::string lockfile_name, b
     // Create empty lock file if it doesn't exist.
     FILE* file = fsbridge::fopen(pathLockFile, "a");
     if (file) fclose(file);
-    auto lock = MakeUnique<fsbridge::FileLock>(pathLockFile);
+    auto lock = std::make_unique<fsbridge::FileLock>(pathLockFile);
     if (!lock->TryLock()) {
         return error("Error while attempting to lock directory %s: %s", directory.string(), lock->GetReason());
     }
     if (!probe_only) {
-        // Lock successful and we're not just probing, put it into the map
-        dir_locks.emplace(pathLockFile.string(), std::move(lock));
+        // SYSCOIN Lock successful and we're not just probing, put it into the map
+        dir_locks[pathLockFile.string()] = std::move(lock);
     }
     return true;
 }
 
 void UnlockDirectory(const fs::path& directory, const std::string& lockfile_name)
 {
-    std::lock_guard<std::mutex> lock(cs_dir_locks);
+    LOCK(cs_dir_locks);
     dir_locks.erase((directory / lockfile_name).string());
 }
 
 void ReleaseDirectoryLocks()
 {
-    std::lock_guard<std::mutex> ulock(cs_dir_locks);
+    LOCK(cs_dir_locks);
     dir_locks.clear();
 }
 
 bool DirIsWritable(const fs::path& directory)
 {
-    fs::path tmpFile = directory / fs::unique_path();
+    fs::path tmpFile = GetUniquePath(directory);
 
     FILE* file = fsbridge::fopen(tmpFile, "a");
     if (!file) return false;
@@ -209,6 +159,12 @@ bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes)
 
     uint64_t free_bytes_available = fs::space(dir).available;
     return free_bytes_available >= min_disk_space + additional_bytes;
+}
+
+std::streampos GetFileSize(const char* path, std::streamsize max) {
+    std::ifstream file(path, std::ios::binary);
+    file.ignore(max);
+    return file.gcount();
 }
 
 /**
@@ -296,10 +252,11 @@ static bool CheckValid(const std::string& key, const util::SettingsValue& val, u
     return true;
 }
 
-ArgsManager::ArgsManager()
-{
-    // nothing to do
-}
+// Define default constructor and destructor that are not inline, so code instantiating this class doesn't need to
+// #include class definitions for all members.
+// For example, m_settings has an internal dependency on univalue.
+ArgsManager::ArgsManager() {}
+ArgsManager::~ArgsManager() {}
 
 const std::set<std::string> ArgsManager::GetUnsuitableSectionOnlyArgs() const
 {
@@ -326,6 +283,7 @@ const std::list<SectionInfo> ArgsManager::GetUnrecognizedSections() const
     // Section names to be recognized in the config file.
     static const std::set<std::string> available_sections{
         CBaseChainParams::REGTEST,
+        CBaseChainParams::SIGNET,
         CBaseChainParams::TESTNET,
         CBaseChainParams::MAIN
     };
@@ -371,8 +329,22 @@ bool ArgsManager::ParseParameters(int argc, const char* const argv[], std::strin
             key[0] = '-';
 #endif
 
-        if (key[0] != '-')
+        if (key[0] != '-') {
+            if (!m_accept_any_command && m_command.empty()) {
+                // The first non-dash arg is a registered command
+                std::optional<unsigned int> flags = GetArgFlags(key);
+                if (!flags || !(*flags & ArgsManager::COMMAND)) {
+                    error = strprintf("Invalid command '%s'", argv[i]);
+                    return false;
+                }
+            }
+            m_command.push_back(key);
+            while (++i < argc) {
+                // The remaining args are command args
+                m_command.push_back(argv[i]);
+            }
             break;
+        }
 
         // Transform --foo to -foo
         if (key.length() > 1 && key[1] == '-')
@@ -382,7 +354,7 @@ bool ArgsManager::ParseParameters(int argc, const char* const argv[], std::strin
         key.erase(0, 1);
         std::string section;
         util::SettingsValue value = InterpretOption(section, key, val);
-        Optional<unsigned int> flags = GetArgFlags('-' + key);
+        std::optional<unsigned int> flags = GetArgFlags('-' + key);
 
         // Unknown command line options and command line options with dot
         // characters (which are returned from InterpretOption with nonempty
@@ -408,7 +380,7 @@ bool ArgsManager::ParseParameters(int argc, const char* const argv[], std::strin
     return success;
 }
 
-Optional<unsigned int> ArgsManager::GetArgFlags(const std::string& name) const
+std::optional<unsigned int> ArgsManager::GetArgFlags(const std::string& name) const
 {
     LOCK(cs_args);
     for (const auto& arg_map : m_available_args) {
@@ -417,7 +389,27 @@ Optional<unsigned int> ArgsManager::GetArgFlags(const std::string& name) const
             return search->second.m_flags;
         }
     }
-    return nullopt;
+    return std::nullopt;
+}
+
+std::optional<const ArgsManager::Command> ArgsManager::GetCommand() const
+{
+    Command ret;
+    LOCK(cs_args);
+    auto it = m_command.begin();
+    if (it == m_command.end()) {
+        // No command was passed
+        return std::nullopt;
+    }
+    if (!m_accept_any_command) {
+        // The registered command
+        ret.command = *(it++);
+    }
+    while (it != m_command.end()) {
+        // The unregistered command and args (if any)
+        ret.args.push_back(*(it++));
+    }
+    return ret;
 }
 
 std::vector<std::string> ArgsManager::GetArgs(const std::string& strArg) const
@@ -432,6 +424,92 @@ std::vector<std::string> ArgsManager::GetArgs(const std::string& strArg) const
 bool ArgsManager::IsArgSet(const std::string& strArg) const
 {
     return !GetSetting(strArg).isNull();
+}
+
+bool ArgsManager::InitSettings(std::string& error)
+{
+    if (!GetSettingsPath()) {
+        return true; // Do nothing if settings file disabled.
+    }
+
+    std::vector<std::string> errors;
+    if (!ReadSettingsFile(&errors)) {
+        error = strprintf("Failed loading settings file:\n- %s\n", Join(errors, "\n- "));
+        return false;
+    }
+    if (!WriteSettingsFile(&errors)) {
+        error = strprintf("Failed saving settings file:\n- %s\n", Join(errors, "\n- "));
+        return false;
+    }
+    return true;
+}
+
+bool ArgsManager::GetSettingsPath(fs::path* filepath, bool temp) const
+{
+    if (IsArgNegated("-settings")) {
+        return false;
+    }
+    if (filepath) {
+        std::string settings = GetArg("-settings", SYSCOIN_SETTINGS_FILENAME);
+        *filepath = fsbridge::AbsPathJoin(GetDataDir(/* net_specific= */ true), temp ? settings + ".tmp" : settings);
+    }
+    return true;
+}
+
+static void SaveErrors(const std::vector<std::string> errors, std::vector<std::string>* error_out)
+{
+    for (const auto& error : errors) {
+        if (error_out) {
+            error_out->emplace_back(error);
+        } else {
+            LogPrintf("%s\n", error);
+        }
+    }
+}
+
+bool ArgsManager::ReadSettingsFile(std::vector<std::string>* errors)
+{
+    fs::path path;
+    if (!GetSettingsPath(&path, /* temp= */ false)) {
+        return true; // Do nothing if settings file disabled.
+    }
+
+    LOCK(cs_args);
+    m_settings.rw_settings.clear();
+    std::vector<std::string> read_errors;
+    if (!util::ReadSettings(path, m_settings.rw_settings, read_errors)) {
+        SaveErrors(read_errors, errors);
+        return false;
+    }
+    for (const auto& setting : m_settings.rw_settings) {
+        std::string section;
+        std::string key = setting.first;
+        (void)InterpretOption(section, key, /* value */ {}); // Split setting key into section and argname
+        if (!GetArgFlags('-' + key)) {
+            LogPrintf("Ignoring unknown rw_settings value %s\n", setting.first);
+        }
+    }
+    return true;
+}
+
+bool ArgsManager::WriteSettingsFile(std::vector<std::string>* errors) const
+{
+    fs::path path, path_tmp;
+    if (!GetSettingsPath(&path, /* temp= */ false) || !GetSettingsPath(&path_tmp, /* temp= */ true)) {
+        throw std::logic_error("Attempt to write settings file when dynamic settings are disabled.");
+    }
+
+    LOCK(cs_args);
+    std::vector<std::string> write_errors;
+    if (!util::WriteSettings(path_tmp, m_settings.rw_settings, write_errors)) {
+        SaveErrors(write_errors, errors);
+        return false;
+    }
+    if (!RenameOver(path_tmp, path)) {
+        SaveErrors({strprintf("Failed renaming settings file %s to %s\n", path_tmp.string(), path.string())}, errors);
+        return false;
+    }
+    return true;
 }
 
 bool ArgsManager::IsArgNegated(const std::string& strArg) const
@@ -479,8 +557,22 @@ void ArgsManager::ForceSetArg(const std::string& strArg, const std::string& strV
     m_settings.forced_settings[SettingName(strArg)] = strValue;
 }
 
+void ArgsManager::AddCommand(const std::string& cmd, const std::string& help, const OptionsCategory& cat)
+{
+    Assert(cmd.find('=') == std::string::npos);
+    Assert(cmd.at(0) != '-');
+
+    LOCK(cs_args);
+    m_accept_any_command = false; // latch to false
+    std::map<std::string, Arg>& arg_map = m_available_args[cat];
+    auto ret = arg_map.emplace(cmd, Arg{"", help, ArgsManager::COMMAND});
+    Assert(ret.second); // Fail on duplicate commands
+}
+
 void ArgsManager::AddArg(const std::string& name, const std::string& help, unsigned int flags, const OptionsCategory& cat)
 {
+    Assert((flags & ArgsManager::COMMAND) == 0); // use AddCommand
+
     // Split arg name from its help param
     size_t eq_index = name.find('=');
     if (eq_index == std::string::npos) {
@@ -490,7 +582,7 @@ void ArgsManager::AddArg(const std::string& name, const std::string& help, unsig
 
     LOCK(cs_args);
     std::map<std::string, Arg>& arg_map = m_available_args[cat];
-    auto ret = arg_map.emplace(arg_name, Arg{name.substr(eq_index, name.size() - eq_index), help, flags});
+    auto ret = arg_map.try_emplace(arg_name, Arg{name.substr(eq_index, name.size() - eq_index), help, flags});
     assert(ret.second); // Make sure an insertion actually happened
 
     if (flags & ArgsManager::NETWORK_ONLY) {
@@ -507,7 +599,7 @@ void ArgsManager::AddHiddenArgs(const std::vector<std::string>& names)
 
 std::string ArgsManager::GetHelpMessage() const
 {
-    const bool show_debug = gArgs.GetBoolArg("-help-debug", false);
+    const bool show_debug = GetBoolArg("-help-debug", false);
 
     std::string usage = "";
     LOCK(cs_args);
@@ -625,10 +717,9 @@ void PrintExceptionContinue(const std::exception* pex, const char* pszThread)
 
 fs::path GetDefaultDataDir()
 {
-    // Windows < Vista: C:\Documents and Settings\Username\Application Data\Syscoin
-    // Windows >= Vista: C:\Users\Username\AppData\Roaming\Syscoin
-    // Mac: ~/Library/Application Support/Syscoin
-    // Unix: ~/.syscoin
+    // Windows: C:\Users\Username\AppData\Roaming\Syscoin
+    // macOS: ~/Library/Application Support/Syscoin
+    // Unix-like: ~/.syscoin
 #ifdef WIN32
     // Windows
     return GetSpecialFolderPath(CSIDL_APPDATA) / "Syscoin";
@@ -640,14 +731,27 @@ fs::path GetDefaultDataDir()
     else
         pathRet = fs::path(pszHome);
 #ifdef MAC_OSX
-    // Mac
+    // macOS
     return pathRet / "Library/Application Support/Syscoin";
 #else
-    // Unix
+    // Unix-like
     return pathRet / ".syscoin";
 #endif
 #endif
 }
+
+namespace {
+fs::path StripRedundantLastElementsOfPath(const fs::path& path)
+{
+    auto result = path;
+    while (result.filename().string() == ".") {
+        result = result.parent_path();
+    }
+
+    assert(fs::equivalent(result, path));
+    return result;
+}
+} // namespace
 
 static fs::path g_blocks_path_cache_net_specific;
 static fs::path pathCached;
@@ -675,7 +779,9 @@ const fs::path &GetBlocksDir()
 
     path /= BaseParams().DataDir();
     path /= "blocks";
-    fs::create_directories(path);
+    // SYSCOIN
+    TryCreateDirectories(path);
+    path = StripRedundantLastElementsOfPath(path);
     return path;
 }
 
@@ -701,11 +807,13 @@ const fs::path &GetDataDir(bool fNetSpecific)
     if (fNetSpecific)
         path /= BaseParams().DataDir();
 
-    if (fs::create_directories(path)) {
+    // SYSCOIN
+    if (TryCreateDirectories(path)) {
         // This is the first run, create wallets subdirectory too
-        fs::create_directories(path / "wallets");
+        TryCreateDirectories(path / "wallets");
     }
 
+    path = StripRedundantLastElementsOfPath(path);
     return path;
 }
 
@@ -727,14 +835,6 @@ void ClearDatadirCache()
 fs::path GetConfigFile(const std::string& confPath)
 {
     return AbsPathForConfigVal(fs::path(confPath), false);
-}
-// SYSCOIN
-fs::path GetMasternodeConfigFile()
-{
-    fs::path pathConfigFile(gArgs.GetArg("-mnconf", "masternode.conf"));
-    if (!pathConfigFile.is_absolute())
-        pathConfigFile = GetDataDir() / pathConfigFile;
-    return pathConfigFile;
 }
 
 static bool GetConfigOptions(std::istream& stream, const std::string& filepath, std::string& error, std::vector<std::pair<std::string, std::string>>& options, std::list<SectionInfo>& sections)
@@ -793,7 +893,7 @@ bool ArgsManager::ReadConfigStream(std::istream& stream, const std::string& file
         std::string section;
         std::string key = option.first;
         util::SettingsValue value = InterpretOption(section, key, option.second);
-        Optional<unsigned int> flags = GetArgFlags('-' + key);
+        std::optional<unsigned int> flags = GetArgFlags('-' + key);
         if (flags) {
             if (!CheckValid(key, value, *flags, error)) {
                 return false;
@@ -892,7 +992,7 @@ bool ArgsManager::ReadConfigFiles(std::string& error, bool ignore_invalid_keys)
     // If datadir is changed in .conf file:
     ClearDatadirCache();
     if (!CheckDataDirOption()) {
-        error = strprintf("specified data directory \"%s\" does not exist.", gArgs.GetArg("-datadir", ""));
+        error = strprintf("specified data directory \"%s\" does not exist.", GetArg("-datadir", ""));
         return false;
     }
     return true;
@@ -909,16 +1009,21 @@ std::string ArgsManager::GetChainName() const
     };
 
     const bool fRegTest = get_net("-regtest");
+    const bool fSigNet  = get_net("-signet");
     const bool fTestNet = get_net("-testnet");
     const bool is_chain_arg_set = IsArgSet("-chain");
 
-    if ((int)is_chain_arg_set + (int)fRegTest + (int)fTestNet > 1) {
-        throw std::runtime_error("Invalid combination of -regtest, -testnet and -chain. Can use at most one.");
+    if ((int)is_chain_arg_set + (int)fRegTest + (int)fSigNet + (int)fTestNet > 1) {
+        throw std::runtime_error("Invalid combination of -regtest, -signet, -testnet and -chain. Can use at most one.");
     }
     if (fRegTest)
         return CBaseChainParams::REGTEST;
+    if (fSigNet) {
+        return CBaseChainParams::SIGNET;
+    }
     if (fTestNet)
         return CBaseChainParams::TESTNET;
+
     return GetArg("-chain", CBaseChainParams::MAIN);
 }
 // SYSCOIN
@@ -926,109 +1031,18 @@ fs::path GetGethPidFile()
 {
     return AbsPathForConfigVal(fs::path("geth.pid"));
 }
-void KillProcess(const pid_t& pid){
-    if(pid <= 0)
-        return;
-    LogPrintf("%s: Trying to kill pid %d\n", __func__, pid);
-    #ifdef WIN32
-        HANDLE handy;
-        handy =OpenProcess(SYNCHRONIZE|PROCESS_TERMINATE, TRUE,pid);
-        TerminateProcess(handy,0);
-    #endif  
-    #ifndef WIN32
-        int result = 0;
-        for(int i =0;i<10;i++){
-            UninterruptibleSleep(std::chrono::milliseconds(500));
-            result = kill( pid, SIGINT ) ;
-            if(result == 0){
-                LogPrintf("%s: Killing with SIGINT %d\n", __func__, pid);
-                continue;
-            }  
-            LogPrintf("%s: Killed with SIGINT\n", __func__);
-            return;
-        }
-        for(int i =0;i<10;i++){
-            UninterruptibleSleep(std::chrono::milliseconds(500));
-            result = kill( pid, SIGTERM ) ;
-            if(result == 0){
-                LogPrintf("%s: Killing with SIGTERM %d\n", __func__, pid);
-                continue;
-            }  
-            LogPrintf("%s: Killed with SIGTERM\n", __func__);
-            return;
-        }
-        for(int i =0;i<10;i++){
-            UninterruptibleSleep(std::chrono::milliseconds(500));
-            result = kill( pid, SIGKILL ) ;
-            if(result == 0){
-                LogPrintf("%s: Killing with SIGKILL %d\n", __func__, pid);
-                continue;
-            }  
-            LogPrintf("%s: Killed with SIGKILL\n", __func__);
-            return;
-        }  
-        LogPrintf("%s: Done trying to kill with SIGINT-SIGTERM-SIGKILL\n", __func__);            
-    #endif 
-}
 std::string GetGethFilename(){
     // For Windows:
     #ifdef WIN32
-       return "sysgeth.nod.exe";
+       return "sysgeth.exe";
     #endif    
     #ifdef MAC_OSX
         // Mac
-        return "sysgeth.nod";
+        return "sysgeth";
     #else
         // Linux
-        return "sysgeth.nod";
+        return "sysgeth";
     #endif
-}
-std::string GetGethAndRelayerFilepath(){
-    // For Windows:
-    #ifdef WIN32
-       return "/bin/win64/";
-    #endif    
-    #ifdef MAC_OSX
-        // Mac
-        return "/bin/osx/";
-    #else
-        // Linux
-        return "/bin/linux/";
-    #endif
-}
-bool StopGethNode(pid_t &pid)
-{
-    if(pid < 0)
-        return false;
-    if(fUnitTest || fTPSTest)
-        return true;
-    if(pid){
-        try{
-            KillProcess(pid);
-            LogPrintf("%s: Geth successfully exited from pid %d\n", __func__, pid);
-        }
-        catch(...){
-            LogPrintf("%s: Geth failed to exit from pid %d\n", __func__, pid);
-        }
-    }
-    {
-        boost::filesystem::ifstream ifs(GetGethPidFile(), std::ios::in);
-        pid_t pidFile = 0;
-        while(ifs >> pidFile){
-            if(pidFile && pidFile != pid){
-                try{
-                    KillProcess(pidFile);
-                    LogPrintf("%s: Geth successfully exited from pid %d(from geth.pid)\n", __func__, pidFile);
-                }
-                catch(...){
-                    LogPrintf("%s: Geth failed to exit from pid %d(from geth.pid)\n", __func__, pidFile);
-                }
-            } 
-        }  
-    }
-    boost::filesystem::remove(GetGethPidFile());
-    pid = -1;
-    return true;
 }
 bool CheckSpecs(std::string &errMsg, bool bMiner){
     meminfo_t memInfo = parse_meminfo();
@@ -1040,189 +1054,7 @@ bool CheckSpecs(std::string &errMsg, bool bMiner){
     LogPrintf("Total number of physical cores found %d\n", GetNumCores());
     if(GetNumCores() < (bMiner? 4: 2))
         errMsg = _("Insufficient CPU cores, you need at least 2 cores to run a masternode. Please see documentation.").translated;
-   bb = !errMsg.empty();
    return errMsg.empty();         
-}
-bool StartGethNode(const std::string &exePath, pid_t &pid, int websocketport, int ethrpcport, const std::string &mode)
-{
-    if(fUnitTest || fTPSTest)
-        return true;
-    LogPrintf("%s: Starting geth on wsport %d rpcport %d (testnet=%d)...\n", __func__, websocketport, ethrpcport, bGethTestnet? 1:0);
-    std::string gethFilename = GetGethFilename();
-    
-    // stop any geth nodes before starting
-    StopGethNode(pid);
-    fs::path fpathDefault = exePath;
-    fpathDefault = fpathDefault.parent_path();
-    
-    fs::path dataDir = GetDataDir(true) / "geth";
-
-    // ../Resources
-    fs::path attempt1 = fpathDefault.string() + fs::system_complete("/../Resources/").string() + gethFilename;
-    attempt1 = attempt1.make_preferred();
-
-    // current executable path
-    fs::path attempt2 = fpathDefault.string() + "/" + gethFilename;
-    attempt2 = attempt2.make_preferred();
-    // current executable path + bin/[os]/sysgeth.nod
-    fs::path attempt3 = fpathDefault.string() + GetGethAndRelayerFilepath() + gethFilename;
-    attempt3 = attempt3.make_preferred();
-    // $path
-    fs::path attempt4 = gethFilename;
-    attempt4 = attempt4.make_preferred();
-    // $path + bin/[os]/sysgeth.nod
-    fs::path attempt5 = GetGethAndRelayerFilepath() + gethFilename;
-    attempt5 = attempt5.make_preferred();
-    // /usr/local/bin/sysgeth.nod
-    fs::path attempt6 = fs::system_complete("/usr/local/bin/").string() + gethFilename;
-    attempt6 = attempt6.make_preferred();
-
-    
-  
-    #ifndef WIN32
-    // Prevent killed child-processes remaining as "defunct"
-    struct sigaction sa;
-    sa.sa_handler = SIG_DFL;
-    sa.sa_flags = SA_NOCLDWAIT;
-        
-    sigaction( SIGCHLD, &sa, NULL ) ;
-        
-    // Duplicate ("fork") the process. Will return zero in the child
-    // process, and the child's PID in the parent (or negative on error).
-    pid = fork() ;
-    if( pid < 0 ) {
-        LogPrintf("Could not start Geth, pid < 0 %d\n", pid);
-        return false;
-    }
-	// TODO: sanitize environment variables as per
-	// https://wiki.sei.cmu.edu/confluence/display/c/ENV03-C.+Sanitize+the+environment+when+invoking+external+programs
-    if( pid == 0 ) {
-        // Order of looking for the geth binary:
-        // 1. current executable directory
-        // 2. current executable directory/bin/[os]/syscoin_geth
-        // 3. $path
-        // 4. $path/bin/[os]/syscoin_geth
-        // 5. /usr/local/bin/syscoin_geth
-        std::string portStr = itostr(websocketport);
-        std::string rpcportStr = itostr(ethrpcport);
-        char * argvAttempt1[20] = {(char*)attempt1.string().c_str(), 
-                (char*)"--ws", (char*)"--wsport", (char*)portStr.c_str(),
-                (char*)"--rpc", (char*)"--rpcapi", (char*)"personal,eth", (char*)"--rpcport", (char*)rpcportStr.c_str(),
-                (char*)"--wsorigins", (char*)"*",
-                (char*)"--syncmode", (char*)mode.c_str(), 
-                (char*)"--datadir", (char*)dataDir.c_str(),
-                (char*)"--allow-insecure-unlock",
-                bGethTestnet?(char*)"--rinkeby": NULL,
-                (char*)"--rpccorsdomain",(char*)"*",
-                NULL };
-        char * argvAttempt2[20] = {(char*)attempt2.string().c_str(), 
-                (char*)"--ws", (char*)"--wsport", (char*)portStr.c_str(),
-                (char*)"--rpc", (char*)"--rpcapi", (char*)"personal,eth", (char*)"--rpcport", (char*)rpcportStr.c_str(),
-                (char*)"--wsorigins", (char*)"*",
-                (char*)"--syncmode", (char*)mode.c_str(), 
-                (char*)"--datadir", (char*)dataDir.c_str(),
-                (char*)"--allow-insecure-unlock",
-                bGethTestnet?(char*)"--rinkeby": NULL,
-                (char*)"--rpccorsdomain",(char*)"*",
-                NULL };
-        char * argvAttempt3[20] = {(char*)attempt3.string().c_str(), 
-                (char*)"--ws", (char*)"--wsport", (char*)portStr.c_str(), 
-                (char*)"--rpc", (char*)"--rpcapi", (char*)"personal,eth", (char*)"--rpcport", (char*)rpcportStr.c_str(),
-                (char*)"--wsorigins", (char*)"*",
-                (char*)"--syncmode", (char*)mode.c_str(), 
-                (char*)"--datadir", (char*)dataDir.c_str(),
-                (char*)"--allow-insecure-unlock",
-                bGethTestnet?(char*)"--rinkeby": NULL,
-                (char*)"--rpccorsdomain",(char*)"*",
-                NULL };
-        char * argvAttempt4[20] = {(char*)attempt4.string().c_str(), 
-                (char*)"--ws", (char*)"--wsport", (char*)portStr.c_str(), 
-                (char*)"--rpc", (char*)"--rpcapi", (char*)"personal,eth", (char*)"--rpcport", (char*)rpcportStr.c_str(),
-                (char*)"--wsorigins", (char*)"*",
-                (char*)"--syncmode", (char*)mode.c_str(), 
-                (char*)"--datadir", (char*)dataDir.c_str(),
-                (char*)"--allow-insecure-unlock",
-                bGethTestnet?(char*)"--rinkeby": NULL,
-                (char*)"--rpccorsdomain",(char*)"*",
-                NULL };
-        char * argvAttempt5[20] = {(char*)attempt5.string().c_str(), 
-                (char*)"--ws", (char*)"--wsport", (char*)portStr.c_str(),
-                (char*)"--rpc", (char*)"--rpcapi", (char*)"personal,eth", (char*)"--rpcport", (char*)rpcportStr.c_str(),
-                (char*)"--wsorigins", (char*)"*",
-                (char*)"--syncmode", (char*)mode.c_str(), 
-                (char*)"--datadir", (char*)dataDir.c_str(),
-                (char*)"--allow-insecure-unlock",
-                bGethTestnet?(char*)"--rinkeby": NULL,
-                (char*)"--rpccorsdomain",(char*)"*",
-                NULL };   
-        char * argvAttempt6[20] = {(char*)attempt6.string().c_str(), 
-                (char*)"--ws", (char*)"--wsport", (char*)portStr.c_str(), 
-                (char*)"--rpc", (char*)"--rpcapi", (char*)"personal,eth", (char*)"--rpcport", (char*)rpcportStr.c_str(),
-                (char*)"--wsorigins", (char*)"*",
-                (char*)"--syncmode", (char*)mode.c_str(), 
-                (char*)"--datadir", (char*)dataDir.c_str(),
-                (char*)"--allow-insecure-unlock",
-                bGethTestnet?(char*)"--rinkeby": NULL,
-                (char*)"--rpccorsdomain",(char*)"*",
-                NULL };                                                                   
-        execv(argvAttempt1[0], &argvAttempt1[0]); // current directory
-        if (errno != 0) {
-            LogPrintf("Geth not found at %s, trying in current folder\n", argvAttempt1[0]);
-            execv(argvAttempt2[0], &argvAttempt2[0]);
-            if (errno != 0) {
-                LogPrintf("Geth not found at %s, trying in current bin folder\n", argvAttempt2[0]);
-                execvp(argvAttempt3[0], &argvAttempt3[0]); // path
-                if (errno != 0) {
-                    LogPrintf("Geth not found at %s, trying in $PATH\n", argvAttempt3[0]);
-                    execvp(argvAttempt4[0], &argvAttempt4[0]);
-                    if (errno != 0) {
-                        LogPrintf("Geth not found at %s, trying in $PATH bin folder\n", argvAttempt4[0]);
-                        execvp(argvAttempt5[0], &argvAttempt5[0]);
-                        if (errno != 0) {
-                            LogPrintf("Geth not found at %s, trying in /usr/local/bin folder\n", argvAttempt5[0]);
-                            execvp(argvAttempt6[0], &argvAttempt6[0]);
-                            if (errno != 0) {
-                                LogPrintf("Geth not found in %s, giving up.\n", argvAttempt6[0]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        boost::filesystem::ofstream ofs(GetGethPidFile(), std::ios::out | std::ios::trunc);
-        ofs << pid;
-    }
-    #else
-        std::string portStr = itostr(websocketport);
-        std::string rpcportStr = itostr(ethrpcport);
-        std::string args =  std::string("--rpc --rpcapi personal,eth --rpccorsdomain * --rpcport ") + rpcportStr + std::string(" --ws --wsport ") + portStr + std::string(" --wsorigins * --syncmode ") + mode + std::string(" --datadir ") +  dataDir.string();
-        if(bGethTestnet) {
-            args += std::string(" --rinkeby");
-        }
-        pid = fork(attempt2.string(), args);
-        if( pid <= 0 ) {
-            LogPrintf("Geth not found at %s, trying in current bin folder\n", attempt2.string());
-            pid = fork(attempt3.string(), args);
-            if( pid <= 0 ) {
-                LogPrintf("Geth not found at %s, trying in $PATH\n", attempt3.string());
-                pid = fork(attempt4.string(), args);
-                if( pid <= 0 ) {
-                    LogPrintf("Geth not found at %s, trying in $PATH bin folder\n", attempt4.string());
-                    pid = fork(attempt5.string(), args);
-                    if( pid <= 0 ) {
-                        LogPrintf("Geth not found in %s, giving up.\n", attempt5.string());
-                        return false;
-                    }
-                }
-            }
-        }  
-        boost::filesystem::ofstream ofs(GetGethPidFile(), std::ios::out | std::ios::trunc);
-        ofs << pid;
-    #endif
-    if(pid > 0)
-        LogPrintf("%s: Geth Started with pid %d\n", __func__, pid);
-    return true;
 }
 
 // SYSCOIN - RELAYER
@@ -1233,214 +1065,15 @@ fs::path GetRelayerPidFile()
 std::string GetRelayerFilename(){
     // For Windows:
     #ifdef WIN32
-       return "sysrelayer.nod.exe";
+       return "sysrelayer.exe";
     #endif    
     #ifdef MAC_OSX
         // Mac
-        return "sysrelayer.nod";
+        return "sysrelayer";
     #else
         // Linux
-        return "sysrelayer.nod";
+        return "sysrelayer";
     #endif
-}
-bool StopRelayerNode(pid_t &pid)
-{
-    if(pid < 0)
-        return false;
-    if(fUnitTest || fTPSTest)
-        return true;
-    if(pid){
-        try{
-            KillProcess(pid);
-            LogPrintf("%s: Relayer successfully exited from pid %d\n", __func__, pid);
-        }
-        catch(...){
-            LogPrintf("%s: Relayer failed to exit from pid %d\n", __func__, pid);
-        }
-    }
-    {
-        boost::filesystem::ifstream ifs(GetRelayerPidFile(), std::ios::in);
-        pid_t pidFile = 0;
-        while(ifs >> pidFile){
-            if(pidFile && pidFile != pid){
-                try{
-                    KillProcess(pidFile);
-                    LogPrintf("%s: Relayer successfully exited from pid %d(from relayer.pid)\n", __func__, pidFile);
-                }
-                catch(...){
-                    LogPrintf("%s: Relayer failed to exit from pid %d(from relayer.pid)\n", __func__, pidFile);
-                }
-            } 
-        }  
-    }
-    boost::filesystem::remove(GetRelayerPidFile());
-    pid = -1;
-    return true;
-}
-
-bool StartRelayerNode(const std::string &exePath, pid_t &pid, int rpcport, int websocketport, int ethrpcport)
-{
-    if(fUnitTest || fTPSTest)
-        return true;
-    
-    std::string relayerFilename = GetRelayerFilename();
-    // stop any relayer process  before starting
-    StopRelayerNode(pid);
-
-    // Get RPC credentials
-    std::string strRPCUserColonPass;
-    if (gArgs.GetArg("-rpcpassword", "") != "" || !GetAuthCookie(&strRPCUserColonPass)) {
-        strRPCUserColonPass = gArgs.GetArg("-rpcuser", "") + ":" + gArgs.GetArg("-rpcpassword", "");
-    }
-    LogPrintf("%s: Starting relayer on port %d, RPC credentials %s, wsport %d ethrpcport %d...\n", __func__, rpcport, strRPCUserColonPass, websocketport, ethrpcport);
-
-
-    fs::path fpathDefault = exePath;
-    fpathDefault = fpathDefault.parent_path();
-    
-    fs::path dataDir = GetDataDir(true) / "geth";
-
-    // ../Resources
-    fs::path attempt1 = fpathDefault.string() + fs::system_complete("/../Resources/").string() + relayerFilename;
-    attempt1 = attempt1.make_preferred();
-
-    // current executable path
-    fs::path attempt2 = fpathDefault.string() + "/" + relayerFilename;
-    attempt2 = attempt2.make_preferred();
-    // current executable path + bin/[os]/sysrelayer.nod
-    fs::path attempt3 = fpathDefault.string() + GetGethAndRelayerFilepath() + relayerFilename;
-    attempt3 = attempt3.make_preferred();
-    // $path
-    fs::path attempt4 = relayerFilename;
-    attempt4 = attempt4.make_preferred();
-    // $path + bin/[os]/sysrelayer.nod
-    fs::path attempt5 = GetGethAndRelayerFilepath() + relayerFilename;
-    attempt5 = attempt5.make_preferred();
-    // /usr/local/bin/sysrelayer.nod
-    fs::path attempt6 = fs::system_complete("/usr/local/bin/").string() + relayerFilename;
-    attempt6 = attempt6.make_preferred();
-    #ifndef WIN32
-        // Prevent killed child-processes remaining as "defunct"
-        struct sigaction sa;
-        sa.sa_handler = SIG_DFL;
-        sa.sa_flags = SA_NOCLDWAIT;
-      
-        sigaction( SIGCHLD, &sa, NULL ) ;
-		// Duplicate ("fork") the process. Will return zero in the child
-        // process, and the child's PID in the parent (or negative on error).
-        pid = fork() ;
-        if( pid < 0 ) {
-            LogPrintf("Could not start Relayer, pid < 0 %d\n", pid);
-            return false;
-        }
-
-        if( pid == 0 ) {
-            // Order of looking for the relayer binary:
-            // 1. current executable directory
-            // 2. current executable directory/bin/[os]/syscoin_relayer
-            // 3. $path
-            // 4. $path/bin/[os]/syscoin_relayer
-            // 5. /usr/local/bin/syscoin_relayer
-            std::string portStr = itostr(websocketport);
-            std::string rpcEthPortStr = itostr(ethrpcport);
-            std::string rpcSysPortStr = itostr(rpcport);
-            char * argvAttempt1[] = {(char*)attempt1.string().c_str(), 
-					(char*)"--ethwsport", (char*)portStr.c_str(),
-                    (char*)"--ethrpcport", (char*)rpcEthPortStr.c_str(),
-                    (char*)"--datadir", (char*)dataDir.string().c_str(),
-					(char*)"--sysrpcusercolonpass", (char*)strRPCUserColonPass.c_str(),
-					(char*)"--sysrpcport", (char*)rpcSysPortStr.c_str(),  NULL };
-            char * argvAttempt2[] = {(char*)attempt2.string().c_str(), 
-					(char*)"--ethwsport", (char*)portStr.c_str(),
-                    (char*)"--ethrpcport", (char*)rpcEthPortStr.c_str(),
-                    (char*)"--datadir", (char*)dataDir.string().c_str(),
-					(char*)"--sysrpcusercolonpass", (char*)strRPCUserColonPass.c_str(),
-					(char*)"--sysrpcport", (char*)rpcSysPortStr.c_str(), NULL };
-            char * argvAttempt3[] = {(char*)attempt3.string().c_str(), 
-					(char*)"--ethwsport", (char*)portStr.c_str(),
-                    (char*)"--ethrpcport", (char*)rpcEthPortStr.c_str(),
-                    (char*)"--datadir", (char*)dataDir.string().c_str(),
-					(char*)"--sysrpcusercolonpass", (char*)strRPCUserColonPass.c_str(),
-					(char*)"--sysrpcport", (char*)rpcSysPortStr.c_str(), NULL };
-            char * argvAttempt4[] = {(char*)attempt4.string().c_str(), 
-					(char*)"--ethwsport", (char*)portStr.c_str(),
-                    (char*)"--ethrpcport", (char*)rpcEthPortStr.c_str(),
-                    (char*)"--datadir", (char*)dataDir.string().c_str(),
-					(char*)"--sysrpcusercolonpass", (char*)strRPCUserColonPass.c_str(),
-					(char*)"--sysrpcport", (char*)rpcSysPortStr.c_str(),  NULL };
-            char * argvAttempt5[] = {(char*)attempt5.string().c_str(), 
-					(char*)"--ethwsport", (char*)portStr.c_str(),
-                    (char*)"--ethrpcport", (char*)rpcEthPortStr.c_str(),
-                    (char*)"--datadir", (char*)dataDir.string().c_str(),
-					(char*)"--sysrpcusercolonpass", (char*)strRPCUserColonPass.c_str(),
-					(char*)"--sysrpcport", (char*)rpcSysPortStr.c_str(), NULL };
-            char * argvAttempt6[] = {(char*)attempt6.string().c_str(), 
-					(char*)"--ethwsport", (char*)portStr.c_str(),
-                    (char*)"--ethrpcport", (char*)rpcEthPortStr.c_str(),
-                    (char*)"--datadir", (char*)dataDir.string().c_str(),
-					(char*)"--sysrpcusercolonpass", (char*)strRPCUserColonPass.c_str(),
-					(char*)"--sysrpcport", (char*)rpcSysPortStr.c_str(), NULL };
-            execv(argvAttempt1[0], &argvAttempt1[0]); // current directory
-	        if (errno != 0) {
-		        LogPrintf("Relayer not found at %s, trying in current folder\n", argvAttempt1[0]);
-		        execv(argvAttempt2[0], &argvAttempt2[0]);
-		        if (errno != 0) {
-                    LogPrintf("Relayer not found at %s, trying in current bin folder\n", argvAttempt2[0]);
-                    execvp(argvAttempt3[0], &argvAttempt3[0]); // path
-                    if (errno != 0) {
-                        LogPrintf("Relayer not found at %s, trying in $PATH\n", argvAttempt3[0]);
-                        execvp(argvAttempt4[0], &argvAttempt4[0]);
-                        if (errno != 0) {
-                            LogPrintf("Relayer not found at %s, trying in $PATH bin folder\n", argvAttempt4[0]);
-                            execvp(argvAttempt5[0], &argvAttempt5[0]);
-                            if (errno != 0) {
-                                LogPrintf("Relayer not found at %s, trying in /usr/local/bin folder\n", argvAttempt5[0]);
-                                execvp(argvAttempt6[0], &argvAttempt6[0]);
-                                if (errno != 0) {
-                                    LogPrintf("Relayer not found in %s, giving up.\n", argvAttempt6[0]);
-                                }
-                            }
-                        }
-                    }
-	            }
-	        }
-        } else {
-            boost::filesystem::ofstream ofs(GetRelayerPidFile(), std::ios::out | std::ios::trunc);
-            ofs << pid;
-        }
-    #else
-		std::string portStr = itostr(websocketport);
-        std::string rpcEthPortStr = itostr(ethrpcport);
-        std::string rpcSysPortStr = itostr(rpcport);
-        std::string args =
-				std::string("--ethwsport ") + portStr +
-                std::string(" --ethrpcport ") + rpcEthPortStr +
-                std::string(" --datadir ") + dataDir.string() +
-				std::string(" --sysrpcusercolonpass ") + strRPCUserColonPass +
-				std::string(" --sysrpcport ") + rpcSysPortStr; 
-        pid = fork(attempt2.string(), args);
-        if( pid <= 0 ) {
-            LogPrintf("Relayer not found at %s, trying in current direction bin folder\n", attempt2.string());
-            pid = fork(attempt3.string(), args);
-            if( pid <= 0 ) {
-                LogPrintf("Relayer not found at %s, trying in $PATH\n", attempt3.string());
-                pid = fork(attempt4.string(), args);
-                if( pid <= 0 ) {
-                    LogPrintf("Relayer not found at %s, trying in $PATH bin folder\n", attempt4.string());
-                    pid = fork(attempt5.string(), args);
-                    if( pid <= 0 ) {
-                        LogPrintf("Relayer not found in %s, giving up.\n", attempt5.string());
-                        return false;
-                    }
-                }
-            }
-        }                         
-        boost::filesystem::ofstream ofs(GetRelayerPidFile(), std::ios::out | std::ios::trunc);
-        ofs << pid;
-	#endif
-    if(pid > 0)
-        LogPrintf("%s: Relayer started with pid %d\n", __func__, pid);
-    return true;
 }
 /* Parse the contents of /proc/meminfo (in buf), return value of "name"
  * (example: MemTotal) */
@@ -1552,7 +1185,7 @@ void ArgsManager::logArgsPrefix(
     std::string section_str = section.empty() ? "" : "[" + section + "] ";
     for (const auto& arg : args) {
         for (const auto& value : arg.second) {
-            Optional<unsigned int> flags = GetArgFlags('-' + arg.first);
+            std::optional<unsigned int> flags = GetArgFlags('-' + arg.first);
             if (flags) {
                 std::string value_str = (*flags & SENSITIVE) ? "****" : value.write();
                 LogPrintf("%s %s%s=%s\n", prefix, section_str, arg.first, value_str);
@@ -1566,6 +1199,9 @@ void ArgsManager::LogArgs() const
     LOCK(cs_args);
     for (const auto& section : m_settings.ro_config) {
         logArgsPrefix("Config file arg:", section.first, section.second);
+    }
+    for (const auto& setting : m_settings.rw_settings) {
+        LogPrintf("Setting file arg: %s = %s\n", setting.first, setting.second.write());
     }
     logArgsPrefix("Command-line arg:", "", m_settings.command_line_options);
 }
@@ -1590,6 +1226,9 @@ bool TryCreateDirectories(const fs::path& p)
 {
     try
     {
+        if (fs::exists(p) && !fs::is_directory(p)) {
+            fs::remove(p);
+        }
         return fs::create_directories(p);
     } catch (const fs::filesystem_error&) {
         if (!fs::exists(p) || !fs::is_directory(p))
@@ -1598,6 +1237,16 @@ bool TryCreateDirectories(const fs::path& p)
 
     // create_directories didn't create the directory, it had to have existed already
     return false;
+}
+// SYSCOIN
+bool ExistsOldAssetDir()
+{
+    const fs::path p =  GetDataDir() / "assets";
+    return (fs::exists(p) && fs::is_directory(p));
+}
+void DeleteOldAssetDir()
+{
+    fs::remove_all(GetDataDir() / "assets");
 }
 
 bool FileCommit(FILE *file)
@@ -1612,25 +1261,34 @@ bool FileCommit(FILE *file)
         LogPrintf("%s: FlushFileBuffers failed: %d\n", __func__, GetLastError());
         return false;
     }
-#else
-    #if defined(__linux__) || defined(__NetBSD__)
-    if (fdatasync(fileno(file)) != 0 && errno != EINVAL) { // Ignore EINVAL for filesystems that don't support sync
-        LogPrintf("%s: fdatasync failed: %d\n", __func__, errno);
-        return false;
-    }
-    #elif defined(MAC_OSX) && defined(F_FULLFSYNC)
+#elif defined(MAC_OSX) && defined(F_FULLFSYNC)
     if (fcntl(fileno(file), F_FULLFSYNC, 0) == -1) { // Manpage says "value other than -1" is returned on success
         LogPrintf("%s: fcntl F_FULLFSYNC failed: %d\n", __func__, errno);
         return false;
     }
-    #else
+#elif HAVE_FDATASYNC
+    if (fdatasync(fileno(file)) != 0 && errno != EINVAL) { // Ignore EINVAL for filesystems that don't support sync
+        LogPrintf("%s: fdatasync failed: %d\n", __func__, errno);
+        return false;
+    }
+#else
     if (fsync(fileno(file)) != 0 && errno != EINVAL) {
         LogPrintf("%s: fsync failed: %d\n", __func__, errno);
         return false;
     }
-    #endif
 #endif
     return true;
+}
+
+void DirectoryCommit(const fs::path &dirname)
+{
+#ifndef WIN32
+    FILE* file = fsbridge::fopen(dirname, "r");
+    if (file) {
+        fsync(fileno(file));
+        fclose(file);
+    }
+#endif
 }
 
 bool TruncateFile(FILE *file, unsigned int length) {
@@ -1694,7 +1352,7 @@ void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length) {
     }
     ftruncate(fileno(file), static_cast<off_t>(offset) + length);
 #else
-    #if defined(__linux__)
+    #if defined(HAVE_POSIX_FALLOCATE)
     // Version using posix_fallocate
     off_t nEndPos = (off_t)offset + length;
     if (0 == posix_fallocate(fileno(file), 0, nEndPos)) return;
@@ -1752,6 +1410,43 @@ void runCommand(const std::string& strCommand)
         LogPrintf("runCommand error: system(%s) returned %d\n", strCommand, nErr);
 }
 #endif
+
+#ifdef ENABLE_EXTERNAL_SIGNER
+UniValue RunCommandParseJSON(const std::string& str_command, const std::string& str_std_in)
+{
+    namespace bp = boost::process;
+
+    UniValue result_json;
+    bp::opstream stdin_stream;
+    bp::ipstream stdout_stream;
+    bp::ipstream stderr_stream;
+
+    if (str_command.empty()) return UniValue::VNULL;
+
+    bp::child c(
+        str_command,
+        bp::std_out > stdout_stream,
+        bp::std_err > stderr_stream,
+        bp::std_in < stdin_stream
+    );
+    if (!str_std_in.empty()) {
+        stdin_stream << str_std_in << std::endl;
+    }
+    stdin_stream.pipe().close();
+
+    std::string result;
+    std::string error;
+    std::getline(stdout_stream, result);
+    std::getline(stderr_stream, error);
+
+    c.wait();
+    const int n_error = c.exit_code();
+    if (n_error) throw std::runtime_error(strprintf("RunCommandParseJSON error: process(%s) returned %d: %s\n", str_command, n_error, error));
+    if (!result_json.read(result)) throw std::runtime_error("Unable to parse JSON: " + result);
+
+    return result_json;
+}
+#endif // ENABLE_EXTERNAL_SIGNER
 
 void SetupEnvironment()
 {
@@ -1830,15 +1525,16 @@ fs::path AbsPathForConfigVal(const fs::path& path, bool net_specific)
     if (path.is_absolute()) {
         return path;
     }
-    return fs::absolute(path, GetDataDir(net_specific));
+    return fsbridge::AbsPathJoin(GetDataDir(net_specific), path);
 }
 
 void ScheduleBatchPriority()
 {
 #ifdef SCHED_BATCH
     const static sched_param param{};
-    if (pthread_setschedparam(pthread_self(), SCHED_BATCH, &param) != 0) {
-        LogPrintf("Failed to pthread_setschedparam: %s\n", strerror(errno));
+    const int rc = pthread_setschedparam(pthread_self(), SCHED_BATCH, &param);
+    if (rc != 0) {
+        LogPrintf("Failed to pthread_setschedparam: %s\n", strerror(rc));
     }
 #endif
 }

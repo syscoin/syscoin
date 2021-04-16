@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -128,6 +128,8 @@ enum BlockStatus: uint32_t {
     BLOCK_FAILED_MASK        =   BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD,
 
     BLOCK_OPT_WITNESS       =   128, //!< block data in blk*.data was received with a witness-enforcing client
+    // SYSCOIN
+    BLOCK_CONFLICT_CHAINLOCK =   256, //!< conflicts with chainlock system
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -164,14 +166,27 @@ public:
 
     //! Number of transactions in this block.
     //! Note: in a potential headers-first mode, this number cannot be relied upon
+    //! Note: this value is faked during UTXO snapshot load to ensure that
+    //! LoadBlockIndex() will load index entries for blocks that we lack data for.
+    //! @sa ActivateSnapshot
     unsigned int nTx{0};
 
     //! (memory only) Number of transactions in the chain up to and including this block.
     //! This value will be non-zero only if and only if transactions for this block and all its parents are available.
     //! Change to 64-bit type when necessary; won't happen before 2030
+    //!
+    //! Note: this value is faked during use of a UTXO snapshot because we don't
+    //! have the underlying block data available during snapshot load.
+    //! @sa AssumeutxoData
+    //! @sa ActivateSnapshot
     unsigned int nChainTx{0};
 
     //! Verification status of this block. See enum BlockStatus
+    //!
+    //! Note: this value is modified to show BLOCK_OPT_WITNESS during UTXO snapshot
+    //! load to avoid the block index being spuriously rewound.
+    //! @sa RewindBlockIndex
+    //! @sa ActivateSnapshot
     uint32_t nStatus{0};
 
     //! block header
@@ -303,6 +318,11 @@ public:
     {
         return CPureBlockHeader::GetBaseVersion(nVersion);
     }
+    /* Analyse the block version.  */
+    inline int GetOldBaseVersion() const
+    {
+        return CPureBlockHeader::GetOldBaseVersion(nVersion);
+    }
 };
 
 arith_uint256 GetBlockProof(const CBlockIndex& block);
@@ -392,12 +412,6 @@ public:
         if (nHeight < 0 || nHeight >= (int)vChain.size())
             return nullptr;
         return vChain[nHeight];
-    }
-
-    /** Compare two chains efficiently. */
-    friend bool operator==(const CChain &a, const CChain &b) {
-        return a.vChain.size() == b.vChain.size() &&
-               a.vChain[a.vChain.size() - 1] == b.vChain[b.vChain.size() - 1];
     }
 
     /** Efficiently check whether a block is present in this chain. */

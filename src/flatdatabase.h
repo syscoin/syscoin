@@ -1,5 +1,4 @@
-// Copyright (c) 2014-2017 The Dash Core developers
-// Copyright (c) 2017-2018 The Bitcoin Core developers
+// Copyright (c) 2014-2020 The Dash Core developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,10 +7,10 @@
 
 #include <chainparams.h>
 #include <clientversion.h>
+#include <fs.h>
 #include <hash.h>
 #include <streams.h>
-
-#include <boost/filesystem.hpp>
+#include <util/system.h>
 
 /** 
 *   Generic Dumping and Loading
@@ -33,7 +32,7 @@ private:
         IncorrectFormat
     };
 
-    boost::filesystem::path pathDB;
+    fs::path pathDB;
     std::string strFilename;
     std::string strMagicMessage;
 
@@ -46,9 +45,9 @@ private:
         // serialize, checksum data up to that point, then append checksum
         CDataStream ssObj(SER_DISK, CLIENT_VERSION);
         ssObj << strMagicMessage; // specific magic message for this type of object
-        ssObj << FLATDATA(Params().MessageStart()); // network specific magic number
+        ssObj << Params().MessageStart(); // network specific magic number
         ssObj << objToSave;
-        uint256 hash = Hash(ssObj.begin(), ssObj.end());
+        uint256 hash = Hash(ssObj);
         ssObj << hash;
 
         // open output file, and associate with CAutoFile
@@ -87,7 +86,7 @@ private:
         }
 
         // use file size to size memory buffer
-        int fileSize = boost::filesystem::file_size(pathDB);
+        int fileSize = fs::file_size(pathDB);
         int dataSize = fileSize - sizeof(uint256);
         // Don't try to resize to a negative number if file is small
         if (dataSize < 0)
@@ -98,7 +97,7 @@ private:
 
         // read data and checksum from file
         try {
-            filein.read((char *)&vchData[0], dataSize);
+            filein.read((char *)vchData.data(), dataSize);
             filein >> hashIn;
         }
         catch (std::exception &e) {
@@ -110,7 +109,7 @@ private:
         CDataStream ssObj(vchData, SER_DISK, CLIENT_VERSION);
 
         // verify stored checksum matches input data
-        uint256 hashTmp = Hash(ssObj.begin(), ssObj.end());
+        uint256 hashTmp = Hash(ssObj);
         if (hashIn != hashTmp)
         {
             error("%s: Checksum mismatch, data corrupted", __func__);
@@ -133,7 +132,7 @@ private:
 
 
             // de-serialize file header (network specific magic number) and ..
-            ssObj >> FLATDATA(pchMsgTmp);
+            ssObj >> pchMsgTmp;
 
             // ... verify the network matches ours
             if (memcmp(pchMsgTmp, Params().MessageStart(), sizeof(pchMsgTmp)))

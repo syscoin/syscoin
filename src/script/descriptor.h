@@ -1,16 +1,16 @@
-// Copyright (c) 2018-2019 The Bitcoin Core developers
+// Copyright (c) 2018-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_SCRIPT_DESCRIPTOR_H
 #define SYSCOIN_SCRIPT_DESCRIPTOR_H
 
-#include <optional.h>
 #include <outputtype.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
 
+#include <optional>
 #include <vector>
 
 using ExtPubKeyMap = std::unordered_map<uint32_t, CExtPubKey>;
@@ -87,8 +87,14 @@ struct Descriptor {
     /** Convert the descriptor back to a string, undoing parsing. */
     virtual std::string ToString() const = 0;
 
+    /** Whether this descriptor will return one scriptPubKey or multiple (aka is or is not combo) */
+    virtual bool IsSingleType() const = 0;
+
     /** Convert the descriptor to a private string. This fails if the provided provider does not have the relevant private keys. */
     virtual bool ToPrivateString(const SigningProvider& provider, std::string& out) const = 0;
+
+    /** Convert the descriptor to a normalized string. Normalized descriptors have the xpub at the last hardened step. This fails if the provided provider does not have the private keys to derive that xpub. */
+    virtual bool ToNormalizedString(const SigningProvider& provider, std::string& out, bool priv) const = 0;
 
     /** Expand a descriptor at a specified position.
      *
@@ -118,7 +124,7 @@ struct Descriptor {
     virtual void ExpandPrivate(int pos, const SigningProvider& provider, FlatSigningProvider& out) const = 0;
 
     /** @return The OutputType of the scriptPubKey(s) produced by this descriptor. Or nullopt if indeterminate (multiple or none) */
-    virtual Optional<OutputType> GetOutputType() const = 0;
+    virtual std::optional<OutputType> GetOutputType() const = 0;
 };
 
 /** Parse a `descriptor` string. Included private keys are put in `out`.

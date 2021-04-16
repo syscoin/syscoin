@@ -244,6 +244,11 @@ public:
         static_assert(WIDTH >= 2, "Assertion WIDTH >= 2 failed (WIDTH = BITS / 32). BITS is a template parameter.");
         return pn[0] | (uint64_t)pn[1] << 32;
     }
+    uint32_t GetLow32() const
+    {
+        static_assert(WIDTH >= 1, "Assertion WIDTH >= 1 failed (WIDTH = BITS / 32). BITS is a template parameter.");
+        return pn[0];
+    }
 };
 
 /** 256-bit unsigned big integer. */
@@ -253,7 +258,6 @@ public:
     arith_uint256(const base_uint<256>& b) : base_uint<256>(b) {}
     arith_uint256(uint64_t b) : base_uint<256>(b) {}
     explicit arith_uint256(const std::string& str) : base_uint<256>(str) {}
-
     /**
      * The "compact" format is a representation of a whole
      * number N using an unsigned 32bit number similar to a

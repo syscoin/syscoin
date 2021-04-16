@@ -31,7 +31,7 @@ importing the `TestShell` class from the `test_shell` sub-package.
 ```
 >>> import sys
 >>> sys.path.insert(0, "/path/to/syscoin/test/functional")
->>> from test_framework.test_shell import `TestShell`
+>>> from test_framework.test_shell import TestShell
 ```
 
 The following `TestShell` methods manage the lifetime of the underlying syscoind
@@ -51,8 +51,7 @@ The following sections demonstrate how to initialize, run, and shut down a
 ## 3. Initializing a `TestShell` object
 
 ```
->>> test = TestShell()
->>> test.setup(num_nodes=2, setup_clean_chain=True)
+>>> test = TestShell().setup(num_nodes=2, setup_clean_chain=True)
 20XX-XX-XXTXX:XX:XX.XXXXXXX TestFramework (INFO): Initializing test directory /path/to/syscoin_func_test_XXXXXXX
 ```
 The `TestShell` forwards all functional test parameters of the parent
@@ -66,8 +65,7 @@ temporary folder. If you need more syscoind nodes than set by default (1),
 simply increase the `num_nodes` parameter during setup.
 
 ```
->>> test2 = TestShell()
->>> test2.setup()
+>>> test2 = TestShell().setup()
 TestShell is already running!
 ```
 
@@ -180,7 +178,7 @@ can be called after the TestShell is shut down.
 | `num_nodes` | `1` | Sets the number of initialized syscoind processes. |
 | `perf` | False | Profiles running nodes with `perf` for the duration of the test if set to `True`. |
 | `rpc_timeout` | `60` | Sets the RPC server timeout for the underlying syscoind processes. |
-| `setup_clean_chain` | `False` | Initializes an empty blockchain by default. A 199-block-long chain is initialized if set to `True`. |
+| `setup_clean_chain` | `False` | A 200-block-long chain is initialized from cache by default. Instead, `setup_clean_chain` initializes an empty blockchain if set to `True`. |
 | `randomseed` | Random Integer | `TestShell.options.randomseed` is a member of `TestShell` which can be accessed during a test to seed a random generator. User can override default with a constant value for reproducible test runs. |
 | `supports_cli` | `False` | Whether the syscoin-cli utility is compiled and available for the test. |
 | `tmpdir` | `"/var/folders/.../"` | Sets directory for test logs. Will be deleted upon a successful test run unless `nocleanup` is set to `True` |

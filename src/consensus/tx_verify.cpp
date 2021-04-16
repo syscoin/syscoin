@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2019 The Bitcoin Core developers
+// Copyright (c) 2017-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -14,7 +14,7 @@
 #include <coins.h>
 #include <util/moneystr.h>
 // SYSCOIN
-const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN = 0x7400;
+#include <services/asset.h>
 bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
 {
     if (tx.nLockTime == 0)
@@ -28,9 +28,9 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
     return true;
 }
 
-std::pair<int, int64_t> CalculateSequenceLocks(const CTransaction &tx, int flags, std::vector<int>* prevHeights, const CBlockIndex& block)
+std::pair<int, int64_t> CalculateSequenceLocks(const CTransaction &tx, int flags, std::vector<int>& prevHeights, const CBlockIndex& block)
 {
-    assert(prevHeights->size() == tx.vin.size());
+    assert(prevHeights.size() == tx.vin.size());
 
     // Will be set to the equivalent height- and time-based nLockTime
     // values that would be necessary to satisfy all relative lock-
@@ -60,11 +60,11 @@ std::pair<int, int64_t> CalculateSequenceLocks(const CTransaction &tx, int flags
         // consensus-enforced meaning at this point.
         if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG) {
             // The height of this input is not relevant for sequence locks
-            (*prevHeights)[txinIndex] = 0;
+            prevHeights[txinIndex] = 0;
             continue;
         }
 
-        int nCoinHeight = (*prevHeights)[txinIndex];
+        int nCoinHeight = prevHeights[txinIndex];
 
         if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) {
             int64_t nCoinTime = block.GetAncestor(std::max(nCoinHeight-1, 0))->GetMedianTimePast();
@@ -100,7 +100,7 @@ bool EvaluateSequenceLocks(const CBlockIndex& block, std::pair<int, int64_t> loc
     return true;
 }
 
-bool SequenceLocks(const CTransaction &tx, int flags, std::vector<int>* prevHeights, const CBlockIndex& block)
+bool SequenceLocks(const CTransaction &tx, int flags, std::vector<int>& prevHeights, const CBlockIndex& block)
 {
     return EvaluateSequenceLocks(block, CalculateSequenceLocks(tx, flags, prevHeights, block));
 }
@@ -156,17 +156,13 @@ int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& i
     }
     return nSigOps;
 }
-
-bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee, CTransaction *txMissingInput)
+bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache &inputs, int nSpendHeight, CAmount& txfee, CAssetsMap &mapAssetIn, CAssetsMap &mapAssetOut)
 {
     // are the actual inputs available?
     if (!inputs.HaveInputs(tx)) {
-        if(txMissingInput != nullptr)
-            *txMissingInput = tx;
         return state.Invalid(TxValidationResult::TX_MISSING_INPUTS, "bad-txns-inputs-missingorspent",
                          strprintf("%s: inputs missing/spent", __func__));
     }
-
     CAmount nValueIn = 0;
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
@@ -178,30 +174,52 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "bad-txns-premature-spend-of-coinbase",
                 strprintf("tried to spend coinbase at depth %d", nSpendHeight - coin.nHeight));
         }
-
+        if (!coin.out.assetInfo.IsNull()) {
+            const bool &zeroVal = coin.out.assetInfo.nValue == 0;
+            auto inRes = mapAssetIn.try_emplace(coin.out.assetInfo.nAsset, zeroVal, coin.out.assetInfo.nValue);
+            if (!inRes.second) {
+                inRes.first->second.nAmount += coin.out.assetInfo.nValue;
+                if (!inRes.first->second.bZeroVal) {
+                    inRes.first->second.bZeroVal = zeroVal;
+                }
+                // sanity, should never have multiple zero val inputs for an asset
+                else if (zeroVal) {
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-multiple-zero-val-input");
+                }
+                if(!MoneyRangeAsset(inRes.first->second.nAmount) || !MoneyRangeAsset(coin.out.assetInfo.nValue)) {
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-inputvalues-outofrange");
+                }
+            }
+        }
         // Check for negative or overflow input values
         nValueIn += coin.out.nValue;
         if (!MoneyRange(coin.out.nValue) || !MoneyRange(nValueIn)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputvalues-outofrange");
         }
-    }
-    // SYSCOIN
-    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN){
-        if(tx.vout.size() < 3 || tx.vout.size() > 4)
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-mint-outputs-wrong");
+        
     }
     const CAmount &value_out = tx.GetValueOut();
-    if (nValueIn < value_out){
+    if (nValueIn < value_out) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-in-belowout",
             strprintf("value in (%s) < value out (%s)", FormatMoney(nValueIn), FormatMoney(value_out)));
     }
-
+    // SYSCOIN
+    if(tx.HasAssets()) {
+        std::string err;
+        if(!tx.GetAssetValueOut(mapAssetOut, err)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, err);
+        }
+        // if input was used, validate it against output (note, no fees for assets in == out)
+        if(!CheckTxInputsAssets(tx, state, GetBaseAssetID(tx.voutAssets.begin()->key), mapAssetIn, mapAssetOut)) {
+            return false; // state filled by CheckTxInputsAssets
+        }
+    }
+    
     // Tally transaction fees
     const CAmount txfee_aux = nValueIn - value_out;
     if (!MoneyRange(txfee_aux)) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-fee-outofrange");
     }
-
     txfee = txfee_aux;
     return true;
 }

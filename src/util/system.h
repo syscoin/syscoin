@@ -19,45 +19,44 @@
 #include <compat/assumptions.h>
 #include <fs.h>
 #include <logging.h>
-#include <optional.h>
 #include <sync.h>
 #include <tinyformat.h>
-#include <util/memory.h>
 #include <util/settings.h>
 #include <util/threadnames.h>
 #include <util/time.h>
 
+#include <any>
 #include <exception>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdint.h>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <boost/thread/condition_variable.hpp> // for boost::thread_interrupted
 // SYSCOIN
+#include <ctpl.h>
+#include <amount.h>
 class JSONRPCRequest;
 extern bool fMasternodeMode;
-extern bool fUnitTest;
 extern bool bGethTestnet;
-extern bool fTPSTest;
-extern bool fTPSTestEnabled;
-extern bool fZMQWalletStatus;
-extern bool fZMQEthStatus;
-extern bool fZMQNetworkStatus;
-extern bool fZMQWalletRawTx;
-extern bool fLiteMode;
+extern bool fDisableGovernance;
+extern bool fRegTest;
+extern bool fSigNet;
 extern uint32_t fGethSyncHeight;
 extern uint32_t fGethCurrentHeight;
 extern std::string fGethSyncStatus;
 extern bool fGethSynced;
 extern bool fLoaded;
-extern bool bb;
 extern pid_t gethPID;
 extern pid_t relayerPID;
+extern int64_t nLastGethHeaderTime;
+extern int64_t nRandomResetSec;
 extern bool fAssetIndex;
-extern std::vector<JSONRPCRequest> vecTPSRawTransactions;
+extern int32_t DEFAULT_MN_COLLATERAL_REQUIRED;
+extern int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE;
+extern CAmount nMNCollateralRequired;
 typedef struct {
     // Values from /proc/meminfo, in KiB or converted to MiB.
     long MemTotalKiB;
@@ -72,12 +71,13 @@ typedef struct {
 } meminfo_t;
 
 meminfo_t parse_meminfo();
+class UniValue;
 
 // Application startup time (used for uptime calculation)
 int64_t GetStartupTime();
 
 extern const char * const SYSCOIN_CONF_FILENAME;
-
+extern const char * const SYSCOIN_SETTINGS_FILENAME;
 void SetupEnvironment();
 bool SetupNetworking();
 
@@ -89,15 +89,35 @@ bool error(const char* fmt, const Args&... args)
 }
 
 void PrintExceptionContinue(const std::exception *pex, const char* pszThread);
+
+/**
+ * Ensure file contents are fully committed to disk, using a platform-specific
+ * feature analogous to fsync().
+ */
 bool FileCommit(FILE *file);
+
+/**
+ * Sync directory contents. This is required on some environments to ensure that
+ * newly created files are committed to disk.
+ */
+void DirectoryCommit(const fs::path &dirname);
+
 bool TruncateFile(FILE *file, unsigned int length);
 int RaiseFileDescriptorLimit(int nMinFD);
 void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
-bool RenameOver(fs::path src, fs::path dest);
+[[nodiscard]] bool RenameOver(fs::path src, fs::path dest);
 bool LockDirectory(const fs::path& directory, const std::string lockfile_name, bool probe_only=false);
 void UnlockDirectory(const fs::path& directory, const std::string& lockfile_name);
 bool DirIsWritable(const fs::path& directory);
 bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes = 0);
+
+/** Get the size of a file by scanning it.
+ *
+ * @param[in] path The file path
+ * @param[in] max Stop seeking beyond this limit
+ * @return The file size or max
+ */
+std::streampos GetFileSize(const char* path, std::streamsize max = std::numeric_limits<std::streamsize>::max());
 
 /** Release all directory locks. This is used for unit testing only, at runtime
  * the global destructor will take care of the locks.
@@ -105,22 +125,18 @@ bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes = 0);
 void ReleaseDirectoryLocks();
 
 bool TryCreateDirectories(const fs::path& p);
+bool ExistsOldAssetDir();
+void DeleteOldAssetDir();
 fs::path GetDefaultDataDir();
 // The blocks directory is always net specific.
 const fs::path &GetBlocksDir();
 const fs::path &GetDataDir(bool fNetSpecific = true);
 // SYSCOIN
 fs::path GetGethPidFile();
-void KillProcess(const pid_t& pid);
-std::string GetGethFilename();
-fs::path GetMasternodeConfigFile();
 bool CheckSpecs(std::string &errMsg, bool bMiner = false);
-bool StartGethNode(const std::string &exePath, pid_t &pid, int websocketport=8646, int ethrpcport=8645, const std::string & mode="light");
-bool StopGethNode(pid_t &pid);
 fs::path GetRelayerPidFile();
-std::string GeteRelayerFilename();
-bool StartRelayerNode(const std::string &exePath, pid_t &pid, int rpcport, int websocketport=8646, int ethrpcport=8645);
-bool StopRelayerNode(pid_t &pid);
+std::string GetRelayerFilename();
+std::string GetGethFilename();
 // Return true if -datadir option points to a valid directory or is not specified.
 bool CheckDataDirOption();
 /** Tests only */
@@ -135,6 +151,16 @@ std::string ShellEscape(const std::string& arg);
 #if HAVE_SYSTEM
 void runCommand(const std::string& strCommand);
 #endif
+#ifdef ENABLE_EXTERNAL_SIGNER
+/**
+ * Execute a command which returns JSON, and parse the result.
+ *
+ * @param str_command The command to execute, including any arguments
+ * @param str_std_in string to pass to stdin
+ * @return parsed JSON
+ */
+UniValue RunCommandParseJSON(const std::string& str_command, const std::string& str_std_in="");
+#endif // ENABLE_EXTERNAL_SIGNER
 
 /**
  * Most paths passed as configuration arguments are treated as relative to
@@ -183,7 +209,7 @@ struct SectionInfo
 class ArgsManager
 {
 public:
-    enum Flags {
+    enum Flags : uint32_t {
         // Boolean options can accept negation syntax -noOPTION or -noOPTION=1
         ALLOW_BOOL = 0x01,
         ALLOW_INT = 0x02,
@@ -198,6 +224,7 @@ public:
         NETWORK_ONLY = 0x200,
         // This argument's value is sensitive (such as a password).
         SENSITIVE = 0x400,
+        COMMAND = 0x800,
     };
 
 protected:
@@ -210,12 +237,14 @@ protected:
 
     mutable RecursiveMutex cs_args;
     util::Settings m_settings GUARDED_BY(cs_args);
+    std::vector<std::string> m_command GUARDED_BY(cs_args);
     std::string m_network GUARDED_BY(cs_args);
     std::set<std::string> m_network_only_args GUARDED_BY(cs_args);
     std::map<OptionsCategory, std::map<std::string, Arg>> m_available_args GUARDED_BY(cs_args);
+    bool m_accept_any_command GUARDED_BY(cs_args){true};
     std::list<SectionInfo> m_config_sections GUARDED_BY(cs_args);
 
-    NODISCARD bool ReadConfigStream(std::istream& stream, const std::string& filepath, std::string& error, bool ignore_invalid_keys = false);
+    [[nodiscard]] bool ReadConfigStream(std::istream& stream, const std::string& filepath, std::string& error, bool ignore_invalid_keys = false);
 
     /**
      * Returns true if settings values from the default section should be used,
@@ -240,14 +269,15 @@ protected:
 
 public:
     ArgsManager();
+    ~ArgsManager();
 
     /**
      * Select the network in use
      */
     void SelectConfigNetwork(const std::string& network);
 
-    NODISCARD bool ParseParameters(int argc, const char* const argv[], std::string& error);
-    NODISCARD bool ReadConfigFiles(std::string& error, bool ignore_invalid_keys = false);
+    [[nodiscard]] bool ParseParameters(int argc, const char* const argv[], std::string& error);
+    [[nodiscard]] bool ReadConfigFiles(std::string& error, bool ignore_invalid_keys = false);
 
     /**
      * Log warnings for options in m_section_only_args when
@@ -261,6 +291,20 @@ public:
      * Log warnings for unrecognized section names in the config file.
      */
     const std::list<SectionInfo> GetUnrecognizedSections() const;
+
+    struct Command {
+        /** The command (if one has been registered with AddCommand), or empty */
+        std::string command;
+        /**
+         * If command is non-empty: Any args that followed it
+         * If command is empty: The unregistered command and any args that followed it
+         */
+        std::vector<std::string> args;
+    };
+    /**
+     * Get the command and command args (returns std::nullopt if no command provided)
+     */
+    std::optional<const Command> GetCommand() const;
 
     /**
      * Return a vector of strings of the given argument
@@ -348,6 +392,11 @@ public:
     void AddArg(const std::string& name, const std::string& help, unsigned int flags, const OptionsCategory& cat);
 
     /**
+     * Add subcommand
+     */
+    void AddCommand(const std::string& cmd, const std::string& help, const OptionsCategory& cat);
+
+    /**
      * Add many hidden arguments
      */
     void AddHiddenArgs(const std::vector<std::string>& args);
@@ -370,7 +419,40 @@ public:
      * Return Flags for known arg.
      * Return nullopt for unknown arg.
      */
-    Optional<unsigned int> GetArgFlags(const std::string& name) const;
+    std::optional<unsigned int> GetArgFlags(const std::string& name) const;
+
+    /**
+     * Read and update settings file with saved settings. This needs to be
+     * called after SelectParams() because the settings file location is
+     * network-specific.
+     */
+    bool InitSettings(std::string& error);
+
+    /**
+     * Get settings file path, or return false if read-write settings were
+     * disabled with -nosettings.
+     */
+    bool GetSettingsPath(fs::path* filepath = nullptr, bool temp = false) const;
+
+    /**
+     * Read settings file. Push errors to vector, or log them if null.
+     */
+    bool ReadSettingsFile(std::vector<std::string>* errors = nullptr);
+
+    /**
+     * Write settings file. Push errors to vector, or log them if null.
+     */
+    bool WriteSettingsFile(std::vector<std::string>* errors = nullptr) const;
+
+    /**
+     * Access settings with lock held.
+     */
+    template <typename Fn>
+    void LockSettings(Fn&& fn)
+    {
+        LOCK(cs_args);
+        fn(m_settings);
+    }
 
     /**
      * Log the config file options and the command line arguments,
@@ -424,24 +506,21 @@ int GetNumCores();
  */
 template <typename Callable> void TraceThread(const char* name,  Callable func)
 {
+    // SYSCOIN keep copy to work with dynamic thread names in LLMQ code
+    std::string strName = std::string(name);
     util::ThreadRename(name);
     try
     {
-        LogPrintf("%s thread start\n", name);
+        LogPrintf("%s thread start\n", strName);
         func();
-        LogPrintf("%s thread exit\n", name);
-    }
-    catch (const boost::thread_interrupted&)
-    {
-        LogPrintf("%s thread interrupt\n", name);
-        throw;
+        LogPrintf("%s thread exit\n", strName);
     }
     catch (const std::exception& e) {
-        PrintExceptionContinue(&e, name);
+        PrintExceptionContinue(&e, strName.c_str());
         throw;
     }
     catch (...) {
-        PrintExceptionContinue(nullptr, name);
+        PrintExceptionContinue(nullptr, strName.c_str());
         throw;
     }
 }
@@ -465,6 +544,18 @@ inline void insert(Tdst& dst, const Tsrc& src) {
 template <typename TsetT, typename Tsrc>
 inline void insert(std::set<TsetT>& dst, const Tsrc& src) {
     dst.insert(src.begin(), src.end());
+}
+
+/**
+ * Helper function to access the contained object of a std::any instance.
+ * Returns a pointer to the object if passed instance has a value and the type
+ * matches, nullptr otherwise.
+ */
+template<typename T>
+T* AnyPtr(const std::any& any) noexcept
+{
+    T* const* ptr = std::any_cast<T*>(&any);
+    return ptr ? *ptr : nullptr;
 }
 
 #ifdef WIN32
