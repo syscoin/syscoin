@@ -340,7 +340,7 @@ static RPCHelpMan assetallocationverifyzdag()
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
 	const UniValue &params = request.params;
-    const CTxMemPool& mempool = EnsureMemPool(request.context);
+    const CTxMemPool& mempool = EnsureAnyMemPool(request.context);
 	uint256 txid;
 	txid.SetHex(params[0].get_str());
 	UniValue oAssetAllocationStatus(UniValue::VOBJ);
@@ -382,7 +382,7 @@ static RPCHelpMan syscoindecoderawtransaction()
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     const UniValue &params = request.params;
-    const NodeContext& node = EnsureNodeContext(request.context);
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
 
     std::string hexstring = params[0].get_str();
     CMutableTransaction tx;
@@ -463,8 +463,8 @@ static RPCHelpMan listassets()
     return RPCHelpMan{"listassets",
         "\nScan through all assets.\n",
         {
-            {"count", RPCArg::Type::NUM, "10", "The number of results to return."},
-            {"from", RPCArg::Type::NUM, "0", "The number of results to skip."},
+            {"count", RPCArg::Type::NUM, RPCArg::Default{10}, "The number of results to return."},
+            {"from", RPCArg::Type::NUM, RPCArg::Default{0}, "The number of results to skip."},
             {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "A json object with options to filter results.",
                 {
                     {"asset_guid", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Asset GUID to filter"},

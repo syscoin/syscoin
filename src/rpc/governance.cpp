@@ -7,12 +7,13 @@
 #include <governance/governance.h>
 #include <governance/governanceclasses.h>
 #include <governance/governancevalidators.h>
+#include <evo/deterministicmns.h>
 #include <validation.h>
 #include <masternode/masternodesync.h>
 #include <rpc/server.h>
 #include <rpc/blockchain.h>
 #include <node/context.h>
-
+#include <timedata.h>
 static RPCHelpMan gobject_count()
 {
     return RPCHelpMan{"gobject_count",
@@ -133,7 +134,7 @@ static RPCHelpMan gobject_submit()
     if(!masternodeSync.IsBlockchainSynced()) {
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "Must wait for client to sync with masternode network. Try again in a minute or so.");
     }
-    NodeContext& node = EnsureNodeContext(request.context);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
     CDeterministicMNList mnList;
@@ -239,7 +240,7 @@ static RPCHelpMan gobject_vote_conf()
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    NodeContext& node = EnsureNodeContext(request.context);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 
@@ -394,8 +395,8 @@ static RPCHelpMan gobject_list()
     return RPCHelpMan{"gobject_list",
         "\nList governance objects (can be filtered by signal and/or object type)\n",
         {      
-            {"signal", RPCArg::Type::STR, "valid", "Cached signal, possible values: [valid|funding|delete|endorsed|all]."},
-            {"type", RPCArg::Type::STR, "all", "Object type, possible values: [proposals|triggers|all]."},                                    
+            {"signal", RPCArg::Type::STR, RPCArg::Default{"valid"}, "Cached signal, possible values: [valid|funding|delete|endorsed|all]."},
+            {"type", RPCArg::Type::STR, RPCArg::Default{"all"}, "Object type, possible values: [proposals|triggers|all]."},                                    
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
@@ -428,8 +429,8 @@ static RPCHelpMan gobject_diff()
     return RPCHelpMan{"gobject_diff",
         "\nList differences since last diff or list\n",
         {      
-            {"signal", RPCArg::Type::STR, "valid", "Cached signal, possible values: [valid|funding|delete|endorsed|all]."},
-            {"type", RPCArg::Type::STR, "all", "Object type, possible values: [proposals|triggers|all]."},                                    
+            {"signal", RPCArg::Type::STR, RPCArg::Default{"valid"}, "Cached signal, possible values: [valid|funding|delete|endorsed|all]."},
+            {"type", RPCArg::Type::STR, RPCArg::Default{"all"}, "Object type, possible values: [proposals|triggers|all]."},                                    
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
@@ -618,7 +619,7 @@ static RPCHelpMan voteraw()
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
 
-    NodeContext& node = EnsureNodeContext(request.context);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 

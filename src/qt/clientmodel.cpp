@@ -8,6 +8,7 @@
 #include <qt/guiconstants.h>
 #include <qt/guiutil.h>
 #include <qt/peertablemodel.h>
+#include <evo/deterministicmns.h>
 
 #include <clientversion.h>
 #include <interfaces/handler.h>
@@ -57,7 +58,8 @@ ClientModel::ClientModel(interfaces::Node& node, OptionsModel *_optionsModel, QO
         util::ThreadRename("qt-clientmodl");
     });
 
-
+    // SYSCOIN
+    mnListCached = std::make_shared<CDeterministicMNList>();
     subscribeToCoreSignals();
 }
 
@@ -85,17 +87,17 @@ int ClientModel::getNumConnections(unsigned int flags) const
 void ClientModel::setMasternodeList(const CDeterministicMNList& mnList)
 {
     LOCK(cs_mnlinst);
-    if (mnListCached.GetBlockHash() == mnList.GetBlockHash()) {
+    if (mnListCached && mnListCached->GetBlockHash() == mnList.GetBlockHash()) {
         return;
     }
-    mnListCached = mnList;
+    mnListCached = std::make_shared<CDeterministicMNList>(mnList);
     Q_EMIT masternodeListChanged();
 }
 // SYSCOIN
 CDeterministicMNList ClientModel::getMasternodeList() const
 {
     LOCK(cs_mnlinst);
-    return mnListCached;
+    return *mnListCached;
 }
 interfaces::Masternode::Sync& ClientModel::masternodeSync() const { 
     return m_node.masternodeSync(); 
@@ -240,7 +242,7 @@ QString ClientModel::dataDir() const
 
 QString ClientModel::blocksDir() const
 {
-    return GUIUtil::boostPathToQString(GetBlocksDir());
+    return GUIUtil::boostPathToQString(gArgs.GetBlocksDirPath());
 }
 
 void ClientModel::updateBanlist()

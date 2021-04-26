@@ -628,8 +628,8 @@ void CNode::copyStats(CNodeStats &stats, const std::vector<bool> &m_asmap)
         LOCK(cs_mnauth);
         X(verifiedProRegTxHash);
         X(verifiedPubKeyHash);
+        X(m_masternode_connection);
     }
-    X(m_masternode_connection);
 
     X(m_conn_type);
 }
@@ -1797,7 +1797,7 @@ void CConnman::ProcessAddrFetch()
     }
 }
 
-bool CConnman::GetTryNewOutboundPeer()
+bool CConnman::GetTryNewOutboundPeer() const
 {
     return m_try_another_outbound_peer;
 }
@@ -1814,14 +1814,15 @@ void CConnman::SetTryNewOutboundPeer(bool flag)
 // Also exclude peers that haven't finished initial connection handshake yet
 // (so that we don't decide we're over our desired connection limit, and then
 // evict some peer that has finished the handshake)
-int CConnman::GetExtraFullOutboundCount()
+int CConnman::GetExtraFullOutboundCount() const
 {
     int full_outbound_peers = 0;
     {
         LOCK(cs_vNodes);
         for (const CNode* pnode : vNodes) {
+
             // SYSCOIN don't count outbound masternodes
-            if (pnode->m_masternode_connection) {
+            if (pnode->IsMasternodeConnection()) {
                 continue;
             }
             if (pnode->fSuccessfullyConnected && !pnode->fDisconnect && !pnode->m_masternode_probe_connection && pnode->IsFullOutboundConn()) {
@@ -1832,7 +1833,7 @@ int CConnman::GetExtraFullOutboundCount()
     return std::max(full_outbound_peers - m_max_outbound_full_relay, 0);
 }
 
-int CConnman::GetExtraBlockRelayCount()
+int CConnman::GetExtraBlockRelayCount() const
 {
     int block_relay_peers = 0;
     {
@@ -1937,7 +1938,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
             LOCK(cs_vNodes);
             for (const CNode* pnode : vNodes) {
                 // SYSCOIN
-                if (pnode->m_masternode_connection) continue;
+                if (pnode->IsMasternodeConnection()) continue;
                 if (pnode->IsFullOutboundConn()) nOutboundFullRelay++;
                 if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
                 // Netgroups for inbound and manual peers are not excluded because our goal here
@@ -2306,7 +2307,7 @@ std::vector<CAddress> CConnman::GetCurrentBlockRelayOnlyConns() const
     return ret;
 }
 
-std::vector<AddedNodeInfo> CConnman::GetAddedNodeInfo()
+std::vector<AddedNodeInfo> CConnman::GetAddedNodeInfo() const
 {
     std::vector<AddedNodeInfo> ret;
 
@@ -2425,8 +2426,10 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         grantOutbound->MoveTo(pnode->grantOutbound);
 
     // SYSCOIN
-    if (masternode_connection)
-        pnode->m_masternode_connection = true;        
+    if (masternode_connection) {
+        LOCK(pnode->cs_mnauth);
+        pnode->m_masternode_connection = true;    
+    }    
     if (m_masternode_probe_connection)
         pnode->m_masternode_probe_connection = true;
 
@@ -2476,7 +2479,7 @@ void CConnman::ThreadMessageHandler()
                 return;
                 
             // SYSCOIN Send messages
-            if (!fSkipSendMessagesForMasternodes || !pnode->m_masternode_connection) {
+            if (!fSkipSendMessagesForMasternodes || !pnode->IsMasternodeConnection()) {
                 LOCK(pnode->cs_sendProcessing);
                 m_msgproc->SendMessages(pnode);
             }
@@ -2922,23 +2925,26 @@ void CConnman::StopNodes()
         }
     }
 
-    // Close sockets
-    LOCK(cs_vNodes);
-    for (CNode* pnode : vNodes)
+    // Delete peer connections.
+    std::vector<CNode*> nodes;
+    WITH_LOCK(cs_vNodes, nodes.swap(vNodes));
+    for (CNode* pnode : nodes) {
         pnode->CloseSocketDisconnect();
-    for (ListenSocket& hListenSocket : vhListenSocket)
-        if (hListenSocket.socket != INVALID_SOCKET)
-            if (!CloseSocket(hListenSocket.socket))
-                LogPrintf("CloseSocket(hListenSocket) failed with error %s\n", NetworkErrorString(WSAGetLastError()));
-
-    // clean up some globals (to help leak detection)
-    for (CNode* pnode : vNodes) {
         DeleteNode(pnode);
     }
+
+    // Close listening sockets.
+    for (ListenSocket& hListenSocket : vhListenSocket) {
+        if (hListenSocket.socket != INVALID_SOCKET) {
+            if (!CloseSocket(hListenSocket.socket)) {
+                LogPrintf("CloseSocket(hListenSocket) failed with error %s\n", NetworkErrorString(WSAGetLastError()));
+            }
+        }
+    }
+
     for (CNode* pnode : vNodesDisconnected) {
         DeleteNode(pnode);
     }
-    vNodes.clear();
     vNodesDisconnected.clear();
     vhListenSocket.clear();
     semOutbound.reset();
@@ -2958,7 +2964,7 @@ CConnman::~CConnman()
     Stop();
 }
 
-std::vector<CAddress> CConnman::GetAddresses(size_t max_addresses, size_t max_pct)
+std::vector<CAddress> CConnman::GetAddresses(size_t max_addresses, size_t max_pct) const
 {
     std::vector<CAddress> addresses = addrman.GetAddr(max_addresses, max_pct);
     if (m_banman) {
@@ -3066,18 +3072,23 @@ void CConnman::SetMasternodeQuorumRelayMembers(uint8_t llmqType, const uint256& 
     // Update existing connections
     ForEachNode([&](CNode* pnode) {
         uint256 verifiedProRegTxHash;
+        bool iqr;
         {
             LOCK(pnode->cs_mnauth);
             verifiedProRegTxHash = pnode->verifiedProRegTxHash;
+            iqr = pnode->m_masternode_iqr_connection;
         }
-        if (!verifiedProRegTxHash.IsNull() && !pnode->m_masternode_iqr_connection && IsMasternodeQuorumRelayMember(verifiedProRegTxHash)) {
+        if (!verifiedProRegTxHash.IsNull() && !iqr && IsMasternodeQuorumRelayMember(verifiedProRegTxHash)) {
             // Tell our peer that we're interested in plain LLMQ recovered signatures.
             // Otherwise the peer would only announce/send messages resulting from QRECSIG,
             // e.g. InstantSend locks or ChainLocks. SPV and regular full nodes should not send
             // this message as they are usually only interested in the higher level messages.
             const CNetMsgMaker msgMaker(pnode->GetCommonVersion());
             PushMessage(pnode, msgMaker.Make(NetMsgType::QSENDRECSIGS));
-            pnode->m_masternode_iqr_connection = true;
+            {
+                LOCK(pnode->cs_mnauth);
+                pnode->m_masternode_iqr_connection = true;
+            }
         }
     });
 }
@@ -3185,7 +3196,7 @@ void CConnman::AddPendingProbeConnections(const std::set<uint256> &proTxHashes)
     masternodePendingProbes.insert(proTxHashes.begin(), proTxHashes.end());
 }
 
-size_t CConnman::GetNodeCount(ConnectionDirection flags)
+size_t CConnman::GetNodeCount(ConnectionDirection flags) const
 {
     LOCK(cs_vNodes);
     if (flags == ConnectionDirection::Both) // Shortcut if we want total
@@ -3205,7 +3216,7 @@ size_t CConnman::GetMaxOutboundNodeCount()
 {
     return m_max_outbound_full_relay;
 }
-void CConnman::GetNodeStats(std::vector<CNodeStats>& vstats)
+void CConnman::GetNodeStats(std::vector<CNodeStats>& vstats) const
 {
     vstats.clear();
     LOCK(cs_vNodes);
@@ -3289,18 +3300,18 @@ void CConnman::RecordBytesSent(uint64_t bytes)
     nMaxOutboundTotalBytesSentInCycle += bytes;
 }
 
-uint64_t CConnman::GetMaxOutboundTarget()
+uint64_t CConnman::GetMaxOutboundTarget() const
 {
     LOCK(cs_totalBytesSent);
     return nMaxOutboundLimit;
 }
 
-std::chrono::seconds CConnman::GetMaxOutboundTimeframe()
+std::chrono::seconds CConnman::GetMaxOutboundTimeframe() const
 {
     return MAX_UPLOAD_TIMEFRAME;
 }
 
-std::chrono::seconds CConnman::GetMaxOutboundTimeLeftInCycle()
+std::chrono::seconds CConnman::GetMaxOutboundTimeLeftInCycle() const
 {
     LOCK(cs_totalBytesSent);
     if (nMaxOutboundLimit == 0)
@@ -3314,7 +3325,7 @@ std::chrono::seconds CConnman::GetMaxOutboundTimeLeftInCycle()
     return (cycleEndTime < now) ? 0s : cycleEndTime - now;
 }
 
-bool CConnman::OutboundTargetReached(bool historicalBlockServingLimit)
+bool CConnman::OutboundTargetReached(bool historicalBlockServingLimit) const
 {
     LOCK(cs_totalBytesSent);
     if (nMaxOutboundLimit == 0)
@@ -3335,7 +3346,7 @@ bool CConnman::OutboundTargetReached(bool historicalBlockServingLimit)
     return false;
 }
 
-uint64_t CConnman::GetOutboundTargetBytesLeft()
+uint64_t CConnman::GetOutboundTargetBytesLeft() const
 {
     LOCK(cs_totalBytesSent);
     if (nMaxOutboundLimit == 0)
@@ -3344,13 +3355,13 @@ uint64_t CConnman::GetOutboundTargetBytesLeft()
     return (nMaxOutboundTotalBytesSentInCycle >= nMaxOutboundLimit) ? 0 : nMaxOutboundLimit - nMaxOutboundTotalBytesSentInCycle;
 }
 
-uint64_t CConnman::GetTotalBytesRecv()
+uint64_t CConnman::GetTotalBytesRecv() const
 {
     LOCK(cs_totalBytesRecv);
     return nTotalBytesRecv;
 }
 
-uint64_t CConnman::GetTotalBytesSent()
+uint64_t CConnman::GetTotalBytesSent() const
 {
     LOCK(cs_totalBytesSent);
     return nTotalBytesSent;
@@ -3403,6 +3414,7 @@ CNode::CNode(NodeId idIn, ServiceFlags nLocalServicesIn, SOCKET hSocketIn, const
     // SYSCOIN
     m_masternode_connection = false;
     m_masternode_probe_connection = false;
+    m_masternode_iqr_connection = false;
 }
 
 CNode::~CNode()
@@ -3477,8 +3489,9 @@ bool CConnman::IsMasternodeOrDisconnectRequested(const CService& addr) {
     if(!pnode) {
         pnode = FindNode(addr.ToStringIPPort());
     }
-    if(pnode)
-        return pnode->m_masternode_connection || pnode->fDisconnect;
+    if(pnode) {
+        return pnode->IsMasternodeConnection() || pnode->fDisconnect;
+    }
     return false;
 }
 

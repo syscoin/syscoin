@@ -7,8 +7,10 @@
 #include <validation.h>
 
 #include <masternode/activemasternode.h>
+#include <evo/deterministicmns.h>
 
 #include <llmq/quorums.h>
+#include <llmq/quorums_commitment.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <llmq/quorums_debug.h>
 #include <llmq/quorums_dkgsession.h>
@@ -24,7 +26,7 @@ static RPCHelpMan quorum_list()
     return RPCHelpMan{"quorum_list",
         "\nList of on-chain quorums\n",
         {
-            {"count", RPCArg::Type::NUM, /* default */ "0", "Number of quorums to list. Will list active quorums\n"
+            {"count", RPCArg::Type::NUM, RPCArg::Default{0}, "Number of quorums to list. Will list active quorums\n"
                                 "if \"count\" is not specified.\n"},                 
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
@@ -52,7 +54,7 @@ static RPCHelpMan quorum_list()
         std::vector<llmq::CQuorumCPtr> quorums;
         llmq::quorumManager->ScanQuorums(p.first, ::ChainActive().Tip(), count > -1 ? count : p.second.signingActiveQuorumCount, quorums);
         for (auto& q : quorums) {
-            v.push_back(q->qc.quorumHash.ToString());
+            v.push_back(q->qc->quorumHash.ToString());
         }
 
         ret.pushKV(p.second.name, v);
@@ -70,7 +72,7 @@ UniValue BuildQuorumInfo(const llmq::CQuorumCPtr& quorum, bool includeMembers, b
 
     ret.pushKV("height", quorum->pindexQuorum->nHeight);
     ret.pushKV("type", quorum->params.name);
-    ret.pushKV("quorumHash", quorum->qc.quorumHash.ToString());
+    ret.pushKV("quorumHash", quorum->qc->quorumHash.ToString());
     ret.pushKV("minedBlock", quorum->minedBlockHash.ToString());
 
     if (includeMembers) {
@@ -80,8 +82,8 @@ UniValue BuildQuorumInfo(const llmq::CQuorumCPtr& quorum, bool includeMembers, b
             UniValue mo(UniValue::VOBJ);
             mo.pushKV("proTxHash", dmn->proTxHash.ToString());
             mo.pushKV("pubKeyOperator", dmn->pdmnState->pubKeyOperator.Get().ToString());
-            mo.pushKV("valid", quorum->qc.validMembers[i]);
-            if (quorum->qc.validMembers[i]) {
+            mo.pushKV("valid", quorum->qc->validMembers[i]);
+            if (quorum->qc->validMembers[i]) {
                 CBLSPublicKey pubKey = quorum->GetPubKeyShare(i);
                 if (pubKey.IsValid()) {
                     mo.pushKV("pubKeyShare", pubKey.ToString());
@@ -92,7 +94,7 @@ UniValue BuildQuorumInfo(const llmq::CQuorumCPtr& quorum, bool includeMembers, b
 
         ret.pushKV("members", membersArr);
     }
-    ret.pushKV("quorumPublicKey", quorum->qc.quorumPublicKey.ToString());
+    ret.pushKV("quorumPublicKey", quorum->qc->quorumPublicKey.ToString());
     const CBLSSecretKey& skShare = quorum->GetSkShare();
     if (includeSkShare && skShare.IsValid()) {
         ret.pushKV("secretKeyShare", skShare.ToString());
@@ -107,7 +109,7 @@ static RPCHelpMan quorum_info()
         {
             {"llmqType", RPCArg::Type::NUM, RPCArg::Optional::NO, "LLMQ type.\n"},      
             {"quorumHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Block hash of quorum.\n"},      
-            {"includeSkShare", RPCArg::Type::BOOL, "false", "Include secret key share in output.\n"},                 
+            {"includeSkShare", RPCArg::Type::BOOL, RPCArg::Default{false}, "Include secret key share in output.\n"},                 
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
@@ -143,7 +145,7 @@ static RPCHelpMan quorum_dkgstatus()
     return RPCHelpMan{"quorum_dkgstatus",
         "\nReturn the status of the current DKG process.\n",
         {
-            {"detail_level", RPCArg::Type::NUM, /* default */ "0", "Detail level of output.\n"
+            {"detail_level", RPCArg::Type::NUM, RPCArg::Default{0}, "Detail level of output.\n"
                             "0=Only show counts. 1=Show member indexes. 2=Show member's ProTxHashes.\n"},                     
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
@@ -172,7 +174,7 @@ static RPCHelpMan quorum_dkgstatus()
 
     UniValue minableCommitments(UniValue::VOBJ);
     UniValue quorumConnections(UniValue::VOBJ);
-    NodeContext& node = EnsureNodeContext(request.context);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 
@@ -232,7 +234,7 @@ static RPCHelpMan quorum_memberof()
         "\nChecks which quorums the given masternode is a member of.\n",
         {
             {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "ProTxHash of the masternode.\n"},  
-            {"scanQuorumsCount", RPCArg::Type::NUM, /* default */ "-1", "Number of quorums to scan for. If not specified,\n"
+            {"scanQuorumsCount", RPCArg::Type::NUM, RPCArg::Default{-1}, "Number of quorums to scan for. If not specified,\n"
                                  "the active quorum count for each specific quorum type is used."},                     
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
@@ -433,8 +435,8 @@ static RPCHelpMan quorum_verify()
         if (!quorum) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "quorum not found");
         }
-        uint256 signHash = llmq::CLLMQUtils::BuildSignHash(llmqType, quorum->qc.quorumHash, id, msgHash);
-        return sig.VerifyInsecure(quorum->qc.quorumPublicKey, signHash);
+        uint256 signHash = llmq::CLLMQUtils::BuildSignHash(llmqType, quorum->qc->quorumHash, id, msgHash);
+        return sig.VerifyInsecure(quorum->qc->quorumPublicKey, signHash);
     }
 },
     };
@@ -534,7 +536,7 @@ static RPCHelpMan quorum_selectquorum()
     if (!quorum) {
         throw JSONRPCError(RPC_MISC_ERROR, "no quorums active");
     }
-    ret.pushKV("quorumHash", quorum->qc.quorumHash.ToString());
+    ret.pushKV("quorumHash", quorum->qc->quorumHash.ToString());
 
     UniValue recoveryMembers(UniValue::VARR);
     for (int i = 0; i < quorum->params.recoveryMembers; i++) {

@@ -3,14 +3,15 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <masternode/activemasternode.h>
-#include <netbase.h>
-#include <validation.h>
 #include <masternode/masternodepayments.h>
 #include <rpc/server.h>
 #include <rpc/blockchain.h>
 #include <node/context.h>
 #include <governance/governanceclasses.h>
 #include <node/blockstorage.h>
+#include <evo/deterministicmns.h>
+#include <net.h>
+#include <validation.h>
 RPCHelpMan masternodelist();
 
 static RPCHelpMan masternode_list()
@@ -18,7 +19,7 @@ static RPCHelpMan masternode_list()
     return RPCHelpMan{"masternode_list",
         "\nGet a list of masternodes in different modes. This call is identical to 'masternode list' call\n",
         {
-            {"mode", RPCArg::Type::STR, "json", "The mode to run list in.\n"
+            {"mode", RPCArg::Type::STR, RPCArg::Default{"json"}, "The mode to run list in.\n"
             "\nAvailable modes:\n"
             "  addr           - Print ip address associated with a masternode (can be additionally filtered, partial match)\n"
             "  full           - Print info in format 'status payee lastpaidtime lastpaidblock IP'\n"
@@ -75,7 +76,7 @@ static RPCHelpMan masternode_connect()
     CService addr;
     if (!Lookup(strAddress.c_str(), addr, 0, false))
         throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Incorrect masternode address %s", strAddress));
-  NodeContext& node = EnsureNodeContext(request.context);
+  NodeContext& node = EnsureAnyNodeContext(request.context);
   if(!node.connman)
       throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
     // TODO: Pass CConnman instance somehow and don't use global variable.
@@ -330,7 +331,7 @@ RPCHelpMan masternode_payments()
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     CBlockIndex* pindex{nullptr};
-    const NodeContext& node = EnsureNodeContext(request.context);
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
     if (request.params[0].isNull()) {
         LOCK(cs_main);
         pindex = ::ChainActive().Tip();

@@ -335,6 +335,7 @@ syscoin_qt_ldadd += $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(
 syscoin_qt_ldflags = $(RELDFLAGS) $(AM_LDFLAGS) $(QT_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 syscoin_qt_libtoolflags = $(AM_LIBTOOLFLAGS) --tag CXX
 
+
 qt_syscoin_qt_CPPFLAGS = $(syscoin_qt_cppflags)
 qt_syscoin_qt_CXXFLAGS = $(syscoin_qt_cxxflags)
 qt_syscoin_qt_SOURCES = $(syscoin_qt_sources)
@@ -361,6 +362,8 @@ $(srcdir)/qt/syscoinstrings.cpp: FORCE
 translate: $(srcdir)/qt/syscoinstrings.cpp $(QT_FORMS_UI) $(QT_FORMS_UI) $(SYSCOIN_QT_BASE_CPP) qt/syscoin.cpp $(SYSCOIN_QT_WINDOWS_CPP) $(SYSCOIN_QT_WALLET_CPP) $(SYSCOIN_QT_H) $(SYSCOIN_MM)
 	@test -n $(LUPDATE) || echo "lupdate is required for updating translations"
 	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(LUPDATE) $^ -locations relative -no-obsolete -ts $(srcdir)/qt/locale/syscoin_en.ts
+	@test -n $(LCONVERT) || echo "lconvert is required for updating translations"
+	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(LCONVERT) -o $(srcdir)/qt/locale/syscoin_en.xlf -i $(srcdir)/qt/locale/syscoin_en.ts
 
 $(QT_QRC_LOCALE_CPP): $(QT_QRC_LOCALE) $(QT_QM)
 	@test -f $(RCC)

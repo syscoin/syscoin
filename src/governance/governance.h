@@ -5,23 +5,13 @@
 #ifndef SYSCOIN_GOVERNANCE_GOVERNANCE_H
 #define SYSCOIN_GOVERNANCE_GOVERNANCE_H
 
-#include <bloom.h>
 #include <cachemap.h>
 #include <cachemultimap.h>
-#include <chain.h>
-#include <governance/governanceexceptions.h>
 #include <governance/governanceobject.h>
-#include <governance/governancevote.h>
-#include <net.h>
-#include <sync.h>
-#include <timedata.h>
-#include <util/system.h>
-#include <threadsafety.h>
 
-#include <evo/deterministicmns.h>
-
-#include <univalue.h>
-
+class CBloomFilter;
+class CBlockIndex;
+class CInv;
 class CGovernanceManager;
 class CGovernanceTriggerManager;
 class CGovernanceObject;
@@ -31,7 +21,8 @@ class PeerManager;
 extern CGovernanceManager governance;
 
 static const int RATE_BUFFER_SIZE = 5;
-
+class CDeterministicMNList;
+typedef std::shared_ptr<CDeterministicMNList> CDeterministicMNListPtr;
 class CRateCheckBuffer
 {
 private:
@@ -200,7 +191,7 @@ private:
     bool fRateChecksEnabled;
 
     // used to check for changed voting keys
-    CDeterministicMNList lastMNListForVotingKeys;
+    CDeterministicMNListPtr lastMNListForVotingKeys;
 
     class ScopedLockBool
     {
@@ -284,7 +275,7 @@ public:
         s << cmmapOrphanVotes;
         s << mapObjects;
         s << mapLastMasternodeObject;
-        s << lastMNListForVotingKeys;
+        s << *lastMNListForVotingKeys;
    
     }
 
@@ -303,7 +294,7 @@ public:
         s >> cmmapOrphanVotes;
         s >> mapObjects;
         s >> mapLastMasternodeObject;
-        s >> lastMNListForVotingKeys;
+        s >> *lastMNListForVotingKeys;
     }
 
     void UpdatedBlockTip(const CBlockIndex* pindex, CConnman& connman);
@@ -375,7 +366,7 @@ private:
 
     static bool AcceptMessage(const uint256& nHash, hash_s_t& setHash);
 
-    void CheckOrphanVotes(CGovernanceObject& govobj, CGovernanceException& exception, CConnman& connman) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void CheckOrphanVotes(CGovernanceObject& govobj, CConnman& connman) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     void RebuildIndexes();
 

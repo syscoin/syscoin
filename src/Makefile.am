@@ -206,6 +206,7 @@ SYSCOIN_CORE_H = \
   index/txindex.h \
   indirectmap.h \
   init.h \
+  init/common.h \
   interfaces/chain.h \
   interfaces/handler.h \
   interfaces/node.h \
@@ -262,6 +263,7 @@ SYSCOIN_CORE_H = \
   rpc/auxpow_miner.h \
   rpc/client.h \
   rpc/mining.h \
+  rpc/net.h \
   rpc/protocol.h \
   rpc/rawtransaction_util.h \
   rpc/register.h \
@@ -385,9 +387,6 @@ libsyscoin_util_a-clientversion.$(OBJEXT): obj/build.h
   ethereum/ethereum.h \
   ethereum/vector_ref.h
 
-if GLIBC_BACK_COMPAT
-  ethereum_libethereum_a_SOURCES += compat/glibc_compat.cpp
-endif
 
  # BLS
  libsyscoin_bls_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
@@ -419,9 +418,6 @@ endif
   chiabls/src/util.hpp \
   $(SYSCOIN_CORE_H)
 
-if GLIBC_BACK_COMPAT
-  libsyscoin_bls_a_SOURCES += compat/glibc_compat.cpp
-endif
 
 # server: shared between syscoind and syscoin-qt
 # Contains code accessing mempool and chain state that is meant to be separated
@@ -705,6 +701,7 @@ libsyscoin_common_a_SOURCES = \
   core_write.cpp \
   dbwrapper.cpp \
   external_signer.cpp \
+  init/common.cpp \
   key.cpp \
   key_io.cpp \
   merkleblock.cpp \
@@ -844,9 +841,6 @@ if TARGET_WINDOWS
 syscoin_cli_SOURCES += syscoin-cli-res.rc
 endif
 
-if GLIBC_BACK_COMPAT
-  syscoin_cli_SOURCES += compat/glibc_compat.cpp
-endif
 
 syscoin_cli_LDADD = \
   $(LIBSYSCOIN_CLI) \

@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <governance/governance.h>
+#include <bloom.h>
+#include <chain.h>
 #include <consensus/validation.h>
 #include <governance/governanceclasses.h>
 #include <governance/governanceobject.h>
@@ -11,13 +13,13 @@
 #include <init.h>
 #include <masternode/masternodemeta.h>
 #include <masternode/masternodesync.h>
-#include <messagesigner.h>
 #include <net_processing.h>
 #include <netfulfilledman.h>
 #include <netmessagemaker.h>
 #include <spork.h>
 #include <util/system.h>
-#include <validation.h>
+#include <protocol.h>
+#include <evo/deterministicmns.h>
 #include <validationinterface.h>
 #include <shutdown.h>
 
@@ -40,6 +42,7 @@ CGovernanceManager::CGovernanceManager() :
     mapLastMasternodeObject(),
     setRequestedObjects(),
     fRateChecksEnabled(true),
+    lastMNListForVotingKeys(std::make_shared<CDeterministicMNList>()),
     cs()
 {
 }
@@ -245,7 +248,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
     }
 }
 
-void CGovernanceManager::CheckOrphanVotes(CGovernanceObject& govobj, CGovernanceException& exception, CConnman& connman)
+void CGovernanceManager::CheckOrphanVotes(CGovernanceObject& govobj, CConnman& connman)
 {
     AssertLockHeld(cs);
     uint256 nHash = govobj.GetHash();
@@ -258,10 +261,10 @@ void CGovernanceManager::CheckOrphanVotes(CGovernanceObject& govobj, CGovernance
     for (auto& pairVote : vecVotePairs) {
         bool fRemove = false;
         CGovernanceVote& vote = pairVote.first;
-        CGovernanceException exception;
+        CGovernanceException e;
         if (pairVote.second < nNow) {
             fRemove = true;
-        } else if (govobj.ProcessVote(nullptr, vote, exception, connman)) {
+        } else if (govobj.ProcessVote(nullptr, vote, e, connman)) {
             vote.Relay(connman);
             fRemove = true;
         }
@@ -324,8 +327,7 @@ void CGovernanceManager::AddGovernanceObject(CGovernanceObject& govobj, CConnman
 
         // WE MIGHT HAVE PENDING/ORPHAN VOTES FOR THIS OBJECT
 
-        CGovernanceException exception;
-        CheckOrphanVotes(govobj, exception, connman);
+        CheckOrphanVotes(govobj, connman);
     }
     // SEND NOTIFICATION TO SCRIPT/ZMQ
     GetMainSignals().NotifyGovernanceObject(std::make_shared<const CGovernanceObject>(govobj));
@@ -775,13 +777,13 @@ bool CGovernanceManager::MasternodeRateCheck(const CGovernanceObject& govobj, bo
 
 bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, CGovernanceException& exception, CConnman& connman)
 {
-    ENTER_CRITICAL_SECTION(cs);
+    ENTER_CRITICAL_SECTION(cs)
     const uint256 &nHashVote = vote.GetHash();
     const uint256 &nHashGovobj = vote.GetParentHash();
 
     if (cmapVoteToObject.HasKey(nHashVote)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceObject::ProcessVote -- skipping known valid vote %s for object %s\n", nHashVote.ToString(), nHashGovobj.ToString());
-        LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(cs)
         return false;
     }
 
@@ -792,7 +794,7 @@ bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, 
              << ", governance object hash = " << nHashGovobj.ToString();
         LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
         exception = CGovernanceException(ostr.str(), GOVERNANCE_EXCEPTION_PERMANENT_ERROR, 20);
-        LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(cs)
         return false;
     }
 
@@ -803,14 +805,14 @@ bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, 
              << ", MN outpoint = " << vote.GetMasternodeOutpoint().ToStringShort();
         exception = CGovernanceException(ostr.str(), GOVERNANCE_EXCEPTION_WARNING);
         if (cmmapOrphanVotes.Insert(nHashGovobj, vote_time_pair_t(vote, GetAdjustedTime() + GOVERNANCE_ORPHAN_EXPIRATION_TIME))) {
-            LEAVE_CRITICAL_SECTION(cs);
+            LEAVE_CRITICAL_SECTION(cs)
             RequestGovernanceObject(pfrom, nHashGovobj, connman);
             LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
             return false;
         }
 
         LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
-        LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(cs)
         return false;
     }
 
@@ -818,12 +820,12 @@ bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, 
 
     if (govobj.IsSetCachedDelete() || govobj.IsSetExpired()) {
         LogPrint(BCLog::GOBJECT, "CGovernanceObject::ProcessVote -- ignoring vote for expired or deleted object, hash = %s\n", nHashGovobj.ToString());
-        LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(cs)
         return false;
     }
 
     bool fOk = govobj.ProcessVote(pfrom, vote, exception, connman) && cmapVoteToObject.Insert(nHashVote, &govobj);
-    LEAVE_CRITICAL_SECTION(cs);
+    LEAVE_CRITICAL_SECTION(cs)
     return fOk;
 }
 
@@ -1246,11 +1248,11 @@ void CGovernanceManager::RemoveInvalidVotes()
     if(deterministicMNManager)
         deterministicMNManager->GetListAtChainTip(curMNList);
     CDeterministicMNListDiff diff;
-    lastMNListForVotingKeys.BuildDiff(curMNList, diff);
+    lastMNListForVotingKeys->BuildDiff(curMNList, diff);
 
     std::vector<COutPoint> changedKeyMNs;
     for (const auto& p : diff.updatedMNs) {
-        auto oldDmn = lastMNListForVotingKeys.GetMNByInternalId(p.first);
+        auto oldDmn = lastMNListForVotingKeys->GetMNByInternalId(p.first);
         if ((p.second.fields & CDeterministicMNStateDiff::Field_keyIDVoting) && p.second.state.keyIDVoting != oldDmn->pdmnState->keyIDVoting) {
             changedKeyMNs.emplace_back(oldDmn->collateralOutpoint);
         } else if ((p.second.fields & CDeterministicMNStateDiff::Field_pubKeyOperator) && p.second.state.pubKeyOperator != oldDmn->pdmnState->pubKeyOperator) {
@@ -1258,7 +1260,7 @@ void CGovernanceManager::RemoveInvalidVotes()
         }
     }
     for (const auto& id : diff.removedMns) {
-        auto oldDmn = lastMNListForVotingKeys.GetMNByInternalId(id);
+        auto oldDmn = lastMNListForVotingKeys->GetMNByInternalId(id);
         changedKeyMNs.emplace_back(oldDmn->collateralOutpoint);
     }
 
@@ -1278,7 +1280,7 @@ void CGovernanceManager::RemoveInvalidVotes()
     }
 
     // store current MN list for the next run so that we can determine which keys changed
-    lastMNListForVotingKeys = curMNList;
+    lastMNListForVotingKeys = std::make_shared<CDeterministicMNList>(curMNList);
 }
 
 bool AreSuperblocksEnabled()
