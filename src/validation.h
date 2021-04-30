@@ -204,14 +204,14 @@ struct MempoolAcceptResult {
         VALID, //!> Fully validated, valid.
         INVALID, //!> Invalid.
     };
-    ResultType m_result_type;
-    TxValidationState m_state;
+    const ResultType m_result_type;
+    const TxValidationState m_state;
 
     // The following fields are only present when m_result_type = ResultType::VALID
     /** Mempool transactions replaced by the tx per BIP 125 rules. */
-    std::optional<std::list<CTransactionRef>> m_replaced_transactions;
-    /** Raw base fees. */
-    std::optional<CAmount> m_base_fees;
+    const std::optional<std::list<CTransactionRef>> m_replaced_transactions;
+    /** Raw base fees in satoshis. */
+    const std::optional<CAmount> m_base_fees;
 
     /** Constructor for failure case */
     explicit MempoolAcceptResult(TxValidationState state)
@@ -221,7 +221,7 @@ struct MempoolAcceptResult {
 
     /** Constructor for success case */
     explicit MempoolAcceptResult(std::list<CTransactionRef>&& replaced_txns, CAmount fees)
-        : m_result_type(ResultType::VALID), m_state(TxValidationState{}),
+        : m_result_type(ResultType::VALID),
         m_replaced_transactions(std::move(replaced_txns)), m_base_fees(fees) {}
 };
 // SYSCOIN
@@ -349,7 +349,12 @@ class CVerifyDB {
 public:
     CVerifyDB();
     ~CVerifyDB();
-    bool VerifyDB(const CChainParams& chainparams, CChainState& active_chainstate, CCoinsView *coinsview, int nCheckLevel, int nCheckDepth) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool VerifyDB(
+        CChainState& chainstate,
+        const CChainParams& chainparams,
+        CCoinsView& coinsview,
+        int nCheckLevel,
+        int nCheckDepth) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 };
 // SYSCOIN
 std::pair<PrevBlockMap::iterator,PrevBlockMap::iterator> LookupBlockIndexPrev(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -743,7 +748,9 @@ public:
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks(const CChainParams& params);
-    bool RewindBlockIndex(const CChainParams& params) LOCKS_EXCLUDED(cs_main);
+
+    /** Whether the chain state needs to be redownloaded due to lack of witness data */
+    [[nodiscard]] bool NeedsRedownload(const CChainParams& params) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Ensures we have a genesis block in the block tree, possibly writing one to disk. */
     bool LoadGenesisBlock(const CChainParams& chainparams);
 
@@ -789,9 +796,6 @@ private:
     void ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos, const Consensus::Params& consensusParams) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, const CChainParams& params, AssetMap &mapAssets, EthereumMintTxMap &mapMintKeys, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-
-    //! Mark a block as not having block data
-    void EraseBlockData(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void CheckForkWarningConditions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void InvalidChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -950,6 +954,9 @@ public:
     {
         return m_blockman.m_prev_block_index;
     }
+
+    //! @returns true if a snapshot-based chainstate is in use. Also implies
+    //!          that a background validation chainstate is also in use.
     bool IsSnapshotActive() const;
 
     std::optional<uint256> SnapshotBlockhash() const;

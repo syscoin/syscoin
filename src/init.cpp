@@ -1622,7 +1622,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     LogPrintf("* Using %.1f MiB for in-memory UTXO set (plus up to %.1f MiB of unused mempool space)\n", nCoinCacheUsage * (1.0 / 1024 / 1024), nMempoolSizeMax * (1.0 / 1024 / 1024));
 
     while (!fLoaded && !ShutdownRequested()) {
-        bool fReset = fReindex;
+        const bool fReset = fReindex;
         auto is_coinsview_empty = [&](CChainState* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
             return fReset || fReindexChainState || chainstate->CoinsTip().GetBestBlock().IsNull();
         };
@@ -1773,27 +1773,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 break;
             }
 
-            bool failed_rewind{false};
-            // Can't hold cs_main while calling RewindBlockIndex, so retrieve the relevant
-            // chainstates beforehand.
-            for (CChainState* chainstate : WITH_LOCK(::cs_main, return chainman.GetAll())) {
-                if (!fReset) {
-                    // Note that RewindBlockIndex MUST run even if we're about to -reindex-chainstate.
-                    // It both disconnects blocks based on the chainstate, and drops block data in
-                    // BlockIndex() based on lack of available witness data.
-                    uiInterface.InitMessage(_("Rewinding blocks...").translated);
-                    if (!chainstate->RewindBlockIndex(chainparams)) {
-                        strLoadError = _(
-                            "Unable to rewind the database to a pre-fork state. "
-                            "You will need to redownload the blockchain");
-                        failed_rewind = true;
-                        break; // out of the per-chainstate loop
-                    }
+            if (!fReset) {
+                LOCK(cs_main);
+                auto chainstates{chainman.GetAll()};
+                if (std::any_of(chainstates.begin(), chainstates.end(),
+                                [&chainparams](const CChainState* cs) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return cs->NeedsRedownload(chainparams); })) {
+                    strLoadError = strprintf(_("Witness data for blocks after height %d requires validation. Please restart with -reindex."),
+                                             chainparams.GetConsensus().SegwitHeight);
+                    break;
                 }
-            }
-
-            if (failed_rewind) {
-                break; // out of the chainstate activation do-while
             }
 
             bool failed_verification = false;
@@ -1819,11 +1807,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                             break;
                         }
 
-                        // Only verify the DB of the active chainstate. This is fixed in later
-                        // work when we allow VerifyDB to be parameterized by chainstate.
-                        if (&::ChainstateActive() == chainstate &&
-                            !CVerifyDB().VerifyDB(
-                                chainparams, *chainstate, &chainstate->CoinsDB(),
+                        if (!CVerifyDB().VerifyDB(
+                                *chainstate, chainparams, chainstate->CoinsDB(),
                                 args.GetArg("-checklevel", DEFAULT_CHECKLEVEL),
                                 args.GetArg("-checkblocks", DEFAULT_CHECKBLOCKS))) {
                             strLoadError = _("Corrupted block database detected");

@@ -5,6 +5,7 @@
 #define SYSCOIN_MASTERNODE_MASTERNODESYNC_H
 
 #include <util/translation.h>
+#include <sync.h>
 class CMasternodeSync;
 class PeerManager;
 class CBlockIndex;
@@ -32,22 +33,22 @@ class CMasternodeSync
 private:
     mutable RecursiveMutex cs;
     // Keep track of current asset
-    int nCurrentAsset;
+    int nCurrentAsset GUARDED_BY(cs) {MASTERNODE_SYNC_BLOCKCHAIN};
     // Count peers we've requested the asset from
-    int nTriedPeerCount;
+    int nTriedPeerCount GUARDED_BY(cs) {0};
 
     // Time when current masternode asset sync started
-    int64_t nTimeAssetSyncStarted;
+    int64_t nTimeAssetSyncStarted GUARDED_BY(cs) {0};
     // ... last bumped
-    int64_t nTimeLastBumped;
+    int64_t nTimeLastBumped GUARDED_BY(cs) {0};
 
     /// Set to true if best header is reached in CMasternodeSync::UpdatedBlockTip
-    bool fReachedBestHeader{false};
+    bool fReachedBestHeader GUARDED_BY(cs) {false};
     /// Last time UpdateBlockTip has been called
-    int64_t nTimeLastUpdateBlockTip{0};
+    int64_t nTimeLastUpdateBlockTip GUARDED_BY(cs) {0};
 
 public:
-    CMasternodeSync() { Reset(true, false); }
+    CMasternodeSync() = default;
 
 
     static void SendGovernanceSyncRequest(CNode* pnode, CConnman& connman);
@@ -57,9 +58,12 @@ public:
     void SetSyncMode(const int nMode) { LOCK(cs); nCurrentAsset = nMode; }
 
     int GetAssetID() const { LOCK(cs); return nCurrentAsset; }
-    int GetAttempt() const { return nTriedPeerCount; }
+    int64_t GetLastUpdateBlockTip() const { LOCK(cs); return nTimeLastUpdateBlockTip; }
+    int GetAttempt() const { LOCK(cs); return nTriedPeerCount; }
     void BumpAssetLastTime(const std::string& strFuncName);
-    int64_t GetAssetStartTime() { return nTimeAssetSyncStarted; }
+    int64_t GetAssetStartTime() { LOCK(cs); return nTimeAssetSyncStarted; }
+    int64_t GetTimeLastBumped() { LOCK(cs); return nTimeLastBumped; }
+    bool ReachedBestHeader() { LOCK(cs); return fReachedBestHeader;}
     std::string GetAssetName() const;
     bilingual_str GetSyncStatus();
 
