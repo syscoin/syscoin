@@ -13,7 +13,6 @@
 extern RecursiveMutex cs_main;
 class CNode;
 class CConnman;
-class CEvoDB;
 class PeerManager;
 class BlockValidationState;
 namespace llmq
@@ -23,7 +22,6 @@ typedef std::shared_ptr<CFinalCommitment> CFinalCommitmentPtr;
 class CQuorumBlockProcessor
 {
 private:
-    CEvoDB& evoDb;
     CConnman& connman;
     // TODO cleanup
     mutable RecursiveMutex minableCommitmentsCs;
@@ -33,7 +31,7 @@ private:
     std::map<uint8_t, unordered_lru_cache<uint256, bool, StaticSaltedHasher>> mapHasMinedCommitmentCache GUARDED_BY(minableCommitmentsCs);
 
 public:
-    explicit CQuorumBlockProcessor(CEvoDB& _evoDb, CConnman &_connman);
+    explicit CQuorumBlockProcessor(CConnman &_connman);
 
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, PeerManager& peerman);
