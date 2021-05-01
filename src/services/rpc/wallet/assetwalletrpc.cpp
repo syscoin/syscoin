@@ -2344,20 +2344,19 @@ private:
    */
   std::map<std::string, PerWallet> data;
 
-  /** Lock for this instance.  */
-  mutable RecursiveMutex cs;
 
 public:
-
+  /** Lock for this instance.  */
+  mutable RecursiveMutex cs;
   ReservedKeysForMining () = default;
 
   /**
    * Retrieves the key to use for mining at the moment.
    */
   CScript
-  GetCoinbaseScript (CWallet* pwallet)
+  GetCoinbaseScript (CWallet* pwallet) EXCLUSIVE_LOCKS_REQUIRED(cs)
   {
-    LOCK2 (cs, pwallet->cs_wallet);
+    LOCK (pwallet->cs_wallet);
 
     const auto mit = data.find (pwallet->GetName ());
     if (mit != data.end ())
@@ -2381,10 +2380,8 @@ public:
    * to the set of blocks for the current key.
    */
   void
-  AddBlockHash (const CWallet* pwallet, const std::string& hashHex)
+  AddBlockHash (const CWallet* pwallet, const std::string& hashHex)  EXCLUSIVE_LOCKS_REQUIRED(cs)
   {
-    LOCK (cs);
-
     const auto mit = data.find (pwallet->GetName ());
     assert (mit != data.end ());
     mit->second.blockHashes.insert (hashHex);
@@ -2394,10 +2391,8 @@ public:
    * Marks a block as submitted, releasing the key for it (if any).
    */
   void
-  MarkBlockSubmitted (const CWallet* pwallet, const std::string& hashHex)
+  MarkBlockSubmitted (const CWallet* pwallet, const std::string& hashHex)  EXCLUSIVE_LOCKS_REQUIRED(cs)
   {
-    LOCK (cs);
-
     const auto mit = data.find (pwallet->GetName ());
     if (mit == data.end ())
       return;
@@ -2455,6 +2450,7 @@ static RPCHelpMan getauxblock()
     if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
     }
+    LOCK(g_mining_keys.cs);
     /* Create a new block */
     if (request.params.size() == 0)
     {
