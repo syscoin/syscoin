@@ -7,7 +7,7 @@ import time
 import struct
 from test_framework.test_framework import DashTestFramework
 from test_framework.messages import CInv, hash256, msg_clsig, msg_inv, ser_string, uint256_from_str
-from test_framework.util import hex_str_to_bytes, wait_until_helper
+from test_framework.util import hex_str_to_bytes
 from test_framework.p2p import (
   P2PInterface,
 )
@@ -41,7 +41,7 @@ class TestP2PConn(P2PInterface):
 
 class LLMQChainLocksTest(DashTestFramework):
     def set_test_params(self):
-        self.set_dash_test_params(4, 3, [["-whitelist=noban@127.0.0.1"]] * 4, fast_dip3_enforcement=True)
+        self.set_dash_test_params(4, 3, fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -86,9 +86,7 @@ class LLMQChainLocksTest(DashTestFramework):
         self.nodes[1].generatetoaddress(5, node0_mining_addr)
         self.wait_for_chainlocked_block(self.nodes[1], self.nodes[1].getbestblockhash())
         assert(self.nodes[0].getbestblockhash() == node0_tip)
-        self.nodes[0].setnetworkactive(True)
-        for i in range(self.num_nodes - 1):
-            self.connect_nodes(0, i + 1)
+        self.reconnect_isolated_node(self.nodes[0], 1)
         self.nodes[1].generatetoaddress(1, node0_mining_addr)
         self.wait_for_chainlocked_block(self.nodes[0], self.nodes[1].getbestblockhash())
 
@@ -99,9 +97,7 @@ class LLMQChainLocksTest(DashTestFramework):
         good_tip = self.nodes[1].getbestblockhash()
         self.wait_for_chainlocked_block(self.nodes[1], good_tip)
         assert(not self.nodes[0].getblock(self.nodes[0].getbestblockhash())["chainlock"])
-        self.nodes[0].setnetworkactive(True)
-        for i in range(self.num_nodes - 1):
-            self.connect_nodes(0, i + 1)
+        self.reconnect_isolated_node(self.nodes[0], 1)
         self.nodes[1].generatetoaddress(1, node0_mining_addr)
         self.wait_for_chainlocked_block(self.nodes[0], self.nodes[1].getbestblockhash())
         assert(self.nodes[0].getblock(self.nodes[0].getbestblockhash())["previousblockhash"] == good_tip)
@@ -116,23 +112,12 @@ class LLMQChainLocksTest(DashTestFramework):
                 break
         assert(found)
 
-        def wait_for_headers():
-            if self.nodes[1].getconnectioncount() == node1_num_peers_before:
-                return False
-            if self.nodes[1].getpeerinfo()[-1]["synced_headers"] < self.nodes[0].getblockcount():
-                return False
-            return True
-
         self.log.info("Keep node connected and let it try to reorg the chain")
         good_tip = self.nodes[0].getbestblockhash()
         self.log.info("Restart it so that it forgets all the chainlock messages from the past")
         self.stop_node(0)
         self.start_node(0)
-        node1_num_peers_before = self.nodes[1].getconnectioncount()
         self.connect_nodes(0, 1)
-        # We need to wait for nodes to exchange headers first because
-        # node1 won't recognize node0 as a good peer to send new blocks to otherwise.
-        wait_until_helper(wait_for_headers, sleep=1, timeout=5)
         assert(self.nodes[0].getbestblockhash() == good_tip)
         self.nodes[0].invalidateblock(good_tip)
         self.log.info("Now try to reorg the chain")
@@ -190,9 +175,7 @@ class LLMQChainLocksTest(DashTestFramework):
         # Enable network on first node again, which will cause the blocks to propagate
         # for the mined TXs, which will then allow the network to create a CLSIG
         self.log.info("Re-enable network on first node and wait for chainlock")
-        self.nodes[0].setnetworkactive(True)
-        for i in range(self.num_nodes - 1):
-            self.connect_nodes(0, i + 1)
+        self.reconnect_isolated_node(self.nodes[0], 1)
 
         self.log.info("Send fake future clsigs and see if this breaks ChainLocks")
         for i in range(len(self.nodes)):
@@ -208,9 +191,11 @@ class LLMQChainLocksTest(DashTestFramework):
         self.bump_mocktime(5, nodes=self.nodes)
         time.sleep(5)
         for node in self.nodes:
-            self.wait_for_most_recent_chainlock(node, fake_block_hash1, timeout=15)
+            self.wait_for_most_recent_chainlock(node, fake_block_hash1, timeout=5)
         tip = self.nodes[0].generate(1)[-1]
-        self.wait_for_chainlocked_block_all_nodes(tip, timeout=5)
+        self.sync_blocks()
+        self.bump_mocktime(5, nodes=self.nodes)
+        self.wait_for_chainlocked_block_all_nodes(tip, timeout=15)
         self.log.info("Shouldn't accept fake clsig for 'tip + SIGN_HEIGHT_OFFSET + 1' block height")
         fake_clsig2, fake_block_hash2 = self.create_fake_clsig(SIGN_HEIGHT_OFFSET + 1)
         p2p_node.send_clsig(fake_clsig2)

@@ -15,6 +15,7 @@
 class CBlockIndex;
 class CConnman;
 class PeerManager;
+class CScheduler;
 namespace llmq
 {
 
@@ -58,6 +59,8 @@ class CChainLocksHandler : public CRecoveredSigsListener
 
 
 private:
+    CScheduler* scheduler;
+    std::thread* scheduler_thread;
     mutable RecursiveMutex cs;
     bool isEnabled GUARDED_BY(cs) {false};
     bool isEnforced GUARDED_BY(cs) {false};
@@ -97,7 +100,7 @@ public:
     void AcceptedBlockHeader(const CBlockIndex* pindexNew);
     void UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload);
     void CheckActiveState();
-    void TrySignChainTip(const CBlockIndex* pindexNew);
+    void TrySignChainTip();
     virtual void HandleNewRecoveredSig(const CRecoveredSig& recoveredSig) override;
 
     bool HasChainLock(int nHeight, const uint256& blockHash);

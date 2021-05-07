@@ -27,9 +27,11 @@
              (gnu packages version-control)
              (guix build-system font)
              (guix build-system gnu)
+             (guix build-system python)
              (guix build-system trivial)
              (guix download)
              (guix gexp)
+             (guix git-download)
              ((guix licenses) #:prefix license:)
              (guix packages)
              (guix profiles)
@@ -129,7 +131,7 @@ chain for " target " development."))
                                   (base-gcc-for-libc gcc-7)
                                   (base-kernel-headers linux-libre-headers-5.4)
                                   (base-libc glibc)  ; glibc 2.31
-                                  (base-gcc (make-gcc-rpath-link gcc-9)))
+                                  (base-gcc (make-gcc-rpath-link gcc-8)))
   "Convenience wrapper around MAKE-CROSS-TOOLCHAIN with default values
 desirable for building Syscoin Core release binaries."
   (make-cross-toolchain target
@@ -147,7 +149,7 @@ desirable for building Syscoin Core release binaries."
          (pthreads-xlibc mingw-w64-x86_64-winpthreads)
          (pthreads-xgcc (make-gcc-with-pthreads
                          (cross-gcc target
-                                    #:xgcc (make-ssp-fixed-gcc gcc-9)
+                                    #:xgcc (make-ssp-fixed-gcc gcc-8)
                                     #:xbinutils xbinutils
                                     #:libc pthreads-xlibc))))
     ;; Define a meta-package that propagates the resulting XBINUTILS, XLIBC, and
@@ -192,6 +194,29 @@ chain for " target " development."))
     "Thatcher Ulrich's first outline font design. He started with the goal of producing a neutral, readable sans-serif text font. There are lots of \"expressive\" fonts out there, but he wanted to start with something very plain and clean, something he might want to actually use. ")
    (license license:public-domain)))
 
+(define-public lief
+  (package
+   (name "python-lief")
+   (version "0.11.4")
+   (source
+    (origin
+     (method git-fetch)
+     (uri (git-reference
+           (url "https://github.com/lief-project/LIEF.git")
+           (commit version)))
+     (file-name (git-file-name name version))
+     (sha256
+      (base32
+       "0h4kcwr9z478almjqhmils8imfpflzk0r7d05g4xbkdyknn162qf"))))
+   (build-system python-build-system)
+   (native-inputs
+    `(("cmake" ,cmake)))
+   (home-page "https://github.com/lief-project/LIEF")
+   (synopsis "Library to Instrument Executable Formats")
+   (description "Python library to to provide a cross platform library which can
+parse, modify and abstract ELF, PE and MachO formats.")
+   (license license:asl2.0)))
+
 (packages->manifest
  (append
   (list ;; The Basics
@@ -227,6 +252,8 @@ chain for " target " development."))
         python-3
         ;; Git
         git
+        ;; Tests
+        lief
         ;; Native gcc 7 toolchain
         gcc-toolchain-7
         (list gcc-toolchain-7 "static"))
@@ -239,5 +266,5 @@ chain for " target " development."))
           ((string-contains target "-linux-")
            (list (make-syscoin-cross-toolchain target)))
           ((string-contains target "darwin")
-           (list clang-toolchain-8 binutils imagemagick libtiff librsvg font-tuffy cmake xorriso))
+           (list clang-toolchain-10 binutils imagemagick libtiff librsvg font-tuffy cmake xorriso))
           (else '())))))
