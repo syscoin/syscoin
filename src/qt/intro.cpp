@@ -155,7 +155,7 @@ Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_si
         UpdatePruneLabels(prune_checked);
         UpdateFreeSpaceLabel();
     });
-    connect(ui->pruneGB, QOverload<int>::of(&QSpinBox::valueChanged), [this](int prune_GB) {
+    connect(ui->pruneGB, qOverload<int>(&QSpinBox::valueChanged), [this](int prune_GB) {
         m_prune_target_gb = prune_GB;
         UpdatePruneLabels(ui->prune->isChecked());
         UpdateFreeSpaceLabel();
@@ -214,9 +214,9 @@ bool Intro::showIfNeeded(bool& did_show_intro, int64_t& prune_MiB)
     // SYSCOIN
     /* 1) Default data directory for operating system */
     QString defaultDir = GUIUtil::getDefaultDataDirectory();
-    /* 2) Allow QSettings to override default dir only if not syscoincore which was used in v3 */
+    /* 2) Allow QSettings to override default dir only if not SyscoinCore which was used in v3 */
     QString dataDir = settings.value("strDataDir", defaultDir).toString();
-    if(QString::compare(dataDir, "syscoincore", Qt::CaseInsensitive) == 0)
+    if(dataDir.endsWith(QString("SyscoinCore"), Qt::CaseInsensitive))
         dataDir = defaultDir;
 
     if(!fs::exists(GUIUtil::qstringToBoostPath(dataDir)) || gArgs.GetBoolArg("-choosedatadir", DEFAULT_CHOOSE_DATADIR) || settings.value("fReset", false).toBool() || gArgs.GetBoolArg("-resetguisettings", false))
@@ -301,12 +301,12 @@ void Intro::setStatus(int status, const QString &message, quint64 bytesAvailable
 
 void Intro::UpdateFreeSpaceLabel()
 {
-    QString freeString = tr("%n GB of free space available", "", m_bytes_available / GB_BYTES);
+    QString freeString = tr("%1 GB of free space available").arg(m_bytes_available / GB_BYTES);
     if (m_bytes_available < m_required_space_gb * GB_BYTES) {
-        freeString += " " + tr("(of %n GB needed)", "", m_required_space_gb);
+        freeString += " " + tr("(of %1 GB needed)").arg(m_required_space_gb);
         ui->freeSpace->setStyleSheet("QLabel { color: #800000 }");
     } else if (m_bytes_available / GB_BYTES - m_required_space_gb < 10) {
-        freeString += " " + tr("(%n GB needed for full chain)", "", m_required_space_gb);
+        freeString += " " + tr("(%1 GB needed for full chain)").arg(m_required_space_gb);
         ui->freeSpace->setStyleSheet("QLabel { color: #999900 }");
     } else {
         ui->freeSpace->setStyleSheet("");
