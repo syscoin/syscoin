@@ -22,9 +22,9 @@ packages:
 - "zip"
 - "ca-certificates"
 - "python3"
-- "python3-pip"
 # SYSCOIN
-- "libzmq3-dev"
+- "cmake"
+- "python3-pip"
 remotes:
 - "url": "https://github.com/syscoin/syscoin.git"
   "dir": "syscoin"
@@ -40,6 +40,7 @@ script: |
   HOST_CFLAGS="-O2 -g -fno-ident"
   HOST_CXXFLAGS="-O2 -g -fno-ident"
 
+  export QT_RCC_SOURCE_DATE_OVERRIDE=1
   export TZ="UTC"
   export BUILD_DIR="$PWD"
   mkdir -p ${WRAP_DIR}
@@ -88,7 +89,7 @@ script: |
   done
   }
 
-  pip3 install lief==0.11.5
+  pip3 install lief==0.11.4
 
   # Faketime for depends so intermediate results are comparable
   export PATH_orig=${PATH}

@@ -3,7 +3,7 @@ name: "syscoin-core-osx-4.2"
 enable_cache: true
 distro: "ubuntu"
 suites:
-- "focal"
+- "bionic"
 architectures:
 - "amd64"
 packages:
@@ -27,9 +27,6 @@ packages:
 - "python3-setuptools"
 - "fonts-tuffy"
 - "xorriso"
-- "libtinfo5"
-# SYSCOIN
-- "libzmq3-dev"
 remotes:
 - "url": "https://github.com/syscoin/syscoin.git"
   "dir": "syscoin"
@@ -44,6 +41,7 @@ script: |
   FAKETIME_HOST_PROGS=""
   FAKETIME_PROGS="ar ranlib date dmg xorrisofs"
 
+  export QT_RCC_SOURCE_DATE_OVERRIDE=1
   export TZ="UTC"
   export BUILD_DIR="$PWD"
   mkdir -p ${WRAP_DIR}
@@ -80,7 +78,7 @@ script: |
   done
   }
 
-  pip3 install lief==0.11.5
+  pip3 install lief==0.11.4
 
   # Faketime for depends so intermediate results are comparable
   export PATH_orig=${PATH}

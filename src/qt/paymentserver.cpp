@@ -49,9 +49,9 @@ static QString ipcServerName()
     QString name("SyscoinQt");
 
     // Append a simple hash of the datadir
-    // Note that gArgs.GetDataDirNet() returns a different path
+    // Note that GetDataDir(true) returns a different path
     // for -testnet versus main net
-    QString ddir(GUIUtil::boostPathToQString(gArgs.GetDataDirNet()));
+    QString ddir(GUIUtil::boostPathToQString(GetDataDir(true)));
     name.append(QString::number(qHash(ddir)));
 
     return name;

@@ -6,7 +6,6 @@
 #include <chainparams.h>
 #include <chainparamsbase.h>
 #include <coins.h>
-#include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <key.h>
@@ -27,7 +26,6 @@
 #include <vector>
 
 namespace {
-const TestingSetup* g_setup;
 const Coin EMPTY_COIN{};
 
 bool operator==(const Coin& a, const Coin& b)
@@ -40,7 +38,6 @@ bool operator==(const Coin& a, const Coin& b)
 void initialize_coins_view()
 {
     static const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
-    g_setup = testing_setup.get();
 }
 
 FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
@@ -183,8 +180,8 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
     }
 
     {
-        std::unique_ptr<CCoinsViewCursor> coins_view_cursor = backend_coins_view.Cursor();
-        assert(!coins_view_cursor);
+        const CCoinsViewCursor* coins_view_cursor = backend_coins_view.Cursor();
+        assert(coins_view_cursor == nullptr);
         (void)backend_coins_view.EstimateSize();
         (void)backend_coins_view.GetBestBlock();
         (void)backend_coins_view.GetHeadBlocks();
@@ -233,17 +230,11 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
                     // consensus/tx_verify.cpp:171: bool Consensus::CheckTxInputs(const CTransaction &, TxValidationState &, const CCoinsViewCache &, int, CAmount &): Assertion `!coin.IsSpent()' failed.
                     return;
                 }
-                TxValidationState dummy;
-                if (!CheckTransaction(transaction, dummy)) {
-                    // It is not allowed to call CheckTxInputs if CheckTransaction failed
-                    return;
-                }
-                // SYSCOIN
-                CAssetsMap mapAssetIn;
-                CAssetsMap mapAssetOut;
-                if (Consensus::CheckTxInputs(transaction, state, coins_view_cache, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, std::numeric_limits<int>::max()), tx_fee_out, mapAssetIn, mapAssetOut)) {
-                    assert(MoneyRange(tx_fee_out));
-                }
+                    // SYSCOIN
+                    CAssetsMap mapAssetIn;
+                    CAssetsMap mapAssetOut;
+                    (void)Consensus::CheckTxInputs(transaction, state, coins_view_cache, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, std::numeric_limits<int>::max()), tx_fee_out, mapAssetIn, mapAssetOut);
+                assert(MoneyRange(tx_fee_out));
             },
             [&] {
                 const CTransaction transaction{random_mutable_transaction};
@@ -261,7 +252,7 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
                     // consensus/tx_verify.cpp:130: unsigned int GetP2SHSigOpCount(const CTransaction &, const CCoinsViewCache &): Assertion `!coin.IsSpent()' failed.
                     return;
                 }
-                const auto flags{fuzzed_data_provider.ConsumeIntegral<uint32_t>()};
+                const int flags = fuzzed_data_provider.ConsumeIntegral<int>();
                 if (!transaction.vin.empty() && (flags & SCRIPT_VERIFY_WITNESS) != 0 && (flags & SCRIPT_VERIFY_P2SH) == 0) {
                     // Avoid:
                     // script/interpreter.cpp:1705: size_t CountWitnessSigOps(const CScript &, const CScript &, const CScriptWitness *, unsigned int): Assertion `(flags & SCRIPT_VERIFY_P2SH) != 0' failed.
@@ -273,7 +264,7 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
                 CCoinsStats stats{CoinStatsHashType::HASH_SERIALIZED};
                 bool expected_code_path = false;
                 try {
-                    (void)GetUTXOStats(&coins_view_cache, WITH_LOCK(::cs_main, return std::ref(g_setup->m_node.chainman->m_blockman)), stats);
+                    (void)GetUTXOStats(&coins_view_cache, WITH_LOCK(::cs_main, return std::ref(g_chainman.m_blockman)), stats);
                 } catch (const std::logic_error&) {
                     expected_code_path = true;
                 }

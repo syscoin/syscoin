@@ -17,8 +17,6 @@
 #include <vector>
 
 class CBlockIndex;
-// SYSCOIN
-class CNEVMBlockIndex;
 class CCoinsViewDBCursor;
 class uint256;
 
@@ -62,7 +60,7 @@ public:
     uint256 GetBestBlock() const override;
     std::vector<uint256> GetHeadBlocks() const override;
     bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock) override;
-    std::unique_ptr<CCoinsViewCursor> Cursor() const override;
+    CCoinsViewCursor *Cursor() const override;
 
     //! Attempt to update from an older database format. Returns whether an error occurred.
     bool Upgrade();
@@ -72,11 +70,34 @@ public:
     void ResizeCache(size_t new_cache_size) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 };
 
+/** Specialization of CCoinsViewCursor to iterate over a CCoinsViewDB */
+class CCoinsViewDBCursor: public CCoinsViewCursor
+{
+public:
+    ~CCoinsViewDBCursor() {}
+
+    bool GetKey(COutPoint &key) const override;
+    bool GetValue(Coin &coin) const override;
+    unsigned int GetValueSize() const override;
+
+    bool Valid() const override;
+    void Next() override;
+
+private:
+    CCoinsViewDBCursor(CDBIterator* pcursorIn, const uint256 &hashBlockIn):
+        CCoinsViewCursor(hashBlockIn), pcursor(pcursorIn) {}
+    std::unique_ptr<CDBIterator> pcursor;
+    std::pair<char, COutPoint> keyTmp;
+
+    friend class CCoinsViewDB;
+};
+
 /** Access to the block database (blocks/index/) */
 class CBlockTreeDB : public CDBWrapper
 {
 public:
     explicit CBlockTreeDB(size_t nCacheSize, bool fMemory = false, bool fWipe = false);
+
     bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*> >& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo);
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo &info);
     bool ReadLastBlockFile(int &nFile);
@@ -85,14 +106,5 @@ public:
     bool WriteFlag(const std::string &name, bool fValue);
     bool ReadFlag(const std::string &name, bool &fValue);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex);
-};
-// SYSCOIN
-/** Access to the EVM block database (blocks/index/) */
-class CNEVMBlockTreeDB : public CDBWrapper
-{
-public:
-    explicit CNEVMBlockTreeDB(size_t nCacheSize, bool fMemory = false, bool fWipe = false);
-    bool WriteBatchSync(const std::vector<const CNEVMBlockIndex*>& blockinfo);
-    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CNEVMBlockIndex*(const uint256&)> insertBlockIndex);
 };
 #endif // SYSCOIN_TXDB_H

@@ -13,7 +13,9 @@
 #include <string>
 #include <vector>
 
-ExternalSigner::ExternalSigner(const std::string& command, const std::string chain, const std::string& fingerprint, const std::string name): m_command(command), m_chain(chain), m_fingerprint(fingerprint), m_name(name) {}
+#ifdef ENABLE_EXTERNAL_SIGNER
+
+ExternalSigner::ExternalSigner(const std::string& command, const std::string& fingerprint, const std::string chain, const std::string name): m_command(command), m_fingerprint(fingerprint), m_chain(chain), m_name(name) {}
 
 const std::string ExternalSigner::NetworkArg() const
 {
@@ -53,7 +55,7 @@ bool ExternalSigner::Enumerate(const std::string& command, std::vector<ExternalS
         if (model_field.isStr() && model_field.getValStr() != "") {
             name += model_field.getValStr();
         }
-        signers.push_back(ExternalSigner(command, chain, fingerprintStr, name));
+        signers.push_back(ExternalSigner(command, fingerprintStr, chain, name));
     }
     return true;
 }
@@ -114,3 +116,5 @@ bool ExternalSigner::SignTransaction(PartiallySignedTransaction& psbtx, std::str
 
     return true;
 }
+
+#endif // ENABLE_EXTERNAL_SIGNER

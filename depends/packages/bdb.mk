@@ -4,6 +4,7 @@ $(package)_download_path=https://download.oracle.com/berkeley-db
 $(package)_file_name=db-$($(package)_version).NC.tar.gz
 $(package)_sha256_hash=12edc0df75bf9abd7f82f821795bcee50f42cb2e5f76a6a281b85732798364ef
 $(package)_build_subdir=build_unix
+$(package)_dependencies=libcurl
 $(package)_patches=clang_cxx_11.patch
 
 define $(package)_set_vars
@@ -12,7 +13,7 @@ $(package)_config_opts_mingw32=--enable-mingw
 $(package)_config_opts_linux=--with-pic
 $(package)_config_opts_android=--with-pic
 $(package)_cflags+=-Wno-error=implicit-function-declaration
-$(package)_cxxflags+=-std=c++17
+$(package)_cxxflags=-std=c++17
 $(package)_cppflags_mingw32=-DUNICODE -D_UNICODE
 endef
 

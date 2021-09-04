@@ -1,8 +1,8 @@
 .NOTPARALLEL :
 
 # Pattern rule to print variables, e.g. make print-top_srcdir
-print-%: FORCE
-	@echo '$*'='$($*)'
+print-%:
+	@echo '$*' = '$($*)'
 
 # When invoking a sub-make, keep only the command line variable definitions
 # matching the pattern in the filter function.
@@ -284,4 +284,3 @@ download: download-osx download-linux download-win
 $(foreach package,$(all_packages),$(eval $(call ext_add_stages,$(package))))
 
 .PHONY: install cached clean clean-all download-one download-osx download-linux download-win download check-packages check-sources
-.PHONY: FORCE

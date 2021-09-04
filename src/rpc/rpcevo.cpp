@@ -27,15 +27,9 @@ UniValue BuildDMNListEntry(const NodeContext& node, const CDeterministicMNCPtr& 
     }
     UniValue o(UniValue::VOBJ);
 
-    dmn->ToJson(*node.chain, o);
-    std::map<COutPoint, Coin> coins;
-    coins[dmn->collateralOutpoint]; 
-    node.chain->findCoins(coins);
-    int confirmations = 0;
-    const Coin &coin = coins.at(dmn->collateralOutpoint);
-    if (!coin.IsSpent()) {
-        confirmations = *node.chain->getHeight() - coin.nHeight;
-    }
+    dmn->ToJson(o);
+
+    int confirmations = GetUTXOConfirmations(dmn->collateralOutpoint);
     o.pushKV("confirmations", confirmations);
     auto metaInfo = mmetaman.GetMetaInfo(dmn->proTxHash);
     o.pushKV("metaInfo", metaInfo->ToJson());
@@ -78,12 +72,12 @@ static RPCHelpMan protx_list()
         bool detailed = !request.params[1].isNull() ? request.params[1].get_bool() : false;
         {
             LOCK(cs_main);
-            int height = !request.params[2].isNull() ? request.params[2].get_int() : node.chainman->ActiveHeight();
-            if (height < 1 || height > node.chainman->ActiveHeight()) {
+            int height = !request.params[2].isNull() ? request.params[2].get_int() : ::ChainActive().Height();
+            if (height < 1 || height > ::ChainActive().Height()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid height specified");
             }
             if(deterministicMNManager)
-                deterministicMNManager->GetListForBlock(node.chainman->ActiveChain()[height], mnList);
+                deterministicMNManager->GetListForBlock(::ChainActive()[height], mnList);
         }
         bool onlyValid = type == "valid";
         mnList.ForEachMN(onlyValid, [&](const CDeterministicMNCPtr& dmn) {
@@ -129,16 +123,16 @@ static RPCHelpMan protx_info()
     };
 } 
 
-static uint256 ParseBlock(ChainstateManager& chainman, const UniValue& v, std::string strName)
+static uint256 ParseBlock(const UniValue& v, std::string strName)
 {
     try {
         return ParseHashV(v, strName);
     } catch (...) {
         LOCK(cs_main);
         int h = v.get_int();
-        if (h < 1 || h > chainman.ActiveHeight())
+        if (h < 1 || h > ::ChainActive().Height())
             throw std::runtime_error(strprintf("%s must be a block hash or chain height and not %s", strName, v.getValStr()));
-        return *chainman.ActiveChain()[h]->phashBlock;
+        return *::ChainActive()[h]->phashBlock;
     }
 }
 
@@ -157,13 +151,12 @@ static RPCHelpMan protx_diff()
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    const NodeContext& node = EnsureAnyNodeContext(request.context);
-    uint256 baseBlockHash = ParseBlock(*node.chainman, request.params[0], "baseBlock");
-    uint256 blockHash = ParseBlock(*node.chainman, request.params[1], "block");
+    uint256 baseBlockHash = ParseBlock(request.params[0], "baseBlock");
+    uint256 blockHash = ParseBlock(request.params[1], "block");
 
     CSimplifiedMNListDiff mnListDiff;
     std::string strError;
-    if (!BuildSimplifiedMNListDiff(*node.chainman, baseBlockHash, blockHash, mnListDiff, strError)) {
+    if (!BuildSimplifiedMNListDiff(baseBlockHash, blockHash, mnListDiff, strError)) {
         throw std::runtime_error(strError);
     }
 

@@ -13,7 +13,6 @@ class CConnman;
 class UniValue;
 class PeerManager;
 class CBlockIndex;
-class ChainstateManager;
 namespace llmq
 {
 
@@ -22,7 +21,7 @@ class CDKGSessionManager
     static const int64_t MAX_CONTRIBUTION_CACHE_TIME = 60 * 1000;
 
 private:
-    std::unique_ptr<CDBWrapper> db{nullptr};
+    CDBWrapper& llmqDb;
     CBLSWorker& blsWorker;
     std::map<uint8_t, CDKGSessionHandler> dkgSessionHandlers;
 
@@ -48,7 +47,7 @@ private:
 public:
     CConnman& connman;
     PeerManager& peerman;
-    CDKGSessionManager(CBLSWorker& _blsWorker, CConnman &connman, PeerManager& peerman, ChainstateManager& chainman, bool unitTests, bool fWipe);
+    CDKGSessionManager(CDBWrapper& _llmqDb, CBLSWorker& _blsWorker, CConnman &connman, PeerManager& peerman);
     ~CDKGSessionManager();
 
     void StartThreads();
@@ -70,10 +69,9 @@ public:
     /// Write encrypted (unverified) DKG contributions for the member with the given proTxHash to the llmqDb
     void WriteEncryptedContributions(uint8_t llmqType, const CBlockIndex* pindexQuorum, const uint256& proTxHash, const CBLSIESMultiRecipientObjects<CBLSSecretKey>& contributions);
     /// Read encrypted (unverified) DKG contributions for the member with the given proTxHash from the llmqDb
-    bool GetEncryptedContributions(uint8_t llmqType, const CBlockIndex* pindexQuorum, const std::vector<bool>& validMembers, const uint256& proTxHash, std::vector<CBLSIESEncryptedObject<CBLSSecretKey>>& vecRet) const;
+    bool GetEncryptedContributions(uint8_t llmqType, const CBlockIndex* pindexQuorum, const std::vector<bool>& validMembers, const uint256& proTxHash, std::vector<CBLSIESEncryptedObject<CBLSSecretKey>>& vecRet);
 
 private:
-    void MigrateDKG();
     void CleanupCache();
 };
 

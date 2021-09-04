@@ -59,13 +59,10 @@ bool PartiallySignedTransaction::AddOutput(const CTxOut& txout, const PSBTOutput
 
 bool PartiallySignedTransaction::GetInputUTXO(CTxOut& utxo, int input_index) const
 {
-    const PSBTInput& input = inputs[input_index];
+    PSBTInput input = inputs[input_index];
     uint32_t prevout_index = tx->vin[input_index].prevout.n;
     if (input.non_witness_utxo) {
         if (prevout_index >= input.non_witness_utxo->vout.size()) {
-            return false;
-        }
-        if (input.non_witness_utxo->GetHash() != tx->vin[input_index].prevout.hash) {
             return false;
         }
         utxo = input.non_witness_utxo->vout[prevout_index];
@@ -230,24 +227,7 @@ void UpdatePSBTOutput(const SigningProvider& provider, PartiallySignedTransactio
     psbt_out.FromSignatureData(sigdata);
 }
 
-PrecomputedTransactionData PrecomputePSBTData(const PartiallySignedTransaction& psbt)
-{
-    const CMutableTransaction& tx = *psbt.tx;
-    bool have_all_spent_outputs = true;
-    std::vector<CTxOut> utxos(tx.vin.size());
-    for (size_t idx = 0; idx < tx.vin.size(); ++idx) {
-        if (!psbt.GetInputUTXO(utxos[idx], idx)) have_all_spent_outputs = false;
-    }
-    PrecomputedTransactionData txdata;
-    if (have_all_spent_outputs) {
-        txdata.Init(tx, std::move(utxos), true);
-    } else {
-        txdata.Init(tx, {}, true);
-    }
-    return txdata;
-}
-
-bool SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& psbt, int index, const PrecomputedTransactionData* txdata, int sighash, SignatureData* out_sigdata)
+bool SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& psbt, int index, int sighash, SignatureData* out_sigdata, bool use_dummy)
 {
     PSBTInput& input = psbt.inputs.at(index);
     const CMutableTransaction& tx = *psbt.tx;
@@ -287,10 +267,10 @@ bool SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& 
 
     sigdata.witness = false;
     bool sig_complete;
-    if (txdata == nullptr) {
+    if (use_dummy) {
         sig_complete = ProduceSignature(provider, DUMMY_SIGNATURE_CREATOR, utxo.scriptPubKey, sigdata);
     } else {
-        MutableTransactionSignatureCreator creator(&tx, index, utxo.nValue, txdata, sighash);
+        MutableTransactionSignatureCreator creator(&tx, index, utxo.nValue, sighash);
         sig_complete = ProduceSignature(provider, creator, utxo.scriptPubKey, sigdata);
     }
     // Verify that a witness signature was produced in case one was required.
@@ -322,9 +302,8 @@ bool FinalizePSBT(PartiallySignedTransaction& psbtx)
     //   PartiallySignedTransaction did not understand them), this will combine them into a final
     //   script.
     bool complete = true;
-    const PrecomputedTransactionData txdata = PrecomputePSBTData(psbtx);
     for (unsigned int i = 0; i < psbtx.tx->vin.size(); ++i) {
-        complete &= SignPSBTInput(DUMMY_SIGNING_PROVIDER, psbtx, i, &txdata, SIGHASH_ALL);
+        complete &= SignPSBTInput(DUMMY_SIGNING_PROVIDER, psbtx, i, SIGHASH_ALL);
     }
 
     return complete;

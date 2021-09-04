@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_WALLET_EXTERNAL_SIGNER_SCRIPTPUBKEYMAN_H
 #define SYSCOIN_WALLET_EXTERNAL_SIGNER_SCRIPTPUBKEYMAN_H
 
+#ifdef ENABLE_EXTERNAL_SIGNER
 #include <wallet/scriptpubkeyman.h>
 
 #include <memory>
@@ -15,8 +16,8 @@ class ExternalSignerScriptPubKeyMan : public DescriptorScriptPubKeyMan
   ExternalSignerScriptPubKeyMan(WalletStorage& storage, WalletDescriptor& descriptor)
       :   DescriptorScriptPubKeyMan(storage, descriptor)
       {}
-  ExternalSignerScriptPubKeyMan(WalletStorage& storage)
-      :   DescriptorScriptPubKeyMan(storage)
+  ExternalSignerScriptPubKeyMan(WalletStorage& storage, bool internal)
+      :   DescriptorScriptPubKeyMan(storage, internal)
       {}
 
   /** Provide a descriptor at setup time
@@ -28,6 +29,8 @@ class ExternalSignerScriptPubKeyMan : public DescriptorScriptPubKeyMan
 
   bool DisplayAddress(const CScript scriptPubKey, const ExternalSigner &signer) const;
 
-  TransactionError FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = 1 /* SIGHASH_ALL */, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr) const override;
+  TransactionError FillPSBT(PartiallySignedTransaction& psbt, int sighash_type = 1 /* SIGHASH_ALL */, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr) const override;
 };
+#endif
+
 #endif // SYSCOIN_WALLET_EXTERNAL_SIGNER_SCRIPTPUBKEYMAN_H

@@ -9,7 +9,6 @@
 #include <test/util/setup_common.h>
 #include <test/util/wallet.h>
 #include <validationinterface.h>
-#include <wallet/receive.h>
 #include <wallet/wallet.h>
 
 #include <optional>
@@ -23,7 +22,8 @@ static void WalletBalance(benchmark::Bench& bench, const bool set_dirty, const b
     CWallet wallet{test_setup->m_node.chain.get(), "", CreateMockWalletDatabase()};
     {
         wallet.SetupLegacyScriptPubKeyMan();
-        if (wallet.LoadWallet() != DBErrors::LOAD_OK) assert(false);
+        bool first_run;
+        if (wallet.LoadWallet(first_run) != DBErrors::LOAD_OK) assert(false);
     }
     auto handler = test_setup->m_node.chain->handleNotifications({&wallet, [](CWallet*) {}});
 
@@ -36,11 +36,11 @@ static void WalletBalance(benchmark::Bench& bench, const bool set_dirty, const b
     }
     SyncWithValidationInterfaceQueue();
 
-    auto bal = GetBalance(wallet); // Cache
+    auto bal = wallet.GetBalance(); // Cache
 
     bench.run([&] {
         if (set_dirty) wallet.MarkDirty();
-        bal = GetBalance(wallet);
+        bal = wallet.GetBalance();
         if (add_mine) assert(bal.m_mine_trusted > 0);
         if (add_watchonly) assert(bal.m_watchonly_trusted > 0);
     });

@@ -75,7 +75,7 @@ public:
         return &m_data[WIDTH];
     }
 
-    static constexpr unsigned int size()
+    unsigned int size() const
     {
         return sizeof(m_data);
     }

@@ -4,12 +4,11 @@
 
 #include <amount.h>
 #include <policy/feerate.h>
-
-#include <limits>
+#include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
-BOOST_AUTO_TEST_SUITE(amount_tests)
+BOOST_FIXTURE_TEST_SUITE(amount_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(MoneyRangeTest)
 {
@@ -74,7 +73,8 @@ BOOST_AUTO_TEST_CASE(GetFeeTest)
     BOOST_CHECK(CFeeRate(CAmount(0), 0) == CFeeRate(0));
     BOOST_CHECK(CFeeRate(CAmount(1), 0) == CFeeRate(0));
     // default value
-    BOOST_CHECK(CFeeRate(CAmount(-1), 1000) == CFeeRate(-1));
+    // SYSCOIN
+    BOOST_CHECK(CFeeRate(CAmount(-1), 1000) == CFeeRate(0));
     BOOST_CHECK(CFeeRate(CAmount(0), 1000) == CFeeRate(0));
     BOOST_CHECK(CFeeRate(CAmount(1), 1000) == CFeeRate(1));
     // lost precision (can only resolve satoshis per kB)
@@ -84,7 +84,7 @@ BOOST_AUTO_TEST_CASE(GetFeeTest)
     BOOST_CHECK(CFeeRate(CAmount(26), 789) == CFeeRate(32));
     BOOST_CHECK(CFeeRate(CAmount(27), 789) == CFeeRate(34));
     // Maximum size in bytes, should not crash
-    CFeeRate(21000000*COIN, std::numeric_limits<uint32_t>::max()).GetFeePerK();
+    CFeeRate(MAX_MONEY, std::numeric_limits<size_t>::max() >> 1).GetFeePerK();
 }
 
 BOOST_AUTO_TEST_CASE(BinaryOperatorTest)

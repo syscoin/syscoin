@@ -15,25 +15,23 @@
 #include <util/vector.h>
 
 #include <stdint.h>
-// SYSCOIN
-#include <timedata.h>
-extern int64_t nMaxTipAge;
-extern std::set<CNEVMBlockIndex*> setDirtyNEVMBlockIndex;
-static constexpr uint8_t DB_COIN{'C'};
-static constexpr uint8_t DB_COINS{'c'};
-static constexpr uint8_t DB_BLOCK_FILES{'f'};
-static constexpr uint8_t DB_BLOCK_INDEX{'b'};
 
-static constexpr uint8_t DB_BEST_BLOCK{'B'};
-static constexpr uint8_t DB_HEAD_BLOCKS{'H'};
-static constexpr uint8_t DB_FLAG{'F'};
-static constexpr uint8_t DB_REINDEX_FLAG{'R'};
-static constexpr uint8_t DB_LAST_BLOCK{'l'};
+static const char DB_COIN = 'C';
+static const char DB_COINS = 'c';
+static const char DB_BLOCK_FILES = 'f';
+static const char DB_BLOCK_INDEX = 'b';
+
+static const char DB_BEST_BLOCK = 'B';
+static const char DB_HEAD_BLOCKS = 'H';
+static const char DB_FLAG = 'F';
+static const char DB_REINDEX_FLAG = 'R';
+static const char DB_LAST_BLOCK = 'l';
+
 namespace {
 
 struct CoinEntry {
     COutPoint* outpoint;
-    uint8_t key;
+    char key;
     explicit CoinEntry(const COutPoint* ptr) : outpoint(const_cast<COutPoint*>(ptr)), key(DB_COIN)  {}
 
     SERIALIZE_METHODS(CoinEntry, obj) { READWRITE(obj.key, obj.outpoint->hash, VARINT(obj.outpoint->n)); }
@@ -145,13 +143,10 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock) {
 
 size_t CCoinsViewDB::EstimateSize() const
 {
-    return m_db->EstimateSize(DB_COIN, uint8_t(DB_COIN + 1));
+    return m_db->EstimateSize(DB_COIN, (char)(DB_COIN+1));
 }
 
-CBlockTreeDB::CBlockTreeDB(size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(gArgs.GetDataDirNet() / "blocks" / "index", nCacheSize, fMemory, fWipe) {
-}
-// SYSCOIN
-CNEVMBlockTreeDB::CNEVMBlockTreeDB(size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(gArgs.GetDataDirNet() / "blocks" / "nevmindex", nCacheSize, fMemory, fWipe) {
+CBlockTreeDB::CBlockTreeDB(size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(GetDataDir() / "blocks" / "index", nCacheSize, fMemory, fWipe) {
 }
 
 bool CBlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo &info) {
@@ -160,7 +155,7 @@ bool CBlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo &info) {
 
 bool CBlockTreeDB::WriteReindexing(bool fReindexing) {
     if (fReindexing)
-        return Write(DB_REINDEX_FLAG, uint8_t{'1'});
+        return Write(DB_REINDEX_FLAG, '1');
     else
         return Erase(DB_REINDEX_FLAG);
 }
@@ -173,34 +168,9 @@ bool CBlockTreeDB::ReadLastBlockFile(int &nFile) {
     return Read(DB_LAST_BLOCK, nFile);
 }
 
-/** Specialization of CCoinsViewCursor to iterate over a CCoinsViewDB */
-class CCoinsViewDBCursor: public CCoinsViewCursor
+CCoinsViewCursor *CCoinsViewDB::Cursor() const
 {
-public:
-    // Prefer using CCoinsViewDB::Cursor() since we want to perform some
-    // cache warmup on instantiation.
-    CCoinsViewDBCursor(CDBIterator* pcursorIn, const uint256&hashBlockIn):
-        CCoinsViewCursor(hashBlockIn), pcursor(pcursorIn) {}
-    ~CCoinsViewDBCursor() {}
-
-    bool GetKey(COutPoint &key) const override;
-    bool GetValue(Coin &coin) const override;
-    unsigned int GetValueSize() const override;
-
-    bool Valid() const override;
-    void Next() override;
-
-private:
-    std::unique_ptr<CDBIterator> pcursor;
-    std::pair<char, COutPoint> keyTmp;
-
-    friend class CCoinsViewDB;
-};
-
-std::unique_ptr<CCoinsViewCursor> CCoinsViewDB::Cursor() const
-{
-    auto i = std::make_unique<CCoinsViewDBCursor>(
-        const_cast<CDBWrapper&>(*m_db).NewIterator(), GetBestBlock());
+    CCoinsViewDBCursor *i = new CCoinsViewDBCursor(const_cast<CDBWrapper&>(*m_db).NewIterator(), GetBestBlock());
     /* It seems that there are no "const iterators" for LevelDB.  Since we
        only need read operations on it, use a const-cast to get around
        that restriction.  */
@@ -265,14 +235,14 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockF
 }
 
 bool CBlockTreeDB::WriteFlag(const std::string &name, bool fValue) {
-    return Write(std::make_pair(DB_FLAG, name), fValue ? uint8_t{'1'} : uint8_t{'0'});
+    return Write(std::make_pair(DB_FLAG, name), fValue ? '1' : '0');
 }
 
 bool CBlockTreeDB::ReadFlag(const std::string &name, bool &fValue) {
-    uint8_t ch;
+    char ch;
     if (!Read(std::make_pair(DB_FLAG, name), ch))
         return false;
-    fValue = ch == uint8_t{'1'};
+    fValue = ch == '1';
     return true;
 }
 
@@ -281,10 +251,11 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
 
     pcursor->Seek(std::make_pair(DB_BLOCK_INDEX, uint256()));
+
     // Load m_block_index
     while (pcursor->Valid()) {
         if (ShutdownRequested()) return false;
-        std::pair<uint8_t, uint256> key;
+        std::pair<char, uint256> key;
         if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
             CDiskBlockIndex diskindex;
             if (pcursor->GetValue(diskindex)) {
@@ -316,55 +287,6 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
         }
     }
 
-    return true;
-}
-// SYSCOIN
-bool CNEVMBlockTreeDB::WriteBatchSync(const std::vector<const CNEVMBlockIndex*>& blockinfo) {
-    CDBBatch batch(*this);    
-    int64_t nAgeThreshold = nMaxTipAge*2;
-    int64_t nTime = GetAdjustedTime();
-    for (std::vector<const CNEVMBlockIndex*>::const_iterator it=blockinfo.begin(); it != blockinfo.end(); it++) {
-        if((*it)->GetBlockTime() < (nTime - nAgeThreshold)) {
-            batch.Erase(std::make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()));
-        } else {
-            batch.Write(std::make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()), CDiskNEVMBlockIndex(*it));
-        }
-    }
-    return WriteBatch(batch, true);
-}
-bool CNEVMBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CNEVMBlockIndex*(const uint256&)> insertBlockIndex)
-{
-    std::unique_ptr<CDBIterator> pcursor(NewIterator());
-    int64_t nAgeThreshold = nMaxTipAge*2;
-    int64_t nTime = GetAdjustedTime();
-    pcursor->Seek(std::make_pair(DB_BLOCK_INDEX, uint256()));
-    // Load m_block_index
-    while (pcursor->Valid()) {
-        if (ShutdownRequested()) return false;
-        std::pair<uint8_t, uint256> key;
-        if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
-            CDiskNEVMBlockIndex diskindex;
-            if (pcursor->GetValue(diskindex)) {
-                // Construct block index object
-                CNEVMBlockIndex* pindexNew = insertBlockIndex(diskindex.GetBlockHash());
-                pindexNew->pprev           = insertBlockIndex(diskindex.hashPrev);
-                pindexNew->nTime           = diskindex.nTime;
-                if(pindexNew->nTime < (nTime - nAgeThreshold)) {
-                    // if block older than tip * 2 has evm block data, don't set the block data on index and mark it as dirty so it will get removed on flush
-                    if(!diskindex.vchNEVMBlockData.empty()) {
-                        setDirtyNEVMBlockIndex.insert(pindexNew);
-                    }
-                } else {
-                    pindexNew->vchNEVMBlockData = diskindex.vchNEVMBlockData;
-                }
-                pcursor->Next();
-            } else {
-                return error("%s: failed to read value", __func__);
-            }
-        } else {
-            break;
-        }
-    }
     return true;
 }
 

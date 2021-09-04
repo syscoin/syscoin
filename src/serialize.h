@@ -136,6 +136,34 @@ template<typename Stream> inline uint64_t ser_readdata64(Stream &s)
     s.read((char*)&obj, 8);
     return le64toh(obj);
 }
+inline uint64_t ser_double_to_uint64(double x)
+{
+    uint64_t tmp;
+    std::memcpy(&tmp, &x, sizeof(x));
+    static_assert(sizeof(tmp) == sizeof(x), "double and uint64_t assumed to have the same size");
+    return tmp;
+}
+inline uint32_t ser_float_to_uint32(float x)
+{
+    uint32_t tmp;
+    std::memcpy(&tmp, &x, sizeof(x));
+    static_assert(sizeof(tmp) == sizeof(x), "float and uint32_t assumed to have the same size");
+    return tmp;
+}
+inline double ser_uint64_to_double(uint64_t y)
+{
+    double tmp;
+    std::memcpy(&tmp, &y, sizeof(y));
+    static_assert(sizeof(tmp) == sizeof(y), "double and uint64_t assumed to have the same size");
+    return tmp;
+}
+inline float ser_uint32_to_float(uint32_t y)
+{
+    float tmp;
+    std::memcpy(&tmp, &y, sizeof(y));
+    static_assert(sizeof(tmp) == sizeof(y), "float and uint32_t assumed to have the same size");
+    return tmp;
+}
 
 
 /////////////////////////////////////////////////////////////////
@@ -152,7 +180,6 @@ enum
     SER_NETWORK         = (1 << 0),
     SER_DISK            = (1 << 1),
     SER_GETHASH         = (1 << 2),
-    SER_TRANSPORT       = (1 << 3),
 };
 
 //! Convert the reference base type to X, without changing constness or reference type.
@@ -221,6 +248,8 @@ template<typename Stream> inline void Serialize(Stream& s, int32_t a ) { ser_wri
 template<typename Stream> inline void Serialize(Stream& s, uint32_t a) { ser_writedata32(s, a); }
 template<typename Stream> inline void Serialize(Stream& s, int64_t a ) { ser_writedata64(s, a); }
 template<typename Stream> inline void Serialize(Stream& s, uint64_t a) { ser_writedata64(s, a); }
+template<typename Stream> inline void Serialize(Stream& s, float a   ) { ser_writedata32(s, ser_float_to_uint32(a)); }
+template<typename Stream> inline void Serialize(Stream& s, double a  ) { ser_writedata64(s, ser_double_to_uint64(a)); }
 template<typename Stream, int N> inline void Serialize(Stream& s, const char (&a)[N]) { s.write(a, N); }
 template<typename Stream, int N> inline void Serialize(Stream& s, const unsigned char (&a)[N]) { s.write(CharCast(a), N); }
 template<typename Stream> inline void Serialize(Stream& s, const Span<const unsigned char>& span) { s.write(CharCast(span.data()), span.size()); }
@@ -237,14 +266,21 @@ template<typename Stream> inline void Unserialize(Stream& s, int32_t& a ) { a = 
 template<typename Stream> inline void Unserialize(Stream& s, uint32_t& a) { a = ser_readdata32(s); }
 template<typename Stream> inline void Unserialize(Stream& s, int64_t& a ) { a = ser_readdata64(s); }
 template<typename Stream> inline void Unserialize(Stream& s, uint64_t& a) { a = ser_readdata64(s); }
+template<typename Stream> inline void Unserialize(Stream& s, float& a   ) { a = ser_uint32_to_float(ser_readdata32(s)); }
+template<typename Stream> inline void Unserialize(Stream& s, double& a  ) { a = ser_uint64_to_double(ser_readdata64(s)); }
 template<typename Stream, int N> inline void Unserialize(Stream& s, char (&a)[N]) { s.read(a, N); }
 template<typename Stream, int N> inline void Unserialize(Stream& s, unsigned char (&a)[N]) { s.read(CharCast(a), N); }
 template<typename Stream> inline void Unserialize(Stream& s, Span<unsigned char>& span) { s.read(CharCast(span.data()), span.size()); }
 
-template <typename Stream> inline void Serialize(Stream& s, bool a) { uint8_t f = a; ser_writedata8(s, f); }
-template <typename Stream> inline void Unserialize(Stream& s, bool& a) { uint8_t f = ser_readdata8(s); a = f; }
+template<typename Stream> inline void Serialize(Stream& s, bool a)    { char f=a; ser_writedata8(s, f); }
+template<typename Stream> inline void Unserialize(Stream& s, bool& a) { char f=ser_readdata8(s); a=f; }
+
 // SYSCOIN
 template <typename S, typename T> size_t GetSerializeSize(const S& s, const T& t);
+
+
+
+
 
 /**
  * Compact Size
@@ -428,144 +464,6 @@ I ReadVarInt(Stream& is)
         }
     }
 }
-
-/** TODO: describe FixedBitSet */
-inline unsigned int GetSizeOfFixedBitSet(size_t size)
-{
-    return (size + 7) / 8;
-}
-
-template<typename Stream>
-void WriteFixedBitSet(Stream& s, const std::vector<bool>& vec, size_t size)
-{
-    std::vector<unsigned char> vBytes((size + 7) / 8);
-    size_t ms = std::min(size, vec.size());
-    for (size_t p = 0; p < ms; p++)
-        vBytes[p / 8] |= vec[p] << (p % 8);
-    s.write((char*)vBytes.data(), vBytes.size());
-}
-
-template<typename Stream>
-void ReadFixedBitSet(Stream& s, std::vector<bool>& vec, size_t size)
-{
-    vec.resize(size);
-
-    std::vector<unsigned char> vBytes((size + 7) / 8);
-    s.read((char*)vBytes.data(), vBytes.size());
-    for (size_t p = 0; p < size; p++)
-        vec[p] = (vBytes[p / 8] & (1 << (p % 8))) != 0;
-    if (vBytes.size() * 8 != size) {
-        size_t rem = vBytes.size() * 8 - size;
-        uint8_t m = ~(uint8_t)(0xff >> rem);
-        if (vBytes[vBytes.size() - 1] & m) {
-            throw std::ios_base::failure("Out-of-range bits set");
-        }
-    }
-}
-
-/**
- * Stores a fixed size bitset as a series of VarInts. Each VarInt is an offset from the last entry and the sum of the
- * last entry and the offset gives an index into the bitset for a set bit. The series of VarInts ends with a 0.
- */
-template<typename Stream>
-void WriteFixedVarIntsBitSet(Stream& s, const std::vector<bool>& vec, size_t size)
-{
-    int32_t last = -1;
-    for (int32_t i = 0; i < (int32_t)vec.size(); i++) {
-        if (vec[i]) {
-            WriteVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s, (uint32_t)(i - last));
-            last = i;
-        }
-    }
-    WriteVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s, 0); // stopper
-}
-
-template<typename Stream>
-void ReadFixedVarIntsBitSet(Stream& s, std::vector<bool>& vec, size_t size)
-{
-    vec.assign(size, false);
-
-    int32_t last = -1;
-    while(true) {
-        uint32_t offset = ReadVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s);
-        if (offset == 0) {
-            break;
-        }
-        int32_t idx = last + offset;
-        if (idx >= (int32_t)size) {
-            throw std::ios_base::failure("out of bounds index");
-        }
-        if (last != -1 && idx <= last) {
-            throw std::ios_base::failure("offset overflow");
-        }
-        vec[idx] = true;
-        last = idx;
-    }
-}
-
-/**
- * Serializes either as a CFixedBitSet or CFixedVarIntsBitSet, depending on which would give a smaller size
- */
-typedef std::pair<std::vector<bool>, size_t> autobitset_t;
-
-struct CFixedBitSet
-{
-    const std::vector<bool>& vec;
-    size_t size;
-    CFixedBitSet(const std::vector<bool>& vecIn, size_t sizeIn) : vec(vecIn), size(sizeIn) {}
-    template<typename Stream>
-    void Serialize(Stream& s) const { WriteFixedBitSet(s, vec, size); }
-};
-
-struct CFixedVarIntsBitSet
-{
-    const std::vector<bool>& vec;
-    size_t size;
-    CFixedVarIntsBitSet(const std::vector<bool>& vecIn, size_t sizeIn) : vec(vecIn), size(sizeIn) {}
-    template<typename Stream>
-    void Serialize(Stream& s) const { WriteFixedVarIntsBitSet(s, vec, vec.size()); }
-};
-
-template<typename Stream>
-void WriteAutoBitSet(Stream& s, const autobitset_t& item)
-{
-    auto& vec = item.first;
-    auto& size = item.second;
-
-    assert(vec.size() == size);
-
-    size_t size1 = ::GetSerializeSize(s, CFixedBitSet(vec, size));
-    size_t size2 = ::GetSerializeSize(s, CFixedVarIntsBitSet(vec, size));
-
-    assert(size1 == GetSizeOfFixedBitSet(size));
-
-    if (size1 < size2) {
-        ser_writedata8(s, 0);
-        WriteFixedBitSet(s, vec, vec.size());
-    } else {
-        ser_writedata8(s, 1);
-        WriteFixedVarIntsBitSet(s, vec, vec.size());
-    }
-}
-
-template<typename Stream>
-void ReadAutoBitSet(Stream& s, autobitset_t& item)
-{
-    uint8_t isVarInts = ser_readdata8(s);
-    if (isVarInts != 0 && isVarInts != 1) {
-        throw std::ios_base::failure("invalid value for isVarInts byte");
-    }
-
-    auto& vec = item.first;
-    auto& size = item.second;
-
-    if (!isVarInts) {
-        ReadFixedBitSet(s, vec, size);
-    } else {
-        ReadFixedVarIntsBitSet(s, vec, size);
-    }
-}
-
 /** Simple wrapper class to serialize objects using a formatter; used by Using(). */
 template<typename Formatter, typename T>
 class Wrapper
@@ -598,41 +496,165 @@ static inline Wrapper<Formatter, T&> Using(T&& t) { return Wrapper<Formatter, T&
 #define LIMITED_STRING(obj,n) Using<LimitedStringFormatter<n>>(obj)
 
 // SYSCOIN
-#define DYNBITSET(obj) Using<DynamicBitSetFormatter>(obj)
-#define AUTOBITSET(obj) Using<AutoBitSetFormatter>(obj)
+#define FIXEDBITSET(obj, size) REF(CFixedBitSet(REF(obj), (size)))
+#define DYNBITSET(obj) REF(CDynamicBitSet(REF(obj)))
+#define FIXEDVARINTSBITSET(obj, size) REF(CFixedVarIntsBitSet(REF(obj), (size)))
+#define AUTOBITSET(obj, size) REF(CAutoBitSet(REF(obj), (size)))
 
-/** TODO: describe DynamicBitSet */
-struct DynamicBitSetFormatter
+
+class CFixedBitSet
 {
+protected:
+    std::vector<bool>& vec;
+    size_t size;
+
+public:
+    CFixedBitSet(std::vector<bool>& vecIn, size_t sizeIn) : vec(vecIn), size(sizeIn) {}
+
     template<typename Stream>
-    void Ser(Stream& s, const std::vector<bool>& vec) const
+    void Serialize(Stream& s) const
     {
-        WriteCompactSize(s, vec.size());
-        WriteFixedBitSet(s, vec, vec.size());
+        std::vector<unsigned char> vBytes((size + 7) / 8);
+        size_t ms = std::min(size, vec.size());
+        for (size_t p = 0; p < ms; p++)
+            vBytes[p / 8] |= vec[p] << (p % 8);
+        s.write((char*)vBytes.data(), vBytes.size());
     }
 
     template<typename Stream>
-    void Unser(Stream& s, std::vector<bool>& vec)
+    void Unserialize(Stream& s)
     {
-        ReadFixedBitSet(s, vec, ReadCompactSize(s));
+        vec.resize(size);
+
+        std::vector<unsigned char> vBytes((size + 7) / 8);
+        s.read((char*)vBytes.data(), vBytes.size());
+        for (size_t p = 0; p < size; p++)
+            vec[p] = (vBytes[p / 8] & (1 << (p % 8))) != 0;
+        if (vBytes.size() * 8 != size) {
+            size_t rem = vBytes.size() * 8 - size;
+            uint8_t m = ~(uint8_t)(0xff >> rem);
+            if (vBytes[vBytes.size() - 1] & m) {
+                throw std::ios_base::failure("Out-of-range bits set");
+            }
+        }
+    }
+};
+
+class CDynamicBitSet
+{
+protected:
+    std::vector<bool>& vec;
+
+public:
+    explicit CDynamicBitSet(std::vector<bool>& vecIn) : vec(vecIn) {}
+
+    template<typename Stream>
+    void Serialize(Stream& s) const
+    {
+        WriteCompactSize(s, vec.size());
+        CFixedBitSet(REF(vec), vec.size()).Serialize(s);
+    }
+
+    template<typename Stream>
+    void Unserialize(Stream& s)
+    {
+        vec.resize(ReadCompactSize(s));
+        CFixedBitSet(vec, vec.size()).Unserialize(s);
+    }
+};
+
+/**
+ * Stores a fixed size bitset as a series of VarInts. Each VarInt is an offset from the last entry and the sum of the
+ * last entry and the offset gives an index into the bitset for a set bit. The series of VarInts ends with a 0.
+ */
+class CFixedVarIntsBitSet
+{
+protected:
+    std::vector<bool>& vec;
+    size_t size;
+
+public:
+    CFixedVarIntsBitSet(std::vector<bool>& vecIn, size_t sizeIn) : vec(vecIn), size(sizeIn) {}
+
+    template<typename Stream>
+    void Serialize(Stream& s) const
+    {
+        int32_t last = -1;
+        for (int32_t i = 0; i < (int32_t)vec.size(); i++) {
+            if (vec[i]) {
+                WriteVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s, (uint32_t)(i - last));
+                last = i;
+            }
+        }
+        WriteVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s, 0); // stopper
+    }
+
+    template<typename Stream>
+    void Unserialize(Stream& s)
+    {
+        vec.assign(size, false);
+
+        int32_t last = -1;
+        while(true) {
+            uint32_t offset = ReadVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s);
+            if (offset == 0) {
+                break;
+            }
+            int32_t idx = last + offset;
+            if (idx >= (int32_t)size) {
+                throw std::ios_base::failure("out of bounds index");
+            }
+            if (last != -1 && idx <= last) {
+                throw std::ios_base::failure("offset overflow");
+            }
+            vec[idx] = true;
+            last = idx;
+        }
     }
 };
 
 /**
  * Serializes either as a CFixedBitSet or CFixedVarIntsBitSet, depending on which would give a smaller size
  */
-struct AutoBitSetFormatter
+class CAutoBitSet
 {
+protected:
+    std::vector<bool>& vec;
+    size_t size;
+
+public:
+    explicit CAutoBitSet(std::vector<bool>& vecIn, size_t sizeIn) : vec(vecIn), size(sizeIn) {}
+
     template<typename Stream>
-    void Ser(Stream& s, const autobitset_t& item) const
+    void Serialize(Stream& s) const
     {
-        WriteAutoBitSet(s, item);
+        assert(vec.size() == size);
+
+        size_t size1 = ::GetSerializeSize(s, CFixedBitSet(vec, size));
+        size_t size2 = ::GetSerializeSize(s, CFixedVarIntsBitSet(vec, size));
+
+        if (size1 < size2) {
+            ser_writedata8(s, 0);
+            s << FIXEDBITSET(vec, vec.size());
+        } else {
+            ser_writedata8(s, 1);
+            s << FIXEDVARINTSBITSET(vec, vec.size());
+        }
     }
 
     template<typename Stream>
-    void Unser(Stream& s, autobitset_t& item)
+    void Unserialize(Stream& s)
     {
-        ReadAutoBitSet(s, item);
+        uint8_t isVarInts = ser_readdata8(s);
+        if (isVarInts != 0 && isVarInts != 1) {
+            throw std::ios_base::failure("invalid value for isVarInts byte");
+        }
+
+        if (!isVarInts) {
+            s >> FIXEDBITSET(vec, size);
+        } else {
+            s >> FIXEDVARINTSBITSET(vec, size);
+        }
     }
 };
 
@@ -1331,8 +1353,6 @@ public:
     }
 
     int GetVersion() const { return nVersion; }
-    // SYSCOIN
-    int GetType() const { return SER_DISK; }
 };
 
 template<typename Stream>

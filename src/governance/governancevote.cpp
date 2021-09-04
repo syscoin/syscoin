@@ -158,24 +158,26 @@ uint256 CGovernanceVote::GetSignatureHash() const
 bool CGovernanceVote::Sign(const CKey& key, const CKeyID& keyID)
 {
 
-    uint256 signatureHash = GetSignatureHash();
+    uint256 hash = GetSignatureHash();
 
-    if (!CHashSigner::SignHash(signatureHash, key, vchSig)) {
+    if (!CHashSigner::SignHash(hash, key, vchSig)) {
         LogPrintf("CGovernanceVote::Sign -- SignHash() failed\n");
         return false;
     }
 
-    if (!CHashSigner::VerifyHash(signatureHash, keyID, vchSig)) {
-        LogPrintf("CGovernanceVote::Sign -- VerifyHash() failed, error\n");
+    if (!CHashSigner::VerifyHash(hash, keyID, vchSig)) {
+        LogPrintf("CGovernanceVote::Sign -- VerifyHash() failed\n");
         return false;
     }
+
 
     return true;
 }
 
 bool CGovernanceVote::CheckSignature(const CKeyID& keyID) const
 {
-    if (!CHashSigner::VerifyHash(GetSignatureHash(), keyID, vchSig)) {
+    uint256 hash = GetSignatureHash();
+    if (!CHashSigner::VerifyHash(hash, keyID, vchSig)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceVote::IsValid -- VerifyMessage() failed\n");
         return false;
     }
@@ -185,7 +187,8 @@ bool CGovernanceVote::CheckSignature(const CKeyID& keyID) const
 
 bool CGovernanceVote::Sign(const CBLSSecretKey& key)
 {
-    CBLSSignature sig = key.Sign(GetSignatureHash());
+    uint256 hash = GetSignatureHash();
+    CBLSSignature sig = key.Sign(hash);
     if (!sig.IsValid()) {
         return false;
     }

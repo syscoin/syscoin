@@ -9,62 +9,12 @@ Version 2 compact blocks are post-segwit (wtxids)
 """
 import random
 
-from test_framework.blocktools import (
-    COINBASE_MATURITY,
-    NORMAL_GBT_REQUEST_PARAMS,
-    add_witness_commitment,
-    create_block,
-)
-from test_framework.messages import (
-    BlockTransactions,
-    BlockTransactionsRequest,
-    CBlock,
-    CBlockHeader,
-    CInv,
-    COutPoint,
-    CTransaction,
-    CTxIn,
-    CTxInWitness,
-    CTxOut,
-    from_hex,
-    HeaderAndShortIDs,
-    MSG_BLOCK,
-    MSG_CMPCT_BLOCK,
-    MSG_WITNESS_FLAG,
-    NODE_NETWORK,
-    P2PHeaderAndShortIDs,
-    PrefilledTransaction,
-    calculate_shortid,
-    msg_block,
-    msg_blocktxn,
-    msg_cmpctblock,
-    msg_getblocktxn,
-    msg_getdata,
-    msg_getheaders,
-    msg_headers,
-    msg_inv,
-    msg_no_witness_block,
-    msg_no_witness_blocktxn,
-    msg_sendcmpct,
-    msg_sendheaders,
-    msg_tx,
-    ser_uint256,
-    tx_from_hex,
-)
-from test_framework.p2p import (
-    P2PInterface,
-    p2p_lock,
-)
-from test_framework.script import (
-    CScript,
-    OP_DROP,
-    OP_TRUE,
-)
+from test_framework.blocktools import create_block, NORMAL_GBT_REQUEST_PARAMS, add_witness_commitment
+from test_framework.messages import BlockTransactions, BlockTransactionsRequest, calculate_shortid, CBlock, CBlockHeader, CInv, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, FromHex, HeaderAndShortIDs, msg_no_witness_block, msg_no_witness_blocktxn, msg_cmpctblock, msg_getblocktxn, msg_getdata, msg_getheaders, msg_headers, msg_inv, msg_sendcmpct, msg_sendheaders, msg_tx, msg_block, msg_blocktxn, MSG_BLOCK, MSG_CMPCT_BLOCK, MSG_WITNESS_FLAG, NODE_NETWORK, P2PHeaderAndShortIDs, PrefilledTransaction, ser_uint256, ToHex
+from test_framework.p2p import p2p_lock, P2PInterface
+from test_framework.script import CScript, OP_TRUE, OP_DROP
 from test_framework.test_framework import SyscoinTestFramework
-from test_framework.util import (
-    assert_equal,
-    softfork_active,
-)
+from test_framework.util import assert_equal, softfork_active
 
 # TestP2PConn: A peer we use to send messages to syscoind, and store responses.
 class TestP2PConn(P2PInterface):
@@ -165,7 +115,7 @@ class CompactBlocksTest(SyscoinTestFramework):
         block = self.build_block_on_tip(self.nodes[0])
         self.segwit_node.send_and_ping(msg_no_witness_block(block))
         assert int(self.nodes[0].getbestblockhash(), 16) == block.sha256
-        self.nodes[0].generatetoaddress(COINBASE_MATURITY, self.nodes[0].getnewaddress(address_type="bech32"))
+        self.nodes[0].generatetoaddress(100, self.nodes[0].getnewaddress(address_type="bech32"))
 
         total_value = block.vtx[0].vout[0].nValue
         out_value = total_value // 10
@@ -276,7 +226,7 @@ class CompactBlocksTest(SyscoinTestFramework):
 
     # This test actually causes syscoind to (reasonably!) disconnect us, so do this last.
     def test_invalid_cmpctblock_message(self):
-        self.nodes[0].generate(COINBASE_MATURITY + 1)
+        self.nodes[0].generate(101)
         block = self.build_block_on_tip(self.nodes[0])
 
         cmpct_block = P2PHeaderAndShortIDs()
@@ -294,7 +244,7 @@ class CompactBlocksTest(SyscoinTestFramework):
         version = test_node.cmpct_version
         node = self.nodes[0]
         # Generate a bunch of transactions.
-        node.generate(COINBASE_MATURITY + 1)
+        node.generate(101)
         num_transactions = 25
         address = node.getnewaddress()
 
@@ -302,7 +252,7 @@ class CompactBlocksTest(SyscoinTestFramework):
         for _ in range(num_transactions):
             txid = node.sendtoaddress(address, 0.1)
             hex_tx = node.gettransaction(txid)["hex"]
-            tx = tx_from_hex(hex_tx)
+            tx = FromHex(CTransaction(), hex_tx)
             if not tx.wit.is_null():
                 segwit_tx_generated = True
 
@@ -321,7 +271,7 @@ class CompactBlocksTest(SyscoinTestFramework):
         block_hash = int(node.generate(1)[0], 16)
 
         # Store the raw block in our internal format.
-        block = from_hex(CBlock(), node.getblock("%064x" % block_hash, False))
+        block = FromHex(CBlock(), node.getblock("%064x" % block_hash, False))
         for tx in block.vtx:
             tx.calc_sha256()
         block.rehash()
@@ -614,7 +564,7 @@ class CompactBlocksTest(SyscoinTestFramework):
         current_height = chain_height
         while (current_height >= chain_height - MAX_GETBLOCKTXN_DEPTH):
             block_hash = node.getblockhash(current_height)
-            block = from_hex(CBlock(), node.getblock(block_hash, False))
+            block = FromHex(CBlock(), node.getblock(block_hash, False))
 
             msg = msg_getblocktxn()
             msg.block_txn_request = BlockTransactionsRequest(int(block_hash, 16), [])
@@ -717,9 +667,9 @@ class CompactBlocksTest(SyscoinTestFramework):
 
         [l.clear_block_announcement() for l in listeners]
 
-        # serialize without witness (this block has no witnesses anyway).
-        # TODO: repeat this test with witness tx's to a segwit node.
-        node.submitblock(block.serialize().hex())
+        # ToHex() won't serialize with witness, but this block has no witnesses
+        # anyway. TODO: repeat this test with witness tx's to a segwit node.
+        node.submitblock(ToHex(block))
 
         for l in listeners:
             l.wait_until(lambda: "cmpctblock" in l.last_message, timeout=30)

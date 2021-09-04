@@ -4,7 +4,6 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test resurrection of mined transactions when the blockchain is re-organized."""
 
-from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import assert_equal
 from test_framework.wallet import MiniWallet
@@ -21,7 +20,7 @@ class MempoolCoinbaseTest(SyscoinTestFramework):
 
         # Add enough mature utxos to the wallet so that all txs spend confirmed coins
         wallet.generate(3)
-        node.generate(COINBASE_MATURITY)
+        node.generate(100)
 
         # Spend block 1/2/3's coinbase transactions
         # Mine a block

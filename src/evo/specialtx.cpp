@@ -16,7 +16,7 @@
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_blockprocessor.h>
 class CCoinsViewCache;
-bool CheckSpecialTx(BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck)
+bool CheckSpecialTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck)
 {
 
     try {
@@ -32,7 +32,7 @@ bool CheckSpecialTx(BlockManager &blockman, const CTransaction& tx, const CBlock
         case SYSCOIN_TX_VERSION_MN_COINBASE:
             return CheckCbTx(tx, pindexPrev, state, fJustCheck);
         case SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT:
-            return llmq::CheckLLMQCommitment(blockman, tx, pindexPrev, state, fJustCheck);
+            return llmq::CheckLLMQCommitment(tx, pindexPrev, state, fJustCheck);
         default:
             return true;
         }
@@ -61,19 +61,20 @@ bool IsSpecialTx(const CTransaction& tx)
     return false;
 }
 
-bool ProcessSpecialTxsInBlock(BlockManager &blockman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool fCheckCbTxMerleRoots)
+bool ProcessSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool fCheckCbTxMerleRoots)
 {
-    try {
-        static int64_t nTimeLoop = 0;
-        static int64_t nTimeQuorum = 0;
-        static int64_t nTimeDMN = 0;
-        static int64_t nTimeMerkle = 0;
+    static int64_t nTimeLoop = 0;
+    static int64_t nTimeQuorum = 0;
+    static int64_t nTimeDMN = 0;
+    static int64_t nTimeMerkle = 0;
 
+    try {
         int64_t nTime1 = GetTimeMicros();
 
-        for (const auto& ptr_tx : block.vtx) {
+        for (size_t i = 0; i < block.vtx.size(); i++) {
+            const CTransaction& tx = *block.vtx[i];
             TxValidationState txstate;
-            if (!CheckSpecialTx(blockman, *ptr_tx, pindex->pprev, txstate, view, false)) {
+            if (!CheckSpecialTx(tx, pindex->pprev, txstate, view, false)) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, txstate.GetRejectReason());
             }
         }

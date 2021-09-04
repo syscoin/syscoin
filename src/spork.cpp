@@ -130,7 +130,8 @@ void CSporkManager::ProcessSpork(CNode* pfrom, const std::string& strCommand, CD
             LOCK(cs_main);
             pfrom->AddKnownTx(hash);
             peerman.ReceivedResponse(pfrom->GetId(), hash);
-            strLogMsg = strprintf("SPORK -- hash: %s id: %d value: %10d peer=%d", hash.ToString(), spork.nSporkID, spork.nValue, pfrom->GetId());
+            if(!::ChainActive().Tip()) return;
+            strLogMsg = strprintf("SPORK -- hash: %s id: %d value: %10d bestHeight: %d peer=%d", hash.ToString(), spork.nSporkID, spork.nValue, ::ChainActive().Height(), pfrom->GetId());
         }
 
         if (spork.nTimeSigned > GetAdjustedTime() + 2 * 60 * 60) {

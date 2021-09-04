@@ -59,7 +59,7 @@ First, install the general dependencies:
 
     sudo apt update
     sudo apt upgrade
-    sudo apt install build-essential libtool autotools-dev automake pkg-config bsdmainutils curl git
+    sudo apt install build-essential libtool autotools-dev automake pkg-config bsdmainutils curl git cmake
 
 A host toolchain (`build-essential`) is necessary because some dependency
 packages need to build host utilities that are used in the build process.
@@ -81,26 +81,9 @@ The first step is to install the mingw-w64 cross-compilation tool chain:
 
     sudo apt install g++-mingw-w64-x86-64
 
-Next, set the default `mingw32 g++` compiler option to POSIX<sup>[1](#footnote1)</sup>:
+Ubuntu Bionic 18.04 <sup>[1](#footnote1)</sup>:
 
-```
-sudo update-alternatives --config x86_64-w64-mingw32-g++
-```
-
-After running the above command, you should see output similar to that below.
-Choose the option that ends with `posix`.
-
-```
-There are 2 choices for the alternative x86_64-w64-mingw32-g++ (providing /usr/bin/x86_64-w64-mingw32-g++).
-
-  Selection    Path                                   Priority   Status
-------------------------------------------------------------
-  0            /usr/bin/x86_64-w64-mingw32-g++-win32   60        auto mode
-* 1            /usr/bin/x86_64-w64-mingw32-g++-posix   30        manual mode
-  2            /usr/bin/x86_64-w64-mingw32-g++-win32   60        manual mode
-
-Press <enter> to keep the current choice[*], or type selection number:
-```
+    sudo update-alternatives --config x86_64-w64-mingw32-g++ # Set the default mingw32 g++ compiler option to posix.
 
 Once the toolchain is installed the build steps are common:
 
@@ -122,7 +105,7 @@ Build using:
     cd ..
     ./autogen.sh
     CONFIG_SITE=$PWD/depends/x86_64-w64-mingw32/share/config.site ./configure --prefix=/
-    make # use "-j N" for N parallel jobs
+    make
     sudo bash -c "echo 1 > /proc/sys/fs/binfmt_misc/status" # Enable WSL support for Win32 applications.
 
 ## Depends system

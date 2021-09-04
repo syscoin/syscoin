@@ -12,7 +12,8 @@ FUZZ_TARGET(parse_numbers)
 {
     const std::string random_string(buffer.begin(), buffer.end());
 
-    (void)ParseMoney(random_string);
+    CAmount amount;
+    (void)ParseMoney(random_string, amount);
 
     double d;
     (void)ParseDouble(random_string, &d);

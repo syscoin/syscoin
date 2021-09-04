@@ -97,6 +97,7 @@ static bool GetUTXOStats(CCoinsView* view, BlockManager& blockman, CCoinsStats& 
     if (!pindex) {
         {
             LOCK(cs_main);
+            assert(std::addressof(g_chainman.m_blockman) == std::addressof(blockman));
             pindex = blockman.LookupBlockIndex(view->GetBestBlock());
         }
     }

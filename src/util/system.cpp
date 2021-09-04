@@ -6,11 +6,6 @@
 #include <util/system.h>
 
 #ifdef ENABLE_EXTERNAL_SIGNER
-#if defined(WIN32) && !defined(__kernel_entry)
-// A workaround for boost 1.71 incompatibility with mingw-w64 compiler.
-// For details see https://github.com/bitcoin/bitcoin/pull/22348.
-#define __kernel_entry
-#endif
 #include <boost/process.hpp>
 #endif // ENABLE_EXTERNAL_SIGNER
 
@@ -21,8 +16,6 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/translation.h>
-// SYSCOIN
-#include <ctpl_stl.h>
 
 
 #if (defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__DragonFly__))
@@ -78,13 +71,17 @@
 #include <univalue.h>
 // SYSCOIN only features
 bool fMasternodeMode = false;
+bool bGethTestnet = false;
 bool fDisableGovernance = false;
 bool fRegTest = false;
 bool fSigNet = false;
 bool fAssetIndex = false;
+uint32_t fGethSyncHeight = 0;
 uint32_t fGethCurrentHeight = 0;
-bool fNEVMConnection = false;
 pid_t gethPID = 0;
+pid_t relayerPID = 0;
+int64_t nRandomResetSec = 0;
+int64_t nLastGethHeaderTime = 0;
 std::string fGethSyncStatus = "waiting to sync...";
 bool fGethSynced = true;
 bool fLoaded = false;
@@ -385,16 +382,15 @@ bool ArgsManager::ParseParameters(int argc, const char* const argv[], std::strin
         m_settings.command_line_options[key].push_back(value);
     }
 
-    // we do not allow -includeconf from command line, only -noincludeconf
+    // we do not allow -includeconf from command line
+    bool success = true;
     if (auto* includes = util::FindKey(m_settings.command_line_options, "includeconf")) {
-        const util::SettingsSpan values{*includes};
-        // Range may be empty if -noincludeconf was passed
-        if (!values.empty()) {
-            error = "-includeconf cannot be used from commandline; -includeconf=" + values.begin()->write();
-            return false; // pick first value as example
+        for (const auto& include : util::SettingsSpan(*includes)) {
+            error += "-includeconf cannot be used from commandline; -includeconf=" + include.get_str() + "\n";
+            success = false;
         }
     }
-    return true;
+    return success;
 }
 
 std::optional<unsigned int> ArgsManager::GetArgFlags(const std::string& name) const
@@ -409,7 +405,7 @@ std::optional<unsigned int> ArgsManager::GetArgFlags(const std::string& name) co
     return std::nullopt;
 }
 
-const fs::path& ArgsManager::GetBlocksDirPath() const
+const fs::path& ArgsManager::GetBlocksDirPath()
 {
     LOCK(cs_args);
     fs::path& path = m_cached_blocks_path;
@@ -425,7 +421,7 @@ const fs::path& ArgsManager::GetBlocksDirPath() const
             return path;
         }
     } else {
-        path = GetDataDirBase();
+        path = GetDataDirPath(false);
     }
 
     path /= BaseParams().DataDir();
@@ -437,7 +433,7 @@ const fs::path& ArgsManager::GetBlocksDirPath() const
     return path;
 }
 
-const fs::path& ArgsManager::GetDataDir(bool net_specific) const
+const fs::path& ArgsManager::GetDataDirPath(bool net_specific) const
 {
     LOCK(cs_args);
     fs::path& path = net_specific ? m_cached_network_datadir_path : m_cached_datadir_path;
@@ -519,11 +515,11 @@ bool ArgsManager::InitSettings(std::string& error)
 
     std::vector<std::string> errors;
     if (!ReadSettingsFile(&errors)) {
-        error = strprintf("Failed loading settings file:\n%s\n", MakeUnorderedList(errors));
+        error = strprintf("Failed loading settings file:\n- %s\n", Join(errors, "\n- "));
         return false;
     }
     if (!WriteSettingsFile(&errors)) {
-        error = strprintf("Failed saving settings file:\n%s\n", MakeUnorderedList(errors));
+        error = strprintf("Failed saving settings file:\n- %s\n", Join(errors, "\n- "));
         return false;
     }
     return true;
@@ -536,7 +532,7 @@ bool ArgsManager::GetSettingsPath(fs::path* filepath, bool temp) const
     }
     if (filepath) {
         std::string settings = GetArg("-settings", SYSCOIN_SETTINGS_FILENAME);
-        *filepath = fsbridge::AbsPathJoin(GetDataDirNet(), temp ? settings + ".tmp" : settings);
+        *filepath = fsbridge::AbsPathJoin(GetDataDirPath(/* net_specific= */ true), temp ? settings + ".tmp" : settings);
     }
     return true;
 }
@@ -642,14 +638,14 @@ void ArgsManager::ForceSetArg(const std::string& strArg, const std::string& strV
     m_settings.forced_settings[SettingName(strArg)] = strValue;
 }
 
-void ArgsManager::AddCommand(const std::string& cmd, const std::string& help)
+void ArgsManager::AddCommand(const std::string& cmd, const std::string& help, const OptionsCategory& cat)
 {
     Assert(cmd.find('=') == std::string::npos);
     Assert(cmd.at(0) != '-');
 
     LOCK(cs_args);
     m_accept_any_command = false; // latch to false
-    std::map<std::string, Arg>& arg_map = m_available_args[OptionsCategory::COMMANDS];
+    std::map<std::string, Arg>& arg_map = m_available_args[cat];
     auto ret = arg_map.emplace(cmd, Arg{"", help, ArgsManager::COMMAND});
     Assert(ret.second); // Fail on duplicate commands
 }
@@ -825,6 +821,11 @@ fs::path GetDefaultDataDir()
 #endif
 }
 
+const fs::path &GetDataDir(bool fNetSpecific)
+{
+    return gArgs.GetDataDirPath(fNetSpecific);
+}
+
 bool CheckDataDirOption()
 {
     std::string datadir = gArgs.GetArg("-datadir", "");
@@ -921,11 +922,6 @@ bool ArgsManager::ReadConfigFiles(std::string& error, bool ignore_invalid_keys)
     const std::string confPath = GetArg("-conf", SYSCOIN_CONF_FILENAME);
     fsbridge::ifstream stream(GetConfigFile(confPath));
 
-    // not ok to have a config file specified that cannot be opened
-    if (IsArgSet("-conf") && !stream.good()) {
-        error = strprintf("specified config file \"%s\" could not be opened.", confPath);
-        return false;
-    }
     // ok to not have a config file
     if (stream.good()) {
         if (!ReadConfigStream(stream, confPath, error, ignore_invalid_keys)) {
@@ -1059,6 +1055,25 @@ bool CheckSpecs(std::string &errMsg, bool bMiner){
     if(GetNumCores() < (bMiner? 4: 2))
         errMsg = _("Insufficient CPU cores, you need at least 2 cores to run a masternode. Please see documentation.").translated;
    return errMsg.empty();         
+}
+
+// SYSCOIN - RELAYER
+fs::path GetRelayerPidFile()
+{
+    return AbsPathForConfigVal(fs::path("relayer.pid"));
+}
+std::string GetRelayerFilename(){
+    // For Windows:
+    #ifdef WIN32
+       return "sysrelayer.exe";
+    #endif    
+    #ifdef MAC_OSX
+        // Mac
+        return "sysrelayer";
+    #else
+        // Linux
+        return "sysrelayer";
+    #endif
 }
 /* Parse the contents of /proc/meminfo (in buf), return value of "name"
  * (example: MemTotal) */
@@ -1226,12 +1241,12 @@ bool TryCreateDirectories(const fs::path& p)
 // SYSCOIN
 bool ExistsOldAssetDir()
 {
-    const fs::path p =  gArgs.GetDataDirNet() / "assets";
+    const fs::path p =  GetDataDir() / "assets";
     return (fs::exists(p) && fs::is_directory(p));
 }
 void DeleteOldAssetDir()
 {
-    fs::remove_all(gArgs.GetDataDirNet() / "assets");
+    fs::remove_all(GetDataDir() / "assets");
 }
 
 bool FileCommit(FILE *file)
@@ -1396,9 +1411,9 @@ void runCommand(const std::string& strCommand)
 }
 #endif
 
+#ifdef ENABLE_EXTERNAL_SIGNER
 UniValue RunCommandParseJSON(const std::string& str_command, const std::string& str_std_in)
 {
-#ifdef ENABLE_EXTERNAL_SIGNER
     namespace bp = boost::process;
 
     UniValue result_json;
@@ -1430,10 +1445,8 @@ UniValue RunCommandParseJSON(const std::string& str_command, const std::string& 
     if (!result_json.read(result)) throw std::runtime_error("Unable to parse JSON: " + result);
 
     return result_json;
-#else
-    throw std::runtime_error("Compiled without external signing support (required for external signing).");
-#endif // ENABLE_EXTERNAL_SIGNER
 }
+#endif // ENABLE_EXTERNAL_SIGNER
 
 void SetupEnvironment()
 {
@@ -1512,7 +1525,7 @@ fs::path AbsPathForConfigVal(const fs::path& path, bool net_specific)
     if (path.is_absolute()) {
         return path;
     }
-    return fsbridge::AbsPathJoin(net_specific ? gArgs.GetDataDirNet() : gArgs.GetDataDirBase(), path);
+    return fsbridge::AbsPathJoin(GetDataDir(net_specific), path);
 }
 
 void ScheduleBatchPriority()

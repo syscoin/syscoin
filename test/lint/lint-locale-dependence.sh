@@ -56,13 +56,13 @@ KNOWN_VIOLATIONS=(
     "src/util/strencodings.cpp:.*strtoul"
     "src/util/strencodings.h:.*atoi"
     "src/util/system.cpp:.*atoi"
-    "src/nevm/nevm.cpp:.*strtol"
-    "src/nevm/nevm.cpp:.*stoul"
+    "src/ethereum/ethereum.cpp:.*strtol"
+    "src/ethereum/ethereum.cpp:.*stoul"
     "src/util/system.cpp:.*strtol"
     "src/rpc/blockchain.cpp:.*fprintf"
 )
 
-REGEXP_IGNORE_EXTERNAL_DEPENDENCIES="^src/(crypto/ctaes/|leveldb/|secp256k1/|tinyformat.h|univalue/|bls-dash/)"
+REGEXP_IGNORE_EXTERNAL_DEPENDENCIES="^src/(crypto/ctaes/|leveldb/|secp256k1/|tinyformat.h|univalue/|chiabls/)"
 
 LOCALE_DEPENDENT_FUNCTIONS=(
     alphasort    # LC_COLLATE (via strcoll)

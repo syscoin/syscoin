@@ -18,7 +18,6 @@
 #include <coins.h>
 #include <indirectmap.h>
 #include <policy/feerate.h>
-#include <policy/packages.h>
 #include <primitives/transaction.h>
 #include <random.h>
 #include <sync.h>
@@ -491,21 +490,21 @@ class CTxMemPool
 protected:
     const int m_check_ratio; //!< Value n means that 1 times in n we check.
     std::atomic<unsigned int> nTransactionsUpdated{0}; //!< Used by getblocktemplate to trigger CreateNewBlock() invocation
-    CBlockPolicyEstimator* const minerPolicyEstimator;
+    CBlockPolicyEstimator* minerPolicyEstimator;
 
     uint64_t totalTxSize GUARDED_BY(cs);      //!< sum of all mempool tx's virtual sizes. Differs from serialized tx size since witness data is discounted. Defined in BIP 141.
     CAmount m_total_fee GUARDED_BY(cs);       //!< sum of all mempool tx's fees (NOT modified fee)
     uint64_t cachedInnerUsage GUARDED_BY(cs); //!< sum of dynamic memory usage of all the map elements (NOT the maps themselves)
 
-    mutable int64_t lastRollingFeeUpdate GUARDED_BY(cs);
-    mutable bool blockSinceLastRollingFeeBump GUARDED_BY(cs);
-    mutable double rollingMinimumFeeRate GUARDED_BY(cs); //!< minimum fee to get into the pool, decreases exponentially
+    mutable int64_t lastRollingFeeUpdate;
+    mutable bool blockSinceLastRollingFeeBump;
+    mutable double rollingMinimumFeeRate; //!< minimum fee to get into the pool, decreases exponentially
     mutable Epoch m_epoch GUARDED_BY(cs);
 
     // In-memory counter for external mempool tracking purposes.
     // This number is incremented once every time a transaction
     // is added or removed from the mempool for any reason.
-    mutable uint64_t m_sequence_number GUARDED_BY(cs){1};
+    mutable uint64_t m_sequence_number{1};
 
     void trackPackageRemoved(const CFeeRate& rate) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
@@ -611,29 +610,9 @@ private:
     std::map<CKeyID, uint256> mapProTxPubKeyIDs;
     std::map<uint256, uint256> mapProTxBlsPubKeyHashes;
     std::map<COutPoint, uint256> mapProTxCollaterals;
-
-
-    /**
-     * Helper function to calculate all in-mempool ancestors of staged_ancestors and apply ancestor
-     * and descendant limits (including staged_ancestors thsemselves, entry_size and entry_count).
-     * param@[in]   entry_size          Virtual size to include in the limits.
-     * param@[in]   entry_count         How many entries to include in the limits.
-     * param@[in]   staged_ancestors    Should contain entries in the mempool.
-     * param@[out]  setAncestors        Will be populated with all mempool ancestors.
-     */
-    bool CalculateAncestorsAndCheckLimits(size_t entry_size,
-                                          size_t entry_count,
-                                          setEntries& setAncestors,
-                                          CTxMemPoolEntry::Parents &staged_ancestors,
-                                          uint64_t limitAncestorCount,
-                                          uint64_t limitAncestorSize,
-                                          uint64_t limitDescendantCount,
-                                          uint64_t limitDescendantSize,
-                                          std::string &errString) const EXCLUSIVE_LOCKS_REQUIRED(cs);
-
 public:
     indirectmap<COutPoint, const CTransaction*> mapNextTx GUARDED_BY(cs);
-    std::map<uint256, CAmount> mapDeltas GUARDED_BY(cs);
+    std::map<uint256, CAmount> mapDeltas;
 
     /** Create a new CTxMemPool.
      * Sanity checks will be off by default for performance, because otherwise
@@ -736,28 +715,6 @@ public:
      *    look up parents from mapLinks. Must be true for entries not in the mempool
      */
     bool CalculateMemPoolAncestors(const CTxMemPoolEntry& entry, setEntries& setAncestors, uint64_t limitAncestorCount, uint64_t limitAncestorSize, uint64_t limitDescendantCount, uint64_t limitDescendantSize, std::string& errString, bool fSearchForParents = true) const EXCLUSIVE_LOCKS_REQUIRED(cs);
-
-    /** Calculate all in-mempool ancestors of a set of transactions not already in the mempool and
-     * check ancestor and descendant limits. Heuristics are used to estimate the ancestor and
-     * descendant count of all entries if the package were to be added to the mempool.  The limits
-     * are applied to the union of all package transactions. For example, if the package has 3
-     * transactions and limitAncestorCount = 25, the union of all 3 sets of ancestors (including the
-     * transactions themselves) must be <= 22.
-     * @param[in]       package                 Transaction package being evaluated for acceptance
-     *                                          to mempool. The transactions need not be direct
-     *                                          ancestors/descendants of each other.
-     * @param[in]       limitAncestorCount      Max number of txns including ancestors.
-     * @param[in]       limitAncestorSize       Max virtual size including ancestors.
-     * @param[in]       limitDescendantCount    Max number of txns including descendants.
-     * @param[in]       limitDescendantSize     Max virtual size including descendants.
-     * @param[out]      errString               Populated with error reason if a limit is hit.
-     */
-    bool CheckPackageLimits(const Package& package,
-                            uint64_t limitAncestorCount,
-                            uint64_t limitAncestorSize,
-                            uint64_t limitDescendantCount,
-                            uint64_t limitDescendantSize,
-                            std::string &errString) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Populate setDescendants with all in-mempool descendants of hash.
      *  Assumes that setDescendants includes all in-mempool descendants of anything
@@ -931,8 +888,7 @@ public:
  * CCoinsView that brings transactions from a mempool into view.
  * It does not check for spendings by memory pool transactions.
  * Instead, it provides access to all Coins which are either unspent in the
- * base CCoinsView, are outputs from any mempool transaction, or are
- * tracked temporarily to allow transaction dependencies in package validation.
+ * base CCoinsView, or are outputs from any mempool transaction!
  * This allows transaction replacement to work as expected, as you want to
  * have all inputs "available" to check signatures, and any cycles in the
  * dependency graph are checked directly in AcceptToMemoryPool.
@@ -942,20 +898,12 @@ public:
  */
 class CCoinsViewMemPool : public CCoinsViewBacked
 {
-    /**
-    * Coins made available by transactions being validated. Tracking these allows for package
-    * validation, since we can access transaction outputs without submitting them to mempool.
-    */
-    std::unordered_map<COutPoint, Coin, SaltedOutpointHasher> m_temp_added;
 protected:
     const CTxMemPool& mempool;
 
 public:
     CCoinsViewMemPool(CCoinsView* baseIn, const CTxMemPool& mempoolIn);
     bool GetCoin(const COutPoint &outpoint, Coin &coin) const override;
-    /** Add the coins created by this transaction. These coins are only temporarily stored in
-     * m_temp_added and cannot be flushed to the back end. Only used for package validation. */
-    void PackageAddTransaction(const CTransactionRef& tx);
 };
 
 /**

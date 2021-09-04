@@ -28,6 +28,7 @@ from test_framework.p2p import (
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_equal,
+    hex_str_to_bytes,
     force_finish_mnsync,
 )
 
@@ -58,7 +59,6 @@ class InvalidMessagesTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-whitelist=addr@127.0.0.1"]]
 
     def run_test(self):
         # SYSCOIN
@@ -191,7 +191,7 @@ class InvalidMessagesTest(SyscoinTestFramework):
             [
                 'received: addrv2 (1 bytes)',
             ],
-            bytes.fromhex('00'))
+            hex_str_to_bytes('00'))
 
     def test_addrv2_too_long_address(self):
         self.test_addrv2('too long address',
@@ -200,7 +200,7 @@ class InvalidMessagesTest(SyscoinTestFramework):
                 'ProcessMessages(addrv2, 525 bytes): Exception',
                 'Address too long: 513 > 512',
             ],
-            bytes.fromhex(
+            hex_str_to_bytes(
                 '01' +       # number of entries
                 '61bc6649' + # time, Fri Jan  9 02:54:25 UTC 2009
                 '00' +       # service flags, COMPACTSIZE(NODE_NONE)
@@ -217,7 +217,7 @@ class InvalidMessagesTest(SyscoinTestFramework):
                 'IP 9.9.9.9 mapped',
                 'Added 1 addresses',
             ],
-            bytes.fromhex(
+            hex_str_to_bytes(
                 '02' +     # number of entries
                 # this should be ignored without impeding acceptance of subsequent ones
                 now_hex +  # time

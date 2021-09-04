@@ -38,6 +38,9 @@ FUZZ_TARGET_INIT(net, initialize_net)
                 node.CloseSocketDisconnect();
             },
             [&] {
+                node.MaybeSetAddrName(fuzzed_data_provider.ConsumeRandomLengthString(32));
+            },
+            [&] {
                 const std::vector<bool> asmap = ConsumeRandomLengthBitVector(fuzzed_data_provider);
                 if (!SanityCheckASMap(asmap)) {
                     return;
@@ -53,6 +56,27 @@ FUZZ_TARGET_INIT(net, initialize_net)
                 if (node.GetRefCount() > 0) {
                     node.Release();
                 }
+            },
+            [&] {
+                if (node.m_addr_known == nullptr) {
+                    return;
+                }
+                const std::optional<CAddress> addr_opt = ConsumeDeserializable<CAddress>(fuzzed_data_provider);
+                if (!addr_opt) {
+                    return;
+                }
+                node.AddAddressKnown(*addr_opt);
+            },
+            [&] {
+                if (node.m_addr_known == nullptr) {
+                    return;
+                }
+                const std::optional<CAddress> addr_opt = ConsumeDeserializable<CAddress>(fuzzed_data_provider);
+                if (!addr_opt) {
+                    return;
+                }
+                FastRandomContext fast_random_context{ConsumeUInt256(fuzzed_data_provider)};
+                node.PushAddress(*addr_opt, fast_random_context);
             },
             [&] {
                 const std::optional<CInv> inv_opt = ConsumeDeserializable<CInv>(fuzzed_data_provider);
@@ -79,12 +103,14 @@ FUZZ_TARGET_INIT(net, initialize_net)
     }
 
     (void)node.GetAddrLocal();
+    (void)node.GetAddrName();
     (void)node.GetId();
     (void)node.GetLocalNonce();
     (void)node.GetLocalServices();
     const int ref_count = node.GetRefCount();
     assert(ref_count >= 0);
     (void)node.GetCommonVersion();
+    (void)node.RelayAddrsWithConn();
 
     const NetPermissionFlags net_permission_flags = ConsumeWeakEnum(fuzzed_data_provider, ALL_NET_PERMISSION_FLAGS);
     (void)node.HasPermission(net_permission_flags);

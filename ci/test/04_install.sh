@@ -11,7 +11,6 @@ if [[ $QEMU_USER_CMD == qemu-s390* ]]; then
 fi
 
 if [ "$CI_OS_NAME" == "macos" ]; then
-  sudo -H pip3 install --upgrade pip
   IN_GETOPT_BIN="/usr/local/opt/gnu-getopt/bin/getopt" ${CI_RETRY_EXE} pip3 install --user $PIP_PACKAGES
 fi
 
@@ -84,14 +83,11 @@ fi
 DOCKER_EXEC echo "Free disk space:"
 DOCKER_EXEC df -h
 
-if [ "$RUN_FUZZ_TESTS" = "true" ] || [ "$RUN_UNIT_TESTS" = "true" ] || [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then
-  if [ ! -d ${DIR_QA_ASSETS} ]; then
-    DOCKER_EXEC git clone --depth=1 https://github.com/bitcoin-core/qa-assets ${DIR_QA_ASSETS}
-  fi
-
-  export DIR_FUZZ_IN=${DIR_QA_ASSETS}/fuzz_seed_corpus/
-  export DIR_UNIT_TEST_DATA=${DIR_QA_ASSETS}/unit_test_data/
+if [ ! -d ${DIR_QA_ASSETS} ]; then
+  DOCKER_EXEC git clone --depth=1 https://github.com/bitcoin-core/qa-assets ${DIR_QA_ASSETS}
 fi
+export DIR_FUZZ_IN=${DIR_QA_ASSETS}/fuzz_seed_corpus/
+export DIR_UNIT_TEST_DATA=${DIR_QA_ASSETS}/unit_test_data/
 
 DOCKER_EXEC mkdir -p "${BASE_SCRATCH_DIR}/sanitizer-output/"
 

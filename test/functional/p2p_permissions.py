@@ -9,8 +9,9 @@ Test that permissions are correctly calculated and applied
 
 from test_framework.address import ADDRESS_BCRT1_P2WSH_OP_TRUE
 from test_framework.messages import (
+    CTransaction,
     CTxInWitness,
-    tx_from_hex,
+    FromHex,
 )
 from test_framework.p2p import P2PDataStore
 from test_framework.script import (
@@ -104,7 +105,8 @@ class P2PPermissionsTests(SyscoinTestFramework):
         p2p_rebroadcast_wallet = self.nodes[1].add_p2p_connection(P2PDataStore())
 
         self.log.debug("Send a tx from the wallet initially")
-        tx = tx_from_hex(
+        tx = FromHex(
+            CTransaction(),
             self.nodes[0].createrawtransaction(
                 inputs=[{
                     'txid': block_op_true['tx'][0],
@@ -130,7 +132,7 @@ class P2PPermissionsTests(SyscoinTestFramework):
         tx.vout[0].nValue += 1
         txid = tx.rehash()
         # Send the transaction twice. The first time, it'll be rejected by ATMP because it conflicts
-        # with a mempool transaction. The second time, it'll be in the m_recent_rejects filter.
+        # with a mempool transaction. The second time, it'll be in the recentRejects filter.
         p2p_rebroadcast_wallet.send_txs_and_test(
             [tx],
             self.nodes[1],

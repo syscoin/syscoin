@@ -6,7 +6,6 @@
 
 #include <qt/syscoinaddressvalidator.h>
 #include <qt/syscoinunits.h>
-#include <qt/platformstyle.h>
 #include <qt/qvalidatedlineedit.h>
 #include <qt/sendcoinsrecipient.h>
 
@@ -30,7 +29,6 @@
 #include <shlwapi.h>
 #endif
 
-#include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QClipboard>
@@ -57,12 +55,12 @@
 #include <QShortcut>
 #include <QSize>
 #include <QString>
+#include <QStringBuilder>
 #include <QTextDocument> // for Qt::mightBeRichText
 #include <QThread>
 #include <QUrlQuery>
 #include <QtGlobal>
 
-#include <cassert>
 #include <chrono>
 
 #if defined(Q_OS_MAC)
@@ -81,7 +79,7 @@ QString dateTimeStr(const QDateTime &date)
 
 QString dateTimeStr(qint64 nTime)
 {
-    return dateTimeStr(QDateTime::fromSecsSinceEpoch(nTime));
+    return dateTimeStr(QDateTime::fromTime_t((qint32)nTime));
 }
 
 QFont fixedPitchFont(bool use_embedded_font)
@@ -121,11 +119,6 @@ void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent)
         QString::fromStdString(DummyAddress(Params()))));
     widget->setValidator(new SyscoinAddressEntryValidator(parent));
     widget->setCheckValidator(new SyscoinAddressCheckValidator(parent));
-}
-
-void AddButtonShortcut(QAbstractButton* button, const QKeySequence& shortcut)
-{
-    QObject::connect(new QShortcut(shortcut, button), &QShortcut::activated, [button]() { button->animateClick(); });
 }
 
 bool parseSyscoinURI(const QUrl &uri, SendCoinsRecipient *out)
@@ -408,7 +401,7 @@ void handleCloseWindowShortcut(QWidget* w)
 
 void openDebugLogfile()
 {
-    fs::path pathDebug = gArgs.GetDataDirNet() / "debug.log";
+    fs::path pathDebug = GetDataDir() / "debug.log";
 
     /* Open debug.log with the associated application */
     if (fs::exists(pathDebug))
@@ -794,39 +787,6 @@ qreal calculateIdealFontSize(int width, const QString& text, QFont font, qreal m
     return font_size;
 }
 
-ThemedLabel::ThemedLabel(const PlatformStyle* platform_style, QWidget* parent)
-    : QLabel{parent}, m_platform_style{platform_style}
-{
-    assert(m_platform_style);
-}
-
-void ThemedLabel::setThemedPixmap(const QString& image_filename, int width, int height)
-{
-    m_image_filename = image_filename;
-    m_pixmap_width = width;
-    m_pixmap_height = height;
-    updateThemedPixmap();
-}
-
-void ThemedLabel::changeEvent(QEvent* e)
-{
-    if (e->type() == QEvent::PaletteChange) {
-        updateThemedPixmap();
-    }
-
-    QLabel::changeEvent(e);
-}
-
-void ThemedLabel::updateThemedPixmap()
-{
-    setPixmap(m_platform_style->SingleColorIcon(m_image_filename).pixmap(m_pixmap_width, m_pixmap_height));
-}
-
-ClickableLabel::ClickableLabel(const PlatformStyle* platform_style, QWidget* parent)
-    : ThemedLabel{platform_style, parent}
-{
-}
-
 void ClickableLabel::mouseReleaseEvent(QMouseEvent *event)
 {
     Q_EMIT clicked(event->pos());
@@ -853,12 +813,10 @@ void PolishProgressDialog(QProgressDialog* dialog)
     // Workaround for macOS-only Qt bug; see: QTBUG-65750, QTBUG-70357.
     const int margin = TextWidth(dialog->fontMetrics(), ("X"));
     dialog->resize(dialog->width() + 2 * margin, dialog->height());
+    dialog->show();
+#else
+    Q_UNUSED(dialog);
 #endif
-    // QProgressDialog estimates the time the operation will take (based on time
-    // for steps), and only shows itself if that estimate is beyond minimumDuration.
-    // The default minimumDuration value is 4 seconds, and it could make users
-    // think that the GUI is frozen.
-    dialog->setMinimumDuration(0);
 }
 
 int TextWidth(const QFontMetrics& fm, const QString& text)
@@ -945,7 +903,7 @@ QString MakeHtmlLink(const QString& source, const QString& link)
 {
     return QString(source).replace(
         link,
-        QLatin1String("<a href=\"") + link + QLatin1String("\">") + link + QLatin1String("</a>"));
+        QLatin1String("<a href=\"") % link % QLatin1String("\">") % link % QLatin1String("</a>"));
 }
 
 void PrintSlotException(

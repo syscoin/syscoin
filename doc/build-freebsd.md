@@ -124,6 +124,6 @@ This explicitly enables the GUI and disables legacy wallet support. If `qt5` is 
 **Important**: Use `gmake` (the non-GNU `make` will exit with an error).
 
 ```bash
-gmake # use "-j N" for N parallel jobs
+gmake # use -jX here for parallelism
 gmake check # Run tests if Python 3 is available
 ```

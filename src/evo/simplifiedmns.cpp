@@ -102,23 +102,23 @@ bool CSimplifiedMNListDiff::BuildQuorumsDiff(const CBlockIndex* baseBlockIndex, 
 
     std::set<std::pair<uint8_t, uint256>> baseQuorumHashes;
     std::set<std::pair<uint8_t, uint256>> quorumHashes;
-    for (const auto& p : baseQuorums) {
-        for (const auto& p2 : p.second) {
+    for (auto& p : baseQuorums) {
+        for (auto& p2 : p.second) {
             baseQuorumHashes.emplace(p.first, p2->GetBlockHash());
         }
     }
-    for (const auto& p : quorums) {
-        for (const auto& p2 : p.second) {
+    for (auto& p : quorums) {
+        for (auto& p2 : p.second) {
             quorumHashes.emplace(p.first, p2->GetBlockHash());
         }
     }
 
-    for (const auto& p : baseQuorumHashes) {
+    for (auto& p : baseQuorumHashes) {
         if (!quorumHashes.count(p)) {
             deletedQuorums.emplace_back(p.first, p.second);
         }
     }
-    for (const auto& p : quorumHashes) {
+    for (auto& p : quorumHashes) {
         if (!baseQuorumHashes.count(p)) {
             uint256 minedBlockHash;
             llmq::CFinalCommitmentPtr qc = llmq::quorumBlockProcessor->GetMinedCommitment(p.first, p.second, minedBlockHash);
@@ -176,27 +176,27 @@ void CSimplifiedMNListDiff::ToJson(UniValue& obj) const
     obj.pushKV("merkleRootQuorums", merkleRootQuorums.ToString()); 
 }
 
-bool BuildSimplifiedMNListDiff(ChainstateManager& chainman, const uint256& baseBlockHash, const uint256& blockHash, CSimplifiedMNListDiff& mnListDiffRet, std::string& errorRet)
+bool BuildSimplifiedMNListDiff(const uint256& baseBlockHash, const uint256& blockHash, CSimplifiedMNListDiff& mnListDiffRet, std::string& errorRet)
 {
     if(!deterministicMNManager)
         return false;
     LOCK(cs_main);
     mnListDiffRet = CSimplifiedMNListDiff();
-    const CBlockIndex* baseBlockIndex = chainman.ActiveChain().Genesis();
+    const CBlockIndex* baseBlockIndex = ::ChainActive().Genesis();
     if (!baseBlockHash.IsNull()) {
-        baseBlockIndex = chainman.m_blockman.LookupBlockIndex(baseBlockHash);
+        baseBlockIndex = g_chainman.m_blockman.LookupBlockIndex(baseBlockHash);
         if (!baseBlockIndex) {
             errorRet = strprintf("block %s not found", baseBlockHash.ToString());
             return false;
         }
     }
     
-    const CBlockIndex* blockIndex = chainman.m_blockman.LookupBlockIndex(blockHash);
+    const CBlockIndex* blockIndex = g_chainman.m_blockman.LookupBlockIndex(blockHash);
     if (!blockIndex) {
         errorRet = strprintf("block %s not found", blockHash.ToString());
         return false;
     }
-    if (!chainman.ActiveChain().Contains(baseBlockIndex) || !chainman.ActiveChain().Contains(blockIndex)) {
+    if (!::ChainActive().Contains(baseBlockIndex) || !::ChainActive().Contains(blockIndex)) {
         errorRet = strprintf("block %s and %s are not in the same chain", baseBlockHash.ToString(), blockHash.ToString());
         return false;
     }

@@ -17,7 +17,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <script/standard.h>
-#include <interfaces/chain.h>
 class CBlock;
 class CBlockIndex;
 class BlockValidationState;
@@ -220,7 +219,7 @@ public:
     uint64_t GetInternalId() const;
 
     std::string ToString() const;
-    void ToJson(interfaces::Chain& chain, UniValue& obj) const;
+    void ToJson(UniValue& obj) const;
 };
 typedef std::shared_ptr<const CDeterministicMN> CDeterministicMNCPtr;
 
@@ -355,7 +354,7 @@ public:
     }
     CDeterministicMNCPtr GetMN(const uint256& proTxHash) const;
     CDeterministicMNCPtr GetValidMN(const uint256& proTxHash) const;
-    CDeterministicMNCPtr GetMNByOperatorKey(const CBLSPublicKey& pubKey) const;
+    CDeterministicMNCPtr GetMNByOperatorKey(const CBLSPublicKey& pubKey);
     CDeterministicMNCPtr GetMNByCollateral(const COutPoint& collateralOutpoint) const;
     CDeterministicMNCPtr GetValidMNByCollateral(const COutPoint& collateralOutpoint) const;
     CDeterministicMNCPtr GetMNByService(const CService& service) const;
@@ -437,63 +436,51 @@ public:
     }
 
 private:
-
     template <typename T>
-    bool AddUniqueProperty(const CDeterministicMNCPtr& dmn, const T& v)
+    void AddUniqueProperty(const CDeterministicMNCPtr& dmn, const T& v)
     {
         static const T nullValue;
-        if (v == nullValue) {
-            return false;
-        }
+        assert(v != nullValue);
 
         auto hash = ::SerializeHash(v);
         auto oldEntry = mnUniquePropertyMap.find(hash);
-        if (oldEntry != nullptr && oldEntry->first != dmn->proTxHash) {
-            return false;
-        }
+        assert(!oldEntry || oldEntry->first == dmn->proTxHash);
         std::pair<uint256, uint32_t> newEntry(dmn->proTxHash, 1);
-        if (oldEntry != nullptr) {
+        if (oldEntry) {
             newEntry.second = oldEntry->second + 1;
         }
         mnUniquePropertyMap = mnUniquePropertyMap.set(hash, newEntry);
-        return true;
     }
     template <typename T>
-    bool DeleteUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue)
+    void DeleteUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue)
     {
         static const T nullValue;
-        if (oldValue == nullValue) {
-            return false;
-        }
+        assert(oldValue != nullValue);
 
         auto oldHash = ::SerializeHash(oldValue);
         auto p = mnUniquePropertyMap.find(oldHash);
-        if (p == nullptr || p->first != dmn->proTxHash) {
-            return false;
-        }
+        assert(p && p->first == dmn->proTxHash);
         if (p->second == 1) {
             mnUniquePropertyMap = mnUniquePropertyMap.erase(oldHash);
         } else {
             mnUniquePropertyMap = mnUniquePropertyMap.set(oldHash, std::make_pair(dmn->proTxHash, p->second - 1));
         }
-        return true;
     }
     template <typename T>
-    bool UpdateUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue, const T& newValue)
+    void UpdateUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue, const T& newValue)
     {
         if (oldValue == newValue) {
-            return true;
+            return;
         }
         static const T nullValue;
 
-        if (oldValue != nullValue && !DeleteUniqueProperty(dmn, oldValue)) {
-            return false;
+        if (oldValue != nullValue) {
+            DeleteUniqueProperty(dmn, oldValue);
         }
 
-        if (newValue != nullValue && !AddUniqueProperty(dmn, newValue)) {
-            return false;
+        if (newValue != nullValue) {
+            AddUniqueProperty(dmn, newValue);
         }
-        return true;
     }
 };
 

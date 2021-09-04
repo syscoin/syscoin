@@ -71,6 +71,8 @@ bool CheckCbTxMerkleRoots(const CBlock& block, const CBlockIndex* pindex, BlockV
     }
 
     static int64_t nTimePayload = 0;
+    static int64_t nTimeMerkleMNL = 0;
+    static int64_t nTimeMerkleQuorum = 0;
 
     int64_t nTime1 = GetTimeMicros();
 
@@ -83,9 +85,6 @@ bool CheckCbTxMerkleRoots(const CBlock& block, const CBlockIndex* pindex, BlockV
     LogPrint(BCLog::BENCHMARK, "          - GetTxPayload: %.2fms [%.2fs]\n", 0.001 * (nTime2 - nTime1), nTimePayload * 0.000001);
 
     if (pindex) {
-        static int64_t nTimeMerkleMNL = 0;
-        static int64_t nTimeMerkleQuorum = 0;
-
         uint256 calculatedMerkleRoot;
         if (!CalcCbTxMerkleRootMNList(block, pindex->pprev, calculatedMerkleRoot, state, view)) {
             // pass the state returned by the function above
@@ -122,13 +121,13 @@ bool CalcCbTxMerkleRootMNList(const CBlock& block, const CBlockIndex* pindexPrev
         return false;
     LOCK(deterministicMNManager->cs);
 
+    static int64_t nTimeDMN = 0;
+    static int64_t nTimeSMNL = 0;
+    static int64_t nTimeMerkle = 0;
+
+    int64_t nTime1 = GetTimeMicros();
+
     try {
-        static int64_t nTimeDMN = 0;
-        static int64_t nTimeSMNL = 0;
-        static int64_t nTimeMerkle = 0;
-
-        int64_t nTime1 = GetTimeMicros();
-
         CDeterministicMNList tmpMNList;
         if (!deterministicMNManager->BuildNewListFromBlock(block, pindexPrev, state, view, tmpMNList, false, qcIn)) {
             // pass the state returned by the function above
@@ -256,8 +255,9 @@ bool CalcCbTxMerkleRootQuorums(const CBlock& block, const CBlockIndex* pindexPre
     qcHashesVec.reserve(hashCount);
 
     for (const auto& p : qcHashes) {
-        // Copy p.second into qcHashesVec
-        std::copy(p.second.begin(), p.second.end(), std::back_inserter(qcHashesVec));
+        for (const auto& h : p.second) {
+            qcHashesVec.emplace_back(h);
+        }
     }
     std::sort(qcHashesVec.begin(), qcHashesVec.end());
 

@@ -13,14 +13,9 @@
 #include <cstdint>
 #include <vector>
 
-namespace {
-const TestingSetup* g_setup;
-} // namespace
-
 void initialize_load_external_block_file()
 {
     static const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
-    g_setup = testing_setup.get();
 }
 
 FUZZ_TARGET_INIT(load_external_block_file, initialize_load_external_block_file)
@@ -32,5 +27,5 @@ FUZZ_TARGET_INIT(load_external_block_file, initialize_load_external_block_file)
         return;
     }
     FlatFilePos flat_file_pos;
-    g_setup->m_node.chainman->ActiveChainstate().LoadExternalBlockFile(fuzzed_block_file, fuzzed_data_provider.ConsumeBool() ? &flat_file_pos : nullptr);
+    ::ChainstateActive().LoadExternalBlockFile(Params(), fuzzed_block_file, fuzzed_data_provider.ConsumeBool() ? &flat_file_pos : nullptr);
 }

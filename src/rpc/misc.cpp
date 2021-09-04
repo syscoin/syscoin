@@ -24,7 +24,6 @@
 #include <util/strencodings.h>
 #include <util/system.h>
 
-#include <optional>
 #include <stdint.h>
 #include <tuple>
 #ifdef HAVE_MALLOC_INFO
@@ -227,7 +226,7 @@ static RPCHelpMan createmultisig()
             "\nCreate a multisig address from 2 public keys\n"
             + HelpExampleCli("createmultisig", "2 \"[\\\"03789ed0bb717d88f7d321a368d905e7430207ebbd82bd342cf11ae157a7ace5fd\\\",\\\"03dbc6764b8884a92e871274b87583e6d5c2a58819473e17e107ef3f6aa5a61626\\\"]\"") +
             "\nAs a JSON-RPC call\n"
-            + HelpExampleRpc("createmultisig", "2, [\"03789ed0bb717d88f7d321a368d905e7430207ebbd82bd342cf11ae157a7ace5fd\",\"03dbc6764b8884a92e871274b87583e6d5c2a58819473e17e107ef3f6aa5a61626\"]")
+            + HelpExampleRpc("createmultisig", "2, \"[\\\"03789ed0bb717d88f7d321a368d905e7430207ebbd82bd342cf11ae157a7ace5fd\\\",\\\"03dbc6764b8884a92e871274b87583e6d5c2a58819473e17e107ef3f6aa5a61626\\\"]\"")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -247,13 +246,9 @@ static RPCHelpMan createmultisig()
     // Get the output type
     OutputType output_type = OutputType::BECH32;
     if (!request.params[2].isNull()) {
-        std::optional<OutputType> parsed = ParseOutputType(request.params[2].get_str());
-        if (!parsed) {
+        if (!ParseOutputType(request.params[2].get_str(), output_type)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Unknown address type '%s'", request.params[2].get_str()));
-        } else if (parsed.value() == OutputType::BECH32M) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "createmultisig cannot create bech32m multisig addresses");
         }
-        output_type = parsed.value();
     }
 
     // Construct using pay-to-script-hash:
@@ -276,8 +271,6 @@ static RPCHelpMan createmultisig()
 
 static RPCHelpMan getdescriptorinfo()
 {
-    const std::string EXAMPLE_DESCRIPTOR = "wpkh([d34db33f/84h/0h/0h]0279be667ef9dcbbac55a06295Ce870b07029Bfcdb2dce28d959f2815b16f81798)";
-
     return RPCHelpMan{"getdescriptorinfo",
             {"\nAnalyses a descriptor.\n"},
             {
@@ -295,8 +288,7 @@ static RPCHelpMan getdescriptorinfo()
             },
             RPCExamples{
                 "Analyse a descriptor\n" +
-                HelpExampleCli("getdescriptorinfo", "\"" + EXAMPLE_DESCRIPTOR + "\"") +
-                HelpExampleRpc("getdescriptorinfo", "\"" + EXAMPLE_DESCRIPTOR + "\"")
+                HelpExampleCli("getdescriptorinfo", "\"wpkh([d34db33f/84h/0h/0h]0279be667ef9dcbbac55a06295Ce870b07029Bfcdb2dce28d959f2815b16f81798)\"")
             },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -356,8 +348,9 @@ static RPCHelpMan mnauth()
     }
 
     bool fSuccess = node.connman->ForNode(nodeId, AllNodes, [&](CNode* pNode){
-        pNode->SetVerifiedProRegTxHash(proTxHash);
-        pNode->SetVerifiedPubKeyHash(publicKey.GetHash());
+        LOCK(pNode->cs_mnauth);
+        pNode->verifiedProRegTxHash = proTxHash;
+        pNode->verifiedPubKeyHash = publicKey.GetHash();
         return true;
     });
 
@@ -367,8 +360,6 @@ static RPCHelpMan mnauth()
 }
 static RPCHelpMan deriveaddresses()
 {
-    const std::string EXAMPLE_DESCRIPTOR = "wpkh([d34db33f/84h/0h/0h]xpub6DJ2dNUysrn5Vt36jH2KLBT2i1auw1tTSSomg8PhqNiUtx8QX2SvC9nrHu81fT41fvDUnhMjEzQgXnQjKEu3oaqMSzhSrHMxyyoEAmUHQbY/0/*)#cjjspncu";
-
     return RPCHelpMan{"deriveaddresses",
             {"\nDerives one or more addresses corresponding to an output descriptor.\n"
             "Examples of output descriptors are:\n"
@@ -391,8 +382,7 @@ static RPCHelpMan deriveaddresses()
             },
             RPCExamples{
                 "First three native segwit receive addresses\n" +
-                HelpExampleCli("deriveaddresses", "\"" + EXAMPLE_DESCRIPTOR + "\" \"[0,2]\"") +
-                HelpExampleRpc("deriveaddresses", "\"" + EXAMPLE_DESCRIPTOR + "\", \"[0,2]\"")
+                HelpExampleCli("deriveaddresses", "\"wpkh([d34db33f/84h/0h/0h]xpub6DJ2dNUysrn5Vt36jH2KLBT2i1auw1tTSSomg8PhqNiUtx8QX2SvC9nrHu81fT41fvDUnhMjEzQgXnQjKEu3oaqMSzhSrHMxyyoEAmUHQbY/0/*)#cjjspncu\" \"[0,2]\"")
             },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -598,7 +588,7 @@ static RPCHelpMan mockscheduler()
     // check params are valid values
     RPCTypeCheck(request.params, {UniValue::VNUM});
     int64_t delta_seconds = request.params[0].get_int64();
-    if (delta_seconds <= 0 || delta_seconds > 3600) {
+    if ((delta_seconds <= 0) || (delta_seconds > 3600)) {
         throw std::runtime_error("delta_time must be between 1 and 3600 seconds (1 hr)");
     }
 

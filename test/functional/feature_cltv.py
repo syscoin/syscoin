@@ -4,11 +4,11 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test BIP65 (CHECKLOCKTIMEVERIFY).
 
-Test that the CHECKLOCKTIMEVERIFY soft-fork activates.
+Test that the CHECKLOCKTIMEVERIFY soft-fork activates at (regtest) block height
+1351.
 """
 
 from test_framework.blocktools import (
-    CLTV_HEIGHT,
     create_block,
     create_coinbase,
 )
@@ -26,16 +26,15 @@ from test_framework.script import (
 )
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import assert_equal
-from test_framework.wallet import (
-    MiniWallet,
-    MiniWalletMode,
-)
+from test_framework.wallet import MiniWallet
+
+CLTV_HEIGHT = 1351
 
 
 # Helper function to modify a transaction by
 # 1) prepending a given script to the scriptSig of vin 0 and
 # 2) (optionally) modify the nSequence of vin 0 and the tx's nLockTime
-def cltv_modify_tx(tx, prepend_scriptsig, nsequence=None, nlocktime=None):
+def cltv_modify_tx(node, tx, prepend_scriptsig, nsequence=None, nlocktime=None):
     assert_equal(len(tx.vin), 1)
     if nsequence is not None:
         tx.vin[0].nSequence = nsequence
@@ -43,9 +42,10 @@ def cltv_modify_tx(tx, prepend_scriptsig, nsequence=None, nlocktime=None):
 
     tx.vin[0].scriptSig = CScript(prepend_scriptsig + list(CScript(tx.vin[0].scriptSig)))
     tx.rehash()
+    return tx
 
 
-def cltv_invalidate(tx, failure_reason):
+def cltv_invalidate(node, tx, failure_reason):
     # Modify the signature in vin 0 and nSequence/nLockTime of the tx to fail CLTV
     #
     # According to BIP65, OP_CHECKLOCKTIMEVERIFY can fail due the following reasons:
@@ -61,19 +61,19 @@ def cltv_invalidate(tx, failure_reason):
         # +-------------------------------------------------+------------+--------------+
         [[OP_CHECKLOCKTIMEVERIFY],                            None,       None],
         [[OP_1NEGATE, OP_CHECKLOCKTIMEVERIFY, OP_DROP],       None,       None],
-        [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          1296688602],  # timestamp of genesis block
-        [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          50],
-        [[CScriptNum(50),  OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0xffffffff, 50],
+        [[CScriptNum(1000), OP_CHECKLOCKTIMEVERIFY, OP_DROP], 0,          1296688602],  # timestamp of genesis block
+        [[CScriptNum(1000), OP_CHECKLOCKTIMEVERIFY, OP_DROP], 0,          500],
+        [[CScriptNum(500),  OP_CHECKLOCKTIMEVERIFY, OP_DROP], 0xffffffff, 500],
     ][failure_reason]
 
-    cltv_modify_tx(tx, prepend_scriptsig=scheme[0], nsequence=scheme[1], nlocktime=scheme[2])
+    return cltv_modify_tx(node, tx, prepend_scriptsig=scheme[0], nsequence=scheme[1], nlocktime=scheme[2])
 
 
-def cltv_validate(tx, height):
+def cltv_validate(node, tx, height):
     # Modify the signature in vin 0 and nSequence/nLockTime of the tx to pass CLTV
     scheme = [[CScriptNum(height), OP_CHECKLOCKTIMEVERIFY, OP_DROP], 0, height]
 
-    cltv_modify_tx(tx, prepend_scriptsig=scheme[0], nsequence=scheme[1], nlocktime=scheme[2])
+    return cltv_modify_tx(node, tx, prepend_scriptsig=scheme[0], nsequence=scheme[1], nlocktime=scheme[2])
 
 
 class BIP65Test(SyscoinTestFramework):
@@ -97,30 +97,29 @@ class BIP65Test(SyscoinTestFramework):
 
     def run_test(self):
         peer = self.nodes[0].add_p2p_connection(P2PInterface())
-        wallet = MiniWallet(self.nodes[0], mode=MiniWalletMode.RAW_OP_TRUE)
+        wallet = MiniWallet(self.nodes[0], raw_script=True)
 
         self.test_cltv_info(is_active=False)
 
         self.log.info("Mining %d blocks", CLTV_HEIGHT - 2)
         wallet.generate(10)
         self.nodes[0].generate(CLTV_HEIGHT - 2 - 10)
-        assert_equal(self.nodes[0].getblockcount(), CLTV_HEIGHT - 2)
 
         self.log.info("Test that invalid-according-to-CLTV transactions can still appear in a block")
 
         # create one invalid tx per CLTV failure reason (5 in total) and collect them
-        invalid_cltv_txs = []
+        invalid_ctlv_txs = []
         for i in range(5):
             spendtx = wallet.create_self_transfer(from_node=self.nodes[0])['tx']
-            cltv_invalidate(spendtx, i)
-            invalid_cltv_txs.append(spendtx)
+            spendtx = cltv_invalidate(self.nodes[0], spendtx, i)
+            invalid_ctlv_txs.append(spendtx)
 
         tip = self.nodes[0].getbestblockhash()
         block_time = self.nodes[0].getblockheader(tip)['mediantime'] + 1
 
         block = create_block(int(tip, 16), create_coinbase(CLTV_HEIGHT - 1), block_time)
         block.nVersion = 3
-        block.vtx.extend(invalid_cltv_txs)
+        block.vtx.extend(invalid_ctlv_txs)
         block.hashMerkleRoot = block.calc_merkle_root()
         block.solve()
 
@@ -135,8 +134,7 @@ class BIP65Test(SyscoinTestFramework):
         block = create_block(tip, create_coinbase(CLTV_HEIGHT), block_time)
         block.nVersion = 3
         block.solve()
-
-        with self.nodes[0].assert_debug_log(expected_msgs=[f'{block.hash}, bad-version(0x00000003)']):
+        with self.nodes[0].assert_debug_log(expected_msgs=['{}, bad-version(0x00000003)'.format(block.hash)]):
             peer.send_and_ping(msg_block(block))
             assert_equal(int(self.nodes[0].getbestblockhash(), 16), tip)
             peer.sync_with_ping()
@@ -148,7 +146,7 @@ class BIP65Test(SyscoinTestFramework):
         # create and test one invalid tx per CLTV failure reason (5 in total)
         for i in range(5):
             spendtx = wallet.create_self_transfer(from_node=self.nodes[0])['tx']
-            cltv_invalidate(spendtx, i)
+            spendtx = cltv_invalidate(self.nodes[0], spendtx, i)
 
             expected_cltv_reject_reason = [
                 "non-mandatory-script-verify-flag (Operation not valid with the current stack size)",
@@ -174,13 +172,14 @@ class BIP65Test(SyscoinTestFramework):
             block.hashMerkleRoot = block.calc_merkle_root()
             block.solve()
 
-            with self.nodes[0].assert_debug_log(expected_msgs=[f'CheckInputScripts on {block.vtx[-1].hash} failed with {expected_cltv_reject_reason}']):
+            with self.nodes[0].assert_debug_log(expected_msgs=['CheckInputScripts on {} failed with {}'.format(
+                                                block.vtx[-1].hash, expected_cltv_reject_reason)]):
                 peer.send_and_ping(msg_block(block))
                 assert_equal(int(self.nodes[0].getbestblockhash(), 16), tip)
                 peer.sync_with_ping()
 
         self.log.info("Test that a version 4 block with a valid-according-to-CLTV transaction is accepted")
-        cltv_validate(spendtx, CLTV_HEIGHT - 1)
+        spendtx = cltv_validate(self.nodes[0], spendtx, CLTV_HEIGHT - 1)
 
         block.vtx.pop(1)
         block.vtx.append(spendtx)
