@@ -25,7 +25,7 @@ FUZZ_TARGET_INIT(connman, initialize_connman)
 {
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     SetMockTime(ConsumeTime(fuzzed_data_provider));
-    CAddrMan addrman(/* deterministic */ false, /* consistency_check_ratio */ 0);
+    CAddrMan addrman;
     CConnman connman{fuzzed_data_provider.ConsumeIntegral<uint64_t>(), fuzzed_data_provider.ConsumeIntegral<uint64_t>(), addrman, fuzzed_data_provider.ConsumeBool()};
     CNetAddr random_netaddr;
     CNode random_node = ConsumeNode(fuzzed_data_provider);
@@ -65,19 +65,16 @@ FUZZ_TARGET_INIT(connman, initialize_connman)
                 connman.ForEachNode([](auto) {});
             },
             [&] {
+                connman.ForEachNodeThen([](auto) {}, []() {});
+            },
+            [&] {
                 (void)connman.ForNode(fuzzed_data_provider.ConsumeIntegral<NodeId>(), [&](auto) { return fuzzed_data_provider.ConsumeBool(); });
             },
             [&] {
-                (void)connman.GetAddresses(
-                    /* max_addresses */ fuzzed_data_provider.ConsumeIntegral<size_t>(),
-                    /* max_pct */ fuzzed_data_provider.ConsumeIntegral<size_t>(),
-                    /* network */ std::nullopt);
+                (void)connman.GetAddresses(fuzzed_data_provider.ConsumeIntegral<size_t>(), fuzzed_data_provider.ConsumeIntegral<size_t>());
             },
             [&] {
-                (void)connman.GetAddresses(
-                    /* requestor */ random_node,
-                    /* max_addresses */ fuzzed_data_provider.ConsumeIntegral<size_t>(),
-                    /* max_pct */ fuzzed_data_provider.ConsumeIntegral<size_t>());
+                (void)connman.GetAddresses(random_node, fuzzed_data_provider.ConsumeIntegral<size_t>(), fuzzed_data_provider.ConsumeIntegral<size_t>());
             },
             [&] {
                 (void)connman.GetDeterministicRandomizer(fuzzed_data_provider.ConsumeIntegral<uint64_t>());

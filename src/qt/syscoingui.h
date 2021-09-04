@@ -9,7 +9,6 @@
 #include <config/syscoin-config.h>
 #endif
 
-#include <qt/guiutil.h>
 #include <qt/optionsdialog.h>
 
 #include <amount.h>
@@ -17,7 +16,6 @@
 #include <QLabel>
 #include <QMainWindow>
 #include <QMap>
-#include <QMenu>
 #include <QPoint>
 #include <QSystemTrayIcon>
 
@@ -51,6 +49,7 @@ QT_BEGIN_NAMESPACE
 class QAction;
 class QComboBox;
 class QDateTime;
+class QMenu;
 class QProgressBar;
 class QProgressDialog;
 // SYSCOIN
@@ -123,8 +122,8 @@ private:
     WalletFrame* walletFrame = nullptr;
 
     UnitDisplayStatusBarControl* unitDisplayControl = nullptr;
-    GUIUtil::ThemedLabel* labelWalletEncryptionIcon = nullptr;
-    GUIUtil::ThemedLabel* labelWalletHDStatusIcon = nullptr;
+    QLabel* labelWalletEncryptionIcon = nullptr;
+    QLabel* labelWalletHDStatusIcon = nullptr;
     GUIUtil::ClickableLabel* labelProxyIcon = nullptr;
     GUIUtil::ClickableLabel* connectionsControl = nullptr;
     GUIUtil::ClickableLabel* labelBlocksIcon = nullptr;
@@ -178,8 +177,6 @@ private:
     ModalOverlay* modalOverlay = nullptr;
     QAction *openRepairAction = nullptr;
 
-    QMenu* m_network_context_menu = new QMenu(this);
-
 #ifdef Q_OS_MAC
     CAppNapInhibitor* m_app_nap_inhibitor = nullptr;
 #endif
@@ -230,7 +227,7 @@ public Q_SLOTS:
     /** Set number of connections shown in the UI */
     void setNumConnections(int count);
     /** Set network state shown in the UI */
-    void setNetworkActive(bool network_active);
+    void setNetworkActive(bool networkActive);
     // SYSCOIN
     /** Get restart command-line parameters and request restart */
     void handleRestart(const QStringList &args);
@@ -350,12 +347,10 @@ public:
 protected:
     /** So that it responds to left-button clicks */
     void mousePressEvent(QMouseEvent *event) override;
-    void changeEvent(QEvent* e) override;
 
 private:
     OptionsModel *optionsModel;
     QMenu* menu;
-    const PlatformStyle* m_platform_style;
 
     /** Shows context menu with Display Unit options by the mouse coordinates */
     void onDisplayUnitsClicked(const QPoint& point);

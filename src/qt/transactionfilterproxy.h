@@ -10,8 +10,6 @@
 #include <QDateTime>
 #include <QSortFilterProxyModel>
 
-#include <optional>
-
 /** Filter the transaction list according to pre-specified rules. */
 class TransactionFilterProxy : public QSortFilterProxyModel
 {
@@ -20,6 +18,10 @@ class TransactionFilterProxy : public QSortFilterProxyModel
 public:
     explicit TransactionFilterProxy(QObject *parent = nullptr);
 
+    /** Earliest date that can be represented (far in the past) */
+    static const QDateTime MIN_DATE;
+    /** Last date that can be represented (far in the future) */
+    static const QDateTime MAX_DATE;
     /** Type filter bit field (all types) */
     static const quint32 ALL_TYPES = 0xFFFFFFFF;
 
@@ -32,8 +34,7 @@ public:
         WatchOnlyFilter_No
     };
 
-    /** Filter transactions between date range. Use std::nullopt for open range. */
-    void setDateRange(const std::optional<QDateTime>& from, const std::optional<QDateTime>& to);
+    void setDateRange(const QDateTime &from, const QDateTime &to);
     void setSearchString(const QString &);
     /**
       @note Type filter takes a bit field created with TYPE() or ALL_TYPES
@@ -54,8 +55,8 @@ protected:
     bool filterAcceptsRow(int source_row, const QModelIndex & source_parent) const override;
 
 private:
-    std::optional<QDateTime> dateFrom;
-    std::optional<QDateTime> dateTo;
+    QDateTime dateFrom;
+    QDateTime dateTo;
     QString m_search_string;
     quint32 typeFilter;
     WatchOnlyFilter watchOnlyFilter;

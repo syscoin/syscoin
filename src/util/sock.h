@@ -64,7 +64,7 @@ public:
      * Get the value of the contained socket.
      * @return socket or INVALID_SOCKET if empty
      */
-    [[nodiscard]] virtual SOCKET Get() const;
+    virtual SOCKET Get() const;
 
     /**
      * Get the value of the contained socket and drop ownership. It will not be closed by the
@@ -82,29 +82,26 @@ public:
      * send(2) wrapper. Equivalent to `send(this->Get(), data, len, flags);`. Code that uses this
      * wrapper can be unit tested if this method is overridden by a mock Sock implementation.
      */
-    [[nodiscard]] virtual ssize_t Send(const void* data, size_t len, int flags) const;
+    virtual ssize_t Send(const void* data, size_t len, int flags) const;
 
     /**
      * recv(2) wrapper. Equivalent to `recv(this->Get(), buf, len, flags);`. Code that uses this
      * wrapper can be unit tested if this method is overridden by a mock Sock implementation.
      */
-    [[nodiscard]] virtual ssize_t Recv(void* buf, size_t len, int flags) const;
+    virtual ssize_t Recv(void* buf, size_t len, int flags) const;
 
     /**
      * connect(2) wrapper. Equivalent to `connect(this->Get(), addr, addrlen)`. Code that uses this
      * wrapper can be unit tested if this method is overridden by a mock Sock implementation.
      */
-    [[nodiscard]] virtual int Connect(const sockaddr* addr, socklen_t addr_len) const;
+    virtual int Connect(const sockaddr* addr, socklen_t addr_len) const;
 
     /**
      * getsockopt(2) wrapper. Equivalent to
      * `getsockopt(this->Get(), level, opt_name, opt_val, opt_len)`. Code that uses this
      * wrapper can be unit tested if this method is overridden by a mock Sock implementation.
      */
-    [[nodiscard]] virtual int GetSockOpt(int level,
-                                         int opt_name,
-                                         void* opt_val,
-                                         socklen_t* opt_len) const;
+    virtual int GetSockOpt(int level, int opt_name, void* opt_val, socklen_t* opt_len) const;
 
     using Event = uint8_t;
 
@@ -127,9 +124,9 @@ public:
      * value of `true` and `occurred` being set to 0.
      * @return true on success and false otherwise
      */
-    [[nodiscard]] virtual bool Wait(std::chrono::milliseconds timeout,
-                                    Event requested,
-                                    Event* occurred = nullptr) const;
+    virtual bool Wait(std::chrono::milliseconds timeout,
+                      Event requested,
+                      Event* occurred = nullptr) const;
 
     /* Higher level, convenience, methods. These may throw. */
 
@@ -157,17 +154,17 @@ public:
      * @throws std::runtime_error if the operation cannot be completed. In this case some bytes may
      * have been consumed from the socket.
      */
-    [[nodiscard]] virtual std::string RecvUntilTerminator(uint8_t terminator,
-                                                          std::chrono::milliseconds timeout,
-                                                          CThreadInterrupt& interrupt,
-                                                          size_t max_data) const;
+    virtual std::string RecvUntilTerminator(uint8_t terminator,
+                                            std::chrono::milliseconds timeout,
+                                            CThreadInterrupt& interrupt,
+                                            size_t max_data) const;
 
     /**
      * Check if still connected.
      * @param[out] errmsg The error string, if the socket has been disconnected.
      * @return true if connected
      */
-    [[nodiscard]] virtual bool IsConnected(std::string& errmsg) const;
+    virtual bool IsConnected(std::string& errmsg) const;
 
 protected:
     /**

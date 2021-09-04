@@ -25,8 +25,6 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QIcon>
-#include <QLatin1Char>
-#include <QLatin1String>
 #include <QList>
 
 
@@ -98,20 +96,18 @@ public:
      */
     QList<TransactionRecord> cachedWallet;
 
-    /** True when model finishes loading all wallet transactions on start */
-    bool m_loaded = false;
-    /** True when transactions are being notified, for instance when scanning */
-    bool m_loading = false;
+    bool fQueueNotifications = false;
     std::vector< TransactionNotification > vQueueNotifications;
 
     void NotifyTransactionChanged(const uint256 &hash, ChangeType status);
-    void DispatchNotifications();
+    void ShowProgress(const std::string &title, int nProgress);
 
     /* Query entire wallet anew from core.
      */
     void refreshWallet(interfaces::Wallet& wallet)
     {
-        assert(!m_loaded);
+        qDebug() << "TransactionTablePriv::refreshWallet";
+        cachedWallet.clear();
         {
             for (const auto& wtx : wallet.getWalletTxs()) {
                 if (TransactionRecord::showTransaction()) {
@@ -119,8 +115,6 @@ public:
                 }
             }
         }
-        m_loaded = true;
-        DispatchNotifications();
     }
 
     /* Update our model of the wallet incrementally, to synchronize our model of the wallet
@@ -255,12 +249,12 @@ TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle
         fProcessingQueuedTransactions(false),
         platformStyle(_platformStyle)
 {
-    subscribeToCoreSignals();
-
     columns << QString() << QString() << tr("Date") << tr("Type") << tr("Label") << SyscoinUnits::getAmountColumnTitle(walletModel->getOptionsModel()->getDisplayUnit());
     priv->refreshWallet(walletModel->wallet());
 
     connect(walletModel->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &TransactionTableModel::updateDisplayUnit);
+
+    subscribeToCoreSignals();
 }
 
 TransactionTableModel::~TransactionTableModel()
@@ -415,9 +409,9 @@ QVariant TransactionTableModel::txAddressDecoration(const TransactionRecord *wtx
 QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, bool tooltip) const
 {
     QString watchAddress;
-    if (tooltip && wtx->involvesWatchAddress) {
+    if (tooltip) {
         // Mark transactions involving watch-only addresses by adding " (watch-only)"
-        watchAddress = QLatin1String(" (") + tr("watch-only") + QLatin1Char(')');
+        watchAddress = wtx->involvesWatchAddress ? QString(" (") + tr("watch-only") + QString(")") : "";
     }
 
     switch(wtx->type)
@@ -611,7 +605,7 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
     case TypeRole:
         return rec->type;
     case DateRole:
-        return QDateTime::fromSecsSinceEpoch(rec->time);
+        return QDateTime::fromTime_t(static_cast<uint>(rec->time));
     case WatchonlyRole:
         return rec->involvesWatchAddress;
     case WatchonlyDecorationRole:
@@ -631,7 +625,7 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
     case TxPlainTextRole:
         {
             QString details;
-            QDateTime date = QDateTime::fromSecsSinceEpoch(rec->time);
+            QDateTime date = QDateTime::fromTime_t(static_cast<uint>(rec->time));
             QString txLabel = walletModel->getAddressTableModel()->labelForAddress(QString::fromStdString(rec->address));
 
             details.append(date.toString("M/d/yy HH:mm"));
@@ -726,7 +720,7 @@ void TransactionTablePriv::NotifyTransactionChanged(const uint256 &hash, ChangeT
 
     TransactionNotification notification(hash, status, showTransaction);
 
-    if (!m_loaded || m_loading)
+    if (fQueueNotifications)
     {
         vQueueNotifications.push_back(notification);
         return;
@@ -734,34 +728,36 @@ void TransactionTablePriv::NotifyTransactionChanged(const uint256 &hash, ChangeT
     notification.invoke(parent);
 }
 
-void TransactionTablePriv::DispatchNotifications()
+void TransactionTablePriv::ShowProgress(const std::string &title, int nProgress)
 {
-    if (!m_loaded || m_loading) return;
+    if (nProgress == 0)
+        fQueueNotifications = true;
 
-    if (vQueueNotifications.size() > 10) { // prevent balloon spam, show maximum 10 balloons
-        bool invoked = QMetaObject::invokeMethod(parent, "setProcessingQueuedTransactions", Qt::QueuedConnection, Q_ARG(bool, true));
-        assert(invoked);
-    }
-    for (unsigned int i = 0; i < vQueueNotifications.size(); ++i)
+    if (nProgress == 100)
     {
-        if (vQueueNotifications.size() - i <= 10) {
-            bool invoked = QMetaObject::invokeMethod(parent, "setProcessingQueuedTransactions", Qt::QueuedConnection, Q_ARG(bool, false));
+        fQueueNotifications = false;
+        if (vQueueNotifications.size() > 10) { // prevent balloon spam, show maximum 10 balloons
+            bool invoked = QMetaObject::invokeMethod(parent, "setProcessingQueuedTransactions", Qt::QueuedConnection, Q_ARG(bool, true));
             assert(invoked);
         }
+        for (unsigned int i = 0; i < vQueueNotifications.size(); ++i)
+        {
+            if (vQueueNotifications.size() - i <= 10) {
+                bool invoked = QMetaObject::invokeMethod(parent, "setProcessingQueuedTransactions", Qt::QueuedConnection, Q_ARG(bool, false));
+                assert(invoked);
+            }
 
-        vQueueNotifications[i].invoke(parent);
+            vQueueNotifications[i].invoke(parent);
+        }
+        vQueueNotifications.clear();
     }
-    vQueueNotifications.clear();
 }
 
 void TransactionTableModel::subscribeToCoreSignals()
 {
     // Connect signals to wallet
     m_handler_transaction_changed = walletModel->wallet().handleTransactionChanged(std::bind(&TransactionTablePriv::NotifyTransactionChanged, priv, std::placeholders::_1, std::placeholders::_2));
-    m_handler_show_progress = walletModel->wallet().handleShowProgress([this](const std::string&, int progress) {
-        priv->m_loading = progress < 100;
-        priv->DispatchNotifications();
-    });
+    m_handler_show_progress = walletModel->wallet().handleShowProgress(std::bind(&TransactionTablePriv::ShowProgress, priv, std::placeholders::_1, std::placeholders::_2));
 }
 
 void TransactionTableModel::unsubscribeFromCoreSignals()

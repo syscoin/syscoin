@@ -138,14 +138,6 @@ Skip if you don't intend to use the GUI.
 brew install qt@5
 ```
 
-Ensure that the `qt@5` package is installed, not the `qt` package.
-If 'qt' is installed, the build process will fail.
-if installed, remove the `qt` package with the following command:
-
-``` bash
-brew uninstall qt
-```
-
 Note: Building with Qt binaries downloaded from the Qt website is not officially supported.
 See the notes in [#7714](https://github.com/syscoin/syscoin/issues/7714).
 
@@ -187,7 +179,7 @@ Check out the [further configuration](#further-configuration) section for more i
 #### ZMQ Dependencies
 
 Support for ZMQ notifications requires the following dependency.
-You must install ZMQ if you wish to enable the NEVM layer.
+Skip if you do not need ZMQ functionality.
 
 ``` bash
 brew install zeromq
@@ -278,7 +270,7 @@ After configuration, you are ready to compile.
 Run the following in your terminal to compile Syscoin Core:
 
 ``` bash
-make        # use "-j N" here for N parallel jobs
+make -jx    # use -jX here for parallelism
 make check  # Run tests if Python 3 is available
 ```
 

@@ -15,7 +15,6 @@
 #include <node/context.h>
 #include <node/psbt.h>
 #include <node/transaction.h>
-#include <policy/packages.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <primitives/transaction.h>
@@ -74,10 +73,12 @@ static RPCHelpMan getrawtransaction()
                 "getrawtransaction",
                 "\nReturn the raw transaction data.\n"
 
-                "\nBy default, this call only returns a transaction if it is in the mempool. If -txindex is enabled\n"
-                "and no blockhash argument is passed, it will return the transaction if it is in the mempool or any block.\n"
-                "If a blockhash argument is passed, it will return the transaction if\n"
-                "the specified block is available and the transaction is in that block.\n"
+                "\nBy default this function only works for mempool transactions. When called with a blockhash\n"
+                "argument, getrawtransaction will return the transaction if the specified block is available and\n"
+                "the transaction is found in that block. When called without a blockhash argument, getrawtransaction\n"
+                "will return the transaction if it is in the mempool, or if -txindex is enabled and the transaction\n"
+                "is in a block in the blockchain.\n"
+
                 "\nHint: Use gettransaction for wallet transactions.\n"
 
                 "\nIf verbose is 'true', returns an Object with information about 'txid'.\n"
@@ -320,8 +321,8 @@ static RPCHelpMan gettxoutproof()
     if (ntxFound != setTxids.size()) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Not all transactions found in specified or retrieved block");
     }
-    // SYSCOIN
-    CDataStream ssMB(SER_TRANSPORT, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+
+    CDataStream ssMB(SER_NETWORK, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
     CMerkleBlock mb(block, setTxids);
     ssMB << mb;
     std::string strHex = HexStr(ssMB);
@@ -347,8 +348,7 @@ static RPCHelpMan verifytxoutproof()
                 RPCExamples{""},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    // SYSCOIN
-    CDataStream ssMB(ParseHexV(request.params[0], "proof"), SER_TRANSPORT, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+    CDataStream ssMB(ParseHexV(request.params[0], "proof"), SER_NETWORK, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
     CMerkleBlock merkleBlock;
     ssMB >> merkleBlock;
 
@@ -759,8 +759,7 @@ static RPCHelpMan signrawtransactionwithkey()
                                 },
                         },
                         },
-                    {"sighashtype", RPCArg::Type::STR, RPCArg::Default{"DEFAULT"}, "The signature hash type. Must be one of:\n"
-            "       \"DEFAULT\"\n"
+                    {"sighashtype", RPCArg::Type::STR, RPCArg::Default{"ALL"}, "The signature hash type. Must be one of:\n"
             "       \"ALL\"\n"
             "       \"NONE\"\n"
             "       \"SINGLE\"\n"
@@ -893,33 +892,27 @@ RPCHelpMan sendrawtransaction()
 static RPCHelpMan testmempoolaccept()
 {
     return RPCHelpMan{"testmempoolaccept",
-                "\nReturns result of mempool acceptance tests indicating if raw transaction(s) (serialized, hex-encoded) would be accepted by mempool.\n"
-                "\nIf multiple transactions are passed in, parents must come before children and package policies apply: the transactions cannot conflict with any mempool transactions or each other.\n"
-                "\nIf one transaction fails, other transactions may not be fully validated (the 'allowed' key will be blank).\n"
-                "\nThe maximum number of transactions allowed is " + ToString(MAX_PACKAGE_COUNT) + ".\n"
-                "\nThis checks if transactions violate the consensus or policy rules.\n"
+                "\nReturns result of mempool acceptance tests indicating if raw transaction (serialized, hex-encoded) would be accepted by mempool.\n"
+                "\nThis checks if the transaction violates the consensus or policy rules.\n"
                 "\nSee sendrawtransaction call.\n",
                 {
-                    {"rawtxs", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of hex strings of raw transactions.",
+                    {"rawtxs", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of hex strings of raw transactions.\n"
+            "                                        Length must be one for now.",
                         {
                             {"rawtx", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, ""},
                         },
                         },
-                    {"maxfeerate", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK())},
-                     "Reject transactions whose fee rate is higher than the specified value, expressed in " + CURRENCY_UNIT + "/kvB\n"},
+                    {"maxfeerate", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK())}, "Reject transactions whose fee rate is higher than the specified value, expressed in " + CURRENCY_UNIT + "/kvB\n"},
                 },
                 RPCResult{
                     RPCResult::Type::ARR, "", "The result of the mempool acceptance test for each raw transaction in the input array.\n"
-                        "Returns results for each transaction in the same order they were passed in.\n"
-                        "Transactions that cannot be fully validated due to failures in other transactions will not contain an 'allowed' result.\n",
+                        "Length is exactly one for now.",
                     {
                         {RPCResult::Type::OBJ, "", "",
                         {
                             {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
                             {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
-                            {RPCResult::Type::STR, "package-error", "Package validation error, if any (only possible if rawtxs had more than 1 transaction)."},
-                            {RPCResult::Type::BOOL, "allowed", "Whether this tx would be accepted to the mempool and pass client-specified maxfeerate."
-                                                               "If not present, the tx was not fully validated due to a failure in another tx in the list."},
+                            {RPCResult::Type::BOOL, "allowed", "If the mempool allows this tx to be inserted"},
                             {RPCResult::Type::NUM, "vsize", "Virtual transaction size as defined in BIP 141. This is different from actual serialized size for witness transactions as witness data is discounted (only present when 'allowed' is true)"},
                             {RPCResult::Type::OBJ, "fees", "Transaction fees (only present if 'allowed' is true)",
                             {
@@ -945,87 +938,63 @@ static RPCHelpMan testmempoolaccept()
         UniValue::VARR,
         UniValueType(), // VNUM or VSTR, checked inside AmountFromValue()
     });
-    const UniValue raw_transactions = request.params[0].get_array();
-    if (raw_transactions.size() < 1 || raw_transactions.size() > MAX_PACKAGE_COUNT) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER,
-                           "Array must contain between 1 and " + ToString(MAX_PACKAGE_COUNT) + " transactions.");
+
+    if (request.params[0].get_array().size() != 1) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Array must contain exactly one raw transaction for now");
     }
+    
+    CMutableTransaction mtx;
+    if (!DecodeHexTx(mtx, request.params[0].get_array()[0].get_str())) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed. Make sure the tx has at least one input.");
+    }
+    CTransactionRef tx(MakeTransactionRef(std::move(mtx)));
 
     const CFeeRate max_raw_tx_fee_rate = request.params[1].isNull() ?
                                              DEFAULT_MAX_RAW_TX_FEE_RATE :
                                              CFeeRate(AmountFromValue(request.params[1]));
 
-    std::vector<CTransactionRef> txns;
-    txns.reserve(raw_transactions.size());
-    for (const auto& rawtx : raw_transactions.getValues()) {
-        CMutableTransaction mtx;
-        if (!DecodeHexTx(mtx, rawtx.get_str())) {
-            throw JSONRPCError(RPC_DESERIALIZATION_ERROR,
-                               "TX decode failed: " + rawtx.get_str() + " Make sure the tx has at least one input.");
-        }
-        txns.emplace_back(MakeTransactionRef(std::move(mtx)));
-    }
-
     NodeContext& node = EnsureAnyNodeContext(request.context);
-    CTxMemPool& mempool = EnsureMemPool(node);
-    CChainState& chainstate = EnsureChainman(node).ActiveChainstate();
-    const PackageMempoolAcceptResult package_result = [&] {
-        LOCK(::cs_main);
-        if (txns.size() > 1) return ProcessNewPackage(chainstate, mempool, txns, /* test_accept */ true);
-        return PackageMempoolAcceptResult(txns[0]->GetWitnessHash(),
-               AcceptToMemoryPool(chainstate, mempool, txns[0], /* bypass_limits */ false, /* test_accept*/ true));
-    }();
 
-    UniValue rpc_result(UniValue::VARR);
-    // We will check transaction fees while we iterate through txns in order. If any transaction fee
-    // exceeds maxfeerate, we will leave the rest of the validation results blank, because it
-    // doesn't make sense to return a validation result for a transaction if its ancestor(s) would
-    // not be submitted.
-    bool exit_early{false};
-    for (const auto& tx : txns) {
-        UniValue result_inner(UniValue::VOBJ);
-        result_inner.pushKV("txid", tx->GetHash().GetHex());
-        result_inner.pushKV("wtxid", tx->GetWitnessHash().GetHex());
-        if (package_result.m_state.GetResult() == PackageValidationResult::PCKG_POLICY) {
-            result_inner.pushKV("package-error", package_result.m_state.GetRejectReason());
-        }
-        auto it = package_result.m_tx_results.find(tx->GetWitnessHash());
-        if (exit_early || it == package_result.m_tx_results.end()) {
-            // Validation unfinished. Just return the txid and wtxid.
-            rpc_result.push_back(result_inner);
-            continue;
-        }
-        const auto& tx_result = it->second;
-        if (tx_result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-            const CAmount fee = tx_result.m_base_fees.value();
-            // Check that fee does not exceed maximum fee
-            const int64_t virtual_size = GetVirtualTransactionSize(*tx);
-            const CAmount max_raw_tx_fee = max_raw_tx_fee_rate.GetFee(virtual_size);
-            if (max_raw_tx_fee && fee > max_raw_tx_fee) {
-                result_inner.pushKV("allowed", false);
-                result_inner.pushKV("reject-reason", "max-fee-exceeded");
-                exit_early = true;
-            } else {
-                // Only return the fee and vsize if the transaction would pass ATMP.
-                // These can be used to calculate the feerate.
-                result_inner.pushKV("allowed", true);
-                result_inner.pushKV("vsize", virtual_size);
-                UniValue fees(UniValue::VOBJ);
-                fees.pushKV("base", ValueFromAmount(fee));
-                result_inner.pushKV("fees", fees);
-            }
+    CTxMemPool& mempool = EnsureMemPool(node);
+    int64_t virtual_size = GetVirtualTransactionSize(*tx);
+    CAmount max_raw_tx_fee = max_raw_tx_fee_rate.GetFee(virtual_size);
+
+    UniValue result(UniValue::VARR);
+    UniValue result_0(UniValue::VOBJ);
+    result_0.pushKV("txid", tx->GetHash().GetHex());
+    result_0.pushKV("wtxid", tx->GetWitnessHash().GetHex());
+
+    ChainstateManager& chainman = EnsureChainman(node);
+    const MempoolAcceptResult accept_result = WITH_LOCK(cs_main, return AcceptToMemoryPool(chainman.ActiveChainstate(), mempool, std::move(tx),
+                                                  false /* bypass_limits */, /* test_accept */ true));
+
+    // Only return the fee and vsize if the transaction would pass ATMP.
+    // These can be used to calculate the feerate.
+    if (accept_result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+        const CAmount fee = accept_result.m_base_fees.value();
+        // Check that fee does not exceed maximum fee
+        if (max_raw_tx_fee && fee > max_raw_tx_fee) {
+            result_0.pushKV("allowed", false);
+            result_0.pushKV("reject-reason", "max-fee-exceeded");
         } else {
-            result_inner.pushKV("allowed", false);
-            const TxValidationState state = tx_result.m_state;
-            if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
-                result_inner.pushKV("reject-reason", "missing-inputs");
-            } else {
-                result_inner.pushKV("reject-reason", state.GetRejectReason());
-            }
+            result_0.pushKV("allowed", true);
+            result_0.pushKV("vsize", virtual_size);
+            UniValue fees(UniValue::VOBJ);
+            fees.pushKV("base", ValueFromAmount(fee));
+            result_0.pushKV("fees", fees);
         }
-        rpc_result.push_back(result_inner);
+        result.push_back(std::move(result_0));
+    } else {
+        result_0.pushKV("allowed", false);
+        const TxValidationState state = accept_result.m_state;
+        if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
+            result_0.pushKV("reject-reason", "missing-inputs");
+        } else {
+            result_0.pushKV("reject-reason", state.GetRejectReason());
+        }
+        result.push_back(std::move(result_0));
     }
-    return rpc_result;
+    return result;
 },
     };
 }
@@ -1472,7 +1441,7 @@ static RPCHelpMan createpsbt()
                             "For compatibility reasons, a dictionary, which holds the key-value pairs directly, is also\n"
                             "                             accepted as second parameter.",
                         {
-                            {"", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::OMITTED, "",
+                            {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
                                 {
                                     {"address", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "A key-value pair. The key (string) is the syscoin address, the value (float or string) is the amount in " + CURRENCY_UNIT},
                                 },
@@ -1661,7 +1630,6 @@ static RPCHelpMan utxoupdatepsbt()
     }
 
     // Fill the inputs
-    const PrecomputedTransactionData txdata = PrecomputePSBTData(psbtx);
     for (unsigned int i = 0; i < psbtx.tx->vin.size(); ++i) {
         PSBTInput& input = psbtx.inputs.at(i);
 
@@ -1678,7 +1646,7 @@ static RPCHelpMan utxoupdatepsbt()
         // Update script/keypath information using descriptor data.
         // Note that SignPSBTInput does a lot more than just constructing ECDSA signatures
         // we don't actually care about those here, in fact.
-        SignPSBTInput(public_provider, psbtx, i, &txdata, /* sighash_type */ 1);
+        SignPSBTInput(public_provider, psbtx, i, /* sighash_type */ 1);
     }
 
     // Update script/keypath information using descriptor data.

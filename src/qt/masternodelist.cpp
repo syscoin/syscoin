@@ -20,7 +20,6 @@
 #include <QTimer>
 #include <QtGui/QClipboard>
 #include <interfaces/node.h>
-#include <node/context.h>
 int GetOffsetFromUtc()
 {
 #if QT_VERSION < 0x050200
@@ -32,7 +31,7 @@ int GetOffsetFromUtc()
 #endif
 }
 
-MasternodeList::MasternodeList(QWidget* parent) :
+MasternodeList::MasternodeList(const PlatformStyle* platformStyle, QWidget* parent) :
     QWidget(parent),
     nTimeFilterUpdatedDIP3(0),
     nTimeUpdatedDIP3(0),
@@ -74,9 +73,6 @@ MasternodeList::MasternodeList(QWidget* parent) :
     ui->tableWidgetMasternodesDIP3->setColumnHidden(11, true);
 
     ui->tableWidgetMasternodesDIP3->setContextMenuPolicy(Qt::CustomContextMenu);
-
-    ui->filterLineEditDIP3->setPlaceholderText(tr("Filter by any property (e.g. address or protx hash)"));
-    ui->checkBoxMyMasternodesOnly->setEnabled(false);
 
     QAction* copyProTxHashAction = new QAction(tr("Copy ProTx Hash"), this);
     QAction* copyCollateralOutpointAction = new QAction(tr("Copy Collateral Outpoint"), this);
@@ -126,7 +122,6 @@ void MasternodeList::setClientModel(ClientModel* model)
 void MasternodeList::setWalletModel(WalletModel* model)
 {
     this->walletModel = model;
-    ui->checkBoxMyMasternodesOnly->setEnabled(model != nullptr);
 }
 
 void MasternodeList::showContextMenuDIP3(const QPoint& point)
@@ -186,11 +181,8 @@ void MasternodeList::updateDIP3List()
         LOCK(cs_main);
         mnList.ForEachMN(false, [&](const CDeterministicMNCPtr& dmn) {
             CTxDestination collateralDest;
-            std::map<COutPoint, Coin> coins;
-            coins[dmn->collateralOutpoint]; 
-            clientModel->node().context()->chain->findCoins(coins);
-            const Coin &coin = coins.at(dmn->collateralOutpoint);
-            if (!coin.IsSpent() && ExtractDestination(coin.out.scriptPubKey, collateralDest)) {
+            Coin coin;
+            if (GetUTXOCoin(dmn->collateralOutpoint, coin) && ExtractDestination(coin.out.scriptPubKey, collateralDest)) {
                 mapCollateralDests.try_emplace(dmn->proTxHash, collateralDest);
             }
         });
@@ -364,7 +356,7 @@ void MasternodeList::extraInfoDIP3_clicked()
     }
 
     UniValue json(UniValue::VOBJ);
-    dmn->ToJson(*clientModel->node().context()->chain, json);
+    dmn->ToJson(json);
 
     // Title of popup window
     QString strWindowtitle = tr("Additional information for DIP3 Masternode %1").arg(QString::fromStdString(dmn->proTxHash.ToString()));
@@ -425,11 +417,8 @@ void MasternodeList::copyCollateral_clicked()
     
     QString collateralStr;
     CTxDestination collateralDest;
-    std::map<COutPoint, Coin> coins;
-    coins[dmn->collateralOutpoint]; 
-    clientModel->node().context()->chain->findCoins(coins);
-    const Coin &coin = coins.at(dmn->collateralOutpoint);
-    if (!coin.IsSpent() && ExtractDestination(coin.out.scriptPubKey, collateralDest)) {
+    Coin coin;
+    if (GetUTXOCoin(dmn->collateralOutpoint, coin) && ExtractDestination(coin.out.scriptPubKey, collateralDest)) {
         collateralStr = QString::fromStdString(EncodeDestination(collateralDest));
     }
     QApplication::clipboard()->setText(collateralStr);

@@ -6,11 +6,9 @@
 #define SYSCOIN_ZMQ_ZMQPUBLISHNOTIFIER_H
 
 #include <zmq/zmqabstractnotifier.h>
-#include <vector>
+
 class CBlockIndex;
-// SYSCOIN
-class CNEVMBlock;
-class uint256;
+
 class CZMQAbstractPublishNotifier : public CZMQAbstractNotifier
 {
 private:
@@ -25,38 +23,11 @@ public:
           * message sequence number
     */
     bool SendZmqMessage(const char *command, const void* data, size_t size);
-    // SYSCOIN
-    bool SendZmqMessageNEVM(const char *command, const void* data, size_t size);
-    /* receive zmq message
-       parts:
-          * command
-          * data
-    */
-    bool ReceiveZmqMessage(std::vector<std::string>& parts);
-    bool Initialize(void *pcontext, void *pcontextsub) override;
+
+    bool Initialize(void *pcontext) override;
     void Shutdown() override;
 };
-// SYSCOIN
-class CZMQPublishNEVMCommsNotifier : public CZMQAbstractPublishNotifier
-{
-public:
-    bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse) override;
-};
-class CZMQPublishNEVMBlockNotifier : public CZMQAbstractPublishNotifier
-{
-public:
-    bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state) override;
-};
-class CZMQPublishNEVMBlockConnectNotifier : public CZMQAbstractPublishNotifier
-{
-public:
-    bool NotifyNEVMBlockConnect(const CNEVMBlock &evmBlock, BlockValidationState &state, const uint256& nBlockHash) override;
-};
-class CZMQPublishNEVMBlockDisconnectNotifier : public CZMQAbstractPublishNotifier
-{
-public:
-    bool NotifyNEVMBlockDisconnect(const CNEVMBlock &evmBlock, BlockValidationState &state, const uint256& nBlockHash) override;
-};
+
 class CZMQPublishHashBlockNotifier : public CZMQAbstractPublishNotifier
 {
 public:

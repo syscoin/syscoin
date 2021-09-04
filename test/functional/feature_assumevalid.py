@@ -191,6 +191,7 @@ class AssumeValidTest(SyscoinTestFramework):
         # Send blocks to node2. Block 102 will be rejected.
         self.send_blocks_until_disconnected(p2p2)
         # SYSCOIN
+        self.bump_mocktime(5)
         self.assert_blockchain_height(self.nodes[2], 101)
 
 

@@ -18,19 +18,16 @@
 /*
  * Usage:
 
-static void NameOfYourBenchmarkFunction(benchmark::Bench& bench)
+static void CODE_TO_TIME(benchmark::Bench& bench)
 {
-    ...do any setup needed...
-
-    bench.run([&] {
-         ...do stuff you want to time; refer to src/bench/nanobench.h
-            for more information and the options that can be passed here...
+    ... do any setup needed...
+    nanobench::Config().run([&] {
+       ... do stuff you want to time...
     });
-
-    ...do any cleanup needed...
+    ... do any cleanup needed...
 }
 
-BENCHMARK(NameOfYourBenchmarkFunction);
+BENCHMARK(CODE_TO_TIME);
 
  */
 
@@ -58,8 +55,7 @@ public:
 
     static void RunAll(const Args& args);
 };
-} // namespace benchmark
-
+}
 // BENCHMARK(foo) expands to:  benchmark::BenchRunner bench_11foo("foo", foo);
 #define BENCHMARK(n) \
     benchmark::BenchRunner PASTE2(bench_, PASTE2(__LINE__, n))(STRINGIZE(n), n);

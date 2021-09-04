@@ -102,7 +102,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
     return true;
 }
 
-bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, CAmount& nMNSeniorityRet, CAmount& nMNFloorDiffRet)
+bool IsBlockPayeeValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, CAmount& nMNSeniorityRet)
 {
     if(fDisableGovernance) {
         //there is no budget data to use to check anything, let's just accept the longest chain
@@ -125,7 +125,7 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
     const CAmount &nHalfFee = fees / 2;
 
     // Check for correct masternode payment
-    if(CMasternodePayments::IsTransactionValid(activeChain, txNew, nBlockHeight, blockReward, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet)) {
+    if(CMasternodePayments::IsTransactionValid(txNew, nBlockHeight, blockReward, nHalfFee, nMNSeniorityRet)) {
         LogPrint(BCLog::MNPAYMENTS, "%s -- Valid masternode payment at height %d\n", __func__, nBlockHeight);
         return true;
     }
@@ -134,7 +134,7 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
 
     if(AreSuperblocksEnabled()) {
         if(CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
-            if(CSuperblockManager::IsValid(txNew, nBlockHeight, blockReward+nMNSeniorityRet+nMNFloorDiffRet)) {
+            if(CSuperblockManager::IsValid(txNew, nBlockHeight, blockReward+nMNSeniorityRet)) {
                 LogPrint(BCLog::GOBJECT, "%s -- Valid superblock at height %d\n", __func__, nBlockHeight);
                 // continue validation, should also pay MN
             } else {
@@ -154,7 +154,7 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
     return false;
 }
 
-void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, std::vector<CTxOut>& voutMasternodePaymentsRet, std::vector<CTxOut>& voutSuperblockPaymentsRet)
+void FillBlockPayments(CMutableTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, std::vector<CTxOut>& voutMasternodePaymentsRet, std::vector<CTxOut>& voutSuperblockPaymentsRet)
 {
     // only create superblocks if spork is enabled AND if superblock is actually triggered
     // (height should be validated inside)
@@ -165,7 +165,7 @@ void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
     }
 
     const CAmount &nHalfFee = fees / 2;
-    if (!CMasternodePayments::GetMasternodeTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee)) {
+    if (!CMasternodePayments::GetMasternodeTxOuts(nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee)) {
         LogPrint(BCLog::MNPAYMENTS, "%s -- no masternode to pay (MN list probably empty)\n", __func__);
         return;
     }
@@ -195,14 +195,13 @@ void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
 *   Get masternode payment tx outputs
 */
 
-bool CMasternodePayments::GetMasternodeTxOuts(CChain& activeChain, int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee)
+bool CMasternodePayments::GetMasternodeTxOuts(int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee)
 {
     // make sure it's not filled yet
     voutMasternodePaymentsRet.clear();
     CAmount nMNSeniorityRet;
-    CAmount nMNFloorDiffRet;
     int nCollateralHeight;
-    if(!GetBlockTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, nCollateralHeight)) {
+    if(!GetBlockTxOuts(nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee, nMNSeniorityRet, nCollateralHeight)) {
         LogPrintf("CMasternodePayments::%s -- no payee (deterministic masternode list empty)\n", __func__);
         return false;
     }
@@ -216,23 +215,20 @@ bool CMasternodePayments::GetMasternodeTxOuts(CChain& activeChain, int nBlockHei
 
     return true;
 }
-CAmount GetBlockMNSubsidy(const CAmount &nBlockReward, unsigned int nHeight, const Consensus::Params& consensusParams, unsigned int nStartHeight, CAmount& nMNSeniorityRet, CAmount& nMNFloorDiffRet)
+CAmount GetBlockMNSubsidy(const CAmount &nBlockReward, unsigned int nHeight, const Consensus::Params& consensusParams, unsigned int nStartHeight, CAmount& nMNSeniorityRet)
 {
-    // MN takes 75% of the subsidy
     CAmount nSubsidy = nBlockReward*0.75;
-    
-    // ensure that if subsidy is less than min amount then stick to min for long term MN full node/chainlock incentive
-    const CAmount &nMinMN = consensusParams.nMinMNSubsidySats;
-    if(nSubsidy < nMinMN) {
-        nMNFloorDiffRet = nMinMN-nSubsidy;
-        nSubsidy = nMinMN;
-    }
     if (nHeight > 0 && nStartHeight > 0) {
         unsigned int nDifferenceInBlocks = 0;
         if (nHeight > nStartHeight) {
             nDifferenceInBlocks = (nHeight - nStartHeight);
         }
-        const double &fSubsidyAdjustmentPercentage = consensusParams.Seniority(nHeight, nDifferenceInBlocks);
+        double fSubsidyAdjustmentPercentage = 0;
+        if(nDifferenceInBlocks >= consensusParams.nSeniorityHeight2)
+            fSubsidyAdjustmentPercentage = consensusParams.nSeniorityLevel2;
+        else if(nDifferenceInBlocks >= consensusParams.nSeniorityHeight1)
+            fSubsidyAdjustmentPercentage = consensusParams.nSeniorityLevel1;
+            
         if(fSubsidyAdjustmentPercentage > 0){
             nMNSeniorityRet = nSubsidy*fSubsidyAdjustmentPercentage;
             nSubsidy += nMNSeniorityRet;
@@ -240,13 +236,13 @@ CAmount GetBlockMNSubsidy(const CAmount &nBlockReward, unsigned int nHeight, con
     }
     return nSubsidy;
 }
-bool CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet, int& nCollateralHeightRet)
+bool CMasternodePayments::GetBlockTxOuts(int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee, CAmount& nMNSeniorityRet, int& nCollateralHeightRet)
 {
     voutMasternodePaymentsRet.clear();
     CDeterministicMNCPtr dmnPayee;
     {
         LOCK(cs_main);
-        const CBlockIndex* pindex = activeChain[nBlockHeight - 1];
+        const CBlockIndex* pindex = ::ChainActive()[nBlockHeight - 1];
         if(!pindex)
             return false;
         CDeterministicMNList dmnPayeeList;
@@ -258,7 +254,7 @@ bool CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, 
         }
     }
     nCollateralHeightRet = dmnPayee->pdmnState->nCollateralHeight;
-    CAmount masternodeReward = GetBlockMNSubsidy(blockReward, nBlockHeight, Params().GetConsensus(), nCollateralHeightRet, nMNSeniorityRet, nMNFloorDiffRet) + nHalfFee;
+    CAmount masternodeReward = GetBlockMNSubsidy(blockReward, nBlockHeight, Params().GetConsensus(), nCollateralHeightRet, nMNSeniorityRet) + nHalfFee;
 
     CAmount operatorReward = 0;
     if (dmnPayee->nOperatorReward != 0 && dmnPayee->pdmnState->scriptOperatorPayout != CScript()) {
@@ -278,7 +274,7 @@ bool CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, 
     return true;
 }
 
-bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet)
+bool CMasternodePayments::IsTransactionValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nHalfFee, CAmount& nMNSeniorityRet)
 {
     if (!deterministicMNManager || !deterministicMNManager->IsDIP3Enforced(nBlockHeight)) {
         // can't verify historical blocks here
@@ -287,7 +283,7 @@ bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransac
 
     std::vector<CTxOut> voutMasternodePayments;
     int nCollateralHeight;
-    if (!GetBlockTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePayments, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, nCollateralHeight)) {
+    if (!GetBlockTxOuts(nBlockHeight, blockReward, voutMasternodePayments, nHalfFee, nMNSeniorityRet, nCollateralHeight)) {
         LogPrintf("CMasternodePayments::%s -- ERROR failed to get payees for block at height %s\n", __func__, nBlockHeight);
         return true;
     }

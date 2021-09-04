@@ -8,12 +8,12 @@
 #include <QFrame>
 #include <QMap>
 
+class SyscoinGUI;
 class ClientModel;
 class PlatformStyle;
 class SendCoinsRecipient;
 class WalletModel;
 class WalletView;
-class MasternodeList;
 
 QT_BEGIN_NAMESPACE
 class QStackedWidget;
@@ -31,12 +31,12 @@ class WalletFrame : public QFrame
     Q_OBJECT
 
 public:
-    explicit WalletFrame(const PlatformStyle* platformStyle, QWidget* parent);
+    explicit WalletFrame(const PlatformStyle *platformStyle, SyscoinGUI *_gui = nullptr);
     ~WalletFrame();
 
     void setClientModel(ClientModel *clientModel);
 
-    bool addWallet(WalletModel* walletModel, WalletView* walletView);
+    bool addWallet(WalletModel *walletModel);
     void setCurrentWallet(WalletModel* wallet_model);
     void removeWallet(WalletModel* wallet_model);
     void removeAllWallets();
@@ -48,16 +48,14 @@ public:
     QSize sizeHint() const override { return m_size_hint; }
 
 Q_SIGNALS:
-    void createWalletButtonClicked();
-    void message(const QString& title, const QString& message, unsigned int style);
-    void currentWalletSet();
+    /** Notify that the user has requested more information about the out-of-sync warning */
+    void requestedSyncWarningInfo();
 
 private:
     QStackedWidget *walletStack;
+    SyscoinGUI *gui;
     ClientModel *clientModel;
     QMap<WalletModel*, WalletView*> mapWalletViews;
-    // SYSCOIN
-    MasternodeList* masternodeListPage;
 
     bool bOutOfSync;
 
@@ -102,6 +100,8 @@ public Q_SLOTS:
     void usedSendingAddresses();
     /** Show used receiving addresses */
     void usedReceivingAddresses();
+    /** Pass on signal over requested out-of-sync-warning information */
+    void outOfSyncWarningClicked();
 };
 
 #endif // SYSCOIN_QT_WALLETFRAME_H

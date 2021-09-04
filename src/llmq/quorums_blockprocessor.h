@@ -15,7 +15,6 @@ class CNode;
 class CConnman;
 class PeerManager;
 class BlockValidationState;
-class ChainstateManager;
 namespace llmq
 {
 class CFinalCommitment;
@@ -24,7 +23,6 @@ class CQuorumBlockProcessor
 {
 private:
     CConnman& connman;
-    ChainstateManager &chainman;
     // TODO cleanup
     mutable RecursiveMutex minableCommitmentsCs;
     std::map<std::pair<uint8_t, uint256>, uint256> minableCommitmentsByQuorum GUARDED_BY(minableCommitmentsCs);
@@ -33,7 +31,7 @@ private:
     std::map<uint8_t, unordered_lru_cache<uint256, bool, StaticSaltedHasher>> mapHasMinedCommitmentCache GUARDED_BY(minableCommitmentsCs);
 
 public:
-    explicit CQuorumBlockProcessor(CConnman &_connman, ChainstateManager& _chainman);
+    explicit CQuorumBlockProcessor(CConnman &_connman);
 
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, PeerManager& peerman);
@@ -57,7 +55,7 @@ private:
     bool ProcessCommitment(int nHeight, const uint256& blockHash, const CFinalCommitment& qc, BlockValidationState& state, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     static bool IsMiningPhase(uint8_t llmqType, int nHeight);
     bool IsCommitmentRequired(uint8_t llmqType, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    static uint256 GetQuorumBlockHash(ChainstateManager& chainman, uint8_t llmqType, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    static uint256 GetQuorumBlockHash(uint8_t llmqType, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
 extern CQuorumBlockProcessor* quorumBlockProcessor;

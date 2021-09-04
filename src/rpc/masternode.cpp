@@ -12,7 +12,6 @@
 #include <evo/deterministicmns.h>
 #include <net.h>
 #include <validation.h>
-#include <node/transaction.h>
 RPCHelpMan masternodelist();
 
 static RPCHelpMan masternode_list()
@@ -197,25 +196,20 @@ static RPCHelpMan masternode_status()
 
     UniValue mnObj(UniValue::VOBJ);
 
-    CDeterministicMNCPtr dmn;
-    {
-        LOCK(activeMasternodeInfoCs);
-
-        // keep compatibility with legacy status for now (might get deprecated/removed later)
-        mnObj.pushKV("outpoint", activeMasternodeInfo.outpoint.ToStringShort());
-        mnObj.pushKV("service", activeMasternodeInfo.service.ToString());
-        CDeterministicMNList mnList;
-        if(deterministicMNManager)
-            deterministicMNManager->GetListAtChainTip(mnList);
-        auto dmn = mnList.GetMN(activeMasternodeInfo.proTxHash);
-        if (dmn) {
-            mnObj.pushKV("proTxHash", dmn->proTxHash.ToString());
-            mnObj.pushKV("collateralHash", dmn->collateralOutpoint.hash.ToString());
-            mnObj.pushKV("collateralIndex", (int)dmn->collateralOutpoint.n);
-            UniValue stateObj;
-            dmn->pdmnState->ToJson(stateObj);
-            mnObj.pushKV("dmnState", stateObj);
-        }
+    // keep compatibility with legacy status for now (might get deprecated/removed later)
+    mnObj.pushKV("outpoint", activeMasternodeInfo.outpoint.ToStringShort());
+    mnObj.pushKV("service", activeMasternodeInfo.service.ToString());
+    CDeterministicMNList mnList;
+    if(deterministicMNManager)
+        deterministicMNManager->GetListAtChainTip(mnList);
+    auto dmn = mnList.GetMN(activeMasternodeInfo.proTxHash);
+    if (dmn) {
+        mnObj.pushKV("proTxHash", dmn->proTxHash.ToString());
+        mnObj.pushKV("collateralHash", dmn->collateralOutpoint.hash.ToString());
+        mnObj.pushKV("collateralIndex", (int)dmn->collateralOutpoint.n);
+        UniValue stateObj;
+        dmn->pdmnState->ToJson(stateObj);
+        mnObj.pushKV("dmnState", stateObj);
     }
     mnObj.pushKV("state", activeMasternodeManager->GetStateString());
     mnObj.pushKV("status", activeMasternodeManager->GetStatus());
@@ -274,11 +268,10 @@ static RPCHelpMan masternode_winners()
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    const NodeContext& node = EnsureAnyNodeContext(request.context);
     const CBlockIndex* pindexTip{nullptr};
     {
         LOCK(cs_main);
-        pindexTip = node.chainman->ActiveTip();
+        pindexTip = ::ChainActive().Tip();
         if (!pindexTip) return NullUniValue;
     }
 
@@ -341,11 +334,11 @@ RPCHelpMan masternode_payments()
     const NodeContext& node = EnsureAnyNodeContext(request.context);
     if (request.params[0].isNull()) {
         LOCK(cs_main);
-        pindex = node.chainman->ActiveTip();
+        pindex = ::ChainActive().Tip();
     } else {
         LOCK(cs_main);
         uint256 blockHash = ParseHashV(request.params[0], "blockhash");
-        pindex = node.chainman->m_blockman.LookupBlockIndex(blockHash);
+        pindex = g_chainman.m_blockman.LookupBlockIndex(blockHash);
         if (pindex == nullptr) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
@@ -384,7 +377,7 @@ RPCHelpMan masternode_payments()
         CMutableTransaction coinbaseTx;
         coinbaseTx.vout.resize(1);
         coinbaseTx.vout[0].nValue = blockReward + nBlockFees;
-        FillBlockPayments(node.chainman->ActiveChain(), coinbaseTx, pindex->nHeight, blockReward, nBlockFees, voutMasternodePayments, voutDummy);
+        FillBlockPayments(coinbaseTx, pindex->nHeight, blockReward, nBlockFees, voutMasternodePayments, voutDummy);
 
         UniValue blockObj(UniValue::VOBJ);
         CAmount payedPerBlock{0};
@@ -422,7 +415,7 @@ RPCHelpMan masternode_payments()
 
         if (nCount > 0) {
             LOCK(cs_main);
-            pindex = node.chainman->ActiveChain().Next(pindex);
+            pindex = ::ChainActive().Next(pindex);
         } else {
             pindex = pindex->pprev;
         }
@@ -458,7 +451,6 @@ RPCHelpMan masternodelist()
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    const NodeContext& node = EnsureAnyNodeContext(request.context);
     std::string strMode = "json";
     std::string strFilter = "";
 
@@ -494,18 +486,15 @@ RPCHelpMan masternodelist()
         }
 
         LOCK(cs_main);
-        const CBlockIndex* pindex = node.chainman->ActiveChain()[dmn->pdmnState->nLastPaidHeight];
+        const CBlockIndex* pindex = ::ChainActive()[dmn->pdmnState->nLastPaidHeight];
         return (int)pindex->nTime;
     };
 
     mnList.ForEachMN(false, [&](const CDeterministicMNCPtr& dmn) {
         std::string strOutpoint = dmn->collateralOutpoint.ToStringShort();
+        Coin coin;
         std::string collateralAddressStr = "UNKNOWN";
-        std::map<COutPoint, Coin> coins;
-        coins[dmn->collateralOutpoint]; 
-        node.chain->findCoins(coins);
-        const Coin &coin = coins.at(dmn->collateralOutpoint);
-        if (!coin.IsSpent()) {
+        if (GetUTXOCoin(dmn->collateralOutpoint, coin)) {
             CTxDestination collateralDest;
             if (ExtractDestination(coin.out.scriptPubKey, collateralDest)) {
                 collateralAddressStr = EncodeDestination(collateralDest);

@@ -35,7 +35,7 @@ static RPCHelpMan gobject_count()
         strMode = request.params[0].get_str();
     }
 
-    return strMode == "json" ? governance->ToJson() : governance->ToString();
+    return strMode == "json" ? governance.ToJson() : governance.ToString();
 },
     };
 } 
@@ -140,11 +140,11 @@ static RPCHelpMan gobject_submit()
     CDeterministicMNList mnList;
     if(deterministicMNManager)
         deterministicMNManager->GetListAtChainTip(mnList);
-    bool fMnFound = WITH_LOCK(activeMasternodeInfoCs, return mnList.HasValidMNByCollateral(activeMasternodeInfo.outpoint));
+    bool fMnFound = mnList.HasValidMNByCollateral(activeMasternodeInfo.outpoint);
 
     LogPrint(BCLog::GOBJECT, "gobject_submit -- pubKeyOperator = %s, outpoint = %s, params.size() = %lld, fMnFound = %d\n",
-            (WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsPubKeyOperator ? activeMasternodeInfo.blsPubKeyOperator->ToString() : "N/A")),
-            WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.outpoint.ToStringShort()), request.params.size(), fMnFound);
+            (activeMasternodeInfo.blsPubKeyOperator ? activeMasternodeInfo.blsPubKeyOperator->ToString() : "N/A"),
+            activeMasternodeInfo.outpoint.ToStringShort(), request.params.size(), fMnFound);
 
     // ASSEMBLE NEW GOVERNANCE OBJECT FROM USER PARAMETERS
 
@@ -181,7 +181,6 @@ static RPCHelpMan gobject_submit()
     // Attempt to sign triggers if we are a MN
     if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER) {
         if (fMnFound) {
-            LOCK(activeMasternodeInfoCs);
             govobj.SetMasternodeOutpoint(activeMasternodeInfo.outpoint);
             govobj.Sign(*activeMasternodeInfo.blsKeyOperator);
         } else {
@@ -198,7 +197,7 @@ static RPCHelpMan gobject_submit()
     std::string strError = "";
     bool fMissingConfirmations;
     
-    if (!govobj.IsValidLocally(*node.chainman, strError, fMissingConfirmations, true) && !fMissingConfirmations) {
+    if (!govobj.IsValidLocally(strError, fMissingConfirmations, true) && !fMissingConfirmations) {
         LogPrintf("gobject(submit) -- Object submission rejected because object is not valid - hash = %s, strError = %s\n", strHash, strError);
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + strHash + " - " + strError);
     }
@@ -206,7 +205,7 @@ static RPCHelpMan gobject_submit()
 
     // RELAY THIS OBJECT
     // Reject if rate check fails but don't update buffer
-    if (!governance->MasternodeRateCheck(govobj)) {
+    if (!governance.MasternodeRateCheck(govobj)) {
         LogPrintf("gobject(submit) -- Object submission rejected because of rate check failure - hash = %s\n", strHash);
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Object creation rate limit exceeded");
     }
@@ -214,10 +213,10 @@ static RPCHelpMan gobject_submit()
     LogPrintf("gobject(submit) -- Adding locally created governance object - %s\n", strHash);
 
     if (fMissingConfirmations) {
-        governance->AddPostponedObject(govobj);
+        governance.AddPostponedObject(govobj);
         govobj.Relay(*node.connman);
     } else {
-        governance->AddGovernanceObject(govobj, *node.connman);
+        governance.AddGovernanceObject(govobj, *node.connman);
     }
 
     return govobj.GetHash().ToString();
@@ -265,8 +264,8 @@ static RPCHelpMan gobject_vote_conf()
 
     int govObjType;
     {
-        LOCK(governance->cs);
-        CGovernanceObject *pGovObj = governance->FindGovernanceObject(hash);
+        LOCK(governance.cs);
+        CGovernanceObject *pGovObj = governance.FindGovernanceObject(hash);
         if (!pGovObj) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Governance object not found");
         }
@@ -283,7 +282,7 @@ static RPCHelpMan gobject_vote_conf()
     CDeterministicMNList mnList;
     if(deterministicMNManager)
         deterministicMNManager->GetListAtChainTip(mnList);
-    auto dmn = WITH_LOCK(activeMasternodeInfoCs, return mnList.GetValidMNByCollateral(activeMasternodeInfo.outpoint));
+    auto dmn = mnList.GetValidMNByCollateral(activeMasternodeInfo.outpoint);
 
     if (!dmn) {
         nFailed++;
@@ -301,12 +300,8 @@ static RPCHelpMan gobject_vote_conf()
     if (govObjType == GOVERNANCE_OBJECT_PROPOSAL && eVoteSignal == VOTE_SIGNAL_FUNDING) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Can't use vote-conf for proposals");
     }
-
-    {
-        LOCK(activeMasternodeInfoCs);
-        if (activeMasternodeInfo.blsKeyOperator) {
-            signSuccess = vote.Sign(*activeMasternodeInfo.blsKeyOperator);
-        }
+    if (activeMasternodeInfo.blsKeyOperator) {
+        signSuccess = vote.Sign(*activeMasternodeInfo.blsKeyOperator);
     }
 
     if (!signSuccess) {
@@ -320,7 +315,7 @@ static RPCHelpMan gobject_vote_conf()
     }
 
     CGovernanceException exception;
-    if (governance->ProcessVoteAndRelay(vote, exception, *node.connman)) {
+    if (governance.ProcessVoteAndRelay(vote, exception, *node.connman)) {
         nSuccessful++;
         statusObj.pushKV("result", "success");
     } else {
@@ -340,16 +335,16 @@ static RPCHelpMan gobject_vote_conf()
 } 
 
 
-UniValue ListObjects(ChainstateManager& chainman, const std::string& strCachedSignal, const std::string& strType, int nStartTime)
+UniValue ListObjects(const std::string& strCachedSignal, const std::string& strType, int nStartTime)
 {
     UniValue objResult(UniValue::VOBJ);
 
     // GET MATCHING GOVERNANCE OBJECTS
 
-    LOCK(governance->cs);
+    LOCK(governance.cs);
 
-    std::vector<const CGovernanceObject*> objs = governance->GetAllNewerThan(nStartTime);
-    governance->UpdateLastDiffTime(GetTime());
+    std::vector<const CGovernanceObject*> objs = governance.GetAllNewerThan(nStartTime);
+    governance.UpdateLastDiffTime(GetTime());
 
     // CREATE RESULTS FOR USER
 
@@ -382,7 +377,7 @@ UniValue ListObjects(ChainstateManager& chainman, const std::string& strCachedSi
 
         // REPORT VALIDITY AND CACHING FLAGS FOR VARIOUS SETTINGS
         std::string strError = "";
-        bObj.pushKV("fBlockchainValidity",  pGovObj->IsValidLocally(chainman, strError, false));
+        bObj.pushKV("fBlockchainValidity",  pGovObj->IsValidLocally(strError, false));
         bObj.pushKV("IsValidReason",  strError.c_str());
         bObj.pushKV("fCachedValid",  pGovObj->IsSetCachedValid());
         bObj.pushKV("fCachedFunding",  pGovObj->IsSetCachedFunding());
@@ -410,7 +405,6 @@ static RPCHelpMan gobject_list()
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    NodeContext& node = EnsureAnyNodeContext(request.context);
     std::string strCachedSignal = "valid";
     if (!request.params[0].isNull()) {
         strCachedSignal = request.params[0].get_str();
@@ -425,7 +419,7 @@ static RPCHelpMan gobject_list()
     if (strType != "proposals" && strType != "triggers" && strType != "all")
         return "Invalid type, should be 'proposals', 'triggers' or 'all'";
 
-    return ListObjects(*node.chainman, strCachedSignal, strType, 0);
+    return ListObjects(strCachedSignal, strType, 0);
 },
     };
 } 
@@ -445,7 +439,6 @@ static RPCHelpMan gobject_diff()
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    NodeContext& node = EnsureAnyNodeContext(request.context);
     std::string strCachedSignal = "valid";
     if (!request.params[0].isNull()) {
         strCachedSignal = request.params[0].get_str();
@@ -460,7 +453,7 @@ static RPCHelpMan gobject_diff()
     if (strType != "proposals" && strType != "triggers" && strType != "all")
         return "Invalid type, should be 'proposals', 'triggers' or 'all'";
 
-    return ListObjects(*node.chainman, strCachedSignal, strType, governance->GetLastDiffTime());
+    return ListObjects(strCachedSignal, strType, governance.GetLastDiffTime());
 },
     };
 } 
@@ -481,11 +474,11 @@ static RPCHelpMan gobject_get()
 {
     // COLLECT VARIABLES FROM OUR USER
     uint256 hash = ParseHashV(request.params[0], "GovObj hash");
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    LOCK(governance->cs);
+
+    LOCK(governance.cs);
 
     // FIND THE GOVERNANCE OBJECT THE USER IS LOOKING FOR
-    CGovernanceObject* pGovObj = governance->FindGovernanceObject(hash);
+    CGovernanceObject* pGovObj = governance.FindGovernanceObject(hash);
 
     if (pGovObj == nullptr) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown governance object");
@@ -541,7 +534,7 @@ static RPCHelpMan gobject_get()
 
     // --
     std::string strError = "";
-    objResult.pushKV("fLocalValidity",  pGovObj->IsValidLocally(*node.chainman, strError, false));
+    objResult.pushKV("fLocalValidity",  pGovObj->IsValidLocally(strError, false));
     objResult.pushKV("IsValidReason",  strError.c_str());
     objResult.pushKV("fCachedValid",  pGovObj->IsSetCachedValid());
     objResult.pushKV("fCachedFunding",  pGovObj->IsSetCachedFunding());
@@ -581,9 +574,9 @@ static RPCHelpMan gobject_getcurrentvotes()
 
     // FIND OBJECT USER IS LOOKING FOR
 
-    LOCK(governance->cs);
+    LOCK(governance.cs);
 
-    CGovernanceObject* pGovObj = governance->FindGovernanceObject(hash);
+    CGovernanceObject* pGovObj = governance.FindGovernanceObject(hash);
 
     if (pGovObj == nullptr) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown governance-hash");
@@ -595,7 +588,7 @@ static RPCHelpMan gobject_getcurrentvotes()
 
     // GET MATCHING VOTES BY HASH, THEN SHOW USERS VOTE INFORMATION
 
-    std::vector<CGovernanceVote> vecVotes = governance->GetCurrentVotes(hash, mnCollateralOutpoint);
+    std::vector<CGovernanceVote> vecVotes = governance.GetCurrentVotes(hash, mnCollateralOutpoint);
     for (const auto& vote : vecVotes) {
         bResult.pushKV(vote.GetHash().ToString(),  vote.ToString());
     }
@@ -652,8 +645,8 @@ static RPCHelpMan voteraw()
 
     int govObjType;
     {
-        LOCK(governance->cs);
-        CGovernanceObject *pGovObj = governance->FindGovernanceObject(hashGovObj);
+        LOCK(governance.cs);
+        CGovernanceObject *pGovObj = governance.FindGovernanceObject(hashGovObj);
         if (!pGovObj) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Governance object not found");
         }
@@ -688,7 +681,7 @@ static RPCHelpMan voteraw()
     }
 
     CGovernanceException exception;
-    if (governance->ProcessVoteAndRelay(vote, exception, *node.connman)) {
+    if (governance.ProcessVoteAndRelay(vote, exception, *node.connman)) {
         return "Voted successfully";
     } else {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Error voting : " + exception.GetMessageStr());
@@ -719,18 +712,18 @@ static RPCHelpMan getgovernanceinfo()
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    NodeContext& node = EnsureAnyNodeContext(request.context);
+
     LOCK(cs_main);
 
     int nLastSuperblock = 0, nNextSuperblock = 0;
-    int nBlockHeight = node.chainman->ActiveHeight();
+    int nBlockHeight = ::ChainActive().Height();
 
     CSuperblock::GetNearestSuperblocksHeights(nBlockHeight, nLastSuperblock, nNextSuperblock);
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("governanceminquorum", Params().GetConsensus().nGovernanceMinQuorum);
     obj.pushKV("proposalfee", ValueFromAmount(GOVERNANCE_PROPOSAL_FEE_TX));
-    obj.pushKV("superblockcycle", Params().GetConsensus().SuperBlockCycle(nBlockHeight));
+    obj.pushKV("superblockcycle", Params().GetConsensus().nSuperblockCycle);
     obj.pushKV("lastsuperblock", nLastSuperblock);
     obj.pushKV("nextsuperblock", nNextSuperblock);
 

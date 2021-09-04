@@ -40,6 +40,7 @@
 /doc/dependencies.md                        @fanquake
 /doc/developer-notes.md                     @laanwj
 /doc/files.md                               @hebasto
+/doc/gitian-building.md                     @laanwj
 /doc/reduce-memory.md                       @fanquake
 /doc/reduce-traffic.md                      @jonasschnelli
 /doc/release-process.md                     @laanwj
@@ -55,6 +56,8 @@
 /src/util/settings.*                        @ryanofsky
 
 # Fuzzing
+/src/test/fuzz/                             @practicalswift
+/doc/fuzzing.md                             @practicalswift
 
 # Test framework
 /test/functional/mempool_updatefromblock.py @hebasto
@@ -70,7 +73,8 @@
 /contrib/devtools/test-security-check.py    @fanquake
 /contrib/devtools/symbol-check.py           @fanquake
 
-# Guix
+# Gitian/Guix
+/contrib/gitian-build.py                    @hebasto
 /contrib/guix/                              @dongcarl
 
 # Compatibility
@@ -101,7 +105,9 @@
 /src/txdb.*                                 @jamesob
 /src/dbwrapper.*                            @jamesob
 
-# Linter
+# Scripts/Linter
+*.sh                                        @practicalswift
+/test/lint/                                 @practicalswift
 /test/lint/lint-shell.sh                    @hebasto
 
 # Bech32

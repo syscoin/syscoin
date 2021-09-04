@@ -15,7 +15,7 @@
 class CDataStream;
 class CInv;
 class CScheduler;
-class ChainstateManager;
+
 namespace llmq
 {
 
@@ -52,6 +52,7 @@ public:
     uint256 quorumHash;
     uint32_t quorumHeight{0};
     uint8_t phase{0};
+
     union {
         struct
         {
@@ -71,8 +72,7 @@ public:
 public:
     CDKGDebugSessionStatus() : statusBitset(0) {}
 
-
-    UniValue ToJson(ChainstateManager &chainman,int detailLevel) const;
+    UniValue ToJson(int detailLevel) const;
 };
 
 class CDKGDebugStatus
@@ -83,7 +83,7 @@ public:
     std::map<uint8_t, CDKGDebugSessionStatus> sessions;
 
 public:
-    UniValue ToJson(ChainstateManager &chainman, int detailLevel) const;
+    UniValue ToJson(int detailLevel) const;
 };
 
 class CDKGDebugManager
@@ -91,6 +91,7 @@ class CDKGDebugManager
 private:
     mutable RecursiveMutex cs;
     CDKGDebugStatus localStatus GUARDED_BY(cs);
+
 public:
     CDKGDebugManager();
 

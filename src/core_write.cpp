@@ -53,9 +53,9 @@ bool AssetAllocationTxToJSON(const CTransaction &tx, const uint256& hashBlock, U
     }
 
     entry.__pushKV("allocations", oAssetAllocationReceiversArray);
-    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM){
+    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM){
          CBurnSyscoin burnSyscoin(tx);
-         entry.__pushKV("nevm_destination", "0x" + HexStr(burnSyscoin.vchNEVMAddress));
+         entry.__pushKV("ethereum_destination", "0x" + HexStr(burnSyscoin.vchEthAddress));
     }
     return true;
 }
@@ -68,8 +68,7 @@ bool AssetMintTxToJson(const CTransaction& tx, const uint256& txHash, const uint
         entry.__pushKV("txid", txHash.GetHex());
         entry.__pushKV("blockhash", hashBlock.GetHex());  
         UniValue oSPVProofObj(UniValue::VOBJ);
-        oSPVProofObj.__pushKV("txid", mintSyscoin.strTxHash);  
-        oSPVProofObj.__pushKV("blockhash", mintSyscoin.nBlockHash.GetHex());  
+        oSPVProofObj.__pushKV("bridgetransferid", mintSyscoin.nBridgeTransferID);  
         oSPVProofObj.__pushKV("postx", mintSyscoin.posTx);
         oSPVProofObj.__pushKV("txroot", HexStr(mintSyscoin.vchTxRoot)); 
         oSPVProofObj.__pushKV("txparentnodes", HexStr(mintSyscoin.vchTxParentNodes)); 
@@ -77,6 +76,7 @@ bool AssetMintTxToJson(const CTransaction& tx, const uint256& txHash, const uint
         oSPVProofObj.__pushKV("posReceipt", mintSyscoin.posReceipt);  
         oSPVProofObj.__pushKV("receiptroot", HexStr(mintSyscoin.vchReceiptRoot));  
         oSPVProofObj.__pushKV("receiptparentnodes", HexStr(mintSyscoin.vchReceiptParentNodes));  
+        oSPVProofObj.__pushKV("ethblocknumber", mintSyscoin.nBlockNumber); 
         entry.__pushKV("spv_proof", oSPVProofObj);
         UniValue oAssetAllocationReceiversArray(UniValue::VARR);
         for(const auto &it: mintSyscoin.voutAssets) {
@@ -390,10 +390,7 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_add
     const bool calculate_fee = txundo != nullptr;
     CAmount amt_total_in = 0;
     CAmount amt_total_out = 0;
-    // SYSCOIN
-    if(calculate_fee) {
-        amt_total_out = tx.GetValueOut();
-    }
+
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CTxIn& txin = tx.vin[i];
         UniValue in(UniValue::VOBJ);
@@ -436,6 +433,10 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_add
         ScriptPubKeyToUniv(txout.scriptPubKey, o, true, include_addresses);
         out.pushKV("scriptPubKey", o);
         vout.push_back(out);
+
+        if (calculate_fee) {
+            amt_total_out += txout.nValue;
+        }
     }
     entry.pushKV("vout", vout);
     // SYSCOIN

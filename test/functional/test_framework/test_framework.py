@@ -119,9 +119,6 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         # By default the wallet is not required. Set to true by skip_if_no_wallet().
         # When False, we ignore wallet_names regardless of what it is.
         self.requires_wallet = False
-        # Disable ThreadOpenConnections by default, so that adding entries to
-        # addrman will not result in automatic connections to them.
-        self.disable_autoconnect = True
         self.set_test_params()
         assert self.wallet_names is None or len(self.wallet_names) <= self.num_nodes
         if self.options.timeout_factor == 0 :
@@ -203,10 +200,6 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
                             help="Run test using legacy wallets", dest='descriptors')
 
         self.add_options(parser)
-        # Running TestShell in a Jupyter notebook causes an additional -f argument
-        # To keep TestShell from failing with an "unrecognized argument" error, we add a dummy "-f" argument
-        # source: https://stackoverflow.com/questions/48796169/how-to-fix-ipykernel-launcher-py-error-unrecognized-arguments-in-jupyter/56349168#56349168
-        parser.add_argument("-f", "--fff", help="a dummy argument to fool ipython", default="1")
         self.options = parser.parse_args()
         self.options.previous_releases_path = previous_releases_path
 
@@ -416,7 +409,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             # To ensure that all nodes are out of IBD, the most recent block
             # must have a timestamp not too old (see IsInitialBlockDownload()).
             self.log.debug('Generate a block with current time')
-            block_hash = self.generate(self.nodes[0], 1)[0]
+            block_hash = self.nodes[0].generate(1)[0]
             block = self.nodes[0].getblock(blockhash=block_hash, verbosity=0)
             for n in self.nodes:
                 n.submitblock(block)
@@ -643,22 +636,6 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         node.setnetworkactive(True)
         self.connect_nodes(node.index, node_num)
 
-    def generate(self, generator, *args, **kwargs):
-        blocks = generator.generate(*args, **kwargs)
-        return blocks
-
-    def generateblock(self, generator, *args, **kwargs):
-        blocks = generator.generateblock(*args, **kwargs)
-        return blocks
-
-    def generatetoaddress(self, generator, *args, **kwargs):
-        blocks = generator.generatetoaddress(*args, **kwargs)
-        return blocks
-
-    def generatetodescriptor(self, generator, *args, **kwargs):
-        blocks = generator.generatetodescriptor(*args, **kwargs)
-        return blocks
-
     def sync_blocks(self, nodes=None, wait=1, timeout=60):
         """
         Wait until everybody has the same tip.
@@ -754,7 +731,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         if not os.path.isdir(cache_node_dir):
             self.log.debug("Creating cache directory {}".format(cache_node_dir))
 
-            initialize_datadir(self.options.cachedir, CACHE_NODE_ID, self.chain, self.disable_autoconnect)
+            initialize_datadir(self.options.cachedir, CACHE_NODE_ID, self.chain)
             self.nodes.append(
                 TestNode(
                     CACHE_NODE_ID,
@@ -789,8 +766,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             gen_addresses = [k.address for k in TestNode.PRIV_KEYS][:3] + [ADDRESS_BCRT1_P2WSH_OP_TRUE]
             assert_equal(len(gen_addresses), 4)
             for i in range(8):
-                self.generatetoaddress(
-                    cache_node,
+                cache_node.generatetoaddress(
                     nblocks=25 if i != 7 else 24,
                     address=gen_addresses[i % len(gen_addresses)],
                 )
@@ -806,14 +782,14 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
             os.rmdir(cache_path('wallets'))  # Remove empty wallets dir
             for entry in os.listdir(cache_path()):
-                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'asset', 'assetnft', 'llmq', 'evodb']:  # Only keep chainstate and blocks folder
+                if entry not in ['chainstate', 'blocks', 'indexes', 'ethereumminttx', 'ethereumtxroots', 'geth', 'dbblockindex', 'asset', 'llmq', 'evodb']:  # Only keep chainstate and blocks folder
                     os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
             self.log.debug("Copy cache directory {} to node {}".format(cache_node_dir, i))
             to_dir = get_datadir_path(self.options.tmpdir, i)
             shutil.copytree(cache_node_dir, to_dir)
-            initialize_datadir(self.options.tmpdir, i, self.chain, self.disable_autoconnect)  # Overwrite port/rpcport in syscoin.conf
+            initialize_datadir(self.options.tmpdir, i, self.chain)  # Overwrite port/rpcport in syscoin.conf
 
     def _initialize_chain_clean(self):
         """Initialize empty blockchain for use by the test.
@@ -821,7 +797,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         Create an empty blockchain and num_nodes wallets.
         Useful if a test case wants complete control over initialization."""
         for i in range(self.num_nodes):
-            initialize_datadir(self.options.tmpdir, i, self.chain, self.disable_autoconnect)
+            initialize_datadir(self.options.tmpdir, i, self.chain)
 
     def skip_if_no_py3_zmq(self):
         """Attempt to import the zmq package and skip the test if the import fails."""
@@ -965,7 +941,6 @@ class DashTestFramework(SyscoinTestFramework):
         self.quorum_data_thread_request_timeout_seconds = 10
         # This is EXPIRATION_TIMEOUT in CQuorumDataRequest
         self.quorum_data_request_expiration_timeout = 300
-        self.disable_autoconnect = False
 
     def confirm_mns(self):
         while True:
@@ -1446,8 +1421,8 @@ class DashTestFramework(SyscoinTestFramework):
         assert_equal(q, new_quorum)
         quorum_info = self.nodes[0].quorum_info(100, new_quorum)
 
-        # Mine 8 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
-        self.nodes[0].generate(8)
+        # Mine 20 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
+        self.nodes[0].generate(20)
         self.bump_mocktime(5, nodes=nodes)
         self.sync_blocks(nodes)
 

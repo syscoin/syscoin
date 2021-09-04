@@ -165,7 +165,7 @@ private:
 public:
     CFlatDB(std::string strFilenameIn, std::string strMagicMessageIn)
     {
-        pathDB = gArgs.GetDataDirNet() / strFilenameIn;
+        pathDB = GetDataDir() / strFilenameIn;
         strFilename = strFilenameIn;
         strMagicMessage = strMagicMessageIn;
     }
@@ -192,11 +192,12 @@ public:
         return true;
     }
 
-    bool Dump(T& objToSave, T &tmpObjToLoad)
+    bool Dump(T& objToSave)
     {
         int64_t nStart = GetTimeMillis();
 
         LogPrintf("Verifying %s format...\n", strFilename);
+        T tmpObjToLoad;
         ReadResult readResult = Read(tmpObjToLoad, true);
 
         // there was an error and it was not an error on file opening => do not proceed

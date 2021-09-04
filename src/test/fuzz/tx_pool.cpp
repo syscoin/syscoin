@@ -21,9 +21,8 @@ std::vector<COutPoint> g_outpoints_coinbase_init_mature;
 std::vector<COutPoint> g_outpoints_coinbase_init_immature;
 
 struct MockedTxPool : public CTxMemPool {
-    void RollingFeeUpdate() EXCLUSIVE_LOCKS_REQUIRED(!cs)
+    void RollingFeeUpdate()
     {
-        LOCK(cs);
         lastRollingFeeUpdate = GetTime();
         blockSinceLastRollingFeeBump = true;
     }
@@ -142,8 +141,7 @@ FUZZ_TARGET_INIT(tx_pool_standard, initialize_tx_pool)
         return c.out.nValue;
     };
 
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 300)
-    {
+    while (fuzzed_data_provider.ConsumeBool()) {
         {
             // Total supply is the mempool fee + all outpoints
             CAmount supply_now{WITH_LOCK(tx_pool.cs, return tx_pool.GetTotalFee())};
@@ -220,16 +218,6 @@ FUZZ_TARGET_INIT(tx_pool_standard, initialize_tx_pool)
         RegisterSharedValidationInterface(txr);
         const bool bypass_limits = fuzzed_data_provider.ConsumeBool();
         ::fRequireStandard = fuzzed_data_provider.ConsumeBool();
-
-        // Make sure ProcessNewPackage on one transaction works and always fully validates the transaction.
-        // The result is not guaranteed to be the same as what is returned by ATMP.
-        const auto result_package = WITH_LOCK(::cs_main,
-                                    return ProcessNewPackage(node.chainman->ActiveChainstate(), tx_pool, {tx}, true));
-        auto it = result_package.m_tx_results.find(tx->GetWitnessHash());
-        Assert(it != result_package.m_tx_results.end());
-        Assert(it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
-               it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID);
-
         const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, tx_pool, tx, bypass_limits));
         const bool accepted = res.m_result_type == MempoolAcceptResult::ResultType::VALID;
         SyncWithValidationInterfaceQueue();
@@ -306,8 +294,7 @@ FUZZ_TARGET_INIT(tx_pool, initialize_tx_pool)
     CTxMemPool tx_pool_{/* estimator */ nullptr, /* check_ratio */ 1};
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(&tx_pool_);
 
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 300)
-    {
+    while (fuzzed_data_provider.ConsumeBool()) {
         const auto mut_tx = ConsumeTransaction(fuzzed_data_provider, txids);
 
         if (fuzzed_data_provider.ConsumeBool()) {

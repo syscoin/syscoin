@@ -10,8 +10,6 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <core_io.h>
-#include <deploymentinfo.h>
-#include <deploymentstatus.h>
 #include <key_io.h>
 #include <miner.h>
 #include <net.h>
@@ -37,6 +35,7 @@
 #include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <versionbitsinfo.h>
 #include <warnings.h>
 
 #include <memory>
@@ -62,7 +61,7 @@ static UniValue GetNetworkHashPS(int lookup, int height, const CChain& active_ch
 
     // If lookup is -1, then use blocks since last difficulty change.
     if (lookup <= 0)
-        lookup = pb->nHeight % Params().GetConsensus().DifficultyAdjustmentInterval(pb->nHeight) + 1;
+        lookup = pb->nHeight % Params().GetConsensus().DifficultyAdjustmentInterval() + 1;
 
     // If lookup is larger than chain, then set it to chain length.
     if (lookup > pb->nHeight)
@@ -119,6 +118,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
 
     {
         LOCK(cs_main);
+        CHECK_NONFATAL(std::addressof(::ChainActive()) == std::addressof(chainman.ActiveChain()));
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
     }
 
@@ -151,6 +151,7 @@ static UniValue generateBlocks(ChainstateManager& chainman, const CTxMemPool& me
 
     {   // Don't keep cs_main locked
         LOCK(cs_main);
+        CHECK_NONFATAL(std::addressof(::ChainActive()) == std::addressof(chainman.ActiveChain()));
         nHeight = chainman.ActiveChain().Height();
         nHeightEnd = nHeight+nGenerate;
     }
@@ -383,8 +384,9 @@ static RPCHelpMan generateblock()
 
     // Add transactions
     block.vtx.insert(block.vtx.end(), txs.begin(), txs.end());
-    // SYSCOIN
-    RegenerateCommitments(block, chainman, blocktemplate->vchCoinbaseCommitmentExtra);
+     // SYSCOIN
+    CBlockIndex* prev_block = WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock));
+    RegenerateCommitments(block, prev_block, blocktemplate->vchCoinbaseCommitmentExtra);
 
     {
         LOCK(cs_main);
@@ -698,14 +700,14 @@ static RPCHelpMan getblocktemplate()
     // Get expected MN/superblock payees. The call to GetBlockTxOuts might fail on regtest/devnet or when
     // testnet is reset. This is fine and we ignore failure (blocks will be accepted)
     std::vector<CTxOut> voutMasternodePayments;
-    CAmount mnRet, mnRet1;
+    CAmount mnRet;
     int nCollateralHeight;
-    mnpayments.GetBlockTxOuts(node.chainman->ActiveChain(), node.chainman->ActiveHeight() + 1, 0, voutMasternodePayments, 0, mnRet, mnRet1, nCollateralHeight);
+    mnpayments.GetBlockTxOuts(::ChainActive().Height() + 1, 0, voutMasternodePayments, 0, mnRet, nCollateralHeight);
 
     // next bock is a superblock and we need governance info to correctly construct it
     if (!fRegTest && !fSigNet && isSBSportActive
         && !masternodeSync.IsSynced()
-        && CSuperblock::IsValidBlockHeight(node.chainman->ActiveHeight() + 1))
+        && CSuperblock::IsValidBlockHeight(::ChainActive().Height() + 1))
             throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "Syscoin Core is syncing with network...");
     
 
@@ -803,7 +805,7 @@ static RPCHelpMan getblocktemplate()
     pblock->nNonce = 0;
 
     // NOTE: If at some point we support pre-segwit miners post-segwit-activation, this needs to take segwit support into consideration
-    const bool fPreSegWit = !DeploymentActiveAfter(pindexPrev, consensusParams, Consensus::DEPLOYMENT_SEGWIT);
+    const bool fPreSegWit = (pindexPrev->nHeight + 1 < consensusParams.SegwitHeight);
 
     UniValue aCaps(UniValue::VARR); aCaps.push_back("proposal");
 
@@ -869,7 +871,7 @@ static RPCHelpMan getblocktemplate()
     UniValue vbavailable(UniValue::VOBJ);
     for (int j = 0; j < (int)Consensus::MAX_VERSION_BITS_DEPLOYMENTS; ++j) {
         Consensus::DeploymentPos pos = Consensus::DeploymentPos(j);
-        ThresholdState state = g_versionbitscache.State(pindexPrev, consensusParams, pos);
+        ThresholdState state = VersionBitsState(pindexPrev, consensusParams, pos, versionbitscache);
         switch (state) {
             case ThresholdState::DEFINED:
             case ThresholdState::FAILED:
@@ -877,8 +879,8 @@ static RPCHelpMan getblocktemplate()
                 break;
             case ThresholdState::LOCKED_IN:
                 // Ensure bit is set in block version
-                pblock->nVersion |= g_versionbitscache.Mask(consensusParams, pos);
-                [[fallthrough]];
+                pblock->nVersion |= VersionBitsMask(consensusParams, pos);
+                // FALL THROUGH to get vbavailable set...
             case ThresholdState::STARTED:
             {
                 const struct VBDeploymentInfo& vbinfo = VersionBitsDeploymentInfo[pos];
@@ -886,7 +888,7 @@ static RPCHelpMan getblocktemplate()
                 if (setClientRules.find(vbinfo.name) == setClientRules.end()) {
                     if (!vbinfo.gbt_force) {
                         // If the client doesn't support this, don't indicate it in the [default] version
-                        pblock->nVersion &= ~g_versionbitscache.Mask(consensusParams, pos);
+                        pblock->nVersion &= ~VersionBitsMask(consensusParams, pos);
                     }
                 }
                 break;
@@ -1153,8 +1155,7 @@ static RPCHelpMan estimatesmartfee()
             "have been observed to make an estimate for any number of blocks."},
                     }},
                 RPCExamples{
-                    HelpExampleCli("estimatesmartfee", "6") +
-                    HelpExampleRpc("estimatesmartfee", "6")
+                    HelpExampleCli("estimatesmartfee", "6")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {

@@ -7,7 +7,6 @@
 #include <random.h>
 #include <util/time.h>
 
-#include <optional>
 #include <vector>
 
 /* A "source" is a source address from which we have received a bunch of other addresses. */
@@ -72,15 +71,17 @@ static void AddrManAdd(benchmark::Bench& bench)
 {
     CreateAddresses();
 
+    CAddrMan addrman;
+
     bench.run([&] {
-        CAddrMan addrman{/* deterministic */ false, /* consistency_check_ratio */ 0};
         AddAddressesToAddrMan(addrman);
+        addrman.Clear();
     });
 }
 
 static void AddrManSelect(benchmark::Bench& bench)
 {
-    CAddrMan addrman(/* deterministic */ false, /* consistency_check_ratio */ 0);
+    CAddrMan addrman;
 
     FillAddrMan(addrman);
 
@@ -92,12 +93,12 @@ static void AddrManSelect(benchmark::Bench& bench)
 
 static void AddrManGetAddr(benchmark::Bench& bench)
 {
-    CAddrMan addrman(/* deterministic */ false, /* consistency_check_ratio */ 0);
+    CAddrMan addrman;
 
     FillAddrMan(addrman);
 
     bench.run([&] {
-        const auto& addresses = addrman.GetAddr(/* max_addresses */ 2500, /* max_pct */ 23, /* network */ std::nullopt);
+        const auto& addresses = addrman.GetAddr(2500, 23);
         assert(addresses.size() > 0);
     });
 }
@@ -110,12 +111,10 @@ static void AddrManGood(benchmark::Bench& bench)
      * we want to do the same amount of work in every loop iteration. */
 
     bench.epochs(5).epochIterations(1);
-    const size_t addrman_count{bench.epochs() * bench.epochIterations()};
 
-    std::vector<std::unique_ptr<CAddrMan>> addrmans(addrman_count);
-    for (size_t i{0}; i < addrman_count; ++i) {
-        addrmans[i] = std::make_unique<CAddrMan>(/* deterministic */ false, /* consistency_check_ratio */ 0);
-        FillAddrMan(*addrmans[i]);
+    std::vector<CAddrMan> addrmans(bench.epochs() * bench.epochIterations());
+    for (auto& addrman : addrmans) {
+        FillAddrMan(addrman);
     }
 
     auto markSomeAsGood = [](CAddrMan& addrman) {
@@ -130,7 +129,7 @@ static void AddrManGood(benchmark::Bench& bench)
 
     uint64_t i = 0;
     bench.run([&] {
-        markSomeAsGood(*addrmans.at(i));
+        markSomeAsGood(addrmans.at(i));
         ++i;
     });
 }

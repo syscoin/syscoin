@@ -18,7 +18,7 @@ ser_*, deser_*: functions that handle serialization/deserialization.
 Classes use __slots__ to ensure extraneous attributes aren't accidentally added
 by tests, compromising their intended effect.
 """
-from base64 import b32decode, b32encode
+from codecs import encode
 import copy
 import hashlib
 from io import BytesIO
@@ -29,18 +29,18 @@ import struct
 import time
 
 from test_framework.siphash import siphash256
-from test_framework.util import assert_equal
-# SYSCOIN
+from test_framework.util import hex_str_to_bytes, assert_equal
 from collections import namedtuple
 MAX_LOCATOR_SZ = 101
-MAX_BLOCK_WEIGHT = 4000000
+# SYSCOIN
+MAX_BLOCK_BASE_SIZE = 4000000
 MAX_BLOOM_FILTER_SIZE = 36000
 MAX_BLOOM_HASH_FUNCS = 50
 
 COIN = 100000000  # 1 sys in satoshis
 MAX_MONEY = 888000000 * COIN
 
-BIP125_SEQUENCE_NUMBER = 0xfffffffd  # Sequence number that is rbf-opt-in (BIP 125) and csv-opt-out (BIP 68)
+BIP125_SEQUENCE_NUMBER = 0xfffffffd  # Sequence number that is BIP 125 opt-in and BIP 68-opt-out
 # SYSCOIN
 MAX_PROTOCOL_MESSAGE_LENGTH = 32 * 1024 * 1024  # Maximum length of incoming protocol messages
 MAX_HEADERS_RESULTS = 2000  # Number of headers sent in one getheaders result
@@ -72,7 +72,6 @@ MSG_QUORUM_JUSTIFICATION = 17
 MSG_QUORUM_PREMATURE_COMMITMENT = 18
 MSG_QUORUM_RECOVERED_SIG = 19
 MSG_CLSIG = 20
-VERSION_NEVM = (1 << 7)
 # Constants for the auxpow block version.
 VERSION_AUXPOW = (1 << 8)
 VERSION_START_BIT = 16
@@ -236,87 +235,17 @@ def ser_dyn_bitset(l, bytes_based):
         r = ser_compact_size(n) + bytes(r)
     return r
 
-def from_hex(obj, hex_string):
-    """Deserialize from a hex string representation (e.g. from RPC)
-
-    Note that there is no complementary helper like e.g. `to_hex` for the
-    inverse operation. To serialize a message object to a hex string, simply
-    use obj.serialize().hex()"""
-    obj.deserialize(BytesIO(bytes.fromhex(hex_string)))
+# Deserialize from a hex string representation (eg from RPC)
+def FromHex(obj, hex_string):
+    obj.deserialize(BytesIO(hex_str_to_bytes(hex_string)))
     return obj
 
-
-def tx_from_hex(hex_string):
-    """Deserialize from hex string to a transaction object"""
-    return from_hex(CTransaction(), hex_string)
-
+# Convert a binary-serializable object to hex (eg for submission via RPC)
+def ToHex(obj):
+    return obj.serialize().hex()
 
 # Objects that map to syscoind objects, which can be serialized/deserialized
 # SYSCOIN
-class CNEVMBlock:
-    __slots__ = ("blockhash", "parentblockhash", "txroot", "receiptroot", "blockdata")
-    def __init__(self, blockhash=0, parentblockhash=0,txroot=b"", receiptroot=b"", blockdata=b""):
-        self.blockhash = blockhash
-        self.parentblockhash = blockhash
-        self.txroot = txroot
-        self.receiptroot = receiptroot
-        self.blockdata = blockdata
-
-    def deserialize(self, f):
-        self.blockhash = deser_uint256(f)
-        self.parentblockhash = deser_uint256(f)
-        self.txroot = deser_string(f)
-        self.receiptroot = deser_string(f)
-        self.blockdata = deser_string(f)
-
-    def serialize(self):
-        r = b""
-        r += ser_uint256(self.blockhash)
-        r += ser_uint256(self.parentblockhash)
-        r += ser_string(self.txroot)
-        r += ser_string(self.receiptroot)
-        r += ser_string(self.blockdata)
-        return r
-
-    def __repr__(self):
-        return "CEVMBlock(blockhash=%064x parentblockhash=%064x txroot=%s receiptroot=%s blockdata=%s)" % (self.blockhash, self.parentblockhash, self.txroot, self.receiptroot, self.blockdata)
-
-class CNEVMBlockConnect(CNEVMBlock):
-    __slots__ = ("sysblockhash")
-    def __init__(self):
-        super(CNEVMBlockConnect, self).__init__()
-        self.sysblockhash = 0
-
-    def deserialize(self, f):
-        super(CNEVMBlockConnect, self).deserialize(f)
-        self.sysblockhash = deser_uint256(f)
-
-    def serialize(self):
-        r = b""
-        r += super(CNEVMBlockConnect, self).serialize()
-        r += ser_uint256(self.sysblockhash)
-        return r
-
-    def __repr__(self):
-        return "CNEVMBlockConnect(blockhash=%064x parentblockhash=%064x sysblockhash=%064x txroot=%s receiptroot=%s blockdata=%s)" % (self.blockhash, self.parentblockhash, self.sysblockhash, self.txroot, self.receiptroot, self.blockdata)
-
-class CNEVMBlockDisconnect():
-    __slots__ = ("sysblockhash")
-    def __init__(self):
-        self.sysblockhash = 0
-
-    def deserialize(self, f):
-        self.sysblockhash = deser_uint256(f)
-
-    def serialize(self):
-        r = b""
-        r += ser_uint256(self.sysblockhash)
-        return r
-
-    def __repr__(self):
-        return "CNEVMBlockDisconnect(sysblockhash=%064x)" % (self.sysblockhash)
-
-
 class CService:
     __slots__ = ("ip", "port")
     def __init__(self):
@@ -341,19 +270,14 @@ class CAddress:
 
     # see https://github.com/bitcoin/bips/blob/master/bip-0155.mediawiki
     NET_IPV4 = 1
-    NET_I2P = 5
 
     ADDRV2_NET_NAME = {
-        NET_IPV4: "IPv4",
-        NET_I2P: "I2P"
+        NET_IPV4: "IPv4"
     }
 
     ADDRV2_ADDRESS_LENGTH = {
-        NET_IPV4: 4,
-        NET_I2P: 32
+        NET_IPV4: 4
     }
-
-    I2P_PAD = "===="
 
     def __init__(self):
         self.time = 0
@@ -361,9 +285,6 @@ class CAddress:
         self.net = self.NET_IPV4
         self.ip = "0.0.0.0"
         self.port = 0
-
-    def __eq__(self, other):
-        return self.net == other.net and self.ip == other.ip and self.nServices == other.nServices and self.port == other.port and self.time == other.time
 
     def deserialize(self, f, *, with_time=True):
         """Deserialize from addrv1 format (pre-BIP155)"""
@@ -397,33 +318,24 @@ class CAddress:
         self.nServices = deser_compact_size(f)
 
         self.net = struct.unpack("B", f.read(1))[0]
-        assert self.net in (self.NET_IPV4, self.NET_I2P)
+        assert self.net == self.NET_IPV4
 
         address_length = deser_compact_size(f)
         assert address_length == self.ADDRV2_ADDRESS_LENGTH[self.net]
 
-        addr_bytes = f.read(address_length)
-        if self.net == self.NET_IPV4:
-            self.ip = socket.inet_ntoa(addr_bytes)
-        else:
-            self.ip = b32encode(addr_bytes)[0:-len(self.I2P_PAD)].decode("ascii").lower() + ".b32.i2p"
+        self.ip = socket.inet_ntoa(f.read(4))
 
         self.port = struct.unpack(">H", f.read(2))[0]
 
     def serialize_v2(self):
         """Serialize in addrv2 format (BIP155)"""
-        assert self.net in (self.NET_IPV4, self.NET_I2P)
+        assert self.net == self.NET_IPV4
         r = b""
         r += struct.pack("<I", self.time)
         r += ser_compact_size(self.nServices)
         r += struct.pack("B", self.net)
         r += ser_compact_size(self.ADDRV2_ADDRESS_LENGTH[self.net])
-        if self.net == self.NET_IPV4:
-            r += socket.inet_aton(self.ip)
-        else:
-            sfx = ".b32.i2p"
-            assert self.ip.endswith(sfx)
-            r += b32decode(self.ip[0:-len(sfx)] + self.I2P_PAD, True)
+        r += socket.inet_aton(self.ip)
         r += struct.pack(">H", self.port)
         return r
 
@@ -748,15 +660,12 @@ class CTransaction:
                 return False
         return True
 
-    # Calculate the transaction weight using witness and non-witness
+    # Calculate the virtual transaction size using witness and non-witness
     # serialization size (does NOT use sigops).
-    def get_weight(self):
+    def get_vsize(self):
         with_witness_size = len(self.serialize_with_witness())
         without_witness_size = len(self.serialize_without_witness())
-        return (WITNESS_SCALE_FACTOR - 1) * without_witness_size + with_witness_size
-
-    def get_vsize(self):
-        return math.ceil(self.get_weight() / WITNESS_SCALE_FACTOR)
+        return math.ceil(((WITNESS_SCALE_FACTOR - 1) * without_witness_size + with_witness_size) / WITNESS_SCALE_FACTOR)
 
     def __repr__(self):
         return "CTransaction(nVersion=%i vin=%s vout=%s wit=%s nLockTime=%i)" \
@@ -817,7 +726,8 @@ class CBlockHeader:
             self.calc_sha256()
 
     def set_null(self):
-        self.nVersion = 4
+        self.nVersion = 1
+
         self.hashPrevBlock = 0
         self.hashMerkleRoot = 0
         self.nTime = 0
@@ -835,14 +745,8 @@ class CBlockHeader:
     def mark_auxpow(self):
         self.nVersion |= VERSION_AUXPOW
 
-    def mark_nevm(self):
-        self.nVersion |= VERSION_NEVM
-
     def is_auxpow(self):
         return (self.nVersion & VERSION_AUXPOW) > 0
-
-    def is_nevm(self):
-        return (self.nVersion & VERSION_NEVM) > 0
 
     def deserialize(self, f):
         self.nVersion = struct.unpack("<i", f.read(4))[0]
@@ -854,9 +758,6 @@ class CBlockHeader:
         if self.is_auxpow():
             self.auxpow = CAuxPow()
             self.auxpow.deserialize(f)
-        elif self.is_nevm():
-            # SYSCOIN read 1 byte for evm data, note auxpow has parent header which puts the extra byte at the end of auxpow
-            f.read(1)
         self.sha256 = None
         self.hash = None
 
@@ -870,9 +771,6 @@ class CBlockHeader:
         r += struct.pack("<I", self.nNonce)
         if self.is_auxpow():
             r += self.auxpow.serialize()
-        elif self.is_nevm():
-            # SYSCOIN nevm data, note auxpow reads one extra byte from parent block header so no need to read it if auxpow here
-            r += struct.pack("<b", 0)
         return r
 
     def calc_sha256(self):
@@ -885,7 +783,7 @@ class CBlockHeader:
             r += struct.pack("<I", self.nBits)
             r += struct.pack("<I", self.nNonce)
             self.sha256 = uint256_from_str(hash256(r))
-            self.hash = hash256(r)[::-1].hex()
+            self.hash = encode(hash256(r)[::-1], 'hex_codec').decode('ascii')
 
     def rehash(self):
         self.sha256 = None
@@ -972,13 +870,6 @@ class CBlock(CBlockHeader):
         while self.sha256 > target:
             self.nNonce += 1
             self.rehash()
-
-    # Calculate the block weight using witness and non-witness
-    # serialization size (does NOT use sigops).
-    def get_weight(self):
-        with_witness_size = len(self.serialize(with_witness=True))
-        without_witness_size = len(self.serialize(with_witness=False))
-        return (WITNESS_SCALE_FACTOR - 1) * without_witness_size + with_witness_size
 
     def __repr__(self):
         return "CBlock(nVersion=%i hashPrevBlock=%064x hashMerkleRoot=%064x nTime=%s nBits=%08x nNonce=%08x vtx=%s)" \

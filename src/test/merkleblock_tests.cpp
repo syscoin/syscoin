@@ -8,10 +8,8 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <set>
-#include <vector>
 
-BOOST_AUTO_TEST_SUITE(merkleblock_tests)
+BOOST_FIXTURE_TEST_SUITE(merkleblock_tests, BasicTestingSetup)
 
 /**
  * Create a CMerkleBlock using a list of txids which will be found in the

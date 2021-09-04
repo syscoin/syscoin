@@ -21,17 +21,16 @@ persistent_worker_template: &PERSISTENT_WORKER_TEMPLATE
 base_template: &BASE_TEMPLATE
   skip: $CIRRUS_REPO_FULL_NAME == "syscoin-core/gui" && $CIRRUS_PR == ""  # No need to run on the read-only mirror, unless it is a PR. https://cirrus-ci.org/guide/writing-tasks/#conditional-task-execution
   merge_base_script:
-    # Unconditionally install git (used in fingerprint_script) and set the
-    # default git author name (used in verify-commits.py)
+    - if [ "$CIRRUS_PR" = "" ]; then exit 0; fi
     - bash -c "$PACKAGE_MANAGER_INSTALL git"
+    - git fetch $CIRRUS_REPO_CLONE_URL $CIRRUS_BASE_BRANCH
     - git config --global user.email "ci@ci.ci"
     - git config --global user.name "ci"
-    - if [ "$CIRRUS_PR" = "" ]; then exit 0; fi
-    - git fetch $CIRRUS_REPO_CLONE_URL $CIRRUS_BASE_BRANCH
     - git merge FETCH_HEAD  # Merge base to detect silent merge conflicts
   stateful: false  # https://cirrus-ci.org/guide/writing-tasks/#stateful-tasks
 
-main_template: &MAIN_TEMPLATE
+global_task_template: &GLOBAL_TASK_TEMPLATE
+  << : *BASE_TEMPLATE
   timeout_in: 120m  # https://cirrus-ci.org/faq/#instance-timed-out
   container:
     # https://cirrus-ci.org/faq/#are-there-any-limits
@@ -42,13 +41,8 @@ main_template: &MAIN_TEMPLATE
     folder: "/tmp/ccache_dir"
   depends_built_cache:
     folder: "depends/built"
-    fingerprint_script: echo $CIRRUS_TASK_NAME $(git rev-list -1 HEAD ./depends)
   ci_script:
     - ./ci/test_run_all.sh
-
-global_task_template: &GLOBAL_TASK_TEMPLATE
-  << : *BASE_TEMPLATE
-  << : *MAIN_TEMPLATE
 
 depends_sdk_cache_template: &DEPENDS_SDK_CACHE_TEMPLATE
   depends_sdk_cache:
@@ -155,15 +149,13 @@ task:
 
 task:
   name: '[no depends, sanitizers: fuzzer,address,undefined,integer] [focal]'
-  only_if: $CIRRUS_BRANCH == $CIRRUS_DEFAULT_BRANCH || $CIRRUS_BASE_BRANCH == $CIRRUS_DEFAULT_BRANCH
   << : *GLOBAL_TASK_TEMPLATE
   container:
     image: ubuntu:focal
-    cpu: 4  # Increase CPU and memory to avoid timeout
+    cpu: 4  # Double CPU and Memory to avoid timeout
     memory: 16G
   env:
     << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
-    MAKEJOBS: "-j8"
     FILE_ENV: "./ci/test/00_setup_env_native_fuzz.sh"
 
 task:
@@ -171,11 +163,8 @@ task:
   << : *GLOBAL_TASK_TEMPLATE
   container:
     image: ubuntu:focal
-    cpu: 4
-    memory: 16G  # The default memory is sometimes just a bit too small, so double everything
   env:
     << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
-    MAKEJOBS: "-j8"
     FILE_ENV: "./ci/test/00_setup_env_native_multiprocess.sh"
 
 task:
@@ -200,11 +189,12 @@ task:
 task:
   name: 'macOS 11 native [gui] [no depends]'
   brew_install_script:
+    - brew update
     - brew install boost libevent berkeley-db4 qt@5 miniupnpc libnatpmp ccache zeromq qrencode sqlite libtool automake pkg-config gnu-getopt
   << : *GLOBAL_TASK_TEMPLATE
   osx_instance:
     # Use latest image, but hardcode version to avoid silent upgrades (and breaks)
-    image: big-sur-xcode-12.5  # https://cirrus-ci.org/guide/macOS
+    image: big-sur-xcode-12.4  # https://cirrus-ci.org/guide/macOS
   env:
     << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
     CI_USE_APT_INSTALL: "no"

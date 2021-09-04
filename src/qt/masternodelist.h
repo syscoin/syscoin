@@ -2,6 +2,7 @@
 #define SYSCOIN_QT_MASTERNODELIST_H
 
 #include <primitives/transaction.h>
+#include <qt/platformstyle.h>
 #include <sync.h>
 #include <util/system.h>
 
@@ -33,7 +34,7 @@ class MasternodeList : public QWidget
     Q_OBJECT
 
 public:
-    explicit MasternodeList(QWidget* parent = 0);
+    explicit MasternodeList(const PlatformStyle* platformStyle, QWidget* parent = 0);
     ~MasternodeList();
 
     void setClientModel(ClientModel* clientModel);

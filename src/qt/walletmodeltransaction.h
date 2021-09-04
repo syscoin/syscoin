@@ -27,8 +27,6 @@ public:
     QList<SendCoinsRecipient> getRecipients() const;
 
     CTransactionRef& getWtx();
-    void setWtx(const CTransactionRef&);
-
     unsigned int getTransactionSize();
 
     void setTransactionFee(const CAmount& newFee);

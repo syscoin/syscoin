@@ -12,7 +12,6 @@ definable expiry timeout via the '-mempoolexpiry=<n>' command line argument
 
 from datetime import timedelta
 
-from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -37,7 +36,7 @@ class MempoolExpiryTest(SyscoinTestFramework):
 
         # Add enough mature utxos to the wallet so that all txs spend confirmed coins.
         self.wallet.generate(4)
-        node.generate(COINBASE_MATURITY)
+        node.generate(100)
 
         # Send a parent transaction that will expire.
         parent_txid = self.wallet.send_self_transfer(from_node=node)['txid']

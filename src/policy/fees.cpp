@@ -10,7 +10,6 @@
 #include <logging.h>
 #include <streams.h>
 #include <txmempool.h>
-#include <util/serfloat.h>
 #include <util/system.h>
 
 static const char* FEE_ESTIMATES_FILENAME = "fee_estimates.dat";
@@ -26,25 +25,6 @@ std::string StringForFeeEstimateHorizon(FeeEstimateHorizon horizon)
     } // no default case, so the compiler can warn about missing cases
     assert(false);
 }
-
-namespace {
-
-struct EncodedDoubleFormatter
-{
-    template<typename Stream> void Ser(Stream &s, double v)
-    {
-        s << EncodeDouble(v);
-    }
-
-    template<typename Stream> void Unser(Stream& s, double& v)
-    {
-        uint64_t encoded;
-        s >> encoded;
-        v = DecodeDouble(encoded);
-    }
-};
-
-} // namespace
 
 /**
  * We will instantiate an instance of this class to track transactions that were
@@ -376,12 +356,12 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
 
 void TxConfirmStats::Write(CAutoFile& fileout) const
 {
-    fileout << Using<EncodedDoubleFormatter>(decay);
+    fileout << decay;
     fileout << scale;
-    fileout << Using<VectorFormatter<EncodedDoubleFormatter>>(m_feerate_avg);
-    fileout << Using<VectorFormatter<EncodedDoubleFormatter>>(txCtAvg);
-    fileout << Using<VectorFormatter<VectorFormatter<EncodedDoubleFormatter>>>(confAvg);
-    fileout << Using<VectorFormatter<VectorFormatter<EncodedDoubleFormatter>>>(failAvg);
+    fileout << m_feerate_avg;
+    fileout << txCtAvg;
+    fileout << confAvg;
+    fileout << failAvg;
 }
 
 void TxConfirmStats::Read(CAutoFile& filein, int nFileVersion, size_t numBuckets)
@@ -392,7 +372,7 @@ void TxConfirmStats::Read(CAutoFile& filein, int nFileVersion, size_t numBuckets
     size_t maxConfirms, maxPeriods;
 
     // The current version will store the decay with each individual TxConfirmStats and also keep a scale factor
-    filein >> Using<EncodedDoubleFormatter>(decay);
+    filein >> decay;
     if (decay <= 0 || decay >= 1) {
         throw std::runtime_error("Corrupt estimates file. Decay must be between 0 and 1 (non-inclusive)");
     }
@@ -401,15 +381,15 @@ void TxConfirmStats::Read(CAutoFile& filein, int nFileVersion, size_t numBuckets
         throw std::runtime_error("Corrupt estimates file. Scale must be non-zero");
     }
 
-    filein >> Using<VectorFormatter<EncodedDoubleFormatter>>(m_feerate_avg);
+    filein >> m_feerate_avg;
     if (m_feerate_avg.size() != numBuckets) {
         throw std::runtime_error("Corrupt estimates file. Mismatch in feerate average bucket count");
     }
-    filein >> Using<VectorFormatter<EncodedDoubleFormatter>>(txCtAvg);
+    filein >> txCtAvg;
     if (txCtAvg.size() != numBuckets) {
         throw std::runtime_error("Corrupt estimates file. Mismatch in tx count bucket count");
     }
-    filein >> Using<VectorFormatter<VectorFormatter<EncodedDoubleFormatter>>>(confAvg);
+    filein >> confAvg;
     maxPeriods = confAvg.size();
     maxConfirms = scale * maxPeriods;
 
@@ -422,7 +402,7 @@ void TxConfirmStats::Read(CAutoFile& filein, int nFileVersion, size_t numBuckets
         }
     }
 
-    filein >> Using<VectorFormatter<VectorFormatter<EncodedDoubleFormatter>>>(failAvg);
+    filein >> failAvg;
     if (maxPeriods != failAvg.size()) {
         throw std::runtime_error("Corrupt estimates file. Mismatch in confirms tracked for failures");
     }
@@ -524,7 +504,7 @@ CBlockPolicyEstimator::CBlockPolicyEstimator()
     longStats = std::unique_ptr<TxConfirmStats>(new TxConfirmStats(buckets, bucketMap, LONG_BLOCK_PERIODS, LONG_DECAY, LONG_SCALE));
 
     // If the fee estimation file is present, read recorded estimations
-    fs::path est_filepath = gArgs.GetDataDirNet() / FEE_ESTIMATES_FILENAME;
+    fs::path est_filepath = GetDataDir() / FEE_ESTIMATES_FILENAME;
     CAutoFile est_file(fsbridge::fopen(est_filepath, "rb"), SER_DISK, CLIENT_VERSION);
     if (est_file.IsNull() || !Read(est_file)) {
         LogPrintf("Failed to read fee estimates from %s. Continue anyway.\n", est_filepath.string());
@@ -884,7 +864,7 @@ CFeeRate CBlockPolicyEstimator::estimateSmartFee(int confTarget, FeeCalculation 
 void CBlockPolicyEstimator::Flush() {
     FlushUnconfirmed();
 
-    fs::path est_filepath = gArgs.GetDataDirNet() / FEE_ESTIMATES_FILENAME;
+    fs::path est_filepath = GetDataDir() / FEE_ESTIMATES_FILENAME;
     CAutoFile est_file(fsbridge::fopen(est_filepath, "wb"), SER_DISK, CLIENT_VERSION);
     if (est_file.IsNull() || !Write(est_file)) {
         LogPrintf("Failed to write fee estimates to %s. Continue anyway.\n", est_filepath.string());
@@ -904,7 +884,7 @@ bool CBlockPolicyEstimator::Write(CAutoFile& fileout) const
         else {
             fileout << historicalFirst << historicalBest;
         }
-        fileout << Using<VectorFormatter<EncodedDoubleFormatter>>(buckets);
+        fileout << buckets;
         feeStats->Write(fileout);
         shortStats->Write(fileout);
         longStats->Write(fileout);
@@ -940,7 +920,7 @@ bool CBlockPolicyEstimator::Read(CAutoFile& filein)
                 throw std::runtime_error("Corrupt estimates file. Historical block range for estimates is invalid");
             }
             std::vector<double> fileBuckets;
-            filein >> Using<VectorFormatter<EncodedDoubleFormatter>>(fileBuckets);
+            filein >> fileBuckets;
             size_t numBuckets = fileBuckets.size();
             if (numBuckets <= 1 || numBuckets > 1000) {
                 throw std::runtime_error("Corrupt estimates file. Must have between 2 and 1000 feerate buckets");

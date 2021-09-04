@@ -37,7 +37,7 @@ public:
 };
 
 TxIndex::DB::DB(size_t n_cache_size, bool f_memory, bool f_wipe) :
-    BaseIndex::DB(gArgs.GetDataDirNet() / "indexes" / "txindex", n_cache_size, f_memory, f_wipe)
+    BaseIndex::DB(GetDataDir() / "indexes" / "txindex", n_cache_size, f_memory, f_wipe)
 {}
 
 bool TxIndex::DB::ReadTxPos(const uint256 &txid, CDiskTxPos& pos) const
@@ -204,7 +204,7 @@ bool TxIndex::Init()
     // Attempt to migrate txindex from the old database to the new one. Even if
     // chain_tip is null, the node could be reindexing and we still want to
     // delete txindex records in the old database.
-    if (!m_db->MigrateData(*m_chainstate->m_blockman.m_block_tree_db, m_chainstate->m_chain.GetLocator())) {
+    if (!m_db->MigrateData(*pblocktree, ::ChainActive().GetLocator())) {
         return false;
     }
 

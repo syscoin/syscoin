@@ -33,7 +33,9 @@ template <typename Object>
 class CBLSIESEncryptedObject : public CBLSIESEncryptedBlob
 {
 public:
-    CBLSIESEncryptedObject() = default;
+    CBLSIESEncryptedObject()
+    {
+    }
 
     CBLSIESEncryptedObject(const CBLSPublicKey& ephemeralPubKeyIn, const uint256& ivSeedIn, const std::vector<unsigned char>& dataIn)
     {
@@ -48,7 +50,7 @@ public:
             CDataStream ds(SER_NETWORK, nVersion);
             ds << obj;
             return CBLSIESEncryptedBlob::Encrypt(idx, peerPubKey, ds.data(), ds.size());
-        } catch (const std::exception&) {
+        } catch (std::exception&) {
             return false;
         }
     }
@@ -116,7 +118,7 @@ public:
                 ds << _objects[i];
                 blobs[i].assign(ds.begin(), ds.end());
             }
-        } catch (const std::exception&) {
+        } catch (std::exception&) {
             return false;
         }
 
@@ -142,7 +144,7 @@ public:
             CDataStream ds(blob, SER_NETWORK, nVersion);
             ds >> objectRet;
             return true;
-        } catch (const std::exception&) {
+        } catch (std::exception&) {
             return false;
         }
     }

@@ -29,8 +29,7 @@ CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, bool f
 }
 
 void CBlockHeaderAndShortTxIDs::FillShortTxIDSelector() const {
-    // SYSCOIN
-    CDataStream stream(SER_TRANSPORT, PROTOCOL_VERSION);
+    CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
     stream << header << nonce;
     CSHA256 hasher;
     hasher.Write((unsigned char*)&(*stream.begin()), stream.end() - stream.begin());

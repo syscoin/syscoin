@@ -4,16 +4,9 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test gettxoutproof and verifytxoutproof RPCs."""
 
-from test_framework.blocktools import COINBASE_MATURITY
-from test_framework.messages import (
-    CMerkleBlock,
-    from_hex,
-)
+from test_framework.messages import CMerkleBlock, FromHex, ToHex
 from test_framework.test_framework import SyscoinTestFramework
-from test_framework.util import (
-    assert_equal,
-    assert_raises_rpc_error,
-)
+from test_framework.util import assert_equal, assert_raises_rpc_error
 from test_framework.wallet import MiniWallet
 
 
@@ -30,7 +23,7 @@ class MerkleBlockTest(SyscoinTestFramework):
         miniwallet = MiniWallet(self.nodes[0])
         # Add enough mature utxos to the wallet, so that all txs spend confirmed coins
         miniwallet.generate(5)
-        self.nodes[0].generate(COINBASE_MATURITY)
+        self.nodes[0].generate(100)
         self.sync_all()
 
         chain_height = self.nodes[1].getblockcount()
@@ -94,10 +87,10 @@ class MerkleBlockTest(SyscoinTestFramework):
         assert txid1 in self.nodes[0].verifytxoutproof(proof)
         assert txid2 in self.nodes[1].verifytxoutproof(proof)
 
-        tweaked_proof = from_hex(CMerkleBlock(), proof)
+        tweaked_proof = FromHex(CMerkleBlock(), proof)
 
         # Make sure that our serialization/deserialization is working
-        assert txid1 in self.nodes[0].verifytxoutproof(tweaked_proof.serialize().hex())
+        assert txid1 in self.nodes[0].verifytxoutproof(ToHex(tweaked_proof))
 
         # Check to see if we can go up the merkle tree and pass this off as a
         # single-transaction block
@@ -106,7 +99,7 @@ class MerkleBlockTest(SyscoinTestFramework):
         tweaked_proof.txn.vBits = [True] + [False]*7
 
         for n in self.nodes:
-            assert not n.verifytxoutproof(tweaked_proof.serialize().hex())
+            assert not n.verifytxoutproof(ToHex(tweaked_proof))
 
         # TODO: try more variants, eg transactions at different depths, and
         # verify that the proofs are invalid

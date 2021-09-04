@@ -29,8 +29,6 @@ from test_framework.util import (
     assert_greater_than_or_equal,
 )
 
-PEER_TIMEOUT = 3
-
 
 class LazyPeer(P2PInterface):
     def __init__(self):
@@ -100,7 +98,7 @@ class P2PVersionStore(P2PInterface):
 class P2PLeakTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [[f"-peertimeout={PEER_TIMEOUT}"]]
+        self.extra_args = [['-peertimeout=4']]
 
     def create_old_version(self, nversion):
         old_version_msg = msg_version()
@@ -136,7 +134,7 @@ class P2PLeakTest(SyscoinTestFramework):
         self.nodes[0].generate(nblocks=1)
 
         # Give the node enough time to possibly leak out a message
-        time.sleep(PEER_TIMEOUT + 2)
+        time.sleep(5)
 
         # Make sure only expected messages came in
         assert not no_version_idle_peer.unexpected_msg

@@ -23,8 +23,6 @@ class CRPCCommand;
 class CScheduler;
 class Coin;
 class uint256;
-// SYSCOIN
-class CDeterministicMNList;
 enum class MemPoolRemovalReason;
 enum class RBFTransactionState;
 struct bilingual_str;
@@ -37,9 +35,7 @@ namespace interfaces {
 class Handler;
 class Wallet;
 
-//! Helper for findBlock to selectively return pieces of block data. If block is
-//! found, data will be returned by setting specified output variables. If block
-//! is not found, output variables will keep their previous values.
+//! Helper for findBlock to selectively return pieces of block data.
 class FoundBlock
 {
 public:
@@ -64,7 +60,6 @@ public:
     bool* m_in_active_chain = nullptr;
     const FoundBlock* m_next_block = nullptr;
     CBlock* m_data = nullptr;
-    mutable bool found = false;
 };
 
 //! Interface giving clients (wallet processes, maybe other analysis tools in
@@ -115,10 +110,6 @@ public:
     //! which will either be the original block used to create the locator,
     //! or one of its ancestors.
     virtual std::optional<int> findLocatorFork(const CBlockLocator& locator) = 0;
-
-    // SYSCOIN
-    //! Get masternode list for a specific block height.
-    virtual CDeterministicMNList getMNList(int height) = 0;
 
     //! Check if transaction will be final given chain height current time.
     virtual bool checkFinalTx(const CTransaction& tx) = 0;
@@ -286,9 +277,6 @@ public:
     //! to be prepared to handle this by ignoring notifications about unknown
     //! removed transactions and already added new transactions.
     virtual void requestMempoolTransactions(Notifications& notifications) = 0;
-
-    //! Check if Taproot has activated
-    virtual bool isTaprootActive() const = 0;
 };
 
 //! Interface to let node manage chain clients (wallets, or maybe tools for

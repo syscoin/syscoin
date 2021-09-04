@@ -5,7 +5,6 @@
 """Test createwallet watchonly arguments.
 """
 
-from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -37,7 +36,7 @@ class CreateWalletWatchonlyTest(SyscoinTestFramework):
         wo_wallet.importpubkey(pubkey=def_wallet.getaddressinfo(wo_change)['pubkey'])
 
         # generate some sys for testing
-        node.generatetoaddress(COINBASE_MATURITY + 1, a1)
+        node.generatetoaddress(101, a1)
 
         # send 1 sys to our watch-only address
         txid = def_wallet.sendtoaddress(wo_addr, 1)

@@ -1,7 +1,7 @@
 AC_PREREQ([2.69])
 define(_CLIENT_VERSION_MAJOR, 4)
-define(_CLIENT_VERSION_MINOR, 3)
-define(_CLIENT_VERSION_BUILD, 99)
+define(_CLIENT_VERSION_MINOR, 2)
+define(_CLIENT_VERSION_BUILD, 2)
 define(_CLIENT_VERSION_RC, 0)
 define(_CLIENT_VERSION_IS_RELEASE, true)
 define(_COPYRIGHT_YEAR, 2021)
@@ -318,6 +318,13 @@ AC_ARG_ENABLE([gprof],
     [enable_gprof=$enableval],
     [enable_gprof=no])
 
+dnl Pass compiler & linker flags that make builds deterministic
+AC_ARG_ENABLE([determinism],
+    [AS_HELP_STRING([--enable-determinism],
+                    [Enable compilation flags that make builds deterministic (default is no)])],
+    [enable_determinism=$enableval],
+    [enable_determinism=no])
+
 dnl Turn warnings into errors
 AC_ARG_ENABLE([werror],
     [AS_HELP_STRING([--enable-werror],
@@ -326,9 +333,9 @@ AC_ARG_ENABLE([werror],
     [enable_werror=no])
 
 AC_ARG_ENABLE([external-signer],
-    [AS_HELP_STRING([--enable-external-signer],[compile external signer support (default is yes, requires Boost::Process)])],
+    [AS_HELP_STRING([--enable-external-signer],[compile external signer support (default is no, requires Boost::Process)])],
     [use_external_signer=$enableval],
-    [use_external_signer=yes])
+    [use_external_signer=no])
 
 AC_LANG_PUSH([C++])
 
@@ -417,13 +424,7 @@ if test "x$enable_werror" = "xyes"; then
   AX_CHECK_COMPILE_FLAG([-Werror=range-loop-analysis],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=range-loop-analysis"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Werror=unused-variable],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=unused-variable"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Werror=date-time],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=date-time"],,[[$CXXFLAG_WERROR]])
-
-  dnl -Wreturn-type is broken in GCC for MinGW-w64.
-  dnl https://sourceforge.net/p/mingw-w64/bugs/306/
-  AX_CHECK_COMPILE_FLAG([-Werror=return-type], [ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=return-type"], [], [$CXXFLAG_WERROR],
-                        [AC_LANG_SOURCE([[#include <cassert>
-                                          int f(){ assert(false); }]])])
-
+  AX_CHECK_COMPILE_FLAG([-Werror=return-type],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=return-type"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Werror=conditional-uninitialized],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=conditional-uninitialized"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Werror=sign-compare],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=sign-compare"],,[[$CXXFLAG_WERROR]])
   dnl -Wsuggest-override is broken with GCC before 9.2
@@ -432,9 +433,8 @@ if test "x$enable_werror" = "xyes"; then
                         [AC_LANG_SOURCE([[struct A { virtual void f(); }; struct B : A { void f() final; };]])])
   AX_CHECK_COMPILE_FLAG([-Werror=unreachable-code-loop-increment],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=unreachable-code-loop-increment"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Werror=mismatched-tags], [ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=mismatched-tags"], [], [$CXXFLAG_WERROR])
-  AX_CHECK_COMPILE_FLAG([-Werror=implicit-fallthrough], [ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=implicit-fallthrough"], [], [$CXXFLAG_WERROR])
 
-  if test x$suppress_external_warnings = xno ; then
+  if test x$suppress_external_warnings != xno ; then
     AX_CHECK_COMPILE_FLAG([-Werror=documentation],[ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror=documentation"],,[[$CXXFLAG_WERROR]])
   fi
 fi
@@ -463,7 +463,6 @@ if test "x$CXXFLAGS_overridden" = "xno"; then
   AX_CHECK_COMPILE_FLAG([-Wsuggest-override],[WARN_CXXFLAGS="$WARN_CXXFLAGS -Wsuggest-override"],,[[$CXXFLAG_WERROR]],
                         [AC_LANG_SOURCE([[struct A { virtual void f(); }; struct B : A { void f() final; };]])])
   AX_CHECK_COMPILE_FLAG([-Wunreachable-code-loop-increment],[WARN_CXXFLAGS="$WARN_CXXFLAGS -Wunreachable-code-loop-increment"],,[[$CXXFLAG_WERROR]])
-  AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wimplicit-fallthrough"], [], [$CXXFLAG_WERROR])
 
   if test x$suppress_external_warnings != xno ; then
     AX_CHECK_COMPILE_FLAG([-Wdocumentation],[WARN_CXXFLAGS="$WARN_CXXFLAGS -Wdocumentation"],,[[$CXXFLAG_WERROR]])
@@ -475,9 +474,8 @@ if test "x$CXXFLAGS_overridden" = "xno"; then
   AX_CHECK_COMPILE_FLAG([-Wunused-parameter],[NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-unused-parameter"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Wself-assign],[NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-self-assign"],,[[$CXXFLAG_WERROR]])
   AX_CHECK_COMPILE_FLAG([-Wunused-local-typedef],[NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-unused-local-typedef"],,[[$CXXFLAG_WERROR]])
-  if test x$suppress_external_warnings != xyes ; then
-    AX_CHECK_COMPILE_FLAG([-Wdeprecated-copy],[NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-deprecated-copy"],,[[$CXXFLAG_WERROR]])
-  fi
+  AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough],[NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-implicit-fallthrough"],,[[$CXXFLAG_WERROR]])
+  AX_CHECK_COMPILE_FLAG([-Wdeprecated-copy],[NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-deprecated-copy"],,[[$CXXFLAG_WERROR]])
 fi
 
 dnl Don't allow extended (non-ASCII) symbols in identifiers. This is easier for code review.
@@ -840,6 +838,8 @@ if test x$use_glibc_compat != xno; then
   AX_CHECK_LINK_FLAG([[-Wl,--wrap=__divmoddi4]], [COMPAT_LDFLAGS="$COMPAT_LDFLAGS -Wl,--wrap=__divmoddi4"])
   AX_CHECK_LINK_FLAG([[-Wl,--wrap=log2f]], [COMPAT_LDFLAGS="$COMPAT_LDFLAGS -Wl,--wrap=log2f"])
   dnl SYSCOIN
+  AX_CHECK_LINK_FLAG([[-Wl,--wrap=getrandom]], [COMPAT_LDFLAGS="$COMPAT_LDFLAGS -Wl,--wrap=getrandom"])
+  AX_CHECK_LINK_FLAG([[-Wl,--wrap=getentropy]], [COMPAT_LDFLAGS="$COMPAT_LDFLAGS -Wl,--wrap=getentropy"])
   AX_CHECK_LINK_FLAG([[-Wl,--wrap=fmemopen]], [COMPAT_LDFLAGS="$COMPAT_LDFLAGS -Wl,--wrap=fmemopen"])
   case $host in
     powerpc64* | ppc64*)
@@ -892,7 +892,7 @@ if test x$use_hardening != xno; then
       dnl See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=90458 for more details.
       ;;
     *)
-      AX_CHECK_COMPILE_FLAG([-fstack-clash-protection], [HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fstack-clash-protection"], [], [$CXXFLAG_WERROR])
+      AX_CHECK_COMPILE_FLAG([-fstack-clash-protection],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fstack-clash-protection"])
       ;;
   esac
 
@@ -909,7 +909,6 @@ if test x$use_hardening != xno; then
     ])
   fi
 
-  AX_CHECK_LINK_FLAG([[-Wl,--enable-reloc-section]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,--enable-reloc-section"],, [[$LDFLAG_WERROR]])
   AX_CHECK_LINK_FLAG([[-Wl,--dynamicbase]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,--dynamicbase"],, [[$LDFLAG_WERROR]])
   AX_CHECK_LINK_FLAG([[-Wl,--nxcompat]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,--nxcompat"],, [[$LDFLAG_WERROR]])
   AX_CHECK_LINK_FLAG([[-Wl,--high-entropy-va]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,--high-entropy-va"],, [[$LDFLAG_WERROR]])
@@ -932,6 +931,12 @@ if test x$TARGET_OS = xdarwin; then
   AX_CHECK_LINK_FLAG([[-Wl,-dead_strip]], [LDFLAGS="$LDFLAGS -Wl,-dead_strip"],, [[$LDFLAG_WERROR]])
   AX_CHECK_LINK_FLAG([[-Wl,-dead_strip_dylibs]], [LDFLAGS="$LDFLAGS -Wl,-dead_strip_dylibs"],, [[$LDFLAG_WERROR]])
   AX_CHECK_LINK_FLAG([[-Wl,-bind_at_load]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-bind_at_load"],, [[$LDFLAG_WERROR]])
+fi
+
+if test x$enable_determinism = xyes; then
+  if test x$TARGET_OS = xwindows; then
+    AX_CHECK_LINK_FLAG([[-Wl,--no-insert-timestamp]], [LDFLAGS="$LDFLAGS -Wl,--no-insert-timestamp"],, [[$LDFLAG_WERROR]])
+  fi
 fi
 
 AC_CHECK_HEADERS([endian.h sys/endian.h byteswap.h stdio.h stdlib.h unistd.h strings.h sys/types.h sys/stat.h sys/select.h sys/prctl.h sys/sysctl.h vm/vm_param.h sys/vmmeter.h sys/resources.h])
@@ -1356,15 +1361,13 @@ if test x$enable_wallet != xno; then
 fi
 
 if test x$use_ebpf != xno; then
-  AC_MSG_CHECKING([whether eBPF tracepoints are supported])
-  AC_COMPILE_IFELSE([
-    AC_LANG_PROGRAM(
-      [#include <sys/sdt.h>],
-      [DTRACE_PROBE("context", "event");]
-    )],
-    [AC_MSG_RESULT(yes); have_sdt=yes; AC_DEFINE([ENABLE_TRACING], [1], [Define to 1 to enable eBPF user static defined tracepoints])],
-    [AC_MSG_RESULT(no); have_sdt=no;]
-  )
+  AC_CHECK_HEADER([sys/sdt.h], [have_sdt=yes], [have_sdt=no])
+else
+  have_sdt=no
+fi
+
+if test x$have_sdt = xyes; then
+  AC_DEFINE([ENABLE_TRACING], [1], [Define to 1 to enable eBPF user static defined tracepoints])
 fi
 
 dnl Check for libminiupnpc (optional)
@@ -1412,23 +1415,37 @@ fi
 if test x$use_boost = xyes; then
 
   dnl Check for Boost headers
-  AX_BOOST_BASE([1.64.0],[],[AC_MSG_ERROR([Boost is not available!])])
+  AX_BOOST_BASE([1.58.0],[],[AC_MSG_ERROR([Boost is not available!])])
   if test x$want_boost = xno; then
     AC_MSG_ERROR([[only libsyscoinconsensus can be built without boost]])
   fi
   AX_BOOST_SYSTEM
   AX_BOOST_FILESYSTEM
 
+  dnl Opt-in to Boost Process if external signer support is requested
+  if test "x$use_external_signer" != xno; then
+    AC_MSG_CHECKING(for Boost Process)
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <boost/process.hpp>]],
+     [[ boost::process::child* child = new boost::process::child; delete child; ]])],
+     [ AC_MSG_RESULT(yes)
+     AC_DEFINE([ENABLE_EXTERNAL_SIGNER],,[define if external signer support is enabled])
+     ],
+     [ AC_MSG_ERROR([Boost::Process is required for external signer support, but not available!])]
+    )
+  fi
+
   if test x$suppress_external_warnings != xno; then
     BOOST_CPPFLAGS=SUPPRESS_WARNINGS($BOOST_CPPFLAGS)
   fi
 
+  dnl Boost 1.56 through 1.62 allow using std::atomic instead of its own atomic
+  dnl counter implementations. In 1.63 and later the std::atomic approach is default.
+  m4_pattern_allow(DBOOST_AC_USE_STD_ATOMIC) dnl otherwise it's treated like a macro
+  BOOST_CPPFLAGS="-DBOOST_SP_USE_STD_ATOMIC -DBOOST_AC_USE_STD_ATOMIC $BOOST_CPPFLAGS"
+
   BOOST_LIBS="$BOOST_LDFLAGS $BOOST_SYSTEM_LIB $BOOST_FILESYSTEM_LIB"
 fi
 
-if test "x$use_external_signer" != xno; then
-  AC_DEFINE([ENABLE_EXTERNAL_SIGNER],,[define if external signer support is enabled])
-fi
 AM_CONDITIONAL([ENABLE_EXTERNAL_SIGNER], [test "x$use_external_signer" = "xyes"])
 
 dnl Check for reduced exports
@@ -1500,7 +1517,6 @@ else
   AC_DEFINE_UNQUOTED([ENABLE_ZMQ], [0], [Define to 1 to enable ZMQ functions])
 fi
 
-
 if test "x$use_zmq" = xyes; then
   dnl Assume libzmq was built for static linking
   case $host in
@@ -1540,14 +1556,13 @@ AC_SUBST(UNIVALUE_LIBS)
 
 dnl chiabls check
 
-AC_CHECK_LIB([bls-dash],[main],[need_bundled_chiabls=no;],[need_bundled_chiabls=yes;])
+AC_CHECK_LIB([chiabls],[main],[need_bundled_chiabls=no;],[need_bundled_chiabls=yes;])
 AM_CONDITIONAL([EMBEDDED_CHIABLS],[test x$need_bundled_chiabls = xyes])
-LIBCHIABLS_CFLAGS='-I$(srcdir)/bls-dash/build/_deps/relic-build/include -I$(srcdir)/bls-dash/build/_deps/relic-src/include'
-LIBCHIABLS_CFLAGS="$LIBCHIABLS_CFLAGS -I$depends_prefix/include/bls-dash"
+LIBCHIABLS_CFLAGS='-I$(srcdir)/chiabls/build/contrib/relic/include -I$(srcdir)/chiabls/contrib/relic/include'
 if test x$need_bundled_chiabls = xyes; then
-  LIBCHIABLS_LIBS=bls-dash/build/libbls-dash.a
+  LIBCHIABLS_LIBS=chiabls/build/libchiabls.a
 elif test "x$need_bundled_chiabls" = xno; then
-  LIBCHIABLS_LIBS=-lbls-dash
+  LIBCHIABLS_LIBS=-lchiabls
 fi        
 AC_SUBST(LIBCHIABLS_CFLAGS)
 AC_SUBST(LIBCHIABLS_LIBS)  
@@ -1783,10 +1798,6 @@ if test x$build_syscoin_wallet$build_syscoin_cli$build_syscoin_tx$build_syscoin_
   AC_MSG_ERROR([No targets! Please specify at least one of: --with-utils --with-libs --with-daemon --with-gui --enable-bench or --enable-tests])
 fi
 
-if test x$enable_fuzz_binary = xyes; then
-  CHECK_RUNTIME_LIB
-fi
-
 AM_CONDITIONAL([TARGET_DARWIN], [test x$TARGET_OS = xdarwin])
 AM_CONDITIONAL([BUILD_DARWIN], [test x$BUILD_OS = xdarwin])
 AM_CONDITIONAL([TARGET_LINUX], [test x$TARGET_OS = xlinux])
@@ -1926,20 +1937,20 @@ PKGCONFIG_LIBDIR_TEMP="$PKG_CONFIG_LIBDIR"
 unset PKG_CONFIG_LIBDIR
 PKG_CONFIG_LIBDIR="$PKGCONFIG_LIBDIR_TEMP"
 
-dnl check if libgmp is present
-AC_CHECK_HEADER([gmp.h],, AC_MSG_ERROR(libgmp headers missing))
-AC_CHECK_LIB([gmp],  [__gmpz_init],GMP_LIBS=-lgmp, AC_MSG_ERROR(libgmp3-dev missing))
-AC_SUBST(GMP_LIBS)
+AC_CHECK_HEADER(gmp.h,[AC_CHECK_LIB(gmp, __gmpz_init,[has_gmp=yes;])])
+if test x$has_gmp != xyes; then
+    AC_MSG_ERROR([[libgmp3-dev not installed]])
+fi
 
 if test x$need_bundled_univalue = xyes; then
   AC_CONFIG_SUBDIRS([src/univalue])
 fi
 
 if test x$need_bundled_chiabls = xyes; then
-  AC_CONFIG_SUBDIRS([src/bls-dash/build])
+  AC_CONFIG_SUBDIRS([src/chiabls/build])
 fi
 
-ac_configure_args="${ac_configure_args} --disable-shared --with-pic --enable-benchmark=no --enable-module-recovery --enable-module-schnorrsig --enable-experimental"
+ac_configure_args="${ac_configure_args} --disable-shared --with-pic --enable-benchmark=no --with-bignum=no --enable-module-recovery --enable-module-schnorrsig --enable-experimental"
 AC_CONFIG_SUBDIRS([src/secp256k1])
 
 AC_OUTPUT
@@ -1993,5 +2004,4 @@ echo "  CXX             = $CXX"
 echo "  CXXFLAGS        = $DEBUG_CXXFLAGS $HARDENED_CXXFLAGS $WARN_CXXFLAGS $NOWARN_CXXFLAGS $ERROR_CXXFLAGS $GPROF_CXXFLAGS $CXXFLAGS"
 echo "  LDFLAGS         = $PTHREAD_LIBS $HARDENED_LDFLAGS $GPROF_LDFLAGS $LDFLAGS"
 echo "  ARFLAGS         = $ARFLAGS"
-echo "  LIBCHIABLS_CFLAGS         = $LIBCHIABLS_CFLAGS"
 echo

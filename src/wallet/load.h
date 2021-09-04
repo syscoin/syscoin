@@ -11,28 +11,27 @@
 
 class ArgsManager;
 class CScheduler;
-struct WalletContext;
 
 namespace interfaces {
 class Chain;
 } // namespace interfaces
 
 //! Responsible for reading and validating the -wallet arguments and verifying the wallet database.
-bool VerifyWallets(WalletContext& context);
+bool VerifyWallets(interfaces::Chain& chain);
 
 //! Load wallet databases.
-bool LoadWallets(WalletContext& context);
+bool LoadWallets(interfaces::Chain& chain);
 
 //! Complete startup of wallets.
-void StartWallets(WalletContext& context, CScheduler& scheduler);
+void StartWallets(CScheduler& scheduler, const ArgsManager& args);
 
 //! Flush all wallets in preparation for shutdown.
-void FlushWallets(WalletContext& context);
+void FlushWallets();
 
 //! Stop all wallets. Wallets will be flushed first.
-void StopWallets(WalletContext& context);
+void StopWallets();
 
 //! Close all wallets.
-void UnloadWallets(WalletContext& context);
+void UnloadWallets();
 
 #endif // SYSCOIN_WALLET_LOAD_H

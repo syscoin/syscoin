@@ -5,7 +5,6 @@
 #include <llmq/quorums.h>
 #include <llmq/quorums_utils.h>
 #include <llmq/quorums_commitment.h>
-#include <llmq/quorums_init.h>
 
 #include <bls/bls.h>
 #include <evo/deterministicmns.h>
@@ -116,7 +115,7 @@ std::set<uint256> CLLMQUtils::GetQuorumConnections(uint8_t llmqType, const CBloc
         GetAllQuorumMembers(llmqType, pindexQuorum, mns);
         std::set<uint256> result;
 
-        for (const auto& dmn : mns) {
+        for (auto& dmn : mns) {
             if (dmn->proTxHash == forMember) {
                 continue;
             }
@@ -140,7 +139,7 @@ std::set<uint256> CLLMQUtils::GetQuorumRelayMembers(uint8_t llmqType, const CBlo
     GetAllQuorumMembers(llmqType, pindexQuorum, mns);
     std::set<uint256> result;
 
-    auto calcOutbound = [&](size_t i, const uint256 &proTxHash) {
+    auto calcOutbound = [&](size_t i, const uint256 proTxHash) {
         // Relay to nodes at indexes (i+2^k)%n, where
         //   k: 0..max(1, floor(log2(n-1))-1)
         //   n: size of the quorum/ring
@@ -150,7 +149,7 @@ std::set<uint256> CLLMQUtils::GetQuorumRelayMembers(uint8_t llmqType, const CBlo
         int k = 0;
         while ((gap_max >>= 1) || k <= 1) {
             size_t idx = (i + gap) % mns.size();
-            const auto& otherDmn = mns[idx];
+            auto& otherDmn = mns[idx];
             if (otherDmn->proTxHash == proTxHash) {
                 gap <<= 1;
                 k++;
@@ -164,7 +163,7 @@ std::set<uint256> CLLMQUtils::GetQuorumRelayMembers(uint8_t llmqType, const CBlo
     };
 
     for (size_t i = 0; i < mns.size(); i++) {
-        const auto& dmn = mns[i];
+        auto& dmn = mns[i];
         if (dmn->proTxHash == forMember) {
             auto r = calcOutbound(i, dmn->proTxHash);
             result.insert(r.begin(), r.end());
@@ -186,8 +185,10 @@ std::set<size_t> CLLMQUtils::CalcDeterministicWatchConnections(uint8_t llmqType,
     static RecursiveMutex qwatchConnectionSeedCs;
     if (!qwatchConnectionSeedGenerated) {
         LOCK(qwatchConnectionSeedCs);
-        qwatchConnectionSeed = GetRandHash();
-        qwatchConnectionSeedGenerated = true;
+        if (!qwatchConnectionSeedGenerated) {
+            qwatchConnectionSeed = GetRandHash();
+            qwatchConnectionSeedGenerated = true;
+        }
     }
 
     std::set<size_t> result;
@@ -199,14 +200,14 @@ std::set<size_t> CLLMQUtils::CalcDeterministicWatchConnections(uint8_t llmqType,
     return result;
 }
 
-bool CLLMQUtils::EnsureQuorumConnections(uint8_t llmqType, const CBlockIndex *pindexQuorum, const uint256& myProTxHash, CConnman& connman)
+void CLLMQUtils::EnsureQuorumConnections(uint8_t llmqType, const CBlockIndex *pindexQuorum, const uint256& myProTxHash, bool allowWatch, CConnman& connman)
 {
     std::vector<CDeterministicMNCPtr> members;
     GetAllQuorumMembers(llmqType, pindexQuorum, members);
     bool isMember = std::find_if(members.begin(), members.end(), [&](const CDeterministicMNCPtr& dmn) { return dmn->proTxHash == myProTxHash; }) != members.end();
 
-    if (!isMember && !CLLMQUtils::IsWatchQuorumsEnabled()) {
-        return false;
+    if (!isMember && !allowWatch) {
+        return;
     }
 
     std::set<uint256> connections;
@@ -242,13 +243,6 @@ bool CLLMQUtils::EnsureQuorumConnections(uint8_t llmqType, const CBlockIndex *pi
     if (!relayMembers.empty()) {
         connman.SetMasternodeQuorumRelayMembers(llmqType, pindexQuorum->GetBlockHash(), relayMembers);
     }
-    return true;
-}
-
-bool CLLMQUtils::IsWatchQuorumsEnabled()
-{
-    static bool fIsWatchQuroumsEnabled = gArgs.GetBoolArg("-watchquorums", llmq::DEFAULT_WATCH_QUORUMS);
-    return fIsWatchQuroumsEnabled;
 }
 
 void CLLMQUtils::AddQuorumProbeConnections(uint8_t llmqType, const CBlockIndex *pindexQuorum, const uint256 &myProTxHash, CConnman& connman)
@@ -262,7 +256,7 @@ void CLLMQUtils::AddQuorumProbeConnections(uint8_t llmqType, const CBlockIndex *
     auto curTime = GetAdjustedTime();
 
     std::set<uint256> probeConnections;
-    for (const auto& dmn : members) {
+    for (auto& dmn : members) {
         if (dmn->proTxHash == myProTxHash) {
             continue;
         }
@@ -303,7 +297,7 @@ bool CLLMQUtils::IsQuorumActive(uint8_t llmqType, const uint256& quorumHash)
     // fail while we are on the brink of a new quorum
     std::vector<CQuorumCPtr> quorums;
     quorumManager->ScanQuorums(llmqType, (int)params.signingActiveQuorumCount + 1, quorums);
-    for (const auto& q : quorums) {
+    for (auto& q : quorums) {
         if (q->qc->quorumHash == quorumHash) {
             return true;
         }

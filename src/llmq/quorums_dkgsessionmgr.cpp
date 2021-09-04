@@ -21,109 +21,18 @@ static const std::string DB_VVEC = "qdkg_V";
 static const std::string DB_SKCONTRIB = "qdkg_S";
 static const std::string DB_ENC_CONTRIB = "qdkg_E";
 
-CDKGSessionManager::CDKGSessionManager(CBLSWorker& _blsWorker, CConnman &_connman, PeerManager& _peerman, ChainstateManager& _chainman, bool unitTests, bool fWipe) :
+CDKGSessionManager::CDKGSessionManager(CDBWrapper& _llmqDb, CBLSWorker& _blsWorker, CConnman &_connman, PeerManager& _peerman) :
+    llmqDb(_llmqDb),
     blsWorker(_blsWorker),
     connman(_connman),
     peerman(_peerman)
 {
-    db = std::make_unique<CDBWrapper>(unitTests ? "" : (gArgs.GetDataDirNet() / "llmq/dkgdb"), 1 << 20, unitTests, fWipe);
-    MigrateDKG();
-
     for (const auto& qt : Params().GetConsensus().llmqs) {
-        dkgSessionHandlers.try_emplace(qt.first, qt.second, blsWorker, *this, peerman, _chainman);
+        dkgSessionHandlers.try_emplace(qt.first, qt.second, blsWorker, *this, peerman);
     }
 }
 
 CDKGSessionManager::~CDKGSessionManager() = default;
-
-void CDKGSessionManager::MigrateDKG()
-{
-    if (!db->IsEmpty()) return;
-
-    LogPrint(BCLog::LLMQ, "CDKGSessionManager::%d -- start\n", __func__);
-
-    CDBBatch batch(*db);
-    auto oldDb = std::make_unique<CDBWrapper>(gArgs.GetDataDirNet() / "llmq", 8 << 20);
-    std::unique_ptr<CDBIterator> pcursor(oldDb->NewIterator());
-
-    auto start_vvec = std::make_tuple(DB_VVEC, (uint8_t)0, uint256(), uint256());
-    pcursor->Seek(start_vvec);
-
-    while (pcursor->Valid()) {
-        decltype(start_vvec) k;
-        BLSVerificationVector v;
-
-        if (!pcursor->GetKey(k) || std::get<0>(k) != DB_VVEC) {
-            break;
-        }
-        if (!pcursor->GetValue(v)) {
-            break;
-        }
-
-        batch.Write(k, v);
-
-        if (batch.SizeEstimate() >= (1 << 24)) {
-            db->WriteBatch(batch);
-            batch.Clear();
-        }
-
-        pcursor->Next();
-    }
-
-    auto start_contrib = std::make_tuple(DB_SKCONTRIB, (uint8_t)0, uint256(), uint256());
-    pcursor->Seek(start_contrib);
-
-    while (pcursor->Valid()) {
-        decltype(start_contrib) k;
-        CBLSSecretKey v;
-
-        if (!pcursor->GetKey(k) || std::get<0>(k) != DB_SKCONTRIB) {
-            break;
-        }
-        if (!pcursor->GetValue(v)) {
-            break;
-        }
-
-        batch.Write(k, v);
-
-        if (batch.SizeEstimate() >= (1 << 24)) {
-            db->WriteBatch(batch);
-            batch.Clear();
-        }
-
-        pcursor->Next();
-    }
-
-    auto start_enc_contrib = std::make_tuple(DB_ENC_CONTRIB, (uint8_t)0, uint256(), uint256());
-    pcursor->Seek(start_enc_contrib);
-
-    while (pcursor->Valid()) {
-        decltype(start_enc_contrib) k;
-        CBLSIESMultiRecipientObjects<CBLSSecretKey> v;
-
-        if (!pcursor->GetKey(k) || std::get<0>(k) != DB_ENC_CONTRIB) {
-            break;
-        }
-        if (!pcursor->GetValue(v)) {
-            break;
-        }
-
-        batch.Write(k, v);
-
-        if (batch.SizeEstimate() >= (1 << 24)) {
-            db->WriteBatch(batch);
-            batch.Clear();
-        }
-
-        pcursor->Next();
-    }
-
-    db->WriteBatch(batch);
-    pcursor.reset();
-    oldDb.reset();
-
-    LogPrint(BCLog::LLMQ, "CDKGSessionManager::%d -- done\n", __func__);
-}
 
 void CDKGSessionManager::StartThreads()
 {
@@ -288,16 +197,16 @@ bool CDKGSessionManager::GetPrematureCommitment(const uint256& hash, CDKGPrematu
 
 void CDKGSessionManager::WriteVerifiedVvecContribution(uint8_t llmqType, const uint256& hashQuorum, const uint256& proTxHash, const BLSVerificationVectorPtr& vvec)
 {
-    db->Write(std::make_tuple(DB_VVEC, llmqType, hashQuorum, proTxHash), *vvec);
+    llmqDb.Write(std::make_tuple(DB_VVEC, llmqType, hashQuorum, proTxHash), *vvec);
 }
 
 void CDKGSessionManager::WriteVerifiedSkContribution(uint8_t llmqType, const uint256& hashQuorum, const uint256& proTxHash, const CBLSSecretKey& skContribution)
 {
-    db->Write(std::make_tuple(DB_SKCONTRIB, llmqType, hashQuorum, proTxHash), skContribution);
+    llmqDb.Write(std::make_tuple(DB_SKCONTRIB, llmqType, hashQuorum, proTxHash), skContribution);
 }
 void CDKGSessionManager::WriteEncryptedContributions(uint8_t llmqType, const CBlockIndex* pindexQuorum, const uint256& proTxHash, const CBLSIESMultiRecipientObjects<CBLSSecretKey>& contributions)
 {
-    db->Write(std::make_tuple(DB_ENC_CONTRIB, llmqType, pindexQuorum->GetBlockHash(), proTxHash), contributions);
+    llmqDb.Write(std::make_tuple(DB_ENC_CONTRIB, llmqType, pindexQuorum->GetBlockHash(), proTxHash), contributions);
 }
 bool CDKGSessionManager::GetVerifiedContributions(uint8_t llmqType, const CBlockIndex* pindexQuorum, const std::vector<bool>& validMembers, std::vector<uint16_t>& memberIndexesRet, std::vector<BLSVerificationVectorPtr>& vvecsRet, BLSSecretKeyVector& skContributionsRet)
 {
@@ -317,12 +226,12 @@ bool CDKGSessionManager::GetVerifiedContributions(uint8_t llmqType, const CBlock
             ContributionsCacheKey cacheKey = {llmqType, pindexQuorum->GetBlockHash(), proTxHash};
             auto it = contributionsCache.find(cacheKey);
             if (it == contributionsCache.end()) {
-                auto vvecPtr = std::make_shared<BLSVerificationVector>();
+                BLSVerificationVectorPtr vvecPtr = std::make_shared<BLSVerificationVector>();
                 CBLSSecretKey skContribution;
-                if (!db->Read(std::make_tuple(DB_VVEC, llmqType, pindexQuorum->GetBlockHash(), proTxHash), *vvecPtr)) {
+                if (!llmqDb.Read(std::make_tuple(DB_VVEC, llmqType, pindexQuorum->GetBlockHash(), proTxHash), *vvecPtr)) {
                     return false;
                 }
-                db->Read(std::make_tuple(DB_SKCONTRIB, llmqType, pindexQuorum->GetBlockHash(), proTxHash), skContribution);
+                llmqDb.Read(std::make_tuple(DB_SKCONTRIB, llmqType, pindexQuorum->GetBlockHash(), proTxHash), skContribution);
 
                 it = contributionsCache.try_emplace(cacheKey, ContributionsCacheEntry{GetTimeMillis(), vvecPtr, skContribution}).first;
             }
@@ -335,7 +244,7 @@ bool CDKGSessionManager::GetVerifiedContributions(uint8_t llmqType, const CBlock
     return true;
 }
 
-bool CDKGSessionManager::GetEncryptedContributions(uint8_t llmqType, const CBlockIndex* pindexQuorum, const std::vector<bool>& validMembers, const uint256& nProTxHash, std::vector<CBLSIESEncryptedObject<CBLSSecretKey>>& vecRet) const
+bool CDKGSessionManager::GetEncryptedContributions(uint8_t llmqType, const CBlockIndex* pindexQuorum, const std::vector<bool>& validMembers, const uint256& nProTxHash, std::vector<CBLSIESEncryptedObject<CBLSSecretKey>>& vecRet)
 {
     std::vector<CDeterministicMNCPtr> members;
     CLLMQUtils::GetAllQuorumMembers(llmqType, pindexQuorum, members);
@@ -357,7 +266,7 @@ bool CDKGSessionManager::GetEncryptedContributions(uint8_t llmqType, const CBloc
     for (size_t i = 0; i < members.size(); i++) {
         if (validMembers[i]) {
             CBLSIESMultiRecipientObjects<CBLSSecretKey> encryptedContributions;
-            if (!db->Read(std::make_tuple(DB_ENC_CONTRIB, llmqType, pindexQuorum->GetBlockHash(), members[i]->proTxHash), encryptedContributions)) {
+            if (!llmqDb.Read(std::make_tuple(DB_ENC_CONTRIB, llmqType, pindexQuorum->GetBlockHash(), members[i]->proTxHash), encryptedContributions)) {
                 return false;
             }
             vecRet.emplace_back(encryptedContributions.Get(nRequestedMemberIdx));
