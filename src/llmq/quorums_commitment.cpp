@@ -136,12 +136,13 @@ bool CFinalCommitment::VerifySizes(const Consensus::LLMQParams& params) const
     return true;
 }
 
-bool CheckLLMQCommitment(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
+bool CheckLLMQCommitment(BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
 {
     AssertLockHeld(cs_main);
     if (!tx.IsCoinBase()) {
         return FormatSyscoinErrorMessage(state, "bad-qctx-invalid", fJustCheck);
     }
+    const int nPrevHeight = pindexPrev->nHeight;
     CFinalCommitmentTxPayload qcTx;
     if (!GetTxPayload(tx, qcTx)) {
         return FormatSyscoinErrorMessage(state, "bad-qc-payload", fJustCheck);
@@ -151,7 +152,7 @@ bool CheckLLMQCommitment(const CTransaction& tx, const CBlockIndex* pindexPrev, 
         return FormatSyscoinErrorMessage(state, "bad-qc-cbtx", fJustCheck);
     }
     for(const auto& commitment: qcTx.commitments) {
-        const CBlockIndex* pindexQuorum = g_chainman.m_blockman.LookupBlockIndex(commitment.quorumHash);
+        const CBlockIndex* pindexQuorum = blockman.LookupBlockIndex(commitment.quorumHash);
         if(!pindexQuorum) {
             return FormatSyscoinErrorMessage(state, "bad-qc-quorum-hash", fJustCheck);
         }
@@ -159,9 +160,17 @@ bool CheckLLMQCommitment(const CTransaction& tx, const CBlockIndex* pindexPrev, 
             // not part of active chain
             return FormatSyscoinErrorMessage(state, "bad-qc-quorum-hash", fJustCheck);
         }
-
         if (!Params().GetConsensus().llmqs.count(commitment.llmqType)) {
             return FormatSyscoinErrorMessage(state, "bad-qc-type", fJustCheck);
+        }
+        if(!fRegTest) {
+            if(nPrevHeight >= (Params().GetConsensus().nNEVMStartBlock + 1)) {
+                if(commitment.llmqType != Consensus::LLMQ_400_60) {
+                    return FormatSyscoinErrorMessage(state, "bad-qc-type-post-nevm", fJustCheck);
+                }
+            } else if(commitment.llmqType != Consensus::LLMQ_50_60) {
+                return FormatSyscoinErrorMessage(state, "bad-qc-type-pre-nevm", fJustCheck);
+            }
         }
 
         if (commitment.IsNull()) {

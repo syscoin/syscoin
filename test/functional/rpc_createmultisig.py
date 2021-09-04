@@ -3,12 +3,12 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test multisig RPCs"""
-import binascii
 import decimal
 import itertools
 import json
 import os
 
+from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.authproxy import JSONRPCException
 from test_framework.descriptors import descsum_create, drop_origins
 from test_framework.key import ECPubKey, ECKey
@@ -65,9 +65,9 @@ class RpcCreateMultiSigTest(SyscoinTestFramework):
 
         # decompress pk2
         pk_obj = ECPubKey()
-        pk_obj.set(binascii.unhexlify(pk2))
+        pk_obj.set(bytes.fromhex(pk2))
         pk_obj.compressed = False
-        pk2 = binascii.hexlify(pk_obj.get_bytes()).decode()
+        pk2 = pk_obj.get_bytes().hex()
 
         node0.createwallet(wallet_name='wmulti0', disable_private_keys=True)
         wmulti0 = node0.get_wallet_rpc('wmulti0')
@@ -96,6 +96,9 @@ class RpcCreateMultiSigTest(SyscoinTestFramework):
             sorted_key_desc = descsum_create('sh(multi(2,{}))'.format(sorted_key_str))
             assert_equal(self.nodes[0].deriveaddresses(sorted_key_desc)[0], t['address'])
 
+        # Check that bech32m is currently not allowed
+        assert_raises_rpc_error(-5, "createmultisig cannot create bech32m multisig addresses", self.nodes[0].createmultisig, 2, self.pub, "bech32m")
+
     def check_addmultisigaddress_errors(self):
         if self.options.descriptors:
             return
@@ -107,9 +110,13 @@ class RpcCreateMultiSigTest(SyscoinTestFramework):
             self.nodes[0].importaddress(a)
         assert_raises_rpc_error(-5, 'no full public key for address', lambda: self.nodes[0].addmultisigaddress(nrequired=1, keys=addresses))
 
+        # Bech32m address type is disallowed for legacy wallets
+        pubs = [self.nodes[1].getaddressinfo(addr)["pubkey"] for addr in addresses]
+        assert_raises_rpc_error(-5, "Bech32m multisig addresses cannot be created with legacy wallets", self.nodes[0].addmultisigaddress, 2, pubs, "", "bech32m")
+
     def checkbalances(self):
         node0, node1, node2 = self.nodes
-        node0.generate(100)
+        node0.generate(COINBASE_MATURITY)
         self.sync_all()
 
         bal0 = node0.getbalance()

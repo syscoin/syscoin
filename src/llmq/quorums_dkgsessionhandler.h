@@ -6,13 +6,14 @@
 #define SYSCOIN_LLMQ_QUORUMS_DKGSESSIONHANDLER_H
 
 
-#include <ctpl.h>
+#include <ctpl_stl.h>
 #include <net.h>
 
 class CBLSWorker;
 class CBlockIndex;
 class CConnman;
 class PeerManager;
+class ChainstateManager;
 namespace llmq
 {
 class CDKGSession;
@@ -108,6 +109,7 @@ private:
     const Consensus::LLMQParams& params;
     CBLSWorker& blsWorker;
     CDKGSessionManager& dkgManager;
+    ChainstateManager& chainman;
 
     QuorumPhase phase GUARDED_BY(cs) {QuorumPhase_Idle};
     int currentHeight GUARDED_BY(cs) {-1};
@@ -123,7 +125,7 @@ private:
     std::string m_threadName;
     PeerManager& peerman;
 public:
-    CDKGSessionHandler(const Consensus::LLMQParams& _params, CBLSWorker& blsWorker, CDKGSessionManager& _dkgManager, PeerManager& peerman);
+    CDKGSessionHandler(const Consensus::LLMQParams& _params, CBLSWorker& blsWorker, CDKGSessionManager& _dkgManager, PeerManager& peerman, ChainstateManager& _chainman);
     ~CDKGSessionHandler();
 
     void UpdatedBlockTip(const CBlockIndex *pindexNew);
@@ -140,8 +142,8 @@ private:
 
     typedef std::function<void()> StartPhaseFunc;
     typedef std::function<bool()> WhileWaitFunc;
-    void WaitForNextPhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting);
-    void WaitForNewQuorum(const uint256& oldQuorumHash);
+    void WaitForNextPhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const;
+    void WaitForNewQuorum(const uint256& oldQuorumHash) const;
     void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const WhileWaitFunc& runWhileWaiting);
     void HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const StartPhaseFunc& startPhaseFunc, const WhileWaitFunc& runWhileWaiting);
     void HandleDKGRound();

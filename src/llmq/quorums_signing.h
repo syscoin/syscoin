@@ -23,6 +23,7 @@ typedef int64_t NodeId;
 class CNode;
 class CConnman;
 class PeerManager;
+class ChainstateManager;
 namespace llmq
 {
 
@@ -79,7 +80,7 @@ public:
 class CRecoveredSigsDb
 {
 private:
-    CDBWrapper& db;
+    std::unique_ptr<CDBWrapper> db{nullptr};
 
     mutable RecursiveMutex cs;
     unordered_lru_cache<std::pair<uint8_t, uint256>, bool, StaticSaltedHasher, 30000> hasSigForIdCache GUARDED_BY(cs);
@@ -87,12 +88,9 @@ private:
     unordered_lru_cache<uint256, bool, StaticSaltedHasher, 30000> hasSigForHashCache GUARDED_BY(cs);
 
 public:
-    explicit CRecoveredSigsDb(CDBWrapper& _db);
+    explicit CRecoveredSigsDb(bool fMemory, bool fWipe);
 
-    void ConvertInvalidTimeKeys();
-    void AddVoteTimeKeys();
-
-    bool HasRecoveredSig(uint8_t llmqType, const uint256& id, const uint256& msgHash);
+    bool HasRecoveredSig(uint8_t llmqType, const uint256& id, const uint256& msgHash) const;
     bool HasRecoveredSigForId(uint8_t llmqType, const uint256& id);
     bool HasRecoveredSigForSession(const uint256& signHash);
     bool HasRecoveredSigForHash(const uint256& hash);
@@ -105,15 +103,17 @@ public:
     void CleanupOldRecoveredSigs(int64_t maxAge);
 
     // votes are removed when the recovered sig is written to the db
-    bool HasVotedOnId(uint8_t llmqType, const uint256& id);
-    bool GetVoteForId(uint8_t llmqType, const uint256& id, uint256& msgHashRet);
+    bool HasVotedOnId(uint8_t llmqType, const uint256& id) const;
+    bool GetVoteForId(uint8_t llmqType, const uint256& id, uint256& msgHashRet) const;
     void WriteVoteForId(uint8_t llmqType, const uint256& id, const uint256& msgHash);
 
     void CleanupOldVotes(int64_t maxAge);
 
 private:
-    bool ReadRecoveredSig(uint8_t llmqType, const uint256& id, CRecoveredSig& ret);
-    void RemoveRecoveredSig(CDBBatch& batch, uint8_t llmqType, const uint256& id, bool deleteHashKey, bool deleteTimeKey)  EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void MigrateRecoveredSigs();
+
+    bool ReadRecoveredSig(uint8_t llmqType, const uint256& id, CRecoveredSig& ret) const;
+    void RemoveRecoveredSig(CDBBatch& batch, uint8_t llmqType, const uint256& id, bool deleteHashKey, bool deleteTimeKey) EXCLUSIVE_LOCKS_REQUIRED(cs);
 };
 
 class CRecoveredSigsListener
@@ -135,6 +135,7 @@ private:
     CRecoveredSigsDb db;
     CConnman& connman;
     PeerManager& peerman;
+    ChainstateManager& chainman;
     // Incoming and not verified yet
     std::unordered_map<NodeId, std::list<std::shared_ptr<const CRecoveredSig>>> pendingRecoveredSigs GUARDED_BY(cs);
     std::unordered_map<uint256, std::shared_ptr<const CRecoveredSig>, StaticSaltedHasher> pendingReconstructedRecoveredSigs GUARDED_BY(cs);
@@ -149,8 +150,8 @@ public:
     // when selecting a quorum for signing and verification, we use CQuorumManager::SelectQuorum with this offset as
     // starting height for scanning. This is because otherwise the resulting signatures would not be verifiable by nodes
     // which are not 100% at the chain tip.
-    static const int SIGN_HEIGHT_OFFSET = 20;
-    CSigningManager(CDBWrapper& llmqDb, bool fMemory, CConnman& _connman, PeerManager& _peerman);
+    static const int SIGN_HEIGHT_OFFSET = 8;
+    CSigningManager(bool fMemory, CConnman& _connman, PeerManager& _peerman, ChainstateManager& _chainman, bool fWipe);
 
     bool AlreadyHave(const uint256& hash);
     bool GetRecoveredSigForGetData(const uint256& hash, CRecoveredSig& ret);
@@ -195,9 +196,9 @@ public:
     bool GetVoteForId(uint8_t llmqType, const uint256& id, uint256& msgHashRet);
 
     static std::vector<CQuorumCPtr> GetActiveQuorumSet(uint8_t llmqType, int signHeight);
-    static CQuorumCPtr SelectQuorumForSigning(uint8_t llmqType, const uint256& selectionHash, int signHeight = -1 /*chain tip*/, int signOffset = SIGN_HEIGHT_OFFSET);
+    static CQuorumCPtr SelectQuorumForSigning(ChainstateManager& chainman, uint8_t llmqType, const uint256& selectionHash, int signHeight = -1 /*chain tip*/, int signOffset = SIGN_HEIGHT_OFFSET);
     // Verifies a recovered sig that was signed while the chain tip was at signedAtTip
-    static bool VerifyRecoveredSig(uint8_t llmqType, int signedAtHeight, const uint256& id, const uint256& msgHash, const CBLSSignature& sig, int signOffset = SIGN_HEIGHT_OFFSET);
+    static bool VerifyRecoveredSig(ChainstateManager& chainman, uint8_t llmqType, int signedAtHeight, const uint256& id, const uint256& msgHash, const CBLSSignature& sig, int signOffset = SIGN_HEIGHT_OFFSET);
 };
 
 extern CSigningManager* quorumSigningManager;

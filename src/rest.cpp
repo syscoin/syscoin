@@ -108,6 +108,27 @@ static CTxMemPool* GetMemPool(const std::any& context, HTTPRequest* req)
     return node_context->mempool.get();
 }
 
+/**
+ * Get the node context chainstatemanager.
+ *
+ * @param[in]  req The HTTP request, whose status code will be set if node
+ *                 context chainstatemanager is not found.
+ * @returns        Pointer to the chainstatemanager or nullptr if none found.
+ */
+static ChainstateManager* GetChainman(const std::any& context, HTTPRequest* req)
+{
+    auto node_context = util::AnyPtr<NodeContext>(context);
+    if (!node_context || !node_context->chainman) {
+        RESTERR(req, HTTP_INTERNAL_SERVER_ERROR,
+                strprintf("%s:%d (%s)\n"
+                          "Internal bug detected: Chainman disabled or instance not found!\n"
+                          "You may report this issue here: %s\n",
+                          __FILE__, __LINE__, __func__, PACKAGE_BUGREPORT));
+        return nullptr;
+    }
+    return node_context->chainman.get();
+}
+
 static RetFormat ParseDataFormat(std::string& param, const std::string& strReq)
 {
     const std::string::size_type pos = strReq.rfind('.');
@@ -182,7 +203,9 @@ static bool rest_headers(const std::any& context,
     std::vector<const CBlockIndex *> headers;
     headers.reserve(count);
     {
-        ChainstateManager& chainman = EnsureAnyChainman(context);
+        ChainstateManager* maybe_chainman = GetChainman(context, req);
+        if (!maybe_chainman) return false;
+        ChainstateManager& chainman = *maybe_chainman;
         LOCK(cs_main);
         CChain& active_chain = chainman.ActiveChain();
         tip = active_chain.Tip();
@@ -252,9 +275,10 @@ static bool rest_block(const std::any& context,
     CBlock block;
     CBlockIndex* pblockindex = nullptr;
     CBlockIndex* tip = nullptr;
-    // SYSCOIN
-    ChainstateManager& chainman = EnsureAnyChainman(context);
     {
+        ChainstateManager* maybe_chainman = GetChainman(context, req);
+        if (!maybe_chainman) return false;
+        ChainstateManager& chainman = *maybe_chainman;
         LOCK(cs_main);
         tip = chainman.ActiveChain().Tip();
         pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
@@ -290,6 +314,7 @@ static bool rest_block(const std::any& context,
 
     case RetFormat::JSON: {
         // SYSCOIN
+        ChainstateManager& chainman = EnsureAnyChainman(context);
         UniValue objBlock = blockToJSON(block, tip, pblockindex, showTxDetails, &chainman);
         std::string strJSON = objBlock.write() + "\n";
         req->WriteHeader("Content-Type", "application/json");
@@ -399,6 +424,7 @@ static bool rest_tx(const std::any& context, HTTPRequest* req, const std::string
         return RESTERR(req, HTTP_BAD_REQUEST, "Invalid hash: " + hashStr);
     CBlockIndex* blockindex = nullptr;
     uint256 hashBlock = uint256();
+    const NodeContext* const node = GetNodeContext(context, req);
     if (g_txindex) {
         g_txindex->BlockUntilSyncedToCurrentChain();
     }
@@ -407,10 +433,9 @@ static bool rest_tx(const std::any& context, HTTPRequest* req, const std::string
         uint32_t nBlockHeight;
         if(pblockindexdb->ReadBlockHeight(hash, nBlockHeight)) {
             LOCK(cs_main);
-            blockindex = ::ChainActive()[nBlockHeight];
+            blockindex = node->chainman->ActiveChain()[nBlockHeight];
         }
     }
-    const NodeContext* const node = GetNodeContext(context, req);
     if (!node) return false;
     // SYSCOIN
     const CTransactionRef tx = GetTransaction(blockindex, node->mempool.get(), hash, Params().GetConsensus(), hashBlock);
@@ -510,6 +535,7 @@ static bool rest_getutxos(const std::any& context, HTTPRequest* req, const std::
         // convert hex to bin, continue then with bin part
         std::vector<unsigned char> strRequestV = ParseHex(strRequestMutable);
         strRequestMutable.assign(strRequestV.begin(), strRequestV.end());
+        [[fallthrough]];
     }
 
     case RetFormat::BINARY: {
@@ -552,7 +578,9 @@ static bool rest_getutxos(const std::any& context, HTTPRequest* req, const std::
     std::string bitmapStringRepresentation;
     std::vector<bool> hits;
     bitmap.resize((vOutPoints.size() + 7) / 8);
-    ChainstateManager& chainman = EnsureAnyChainman(context);
+    ChainstateManager* maybe_chainman = GetChainman(context, req);
+    if (!maybe_chainman) return false;
+    ChainstateManager& chainman = *maybe_chainman;
     {
         auto process_utxos = [&vOutPoints, &outs, &hits](const CCoinsView& view, const CTxMemPool& mempool) {
             for (const COutPoint& vOutPoint : vOutPoints) {
@@ -660,7 +688,9 @@ static bool rest_blockhash_by_height(const std::any& context, HTTPRequest* req,
 
     CBlockIndex* pblockindex = nullptr;
     {
-        ChainstateManager& chainman = EnsureAnyChainman(context);
+        ChainstateManager* maybe_chainman = GetChainman(context, req);
+        if (!maybe_chainman) return false;
+        ChainstateManager& chainman = *maybe_chainman;
         LOCK(cs_main);
         const CChain& active_chain = chainman.ActiveChain();
         if (blockheight > active_chain.Height()) {

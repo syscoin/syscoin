@@ -8,10 +8,13 @@
 
 #include <chainparamsbase.h>
 #include <consensus/params.h>
+#include <netaddress.h>
 #include <primitives/block.h>
 #include <protocol.h>
+#include <util/hash_type.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 typedef std::map<int, uint256> MapCheckpoints;
@@ -25,6 +28,10 @@ struct CCheckpointData {
     }
 };
 
+struct AssumeutxoHash : public BaseHash<uint256> {
+    explicit AssumeutxoHash(const uint256& hash) : BaseHash(hash) {}
+};
+
 /**
  * Holds configuration for use during UTXO snapshot load and validation. The contents
  * here are security critical, since they dictate which UTXO snapshots are recognized
@@ -32,7 +39,7 @@ struct CCheckpointData {
  */
 struct AssumeutxoData {
     //! The expected hash of the deserialized UTXO set.
-    const uint256 hash_serialized;
+    const AssumeutxoHash hash_serialized;
 
     //! Used to populate the nChainTx value, which is used during BlockManager::LoadBlockIndex().
     //!
@@ -40,8 +47,6 @@ struct AssumeutxoData {
     //! which we do not necessarily have at the time of snapshot load.
     const unsigned int nChainTx;
 };
-
-std::ostream& operator<<(std::ostream& o, const AssumeutxoData& aud);
 
 using MapAssumeutxo = std::map<int, const AssumeutxoData>;
 
@@ -77,6 +82,15 @@ public:
     const Consensus::Params& GetConsensus() const { return consensus; }
     const CMessageHeader::MessageStartChars& MessageStart() const { return pchMessageStart; }
     uint16_t GetDefaultPort() const { return nDefaultPort; }
+    uint16_t GetDefaultPort(Network net) const
+    {
+        return net == NET_I2P ? I2P_SAM31_PORT : GetDefaultPort();
+    }
+    uint16_t GetDefaultPort(const std::string& addr) const
+    {
+        CNetAddr a;
+        return a.SetSpecial(addr) ? GetDefaultPort(a.GetNetwork()) : GetDefaultPort();
+    }
 
     const CBlock& GenesisBlock() const { return genesis; }
     /** Default value for -checkmempool and -checkblockindex argument */

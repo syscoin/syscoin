@@ -13,6 +13,7 @@
 #include <consensus/merkle.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
+#include <deploymentstatus.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
 #include <pow.h>
@@ -32,6 +33,7 @@
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <llmq/quorums_commitment.h>
+#include <validationinterface.h>
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
 {
     int64_t nOldTime = pblock->nTime;
@@ -47,13 +49,14 @@ int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParam
     return nNewTime - nOldTime;
 }
 // SYSCOIN
-void RegenerateCommitments(CBlock& block, CBlockIndex* prev_block, const std::vector<unsigned char> &vchExtraData)
+void RegenerateCommitments(CBlock& block, ChainstateManager& chainman, const std::vector<unsigned char> &vchExtraData)
 {
     CMutableTransaction tx{*block.vtx.at(0)};
     tx.vout.erase(tx.vout.begin() + GetWitnessCommitmentIndex(block));
     block.vtx.at(0) = MakeTransactionRef(tx);
+
+    CBlockIndex* prev_block = WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock));
     // SYSCOIN
-    WITH_LOCK(::cs_main, assert(g_chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock) == prev_block));
     GenerateCoinbaseCommitment(block, prev_block, Params().GetConsensus(), vchExtraData);
 
     block.hashMerkleRoot = BlockMerkleRoot(block);
@@ -80,11 +83,11 @@ static BlockAssembler::Options DefaultOptions()
     // If -blockmaxweight is not given, limit to DEFAULT_BLOCK_MAX_WEIGHT
     BlockAssembler::Options options;
     options.nBlockMaxWeight = gArgs.GetArg("-blockmaxweight", DEFAULT_BLOCK_MAX_WEIGHT);
-    CAmount n = 0;
-    if (gArgs.IsArgSet("-blockmintxfee") && ParseMoney(gArgs.GetArg("-blockmintxfee", ""), n)) {
-        options.blockMinFeeRate = CFeeRate(n);
+    if (gArgs.IsArgSet("-blockmintxfee")) {
+        std::optional<CAmount> parsed = ParseMoney(gArgs.GetArg("-blockmintxfee", ""));
+        options.blockMinFeeRate = CFeeRate{parsed.value_or(DEFAULT_BLOCK_MIN_TX_FEE)};
     } else {
-        options.blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_TX_FEE);
+        options.blockMinFeeRate = CFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
     }
     return options;
 }
@@ -124,17 +127,20 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblocktemplate->vTxSigOpsCost.push_back(-1); // updated at end
 
     LOCK2(cs_main, m_mempool.cs);
-    assert(std::addressof(*::ChainActive().Tip()) == std::addressof(*m_chainstate.m_chain.Tip()));
     CBlockIndex* pindexPrev = m_chainstate.m_chain.Tip();
     assert(pindexPrev != nullptr);
     nHeight = pindexPrev->nHeight + 1;
     bool fDIP0003Active_context = nHeight >= chainparams.GetConsensus().DIP0003Height;
+    bool NEVMActive_context = nHeight >= chainparams.GetConsensus().nNEVMStartBlock;
     if(nHeight >= chainparams.GetConsensus().nUTXOAssetsBlock) {
         const int32_t nChainId = chainparams.GetConsensus ().nAuxpowChainId;
-        const int32_t nVersion = ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
+        const int32_t nVersion = g_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
         pblock->SetBaseVersion(nVersion, nChainId);
     } else {
         pblock->SetOldBaseVersion(4, chainparams.GetConsensus ().nAuxpowOldChainId);
+    }
+    if(NEVMActive_context && (!fRegTest || fNEVMConnection)) {
+        pblock->SetNEVMVersion();
     }
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
@@ -152,12 +158,13 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // This is only needed in case the witness softfork activation is reverted
     // (which would require a very deep reorganization).
     // Note that the mempool would accept transactions with witness data before
-    // IsWitnessEnabled, but we would only ever mine blocks after IsWitnessEnabled
+    // the deployment is active, but we would only ever mine blocks after activation
     // unless there is a massive block reorganization with the witness softfork
     // not activated.
     // TODO: replace this with a call to main to assess validity of a mempool
     // transaction (which in most cases can be a no-op).
-    fIncludeWitness = IsWitnessEnabled(pindexPrev, chainparams.GetConsensus());
+    fIncludeWitness = DeploymentActiveAfter(pindexPrev, chainparams.GetConsensus(), Consensus::DEPLOYMENT_SEGWIT);
+
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
     addPackageTxs(nPackagesSelected, nDescendantsUpdated);
@@ -185,6 +192,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         }
     }
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
+    CDataStream dsNEVM(SER_NETWORK, PROTOCOL_VERSION);
     BlockValidationState state;
     if(fDIP0003Active_context) {
         // Update coinbase transaction with additional info about masternode and governance payments,
@@ -194,19 +202,17 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         cbTx.nVersion = 2;
         cbTx.nHeight = nHeight;
         llmq::CFinalCommitmentTxPayload qc;
-        for (auto& p : chainparams.GetConsensus().llmqs) {
-            // create commitment payload if quorum commitment is needed
-            llmq::CFinalCommitment commitment;
-            if (llmq::quorumBlockProcessor->GetMinableCommitment(p.first, nHeight, commitment)) {
-                coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
-                qc.commitments.push_back(commitment);
-            }
+        // create commitment payload if quorum commitment is needed
+        llmq::CFinalCommitment commitment;
+        if (llmq::quorumBlockProcessor->GetMinableCommitment(chainparams.GetConsensus().llmqTypeChainLocks, nHeight, commitment)) {
+            coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
+            qc.commitments.push_back(commitment);
         }
         if (coinbaseTx.nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
             qc.cbTx = cbTx;
         }
         // pass qc pointer here because we want to build merkleRootMNList / merkleRootQuorums which depends on qc if qc is valid
-        if (!CalcCbTxMerkleRootMNList(*pblock, pindexPrev, cbTx.merkleRootMNList, state, ::ChainstateActive().CoinsTip(), &qc)) {
+        if (!CalcCbTxMerkleRootMNList(*pblock, pindexPrev, cbTx.merkleRootMNList, state, m_chainstate.CoinsTip(), &qc)) {
             throw std::runtime_error(strprintf("%s: CalcCbTxMerkleRootMNList failed: %s", __func__, state.ToString()));
         }
         if (!CalcCbTxMerkleRootQuorums(*pblock, pindexPrev, cbTx.merkleRootQuorums, state, &qc)) {
@@ -221,13 +227,24 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         }
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate
-        FillBlockPayments(coinbaseTx, nHeight, blockReward, nFees, pblocktemplate->voutMasternodePayments, pblocktemplate->voutSuperblockPayments);
+        FillBlockPayments(m_chainstate.m_chain, coinbaseTx, nHeight, blockReward, nFees, pblocktemplate->voutMasternodePayments, pblocktemplate->voutSuperblockPayments);
     }
-
-    
+    if(NEVMActive_context && fNEVMConnection) {
+        CNEVMBlock nevmBlock;
+        BlockValidationState state;
+        GetMainSignals().NotifyGetNEVMBlock(nevmBlock, state);
+        if(state.IsInvalid()) {
+            throw std::runtime_error(strprintf("Could not fetch NEVM block %s", state.ToString()));
+        }
+        // block data stored in block which is a mutable field that is only sent over network
+        pblock->vchNEVMBlockData = nevmBlock.vchNEVMBlockData;
+        nevmBlock.vchNEVMBlockData.clear();
+        dsNEVM << "NEVM" << nevmBlock;
+    }
     pblock->vtx[0] = MakeTransactionRef(coinbaseTx);
     // SYSCOIN
     pblocktemplate->vchCoinbaseCommitmentExtra = std::vector<unsigned char>(ds.begin(), ds.end());
+    pblocktemplate->vchCoinbaseCommitmentExtra.insert( pblocktemplate->vchCoinbaseCommitmentExtra.end(), dsNEVM.begin(), dsNEVM.end() );
     pblocktemplate->vchCoinbaseCommitment = GenerateCoinbaseCommitment(*pblock, pindexPrev, chainparams.GetConsensus(), pblocktemplate->vchCoinbaseCommitmentExtra);
     // add coinbase payload if not witness commitment which would append it after witness data, in this case we can assume no witness commitment
     if(pblocktemplate->vchCoinbaseCommitment.empty() && !pblocktemplate->vchCoinbaseCommitmentExtra.empty()) {
@@ -244,8 +261,6 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblock->nNonce         = 0;
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);
 
-    // BlockValidationState state;
-    assert(std::addressof(::ChainstateActive()) == std::addressof(m_chainstate));
     if (!TestBlockValidity(state, chainparams, m_chainstate, *pblock, pindexPrev, false, false)) {
         throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
     }

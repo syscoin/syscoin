@@ -54,11 +54,10 @@ static const int TIMEOUT_INTERVAL = 20 * 60;
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
 static constexpr auto EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL = 5min;
-/** The maximum number of addresses from our addrman to return in response to a getaddr message. */
-static constexpr size_t MAX_ADDR_TO_SEND = 1000;
+// SYSCOIN
 /**  
  * Maximum length of incoming protocol messages (no message over 32 MiB is
- * currently acceptable).  Syscoin has 4 MiB here, but we need more space
+ * currently acceptable).  Bitcoin has 4 MiB here, but we need more space
  * to allow for 2,000 block headers with auxpow.
  */
 /* FIXME: Once the headers size limit is deployed sufficiently in the network,
@@ -89,9 +88,9 @@ static const int INBOUND_EVICTION_PROTECTION_TIME = 1;
 /** Number of file descriptors required for message capture **/
 static const int NUM_FDS_MESSAGE_CAPTURE = 1;
 
-static const bool DEFAULT_FORCEDNSSEED = false;
-static const bool DEFAULT_DNSSEED = true;
-static const bool DEFAULT_FIXEDSEEDS = true;
+static constexpr bool DEFAULT_FORCEDNSSEED{false};
+static constexpr bool DEFAULT_DNSSEED{true};
+static constexpr bool DEFAULT_FIXEDSEEDS{true};
 static const size_t DEFAULT_MAXRECEIVEBUFFER = 5 * 1000;
 static const size_t DEFAULT_MAXSENDBUFFER    = 1 * 1000;
 
@@ -271,7 +270,7 @@ public:
     int64_t nLastBlockTime;
     int64_t nTimeConnected;
     int64_t nTimeOffset;
-    std::string addrName;
+    std::string m_addr_name;
     int nVersion;
     std::string cleanSubVer;
     bool fInbound;
@@ -428,7 +427,7 @@ public:
     std::unique_ptr<TransportDeserializer> m_deserializer;
     std::unique_ptr<TransportSerializer> m_serializer;
 
-    NetPermissionFlags m_permissionFlags{PF_NONE};
+    NetPermissionFlags m_permissionFlags{NetPermissionFlags::None};
     std::atomic<ServiceFlags> nServices{NODE_NONE};
     SOCKET hSocket GUARDED_BY(cs_hSocket);
     /** Total size of all vSendMsg entries */
@@ -458,15 +457,16 @@ public:
     std::atomic<int64_t> nTimeFirstMessageReceived;
     std::atomic<bool> fFirstMessageIsMNAUTH;
     // If 'true' this node will be disconnected on CMasternodeMan::ProcessMasternodeConnections()
-    bool m_masternode_connection;
+    std::atomic<bool> m_masternode_connection;
     // If 'true' this node will be disconnected after MNAUTH
-    bool m_masternode_probe_connection;
+    std::atomic<bool> m_masternode_probe_connection;
     // If 'true', we identified it as an intra-quorum relay connection
-    bool m_masternode_iqr_connection;
+    std::atomic<bool> m_masternode_iqr_connection{false};
     // Address of this peer
     const CAddress addr;
     // Bind address of our side of the connection
     const CAddress addrBind;
+    const std::string m_addr_name;
     //! Whether this peer is an inbound onion, i.e. connected via our Tor onion service.
     const bool m_inbound_onion;
     std::atomic<int> nVersion{0};
@@ -482,17 +482,11 @@ public:
     }
     bool fClient{false}; // set by version message
     bool m_limited_node{false}; //after BIP159, set by version message
-    /**
-     * Whether the peer has signaled support for receiving ADDRv2 (BIP155)
-     * messages, implying a preference to receive ADDRv2 instead of ADDR ones.
-     */
-    std::atomic_bool m_wants_addrv2{false};
     /** fSuccessfullyConnected is set to true on receiving VERACK from the peer. */
     std::atomic_bool fSuccessfullyConnected{false};
     // Setting fDisconnect to true will cause the node to be disconnected the
     // next time DisconnectNodes() runs
     std::atomic_bool fDisconnect{false};
-    bool fSentAddr{false};
     CSemaphoreGrant grantOutbound;
     std::atomic<int> nRefCount{0};
 
@@ -539,15 +533,6 @@ public:
         return m_conn_type == ConnectionType::INBOUND;
     }
 
-    /* Whether we send addr messages over this connection */
-    bool RelayAddrsWithConn() const
-    {
-        // Don't relay addr messages to peers that we connect to as block-relay-only
-        // peers (to prevent adversaries from inferring these links from addr
-        // traffic).
-        return m_conn_type != ConnectionType::BLOCK_RELAY;
-    }
-
     bool ExpectServicesFromConn() const {
         switch (m_conn_type) {
             case ConnectionType::INBOUND:
@@ -579,14 +564,6 @@ public:
     std::atomic<bool> m_bip152_highbandwidth_to{false};
     // Peer selected us as (compact blocks) high-bandwidth peer (BIP152)
     std::atomic<bool> m_bip152_highbandwidth_from{false};
-
-    // flood relay
-    std::vector<CAddress> vAddrToSend;
-    std::unique_ptr<CRollingBloomFilter> m_addr_known{nullptr};
-    bool fGetAddr{false};
-    Mutex m_addr_send_times_mutex;
-    std::chrono::microseconds m_next_addr_send GUARDED_BY(m_addr_send_times_mutex){0};
-    std::chrono::microseconds m_next_local_addr_send GUARDED_BY(m_addr_send_times_mutex){0};
 
     struct TxRelay {
         mutable RecursiveMutex cs_filter;
@@ -640,10 +617,10 @@ public:
     // SYSCOIN
     // Challenge sent in VERSION to be answered with MNAUTH (only happens between MNs)
     mutable RecursiveMutex cs_mnauth;
-    uint256 sentMNAuthChallenge;
-    uint256 receivedMNAuthChallenge;
-    uint256 verifiedProRegTxHash;
-    uint256 verifiedPubKeyHash;
+    uint256 sentMNAuthChallenge GUARDED_BY(cs_mnauth);
+    uint256 receivedMNAuthChallenge GUARDED_BY(cs_mnauth);
+    uint256 verifiedProRegTxHash GUARDED_BY(cs_mnauth);
+    uint256 verifiedPubKeyHash GUARDED_BY(cs_mnauth);
 
     // If true, we will announce/send him plain recovered sigs (usually true for full nodes)
     std::atomic<bool> fSendRecSigs{false};
@@ -706,37 +683,6 @@ public:
         nRefCount--;
     }
 
-    void AddAddressKnown(const CAddress& _addr)
-    {
-        assert(m_addr_known);
-        m_addr_known->insert(_addr.GetKey());
-    }
-
-    /**
-     * Whether the peer supports the address. For example, a peer that does not
-     * implement BIP155 cannot receive Tor v3 addresses because it requires
-     * ADDRv2 (BIP155) encoding.
-     */
-    bool IsAddrCompatible(const CAddress& addr) const
-    {
-        return m_wants_addrv2 || addr.IsAddrV1Compatible();
-    }
-
-    void PushAddress(const CAddress& _addr, FastRandomContext &insecure_rand)
-    {
-        // Known checking here is only to save space from duplicates.
-        // SendMessages will filter it again for knowns that were added
-        // after addresses were pushed.
-        assert(m_addr_known);
-        if (_addr.IsValid() && !m_addr_known->contains(_addr.GetKey()) && IsAddrCompatible(_addr)) {
-            if (vAddrToSend.size() >= MAX_ADDR_TO_SEND) {
-                vAddrToSend[insecure_rand.randrange(vAddrToSend.size())] = _addr;
-            } else {
-                vAddrToSend.push_back(_addr);
-            }
-        }
-    }
-
     void AddKnownTx(const uint256& hash)
     {
         if (m_tx_relay != nullptr) {
@@ -771,11 +717,47 @@ public:
         return nLocalServices;
     }
 
-    std::string GetAddrName() const;
-    //! Sets the addrName only if it was not previously set
-    void MaybeSetAddrName(const std::string& addrNameIn);
     // SYSCOIN
     bool CanRelay() const { LOCK(cs_mnauth); return !m_masternode_connection || m_masternode_iqr_connection; }
+    uint256 GetSentMNAuthChallenge() const {
+        LOCK(cs_mnauth);
+        return sentMNAuthChallenge;
+    }
+
+    uint256 GetReceivedMNAuthChallenge() const {
+        LOCK(cs_mnauth);
+        return receivedMNAuthChallenge;
+    }
+
+    uint256 GetVerifiedProRegTxHash() const {
+        LOCK(cs_mnauth);
+        return verifiedProRegTxHash;
+    }
+
+    uint256 GetVerifiedPubKeyHash() const {
+        LOCK(cs_mnauth);
+        return verifiedPubKeyHash;
+    }
+
+    void SetSentMNAuthChallenge(const uint256& newSentMNAuthChallenge) {
+        LOCK(cs_mnauth);
+        sentMNAuthChallenge = newSentMNAuthChallenge;
+    }
+
+    void SetReceivedMNAuthChallenge(const uint256& newReceivedMNAuthChallenge) {
+        LOCK(cs_mnauth);
+        receivedMNAuthChallenge = newReceivedMNAuthChallenge;
+    }
+
+    void SetVerifiedProRegTxHash(const uint256& newVerifiedProRegTxHash) {
+        LOCK(cs_mnauth);
+        verifiedProRegTxHash = newVerifiedProRegTxHash;
+    }
+
+    void SetVerifiedPubKeyHash(const uint256& newVerifiedPubKeyHash) {
+        LOCK(cs_mnauth);
+        verifiedPubKeyHash = newVerifiedPubKeyHash;
+    }
     bool IsMasternodeConnection() const { LOCK(cs_mnauth); return m_masternode_connection; }
     std::string ConnectionTypeAsString() const { return ::ConnectionTypeAsString(m_conn_type); }
 
@@ -808,10 +790,7 @@ private:
     //! service advertisements.
     const ServiceFlags nLocalServices;
 
-    std::list<CNetMessage> vRecvMsg;  // Used only by SocketHandler thread
-
-    mutable RecursiveMutex cs_addrName;
-    std::string addrName GUARDED_BY(cs_addrName);
+    std::list<CNetMessage> vRecvMsg; // Used only by SocketHandler thread
 
     // Our address, as reported by the peer
     CService addrLocal GUARDED_BY(cs_addrLocal);
@@ -883,6 +862,9 @@ public:
         std::vector<NetWhitebindPermissions> vWhiteBinds;
         std::vector<CService> vBinds;
         std::vector<CService> onion_binds;
+        /// True if the user did not specify -bind= or -whitebind= and thus
+        /// we should bind on `0.0.0.0` (IPv4) and `::` (IPv6).
+        bool bind_on_any;
         bool m_use_addrman_outgoing = true;
         std::vector<std::string> m_specified_outgoing;
         std::vector<std::string> m_added_nodes;
@@ -899,7 +881,7 @@ public:
         nMaxAddnode = connOptions.nMaxAddnode;
         nMaxFeeler = connOptions.nMaxFeeler;
         m_max_outbound = m_max_outbound_full_relay + m_max_outbound_block_relay + nMaxFeeler;
-        clientInterface = connOptions.uiInterface;
+        m_client_interface = connOptions.uiInterface;
         m_banman = connOptions.m_banman;
         m_msgproc = connOptions.m_msgproc;
         nSendBufferMaxSize = connOptions.nSendBufferMaxSize;
@@ -1009,45 +991,18 @@ public:
         ForEachNode(FullyConnectedOnly, func);
     }
 
-    template<typename Condition, typename Callable, typename CallableAfter>
-    void ForEachNodeThen(const Condition& cond, Callable&& pre, CallableAfter&& post)
-    {
-        LOCK(cs_vNodes);
-        for (auto&& node : vNodes) {
-            if (cond(node))
-                pre(node);
-        }
-        post();
-    };
-
-    template<typename Callable, typename CallableAfter>
-    void ForEachNodeThen(Callable&& pre, CallableAfter&& post)
-    {
-        ForEachNodeThen(FullyConnectedOnly, pre, post);
-    }
-
-    template<typename Condition, typename Callable, typename CallableAfter>
-    void ForEachNodeThen(const Condition& cond, Callable&& pre, CallableAfter&& post) const
-    {
-        LOCK(cs_vNodes);
-        for (auto&& node : vNodes) {
-            if (cond(node))
-                pre(node);
-        }
-        post();
-    };
-
-    template<typename Callable, typename CallableAfter>
-    void ForEachNodeThen(Callable&& pre, CallableAfter&& post) const
-    {
-        ForEachNodeThen(FullyConnectedOnly, pre, post);
-    }
-
     void CopyNodeVector(std::vector<CNode*>& vecNodesCopy);
     void ReleaseNodeVector(const std::vector<CNode*>& vecNodes);
 
     // Addrman functions
-    std::vector<CAddress> GetAddresses(size_t max_addresses, size_t max_pct) const;
+    /**
+     * Return all or many randomly selected addresses, optionally by network.
+     *
+     * @param[in] max_addresses  Maximum number of addresses to return (0 = all).
+     * @param[in] max_pct        Maximum percentage of addresses to return (0 = all).
+     * @param[in] network        Select only addresses of this network (nullopt = all).
+     */
+    std::vector<CAddress> GetAddresses(size_t max_addresses, size_t max_pct, std::optional<Network> network) const;
     /**
      * Cache is used to minimize topology leaks, so it should
      * be used for all non-trusted calls, for example, p2p.
@@ -1098,6 +1053,7 @@ public:
      *
      * @param[in]   address     Address of node to try connecting to
      * @param[in]   conn_type   ConnectionType::OUTBOUND or ConnectionType::BLOCK_RELAY
+     *                          or ConnectionType::ADDR_FETCH
      * @return      bool        Returns false if there are no available
      *                          slots for this connection:
      *                          - conn_type not a supported ConnectionType
@@ -1173,10 +1129,7 @@ private:
 
     bool BindListenPort(const CService& bindAddr, bilingual_str& strError, NetPermissionFlags permissions);
     bool Bind(const CService& addr, unsigned int flags, NetPermissionFlags permissions);
-    bool InitBinds(
-        const std::vector<CService>& binds,
-        const std::vector<NetWhitebindPermissions>& whiteBinds,
-        const std::vector<CService>& onion_binds);
+    bool InitBinds(const Options& options);
 
     void ThreadOpenAddedConnections();
     void AddAddrFetch(const std::string& strDest);
@@ -1342,7 +1295,7 @@ private:
     int nMaxFeeler;
     int m_max_outbound;
     bool m_use_addrman_outgoing;
-    CClientUIInterface* clientInterface;
+    CClientUIInterface* m_client_interface;
     NetEventsInterface* m_msgproc;
     /** Pointer to this node's banman. May be nullptr - check existence before dereferencing. */
     BanMan* m_banman;
@@ -1433,7 +1386,7 @@ struct NodeEvictionCandidate
     uint64_t nKeyedNetGroup;
     bool prefer_evict;
     bool m_is_local;
-    bool m_is_onion;
+    Network m_network;
 };
 
 /**
@@ -1451,20 +1404,20 @@ struct NodeEvictionCandidate
  * longest, to replicate the non-eviction implicit behavior and preclude attacks
  * that start later.
  *
- * Half of these protected spots (1/4 of the total) are reserved for onion peers
- * connected via our tor control service, if any, sorted by longest uptime, even
- * if they're not longest uptime overall. Any remaining slots of the 1/4 are
- * then allocated to protect localhost peers, if any (or up to 2 localhost peers
- * if no slots remain and 2 or more onion peers were protected), sorted by
- * longest uptime, as manually configured hidden services not using
- * `-bind=addr[:port]=onion` will not be detected as inbound onion connections.
+ * Half of these protected spots (1/4 of the total) are reserved for the
+ * following categories of peers, sorted by longest uptime, even if they're not
+ * longest uptime overall:
  *
- * This helps protect onion peers, which tend to be otherwise disadvantaged
- * under our eviction criteria for their higher min ping times relative to IPv4
- * and IPv6 peers, and favorise the diversity of peer connections.
+ * - onion peers connected via our tor control service
  *
- * This function was extracted from SelectNodeToEvict() to be able to test the
- * ratio-based protection logic deterministically.
+ * - localhost peers, as manually configured hidden services not using
+ *   `-bind=addr[:port]=onion` will not be detected as inbound onion connections
+ *
+ * - I2P peers
+ *
+ * This helps protect these privacy network peers, which tend to be otherwise
+ * disadvantaged under our eviction criteria for their higher min ping times
+ * relative to IPv4/IPv6 peers, and favorise the diversity of peer connections.
  */
 void ProtectEvictionCandidatesByRatio(std::vector<NodeEvictionCandidate>& vEvictionCandidates);
 

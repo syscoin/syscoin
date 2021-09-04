@@ -23,6 +23,8 @@
 #include <dsnotificationinterface.h>
 #include <walletinitinterface.h>
 #include <primitives/block.h>
+#include <node/context.h>
+#include <timedata.h>
 std::atomic_bool fImporting(false);
 std::atomic_bool fReindex(false);
 bool fHavePruned = false;
@@ -41,6 +43,10 @@ bool fCheckForPruning = false;
 
 /** Dirty block index entries. */
 std::set<CBlockIndex*> setDirtyBlockIndex;
+
+// SYSCOIN
+/** Dirty NEVM block index entries. */
+std::set<CNEVMBlockIndex*> setDirtyNEVMBlockIndex;
 
 /** Dirty block file entries. */
 std::set<int> setDirtyFileInfo;
@@ -252,7 +258,6 @@ bool FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight,
             // when the undo file is keeping up with the block file, we want to flush it explicitly
             // when it is lagging behind (more blocks arrive than are being connected), we let the
             // undo block write case handle it
-            assert(std::addressof(::ChainActive()) == std::addressof(active_chain));
             finalize_undo = (vinfoBlockFile[nFile].nHeightLast == (unsigned int)active_chain.Tip()->nHeight);
             nFile++;
             if (vinfoBlockFile.size() <= nFile) {
@@ -347,7 +352,7 @@ bool WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValidationState& st
    both a block and its header.  */
 
 template<typename T>
-static bool ReadBlockOrHeader(T& block, const FlatFilePos& pos, const Consensus::Params& consensusParams)
+static bool ReadBlockOrHeader(T& block, const FlatFilePos& pos, const Consensus::Params& consensusParams, bool fCheckPOW, const BlockManager* blockman)
 {
     block.SetNull();
 
@@ -365,18 +370,29 @@ static bool ReadBlockOrHeader(T& block, const FlatFilePos& pos, const Consensus:
     }
 
     // Check the header
-    if (!CheckProofOfWork(block, consensusParams))
+    if (!CheckProofOfWork(block, consensusParams, fCheckPOW))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
     // Signet only: check block solution
     if (consensusParams.signet_blocks && !CheckSignetBlockSolution(block, consensusParams)) {
         return error("ReadBlockFromDisk: Errors in block solution at %s", pos.ToString());
-    }
-
+    } 
+  
+    // SYSCOIN
+     if(blockman) {
+        int64_t nAgeThreshold = nMaxTipAge*2;
+        if(block.nTime >= (GetAdjustedTime() - nAgeThreshold)) {
+            LOCK(cs_main);
+            const auto *NEVMBlockIndex = blockman->LookupNEVMBlockIndex(block.GetHash());
+            if(NEVMBlockIndex != nullptr) {
+                block.vchNEVMBlockData = NEVMBlockIndex->vchNEVMBlockData;
+            }
+        }
+    } 
     return true;
 }
 template<typename T>
-static bool ReadBlockOrHeader(T& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams)
+static bool ReadBlockOrHeader(T& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams, bool fCheckPOW, const BlockManager* blockman)
 {
     FlatFilePos blockPos;
     {
@@ -384,26 +400,26 @@ static bool ReadBlockOrHeader(T& block, const CBlockIndex* pindex, const Consens
         blockPos = pindex->GetBlockPos();
     }
 
-    if (!ReadBlockOrHeader(block, blockPos, consensusParams))
+    if (!ReadBlockOrHeader(block, blockPos, consensusParams, fCheckPOW, blockman))
         return false;
     if (block.GetHash() != pindex->GetBlockHash())
         return error("ReadBlockFromDisk(CBlock&, CBlockIndex*): GetHash() doesn't match index for %s at %s",
-                pindex->ToString(), pindex->GetBlockPos().ToString());
+                pindex->ToString(), pindex->GetBlockPos().ToString());  
     return true;
 }
-bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos, const Consensus::Params& consensusParams)
+bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos, const Consensus::Params& consensusParams, bool fCheckPOW, const BlockManager* blockman)
 {
-    return ReadBlockOrHeader(block, pos, consensusParams);
+    return ReadBlockOrHeader(block, pos, consensusParams, fCheckPOW, blockman);
 }
 
- bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams)
+ bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams, bool fCheckPOW, const BlockManager* blockman)
 {
-    return ReadBlockOrHeader(block, pindex, consensusParams);
+    return ReadBlockOrHeader(block, pindex, consensusParams, fCheckPOW, blockman);
 }
 
- bool ReadBlockHeaderFromDisk(CBlockHeader& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams)
+ bool ReadBlockHeaderFromDisk(CBlockHeader& block, const CBlockIndex* pindex, const Consensus::Params& consensusParams, bool fCheckPOW, const BlockManager* blockman)
 {
-    return ReadBlockOrHeader(block, pindex, consensusParams);
+    return ReadBlockOrHeader(block, pindex, consensusParams, fCheckPOW, blockman);
 }
 
 static bool WriteBlockToDisk(const CBlock& block, FlatFilePos& pos, const CMessageHeader::MessageStartChars& messageStart)
@@ -510,9 +526,8 @@ struct CImportingNow {
     }
 };
 
-void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFiles, const ArgsManager& args, CDSNotificationInterface* pdsNotificationInterface, std::unique_ptr<CDeterministicMNManager> &deterministicMNManager, const WalletInitInterface &g_wallet_init_interface)
+void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFiles, const ArgsManager& args, CDSNotificationInterface* pdsNotificationInterface, std::unique_ptr<CDeterministicMNManager> &deterministicMNManager, const WalletInitInterface &g_wallet_init_interface, NodeContext& node)
 {
-    const CChainParams& chainparams = Params();
     ScheduleBatchPriority();
 
     {
@@ -531,18 +546,18 @@ void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFile
                     break; // This error is logged in OpenBlockFile
                 }
                 LogPrintf("Reindexing block file blk%05u.dat...\n", (unsigned int)nFile);
-                chainman.ActiveChainstate().LoadExternalBlockFile(chainparams, file, &pos);
+                chainman.ActiveChainstate().LoadExternalBlockFile(file, &pos);
                 if (ShutdownRequested()) {
                     LogPrintf("Shutdown requested. Exit %s\n", __func__);
                     return;
                 }
                 nFile++;
             }
-            pblocktree->WriteReindexing(false);
+            WITH_LOCK(::cs_main, chainman.m_blockman.m_block_tree_db->WriteReindexing(false));
             fReindex = false;
             LogPrintf("Reindexing finished\n");
             // To avoid ending up in a situation without genesis block, re-try initializing (no-op if reindexing worked):
-            chainman.ActiveChainstate().LoadGenesisBlock(chainparams);
+            chainman.ActiveChainstate().LoadGenesisBlock();
         }
 
         // -loadblock=
@@ -550,7 +565,7 @@ void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFile
             FILE* file = fsbridge::fopen(path, "rb");
             if (file) {
                 LogPrintf("Importing blocks file %s...\n", path.string());
-                chainman.ActiveChainstate().LoadExternalBlockFile(chainparams, file);
+                chainman.ActiveChainstate().LoadExternalBlockFile(file);
                 if (ShutdownRequested()) {
                     LogPrintf("Shutdown requested. Exit %s\n", __func__);
                     return;
@@ -567,7 +582,7 @@ void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFile
         // the relevant pointers before the ABC call.
         for (CChainState* chainstate : WITH_LOCK(::cs_main, return chainman.GetAll())) {
             BlockValidationState state;
-            if (!chainstate->ActivateBestChain(state, chainparams, nullptr)) {
+            if (!chainstate->ActivateBestChain(state, nullptr)) {
                 LogPrintf("Failed to connect best block (%s)\n", state.ToString());
                 StartShutdown();
                 return;
@@ -575,7 +590,7 @@ void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFile
         }
         // SYSCOIN
         if(pdsNotificationInterface)
-            pdsNotificationInterface->InitializeCurrentBlockTip();
+            pdsNotificationInterface->InitializeCurrentBlockTip(chainman);
         // Get all UTXOs for each MN collateral in one go so that we can fill coin cache early
         // and reduce further locking overhead for cs_main in other parts of code including GUI
         LogPrintf("Filling coin cache with masternode UTXOs...\n");
@@ -584,13 +599,14 @@ void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFile
         if(deterministicMNManager)
             deterministicMNManager->GetListAtChainTip(mnList);
         mnList.ForEachMN(false, [&](const CDeterministicMNCPtr& dmn) {
-            Coin coin;
-            GetUTXOCoin(dmn->collateralOutpoint, coin);
+            std::map<COutPoint, Coin> coins;
+            coins[dmn->collateralOutpoint]; 
+            node.chain->findCoins(coins);
         });
         LogPrintf("Filling coin cache with masternode UTXOs: done in %dms\n", GetTimeMillis() - nStart);
 
         
-        g_wallet_init_interface.AutoLockMasternodeCollaterals();
+        g_wallet_init_interface.AutoLockMasternodeCollaterals(node);
         if (args.GetBoolArg("-stopafterblockimport", DEFAULT_STOPAFTERBLOCKIMPORT)) {
             LogPrintf("Stopping after block import\n");
             StartShutdown();

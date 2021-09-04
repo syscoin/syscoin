@@ -10,9 +10,10 @@
 
 #include <net.h>
 
-#include <QWidget>
+#include <QByteArray>
 #include <QCompleter>
 #include <QThread>
+#include <QWidget>
 
 class ClientModel;
 class PlatformStyle;
@@ -75,6 +76,7 @@ public:
 protected:
     virtual bool eventFilter(QObject* obj, QEvent *event) override;
     void keyPressEvent(QKeyEvent *) override;
+    void changeEvent(QEvent* e) override;
 
 private Q_SLOTS:
     void on_lineEdit_returnPressed();
@@ -176,6 +178,9 @@ private:
     QCompleter *autoCompleter = nullptr;
     QThread thread;
     WalletModel* m_last_wallet_model{nullptr};
+    bool m_is_executing{false};
+    QByteArray m_peer_widget_header_state;
+    QByteArray m_banlist_widget_header_state;
 
     /** Update UI with latest network info from model. */
     void updateNetworkState();

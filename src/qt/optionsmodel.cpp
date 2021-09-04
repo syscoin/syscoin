@@ -21,6 +21,7 @@
 #include <validation.h> // For DEFAULT_SCRIPTCHECK_THREADS
 
 #include <QDebug>
+#include <QLatin1Char>
 #include <QSettings>
 #include <QStringList>
 const char *DEFAULT_GUI_PROXY_HOST = "127.0.0.1";
@@ -114,6 +115,18 @@ void OptionsModel::Init(bool resetSettings)
         settings.setValue("bSpendZeroConfChange", true);
     if (!gArgs.SoftSetBoolArg("-spendzeroconfchange", settings.value("bSpendZeroConfChange").toBool()))
         addOverriddenOption("-spendzeroconfchange");
+
+    if (!settings.contains("external_signer_path"))
+        settings.setValue("external_signer_path", "");
+
+    if (!gArgs.SoftSetArg("-signer", settings.value("external_signer_path").toString().toStdString())) {
+        addOverriddenOption("-signer");
+    }
+
+    if (!settings.contains("SubFeeFromAmount")) {
+        settings.setValue("SubFeeFromAmount", false);
+    }
+    m_sub_fee_from_amount = settings.value("SubFeeFromAmount", false).toBool();
 #endif
 
     // Network
@@ -193,7 +206,7 @@ void OptionsModel::Reset()
     QSettings settings;
 
     // Backup old settings to chain-specific datadir for troubleshooting
-    BackupSettings(GetDataDir(true) / "guisettings.ini.bak", settings);
+    BackupSettings(gArgs.GetDataDirNet() / "guisettings.ini.bak", settings);
 
     // Save the strDataDir setting
     QString dataDir = GUIUtil::getDefaultDataDirectory();
@@ -242,7 +255,7 @@ static ProxySetting GetProxySetting(QSettings &settings, const QString &name)
 
 static void SetProxySetting(QSettings &settings, const QString &name, const ProxySetting &ip_port)
 {
-    settings.setValue(name, ip_port.ip + ":" + ip_port.port);
+    settings.setValue(name, QString{ip_port.ip + QLatin1Char(':') + ip_port.port});
 }
 
 static const QString GetDefaultProxyAddress()
@@ -325,6 +338,10 @@ QVariant OptionsModel::data(const QModelIndex & index, int role) const
             return settings.value("bSpendZeroConfChange");
         case ShowMasternodesTab:
             return settings.value("fShowMasternodesTab");           
+        case ExternalSignerPath:
+            return settings.value("external_signer_path");
+        case SubFeeFromAmount:
+            return m_sub_fee_from_amount;
 #endif
         case DisplayUnit:
             return nDisplayUnit;
@@ -450,6 +467,16 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
                 setRestartRequired(true);
             }
             break;  
+        case ExternalSignerPath:
+            if (settings.value("external_signer_path") != value.toString()) {
+                settings.setValue("external_signer_path", value.toString());
+                setRestartRequired(true);
+            }
+            break;
+        case SubFeeFromAmount:
+            m_sub_fee_from_amount = value.toBool();
+            settings.setValue("SubFeeFromAmount", m_sub_fee_from_amount);
+            break;
 #endif
         case DisplayUnit:
             setDisplayUnit(value);

@@ -16,6 +16,7 @@ class CBlockIndex;
 class CConnman;
 class PeerManager;
 class CScheduler;
+class ChainstateManager;
 namespace llmq
 {
 
@@ -77,7 +78,8 @@ private:
 public:
     CConnman& connman;
     PeerManager& peerman;
-    explicit CChainLocksHandler(CConnman &connman, PeerManager& peerman);
+    ChainstateManager& chainman;
+    explicit CChainLocksHandler(CConnman &connman, PeerManager& peerman, ChainstateManager& chainman);
     ~CChainLocksHandler();
 
     void Start();
@@ -95,11 +97,10 @@ public:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload);
     void CheckActiveState();
     void TrySignChainTip();
-    virtual void HandleNewRecoveredSig(const CRecoveredSig& recoveredSig) override;
+    void HandleNewRecoveredSig(const CRecoveredSig& recoveredSig) override;
 
     bool HasChainLock(int nHeight, const uint256& blockHash);
     bool HasConflictingChainLock(int nHeight, const uint256& blockHash);
-
 
 private:
     // these require locks to be held already

@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2019 The Dash Core developers
+// Copyright (c) 2018-2021 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -10,16 +10,21 @@
 #include <uint256.h>
 #include <util/strencodings.h>
 
-#undef ERROR // chia BLS uses relic, which defines ERROR, which in turn causes win32/win64 builds to print many warnings
-#include <chiabls/src/bls.hpp>
-#include <chiabls/src/privatekey.hpp>
-#include <chiabls/src/publickey.hpp>
-#include <chiabls/src/signature.hpp>
+// chiabls uses relic, which may define DEBUG and ERROR, which leads to many warnings in some build setups
+#undef ERROR
+#undef DEBUG
+#include <bls-dash/src/bls.hpp>
+#include <bls-dash/src/privatekey.hpp>
+#include <bls-dash/src/elements.hpp>
+#include <bls-dash/src/schemes.hpp>
+#include <bls-dash/src/threshold.hpp>
 #undef DOUBLE
 
 #include <array>
 #include <sync.h>
 #include <unistd.h>
+
+static const bool fLegacyDefault{true};
 
 // reversed BLS12-381
 #define BLS_CURVE_ID_SIZE 32
@@ -37,6 +42,8 @@ class CBLSWrapper
     friend class CBLSPublicKey;
     friend class CBLSSignature;
 
+    bool fLegacy;
+
 protected:
     ImplType impl;
     bool fValid{false};
@@ -47,30 +54,33 @@ protected:
 public:
     static const size_t SerSize = _SerSize;
 
-    CBLSWrapper()
+    explicit CBLSWrapper(const bool fLegacyIn = fLegacyDefault) : fLegacy(fLegacyIn)
     {
     }
-    CBLSWrapper(const std::vector<unsigned char>& vecBytes) : CBLSWrapper<ImplType, _SerSize, C>()
+    explicit CBLSWrapper(const std::vector<unsigned char>& vecBytes, const bool fLegacyIn = fLegacyDefault) : CBLSWrapper<ImplType, _SerSize, C>(fLegacyIn)
     {
         SetByteVector(vecBytes);
     }
-    virtual ~CBLSWrapper() {}
 
     CBLSWrapper(const CBLSWrapper& ref) = default;
     CBLSWrapper& operator=(const CBLSWrapper& ref) = default;
-    CBLSWrapper(CBLSWrapper&& ref)
+    CBLSWrapper(CBLSWrapper&& ref) noexcept
     {
         std::swap(impl, ref.impl);
         std::swap(fValid, ref.fValid);
         std::swap(cachedHash, ref.cachedHash);
+        fLegacy = ref.fLegacy;
     }
-    CBLSWrapper& operator=(CBLSWrapper&& ref)
+    CBLSWrapper& operator=(CBLSWrapper&& ref) noexcept
     {
         std::swap(impl, ref.impl);
         std::swap(fValid, ref.fValid);
         std::swap(cachedHash, ref.cachedHash);
+        fLegacy = ref.fLegacy;
         return *this;
     }
+
+    virtual ~CBLSWrapper() = default;
 
     bool operator==(const C& r) const
     {
@@ -88,7 +98,7 @@ public:
 
     void Reset()
     {
-        *((C*)this) = C();
+        *(static_cast<C*>(this)) = C(fLegacy);
     }
 
     void SetByteVector(const std::vector<uint8_t>& vecBytes)
@@ -102,7 +112,7 @@ public:
             Reset();
         } else {
             try {
-                impl = ImplType::FromBytes(vecBytes.data());
+                impl = ImplType::FromBytes(bls::Bytes(vecBytes), fLegacy);
                 fValid = true;
             } catch (...) {
                 Reset();
@@ -116,7 +126,7 @@ public:
         if (!fValid) {
             return std::vector<uint8_t>(SerSize, 0);
         }
-        return impl.Serialize();
+        return impl.Serialize(fLegacy);
     }
 
     const uint256& GetHash() const
@@ -184,18 +194,18 @@ public:
 
 struct CBLSIdImplicit : public uint256
 {
-    CBLSIdImplicit() {}
+    CBLSIdImplicit() = default;
     CBLSIdImplicit(const uint256& id)
     {
         memcpy(begin(), id.begin(), sizeof(uint256));
     }
-    static CBLSIdImplicit FromBytes(const uint8_t* buffer)
+    static CBLSIdImplicit FromBytes(const uint8_t* buffer, const bool fLegacy = false)
     {
         CBLSIdImplicit instance;
         memcpy(instance.begin(), buffer, sizeof(CBLSIdImplicit));
         return instance;
     }
-    std::vector<uint8_t> Serialize() const
+    std::vector<uint8_t> Serialize(const bool fLegacy = false) const
     {
         return {begin(), end()};
     }
@@ -207,13 +217,10 @@ public:
     using CBLSWrapper::operator=;
     using CBLSWrapper::operator==;
     using CBLSWrapper::operator!=;
+    using CBLSWrapper::CBLSWrapper;
 
-    CBLSId() {}
-    void SetInt(int x);
-    void SetHash(const uint256& hash);
-
-    static CBLSId FromInt(int64_t i);
-    static CBLSId FromHash(const uint256& hash);
+    CBLSId() = default;
+    explicit CBLSId(const uint256& nHash);
 };
 
 class CBLSSecretKey : public CBLSWrapper<bls::PrivateKey, BLS_CURVE_SECKEY_SIZE, CBLSSecretKey>
@@ -222,10 +229,12 @@ public:
     using CBLSWrapper::operator=;
     using CBLSWrapper::operator==;
     using CBLSWrapper::operator!=;
+    using CBLSWrapper::CBLSWrapper;
 
-    CBLSSecretKey() {}
+    CBLSSecretKey() = default;
     CBLSSecretKey(const CBLSSecretKey&) = default;
     CBLSSecretKey& operator=(const CBLSSecretKey&) = default;
+
     void AggregateInsecure(const CBLSSecretKey& o);
     static CBLSSecretKey AggregateInsecure(const std::vector<CBLSSecretKey>& sks);
 
@@ -238,7 +247,7 @@ public:
     CBLSSignature Sign(const uint256& hash) const;
 };
 
-class CBLSPublicKey : public CBLSWrapper<bls::PublicKey, BLS_CURVE_PUBKEY_SIZE, CBLSPublicKey>
+class CBLSPublicKey : public CBLSWrapper<bls::G1Element, BLS_CURVE_PUBKEY_SIZE, CBLSPublicKey>
 {
     friend class CBLSSecretKey;
     friend class CBLSSignature;
@@ -247,17 +256,19 @@ public:
     using CBLSWrapper::operator=;
     using CBLSWrapper::operator==;
     using CBLSWrapper::operator!=;
+    using CBLSWrapper::CBLSWrapper;
 
-    CBLSPublicKey() {}
+    CBLSPublicKey() = default;
+
     void AggregateInsecure(const CBLSPublicKey& o);
-    static CBLSPublicKey AggregateInsecure(const std::vector<CBLSPublicKey>& pks);
+    static CBLSPublicKey AggregateInsecure(const std::vector<CBLSPublicKey>& pks, bool fLegacy = fLegacyDefault);
 
     bool PublicKeyShare(const std::vector<CBLSPublicKey>& mpk, const CBLSId& id);
     bool DHKeyExchange(const CBLSSecretKey& sk, const CBLSPublicKey& pk);
 
 };
 
-class CBLSSignature : public CBLSWrapper<bls::InsecureSignature, BLS_CURVE_SIG_SIZE, CBLSSignature>
+class CBLSSignature : public CBLSWrapper<bls::G2Element, BLS_CURVE_SIG_SIZE, CBLSSignature>
 {
     friend class CBLSSecretKey;
 
@@ -266,13 +277,13 @@ public:
     using CBLSWrapper::operator!=;
     using CBLSWrapper::CBLSWrapper;
 
-    CBLSSignature() {}
+    CBLSSignature() = default;
     CBLSSignature(const CBLSSignature&) = default;
     CBLSSignature& operator=(const CBLSSignature&) = default;
 
     void AggregateInsecure(const CBLSSignature& o);
-    static CBLSSignature AggregateInsecure(const std::vector<CBLSSignature>& sigs);
-    static CBLSSignature AggregateSecure(const std::vector<CBLSSignature>& sigs, const std::vector<CBLSPublicKey>& pks, const uint256& hash);
+    static CBLSSignature AggregateInsecure(const std::vector<CBLSSignature>& sigs, bool fLegacy = fLegacyDefault);
+    static CBLSSignature AggregateSecure(const std::vector<CBLSSignature>& sigs, const std::vector<CBLSPublicKey>& pks, const uint256& hash, bool fLegacy = fLegacyDefault);
 
     void SubInsecure(const CBLSSignature& o);
 
@@ -311,6 +322,7 @@ public:
     {
         *this = r;
     }
+    virtual ~CBLSLazyWrapper() = default;
 
     CBLSLazyWrapper& operator=(const CBLSLazyWrapper& r)
     {

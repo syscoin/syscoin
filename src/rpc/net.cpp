@@ -28,6 +28,8 @@
 #include <version.h>
 #include <warnings.h>
 
+#include <optional>
+
 #include <univalue.h>
 
 const std::vector<std::string> CONNECTION_TYPE_DOC{
@@ -157,6 +159,9 @@ static RPCHelpMan getpeerinfo()
                             {
                                 {RPCResult::Type::NUM, "n", "The heights of blocks we're currently asking from this peer"},
                             }},
+                            {RPCResult::Type::BOOL, "addr_relay_enabled", "Whether we participate in address relay with this peer"},
+                            {RPCResult::Type::NUM, "addr_processed", "The total number of addresses processed, excluding those dropped due to rate limiting"},
+                            {RPCResult::Type::NUM, "addr_rate_limited", "The total number of addresses dropped due to rate limiting"},
                             {RPCResult::Type::ARR, "permissions", "Any special permissions that have been granted to this peer",
                             {
                                 {RPCResult::Type::STR, "permission_type", Join(NET_PERMISSIONS_DOC, ",\n") + ".\n"},
@@ -168,7 +173,7 @@ static RPCHelpMan getpeerinfo()
                                                               "When a message type is not listed in this json object, the bytes sent are 0.\n"
                                                               "Only known message types can appear as keys in the object."}
                             }},
-                            {RPCResult::Type::OBJ, "bytesrecv_per_msg", "",
+                            {RPCResult::Type::OBJ_DYN, "bytesrecv_per_msg", "",
                             {
                                 {RPCResult::Type::NUM, "msg", "The total bytes received aggregated by message type\n"
                                                               "When a message type is not listed in this json object, the bytes received are 0.\n"
@@ -201,7 +206,7 @@ static RPCHelpMan getpeerinfo()
         CNodeStateStats statestats;
         bool fStateStats = peerman.GetNodeStateStats(stats.nodeid, statestats);
         obj.pushKV("id", stats.nodeid);
-        obj.pushKV("addr", stats.addrName);
+        obj.pushKV("addr", stats.m_addr_name);
         if (stats.addrBind.IsValid()) {
             obj.pushKV("addrbind", stats.addrBind.ToString());
         }
@@ -257,6 +262,9 @@ static RPCHelpMan getpeerinfo()
                 heights.push_back(height);
             }
             obj.pushKV("inflight", heights);
+            obj.pushKV("addr_relay_enabled", statestats.m_addr_relay_enabled);
+            obj.pushKV("addr_processed", statestats.m_addr_processed);
+            obj.pushKV("addr_rate_limited", statestats.m_addr_rate_limited);
         }
         UniValue permissions(UniValue::VARR);
         for (const auto& permission : NetPermissions::ToStrings(stats.m_permissionFlags)) {
@@ -352,7 +360,7 @@ static RPCHelpMan addconnection()
         "\nOpen an outbound connection to a specified node. This RPC is for testing only.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The IP address and port to attempt connecting to."},
-            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open, either \"outbound-full-relay\" or \"block-relay-only\"."},
+            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\" or \"addr-fetch\")."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -378,6 +386,8 @@ static RPCHelpMan addconnection()
         conn_type = ConnectionType::OUTBOUND_FULL_RELAY;
     } else if (conn_type_in == "block-relay-only") {
         conn_type = ConnectionType::BLOCK_RELAY;
+    } else if (conn_type_in == "addr-fetch") {
+        conn_type = ConnectionType::ADDR_FETCH;
     } else {
         throw JSONRPCError(RPC_INVALID_PARAMETER, self.ToString());
     }
@@ -868,6 +878,7 @@ static RPCHelpMan getnodeaddresses()
                 "\nReturn known addresses, which can potentially be used to find new nodes in the network.\n",
                 {
                     {"count", RPCArg::Type::NUM, RPCArg::Default{1}, "The maximum number of addresses to return. Specify 0 to return all known addresses."},
+                    {"network", RPCArg::Type::STR, RPCArg::DefaultHint{"all networks"}, "Return only addresses of the specified network. Can be one of: " + Join(GetNetworkNames(), ", ") + "."},
                 },
                 RPCResult{
                     RPCResult::Type::ARR, "", "",
@@ -884,7 +895,10 @@ static RPCHelpMan getnodeaddresses()
                 },
                 RPCExamples{
                     HelpExampleCli("getnodeaddresses", "8")
-            + HelpExampleRpc("getnodeaddresses", "8")
+                    + HelpExampleCli("getnodeaddresses", "4 \"i2p\"")
+                    + HelpExampleCli("-named getnodeaddresses", "network=onion count=12")
+                    + HelpExampleRpc("getnodeaddresses", "8")
+                    + HelpExampleRpc("getnodeaddresses", "4, \"i2p\"")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -894,8 +908,13 @@ static RPCHelpMan getnodeaddresses()
     const int count{request.params[0].isNull() ? 1 : request.params[0].get_int()};
     if (count < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Address count out of range");
 
+    const std::optional<Network> network{request.params[1].isNull() ? std::nullopt : std::optional<Network>{ParseNetwork(request.params[1].get_str())}};
+    if (network == NET_UNROUTABLE) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Network not recognized: %s", request.params[1].get_str()));
+    }
+
     // returns a shuffled list of CAddress
-    const std::vector<CAddress> vAddr{connman.GetAddresses(count, /* max_pct */ 0)};
+    const std::vector<CAddress> vAddr{connman.GetAddresses(count, /* max_pct */ 0, network)};
     UniValue ret(UniValue::VARR);
 
     for (const CAddress& addr : vAddr) {
@@ -937,26 +956,22 @@ static RPCHelpMan addpeeraddress()
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Address manager functionality missing or disabled");
     }
 
+    const std::string& addr_string{request.params[0].get_str()};
+    const uint16_t port{static_cast<uint16_t>(request.params[1].get_int())};
+
     UniValue obj(UniValue::VOBJ);
-
-    std::string addr_string = request.params[0].get_str();
-    uint16_t port{static_cast<uint16_t>(request.params[1].get_int())};
-
     CNetAddr net_addr;
-    if (!LookupHost(addr_string, net_addr, false)) {
-        obj.pushKV("success", false);
-        return obj;
-    }
-    CAddress address = CAddress({net_addr, port}, ServiceFlags(NODE_NETWORK|NODE_WITNESS));
-    address.nTime = GetAdjustedTime();
-    // The source address is set equal to the address. This is equivalent to the peer
-    // announcing itself.
-    if (!node.addrman->Add(address, address)) {
-        obj.pushKV("success", false);
-        return obj;
+    bool success{false};
+
+    if (LookupHost(addr_string, net_addr, false)) {
+        CAddress address{{net_addr, port}, ServiceFlags{NODE_NETWORK | NODE_WITNESS}};
+        address.nTime = GetAdjustedTime();
+        // The source address is set equal to the address. This is equivalent to the peer
+        // announcing itself.
+        if (node.addrman->Add({address}, address)) success = true;
     }
 
-    obj.pushKV("success", true);
+    obj.pushKV("success", success);
     return obj;
 },
     };

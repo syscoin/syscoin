@@ -28,8 +28,8 @@ JSON_TEST_FILES = \
   test/data/proposals_invalid.json \
   test/data/utxo.json \
   test/data/assetbalances.json \
-  test/data/ethspv_valid.json \
-  test/data/ethspv_invalid.json \
+  test/data/nevmspv_valid.json \
+  test/data/nevmspv_invalid.json \
   test/data/tx_valid.json
 
 RAW_TEST_FILES = \
@@ -42,11 +42,12 @@ SYSCOIN_TEST_SUITE = \
   $(TEST_UTIL_H)
 
 FUZZ_SUITE_LD_COMMON = \
- $(LIBSYSCOIN_SERVER) \
- $(LIBSYSCOIN_COMMON) \
- $(LIBSYSCOIN_UTIL) \
  $(LIBTEST_UTIL) \
  $(LIBTEST_FUZZ) \
+ $(LIBSYSCOIN_SERVER) \
+ $(LIBSYSCOIN_WALLET) \
+ $(LIBSYSCOIN_COMMON) \
+ $(LIBSYSCOIN_UTIL) \
  $(LIBSYSCOIN_CONSENSUS) \
  $(LIBSYSCOIN_CRYPTO) \
  $(LIBSYSCOIN_CLI) \
@@ -59,7 +60,7 @@ FUZZ_SUITE_LD_COMMON = \
  $(LIBSECP256K1) \
  $(EVENT_LIBS) \
  $(EVENT_PTHREADS_LIBS) \
- $(LIBETHEREUM)
+ $(LIBNEVM)
 
 if USE_UPNP
 FUZZ_SUITE_LD_COMMON += $(MINIUPNPC_LIBS)
@@ -99,7 +100,7 @@ SYSCOIN_TESTS =\
   test/cuckoocache_tests.cpp \
   test/denialofservice_tests.cpp \
   test/descriptor_tests.cpp \
-  test/ethereum_tests.cpp \
+  test/nevm_tests.cpp \
   test/evo_deterministicmns_tests.cpp \
   test/evo_simplifiedmns_tests.cpp \
   test/flatfile_tests.cpp \
@@ -133,6 +134,7 @@ SYSCOIN_TESTS =\
   test/script_tests.cpp \
   test/script_standard_tests.cpp \
   test/scriptnum_tests.cpp \
+  test/serfloat_tests.cpp \
   test/serialize_tests.cpp \
   test/settings_tests.cpp \
   test/sighash_tests.cpp \
@@ -164,6 +166,7 @@ SYSCOIN_TESTS =\
 if ENABLE_WALLET
 SYSCOIN_TESTS += \
   wallet/test/psbt_wallet_tests.cpp \
+  wallet/test/spend_tests.cpp \
   wallet/test/wallet_tests.cpp \
   wallet/test/walletdb_tests.cpp \
   wallet/test/wallet_crypto_tests.cpp \
@@ -173,7 +176,6 @@ SYSCOIN_TESTS += \
   wallet/test/scriptpubkeyman_tests.cpp
 
 FUZZ_SUITE_LD_COMMON +=\
- $(LIBSYSCOIN_WALLET) \
  $(SQLITE_LIBS) \
  $(BDB_LIBS)
 
@@ -183,6 +185,8 @@ endif
 
 
 SYSCOIN_TEST_SUITE += \
+  wallet/test/util.cpp \
+  wallet/test/util.h \
   wallet/test/wallet_test_fixture.cpp \
   wallet/test/wallet_test_fixture.h \
   wallet/test/init_test_fixture.cpp \
@@ -197,7 +201,7 @@ test_test_syscoin_LDADD += $(LIBSYSCOIN_WALLET)
 endif
 
 test_test_syscoin_LDADD += $(LIBSYSCOIN_SERVER) $(LIBSYSCOIN_BLS) $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBCHIABLS) $(LIBSYSCOIN_CONSENSUS) $(LIBSYSCOIN_CRYPTO) $(LIBUNIVALUE) \
-  $(LIBLEVELDB) $(LIBLEVELDB_SSE42) $(LIBMEMENV) $(BOOST_LIBS) $(BOOST_UNIT_TEST_FRAMEWORK_LIB) $(LIBSECP256K1) $(EVENT_LIBS) $(EVENT_PTHREADS_LIBS) $(LIBETHEREUM)
+  $(LIBLEVELDB) $(LIBLEVELDB_SSE42) $(LIBMEMENV) $(BOOST_LIBS) $(BOOST_UNIT_TEST_FRAMEWORK_LIB) $(LIBSECP256K1) $(EVENT_LIBS) $(EVENT_PTHREADS_LIBS) $(LIBNEVM)
 test_test_syscoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) 
 
 test_test_syscoin_LDADD += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(SQLITE_LIBS)
@@ -214,10 +218,9 @@ if ENABLE_FUZZ_BINARY
 test_fuzz_fuzz_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
 test_fuzz_fuzz_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 test_fuzz_fuzz_LDADD = $(FUZZ_SUITE_LD_COMMON)
-test_fuzz_fuzz_LDFLAGS = $(FUZZ_SUITE_LDFLAGS_COMMON)
+test_fuzz_fuzz_LDFLAGS = $(FUZZ_SUITE_LDFLAGS_COMMON) $(RUNTIME_LDFLAGS)
 test_fuzz_fuzz_SOURCES = \
  test/fuzz/addition_overflow.cpp \
- test/fuzz/addrdb.cpp \
  test/fuzz/addrman.cpp \
  test/fuzz/asmap.cpp \
  test/fuzz/asmap_direct.cpp \
@@ -271,7 +274,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/netaddress.cpp \
  test/fuzz/netbase_dns_lookup.cpp \
  test/fuzz/node_eviction.cpp \
- test/fuzz/p2p_transport_deserializer.cpp \
+ test/fuzz/p2p_transport_serialization.cpp \
  test/fuzz/parse_hd_keypath.cpp \
  test/fuzz/parse_iso8601.cpp \
  test/fuzz/parse_numbers.cpp \
@@ -317,6 +320,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/tx_out.cpp \
  test/fuzz/tx_pool.cpp \
  test/fuzz/txrequest.cpp \
+ test/fuzz/utxo_snapshot.cpp \
  test/fuzz/validation_load_mempool.cpp
 endif # ENABLE_FUZZ_BINARY
 

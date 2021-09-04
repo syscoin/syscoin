@@ -14,16 +14,23 @@ added in the future, they should try to follow the same convention and not
 make assumptions about execution order.
 """
 from decimal import Decimal
-import io
 
-from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase, send_to_witness
-from test_framework.messages import BIP125_SEQUENCE_NUMBER, CTransaction
+from test_framework.blocktools import (
+    COINBASE_MATURITY,
+    add_witness_commitment,
+    create_block,
+    create_coinbase,
+    send_to_witness,
+)
+from test_framework.messages import (
+    BIP125_SEQUENCE_NUMBER,
+    tx_from_hex,
+)
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_greater_than,
     assert_raises_rpc_error,
-    hex_str_to_bytes,
 )
 
 WALLET_PASSPHRASE = "test"
@@ -265,7 +272,7 @@ def test_small_output_with_feerate_succeeds(self, rbf_node, dest_address):
     self.log.info('Testing small output with feerate bump succeeds')
 
     # Make sure additional inputs exist
-    rbf_node.generatetoaddress(101, rbf_node.getnewaddress())
+    rbf_node.generatetoaddress(COINBASE_MATURITY + 1, rbf_node.getnewaddress())
     rbfid = spend_one_input(rbf_node, dest_address)
     input_list = rbf_node.getrawtransaction(rbfid, 1)["vin"]
     assert_equal(len(input_list), 1)
@@ -575,9 +582,7 @@ def spend_one_input(node, dest_address, change_size=Decimal("0.00049000")):
 
 
 def submit_block_with_tx(node, tx):
-    ctx = CTransaction()
-    ctx.deserialize(io.BytesIO(hex_str_to_bytes(tx)))
-
+    ctx = tx_from_hex(tx)
     tip = node.getbestblockhash()
     height = node.getblockcount() + 1
     block_time = node.getblockheader(tip)["mediantime"] + 1

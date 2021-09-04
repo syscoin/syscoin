@@ -3,7 +3,7 @@ name: "syscoin-core-linux-4.2"
 enable_cache: true
 distro: "ubuntu"
 suites:
-- "bionic"
+- "focal"
 architectures:
 - "amd64"
 packages:
@@ -16,18 +16,21 @@ packages:
 - "ca-certificates"
 - "curl"
 - "faketime"
+- "g++-8"
+- "gcc-8"
 - "git"
 - "libtool"
 - "patch"
 - "pkg-config"
 - "python3"
-# SYSCOIN
-- "cmake"
 - "python3-pip"
+# SYSCOIN
+- "libzmq3-dev"
 # Cross compilation HOSTS:
 #  - arm-linux-gnueabihf
 - "binutils-arm-linux-gnueabihf"
 - "g++-8-arm-linux-gnueabihf"
+- "gcc-8-arm-linux-gnueabihf"
 #  - aarch64-linux-gnu
 - "binutils-aarch64-linux-gnu"
 - "g++-8-aarch64-linux-gnu"
@@ -54,7 +57,6 @@ script: |
   HOST_CXXFLAGS="-O2 -g"
   HOST_LDFLAGS_BASE="-static-libstdc++ -Wl,-O2"
 
-  export QT_RCC_SOURCE_DATE_OVERRIDE=1
   export TZ="UTC"
   export BUILD_DIR="$PWD"
   mkdir -p ${WRAP_DIR}
@@ -98,7 +100,7 @@ script: |
   done
   }
 
-  pip3 install lief==0.11.4
+  pip3 install lief==0.11.5
 
   # Faketime for depends so intermediate results are comparable
   export PATH_orig=${PATH}
@@ -110,7 +112,7 @@ script: |
   BASEPREFIX="${PWD}/depends"
   # Build dependencies for each host
   for i in $HOSTS; do
-    make ${MAKEOPTS} -C ${BASEPREFIX} HOST="${i}"
+    make ${MAKEOPTS} -C ${BASEPREFIX} HOST="${i}" CC=${i}-gcc-8 CXX=${i}-g++-8
   done
 
   # Faketime for binaries
@@ -147,7 +149,7 @@ script: |
     tar --strip-components=1 -xf "${GIT_ARCHIVE}"
 
     ./autogen.sh
-    CONFIG_SITE=${BASEPREFIX}/${i}/share/config.site ./configure --prefix=/ --disable-ccache --disable-maintainer-mode --disable-dependency-tracking ${CONFIGFLAGS} CFLAGS="${HOST_CFLAGS}" CXXFLAGS="${HOST_CXXFLAGS}" LDFLAGS="${HOST_LDFLAGS}"
+    CONFIG_SITE=${BASEPREFIX}/${i}/share/config.site ./configure --prefix=/ --disable-ccache --disable-maintainer-mode --disable-dependency-tracking ${CONFIGFLAGS} CFLAGS="${HOST_CFLAGS}" CXXFLAGS="${HOST_CXXFLAGS}" LDFLAGS="${HOST_LDFLAGS}" CC=${i}-gcc-8 CXX=${i}-g++-8
     make ${MAKEOPTS}
     make ${MAKEOPTS} -C src check-security
     make ${MAKEOPTS} -C src check-symbols

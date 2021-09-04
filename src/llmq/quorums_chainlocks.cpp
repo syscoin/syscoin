@@ -34,9 +34,10 @@ std::string CChainLockSig::ToString() const
                 std::count(signers.begin(), signers.end(), true));
 }
 
-CChainLocksHandler::CChainLocksHandler(CConnman& _connman, PeerManager& _peerman):     
+CChainLocksHandler::CChainLocksHandler(CConnman& _connman, PeerManager& _peerman, ChainstateManager& _chainman):     
     connman(_connman),
-    peerman(_peerman)
+    peerman(_peerman),
+    chainman(_chainman)
 {
     scheduler = new CScheduler();
     CScheduler::Function serviceLoop = std::bind(&CScheduler::serviceQueue, scheduler);
@@ -67,7 +68,7 @@ void CChainLocksHandler::Start()
         }
         if(enforced) {
             AssertLockNotHeld(cs);
-            ::ChainstateActive().EnforceBestChainLock(pindex);
+            chainman.ActiveChainstate().EnforceBestChainLock(pindex);
         }
         TrySignChainTip();
     }, std::chrono::seconds{5});
@@ -304,9 +305,7 @@ void CChainLocksHandler::ProcessMessage(CNode* pfrom, const std::string& strComm
         CChainLockSig clsig;
         vRecv >> clsig;
 
-        auto hash = ::SerializeHash(clsig);
-
-        ProcessNewChainLock(pfrom->GetId(), clsig, hash);
+        ProcessNewChainLock(pfrom->GetId(), clsig, ::SerializeHash(clsig));
     }
 }
 
@@ -344,20 +343,20 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
     CBlockIndex* pindexScan{nullptr};
     {
         LOCK(cs_main);
-        if (clsig.nHeight > ::ChainActive().Height() + CSigningManager::SIGN_HEIGHT_OFFSET) {
+        if (clsig.nHeight > chainman.ActiveHeight() + CSigningManager::SIGN_HEIGHT_OFFSET) {
             // too far into the future
             LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- future CLSIG (%s), peer=%d\n", __func__, clsig.ToString(), from);
             return;
         }
-        pindexSig = pindexScan = g_chainman.m_blockman.LookupBlockIndex(clsig.blockHash);
+        pindexSig = pindexScan = chainman.m_blockman.LookupBlockIndex(clsig.blockHash);
          if (pindexScan == nullptr) {
             // we don't know the block/header for this CLSIG yet
-            if (clsig.nHeight <= ::ChainActive().Height()) {
+            if (clsig.nHeight <= chainman.ActiveHeight()) {
                 // could be a parallel fork at the same height, try scanning quorums at the same height
-                pindexScan = ::ChainActive().Tip()->GetAncestor(clsig.nHeight);
+                pindexScan = chainman.ActiveTip()->GetAncestor(clsig.nHeight);
             } else {
                 // no idea what kind of block it is, try scanning quorums at chain tip
-                pindexScan = ::ChainActive().Tip();
+                pindexScan = chainman.ActiveTip();
             }
         }
         if (pindexSig != nullptr && pindexSig->nHeight != clsig.nHeight) {
@@ -448,6 +447,10 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             mostRecentChainLockShare = clsig;
             TryUpdateBestChainLock(pindexSig);
         }
+        {
+            LOCK(cs_main);
+            PruneNEVMData(chainman.m_blockman.LookupNEVMBlockIndex(clsig.blockHash));
+        }
         // Note: do not hold cs while calling RelayInv
         AssertLockNotHeld(cs);
         connman.RelayOtherInv(clsigInv);
@@ -473,7 +476,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
         }
         if(enforced) {
             AssertLockNotHeld(cs);
-            ::ChainstateActive().EnforceBestChainLock(pindex);
+            chainman.ActiveChainstate().EnforceBestChainLock(pindex);
         }
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- processed new CLSIG (%s), peer=%d\n",
               __func__, clsig.ToString(), from);
@@ -517,7 +520,7 @@ void CChainLocksHandler::UpdatedBlockTip(const CBlockIndex* pindexNew, bool fIni
     
     if(enforced) {
         AssertLockNotHeld(cs);
-        ::ChainstateActive().EnforceBestChainLock(pindex);
+        chainman.ActiveChainstate().EnforceBestChainLock(pindex);
     }
     TrySignChainTip();
     {       
@@ -595,7 +598,7 @@ void CChainLocksHandler::TrySignChainTip()
     const CBlockIndex* pindex;
     {
         LOCK(cs_main);
-        pindex = ::ChainActive().Tip();
+        pindex = chainman.ActiveTip();
     }
 
     if (!pindex || !pindex->pprev) {
@@ -692,7 +695,7 @@ void CChainLocksHandler::TrySignChainTip()
                 // just sign whatever we think is a good tip
             } else if (it2->second->blockHash != pindex->GetBlockHash()) {
                 LOCK(cs_main);
-                auto shareBlockIndex = g_chainman.m_blockman.LookupBlockIndex(it2->second->blockHash);
+                auto shareBlockIndex = chainman.m_blockman.LookupBlockIndex(it2->second->blockHash);
                 if (shareBlockIndex != nullptr && shareBlockIndex->nHeight == pindex->nHeight) {
                     // previous quorum signed an alternative chain tip, sign it too instead
                     LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- previous quorum (%d, %s) signed an alternative chaintip (%s != %s) at height %d, join it\n",

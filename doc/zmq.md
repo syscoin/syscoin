@@ -47,7 +47,7 @@ operation.
 ## Enabling
 
 By default, the ZeroMQ feature is automatically compiled in if the
-necessary prerequisites are found.  To disable, use --disable-zmq
+necessary prerequisites are found. To disable, use --disable-zmq
 during the *configure* step of building syscoind:
 
     $ ./configure --disable-zmq (other options)
