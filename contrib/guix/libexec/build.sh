@@ -147,7 +147,7 @@ case "$HOST" in
         #
         # After the native packages in depends are built, the ld wrapper should
         # no longer affect our build, as clang would instead reach for
-        # x86_64-apple-darwin18-ld from cctools
+        # x86_64-apple-darwin19-ld from cctools
         ;;
     *) export GUIX_LD_WRAPPER_DISABLE_RPATH=yes ;;
 esac
@@ -240,10 +240,9 @@ mkdir -p "$OUTDIR"
 ###########################
 
 # SYSCOIN CONFIGFLAGS
-CONFIGFLAGS="--enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary"
-CONFIGFLAGS+=" --disable-debug"
+CONFIGFLAGS="--enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary --disable-debug"
 case "$HOST" in
-    *linux*)  CONFIGFLAGS+=" --enable-glibc-back-compat" ;;
+    *linux*) CONFIGFLAGS+=" --disable-threadlocal" ;;
 esac
 
 # CFLAGS
@@ -436,8 +435,8 @@ mkdir -p "$DISTSRC"
                 find "${DISTNAME}" -print0 \
                     | sort --zero-terminated \
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin18/osx64}.tar.gz" \
-                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin18/osx64}.tar.gz" && exit 1 )
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin19/osx64}.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin19/osx64}.tar.gz" && exit 1 )
                 ;;
         esac
     )  # $DISTSRC/installed
