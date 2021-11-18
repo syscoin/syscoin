@@ -6,13 +6,14 @@
 #define SYSCOIN_LLMQ_QUORUMS_DKGSESSIONHANDLER_H
 
 
-#include <ctpl.h>
+#include <ctpl_stl.h>
 #include <net.h>
 
 class CBLSWorker;
 class CBlockIndex;
 class CConnman;
 class PeerManager;
+class ChainstateManager;
 namespace llmq
 {
 class CDKGSession;
@@ -39,7 +40,7 @@ enum QuorumPhase {
 class CDKGPendingMessages
 {
 public:
-    typedef std::pair<NodeId, std::shared_ptr<CDataStream>> BinaryMessage;
+    using BinaryMessage = std::pair<NodeId, std::shared_ptr<CDataStream>>;
 
 private:
     mutable RecursiveMutex cs;
@@ -108,6 +109,7 @@ private:
     const Consensus::LLMQParams& params;
     CBLSWorker& blsWorker;
     CDKGSessionManager& dkgManager;
+    ChainstateManager& chainman;
 
     QuorumPhase phase GUARDED_BY(cs) {QuorumPhase_Idle};
     int currentHeight GUARDED_BY(cs) {-1};
@@ -123,7 +125,7 @@ private:
     std::string m_threadName;
     PeerManager& peerman;
 public:
-    CDKGSessionHandler(const Consensus::LLMQParams& _params, CBLSWorker& blsWorker, CDKGSessionManager& _dkgManager, PeerManager& peerman);
+    CDKGSessionHandler(const Consensus::LLMQParams& _params, CBLSWorker& blsWorker, CDKGSessionManager& _dkgManager, PeerManager& peerman, ChainstateManager& _chainman);
     ~CDKGSessionHandler();
 
     void UpdatedBlockTip(const CBlockIndex *pindexNew);
@@ -134,15 +136,15 @@ public:
     const char* GetName() {return m_threadName.c_str();}
 
 private:
-    bool InitNewQuorum(const CBlockIndex* pindexQuorum);
+    bool InitNewQuorum(const CBlockIndex* pQuorumBaseBlockIndex);
 
     std::pair<QuorumPhase, uint256> GetPhaseAndQuorumHash() const;
 
-    typedef std::function<void()> StartPhaseFunc;
-    typedef std::function<bool()> WhileWaitFunc;
-    void WaitForNextPhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting);
-    void WaitForNewQuorum(const uint256& oldQuorumHash);
-    void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const WhileWaitFunc& runWhileWaiting);
+    using StartPhaseFunc = std::function<void()>;
+    using WhileWaitFunc = std::function<bool()>;
+    void WaitForNextPhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const;
+    void WaitForNewQuorum(const uint256& oldQuorumHash) const;
+    void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const WhileWaitFunc& runWhileWaiting) const;
     void HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const StartPhaseFunc& startPhaseFunc, const WhileWaitFunc& runWhileWaiting);
     void HandleDKGRound();
     void PhaseHandlerThread();

@@ -28,7 +28,7 @@ CFinalCommitment::CFinalCommitment(const Consensus::LLMQParams& params, const ui
     LogInstance().LogPrintStr(strprintf("CFinalCommitment::%s -- %s", __func__, tinyformat::format(__VA_ARGS__)), __func__, "", 0); \
 } while(0)
 
-bool CFinalCommitment::Verify(const CBlockIndex* pQuorumIndex, bool checkSigs) const
+bool CFinalCommitment::Verify(const CBlockIndex* pQuorumBaseBlockIndex, bool checkSigs) const
 {
     if (nVersion == 0 || nVersion > CURRENT_VERSION) {
         return false;
@@ -69,7 +69,7 @@ bool CFinalCommitment::Verify(const CBlockIndex* pQuorumIndex, bool checkSigs) c
         return false;
     }
     std::vector<CDeterministicMNCPtr> members;
-    CLLMQUtils::GetAllQuorumMembers(llmqType, pQuorumIndex, members);
+    CLLMQUtils::GetAllQuorumMembers(llmqType, pQuorumBaseBlockIndex, members);
 
     for (size_t i = members.size(); i < (size_t)params.size; i++) {
         if (validMembers[i]) {
@@ -136,12 +136,13 @@ bool CFinalCommitment::VerifySizes(const Consensus::LLMQParams& params) const
     return true;
 }
 
-bool CheckLLMQCommitment(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
+bool CheckLLMQCommitment(BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
 {
     AssertLockHeld(cs_main);
     if (!tx.IsCoinBase()) {
         return FormatSyscoinErrorMessage(state, "bad-qctx-invalid", fJustCheck);
     }
+    const int nPrevHeight = pindexPrev->nHeight;
     CFinalCommitmentTxPayload qcTx;
     if (!GetTxPayload(tx, qcTx)) {
         return FormatSyscoinErrorMessage(state, "bad-qc-payload", fJustCheck);
@@ -151,17 +152,25 @@ bool CheckLLMQCommitment(const CTransaction& tx, const CBlockIndex* pindexPrev, 
         return FormatSyscoinErrorMessage(state, "bad-qc-cbtx", fJustCheck);
     }
     for(const auto& commitment: qcTx.commitments) {
-        const CBlockIndex* pindexQuorum = g_chainman.m_blockman.LookupBlockIndex(commitment.quorumHash);
-        if(!pindexQuorum) {
+        const CBlockIndex* pQuorumBaseBlockIndex = blockman.LookupBlockIndex(commitment.quorumHash);
+        if(!pQuorumBaseBlockIndex) {
             return FormatSyscoinErrorMessage(state, "bad-qc-quorum-hash", fJustCheck);
         }
-        if (pindexQuorum != pindexPrev->GetAncestor(pindexQuorum->nHeight)) {
+        if (pQuorumBaseBlockIndex != pindexPrev->GetAncestor(pQuorumBaseBlockIndex->nHeight)) {
             // not part of active chain
             return FormatSyscoinErrorMessage(state, "bad-qc-quorum-hash", fJustCheck);
         }
-
         if (!Params().GetConsensus().llmqs.count(commitment.llmqType)) {
             return FormatSyscoinErrorMessage(state, "bad-qc-type", fJustCheck);
+        }
+        if(!fRegTest) {
+            if(nPrevHeight >= (Params().GetConsensus().nNEVMStartBlock + 1)) {
+                if(commitment.llmqType != Consensus::LLMQ_400_60) {
+                    return FormatSyscoinErrorMessage(state, "bad-qc-type-post-nevm", fJustCheck);
+                }
+            } else if(commitment.llmqType != Consensus::LLMQ_50_60) {
+                return FormatSyscoinErrorMessage(state, "bad-qc-type-pre-nevm", fJustCheck);
+            }
         }
 
         if (commitment.IsNull()) {
@@ -170,7 +179,7 @@ bool CheckLLMQCommitment(const CTransaction& tx, const CBlockIndex* pindexPrev, 
             }
             return true;
         }
-        if (!commitment.Verify(pindexQuorum, false)) {
+        if (!commitment.Verify(pQuorumBaseBlockIndex, false)) {
             return FormatSyscoinErrorMessage(state, "bad-qc-invalid", fJustCheck);
         }
     }

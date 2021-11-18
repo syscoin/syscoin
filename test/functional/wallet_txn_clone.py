@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2020 The Bitcoin Core developers
+# Copyright (c) 2014-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the wallet accounts properly when there are cloned transactions with malleated scriptsigs."""
 
-import io
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_equal,
 )
-from test_framework.messages import CTransaction, COIN
+from test_framework.messages import (
+    COIN,
+    tx_from_hex,
+)
 
 
 class TxnMallTest(SyscoinTestFramework):
@@ -71,8 +73,7 @@ class TxnMallTest(SyscoinTestFramework):
         clone_raw = self.nodes[0].createrawtransaction(clone_inputs, clone_outputs, clone_locktime)
 
         # createrawtransaction randomizes the order of its outputs, so swap them if necessary.
-        clone_tx = CTransaction()
-        clone_tx.deserialize(io.BytesIO(bytes.fromhex(clone_raw)))
+        clone_tx = tx_from_hex(clone_raw)
         if (rawtx1["vout"][0]["value"] == 40 and clone_tx.vout[0].nValue != 40*COIN or rawtx1["vout"][0]["value"] != 40 and clone_tx.vout[0].nValue == 40*COIN):
             (clone_tx.vout[0], clone_tx.vout[1]) = (clone_tx.vout[1], clone_tx.vout[0])
 
@@ -83,8 +84,7 @@ class TxnMallTest(SyscoinTestFramework):
 
         # Have node0 mine a block, if requested:
         if (self.options.mine_block):
-            self.nodes[0].generate(1)
-            self.sync_blocks(self.nodes[0:2])
+            self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_blocks(self.nodes[0:2]))
 
         tx1 = self.nodes[0].gettransaction(txid1)
         tx2 = self.nodes[0].gettransaction(txid2)
@@ -113,14 +113,13 @@ class TxnMallTest(SyscoinTestFramework):
             return
 
         # ... mine a block...
-        self.nodes[2].generate(1)
+        self.generate(self.nodes[2], 1, sync_fun=self.no_op)
 
         # Reconnect the split network, and sync chain:
         self.connect_nodes(1, 2)
         self.nodes[2].sendrawtransaction(node0_tx2["hex"])
         self.nodes[2].sendrawtransaction(tx2["hex"])
-        self.nodes[2].generate(1)  # Mine another block to make sure we sync
-        self.sync_blocks()
+        self.generate(self.nodes[2], 1)  # Mine another block to make sure we sync
 
         # Re-fetch transaction info:
         tx1 = self.nodes[0].gettransaction(txid1)

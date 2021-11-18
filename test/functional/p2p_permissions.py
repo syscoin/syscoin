@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2020 The Bitcoin Core developers
+# Copyright (c) 2015-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test p2p permission message.
@@ -9,9 +9,8 @@ Test that permissions are correctly calculated and applied
 
 from test_framework.address import ADDRESS_BCRT1_P2WSH_OP_TRUE
 from test_framework.messages import (
-    CTransaction,
     CTxInWitness,
-    FromHex,
+    tx_from_hex,
 )
 from test_framework.p2p import P2PDataStore
 from test_framework.script import (
@@ -94,8 +93,7 @@ class P2PPermissionsTests(SyscoinTestFramework):
         self.nodes[1].assert_start_raises_init_error(["-whitebind=noban@127.0.0.1/10"], "Cannot resolve -whitebind address", match=ErrorMatch.PARTIAL_REGEX)
 
     def check_tx_relay(self):
-        block_op_true = self.nodes[0].getblock(self.nodes[0].generatetoaddress(100, ADDRESS_BCRT1_P2WSH_OP_TRUE)[0])
-        self.sync_all()
+        block_op_true = self.nodes[0].getblock(self.generatetoaddress(self.nodes[0], 100, ADDRESS_BCRT1_P2WSH_OP_TRUE)[0])
 
         self.log.debug("Create a connection from a forcerelay peer that rebroadcasts raw txs")
         # A test framework p2p connection is needed to send the raw transaction directly. If a full node was used, it could only
@@ -105,8 +103,7 @@ class P2PPermissionsTests(SyscoinTestFramework):
         p2p_rebroadcast_wallet = self.nodes[1].add_p2p_connection(P2PDataStore())
 
         self.log.debug("Send a tx from the wallet initially")
-        tx = FromHex(
-            CTransaction(),
+        tx = tx_from_hex(
             self.nodes[0].createrawtransaction(
                 inputs=[{
                     'txid': block_op_true['tx'][0],
@@ -132,7 +129,7 @@ class P2PPermissionsTests(SyscoinTestFramework):
         tx.vout[0].nValue += 1
         txid = tx.rehash()
         # Send the transaction twice. The first time, it'll be rejected by ATMP because it conflicts
-        # with a mempool transaction. The second time, it'll be in the recentRejects filter.
+        # with a mempool transaction. The second time, it'll be in the m_recent_rejects filter.
         p2p_rebroadcast_wallet.send_txs_and_test(
             [tx],
             self.nodes[1],

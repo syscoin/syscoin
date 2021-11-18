@@ -23,8 +23,8 @@ std::string stringFromSyscoinTx(const int &nVersion) {
 		return "assetsend";
 	case SYSCOIN_TX_VERSION_ALLOCATION_SEND:
 		return "assetallocationsend";
-	case SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM:
-		return "assetallocationburntoethereum"; 
+	case SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
+		return "assetallocationburntonevm"; 
 	case SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
 		return "assetallocationburntosyscoin";
 	case SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
@@ -68,13 +68,18 @@ uint64_t CreateAssetID(const uint32_t &NFTID, const uint32_t &nBaseAsset) {
 }
 bool GetAsset(const uint32_t &nBaseAsset,
         CAsset& txPos) {
-    if (!passetdb || !passetdb->ReadAsset(nBaseAsset, txPos))
+    if (!passetdb || !passetdb->ReadAsset(nBaseAsset, txPos) || txPos.IsNull())
+        return false;
+    return true;
+}
+bool ExistsNFTAsset(const uint64_t &nAsset) {
+    if (!passetnftdb || !passetnftdb->ExistsNFTAsset(nAsset))
         return false;
     return true;
 }
 bool GetAssetNotaryKeyID(const uint32_t &nBaseAsset,
         std::vector<unsigned char>& keyID) {
-    if (!passetdb || !passetdb->ReadAssetNotaryKeyID(nBaseAsset, keyID))
+    if (!passetdb || !passetdb->ReadAssetNotaryKeyID(nBaseAsset, keyID) || keyID.empty())
         return false;
     return true;
 }

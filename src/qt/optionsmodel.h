@@ -5,7 +5,6 @@
 #ifndef SYSCOIN_QT_OPTIONSMODEL_H
 #define SYSCOIN_QT_OPTIONSMODEL_H
 
-#include <amount.h>
 #include <cstdint>
 #include <qt/guiconstants.h>
 
@@ -61,13 +60,16 @@ public:
         Language,               // QString
         UseEmbeddedMonospacedFont, // bool
         CoinControlFeatures,    // bool
+        SubFeeFromAmount,       // bool
         ThreadsScriptVerif,     // int
         Prune,                  // bool
         PruneSize,              // int
         DatabaseCache,          // int
+        ExternalSignerPath,     // QString
         SpendZeroConfChange,    // bool
         ShowMasternodesTab,     // bool
         Listen,                 // bool
+        Server,                 // bool
         OptionIDRowCount,
     };
 
@@ -88,6 +90,7 @@ public:
     QString getThirdPartyTxUrls() const { return strThirdPartyTxUrls; }
     bool getUseEmbeddedMonospacedFont() const { return m_use_embedded_monospaced_font; }
     bool getCoinControlFeatures() const { return fCoinControlFeatures; }
+    bool getSubFeeFromAmount() const { return m_sub_fee_from_amount; }
     const QString& getOverriddenByCommandLine() { return strOverriddenByCommandLine; }
 
     /* Explicit setters */
@@ -112,6 +115,7 @@ private:
     QString strThirdPartyTxUrls;
     bool m_use_embedded_monospaced_font;
     bool fCoinControlFeatures;
+    bool m_sub_fee_from_amount;
     /* settings that were overridden by command-line */
     QString strOverriddenByCommandLine;
 

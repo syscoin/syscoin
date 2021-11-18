@@ -5,7 +5,7 @@
 
 import time
 from test_framework.test_framework import DashTestFramework
-from test_framework.util import force_finish_mnsync, assert_raises_rpc_error, assert_equal, hex_str_to_bytes, wait_until_helper
+from test_framework.util import force_finish_mnsync, assert_raises_rpc_error, assert_equal, wait_until_helper
 from test_framework.p2p import (
   P2PInterface,
 )
@@ -108,7 +108,7 @@ class LLMQSigningTest(DashTestFramework):
             sig_share.quorumMember = int(sig_share_rpc_1["quorumMember"])
             sig_share.id = int(sig_share_rpc_1["id"], 16)
             sig_share.msgHash = int(sig_share_rpc_1["msgHash"], 16)
-            sig_share.sigShare = hex_str_to_bytes(sig_share_rpc_1["signature"])
+            sig_share.sigShare = bytes.fromhex(sig_share_rpc_1["signature"])
             for i in range(len(self.mninfo)):
                 assert self.mninfo[i].node.getconnectioncount() == 5
             # Get the current recovery member of the quorum
@@ -183,7 +183,7 @@ class LLMQSigningTest(DashTestFramework):
         self.bump_mocktime(recsig_time + int(60 * 60 * 24 * 6.5) - self.mocktime)
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
         self.sync_blocks()
         self.bump_mocktime(5)
         # Cleanup starts every 5 seconds
@@ -192,7 +192,7 @@ class LLMQSigningTest(DashTestFramework):
         self.bump_mocktime(int(60 * 60 * 24 * 1))
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
         self.sync_blocks()
         self.bump_mocktime(5)
         # Cleanup starts every 5 seconds
@@ -203,7 +203,7 @@ class LLMQSigningTest(DashTestFramework):
             self.mninfo[i].node.quorum_sign(100, id, msgHashConflict)
         for i in range(2, 5):
             self.mninfo[i].node.quorum_sign(100, id, msgHash)
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
         self.sync_blocks()
         self.bump_mocktime(5)
         wait_for_sigs(True, False, True, 15)
@@ -228,7 +228,7 @@ class LLMQSigningTest(DashTestFramework):
             wait_until_helper(lambda: mn.node.getconnectioncount() == 5, timeout=10, sleep=2)
             mn.node.ping()
             self.wait_until(lambda: all('pingwait' not in peer for peer in mn.node.getpeerinfo()))
-            self.nodes[0].generate(1)
+            self.generate(self.nodes[0], 1)
             self.sync_blocks()
             self.bump_mocktime(5)
             wait_for_sigs(True, False, True, 15)

@@ -36,7 +36,7 @@ import re
 class BIP155Network(Enum):
     IPV4 = 1
     IPV6 = 2
-    TORV2 = 3
+    TORV2 = 3  # no longer supported
     TORV3 = 4
     I2P = 5
     CJDNS = 6
@@ -45,16 +45,16 @@ def name_to_bip155(addr):
     '''Convert address string to BIP155 (networkID, addr) tuple.'''
     if addr.endswith('.onion'):
         vchAddr = b32decode(addr[0:-6], True)
-        if len(vchAddr) == 10:
-            return (BIP155Network.TORV2, vchAddr)
-        elif len(vchAddr) == 35:
-            assert(vchAddr[34] == 3)
+        if len(vchAddr) == 35:
+            assert vchAddr[34] == 3
             return (BIP155Network.TORV3, vchAddr[:32])
+        elif len(vchAddr) == 10:
+            return (BIP155Network.TORV2, vchAddr)
         else:
             raise ValueError('Invalid onion %s' % vchAddr)
     elif '.' in addr: # IPv4
         return (BIP155Network.IPV4, bytes((int(x) for x in addr.split('.'))))
-    elif ':' in addr: # IPv6
+    elif ':' in addr: # IPv6 or CJDNS
         sub = [[], []] # prefix, suffix
         x = 0
         addr = addr.split(':')
@@ -70,7 +70,14 @@ def name_to_bip155(addr):
                 sub[x].append(val & 0xff)
         nullbytes = 16 - len(sub[0]) - len(sub[1])
         assert((x == 0 and nullbytes == 0) or (x == 1 and nullbytes > 0))
-        return (BIP155Network.IPV6, bytes(sub[0] + ([0] * nullbytes) + sub[1]))
+        addr_bytes = bytes(sub[0] + ([0] * nullbytes) + sub[1])
+        if addr_bytes[0] == 0xfc:
+            # Assume that seeds with fc00::/8 addresses belong to CJDNS,
+            # not to the publicly unroutable "Unique Local Unicast" network, see
+            # RFC4193: https://datatracker.ietf.org/doc/html/rfc4193#section-8
+            return (BIP155Network.CJDNS, addr_bytes)
+        else:
+            return (BIP155Network.IPV6, addr_bytes)
     else:
         raise ValueError('Could not parse address %s' % addr)
 
@@ -93,7 +100,10 @@ def parse_spec(s):
 
     host = name_to_bip155(host)
 
-    return host + (port, )
+    if host[0] == BIP155Network.TORV2:
+        return None  # TORV2 is no longer supported, so we ignore it
+    else:
+        return host + (port, )
 
 def ser_compact_size(l):
     r = b""
@@ -129,6 +139,8 @@ def process_nodes(g, f, structname):
             continue
 
         spec = parse_spec(line)
+        if spec is None:  # ignore this entry (e.g. no longer supported addresses like TORV2)
+            continue
         blob = bip155_serialize(spec)
         hoststr = ','.join(('0x%02x' % b) for b in blob)
         g.write(f'    {hoststr},\n')

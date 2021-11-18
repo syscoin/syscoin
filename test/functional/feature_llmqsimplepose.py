@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2020 The Dash Core developers
+# Copyright (c) 2015-2021 The Dash Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-
 import time
 
 from test_framework.test_framework import DashTestFramework
-from test_framework.util import p2p_port, force_finish_mnsync
+from test_framework.util import force_finish_mnsync, p2p_port
+
 
 '''
-llmq-simplepose.py
+feature_llmqsimplepose.py
 
 Checks simple PoSe system based on LLMQ commitments
 
 '''
+
 
 class LLMQSimplePoSeTest(DashTestFramework):
     def set_test_params(self):
@@ -116,9 +117,9 @@ class LLMQSimplePoSeTest(DashTestFramework):
                 expected_contributors -= 1
 
             t = time.time()
-            while (not self.check_banned(mn)) and (time.time() - t) < 240:
+            while (not self.check_banned(mn)) and (time.time() - t) < 120:
                 self.reset_probe_timeouts()
-                self.nodes[0].generate(1)
+                self.generate(self.nodes[0], 1, sync_fun=self.no_op)
                 self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_contributors-1, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
 
             assert(self.check_banned(mn))
@@ -134,7 +135,9 @@ class LLMQSimplePoSeTest(DashTestFramework):
                 addr = self.nodes[0].getnewaddress()
                 self.nodes[0].sendtoaddress(addr, 0.1)
                 self.nodes[0].protx_update_service(mn.proTxHash, '127.0.0.1:%d' % p2p_port(mn.node.index), mn.keyOperator, "", addr)
-                self.nodes[0].generate(1)
+                # Make sure this tx "safe" to mine even when InstantSend and ChainLocks are no longer functional
+                self.bump_mocktime(60 * 10 + 1)
+                self.generate(self.nodes[0], 1, sync_fun=self.no_op)
                 assert(not self.check_banned(mn))
 
                 if restart:

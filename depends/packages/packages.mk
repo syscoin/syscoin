@@ -1,4 +1,4 @@
-packages:=boost libevent chia_bls gmp zlib libcurl gnutls nettle
+packages:=boost libevent cmake gmp zlib nettle gnutls libcurl bls-dash
 
 qrencode_packages = qrencode
 

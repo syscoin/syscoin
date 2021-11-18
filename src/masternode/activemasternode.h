@@ -13,6 +13,7 @@ class CBLSPublicKey;
 class CBLSSecretKey;
 struct CActiveMasternodeInfo;
 extern CActiveMasternodeInfo activeMasternodeInfo;
+extern RecursiveMutex activeMasternodeInfoCs;
 
 struct CActiveMasternodeInfo {
     // Keys for the active Masternode
@@ -60,4 +61,4 @@ private:
     bool GetLocalAddress(CService& addrRet);
 };
 extern std::unique_ptr<CActiveMasternodeManager> activeMasternodeManager;
-#endif
+#endif // SYSCOIN_MASTERNODE_ACTIVEMASTERNODE_H

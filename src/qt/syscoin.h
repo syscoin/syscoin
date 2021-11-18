@@ -9,11 +9,14 @@
 #include <config/syscoin-config.h>
 #endif
 
-#include <QApplication>
+#include <interfaces/node.h>
+#include <qt/initexecutor.h>
+
 #include <assert.h>
 #include <memory>
+#include <optional>
 
-#include <interfaces/node.h>
+#include <QApplication>
 
 class SyscoinGUI;
 class ClientModel;
@@ -24,37 +27,10 @@ class PlatformStyle;
 class SplashScreen;
 class WalletController;
 class WalletModel;
+namespace interfaces {
+class Init;
+} // namespace interfaces
 
-QT_BEGIN_NAMESPACE
-// SYSCOIN
-class QStringList;
-QT_END_NAMESPACE
-/** Class encapsulating Syscoin Core startup and shutdown.
- * Allows running startup and shutdown in a different thread from the UI thread.
- */
-class SyscoinCore: public QObject
-{
-    Q_OBJECT
-public:
-    explicit SyscoinCore(interfaces::Node& node);
-
-public Q_SLOTS:
-    void initialize();
-    void shutdown();
-    // SYSCOIN
-    void restart(const QStringList &args);
-
-Q_SIGNALS:
-    void initializeResult(bool success, interfaces::BlockAndHeaderTipInfo tip_info);
-    void shutdownResult();
-    void runawayException(const QString &message);
-
-private:
-    /// Pass fatal exception message to UI thread
-    void handleRunawayException(const std::exception *e);
-
-    interfaces::Node& m_node;
-};
 
 /** Main Syscoin application object */
 class SyscoinApplication: public QApplication
@@ -78,13 +54,13 @@ public:
     void createWindow(const NetworkStyle *networkStyle);
     /// Create splash screen
     void createSplashScreen(const NetworkStyle *networkStyle);
+    /// Create or spawn node
+    void createNode(interfaces::Init& init);
     /// Basic initialization, before starting initialization/shutdown thread. Return true on success.
     bool baseInitialize();
 
     /// Request core initialization
     void requestInitialize();
-    /// Request core shutdown
-    void requestShutdown();
 
     /// Get process return value
     int getReturnValue() const { return returnValue; }
@@ -96,11 +72,11 @@ public:
     void setupPlatformStyle();
 
     interfaces::Node& node() const { assert(m_node); return *m_node; }
-    void setNode(interfaces::Node& node);
 
 public Q_SLOTS:
     void initializeResult(bool success, interfaces::BlockAndHeaderTipInfo tip_info);
-    void shutdownResult();
+    /// Request core shutdown
+    void requestShutdown();
     /// Handle runaway exceptions. Shows a message box with the problem and quits the program.
     void handleRunawayException(const QString &message);
 
@@ -117,7 +93,7 @@ Q_SIGNALS:
     void windowShown(SyscoinGUI* window);
 
 private:
-    QThread *coreThread;
+    std::optional<InitExecutor> m_executor;
     OptionsModel *optionsModel;
     ClientModel *clientModel;
     SyscoinGUI *window;
@@ -130,7 +106,7 @@ private:
     const PlatformStyle *platformStyle;
     std::unique_ptr<QWidget> shutdownWindow;
     SplashScreen* m_splash = nullptr;
-    interfaces::Node* m_node = nullptr;
+    std::unique_ptr<interfaces::Node> m_node;
 
     void startThread();
 };

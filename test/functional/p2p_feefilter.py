@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (c) 2016-2020 The Bitcoin Core developers
+# Copyright (c) 2016-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test processing of feefilter messages."""
 
 from decimal import Decimal
 
+from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.messages import MSG_TX, MSG_WTX, msg_feefilter
 from test_framework.p2p import P2PInterface, p2p_lock
 from test_framework.test_framework import SyscoinTestFramework
@@ -80,8 +81,8 @@ class FeeFilterTest(SyscoinTestFramework):
         node0 = self.nodes[0]
         miniwallet = MiniWallet(node1)
         # Add enough mature utxos to the wallet, so that all txs spend confirmed coins
-        miniwallet.generate(5)
-        node1.generate(100)
+        self.generate(miniwallet, 5)
+        self.generate(node1, COINBASE_MATURITY)
 
         conn = self.nodes[0].add_p2p_connection(TestP2PConn())
 

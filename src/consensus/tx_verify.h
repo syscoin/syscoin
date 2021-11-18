@@ -5,7 +5,7 @@
 #ifndef SYSCOIN_CONSENSUS_TX_VERIFY_H
 #define SYSCOIN_CONSENSUS_TX_VERIFY_H
 
-#include <amount.h>
+#include <consensus/amount.h>
 
 #include <stdint.h>
 #include <vector>
@@ -23,7 +23,7 @@ namespace Consensus {
  * @param[out] txfee Set to the transaction fee if successful.
  * Preconditions: tx.IsCoinBase() is false.
  */
-bool CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee, CAssetsMap &mapAssetIn, CAssetsMap &mapAssetOut);
+[[nodiscard]] bool CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee, CAssetsMap &mapAssetIn, CAssetsMap &mapAssetOut);
 } // namespace Consensus
 
 /** Auxiliary functions for transaction validation (ideally should not be exposed) */
@@ -48,10 +48,10 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& ma
  * Compute total signature operation cost of a transaction.
  * @param[in] tx     Transaction for which we are computing the cost
  * @param[in] inputs Map of previous transactions that have outputs we're spending
- * @param[out] flags Script verification flags
+ * @param[in] flags Script verification flags
  * @return Total signature operation cost of tx
  */
-int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& inputs, int flags);
+int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& inputs, uint32_t flags);
 
 /**
  * Check if transaction is final and can be included in a block with the

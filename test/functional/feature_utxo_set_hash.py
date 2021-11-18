@@ -9,7 +9,7 @@ import struct
 from test_framework.messages import (
     CBlock,
     COutPoint,
-    FromHex,
+    from_hex,
 )
 from test_framework.muhash import MuHash3072
 from test_framework.test_framework import SyscoinTestFramework
@@ -31,14 +31,14 @@ class UTXOSetHashTest(SyscoinTestFramework):
 
         # Generate 100 blocks and remove the first since we plan to spend its
         # coinbase
-        block_hashes = wallet.generate(1) + node.generate(99)
-        blocks = list(map(lambda block: FromHex(CBlock(), node.getblock(block, False)), block_hashes))
+        block_hashes = self.generate(wallet, 1) + self.generate(node, 99)
+        blocks = list(map(lambda block: from_hex(CBlock(), node.getblock(block, False)), block_hashes))
         blocks.pop(0)
 
         # Create a spending transaction and mine a block which includes it
         txid = wallet.send_self_transfer(from_node=node)['txid']
-        tx_block = node.generateblock(output=wallet.get_address(), transactions=[txid])
-        blocks.append(FromHex(CBlock(), node.getblock(tx_block['hash'], False)))
+        tx_block = self.generateblock(node, output=wallet.get_address(), transactions=[txid])
+        blocks.append(from_hex(CBlock(), node.getblock(tx_block['hash'], False)))
 
         # Serialize the outputs that should be in the UTXO set and add them to
         # a MuHash object
@@ -69,8 +69,8 @@ class UTXOSetHashTest(SyscoinTestFramework):
         assert_equal(finalized[::-1].hex(), node_muhash)
 
         self.log.info("Test deterministic UTXO set hash results")
-        assert_equal(node.gettxoutsetinfo()['hash_serialized_2'], "311e79f2306b4c7f43fb508a6c4b76b7b0816156c88a12c2595c0ef065cef678")
-        assert_equal(node.gettxoutsetinfo("muhash")['muhash'], "4b8803075d7151d06fad3e88b68ba726886794873fbfa841d12aefb2cc2b881b")
+        assert_equal(node.gettxoutsetinfo()['hash_serialized_2'], "1e0d6006c6ea254e6591ef3f7951a5106881a8cba77d734735d6b9c4c40514a5")
+        assert_equal(node.gettxoutsetinfo("muhash")['muhash'], "7c0890c68501f7630d36aeb3999dc924e63af084ae1bbfba11dd462144637635")
 
     def run_test(self):
         self.test_muhash_implementation()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2020 The Bitcoin Core developers
+# Copyright (c) 2014-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Base class for RPC testing."""
@@ -20,7 +20,7 @@ import time
 import copy
 
 from typing import List
-from .address import ADDRESS_BCRT1_P2WSH_OP_TRUE
+from .address import create_deterministic_address_bcrt1_p2tr_op_true
 from .authproxy import JSONRPCException
 from . import coverage
 from .p2p import NetworkThread
@@ -106,6 +106,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         self.supports_cli = True
         self.bind_to_localhost_only = True
         self.parse_args()
+        self.disable_syscall_sandbox = self.options.nosandbox or self.options.valgrind
         self.default_wallet_name = "default_wallet" if self.options.descriptors else ""
         self.wallet_data_filename = "wallet.dat"
         # Optional list of wallet names that can be set in set_test_params to
@@ -119,6 +120,9 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         # By default the wallet is not required. Set to true by skip_if_no_wallet().
         # When False, we ignore wallet_names regardless of what it is.
         self.requires_wallet = False
+        # Disable ThreadOpenConnections by default, so that adding entries to
+        # addrman will not result in automatic connections to them.
+        self.disable_autoconnect = True
         self.set_test_params()
         assert self.wallet_names is None or len(self.wallet_names) <= self.num_nodes
         if self.options.timeout_factor == 0 :
@@ -162,6 +166,8 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         parser = argparse.ArgumentParser(usage="%(prog)s [options]")
         parser.add_argument("--nocleanup", dest="nocleanup", default=False, action="store_true",
                             help="Leave syscoinds and test.* datadir on exit or error")
+        parser.add_argument("--nosandbox", dest="nosandbox", default=False, action="store_true",
+                            help="Don't use the syscall sandbox")
         parser.add_argument("--noshutdown", dest="noshutdown", default=False, action="store_true",
                             help="Don't stop syscoinds after the test execution")
         parser.add_argument("--cachedir", dest="cachedir", default=os.path.abspath(os.path.dirname(os.path.realpath(__file__)) + "/../../cache"),
@@ -188,7 +194,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         parser.add_argument("--perf", dest="perf", default=False, action="store_true",
                             help="profile running nodes with perf for the duration of the test")
         parser.add_argument("--valgrind", dest="valgrind", default=False, action="store_true",
-                            help="run nodes under the valgrind memory error detector: expect at least a ~10x slowdown, valgrind 3.14 or later required")
+                            help="run nodes under the valgrind memory error detector: expect at least a ~10x slowdown. valgrind 3.14 or later required. Forces --nosandbox.")
         parser.add_argument("--randomseed", type=int,
                             help="set a random seed for deterministically reproducing a previous test run")
         parser.add_argument('--timeout-factor', dest="timeout_factor", type=float, default=1.0, help='adjust test timeouts by a factor. Setting it to 0 disables all timeouts')
@@ -200,6 +206,10 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
                             help="Run test using legacy wallets", dest='descriptors')
 
         self.add_options(parser)
+        # Running TestShell in a Jupyter notebook causes an additional -f argument
+        # To keep TestShell from failing with an "unrecognized argument" error, we add a dummy "-f" argument
+        # source: https://stackoverflow.com/questions/48796169/how-to-fix-ipykernel-launcher-py-error-unrecognized-arguments-in-jupyter/56349168#56349168
+        parser.add_argument("-f", "--fff", help="a dummy argument to fool ipython", default="1")
         self.options = parser.parse_args()
         self.options.previous_releases_path = previous_releases_path
 
@@ -409,7 +419,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             # To ensure that all nodes are out of IBD, the most recent block
             # must have a timestamp not too old (see IsInitialBlockDownload()).
             self.log.debug('Generate a block with current time')
-            block_hash = self.nodes[0].generate(1)[0]
+            block_hash = self.generate(self.nodes[0], 1, sync_fun=self.no_op)[0]
             block = self.nodes[0].getblock(blockhash=block_hash, verbosity=0)
             for n in self.nodes:
                 n.submitblock(block)
@@ -419,12 +429,12 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
     def import_deterministic_coinbase_privkeys(self):
         for i in range(self.num_nodes):
-            self.init_wallet(i)
+            self.init_wallet(node=i)
 
-    def init_wallet(self, i):
-        wallet_name = self.default_wallet_name if self.wallet_names is None else self.wallet_names[i] if i < len(self.wallet_names) else False
+    def init_wallet(self, *, node):
+        wallet_name = self.default_wallet_name if self.wallet_names is None else self.wallet_names[node] if node < len(self.wallet_names) else False
         if wallet_name is not False:
-            n = self.nodes[i]
+            n = self.nodes[node]
             if wallet_name is not None:
                 n.createwallet(wallet_name=wallet_name, descriptors=self.options.descriptors, load_on_startup=True)
             n.importprivkey(privkey=n.get_deterministic_priv_key().key, label='coinbase')
@@ -467,6 +477,10 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             extra_args = [[]] * num_nodes
         if versions is None:
             versions = [None] * num_nodes
+        if self.is_syscall_sandbox_compiled() and not self.disable_syscall_sandbox:
+            for i in range(len(extra_args)):
+                if versions[i] is None or versions[i] >= 219900:
+                    extra_args[i] = extra_args[i] + ["-sandbox=log-and-abort"]
         if binary is None:
             binary = [get_bin_from_version(v, 'syscoind', self.options.syscoind) for v in versions]
         if binary_cli is None:
@@ -563,18 +577,19 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         self.nodes[i].process.wait(timeout)
 
     def connect_nodes(self, a, b):
-        def connect_nodes_helper(from_connection, node_num):
-            ip_port = "127.0.0.1:" + str(p2p_port(node_num))
-            from_connection.addnode(ip_port, "onetry")
-            # poll until version handshake complete to avoid race conditions
-            # with transaction relaying
-            # See comments in net_processing:
-            # * Must have a version message before anything else
-            # * Must have a verack message before anything else
-            wait_until_helper(lambda: all(peer['version'] != 0 for peer in from_connection.getpeerinfo()))
-            wait_until_helper(lambda: all(peer['bytesrecv_per_msg'].pop('verack', 0) == 24 for peer in from_connection.getpeerinfo()))
-
-        connect_nodes_helper(self.nodes[a], b)
+        from_connection = self.nodes[a]
+        to_connection = self.nodes[b]
+        ip_port = "127.0.0.1:" + str(p2p_port(b))
+        from_connection.addnode(ip_port, "onetry")
+        # poll until version handshake complete to avoid race conditions
+        # with transaction relaying
+        # See comments in net_processing:
+        # * Must have a version message before anything else
+        # * Must have a verack message before anything else
+        wait_until_helper(lambda: all(peer['version'] != 0 for peer in from_connection.getpeerinfo()))
+        wait_until_helper(lambda: all(peer['version'] != 0 for peer in to_connection.getpeerinfo()))
+        wait_until_helper(lambda: all(peer['bytesrecv_per_msg'].pop('verack', 0) == 24 for peer in from_connection.getpeerinfo()))
+        wait_until_helper(lambda: all(peer['bytesrecv_per_msg'].pop('verack', 0) == 24 for peer in to_connection.getpeerinfo()))
 
     def disconnect_nodes(self, a, b):
         def disconnect_nodes_helper(from_connection, node_num):
@@ -635,6 +650,29 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
     def reconnect_isolated_node(self, node, node_num):
         node.setnetworkactive(True)
         self.connect_nodes(node.index, node_num)
+
+    def no_op(self):
+        pass
+
+    def generate(self, generator, *args, sync_fun=None, **kwargs):
+        blocks = generator.generate(*args, invalid_call=False, **kwargs)
+        sync_fun() if sync_fun else self.sync_all()
+        return blocks
+
+    def generateblock(self, generator, *args, sync_fun=None, **kwargs):
+        blocks = generator.generateblock(*args, invalid_call=False, **kwargs)
+        sync_fun() if sync_fun else self.sync_all()
+        return blocks
+
+    def generatetoaddress(self, generator, *args, sync_fun=None, **kwargs):
+        blocks = generator.generatetoaddress(*args, invalid_call=False, **kwargs)
+        sync_fun() if sync_fun else self.sync_all()
+        return blocks
+
+    def generatetodescriptor(self, generator, *args, sync_fun=None, **kwargs):
+        blocks = generator.generatetodescriptor(*args, invalid_call=False, **kwargs)
+        sync_fun() if sync_fun else self.sync_all()
+        return blocks
 
     def sync_blocks(self, nodes=None, wait=1, timeout=60):
         """
@@ -731,7 +769,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         if not os.path.isdir(cache_node_dir):
             self.log.debug("Creating cache directory {}".format(cache_node_dir))
 
-            initialize_datadir(self.options.cachedir, CACHE_NODE_ID, self.chain)
+            initialize_datadir(self.options.cachedir, CACHE_NODE_ID, self.chain, self.disable_autoconnect)
             self.nodes.append(
                 TestNode(
                     CACHE_NODE_ID,
@@ -763,10 +801,11 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             # block in the cache does not age too much (have an old tip age).
             # This is needed so that we are out of IBD when the test starts,
             # see the tip age check in IsInitialBlockDownload().
-            gen_addresses = [k.address for k in TestNode.PRIV_KEYS][:3] + [ADDRESS_BCRT1_P2WSH_OP_TRUE]
+            gen_addresses = [k.address for k in TestNode.PRIV_KEYS][:3] + [create_deterministic_address_bcrt1_p2tr_op_true()[0]]
             assert_equal(len(gen_addresses), 4)
             for i in range(8):
-                cache_node.generatetoaddress(
+                self.generatetoaddress(
+                    cache_node,
                     nblocks=25 if i != 7 else 24,
                     address=gen_addresses[i % len(gen_addresses)],
                 )
@@ -782,14 +821,14 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
             os.rmdir(cache_path('wallets'))  # Remove empty wallets dir
             for entry in os.listdir(cache_path()):
-                if entry not in ['chainstate', 'blocks', 'indexes', 'ethereumminttx', 'ethereumtxroots', 'geth', 'dbblockindex', 'asset', 'llmq', 'evodb']:  # Only keep chainstate and blocks folder
+                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'asset', 'assetnft', 'llmq', 'evodb']:  # Only keep chainstate and blocks folder
                     os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
             self.log.debug("Copy cache directory {} to node {}".format(cache_node_dir, i))
             to_dir = get_datadir_path(self.options.tmpdir, i)
             shutil.copytree(cache_node_dir, to_dir)
-            initialize_datadir(self.options.tmpdir, i, self.chain)  # Overwrite port/rpcport in syscoin.conf
+            initialize_datadir(self.options.tmpdir, i, self.chain, self.disable_autoconnect)  # Overwrite port/rpcport in syscoin.conf
 
     def _initialize_chain_clean(self):
         """Initialize empty blockchain for use by the test.
@@ -797,7 +836,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         Create an empty blockchain and num_nodes wallets.
         Useful if a test case wants complete control over initialization."""
         for i in range(self.num_nodes):
-            initialize_datadir(self.options.tmpdir, i, self.chain)
+            initialize_datadir(self.options.tmpdir, i, self.chain, self.disable_autoconnect)
 
     def skip_if_no_py3_zmq(self):
         """Attempt to import the zmq package and skip the test if the import fails."""
@@ -894,6 +933,10 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             self.mocktime += t
         set_node_times(nodes or self.nodes, self.mocktime)
 
+    def is_syscall_sandbox_compiled(self):
+        """Checks whether the syscall sandbox was compiled."""
+        return self.config["components"].getboolean("ENABLE_SYSCALL_SANDBOX")
+
 MASTERNODE_COLLATERAL = 100
 
 
@@ -941,6 +984,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.quorum_data_thread_request_timeout_seconds = 10
         # This is EXPIRATION_TIMEOUT in CQuorumDataRequest
         self.quorum_data_request_expiration_timeout = 300
+        self.disable_autoconnect = False
 
     def confirm_mns(self):
         while True:
@@ -952,7 +996,7 @@ class DashTestFramework(SyscoinTestFramework):
                     break
             if not found_unconfirmed:
                 break
-            self.nodes[0].generate(1)
+            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.sync_blocks()
 
     def bump_scheduler(self, t, nodes=None):
@@ -1000,12 +1044,11 @@ class DashTestFramework(SyscoinTestFramework):
             self.nodes[0].lockunspent(True, [{'txid': txid, 'vout': collateral_vout}])
             proTxHash = self.nodes[0].protx_register_fund(address, '127.0.0.1:%d' % port, ownerAddr, bls['public'], votingAddr, 0, rewardsAddr, address)
         else:
-            self.nodes[0].generate(1)
+            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
             proTxHash = self.nodes[0].protx_register(txid, collateral_vout, '127.0.0.1:%d' % port, ownerAddr, bls['public'], votingAddr, 0, rewardsAddr, address)
 
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
         self.mninfo.append(MasternodeInfo(proTxHash, ownerAddr, votingAddr, bls['public'], bls['secret'], address, txid, collateral_vout))
-        self.sync_all()
 
         self.log.info("Prepared masternode %d: collateral_txid=%s, collateral_vout=%d, protxHash=%s" % (idx, txid, collateral_vout, proTxHash))
 
@@ -1014,8 +1057,7 @@ class DashTestFramework(SyscoinTestFramework):
         rawtx = self.nodes[0].createrawtransaction([{"txid": mn.collateral_txid, "vout": mn.collateral_vout}], {self.nodes[0].getnewaddress(): 99.9999})
         rawtx = self.nodes[0].signrawtransactionwithwallet(rawtx)
         self.nodes[0].sendrawtransaction(rawtx["hex"])
-        self.nodes[0].generate(1)
-        self.sync_all()
+        self.generate(self.nodes[0], 1)
         self.mninfo.remove(mn)
 
         self.log.info("Removed masternode %d", idx)
@@ -1076,7 +1118,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.log.info("Generating %d coins" % required_balance)
         while self.nodes[0].getbalance() < required_balance:
             self.bump_mocktime(1)
-            self.nodes[0].generatetoaddress(10, self.nodes[0].getnewaddress())
+            self.generatetoaddress(self.nodes[0], 10, self.nodes[0].getnewaddress())
         num_simple_nodes = self.num_nodes - self.mn_count - 1
         self.log.info("Creating and starting %s simple nodes", num_simple_nodes)
         for i in range(0, num_simple_nodes):
@@ -1085,7 +1127,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.log.info("Activating DIP3")
         if not self.fast_dip3_enforcement:
             while self.nodes[0].getblockcount() < 500:
-                self.nodes[0].generatetoaddress(10, self.nodes[0].getnewaddress())
+                self.generatetoaddress(self.nodes[0], 10, self.nodes[0].getnewaddress())
         self.sync_all()
 
         # create masternodes
@@ -1099,9 +1141,7 @@ class DashTestFramework(SyscoinTestFramework):
             self.connect_nodes(i+1, 0)
 
         self.bump_mocktime(1)
-        self.nodes[0].generate(1)
-        # sync nodes
-        self.sync_all()
+        self.generate(self.nodes[0], 1)
         # Enable ChainLocks by default
         self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
         self.wait_for_sporks_same()
@@ -1323,7 +1363,7 @@ class DashTestFramework(SyscoinTestFramework):
         def wait_func():
             if quorum_hash in self.nodes[0].quorum_list()["llmq_test"]:
                 return True
-            self.nodes[0].generate(1)
+            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
             self.bump_mocktime(1, nodes=nodes)
             self.sync_blocks(nodes)
             return False
@@ -1356,7 +1396,7 @@ class DashTestFramework(SyscoinTestFramework):
             self.bump_mocktime(bumptime, nodes=nodes)
 
         def timeout_func1():
-            self.nodes[0].generate(1)
+            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
             self.bump_mocktime(bumptime, nodes=nodes)
             self.sync_blocks(nodes)
 
@@ -1365,7 +1405,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.log.info("skip_count {}".format(skip_count))
         if skip_count != 0:
             timeout_func()
-            self.nodes[0].generate(skip_count)
+            self.generate(self.nodes[0], skip_count, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         q = self.nodes[0].getbestblockhash()
@@ -1376,31 +1416,31 @@ class DashTestFramework(SyscoinTestFramework):
         if spork23_active:
             self.wait_for_masternode_probes(mninfos_valid, wait_proc=timeout_func)
         self.bump_mocktime(1, nodes=nodes)
-        self.nodes[0].generate(2)
+        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         self.log.info("Waiting for phase 2 (contribute)")
         self.wait_for_quorum_phase(q, 2, expected_members, "receivedContributions", expected_contributions, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 2 (contribute)"))
         self.bump_mocktime(1, nodes=nodes)
-        self.nodes[0].generate(2)
+        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         self.log.info("Waiting for phase 3 (complain)")
         self.wait_for_quorum_phase(q, 3, expected_members, "receivedComplaints", expected_complaints, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 3 (complain)"))
         self.bump_mocktime(1, nodes=nodes)
-        self.nodes[0].generate(2)
+        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         self.log.info("Waiting for phase 4 (justify)")
         self.wait_for_quorum_phase(q, 4, expected_members, "receivedJustifications", expected_justifications, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 4 (justify)"))
         self.bump_mocktime(1, nodes=nodes)
-        self.nodes[0].generate(2)
+        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         self.log.info("Waiting for phase 5 (commit)")
         self.wait_for_quorum_phase(q, 5, expected_members, "receivedPrematureCommitments", expected_commitments, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 5 (commit)"))
         self.bump_mocktime(1, nodes=nodes)
-        self.nodes[0].generate(2)
+        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         self.log.info("Waiting for phase 6 (mining)")
@@ -1412,7 +1452,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.log.info("Mining final commitment")
         self.bump_mocktime(1, nodes=nodes)
         self.nodes[0].getblocktemplate({"rules": ["segwit"]}) # this calls CreateNewBlock
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         self.log.info("Waiting for quorum to appear in the list")
@@ -1421,8 +1461,8 @@ class DashTestFramework(SyscoinTestFramework):
         assert_equal(q, new_quorum)
         quorum_info = self.nodes[0].quorum_info(100, new_quorum)
 
-        # Mine 20 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
-        self.nodes[0].generate(20)
+        # Mine 8 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
+        self.generate(self.nodes[0], 8, sync_fun=self.no_op)
         self.bump_mocktime(5, nodes=nodes)
         self.sync_blocks(nodes)
 

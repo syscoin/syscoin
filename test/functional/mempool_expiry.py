@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2020 The Bitcoin Core developers
+# Copyright (c) 2020-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Tests that a mempool transaction expires after a given timeout and that its
@@ -12,6 +12,7 @@ definable expiry timeout via the '-mempoolexpiry=<n>' command line argument
 
 from datetime import timedelta
 
+from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -35,8 +36,8 @@ class MempoolExpiryTest(SyscoinTestFramework):
         self.wallet = MiniWallet(node)
 
         # Add enough mature utxos to the wallet so that all txs spend confirmed coins.
-        self.wallet.generate(4)
-        node.generate(100)
+        self.generate(self.wallet, 4)
+        self.generate(node, COINBASE_MATURITY)
 
         # Send a parent transaction that will expire.
         parent_txid = self.wallet.send_self_transfer(from_node=node)['txid']

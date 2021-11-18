@@ -23,7 +23,7 @@ class CCoinsViewCache;
 class CCbTx
 {
 public:
-    static const uint16_t CURRENT_VERSION = 2;
+    static constexpr uint16_t CURRENT_VERSION = 2;
 
 public:
     uint16_t nVersion{CURRENT_VERSION};
@@ -43,7 +43,7 @@ public:
         obj.clear();
         obj.setObject();
         obj.pushKV("version", (int)nVersion);
-        obj.pushKV("height", (int)nHeight);
+        obj.pushKV("height", nHeight);
         obj.pushKV("merkleRootMNList", merkleRootMNList.ToString());
         obj.pushKV("merkleRootQuorums", merkleRootQuorums.ToString());
     }
@@ -55,4 +55,4 @@ bool CheckCbTxMerkleRoots(const CBlock& block, const CBlockIndex* pindex, BlockV
 bool CalcCbTxMerkleRootMNList(const CBlock& block, const CBlockIndex* pindexPrev, uint256& merkleRootRet, BlockValidationState& state, CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload *qcIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CalcCbTxMerkleRootQuorums(const CBlock& block, const CBlockIndex* pindexPrev, uint256& merkleRootRet, BlockValidationState& state, const llmq::CFinalCommitmentTxPayload *qcIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-#endif //SYSCOIN_EVO_CBTX_H
+#endif // SYSCOIN_EVO_CBTX_H

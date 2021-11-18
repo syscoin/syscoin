@@ -9,13 +9,12 @@
 #include <util/system.h>
 #include <external_signer.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#ifdef ENABLE_EXTERNAL_SIGNER
-
-ExternalSigner::ExternalSigner(const std::string& command, const std::string& fingerprint, const std::string chain, const std::string name): m_command(command), m_fingerprint(fingerprint), m_chain(chain), m_name(name) {}
+ExternalSigner::ExternalSigner(const std::string& command, const std::string chain, const std::string& fingerprint, const std::string name): m_command(command), m_chain(chain), m_fingerprint(fingerprint), m_name(name) {}
 
 const std::string ExternalSigner::NetworkArg() const
 {
@@ -55,7 +54,7 @@ bool ExternalSigner::Enumerate(const std::string& command, std::vector<ExternalS
         if (model_field.isStr() && model_field.getValStr() != "") {
             name += model_field.getValStr();
         }
-        signers.push_back(ExternalSigner(command, fingerprintStr, chain, name));
+        signers.push_back(ExternalSigner(command, chain, fingerprintStr, name));
     }
     return true;
 }
@@ -77,15 +76,14 @@ bool ExternalSigner::SignTransaction(PartiallySignedTransaction& psbtx, std::str
     ssTx << psbtx;
 
     // Check if signer fingerprint matches any input master key fingerprint
-    bool match = false;
-    for (unsigned int i = 0; i < psbtx.inputs.size(); ++i) {
-        const PSBTInput& input = psbtx.inputs[i];
+    auto matches_signer_fingerprint = [&](const PSBTInput& input) {
         for (const auto& entry : input.hd_keypaths) {
-            if (m_fingerprint == strprintf("%08x", ReadBE32(entry.second.fingerprint))) match = true;
+            if (m_fingerprint == strprintf("%08x", ReadBE32(entry.second.fingerprint))) return true;
         }
-    }
+        return false;
+    };
 
-    if (!match) {
+    if (!std::any_of(psbtx.inputs.begin(), psbtx.inputs.end(), matches_signer_fingerprint)) {
         error = "Signer fingerprint " + m_fingerprint + " does not match any of the inputs:\n" + EncodeBase64(ssTx.str());
         return false;
     }
@@ -116,5 +114,3 @@ bool ExternalSigner::SignTransaction(PartiallySignedTransaction& psbtx, std::str
 
     return true;
 }
-
-#endif // ENABLE_EXTERNAL_SIGNER

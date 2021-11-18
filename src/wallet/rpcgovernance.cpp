@@ -7,7 +7,7 @@
 #include <validation.h>
 #include <rpc/server.h>
 #include <wallet/rpcwallet.h>
-#include <wallet/wallet.h>
+#include <wallet/spend.h>
 #include <rpc/blockchain.h>
 #include <node/context.h>
 #include <evo/deterministicmns.h>
@@ -17,8 +17,8 @@ UniValue VoteWithMasternodes(const std::map<uint256, CKey>& keys,
                              vote_outcome_enum_t eVoteOutcome, CConnman& connman)
 {
     {
-        LOCK(governance.cs);
-        CGovernanceObject *pGovObj = governance.FindGovernanceObject(hash);
+        LOCK(governance->cs);
+        CGovernanceObject *pGovObj = governance->FindGovernanceObject(hash);
         if (!pGovObj) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Governance object not found");
         }
@@ -57,7 +57,7 @@ UniValue VoteWithMasternodes(const std::map<uint256, CKey>& keys,
         }
 
         CGovernanceException exception;
-        if (governance.ProcessVoteAndRelay(vote, exception, connman)) {
+        if (governance->ProcessVoteAndRelay(vote, exception, connman)) {
             nSuccessful++;
             statusObj.pushKV("result", "success");
         } else {
@@ -141,7 +141,7 @@ static RPCHelpMan gobject_prepare()
 {
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
-    NodeContext& node = EnsureAnyNodeContext(request.context);
+    NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 
@@ -189,7 +189,7 @@ static RPCHelpMan gobject_prepare()
     LOCK(pwallet->cs_wallet);
 
     std::string strError = "";
-    if (!govobj.IsValidLocally(strError, false))
+    if (!govobj.IsValidLocally(*node.chainman, strError, false))
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + govobj.GetHash().ToString() + " - " + strError);
 
     // If specified, spend this outpoint as the proposal fee
@@ -205,7 +205,7 @@ static RPCHelpMan gobject_prepare()
     }
 
     CTransactionRef tx;
-    if (!pwallet->GetBudgetSystemCollateralTX(tx, govobj.GetHash(), govobj.GetMinCollateralFee(), outpoint)) {
+    if (!GetBudgetSystemCollateralTX(*pwallet, tx, govobj.GetHash(), govobj.GetMinCollateralFee(), outpoint)) {
         std::string err = "Error making collateral transaction for governance object. Please check your wallet balance and make sure your wallet is unlocked.";
         if (!request.params[4].isNull() && !request.params[5].isNull()) {
             err += "Please verify your specified output is valid and is enough for the combined proposal fee and transaction fee.";
@@ -249,7 +249,7 @@ static RPCHelpMan gobject_vote_many()
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
-    NodeContext& node = EnsureAnyNodeContext(request.context);
+    NodeContext& node =  request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 
@@ -316,7 +316,7 @@ static RPCHelpMan gobject_vote_alias()
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
-    NodeContext& node = EnsureAnyNodeContext(request.context);
+    NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 

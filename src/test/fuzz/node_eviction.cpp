@@ -18,7 +18,7 @@ FUZZ_TARGET(node_eviction)
 {
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     std::vector<NodeEvictionCandidate> eviction_candidates;
-    while (fuzzed_data_provider.ConsumeBool()) {
+    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10000) {
         eviction_candidates.push_back({
             /* id */ fuzzed_data_provider.ConsumeIntegral<NodeId>(),
             /* nTimeConnected */ fuzzed_data_provider.ConsumeIntegral<int64_t>(),
@@ -31,7 +31,7 @@ FUZZ_TARGET(node_eviction)
             /* nKeyedNetGroup */ fuzzed_data_provider.ConsumeIntegral<uint64_t>(),
             /* prefer_evict */ fuzzed_data_provider.ConsumeBool(),
             /* m_is_local */ fuzzed_data_provider.ConsumeBool(),
-            /* m_is_onion */ fuzzed_data_provider.ConsumeBool(),
+            /* m_network */ fuzzed_data_provider.PickValueInArray(ALL_NETWORKS),
         });
     }
     // Make a copy since eviction_candidates may be in some valid but otherwise

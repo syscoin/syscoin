@@ -6,13 +6,13 @@
 
 export LC_ALL=C.UTF-8
 
-export HOST=x86_64-apple-darwin18
+export HOST=x86_64-apple-darwin19
 export PIP_PACKAGES="zmq lief"
 export GOAL="install"
-export SYSCOIN_CONFIG="--with-gui --enable-reduce-exports --enable-external-signer"
+export SYSCOIN_CONFIG="--with-gui --enable-reduce-exports"
 export CI_OS_NAME="macos"
+export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,feature_llmqsimplepose"
 export NO_DEPENDS=1
 export OSX_SDK=""
 export CCACHE_SIZE=300M
-export TEST_RUNNER_EXTRA="--exclude feature_block"
 export RUN_SECURITY_TESTS="true"

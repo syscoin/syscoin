@@ -15,11 +15,13 @@
 #include <uint256.h>
 
 #include <vector>
-
+// SYSCOIN
+class BlockManager;
 /**
  * Maximum amount of time that a block timestamp is allowed to exceed the
  * current network-adjusted time before the block will be accepted.
  */
+
 static constexpr int64_t MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60;
 
 /**
@@ -127,9 +129,16 @@ enum BlockStatus: uint32_t {
     BLOCK_FAILED_CHILD       =   64, //!< descends from failed block
     BLOCK_FAILED_MASK        =   BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD,
 
-    BLOCK_OPT_WITNESS       =   128, //!< block data in blk*.data was received with a witness-enforcing client
+    BLOCK_OPT_WITNESS        =   128, //!< block data in blk*.dat was received with a witness-enforcing client
+    /**
+     * If set, this indicates that the block index entry is assumed-valid.
+     * Certain diagnostics will be skipped in e.g. CheckBlockIndex().
+     * It almost certainly means that the block's full validation is pending
+     * on a background chainstate. See `doc/assumeutxo.md`.
+     */
+    BLOCK_ASSUMED_VALID      =   256,
     // SYSCOIN
-    BLOCK_CONFLICT_CHAINLOCK =   256, //!< conflicts with chainlock system
+    BLOCK_CONFLICT_CHAINLOCK =   512, //!< conflicts with chainlock system
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -173,7 +182,7 @@ public:
 
     //! (memory only) Number of transactions in the chain up to and including this block.
     //! This value will be non-zero only if and only if transactions for this block and all its parents are available.
-    //! Change to 64-bit type when necessary; won't happen before 2030
+    //! Change to 64-bit type before 2024 (assuming worst case of 60 byte transactions).
     //!
     //! Note: this value is faked during use of a UTXO snapshot because we don't
     //! have the underlying block data available during snapshot load.
@@ -185,7 +194,7 @@ public:
     //!
     //! Note: this value is modified to show BLOCK_OPT_WITNESS during UTXO snapshot
     //! load to avoid the block index being spuriously rewound.
-    //! @sa RewindBlockIndex
+    //! @sa NeedsRedownload
     //! @sa ActivateSnapshot
     uint32_t nStatus{0};
 
@@ -201,7 +210,6 @@ public:
 
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
-
     CBlockIndex()
     {
     }
@@ -292,14 +300,24 @@ public:
         return ((nStatus & BLOCK_VALID_MASK) >= nUpTo);
     }
 
+    //! @returns true if the block is assumed-valid; this means it is queued to be
+    //!   validated by a background chainstate.
+    bool IsAssumedValid() const { return nStatus & BLOCK_ASSUMED_VALID; }
+
     //! Raise the validity level of this block index entry.
     //! Returns true if the validity was changed.
     bool RaiseValidity(enum BlockStatus nUpTo)
     {
         assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
-        if (nStatus & BLOCK_FAILED_MASK)
-            return false;
+        if (nStatus & BLOCK_FAILED_MASK) return false;
+
         if ((nStatus & BLOCK_VALID_MASK) < nUpTo) {
+            // If this block had been marked assumed-valid and we're raising
+            // its validity to a certain point, there is no longer an assumption.
+            if (nStatus & BLOCK_ASSUMED_VALID && nUpTo >= BLOCK_VALID_SCRIPTS) {
+                nStatus &= ~BLOCK_ASSUMED_VALID;
+            }
+
             nStatus = (nStatus & ~BLOCK_VALID_MASK) | nUpTo;
             return true;
         }

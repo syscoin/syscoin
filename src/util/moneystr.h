@@ -9,9 +9,10 @@
 #ifndef SYSCOIN_UTIL_MONEYSTR_H
 #define SYSCOIN_UTIL_MONEYSTR_H
 
-#include <amount.h>
 #include <attributes.h>
+#include <consensus/amount.h>
 
+#include <optional>
 #include <string>
 
 /* Do not use these functions to represent or parse monetary amounts to or from
@@ -19,6 +20,6 @@
  */
 std::string FormatMoney(const CAmount n);
 /** Parse an amount denoted in full coins. E.g. "0.0034" supplied on the command line. **/
-[[nodiscard]] bool ParseMoney(const std::string& str, CAmount& nRet);
+std::optional<CAmount> ParseMoney(const std::string& str);
 
 #endif // SYSCOIN_UTIL_MONEYSTR_H

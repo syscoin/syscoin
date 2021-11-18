@@ -8,11 +8,10 @@ export LC_ALL=C.UTF-8
 
 export CONTAINER_NAME=ci_native_multiprocess
 export DOCKER_NAME_TAG=ubuntu:20.04
-export PACKAGES="cmake python3 python3-pip"
-export DEP_OPTS="MULTIPROCESS=1"
+export PACKAGES="cmake python3 python3-pip llvm clang"
+export DEP_OPTS="DEBUG=1 MULTIPROCESS=1"
 export GOAL="install"
-export SYSCOIN_CONFIG="--enable-external-signer"
-export TEST_RUNNER_EXTRA="--exclude feature_block"
+export SYSCOIN_CONFIG="--enable-debug CC=clang CXX=clang++" # Use clang to avoid OOM
 export TEST_RUNNER_ENV="SYSCOIND=syscoin-node"
-export RUN_SECURITY_TESTS="true"
+export TEST_RUNNER_EXTRA="--nosandbox"
 export PIP_PACKAGES="lief"

@@ -25,7 +25,7 @@ static void DuplicateInputs(benchmark::Bench& bench)
     CMutableTransaction naughtyTx{};
 
     LOCK(cs_main);
-    CBlockIndex* pindexPrev = ::ChainActive().Tip();
+    CBlockIndex* pindexPrev = testing_setup->m_node.chainman->ActiveChain().Tip();
     assert(pindexPrev != nullptr);
     block.nBits = GetNextWorkRequired(pindexPrev, &block, chainparams.GetConsensus());
     block.nNonce = 0;
@@ -37,15 +37,15 @@ static void DuplicateInputs(benchmark::Bench& bench)
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = SCRIPT_PUB;
     // SYSCOIN
-    coinbaseTx.vout[0].nValue = GetBlockSubsidy(nHeight, chainparams);
+    coinbaseTx.vout[0].nValue = GetBlockSubsidy(nHeight, chainparams.GetConsensus());
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
 
 
     naughtyTx.vout.resize(1);
     naughtyTx.vout[0].nValue = 0;
     naughtyTx.vout[0].scriptPubKey = SCRIPT_PUB;
-
-    uint64_t n_inputs = (((MAX_BLOCK_SERIALIZED_SIZE / WITNESS_SCALE_FACTOR) - (CTransaction(coinbaseTx).GetTotalSize() + CTransaction(naughtyTx).GetTotalSize())) / 41) - 100;
+    // SYSCOIN
+    uint64_t n_inputs = (((4000000 / WITNESS_SCALE_FACTOR) - (CTransaction(coinbaseTx).GetTotalSize() + CTransaction(naughtyTx).GetTotalSize())) / 41) - 100;
     for (uint64_t x = 0; x < (n_inputs - 1); ++x) {
         naughtyTx.vin.emplace_back(GetRandHash(), 0, CScript(), 0);
     }

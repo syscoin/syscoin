@@ -9,6 +9,7 @@ class CDBWrapper;
 class CConnman;
 class BanMan;
 class PeerManager;
+class ChainstateManager;
 namespace llmq
 {
 
@@ -16,7 +17,7 @@ namespace llmq
 static const bool DEFAULT_WATCH_QUORUMS = false;
 
 // Init/destroy LLMQ globals
-void InitLLMQSystem(bool unitTests, CConnman& connman, BanMan& banman, PeerManager& peerman, bool fWipe = false);
+void InitLLMQSystem(bool unitTests, CConnman& connman, BanMan& banman, PeerManager& peerman, ChainstateManager& chainman, bool fWipe = false);
 void DestroyLLMQSystem();
 
 // Manage scheduled tasks, threads, listeners etc.
@@ -25,4 +26,4 @@ void StopLLMQSystem();
 void InterruptLLMQSystem();
 } // namespace llmq
 
-#endif //SYSCOIN_LLMQ_QUORUMS_INIT_H
+#endif // SYSCOIN_LLMQ_QUORUMS_INIT_H

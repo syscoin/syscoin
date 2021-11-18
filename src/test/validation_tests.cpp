@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h>
+#include <consensus/amount.h>
 #include <net.h>
 #include <signet.h>
 #include <uint256.h>
@@ -14,9 +15,8 @@
 
 BOOST_FIXTURE_TEST_SUITE(validation_tests, TestingSetup)
 
-static void TestBlockSubsidyHalvings(const CChainParams& chainParams)
+static void TestBlockSubsidyHalvings(const Consensus::Params& consensusParams)
 {
-    const Consensus::Params& consensusParams = chainParams.GetConsensus();
     int maxHalvings = 64;
     CAmount nInitialSubsidy = 50 * COIN;
 
@@ -24,12 +24,12 @@ static void TestBlockSubsidyHalvings(const CChainParams& chainParams)
     BOOST_CHECK_EQUAL(nPreviousSubsidy, nInitialSubsidy * 2);
     for (int nHalvings = 0; nHalvings < maxHalvings; nHalvings++) {
         int nHeight = nHalvings * consensusParams.nSubsidyHalvingInterval;
-        CAmount nSubsidy = GetBlockSubsidy(nHeight, chainParams);
+        CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
         BOOST_CHECK(nSubsidy <= nInitialSubsidy);
         BOOST_CHECK_EQUAL(nSubsidy, nPreviousSubsidy / 2);
         nPreviousSubsidy = nSubsidy;
     }
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(maxHalvings * consensusParams.nSubsidyHalvingInterval, chainParams), 0);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(maxHalvings * consensusParams.nSubsidyHalvingInterval, consensusParams), 0);
 }
 
 static void TestBlockSubsidyHalvings(int nSubsidyHalvingInterval)
@@ -41,7 +41,9 @@ static void TestBlockSubsidyHalvings(int nSubsidyHalvingInterval)
 
 BOOST_AUTO_TEST_CASE(block_subsidy_test)
 {
-    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    // SYSCOIN
+    fRegTest = true;
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::REGTEST);
     TestBlockSubsidyHalvings(chainParams->GetConsensus()); // As in main
     TestBlockSubsidyHalvings(150); // As in regtest
     TestBlockSubsidyHalvings(1000); // Just another interval
@@ -49,10 +51,13 @@ BOOST_AUTO_TEST_CASE(block_subsidy_test)
 
 BOOST_AUTO_TEST_CASE(subsidy_limit_test)
 {
-    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    // SYSCOIN
+    fRegTest = true;
+    Consensus::Params consensusParams;
+    consensusParams.nSubsidyHalvingInterval = 210000;
     CAmount nSum = 0;
     for (int nHeight = 0; nHeight < 14000000; nHeight += 1000) {
-        CAmount nSubsidy = GetBlockSubsidy(nHeight, chainParams);
+        CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
         BOOST_CHECK(nSubsidy <= 50 * COIN);
         nSum += nSubsidy * 1000;
         BOOST_CHECK(MoneyRange(nSum));
@@ -137,12 +142,12 @@ BOOST_AUTO_TEST_CASE(test_assumeutxo)
 
     const auto out110 = *ExpectedAssumeutxo(110, *params);
     // SYSCOIN
-    BOOST_CHECK_EQUAL(out110.hash_serialized, uint256S("70b3b480f5476ad86dfd98db1f12bda867a90b6cf1b37644332eb52c2ba74ac9"));
-    BOOST_CHECK_EQUAL(out110.nChainTx, (unsigned int)110);
+    BOOST_CHECK_EQUAL(out110.hash_serialized.ToString(), "70b3b480f5476ad86dfd98db1f12bda867a90b6cf1b37644332eb52c2ba74ac9");
+    BOOST_CHECK_EQUAL(out110.nChainTx, 110U);
 
-    const auto out210 = *ExpectedAssumeutxo(210, *params);
-    BOOST_CHECK_EQUAL(out210.hash_serialized, uint256S("9c5ed99ef98544b34f8920b6d1802f72ac28ae6e2bd2bd4c316ff10c230df3f2"));
-    BOOST_CHECK_EQUAL(out210.nChainTx, (unsigned int)210);
+    const auto out210 = *ExpectedAssumeutxo(200, *params);
+    BOOST_CHECK_EQUAL(out210.hash_serialized.ToString(), "51c8d11d8b5c1de51543c579736e786aa2736206d1e11e627568029ce092cf62");
+    BOOST_CHECK_EQUAL(out210.nChainTx, 200U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

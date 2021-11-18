@@ -13,7 +13,6 @@
 #include <util/system.h>
 #include <util/time.h>
 #include <util/translation.h>
-#include <external_signer.h>
 #include <wallet/scriptpubkeyman.h>
 
 #include <optional>
@@ -21,15 +20,21 @@
 //! Value for the first BIP 32 hardened derivation. Can be used as a bit mask and as a value. See BIP 32 for more details.
 const uint32_t BIP32_HARDENED_KEY_LIMIT = 0x80000000;
 
-bool LegacyScriptPubKeyMan::GetNewDestination(const OutputType type, CTxDestination& dest, std::string& error)
+bool LegacyScriptPubKeyMan::GetNewDestination(const OutputType type, CTxDestination& dest, bilingual_str& error)
 {
+    if (LEGACY_OUTPUT_TYPES.count(type) == 0) {
+        error = _("Error: Legacy wallets only support the \"legacy\", \"p2sh-segwit\", and \"bech32\" address types");
+        return false;
+    }
+    assert(type != OutputType::BECH32M);
+
     LOCK(cs_KeyStore);
     error.clear();
 
     // Generate a new key that is added to wallet
     CPubKey new_key;
     if (!GetKeyFromPool(new_key, type)) {
-        error = _("Error: Keypool ran out, please call keypoolrefill first").translated;
+        error = _("Error: Keypool ran out, please call keypoolrefill first");
         return false;
     }
     LearnRelatedScripts(new_key, type);
@@ -290,14 +295,22 @@ bool LegacyScriptPubKeyMan::Encrypt(const CKeyingMaterial& master_key, WalletBat
     return true;
 }
 
-bool LegacyScriptPubKeyMan::GetReservedDestination(const OutputType type, bool internal, CTxDestination& address, int64_t& index, CKeyPool& keypool)
+bool LegacyScriptPubKeyMan::GetReservedDestination(const OutputType type, bool internal, CTxDestination& address, int64_t& index, CKeyPool& keypool, bilingual_str& error)
 {
+    if (LEGACY_OUTPUT_TYPES.count(type) == 0) {
+        error = _("Error: Legacy wallets only support the \"legacy\", \"p2sh-segwit\", and \"bech32\" address types");
+        return false;
+    }
+    assert(type != OutputType::BECH32M);
+
     LOCK(cs_KeyStore);
     if (!CanGetAddresses(internal)) {
+        error = _("Error: Keypool ran out, please call keypoolrefill first");
         return false;
     }
 
     if (!ReserveKeyFromKeyPool(index, keypool, internal)) {
+        error = _("Error: Keypool ran out, please call keypoolrefill first");
         return false;
     }
     address = GetDestinationForKey(keypool.vchPubKey, type);
@@ -318,7 +331,7 @@ bool LegacyScriptPubKeyMan::TopUpInactiveHDChain(const CKeyID seed_id, int64_t i
     CHDChain& chain = it->second;
 
     // Top up key pool
-    int64_t target_size = std::max(gArgs.GetArg("-keypool", DEFAULT_KEYPOOL_SIZE), (int64_t) 1);
+    int64_t target_size = std::max(gArgs.GetIntArg("-keypool", DEFAULT_KEYPOOL_SIZE), (int64_t) 1);
 
     // "size" of the keypools. Not really the size, actually the difference between index and the chain counter
     // Since chain counter is 1 based and index is 0 based, one of them needs to be offset by 1.
@@ -387,7 +400,7 @@ void LegacyScriptPubKeyMan::UpgradeKeyMetadata()
             CKey key;
             GetKey(meta.hd_seed_id, key);
             CExtKey masterKey;
-            masterKey.SetSeed(key.begin(), key.size());
+            masterKey.SetSeed(key);
             // Add to map
             CKeyID master_id = masterKey.key.GetPubKey().GetID();
             std::copy(master_id.begin(), master_id.begin() + 4, meta.key_origin.fingerprint);
@@ -476,7 +489,7 @@ bool LegacyScriptPubKeyMan::Upgrade(int prev_version, int new_version, bilingual
     }
     // Regenerate the keypool if upgraded to HD
     if (hd_upgrade) {
-        if (!TopUp()) {
+        if (!NewKeyPool()) {
             error = _("Unable to generate keys");
             return false;
         }
@@ -579,7 +592,7 @@ bool LegacyScriptPubKeyMan::CanProvide(const CScript& script, SignatureData& sig
     }
 }
 
-bool LegacyScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, std::string>& input_errors) const
+bool LegacyScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const
 {
     return ::SignTransaction(tx, this, coins, sighash, input_errors);
 }
@@ -597,7 +610,7 @@ SigningResult LegacyScriptPubKeyMan::SignMessage(const std::string& message, con
     return SigningResult::SIGNING_FAILED;
 }
 
-TransactionError LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, int sighash_type, bool sign, bool bip32derivs, int* n_signed) const
+TransactionError LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed) const
 {
     if (n_signed) {
         *n_signed = 0;
@@ -626,7 +639,7 @@ TransactionError LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psb
         }
         SignatureData sigdata;
         input.FillSignatureData(sigdata);
-        SignPSBTInput(HidingSigningProvider(this, !sign, !bip32derivs), psbtx, i, sighash_type);
+        SignPSBTInput(HidingSigningProvider(this, !sign, !bip32derivs), psbtx, i, &txdata, sighash_type);
 
         bool signed_one = PSBTInputSigned(input);
         if (n_signed && (signed_one || !sign)) {
@@ -1072,7 +1085,7 @@ void LegacyScriptPubKeyMan::DeriveNewChildKey(WalletBatch &batch, CKeyMetadata& 
     if (!GetKey(hd_chain.seed_id, seed))
         throw std::runtime_error(std::string(__func__) + ": seed not found");
 
-    masterKey.SetSeed(seed.begin(), seed.size());
+    masterKey.SetSeed(seed);
 
     // derive m/0'
     // use hardened derivation (child keys >= 0x80000000 are hardened after bip32)
@@ -1246,7 +1259,7 @@ bool LegacyScriptPubKeyMan::TopUp(unsigned int kpSize)
         if (kpSize > 0)
             nTargetSize = kpSize;
         else
-            nTargetSize = std::max(gArgs.GetArg("-keypool", DEFAULT_KEYPOOL_SIZE), (int64_t) 0);
+            nTargetSize = std::max(gArgs.GetIntArg("-keypool", DEFAULT_KEYPOOL_SIZE), (int64_t) 0);
 
         // count amount of available keys (internal, external)
         // make sure the keypool of external and internal keys fits the user selected target (-keypool)
@@ -1295,6 +1308,7 @@ void LegacyScriptPubKeyMan::AddKeypoolPubkeyWithDB(const CPubKey& pubkey, const 
 
 void LegacyScriptPubKeyMan::KeepDestination(int64_t nIndex, const OutputType& type)
 {
+    assert(type != OutputType::BECH32M);
     // Remove from key pool
     WalletBatch batch(m_storage.GetDatabase());
     batch.ErasePool(nIndex);
@@ -1328,6 +1342,7 @@ void LegacyScriptPubKeyMan::ReturnDestination(int64_t nIndex, bool fInternal, co
 
 bool LegacyScriptPubKeyMan::GetKeyFromPool(CPubKey& result, const OutputType type, bool internal)
 {
+    assert(type != OutputType::BECH32M);
     if (!CanGetAddresses(internal)) {
         return false;
     }
@@ -1396,6 +1411,7 @@ bool LegacyScriptPubKeyMan::ReserveKeyFromKeyPool(int64_t& nIndex, CKeyPool& key
 
 void LegacyScriptPubKeyMan::LearnRelatedScripts(const CPubKey& key, OutputType type)
 {
+    assert(type != OutputType::BECH32M);
     if (key.IsCompressed() && (type == OutputType::P2SH_SEGWIT || type == OutputType::BECH32)) {
         CTxDestination witdest = WitnessV0KeyHash(key.GetID());
         CScript witprog = GetScriptForDestination(witdest);
@@ -1597,13 +1613,11 @@ std::set<CKeyID> LegacyScriptPubKeyMan::GetKeys() const
     return set_address;
 }
 
-void LegacyScriptPubKeyMan::SetInternal(bool internal) {}
-
-bool DescriptorScriptPubKeyMan::GetNewDestination(const OutputType type, CTxDestination& dest, std::string& error)
+bool DescriptorScriptPubKeyMan::GetNewDestination(const OutputType type, CTxDestination& dest, bilingual_str& error)
 {
     // Returns true if this descriptor supports getting new addresses. Conditions where we may be unable to fetch them (e.g. locked) are caught later
-    if (!CanGetAddresses(m_internal)) {
-        error = "No addresses available";
+    if (!CanGetAddresses()) {
+        error = _("No addresses available");
         return false;
     }
     {
@@ -1622,12 +1636,12 @@ bool DescriptorScriptPubKeyMan::GetNewDestination(const OutputType type, CTxDest
         std::vector<CScript> scripts_temp;
         if (m_wallet_descriptor.range_end <= m_max_cached_index && !TopUp(1)) {
             // We can't generate anymore keys
-            error = "Error: Keypool ran out, please call keypoolrefill first";
+            error = _("Error: Keypool ran out, please call keypoolrefill first");
             return false;
         }
         if (!m_wallet_descriptor.descriptor->ExpandFromCache(m_wallet_descriptor.next_index, m_wallet_descriptor.cache, scripts_temp, out_keys)) {
             // We can't generate anymore keys
-            error = "Error: Keypool ran out, please call keypoolrefill first";
+            error = _("Error: Keypool ran out, please call keypoolrefill first");
             return false;
         }
 
@@ -1707,10 +1721,9 @@ bool DescriptorScriptPubKeyMan::Encrypt(const CKeyingMaterial& master_key, Walle
     return true;
 }
 
-bool DescriptorScriptPubKeyMan::GetReservedDestination(const OutputType type, bool internal, CTxDestination& address, int64_t& index, CKeyPool& keypool)
+bool DescriptorScriptPubKeyMan::GetReservedDestination(const OutputType type, bool internal, CTxDestination& address, int64_t& index, CKeyPool& keypool, bilingual_str& error)
 {
     LOCK(cs_desc_man);
-    std::string error;
     bool result = GetNewDestination(type, address, error);
     index = m_wallet_descriptor.next_index - 1;
     return result;
@@ -1751,7 +1764,7 @@ bool DescriptorScriptPubKeyMan::TopUp(unsigned int size)
     if (size > 0) {
         target_size = size;
     } else {
-        target_size = std::max(gArgs.GetArg("-keypool", DEFAULT_KEYPOOL_SIZE), (int64_t) 1);
+        target_size = std::max(gArgs.GetIntArg("-keypool", DEFAULT_KEYPOOL_SIZE), (int64_t) 1);
     }
 
     // Calculate the new range_end
@@ -1790,34 +1803,10 @@ bool DescriptorScriptPubKeyMan::TopUp(unsigned int size)
             }
             m_map_pubkeys[pubkey] = i;
         }
-        // Write the cache
-        for (const auto& parent_xpub_pair : temp_cache.GetCachedParentExtPubKeys()) {
-            CExtPubKey xpub;
-            if (m_wallet_descriptor.cache.GetCachedParentExtPubKey(parent_xpub_pair.first, xpub)) {
-                if (xpub != parent_xpub_pair.second) {
-                    throw std::runtime_error(std::string(__func__) + ": New cached parent xpub does not match already cached parent xpub");
-                }
-                continue;
-            }
-            if (!batch.WriteDescriptorParentCache(parent_xpub_pair.second, id, parent_xpub_pair.first)) {
-                throw std::runtime_error(std::string(__func__) + ": writing cache item failed");
-            }
-            m_wallet_descriptor.cache.CacheParentExtPubKey(parent_xpub_pair.first, parent_xpub_pair.second);
-        }
-        for (const auto& derived_xpub_map_pair : temp_cache.GetCachedDerivedExtPubKeys()) {
-            for (const auto& derived_xpub_pair : derived_xpub_map_pair.second) {
-                CExtPubKey xpub;
-                if (m_wallet_descriptor.cache.GetCachedDerivedExtPubKey(derived_xpub_map_pair.first, derived_xpub_pair.first, xpub)) {
-                    if (xpub != derived_xpub_pair.second) {
-                        throw std::runtime_error(std::string(__func__) + ": New cached derived xpub does not match already cached derived xpub");
-                    }
-                    continue;
-                }
-                if (!batch.WriteDescriptorDerivedCache(derived_xpub_pair.second, id, derived_xpub_map_pair.first, derived_xpub_pair.first)) {
-                    throw std::runtime_error(std::string(__func__) + ": writing cache item failed");
-                }
-                m_wallet_descriptor.cache.CacheDerivedExtPubKey(derived_xpub_map_pair.first, derived_xpub_pair.first, derived_xpub_pair.second);
-            }
+        // Merge and write the cache
+        DescriptorCache new_items = m_wallet_descriptor.cache.MergeAndDiff(temp_cache);
+        if (!batch.WriteDescriptorCacheItems(id, new_items)) {
+            throw std::runtime_error(std::string(__func__) + ": writing cache items failed");
         }
         m_max_cached_index++;
     }
@@ -1860,6 +1849,12 @@ bool DescriptorScriptPubKeyMan::AddDescriptorKeyWithDB(WalletBatch& batch, const
     AssertLockHeld(cs_desc_man);
     assert(!m_storage.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS));
 
+    // Check if provided key already exists
+    if (m_map_keys.find(pubkey.GetID()) != m_map_keys.end() ||
+        m_map_crypted_keys.find(pubkey.GetID()) != m_map_crypted_keys.end()) {
+        return true;
+    }
+
     if (m_storage.HasEncryptionKeys()) {
         if (m_storage.IsLocked()) {
             return false;
@@ -1879,8 +1874,14 @@ bool DescriptorScriptPubKeyMan::AddDescriptorKeyWithDB(WalletBatch& batch, const
     }
 }
 
-bool DescriptorScriptPubKeyMan::SetupDescriptorGeneration(const CExtKey& master_key, OutputType addr_type)
+bool DescriptorScriptPubKeyMan::SetupDescriptorGeneration(const CExtKey& master_key, OutputType addr_type, bool internal)
 {
+    if (addr_type == OutputType::BECH32M) {
+        // Don't allow setting up taproot descriptors yet
+        // TODO: Allow setting up taproot descriptors
+        return false;
+    }
+
     LOCK(cs_desc_man);
     assert(m_storage.IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS));
 
@@ -1910,6 +1911,7 @@ bool DescriptorScriptPubKeyMan::SetupDescriptorGeneration(const CExtKey& master_
         desc_prefix = "wpkh(" + xpub + "/84'";
         break;
     }
+    case OutputType::BECH32M: assert(false); // TODO: Setup taproot descriptor
     } // no default case, so the compiler can warn about missing cases
     assert(!desc_prefix.empty());
 
@@ -1920,7 +1922,7 @@ bool DescriptorScriptPubKeyMan::SetupDescriptorGeneration(const CExtKey& master_
         desc_prefix += "/57'";
     }
 
-    std::string internal_path = m_internal ? "/1" : "/0";
+    std::string internal_path = internal ? "/1" : "/0";
     std::string desc_str = desc_prefix + "/0'" + internal_path + desc_suffix;
 
     // Make the descriptor
@@ -1975,13 +1977,6 @@ int64_t DescriptorScriptPubKeyMan::GetOldestKeyPoolTime() const
     return 0;
 }
 
-size_t DescriptorScriptPubKeyMan::KeypoolCountExternalKeys() const
-{
-    if (m_internal) {
-        return 0;
-    }
-    return GetKeyPoolSize();
-}
 
 unsigned int DescriptorScriptPubKeyMan::GetKeyPoolSize() const
 {
@@ -2051,7 +2046,7 @@ bool DescriptorScriptPubKeyMan::CanProvide(const CScript& script, SignatureData&
     return IsMine(script);
 }
 
-bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, std::string>& input_errors) const
+bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const
 {
     std::unique_ptr<FlatSigningProvider> keys = std::make_unique<FlatSigningProvider>();
     for (const auto& coin_pair : coins) {
@@ -2083,7 +2078,7 @@ SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message,
     return SigningResult::OK;
 }
 
-TransactionError DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, int sighash_type, bool sign, bool bip32derivs, int* n_signed) const
+TransactionError DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed) const
 {
     if (n_signed) {
         *n_signed = 0;
@@ -2133,7 +2128,7 @@ TransactionError DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction&
             }
         }
 
-        SignPSBTInput(HidingSigningProvider(keys.get(), !sign, !bip32derivs), psbtx, i, sighash_type);
+        SignPSBTInput(HidingSigningProvider(keys.get(), !sign, !bip32derivs), psbtx, i, &txdata, sighash_type);
 
         bool signed_one = PSBTInputSigned(input);
         if (n_signed && (signed_one || !sign)) {
@@ -2181,11 +2176,6 @@ uint256 DescriptorScriptPubKeyMan::GetID() const
     uint256 id;
     CSHA256().Write((unsigned char*)desc_str.data(), desc_str.size()).Finalize(id.begin());
     return id;
-}
-
-void DescriptorScriptPubKeyMan::SetInternal(bool internal)
-{
-    this->m_internal = internal;
 }
 
 void DescriptorScriptPubKeyMan::SetCache(const DescriptorCache& cache)
@@ -2268,15 +2258,82 @@ const std::vector<CScript> DescriptorScriptPubKeyMan::GetScriptPubKeys() const
     return script_pub_keys;
 }
 
-bool DescriptorScriptPubKeyMan::GetDescriptorString(std::string& out, bool priv) const
+bool DescriptorScriptPubKeyMan::GetDescriptorString(std::string& out, const bool priv) const
 {
     LOCK(cs_desc_man);
-    if (m_storage.IsLocked()) {
-        return false;
-    }
 
     FlatSigningProvider provider;
     provider.keys = GetKeys();
 
-    return m_wallet_descriptor.descriptor->ToNormalizedString(provider, out, priv);
+    if (priv) {
+        // For the private version, always return the master key to avoid
+        // exposing child private keys. The risk implications of exposing child
+        // private keys together with the parent xpub may be non-obvious for users.
+        return m_wallet_descriptor.descriptor->ToPrivateString(provider, out);
+    }
+
+    return m_wallet_descriptor.descriptor->ToNormalizedString(provider, out, &m_wallet_descriptor.cache);
+}
+
+void DescriptorScriptPubKeyMan::UpgradeDescriptorCache()
+{
+    LOCK(cs_desc_man);
+    if (m_storage.IsLocked() || m_storage.IsWalletFlagSet(WALLET_FLAG_LAST_HARDENED_XPUB_CACHED)) {
+        return;
+    }
+
+    // Skip if we have the last hardened xpub cache
+    if (m_wallet_descriptor.cache.GetCachedLastHardenedExtPubKeys().size() > 0) {
+        return;
+    }
+
+    // Expand the descriptor
+    FlatSigningProvider provider;
+    provider.keys = GetKeys();
+    FlatSigningProvider out_keys;
+    std::vector<CScript> scripts_temp;
+    DescriptorCache temp_cache;
+    if (!m_wallet_descriptor.descriptor->Expand(0, provider, scripts_temp, out_keys, &temp_cache)){
+        throw std::runtime_error("Unable to expand descriptor");
+    }
+
+    // Cache the last hardened xpubs
+    DescriptorCache diff = m_wallet_descriptor.cache.MergeAndDiff(temp_cache);
+    if (!WalletBatch(m_storage.GetDatabase()).WriteDescriptorCacheItems(GetID(), diff)) {
+        throw std::runtime_error(std::string(__func__) + ": writing cache items failed");
+    }
+}
+
+void DescriptorScriptPubKeyMan::UpdateWalletDescriptor(WalletDescriptor& descriptor)
+{
+    LOCK(cs_desc_man);
+    std::string error;
+    if (!CanUpdateToWalletDescriptor(descriptor, error)) {
+        throw std::runtime_error(std::string(__func__) + ": " + error);
+    }
+
+    m_map_pubkeys.clear();
+    m_map_script_pub_keys.clear();
+    m_max_cached_index = -1;
+    m_wallet_descriptor = descriptor;
+}
+
+bool DescriptorScriptPubKeyMan::CanUpdateToWalletDescriptor(const WalletDescriptor& descriptor, std::string& error)
+{
+    LOCK(cs_desc_man);
+    if (!HasWalletDescriptor(descriptor)) {
+        error = "can only update matching descriptor";
+        return false;
+    }
+
+    if (descriptor.range_start > m_wallet_descriptor.range_start ||
+        descriptor.range_end < m_wallet_descriptor.range_end) {
+        // Use inclusive range for error
+        error = strprintf("new range must include current range = [%d,%d]",
+                          m_wallet_descriptor.range_start,
+                          m_wallet_descriptor.range_end - 1);
+        return false;
+    }
+
+    return true;
 }

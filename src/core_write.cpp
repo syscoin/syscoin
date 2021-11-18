@@ -4,6 +4,7 @@
 
 #include <core_io.h>
 
+#include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <key_io.h>
@@ -53,9 +54,9 @@ bool AssetAllocationTxToJSON(const CTransaction &tx, const uint256& hashBlock, U
     }
 
     entry.__pushKV("allocations", oAssetAllocationReceiversArray);
-    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM){
+    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM){
          CBurnSyscoin burnSyscoin(tx);
-         entry.__pushKV("ethereum_destination", "0x" + HexStr(burnSyscoin.vchEthAddress));
+         entry.__pushKV("nevm_destination", "0x" + HexStr(burnSyscoin.vchNEVMAddress));
     }
     return true;
 }
@@ -68,15 +69,15 @@ bool AssetMintTxToJson(const CTransaction& tx, const uint256& txHash, const uint
         entry.__pushKV("txid", txHash.GetHex());
         entry.__pushKV("blockhash", hashBlock.GetHex());  
         UniValue oSPVProofObj(UniValue::VOBJ);
-        oSPVProofObj.__pushKV("bridgetransferid", mintSyscoin.nBridgeTransferID);  
+        oSPVProofObj.__pushKV("txhash", mintSyscoin.nTxHash.GetHex());  
+        oSPVProofObj.__pushKV("blockhash", mintSyscoin.nBlockHash.GetHex());  
         oSPVProofObj.__pushKV("postx", mintSyscoin.posTx);
-        oSPVProofObj.__pushKV("txroot", HexStr(mintSyscoin.vchTxRoot)); 
+        oSPVProofObj.__pushKV("txroot", mintSyscoin.nTxRoot.GetHex()); 
         oSPVProofObj.__pushKV("txparentnodes", HexStr(mintSyscoin.vchTxParentNodes)); 
         oSPVProofObj.__pushKV("txpath", HexStr(mintSyscoin.vchTxPath)); 
         oSPVProofObj.__pushKV("posReceipt", mintSyscoin.posReceipt);  
-        oSPVProofObj.__pushKV("receiptroot", HexStr(mintSyscoin.vchReceiptRoot));  
+        oSPVProofObj.__pushKV("receiptroot", mintSyscoin.nReceiptRoot.GetHex());  
         oSPVProofObj.__pushKV("receiptparentnodes", HexStr(mintSyscoin.vchReceiptParentNodes));  
-        oSPVProofObj.__pushKV("ethblocknumber", mintSyscoin.nBlockNumber); 
         entry.__pushKV("spv_proof", oSPVProofObj);
         UniValue oAssetAllocationReceiversArray(UniValue::VARR);
         for(const auto &it: mintSyscoin.voutAssets) {
@@ -371,7 +372,7 @@ void ScriptPubKeyToUniv(const CScript& scriptPubKey,
     }
 }
 
-void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_addresses, UniValue& entry, bool include_hex, int serialize_flags, const CTxUndo* txundo)
+void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_addresses, UniValue& entry, bool include_hex, int serialize_flags, const CTxUndo* txundo, TxVerbosity verbosity)
 {
     entry.pushKV("txid", tx.GetHash().GetHex());
     entry.pushKV("hash", tx.GetWitnessHash().GetHex());
@@ -387,10 +388,13 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_add
 
     // If available, use Undo data to calculate the fee. Note that txundo == nullptr
     // for coinbase transactions and for transactions where undo data is unavailable.
-    const bool calculate_fee = txundo != nullptr;
+    const bool have_undo = txundo != nullptr;
     CAmount amt_total_in = 0;
     CAmount amt_total_out = 0;
-
+    // SYSCOIN
+    if(have_undo) {
+        amt_total_out = tx.GetValueOut();
+    }
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CTxIn& txin = tx.vin[i];
         UniValue in(UniValue::VOBJ);
@@ -411,9 +415,28 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_add
             }
             in.pushKV("txinwitness", txinwitness);
         }
-        if (calculate_fee) {
-            const CTxOut& prev_txout = txundo->vprevout[i].out;
+        if (have_undo) {
+            const Coin& prev_coin = txundo->vprevout[i];
+            const CTxOut& prev_txout = prev_coin.out;
+
             amt_total_in += prev_txout.nValue;
+            switch (verbosity) {
+                case TxVerbosity::SHOW_TXID:
+                case TxVerbosity::SHOW_DETAILS:
+                    break;
+
+                case TxVerbosity::SHOW_DETAILS_AND_PREVOUT:
+                    UniValue o_script_pub_key(UniValue::VOBJ);
+                    ScriptPubKeyToUniv(prev_txout.scriptPubKey, o_script_pub_key, /* includeHex */ true, include_addresses);
+
+                    UniValue p(UniValue::VOBJ);
+                    p.pushKV("generated", bool(prev_coin.fCoinBase));
+                    p.pushKV("height", uint64_t(prev_coin.nHeight));
+                    p.pushKV("value", ValueFromAmount(prev_txout.nValue));
+                    p.pushKV("scriptPubKey", o_script_pub_key);
+                    in.pushKV("prevout", p);
+                    break;
+            }
         }
         in.pushKV("sequence", (int64_t)txin.nSequence);
         vin.push_back(in);
@@ -433,10 +456,10 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_add
         ScriptPubKeyToUniv(txout.scriptPubKey, o, true, include_addresses);
         out.pushKV("scriptPubKey", o);
         vout.push_back(out);
-
-        if (calculate_fee) {
+        // SYSCOIN
+        /*if (have_undo) {
             amt_total_out += txout.nValue;
-        }
+        }*/
     }
     entry.pushKV("vout", vout);
     // SYSCOIN
@@ -490,7 +513,7 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_add
     if(DecodeSyscoinRawtransaction(tx, hashBlock, output))
         entry.pushKV("systx", output);
 
-    if (calculate_fee) {
+    if (have_undo) {
         const CAmount fee = amt_total_in - amt_total_out;
         CHECK_NONFATAL(MoneyRange(fee));
         entry.pushKV("fee", ValueFromAmount(fee));

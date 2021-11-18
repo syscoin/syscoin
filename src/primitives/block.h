@@ -25,7 +25,6 @@ class CBlockHeader : public CPureBlockHeader
 public:
     // auxpow (if this is a merge-minded block)
     std::shared_ptr<CAuxPow> auxpow;
-
     CBlockHeader()
     {
         SetNull();
@@ -75,10 +74,10 @@ class CBlock : public CBlockHeader
 public:
     // network and disk
     std::vector<CTransactionRef> vtx;
-
     // memory only
     mutable bool fChecked;
-
+    // SYSCOIN
+    std::vector<unsigned char> vchNEVMBlockData;
     CBlock()
     {
         SetNull();
@@ -94,6 +93,9 @@ public:
     {
         READWRITEAS(CBlockHeader, obj);
         READWRITE(obj.vtx);
+        // SYSCOIN
+        if (obj.IsNEVM() && !(s.GetType() & SER_GETHASH) && !(s.GetType() & SER_SIZE))
+            READWRITE(obj.vchNEVMBlockData);
     }
 
     void SetNull()
@@ -101,6 +103,8 @@ public:
         CBlockHeader::SetNull();
         vtx.clear();
         fChecked = false;
+        // SYSCOIN
+        vchNEVMBlockData.clear();
     }
 
     CBlockHeader GetBlockHeader() const

@@ -56,7 +56,6 @@ CMasternodeMetaInfoPtr CMasternodeMetaMan::GetMetaInfo(const uint256& proTxHash,
 
 bool CMasternodeMetaMan::AddGovernanceVote(const uint256& proTxHash, const uint256& nGovernanceObjectHash)
 {
-    LOCK(cs);
     auto mm = GetMetaInfo(proTxHash);
     mm->AddGovernanceVote(nGovernanceObjectHash);
     return true;
@@ -65,7 +64,7 @@ bool CMasternodeMetaMan::AddGovernanceVote(const uint256& proTxHash, const uint2
 void CMasternodeMetaMan::RemoveGovernanceObject(const uint256& nGovernanceObjectHash)
 {
     LOCK(cs);
-    for(auto& p : metaInfos) {
+    for(const auto& p : metaInfos) {
         p.second->RemoveGovernanceObject(nGovernanceObjectHash);
     }
 }
@@ -85,15 +84,10 @@ void CMasternodeMetaMan::Clear()
     vecDirtyGovernanceObjectHashes.clear();
 }
 
-void CMasternodeMetaMan::CheckAndRemove()
-{
-
-}
-
 std::string CMasternodeMetaMan::ToString() const
 {
     std::ostringstream info;
-
+    LOCK(cs);
     info << "Masternodes: meta infos object count: " << (int)metaInfos.size();
     return info.str();
 }

@@ -23,28 +23,28 @@ class CGovernanceManager;
 class CGovernanceTriggerManager;
 class CGovernanceObject;
 class CGovernanceVote;
+class ChainstateManager;
+static constexpr double GOVERNANCE_FILTER_FP_RATE = 0.001;
 
-static const double GOVERNANCE_FILTER_FP_RATE = 0.001;
+static constexpr int GOVERNANCE_OBJECT_UNKNOWN = 0;
+static constexpr int GOVERNANCE_OBJECT_PROPOSAL = 1;
+static constexpr int GOVERNANCE_OBJECT_TRIGGER = 2;
 
-static const int GOVERNANCE_OBJECT_UNKNOWN = 0;
-static const int GOVERNANCE_OBJECT_PROPOSAL = 1;
-static const int GOVERNANCE_OBJECT_TRIGGER = 2;
+static constexpr CAmount GOVERNANCE_PROPOSAL_FEE_TX = (150.0 * COIN);
 
-static const CAmount GOVERNANCE_PROPOSAL_FEE_TX = (150.0 * COIN);
-
-static const int64_t GOVERNANCE_FEE_CONFIRMATIONS = 6;
-static const int64_t GOVERNANCE_MIN_RELAY_FEE_CONFIRMATIONS = 1;
-static const int64_t GOVERNANCE_UPDATE_MIN = 60 * 60;
-static const int64_t GOVERNANCE_DELETION_DELAY = 10 * 60;
-static const int64_t GOVERNANCE_ORPHAN_EXPIRATION_TIME = 10 * 60;
+static constexpr int64_t GOVERNANCE_FEE_CONFIRMATIONS = 6;
+static constexpr int64_t GOVERNANCE_MIN_RELAY_FEE_CONFIRMATIONS = 1;
+static constexpr int64_t GOVERNANCE_UPDATE_MIN = 60 * 60;
+static constexpr int64_t GOVERNANCE_DELETION_DELAY = 10 * 60;
+static constexpr int64_t GOVERNANCE_ORPHAN_EXPIRATION_TIME = 10 * 60;
 
 // FOR SEEN MAP ARRAYS - GOVERNANCE OBJECTS AND VOTES
-static const int SEEN_OBJECT_IS_VALID = 0;
-static const int SEEN_OBJECT_ERROR_INVALID = 1;
-static const int SEEN_OBJECT_EXECUTED = 3; //used for triggers
-static const int SEEN_OBJECT_UNKNOWN = 4;  // the default
+static constexpr int SEEN_OBJECT_IS_VALID = 0;
+static constexpr int SEEN_OBJECT_ERROR_INVALID = 1;
+static constexpr int SEEN_OBJECT_EXECUTED = 3; //used for triggers
+static constexpr int SEEN_OBJECT_UNKNOWN = 4;  // the default
 
-typedef std::pair<CGovernanceVote, int64_t> vote_time_pair_t;
+using vote_time_pair_t = std::pair<CGovernanceVote, int64_t>;
 
 inline bool operator<(const vote_time_pair_t& p1, const vote_time_pair_t& p2)
 {
@@ -82,7 +82,7 @@ struct vote_instance_t {
     }
 };
 
-typedef std::map<int, vote_instance_t> vote_instance_m_t;
+using vote_instance_m_t = std::map<int, vote_instance_t>;
 
 struct vote_rec_t {
     vote_instance_m_t mapInstances;
@@ -99,7 +99,7 @@ struct vote_rec_t {
 class CGovernanceObject
 {
 public: // Types
-    typedef std::map<COutPoint, vote_rec_t> vote_m_t;
+    using vote_m_t = std::map<COutPoint, vote_rec_t>;
 
 private:
     /// critical section to protect the inner data structures
@@ -247,14 +247,14 @@ public:
 
     // CORE OBJECT FUNCTIONS
 
-    bool IsValidLocally(std::string& strError, bool fCheckCollateral) const;
+    bool IsValidLocally(ChainstateManager &chainman, std::string& strError, bool fCheckCollateral) const;
 
-    bool IsValidLocally(std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral) const;
+    bool IsValidLocally(ChainstateManager &chainman, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral) const;
 
     /// Check the collateral transaction for the budget proposal/finalized budget
-    bool IsCollateralValid(std::string& strError, bool& fMissingConfirmations) const;
+    bool IsCollateralValid(ChainstateManager &chainman, std::string& strError, bool& fMissingConfirmations) const;
 
-    void UpdateLocalValidity();
+    void UpdateLocalValidity(ChainstateManager &chainman);
 
     void UpdateSentinelVariables();
 

@@ -23,7 +23,7 @@ class CCoinsViewCache;
 class CProRegTx
 {
 public:
-    static const uint16_t CURRENT_VERSION = 1;
+    static constexpr uint16_t CURRENT_VERSION = 1;
 
 public:
     uint16_t nVersion{CURRENT_VERSION};                    // message version
@@ -79,7 +79,7 @@ public:
 class CProUpServTx
 {
 public:
-    static const uint16_t CURRENT_VERSION = 1;
+    static constexpr uint16_t CURRENT_VERSION = 1;
 
 public:
     uint16_t nVersion{CURRENT_VERSION}; // message version
@@ -118,7 +118,7 @@ public:
 class CProUpRegTx
 {
 public:
-    static const uint16_t CURRENT_VERSION = 1;
+    static constexpr uint16_t CURRENT_VERSION = 1;
 
 public:
     uint16_t nVersion{CURRENT_VERSION}; // message version
@@ -161,7 +161,7 @@ public:
 class CProUpRevTx
 {
 public:
-    static const uint16_t CURRENT_VERSION = 1;
+    static constexpr uint16_t CURRENT_VERSION = 1;
 
     // these are just informational and do not have any effect on the revocation
     enum {
@@ -207,4 +207,4 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
 bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-#endif //SYSCOIN_EVO_PROVIDERTX_H
+#endif // SYSCOIN_EVO_PROVIDERTX_H

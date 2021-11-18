@@ -6,6 +6,7 @@
 #include <chainparams.h>
 #include <consensus/params.h>
 #include <primitives/block.h>
+#include <util/system.h>
 #include <versionbits.h>
 
 #include <test/fuzz/FuzzedDataProvider.h>
@@ -198,7 +199,7 @@ FUZZ_TARGET_INIT(versionbits, initialize)
     const uint32_t signalling_mask = fuzzed_data_provider.ConsumeIntegral<uint32_t>();
 
     // mine prior periods
-    while (fuzzed_data_provider.remaining_bytes() > 0) {
+    while (fuzzed_data_provider.remaining_bytes() > 0) { // early exit; no need for LIMITED_WHILE
         // all blocks in these periods either do or don't signal
         bool signal = fuzzed_data_provider.ConsumeBool();
         for (int b = 0; b < period; ++b) {

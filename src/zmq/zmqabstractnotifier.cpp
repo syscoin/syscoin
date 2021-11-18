@@ -5,7 +5,10 @@
 #include <zmq/zmqabstractnotifier.h>
 
 #include <cassert>
-
+#include <uint256.h>
+#include <logging.h>
+// SYSCOIN
+#include <primitives/block.h>
 const int CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM;
 
 CZMQAbstractNotifier::~CZMQAbstractNotifier()
@@ -18,6 +21,22 @@ bool CZMQAbstractNotifier::NotifyGovernanceObject(const std::shared_ptr<const CG
     return true;
 }
 bool CZMQAbstractNotifier::NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& /*vote*/)
+{
+    return true;
+}
+bool CZMQAbstractNotifier::NotifyNEVMComms(const std::string& commMessage, bool &bResponse) 
+{
+    return true;
+}
+bool CZMQAbstractNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, BlockValidationState &state, const uint256& nBlockHash)
+{
+    return true;
+}
+bool CZMQAbstractNotifier::NotifyNEVMBlockDisconnect(BlockValidationState &state, const uint256& nBlockHash)
+{
+    return true;
+}
+bool CZMQAbstractNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state)
 {
     return true;
 }

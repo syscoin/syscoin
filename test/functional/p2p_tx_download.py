@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2019-2020 The Bitcoin Core developers
+# Copyright (c) 2019-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """
@@ -8,13 +8,12 @@ Test transaction download behavior
 
 from test_framework.messages import (
     CInv,
-    CTransaction,
-    FromHex,
     MSG_TX,
     MSG_TYPE_MASK,
     MSG_WTX,
     msg_inv,
     msg_notfound,
+    tx_from_hex,
 )
 from test_framework.p2p import (
     P2PInterface,
@@ -100,7 +99,7 @@ class TxDownloadTest(SyscoinTestFramework):
             hexstring=tx,
             privkeys=[self.nodes[0].get_deterministic_priv_key().key],
         )['hex']
-        ctx = FromHex(CTransaction(), tx)
+        ctx = tx_from_hex(tx)
         txid = int(ctx.rehash(), 16)
 
         self.log.info(

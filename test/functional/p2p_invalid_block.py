@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2020 The Bitcoin Core developers
+# Copyright (c) 2015-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test node responses to invalid blocks.
@@ -9,14 +9,20 @@ In this test we connect to one node over p2p, and test block requests:
 2) Invalid block with duplicated transaction should be re-requested.
 3) Invalid block with bad coinbase value should be rejected and not
 re-requested.
+4) Invalid block due to future timestamp is later accepted when that timestamp
+becomes valid.
 """
 import copy
+import time
 
 from test_framework.blocktools import create_block, create_coinbase, create_tx_with_script
 from test_framework.messages import COIN
 from test_framework.p2p import P2PDataStore
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import assert_equal
+
+MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60
+
 
 class InvalidBlockRequestTest(SyscoinTestFramework):
     def set_test_params(self):
@@ -45,7 +51,7 @@ class InvalidBlockRequestTest(SyscoinTestFramework):
         peer.send_blocks_and_test([block1], node, success=True)
 
         self.log.info("Mature the block.")
-        node.generatetoaddress(100, node.get_deterministic_priv_key().address)
+        self.generatetoaddress(node, 100, node.get_deterministic_priv_key().address)
 
         best_block = node.getblock(node.getbestblockhash())
         tip = int(node.getbestblockhash(), 16)
@@ -69,7 +75,6 @@ class InvalidBlockRequestTest(SyscoinTestFramework):
 
         block2.vtx.extend([tx1, tx2])
         block2.hashMerkleRoot = block2.calc_merkle_root()
-        block2.rehash()
         block2.solve()
         orig_hash = block2.sha256
         block2_orig = copy.deepcopy(block2)
@@ -89,7 +94,6 @@ class InvalidBlockRequestTest(SyscoinTestFramework):
         block2_dup.vtx[2].vin.append(block2_dup.vtx[2].vin[0])
         block2_dup.vtx[2].rehash()
         block2_dup.hashMerkleRoot = block2_dup.calc_merkle_root()
-        block2_dup.rehash()
         block2_dup.solve()
         peer.send_blocks_and_test([block2_dup], node, success=False, reject_reason='bad-txns-inputs-duplicate')
 
@@ -101,7 +105,6 @@ class InvalidBlockRequestTest(SyscoinTestFramework):
         block3.vtx[0].sha256 = None
         block3.vtx[0].calc_sha256()
         block3.hashMerkleRoot = block3.calc_merkle_root()
-        block3.rehash()
         block3.solve()
 
         peer.send_blocks_and_test([block3], node, success=False, reject_reason='bad-cb-amount')
@@ -128,10 +131,22 @@ class InvalidBlockRequestTest(SyscoinTestFramework):
         tx3.rehash()
         block4.vtx.append(tx3)
         block4.hashMerkleRoot = block4.calc_merkle_root()
-        block4.rehash()
         block4.solve()
         self.log.info("Test inflation by duplicating input")
         peer.send_blocks_and_test([block4], node, success=False,  reject_reason='bad-txns-inputs-duplicate')
+
+        self.log.info("Test accepting identical block after rejecting it due to a future timestamp.")
+        t = int(time.time())
+        node.setmocktime(t)
+        # Set block time +1 second past max future validity
+        block = create_block(tip, create_coinbase(height), t + MAX_FUTURE_BLOCK_TIME + 1)
+        block.hashMerkleRoot = block.calc_merkle_root()
+        block.solve()
+        # Need force_send because the block will get rejected without a getdata otherwise
+        peer.send_blocks_and_test([block], node, force_send=True, success=False, reject_reason='time-too-new')
+        node.setmocktime(t + 1)
+        peer.send_blocks_and_test([block], node, success=True)
+
 
 if __name__ == '__main__':
     InvalidBlockRequestTest().main()

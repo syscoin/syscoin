@@ -33,9 +33,7 @@ template <typename Object>
 class CBLSIESEncryptedObject : public CBLSIESEncryptedBlob
 {
 public:
-    CBLSIESEncryptedObject()
-    {
-    }
+    CBLSIESEncryptedObject() = default;
 
     CBLSIESEncryptedObject(const CBLSPublicKey& ephemeralPubKeyIn, const uint256& ivSeedIn, const std::vector<unsigned char>& dataIn)
     {
@@ -50,7 +48,7 @@ public:
             CDataStream ds(SER_NETWORK, nVersion);
             ds << obj;
             return CBLSIESEncryptedBlob::Encrypt(idx, peerPubKey, ds.data(), ds.size());
-        } catch (std::exception&) {
+        } catch (const std::exception&) {
             return false;
         }
     }
@@ -73,8 +71,8 @@ public:
 class CBLSIESMultiRecipientBlobs
 {
 public:
-    typedef std::vector<unsigned char> Blob;
-    typedef std::vector<Blob> BlobVector;
+    using Blob = std::vector<unsigned char>;
+    using BlobVector = std::vector<Blob>;
 
 public:
     CBLSPublicKey ephemeralPubKey;
@@ -102,7 +100,7 @@ template <typename Object>
 class CBLSIESMultiRecipientObjects : public CBLSIESMultiRecipientBlobs
 {
 public:
-    typedef std::vector<Object> ObjectVector;
+    using ObjectVector = std::vector<Object>;
 
 public:
     bool Encrypt(const std::vector<CBLSPublicKey>& recipients, const ObjectVector& _objects, int nVersion)
@@ -118,7 +116,7 @@ public:
                 ds << _objects[i];
                 blobs[i].assign(ds.begin(), ds.end());
             }
-        } catch (std::exception&) {
+        } catch (const std::exception&) {
             return false;
         }
 
@@ -144,7 +142,7 @@ public:
             CDataStream ds(blob, SER_NETWORK, nVersion);
             ds >> objectRet;
             return true;
-        } catch (std::exception&) {
+        } catch (const std::exception&) {
             return false;
         }
     }

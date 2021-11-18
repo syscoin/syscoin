@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <script/standard.h>
+#include <interfaces/chain.h>
 class CBlock;
 class CBlockIndex;
 class BlockValidationState;
@@ -118,8 +119,8 @@ public:
     std::string ToString() const;
     void ToJson(UniValue& obj) const;
 };
-typedef std::shared_ptr<CDeterministicMNState> CDeterministicMNStatePtr;
-typedef std::shared_ptr<const CDeterministicMNState> CDeterministicMNStateCPtr;
+using CDeterministicMNStatePtr = std::shared_ptr<CDeterministicMNState>;
+using CDeterministicMNStateCPtr = std::shared_ptr<const CDeterministicMNState>;
 
 class CDeterministicMNStateDiff
 {
@@ -219,17 +220,17 @@ public:
     uint64_t GetInternalId() const;
 
     std::string ToString() const;
-    void ToJson(UniValue& obj) const;
+    void ToJson(interfaces::Chain& chain, UniValue& obj) const;
 };
-typedef std::shared_ptr<const CDeterministicMN> CDeterministicMNCPtr;
+using CDeterministicMNCPtr = std::shared_ptr<const CDeterministicMN>;
 
 class CDeterministicMNListDiff;
 class CDeterministicMNList
 {
 public:
-    typedef immer::map<uint256, CDeterministicMNCPtr> MnMap;
-    typedef immer::map<uint64_t, uint256> MnInternalIdMap;
-    typedef immer::map<uint256, std::pair<uint256, uint32_t> > MnUniquePropertyMap;
+    using MnMap = immer::map<uint256, CDeterministicMNCPtr>;
+    using MnInternalIdMap = immer::map<uint64_t, uint256>;
+    using MnUniquePropertyMap = immer::map<uint256, std::pair<uint256, uint32_t> >;
 
 private:
     uint256 blockHash;
@@ -354,7 +355,7 @@ public:
     }
     CDeterministicMNCPtr GetMN(const uint256& proTxHash) const;
     CDeterministicMNCPtr GetValidMN(const uint256& proTxHash) const;
-    CDeterministicMNCPtr GetMNByOperatorKey(const CBLSPublicKey& pubKey);
+    CDeterministicMNCPtr GetMNByOperatorKey(const CBLSPublicKey& pubKey) const;
     CDeterministicMNCPtr GetMNByCollateral(const COutPoint& collateralOutpoint) const;
     CDeterministicMNCPtr GetValidMNByCollateral(const COutPoint& collateralOutpoint) const;
     CDeterministicMNCPtr GetMNByService(const CService& service) const;
@@ -436,51 +437,63 @@ public:
     }
 
 private:
+
     template <typename T>
-    void AddUniqueProperty(const CDeterministicMNCPtr& dmn, const T& v)
+    bool AddUniqueProperty(const CDeterministicMNCPtr& dmn, const T& v)
     {
         static const T nullValue;
-        assert(v != nullValue);
+        if (v == nullValue) {
+            return false;
+        }
 
         auto hash = ::SerializeHash(v);
         auto oldEntry = mnUniquePropertyMap.find(hash);
-        assert(!oldEntry || oldEntry->first == dmn->proTxHash);
+        if (oldEntry != nullptr && oldEntry->first != dmn->proTxHash) {
+            return false;
+        }
         std::pair<uint256, uint32_t> newEntry(dmn->proTxHash, 1);
-        if (oldEntry) {
+        if (oldEntry != nullptr) {
             newEntry.second = oldEntry->second + 1;
         }
         mnUniquePropertyMap = mnUniquePropertyMap.set(hash, newEntry);
+        return true;
     }
     template <typename T>
-    void DeleteUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue)
+    bool DeleteUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue)
     {
         static const T nullValue;
-        assert(oldValue != nullValue);
+        if (oldValue == nullValue) {
+            return false;
+        }
 
         auto oldHash = ::SerializeHash(oldValue);
         auto p = mnUniquePropertyMap.find(oldHash);
-        assert(p && p->first == dmn->proTxHash);
+        if (p == nullptr || p->first != dmn->proTxHash) {
+            return false;
+        }
         if (p->second == 1) {
             mnUniquePropertyMap = mnUniquePropertyMap.erase(oldHash);
         } else {
             mnUniquePropertyMap = mnUniquePropertyMap.set(oldHash, std::make_pair(dmn->proTxHash, p->second - 1));
         }
+        return true;
     }
     template <typename T>
-    void UpdateUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue, const T& newValue)
+    bool UpdateUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue, const T& newValue)
     {
         if (oldValue == newValue) {
-            return;
+            return true;
         }
         static const T nullValue;
 
-        if (oldValue != nullValue) {
-            DeleteUniqueProperty(dmn, oldValue);
+        if (oldValue != nullValue && !DeleteUniqueProperty(dmn, oldValue)) {
+            return false;
         }
 
-        if (newValue != nullValue) {
-            AddUniqueProperty(dmn, newValue);
+        if (newValue != nullValue && !AddUniqueProperty(dmn, newValue)) {
+            return false;
         }
+        return true;
     }
 };
 
@@ -542,9 +555,9 @@ public:
 
 class CDeterministicMNManager
 {
-    static const int DISK_SNAPSHOT_PERIOD = 576; // once per day
-    static const int DISK_SNAPSHOTS = 3; // keep cache for 3 disk snapshots to have 2 full days covered
-    static const int LIST_DIFFS_CACHE_SIZE = DISK_SNAPSHOT_PERIOD * DISK_SNAPSHOTS;
+    static constexpr int DISK_SNAPSHOT_PERIOD = 576; // once per day
+    static constexpr int DISK_SNAPSHOTS = 3; // keep cache for 3 disk snapshots to have 2 full days covered
+    static constexpr int LIST_DIFFS_CACHE_SIZE = DISK_SNAPSHOT_PERIOD * DISK_SNAPSHOTS;
 
 public:
     mutable RecursiveMutex cs;
@@ -565,7 +578,7 @@ public:
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, CCoinsViewCache& view, CDeterministicMNList& mnListRet, bool debugLogs, const llmq::CFinalCommitmentTxPayload *qcIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, cs);
-    static void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pindexQuorum, CDeterministicMNList& mnList, bool debugLogs);
+    static void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList, bool debugLogs);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList);
 
     void GetListForBlock(const CBlockIndex* pindex, CDeterministicMNList& result);
@@ -582,4 +595,4 @@ private:
 
 extern std::unique_ptr<CDeterministicMNManager> deterministicMNManager;
 
-#endif //SYSCOIN_EVO_DETERMINISTICMNS_H
+#endif // SYSCOIN_EVO_DETERMINISTICMNS_H

@@ -25,13 +25,13 @@ FUZZ_TARGET_INIT(connman, initialize_connman)
 {
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     SetMockTime(ConsumeTime(fuzzed_data_provider));
-    CAddrMan addrman;
+    AddrMan addrman(/* asmap */ std::vector<bool>(), /* deterministic */ false, /* consistency_check_ratio */ 0);
     CConnman connman{fuzzed_data_provider.ConsumeIntegral<uint64_t>(), fuzzed_data_provider.ConsumeIntegral<uint64_t>(), addrman, fuzzed_data_provider.ConsumeBool()};
     CNetAddr random_netaddr;
     CNode random_node = ConsumeNode(fuzzed_data_provider);
     CSubNet random_subnet;
     std::string random_string;
-    while (fuzzed_data_provider.ConsumeBool()) {
+    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10000) {
         CallOneOf(
             fuzzed_data_provider,
             [&] {
@@ -65,16 +65,19 @@ FUZZ_TARGET_INIT(connman, initialize_connman)
                 connman.ForEachNode([](auto) {});
             },
             [&] {
-                connman.ForEachNodeThen([](auto) {}, []() {});
-            },
-            [&] {
                 (void)connman.ForNode(fuzzed_data_provider.ConsumeIntegral<NodeId>(), [&](auto) { return fuzzed_data_provider.ConsumeBool(); });
             },
             [&] {
-                (void)connman.GetAddresses(fuzzed_data_provider.ConsumeIntegral<size_t>(), fuzzed_data_provider.ConsumeIntegral<size_t>());
+                (void)connman.GetAddresses(
+                    /* max_addresses */ fuzzed_data_provider.ConsumeIntegral<size_t>(),
+                    /* max_pct */ fuzzed_data_provider.ConsumeIntegral<size_t>(),
+                    /* network */ std::nullopt);
             },
             [&] {
-                (void)connman.GetAddresses(random_node, fuzzed_data_provider.ConsumeIntegral<size_t>(), fuzzed_data_provider.ConsumeIntegral<size_t>());
+                (void)connman.GetAddresses(
+                    /* requestor */ random_node,
+                    /* max_addresses */ fuzzed_data_provider.ConsumeIntegral<size_t>(),
+                    /* max_pct */ fuzzed_data_provider.ConsumeIntegral<size_t>());
             },
             [&] {
                 (void)connman.GetDeterministicRandomizer(fuzzed_data_provider.ConsumeIntegral<uint64_t>());
@@ -99,12 +102,6 @@ FUZZ_TARGET_INIT(connman, initialize_connman)
             },
             [&] {
                 connman.RemoveAddedNode(random_string);
-            },
-            [&] {
-                const std::vector<bool> asmap = ConsumeRandomLengthBitVector(fuzzed_data_provider);
-                if (SanityCheckASMap(asmap)) {
-                    connman.SetAsmap(asmap);
-                }
             },
             [&] {
                 connman.SetNetworkActive(fuzzed_data_provider.ConsumeBool());

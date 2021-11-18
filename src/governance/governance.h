@@ -18,11 +18,13 @@ class CGovernanceObject;
 class CGovernanceVote;
 class PeerManager;
 
-extern CGovernanceManager governance;
+extern std::unique_ptr<CGovernanceManager> governance;
 
-static const int RATE_BUFFER_SIZE = 5;
+static constexpr int RATE_BUFFER_SIZE = 5;
+
 class CDeterministicMNList;
-typedef std::shared_ptr<CDeterministicMNList> CDeterministicMNListPtr;
+using CDeterministicMNListPtr = std::shared_ptr<CDeterministicMNList>;
+
 class CRateCheckBuffer
 {
 private:
@@ -124,7 +126,7 @@ public:
 class CGovernanceManager
 {
     friend class CGovernanceObject;
-
+    ChainstateManager& chainman;
 public: // Types
     struct last_object_rec {
         explicit last_object_rec(bool fStatusOKIn = true) :
@@ -144,16 +146,16 @@ public: // Types
     };
 
 
-    typedef CacheMap<uint256, CGovernanceObject*> object_ref_cm_t;
+    using object_ref_cm_t = CacheMap<uint256, CGovernanceObject*>;
 
-    typedef CacheMultiMap<uint256, vote_time_pair_t> vote_cmm_t;
+    using vote_cmm_t = CacheMultiMap<uint256, vote_time_pair_t>;
 
-    typedef std::map<COutPoint, last_object_rec> txout_m_t;
+    using txout_m_t = std::map<COutPoint, last_object_rec>;
 
-    typedef std::set<uint256> hash_s_t;
+    using hash_s_t = std::set<uint256>;
 
 private:
-    static const int MAX_CACHE_SIZE = 1000000;
+    static constexpr int MAX_CACHE_SIZE = 1000000;
 
     static const std::string SERIALIZATION_VERSION_STRING;
 
@@ -217,7 +219,7 @@ public:
     // critical section to protect the inner data structures
     mutable RecursiveMutex cs;
 
-    CGovernanceManager();
+    CGovernanceManager(ChainstateManager& _chainman);
 
     virtual ~CGovernanceManager() = default;
 
@@ -382,4 +384,4 @@ private:
 
 bool AreSuperblocksEnabled();
 
-#endif
+#endif // SYSCOIN_GOVERNANCE_GOVERNANCE_H

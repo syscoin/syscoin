@@ -3,8 +3,12 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/validation.h>
+#include <key_io.h>
+#include <policy/packages.h>
+#include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
+#include <script/standard.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 
@@ -33,8 +37,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_reject_coinbase, TestChain100Setup)
     LOCK(cs_main);
 
     unsigned int initialPoolSize = m_node.mempool->size();
-    const MempoolAcceptResult result = AcceptToMemoryPool(::ChainstateActive(), *m_node.mempool, MakeTransactionRef(coinbaseTx),
-                true /* bypass_limits */);
+    const MempoolAcceptResult result = m_node.chainman->ProcessTransaction(MakeTransactionRef(coinbaseTx));
 
     BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
 
@@ -46,5 +49,4 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_reject_coinbase, TestChain100Setup)
     BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "coinbase");
     BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
 }
-
 BOOST_AUTO_TEST_SUITE_END()

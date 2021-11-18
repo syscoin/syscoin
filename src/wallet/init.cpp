@@ -5,6 +5,7 @@
 
 #include <init.h>
 #include <interfaces/chain.h>
+#include <interfaces/init.h>
 #include <interfaces/wallet.h>
 #include <net.h>
 #include <node/context.h>
@@ -37,7 +38,7 @@ public:
     //! Add wallets that should be opened to list of chain clients.
     void Construct(NodeContext& node) const override;
     // SYSCOIN
-    void AutoLockMasternodeCollaterals() const override;
+    void AutoLockMasternodeCollaterals(NodeContext& node) const override;
 };
 
 const WalletInitInterface& g_wallet_init_interface = WalletInit();
@@ -45,7 +46,7 @@ const WalletInitInterface& g_wallet_init_interface = WalletInit();
 void WalletInit::AddWalletOptions(ArgsManager& argsman) const
 {
     argsman.AddArg("-addresstype", strprintf("What type of addresses to use (\"legacy\", \"p2sh-segwit\", or \"bech32\", default: \"%s\")", FormatOutputType(DEFAULT_ADDRESS_TYPE)), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
-    argsman.AddArg("-avoidpartialspends", strprintf("Group outputs by address, selecting all or none, instead of selecting on a per-output basis. Privacy is improved as an address is only used once (unless someone sends to it after spending from it), but may result in slightly higher fees as suboptimal coin selection may result due to the added limitation (default: %u (always enabled for wallets with \"avoid_reuse\" enabled))", DEFAULT_AVOIDPARTIALSPENDS), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
+    argsman.AddArg("-avoidpartialspends", strprintf("Group outputs by address, selecting many (possibly all) or none, instead of selecting on a per-output basis. Privacy is improved as addresses are mostly swept with fewer transactions and outputs are aggregated in clean change addresses. It may result in higher fees due to less optimal coin selection caused by this added limitation and possibly a larger-than-necessary number of inputs being used. Always enabled for wallets with \"avoid_reuse\" enabled, otherwise default: %u.", DEFAULT_AVOIDPARTIALSPENDS), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddArg("-changetype", "What type of change to use (\"legacy\", \"p2sh-segwit\", or \"bech32\"). Default is same as -addresstype, except when -addresstype=p2sh-segwit a native segwit output is used when sending to a native segwit address)", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddArg("-disablewallet", "Do not load the wallet and disable wallet RPC calls", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddArg("-discardfee=<amt>", strprintf("The fee rate (in %s/kvB) that indicates your tolerance for discarding change by adding it to the fee (default: %s). "
@@ -62,7 +63,6 @@ void WalletInit::AddWalletOptions(ArgsManager& argsman) const
                                                             CURRENCY_UNIT, FormatMoney(DEFAULT_TRANSACTION_MINFEE)), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddArg("-paytxfee=<amt>", strprintf("Fee rate (in %s/kvB) to add to transactions you send (default: %s)",
                                                             CURRENCY_UNIT, FormatMoney(CFeeRate{DEFAULT_PAY_TX_FEE}.GetFeePerK())), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
-    argsman.AddArg("-rescan", "Rescan the block chain for missing wallet transactions on startup", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
 #ifdef ENABLE_EXTERNAL_SIGNER
     argsman.AddArg("-signer=<cmd>", "External signing tool, see doc/external-signer.md", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
 #endif
@@ -85,7 +85,7 @@ void WalletInit::AddWalletOptions(ArgsManager& argsman) const
 #endif
 
 #ifdef USE_SQLITE
-    argsman.AddArg("-unsafesqlitesync", "Set SQLite synchronous=OFF to disable waiting for the database to sync to disk. This is unsafe and can cause data loss and corruption. This option is only used by tests to improve their performance (default: false)", ArgsManager::ALLOW_BOOL | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
+    argsman.AddArg("-unsafesqlitesync", "Set SQLite synchronous=OFF to disable waiting for the database to sync to disk. This is unsafe and can cause data loss and corruption. This option is only used by tests to improve their performance (default: false)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
 #else
     argsman.AddHiddenArgs({"-unsafesqlitesync"});
 #endif
@@ -109,7 +109,7 @@ bool WalletInit::ParameterInteraction() const
 
         return true;
     }
-    if (gArgs.GetArg("-prune", 0) > 0) {
+    if (gArgs.GetIntArg("-prune", 0) > 0) {
         if (gArgs.SoftSetBoolArg("-disablegovernance", true)) {
             LogPrintf("%s: parameter interaction: -prune=0 -> setting -disablegovernance=true\n", __func__);
         }
@@ -136,14 +136,24 @@ void WalletInit::Construct(NodeContext& node) const
         LogPrintf("Wallet disabled!\n");
         return;
     }
-    auto wallet_client = interfaces::MakeWalletClient(*node.chain, args);
+    auto wallet_client = node.init->makeWalletClient(*node.chain);
     node.wallet_client = wallet_client.get();
     node.chain_clients.emplace_back(std::move(wallet_client));
 }
 // SYSCOIN
-void WalletInit::AutoLockMasternodeCollaterals() const
+void WalletInit::AutoLockMasternodeCollaterals(NodeContext& node) const
 {
-    for (const std::shared_ptr<CWallet>& pwallet : GetWallets()) {
+    if(!node.wallet_client) {
+        LogPrintf("Wallet disabled, cannot lock masternode collateral!\n");
+        return;
+    }
+    WalletContext* walletContext = node.wallet_client->context();
+    if(!walletContext) {
+        LogPrintf("Wallet context not found, cannot lock masternode collateral!\n");
+        return;
+    }
+    LogPrintf("Locking masternode collateral!\n");
+    for (const std::shared_ptr<CWallet>& pwallet : GetWallets(*walletContext)) {
         pwallet->AutoLockMasternodeCollaterals();
     }
 }

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2020 The Dash Core developers
+# Copyright (c) 2015-2021 The Dash Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 import time
+
 from test_framework.test_framework import DashTestFramework
 from test_framework.util import assert_greater_than_or_equal, force_finish_mnsync
 
@@ -12,6 +14,7 @@ feature_llmqconnections.py
 Checks intra quorum connections
 
 '''
+
 
 class LLMQConnections(DashTestFramework):
     def set_test_params(self):
@@ -41,12 +44,12 @@ class LLMQConnections(DashTestFramework):
 
         self.check_reconnects(2)
 
-        self.log.info("activating SPORK_23_QUORUM_POSE")
+        self.log.info("Activating SPORK_23_QUORUM_POSE")
         self.nodes[0].spork("SPORK_23_QUORUM_POSE", 0)
         self.wait_for_sporks_same()
 
         self.log.info("mining one block and waiting for all members to connect to each other")
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
         for mn in self.get_quorum_masternodes(q):
             self.wait_for_mnauth(mn.node, 4)
 
@@ -58,7 +61,7 @@ class LLMQConnections(DashTestFramework):
             self.wait_until(lambda: self.get_mn_probe_count(mn.node, q, False) == 4)
 
         self.log.info("checking that probes age")
-        self.bump_mocktime(120)
+        self.bump_mocktime(60)
         for mn in self.get_quorum_masternodes(q):
             self.wait_until(lambda: self.get_mn_probe_count(mn.node, q, False) == 0)
 
@@ -81,7 +84,7 @@ class LLMQConnections(DashTestFramework):
             self.wait_until(lambda: len(mn.node.getpeerinfo()) == 0)
         for mn in self.mninfo:
             mn.node.setnetworkactive(True)
-        self.bump_mocktime(120)
+        self.bump_mocktime(60)
 
         self.log.info("verify that all masternodes re-connected")
         for q in self.nodes[0].quorum_list()['llmq_test']:
@@ -90,7 +93,7 @@ class LLMQConnections(DashTestFramework):
 
         # Also re-connect non-masternode connections
         for i in range(1, len(self.nodes)):
-            self.connect_nodes(i, 0)
+            self.connect_nodes(self.nodes[i].index, 0)
             self.nodes[i].ping()
         # wait for ping/pong so that we can be sure that spork propagation works
         time.sleep(1) # needed to make sure we don't check before the ping is actually sent (fPingQueued might be true but SendMessages still not called)
@@ -106,8 +109,8 @@ class LLMQConnections(DashTestFramework):
         return count
 
     def get_mn_probe_count(self, node, q, check_peers):
-        count = 0
         self.bump_mocktime(1)
+        count = 0
         mnList = node.protx_list('registered', True)
         peerList = node.getpeerinfo()
         mnMap = {}
@@ -119,7 +122,7 @@ class LLMQConnections(DashTestFramework):
                 peerMap[p['verified_proregtx_hash']] = p
         for mn in self.get_quorum_masternodes(q):
             pi = mnMap[mn.proTxHash]
-            if pi['metaInfo']['lastOutboundSuccessElapsed'] <= 120:
+            if pi['metaInfo']['lastOutboundSuccessElapsed'] < 60:
                 count += 1
             elif check_peers and mn.proTxHash in peerMap:
                 count += 1

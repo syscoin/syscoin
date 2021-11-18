@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2020 The Bitcoin Core developers
+# Copyright (c) 2014-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test logic for skipping signature validation on old blocks.
@@ -143,7 +143,6 @@ class AssumeValidTest(SyscoinTestFramework):
         self.block_time += 1
         block102.vtx.extend([tx])
         block102.hashMerkleRoot = block102.calc_merkle_root()
-        block102.rehash()
         block102.solve()
         self.blocks.append(block102)
         self.tip = block102.sha256
@@ -191,7 +190,6 @@ class AssumeValidTest(SyscoinTestFramework):
         # Send blocks to node2. Block 102 will be rejected.
         self.send_blocks_until_disconnected(p2p2)
         # SYSCOIN
-        self.bump_mocktime(5)
         self.assert_blockchain_height(self.nodes[2], 101)
 
 

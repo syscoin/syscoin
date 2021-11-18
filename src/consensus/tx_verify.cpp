@@ -4,6 +4,7 @@
 
 #include <consensus/tx_verify.h>
 
+#include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
@@ -21,6 +22,15 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
         return true;
     if ((int64_t)tx.nLockTime < ((int64_t)tx.nLockTime < LOCKTIME_THRESHOLD ? (int64_t)nBlockHeight : nBlockTime))
         return true;
+
+    // Even if tx.nLockTime isn't satisfied by nBlockHeight/nBlockTime, a
+    // transaction is still considered final if all inputs' nSequence ==
+    // SEQUENCE_FINAL (0xffffffff), in which case nLockTime is ignored.
+    //
+    // Because of this behavior OP_CHECKLOCKTIMEVERIFY/CheckLockTime() will
+    // also check that the spending input's nSequence != SEQUENCE_FINAL,
+    // ensuring that an unsatisfied nLockTime value will actually cause
+    // IsFinalTx() to return false here:
     for (const auto& txin : tx.vin) {
         if (!(txin.nSequence == CTxIn::SEQUENCE_FINAL))
             return false;
@@ -136,7 +146,7 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& in
     return nSigOps;
 }
 
-int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& inputs, int flags)
+int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& inputs, uint32_t flags)
 {
     int64_t nSigOps = GetLegacySigOpCount(tx) * WITNESS_SCALE_FACTOR;
 

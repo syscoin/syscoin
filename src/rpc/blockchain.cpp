@@ -5,13 +5,16 @@
 
 #include <rpc/blockchain.h>
 
-#include <amount.h>
 #include <blockfilter.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
+#include <consensus/amount.h>
+#include <consensus/params.h>
 #include <consensus/validation.h>
 #include <core_io.h>
+#include <deploymentinfo.h>
+#include <deploymentstatus.h>
 #include <hash.h>
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
@@ -34,10 +37,12 @@
 #include <txmempool.h>
 #include <undo.h>
 #include <util/strencodings.h>
+#include <util/string.h>
 #include <util/system.h>
 #include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <versionbits.h>
 #include <warnings.h>
 
 #include <stdint.h>
@@ -67,12 +72,6 @@ static CUpdatedBlock latestblock GUARDED_BY(cs_blockchange);
 
 NodeContext& EnsureAnyNodeContext(const std::any& context)
 {
-    // SYSCOIN
-    auto wallet_context = util::AnyPtr<WalletContext>(context);
-    if (wallet_context) {
-        if (wallet_context->nodeContext != nullptr)
-            return *wallet_context->nodeContext;
-    }
     auto node_context = util::AnyPtr<NodeContext>(context);
     if (!node_context) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Node context not found");
@@ -98,7 +97,6 @@ ChainstateManager& EnsureChainman(const NodeContext& node)
     if (!node.chainman) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Node chainman not found");
     }
-    WITH_LOCK(::cs_main, CHECK_NONFATAL(std::addressof(g_chainman) == std::addressof(*node.chainman)));
     return *node.chainman;
 }
 
@@ -246,7 +244,7 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
     return result;
 }
 // SYSCOIN
-UniValue blockToJSON(const CBlock& block, const CBlockIndex* tip, const CBlockIndex* blockindex, bool txDetails, ChainstateManager* chainstate)
+UniValue blockToJSON(const CBlock& block, const CBlockIndex* tip, const CBlockIndex* blockindex, TxVerbosity verbosity, ChainstateManager* chainstate)
 {
     UniValue result = blockheaderToJSON(tip, blockindex);
 
@@ -254,22 +252,29 @@ UniValue blockToJSON(const CBlock& block, const CBlockIndex* tip, const CBlockIn
     result.pushKV("size", (int)::GetSerializeSize(block, PROTOCOL_VERSION));
     result.pushKV("weight", (int)::GetBlockWeight(block));
     UniValue txs(UniValue::VARR);
-    if (txDetails) {
-        CBlockUndo blockUndo;
-        const bool have_undo = !IsBlockPruned(blockindex) && UndoReadFromDisk(blockUndo, blockindex);
-        for (size_t i = 0; i < block.vtx.size(); ++i) {
-            const CTransactionRef& tx = block.vtx.at(i);
-            // coinbase transaction (i == 0) doesn't have undo data
-            const CTxUndo* txundo = (have_undo && i) ? &blockUndo.vtxundo.at(i - 1) : nullptr;
-            UniValue objTx(UniValue::VOBJ);
-            TxToUniv(*tx, uint256(), objTx, true, RPCSerializationFlags(), txundo);
-            txs.push_back(objTx);
-        }
-    } else {
-        for (const CTransactionRef& tx : block.vtx) {
-            txs.push_back(tx->GetHash().GetHex());
-        }
+
+    switch (verbosity) {
+        case TxVerbosity::SHOW_TXID:
+            for (const CTransactionRef& tx : block.vtx) {
+                txs.push_back(tx->GetHash().GetHex());
+            }
+            break;
+
+        case TxVerbosity::SHOW_DETAILS:
+        case TxVerbosity::SHOW_DETAILS_AND_PREVOUT:
+            CBlockUndo blockUndo;
+            const bool have_undo = !IsBlockPruned(blockindex) && UndoReadFromDisk(blockUndo, blockindex);
+
+            for (size_t i = 0; i < block.vtx.size(); ++i) {
+                const CTransactionRef& tx = block.vtx.at(i);
+                // coinbase transaction (i.e. i == 0) doesn't have undo data
+                const CTxUndo* txundo = (have_undo && i > 0) ? &blockUndo.vtxundo.at(i - 1) : nullptr;
+                UniValue objTx(UniValue::VOBJ);
+                TxToUniv(*tx, uint256(), objTx, true, RPCSerializationFlags(), txundo, verbosity);
+                txs.push_back(objTx);
+            }
     }
+
     result.pushKV("tx", txs);
     // SYSCOIN
     if (block.auxpow && chainstate)
@@ -636,7 +641,7 @@ static void entryToJSON(const CTxMemPool& pool, UniValue& info, const CTxMemPool
     std::set<std::string> setDepends;
     for (const CTxIn& txin : tx.vin)
     {
-        if (pool.exists(txin.prevout.hash))
+        if (pool.exists(GenTxid::Txid(txin.prevout.hash)))
             setDepends.insert(txin.prevout.hash.ToString());
     }
 
@@ -1058,7 +1063,8 @@ static RPCHelpMan getblock()
     return RPCHelpMan{"getblock",
                 "\nIf verbosity is 0, returns a string that is serialized, hex-encoded data for block 'hash'.\n"
                 "If verbosity is 1, returns an Object with information about block <hash>.\n"
-                "If verbosity is 2, returns an Object with information about block <hash> and information about each transaction. \n",
+                "If verbosity is 2, returns an Object with information about block <hash> and information about each transaction.\n"
+                "If verbosity is 3, returns an Object with information about block <hash> and information about each transaction, including prevout information for inputs (only for unpruned blocks in the current best chain).\n",
                 {
                     {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash"},
                     {"verbosity|verbose", RPCArg::Type::NUM, RPCArg::Default{1}, "0 for hex-encoded data, 1 for a json object, and 2 for json object with transaction data"},
@@ -1151,7 +1157,6 @@ static RPCHelpMan getblock()
 
         block = GetBlockChecked(pblockindex);
     }
-
     if (verbosity <= 0)
     {
         CDataStream ssBlock(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
@@ -1159,8 +1164,17 @@ static RPCHelpMan getblock()
         std::string strHex = HexStr(ssBlock);
         return strHex;
     }
+
+    TxVerbosity tx_verbosity;
+    if (verbosity == 1) {
+        tx_verbosity = TxVerbosity::SHOW_TXID;
+    } else if (verbosity == 2) {
+        tx_verbosity = TxVerbosity::SHOW_DETAILS;
+    } else {
+        tx_verbosity = TxVerbosity::SHOW_DETAILS_AND_PREVOUT;
+    }
     // SYSCOIN
-    return blockToJSON(block, tip, pblockindex, verbosity >= 2, &chainman);
+    return blockToJSON(block, tip, pblockindex, tx_verbosity, &chainman);
 },
     };
 }
@@ -1245,7 +1259,7 @@ static RPCHelpMan gettxoutsetinfo()
                 "Note this call may take some time if you are not using coinstatsindex.\n",
                 {
                     {"hash_type", RPCArg::Type::STR, RPCArg::Default{"hash_serialized_2"}, "Which UTXO set hash should be calculated. Options: 'hash_serialized_2' (the legacy algorithm), 'muhash', 'none'."},
-                    {"hash_or_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The block hash or height of the target height (only available with coinstatsindex).", "", {"", "string or numeric"}},
+                    {"hash_or_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED_NAMED_ARG, "The block hash or height of the target height (only available with coinstatsindex).", "", {"", "string or numeric"}},
                     {"use_index", RPCArg::Type::BOOL, RPCArg::Default{true}, "Use coinstatsindex, if available."},
                 },
                 RPCResult{
@@ -1257,19 +1271,19 @@ static RPCHelpMan gettxoutsetinfo()
                         {RPCResult::Type::NUM, "bogosize", "Database-independent, meaningless metric indicating the UTXO set size"},
                         {RPCResult::Type::STR_HEX, "hash_serialized_2", /* optional */ true, "The serialized hash (only present if 'hash_serialized_2' hash_type is chosen)"},
                         {RPCResult::Type::STR_HEX, "muhash", /* optional */ true, "The serialized hash (only present if 'muhash' hash_type is chosen)"},
-                        {RPCResult::Type::NUM, "transactions", "The number of transactions with unspent outputs (not available when coinstatsindex is used)"},
-                        {RPCResult::Type::NUM, "disk_size", "The estimated size of the chainstate on disk (not available when coinstatsindex is used)"},
+                        {RPCResult::Type::NUM, "transactions", /* optional */ true, "The number of transactions with unspent outputs (not available when coinstatsindex is used)"},
+                        {RPCResult::Type::NUM, "disk_size", /* optional */ true, "The estimated size of the chainstate on disk (not available when coinstatsindex is used)"},
                         {RPCResult::Type::STR_AMOUNT, "total_amount", "The total amount of coins in the UTXO set"},
-                        {RPCResult::Type::STR_AMOUNT, "total_unspendable_amount", "The total amount of coins permanently excluded from the UTXO set (only available if coinstatsindex is used)"},
-                        {RPCResult::Type::OBJ, "block_info", "Info on amounts in the block at this block height (only available if coinstatsindex is used)",
+                        {RPCResult::Type::STR_AMOUNT, "total_unspendable_amount", /* optional */ true, "The total amount of coins permanently excluded from the UTXO set (only available if coinstatsindex is used)"},
+                        {RPCResult::Type::OBJ, "block_info", /* optional */ true, "Info on amounts in the block at this block height (only available if coinstatsindex is used)",
                         {
-                            {RPCResult::Type::STR_AMOUNT, "prevout_spent", ""},
-                            {RPCResult::Type::STR_AMOUNT, "coinbase", ""},
-                            {RPCResult::Type::STR_AMOUNT, "new_outputs_ex_coinbase", ""},
-                            {RPCResult::Type::STR_AMOUNT, "unspendable", ""},
+                            {RPCResult::Type::STR_AMOUNT, "prevout_spent", "Total amount of all prevouts spent in this block"},
+                            {RPCResult::Type::STR_AMOUNT, "coinbase", "Coinbase subsidy amount of this block"},
+                            {RPCResult::Type::STR_AMOUNT, "new_outputs_ex_coinbase", "Total amount of new outputs created by this block"},
+                            {RPCResult::Type::STR_AMOUNT, "unspendable", "Total amount of unspendable outputs created in this block"},
                             {RPCResult::Type::OBJ, "unspendables", "Detailed view of the unspendable categories",
                             {
-                                {RPCResult::Type::STR_AMOUNT, "genesis_block", ""},
+                                {RPCResult::Type::STR_AMOUNT, "genesis_block", "The unspendable amount of the Genesis block subsidy"},
                                 {RPCResult::Type::STR_AMOUNT, "bip30", "Transactions overridden by duplicates (no longer possible with BIP30)"},
                                 {RPCResult::Type::STR_AMOUNT, "scripts", "Amounts sent to scripts that are unspendable (for example OP_RETURN outputs)"},
                                 {RPCResult::Type::STR_AMOUNT, "unclaimed_rewards", "Fee rewards that miners did not claim in their coinbase transaction"},
@@ -1321,6 +1335,18 @@ static RPCHelpMan gettxoutsetinfo()
         pindex = ParseHashOrHeight(request.params[1], chainman);
     }
 
+    if (stats.index_requested && g_coin_stats_index) {
+        if (!g_coin_stats_index->BlockUntilSyncedToCurrentChain()) {
+            const IndexSummary summary{g_coin_stats_index->GetSummary()};
+
+            // If a specific block was requested and the index has already synced past that height, we can return the
+            // data already even though the index is not fully synced yet.
+            if (pindex->nHeight > summary.best_block_height) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Unable to get data because coinstatsindex is still syncing. Current height: %d", summary.best_block_height));
+            }
+        }
+    }
+
     if (GetUTXOStats(coins_view, *blockman, stats, node.rpc_interruption_point, pindex)) {
         ret.pushKV("height", (int64_t)stats.nHeight);
         ret.pushKV("bestblock", stats.hashBlock.GetHex());
@@ -1337,37 +1363,30 @@ static RPCHelpMan gettxoutsetinfo()
             ret.pushKV("transactions", static_cast<int64_t>(stats.nTransactions));
             ret.pushKV("disk_size", stats.nDiskSize);
         } else {
-            ret.pushKV("total_unspendable_amount", ValueFromAmount(stats.block_unspendable_amount));
+            ret.pushKV("total_unspendable_amount", ValueFromAmount(stats.total_unspendable_amount));
 
             CCoinsStats prev_stats{hash_type};
 
             if (pindex->nHeight > 0) {
-                GetUTXOStats(coins_view, WITH_LOCK(::cs_main, return std::ref(g_chainman.m_blockman)), prev_stats, node.rpc_interruption_point, pindex->pprev);
+                GetUTXOStats(coins_view, *blockman, prev_stats, node.rpc_interruption_point, pindex->pprev);
             }
 
             UniValue block_info(UniValue::VOBJ);
-            block_info.pushKV("prevout_spent", ValueFromAmount(stats.block_prevout_spent_amount - prev_stats.block_prevout_spent_amount));
-            block_info.pushKV("coinbase", ValueFromAmount(stats.block_coinbase_amount - prev_stats.block_coinbase_amount));
-            block_info.pushKV("new_outputs_ex_coinbase", ValueFromAmount(stats.block_new_outputs_ex_coinbase_amount - prev_stats.block_new_outputs_ex_coinbase_amount));
-            block_info.pushKV("unspendable", ValueFromAmount(stats.block_unspendable_amount - prev_stats.block_unspendable_amount));
+            block_info.pushKV("prevout_spent", ValueFromAmount(stats.total_prevout_spent_amount - prev_stats.total_prevout_spent_amount));
+            block_info.pushKV("coinbase", ValueFromAmount(stats.total_coinbase_amount - prev_stats.total_coinbase_amount));
+            block_info.pushKV("new_outputs_ex_coinbase", ValueFromAmount(stats.total_new_outputs_ex_coinbase_amount - prev_stats.total_new_outputs_ex_coinbase_amount));
+            block_info.pushKV("unspendable", ValueFromAmount(stats.total_unspendable_amount - prev_stats.total_unspendable_amount));
 
             UniValue unspendables(UniValue::VOBJ);
-            unspendables.pushKV("genesis_block", ValueFromAmount(stats.unspendables_genesis_block - prev_stats.unspendables_genesis_block));
-            unspendables.pushKV("bip30", ValueFromAmount(stats.unspendables_bip30 - prev_stats.unspendables_bip30));
-            unspendables.pushKV("scripts", ValueFromAmount(stats.unspendables_scripts - prev_stats.unspendables_scripts));
-            unspendables.pushKV("unclaimed_rewards", ValueFromAmount(stats.unspendables_unclaimed_rewards - prev_stats.unspendables_unclaimed_rewards));
+            unspendables.pushKV("genesis_block", ValueFromAmount(stats.total_unspendables_genesis_block - prev_stats.total_unspendables_genesis_block));
+            unspendables.pushKV("bip30", ValueFromAmount(stats.total_unspendables_bip30 - prev_stats.total_unspendables_bip30));
+            unspendables.pushKV("scripts", ValueFromAmount(stats.total_unspendables_scripts - prev_stats.total_unspendables_scripts));
+            unspendables.pushKV("unclaimed_rewards", ValueFromAmount(stats.total_unspendables_unclaimed_rewards - prev_stats.total_unspendables_unclaimed_rewards));
             block_info.pushKV("unspendables", unspendables);
 
             ret.pushKV("block_info", block_info);
         }
     } else {
-        if (g_coin_stats_index) {
-            const IndexSummary summary{g_coin_stats_index->GetSummary()};
-
-            if (!summary.synced) {
-                throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Unable to read UTXO set because coinstatsindex is still syncing. Current height: %d", summary.best_block_height));
-            }
-        }
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
     }
     return ret;
@@ -1466,7 +1485,7 @@ static RPCHelpMan verifychain()
                 "\nVerifies blockchain database.\n",
                 {
                     {"checklevel", RPCArg::Type::NUM, RPCArg::DefaultHint{strprintf("%d, range=0-4", DEFAULT_CHECKLEVEL)},
-                        strprintf("How thorough the block verification is:\n - %s", Join(CHECKLEVEL_DOC, "\n- "))},
+                        strprintf("How thorough the block verification is:\n%s", MakeUnorderedList(CHECKLEVEL_DOC))},
                     {"nblocks", RPCArg::Type::NUM, RPCArg::DefaultHint{strprintf("%d, 0=all", DEFAULT_CHECKBLOCKS)}, "The number of blocks to check."},
                 },
                 RPCResult{
@@ -1490,32 +1509,29 @@ static RPCHelpMan verifychain()
     };
 }
 
-static void BuriedForkDescPushBack(UniValue& softforks, const std::string &name, int softfork_height, int tip_height) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+static void SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& softforks, const Consensus::Params& params, Consensus::BuriedDeployment dep)
 {
     // For buried deployments.
-    // A buried deployment is one where the height of the activation has been hardcoded into
-    // the client implementation long after the consensus change has activated. See BIP 90.
-    // Buried deployments with activation height value of
-    // std::numeric_limits<int>::max() are disabled and thus hidden.
-    if (softfork_height == std::numeric_limits<int>::max()) return;
+
+    if (!DeploymentEnabled(params, dep)) return;
 
     UniValue rv(UniValue::VOBJ);
     rv.pushKV("type", "buried");
     // getblockchaininfo reports the softfork as active from when the chain height is
     // one below the activation height
-    rv.pushKV("active", tip_height + 1 >= softfork_height);
-    rv.pushKV("height", softfork_height);
-    softforks.pushKV(name, rv);
+    rv.pushKV("active", DeploymentActiveAfter(active_chain_tip, params, dep));
+    rv.pushKV("height", params.DeploymentHeight(dep));
+    softforks.pushKV(DeploymentName(dep), rv);
 }
 
-static void BIP9SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& softforks, const std::string &name, const Consensus::Params& consensusParams, Consensus::DeploymentPos id) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+static void SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& softforks, const Consensus::Params& consensusParams, Consensus::DeploymentPos id)
 {
     // For BIP9 deployments.
-    // Deployments that are never active are hidden.
-    if (consensusParams.vDeployments[id].nStartTime == Consensus::BIP9Deployment::NEVER_ACTIVE) return;
+
+    if (!DeploymentEnabled(consensusParams, id)) return;
 
     UniValue bip9(UniValue::VOBJ);
-    const ThresholdState thresholdState = VersionBitsState(active_chain_tip, consensusParams, id, versionbitscache);
+    const ThresholdState thresholdState = g_versionbitscache.State(active_chain_tip, consensusParams, id);
     switch (thresholdState) {
     case ThresholdState::DEFINED: bip9.pushKV("status", "defined"); break;
     case ThresholdState::STARTED: bip9.pushKV("status", "started"); break;
@@ -1523,23 +1539,24 @@ static void BIP9SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniVal
     case ThresholdState::ACTIVE: bip9.pushKV("status", "active"); break;
     case ThresholdState::FAILED: bip9.pushKV("status", "failed"); break;
     }
-    if (ThresholdState::STARTED == thresholdState)
-    {
+    const bool has_signal = (ThresholdState::STARTED == thresholdState || ThresholdState::LOCKED_IN == thresholdState);
+    if (has_signal) {
         bip9.pushKV("bit", consensusParams.vDeployments[id].bit);
     }
     bip9.pushKV("start_time", consensusParams.vDeployments[id].nStartTime);
     bip9.pushKV("timeout", consensusParams.vDeployments[id].nTimeout);
-    int64_t since_height = VersionBitsStateSinceHeight(active_chain_tip, consensusParams, id, versionbitscache);
+    int64_t since_height = g_versionbitscache.StateSinceHeight(active_chain_tip, consensusParams, id);
     bip9.pushKV("since", since_height);
-    if (ThresholdState::STARTED == thresholdState)
-    {
+    if (has_signal) {
         UniValue statsUV(UniValue::VOBJ);
-        BIP9Stats statsStruct = VersionBitsStatistics(active_chain_tip, consensusParams, id);
+        BIP9Stats statsStruct = g_versionbitscache.Statistics(active_chain_tip, consensusParams, id);
         statsUV.pushKV("period", statsStruct.period);
-        statsUV.pushKV("threshold", statsStruct.threshold);
         statsUV.pushKV("elapsed", statsStruct.elapsed);
         statsUV.pushKV("count", statsStruct.count);
-        statsUV.pushKV("possible", statsStruct.possible);
+        if (ThresholdState::LOCKED_IN != thresholdState) {
+            statsUV.pushKV("threshold", statsStruct.threshold);
+            statsUV.pushKV("possible", statsStruct.possible);
+        }
         bip9.pushKV("statistics", statsUV);
     }
     bip9.pushKV("min_activation_height", consensusParams.vDeployments[id].min_activation_height);
@@ -1552,7 +1569,7 @@ static void BIP9SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniVal
     }
     rv.pushKV("active", ThresholdState::ACTIVE == thresholdState);
 
-    softforks.pushKV(name, rv);
+    softforks.pushKV(DeploymentName(id), rv);
 }
 
 RPCHelpMan getblockchaininfo()
@@ -1568,38 +1585,39 @@ RPCHelpMan getblockchaininfo()
                         {RPCResult::Type::NUM, "headers", "the current number of headers we have validated"},
                         {RPCResult::Type::STR, "bestblockhash", "the hash of the currently best block"},
                         {RPCResult::Type::NUM, "difficulty", "the current difficulty"},
-                        {RPCResult::Type::NUM, "mediantime", "median time for the current best block"},
+                        {RPCResult::Type::NUM_TIME, "time", "The block time expressed in " + UNIX_EPOCH_TIME},
+                        {RPCResult::Type::NUM_TIME, "mediantime", "The median block time expressed in " + UNIX_EPOCH_TIME},
                         {RPCResult::Type::NUM, "verificationprogress", "estimate of verification progress [0..1]"},
                         {RPCResult::Type::BOOL, "initialblockdownload", "(debug information) estimate of whether this node is in Initial Block Download mode"},
                         {RPCResult::Type::STR_HEX, "chainwork", "total amount of work in active chain, in hexadecimal"},
                         {RPCResult::Type::NUM, "size_on_disk", "the estimated size of the block and undo files on disk"},
                         {RPCResult::Type::BOOL, "pruned", "if the blocks are subject to pruning"},
-                        {RPCResult::Type::NUM, "pruneheight", "lowest-height complete block stored (only present if pruning is enabled)"},
-                        {RPCResult::Type::BOOL, "automatic_pruning", "whether automatic pruning is enabled (only present if pruning is enabled)"},
-                        {RPCResult::Type::NUM, "prune_target_size", "the target size used by pruning (only present if automatic pruning is enabled)"},
+                        {RPCResult::Type::NUM, "pruneheight", /* optional */ true, "lowest-height complete block stored (only present if pruning is enabled)"},
+                        {RPCResult::Type::BOOL, "automatic_pruning", /* optional */ true, "whether automatic pruning is enabled (only present if pruning is enabled)"},
+                        {RPCResult::Type::NUM, "prune_target_size", /* optional */ true, "the target size used by pruning (only present if automatic pruning is enabled)"},
                         {RPCResult::Type::OBJ_DYN, "softforks", "status of softforks",
                         {
                             {RPCResult::Type::OBJ, "xxxx", "name of the softfork",
                             {
                                 {RPCResult::Type::STR, "type", "one of \"buried\", \"bip9\""},
-                                {RPCResult::Type::OBJ, "bip9", "status of bip9 softforks (only for \"bip9\" type)",
+                                {RPCResult::Type::OBJ, "bip9", /* optional */ true, "status of bip9 softforks (only for \"bip9\" type)",
                                 {
                                     {RPCResult::Type::STR, "status", "one of \"defined\", \"started\", \"locked_in\", \"active\", \"failed\""},
-                                    {RPCResult::Type::NUM, "bit", "the bit (0-28) in the block version field used to signal this softfork (only for \"started\" status)"},
+                                    {RPCResult::Type::NUM, "bit", /* optional */ true, "the bit (0-28) in the block version field used to signal this softfork (only for \"started\" and \"locked_in\" status)"},
                                     {RPCResult::Type::NUM_TIME, "start_time", "the minimum median time past of a block at which the bit gains its meaning"},
                                     {RPCResult::Type::NUM_TIME, "timeout", "the median time past of a block at which the deployment is considered failed if not yet locked in"},
                                     {RPCResult::Type::NUM, "since", "height of the first block to which the status applies"},
                                     {RPCResult::Type::NUM, "min_activation_height", "minimum height of blocks for which the rules may be enforced"},
-                                    {RPCResult::Type::OBJ, "statistics", "numeric statistics about BIP9 signalling for a softfork (only for \"started\" status)",
+                                    {RPCResult::Type::OBJ, "statistics", /* optional */ true, "numeric statistics about signalling for a softfork (only for \"started\" and \"locked_in\" status)",
                                     {
-                                        {RPCResult::Type::NUM, "period", "the length in blocks of the BIP9 signalling period"},
-                                        {RPCResult::Type::NUM, "threshold", "the number of blocks with the version bit set required to activate the feature"},
+                                        {RPCResult::Type::NUM, "period", "the length in blocks of the signalling period"},
+                                        {RPCResult::Type::NUM, "threshold", /* optional */ true, "the number of blocks with the version bit set required to activate the feature (only for \"started\" status)"},
                                         {RPCResult::Type::NUM, "elapsed", "the number of blocks elapsed since the beginning of the current period"},
                                         {RPCResult::Type::NUM, "count", "the number of blocks with the version bit set in the current period"},
-                                        {RPCResult::Type::BOOL, "possible", "returns false if there are not enough blocks left in this period to pass activation threshold"},
+                                        {RPCResult::Type::BOOL, "possible", /* optional */ true, "returns false if there are not enough blocks left in this period to pass activation threshold (only for \"started\" status)"},
                                     }},
                                 }},
-                                {RPCResult::Type::NUM, "height", "height of the first block which the rules are or will be enforced (only for \"buried\" type, or \"bip9\" type with \"active\" status)"},
+                                {RPCResult::Type::NUM, "height", /* optional */ true, "height of the first block which the rules are or will be enforced (only for \"buried\" type, or \"bip9\" type with \"active\" status)"},
                                 {RPCResult::Type::BOOL, "active", "true if the rules are enforced for the mempool and the next block"},
                             }},
                         }},
@@ -1624,6 +1642,7 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1);
     obj.pushKV("bestblockhash",         tip->GetBlockHash().GetHex());
     obj.pushKV("difficulty",            (double)GetDifficulty(tip));
+    obj.pushKV("time",                  (int64_t)tip->nTime);
     obj.pushKV("mediantime",            (int64_t)tip->GetMedianTimePast());
     obj.pushKV("verificationprogress",  GuessVerificationProgress(Params().TxData(), tip));
     obj.pushKV("initialblockdownload",  active_chainstate.IsInitialBlockDownload());
@@ -1640,7 +1659,7 @@ RPCHelpMan getblockchaininfo()
         obj.pushKV("pruneheight",        block->nHeight);
 
         // if 0, execution bypasses the whole if block.
-        bool automatic_pruning = (gArgs.GetArg("-prune", 0) != 1);
+        bool automatic_pruning = (gArgs.GetIntArg("-prune", 0) != 1);
         obj.pushKV("automatic_pruning",  automatic_pruning);
         if (automatic_pruning) {
             obj.pushKV("prune_target_size",  nPruneTarget);
@@ -1648,14 +1667,14 @@ RPCHelpMan getblockchaininfo()
     }
     const Consensus::Params& consensusParams = Params().GetConsensus();
     UniValue softforks(UniValue::VOBJ);
-    BuriedForkDescPushBack(softforks, "bip34", consensusParams.BIP34Height, height);
-    BuriedForkDescPushBack(softforks, "bip66", consensusParams.BIP66Height, height);
-    BuriedForkDescPushBack(softforks, "bip65", consensusParams.BIP65Height, height);
-    BuriedForkDescPushBack(softforks, "csv", consensusParams.CSVHeight, height);
-    BuriedForkDescPushBack(softforks, "segwit", consensusParams.SegwitHeight, height);
-    BIP9SoftForkDescPushBack(tip, softforks, "testdummy", consensusParams, Consensus::DEPLOYMENT_TESTDUMMY);
-    BIP9SoftForkDescPushBack(tip, softforks, "taproot", consensusParams, Consensus::DEPLOYMENT_TAPROOT);
-    obj.pushKV("softforks",             softforks);
+    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_HEIGHTINCB);
+    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_DERSIG);
+    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_CLTV);
+    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_CSV);
+    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_SEGWIT);
+    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_TESTDUMMY);
+    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_TAPROOT);
+    obj.pushKV("softforks", softforks);
 
     obj.pushKV("warnings", GetWarnings(false).original);
     return obj;
@@ -1792,7 +1811,7 @@ UniValue MempoolInfoToJSON(const CTxMemPool& pool)
     ret.pushKV("bytes", (int64_t)pool.GetTotalTxSize());
     ret.pushKV("usage", (int64_t)pool.DynamicMemoryUsage());
     ret.pushKV("total_fee", ValueFromAmount(pool.GetTotalFee()));
-    size_t maxmempool = gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
+    size_t maxmempool = gArgs.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
     ret.pushKV("maxmempool", (int64_t) maxmempool);
     ret.pushKV("mempoolminfee", ValueFromAmount(std::max(pool.GetMinFee(maxmempool), ::minRelayTxFee).GetFeePerK()));
     ret.pushKV("minrelaytxfee", ValueFromAmount(::minRelayTxFee.GetFeePerK()));
@@ -1858,7 +1877,7 @@ static RPCHelpMan preciousblock()
     }
 
     BlockValidationState state;
-    chainman.ActiveChainstate().PreciousBlock(state, Params(), pblockindex);
+    chainman.ActiveChainstate().PreciousBlock(state, pblockindex);
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.ToString());
@@ -1895,10 +1914,10 @@ static RPCHelpMan invalidateblock()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
     }
-    chainman.ActiveChainstate().InvalidateBlock(state, Params(), pblockindex);
+    chainman.ActiveChainstate().InvalidateBlock(state, pblockindex);
 
     if (state.IsValid()) {
-        chainman.ActiveChainstate().ActivateBestChain(state, Params());
+        chainman.ActiveChainstate().ActivateBestChain(state);
     }
 
     if (!state.IsValid()) {
@@ -1940,7 +1959,7 @@ static RPCHelpMan reconsiderblock()
     // SYSCOIN do not re-validate eth txroots
     fLoaded = false;
     BlockValidationState state;
-    chainman.ActiveChainstate().ActivateBestChain(state, Params());
+    chainman.ActiveChainstate().ActivateBestChain(state);
     fLoaded = true;
 
     if (!state.IsValid()) {
@@ -1983,8 +2002,7 @@ static RPCHelpMan getchaintxstats()
     int blockcount = 30 * 24 * 60 * 60 / Params().GetConsensus().nPowTargetSpacing; // By default: 1 month
 
     if (request.params[1].isNull()) {
-        LOCK(cs_main);
-        pindex = chainman.ActiveChain().Tip();
+        pindex = WITH_LOCK(cs_main, return chainman.ActiveChain().Tip());
     } else {
         uint256 hash(ParseHashV(request.params[1], "blockhash"));
         LOCK(cs_main);
@@ -2082,9 +2100,9 @@ void ScriptPubKeyToUniv(const CScript& scriptPubKey, UniValue& out, bool fInclud
     ScriptPubKeyToUniv(scriptPubKey, out, fIncludeHex, IsDeprecatedRPCEnabled("addresses"));
 }
 
-void TxToUniv(const CTransaction& tx, const uint256& hashBlock, UniValue& entry, bool include_hex, int serialize_flags, const CTxUndo* txundo)
+void TxToUniv(const CTransaction& tx, const uint256& hashBlock, UniValue& entry, bool include_hex, int serialize_flags, const CTxUndo* txundo, TxVerbosity verbosity)
 {
-    TxToUniv(tx, hashBlock, IsDeprecatedRPCEnabled("addresses"), entry, include_hex, serialize_flags, txundo);
+    TxToUniv(tx, hashBlock, IsDeprecatedRPCEnabled("addresses"), entry, include_hex, serialize_flags, txundo, verbosity);
 }
 
 template<typename T>
@@ -2115,11 +2133,11 @@ static RPCHelpMan getblockstats()
                 RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::NUM, "avgfee", "Average fee in the block"},
-                {RPCResult::Type::NUM, "avgfeerate", "Average feerate (in satoshis per virtual byte)"},
-                {RPCResult::Type::NUM, "avgtxsize", "Average transaction size"},
-                {RPCResult::Type::STR_HEX, "blockhash", "The block hash (to check for potential reorgs)"},
-                {RPCResult::Type::ARR_FIXED, "feerate_percentiles", "Feerates at the 10th, 25th, 50th, 75th, and 90th percentile weight unit (in satoshis per virtual byte)",
+                {RPCResult::Type::NUM, "avgfee", /* optional */ true, "Average fee in the block"},
+                {RPCResult::Type::NUM, "avgfeerate", /* optional */ true, "Average feerate (in satoshis per virtual byte)"},
+                {RPCResult::Type::NUM, "avgtxsize", /* optional */ true, "Average transaction size"},
+                {RPCResult::Type::STR_HEX, "blockhash", /* optional */ true, "The block hash (to check for potential reorgs)"},
+                {RPCResult::Type::ARR_FIXED, "feerate_percentiles", /* optional */ true, "Feerates at the 10th, 25th, 50th, 75th, and 90th percentile weight unit (in satoshis per virtual byte)",
                 {
                     {RPCResult::Type::NUM, "10th_percentile_feerate", "The 10th percentile feerate"},
                     {RPCResult::Type::NUM, "25th_percentile_feerate", "The 25th percentile feerate"},
@@ -2127,30 +2145,30 @@ static RPCHelpMan getblockstats()
                     {RPCResult::Type::NUM, "75th_percentile_feerate", "The 75th percentile feerate"},
                     {RPCResult::Type::NUM, "90th_percentile_feerate", "The 90th percentile feerate"},
                 }},
-                {RPCResult::Type::NUM, "height", "The height of the block"},
-                {RPCResult::Type::NUM, "ins", "The number of inputs (excluding coinbase)"},
-                {RPCResult::Type::NUM, "maxfee", "Maximum fee in the block"},
-                {RPCResult::Type::NUM, "maxfeerate", "Maximum feerate (in satoshis per virtual byte)"},
-                {RPCResult::Type::NUM, "maxtxsize", "Maximum transaction size"},
-                {RPCResult::Type::NUM, "medianfee", "Truncated median fee in the block"},
-                {RPCResult::Type::NUM, "mediantime", "The block median time past"},
-                {RPCResult::Type::NUM, "mediantxsize", "Truncated median transaction size"},
-                {RPCResult::Type::NUM, "minfee", "Minimum fee in the block"},
-                {RPCResult::Type::NUM, "minfeerate", "Minimum feerate (in satoshis per virtual byte)"},
-                {RPCResult::Type::NUM, "mintxsize", "Minimum transaction size"},
-                {RPCResult::Type::NUM, "outs", "The number of outputs"},
-                {RPCResult::Type::NUM, "subsidy", "The block subsidy"},
-                {RPCResult::Type::NUM, "swtotal_size", "Total size of all segwit transactions"},
-                {RPCResult::Type::NUM, "swtotal_weight", "Total weight of all segwit transactions"},
-                {RPCResult::Type::NUM, "swtxs", "The number of segwit transactions"},
-                {RPCResult::Type::NUM, "time", "The block time"},
-                {RPCResult::Type::NUM, "total_out", "Total amount in all outputs (excluding coinbase and thus reward [ie subsidy + totalfee])"},
-                {RPCResult::Type::NUM, "total_size", "Total size of all non-coinbase transactions"},
-                {RPCResult::Type::NUM, "total_weight", "Total weight of all non-coinbase transactions"},
-                {RPCResult::Type::NUM, "totalfee", "The fee total"},
-                {RPCResult::Type::NUM, "txs", "The number of transactions (including coinbase)"},
-                {RPCResult::Type::NUM, "utxo_increase", "The increase/decrease in the number of unspent outputs"},
-                {RPCResult::Type::NUM, "utxo_size_inc", "The increase/decrease in size for the utxo index (not discounting op_return and similar)"},
+                {RPCResult::Type::NUM, "height", /* optional */ true, "The height of the block"},
+                {RPCResult::Type::NUM, "ins", /* optional */ true, "The number of inputs (excluding coinbase)"},
+                {RPCResult::Type::NUM, "maxfee", /* optional */ true, "Maximum fee in the block"},
+                {RPCResult::Type::NUM, "maxfeerate", /* optional */ true, "Maximum feerate (in satoshis per virtual byte)"},
+                {RPCResult::Type::NUM, "maxtxsize", /* optional */ true, "Maximum transaction size"},
+                {RPCResult::Type::NUM, "medianfee", /* optional */ true, "Truncated median fee in the block"},
+                {RPCResult::Type::NUM, "mediantime", /* optional */ true, "The block median time past"},
+                {RPCResult::Type::NUM, "mediantxsize", /* optional */ true, "Truncated median transaction size"},
+                {RPCResult::Type::NUM, "minfee", /* optional */ true, "Minimum fee in the block"},
+                {RPCResult::Type::NUM, "minfeerate", /* optional */ true, "Minimum feerate (in satoshis per virtual byte)"},
+                {RPCResult::Type::NUM, "mintxsize", /* optional */ true, "Minimum transaction size"},
+                {RPCResult::Type::NUM, "outs", /* optional */ true, "The number of outputs"},
+                {RPCResult::Type::NUM, "subsidy", /* optional */ true, "The block subsidy"},
+                {RPCResult::Type::NUM, "swtotal_size", /* optional */ true, "Total size of all segwit transactions"},
+                {RPCResult::Type::NUM, "swtotal_weight", /* optional */ true, "Total weight of all segwit transactions"},
+                {RPCResult::Type::NUM, "swtxs", /* optional */ true, "The number of segwit transactions"},
+                {RPCResult::Type::NUM, "time", /* optional */ true, "The block time"},
+                {RPCResult::Type::NUM, "total_out", /* optional */ true, "Total amount in all outputs (excluding coinbase and thus reward [ie subsidy + totalfee])"},
+                {RPCResult::Type::NUM, "total_size", /* optional */ true, "Total size of all non-coinbase transactions"},
+                {RPCResult::Type::NUM, "total_weight", /* optional */ true, "Total weight of all non-coinbase transactions"},
+                {RPCResult::Type::NUM, "totalfee", /* optional */ true, "The fee total"},
+                {RPCResult::Type::NUM, "txs", /* optional */ true, "The number of transactions (including coinbase)"},
+                {RPCResult::Type::NUM, "utxo_increase", /* optional */ true, "The increase/decrease in the number of unspent outputs"},
+                {RPCResult::Type::NUM, "utxo_size_inc", /* optional */ true, "The increase/decrease in size for the utxo index (not discounting op_return and similar)"},
             }},
                 RPCExamples{
                     HelpExampleCli("getblockstats", R"('"00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"' '["minfeerate","avgfeerate"]')") +
@@ -2215,8 +2233,8 @@ static RPCHelpMan getblockstats()
 
         CAmount tx_total_out = 0;
         if (loop_outputs) {
+            tx_total_out = tx->GetValueOut();
             for (const CTxOut& out : tx->vout) {
-                tx_total_out += out.nValue;
                 utxo_size_inc += GetSerializeSize(out, PROTOCOL_VERSION) + PER_UTXO_OVERHEAD;
             }
         }
@@ -2308,7 +2326,7 @@ static RPCHelpMan getblockstats()
     ret_all.pushKV("mintxsize", mintxsize == MAX_BLOCK_SERIALIZED_SIZE ? 0 : mintxsize);
     ret_all.pushKV("outs", outputs);
     // SYSCOIN
-    ret_all.pushKV("subsidy", GetBlockSubsidy(pindex->nHeight, Params()));
+    ret_all.pushKV("subsidy", GetBlockSubsidy(pindex->nHeight, Params().GetConsensus()));
     ret_all.pushKV("swtotal_size", swtotal_size);
     ret_all.pushKV("swtotal_weight", swtotal_weight);
     ret_all.pushKV("swtxs", swtxs);
@@ -2343,7 +2361,11 @@ static RPCHelpMan savemempool()
     return RPCHelpMan{"savemempool",
                 "\nDumps the mempool to disk. It will fail until the previous dump is fully loaded.\n",
                 {},
-                RPCResult{RPCResult::Type::NONE, "", ""},
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR, "filename", "the directory and file where the mempool was saved"},
+                    }},
                 RPCExamples{
                     HelpExampleCli("savemempool", "")
             + HelpExampleRpc("savemempool", "")
@@ -2351,6 +2373,8 @@ static RPCHelpMan savemempool()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     const CTxMemPool& mempool = EnsureAnyMemPool(request.context);
+
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
 
     if (!mempool.IsLoaded()) {
         throw JSONRPCError(RPC_MISC_ERROR, "The mempool was not loaded yet");
@@ -2360,7 +2384,10 @@ static RPCHelpMan savemempool()
         throw JSONRPCError(RPC_MISC_ERROR, "Unable to dump mempool to disk");
     }
 
-    return NullUniValue;
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("filename", fs::path((node.args->GetDataDirNet() / "mempool.dat")).u8string());
+
+    return ret;
 },
     };
 }
@@ -2413,6 +2440,7 @@ public:
         if (g_scan_in_progress.exchange(true)) {
             return false;
         }
+        CHECK_NONFATAL(g_scan_progress == 0);
         m_could_reserve = true;
         return true;
     }
@@ -2420,6 +2448,7 @@ public:
     ~CoinsViewScanReserver() {
         if (m_could_reserve) {
             g_scan_in_progress = false;
+            g_scan_progress = 0;
         }
     }
 };
@@ -2536,7 +2565,6 @@ static RPCHelpMan scantxoutset()
         std::vector<CTxOut> input_txos;
         std::map<COutPoint, Coin> coins;
         g_should_abort_scan = false;
-        g_scan_progress = 0;
         int64_t count = 0;
         std::unique_ptr<CCoinsViewCursor> pcursor;
         CBlockIndex* tip;
@@ -2546,7 +2574,7 @@ static RPCHelpMan scantxoutset()
             LOCK(cs_main);
             CChainState& active_chainstate = chainman.ActiveChainstate();
             active_chainstate.ForceFlushStateToDisk();
-            pcursor = std::unique_ptr<CCoinsViewCursor>(active_chainstate.CoinsDB().Cursor());
+            pcursor = active_chainstate.CoinsDB().Cursor();
             CHECK_NONFATAL(pcursor);
             tip = active_chainstate.m_chain.Tip();
             CHECK_NONFATAL(tip);
@@ -2699,19 +2727,19 @@ static RPCHelpMan dumptxoutset()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    const fs::path path = fsbridge::AbsPathJoin(GetDataDir(), request.params[0].get_str());
+    const fs::path path = fsbridge::AbsPathJoin(gArgs.GetDataDirNet(), fs::u8path(request.params[0].get_str()));
     // SYSCOIN
-    const fs::path pathjson = fsbridge::AbsPathJoin(GetDataDir(), request.params[0].get_str()+".json");
+    const fs::path pathjson = fsbridge::AbsPathJoin(gArgs.GetDataDirNet(), fs::u8path(request.params[0].get_str()+".json"));
     // Write to a temporary path and then move into `path` on completion
     // to avoid confusion due to an interruption.
-    const fs::path temppath = fsbridge::AbsPathJoin(GetDataDir(), request.params[0].get_str() + ".incomplete");
+    const fs::path temppath = fsbridge::AbsPathJoin(gArgs.GetDataDirNet(), fs::u8path(request.params[0].get_str() + ".incomplete"));
     // SYSCOIN
-    const fs::path temppathjson = fsbridge::AbsPathJoin(GetDataDir(), request.params[0].get_str() + ".incomplete.json");
+    const fs::path temppathjson = fsbridge::AbsPathJoin(gArgs.GetDataDirNet(), fs::u8path(request.params[0].get_str() + ".incomplete.json"));
 
     if (fs::exists(path)) {
         throw JSONRPCError(
             RPC_INVALID_PARAMETER,
-            path.string() + " already exists. If you are sure this is what you want, "
+            path.u8string() + " already exists. If you are sure this is what you want, "
             "move it out of the way first");
     }
 
@@ -2725,9 +2753,9 @@ static RPCHelpMan dumptxoutset()
     fclose(filejson);
     fs::rename(temppath, path);
     fs::rename(temppathjson, pathjson);
-    result.pushKV("path", path.string());
+    result.pushKV("path", path.u8string());
     // SYSCOIN
-    result.pushKV("pathjson", pathjson.string());
+    result.pushKV("pathjson", pathjson.u8string());
     return result;
 },
     };
@@ -2760,7 +2788,7 @@ UniValue CreateUTXOSnapshot(NodeContext& node, CChainState& chainstate, CAutoFil
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
         }
 
-        pcursor = std::unique_ptr<CCoinsViewCursor>(chainstate.CoinsDB().Cursor());
+        pcursor = chainstate.CoinsDB().Cursor();
         tip = chainstate.m_blockman.LookupBlockIndex(stats.hashBlock);
         CHECK_NONFATAL(tip);
     }

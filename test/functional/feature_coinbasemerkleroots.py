@@ -5,7 +5,7 @@
 from test_framework.p2p import P2PInterface, msg_getmnlistd, CBlockHeader
 from test_framework.test_framework import DashTestFramework
 from test_framework.util import assert_equal,force_finish_mnsync
-from test_framework.messages import FromHex, CMerkleBlock, ser_uint256, hash256, CBlock, QuorumId
+from test_framework.messages import from_hex, CMerkleBlock, ser_uint256, hash256, CBlock, QuorumId
 
 '''
 dip4-coinbasemerkleroots.py
@@ -83,7 +83,7 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
         #############################
         # Now start testing quorum commitment merkle roots
 
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
         oldhash = self.nodes[0].getbestblockhash()
         # Have to disable ChainLocks here because they won't let you to invalidate already locked blocks
         self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 4070908800)
@@ -221,7 +221,7 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
 
     def test_getmnlistdiff_base(self, baseBlockHash, blockHash):
         hexstr = self.nodes[0].getblockheader(blockHash, False)
-        header = FromHex(CBlockHeader(), hexstr)
+        header = from_hex(CBlockHeader(), hexstr)
 
         d = self.test_node.getmnlistdiff(int(baseBlockHash, 16), int(blockHash, 16))
         assert_equal(d.baseBlockHash, int(baseBlockHash, 16))
@@ -260,13 +260,13 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
         cbtx = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 2)["tx"][0]
         assert(cbtx["cbTx"]["version"] == 2)
 
-        self.nodes[0].generatetoaddress(nblocks=1, address=self.nodes[0].getnewaddress(label='coinbase'))
+        self.generatetoaddress(self.nodes[0], nblocks=1, address=self.nodes[0].getnewaddress(label='coinbase'))
         # NOTE: set slow_mode=True if you are activating dip8 after a huge reorg
         # or nodes might fail to catch up otherwise due to a large
         # (MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16 blocks) reorg error.
         self.log.info("Wait for dip0008 activation")
         while self.nodes[0].getblockcount() < 200:
-            self.nodes[0].generate(10)
+            self.generate(self.nodes[0], 10)
             if slow_mode:
                 self.sync_blocks()
         self.sync_blocks()

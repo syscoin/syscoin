@@ -57,16 +57,16 @@ CoinControlDialog::CoinControlDialog(CCoinControl& coin_control, WalletModel* _m
 
     // context menu
     contextMenu = new QMenu(this);
-    contextMenu->addAction(tr("Copy address"), this, &CoinControlDialog::copyAddress);
-    contextMenu->addAction(tr("Copy label"), this, &CoinControlDialog::copyLabel);
-    contextMenu->addAction(tr("Copy amount"), this, &CoinControlDialog::copyAmount);
-    copyTransactionHashAction = contextMenu->addAction(tr("Copy transaction ID"), this, &CoinControlDialog::copyTransactionHash);
+    contextMenu->addAction(tr("&Copy address"), this, &CoinControlDialog::copyAddress);
+    contextMenu->addAction(tr("Copy &label"), this, &CoinControlDialog::copyLabel);
+    contextMenu->addAction(tr("Copy &amount"), this, &CoinControlDialog::copyAmount);
+    m_copy_transaction_outpoint_action = contextMenu->addAction(tr("Copy transaction &ID and output index"), this, &CoinControlDialog::copyTransactionOutpoint);
     // SYSCOIN
     contextMenu->addAction(tr("Copy asset amount"), this, &CoinControlDialog::copyAmountAsset);
     contextMenu->addAction(tr("Copy asset"), this, &CoinControlDialog::copyAsset);
     contextMenu->addSeparator();
-    lockAction = contextMenu->addAction(tr("Lock unspent"), this, &CoinControlDialog::lockCoin);
-    unlockAction = contextMenu->addAction(tr("Unlock unspent"), this, &CoinControlDialog::unlockCoin);
+    lockAction = contextMenu->addAction(tr("L&ock unspent"), this, &CoinControlDialog::lockCoin);
+    unlockAction = contextMenu->addAction(tr("&Unlock unspent"), this, &CoinControlDialog::unlockCoin);
     connect(ui->treeWidget, &QWidget::customContextMenuRequested, this, &CoinControlDialog::showMenu);
 
     // clipboard actions
@@ -197,7 +197,7 @@ void CoinControlDialog::showMenu(const QPoint &point)
         // disable some items (like Copy Transaction ID, lock, unlock) for tree roots in context menu
         else if (item->data(COLUMN_ADDRESS, TxHashRole).toString().length() == 64) // transaction hash is 64 characters (this means it is a child node, so it is not a parent node in tree mode)
         {
-            copyTransactionHashAction->setEnabled(true);
+            m_copy_transaction_outpoint_action->setEnabled(true);
             if (model->wallet().isLockedCoin(COutPoint(uint256S(item->data(COLUMN_ADDRESS, TxHashRole).toString().toStdString()), item->data(COLUMN_ADDRESS, VOutRole).toUInt())))
             {
                 lockAction->setEnabled(false);
@@ -211,7 +211,7 @@ void CoinControlDialog::showMenu(const QPoint &point)
         }
         else // this means click on parent node in tree mode -> disable all
         {
-            copyTransactionHashAction->setEnabled(false);
+            m_copy_transaction_outpoint_action->setEnabled(false);
             lockAction->setEnabled(false);
             unlockAction->setEnabled(false);
         }
@@ -257,10 +257,14 @@ void CoinControlDialog::copyAddress()
         GUIUtil::setClipboard(contextMenuItem->text(COLUMN_ADDRESS));
 }
 
-// context menu action: copy transaction id
-void CoinControlDialog::copyTransactionHash()
+// context menu action: copy transaction id and vout index
+void CoinControlDialog::copyTransactionOutpoint()
 {
-    GUIUtil::setClipboard(contextMenuItem->data(COLUMN_ADDRESS, TxHashRole).toString());
+    const QString address = contextMenuItem->data(COLUMN_ADDRESS, TxHashRole).toString();
+    const QString vout = contextMenuItem->data(COLUMN_ADDRESS, VOutRole).toString();
+    const QString outpoint = QString("%1:%2").arg(address).arg(vout);
+
+    GUIUtil::setClipboard(outpoint);
 }
 
 // context menu action: lock coin
@@ -270,7 +274,7 @@ void CoinControlDialog::lockCoin()
         contextMenuItem->setCheckState(COLUMN_CHECKBOX, Qt::Unchecked);
 
     COutPoint outpt(uint256S(contextMenuItem->data(COLUMN_ADDRESS, TxHashRole).toString().toStdString()), contextMenuItem->data(COLUMN_ADDRESS, VOutRole).toUInt());
-    model->wallet().lockCoin(outpt);
+    model->wallet().lockCoin(outpt, /* write_to_db = */ true);
     contextMenuItem->setDisabled(true);
     contextMenuItem->setIcon(COLUMN_CHECKBOX, platformStyle->SingleColorIcon(":/icons/lock_closed"));
     updateLabelLocked();
@@ -588,6 +592,15 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
     QLabel *label = dialog->findChild<QLabel *>("labelCoinControlInsuffFunds");
     if (label)
         label->setVisible(nChange < 0);
+}
+
+void CoinControlDialog::changeEvent(QEvent* e)
+{
+    if (e->type() == QEvent::PaletteChange) {
+        updateView();
+    }
+
+    QDialog::changeEvent(e);
 }
 
 void CoinControlDialog::updateView()

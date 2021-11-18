@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2017-2020 The Bitcoin Core developers
+# Copyright (c) 2017-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test message sending before handshake completion.
@@ -28,6 +28,8 @@ from test_framework.util import (
     assert_equal,
     assert_greater_than_or_equal,
 )
+
+PEER_TIMEOUT = 3
 
 
 class LazyPeer(P2PInterface):
@@ -98,7 +100,7 @@ class P2PVersionStore(P2PInterface):
 class P2PLeakTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [['-peertimeout=4']]
+        self.extra_args = [[f"-peertimeout={PEER_TIMEOUT}"]]
 
     def create_old_version(self, nversion):
         old_version_msg = msg_version()
@@ -131,10 +133,10 @@ class P2PLeakTest(SyscoinTestFramework):
         pre_wtxidrelay_peer.wait_until(lambda: pre_wtxidrelay_peer.version_received)
 
         # Mine a block and make sure that it's not sent to the connected peers
-        self.nodes[0].generate(nblocks=1)
+        self.generate(self.nodes[0], nblocks=1)
 
         # Give the node enough time to possibly leak out a message
-        time.sleep(5)
+        time.sleep(PEER_TIMEOUT + 2)
 
         # Make sure only expected messages came in
         assert not no_version_idle_peer.unexpected_msg

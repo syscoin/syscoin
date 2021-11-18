@@ -7,9 +7,9 @@
 # Test deterministic masternodes
 #
 from test_framework.blocktools import create_block, create_coinbase, get_masternode_payment, add_witness_commitment
-from test_framework.messages import CTransaction, ToHex, FromHex, CCbTx, COIN, CTxOut
+from test_framework.messages import CTransaction, from_hex, CCbTx, COIN, CTxOut
 from test_framework.test_framework import SyscoinTestFramework
-from test_framework.util import p2p_port, Decimal, force_finish_mnsync, assert_equal, hex_str_to_bytes, MAX_INITIAL_BROADCAST_DELAY
+from test_framework.util import p2p_port, Decimal, force_finish_mnsync, assert_equal, MAX_INITIAL_BROADCAST_DELAY
 class Masternode(object):
     pass
 
@@ -50,7 +50,7 @@ class DIP3Test(SyscoinTestFramework):
             self.nodes[0].createwallet(self.default_wallet_name)
         self.log.info("funding controller node")
         while self.nodes[0].getbalance() < (self.num_initial_mn + 3) * 100:
-            self.nodes[0].generatetoaddress(10, self.nodes[0].getnewaddress()) # generate enough for collaterals
+            self.generatetoaddress(self.nodes[0], 10, self.nodes[0].getnewaddress()) # generate enough for collaterals
         self.log.info("controller node has {} syscoin".format(self.nodes[0].getbalance()))
 
         # Make sure we're below block 432 (which activates dip3)
@@ -66,11 +66,11 @@ class DIP3Test(SyscoinTestFramework):
         mns.append(before_dip3_mn)
 
         # block 432 starts enforcing DIP3 MN payments
-        self.nodes[0].generate(432 - self.nodes[0].getblockcount())
+        self.generate(self.nodes[0], 432 - self.nodes[0].getblockcount())
         assert(self.nodes[0].getblockcount() == 432)
 
         self.log.info("mining final block for DIP3 activation")
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
 
         # We have hundreds of blocks to sync here, give it more time
         self.log.info("syncing blocks for all nodes")
@@ -102,7 +102,7 @@ class DIP3Test(SyscoinTestFramework):
                 self.log.info("register %s" % mn.alias)
                 self.register_mn(self.nodes[0], mn)
 
-            self.nodes[0].generate(1)
+            self.generate(self.nodes[0], 1)
 
             if not start:
                 self.start_mn(mn)
@@ -117,8 +117,7 @@ class DIP3Test(SyscoinTestFramework):
         for i in range(spend_mns_count):
             dummy_txin = self.spend_mn_collateral(mns[i], with_dummy_input_output=True)
             dummy_txins.append(dummy_txin)
-            self.nodes[0].generate(1)
-            self.sync_all()
+            self.generate(self.nodes[0], 1)
             mns_tmp.remove(mns[i])
             self.assert_mnlists(mns_tmp)
 
@@ -130,16 +129,14 @@ class DIP3Test(SyscoinTestFramework):
 
         self.log.info("cause a reorg with a double spend and check that mnlists are still correct on all nodes")
         self.mine_double_spend(self.nodes[0], dummy_txins, self.nodes[0].getnewaddress(), use_mnmerkleroot_from_tip=True)
-        self.nodes[0].generate(spend_mns_count)
-        self.sync_all()
+        self.generate(self.nodes[0], spend_mns_count)
         self.assert_mnlists(mns_tmp)
 
         self.log.info("test mn payment enforcement with deterministic MNs")
         for i in range(20):
             node = self.nodes[i % len(self.nodes)]
             self.test_invalid_mn_payment(node)
-            self.nodes[0].generate(1)
-            self.sync_all()
+            self.generate(self.nodes[0], 1)
 
         self.log.info("testing ProUpServTx")
         for mn in mns:
@@ -161,8 +158,7 @@ class DIP3Test(SyscoinTestFramework):
             bt = self.nodes[0].getblocktemplate({'rules': ['segwit']})
             expected_payee = bt['masternode'][0]['payee']
             expected_amount = bt['masternode'][0]['amount']
-            self.nodes[0].generate(1)
-            self.sync_all()
+            self.generate(self.nodes[0], 1)
             if expected_payee == multisig:
                 block = self.nodes[0].getblock(self.nodes[0].getbestblockhash())
                 cbtx = self.nodes[0].getrawtransaction(block['tx'][0], 1, self.nodes[0].getbestblockhash())
@@ -184,8 +180,7 @@ class DIP3Test(SyscoinTestFramework):
 
             self.register_mn(self.nodes[0], new_mn)
             mns[i] = new_mn
-            self.nodes[0].generate(1)
-            self.sync_all()
+            self.generate(self.nodes[0], 1)
             self.assert_mnlists(mns)
             self.log.info("restarting MN %s" % new_mn.alias)
             self.stop_node(new_mn.idx)
@@ -203,8 +198,7 @@ class DIP3Test(SyscoinTestFramework):
         # also check if funds from payout address are used when no fee source address is specified
         node.sendtoaddress(mn.rewards_address, 0.001)
         node.protx_update_registrar(mn.protx_hash, "", new_voting_address, "")
-        node.generate(1)
-        self.sync_all()
+        self.generate(node, 1)
         new_dmnState = mn.node.masternode_status()["dmnState"]
         new_voting_address_from_rpc = new_dmnState["votingAddress"]
         assert(new_voting_address_from_rpc == new_voting_address)
@@ -231,7 +225,7 @@ class DIP3Test(SyscoinTestFramework):
         mn.collateral_address = node.getnewaddress()
         mn.collateral_txid = node.sendtoaddress(mn.collateral_address, 100)
         mn.collateral_vout = -1
-        node.generate(1)
+        self.generate(node, 1)
 
         rawtx = node.getrawtransaction(mn.collateral_txid, 1)
         for txout in rawtx['vout']:
@@ -263,7 +257,7 @@ class DIP3Test(SyscoinTestFramework):
         mn.rewards_address = node.getnewaddress()
 
         mn.protx_hash = node.protx_register(mn.collateral_txid, mn.collateral_vout, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, mn.operatorAddr, mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
-        node.generate(1)
+        self.generate(node, 1)
 
     def start_mn(self, mn):
         start_idx = len(self.nodes) - 1
@@ -285,16 +279,14 @@ class DIP3Test(SyscoinTestFramework):
     def update_mn_payee(self, mn, payee):
         self.nodes[0].sendtoaddress(mn.fundsAddr, 0.001)
         self.nodes[0].protx_update_registrar(mn.protx_hash, '', '', payee, mn.fundsAddr)
-        self.nodes[0].generate(1)
-        self.sync_all()
+        self.generate(self.nodes[0], 1)
         info = self.nodes[0].protx_info(mn.protx_hash)
         assert(info['state']['payoutAddress'] == payee)
 
     def test_protx_update_service(self, mn):
         self.nodes[0].sendtoaddress(mn.fundsAddr, 0.001)
         self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, "", mn.fundsAddr)
-        self.nodes[0].generate(1)
-        self.sync_all()
+        self.generate(self.nodes[0], 1)
         for node in self.nodes:
             protx_info = node.protx_info( mn.protx_hash)
             mn_list = node.masternode_list()
@@ -303,7 +295,7 @@ class DIP3Test(SyscoinTestFramework):
 
         # undo
         self.nodes[0].protx_update_service(mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port, mn.blsMnkey, "", mn.fundsAddr)
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1)
 
     def assert_mnlists(self, mns):
         for node in self.nodes:
@@ -394,22 +386,22 @@ class DIP3Test(SyscoinTestFramework):
         miner_amount += new_fees/2
 
         coinbase = CTransaction()
-        coinbase.vout.append(CTxOut(int(miner_amount), hex_str_to_bytes(miner_script)))
-        coinbase.vout.append(CTxOut(int(mn_amount), hex_str_to_bytes(mn_payee)))
+        coinbase.vout.append(CTxOut(int(miner_amount), bytes.fromhex(miner_script)))
+        coinbase.vout.append(CTxOut(int(mn_amount), bytes.fromhex(mn_payee)))
         coinbase.vin = create_coinbase(height).vin
 
         # Recreate mn root as using one in BT would result in invalid merkle roots for masternode lists
         coinbase.nVersion = bt['version_coinbase']
         if len(bt['default_witness_commitment_extra']) != 0:
             if use_mnmerkleroot_from_tip:
-                cbtx = FromHex(CCbTx(version=2), bt['default_witness_commitment_extra'])
+                cbtx = from_hex(CCbTx(version=2), bt['default_witness_commitment_extra'])
                 if 'cbTx' in tip_block:
                     cbtx.merkleRootMNList = int(tip_block['cbTx']['merkleRootMNList'], 16)
                 else:
                     cbtx.merkleRootMNList = 0
                 coinbase.extraData = cbtx.serialize()
             else:
-                coinbase.extraData = hex_str_to_bytes(bt['default_witness_commitment_extra'])
+                coinbase.extraData = bytes.fromhex(bt['default_witness_commitment_extra'])
 
         coinbase.calc_sha256(with_witness=True)
 
@@ -419,7 +411,7 @@ class DIP3Test(SyscoinTestFramework):
         block.hashMerkleRoot = block.calc_merkle_root()
         add_witness_commitment(block)
         block.solve()
-        result = node.submitblock(ToHex(block))
+        result = node.submitblock(block.serialize().hex())
         if expected_error is not None and result != expected_error:
             raise AssertionError('mining the block should have failed with error %s, but submitblock returned %s' % (expected_error, result))
         elif expected_error is None and result is not None:
@@ -434,7 +426,7 @@ class DIP3Test(SyscoinTestFramework):
 
         rawtx = node.createrawtransaction(txins, {target_address: amount})
         rawtx = node.signrawtransactionwithwallet(rawtx)['hex']
-        tx = FromHex(CTransaction(), rawtx)
+        tx = from_hex(CTransaction(), rawtx)
 
         self.mine_block(node, [tx], use_mnmerkleroot_from_tip=use_mnmerkleroot_from_tip)
 

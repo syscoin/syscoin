@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2018-2020 The Bitcoin Core developers
+# Copyright (c) 2018-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test syscoin-wallet."""
@@ -31,8 +31,8 @@ class ToolWalletTest(SyscoinTestFramework):
     def syscoin_wallet_process(self, *args):
         binary = self.config["environment"]["BUILDDIR"] + '/src/syscoin-wallet' + self.config["environment"]["EXEEXT"]
         default_args = ['-datadir={}'.format(self.nodes[0].datadir), '-chain=%s' % self.chain]
-        if self.options.descriptors and 'create' in args:
-            default_args.append('-descriptors')
+        if not self.options.descriptors and 'create' in args:
+            default_args.append('-legacy')
 
         return subprocess.Popen([binary] + default_args + list(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
 
@@ -193,7 +193,7 @@ class ToolWalletTest(SyscoinTestFramework):
         locked_dir = os.path.join(self.options.tmpdir, "node0", "regtest", "wallets")
         error = 'Error initializing wallet database environment "{}"!'.format(locked_dir)
         if self.options.descriptors:
-            error = "SQLiteDatabase: Unable to obtain an exclusive lock on the database, is it being used by another syscoind?"
+            error = f"SQLiteDatabase: Unable to obtain an exclusive lock on the database, is it being used by another instance of {self.config['environment']['PACKAGE_NAME']}?"
         self.assert_raises_tool_error(
             error,
             '-wallet=' + self.default_wallet_name,
@@ -242,7 +242,7 @@ class ToolWalletTest(SyscoinTestFramework):
         """
         self.start_node(0)
         self.log.info('Generating transaction to mutate wallet')
-        self.nodes[0].generate(1)
+        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.stop_node(0)
 
         self.log.info('Calling wallet tool info after generating a transaction, testing output')
@@ -344,7 +344,7 @@ class ToolWalletTest(SyscoinTestFramework):
         non_exist_dump = os.path.join(self.nodes[0].datadir, "wallet.nodump")
         self.assert_raises_tool_error('Unknown wallet file format "notaformat" provided. Please provide one of "bdb" or "sqlite".', '-wallet=todump', '-format=notaformat', '-dumpfile={}'.format(wallet_dump), 'createfromdump')
         self.assert_raises_tool_error('Dump file {} does not exist.'.format(non_exist_dump), '-wallet=todump', '-dumpfile={}'.format(non_exist_dump), 'createfromdump')
-        wallet_path = os.path.join(self.nodes[0].datadir, 'regtest/wallets/todump2')
+        wallet_path = os.path.join(self.nodes[0].datadir, 'regtest', 'wallets', 'todump2')
         self.assert_raises_tool_error('Failed to create database path \'{}\'. Database already exists.'.format(wallet_path), '-wallet=todump2', '-dumpfile={}'.format(wallet_dump), 'createfromdump')
         self.assert_raises_tool_error("The -descriptors option can only be used with the 'create' command.", '-descriptors', '-wallet=todump2', '-dumpfile={}'.format(wallet_dump), 'createfromdump')
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2020 The Bitcoin Core developers
+# Copyright (c) 2014-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the wallet accounts properly when there is a double-spend conflict."""
@@ -82,8 +82,7 @@ class TxnMallTest(SyscoinTestFramework):
 
         # Have node0 mine a block:
         if (self.options.mine_block):
-            self.nodes[0].generate(1)
-            self.sync_blocks(self.nodes[0:2])
+            self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_blocks(self.nodes[0:2]))
 
         tx1 = self.nodes[0].gettransaction(txid1)
         tx2 = self.nodes[0].gettransaction(txid2)
@@ -111,12 +110,11 @@ class TxnMallTest(SyscoinTestFramework):
         self.nodes[2].sendrawtransaction(fund_bar_tx["hex"])
         doublespend_txid = self.nodes[2].sendrawtransaction(doublespend["hex"])
         # ... mine a block...
-        self.nodes[2].generate(1)
+        self.generate(self.nodes[2], 1, sync_fun=self.no_op)
 
         # Reconnect the split network, and sync chain:
         self.connect_nodes(1, 2)
-        self.nodes[2].generate(1)  # Mine another block to make sure we sync
-        self.sync_blocks()
+        self.generate(self.nodes[2], 1)  # Mine another block to make sure we sync
         assert_equal(self.nodes[0].gettransaction(doublespend_txid)["confirmations"], 2)
 
         # Re-fetch transaction info:

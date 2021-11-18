@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2020 The Bitcoin Core developers
+# Copyright (c) 2015-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test behavior of -maxuploadtarget.
@@ -37,9 +37,8 @@ class MaxUploadTest(SyscoinTestFramework):
         self.num_nodes = 1
         # SYSCOIN
         self.extra_args = [[
-            "-maxuploadtarget=32000",
+            "-maxuploadtarget=800",
             "-acceptnonstdtxn=1",
-            "-peertimeout=9999",  # bump because mocktime might cause a disconnect otherwise
         ]]
         self.supports_cli = False
 
@@ -57,7 +56,7 @@ class MaxUploadTest(SyscoinTestFramework):
         self.nodes[0].setmocktime(old_time)
 
         # Generate some old blocks
-        self.nodes[0].generate(130)
+        self.generate(self.nodes[0], 130)
 
         # p2p_conns[0] will only request old blocks
         # p2p_conns[1] will only request new blocks
@@ -68,7 +67,7 @@ class MaxUploadTest(SyscoinTestFramework):
             p2p_conns.append(self.nodes[0].add_p2p_connection(TestP2PConn()))
 
         # Now mine a big block
-        mine_large_block(self.nodes[0], self.utxo_cache)
+        mine_large_block(self, self.nodes[0], self.utxo_cache)
 
         # Store the hash; we'll request this later
         big_old_block = self.nodes[0].getbestblockhash()
@@ -79,7 +78,7 @@ class MaxUploadTest(SyscoinTestFramework):
         self.nodes[0].setmocktime(int(time.time()) - 2*60*60*24)
 
         # Mine one more block, so that the prior block looks old
-        mine_large_block(self.nodes[0], self.utxo_cache)
+        mine_large_block(self, self.nodes[0], self.utxo_cache)
 
         # We'll be requesting this new block too
         big_new_block = self.nodes[0].getbestblockhash()
@@ -91,11 +90,9 @@ class MaxUploadTest(SyscoinTestFramework):
         getdata_request = msg_getdata()
         getdata_request.inv.append(CInv(MSG_BLOCK, big_old_block))
         # SYSCOIN
-        max_bytes_per_day = 32000*1024*1024
-        daily_buffer = 1440 * 16000000
-        max_bytes_available = max_bytes_per_day - daily_buffer
+        max_bytes_per_day = 800*1024*1024
+        max_bytes_available = max_bytes_per_day - 1
         success_count = max_bytes_available // old_block_size
-
         # 576MB will be reserved for relaying new blocks, so expect this to
         # succeed for ~235 tries.
         for i in range(success_count):

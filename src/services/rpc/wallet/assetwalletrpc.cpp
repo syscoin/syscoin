@@ -9,7 +9,6 @@
 #include <rpc/util.h>
 #include <rpc/blockchain.h>
 #include <wallet/rpcwallet.h>
-#include <wallet/wallet.h>
 #include <wallet/fees.h>
 #include <policy/policy.h>
 #include <consensus/validation.h>
@@ -26,6 +25,8 @@
 #include <services/rpc/assetrpc.h>
 #include <messagesigner.h>
 #include <rpc/rawtransaction_util.h>
+#include <nevm/sha3.h>
+#include <wallet/spend.h>
 extern std::string EncodeDestination(const CTxDestination& dest);
 extern CTxDestination DecodeDestination(const std::string& str);
 UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vector<CRecipient> &recipients, mapValue_t map_value, bool verbose);
@@ -99,13 +100,13 @@ bool AssetWtxToJSON(const CWalletTx &wtx, const CAssetCoinInfo &assetInfo, const
 bool AssetAllocationWtxToJSON(const CWalletTx &wtx, const CAssetCoinInfo &assetInfo, const std::string &strCategory, UniValue &entry) {
     if(!AllocationWtxToJson(wtx, assetInfo, strCategory, entry))
         return false;
-    if(wtx.tx->nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM){
+    if(wtx.tx->nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM){
          CBurnSyscoin burnSyscoin (*wtx.tx);
          if (!burnSyscoin.IsNull()) {
             CAsset dbAsset;
             GetAsset(GetBaseAssetID(assetInfo.nAsset), dbAsset);
-            entry.__pushKV("ethereum_destination", "0x" + HexStr(burnSyscoin.vchEthAddress));
-            entry.__pushKV("ethereum_contract", "0x" + HexStr(dbAsset.vchContract));
+            entry.__pushKV("nevm_destination", "0x" + HexStr(burnSyscoin.vchNEVMAddress));
+            entry.__pushKV("nevm_contract", "0x" + HexStr(dbAsset.vchContract));
             return true;
          }
          return false;
@@ -118,15 +119,15 @@ bool AssetMintWtxToJson(const CWalletTx &wtx, const CAssetCoinInfo &assetInfo, c
     CMintSyscoin mintSyscoin(*wtx.tx);
     if (!mintSyscoin.IsNull()) {
         UniValue oSPVProofObj(UniValue::VOBJ);
-        oSPVProofObj.__pushKV("bridgetransferid", mintSyscoin.nBridgeTransferID);  
+        oSPVProofObj.__pushKV("txhash", mintSyscoin.nTxHash.GetHex());  
+        oSPVProofObj.__pushKV("blockhash", mintSyscoin.nBlockHash.GetHex());  
         oSPVProofObj.__pushKV("postx", mintSyscoin.posTx);
-        oSPVProofObj.__pushKV("txroot", HexStr(mintSyscoin.vchTxRoot));
+        oSPVProofObj.__pushKV("txroot", mintSyscoin.nTxRoot.GetHex());
         oSPVProofObj.__pushKV("txparentnodes", HexStr(mintSyscoin.vchTxParentNodes)); 
         oSPVProofObj.__pushKV("txpath", HexStr(mintSyscoin.vchTxPath));
         oSPVProofObj.__pushKV("posReceipt", mintSyscoin.posReceipt); 
-        oSPVProofObj.__pushKV("receiptroot", HexStr(mintSyscoin.vchReceiptRoot));  
+        oSPVProofObj.__pushKV("receiptroot", mintSyscoin.nReceiptRoot.GetHex());  
         oSPVProofObj.__pushKV("receiptparentnodes", HexStr(mintSyscoin.vchReceiptParentNodes)); 
-        oSPVProofObj.__pushKV("ethblocknumber", mintSyscoin.nBlockNumber); 
         entry.__pushKV("spv_proof", oSPVProofObj); 
         UniValue oAssetAllocationReceiversArray(UniValue::VARR);
         for(const auto &it: mintSyscoin.voutAssets) {
@@ -295,6 +296,10 @@ static RPCHelpMan syscoinburntoassetallocation()
         {
             {"asset_guid", RPCArg::Type::STR, RPCArg::Optional::NO, "Asset guid of SYSX"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of SYS to burn."},
+            {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+            {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+                        "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+                        "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -319,20 +324,29 @@ static RPCHelpMan syscoinburntoassetallocation()
     EnsureWalletIsUnlocked(*pwallet);
     uint64_t nAsset;
     if(!ParseUInt64(params[0].get_str(), &nAsset))
-        throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse asset_guid");        	
-	CAssetAllocation theAssetAllocation;
+        throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse asset_guid");     
+   	
+    CAssetAllocation theAssetAllocation;
 	CAsset theAsset;
 	if (!GetAsset(GetBaseAssetID(nAsset), theAsset))
 		throw JSONRPCError(RPC_DATABASE_ERROR, "Could not find a asset with this key");
 
-    if (!pwallet->CanGetAddresses()) {
+    std::string fChangeAddress = "";
+    if(!params[2].isNull()) {
+        fChangeAddress = params[2].get_str();
+    }
+    bool fAllowWatchOnly = false;
+    if(!params[3].isNull()) {
+        fAllowWatchOnly = params[3].get_bool();
+    }
+    if (fChangeAddress.empty() && !pwallet->CanGetAddresses()) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: This wallet has no available keys");
     }
 
     CTxDestination dest;
-    std::string errorStr;
-    if (!pwallet->GetNewChangeDestination(pwallet->m_default_address_type, dest, errorStr)) {
-        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr);
+    bilingual_str errorStr;
+    if (fChangeAddress.empty() && !pwallet->GetNewChangeDestination(pwallet->m_default_address_type, dest, errorStr)) {
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr.original);
     }
 
     const CScript& scriptPubKey = GetScriptForDestination(dest);
@@ -340,7 +354,6 @@ static RPCHelpMan syscoinburntoassetallocation()
     CRecipient recp = {scriptPubKey, GetDustThreshold(change_prototype_txout, GetDiscardRate(*pwallet)), false };
 
 
-    CMutableTransaction mtx;
     CAmount nAmount;
     try{
         nAmount = AssetAmountFromValue(params[1], theAsset.nPrecision);
@@ -366,21 +379,47 @@ static RPCHelpMan syscoinburntoassetallocation()
     CCoinControl coin_control;
     coin_control.m_include_unsafe_inputs = true;
     coin_control.m_signal_bip125_rbf = pwallet->m_signal_rbf;
+    coin_control.fAllowWatchOnly = fAllowWatchOnly;
+    if(!fChangeAddress.empty()) {
+        coin_control.destChange = DecodeDestination(fChangeAddress);
+        if (!IsValidDestination(coin_control.destChange)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid change address");
+        }
+    }
     int nChangePosRet = -1;
     bilingual_str error;
     CAmount nFeeRequired = 0;
     CTransactionRef tx;
     FeeCalculation fee_calc_out;
-    if (!pwallet->CreateTransaction(vecSend, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, true /* sign*/, SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION)) {
+    if (!CreateTransaction(*pwallet, vecSend, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, false /* sign*/, SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION)) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
     }
+    CMutableTransaction mtx(*tx);
+    // Script verification errors
+    std::map<int, bilingual_str> input_errors;
+    // Fetch previous transactions (inputs):
+    std::map<COutPoint, Coin> coins;
+    for (const CTxIn& txin : mtx.vin) {
+        coins[txin.prevout]; // Create empty map entry keyed by prevout.
+    }
+    pwallet->chain().findCoins(coins);
+    bool complete = pwallet->SignTransaction(mtx, coins, SIGHASH_ALL, input_errors);
+    if(!complete) {
+        UniValue result(UniValue::VOBJ);
+        SignTransactionResultToJSON(mtx, complete, coins, input_errors, result);
+        return result;
+    }
+    // need to reload asset as notary signature may have gotten added and this is needed in voutAssets so consensus validation passes for notary check
+    mtx.LoadAssets();
+    tx = (MakeTransactionRef(std::move(mtx)));
     std::string err_string;
     AssertLockNotHeld(cs_main);
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    const TransactionError err = BroadcastTransaction(node, tx, err_string, DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), /*relay*/ true, /*wait_callback*/ false);
-    if (TransactionError::OK != err) {
-        throw JSONRPCTransactionError(err, err_string);
+    int64_t virtual_size = GetVirtualTransactionSize(*tx);
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
+    if (!pwallet->chain().broadcastTransaction(tx, max_raw_tx_fee, true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, err_string);
     }
+
     UniValue res(UniValue::VOBJ);
     res.__pushKV("txid", tx->GetHash().GetHex());
     return res;
@@ -397,7 +436,7 @@ RPCHelpMan assetnew()
         {"funding_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Fund resulting UTXO owning the asset by this much SYS for gas."},
         {"symbol", RPCArg::Type::STR, RPCArg::Optional::NO, "Asset symbol (1-8 characters)"},
         {"description", RPCArg::Type::STR, RPCArg::Optional::NO, "Public description of the token."},
-        {"contract", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Ethereum token contract for SyscoinX bridge. Must be in hex and not include the '0x' format tag. For example contract '0xb060ddb93707d2bc2f8bcc39451a5a28852f8d1d' should be set as 'b060ddb93707d2bc2f8bcc39451a5a28852f8d1d'. Leave empty for no smart contract bridge."},
+        {"contract", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "NEVM token contract for SyscoinX bridge. Leave empty for no smart contract bridge."},
         {"precision", RPCArg::Type::NUM, RPCArg::Optional::NO, "Precision of balances. Must be between 0 and 8. The lower it is the higher possible max_supply is available since the supply is represented as a 64 bit integer. With a precision of 8 the max supply is 10 billion."},
         {"max_supply", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Maximum supply of this asset. Depends on the precision value that is set, the lower the precision the higher max_supply can be."},
         {"updatecapability_flags", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Ability to update certain fields. Must be decimal value which is a bitmask for certain rights to update. The bitmask 1 represents the ability to update public data field, 2 for updating the smart contract field, 4 for updating supply, 8 for updating notary address, 16 for updating notary details, 32 for updating auxfee details, 64 for ability to update the capability flags (this field). 127 for all. 0 for none (not updatable)."},
@@ -420,7 +459,11 @@ RPCHelpMan assetnew()
                     },
                 }
             }
-        }
+        },
+        {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+        {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+            "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+            "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
 
     },
     RPCResult{
@@ -457,7 +500,7 @@ RPCHelpMan assetnew()
     if(strContract == "''")
         strContract.clear();
     if(!strContract.empty())
-         boost::erase_all(strContract, "0x");  // strip 0x in hex str if exist
+        boost::erase_all(strContract, "0x");  // strip 0x in hex str if exist
 
     uint32_t precision = params[4].get_uint();
     UniValue param0 = params[0];
@@ -497,6 +540,14 @@ RPCHelpMan assetnew()
     }
     CNotaryDetails notaryDetails(params[8]);
     CAuxFeeDetails auxFeeDetails(params[9], precision);
+    std::string fChangeAddress = "";
+    if(!params[10].isNull()) {
+        fChangeAddress = params[10].get_str();
+    }
+    bool fAllowWatchOnly = false;
+    if(!params[11].isNull()) {
+        fAllowWatchOnly = params[11].get_bool();
+    }
     // calculate net
     // build asset object
     CAsset newAsset;
@@ -541,14 +592,18 @@ RPCHelpMan assetnew()
     newAsset.SerializeData(data);
     // use the script pub key to create the vecsend which sendmoney takes and puts it into vout
     std::vector<CRecipient> vecSend;
-
-    if (!pwallet->CanGetAddresses()) {
+    if (fChangeAddress.empty() && !pwallet->CanGetAddresses()) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: This wallet has no available keys");
     }
     CTxDestination dest;
-    std::string errorStr;
-    if (!pwallet->GetNewChangeDestination(pwallet->m_default_address_type, dest, errorStr)) {
-        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr);
+    bilingual_str errorStr;
+    if (fChangeAddress.empty() && !pwallet->GetNewChangeDestination(pwallet->m_default_address_type, dest, errorStr)) {
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr.original);
+    }
+    if(!fChangeAddress.empty())
+        dest = DecodeDestination(fChangeAddress);
+    if (!IsValidDestination(dest)) {
+        throw std::runtime_error("invalid change address");
     }
     CMutableTransaction mtx;
     std::set<int> setSubtractFeeFromOutputs;
@@ -575,9 +630,12 @@ RPCHelpMan assetnew()
     // assetnew must not be replaceable
     coin_control.m_signal_bip125_rbf = false;
     coin_control.m_min_depth = 1;
+    coin_control.fAllowWatchOnly = fAllowWatchOnly;
+    if(!fChangeAddress.empty())
+        coin_control.destChange = dest;
     bool lockUnspents = false;   
     mtx.nVersion = SYSCOIN_TX_VERSION_ASSET_ACTIVATE;
-    if (!pwallet->FundTransaction(mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
+    if (!FundTransaction(*pwallet, mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
         throw JSONRPCError(RPC_WALLET_ERROR, error.original);
     }
     data.clear();
@@ -596,23 +654,11 @@ RPCHelpMan assetnew()
     mtx.vout.push_back(CTxOut(opreturnRecipient.nAmount, opreturnRecipient.scriptPubKey));
     nFeeRequired = 0;
     nChangePosRet = -1;
-    if (!pwallet->FundTransaction(mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
+    if (!FundTransaction(*pwallet, mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
         throw JSONRPCError(RPC_WALLET_ERROR, error.original);
     }
-    if(pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-        UniValue result(UniValue::VOBJ);
-        PartiallySignedTransaction psbtx(mtx);
-        bool complete = false;
-        const TransactionError err = pwallet->FillPSBT(psbtx, complete, SIGHASH_ALL, false /* sign */, true /* bip32derivs */);
-        CHECK_NONFATAL(err == TransactionError::OK);
-        CHECK_NONFATAL(!complete);
-        CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
-        ssTx << psbtx;
-        result.pushKV("psbt", EncodeBase64(ssTx.str()));
-        return result;
-    }
     // Script verification errors
-    std::map<int, std::string> input_errors;
+    std::map<int, bilingual_str> input_errors;
     // Fetch previous transactions (inputs):
     std::map<COutPoint, Coin> coins;
     for (const CTxIn& txin : mtx.vin) {
@@ -630,10 +676,10 @@ RPCHelpMan assetnew()
     CTransactionRef tx(MakeTransactionRef(std::move(mtx)));
     std::string err_string;
     AssertLockNotHeld(cs_main);
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    const TransactionError err = BroadcastTransaction(node, tx, err_string, DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), /*relay*/ true, /*wait_callback*/ false);
-    if (TransactionError::OK != err) {
-        throw JSONRPCTransactionError(err, err_string);
+    int64_t virtual_size = GetVirtualTransactionSize(*tx);
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
+    if (!pwallet->chain().broadcastTransaction(tx, max_raw_tx_fee, true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, err_string);
     }
     UniValue res(UniValue::VOBJ);
     res.__pushKV("txid", tx->GetHash().GetHex());
@@ -652,7 +698,7 @@ static RPCHelpMan assetnewtest()
         {"funding_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Fund resulting UTXO owning the asset by this much SYS for gas."},
         {"symbol", RPCArg::Type::STR, RPCArg::Optional::NO, "Asset symbol (1-8 characters)"},
         {"description", RPCArg::Type::STR, RPCArg::Optional::NO, "Public description of the token."},
-        {"contract", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Ethereum token contract for SyscoinX bridge. Must be in hex and not include the '0x' format tag. For example contract '0xb060ddb93707d2bc2f8bcc39451a5a28852f8d1d' should be set as 'b060ddb93707d2bc2f8bcc39451a5a28852f8d1d'. Leave empty for no smart contract bridge."},
+        {"contract", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "NEVM token contract for SyscoinX bridge. Leave empty for no smart contract bridge."},
         {"precision", RPCArg::Type::NUM, RPCArg::Optional::NO, "Precision of balances. Must be between 0 and 8. The lower it is the higher possible max_supply is available since the supply is represented as a 64 bit integer. With a precision of 8 the max supply is 10 billion."},
         {"max_supply", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Maximum supply of this asset. Depends on the precision value that is set, the lower the precision the higher max_supply can be."},
         {"updatecapability_flags", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Ability to update certain fields. Must be decimal value which is a bitmask for certain rights to update. The bitmask 1 represents the ability to update public data field, 2 for updating the smart contract field, 4 for updating supply, 8 for updating notary address, 16 for updating notary details, 32 for updating auxfee details, 64 for ability to update the capability flags (this field). 127 for all. 0 for none (not updatable)."},
@@ -675,7 +721,11 @@ static RPCHelpMan assetnewtest()
                     },
                 }
             }
-        }
+        },
+        {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+        {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+            "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+            "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
 
     },
     RPCResult{
@@ -685,8 +735,8 @@ static RPCHelpMan assetnewtest()
             {RPCResult::Type::STR, "asset_guid", "The unique identifier of the new asset"}
         }},
     RPCExamples{
-    HelpExampleCli("assetnew", "1 \"CAT\" \"publicvalue\" \"contractaddr\" 8 1000 127 \"notary_address\" {} {}")
-    + HelpExampleRpc("assetnew", "1, \"CAT\", \"publicvalue\", \"contractaddr\", 8, 1000, 127, \"notary_address\", {}, {}")
+    HelpExampleCli("assetnewtest", "123456 1 \"CAT\" \"publicvalue\" \"contractaddr\" 8 1000 127 \"notary_address\" {} {}")
+    + HelpExampleRpc("assetnewtest", "123456, 1, \"CAT\", \"publicvalue\", \"contractaddr\", 8, 1000, 127, \"notary_address\", {}, {}")
     },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -694,7 +744,7 @@ static RPCHelpMan assetnewtest()
     UniValue paramsFund(UniValue::VARR);
     if(!ParseUInt64(params[0].get_str(), &nCustomAssetGuid))
         throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse asset_guid");    
-    for(int i = 1;i<=10;i++)
+    for(int i = 1;i<=12;i++)
         paramsFund.push_back(params[i]);
     JSONRPCRequest assetNewRequest;
     assetNewRequest.context = request.context;
@@ -704,7 +754,7 @@ static RPCHelpMan assetnewtest()
 },
     };
 }
-UniValue CreateAssetUpdateTx(const std::any& context, const int32_t& nVersionIn, const uint64_t &nAsset, CWallet& pwallet, std::vector<CRecipient>& vecSend, const CRecipient& opreturnRecipient,const CRecipient* recpIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(pwallet.cs_wallet) {
+UniValue CreateAssetUpdateTx(const std::any& context, const int32_t& nVersionIn, const uint64_t &nAsset, CWallet& pwallet, std::vector<CRecipient>& vecSend, const CRecipient& opreturnRecipient, const std::string &fChangeAddress, const bool fAllowWatchOnly, const CRecipient* recpIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(pwallet.cs_wallet) {
     AssertLockHeld(pwallet.cs_wallet);
     CCoinControl coin_control;
     CAmount nMinimumAmountAsset = 0;
@@ -713,8 +763,9 @@ UniValue CreateAssetUpdateTx(const std::any& context, const int32_t& nVersionIn,
     coin_control.m_include_unsafe_inputs = false;
     coin_control.assetInfo = CAssetCoinInfo(nAsset, nMaximumAmountAsset);
     coin_control.m_min_depth = 1;
+    coin_control.fAllowWatchOnly = fAllowWatchOnly;
     std::vector<COutput> vecOutputs;
-    pwallet.AvailableCoins(vecOutputs, !coin_control.m_include_unsafe_inputs, &coin_control, 0, MAX_MONEY, 0, nMinimumAmountAsset, nMaximumAmountAsset, nMinimumSumAmountAsset, 0, false, *coin_control.assetInfo, nVersionIn);
+    AvailableCoins(pwallet, vecOutputs, &coin_control, 0, MAX_MONEY, 0, nMinimumAmountAsset, nMaximumAmountAsset, nMinimumSumAmountAsset, 0, false, *coin_control.assetInfo, nVersionIn);
     int nNumOutputsFound = 0;
     int nFoundOutput = -1;
     for(unsigned int i = 0; i < vecOutputs.size(); i++) {
@@ -731,7 +782,7 @@ UniValue CreateAssetUpdateTx(const std::any& context, const int32_t& nVersionIn,
         throw JSONRPCError(RPC_WALLET_ERROR, "No inputs found for this asset");
     }
     
-    if (!pwallet.CanGetAddresses()) {
+    if (fChangeAddress.empty() && !pwallet.CanGetAddresses()) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: This wallet has no available keys");
     }
     const CInputCoin &inputCoin = vecOutputs[nFoundOutput].GetInputCoin();
@@ -741,12 +792,20 @@ UniValue CreateAssetUpdateTx(const std::any& context, const int32_t& nVersionIn,
     if(recpIn) {
         vecSend.push_back(*recpIn);
     }
+    CTxDestination dest;
+    if(!fChangeAddress.empty()) {
+        dest = DecodeDestination(fChangeAddress);
+        coin_control.destChange = dest;
+        if (!IsValidDestination(dest)) {
+            throw std::runtime_error("invalid change address");
+        }   
+    }
+
     if(!recpIn || nGas > (MIN_CHANGE + pwallet.m_default_max_tx_fee)) {
-        CTxDestination dest;
-        std::string errorStr;
-        if (!pwallet.GetNewChangeDestination(pwallet.m_default_address_type, dest, errorStr)) {
-            throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr);
-        }
+        bilingual_str errorStr;
+        if (fChangeAddress.empty() && !pwallet.GetNewChangeDestination(pwallet.m_default_address_type, dest, errorStr)) {
+            throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr.original);
+        }      
         recp = { GetScriptForDestination(dest), nGas, false};  
     }
     // if enough for change + max fee, we try to take fee from this output
@@ -776,31 +835,34 @@ UniValue CreateAssetUpdateTx(const std::any& context, const int32_t& nVersionIn,
     coin_control.fAllowOtherInputs = recp.nAmount <= 0 || !recp.fSubtractFeeFromAmount; // select asset + sys utxo's
     CTransactionRef tx;
     FeeCalculation fee_calc_out;
-    if (!pwallet.CreateTransaction(vecSend, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, false /* sign*/, nVersionIn)) {
+    if (!CreateTransaction(pwallet, vecSend, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, false /* sign*/, nVersionIn)) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
     }
+    
+    CMutableTransaction mtx(*tx);
     // Script verification errors
-    std::map<int, std::string> input_errors;
+    std::map<int, bilingual_str> input_errors;
     // Fetch previous transactions (inputs):
     std::map<COutPoint, Coin> coins;
     for (const CTxIn& txin : tx->vin) {
         coins[txin.prevout]; // Create empty map entry keyed by prevout.
     }
     pwallet.chain().findCoins(coins);
-    CMutableTransaction mtx(*tx);
     bool complete = pwallet.SignTransaction(mtx, coins, SIGHASH_ALL, input_errors);
     if(!complete) {
         UniValue result(UniValue::VOBJ);
         SignTransactionResultToJSON(mtx, complete, coins, input_errors, result);
         return result;
     }
+    // need to reload asset as notary signature may have gotten added and this is needed in voutAssets so consensus validation passes for notary check
+    mtx.LoadAssets();
     tx = MakeTransactionRef(mtx);
     std::string err_string;
     AssertLockNotHeld(cs_main);
-    NodeContext& node = EnsureAnyNodeContext(context);
-    const TransactionError err = BroadcastTransaction(node, tx, err_string, DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), /*relay*/ true, /*wait_callback*/ false);
-    if (TransactionError::OK != err) {
-        throw JSONRPCTransactionError(err, err_string);
+    int64_t virtual_size = GetVirtualTransactionSize(*tx);
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
+    if (!pwallet.chain().broadcastTransaction(tx, max_raw_tx_fee, true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, err_string);
     }
     UniValue res(UniValue::VOBJ);
     res.__pushKV("txid", tx->GetHash().GetHex());
@@ -814,7 +876,7 @@ static RPCHelpMan assetupdate()
         {
             {"asset_guid", RPCArg::Type::STR, RPCArg::Optional::NO, "Asset guid"},
             {"description", RPCArg::Type::STR, RPCArg::Optional::NO, "Public description of the token."},
-            {"contract",  RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Ethereum token contract for SyscoinX bridge. Leave empty for no smart contract bridge."},
+            {"contract",  RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "NEVM token contract for SyscoinX bridge. Leave empty for no smart contract bridge."},
             {"updatecapability_flags", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Ability to update certain fields. Must be decimal value which is a bitmask for certain rights to update. The bitmask 1 represents the ability to update public data field, 2 for updating the smart contract field, 4 for updating supply, 8 for updating notary address, 16 for updating notary details, 32 for updating auxfee details, 64 for ability to update the capability flags (this field). 127 for all. 0 for none (not updatable)."},
             {"notary_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Notary address"},
             {"notary_details", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Notary details structure (if notary_address is set)",
@@ -835,7 +897,11 @@ static RPCHelpMan assetupdate()
                         },
                     }
                 }
-            }
+            },
+            {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+            {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+                "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+                "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},           
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -914,6 +980,14 @@ static RPCHelpMan assetupdate()
     uint8_t nUpdateMask = 0;
     CNotaryDetails notaryDetails(params[5]);
     CAuxFeeDetails auxFeeDetails(params[6], theAsset.nPrecision);
+    std::string fChangeAddress = "";
+    if(!params[7].isNull()) {
+        fChangeAddress = params[7].get_str();
+    }
+    bool fAllowWatchOnly = false;
+    if(!params[8].isNull()) {
+        fAllowWatchOnly = params[8].get_bool();
+    }
     strPubData = publicData.write();
     if(strPubData != oldData) {
         nUpdateMask |= ASSET_UPDATE_DATA;
@@ -959,7 +1033,7 @@ static RPCHelpMan assetupdate()
     CRecipient opreturnRecipient;
     CreateFeeRecipient(scriptData, opreturnRecipient);
     std::vector<CRecipient> vecSend;
-    return CreateAssetUpdateTx(request.context, SYSCOIN_TX_VERSION_ASSET_UPDATE, (uint64_t)nBaseAsset, *pwallet, vecSend, opreturnRecipient);
+    return CreateAssetUpdateTx(request.context, SYSCOIN_TX_VERSION_ASSET_UPDATE, (uint64_t)nBaseAsset, *pwallet, vecSend, opreturnRecipient, fChangeAddress, fAllowWatchOnly);
 },
     };
 } 
@@ -971,6 +1045,10 @@ static RPCHelpMan assettransfer()
         {
             {"asset_guid", RPCArg::Type::STR, RPCArg::Optional::NO, "Asset guid"},
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "New owner of asset."},
+            {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+            {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+                "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+                "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -1000,7 +1078,14 @@ static RPCHelpMan assettransfer()
         throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse asset_guid");
     const uint32_t &nBaseAsset = GetBaseAssetID(nAsset);
     std::string strAddress = params[1].get_str();
-   
+    std::string fChangeAddress = "";
+    if(!params[2].isNull()) {
+        fChangeAddress = params[2].get_str();
+    }
+    bool fAllowWatchOnly = false;
+    if(!params[3].isNull()) {
+        fAllowWatchOnly = params[3].get_bool();
+    }
     CAsset theAsset;
 
     if (!GetAsset( nBaseAsset, theAsset)) {
@@ -1020,7 +1105,7 @@ static RPCHelpMan assettransfer()
     CRecipient opreturnRecipient;
     CreateFeeRecipient(scriptData, opreturnRecipient);
     std::vector<CRecipient> vecSend;
-    return CreateAssetUpdateTx(request.context, SYSCOIN_TX_VERSION_ASSET_UPDATE, (uint64_t)nBaseAsset, *pwallet, vecSend, opreturnRecipient, &recp);
+    return CreateAssetUpdateTx(request.context, SYSCOIN_TX_VERSION_ASSET_UPDATE, (uint64_t)nBaseAsset, *pwallet, vecSend, opreturnRecipient, fChangeAddress, fAllowWatchOnly, &recp);
 },
     };
 }
@@ -1043,7 +1128,11 @@ static RPCHelpMan assetsendmany()
                 }
             },
             "[assetsendobjects,...]"
-        }
+        },
+        {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+        {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+            "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+            "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
     },
     RPCResult{
         RPCResult::Type::OBJ, "", "",
@@ -1078,7 +1167,14 @@ static RPCHelpMan assetsendmany()
     UniValue valueTo = params[1];
     if (!valueTo.isArray())
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Array of receivers not found");
-
+    std::string fChangeAddress = "";
+    if(!params[2].isNull()) {
+        fChangeAddress = params[2].get_str();
+    }
+    bool fAllowWatchOnly = false;
+    if(!params[3].isNull()) {
+        fAllowWatchOnly = params[3].get_bool();
+    }
     CAsset theAsset;
     if (!GetAsset(nBaseAsset, theAsset))
         throw JSONRPCError(RPC_DATABASE_ERROR, "Could not find a asset with this key");
@@ -1148,7 +1244,7 @@ static RPCHelpMan assetsendmany()
     scriptData << OP_RETURN << data;
     CRecipient opreturnRecipient;
     CreateFeeRecipient(scriptData, opreturnRecipient);
-    UniValue ret = CreateAssetUpdateTx(request.context, SYSCOIN_TX_VERSION_ASSET_SEND, nBaseAsset, *pwallet, vecSend, opreturnRecipient);
+    UniValue ret = CreateAssetUpdateTx(request.context, SYSCOIN_TX_VERSION_ASSET_SEND, nBaseAsset, *pwallet, vecSend, opreturnRecipient, fChangeAddress, fAllowWatchOnly);
     ret.__pushKV("assets_issued_count", (int)mapAssets.size());
     UniValue assetsArr(UniValue::VARR);
     for(auto itAsset: mapAssets) {
@@ -1182,6 +1278,10 @@ static RPCHelpMan assetsend()
         {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of asset to send."},
         {"sys_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Amount of syscoin to send."},
         {"NFTID", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional NFT ID to send"},
+        {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+        {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+            "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+            "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},       
     },
     RPCResult{
         RPCResult::Type::OBJ, "", "",
@@ -1208,6 +1308,8 @@ static RPCHelpMan assetsend()
     UniValue paramsFund(UniValue::VARR);
     paramsFund.push_back(params[0]);
     paramsFund.push_back(output);
+    paramsFund.push_back(params[5]);
+    paramsFund.push_back(params[6]);
     JSONRPCRequest requestMany;
     requestMany.context = request.context;
     requestMany.params = paramsFund;
@@ -1240,6 +1342,10 @@ static RPCHelpMan assetallocationsendmany()
             {"conf_target", RPCArg::Type::NUM, RPCArg::DefaultHint{"wallet default"}, "Confirmation target (in blocks)"},
             {"estimate_mode", RPCArg::Type::STR, RPCArg::Default{"unset"}, std::string() + "The fee estimate mode, must be one of (case insensitive):\n"
             "       \"" + FeeModes("\"\n\"") + "\""},
+            {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+            {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+                "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+                "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},            
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -1285,6 +1391,21 @@ static RPCHelpMan assetallocationsendmany()
     if (!request.params[4].isNull()) {
         if (!FeeModeFromString(request.params[4].get_str(), coin_control.m_fee_mode)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid estimate_mode parameter");
+        }
+    }
+    std::string fChangeAddress = "";
+    if(!request.params[5].isNull()) {
+        fChangeAddress = request.params[5].get_str();
+    }
+    bool fAllowWatchOnly = false;
+    if(!request.params[6].isNull()) {
+        fAllowWatchOnly = request.params[6].get_bool();
+    }
+    coin_control.fAllowWatchOnly = fAllowWatchOnly;
+    if(!fChangeAddress.empty()) {
+        coin_control.destChange = DecodeDestination(fChangeAddress);
+        if (!IsValidDestination(coin_control.destChange)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid change address");
         }
     }
     CAssetAllocation theAssetAllocation;
@@ -1432,24 +1553,12 @@ static RPCHelpMan assetallocationsendmany()
         if(nAmountLargest > nAmountSys) {
             setSubtractFeeFromOutputs.emplace(idxLargest);
         }
-        if (!pwallet->FundTransaction(mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
+        if (!FundTransaction(*pwallet, mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
             throw JSONRPCError(RPC_WALLET_ERROR, error.original);
         }
     }
-    if(pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-        UniValue result(UniValue::VOBJ);
-        PartiallySignedTransaction psbtx(mtx);
-        bool complete = false;
-        const TransactionError err = pwallet->FillPSBT(psbtx, complete, SIGHASH_ALL, false /* sign */, true /* bip32derivs */);
-        CHECK_NONFATAL(err == TransactionError::OK);
-        CHECK_NONFATAL(!complete);
-        CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
-        ssTx << psbtx;
-        result.pushKV("psbt", EncodeBase64(ssTx.str()));
-        return result;
-    }
     // Script verification errors
-    std::map<int, std::string> input_errors;
+    std::map<int, bilingual_str> input_errors;
     // Fetch previous transactions (inputs):
     std::map<COutPoint, Coin> coins;
     for (const CTxIn& txin : mtx.vin) {
@@ -1467,10 +1576,10 @@ static RPCHelpMan assetallocationsendmany()
     CTransactionRef tx(MakeTransactionRef(std::move(mtx)));
     std::string err_string;
     AssertLockNotHeld(cs_main);
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    const TransactionError err = BroadcastTransaction(node, tx, err_string, DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), /*relay*/ true, /*wait_callback*/ false);
-    if (TransactionError::OK != err) {
-        throw JSONRPCTransactionError(err, err_string);
+    int64_t virtual_size = GetVirtualTransactionSize(*tx);
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
+    if (!pwallet->chain().broadcastTransaction(tx, max_raw_tx_fee, true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, err_string);
     }
     UniValue ret(UniValue::VOBJ);
     ret.__pushKV("txid", tx->GetHash().GetHex());
@@ -1507,7 +1616,11 @@ static RPCHelpMan assetallocationburn()
         {
             {"asset_guid", RPCArg::Type::STR, RPCArg::Optional::NO, "Asset guid"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of asset to burn to SYSX"},
-            {"ethereum_destination_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The 20 byte (40 character) hex string of the ethereum destination address. Omit or leave empty to burn to Syscoin."}
+            {"nevm_destination_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The 20 byte (40 character) hex string of the nevm destination address. Omit or leave empty to burn to Syscoin."},
+            {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+            {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+                "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+                "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -1515,8 +1628,8 @@ static RPCHelpMan assetallocationburn()
                 {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
             }},
         RPCExamples{
-            HelpExampleCli("assetallocationburn", "\"asset_guid\" \"amount\" \"ethereum_destination_address\"")
-            + HelpExampleRpc("assetallocationburn", "\"asset_guid\", \"amount\", \"ethereum_destination_address\"")
+            HelpExampleCli("assetallocationburn", "\"asset_guid\" \"amount\" \"nevm_destination_address\"")
+            + HelpExampleRpc("assetallocationburn", "\"asset_guid\", \"amount\", \"nevm_destination_address\"")
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -1535,7 +1648,7 @@ static RPCHelpMan assetallocationburn()
     uint64_t nAsset;
     if(!ParseUInt64(params[0].get_str(), &nAsset))
         throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse asset_guid");   	
-	CAsset theAsset;
+    CAsset theAsset;
 	if (!GetAsset(GetBaseAssetID(nAsset), theAsset))
 		throw JSONRPCError(RPC_DATABASE_ERROR, "Could not find a asset with this key");
         
@@ -1546,17 +1659,25 @@ static RPCHelpMan assetallocationburn()
     catch(...) {
         nAmount = params[1].get_int64();
     }
-	std::string ethAddress = "";
+	std::string nevmAddress = "";
     if(params[2].isStr())
-        ethAddress = params[2].get_str();
-    boost::erase_all(ethAddress, "0x");  // strip 0x if exist
+        nevmAddress = params[2].get_str();
+    std::string fChangeAddress = "";
+    if(!params[3].isNull()) {
+        fChangeAddress = params[3].get_str();
+    } 
+    bool fAllowWatchOnly = false;
+    if(!params[4].isNull()) {
+        fAllowWatchOnly = params[4].get_bool();
+    }       
+    boost::erase_all(nevmAddress, "0x");  // strip 0x if exist
     CScript scriptData;
     int32_t nVersionIn = 0;
 
     CBurnSyscoin burnSyscoin;
     int nChangePosRet = 1; 
     // if no eth address provided just send as a std asset allocation send but to burn address
-    if(ethAddress.empty() || ethAddress == "''") {
+    if(nevmAddress.empty() || nevmAddress == "''") {
         nVersionIn = SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN;
         std::vector<CAssetOutValue> vecOut = {CAssetOutValue(1, nAmount)}; // burn has to be in index 1, sys is output in index 0, any change in index 2
         CAssetOut assetOut(nAsset, vecOut);
@@ -1567,8 +1688,8 @@ static RPCHelpMan assetallocationburn()
         nChangePosRet++;
     }
     else {
-        burnSyscoin.vchEthAddress = ParseHex(ethAddress);
-        nVersionIn = SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM;
+        burnSyscoin.vchNEVMAddress = ParseHex(nevmAddress);
+        nVersionIn = SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM;
         std::vector<CAssetOutValue> vecOut = {CAssetOutValue(0, nAmount)}; // burn has to be in index 0, any change in index 1
         CAssetOut assetOut(nAsset, vecOut);
         if(!theAsset.vchNotaryKeyID.empty()) {
@@ -1578,9 +1699,9 @@ static RPCHelpMan assetallocationburn()
     }
     
     CTxDestination dest;
-    std::string errorStr;
-    if (!pwallet->GetNewChangeDestination(pwallet->m_default_address_type, dest, errorStr)) {
-        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr);
+    bilingual_str errorStr;
+    if (fChangeAddress.empty() && !pwallet->GetNewChangeDestination(pwallet->m_default_address_type, dest, errorStr)) {
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, errorStr.original);
     }
 
     const CScript& scriptPubKey = GetScriptForDestination(dest);
@@ -1605,25 +1726,20 @@ static RPCHelpMan assetallocationburn()
     mtx.nVersion = nVersionIn;
     CCoinControl coin_control;
     coin_control.m_include_unsafe_inputs = true;
+    coin_control.fAllowWatchOnly = fAllowWatchOnly;
+    if(!fChangeAddress.empty()) {
+        coin_control.destChange = DecodeDestination(fChangeAddress);
+        if (!IsValidDestination(coin_control.destChange)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid change address");
+        }
+    }
     coin_control.assetInfo = CAssetCoinInfo(nAsset, nAmount);
     coin_control.m_signal_bip125_rbf = pwallet->m_signal_rbf;
-    if (!pwallet->FundTransaction(mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
+    if (!FundTransaction(*pwallet, mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
         throw JSONRPCError(RPC_WALLET_ERROR, error.original);
     }
-    if(pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-        UniValue result(UniValue::VOBJ);
-        PartiallySignedTransaction psbtx(mtx);
-        bool complete = false;
-        const TransactionError err = pwallet->FillPSBT(psbtx, complete, SIGHASH_ALL, false /* sign */, true /* bip32derivs */);
-        CHECK_NONFATAL(err == TransactionError::OK);
-        CHECK_NONFATAL(!complete);
-        CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
-        ssTx << psbtx;
-        result.pushKV("psbt", EncodeBase64(ssTx.str()));
-        return result;
-    }
     // Script verification errors
-    std::map<int, std::string> input_errors;
+    std::map<int, bilingual_str> input_errors;
     // Fetch previous transactions (inputs):
     std::map<COutPoint, Coin> coins;
     for (const CTxIn& txin : mtx.vin) {
@@ -1641,10 +1757,10 @@ static RPCHelpMan assetallocationburn()
     CTransactionRef tx(MakeTransactionRef(std::move(mtx)));
     std::string err_string;
     AssertLockNotHeld(cs_main);
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    const TransactionError err = BroadcastTransaction(node, tx, err_string, DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), /*relay*/ true, /*wait_callback*/ false);
-    if (TransactionError::OK != err) {
-        throw JSONRPCTransactionError(err, err_string);
+    int64_t virtual_size = GetVirtualTransactionSize(*tx);
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
+    if (!pwallet->chain().broadcastTransaction(tx, max_raw_tx_fee, true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, err_string);
     }
 
     UniValue res(UniValue::VOBJ);
@@ -1669,8 +1785,7 @@ static RPCHelpMan assetallocationmint()
             {"asset_guid", RPCArg::Type::STR, RPCArg::Optional::NO, "Asset guid"},
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Mint to this address."},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of asset to mint.  Note that fees (in SYS) will be taken from the owner address"},
-            {"blocknumber", RPCArg::Type::NUM, RPCArg::Optional::NO, "Block number of the block that included the burn transaction on Ethereum."},
-            {"bridge_transfer_id", RPCArg::Type::NUM, RPCArg::Optional::NO, "Unique Bridge Transfer ID for this event from Ethereum. It is the low 32 bits of the transferIdAndPrecisions field in the TokenFreeze Event on freezeBurnERC20 call."},
+            {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Block that included the burn transaction on NEVM."},
             {"tx_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Transaction hex."},
             {"txroot_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction merkle root that commits this transaction to the block header."},
             {"txmerkleproof_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The list of parent nodes of the Merkle Patricia Tree for SPV proof of transaction merkle root."},
@@ -1686,8 +1801,8 @@ static RPCHelpMan assetallocationmint()
                 {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
             }},
         RPCExamples{
-            HelpExampleCli("assetallocationmint", "\"asset_guid\" \"address\" \"amount\" \"blocknumber\" \"bridge_transfer_id\" \"tx_hex\" \"txroot_hex\" \"txmerkleproof_hex\" \"txmerkleproofpath_hex\" \"receipt_hex\" \"receiptroot_hex\" \"receiptmerkleproof\"")
-            + HelpExampleRpc("assetallocationmint", "\"asset_guid\", \"address\", \"amount\", \"blocknumber\", \"bridge_transfer_id\", \"tx_hex\", \"txroot_hex\", \"txmerkleproof_hex\", \"txmerkleproofpath_hex\", \"receipt_hex\", \"receiptroot_hex\", \"receiptmerkleproof\"")
+            HelpExampleCli("assetallocationmint", "\"asset_guid\" \"address\" \"amount\" \"blockhash\" \"tx_hex\" \"txroot_hex\" \"txmerkleproof_hex\" \"txmerkleproofpath_hex\" \"receipt_hex\" \"receiptroot_hex\" \"receiptmerkleproof\"")
+            + HelpExampleRpc("assetallocationmint", "\"asset_guid\", \"address\", \"amount\", \"blockhash\", \"tx_hex\", \"txroot_hex\", \"txmerkleproof_hex\", \"txmerkleproofpath_hex\", \"receipt_hex\", \"receiptroot_hex\", \"receiptmerkleproof\"")
         },
     [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -1697,7 +1812,6 @@ static RPCHelpMan assetallocationmint()
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
     pwallet->BlockUntilSyncedToCurrentChain();
-
     LOCK(pwallet->cs_wallet);
     EnsureWalletIsUnlocked(*pwallet);
     uint64_t nAsset;
@@ -1714,36 +1828,37 @@ static RPCHelpMan assetallocationmint()
     catch(...) {
         nAmount = request.params[2].get_int64();
     }        
-    const uint32_t &nBlockNumber = params[3].get_uint(); 
-    const uint32_t &nBridgeTransferID = params[4].get_uint(); 
-    
-    std::string vchTxValue = params[5].get_str();
-    std::string vchTxRoot = params[6].get_str();
-    std::string vchTxParentNodes = params[7].get_str();
+    std::string blockStr = params[3].get_str();
+    if(!blockStr.empty())
+        boost::erase_all(blockStr, "0x");  // strip 0x in hex str if exist
+    uint256 nBlockHash;
+    if(!ParseHashStr(blockStr,nBlockHash)) {
+        throw JSONRPCError(RPC_DATABASE_ERROR, "Could not parse block hash");
+    }
+    std::string strTxValue = params[4].get_str();
+    std::string strTxRoot = params[5].get_str();
+    std::string strTxParentNodes = params[6].get_str();
 
     // find byte offset of tx data in the parent nodes
-    size_t pos = vchTxParentNodes.find(vchTxValue);
-    if(pos == std::string::npos || vchTxParentNodes.size() > (USHRT_MAX*2)){
+    size_t pos = strTxParentNodes.find(strTxValue);
+    if(pos == std::string::npos || strTxParentNodes.size() > (USHRT_MAX*2)){
         throw JSONRPCError(RPC_TYPE_ERROR, "Could not find tx value in tx parent nodes");  
     }
     uint16_t posTxValue = (uint16_t)pos/2;
-    std::string vchTxPath = params[8].get_str();
- 
-    std::string vchReceiptValue = params[9].get_str();
-    std::string vchReceiptRoot = params[10].get_str();
-    std::string vchReceiptParentNodes = params[11].get_str();
-    pos = vchReceiptParentNodes.find(vchReceiptValue);
-    if(pos == std::string::npos || vchReceiptParentNodes.size() > (USHRT_MAX*2)){
+    std::string strTxPath = params[7].get_str();
+    std::string strReceiptValue = params[8].get_str();
+    std::string strReceiptRoot = params[9].get_str();
+    std::string strReceiptParentNodes = params[10].get_str();
+    pos = strReceiptParentNodes.find(strReceiptValue);
+    if(pos == std::string::npos || strReceiptParentNodes.size() > (USHRT_MAX*2)){
         throw JSONRPCError(RPC_TYPE_ERROR, "Could not find receipt value in receipt parent nodes");  
     }
     uint16_t posReceiptValue = (uint16_t)pos/2;
     if(!fGethSynced){
         throw JSONRPCError(RPC_MISC_ERROR, "Geth is not synced, please wait until it syncs up and try again");
     }
-
-
-    std::vector<CRecipient> vecSend;
     
+    std::vector<CRecipient> vecSend;
     CMintSyscoin mintSyscoin;
     std::vector<CAssetOutValue> vecOut = {CAssetOutValue(0, nAmount)};
     CAssetOut assetOut(nAsset, vecOut);
@@ -1751,16 +1866,24 @@ static RPCHelpMan assetallocationmint()
         assetOut.vchNotarySig.resize(65);
     }
     mintSyscoin.voutAssets.emplace_back(assetOut);
-    mintSyscoin.nBlockNumber = nBlockNumber;
-    mintSyscoin.nBridgeTransferID = nBridgeTransferID;
+    mintSyscoin.nBlockHash = nBlockHash;
     mintSyscoin.posTx = posTxValue;
-    mintSyscoin.vchTxRoot = ParseHex(vchTxRoot);
-    mintSyscoin.vchTxParentNodes = ParseHex(vchTxParentNodes);
-    mintSyscoin.vchTxPath = ParseHex(vchTxPath);
+    // reverse root's endianness become NEVM stores as LE and Syscoin core uses BE
+    std::vector<unsigned char> vchTxRoot(ParseHex(strTxRoot));
+    std::reverse(vchTxRoot.begin(), vchTxRoot.end());
+    mintSyscoin.nTxRoot = uint256S(HexStr(vchTxRoot));
+    mintSyscoin.vchTxParentNodes = ParseHex(strTxParentNodes);
+    mintSyscoin.vchTxPath = ParseHex(strTxPath);
     mintSyscoin.posReceipt = posReceiptValue;
-    mintSyscoin.vchReceiptRoot = ParseHex(vchReceiptRoot);
-    mintSyscoin.vchReceiptParentNodes = ParseHex(vchReceiptParentNodes);
-    
+    std::vector<unsigned char> vchReceiptRoot(ParseHex(strReceiptRoot));
+    std::reverse(vchReceiptRoot.begin(), vchReceiptRoot.end());
+    mintSyscoin.nReceiptRoot = uint256S(HexStr(vchReceiptRoot));
+    mintSyscoin.vchReceiptParentNodes = ParseHex(strReceiptParentNodes);
+    std::vector<unsigned char> vchTxValue(mintSyscoin.vchTxParentNodes.begin()+mintSyscoin.posTx, mintSyscoin.vchTxParentNodes.end());
+    std::vector<unsigned char> vchTxHash(dev::sha3(vchTxValue).asBytes());
+    // we must reverse the endian-ness because we store uint256 in BE but NEVM uses LE.
+    std::reverse(vchTxHash.begin(), vchTxHash.end());
+    mintSyscoin.nTxHash = uint256S(HexStr(vchTxHash));
     const CScript& scriptPubKey = GetScriptForDestination(DecodeDestination(strAddress));
     CTxOut change_prototype_txout(0, scriptPubKey);
     CRecipient recp = {scriptPubKey, GetDustThreshold(change_prototype_txout, GetDiscardRate(*pwallet)), false };    
@@ -1768,7 +1891,7 @@ static RPCHelpMan assetallocationmint()
     CMutableTransaction mtx;
     mtx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_MINT;
     mtx.vout.push_back(CTxOut(recp.nAmount, recp.scriptPubKey));
-    if(params.size() >= 13 && params[12].isBool() && params[12].get_bool()) {
+    if(params.size() >= 12 && params[11].isBool() && params[11].get_bool()) {
         // aux fees test
         CAmount nAuxFee;
         getAuxFee(theAsset.auxFeeDetails, nAmount, nAuxFee);
@@ -1799,23 +1922,11 @@ static RPCHelpMan assetallocationmint()
     coin_control.m_signal_bip125_rbf = pwallet->m_signal_rbf;
     bool lockUnspents = false;
     std::set<int> setSubtractFeeFromOutputs;
-    if (!pwallet->FundTransaction(mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
+    if (!FundTransaction(*pwallet, mtx, nFeeRequired, nChangePosRet, error, lockUnspents, setSubtractFeeFromOutputs, coin_control)) {
         throw JSONRPCError(RPC_WALLET_ERROR, error.original);
     }
-    if(pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-        UniValue result(UniValue::VOBJ);
-        PartiallySignedTransaction psbtx(mtx);
-        bool complete = false;
-        const TransactionError err = pwallet->FillPSBT(psbtx, complete, SIGHASH_ALL, false /* sign */, true /* bip32derivs */);
-        CHECK_NONFATAL(err == TransactionError::OK);
-        CHECK_NONFATAL(!complete);
-        CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
-        ssTx << psbtx;
-        result.pushKV("psbt", EncodeBase64(ssTx.str()));
-        return result;
-    }
     // Script verification errors
-    std::map<int, std::string> input_errors;
+    std::map<int, bilingual_str> input_errors;
     // Fetch previous transactions (inputs):
     std::map<COutPoint, Coin> coins;
     for (const CTxIn& txin : mtx.vin) {
@@ -1833,10 +1944,10 @@ static RPCHelpMan assetallocationmint()
     CTransactionRef tx(MakeTransactionRef(std::move(mtx)));
     std::string err_string;
     AssertLockNotHeld(cs_main);
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    const TransactionError err = BroadcastTransaction(node, tx, err_string, DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), /*relay*/ true, /*wait_callback*/ false);
-    if (TransactionError::OK != err) {
-        throw JSONRPCTransactionError(err, err_string);
+    int64_t virtual_size = GetVirtualTransactionSize(*tx);
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
+    if (!pwallet->chain().broadcastTransaction(tx, max_raw_tx_fee, true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, err_string);
     }
     UniValue res(UniValue::VOBJ);
     res.__pushKV("txid", tx->GetHash().GetHex());
@@ -1854,6 +1965,10 @@ static RPCHelpMan assetallocationsend()
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of asset to send"},
             {"sys_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Amount of syscoin to send"},
             {"replaceable", RPCArg::Type::BOOL, RPCArg::DefaultHint{"wallet default"}, "Allow this transaction to be replaced by a transaction with higher fees via BIP 125. ZDAG is only possible if RBF is disabled."},
+            {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to."},
+            {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+                "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+                "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -1875,7 +1990,7 @@ static RPCHelpMan assetallocationsend()
     bool m_signal_bip125_rbf = pwallet->m_signal_rbf;
     if (!params[4].isNull()) {
         m_signal_bip125_rbf = params[4].get_bool();
-    }  
+    }          
     UniValue replaceableObj(UniValue::VBOOL);
     UniValue commentObj(UniValue::VSTR);
     UniValue confObj(UniValue::VNUM);
@@ -1897,6 +2012,8 @@ static RPCHelpMan assetallocationsend()
     paramsFund.push_back(commentObj); // comment
     paramsFund.push_back(confObj); // conf_target
     paramsFund.push_back(feeObj); // estimate_mode
+    paramsFund.push_back(params[5]);
+    paramsFund.push_back(params[6]);
     JSONRPCRequest requestMany;
     requestMany.context = request.context;
     requestMany.params = paramsFund;
@@ -2151,7 +2268,7 @@ static RPCHelpMan assetallocationbalance() {
                     {RPCResult::Type::STR, "symbol", "The asset symbol"},
                     {RPCResult::Type::STR_HEX, "txid", "The transaction id that created this asset"},
                     {RPCResult::Type::STR, "public_value", "The public value attached to this asset"},
-                    {RPCResult::Type::STR_HEX, "contract", "The ethereum contract address"},
+                    {RPCResult::Type::STR_HEX, "contract", "The nevm contract address"},
                     {RPCResult::Type::STR_AMOUNT, "total_supply", "The total supply of this asset"},
                     {RPCResult::Type::STR_AMOUNT, "max_supply", "The maximum supply of this asset"},
                     {RPCResult::Type::NUM, "updatecapability_flags", "The capability flag in decimal"},
@@ -2238,6 +2355,10 @@ static RPCHelpMan sendfrom() {
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The amount in " + CURRENCY_UNIT + " to send. eg 0.1"},
             {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, "The minimum confirmations to filter"},
             {"maxconf", RPCArg::Type::NUM, RPCArg::Default{9999999}, "The maximum confirmations to filter"},
+            {"change_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The change address to send to. Will use funding_address if empty."},
+            {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
+                "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
+                "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -2267,6 +2388,14 @@ static RPCHelpMan sendfrom() {
     if (!request.params[4].isNull()) {
         nMaxDepth = request.params[4].get_int();
     }
+    std::string fChangeAddress = "";
+    if(!request.params[5].isNull()) {
+        fChangeAddress = request.params[5].get_str();
+    } 
+    bool fAllowWatchOnly = false;
+    if(!request.params[6].isNull()) {
+        fAllowWatchOnly = request.params[6].get_bool();
+    } 
     const std::string& strFromAddress = request.params[0].get_str();
     const CTxDestination &from = DecodeDestination(strFromAddress);
     if (!IsValidDestination(from)) {
@@ -2285,6 +2414,7 @@ static RPCHelpMan sendfrom() {
     const UniValue &resUTXOs = listunspent().HandleRequest(requestSpent);
     const UniValue &resUTXOArr = resUTXOs.get_array();
     CCoinControl coin_control;
+    coin_control.fAllowWatchOnly = fAllowWatchOnly;
     if(!resUTXOArr.isNull()) {
         for(size_t i =0;i<resUTXOArr.size();i++) {
             const UniValue& utxoObj = resUTXOArr[i].get_obj();
@@ -2309,7 +2439,14 @@ static RPCHelpMan sendfrom() {
     if(!coin_control.HasSelected())
         throw JSONRPCError(RPC_TYPE_ERROR, "Could not find inputs to select");
     coin_control.fAllowOtherInputs = false;
-    coin_control.destChange = from;
+    if(fChangeAddress.empty())
+        coin_control.destChange = from;
+    else {
+        coin_control.destChange = DecodeDestination(fChangeAddress);
+        if (!IsValidDestination(coin_control.destChange)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid change address");
+        }
+    }
     EnsureWalletIsUnlocked(*pwallet);
     mapValue_t mapValue;
     const CRecipient & recipient = {GetScriptForDestination(dest), nAmount, false};
@@ -2386,7 +2523,8 @@ public:
 
     ReserveDestination rdest(pwallet, pwallet->m_default_address_type);
     CTxDestination dest;
-    if (!rdest.GetReservedDestination (dest, false))
+    bilingual_str dest_err;
+    if (!rdest.GetReservedDestination (dest, false, dest_err))
       throw JSONRPCError (RPC_WALLET_KEYPOOL_RAN_OUT,
                           "Error: Keypool ran out,"
                           " please call keypoolrefill first");

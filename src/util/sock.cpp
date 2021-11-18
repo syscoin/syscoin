@@ -10,11 +10,13 @@
 #include <util/system.h>
 #include <util/time.h>
 
-#include <codecvt>
-#include <cwchar>
-#include <locale>
 #include <stdexcept>
 #include <string>
+
+#ifdef WIN32
+#include <codecvt>
+#include <locale>
+#endif
 
 #ifdef USE_POLL
 #include <poll.h>
@@ -179,7 +181,7 @@ void Sock::SendComplete(const std::string& data,
         // Wait for a short while (or the socket to become ready for sending) before retrying
         // if nothing was sent.
         const auto wait_time = std::min(deadline - now, std::chrono::milliseconds{MAX_WAIT_FOR_IO});
-        Wait(wait_time, SEND);
+        (void)Wait(wait_time, SEND);
     }
 }
 
@@ -262,7 +264,7 @@ std::string Sock::RecvUntilTerminator(uint8_t terminator,
 
         // Wait for a short while (or the socket to become ready for reading) before retrying.
         const auto wait_time = std::min(deadline - now, std::chrono::milliseconds{MAX_WAIT_FOR_IO});
-        Wait(wait_time, RECV);
+        (void)Wait(wait_time, RECV);
     }
 }
 

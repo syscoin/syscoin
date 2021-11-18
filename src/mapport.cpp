@@ -14,7 +14,9 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <threadinterrupt.h>
+#include <util/syscall_sandbox.h>
 #include <util/system.h>
+#include <util/thread.h>
 
 #ifdef USE_NATPMP
 #include <compat.h>
@@ -221,6 +223,7 @@ static bool ProcessUpnp()
 
 static void ThreadMapPort()
 {
+    SetSyscallSandboxPolicy(SyscallSandboxPolicy::INITIALIZATION_MAP_PORT);
     bool ok;
     do {
         ok = false;
@@ -255,7 +258,7 @@ void StartThreadMapPort()
 {
     if (!g_mapport_thread.joinable()) {
         assert(!g_mapport_interrupt);
-        g_mapport_thread = std::thread(std::bind(&TraceThread<void (*)()>, "mapport", &ThreadMapPort));
+        g_mapport_thread = std::thread(&util::TraceThread, "mapport", &ThreadMapPort);
     }
 }
 

@@ -27,7 +27,7 @@ FUZZ_TARGET_INIT(pow, initialize_pow)
     std::vector<CBlockIndex> blocks;
     const uint32_t fixed_time = fuzzed_data_provider.ConsumeIntegral<uint32_t>();
     const uint32_t fixed_bits = fuzzed_data_provider.ConsumeIntegral<uint32_t>();
-    while (fuzzed_data_provider.remaining_bytes() > 0) {
+    LIMITED_WHILE(fuzzed_data_provider.remaining_bytes() > 0, 10000) {
         const std::optional<CBlockHeader> block_header = ConsumeDeserializable<CBlockHeader>(fuzzed_data_provider);
         if (!block_header) {
             continue;
@@ -61,7 +61,7 @@ FUZZ_TARGET_INIT(pow, initialize_pow)
         {
             (void)GetBlockProof(current_block);
             (void)CalculateNextWorkRequired(&current_block, fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(0, std::numeric_limits<int64_t>::max()), consensus_params);
-            if (current_block.nHeight != std::numeric_limits<int>::max() && current_block.nHeight - (consensus_params.DifficultyAdjustmentInterval() - 1) >= 0) {
+            if (current_block.nHeight != std::numeric_limits<int>::max() && current_block.nHeight - (consensus_params.DifficultyAdjustmentInterval(current_block.nHeight) - 1) >= 0) {
                 (void)GetNextWorkRequired(&current_block, &(*block_header), consensus_params);
             }
         }

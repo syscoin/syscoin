@@ -10,15 +10,30 @@
 #include <limits>
 // SYSCOIN
 #include <map>
+#include <math.h>
 namespace Consensus {
 
-enum DeploymentPos
-{
+/**
+ * A buried deployment is one where the height of the activation has been hardcoded into
+ * the client implementation long after the consensus change has activated. See BIP 90.
+ */
+enum BuriedDeployment : int16_t {
+    // buried deployments get negative values to avoid overlap with DeploymentPos
+    DEPLOYMENT_HEIGHTINCB = std::numeric_limits<int16_t>::min(),
+    DEPLOYMENT_CLTV,
+    DEPLOYMENT_DERSIG,
+    DEPLOYMENT_CSV,
+    DEPLOYMENT_SEGWIT,
+};
+constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_SEGWIT; }
+
+enum DeploymentPos : uint16_t {
     DEPLOYMENT_TESTDUMMY,
     DEPLOYMENT_TAPROOT, // Deployment of Schnorr/Taproot (BIPs 340-342)
-    // NOTE: Also add new deployments to VersionBitsDeploymentInfo in versionbits.cpp
+    // NOTE: Also add new deployments to VersionBitsDeploymentInfo in deploymentinfo.cpp
     MAX_VERSION_BITS_DEPLOYMENTS
 };
+constexpr bool ValidDeployment(DeploymentPos dep) { return dep < MAX_VERSION_BITS_DEPLOYMENTS; }
 
 /**
  * Struct for each individual consensus rule change using BIP9.
@@ -134,6 +149,7 @@ struct Params {
     uint256 hashGenesisBlock;
     // SYSCOIN
     uint64_t nSYSXAsset;
+    uint32_t nNEVMChainID;
     std::vector<unsigned char> vchSYSXBurnMethodSignature;
     std::vector<unsigned char> vchSYSXERC20Manager;
     std::vector<unsigned char> vchTokenFreezeMethod;
@@ -141,9 +157,12 @@ struct Params {
     double nSeniorityLevel1;
     unsigned int nSeniorityHeight2;
     double nSeniorityLevel2;
+    bool bTestnet{false};
     int nBridgeStartBlock;
+    int nNEVMStartBlock;
     int nUTXOAssetsBlock;
     int nUTXOAssetsBlockProvisioning;
+    uint64_t nMinMNSubsidySats;
         
     int nSuperblockStartBlock;
     int nSuperblockCycle; // in blocks
@@ -153,8 +172,6 @@ struct Params {
     int nSubsidyHalvingInterval;
     /* Block hash that is excepted from BIP16 enforcement */
     uint256 BIP16Exception;
-    /** Block height at with BIP16 becomes active */
-    int BIP16Height;
     /** Block height and hash at which BIP34 becomes active */
     int BIP34Height;
     uint256 BIP34Hash;
@@ -185,7 +202,53 @@ struct Params {
     bool fPowNoRetargeting;
     int64_t nPowTargetSpacing;
     int64_t nPowTargetTimespan;
-    int64_t DifficultyAdjustmentInterval() const { return nPowTargetTimespan / nPowTargetSpacing; }
+    int SuperBlockCycle(int nHeight) const { 
+        if (nHeight >= nNEVMStartBlock) {
+            return nSuperblockCycle;
+        } else {
+            return nSuperblockCycle*2.5;
+        }
+    }
+    double Seniority(int nHeight, int nStartHeight) const {
+        unsigned int nSeniorityAge = 0;
+        if (nHeight > nNEVMStartBlock) {
+            const unsigned int nDifferenceInBlocksPreNEVM = std::max(nNEVMStartBlock - nStartHeight, 0);
+            const unsigned int nDifferenceInBlocksPostNEVM = nHeight - std::max(nStartHeight, nNEVMStartBlock);
+            nSeniorityAge = nDifferenceInBlocksPreNEVM + nDifferenceInBlocksPostNEVM*2.5;
+        } else {
+            nSeniorityAge = nHeight - nStartHeight;
+        } 
+        if(nSeniorityAge >= nSeniorityHeight2)
+            return nSeniorityLevel2;
+        else if(nSeniorityAge >= nSeniorityHeight1)
+            return nSeniorityLevel1;
+        return 0;
+    }
+    int SubsidyHalvingIntervals(int nHeight) const { 
+        if(bTestnet) {
+            if (nHeight >= nNEVMStartBlock) {
+                return nHeight/nSubsidyHalvingInterval;
+            } else {
+                return nHeight/(nSubsidyHalvingInterval*2.5);
+            }
+        }
+        if (nHeight >= nNEVMStartBlock) {
+            static double forkIntervals = nNEVMStartBlock/(nSubsidyHalvingInterval*2.5);
+            return floor(forkIntervals + (((double)(nHeight-nNEVMStartBlock))/((double)nSubsidyHalvingInterval)));
+        } else {
+            return nHeight/(nSubsidyHalvingInterval*2.5);
+        }
+    }
+    int64_t PowTargetSpacing(int nHeight) const {
+        if(nHeight >= nNEVMStartBlock) {
+            return nPowTargetSpacing; 
+        } else {
+            return (nPowTargetSpacing/2.5); 
+        }
+    }
+    int64_t DifficultyAdjustmentInterval(int nHeight) const {
+        return nPowTargetTimespan / PowTargetSpacing(nHeight);
+    }
     /** The best chain should have at least this much work */
     uint256 nMinimumChainWork;
     /** By default assume that the signatures in ancestors of this block are valid */
@@ -221,6 +284,24 @@ struct Params {
      */
     bool signet_blocks{false};
     std::vector<uint8_t> signet_challenge;
+
+    int DeploymentHeight(BuriedDeployment dep) const
+    {
+        switch (dep) {
+        case DEPLOYMENT_HEIGHTINCB:
+            return BIP34Height;
+        case DEPLOYMENT_CLTV:
+            return BIP65Height;
+        case DEPLOYMENT_DERSIG:
+            return BIP66Height;
+        case DEPLOYMENT_CSV:
+            return CSVHeight;
+        case DEPLOYMENT_SEGWIT:
+            return SegwitHeight;
+        } // no default case, so the compiler can warn about missing cases
+        return std::numeric_limits<int>::max();
+    }
 };
+
 } // namespace Consensus
 #endif // SYSCOIN_CONSENSUS_PARAMS_H

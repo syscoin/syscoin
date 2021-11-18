@@ -5,7 +5,7 @@
 #ifndef SYSCOIN_QT_COINCONTROLDIALOG_H
 #define SYSCOIN_QT_COINCONTROLDIALOG_H
 
-#include <amount.h>
+#include <consensus/amount.h>
 
 #include <QAbstractButton>
 #include <QAction>
@@ -51,6 +51,9 @@ public:
     static QList<CAmount> payAmounts;
     static bool fSubtractFeeFromAmount;
 
+protected:
+    void changeEvent(QEvent* e) override;
+
 private:
     Ui::CoinControlDialog *ui;
     CCoinControl& m_coin_control;
@@ -60,7 +63,7 @@ private:
 
     QMenu *contextMenu;
     QTreeWidgetItem *contextMenuItem;
-    QAction *copyTransactionHashAction;
+    QAction* m_copy_transaction_outpoint_action;
     QAction *lockAction;
     QAction *unlockAction;
 
@@ -99,7 +102,7 @@ private Q_SLOTS:
     void copyAsset();
     void copyLabel();
     void copyAddress();
-    void copyTransactionHash();
+    void copyTransactionOutpoint();
     void lockCoin();
     void unlockCoin();
     void clipboardQuantity();

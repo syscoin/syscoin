@@ -1,8 +1,8 @@
 .NOTPARALLEL :
 
 # Pattern rule to print variables, e.g. make print-top_srcdir
-print-%:
-	@echo '$*' = '$($*)'
+print-%: FORCE
+	@echo '$*'='$($*)'
 
 # When invoking a sub-make, keep only the command line variable definitions
 # matching the pattern in the filter function.
@@ -115,7 +115,7 @@ include builders/default.mk
 include packages/packages.mk
 
 # Previously, we directly invoked the well-known programs using $(shell ...)
-# to contruct build_id_string. However, that was problematic because:
+# to construct build_id_string. However, that was problematic because:
 #
 # 1. When invoking a shell, GNU Make special-cases exit code 127 (command not
 #    found) by not capturing the output but instead passing it through. This is
@@ -284,3 +284,4 @@ download: download-osx download-linux download-win
 $(foreach package,$(all_packages),$(eval $(call ext_add_stages,$(package))))
 
 .PHONY: install cached clean clean-all download-one download-osx download-linux download-win download check-packages check-sources
+.PHONY: FORCE

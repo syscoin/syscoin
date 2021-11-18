@@ -7,7 +7,7 @@
 #define SYSCOIN_PRIMITIVES_TRANSACTION_H
 
 #include <stdint.h>
-#include <amount.h>
+#include <consensus/amount.h>
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
@@ -669,11 +669,11 @@ const int SYSCOIN_TX_VERSION_ASSET_ACTIVATE = 130;
 const int SYSCOIN_TX_VERSION_ASSET_UPDATE = 131;
 const int SYSCOIN_TX_VERSION_ASSET_SEND = 132;
 const int SYSCOIN_TX_VERSION_ALLOCATION_MINT = 133;
-const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_ETHEREUM = 134;
+const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM = 134;
 const int SYSCOIN_TX_VERSION_ALLOCATION_SEND = 135;
 const int SYSCOIN_TX_MIN_ASSET_GUID = SYSCOIN_TX_VERSION_ALLOCATION_SEND * 10;
 const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY = 0x7400;
-
+const int MAX_MEMO = 256;
 enum {
 	ZDAG_NOT_FOUND = -1,
 	ZDAG_STATUS_OK = 0,
@@ -947,7 +947,7 @@ public:
     inline friend bool operator!=(const CAsset &a, const CAsset &b) {
         return !(a == b);
     }
-    // set precision to an invalid amount so isnull will identity this asset as invalid state
+    // set precision to an invalid amount so isnull will identify this asset as invalid state
     inline void SetNull() { ClearAsset(); nPrecision = 9; }
     inline bool IsNull() const { return nPrecision == 9; }
     bool UnserializeFromTx(const CTransaction &tx);
@@ -960,14 +960,14 @@ public:
     // where in vchTxParentNodes the vchTxValue can be found as an offset
     uint16_t posTx;
     std::vector<unsigned char> vchTxParentNodes;
-    std::vector<unsigned char> vchTxRoot;
+    uint256 nTxRoot;
     std::vector<unsigned char> vchTxPath;
     // where in vchReceiptParentNodes the vchReceiptValue can be found as an offset
     uint16_t posReceipt;
     std::vector<unsigned char> vchReceiptParentNodes; 
-    std::vector<unsigned char> vchReceiptRoot;
-    uint32_t nBlockNumber;
-    uint32_t nBridgeTransferID;
+    uint256 nReceiptRoot;
+    uint256 nTxHash;
+    uint256 nBlockHash;
 
     CMintSyscoin() {
         SetNull();
@@ -977,12 +977,12 @@ public:
 
     SERIALIZE_METHODS(CMintSyscoin, obj) {
         READWRITEAS(CAssetAllocation, obj);
-        READWRITE(obj.nBridgeTransferID, obj.nBlockNumber, obj.posTx,
+        READWRITE(obj.nTxHash, obj.nBlockHash, obj.posTx,
         obj.vchTxParentNodes, obj.vchTxPath, obj.posReceipt,
-        obj.vchReceiptParentNodes, obj.vchTxRoot, obj.vchReceiptRoot);
+        obj.vchReceiptParentNodes, obj.nTxRoot, obj.nReceiptRoot);
     }
 
-    inline void SetNull() { voutAssets.clear(); posTx = 0; vchTxRoot.clear(); vchReceiptRoot.clear(); vchTxParentNodes.clear(); vchTxPath.clear(); posReceipt = 0; vchReceiptParentNodes.clear(); nBridgeTransferID = 0; nBlockNumber = 0;  }
+    inline void SetNull() { voutAssets.clear(); posTx = 0; nTxRoot.SetNull(); nReceiptRoot.SetNull(); vchTxParentNodes.clear(); vchTxPath.clear(); posReceipt = 0; vchReceiptParentNodes.clear(); nTxHash.SetNull(); nBlockHash.SetNull();  }
     inline bool IsNull() const { return (voutAssets.empty() && posTx == 0 && posReceipt == 0); }
     int UnserializeFromData(const std::vector<unsigned char> &vchData);
     bool UnserializeFromTx(const CTransaction &tx);
@@ -992,7 +992,7 @@ public:
 
 class CBurnSyscoin: public CAssetAllocation {
 public:
-    std::vector<unsigned char> vchEthAddress;
+    std::vector<unsigned char> vchNEVMAddress;
     CBurnSyscoin() {
         SetNull();
     }
@@ -1001,16 +1001,55 @@ public:
 
     SERIALIZE_METHODS(CBurnSyscoin, obj) {
         READWRITEAS(CAssetAllocation, obj);
-        READWRITE(obj.vchEthAddress);
+        READWRITE(obj.vchNEVMAddress);
     }
 
-    inline void SetNull() { voutAssets.clear(); vchEthAddress.clear();  }
-    inline bool IsNull() const { return (vchEthAddress.empty() && voutAssets.empty()); }
+    inline void SetNull() { voutAssets.clear(); vchNEVMAddress.clear();  }
+    inline bool IsNull() const { return (vchNEVMAddress.empty() && voutAssets.empty()); }
     int UnserializeFromData(const std::vector<unsigned char> &vchData);
     bool UnserializeFromTx(const CTransaction &tx);
     bool UnserializeFromTx(const CMutableTransaction &mtx);
     void SerializeData(std::vector<unsigned char>& vchData);
 };
+class NEVMTxRoot {
+    public:
+    uint256 nTxRoot;
+    uint256 nReceiptRoot;
+    SERIALIZE_METHODS(NEVMTxRoot, obj)
+    {
+        READWRITE(obj.nTxRoot, obj.nReceiptRoot);
+    }
+};
+class CNEVMHeader {
+    public:
+    uint256 nBlockHash;
+    uint256 nTxRoot;
+    uint256 nReceiptRoot;
+    CNEVMHeader(){
+        SetNull();
+    };
+    CNEVMHeader(CNEVMHeader&& evmBlock){
+        nBlockHash = std::move(evmBlock.nBlockHash);
+        nTxRoot = std::move(evmBlock.nTxRoot);
+        nReceiptRoot = std::move(evmBlock.nReceiptRoot);
+    }
+    SERIALIZE_METHODS(CNEVMHeader, obj)
+    {
+        READWRITE(obj.nBlockHash, obj.nTxRoot, obj.nReceiptRoot);
+    }
+    inline void SetNull() { nBlockHash.SetNull(); nTxRoot.SetNull(); nReceiptRoot.SetNull(); }
+};
+
+class CNEVMBlock: public CNEVMHeader {
+    public:
+    std::vector<unsigned char>  vchNEVMBlockData;
+    SERIALIZE_METHODS(CNEVMBlock, obj)
+    {
+        READWRITEAS(CNEVMHeader, obj);
+        READWRITE(obj.vchNEVMBlockData);
+    }
+};
+
 bool IsSyscoinTx(const int &nVersion);
 bool IsMasternodeTx(const int &nVersion);
 bool IsAssetAllocationTx(const int &nVersion);
@@ -1023,8 +1062,9 @@ int GetSyscoinDataOutput(const CMutableTransaction& mtx);
 bool GetSyscoinData(const CTransaction &tx, std::vector<unsigned char> &vchData, int& nOut);
 bool GetSyscoinData(const CMutableTransaction &mtx, std::vector<unsigned char> &vchData, int& nOut);
 bool GetSyscoinData(const CScript &scriptPubKey, std::vector<unsigned char> &vchData);
-typedef std::unordered_map<uint32_t, uint256> EthereumMintTxMap;
-typedef std::unordered_map<uint32_t, CAsset > AssetMap;
+typedef std::unordered_map<uint256, uint256> NEVMMintTxMap;
+typedef std::unordered_map<uint256, NEVMTxRoot> NEVMTxRootMap;
+typedef std::unordered_map<uint32_t, std::pair<std::vector<uint64_t>, CAsset > > AssetMap;
 /** A generic txid reference (txid or wtxid). */
 // SYSCOIN
 class GenTxid
@@ -1032,9 +1072,15 @@ class GenTxid
     bool m_is_wtxid;
     uint256 m_hash;
     uint32_t m_type;
-public:
     GenTxid(bool is_wtxid, const uint256& hash, const uint32_t& type) : m_is_wtxid(is_wtxid), m_hash(hash), m_type(type) {}
     GenTxid(bool is_wtxid, const uint256& hash) : m_is_wtxid(is_wtxid), m_hash(hash), m_type(0) {}
+
+public:
+    static GenTxid Txid(const uint256& hash) { return GenTxid{false, hash}; }
+    static GenTxid Wtxid(const uint256& hash) { return GenTxid{true, hash}; }
+    // SYSCOIN
+    static GenTxid Txid(const uint256& hash, const uint32_t& type) { return GenTxid{false, hash, type}; }
+    static GenTxid Wtxid(const uint256& hash, const uint32_t& type) { return GenTxid{true, hash, type}; }
     bool IsWtxid() const { return m_is_wtxid; }
     const uint256& GetHash() const { return m_hash; }
     const uint32_t& GetType() const { return m_type; }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2019 The Bitcoin Core developers
+# Copyright (c) 2014-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the listreceivedbyaddress RPC."""
@@ -24,8 +24,7 @@ class ReceivedByTest(SyscoinTestFramework):
 
     def run_test(self):
         # Generate block to get out of IBD
-        self.nodes[0].generate(1)
-        self.sync_blocks()
+        self.generate(self.nodes[0], 1)
 
         # save the number of coinbase reward addresses so far
         num_cb_reward_addresses = len(self.nodes[1].listreceivedbyaddress(minconf=0, include_empty=True, include_watchonly=True))
@@ -43,8 +42,7 @@ class ReceivedByTest(SyscoinTestFramework):
                             {},
                             True)
         # Bury Tx under 10 block so it will be returned by listreceivedbyaddress
-        self.nodes[1].generate(10)
-        self.sync_all()
+        self.generate(self.nodes[1], 10)
         assert_array_result(self.nodes[1].listreceivedbyaddress(),
                             {"address": addr},
                             {"address": addr, "label": "", "amount": Decimal("0.1"), "confirmations": 10, "txids": [txid, ]})
@@ -78,8 +76,7 @@ class ReceivedByTest(SyscoinTestFramework):
         assert_equal(len(res), 2 + num_cb_reward_addresses)  # Right now 2 entries
         other_addr = self.nodes[1].getnewaddress()
         txid2 = self.nodes[0].sendtoaddress(other_addr, 0.1)
-        self.nodes[0].generate(1)
-        self.sync_all()
+        self.generate(self.nodes[0], 1)
         # Same test as above should still pass
         expected = {"address": addr, "label": "", "amount": Decimal("0.1"), "confirmations": 11, "txids": [txid, ]}
         res = self.nodes[1].listreceivedbyaddress(0, True, True, addr)
@@ -115,8 +112,7 @@ class ReceivedByTest(SyscoinTestFramework):
         assert_equal(balance, Decimal("0.1"))
 
         # Bury Tx under 10 block so it will be returned by the default getreceivedbyaddress
-        self.nodes[1].generate(10)
-        self.sync_all()
+        self.generate(self.nodes[1], 10)
         balance = self.nodes[1].getreceivedbyaddress(addr)
         assert_equal(balance, Decimal("0.1"))
 
@@ -144,8 +140,7 @@ class ReceivedByTest(SyscoinTestFramework):
         balance = self.nodes[1].getreceivedbylabel(label)
         assert_equal(balance, balance_by_label)
 
-        self.nodes[1].generate(10)
-        self.sync_all()
+        self.generate(self.nodes[1], 10)
         # listreceivedbylabel should return updated received list
         assert_array_result(self.nodes[1].listreceivedbylabel(),
                             {"label": label},

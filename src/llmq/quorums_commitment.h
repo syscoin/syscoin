@@ -11,6 +11,7 @@
 
 #include <univalue.h>
 #include <evo/cbtx.h>
+class BlockManager;
 namespace llmq
 {
 
@@ -20,7 +21,7 @@ namespace llmq
 class CFinalCommitment
 {
 public:
-    static const uint16_t CURRENT_VERSION = 1;
+    static constexpr uint16_t CURRENT_VERSION = 1;
 
 public:
     uint16_t nVersion{CURRENT_VERSION};
@@ -48,7 +49,7 @@ public:
         return (int)std::count(validMembers.begin(), validMembers.end(), true);
     }
 
-    bool Verify(const CBlockIndex* pQuorumIndex, bool checkSigs) const;
+    bool Verify(const CBlockIndex* pQuorumBaseBlockIndex, bool checkSigs) const;
     bool VerifyNull() const;
     bool VerifySizes(const Consensus::LLMQParams& params) const;
 
@@ -90,7 +91,8 @@ public:
         obj.pushKV("membersSig", membersSig.ToString());
     }
 };
-typedef std::shared_ptr<CFinalCommitment> CFinalCommitmentPtr;
+using CFinalCommitmentPtr = std::shared_ptr<CFinalCommitment>;
+
 class CFinalCommitmentTxPayload
 {
 public:
@@ -116,7 +118,7 @@ public:
     inline bool IsNull() const {return commitments.empty();}
 };
 
-bool CheckLLMQCommitment(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)  EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+bool CheckLLMQCommitment(BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)  EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 } // namespace llmq
 

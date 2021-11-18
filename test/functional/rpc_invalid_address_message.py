@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2020 The Bitcoin Core developers
+# Copyright (c) 2020-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test error messages for 'getaddressinfo' and 'validateaddress' RPC commands."""
@@ -29,9 +29,6 @@ class InvalidAddressErrorMessageTest(SyscoinTestFramework):
         self.setup_clean_chain = True
         self.num_nodes = 1
 
-    def skip_test_if_missing_module(self):
-        self.skip_if_no_wallet()
-
     def test_validateaddress(self):
         node = self.nodes[0]
 
@@ -60,6 +57,10 @@ class InvalidAddressErrorMessageTest(SyscoinTestFramework):
         assert info['isvalid']
         assert 'error' not in info
 
+        info = node.validateaddress(BECH32_INVALID_VERSION)
+        assert not info['isvalid']
+        assert_equal(info['error'], 'Invalid Bech32 address witness version')
+
         # Base58
         info = node.validateaddress(BASE58_INVALID_PREFIX)
         assert not info['isvalid']
@@ -87,7 +88,10 @@ class InvalidAddressErrorMessageTest(SyscoinTestFramework):
 
     def run_test(self):
         self.test_validateaddress()
-        self.test_getaddressinfo()
+
+        if self.is_wallet_compiled():
+            self.init_wallet(node=0)
+            self.test_getaddressinfo()
 
 
 if __name__ == '__main__':

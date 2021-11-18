@@ -8,8 +8,11 @@
 #include <util/string.h>
 #include <util/time.h>
 
+#include <algorithm>
+#include <array>
 #include <mutex>
-
+// SYSCOIN
+#include <util/system.h>
 const char * const DEFAULT_DEBUGLOGFILE = "debug.log";
 
 BCLog::Logger& LogInstance()
@@ -124,8 +127,7 @@ bool BCLog::Logger::DefaultShrinkDebugFile() const
     return m_categories == BCLog::NONE;
 }
 
-struct CLogCategoryDesc
-{
+struct CLogCategoryDesc {
     BCLog::LogFlags flag;
     std::string category;
 };
@@ -168,6 +170,9 @@ const CLogCategoryDesc LogCategories[] =
     {BCLog::SYS, "syscoin"},
     {BCLog::I2P, "i2p"},
     {BCLog::IPC, "ipc"},
+    {BCLog::LOCK, "lock"},
+    {BCLog::UTIL, "util"},
+    {BCLog::BLOCKSTORE, "blockstorage"},
     {BCLog::ALL, "1"},
     {BCLog::ALL, "all"},
 };
@@ -189,15 +194,18 @@ bool GetLogCategory(BCLog::LogFlags& flag, const std::string& str)
 
 std::vector<LogCategory> BCLog::Logger::LogCategoriesList() const
 {
+    // Sort log categories by alphabetical order.
+    std::array<CLogCategoryDesc, std::size(LogCategories)> categories;
+    std::copy(std::begin(LogCategories), std::end(LogCategories), categories.begin());
+    std::sort(categories.begin(), categories.end(), [](auto a, auto b) { return a.category < b.category; });
+
     std::vector<LogCategory> ret;
-    for (const CLogCategoryDesc& category_desc : LogCategories) {
-        // Omit the special cases.
-        if (category_desc.flag != BCLog::NONE && category_desc.flag != BCLog::ALL) {
-            LogCategory catActive;
-            catActive.category = category_desc.category;
-            catActive.active = WillLogCategory(category_desc.flag);
-            ret.push_back(catActive);
-        }
+    for (const CLogCategoryDesc& category_desc : categories) {
+        if (category_desc.flag == BCLog::NONE || category_desc.flag == BCLog::ALL) continue;
+        LogCategory catActive;
+        catActive.category = category_desc.category;
+        catActive.active = WillLogCategory(category_desc.flag);
+        ret.push_back(catActive);
     }
     return ret;
 }
@@ -247,7 +255,7 @@ namespace BCLog {
         }
         return ret;
     }
-}
+} // namespace BCLog
 
 void BCLog::Logger::LogPrintStr(const std::string& str, const std::string& logging_function, const std::string& source_file, const int source_line)
 {
@@ -328,6 +336,40 @@ void BCLog::Logger::ShrinkDebugFile()
         fclose(file);
 
         file = fsbridge::fopen(m_file_path, "w");
+        if (file)
+        {
+            fwrite(vch.data(), 1, nBytes, file);
+            fclose(file);
+        }
+    }
+    else if (file != nullptr)
+        fclose(file);
+
+    // SYSCOIN
+    // Scroll sysgeth.log if it's getting too big
+    file = fsbridge::fopen(gArgs.GetDataDirNet() / "sysgeth.log", "r");
+
+    // Special files (e.g. device nodes) may not have a size.
+    log_size = 0;
+    try {
+        log_size = fs::file_size(gArgs.GetDataDirNet() / "sysgeth.log");
+    } catch (const fs::filesystem_error&) {}
+
+    // If debug.log file is more than 10% bigger the RECENT_DEBUG_HISTORY_SIZE
+    // trim it down by saving only the last RECENT_DEBUG_HISTORY_SIZE bytes
+    if (file && log_size > 11 * (RECENT_DEBUG_HISTORY_SIZE / 10))
+    {
+        // Restart the file with some of the end
+        std::vector<char> vch(RECENT_DEBUG_HISTORY_SIZE, 0);
+        if (fseek(file, -((long)vch.size()), SEEK_END)) {
+            LogPrintf("Failed to shrink debug log file: fseek(...) failed\n");
+            fclose(file);
+            return;
+        }
+        int nBytes = fread(vch.data(), 1, vch.size(), file);
+        fclose(file);
+
+        file = fsbridge::fopen(gArgs.GetDataDirNet() / "sysgeth.log", "w");
         if (file)
         {
             fwrite(vch.data(), 1, nBytes, file);
