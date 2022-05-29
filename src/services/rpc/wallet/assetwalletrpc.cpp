@@ -384,7 +384,7 @@ static RPCHelpMan syscoinburntoassetallocation()
         nAmount = AssetAmountFromValue(params[1], theAsset.nPrecision);
     }
     catch(...) {
-        nAmount = params[1].get_int64();
+        nAmount = params[1].getInt<int64_t>();
     }
 
     std::vector<CAssetOutValue> outVec = {CAssetOutValue(1, nAmount)};
@@ -411,14 +411,13 @@ static RPCHelpMan syscoinburntoassetallocation()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid change address");
         }
     }
-    int nChangePosRet = -1;
+    int nChangePosInOut = -1;
     bilingual_str error;
-    CAmount nFeeRequired = 0;
     CTransactionRef tx;
     FeeCalculation fee_calc_out;
-    if (!CreateTransaction(*pwallet, vecSend, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, false /* sign*/, SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION)) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
-    }
+    std::optional<CreatedTransactionResult> txr = CreateTransaction(*pwallet, vecSend, nChangePosInOut, error, coin_control, fee_calc_out, false /* sign*/, SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION);
+    if (!txr) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
+    tx = txr->tx;
     CMutableTransaction mtx(*tx);
     // Script verification errors
     std::map<int, bilingual_str> input_errors;
@@ -557,7 +556,7 @@ RPCHelpMan assetnew()
         nMaxSupply = AssetAmountFromValue(params[5], precision);
     }
     catch(...) {
-        nMaxSupply = params[5].get_int64();
+        nMaxSupply = params[5].getInt<int64_t>();
     }
     uint32_t nUpdateCapabilityFlags = ASSET_CAPABILITY_ALL;
     if(!params[6].isNull()) {
@@ -887,17 +886,16 @@ UniValue CreateAssetUpdateTx(const std::any& context, const int32_t& nVersionIn,
     if(recp.nAmount > 0)
         vecSend.push_back(recp);
     vecSend.push_back(opreturnRecipient);
-    CAmount nFeeRequired = 0;
     bilingual_str error;
-    int nChangePosRet = -1;
+    int nChangePosInOut = -1;
     coin_control.m_signal_bip125_rbf = pwallet.m_signal_rbf;
     coin_control.Select(inputCoin.outpoint);
     coin_control.fAllowOtherInputs = recp.nAmount <= 0 || !recp.fSubtractFeeFromAmount; // select asset + sys utxo's
     CTransactionRef tx;
     FeeCalculation fee_calc_out;
-    if (!CreateTransaction(pwallet, vecSend, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, false /* sign*/, nVersionIn)) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
-    }
+    std::optional<CreatedTransactionResult> txr = CreateTransaction(pwallet, vecSend, nChangePosInOut, error, coin_control, fee_calc_out, false /* sign*/, nVersionIn);
+    if (!txr) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
+    tx = txr->tx;
     
     CMutableTransaction mtx(*tx);
     // Script verification errors
@@ -1791,7 +1789,7 @@ static RPCHelpMan assetallocationburn()
         nAmount = AssetAmountFromValue(params[1], theAsset.nPrecision);
     }
     catch(...) {
-        nAmount = params[1].get_int64();
+        nAmount = params[1].getInt<int64_t>();
     }
 	std::string nevmAddress = "";
     if(params[2].isStr())
@@ -2138,7 +2136,7 @@ static RPCHelpMan assetallocationmint()
         nAmount = AssetAmountFromValue(request.params[2], theAsset.nPrecision);
     }
     catch(...) {
-        nAmount = request.params[2].get_int64();
+        nAmount = request.params[2].getInt<int64_t>();
     }        
     std::string blockStr = params[3].get_str();
     if(!blockStr.empty())
@@ -2506,7 +2504,7 @@ static RPCHelpMan listunspentasset()
 
     int nMinDepth = 1;
     if (!request.params[1].isNull()) {
-        nMinDepth = request.params[1].get_int();
+        nMinDepth = request.params[1].getInt<int>();
     }
     int nMaxDepth = 9999999;
     bool include_unsafe = true;
@@ -2556,11 +2554,11 @@ static RPCHelpMan addressbalance() {
 {	
     int nMinDepth = 1;
     if (!request.params[1].isNull()) {
-        nMinDepth = request.params[1].get_int();
+        nMinDepth = request.params[1].getInt<int>();
     }
     int nMaxDepth = 9999999;
     if (!request.params[2].isNull()) {
-        nMaxDepth = request.params[1].get_int();
+        nMaxDepth = request.params[1].getInt<int>();
     }
     UniValue paramsFund(UniValue::VARR);
     paramsFund.push_back(nMinDepth);
@@ -2663,16 +2661,16 @@ static RPCHelpMan assetallocationbalance() {
     
     int nMinDepth = 1;
     if (!request.params[2].isNull()) {
-        nMinDepth = request.params[2].get_int();
+        nMinDepth = request.params[2].getInt<int>();
     }
     int nMaxDepth = 9999999;
     if (!request.params[3].isNull()) {
-        nMaxDepth = request.params[3].get_int();
+        nMaxDepth = request.params[3].getInt<int>();
     }
     // Accept either a bool (true) or a num (>=1) to indicate verbose output.
     bool fVerbose = false;
     if (!request.params[4].isNull()) {
-        fVerbose = request.params[4].isNum() ? (request.params[4].get_int() != 0) : request.params[4].get_bool();
+        fVerbose = request.params[4].isNum() ? (request.params[4].getInt<int>() != 0) : request.params[4].get_bool();
     }
     if(fVerbose && !BuildAssetJson(theAsset, nBaseAsset, oAsset))
         throw JSONRPCError(RPC_DATABASE_ERROR, "Failed to create asset JSON");
@@ -2750,11 +2748,11 @@ static RPCHelpMan sendfrom() {
     LOCK(pwallet->cs_wallet);
     int nMinDepth = 1;
     if (!request.params[3].isNull()) {
-        nMinDepth = request.params[3].get_int();
+        nMinDepth = request.params[3].getInt<int>();
     }
     int nMaxDepth = 9999999;
     if (!request.params[4].isNull()) {
-        nMaxDepth = request.params[4].get_int();
+        nMaxDepth = request.params[4].getInt<int>();
     }
     std::string fChangeAddress = "";
     if(!request.params[5].isNull()) {
@@ -2787,7 +2785,7 @@ static RPCHelpMan sendfrom() {
         for(size_t i =0;i<resUTXOArr.size();i++) {
             const UniValue& utxoObj = resUTXOArr[i].get_obj();
             const uint256 &txid = ParseHashO(utxoObj, "txid");
-            const int &nOut = find_value(utxoObj, "vout").get_int();
+            const int &nOut = find_value(utxoObj, "vout").getInt<int>();
             const UniValue& assetObj = find_value(utxoObj, "asset_guid");
             // since we are sending SYS, don't send asset on any UTXO's
             if(assetObj.isNull()) {
