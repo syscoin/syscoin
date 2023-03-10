@@ -4,7 +4,6 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test gettxoutproof and verifytxoutproof RPCs."""
 
-from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.messages import (
     CMerkleBlock,
     from_hex,
@@ -20,7 +19,6 @@ from test_framework.wallet import MiniWallet
 class MerkleBlockTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
-        self.setup_clean_chain = True
         self.extra_args = [
             [],
             ["-txindex"],
@@ -28,19 +26,16 @@ class MerkleBlockTest(SyscoinTestFramework):
 
     def run_test(self):
         miniwallet = MiniWallet(self.nodes[0])
-        # Add enough mature utxos to the wallet, so that all txs spend confirmed coins
-        self.generate(miniwallet, 5)
-        self.generate(self.nodes[0], COINBASE_MATURITY)
 
         chain_height = self.nodes[1].getblockcount()
-        assert_equal(chain_height, 105)
+        assert_equal(chain_height, 200)
 
         txid1 = miniwallet.send_self_transfer(from_node=self.nodes[0])['txid']
         txid2 = miniwallet.send_self_transfer(from_node=self.nodes[0])['txid']
         # This will raise an exception because the transaction is not yet in a block
         assert_raises_rpc_error(-5, "Transaction not yet in block", self.nodes[0].gettxoutproof, [txid1])
 
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 1)
         blockhash = self.nodes[0].getblockhash(chain_height + 1)
 
         txlist = []

@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2020 The Bitcoin Core developers
+// Copyright (c) 2016-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,9 +6,17 @@
 #define SYSCOIN_BLOCKENCODINGS_H
 
 #include <primitives/block.h>
+namespace node {
+class BlockManager;
+} // namespace node
 
+#include <functional>
 
 class CTxMemPool;
+class BlockValidationState;
+namespace Consensus {
+struct Params;
+};
 
 // Transaction compression schemes for compact block relay can be introduced by writing
 // an actual formatter here.
@@ -52,7 +60,7 @@ public:
     // A BlockTransactions message
     uint256 blockhash;
     std::vector<CTransactionRef> txn;
-    // SYSCOIN
+    // SYSCOIN TODO: remove this field it shouldn't be required
     std::vector<unsigned char> vchNEVMBlockData{};
     BlockTransactions() {}
     explicit BlockTransactions(const BlockTransactionsRequest& req) :
@@ -105,7 +113,7 @@ public:
     // Dummy for deserialization
     CBlockHeaderAndShortTxIDs() {}
     // SYSCOIN
-    CBlockHeaderAndShortTxIDs(const CBlock& block, bool fUseWTXID, bool fMoveNEVMData = false);
+    CBlockHeaderAndShortTxIDs(const CBlock& block, bool fMoveNEVMData = false);
 
     uint64_t GetShortID(const uint256& txhash) const;
 
@@ -122,7 +130,6 @@ public:
         }
     }
 };
-static std::vector<unsigned char> emptyVecData;
 class PartiallyDownloadedBlock {
 protected:
     std::vector<CTransactionRef> txn_available;
@@ -132,13 +139,17 @@ public:
     CBlockHeader header;
     // SYSCOIN
     std::vector<unsigned char> vchNEVMBlockData{};
+
+    // Can be overridden for testing
+    using CheckBlockFn = std::function<bool(const CBlock&, BlockValidationState&, const Consensus::Params&, bool, bool)>;
+    CheckBlockFn m_check_block_mock{nullptr};
+
     explicit PartiallyDownloadedBlock(CTxMemPool* poolIn) : pool(poolIn) {}
 
     // extra_txn is a list of extra transactions to look at, in <witness hash, reference> form
-    ReadStatus InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn, std::vector<unsigned char> &vchNEVMBlockData=emptyVecData);
+    ReadStatus InitData(CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn);
     bool IsTxAvailable(size_t index) const;
-    // SYSCOIN
-    ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, std::vector<unsigned char> &vchNEVMBlockData=emptyVecData);
+    ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing);
 };
 
 #endif // SYSCOIN_BLOCKENCODINGS_H

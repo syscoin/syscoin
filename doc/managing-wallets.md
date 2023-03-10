@@ -12,10 +12,8 @@ In the GUI, the `Create a new wallet` button is displayed on the main screen whe
 The following command, for example, creates a descriptor wallet. More information about this command may be found by running `syscoin-cli help createwallet`.
 
 ```
-$ syscoin-cli -named createwallet wallet_name="wallet-01" descriptors=true
+$ syscoin-cli createwallet "wallet-01"
 ```
-
-The `descriptors` parameter can be omitted if the intention is to create a legacy wallet. For now, the default type is the legacy wallet, but that is expected to change in a future release.
 
 By default, wallets are created in the `wallets` folder of the data directory, which varies by operating system, as shown below. The user can change the default by using the `-datadir` or `-walletdir` initialization parameters.
 
@@ -54,7 +52,7 @@ Only the wallet's private key is encrypted. All other wallet information, such a
 The wallet's private key can also be encrypted in the `createwallet` command via the `passphrase` argument:
 
 ```
-$ syscoin-cli -named createwallet wallet_name="wallet-01" descriptors=true passphrase="passphrase"
+$ syscoin-cli -named createwallet wallet_name="wallet-01" passphrase="passphrase"
 ```
 
 Note that if the passphrase is lost, all the coins in the wallet will also be lost forever.
@@ -90,7 +88,7 @@ In the RPC, the destination parameter must include the name of the file. Otherwi
 $ syscoin-cli -rpcwallet="wallet-01" backupwallet /home/node01/Backups/backup-01.dat
 ```
 
-In the GUI, the wallet is selected in the `Wallet` drop-down list in the upper right corner. If this list is not present, the wallet can be loaded in `File` ->`Open wallet` if necessary. Then, the backup can be done in `File` -> `Backup Wallet...`.
+In the GUI, the wallet is selected in the `Wallet` drop-down list in the upper right corner. If this list is not present, the wallet can be loaded in `File` ->`Open Wallet` if necessary. Then, the backup can be done in `File` -> `Backup Wallet…`.
 
 This backup file can be stored on one or multiple offline devices, which must be reliable enough to work in an emergency and be malware free. Backup files can be regularly tested to avoid problems in the future.
 
@@ -110,7 +108,7 @@ Wallets created before version 0.13 are not HD and must be backed up every 100 k
 
 ### 1.6 Restoring the Wallet From a Backup
 
-To restore a wallet, the `restorewallet` RPC must be used.
+To restore a wallet, the `restorewallet` RPC or the `Restore Wallet` GUI menu item (`File` -> `Restore Wallet…`) must be used.
 
 ```
 $ syscoin-cli restorewallet "restored-wallet" /home/node01/Backups/backup-01.dat
@@ -123,3 +121,28 @@ $ syscoin-cli -rpcwallet="restored-wallet" getwalletinfo
 ```
 
 The restored wallet can also be loaded in the GUI via `File` ->`Open wallet`.
+
+## Migrating Legacy Wallets to Descriptor Wallets
+
+Legacy wallets (traditional non-descriptor wallets) can be migrated to become Descriptor wallets
+through the use of the `migratewallet` RPC. Migrated wallets will have all of their addresses and private keys added to
+a newly created Descriptor wallet that has the same name as the original wallet. Because Descriptor
+wallets do not support having private keys and watch-only scripts, there may be up to two
+additional wallets created after migration. In addition to a descriptor wallet of the same name,
+there may also be a wallet named `<name>_watchonly` and `<name>_solvables`. `<name>_watchonly`
+contains all of the watchonly scripts. `<name>_solvables` contains any scripts which the wallet
+knows but is not watching the corresponding P2(W)SH scripts.
+
+Migrated wallets will also generate new addresses differently. While the same BIP 32 seed will be
+used, the BIP 44, 49, 84, and 86 standard derivation paths will be used. After migrating, a new
+backup of the wallet(s) will need to be created.
+
+Given that there is an extremely large number of possible configurations for the scripts that
+Legacy wallets can know about, be watching for, and be able to sign for, `migratewallet` only
+makes a best effort attempt to capture all of these things into Descriptor wallets. There may be
+unforeseen configurations which result in some scripts being excluded. If a migration fails
+unexpectedly or otherwise misses any scripts, please create an issue on GitHub. A backup of the
+original wallet can be found in the wallet directory with the name `<name>-<timestamp>.legacy.bak`.
+
+The backup can be restored using the methods discussed in the
+[Restoring the Wallet From a Backup](#16-restoring-the-wallet-from-a-backup) section.

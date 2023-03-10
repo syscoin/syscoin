@@ -11,6 +11,7 @@
 #include <validation.h>
 #include <warnings.h>
 #include <bls/bls.h>
+#include <util/system.h>
 // Keep track of the active Masternode
 RecursiveMutex activeMasternodeInfoCs;
 CActiveMasternodeInfo activeMasternodeInfo GUARDED_BY(activeMasternodeInfoCs);
@@ -109,7 +110,7 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
     }
 
     // Check socket connectivity
-    LogPrintf("CActiveMasternodeManager::Init -- Checking inbound connection to '%s'\n", activeMasternodeInfo.service.ToString());
+    LogPrintf("CActiveMasternodeManager::Init -- Checking inbound connection to '%s'\n", activeMasternodeInfo.service.ToStringAddrPort());
     {
         CNode* pnode = connman.FindNode(activeMasternodeInfo.service);
         if (pnode)
@@ -124,23 +125,23 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
     std::unique_ptr<Sock> sockPtr = CreateSockTCP(activeMasternodeInfo.service);
     if(!sockPtr) {
         state = MASTERNODE_ERROR;
-        strError = "Could not create socket to connect to " + activeMasternodeInfo.service.ToString();
+        strError = "Could not create socket to connect to " + activeMasternodeInfo.service.ToStringAddrPort();
         LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
     
     if (sockPtr->Get() == INVALID_SOCKET) {
         state = MASTERNODE_ERROR;
-        strError = "Could not create socket to connect to " + activeMasternodeInfo.service.ToString();
+        strError = "Could not create socket to connect to " + activeMasternodeInfo.service.ToStringAddrPort();
         LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
-    bool fConnected = ConnectSocketDirectly(activeMasternodeInfo.service, *sockPtr, nConnectTimeout, true) && IsSelectableSocket(sockPtr->Get());
-    sockPtr->Reset();
+    bool fConnected = ConnectSocketDirectly(activeMasternodeInfo.service, *sockPtr, nConnectTimeout, true) && sockPtr->IsSelectable();
+    sockPtr = std::make_unique<Sock>(INVALID_SOCKET);
 
     if (!fConnected && Params().RequireRoutableExternalIP()) {
         state = MASTERNODE_ERROR;
-        strError = "Could not connect to " + activeMasternodeInfo.service.ToString();
+        strError = "Could not connect to " + activeMasternodeInfo.service.ToStringAddrPort();
         LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
@@ -150,7 +151,7 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
     state = MASTERNODE_READY;
 }
 
-void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload)
+void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, ChainstateManager& chainman, bool fInitialDownload)
 {
     LOCK2(cs_main, activeMasternodeInfoCs);
 

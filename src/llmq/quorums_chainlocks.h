@@ -59,18 +59,18 @@ private:
     mutable RecursiveMutex cs;
     bool isEnabled GUARDED_BY(cs) {false};
     bool isEnforced GUARDED_BY(cs) {false};
-    bool tryLockChainTipScheduled GUARDED_BY(cs) {false};
+    std::atomic_bool tryLockChainTipScheduled {false};
 
     CChainLockSig mostRecentChainLockShare GUARDED_BY(cs);
     CChainLockSig bestChainLockWithKnownBlock GUARDED_BY(cs);
-    const CBlockIndex* bestChainLockBlockIndex GUARDED_BY(cs) {nullptr};
+    CChainLockSig bestChainLockWithKnownBlockPrev GUARDED_BY(cs);
+    const CBlockIndex* bestChainLockBlockIndex {nullptr};
+    const CBlockIndex* bestChainLockBlockIndexPrev {nullptr};
     // Keep best chainlock shares and candidates, sorted by height (highest heght first).
     std::map<int, std::map<CQuorumCPtr, CChainLockSigCPtr>, ReverseHeightComparator> bestChainLockShares GUARDED_BY(cs);
     std::map<int, CChainLockSigCPtr, ReverseHeightComparator> bestChainLockCandidates GUARDED_BY(cs);
 
     std::map<uint256, std::pair<int, uint256> > mapSignedRequestIds GUARDED_BY(cs);
-
-
     std::map<uint256, int64_t> seenChainLocks GUARDED_BY(cs);
 
     int64_t lastCleanupTime GUARDED_BY(cs) {0};
@@ -87,13 +87,14 @@ public:
 
     bool AlreadyHave(const uint256& hash) const;
     bool GetChainLockByHash(const uint256& hash, CChainLockSig& ret) const;
-    const CChainLockSig GetMostRecentChainLock() const;
-    const CChainLockSig GetBestChainLock() const ;
-    const std::map<CQuorumCPtr, CChainLockSigCPtr> GetBestChainLockShares() const;
+    CChainLockSig GetMostRecentChainLock() const;
+    CChainLockSig GetBestChainLock() const ;
+    const CBlockIndex* GetPreviousChainLock() const ;
+    std::map<CQuorumCPtr, CChainLockSigCPtr> GetBestChainLockShares() const;
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv);
     void ProcessNewChainLock(NodeId from, CChainLockSig& clsig, const uint256& hash, const uint256& idIn = uint256());
-    void AcceptedBlockHeader(const CBlockIndex* pindexNew);
+    void NotifyHeaderTip(const CBlockIndex* pindexNew);
     void UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload);
     void CheckActiveState();
     void TrySignChainTip();
@@ -101,6 +102,7 @@ public:
 
     bool HasChainLock(int nHeight, const uint256& blockHash) const;
     bool HasConflictingChainLock(int nHeight, const uint256& blockHash) const;
+    void SetToPreviousChainLock();
 
 private:
     // these require locks to be held already

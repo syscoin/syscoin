@@ -1,13 +1,16 @@
 // Copyright (c) 2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <rpc/client.h>
+#include <tinyformat.h>
 #include <util/system.h>
 
 #include <set>
 #include <stdint.h>
+#include <string>
+#include <string_view>
 
 class CRPCConvertParam
 {
@@ -46,27 +49,21 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "settxfee", 0, "amount" },
     { "sethdseed", 0, "newkeypool" },
     { "getreceivedbyaddress", 1, "minconf" },
+    { "getreceivedbyaddress", 2, "include_immature_coinbase" },
     { "getreceivedbylabel", 1, "minconf" },
+    { "getreceivedbylabel", 2, "include_immature_coinbase" },
     { "listreceivedbyaddress", 0, "minconf" },
     { "listreceivedbyaddress", 1, "include_empty" },
     { "listreceivedbyaddress", 2, "include_watchonly" },
+    { "listreceivedbyaddress", 4, "include_immature_coinbase" },
     { "listreceivedbylabel", 0, "minconf" },
     { "listreceivedbylabel", 1, "include_empty" },
     { "listreceivedbylabel", 2, "include_watchonly" },
+    { "listreceivedbylabel", 3, "include_immature_coinbase" },
     { "getbalance", 1, "minconf" },
     { "getbalance", 2, "include_watchonly" },
     { "getbalance", 3, "avoid_reuse" },
-    { "addressbalance", 0, "addresses" },
-    { "addressbalance", 1, "minconf" },
-    { "addressbalance", 2, "maxconf" },
-    { "assetallocationbalance", 1, "addresses" },
-    { "assetallocationbalance", 2, "minconf" },
-    { "assetallocationbalance", 3, "maxconf" },
-    { "assetallocationbalance", 4, "verbose" },
-    { "sendfrom", 2, "amount" },
-    { "sendfrom", 3, "minconf" },
-    { "sendfrom", 4, "maxconf" },
-    { "sendfrom", 6, "include_watching" },
+    { "getblockfrompeer", 1, "peer_id" },
     { "getblockhash", 0, "height" },
     { "waitforblockheight", 0, "height" },
     { "waitforblockheight", 1, "timeout" },
@@ -80,6 +77,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "listsinceblock", 1, "target_confirmations" },
     { "listsinceblock", 2, "include_watchonly" },
     { "listsinceblock", 3, "include_removed" },
+    { "listsinceblock", 4, "include_change" },
     { "sendmany", 1, "amounts" },
     { "sendmany", 2, "minconf" },
     { "sendmany", 4, "subtractfeefrom" },
@@ -88,6 +86,10 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "sendmany", 8, "fee_rate"},
     { "sendmany", 9, "verbose" },
     { "deriveaddresses", 1, "range" },
+    { "scanblocks", 1, "scanobjects" },
+    { "scanblocks", 2, "start_height" },
+    { "scanblocks", 3, "stop_height" },
+    { "scanblocks", 5, "options" },
     { "scantxoutset", 1, "scanobjects" },
     { "addmultisigaddress", 0, "nrequired" },
     { "addmultisigaddress", 1, "keys" },
@@ -105,6 +107,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getchaintxstats", 0, "nblocks" },
     { "gettransaction", 1, "include_watchonly" },
     { "gettransaction", 2, "verbose" },
+    { "getrawtransaction", 1, "verbosity" },
     { "getrawtransaction", 1, "verbose" },
     { "createrawtransaction", 0, "inputs" },
     { "createrawtransaction", 1, "outputs" },
@@ -115,8 +118,10 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "signrawtransactionwithkey", 2, "prevtxs" },
     { "signrawtransactionwithwallet", 1, "prevtxs" },
     { "sendrawtransaction", 1, "maxfeerate" },
+    { "sendrawtransaction", 2, "maxburnamount" },
     { "testmempoolaccept", 0, "rawtxs" },
     { "testmempoolaccept", 1, "maxfeerate" },
+    { "submitpackage", 0, "package" },
     { "combinerawtransaction", 0, "txs" },
     { "fundrawtransaction", 1, "options" },
     { "fundrawtransaction", 2, "iswitness" },
@@ -127,6 +132,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "walletcreatefundedpsbt", 4, "bip32derivs" },
     { "walletprocesspsbt", 1, "sign" },
     { "walletprocesspsbt", 3, "bip32derivs" },
+    { "walletprocesspsbt", 4, "finalize" },
     { "createpsbt", 0, "inputs" },
     { "createpsbt", 1, "outputs" },
     { "createpsbt", 2, "locktime" },
@@ -148,6 +154,12 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "send", 1, "conf_target" },
     { "send", 3, "fee_rate"},
     { "send", 4, "options" },
+    { "sendall", 0, "recipients" },
+    { "sendall", 1, "conf_target" },
+    { "sendall", 3, "fee_rate"},
+    { "sendall", 4, "options" },
+    { "simulaterawtransaction", 0, "rawtxs" },
+    { "simulaterawtransaction", 1, "options" },
     { "importprivkey", 2, "rescan" },
     { "importaddress", 2, "rescan" },
     { "importaddress", 3, "p2sh" },
@@ -175,6 +187,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "setwalletflag", 1, "value" },
     { "getmempoolancestors", 1, "verbose" },
     { "getmempooldescendants", 1, "verbose" },
+    { "gettxspendingprevout", 0, "outputs" },
     { "bumpfee", 1, "options" },
     { "psbtbumpfee", 1, "options" },
     { "logging", 0, "include" },
@@ -212,61 +225,38 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "voteraw", 1, "collateralTxIndex" },
     { "voteraw", 5, "time" },
     { "convertaddresswallet", 2, "rescan" },
-    { "assetallocationsend", 2, "amount" },
-    { "assetallocationsend", 3, "sys_amount" },
-    { "assetallocationsend", 4 , "replaceable" },
-    { "assetallocationsend", 6, "include_watching" },
-    { "assetallocationsendmany", 0, "amounts" },
-    { "assetallocationsendmany", 1 , "replaceable" },
-    { "assetallocationsendmany", 3 , "conf_target" },
-    { "assetallocationsendmany", 6, "include_watching" },
-    { "listunspentasset", 1 , "minconf" },
-    { "assetallocationburn", 1, "amount" },
-    { "assetallocationburn", 4, "include_watching" },
-    { "syscoinburntoassetallocation", 1, "amount" },
-    { "syscoinburntoassetallocation", 3, "include_watching" },
-    { "assetallocationmint", 2, "amount" },
-    { "assetallocationmint", 11, "auxfee_test" },
-    { "syscoinsetethheaders", 0, "headers" },
-    { "assetnew", 0, "funding_amount" }, 
-    { "assetnew", 4, "precision" },
-    { "assetnew", 5, "max_supply" },
-    { "assetnew", 6, "updatecapability_flags" },
-    { "assetnew", 8, "notary_details" },
-    { "assetnew", 9, "auxfee_details" },
-    { "assetnew", 11, "include_watching" },
-    { "assetnewtest", 1, "funding_amount" }, 
-    { "assetnewtest", 5, "precision" },
-    { "assetnewtest", 6, "max_supply" },
-    { "assetnewtest", 7, "updatecapability_flags" },
-    { "assetnewtest", 9, "notary_details" },
-    { "assetnewtest", 10, "auxfee_details" },
-    { "assetnewtest", 12, "include_watching" },
-    { "assetupdate", 3, "updatecapability_flags" },
-    { "assetupdate", 5, "notary_details" },
-    { "assetupdate", 6, "auxfee_details" },
-    { "assetupdate", 8, "include_watching" },
-    { "assettransfer", 3, "include_watching" },
-    { "assetsend", 2, "amount" },
-    { "assetsend", 3, "sys_amount" },
-    { "assetsend", 6, "include_watching" },
-    { "assetsendmany", 1, "amounts" },
-    { "assetsendmany", 3, "include_watching" },
     { "listassets", 0, "count" },
     { "listassets", 1, "from" },
     { "listassets", 2, "options" },
+    { "listnevmblobdata", 0, "count" },
+    { "listnevmblobdata", 1, "from" },
+    { "listnevmblobdata", 2, "options" },
+    { "getnevmblobdata", 1, "getdata" },
+    { "syscoincreaterawnevmblob", 2, "conf_target" },
+    { "syscoincreaterawnevmblob", 4, "fee_rate"},
+    { "syscoincreatenevmblob", 1, "overwrite_existing" },
+    { "syscoincreatenevmblob", 2, "conf_target" },
+    { "syscoincreatenevmblob", 4, "fee_rate"},
     { "protx_list_wallet", 0, "detailed" },
     { "protx_list_wallet", 1, "height" },
     { "protx_list", 1, "detailed" },
     { "protx_list", 2, "height" },
+    { "bls_generate", 0, "legacy" },
+    { "bls_fromsecret", 1, "legacy" },
     { "protx_register", 1, "collateralIndex" },
     { "protx_register", 6, "operatorReward" },
     { "protx_register", 9, "submit" },
+    { "protx_register", 10, "legacy" },
     { "protx_register_fund", 5, "operatorReward" },
     { "protx_register_fund", 8, "submit" },
+    { "protx_register_fund", 9, "legacy" },
     { "protx_register_prepare", 1, "collateralIndex" },
     { "protx_register_prepare", 6, "operatorReward" },
+    { "protx_register_prepare", 9, "legacy" },
+    { "protx_update_service", 5, "legacy" },
+    { "protx_update_registrar", 5, "legacy" },
     { "protx_revoke", 2, "reason" },
+    { "protx_revoke", 4, "legacy" },
     { "quorum_list", 0, "count" },
     { "quorum_info", 0, "llmqType" },
     { "quorum_info", 2, "includeSkShare" },
@@ -303,11 +293,16 @@ private:
 public:
     CRPCConvertTable();
 
-    bool convert(const std::string& method, int idx) {
-        return (members.count(std::make_pair(method, idx)) > 0);
+    /** Return arg_value as UniValue, and first parse it if it is a non-string parameter */
+    UniValue ArgToUniValue(std::string_view arg_value, const std::string& method, int param_idx)
+    {
+        return members.count({method, param_idx}) > 0 ? ParseNonRFCJSONValue(arg_value) : arg_value;
     }
-    bool convert(const std::string& method, const std::string& name) {
-        return (membersByName.count(std::make_pair(method, name)) > 0);
+
+    /** Return arg_value as UniValue, and first parse it if it is a non-string parameter */
+    UniValue ArgToUniValue(std::string_view arg_value, const std::string& method, const std::string& param_name)
+    {
+        return membersByName.count({method, param_name}) > 0 ? ParseNonRFCJSONValue(arg_value) : arg_value;
     }
 };
 
@@ -324,13 +319,11 @@ static CRPCConvertTable rpcCvtTable;
 /** Non-RFC4627 JSON parser, accepts internal values (such as numbers, true, false, null)
  * as well as objects and arrays.
  */
-UniValue ParseNonRFCJSONValue(const std::string& strVal)
+UniValue ParseNonRFCJSONValue(std::string_view raw)
 {
-    UniValue jVal;
-    if (!jVal.read(std::string("[")+strVal+std::string("]")) ||
-        !jVal.isArray() || jVal.size()!=1)
-        throw std::runtime_error(std::string("Error parsing JSON: ") + strVal);
-    return jVal[0];
+    UniValue parsed;
+    if (!parsed.read(raw)) throw std::runtime_error(tfm::format("Error parsing JSON: %s", raw));
+    return parsed;
 }
 
 UniValue RPCConvertValues(const std::string &strMethod, const std::vector<std::string> &strParams)
@@ -338,15 +331,8 @@ UniValue RPCConvertValues(const std::string &strMethod, const std::vector<std::s
     UniValue params(UniValue::VARR);
 
     for (unsigned int idx = 0; idx < strParams.size(); idx++) {
-        const std::string& strVal = strParams[idx];
-
-        if (!rpcCvtTable.convert(strMethod, idx)) {
-            // insert string value directly
-            params.push_back(strVal);
-        } else {
-            // parse string as JSON, insert bool/number/object/etc. value
-            params.push_back(ParseNonRFCJSONValue(strVal));
-        }
+        std::string_view value{strParams[idx]};
+        params.push_back(rpcCvtTable.ArgToUniValue(value, strMethod, idx));
     }
 
     return params;
@@ -355,23 +341,29 @@ UniValue RPCConvertValues(const std::string &strMethod, const std::vector<std::s
 UniValue RPCConvertNamedValues(const std::string &strMethod, const std::vector<std::string> &strParams)
 {
     UniValue params(UniValue::VOBJ);
+    UniValue positional_args{UniValue::VARR};
 
-    for (const std::string &s: strParams) {
+    for (std::string_view s: strParams) {
         size_t pos = s.find('=');
         if (pos == std::string::npos) {
-            throw(std::runtime_error("No '=' in named argument '"+s+"', this needs to be present for every argument (even if it is empty)"));
+            positional_args.push_back(rpcCvtTable.ArgToUniValue(s, strMethod, positional_args.size()));
+            continue;
         }
 
-        std::string name = s.substr(0, pos);
-        std::string value = s.substr(pos+1);
+        std::string name{s.substr(0, pos)};
+        std::string_view value{s.substr(pos+1)};
 
-        if (!rpcCvtTable.convert(strMethod, name)) {
-            // insert string value directly
-            params.pushKV(name, value);
-        } else {
-            // parse string as JSON, insert bool/number/object/etc. value
-            params.pushKV(name, ParseNonRFCJSONValue(value));
-        }
+        // Intentionally overwrite earlier named values with later ones as a
+        // convenience for scripts and command line users that want to merge
+        // options.
+        params.pushKV(name, rpcCvtTable.ArgToUniValue(value, strMethod, name));
+    }
+
+    if (!positional_args.empty()) {
+        // Use __pushKV instead of pushKV to avoid overwriting an explicit
+        // "args" value with an implicit one. Let the RPC server handle the
+        // request as given.
+        params.__pushKV("args", positional_args);
     }
 
     return params;

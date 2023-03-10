@@ -7,10 +7,12 @@
 
 #include <validationinterface.h>
 class ChainstateManager;
+class PeerManager;
+class CConnman;
 class CDSNotificationInterface : public CValidationInterface
 {
 public:
-    explicit CDSNotificationInterface(CConnman& connmanIn): connman(connmanIn) {}
+    explicit CDSNotificationInterface(CConnman &connmanIn, PeerManager& peerManIn): peerman(peerManIn), connman(connmanIn) {}
     virtual ~CDSNotificationInterface() = default;
 
     // a small helper to initialize current block height in sub-modules on startup
@@ -18,13 +20,13 @@ public:
 
 protected:
     // CValidationInterface
-    void AcceptedBlockHeader(const CBlockIndex *pindexNew) override;
-    void NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload) override;
-    void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override;
-    void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override;
+    void NotifyHeaderTip(const CBlockIndex *pindexNew) override;
+    void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) override;
+    void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork) override;
     void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) override;
 
 private:
+    PeerManager& peerman;
     CConnman& connman;
 };
 

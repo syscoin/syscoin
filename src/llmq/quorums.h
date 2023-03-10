@@ -5,7 +5,7 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_H
 #define SYSCOIN_LLMQ_QUORUMS_H
 
-#include <threadinterrupt.h>
+#include <util/threadinterrupt.h>
 
 #include <validationinterface.h>
 #include <consensus/params.h>
@@ -46,7 +46,7 @@ using CQuorumPtr = std::shared_ptr<CQuorum>;
 using CQuorumCPtr = std::shared_ptr<const CQuorum>;
 
 class CFinalCommitment;
-using CFinalCommitmentPtr = std::shared_ptr<CFinalCommitment>;
+using CFinalCommitmentPtr = std::unique_ptr<CFinalCommitment>;
 
 
 class CQuorum
@@ -55,7 +55,7 @@ class CQuorum
 public:
     const Consensus::LLMQParams& params;
     CFinalCommitmentPtr qc;
-    const CBlockIndex* m_quorum_base_block_index;
+    const CBlockIndex* m_quorum_base_block_index{nullptr};
     uint256 minedBlockHash;
     std::vector<CDeterministicMNCPtr> members;
 
@@ -71,8 +71,8 @@ private:
 
 public:
     CQuorum(const Consensus::LLMQParams& _params, CBLSWorker& _blsWorker);
-    ~CQuorum();
-    void Init(const CFinalCommitmentPtr& _qc, const CBlockIndex* _pQuorumBaseBlockIndex, const uint256& _minedBlockHash, const std::vector<CDeterministicMNCPtr>& _members);
+    ~CQuorum() = default;
+    void Init(CFinalCommitmentPtr _qc, const CBlockIndex* _pQuorumBaseBlockIndex, const uint256& _minedBlockHash, const std::vector<CDeterministicMNCPtr>& _members);
 
     bool HasVerificationVector() const;
     bool IsMember(const uint256& proTxHash) const;
@@ -100,16 +100,17 @@ private:
     CBLSWorker& blsWorker;
     CDKGSessionManager& dkgManager;
     ChainstateManager& chainman;
-    mutable RecursiveMutex quorumsCacheCs;
-    mutable std::map<uint8_t, unordered_lru_cache<uint256, CQuorumPtr, StaticSaltedHasher>> mapQuorumsCache GUARDED_BY(quorumsCacheCs);
-    mutable std::map<uint8_t, unordered_lru_cache<uint256, std::vector<CQuorumCPtr>, StaticSaltedHasher>> scanQuorumsCache GUARDED_BY(quorumsCacheCs);
+    mutable RecursiveMutex cs_map_quorums;
+    mutable RecursiveMutex cs_scan_quorums;
+    mutable std::map<uint8_t, unordered_lru_cache<uint256, CQuorumPtr, StaticSaltedHasher>> mapQuorumsCache GUARDED_BY(cs_map_quorums);
+    mutable std::map<uint8_t, unordered_lru_cache<uint256, std::vector<CQuorumCPtr>, StaticSaltedHasher>> scanQuorumsCache GUARDED_BY(cs_scan_quorums);
 
     mutable ctpl::thread_pool workerPool;
     mutable CThreadInterrupt quorumThreadInterrupt;
 
 public:
     CQuorumManager(CEvoDB& _evoDb, CBLSWorker& _blsWorker, CDKGSessionManager& _dkgManager, ChainstateManager& _chainman);
-    ~CQuorumManager();
+    ~CQuorumManager() { Stop(); };
 
     void Start();
     void Stop();
@@ -130,7 +131,7 @@ private:
     // all private methods here are cs_main-free
     void EnsureQuorumConnections(const Consensus::LLMQParams& llmqParams, const CBlockIndex *pindexNew) const;
 
-    CQuorumPtr BuildQuorumFromCommitment(uint8_t llmqType, const CBlockIndex* pQuorumBaseBlockIndex) const EXCLUSIVE_LOCKS_REQUIRED(quorumsCacheCs);
+    CQuorumPtr BuildQuorumFromCommitment(uint8_t llmqType, const CBlockIndex* pQuorumBaseBlockIndex) const EXCLUSIVE_LOCKS_REQUIRED(cs_map_quorums);
     bool BuildQuorumContributions(const CFinalCommitmentPtr& fqc, const std::shared_ptr<CQuorum>& quorum) const;
 
     CQuorumCPtr GetQuorum(uint8_t llmqType, const CBlockIndex* pindex) const;

@@ -28,8 +28,10 @@ class LLMQSigningTest(DashTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        self.skip_if_no_bdb()
 
     def add_options(self, parser):
+        self.add_wallet_options(parser)
         parser.add_argument("--spork21", dest="spork21", default=False, action="store_true",
                         help="Test with spork21 enabled")
 
@@ -43,12 +45,12 @@ class LLMQSigningTest(DashTestFramework):
             self.nodes[0].spork("SPORK_21_QUORUM_ALL_CONNECTED", 0)
         self.wait_for_sporks_same()
 
-        self.mine_quorum()
+        self.mine_quorum(mod5=True)
         if self.options.spork21:
             assert self.mninfo[0].node.getconnectioncount() == 5
         id = "0000000000000000000000000000000000000000000000000000000000000001"
-        msgHash = "0000000000000000000000000000000000000000000000000000000000000002"
-        msgHashConflict = "0000000000000000000000000000000000000000000000000000000000000003"
+        msgHash = self.generate(self.nodes[0], 5)[-1]
+        msgHashConflict = self.generate(self.nodes[0], 5)[-1]
 
         def check_sigs(hasrecsigs, isconflicting1, isconflicting2):
             for mn in self.mninfo:
@@ -72,7 +74,7 @@ class LLMQSigningTest(DashTestFramework):
         def assert_sigs_nochange(hasrecsigs, isconflicting1, isconflicting2, timeout):
             t = time.time()
             while time.time() - t < timeout:
-                assert(check_sigs(hasrecsigs, isconflicting1, isconflicting2))
+                assert check_sigs(hasrecsigs, isconflicting1, isconflicting2)
                 time.sleep(0.1)
 
         # Initial state
@@ -84,11 +86,11 @@ class LLMQSigningTest(DashTestFramework):
         # Sign second share and test optional quorumHash parameter, should not result in recovered sig
 
         # 1. Providing an invalid quorum hash should fail and cause no changes for sigs
-        assert(not self.mninfo[1].node.quorum_sign(100, id, msgHash, msgHash))
+        assert not self.mninfo[1].node.quorum_sign(100, id, msgHash, msgHash)
         assert_sigs_nochange(False, False, False, 3)
         # 2. Providing a valid quorum hash should succeed and cause no changes for sigss
         quorumHash = self.mninfo[1].node.quorum_selectquorum(100, id)["quorumHash"]
-        assert(self.mninfo[1].node.quorum_sign(100, id, msgHash, quorumHash))
+        assert self.mninfo[1].node.quorum_sign(100, id, msgHash, quorumHash)
         assert_sigs_nochange(False, False, False, 3)
         # Sign third share and test optional submit parameter if spork21 is enabled, should result in recovered sig
         # and conflict for msgHashConflict
@@ -135,13 +137,13 @@ class LLMQSigningTest(DashTestFramework):
         height = node.getblockcount()
         height_bad = node.getblockheader(recsig["quorumHash"])["height"]
         hash_bad = node.getblockhash(0)
-        assert(node.quorum_verify(100, id, msgHash, recsig["sig"]))
-        assert(node.quorum_verify(100, id, msgHash, recsig["sig"], "", height))
-        assert(not node.quorum_verify(100, id, msgHashConflict, recsig["sig"]))
+        assert node.quorum_verify(100, id, msgHash, recsig["sig"])
+        assert node.quorum_verify(100, id, msgHash, recsig["sig"], "", height)
+        assert not node.quorum_verify(100, id, msgHashConflict, recsig["sig"])
         assert not node.quorum_verify(100, id, msgHash, recsig["sig"], "", height_bad)
         # Use specific quorum
-        assert(node.quorum_verify(100, id, msgHash, recsig["sig"], recsig["quorumHash"]))
-        assert(not node.quorum_verify(100, id, msgHashConflict, recsig["sig"], recsig["quorumHash"]))
+        assert node.quorum_verify(100, id, msgHash, recsig["sig"], recsig["quorumHash"])
+        assert not node.quorum_verify(100, id, msgHashConflict, recsig["sig"], recsig["quorumHash"])
         assert_raises_rpc_error(-8, "quorum not found", node.quorum_verify, 100, id, msgHash, recsig["sig"], hash_bad)
 
 
@@ -183,7 +185,7 @@ class LLMQSigningTest(DashTestFramework):
         self.bump_mocktime(recsig_time + int(60 * 60 * 24 * 6.5) - self.mocktime)
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
-        self.generate(self.nodes[0], 1)
+        self.generate(self.nodes[0], 5)
         self.sync_blocks()
         self.bump_mocktime(5)
         # Cleanup starts every 5 seconds
@@ -192,7 +194,7 @@ class LLMQSigningTest(DashTestFramework):
         self.bump_mocktime(int(60 * 60 * 24 * 1))
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
-        self.generate(self.nodes[0], 1)
+        self.generate(self.nodes[0], 5)
         self.sync_blocks()
         self.bump_mocktime(5)
         # Cleanup starts every 5 seconds
@@ -203,7 +205,7 @@ class LLMQSigningTest(DashTestFramework):
             self.mninfo[i].node.quorum_sign(100, id, msgHashConflict)
         for i in range(2, 5):
             self.mninfo[i].node.quorum_sign(100, id, msgHash)
-        self.generate(self.nodes[0], 1)
+        self.generate(self.nodes[0], 5)
         self.sync_blocks()
         self.bump_mocktime(5)
         wait_for_sigs(True, False, True, 15)
@@ -228,7 +230,7 @@ class LLMQSigningTest(DashTestFramework):
             wait_until_helper(lambda: mn.node.getconnectioncount() == 5, timeout=10, sleep=2)
             mn.node.ping()
             self.wait_until(lambda: all('pingwait' not in peer for peer in mn.node.getpeerinfo()))
-            self.generate(self.nodes[0], 1)
+            self.generate(self.nodes[0], 5)
             self.sync_blocks()
             self.bump_mocktime(5)
             wait_for_sigs(True, False, True, 15)

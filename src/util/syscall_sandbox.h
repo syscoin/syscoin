@@ -1,4 +1,4 @@
-// Copyright (c) 2020 The Bitcoin Core developers
+// Copyright (c) 2020-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -36,7 +36,7 @@ enum class SyscallSandboxPolicy {
 //!
 //! This function is a no-op unless SetupSyscallSandbox(...) has been called.
 //!
-//! SetupSyscallSandbox(...) is called during syscoind initialization if Bitcoin Core was compiled
+//! SetupSyscallSandbox(...) is called during syscoind initialization if Syscoin Core was compiled
 //! with seccomp-bpf support (--with-seccomp) *and* the parameter -sandbox=<mode> was passed to
 //! syscoind.
 //!
@@ -45,9 +45,6 @@ void SetSyscallSandboxPolicy(SyscallSandboxPolicy syscall_policy);
 
 #if defined(USE_SYSCALL_SANDBOX)
 //! Setup and enable the experimental syscall sandbox for the running process.
-//!
-//! SetSyscallSandboxPolicy(SyscallSandboxPolicy::INITIALIZATION) is called as part of
-//! SetupSyscallSandbox(...).
 [[nodiscard]] bool SetupSyscallSandbox(bool log_syscall_violation_before_terminating);
 
 //! Invoke a disallowed syscall. Use for testing purposes.

@@ -18,26 +18,26 @@
 #include <rpc/util.h>
 #include <rpc/blockchain.h>
 #include <node/context.h>
-
-
-UniValue BuildDMNListEntry(const NodeContext& node, const CDeterministicMNCPtr& dmn, bool detailed)
+#include <rpc/server_util.h>
+#include <llmq/quorums_utils.h>
+UniValue BuildDMNListEntry(const node::NodeContext& node, const CDeterministicMN& dmn, bool detailed)
 {
     if (!detailed) {
-        return dmn->proTxHash.ToString();
+        return dmn.proTxHash.ToString();
     }
     UniValue o(UniValue::VOBJ);
 
-    dmn->ToJson(*node.chain, o);
+    dmn.ToJson(*node.chain, o);
     std::map<COutPoint, Coin> coins;
-    coins[dmn->collateralOutpoint]; 
+    coins[dmn.collateralOutpoint]; 
     node.chain->findCoins(coins);
     int confirmations = 0;
-    const Coin &coin = coins.at(dmn->collateralOutpoint);
+    const Coin &coin = coins.at(dmn.collateralOutpoint);
     if (!coin.IsSpent()) {
         confirmations = *node.chain->getHeight() - coin.nHeight;
     }
     o.pushKV("confirmations", confirmations);
-    auto metaInfo = mmetaman.GetMetaInfo(dmn->proTxHash);
+    auto metaInfo = mmetaman.GetMetaInfo(dmn.proTxHash);
     o.pushKV("metaInfo", metaInfo->ToJson());
 
     return o;
@@ -49,7 +49,7 @@ static RPCHelpMan protx_list()
         "\nLists all ProTxs on-chain, depending on the given type.\n"
         "This will also include ProTx which failed PoSe verification.\n",
         {
-             {"type", RPCArg::Type::STR, RPCArg::Default{"registered"}, "Type of ProTx.\n",
+             {"type", RPCArg::Type::STR, RPCArg::Default{"registered"},
             "\nAvailable types:\n"
             "  registered   - List all ProTx which are registered at the given chain height.\n"
             "                 This will also include ProTx which failed PoSe verification.\n"
@@ -62,10 +62,10 @@ static RPCHelpMan protx_list()
                 HelpExampleCli("protx_list", "registered true")
             + HelpExampleRpc("protx_list", "\"registered\", true")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
 
-    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     std::string type = "registered";
     if (!request.params[0].isNull()) {
         type = request.params[0].get_str();
@@ -78,14 +78,14 @@ static RPCHelpMan protx_list()
         bool detailed = !request.params[1].isNull() ? request.params[1].get_bool() : false;
         {
             LOCK(cs_main);
-            int height = !request.params[2].isNull() ? request.params[2].get_int() : node.chainman->ActiveHeight();
+            int height = !request.params[2].isNull() ? request.params[2].getInt<int>() : node.chainman->ActiveHeight();
             if (height < 1 || height > node.chainman->ActiveHeight()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid height specified");
             }
             mnList = deterministicMNManager->GetListForBlock(node.chainman->ActiveChain()[height]);
         }
         bool onlyValid = type == "valid";
-        mnList.ForEachMN(onlyValid, [&](const CDeterministicMNCPtr& dmn) {
+        mnList.ForEachMN(onlyValid, [&](const auto& dmn) {
             ret.push_back(BuildDMNListEntry(node, dmn, detailed));
         });
 
@@ -111,9 +111,9 @@ static RPCHelpMan protx_info()
                 HelpExampleCli("protx_info", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d")
             + HelpExampleRpc("protx_info", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\"")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     uint256 proTxHash = ParseHashV(request.params[0], "proTxHash");
     auto mnList = deterministicMNManager->GetListAtChainTip();
     auto dmn = mnList.GetMN(proTxHash);
@@ -121,7 +121,7 @@ static RPCHelpMan protx_info()
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s not found", proTxHash.ToString()));
     }
    
-    return BuildDMNListEntry(node, dmn, true);
+    return BuildDMNListEntry(node, *dmn, true);
 },
     };
 } 
@@ -132,7 +132,7 @@ static uint256 ParseBlock(ChainstateManager& chainman, const UniValue& v, std::s
         return ParseHashV(v, strName);
     } catch (...) {
         LOCK(cs_main);
-        int h = v.get_int();
+        int h = v.getInt<int>();
         if (h < 1 || h > chainman.ActiveHeight())
             throw std::runtime_error(strprintf("%s must be a block hash or chain height and not %s", strName, v.getValStr()));
         return *chainman.ActiveChain()[h]->phashBlock;
@@ -152,9 +152,9 @@ static RPCHelpMan protx_diff()
                 HelpExampleCli("protx_diff", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d")
             + HelpExampleRpc("protx_diff", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\"")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     uint256 baseBlockHash = ParseBlock(*node.chainman, request.params[0], "baseBlock");
     uint256 blockHash = ParseBlock(*node.chainman, request.params[1], "block");
 
@@ -175,68 +175,89 @@ static RPCHelpMan bls_generate()
 {
      return RPCHelpMan{"bls_generate",
         "\nReturns a BLS secret/public key pair.\n",
-        {              
+        {   
+            {"legacy", RPCArg::Type::BOOL, RPCArg::Default{true}, "Use legacy BLS scheme"},           
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
                 HelpExampleCli("bls_generate", "")
             + HelpExampleRpc("bls_generate", "")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-
+    node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext (request.context);
     CBLSSecretKey sk;
     sk.MakeNewKey();
-
+    bool bls_legacy_scheme;
+    {
+        LOCK(cs_main);
+        bls_legacy_scheme = !llmq::CLLMQUtils::IsV19Active(node.chainman->ActiveHeight());
+        if (!request.params[0].isNull()) {
+            bls_legacy_scheme = request.params[0].get_bool();
+        }
+    }
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("secret", sk.ToString());
-    ret.pushKV("public", sk.GetPublicKey().ToString());
+    ret.pushKV("public", sk.GetPublicKey().ToString(bls_legacy_scheme));
+    std::string bls_scheme_str = bls_legacy_scheme ? "legacy" : "basic";
+    ret.pushKV("scheme", bls_scheme_str);
     return ret;
 },
     };
 } 
-
+static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::string& paramName)
+{
+    CBLSSecretKey secKey;
+    if (!secKey.SetHexStr(hexKey)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
+    }
+    return secKey;
+}
 static RPCHelpMan bls_fromsecret()
 {
      return RPCHelpMan{"bls_fromsecret",
         "\nParses a BLS secret key and returns the secret/public key pair.\n",
         {              
              {"secret", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The BLS secret key."},  
+             {"legacy", RPCArg::Type::BOOL, RPCArg::Default{true}, "Use legacy BLS scheme"},
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
                 HelpExampleCli("bls_fromsecret", "")
             + HelpExampleRpc("bls_fromsecret", "")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    CBLSSecretKey sk;
-    if (!sk.SetHexStr(request.params[0].get_str())) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Secret key must be a valid hex string of length %d", sk.SerSize*2));
+    node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext (request.context);
+    CBLSSecretKey sk = ParseBLSSecretKey(request.params[0].get_str(), "secretKey");
+    bool bls_legacy_scheme;
+    {
+        LOCK(cs_main);
+        bls_legacy_scheme = !llmq::CLLMQUtils::IsV19Active(node.chainman->ActiveHeight());
+        if (!request.params[1].isNull()) {
+            bls_legacy_scheme = request.params[1].get_bool();
+        }
     }
-
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("secret", sk.ToString());
-    ret.pushKV("public", sk.GetPublicKey().ToString());
+    ret.pushKV("public", sk.GetPublicKey().ToString(bls_legacy_scheme));
+    std::string bls_scheme_str = bls_legacy_scheme ? "legacy" : "basic";
+    ret.pushKV("scheme", bls_scheme_str);
     return ret;
 },
     };
-} 
+}
 
 
 void RegisterEvoRPCCommands(CRPCTable &t)
 {
-// clang-format off
-static const CRPCCommand commands[] =
-{ //  category              name                      actor (function)
-  //  --------------------- ------------------------  -----------------------
-    { "evo",                &bls_generate,                },
-    { "evo",                &bls_fromsecret,              },
-    { "evo",                &protx_list,                  },
-    { "evo",                &protx_info,                  },
-    { "evo",                &protx_diff,                  },
-};
-// clang-format on
+    static const CRPCCommand commands[]{
+        {"evo", &bls_generate},
+        {"evo", &bls_fromsecret},
+        {"evo", &protx_list},
+        {"evo", &protx_info},
+        {"evo", &protx_diff},
+    };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);
     }

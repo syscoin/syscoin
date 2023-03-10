@@ -1,33 +1,32 @@
-// Copyright (c) 2015-2020 The Bitcoin Core developers
+// Copyright (c) 2015-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_ZMQ_ZMQABSTRACTNOTIFIER_H
 #define SYSCOIN_ZMQ_ZMQABSTRACTNOTIFIER_H
 
-
+#include <cstdint>
 #include <memory>
 #include <string>
-
+#include <vector>
 class CBlockIndex;
 class CTransaction;
 class CZMQAbstractNotifier;
 // SYSCOIN
-class CGovernanceObject;
-class CGovernanceVote;
 class CNEVMBlock;
 class CNEVMHeader;
 class CBlock;
-class BlockValidationState;
 class uint256;
+class CNEVMData;
+typedef std::vector<std::vector<uint8_t> > NEVMDataVec;
 using CZMQNotifierFactory = std::unique_ptr<CZMQAbstractNotifier> (*)();
 
 class CZMQAbstractNotifier
 {
 public:
     static const int DEFAULT_ZMQ_SNDHWM {1000};
-    // SYSCOIN
-    CZMQAbstractNotifier() : psocket(nullptr), psocketsub(nullptr), outbound_message_high_water_mark(DEFAULT_ZMQ_SNDHWM) { }
+
+    CZMQAbstractNotifier() : outbound_message_high_water_mark(DEFAULT_ZMQ_SNDHWM) {}
     virtual ~CZMQAbstractNotifier();
 
     template <typename T>
@@ -66,17 +65,18 @@ public:
     virtual bool NotifyTransaction(const CTransaction &transaction);
     // SYSCOIN
     virtual bool NotifyTransactionMempool(const CTransaction &transaction);
-    virtual bool NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& vote);
-    virtual bool NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject>& object);
-    virtual bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, BlockValidationState &state, const uint256& nBlockHash);
-    virtual bool NotifyNEVMBlockDisconnect(BlockValidationState &state, const uint256& nBlockHash);
-    virtual bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state);
+    virtual bool NotifyGovernanceVote(const uint256& vote);
+    virtual bool NotifyGovernanceObject(const uint256& object);
+    virtual bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation);
+    virtual bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash);
+    virtual bool NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state);
+    virtual bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
     virtual bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse);
 
 protected:
-    void *psocket;
+    void* psocket{nullptr};
     // SYSCOIN
-    void *psocketsub;
+    void *psocketsub{nullptr};
     std::string type;
     std::string address;
     std::string addresssub;

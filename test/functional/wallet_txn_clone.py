@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2021 The Bitcoin Core developers
+# Copyright (c) 2014-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the wallet accounts properly when there are cloned transactions with malleated scriptsigs."""
@@ -7,6 +7,7 @@
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_equal,
+    find_vout_for_address
 )
 from test_framework.messages import (
     COIN,
@@ -23,6 +24,7 @@ class TxnMallTest(SyscoinTestFramework):
         self.skip_if_no_wallet()
 
     def add_options(self, parser):
+        self.add_wallet_options(parser)
         parser.add_argument("--mineblock", dest="mine_block", default=False, action="store_true",
                             help="Test double-spend of 1-confirmed transaction")
         parser.add_argument("--segwit", dest="segwit", default=False, action="store_true",
@@ -32,6 +34,13 @@ class TxnMallTest(SyscoinTestFramework):
         # Start with split network:
         super().setup_network()
         self.disconnect_nodes(1, 2)
+
+    def spend_txid(self, txid, vout, outputs):
+        inputs = [{"txid": txid, "vout": vout}]
+        tx = self.nodes[0].createrawtransaction(inputs, outputs)
+        tx = self.nodes[0].fundrawtransaction(tx)
+        tx = self.nodes[0].signrawtransactionwithwallet(tx['hex'])
+        return self.nodes[0].sendrawtransaction(tx['hex'])
 
     def run_test(self):
         if self.options.segwit:
@@ -49,6 +58,7 @@ class TxnMallTest(SyscoinTestFramework):
         node0_address1 = self.nodes[0].getnewaddress(address_type=output_type)
         node0_txid1 = self.nodes[0].sendtoaddress(node0_address1, 1219)
         node0_tx1 = self.nodes[0].gettransaction(node0_txid1)
+        self.nodes[0].lockunspent(False, [{"txid":node0_txid1, "vout": find_vout_for_address(self.nodes[0], node0_txid1, node0_address1)}])
 
         node0_address2 = self.nodes[0].getnewaddress(address_type=output_type)
         node0_txid2 = self.nodes[0].sendtoaddress(node0_address2, 29)
@@ -61,8 +71,8 @@ class TxnMallTest(SyscoinTestFramework):
         node1_address = self.nodes[1].getnewaddress()
 
         # Send tx1, and another transaction tx2 that won't be cloned
-        txid1 = self.nodes[0].sendtoaddress(node1_address, 40)
-        txid2 = self.nodes[0].sendtoaddress(node1_address, 20)
+        txid1 = self.spend_txid(node0_txid1, find_vout_for_address(self.nodes[0], node0_txid1, node0_address1), {node1_address: 40})
+        txid2 = self.spend_txid(node0_txid2, find_vout_for_address(self.nodes[0], node0_txid2, node0_address2), {node1_address: 20})
 
         # Construct a clone of tx1, to be malleated
         rawtx1 = self.nodes[0].getrawtransaction(txid1, 1)

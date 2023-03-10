@@ -15,11 +15,15 @@ Tests mnauth RPC command
 
 
 class FakeMNAUTHTest(DashTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.set_dash_test_params(2, 1, fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        self.skip_if_no_bdb()
 
     def run_test(self):
 
@@ -28,18 +32,19 @@ class FakeMNAUTHTest(DashTestFramework):
         p2p_masternode.wait_for_verack()
 
         protx_hash = masternode.proTxHash
+        #TODO: Fix that with basic BLS
         public_key = masternode.pubKeyOperator
 
         # The peerinfo should not yet contain verified_proregtx_hash/verified_pubkey_hash
-        assert("verified_proregtx_hash" not in masternode.node.getpeerinfo()[-1])
-        assert("verified_pubkey_hash" not in masternode.node.getpeerinfo()[-1])
+        assert "verified_proregtx_hash" not in masternode.node.getpeerinfo()[-1]
+        assert "verified_pubkey_hash" not in masternode.node.getpeerinfo()[-1]
         # Fake-Authenticate the P2P connection to the masternode
         node_id = masternode.node.getpeerinfo()[-1]["id"]
-        assert(masternode.node.mnauth(node_id, protx_hash, public_key))
+        assert masternode.node.mnauth(node_id, protx_hash, public_key)
         # The peerinfo should now contain verified_proregtx_hash and verified_pubkey_hash
         peerinfo = masternode.node.getpeerinfo()[-1]
-        assert("verified_proregtx_hash" in peerinfo)
-        assert("verified_pubkey_hash" in peerinfo)
+        assert "verified_proregtx_hash" in peerinfo
+        assert "verified_pubkey_hash" in peerinfo
         assert_equal(peerinfo["verified_proregtx_hash"], protx_hash)
         assert_equal(peerinfo["verified_pubkey_hash"], bytes_to_hex_str(hash256(bytes.fromhex(public_key))[::-1]))
         # Test some error cases
@@ -52,7 +57,7 @@ class FakeMNAUTHTest(DashTestFramework):
                                                          node_id,
                                                          protx_hash,
                                                          null_hash)
-        assert(not masternode.node.mnauth(-1, protx_hash, public_key))
+        assert not masternode.node.mnauth(-1, protx_hash, public_key)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (c) 2018-2021 The Bitcoin Core developers
+# Copyright (c) 2018-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #
@@ -20,8 +20,8 @@ import sys
 import hashlib
 
 SHA256_SUMS = {
-"77f8fcece0c5b9e67bd63ec041c1a73132119407a29ae799e650189b231e642b": "syscoin-4.1.3-osx64.tar.gz",
-"858f0e24be6c999aabe8cd9a682ac3b8bdf24dbc42c36566536701faf85824f4": "syscoin-4.1.3-x86_64-linux-gnu.tar.gz",
+    "77f8fcece0c5b9e67bd63ec041c1a73132119407a29ae799e650189b231e642b": {"tag": "v4.1.3", "tarball": "syscoin-4.1.3-osx64.tar.gz"},
+    "858f0e24be6c999aabe8cd9a682ac3b8bdf24dbc42c36566536701faf85824f4": {"tag": "v4.1.3", "tarball": "syscoin-4.1.3-x86_64-linux-gnu.tar.gz"},
 }
 
 @contextlib.contextmanager
@@ -68,8 +68,8 @@ def download_binary(tag, args) -> int:
         hasher.update(afile.read())
     tarballHash = hasher.hexdigest()
 
-    if tarballHash not in SHA256_SUMS or SHA256_SUMS[tarballHash] != tarball:
-        if tarball in SHA256_SUMS.values():
+    if tarballHash not in SHA256_SUMS or SHA256_SUMS[tarballHash]['tarball'] != tarball:
+        if tarball in [v['tarball'] for v in SHA256_SUMS.values()]:
             print("Checksum did not match")
             return 1
 
@@ -146,8 +146,8 @@ def check_host(args) -> int:
         platforms = {
             'aarch64-*-linux*': 'aarch64-linux-gnu',
             'x86_64-*-linux*': 'x86_64-linux-gnu',
-            'x86_64-apple-darwin*': 'osx64',
-            'aarch64-apple-darwin*': 'osx64',
+            'x86_64-apple-darwin*': 'x86_64-apple-darwin',
+            'aarch64-apple-darwin*': 'arm64-apple-darwin',
         }
         args.platform = ''
         for pattern, target in platforms.items():
@@ -193,7 +193,11 @@ if __name__ == '__main__':
                         help='download release binary.')
     parser.add_argument('-t', '--target-dir', action='store',
                         help='target directory.', default='releases')
-    parser.add_argument('tags', nargs='+',
-                        help="release tags. e.g.: v0.18.1 v0.20.0rc2")
+    all_tags = sorted([*set([v['tag'] for v in SHA256_SUMS.values()])])
+    parser.add_argument('tags', nargs='*', default=all_tags,
+                        help='release tags. e.g.: v0.18.1 v0.20.0rc2 '
+                        '(if not specified, the full list needed for '
+                        'backwards compatibility tests will be used)'
+                        )
     args = parser.parse_args()
     sys.exit(main(args))

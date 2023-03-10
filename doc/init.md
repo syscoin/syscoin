@@ -30,7 +30,7 @@ file, however it is recommended that a strong and secure password be used
 as this password is security critical to securing the wallet should the
 wallet be enabled.
 
-If syscoind or syscoin-qt is run with the "-server" flag (set by default), and no rpcpassword is set,
+If syscoind is run with the "-server" flag (set by default), and no rpcpassword is set,
 it will use a special cookie file for authentication. The cookie is generated with random
 content when the daemon starts, and deleted when it exits. Read access to this file
 controls who can access it through RPC.
@@ -70,7 +70,7 @@ NOTE: When using the systemd .service file, the creation of the aforementioned
 directories and the setting of their permissions is automatically handled by
 systemd. Directories are given a permission of 710, giving the syscoin group
 access to files under it _if_ the files themselves give permission to the
-syscoin group to do so (e.g. when `-sysperms` is specified). This does not allow
+syscoin group to do so. This does not allow
 for the listing of files under the directory.
 
 NOTE: It is not currently possible to override `datadir` in

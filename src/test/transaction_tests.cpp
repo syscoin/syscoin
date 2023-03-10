@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -21,6 +21,8 @@
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
+#include <test/util/json.h>
+#include <test/util/random.h>
 #include <test/util/script.h>
 #include <test/util/transaction_utils.h>
 #include <util/strencodings.h>
@@ -31,16 +33,14 @@
 #include <map>
 #include <string>
 
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/split.hpp>
 #include <boost/test/unit_test.hpp>
 
 #include <univalue.h>
 
 typedef std::vector<unsigned char> valtype;
 
-// In script_tests.cpp
-UniValue read_json(const std::string& jsondata);
+static CFeeRate g_dust{DUST_RELAY_TX_FEE};
+static bool g_bare_multi{DEFAULT_PERMIT_BAREMULTISIG};
 
 static std::map<std::string, unsigned int> mapFlagNames = {
     {std::string("P2SH"), (unsigned int)SCRIPT_VERIFY_P2SH},
@@ -70,8 +70,7 @@ unsigned int ParseScriptFlags(std::string strFlags)
 {
     if (strFlags.empty() || strFlags == "NONE") return 0;
     unsigned int flags = 0;
-    std::vector<std::string> words;
-    boost::algorithm::split(words, strFlags, boost::algorithm::is_any_of(","));
+    std::vector<std::string> words = SplitString(strFlags, ',');
 
     for (const std::string& word : words)
     {
@@ -194,7 +193,7 @@ BOOST_AUTO_TEST_CASE(tx_valid)
     UniValue tests = read_json(std::string(json_tests::tx_valid, json_tests::tx_valid + sizeof(json_tests::tx_valid)));
 
     for (unsigned int idx = 0; idx < tests.size(); idx++) {
-        UniValue test = tests[idx];
+        const UniValue& test = tests[idx];
         std::string strTest = test.write();
         if (test[0].isArray())
         {
@@ -214,17 +213,17 @@ BOOST_AUTO_TEST_CASE(tx_valid)
                     fValid = false;
                     break;
                 }
-                UniValue vinput = input.get_array();
+                const UniValue& vinput = input.get_array();
                 if (vinput.size() < 3 || vinput.size() > 4)
                 {
                     fValid = false;
                     break;
                 }
-                COutPoint outpoint(uint256S(vinput[0].get_str()), vinput[1].get_int());
+                COutPoint outpoint{uint256S(vinput[0].get_str()), uint32_t(vinput[1].getInt<int>())};
                 mapprevOutScriptPubKeys[outpoint] = ParseScript(vinput[2].get_str());
                 if (vinput.size() >= 4)
                 {
-                    mapprevOutValues[outpoint] = vinput[3].get_int64();
+                    mapprevOutValues[outpoint] = vinput[3].getInt<int64_t>();
                 }
             }
             if (!fValid)
@@ -249,26 +248,26 @@ BOOST_AUTO_TEST_CASE(tx_valid)
                 BOOST_ERROR("Bad test flags: " << strTest);
             }
 
-            BOOST_CHECK_MESSAGE(CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, ~verify_flags, txdata, strTest, /* expect_valid */ true),
+            BOOST_CHECK_MESSAGE(CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, ~verify_flags, txdata, strTest, /*expect_valid=*/true),
                                 "Tx unexpectedly failed: " << strTest);
 
             // Backwards compatibility of script verification flags: Removing any flag(s) should not invalidate a valid transaction
             for (const auto& [name, flag] : mapFlagNames) {
                 // Removing individual flags
                 unsigned int flags = TrimFlags(~(verify_flags | flag));
-                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /* expect_valid */ true)) {
+                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /*expect_valid=*/true)) {
                     BOOST_ERROR("Tx unexpectedly failed with flag " << name << " unset: " << strTest);
                 }
                 // Removing random combinations of flags
                 flags = TrimFlags(~(verify_flags | (unsigned int)InsecureRandBits(mapFlagNames.size())));
-                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /* expect_valid */ true)) {
+                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /*expect_valid=*/true)) {
                     BOOST_ERROR("Tx unexpectedly failed with random flags " << ToString(flags) << ": " << strTest);
                 }
             }
 
             // Check that flags are maximal: transaction should fail if any unset flags are set.
             for (auto flags_excluding_one : ExcludeIndividualFlags(verify_flags)) {
-                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, ~flags_excluding_one, txdata, strTest, /* expect_valid */ false)) {
+                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, ~flags_excluding_one, txdata, strTest, /*expect_valid=*/false)) {
                     BOOST_ERROR("Too many flags unset: " << strTest);
                 }
             }
@@ -282,7 +281,7 @@ BOOST_AUTO_TEST_CASE(tx_invalid)
     UniValue tests = read_json(std::string(json_tests::tx_invalid, json_tests::tx_invalid + sizeof(json_tests::tx_invalid)));
 
     for (unsigned int idx = 0; idx < tests.size(); idx++) {
-        UniValue test = tests[idx];
+        const UniValue& test = tests[idx];
         std::string strTest = test.write();
         if (test[0].isArray())
         {
@@ -302,17 +301,17 @@ BOOST_AUTO_TEST_CASE(tx_invalid)
                     fValid = false;
                     break;
                 }
-                UniValue vinput = input.get_array();
+                const UniValue& vinput = input.get_array();
                 if (vinput.size() < 3 || vinput.size() > 4)
                 {
                     fValid = false;
                     break;
                 }
-                COutPoint outpoint(uint256S(vinput[0].get_str()), vinput[1].get_int());
+                COutPoint outpoint{uint256S(vinput[0].get_str()), uint32_t(vinput[1].getInt<int>())};
                 mapprevOutScriptPubKeys[outpoint] = ParseScript(vinput[2].get_str());
                 if (vinput.size() >= 4)
                 {
-                    mapprevOutValues[outpoint] = vinput[3].get_int64();
+                    mapprevOutValues[outpoint] = vinput[3].getInt<int64_t>();
                 }
             }
             if (!fValid)
@@ -340,26 +339,26 @@ BOOST_AUTO_TEST_CASE(tx_invalid)
             }
 
             // Not using FillFlags() in the main test, in order to detect invalid verifyFlags combination
-            BOOST_CHECK_MESSAGE(CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, verify_flags, txdata, strTest, /* expect_valid */ false),
+            BOOST_CHECK_MESSAGE(CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, verify_flags, txdata, strTest, /*expect_valid=*/false),
                                 "Tx unexpectedly passed: " << strTest);
 
             // Backwards compatibility of script verification flags: Adding any flag(s) should not validate an invalid transaction
             for (const auto& [name, flag] : mapFlagNames) {
                 unsigned int flags = FillFlags(verify_flags | flag);
                 // Adding individual flags
-                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /* expect_valid */ false)) {
+                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /*expect_valid=*/false)) {
                     BOOST_ERROR("Tx unexpectedly passed with flag " << name << " set: " << strTest);
                 }
                 // Adding random combinations of flags
                 flags = FillFlags(verify_flags | (unsigned int)InsecureRandBits(mapFlagNames.size()));
-                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /* expect_valid */ false)) {
+                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags, txdata, strTest, /*expect_valid=*/false)) {
                     BOOST_ERROR("Tx unexpectedly passed with random flags " << name << ": " << strTest);
                 }
             }
 
             // Check that flags are minimal: transaction should succeed if any set flags are unset.
             for (auto flags_excluding_one : ExcludeIndividualFlags(verify_flags)) {
-                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags_excluding_one, txdata, strTest, /* expect_valid */ true)) {
+                if (!CheckTxScripts(tx, mapprevOutScriptPubKeys, mapprevOutValues, flags_excluding_one, txdata, strTest, /*expect_valid=*/true)) {
                     BOOST_ERROR("Too many flags set: " << strTest);
                 }
             }
@@ -406,7 +405,7 @@ BOOST_AUTO_TEST_CASE(test_Get)
     t1.vout[0].nValue = 90*CENT;
     t1.vout[0].scriptPubKey << OP_1;
 
-    BOOST_CHECK(AreInputsStandard(CTransaction(t1), coins, false));
+    BOOST_CHECK(AreInputsStandard(CTransaction(t1), coins));
 }
 
 static void CreateCreditAndSpend(const FillableSigningProvider& keystore, const CScript& outscript, CTransactionRef& output, CMutableTransaction& input, bool success = true)
@@ -435,7 +434,8 @@ static void CreateCreditAndSpend(const FillableSigningProvider& keystore, const 
     inputm.vout.resize(1);
     inputm.vout[0].nValue = 1;
     inputm.vout[0].scriptPubKey = CScript();
-    bool ret = SignSignature(keystore, *output, inputm, 0, SIGHASH_ALL);
+    SignatureData empty;
+    bool ret = SignSignature(keystore, *output, inputm, 0, SIGHASH_ALL, empty);
     assert(ret == success);
     CDataStream ssin(SER_NETWORK, PROTOCOL_VERSION);
     ssin << inputm;
@@ -519,7 +519,8 @@ BOOST_AUTO_TEST_CASE(test_big_witness_transaction)
 
     // sign all inputs
     for(uint32_t i = 0; i < mtx.vin.size(); i++) {
-        bool hashSigned = SignSignature(keystore, scriptPubKey, mtx, i, 1000, sigHashes.at(i % sigHashes.size()));
+        SignatureData empty;
+        bool hashSigned = SignSignature(keystore, scriptPubKey, mtx, i, 1000, sigHashes.at(i % sigHashes.size()), empty);
         assert(hashSigned);
     }
 
@@ -562,7 +563,7 @@ SignatureData CombineSignatures(const CMutableTransaction& input1, const CMutabl
     SignatureData sigdata;
     sigdata = DataFromTransaction(input1, 0, tx->vout[0]);
     sigdata.MergeSignatureData(DataFromTransaction(input2, 0, tx->vout[0]));
-    ProduceSignature(DUMMY_SIGNING_PROVIDER, MutableTransactionSignatureCreator(&input1, 0, tx->vout[0].nValue, SIGHASH_ALL), tx->vout[0].scriptPubKey, sigdata);
+    ProduceSignature(DUMMY_SIGNING_PROVIDER, MutableTransactionSignatureCreator(input1, 0, tx->vout[0].nValue, SIGHASH_ALL), tx->vout[0].scriptPubKey, sigdata);
     return sigdata;
 }
 
@@ -748,7 +749,6 @@ BOOST_AUTO_TEST_CASE(test_witness)
 
 BOOST_AUTO_TEST_CASE(test_IsStandard)
 {
-    LOCK(cs_main);
     FillableSigningProvider keystore;
     CCoinsView coinsDummy;
     CCoinsViewCache coins(&coinsDummy);
@@ -768,19 +768,19 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
 
     constexpr auto CheckIsStandard = [](const auto& t) {
         std::string reason;
-        BOOST_CHECK(IsStandardTx(CTransaction(t), reason));
+        BOOST_CHECK(IsStandardTx(CTransaction{t}, MAX_OP_RETURN_RELAY, g_bare_multi, g_dust, reason));
         BOOST_CHECK(reason.empty());
     };
     constexpr auto CheckIsNotStandard = [](const auto& t, const std::string& reason_in) {
         std::string reason;
-        BOOST_CHECK(!IsStandardTx(CTransaction(t), reason));
+        BOOST_CHECK(!IsStandardTx(CTransaction{t}, MAX_OP_RETURN_RELAY, g_bare_multi, g_dust, reason));
         BOOST_CHECK_EQUAL(reason_in, reason);
     };
 
     CheckIsStandard(t);
 
     // Check dust with default relay fee:
-    CAmount nDustThreshold = 182 * dustRelayFee.GetFeePerK() / 1000;
+    CAmount nDustThreshold = 182 * g_dust.GetFeePerK() / 1000;
     BOOST_CHECK_EQUAL(nDustThreshold, 546);
     // dust:
     t.vout[0].nValue = nDustThreshold - 1;
@@ -808,14 +808,14 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
 
     // Check dust with odd relay fee to verify rounding:
     // nDustThreshold = 182 * 3702 / 1000
-    dustRelayFee = CFeeRate(3702);
+    g_dust = CFeeRate(3702);
     // dust:
     t.vout[0].nValue = 674 - 1;
     CheckIsNotStandard(t, "dust");
     // not dust:
     t.vout[0].nValue = 674;
     CheckIsStandard(t);
-    dustRelayFee = CFeeRate(DUST_RELAY_TX_FEE);
+    g_dust = CFeeRate{DUST_RELAY_TX_FEE};
 
     t.vout[0].scriptPubKey = CScript() << OP_1;
     CheckIsNotStandard(t, "scriptpubkey");
@@ -927,34 +927,69 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     BOOST_CHECK_EQUAL(GetTransactionWeight(CTransaction(t)), 400004);
     CheckIsNotStandard(t, "tx-size");
 
-    // Check bare multisig (standard if policy flag fIsBareMultisigStd is set)
-    fIsBareMultisigStd = true;
+    // Check bare multisig (standard if policy flag g_bare_multi is set)
+    g_bare_multi = true;
     t.vout[0].scriptPubKey = GetScriptForMultisig(1, {key.GetPubKey()}); // simple 1-of-1
     t.vin.resize(1);
     t.vin[0].scriptSig = CScript() << std::vector<unsigned char>(65, 0);
     CheckIsStandard(t);
 
-    fIsBareMultisigStd = false;
+    g_bare_multi = false;
     CheckIsNotStandard(t, "bare-multisig");
-    fIsBareMultisigStd = DEFAULT_PERMIT_BAREMULTISIG;
+    g_bare_multi = DEFAULT_PERMIT_BAREMULTISIG;
+
+    // Check compressed P2PK outputs dust threshold (must have leading 02 or 03)
+    t.vout[0].scriptPubKey = CScript() << std::vector<unsigned char>(33, 0x02) << OP_CHECKSIG;
+    t.vout[0].nValue = 576;
+    CheckIsStandard(t);
+    t.vout[0].nValue = 575;
+    CheckIsNotStandard(t, "dust");
+
+    // Check uncompressed P2PK outputs dust threshold (must have leading 04/06/07)
+    t.vout[0].scriptPubKey = CScript() << std::vector<unsigned char>(65, 0x04) << OP_CHECKSIG;
+    t.vout[0].nValue = 672;
+    CheckIsStandard(t);
+    t.vout[0].nValue = 671;
+    CheckIsNotStandard(t, "dust");
+
+    // Check P2PKH outputs dust threshold
+    t.vout[0].scriptPubKey = CScript() << OP_DUP << OP_HASH160 << std::vector<unsigned char>(20, 0) << OP_EQUALVERIFY << OP_CHECKSIG;
+    t.vout[0].nValue = 546;
+    CheckIsStandard(t);
+    t.vout[0].nValue = 545;
+    CheckIsNotStandard(t, "dust");
+
+    // Check P2SH outputs dust threshold
+    t.vout[0].scriptPubKey = CScript() << OP_HASH160 << std::vector<unsigned char>(20, 0) << OP_EQUAL;
+    t.vout[0].nValue = 540;
+    CheckIsStandard(t);
+    t.vout[0].nValue = 539;
+    CheckIsNotStandard(t, "dust");
 
     // Check P2WPKH outputs dust threshold
-    t.vout[0].scriptPubKey = CScript() << OP_0 << ParseHex("ffffffffffffffffffffffffffffffffffffffff");
+    t.vout[0].scriptPubKey = CScript() << OP_0 << std::vector<unsigned char>(20, 0);
     t.vout[0].nValue = 294;
     CheckIsStandard(t);
     t.vout[0].nValue = 293;
     CheckIsNotStandard(t, "dust");
 
     // Check P2WSH outputs dust threshold
-    t.vout[0].scriptPubKey = CScript() << OP_0 << ParseHex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    t.vout[0].scriptPubKey = CScript() << OP_0 << std::vector<unsigned char>(32, 0);
     t.vout[0].nValue = 330;
     CheckIsStandard(t);
     t.vout[0].nValue = 329;
     CheckIsNotStandard(t, "dust");
 
-    // Check future Witness Program versions dust threshold
-    for (int op = OP_2; op <= OP_16; op += 1) {
-        t.vout[0].scriptPubKey = CScript() << (opcodetype)op << ParseHex("ffff");
+    // Check P2TR outputs dust threshold (Invalid xonly key ok!)
+    t.vout[0].scriptPubKey = CScript() << OP_1 << std::vector<unsigned char>(32, 0);
+    t.vout[0].nValue = 330;
+    CheckIsStandard(t);
+    t.vout[0].nValue = 329;
+    CheckIsNotStandard(t, "dust");
+
+    // Check future Witness Program versions dust threshold (non-32-byte pushes are undefined for version 1)
+    for (int op = OP_1; op <= OP_16; op += 1) {
+        t.vout[0].scriptPubKey = CScript() << (opcodetype)op << std::vector<unsigned char>(2, 0);
         t.vout[0].nValue = 240;
         CheckIsStandard(t);
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2021 The Bitcoin Core developers
+# Copyright (c) 2015-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """
@@ -28,6 +28,7 @@ from test_framework.messages import (
     CTxIn,
     CTxOut,
     MAX_MONEY,
+    SEQUENCE_FINAL,
 )
 from test_framework.blocktools import create_tx_with_script, MAX_BLOCK_SIGOPS
 from test_framework.script import (
@@ -45,17 +46,18 @@ from test_framework.script import (
     OP_MOD,
     OP_MUL,
     OP_OR,
+    OP_RETURN,
     OP_RIGHT,
     OP_RSHIFT,
     OP_SUBSTR,
-    OP_TRUE,
     OP_XOR,
 )
 from test_framework.script_util import (
+    MIN_PADDING,
+    MIN_STANDARD_TX_NONWITNESS_SIZE,
     script_to_p2sh_script,
 )
 basic_p2sh = script_to_p2sh_script(CScript([OP_0]))
-
 
 class BadTxTemplate:
     """Allows simple construction of a certain kind of invalid tx. Base class to be subclassed."""
@@ -77,7 +79,7 @@ class BadTxTemplate:
     def __init__(self, *, spend_tx=None, spend_block=None):
         self.spend_tx = spend_block.vtx[0] if spend_block else spend_tx
         self.spend_avail = sum(o.nValue for o in self.spend_tx.vout)
-        self.valid_txin = CTxIn(COutPoint(self.spend_tx.sha256, 0), b"", 0xffffffff)
+        self.valid_txin = CTxIn(COutPoint(self.spend_tx.sha256, 0), b"", SEQUENCE_FINAL)
 
     @abc.abstractmethod
     def get_tx(self, *args, **kwargs):
@@ -121,7 +123,9 @@ class SizeTooSmall(BadTxTemplate):
     def get_tx(self):
         tx = CTransaction()
         tx.vin.append(self.valid_txin)
-        tx.vout.append(CTxOut(0, CScript([OP_TRUE])))
+        tx.vout.append(CTxOut(0, CScript([OP_RETURN] + ([OP_0] * (MIN_PADDING - 2)))))
+        assert len(tx.serialize_without_witness()) == 64
+        assert MIN_STANDARD_TX_NONWITNESS_SIZE - 1 == 64
         tx.calc_sha256()
         return tx
 
@@ -137,7 +141,7 @@ class BadInputOutpointIndex(BadTxTemplate):
         bad_idx = num_indices + 100
 
         tx = CTransaction()
-        tx.vin.append(CTxIn(COutPoint(self.spend_tx.sha256, bad_idx), b"", 0xffffffff))
+        tx.vin.append(CTxIn(COutPoint(self.spend_tx.sha256, bad_idx), b"", SEQUENCE_FINAL))
         tx.vout.append(CTxOut(0, basic_p2sh))
         tx.calc_sha256()
         return tx
@@ -175,7 +179,7 @@ class NonexistentInput(BadTxTemplate):
 
     def get_tx(self):
         tx = CTransaction()
-        tx.vin.append(CTxIn(COutPoint(self.spend_tx.sha256 + 1, 0), b"", 0xffffffff))
+        tx.vin.append(CTxIn(COutPoint(self.spend_tx.sha256 + 1, 0), b"", SEQUENCE_FINAL))
         tx.vin.append(self.valid_txin)
         tx.vout.append(CTxOut(1, basic_p2sh))
         tx.calc_sha256()

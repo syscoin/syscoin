@@ -12,18 +12,14 @@
 #include <util/strencodings.h>
 #include <validation.h>
 
-#include <boost/algorithm/string.hpp>
-
 #include <univalue.h>
 // DECLARE GLOBAL VARIABLES FOR GOVERNANCE CLASSES
 CGovernanceTriggerManager triggerman;
 
 // SPLIT UP STRING BY DELIMITER
-// http://www.boost.org/doc/libs/1_58_0/doc/html/boost/algorithm/split_idp202406848.html
 std::vector<std::string> SplitBy(const std::string& strCommand, const std::string& strDelimit)
 {
-    std::vector<std::string> vParts;
-    boost::split(vParts, strCommand, boost::is_any_of(strDelimit));
+    std::vector<std::string> vParts = SplitString(strCommand, strDelimit);
 
     for (int q = 0; q < (int)vParts.size(); q++) {
         if (strDelimit.find(vParts[q]) != std::string::npos) {
@@ -179,7 +175,7 @@ void CGovernanceTriggerManager::CleanAndRemove()
             if (pObj) {
                 strDataAsPlainString = pObj->GetDataAsPlainString();
                 // mark corresponding object for deletion
-                pObj->PrepareDeletion(GetAdjustedTime());
+                pObj->PrepareDeletion(TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime()));
             }
             LogPrint(BCLog::GOBJECT, "CGovernanceTriggerManager::CleanAndRemove -- Removing trigger object %s\n", strDataAsPlainString);
             // delete the trigger
@@ -416,7 +412,7 @@ CSuperblock::
     UniValue obj = pGovObj->GetJSONObject();
 
     // FIRST WE GET THE START HEIGHT, THE BLOCK HEIGHT AT WHICH THE PAYMENT SHALL OCCUR
-    nBlockHeight = obj["event_block_height"].get_int();
+    nBlockHeight = obj["event_block_height"].getInt<int>();
 
     // NEXT WE GET THE PAYMENT INFORMATION AND RECONSTRUCT THE PAYMENT VECTOR
     std::string strAddresses = obj["payment_addresses"].get_str();

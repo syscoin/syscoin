@@ -1,4 +1,4 @@
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,12 +11,7 @@
 
 #include <test/fuzz/fuzz.h>
 
-void initialize_script_flags()
-{
-    static const ECCVerifyHandle verify_handle;
-}
-
-FUZZ_TARGET_INIT(script_flags, initialize_script_flags)
+FUZZ_TARGET(script_flags)
 {
     CDataStream ds(buffer, SER_NETWORK, INIT_PROTO_VERSION);
     try {
@@ -37,10 +32,11 @@ FUZZ_TARGET_INIT(script_flags, initialize_script_flags)
 
         unsigned int fuzzed_flags;
         ds >> fuzzed_flags;
-
-        std::vector<CTxOut> spent_outputs;
+        // SYSCOIN
+        std::vector<CTxOutCoin> spent_outputs;
         for (unsigned i = 0; i < tx.vin.size(); ++i) {
-            CTxOut prevout;
+            // SYSCOIN
+            CTxOutCoin prevout;
             ds >> prevout;
             if (!MoneyRange(prevout.nValue)) {
                 // prevouts should be consensus-valid
@@ -52,7 +48,8 @@ FUZZ_TARGET_INIT(script_flags, initialize_script_flags)
         txdata.Init(tx, std::move(spent_outputs));
 
         for (unsigned i = 0; i < tx.vin.size(); ++i) {
-            const CTxOut& prevout = txdata.m_spent_outputs.at(i);
+            // SYSCOIN
+            const CTxOutCoin& prevout = txdata.m_spent_outputs.at(i);
             const TransactionSignatureChecker checker{&tx, i, prevout.nValue, txdata, MissingDataBehavior::ASSERT_FAIL};
 
             ScriptError serror;

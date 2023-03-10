@@ -8,16 +8,16 @@ https://syscoincore.org/en/download/.
 
 Further information about Syscoin Core is available in the [doc folder](/doc).
 
-What is Syscoin?
+What is Syscoin Core?
 ----------------
 
-Syscoin is an experimental digital currency that enables instant payments to anyone, anywhere in the world. Syscoin uses peer-to-peer technology to operate with no central authority: managing transactions and issuing money are carried out collectively by the network. Syscoin Core is the name of open source software which enables the use of this currency.
+Syscoin Core is an experimental digital currency that enables instant payments to anyone, anywhere in the world. Syscoin uses peer-to-peer technology to operate with no central authority: managing transactions and issuing money are carried out collectively by the network. Syscoin Core is the name of open source software which enables the use of this currency.
 
 For more information, as well as an immediately useable, binary version of the Syscoin Core software, see https://syscoin.org/, or read the [original whitepaper](https://syscoin.org/zdag_syscoin_whitepaper.pdf).
 
 Syscoin is a merge-minable SHA256 coin which provides an array of useful services which leverage the bitcoin protocol and blockchain technology.
 
-Hybrid layer 2 PoW/PoS consensus with bonded validator system (masternodes) ZDAG technology for point-of-sale speeds and probabilistic confirmations useful for microtransactions Trustless sidechain access to NEVM and back through a custom permissionless/trustless sidechain technology (SYSX bridge) https://github.com/syscoin/sysethereum-contracts Decentralized governance (blockchain pays for work via proposals and masternode votes) Digital asset creation and management. ZDAG is open-source and developed over the course of 12 months by [Blockchain Foundry Inc](https://www.blockchainfoundry.co/), with external audit done over 6 months by [Whiteblock](https://whiteblock.io). [Performance report can be found here](https://syscoin.org/tps_whiteblock_syscoin_report.pdf).
+Hybrid layer 2 PoW/PoS consensus with bonded validator system (masternodes) ZDAG technology for point-of-sale speeds and probabilistic confirmations useful for microtransactions Trustless sidechain access to NEVM and back through a custom permissionless/trustless sidechain technology (SYSX bridge) https://github.com/syscoin/sysethereum Decentralized governance (blockchain pays for work via proposals and masternode votes) Digital asset creation and management. ZDAG is open-source and developed over the course of 12 months by [Blockchain Foundry Inc](https://www.blockchainfoundry.co/), with external audit done over 6 months by [Whiteblock](https://whiteblock.io). [Performance report can be found here](https://syscoin.org/tps_whiteblock_syscoin_report.pdf).
 
 Governance formula: We have implemented a % decline schedule — starting the first month with 1500000 SYS and ending on the 24th month with 196708 SYS. After that period, the superblock starts with 151767 SYS a month and will decline 5% every year. Read more about it here: https://medium.com/@syscoin/syscoin-4-0-rewards-specifications-a3dc01d85adf.
 

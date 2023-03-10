@@ -11,9 +11,10 @@ race:BerkeleyDatabase
 race:DatabaseBatch
 race:zmq::*
 race:syscoin-qt
+race:GenerateBlock
 
 # deadlock (TODO fix)
-deadlock:CChainState::ConnectTip
+deadlock:Chainstate::ConnectTip
 
 # Intentional deadlock in tests
 deadlock:sync_tests::potential_deadlock_detected
@@ -22,10 +23,6 @@ deadlock:sync_tests::potential_deadlock_detected
 race:src/qt/test/*
 race:src/bench/*
 deadlock:src/qt/test/*
-
-# Race in src/test/main.cpp
-# Can be removed once upgraded to boost test 1.74 in depends
-race:validation_chainstatemanager_tests
 
 # External libraries
 deadlock:libdb
@@ -50,4 +47,4 @@ race:CZMQAbstractPublishNotifier::SendZmqMessage
 race:epoll_ctl
 
 # https://github.com/bitcoin/bitcoin/issues/23366
-race:std::__1::ios_base::width
+race:std::__1::ios_base::*

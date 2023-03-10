@@ -1,5 +1,5 @@
 // Copyright (c) 2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -15,7 +15,6 @@
 #include <string>
 #include <univalue.h>
 
-static const unsigned int DEFAULT_RPC_SERIALIZE_VERSION = 1;
 
 class CRPCCommand;
 
@@ -91,7 +90,7 @@ public:
     //! RPC method handler reading request and assigning result. Should return
     //! true if request is fully handled, false if it should be passed on to
     //! subsequent handlers.
-    using Actor = std::function<bool(const JSONRPCRequest& request, UniValue& result, bool last_handler)>;
+    using Actor = std::function<bool(const node::JSONRPCRequest& request, UniValue& result, bool last_handler)>;
 
     //! Constructor taking Actor callback supporting multiple handlers.
     CRPCCommand(std::string category, std::string name, Actor actor, std::vector<std::string> args, intptr_t unique_id)
@@ -105,7 +104,7 @@ public:
         : CRPCCommand(
               category,
               fn().m_name,
-              [fn](const JSONRPCRequest& request, UniValue& result, bool) { result = fn().HandleRequest(request); return true; },
+              [fn](const node::JSONRPCRequest& request, UniValue& result, bool) { result = fn().HandleRequest(request); return true; },
               fn().GetArgNames(),
               intptr_t(fn))
     {
@@ -128,7 +127,7 @@ private:
 public:
     CRPCTable();
 
-    std::string help(const std::string& name,  const JSONRPCRequest& helpreq) const;
+    std::string help(const std::string& name,  const node::JSONRPCRequest& helpreq) const;
 
     /**
      * Execute a method.
@@ -136,7 +135,7 @@ public:
      * @returns Result of the call.
      * @throws an exception (UniValue) when an error happens.
      */
-    UniValue execute(const JSONRPCRequest &request) const;
+    UniValue execute(const node::JSONRPCRequest &request) const;
 
     /**
     * Returns a list of registered commands
@@ -147,7 +146,7 @@ public:
     /**
      * Return all named arguments that need to be converted by the client from string to another JSON type
      */
-    UniValue dumpArgMap(const JSONRPCRequest& request) const;
+    UniValue dumpArgMap(const node::JSONRPCRequest& request) const;
 
     /**
      * Appends a CRPCCommand to the dispatch table.
@@ -171,9 +170,9 @@ extern CRPCTable tableRPC;
 void StartRPC();
 void InterruptRPC();
 void StopRPC();
-std::string JSONRPCExecBatch(const JSONRPCRequest& jreq, const UniValue& vReq);
+std::string JSONRPCExecBatch(const node::JSONRPCRequest& jreq, const UniValue& vReq);
 
-// Retrieves any serialization flags requested in command line argument
-int RPCSerializationFlags();
+// SYSCOIN Retrieves any serialization flags requested in command line argument
+// int RPCSerializationFlags();
 
 #endif // SYSCOIN_RPC_SERVER_H

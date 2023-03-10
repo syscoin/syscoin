@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2020 The Bitcoin Core developers
+// Copyright (c) 2012-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -38,13 +38,13 @@ public:
         READWRITE(obj.txval);
     }
 
-    bool operator==(const CSerializeMethodsTestSingle& rhs)
+    bool operator==(const CSerializeMethodsTestSingle& rhs) const
     {
-        return  intval == rhs.intval && \
-                boolval == rhs.boolval && \
-                stringval == rhs.stringval && \
-                strcmp(charstrval, rhs.charstrval) == 0 && \
-                *txval == *rhs.txval;
+        return intval == rhs.intval &&
+               boolval == rhs.boolval &&
+               stringval == rhs.stringval &&
+               strcmp(charstrval, rhs.charstrval) == 0 &&
+               *txval == *rhs.txval;
     }
 };
 
@@ -61,7 +61,7 @@ public:
 
 BOOST_AUTO_TEST_CASE(sizes)
 {
-    BOOST_CHECK_EQUAL(sizeof(char), GetSerializeSize(char(0), 0));
+    BOOST_CHECK_EQUAL(sizeof(unsigned char), GetSerializeSize((unsigned char)0, 0));
     BOOST_CHECK_EQUAL(sizeof(int8_t), GetSerializeSize(int8_t(0), 0));
     BOOST_CHECK_EQUAL(sizeof(uint8_t), GetSerializeSize(uint8_t(0), 0));
     BOOST_CHECK_EQUAL(sizeof(int16_t), GetSerializeSize(int16_t(0), 0));
@@ -74,7 +74,7 @@ BOOST_AUTO_TEST_CASE(sizes)
     BOOST_CHECK_EQUAL(sizeof(uint8_t), GetSerializeSize(bool(0), 0));
 
     // Sanity-check GetSerializeSize and c++ type matching
-    BOOST_CHECK_EQUAL(GetSerializeSize(char(0), 0), 1U);
+    BOOST_CHECK_EQUAL(GetSerializeSize((unsigned char)0, 0), 1U);
     BOOST_CHECK_EQUAL(GetSerializeSize(int8_t(0), 0), 1U);
     BOOST_CHECK_EQUAL(GetSerializeSize(uint8_t(0), 0), 1U);
     BOOST_CHECK_EQUAL(GetSerializeSize(int16_t(0), 0), 2U);
@@ -90,8 +90,8 @@ BOOST_AUTO_TEST_CASE(varints)
 {
     // encode
 
-    CDataStream ss(SER_DISK, 0);
-    CDataStream::size_type size = 0;
+    DataStream ss{};
+    DataStream::size_type size = 0;
     for (int i = 0; i < 100000; i++) {
         ss << VARINT_MODE(i, VarIntMode::NONNEGATIVE_SIGNED);
         size += ::GetSerializeSize(VARINT_MODE(i, VarIntMode::NONNEGATIVE_SIGNED), 0);
@@ -120,20 +120,20 @@ BOOST_AUTO_TEST_CASE(varints)
 
 BOOST_AUTO_TEST_CASE(varints_bitpatterns)
 {
-    CDataStream ss(SER_DISK, 0);
+    DataStream ss{};
     ss << VARINT_MODE(0, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "00"); ss.clear();
     ss << VARINT_MODE(0x7f, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "7f"); ss.clear();
-    ss << VARINT_MODE((int8_t)0x7f, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "7f"); ss.clear();
+    ss << VARINT_MODE(int8_t{0x7f}, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "7f"); ss.clear();
     ss << VARINT_MODE(0x80, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "8000"); ss.clear();
-    ss << VARINT((uint8_t)0x80); BOOST_CHECK_EQUAL(HexStr(ss), "8000"); ss.clear();
+    ss << VARINT(uint8_t{0x80}); BOOST_CHECK_EQUAL(HexStr(ss), "8000"); ss.clear();
     ss << VARINT_MODE(0x1234, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "a334"); ss.clear();
-    ss << VARINT_MODE((int16_t)0x1234, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "a334"); ss.clear();
+    ss << VARINT_MODE(int16_t{0x1234}, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "a334"); ss.clear();
     ss << VARINT_MODE(0xffff, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "82fe7f"); ss.clear();
-    ss << VARINT((uint16_t)0xffff); BOOST_CHECK_EQUAL(HexStr(ss), "82fe7f"); ss.clear();
+    ss << VARINT(uint16_t{0xffff}); BOOST_CHECK_EQUAL(HexStr(ss), "82fe7f"); ss.clear();
     ss << VARINT_MODE(0x123456, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "c7e756"); ss.clear();
-    ss << VARINT_MODE((int32_t)0x123456, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "c7e756"); ss.clear();
+    ss << VARINT_MODE(int32_t{0x123456}, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "c7e756"); ss.clear();
     ss << VARINT(0x80123456U); BOOST_CHECK_EQUAL(HexStr(ss), "86ffc7e756"); ss.clear();
-    ss << VARINT((uint32_t)0x80123456U); BOOST_CHECK_EQUAL(HexStr(ss), "86ffc7e756"); ss.clear();
+    ss << VARINT(uint32_t{0x80123456U}); BOOST_CHECK_EQUAL(HexStr(ss), "86ffc7e756"); ss.clear();
     ss << VARINT(0xffffffff); BOOST_CHECK_EQUAL(HexStr(ss), "8efefefe7f"); ss.clear();
     ss << VARINT_MODE(0x7fffffffffffffffLL, VarIntMode::NONNEGATIVE_SIGNED); BOOST_CHECK_EQUAL(HexStr(ss), "fefefefefefefefe7f"); ss.clear();
     ss << VARINT(0xffffffffffffffffULL); BOOST_CHECK_EQUAL(HexStr(ss), "80fefefefefefefefe7f"); ss.clear();
@@ -141,7 +141,7 @@ BOOST_AUTO_TEST_CASE(varints_bitpatterns)
 
 BOOST_AUTO_TEST_CASE(compactsize)
 {
-    CDataStream ss(SER_DISK, 0);
+    DataStream ss{};
     std::vector<char>::size_type i, j;
 
     for (i = 1; i <= MAX_SIZE; i *= 2)
@@ -182,80 +182,37 @@ BOOST_AUTO_TEST_CASE(noncanonical)
 {
     // Write some non-canonical CompactSize encodings, and
     // make sure an exception is thrown when read back.
-    CDataStream ss(SER_DISK, 0);
+    DataStream ss{};
     std::vector<char>::size_type n;
 
     // zero encoded with three bytes:
-    ss.write("\xfd\x00\x00", 3);
+    ss.write(MakeByteSpan("\xfd\x00\x00").first(3));
     BOOST_CHECK_EXCEPTION(ReadCompactSize(ss), std::ios_base::failure, isCanonicalException);
 
     // 0xfc encoded with three bytes:
-    ss.write("\xfd\xfc\x00", 3);
+    ss.write(MakeByteSpan("\xfd\xfc\x00").first(3));
     BOOST_CHECK_EXCEPTION(ReadCompactSize(ss), std::ios_base::failure, isCanonicalException);
 
     // 0xfd encoded with three bytes is OK:
-    ss.write("\xfd\xfd\x00", 3);
+    ss.write(MakeByteSpan("\xfd\xfd\x00").first(3));
     n = ReadCompactSize(ss);
     BOOST_CHECK(n == 0xfd);
 
     // zero encoded with five bytes:
-    ss.write("\xfe\x00\x00\x00\x00", 5);
+    ss.write(MakeByteSpan("\xfe\x00\x00\x00\x00").first(5));
     BOOST_CHECK_EXCEPTION(ReadCompactSize(ss), std::ios_base::failure, isCanonicalException);
 
     // 0xffff encoded with five bytes:
-    ss.write("\xfe\xff\xff\x00\x00", 5);
+    ss.write(MakeByteSpan("\xfe\xff\xff\x00\x00").first(5));
     BOOST_CHECK_EXCEPTION(ReadCompactSize(ss), std::ios_base::failure, isCanonicalException);
 
     // zero encoded with nine bytes:
-    ss.write("\xff\x00\x00\x00\x00\x00\x00\x00\x00", 9);
+    ss.write(MakeByteSpan("\xff\x00\x00\x00\x00\x00\x00\x00\x00").first(9));
     BOOST_CHECK_EXCEPTION(ReadCompactSize(ss), std::ios_base::failure, isCanonicalException);
 
     // 0x01ffffff encoded with nine bytes:
-    ss.write("\xff\xff\xff\xff\x01\x00\x00\x00\x00", 9);
+    ss.write(MakeByteSpan("\xff\xff\xff\xff\x01\x00\x00\x00\x00").first(9));
     BOOST_CHECK_EXCEPTION(ReadCompactSize(ss), std::ios_base::failure, isCanonicalException);
-}
-
-BOOST_AUTO_TEST_CASE(insert_delete)
-{
-    // Test inserting/deleting bytes.
-    CDataStream ss(SER_DISK, 0);
-    BOOST_CHECK_EQUAL(ss.size(), 0U);
-
-    ss.write("\x00\x01\x02\xff", 4);
-    BOOST_CHECK_EQUAL(ss.size(), 4U);
-
-    char c = (char)11;
-
-    // Inserting at beginning/end/middle:
-    ss.insert(ss.begin(), c);
-    BOOST_CHECK_EQUAL(ss.size(), 5U);
-    BOOST_CHECK_EQUAL(ss[0], c);
-    BOOST_CHECK_EQUAL(ss[1], 0);
-
-    ss.insert(ss.end(), c);
-    BOOST_CHECK_EQUAL(ss.size(), 6U);
-    BOOST_CHECK_EQUAL(ss[4], 0xff);
-    BOOST_CHECK_EQUAL(ss[5], c);
-
-    ss.insert(ss.begin()+2, c);
-    BOOST_CHECK_EQUAL(ss.size(), 7U);
-    BOOST_CHECK_EQUAL(ss[2], c);
-
-    // Delete at beginning/end/middle
-    ss.erase(ss.begin());
-    BOOST_CHECK_EQUAL(ss.size(), 6U);
-    BOOST_CHECK_EQUAL(ss[0], 0);
-
-    ss.erase(ss.begin()+ss.size()-1);
-    BOOST_CHECK_EQUAL(ss.size(), 5U);
-    BOOST_CHECK_EQUAL(ss[4], 0xff);
-
-    ss.erase(ss.begin()+1);
-    BOOST_CHECK_EQUAL(ss.size(), 4U);
-    BOOST_CHECK_EQUAL(ss[0], 0);
-    BOOST_CHECK_EQUAL(ss[1], 1);
-    BOOST_CHECK_EQUAL(ss[2], 2);
-    BOOST_CHECK_EQUAL(ss[3], 0xff);
 }
 
 BOOST_AUTO_TEST_CASE(class_methods)
@@ -280,7 +237,8 @@ BOOST_AUTO_TEST_CASE(class_methods)
     BOOST_CHECK(methodtest2 == methodtest3);
     BOOST_CHECK(methodtest3 == methodtest4);
 
-    CDataStream ss2(SER_DISK, PROTOCOL_VERSION, intval, boolval, stringval, charstrval, txval);
+    CDataStream ss2{SER_DISK, PROTOCOL_VERSION};
+    ss2 << intval << boolval << stringval << charstrval << txval;
     ss2 >> methodtest3;
     BOOST_CHECK(methodtest3 == methodtest4);
 }

@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -14,8 +14,7 @@
 #include <config/syscoin-config.h>
 #endif
 
-#include <attributes.h>
-#include <compat.h>
+#include <compat/compat.h>
 #include <compat/assumptions.h>
 #include <fs.h>
 #include <logging.h>
@@ -37,7 +36,6 @@
 
 // SYSCOIN
 #include <consensus/amount.h>
-class JSONRPCRequest;
 extern bool fMasternodeMode;
 extern bool fDisableGovernance;
 extern bool fRegTest;
@@ -45,13 +43,15 @@ extern bool fSigNet;
 extern uint32_t fGethCurrentHeight;
 extern std::string fGethSyncStatus;
 extern bool fNEVMConnection;
+extern std::string fNEVMSub;
 extern bool fGethSynced;
-extern bool fLoaded;
+extern std::atomic_bool fLoaded;
 extern bool fAssetIndex;
 extern int32_t DEFAULT_MN_COLLATERAL_REQUIRED;
 extern int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE;
 extern CAmount nMNCollateralRequired;
 extern uint32_t nLastKnownHeightOnStart;
+class ArgsManager;
 class UniValue;
 
 // Application startup time (used for uptime calculation)
@@ -69,7 +69,7 @@ bool error(const char* fmt, const Args&... args)
     return false;
 }
 
-void PrintExceptionContinue(const std::exception *pex, const char* pszThread);
+void PrintExceptionContinue(const std::exception* pex, std::string_view thread_name);
 
 /**
  * Ensure file contents are fully committed to disk, using a platform-specific
@@ -86,9 +86,15 @@ void DirectoryCommit(const fs::path &dirname);
 bool TruncateFile(FILE *file, unsigned int length);
 int RaiseFileDescriptorLimit(int nMinFD);
 void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
+
+/**
+ * Rename src to dest.
+ * @return true if the rename was successful.
+ */
 [[nodiscard]] bool RenameOver(fs::path src, fs::path dest);
-bool LockDirectory(const fs::path& directory, const std::string lockfile_name, bool probe_only=false);
-void UnlockDirectory(const fs::path& directory, const std::string& lockfile_name);
+
+bool LockDirectory(const fs::path& directory, const fs::path& lockfile_name, bool probe_only=false);
+void UnlockDirectory(const fs::path& directory, const fs::path& lockfile_name);
 bool DirIsWritable(const fs::path& directory);
 bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes = 0);
 
@@ -106,17 +112,15 @@ std::streampos GetFileSize(const char* path, std::streamsize max = std::numeric_
 void ReleaseDirectoryLocks();
 
 bool TryCreateDirectories(const fs::path& p);
-bool ExistsOldAssetDir();
 bool ExistsOldEthDir();
-void DeleteOldAssetDir();
 void DeleteOldEthDir();
 fs::path GetDefaultDataDir();
 // SYSCOIN
 std::string GetDefaultPubNEVM();
 std::string GetGethFilename();
 // Return true if -datadir option points to a valid directory or is not specified.
-bool CheckDataDirOption();
-fs::path GetConfigFile(const std::string& confPath);
+bool CheckDataDirOption(const ArgsManager& args);
+fs::path GetConfigFile(const ArgsManager& args, const fs::path& configuration_file_path);
 #ifdef WIN32
 fs::path GetSpecialFolderPath(int nFolder, bool fCreate = true);
 #endif
@@ -126,24 +130,17 @@ std::string ShellEscape(const std::string& arg);
 #if HAVE_SYSTEM
 void runCommand(const std::string& strCommand);
 #endif
-/**
- * Execute a command which returns JSON, and parse the result.
- *
- * @param str_command The command to execute, including any arguments
- * @param str_std_in string to pass to stdin
- * @return parsed JSON
- */
-UniValue RunCommandParseJSON(const std::string& str_command, const std::string& str_std_in="");
 
 /**
  * Most paths passed as configuration arguments are treated as relative to
  * the datadir if they are not absolute.
  *
+ * @param args Parsed arguments and settings.
  * @param path The path to be conditionally prefixed with datadir.
  * @param net_specific Use network specific datadir variant
  * @return The normalized path.
  */
-fs::path AbsPathForConfigVal(const fs::path& path, bool net_specific = true);
+fs::path AbsPathForConfigVal(const ArgsManager& args, const fs::path& path, bool net_specific = true);
 
 inline bool IsSwitchChar(char c)
 {
@@ -179,6 +176,15 @@ struct SectionInfo
     int m_line;
 };
 
+std::string SettingToString(const util::SettingsValue&, const std::string&);
+std::optional<std::string> SettingToString(const util::SettingsValue&);
+
+int64_t SettingToInt(const util::SettingsValue&, int64_t);
+std::optional<int64_t> SettingToInt(const util::SettingsValue&);
+
+bool SettingToBool(const util::SettingsValue&, bool);
+std::optional<bool> SettingToBool(const util::SettingsValue&);
+
 class ArgsManager
 {
 public:
@@ -193,6 +199,7 @@ public:
         // ALLOW_STRING = 0x08,   //!< unimplemented, draft implementation in #16545
         // ALLOW_LIST = 0x10,     //!< unimplemented, draft implementation in #16545
         DISALLOW_NEGATION = 0x20, //!< disallow -nofoo syntax
+        DISALLOW_ELISION = 0x40,  //!< disallow -foo syntax that doesn't assign any value
 
         DEBUG_ONLY = 0x100,
         /* Some options would cause cross-contamination if values for
@@ -259,20 +266,24 @@ protected:
     void SelectConfigNetwork(const std::string& network);
 
     [[nodiscard]] bool ParseParameters(int argc, const char* const argv[], std::string& error);
-    [[nodiscard]] bool ReadConfigFiles(std::string& error, bool ignore_invalid_keys = false);
 
+    /**
+     * Return config file path (read-only)
+     */
+    fs::path GetConfigFilePath() const;
+    [[nodiscard]] bool ReadConfigFiles(std::string& error, bool ignore_invalid_keys = false);
     /**
      * Log warnings for options in m_section_only_args when
      * they are specified in the default section but not overridden
      * on the command line or in a network-specific section in the
      * config file.
      */
-    const std::set<std::string> GetUnsuitableSectionOnlyArgs() const;
+    std::set<std::string> GetUnsuitableSectionOnlyArgs() const;
 
     /**
      * Log warnings for unrecognized section names in the config file.
      */
-    const std::list<SectionInfo> GetUnrecognizedSections() const;
+    std::list<SectionInfo> GetUnrecognizedSections() const;
 
     struct Command {
         /** The command (if one has been registered with AddCommand), or empty */
@@ -299,7 +310,6 @@ protected:
      * Get data directory path
      *
      * @return Absolute path on success, otherwise an empty path when a non-directory path would be returned
-     * @post Returned directory path is created unless it is empty
      */
     const fs::path& GetDataDirBase() const { return GetDataDir(false); }
 
@@ -307,7 +317,6 @@ protected:
      * Get data directory path with appended network identifier
      *
      * @return Absolute path on success, otherwise an empty path when a non-directory path would be returned
-     * @post Returned directory path is created unless it is empty
      */
     const fs::path& GetDataDirNet() const { return GetDataDir(true); }
 
@@ -349,6 +358,19 @@ protected:
      * @return command-line argument or default value
      */
     std::string GetArg(const std::string& strArg, const std::string& strDefault) const;
+    std::optional<std::string> GetArg(const std::string& strArg) const;
+
+    /**
+     * Return path argument or default value
+     *
+     * @param arg Argument to get a path from (e.g., "-datadir", "-blocksdir" or "-walletdir")
+     * @param default_value Optional default value to return instead of the empty path.
+     * @return normalized path if argument is set, with redundant "." and ".."
+     * path components and trailing separators removed (see patharg unit test
+     * for examples or implementation for details). If argument is empty or not
+     * set, default_value is returned unchanged.
+     */
+    fs::path GetPathArg(std::string arg, const fs::path& default_value = {}) const;
 
     /**
      * Return integer argument or default value
@@ -358,6 +380,7 @@ protected:
      * @return command-line argument (0 if invalid number) or default value
      */
     int64_t GetIntArg(const std::string& strArg, int64_t nDefault) const;
+    std::optional<int64_t> GetIntArg(const std::string& strArg) const;
 
     /**
      * Return boolean argument or default value
@@ -367,6 +390,7 @@ protected:
      * @return command-line argument or default value
      */
     bool GetBoolArg(const std::string& strArg, bool fDefault) const;
+    std::optional<bool> GetBoolArg(const std::string& strArg) const;
 
     /**
      * Set an argument if it doesn't already have a value
@@ -432,17 +456,10 @@ protected:
     std::optional<unsigned int> GetArgFlags(const std::string& name) const;
 
     /**
-     * Read and update settings file with saved settings. This needs to be
-     * called after SelectParams() because the settings file location is
-     * network-specific.
-     */
-    bool InitSettings(std::string& error);
-
-    /**
      * Get settings file path, or return false if read-write settings were
      * disabled with -nosettings.
      */
-    bool GetSettingsPath(fs::path* filepath = nullptr, bool temp = false) const;
+    bool GetSettingsPath(fs::path* filepath = nullptr, bool temp = false, bool backup = false) const;
 
     /**
      * Read settings file. Push errors to vector, or log them if null.
@@ -450,9 +467,16 @@ protected:
     bool ReadSettingsFile(std::vector<std::string>* errors = nullptr);
 
     /**
-     * Write settings file. Push errors to vector, or log them if null.
+     * Write settings file or backup settings file. Push errors to vector, or
+     * log them if null.
      */
-    bool WriteSettingsFile(std::vector<std::string>* errors = nullptr) const;
+    bool WriteSettingsFile(std::vector<std::string>* errors = nullptr, bool backup = false) const;
+
+    /**
+     * Get current setting from config file or read/write settings file,
+     * ignoring nonpersistent command line or forced settings values.
+     */
+    util::SettingsValue GetPersistentSetting(const std::string& name) const;
 
     /**
      * Access settings with lock held.
@@ -476,7 +500,6 @@ private:
      *
      * @param net_specific Append network identifier to the returned path
      * @return Absolute path on success, otherwise an empty path when a non-directory path would be returned
-     * @post Returned directory path is created unless it is empty
      */
     const fs::path& GetDataDir(bool net_specific) const;
 
@@ -519,32 +542,6 @@ std::string HelpMessageOpt(const std::string& option, const std::string& message
  * @note This does count virtual cores, such as those provided by HyperThreading.
  */
 int GetNumCores();
-
-/**
- * .. and a wrapper that just calls func once
- */
-template <typename Callable> void TraceThread(const char* name,  Callable func)
-{
-    // SYSCOIN keep copy to work with dynamic thread names in LLMQ code
-    std::string strName = std::string(name);
-    util::ThreadRename(name);
-    try
-    {
-        LogPrintf("%s thread start\n", strName);
-        func();
-        LogPrintf("%s thread exit\n", strName);
-    }
-    catch (const std::exception& e) {
-        PrintExceptionContinue(&e, strName.c_str());
-        throw;
-    }
-    catch (...) {
-        PrintExceptionContinue(nullptr, strName.c_str());
-        throw;
-    }
-}
-
-std::string CopyrightHolders(const std::string& strPrefix);
 
 /**
  * On platforms that support it, tell the kernel the calling thread is

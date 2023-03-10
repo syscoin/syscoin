@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,10 +7,13 @@
 #define SYSCOIN_CONSENSUS_PARAMS_H
 
 #include <uint256.h>
+
 #include <limits>
 // SYSCOIN
+#include <cmath>
 #include <map>
-#include <math.h>
+#include <vector>
+
 namespace Consensus {
 
 /**
@@ -40,11 +43,11 @@ constexpr bool ValidDeployment(DeploymentPos dep) { return dep < MAX_VERSION_BIT
  */
 struct BIP9Deployment {
     /** Bit position to select the particular bit in nVersion. */
-    int bit;
+    int bit{28};
     /** Start MedianTime for version bits miner confirmation. Can be a date in the past */
-    int64_t nStartTime;
+    int64_t nStartTime{NEVER_ACTIVE};
     /** Timeout/expiry MedianTime for the deployment attempt. */
-    int64_t nTimeout;
+    int64_t nTimeout{NEVER_ACTIVE};
     /** If lock in occurs, delay activation until at least this block
      *  height.  Note that activation will only occur on a retarget
      *  boundary.
@@ -160,6 +163,8 @@ struct Params {
     bool bTestnet{false};
     int nBridgeStartBlock;
     int nNEVMStartBlock;
+    int nPODAStartBlock;
+    int nV19StartBlock;
     int nUTXOAssetsBlock;
     int nUTXOAssetsBlockProvisioning;
     uint64_t nMinMNSubsidySats;
@@ -170,8 +175,13 @@ struct Params {
     int nGovernanceFilterElements;
     int nMasternodeMinimumConfirmations;
     int nSubsidyHalvingInterval;
-    /* Block hash that is excepted from BIP16 enforcement */
-    uint256 BIP16Exception;
+    /**
+     * Hashes of blocks that
+     * - are known to be consensus valid, and
+     * - buried in the chain, and
+     * - fail if the default script verify flags are applied.
+     */
+    std::map<uint256, uint32_t> script_flag_exceptions;
     /** Block height and hash at which BIP34 becomes active */
     int BIP34Height;
     uint256 BIP34Hash;

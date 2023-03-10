@@ -8,14 +8,20 @@
 #include <masternode/masternodesync.h>
 #include <netfulfilledman.h>
 #include <netmessagemaker.h>
-#include <node/ui_interface.h>
+#include <node/interface_ui.h>
 #include <evo/deterministicmns.h>
 #include <shutdown.h>
 #include <util/translation.h>
 #include <util/system.h>
-
+#include <timedata.h>
 class CMasternodeSync;
 CMasternodeSync masternodeSync;
+
+CMasternodeSync::CMasternodeSync() :
+    nTimeAssetSyncStarted(GetTime()),
+    nTimeLastBumped(GetTime())
+{
+}
 
 void CMasternodeSync::Reset(bool fForce, bool fNotifyReset)
 {
@@ -203,15 +209,14 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                     // We must be at the tip already, let's move to the next asset.
                     SwitchToNextAsset(connman);
                     uiInterface.NotifyAdditionalDataSyncProgressChanged(nSyncProgress);
-                    if (gArgs.GetBoolArg("-syncmempool", DEFAULT_SYNC_MEMPOOL)) {
-                        // Now that the blockchain is synced request the mempool from the connected outbound nodes if possible
-                        for (auto pNodeTmp : vNodesCopy) {
-                            bool fRequestedEarlier = netfulfilledman.HasFulfilledRequest(pNodeTmp->addr, "mempool-sync");
-                            if (pNodeTmp->nVersion >= 70216 && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
-                                netfulfilledman.AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
-                                connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::MEMPOOL));
-                                LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
-                            }
+                    
+                    // Now that the blockchain is synced request the mempool from the connected outbound nodes if possible
+                    for (auto pNodeTmp : vNodesCopy) {
+                        bool fRequestedEarlier = netfulfilledman.HasFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                        if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
+                            netfulfilledman.AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                            connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::MEMPOOL));
+                            LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
                         }
                     }
                 }
@@ -313,22 +318,12 @@ void CMasternodeSync::SendGovernanceSyncRequest(CNode* pnode, CConnman& connman)
     
 }
 
-void CMasternodeSync::AcceptedBlockHeader(const CBlockIndex *pindexNew)
-{
-    LogPrint(BCLog::MNSYNC, "CMasternodeSync::AcceptedBlockHeader -- pindexNew->nHeight: %d\n", pindexNew->nHeight);
-
-    if (!IsBlockchainSynced()) {
-        // Postpone timeout each time new block header arrives while we are still syncing blockchain
-        BumpAssetLastTime("CMasternodeSync::AcceptedBlockHeader");
-    }
-}
-
-void CMasternodeSync::NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload, CConnman& connman)
+void CMasternodeSync::NotifyHeaderTip(const CBlockIndex *pindexNew)
 {
     if (pindexNew == nullptr) {
         return;
     }
-    LogPrint(BCLog::MNSYNC, "CMasternodeSync::NotifyHeaderTip -- pindexNew->nHeight: %d fInitialDownload=%d\n", pindexNew->nHeight, fInitialDownload);
+    LogPrint(BCLog::MNSYNC, "CMasternodeSync::NotifyHeaderTip -- pindexNew->nHeight: %d\n", pindexNew->nHeight);
 
     if (IsSynced())
         return;
@@ -339,13 +334,13 @@ void CMasternodeSync::NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitia
     }
 }
 
-void CMasternodeSync::UpdatedBlockTip(const CBlockIndex *pindexNew, bool fInitialDownload)
+void CMasternodeSync::UpdatedBlockTip(const CBlockIndex *pindexNew, ChainstateManager& chainman, bool fInitialDownload)
 {
     LogPrint(BCLog::MNSYNC, "CMasternodeSync::UpdatedBlockTip -- pindexNew->nHeight: %d fInitialDownload=%d\n", pindexNew->nHeight, fInitialDownload);
 
 
-    nTimeLastUpdateBlockTip = GetAdjustedTime();
-    CBlockIndex* pindexTip = WITH_LOCK(cs_main, return pindexBestHeader);
+    nTimeLastUpdateBlockTip = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+    CBlockIndex* pindexTip = WITH_LOCK(cs_main, return chainman.m_best_header);
 
     if (IsSynced() || !pindexTip || !pindexNew)
         return;

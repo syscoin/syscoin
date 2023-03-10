@@ -97,7 +97,7 @@ private:
 
         // read data and checksum from file
         try {
-            filein.read((char *)vchData.data(), dataSize);
+            filein.read(MakeWritableByteSpan(vchData));
             filein >> hashIn;
         }
         catch (std::exception &e) {
@@ -165,7 +165,7 @@ private:
 public:
     CFlatDB(std::string strFilenameIn, std::string strMagicMessageIn)
     {
-        pathDB = gArgs.GetDataDirNet() / strFilenameIn;
+        pathDB = gArgs.GetDataDirNet() / fs::u8path(strFilenameIn);
         strFilename = strFilenameIn;
         strMagicMessage = strMagicMessageIn;
     }

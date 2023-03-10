@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2019-2021 The Bitcoin Core developers
+# Copyright (c) 2019-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the generation of UTXO snapshots using `dumptxoutset`.
@@ -47,9 +47,17 @@ class DumptxoutsetTest(SyscoinTestFramework):
             assert_equal(
                 digest, 'e771b160b690e002464f61bed07af483e2d54dd02fd344db6943886697e6463c')
 
-        # Specifying a path to an existing file will fail.
+        assert_equal(
+            out['txoutset_hash'], '19f78e9a07564524fc94b5af5faddb22e70463f9b5f5cf8d8ee1db384cf41d6a')
+        assert_equal(out['nchaintx'], 101)
+
+        # Specifying a path to an existing or invalid file will fail.
         assert_raises_rpc_error(
             -8, '{} already exists'.format(FILENAME),  node.dumptxoutset, FILENAME)
+        invalid_path = str(Path(node.datadir) / "invalid" / "path")
+        assert_raises_rpc_error(
+            -8, "Couldn't open file {}.incomplete for writing".format(invalid_path), node.dumptxoutset, invalid_path)
+
 
 if __name__ == '__main__':
     DumptxoutsetTest().main()

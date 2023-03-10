@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2019-2021 The Bitcoin Core developers
+# Copyright (c) 2019-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the importdescriptors RPC.
@@ -15,7 +15,6 @@ variants.
 - `test_address()` is called to call getaddressinfo for an address on node1
   and test the values returned."""
 
-from test_framework.address import key_to_p2pkh
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.descriptors import descsum_create
@@ -30,11 +29,17 @@ from test_framework.wallet_util import (
 )
 
 class ImportDescriptorsTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser, legacy=False)
+
     def set_test_params(self):
         self.num_nodes = 2
         self.extra_args = [["-addresstype=legacy"],
                            ["-addresstype=bech32", "-keypool=5"]
                           ]
+        # whitelist peers to speed up tx relay / mempool sync
+        for args in self.extra_args:
+            args.append("-whitelist=noban@127.0.0.1")
         self.setup_clean_chain = True
         self.wallet_names = []
 
@@ -114,12 +119,11 @@ class ImportDescriptorsTest(SyscoinTestFramework):
 
         self.log.info("Internal addresses should be detected as such")
         key = get_generate_key()
-        addr = key_to_p2pkh(key.pubkey)
         self.test_importdesc({"desc": descsum_create("pkh(" + key.pubkey + ")"),
                               "timestamp": "now",
                               "internal": True},
                              success=True)
-        info = w1.getaddressinfo(addr)
+        info = w1.getaddressinfo(key.p2pkh_addr)
         assert_equal(info["ismine"], True)
         assert_equal(info["ischange"], True)
 
@@ -444,17 +448,17 @@ class ImportDescriptorsTest(SyscoinTestFramework):
                             wallet=wmulti_priv)
 
         assert_equal(wmulti_priv.getwalletinfo()['keypoolsize'], 1001) # Range end (1000) is inclusive, so 1001 addresses generated
-        addr = wmulti_priv.getnewaddress('', 'bech32')
+        addr = wmulti_priv.getnewaddress('', 'bech32') # uses receive 0
         assert_equal(addr, 'bcrt1qdt0qy5p7dzhxzmegnn4ulzhard33s2809arjqgjndx87rv5vd0fq2czhy8') # Derived at m/84'/0'/0'/0
-        change_addr = wmulti_priv.getrawchangeaddress('bech32')
-        assert_equal(change_addr, 'bcrt1qt9uhe3a9hnq7vajl7a094z4s3crm9ttf8zw3f5v9gr2nyd7e3lnsy44n8e')
+        change_addr = wmulti_priv.getrawchangeaddress('bech32') # uses change 0
+        assert_equal(change_addr, 'bcrt1qt9uhe3a9hnq7vajl7a094z4s3crm9ttf8zw3f5v9gr2nyd7e3lnsy44n8e') # Derived at m/84'/1'/0'/0
         assert_equal(wmulti_priv.getwalletinfo()['keypoolsize'], 1000)
         txid = w0.sendtoaddress(addr, 10)
         self.generate(self.nodes[0], 6)
-        send_txid = wmulti_priv.sendtoaddress(w0.getnewaddress(), 8)
+        send_txid = wmulti_priv.sendtoaddress(w0.getnewaddress(), 8) # uses change 1
         decoded = wmulti_priv.gettransaction(txid=send_txid, verbose=True)['decoded']
         assert_equal(len(decoded['vin'][0]['txinwitness']), 4)
-        self.generate(self.nodes[0], 6)
+        self.sync_all()
 
         self.nodes[1].createwallet(wallet_name="wmulti_pub", disable_private_keys=True, blank=True, descriptors=True)
         wmulti_pub = self.nodes[1].get_wallet_rpc("wmulti_pub")
@@ -477,10 +481,12 @@ class ImportDescriptorsTest(SyscoinTestFramework):
                             wallet=wmulti_pub)
 
         assert_equal(wmulti_pub.getwalletinfo()['keypoolsize'], 1000) # The first one was already consumed by previous import and is detected as used
-        addr = wmulti_pub.getnewaddress('', 'bech32')
+        addr = wmulti_pub.getnewaddress('', 'bech32') # uses receive 1
         assert_equal(addr, 'bcrt1qp8s25ckjl7gr6x2q3dx3tn2pytwp05upkjztk6ey857tt50r5aeqn6mvr9') # Derived at m/84'/0'/0'/1
-        change_addr = wmulti_pub.getrawchangeaddress('bech32')
-        assert_equal(change_addr, 'bcrt1qt9uhe3a9hnq7vajl7a094z4s3crm9ttf8zw3f5v9gr2nyd7e3lnsy44n8e')
+        change_addr = wmulti_pub.getrawchangeaddress('bech32') # uses change 2
+        assert_equal(change_addr, 'bcrt1qp6j3jw8yetefte7kw6v5pc89rkgakzy98p6gf7ayslaveaxqyjusnw580c') # Derived at m/84'/1'/0'/2
+        assert send_txid in self.nodes[0].getrawmempool(True)
+        assert send_txid in (x['txid'] for x in wmulti_pub.listunspent(0))
         assert_equal(wmulti_pub.getwalletinfo()['keypoolsize'], 999)
 
         # generate some utxos for next tests
@@ -660,6 +666,34 @@ class ImportDescriptorsTest(SyscoinTestFramework):
                               "timestamp": "now"},
                               success=True,
                               warnings=["Unknown output type, cannot set descriptor to active."])
+
+        self.log.info("Test importing a descriptor to an encrypted wallet")
+
+        descriptor = {"desc": descsum_create("pkh(" + xpriv + "/1h/*h)"),
+                              "timestamp": "now",
+                              "active": True,
+                              "range": [0,4000],
+                              "next_index": 4000}
+
+        self.nodes[0].createwallet("temp_wallet", blank=True, descriptors=True)
+        temp_wallet = self.nodes[0].get_wallet_rpc("temp_wallet")
+        temp_wallet.importdescriptors([descriptor])
+        self.generatetoaddress(self.nodes[0], COINBASE_MATURITY + 1, temp_wallet.getnewaddress())
+        self.generatetoaddress(self.nodes[0], COINBASE_MATURITY + 1, temp_wallet.getnewaddress())
+
+        self.nodes[0].createwallet("encrypted_wallet", blank=True, descriptors=True, passphrase="passphrase")
+        encrypted_wallet = self.nodes[0].get_wallet_rpc("encrypted_wallet")
+
+        descriptor["timestamp"] = 0
+        descriptor["next_index"] = 0
+
+        batch = []
+        batch.append(encrypted_wallet.walletpassphrase.get_request("passphrase", 3))
+        batch.append(encrypted_wallet.importdescriptors.get_request([descriptor]))
+
+        encrypted_wallet.batch(batch)
+
+        assert_equal(temp_wallet.getbalance(), encrypted_wallet.getbalance())
 
 if __name__ == '__main__':
     ImportDescriptorsTest().main()

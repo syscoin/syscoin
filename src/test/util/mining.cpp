@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2020 The Bitcoin Core developers
+// Copyright (c) 2019-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,7 +7,6 @@
 #include <chainparams.h>
 #include <consensus/merkle.h>
 #include <key_io.h>
-#include <miner.h>
 #include <node/context.h>
 #include <pow.h>
 #include <script/standard.h>
@@ -16,7 +15,9 @@
 #include <validation.h>
 #include <versionbits.h>
 
-CTxIn generatetoaddress(const NodeContext& node, const std::string& address)
+using node::BlockAssembler;
+
+CTxIn generatetoaddress(const node::NodeContext& node, const std::string& address)
 {
     const auto dest = DecodeDestination(address);
     assert(IsValidDestination(dest));
@@ -57,7 +58,7 @@ std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const
     return ret;
 }
 
-CTxIn MineBlock(const NodeContext& node, const CScript& coinbase_scriptPubKey)
+CTxIn MineBlock(const node::NodeContext& node, const CScript& coinbase_scriptPubKey)
 {
     auto block = PrepareBlock(node, coinbase_scriptPubKey);
 
@@ -66,16 +67,17 @@ CTxIn MineBlock(const NodeContext& node, const CScript& coinbase_scriptPubKey)
         assert(block->nNonce);
     }
 
-    bool processed{Assert(node.chainman)->ProcessNewBlock(Params(), block, true, nullptr)};
+    bool processed{Assert(node.chainman)->ProcessNewBlock(block, true, true, nullptr)};
     assert(processed);
 
     return CTxIn{block->vtx[0]->GetHash(), 0};
 }
 
-std::shared_ptr<CBlock> PrepareBlock(const NodeContext& node, const CScript& coinbase_scriptPubKey)
+std::shared_ptr<CBlock> PrepareBlock(const node::NodeContext& node, const CScript& coinbase_scriptPubKey,
+                                     const BlockAssembler::Options& assembler_options)
 {
     auto block = std::make_shared<CBlock>(
-        BlockAssembler{Assert(node.chainman)->ActiveChainstate(), *Assert(node.mempool), Params()}
+        BlockAssembler{Assert(node.chainman)->ActiveChainstate(), Assert(node.mempool.get()), assembler_options}
             .CreateNewBlock(coinbase_scriptPubKey)
             ->block);
 
@@ -84,4 +86,10 @@ std::shared_ptr<CBlock> PrepareBlock(const NodeContext& node, const CScript& coi
     block->hashMerkleRoot = BlockMerkleRoot(*block);
 
     return block;
+}
+std::shared_ptr<CBlock> PrepareBlock(const node::NodeContext& node, const CScript& coinbase_scriptPubKey)
+{
+    BlockAssembler::Options assembler_options;
+    ApplyArgsManOptions(*node.args, assembler_options);
+    return PrepareBlock(node, coinbase_scriptPubKey, assembler_options);
 }

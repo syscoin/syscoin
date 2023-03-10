@@ -6,14 +6,13 @@ welcome to contribute towards development in the form of peer review, testing
 and patches. This document explains the practical process and guidelines for
 contributing.
 
-First, in terms of structure, there is no particular concept of "Bitcoin Core
+First, in terms of structure, there is no particular concept of "Syscoin Core
 developers" in the sense of privileged people. Open source often naturally
 revolves around a meritocracy where contributors earn trust from the developer
 community over time. Nevertheless, some hierarchy is necessary for practical
-purposes. As such, there are repository "maintainers" who are responsible for
-merging pull requests, as well as a "lead maintainer" who is responsible for the
-release cycle as well as overall merging, moderation and appointment of
-maintainers.
+purposes. As such, there are repository maintainers who are responsible for
+merging pull requests, the [release cycle](/doc/release-process.md), and
+moderation.
 
 Getting Started
 ---------------
@@ -25,9 +24,9 @@ as a new contributor. It also will teach you much more about the code and
 process than opening pull requests. Please refer to the [peer review](#peer-review)
 section below.
 
-Before you start contributing, familiarize yourself with the Bitcoin Core build
+Before you start contributing, familiarize yourself with the Syscoin Core build
 system and tests. Refer to the documentation in the repository on how to build
-Bitcoin Core and how to run the unit tests, functional tests, and fuzz tests.
+Syscoin Core and how to run the unit tests, functional tests, and fuzz tests.
 
 There are many open issues of varying difficulty waiting to be fixed.
 If you're looking for somewhere to start contributing, check out the
@@ -75,7 +74,7 @@ To contribute a patch, the workflow is as follows:
   1. Commit patches
 
 For GUI-related issues or pull requests, the https://github.com/syscoin-core/gui repository should be used.
-For all other issues and pull requests, the https://github.com/bitcoin/bitcoin node repository should be used.
+For all other issues and pull requests, the https://github.com/syscoin/syscoin node repository should be used.
 
 The master branch for all monotree repositories is identical.
 
@@ -108,7 +107,7 @@ own without warnings, errors, regressions, or test failures.
 
 Commit messages should be verbose by default consisting of a short subject line
 (50 chars max), a blank line and detailed explanatory text as separate
-paragraph(s), unless the title alone is self-explanatory (like "Corrected typo
+paragraph(s), unless the title alone is self-explanatory (like "Correct typo
 in init.cpp") in which case a single title line is sufficient. Commit messages should be
 helpful to people reading your code in the future, so explain the reasoning for
 your decisions. Further explanation [here](https://chris.beams.io/posts/git-commit/).
@@ -142,7 +141,8 @@ the pull request affects. Valid areas as:
   - `test`, `qa` or `ci` for changes to the unit tests, QA tests or CI code
   - `util` or `lib` for changes to the utils or libraries
   - `wallet` for changes to the wallet code
-  - `build` for changes to the GNU Autotools or reproducible builds
+  - `build` for changes to the GNU Autotools or MSVC builds
+  - `guix` for changes to the GUIX reproducible builds
 
 Examples:
 
@@ -159,7 +159,7 @@ mailing list discussions).
 The description for a new pull request should not contain any `@` mentions. The
 PR description will be included in the commit message when the PR is merged and
 any users mentioned in the description will be annoyingly notified each time a
-fork of Bitcoin Core copies the merge. Instead, make any username mentions in a
+fork of Syscoin Core copies the merge. Instead, make any username mentions in a
 subsequent comment to the PR.
 
 ### Translation changes
@@ -178,9 +178,14 @@ in the body of the pull request to indicate tasks are pending.
 
 At this stage, one should expect comments and review from other contributors. You
 can add more commits to your pull request by committing them locally and pushing
-to your fork until you have satisfied all feedback.
+to your fork.
 
-Note: Code review is a burdensome but important part of the development process, and as such, certain types of pull requests are rejected. In general, if the **improvements** do not warrant the **review effort** required, the PR has a high chance of being rejected. It is up to the PR author to convince the reviewers that the changes warrant the review effort, and if reviewers are "Concept NACK'ing" the PR, the author may need to present arguments and/or do research backing their suggested changes.
+You are expected to reply to any review comments before your pull request is
+merged. You may update the code or reject the feedback if you do not agree with
+it, but you should express so in a reply. If there is outstanding feedback and
+you are not actively working on it, your pull request may be closed.
+
+Please refer to the [peer review](#peer-review) section below for more details.
 
 ### Squashing Commits
 
@@ -200,9 +205,9 @@ Please update the resulting commit message, if needed. It should read as a
 coherent message. In most cases, this means not just listing the interim
 commits.
 
-If you have problems with squashing or other git workflows, you can enable
-"Allow edits from maintainers" in the right-hand sidebar of the GitHub web
-interface and ask for help in the pull request.
+If your change contains a merge commit, the above workflow may not work and you
+will need to remove the merge commit first. See the next section for details on
+how to rebase.
 
 Please refrain from creating several pull requests for the same change.
 Use the pull request that is already open (or was created earlier) to amend
@@ -215,7 +220,9 @@ pull request to pull request.
 ### Rebasing Changes
 
 When a pull request conflicts with the target branch, you may be asked to rebase it on top of the current target branch.
-The `git rebase` command will take care of rebuilding your commits on top of the new base.
+
+    git fetch https://github.com/bitcoin/bitcoin  # Fetch the latest upstream commit
+    git rebase FETCH_HEAD  # Rebuild commits on top of the new base
 
 This project aims to have a clean git history, where code changes are only made in non-merge commits. This simplifies
 auditability because merge commits can be assumed to not contain arbitrary code changes. Merge commits should be signed,
@@ -276,7 +283,7 @@ projects such as libsecp256k1), and is not to be confused with overall Syscoin
 Network Protocol consensus changes.
 
 Whether a pull request is merged into Syscoin Core rests with the project merge
-maintainers and ultimately the project lead.
+maintainers.
 
 Maintainers will take into consideration if a patch is in line with the general
 principles of the project; meets the minimum standards for inclusion; and will
@@ -310,6 +317,14 @@ test out the patch set and opine on the technical merits of the patch. Project
 maintainers take into account the peer review when determining if there is
 consensus to merge a pull request (remember that discussions may have been
 spread out over GitHub, mailing list and IRC discussions).
+
+Code review is a burdensome but important part of the development process, and
+as such, certain types of pull requests are rejected. In general, if the
+**improvements** do not warrant the **review effort** required, the PR has a
+high chance of being rejected. It is up to the PR author to convince the
+reviewers that the changes warrant the review effort, and if reviewers are
+"Concept NACK'ing" the PR, the author may need to present arguments and/or do
+research backing their suggested changes.
 
 #### Conceptual Review
 
@@ -410,11 +425,6 @@ https://github.com/bitcoin/bitcoin/pull/16189).
 
 Also see the [backport.py script](
 https://github.com/bitcoin-core/bitcoin-maintainer-tools#backport).
-
-Release Policy
---------------
-
-The project leader is the release manager for each Syscoin Core release.
 
 Copyright
 ---------

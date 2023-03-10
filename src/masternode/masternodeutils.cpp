@@ -24,7 +24,13 @@ void CMasternodeUtils::ProcessMasternodeConnections(CConnman& connman)
     // Don't disconnect masternode connections when we have less then the desired amount of outbound nodes
     size_t nonMasternodeCount = 0;
     connman.ForEachNode(AllNodes, [&](CNode* pnode) {
-        if (!pnode->IsInboundConn() && !pnode->IsFeelerConn() && !pnode->IsManualConn() && !pnode->IsMasternodeConnection() && !pnode->m_masternode_probe_connection) {
+        if ((!pnode->IsInboundConn() &&
+            !pnode->IsFeelerConn() &&
+            !pnode->IsManualConn() &&
+            !pnode->IsMasternodeConnection() &&
+            !pnode->m_masternode_probe_connection) ||
+            // treat unverified MNs as non-MNs here
+            pnode->GetVerifiedProRegTxHash().IsNull()) {
             nonMasternodeCount++;
         }
     });
@@ -35,15 +41,25 @@ void CMasternodeUtils::ProcessMasternodeConnections(CConnman& connman)
     connman.ForEachNode(AllNodes, [&](CNode* pnode) {
         // we're only disconnecting m_masternode_connection connections
         if (!pnode->IsMasternodeConnection()) return;
-        // we're only disconnecting outbound connections
-        if (pnode->IsInboundConn()) return;
-        // we're not disconnecting LLMQ connections
-        if (connman.IsMasternodeQuorumNode(pnode)) return;
+        if (!pnode->GetVerifiedProRegTxHash().IsNull()) {
+            // keep _verified_ LLMQ connections
+            if (connman.IsMasternodeQuorumNode(pnode)) {
+                return;
+            }
+            // we're only disconnecting outbound connections
+            if (pnode->IsInboundConn()) return;
+        } else if (GetTime<std::chrono::seconds>() - pnode->m_connected < std::chrono::seconds(5)) {
+            // non-verified, give it some time to verify itself
+            return;
+        } else if (pnode->qwatch) {
+            // keep watching nodes
+            return;
+        }
         // we're not disconnecting masternode probes for at least a few seconds
-        if (pnode->m_masternode_probe_connection && GetTimeSeconds() - pnode->nTimeConnected < 5) return;
+        if (pnode->m_masternode_probe_connection && (GetTime<std::chrono::seconds>() - pnode->m_connected) < std::chrono::seconds(5)) return;
 
         if (fLogIPs) {
-            LogPrint(BCLog::NET, "Closing Masternode connection: peer=%d, addr=%s\n", pnode->GetId(), pnode->addr.ToString());
+            LogPrint(BCLog::NET, "Closing Masternode connection: peer=%d, addr=%s\n", pnode->GetId(), pnode->addr.ToStringAddr());
         } else {
             LogPrint(BCLog::NET, "Closing Masternode connection: peer=%d\n", pnode->GetId());
         }

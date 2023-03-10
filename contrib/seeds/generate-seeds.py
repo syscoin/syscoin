@@ -16,6 +16,7 @@ These files must consist of lines in the format
     <ip>:<port>
     [<ipv6>]:<port>
     <onion>.onion:<port>
+    <i2p>.b32.i2p:<port>
 
 The output will be two data structures with the peers in binary format:
 
@@ -52,6 +53,12 @@ def name_to_bip155(addr):
             return (BIP155Network.TORV2, vchAddr)
         else:
             raise ValueError('Invalid onion %s' % vchAddr)
+    elif addr.endswith('.b32.i2p'):
+        vchAddr = b32decode(addr[0:-8] + '====', True)
+        if len(vchAddr) == 32:
+            return (BIP155Network.I2P, vchAddr)
+        else:
+            raise ValueError(f'Invalid I2P {vchAddr}')
     elif '.' in addr: # IPv4
         return (BIP155Network.IPV4, bytes((int(x) for x in addr.split('.'))))
     elif ':' in addr: # IPv6 or CJDNS
@@ -63,13 +70,13 @@ def name_to_bip155(addr):
                 if i == 0 or i == (len(addr)-1): # skip empty component at beginning or end
                     continue
                 x += 1 # :: skips to suffix
-                assert(x < 2)
+                assert x < 2
             else: # two bytes per component
                 val = int(comp, 16)
                 sub[x].append(val >> 8)
                 sub[x].append(val & 0xff)
         nullbytes = 16 - len(sub[0]) - len(sub[1])
-        assert((x == 0 and nullbytes == 0) or (x == 1 and nullbytes > 0))
+        assert (x == 0 and nullbytes == 0) or (x == 1 and nullbytes > 0)
         addr_bytes = bytes(sub[0] + ([0] * nullbytes) + sub[1])
         if addr_bytes[0] == 0xfc:
             # Assume that seeds with fc00::/8 addresses belong to CJDNS,

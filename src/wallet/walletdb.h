@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -15,6 +15,19 @@
 #include <string>
 #include <vector>
 
+class CScript;
+class uint160;
+class uint256;
+struct CBlockLocator;
+// SYSCOIN
+class CGovernanceObject;
+namespace wallet {
+class CKeyPool;
+class CMasterKey;
+class CWallet;
+class CWalletTx;
+struct WalletContext;
+
 /**
  * Overview of wallet database classes:
  *
@@ -29,17 +42,6 @@
 
 static const bool DEFAULT_FLUSHWALLET = true;
 
-struct CBlockLocator;
-struct WalletContext;
-class CKeyPool;
-class CMasterKey;
-class CScript;
-class CWallet;
-class CWalletTx;
-class uint160;
-class uint256;
-// SYSCOIN
-class CGovernanceObject;
 /** Error statuses for the wallet database */
 enum class DBErrors
 {
@@ -47,9 +49,12 @@ enum class DBErrors
     CORRUPT,
     NONCRITICAL_ERROR,
     TOO_NEW,
+    EXTERNAL_SIGNER_SUPPORT_REQUIRED,
     LOAD_FAIL,
     NEED_REWRITE,
-    NEED_RESCAN
+    NEED_RESCAN,
+    UNKNOWN_DESCRIPTOR,
+    UNEXPECTED_LEGACY_ENTRY
 };
 
 namespace DBKeys {
@@ -84,6 +89,9 @@ extern const std::string WATCHMETA;
 extern const std::string WATCHS;
 // SYSCOIN
 extern const std::string GOBJECT;
+
+// Keys in this set pertain only to the legacy wallet (LegacyScriptPubKeyMan) and are removed during migration from legacy to descriptors.
+extern const std::unordered_set<std::string> LEGACY_TYPES;
 } // namespace DBKeys
 
 /* simple HD chain data model */
@@ -93,6 +101,8 @@ public:
     uint32_t nExternalChainCounter;
     uint32_t nInternalChainCounter;
     CKeyID seed_id; //!< seed hash160
+    int64_t m_next_external_index{0}; // Next index in the keypool to be used. Memory only.
+    int64_t m_next_internal_index{0}; // Next index in the keypool to be used. Memory only.
 
     static const int VERSION_HD_BASE        = 1;
     static const int VERSION_HD_CHAIN_SPLIT = 2;
@@ -266,13 +276,16 @@ public:
     bool EraseActiveScriptPubKeyMan(uint8_t type, bool internal);
 
     DBErrors LoadWallet(CWallet* pwallet);
-    DBErrors FindWalletTx(std::vector<uint256>& vTxHash, std::list<CWalletTx>& vWtx);
+    DBErrors FindWalletTxHashes(std::vector<uint256>& tx_hashes);
     DBErrors ZapSelectTx(std::vector<uint256>& vHashIn, std::vector<uint256>& vHashOut);
     /* Function to determine if a certain KV/key-type is a key (cryptographical key) type */
     static bool IsKeyType(const std::string& strType);
 
     //! write the hdchain model (external chain child index counter)
     bool WriteHDChain(const CHDChain& chain);
+
+    //! Delete records of the given types
+    bool EraseRecords(const std::unordered_set<std::string>& types);
 
     bool WriteWalletFlags(const uint64_t flags);
     //! Begin a new transaction
@@ -296,12 +309,14 @@ void MaybeCompactWalletDB(WalletContext& context);
 using KeyFilterFn = std::function<bool(const std::string&)>;
 
 //! Unserialize a given Key-Value pair and load it into the wallet
-bool ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue, std::string& strType, std::string& strErr, const KeyFilterFn& filter_fn = nullptr);
+bool ReadKeyValue(CWallet* pwallet, DataStream& ssKey, CDataStream& ssValue, std::string& strType, std::string& strErr, const KeyFilterFn& filter_fn = nullptr);
 
 /** Return object for accessing dummy database with no read/write capabilities. */
 std::unique_ptr<WalletDatabase> CreateDummyWalletDatabase();
 
 /** Return object for accessing temporary in-memory database. */
+std::unique_ptr<WalletDatabase> CreateMockWalletDatabase(DatabaseOptions& options);
 std::unique_ptr<WalletDatabase> CreateMockWalletDatabase();
+} // namespace wallet
 
 #endif // SYSCOIN_WALLET_WALLETDB_H

@@ -1,4 +1,4 @@
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,6 +12,7 @@
 
 #include <numeric>
 
+namespace node {
 PSBTAnalysis AnalyzePSBT(PartiallySignedTransaction psbtx)
 {
     // Go through each input and build status
@@ -32,8 +33,8 @@ PSBTAnalysis AnalyzePSBT(PartiallySignedTransaction psbtx)
         // We set next role here and ratchet backwards as required
         input_analysis.next = PSBTRole::EXTRACTOR;
 
-        // Check for a UTXO
-        CTxOut utxo;
+        // SYSCOIN Check for a UTXO
+        CTxOutCoin utxo;
         if (psbtx.GetInputUTXO(utxo, i)) {
             if (!MoneyRange(utxo.nValue) || !MoneyRange(in_amt + utxo.nValue)) {
                 result.SetInvalid(strprintf("PSBT is not valid. Input %u has invalid value", i));
@@ -58,7 +59,7 @@ PSBTAnalysis AnalyzePSBT(PartiallySignedTransaction psbtx)
         }
 
         // Check if it is final
-        if (!utxo.IsNull() && !PSBTInputSigned(input)) {
+        if (!PSBTInputSignedAndVerified(psbtx, i, &txdata)) {
             input_analysis.is_final = false;
 
             // Figure out what is missing
@@ -105,7 +106,7 @@ PSBTAnalysis AnalyzePSBT(PartiallySignedTransaction psbtx)
             }
         );
         if (!MoneyRange(out_amt)) {
-            result.SetInvalid(strprintf("PSBT is not valid. Output amount invalid"));
+            result.SetInvalid("PSBT is not valid. Output amount invalid");
             return result;
         }
 
@@ -136,7 +137,7 @@ PSBTAnalysis AnalyzePSBT(PartiallySignedTransaction psbtx)
 
         if (success) {
             CTransaction ctx = CTransaction(mtx);
-            size_t size = GetVirtualTransactionSize(ctx, GetTransactionSigOpCost(ctx, view, STANDARD_SCRIPT_VERIFY_FLAGS));
+            size_t size(GetVirtualTransactionSize(ctx, GetTransactionSigOpCost(ctx, view, STANDARD_SCRIPT_VERIFY_FLAGS), ::nBytesPerSigOp));
             result.estimated_vsize = size;
             // Estimate fee rate
             CFeeRate feerate(fee, size);
@@ -147,3 +148,4 @@ PSBTAnalysis AnalyzePSBT(PartiallySignedTransaction psbtx)
 
     return result;
 }
+} // namespace node

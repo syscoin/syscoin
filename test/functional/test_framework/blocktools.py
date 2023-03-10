@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2021 The Bitcoin Core developers
+# Copyright (c) 2015-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Utilities for manipulating blocks and transactions."""
@@ -22,6 +22,7 @@ from .messages import (
     CTxIn,
     CTxInWitness,
     CTxOut,
+    SEQUENCE_FINAL,
     hash256,
     ser_uint256,
     tx_from_hex,
@@ -66,6 +67,9 @@ SYSCOIN_TX_VERSION_ASSET_SEND = 132
 SYSCOIN_TX_VERSION_ALLOCATION_MINT = 133
 SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM = 134
 SYSCOIN_TX_VERSION_ALLOCATION_SEND = 135
+SYSCOIN_TX_VERSION_NEVM_DATA_SHA3 = 137
+
+MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60
 
 # Coinbase transaction outputs can only be spent after this number of new blocks (network rule)
 COINBASE_MATURITY = 100
@@ -75,6 +79,7 @@ WITNESS_COMMITMENT_HEADER = b"\xaa\x21\xa9\xed"
 
 NORMAL_GBT_REQUEST_PARAMS = {"rules": ["segwit"]}
 VERSIONBITS_LAST_OLD_BLOCK_VERSION = 4
+MIN_BLOCKS_TO_KEEP = 288
 
 # SYSCOIN
 def create_block(hashprev=None, coinbase=None, ntime=None, *, version=None, tmpl=None, txlist=None):
@@ -141,7 +146,7 @@ def script_BIP34_coinbase_height(height):
     return CScript([CScriptNum(height)])
 
 # SYSCOIN
-def create_coinbase(height, pubkey=None, extra_output_script=None, fees=0, nValue=50, witness=None, dip3height=432):
+def create_coinbase(height, pubkey=None, *, script_pubkey=None, extra_output_script=None, fees=0, nValue=50, witness=None, dip3height=432):
     """Create a coinbase transaction.
 
     If pubkey is passed in, the coinbase output will be a P2PK output;
@@ -150,7 +155,7 @@ def create_coinbase(height, pubkey=None, extra_output_script=None, fees=0, nValu
     If extra_output_script is given, make a 0-value output to that
     script. This is useful to pad block weight/sigops as needed. """
     coinbase = CTransaction()
-    coinbase.vin.append(CTxIn(COutPoint(0, 0xffffffff), script_BIP34_coinbase_height(height), 0xffffffff))
+    coinbase.vin.append(CTxIn(COutPoint(0, 0xffffffff), script_BIP34_coinbase_height(height), SEQUENCE_FINAL))
     coinbaseoutput = CTxOut()
     coinbaseoutput.nValue = nValue * COIN
     if nValue == 50:
@@ -159,6 +164,8 @@ def create_coinbase(height, pubkey=None, extra_output_script=None, fees=0, nValu
         coinbaseoutput.nValue += fees
     if pubkey is not None:
         coinbaseoutput.scriptPubKey = key_to_p2pk_script(pubkey)
+    elif script_pubkey is not None:
+        coinbaseoutput.scriptPubKey = script_pubkey
     else:
         coinbaseoutput.scriptPubKey = CScript([OP_TRUE])
     coinbase.vout = [coinbaseoutput]
@@ -186,34 +193,10 @@ def create_tx_with_script(prevtx, n, script_sig=b"", *, amount, script_pub_key=C
     """
     tx = CTransaction()
     assert n < len(prevtx.vout)
-    tx.vin.append(CTxIn(COutPoint(prevtx.sha256, n), script_sig, 0xffffffff))
+    tx.vin.append(CTxIn(COutPoint(prevtx.sha256, n), script_sig, SEQUENCE_FINAL))
     tx.vout.append(CTxOut(amount, script_pub_key))
     tx.calc_sha256()
     return tx
-
-def create_transaction(node, txid, to_address, *, amount):
-    """ Return signed transaction spending the first output of the
-        input txid. Note that the node must have a wallet that can
-        sign for the output that is being spent.
-    """
-    raw_tx = create_raw_transaction(node, txid, to_address, amount=amount)
-    tx = tx_from_hex(raw_tx)
-    return tx
-
-def create_raw_transaction(node, txid, to_address, *, amount):
-    """ Return raw signed transaction spending the first output of the
-        input txid. Note that the node must have a wallet that can sign
-        for the output that is being spent.
-    """
-    psbt = node.createpsbt(inputs=[{"txid": txid, "vout": 0}], outputs={to_address: amount})
-    for _ in range(2):
-        for w in node.listwallets():
-            wrpc = node.get_wallet_rpc(w)
-            signed_psbt = wrpc.walletprocesspsbt(psbt)
-            psbt = signed_psbt['psbt']
-    final_psbt = node.finalizepsbt(psbt)
-    assert_equal(final_psbt["complete"], True)
-    return final_psbt['hex']
 
 def get_legacy_sigopcount_block(block, accurate=True):
     count = 0
@@ -290,11 +273,11 @@ def get_masternode_payment(nHeight, nBlockReward, nStartHeight):
         if (nHeight > nStartHeight):
             nDifferenceInBlocks = (nHeight - nStartHeight)
             fSubsidyAdjustmentPercentage = 0
-            if(nDifferenceInBlocks >= 150):
+            if (nDifferenceInBlocks >= 150):
                 fSubsidyAdjustmentPercentage = 1.0
-            elif(nDifferenceInBlocks >= 60):
+            elif (nDifferenceInBlocks >= 60):
                 fSubsidyAdjustmentPercentage = 0.35
-        if(fSubsidyAdjustmentPercentage > 0):
+        if (fSubsidyAdjustmentPercentage > 0):
             nMNSeniorityRet = nSubsidy*fSubsidyAdjustmentPercentage
             nSubsidy += nMNSeniorityRet
     return nSubsidy

@@ -1,9 +1,11 @@
-// Copyright (c) 2011-2018 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_QT_TRANSACTIONDESC_H
 #define SYSCOIN_QT_TRANSACTIONDESC_H
+
+#include <qt/syscoinunits.h>
 
 #include <QObject>
 #include <QString>
@@ -24,12 +26,12 @@ class TransactionDesc: public QObject
     Q_OBJECT
 
 public:
-    static QString toHTML(interfaces::Node& node, interfaces::Wallet& wallet, TransactionRecord *rec, int unit);
+    static QString toHTML(interfaces::Node& node, interfaces::Wallet& wallet, TransactionRecord* rec, SyscoinUnit unit);
 
 private:
     TransactionDesc() {}
 
-    static QString FormatTxStatus(const interfaces::WalletTx& wtx, const interfaces::WalletTxStatus& status, bool inMempool, int numBlocks);
+    static QString FormatTxStatus(const interfaces::WalletTxStatus& status, bool inMempool);
 };
 
 #endif // SYSCOIN_QT_TRANSACTIONDESC_H

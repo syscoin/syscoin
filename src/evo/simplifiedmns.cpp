@@ -19,6 +19,7 @@
 #include <univalue.h>
 #include <validation.h>
 #include <node/blockstorage.h>
+using node::ReadBlockFromDisk;
 CSimplifiedMNListEntry::CSimplifiedMNListEntry(const CDeterministicMN& dmn) :
     proRegTxHash(dmn.proTxHash),
     confirmedHash(dmn.pdmnState->confirmedHash),
@@ -39,7 +40,7 @@ uint256 CSimplifiedMNListEntry::CalcHash() const
 std::string CSimplifiedMNListEntry::ToString() const
 {
     return strprintf("CSimplifiedMNListEntry(proRegTxHash=%s, confirmedHash=%s, service=%s, pubKeyOperator=%s, votingAddress=%s, isValid=%d)",
-        proRegTxHash.ToString(), confirmedHash.ToString(), service.ToString(), pubKeyOperator.Get().ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), isValid);
+        proRegTxHash.ToString(), confirmedHash.ToString(), service.ToStringAddrPort(), pubKeyOperator.Get().ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), isValid);
 }
 
 void CSimplifiedMNListEntry::ToJson(UniValue& obj) const
@@ -48,10 +49,12 @@ void CSimplifiedMNListEntry::ToJson(UniValue& obj) const
     obj.setObject();
     obj.pushKV("proRegTxHash", proRegTxHash.ToString());
     obj.pushKV("confirmedHash", confirmedHash.ToString());
-    obj.pushKV("service", service.ToString());
+    obj.pushKV("service", service.ToStringAddrPort());
     obj.pushKV("pubKeyOperator", pubKeyOperator.Get().ToString());
     obj.pushKV("votingAddress", EncodeDestination(WitnessV0KeyHash(keyIDVoting)));
     obj.pushKV("isValid", isValid);
+    obj.pushKV("nVersion", nVersion);
+
 }
 
 CSimplifiedMNList::CSimplifiedMNList(const std::vector<CSimplifiedMNListEntry>& smlEntries)
@@ -66,13 +69,15 @@ CSimplifiedMNList::CSimplifiedMNList(const std::vector<CSimplifiedMNListEntry>& 
     });
 }
 
-CSimplifiedMNList::CSimplifiedMNList(const CDeterministicMNList& dmnList)
+CSimplifiedMNList::CSimplifiedMNList(const CDeterministicMNList& dmnList, bool isV19Active)
 {
     mnList.resize(dmnList.GetAllMNsCount());
 
     size_t i = 0;
-    dmnList.ForEachMN(false, [this, &i](const CDeterministicMNCPtr& dmn) {
-        mnList[i++] = std::make_unique<CSimplifiedMNListEntry>(*dmn);
+    dmnList.ForEachMN(false, [this, &i, isV19Active](auto& dmn) {
+        auto sme = std::make_unique<CSimplifiedMNListEntry>(dmn);
+        sme->nVersion = isV19Active ? CSimplifiedMNListEntry::BASIC_BLS_VERSION : CSimplifiedMNListEntry::LEGACY_BLS_VERSION;
+        mnList[i++] = std::move(sme);
     });
 
     std::sort(mnList.begin(), mnList.end(), [&](const std::unique_ptr<CSimplifiedMNListEntry>& a, const std::unique_ptr<CSimplifiedMNListEntry>& b) {
@@ -89,7 +94,16 @@ uint256 CSimplifiedMNList::CalcMerkleRoot(bool* pmutated) const
     }
     return ComputeMerkleRoot(leaves, pmutated);
 }
-
+bool CSimplifiedMNList::operator==(const CSimplifiedMNList& rhs) const
+{
+    return mnList.size() == rhs.mnList.size() &&
+            std::equal(mnList.begin(), mnList.end(), rhs.mnList.begin(),
+                [](const std::unique_ptr<CSimplifiedMNListEntry>& left, const std::unique_ptr<CSimplifiedMNListEntry>& right)
+                {
+                    return *left == *right;
+                }
+            );
+}
 CSimplifiedMNListDiff::CSimplifiedMNListDiff() = default;
 
 CSimplifiedMNListDiff::~CSimplifiedMNListDiff() = default;
@@ -101,14 +115,14 @@ bool CSimplifiedMNListDiff::BuildQuorumsDiff(const CBlockIndex* baseBlockIndex, 
 
     std::set<std::pair<uint8_t, uint256>> baseQuorumHashes;
     std::set<std::pair<uint8_t, uint256>> quorumHashes;
-    for (const auto& p : baseQuorums) {
-        for (const auto& p2 : p.second) {
-            baseQuorumHashes.emplace(p.first, p2->GetBlockHash());
+    for (const auto& [llmqType, vecBlockIndex] : baseQuorums) {
+        for (const auto& blockindex : vecBlockIndex) {
+            baseQuorumHashes.emplace(llmqType, blockindex->GetBlockHash());
         }
     }
-    for (const auto& p : quorums) {
-        for (const auto& p2 : p.second) {
-            quorumHashes.emplace(p.first, p2->GetBlockHash());
+    for (const auto& [llmqType, vecBlockIndex] : quorums) {
+        for (const auto& blockindex : vecBlockIndex) {
+            quorumHashes.emplace(llmqType, blockindex->GetBlockHash());
         }
     }
 
@@ -118,9 +132,10 @@ bool CSimplifiedMNListDiff::BuildQuorumsDiff(const CBlockIndex* baseBlockIndex, 
         }
     }
     for (const auto& p : quorumHashes) {
+        const auto& [llmqType, hash] = p;
         if (!baseQuorumHashes.count(p)) {
             uint256 minedBlockHash;
-            llmq::CFinalCommitmentPtr qc = llmq::quorumBlockProcessor->GetMinedCommitment(p.first, p.second, minedBlockHash);
+            llmq::CFinalCommitmentPtr qc = llmq::quorumBlockProcessor->GetMinedCommitment(llmqType, hash, minedBlockHash);
             if (qc == nullptr) {
                 return false;
             }
@@ -154,6 +169,7 @@ void CSimplifiedMNListDiff::ToJson(UniValue& obj) const
         mnListArr.push_back(eObj);
     }
     obj.pushKV("mnList", mnListArr);
+    obj.pushKV("nVersion", nVersion);
 
     UniValue deletedQuorumsArr(UniValue::VARR);
     for (const auto& e : deletedQuorums) {
@@ -203,11 +219,11 @@ bool BuildSimplifiedMNListDiff(ChainstateManager& chainman, const uint256& baseB
         errorRet = strprintf("base block %s is higher then block %s", baseBlockHash.ToString(), blockHash.ToString());
         return false;
     }
-    
+    const int nHeight = chainman.ActiveHeight();
     LOCK(deterministicMNManager->cs);
     auto baseDmnList = deterministicMNManager->GetListForBlock(baseBlockIndex);
     auto dmnList = deterministicMNManager->GetListForBlock(blockIndex);
-    mnListDiffRet = baseDmnList.BuildSimplifiedDiff(dmnList);
+    mnListDiffRet = baseDmnList.BuildSimplifiedDiff(dmnList, nHeight);
     // We need to return the value that was provided by the other peer as it otherwise won't be able to recognize the
     // response. This will usually be identical to the block found in baseBlockIndex. The only difference is when a
     // null block hash was provided to get the diff from the genesis block.

@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021 The Bitcoin Core developers
+// Copyright (c) 2019-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -32,9 +32,6 @@
 
 void initialize_script()
 {
-    // Fuzzers using pubkey must hold an ECCVerifyHandle.
-    static const ECCVerifyHandle verify_handle;
-
     SelectParams(CBaseChainParams::REGTEST);
 }
 
@@ -55,7 +52,7 @@ FUZZ_TARGET_INIT(script, initialize_script)
     }
 
     TxoutType which_type;
-    bool is_standard_ret = IsStandard(script, which_type);
+    bool is_standard_ret = IsStandard(script, std::nullopt, which_type);
     if (!is_standard_ret) {
         assert(which_type == TxoutType::NONSTANDARD ||
                which_type == TxoutType::NULL_DATA ||
@@ -89,7 +86,6 @@ FUZZ_TARGET_INIT(script, initialize_script)
     const FlatSigningProvider signing_provider;
     (void)InferDescriptor(script, signing_provider);
     (void)IsSegWitOutput(signing_provider, script);
-    (void)IsSolvable(signing_provider, script);
 
     (void)RecursiveDynamicUsage(script);
 
@@ -101,17 +97,6 @@ FUZZ_TARGET_INIT(script, initialize_script)
     (void)script.IsPayToWitnessScriptHash();
     (void)script.IsPushOnly();
     (void)script.GetSigOpCount(/* fAccurate= */ false);
-
-    (void)FormatScript(script);
-    (void)ScriptToAsmStr(script, false);
-    (void)ScriptToAsmStr(script, true);
-
-    UniValue o1(UniValue::VOBJ);
-    ScriptPubKeyToUniv(script, o1, true);
-    UniValue o2(UniValue::VOBJ);
-    ScriptPubKeyToUniv(script, o2, false);
-    UniValue o3(UniValue::VOBJ);
-    ScriptToUniv(script, o3, false);
 
     {
         const std::vector<uint8_t> bytes = ConsumeRandomLengthByteVector(fuzzed_data_provider);
@@ -164,7 +149,7 @@ FUZZ_TARGET_INIT(script, initialize_script)
         const std::string encoded_dest{EncodeDestination(tx_destination_1)};
         const UniValue json_dest{DescribeAddress(tx_destination_1)};
         Assert(tx_destination_1 == DecodeDestination(encoded_dest));
-        (void)GetKeyForDestination(/* store */ {}, tx_destination_1);
+        (void)GetKeyForDestination(/*store=*/{}, tx_destination_1);
         const CScript dest{GetScriptForDestination(tx_destination_1)};
         const bool valid{IsValidDestination(tx_destination_1)};
         Assert(dest.empty() != valid);

@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2020 The Bitcoin Core developers
+// Copyright (c) 2016-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -15,21 +15,22 @@
 #include <util/system.h>
 
 #include <unordered_map>
-
-CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, bool fUseWTXID, bool fMoveNEVMData) :
-        nonce(GetRand(std::numeric_limits<uint64_t>::max())),
+// SYSCOIN
+CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, bool fMoveNEVMData) :
+        nonce(GetRand<uint64_t>()),
         shorttxids(block.vtx.size() - 1), prefilledtxn(1), header(block) {
     FillShortTxIDSelector();
     //TODO: Use our mempool prior to block acceptance to predictively fill more than just the coinbase
     prefilledtxn[0] = {0, block.vtx[0]};
     for (size_t i = 1; i < block.vtx.size(); i++) {
         const CTransaction& tx = *block.vtx[i];
-        shorttxids[i - 1] = GetShortID(fUseWTXID ? tx.GetWitnessHash() : tx.GetHash());
+        shorttxids[i - 1] = GetShortID(tx.GetWitnessHash());
     }
     // SYSCOIN
+    CBlock& blockRef = const_cast<CBlock&>(block);
     if(!block.vchNEVMBlockData.empty()) {
         if(fMoveNEVMData) {
-            vchNEVMBlockData = std::move(block.vchNEVMBlockData);
+            vchNEVMBlockData = std::move(blockRef.vchNEVMBlockData);
         } else {
             vchNEVMBlockData = block.vchNEVMBlockData;
         }
@@ -54,13 +55,14 @@ uint64_t CBlockHeaderAndShortTxIDs::GetShortID(const uint256& txhash) const {
 
 
 
-ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn, std::vector<unsigned char> &vchNEVMBlockDataIn) {
+ReadStatus PartiallyDownloadedBlock::InitData(CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn) {
     if (cmpctblock.header.IsNull() || (cmpctblock.shorttxids.empty() && cmpctblock.prefilledtxn.empty()))
         return READ_STATUS_INVALID;
     if (cmpctblock.shorttxids.size() + cmpctblock.prefilledtxn.size() > MAX_BLOCK_WEIGHT / MIN_SERIALIZABLE_TRANSACTION_WEIGHT)
         return READ_STATUS_INVALID;
 
-    assert(header.IsNull() && txn_available.empty());
+    if (!header.IsNull() || !txn_available.empty()) return READ_STATUS_INVALID;
+
     header = cmpctblock.header;
     txn_available.resize(cmpctblock.BlockTxCount());
 
@@ -170,22 +172,27 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
             break;
     }
     // SYSCOIN
-    if(!vchNEVMBlockDataIn.empty()) {
-        vchNEVMBlockData = std::move(vchNEVMBlockDataIn);
+    if(!cmpctblock.vchNEVMBlockData.empty()) {
+        vchNEVMBlockData = std::move(cmpctblock.vchNEVMBlockData);
     }
+
     LogPrint(BCLog::CMPCTBLOCK, "Initialized PartiallyDownloadedBlock for block %s using a cmpctblock of size %lu\n", cmpctblock.header.GetHash().ToString(), GetSerializeSize(cmpctblock, PROTOCOL_VERSION));
 
     return READ_STATUS_OK;
 }
 
-bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const {
-    assert(!header.IsNull());
+bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
+{
+    if (header.IsNull()) return false;
+
     assert(index < txn_available.size());
     return txn_available[index] != nullptr;
 }
 
-ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, std::vector<unsigned char> &vchNEVMBlockDataIn) {
-    assert(!header.IsNull());
+ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing)
+{
+    if (header.IsNull()) return READ_STATUS_INVALID;
+
     uint256 hash = header.GetHash();
     block = header;
     block.vtx.resize(txn_available.size());
@@ -207,10 +214,12 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
         return READ_STATUS_INVALID;
 
     // SYSCOIN
-    if(!vchNEVMBlockDataIn.empty() && block.vchNEVMBlockData.empty())
-        block.vchNEVMBlockData = std::move(vchNEVMBlockDataIn);
+    if(!vchNEVMBlockData.empty() && block.vchNEVMBlockData.empty())
+        block.vchNEVMBlockData = std::move(vchNEVMBlockData);
+
     BlockValidationState state;
-    if (!CheckBlock(block, state, Params().GetConsensus())) {
+    CheckBlockFn check_block = m_check_block_mock ? m_check_block_mock : CheckBlock;
+    if (!check_block(block, state, Params().GetConsensus(), /*fCheckPoW=*/true, /*fCheckMerkleRoot=*/true)) {
         // TODO: We really want to just check merkle tree manually here,
         // but that is expensive, and CheckBlock caches a block's
         // "checked-status" (in the CBlock?). CBlock should be able to

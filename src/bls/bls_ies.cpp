@@ -1,4 +1,4 @@
-// Copyright (c) 2018 The Dash Core developers
+// Copyright (c) 2018-2021 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,7 +6,6 @@
 
 #include <hash.h>
 #include <random.h>
-#include <streams.h>
 
 #include <crypto/aes.h>
 
@@ -15,9 +14,9 @@ static bool EncryptBlob(const void* in, size_t inSize, Out& out, const void* sym
 {
     out.resize(inSize);
 
-    AES256CBCEncrypt enc((const unsigned char*)symKey, (const unsigned char*)iv, false);
-    int w = enc.Encrypt((const unsigned char*)in, (int)inSize, (unsigned char*)out.data());
-    return w == (int)inSize;
+    AES256CBCEncrypt enc(reinterpret_cast<const unsigned char*>(symKey), reinterpret_cast<const unsigned char*>(iv), false);
+    int w = enc.Encrypt(reinterpret_cast<const unsigned char*>(in), int(inSize), reinterpret_cast<unsigned char*>(out.data()));
+    return w == int(inSize);
 }
 
 template <typename Out>
@@ -25,8 +24,8 @@ static bool DecryptBlob(const void* in, size_t inSize, Out& out, const void* sym
 {
     out.resize(inSize);
 
-    AES256CBCDecrypt enc((const unsigned char*)symKey, (const unsigned char*)iv, false);
-    int w = enc.Decrypt((const unsigned char*)in, (int)inSize, (unsigned char*)out.data());
+    AES256CBCDecrypt enc(reinterpret_cast<const unsigned char*>(symKey), reinterpret_cast<const unsigned char*>(iv), false);
+    int w = enc.Decrypt(reinterpret_cast<const unsigned char*>(in), int(inSize), reinterpret_cast<unsigned char*>(out.data()));
     return w == (int)inSize;
 }
 
@@ -98,7 +97,7 @@ void CBLSIESMultiRecipientBlobs::InitEncrypt(size_t count)
 {
     ephemeralSecretKey.MakeNewKey();
     ephemeralPubKey = ephemeralSecretKey.GetPublicKey();
-    GetStrongRandBytes(ivSeed.begin(), ivSeed.size());
+    GetStrongRandBytes(ivSeed);
 
     uint256 iv = ivSeed;
     ivVector.resize(count);

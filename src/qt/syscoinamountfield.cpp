@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -14,6 +14,9 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QVariant>
+
+#include <cassert>
 
 /** QSpinBox that uses fixed-point numbers internally and uses our own
  * formatting/parsing functions.
@@ -56,8 +59,7 @@ public:
 
         if (valid) {
             val = qBound(m_min_amount, val, m_max_amount);
-            // SYSCOIN
-            input = SyscoinUnits::format(currentUnit, val, 0, false, SyscoinUnits::SeparatorStyle::ALWAYS);
+            input = SyscoinUnits::format(currentUnit, val, false, SyscoinUnits::SeparatorStyle::ALWAYS);
             lineEdit()->setText(input);
         }
     }
@@ -69,8 +71,7 @@ public:
 
     void setValue(const CAmount& value)
     {
-        // SYSCOIN
-        lineEdit()->setText(SyscoinUnits::format(currentUnit, value, 0, false, SyscoinUnits::SeparatorStyle::ALWAYS));
+        lineEdit()->setText(SyscoinUnits::format(currentUnit, value, false, SyscoinUnits::SeparatorStyle::ALWAYS));
         Q_EMIT valueChanged();
     }
 
@@ -98,14 +99,13 @@ public:
         setValue(val);
     }
 
-    void setDisplayUnit(int unit)
+    void setDisplayUnit(SyscoinUnit unit)
     {
         bool valid = false;
         CAmount val = value(&valid);
 
         currentUnit = unit;
-        // SYSCOIN
-        lineEdit()->setPlaceholderText(SyscoinUnits::format(currentUnit, m_min_amount, 0, false, SyscoinUnits::SeparatorStyle::ALWAYS));
+        lineEdit()->setPlaceholderText(SyscoinUnits::format(currentUnit, m_min_amount, false, SyscoinUnits::SeparatorStyle::ALWAYS));
         if(valid)
             setValue(val);
         else
@@ -125,8 +125,7 @@ public:
 
             const QFontMetrics fm(fontMetrics());
             int h = lineEdit()->minimumSizeHint().height();
-            // SYSCOIN
-            int w = GUIUtil::TextWidth(fm, SyscoinUnits::format(SyscoinUnits::SYS, SyscoinUnits::maxMoney(), 0, false, SyscoinUnits::SeparatorStyle::ALWAYS));
+            int w = GUIUtil::TextWidth(fm, SyscoinUnits::format(SyscoinUnit::SYS, SyscoinUnits::maxMoney(), false, SyscoinUnits::SeparatorStyle::ALWAYS));
             w += 2; // cursor blinking space
 
             QStyleOptionSpinBox opt;
@@ -145,14 +144,13 @@ public:
 
             opt.rect = rect();
 
-            cachedMinimumSizeHint = style()->sizeFromContents(QStyle::CT_SpinBox, &opt, hint, this)
-                                    .expandedTo(QApplication::globalStrut());
+            cachedMinimumSizeHint = style()->sizeFromContents(QStyle::CT_SpinBox, &opt, hint, this);
         }
         return cachedMinimumSizeHint;
     }
 
 private:
-    int currentUnit{SyscoinUnits::SYS};
+    SyscoinUnit currentUnit{SyscoinUnit::SYS};
     CAmount singleStep{CAmount(100000)}; // satoshis
     mutable QSize cachedMinimumSizeHint;
     bool m_allow_empty{true};
@@ -219,9 +217,8 @@ Q_SIGNALS:
 
 #include <qt/syscoinamountfield.moc>
 
-SyscoinAmountField::SyscoinAmountField(QWidget *parent) :
-    QWidget(parent),
-    amount(nullptr)
+SyscoinAmountField::SyscoinAmountField(QWidget* parent)
+    : QWidget(parent)
 {
     amount = new AmountSpinBox(this);
     amount->setLocale(QLocale::c());
@@ -330,14 +327,14 @@ void SyscoinAmountField::unitChanged(int idx)
     unit->setToolTip(unit->itemData(idx, Qt::ToolTipRole).toString());
 
     // Determine new unit ID
-    int newUnit = unit->itemData(idx, SyscoinUnits::UnitRole).toInt();
-
-    amount->setDisplayUnit(newUnit);
+    QVariant new_unit = unit->currentData(SyscoinUnits::UnitRole);
+    assert(new_unit.isValid());
+    amount->setDisplayUnit(new_unit.value<SyscoinUnit>());
 }
 
-void SyscoinAmountField::setDisplayUnit(int newUnit)
+void SyscoinAmountField::setDisplayUnit(SyscoinUnit new_unit)
 {
-    unit->setValue(newUnit);
+    unit->setValue(QVariant::fromValue(new_unit));
 }
 
 void SyscoinAmountField::setSingleStep(const CAmount& step)

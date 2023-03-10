@@ -75,7 +75,7 @@ crucial differences:
 
 1. Since only Windows and macOS build outputs require codesigning, the `HOSTS`
    environment variable will have a sane default value of `x86_64-w64-mingw32
-   x86_64-apple-darwin19` instead of all the platforms.
+   x86_64-apple-darwin arm64-apple-darwin` instead of all the platforms.
 2. The `guix-codesign` command ***requires*** a `DETACHED_SIGS_REPO` flag.
     * _**DETACHED_SIGS_REPO**_
 
@@ -159,7 +159,7 @@ which case you can override the default list by setting the space-separated
 `HOSTS` environment variable:
 
 ```sh
-env HOSTS='x86_64-w64-mingw32 x86_64-apple-darwin19' ./contrib/guix/guix-build
+env HOSTS='x86_64-w64-mingw32 x86_64-apple-darwin' ./contrib/guix/guix-build
 ```
 
 See the [recognized environment variables][env-vars-list] section for more
@@ -224,7 +224,7 @@ details.
 
   _(defaults to "x86\_64-linux-gnu arm-linux-gnueabihf aarch64-linux-gnu
   riscv64-linux-gnu powerpc64-linux-gnu powerpc64le-linux-gnu
-  x86\_64-w64-mingw32 x86\_64-apple-darwin19")_
+  x86\_64-w64-mingw32 x86\_64-apple-darwin arm64-apple-darwin")_
 
 * _**SOURCES_PATH**_
 
@@ -249,7 +249,7 @@ details.
   Set the path where _extracted_ SDKs can be found. This is passed through to
   the depends tree. Note that this is should be set to the _parent_ directory of
   the actual SDK (e.g. `SDK_PATH=$HOME/Downloads/macOS-SDKs` instead of
-  `$HOME/Downloads/macOS-SDKs/Xcode-12.1-12A7403-extracted-SDK-with-libcxx-headers`).
+  `$HOME/Downloads/macOS-SDKs/Xcode-12.2-12B45b-extracted-SDK-with-libcxx-headers`).
 
   The path that this environment variable points to **must be a directory**, and
   **NOT a symlink to a directory**.
@@ -382,7 +382,7 @@ https://ci.guix.gnu.org is automatically used unless the `--no-substitutes` flag
 is supplied. This default list of substitute servers is overridable both on a
 `guix-daemon` level and when you invoke `guix` commands. See examples below for
 the various ways of adding dongcarl's substitute server after having [authorized
-his signing key](#authorize-the-signing-keys).
+his signing key](#step-1-authorize-the-signing-keys).
 
 Change the **default list** of substitute servers by starting `guix-daemon` with
 the `--substitute-urls` option (you will likely need to edit your init script):
@@ -430,55 +430,6 @@ used.
 If you start `guix-daemon` using an init script, you can edit said script to
 supply this flag.
 
-
-# Purging/Uninstalling Guix
-
-In the extraordinarily rare case where you messed up your Guix installation in
-an irreversible way, you may want to completely purge Guix from your system and
-start over.
-
-1. Uninstall Guix itself according to the way you installed it (e.g. `sudo apt
-   purge guix` for Ubuntu packaging, `sudo make uninstall` for a build from source).
-2. Remove all build users and groups
-
-   You may check for relevant users and groups using:
-
-   ```
-   getent passwd | grep guix
-   getent group | grep guix
-   ```
-
-   Then, you may remove users and groups using:
-
-   ```
-   sudo userdel <user>
-   sudo groupdel <group>
-   ```
-
-3. Remove all possible Guix-related directories
-    - `/var/guix/`
-    - `/var/log/guix/`
-    - `/gnu/`
-    - `/etc/guix/`
-    - `/home/*/.config/guix/`
-    - `/home/*/.cache/guix/`
-    - `/home/*/.guix-profile/`
-    - `/root/.config/guix/`
-    - `/root/.cache/guix/`
-    - `/root/.guix-profile/`
-
 [b17e]: https://bootstrappable.org/
 [r12e/source-date-epoch]: https://reproducible-builds.org/docs/source-date-epoch/
-
-[guix/install.sh]: https://git.savannah.gnu.org/cgit/guix.git/plain/etc/guix-install.sh
-[guix/bin-install]: https://www.gnu.org/software/guix/manual/en/html_node/Binary-Installation.html
-[guix/env-setup]: https://www.gnu.org/software/guix/manual/en/html_node/Build-Environment-Setup.html
-[guix/substitutes]: https://www.gnu.org/software/guix/manual/en/html_node/Substitutes.html
-[guix/substitute-server-auth]: https://www.gnu.org/software/guix/manual/en/html_node/Substitute-Server-Authorization.html
-[guix/time-machine]: https://guix.gnu.org/manual/en/html_node/Invoking-guix-time_002dmachine.html
-
-[debian/guix-bullseye]: https://packages.debian.org/bullseye/guix
-[ubuntu/guix-hirsute]: https://packages.ubuntu.com/hirsute/guix
-[fanquake/guix-docker]: https://github.com/fanquake/core-review/tree/master/guix
-
 [env-vars-list]: #recognized-environment-variables

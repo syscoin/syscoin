@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -28,6 +28,7 @@ class Node;
 namespace Masternode {
     class Sync;
 }
+struct BlockTip;
 }
 
 QT_BEGIN_NAMESPACE
@@ -36,9 +37,14 @@ QT_END_NAMESPACE
 
 enum class BlockSource {
     NONE,
-    REINDEX,
     DISK,
-    NETWORK
+    NETWORK,
+};
+
+enum class SyncType {
+    HEADER_PRESYNC,
+    HEADER_SYNC,
+    BLOCK_SYNC
 };
 
 enum NumConnections {
@@ -70,7 +76,7 @@ public:
     //! Return number of connections, default is in- and outbound (total)
     int getNumConnections(unsigned int flags = CONNECTIONS_ALL) const;
     int getNumBlocks() const;
-    uint256 getBestBlockHash();
+    uint256 getBestBlockHash() EXCLUSIVE_LOCKS_REQUIRED(!m_cached_tip_mutex);
     int getHeaderTipHeight() const;
     int64_t getHeaderTipTime() const;
 
@@ -79,8 +85,8 @@ public:
     CDeterministicMNList getMasternodeList() const;
     void refreshMasternodeList();
 
-    //! Returns enum BlockSource of the current importing/syncing state
-    enum BlockSource getBlockSource() const;
+    //! Returns the block source of the current importing/syncing state
+    BlockSource getBlockSource() const;
     //! Return warnings to be displayed in status bar
     QString getStatusBarWarnings() const;
 
@@ -114,9 +120,9 @@ private:
     std::unique_ptr<interfaces::Handler>  m_handler_additional_data_sync_progress_changed;
     std::unique_ptr<interfaces::Handler>  m_handler_masternodelist_changed;
     OptionsModel *optionsModel;
-    PeerTableModel *peerTableModel;
+    PeerTableModel* peerTableModel{nullptr};
     PeerTableSortProxy* m_peer_table_sort_proxy{nullptr};
-    BanTableModel *banTableModel;
+    BanTableModel* banTableModel{nullptr};
 
     //! A thread to interact with m_node asynchronously
     QThread* const m_thread;
@@ -127,12 +133,13 @@ private:
     mutable RecursiveMutex cs_mnlinst; // protects mnListCached
     CDeterministicMNListPtr mnListCached;
 
+    void TipChanged(SynchronizationState sync_state, interfaces::BlockTip tip, double verification_progress, SyncType synctype) EXCLUSIVE_LOCKS_REQUIRED(!m_cached_tip_mutex);
     void subscribeToCoreSignals();
     void unsubscribeFromCoreSignals();
 
 Q_SIGNALS:
     void numConnectionsChanged(int count);
-    void numBlocksChanged(int count, const QDateTime& blockDate, double nVerificationProgress, bool header, SynchronizationState sync_state);
+    void numBlocksChanged(int count, const QDateTime& blockDate, double nVerificationProgress, SyncType header, SynchronizationState sync_state);
     void mempoolSizeChanged(long count, size_t mempoolSizeInBytes);
     void networkActiveChanged(bool networkActive);
     void alertsChanged(const QString &warnings);
@@ -146,12 +153,6 @@ Q_SIGNALS:
     // SYSCOIN
     void masternodeListChanged() const;
     void additionalDataSyncProgressChanged(double nSyncProgress);
-
-public Q_SLOTS:
-    void updateNumConnections(int numConnections);
-    void updateNetworkActive(bool networkActive);
-    void updateAlert();
-    void updateBanlist();
 };
 
 #endif // SYSCOIN_QT_CLIENTMODEL_H

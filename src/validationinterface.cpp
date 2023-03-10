@@ -1,10 +1,11 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <validationinterface.h>
 
+#include <attributes.h>
 #include <chain.h>
 #include <consensus/validation.h>
 #include <logging.h>
@@ -15,15 +16,21 @@
 #include <future>
 #include <unordered_map>
 #include <utility>
+// SYSCOIN
+#include <node/blockstorage.h>
 
-//! The MainSignalsInstance manages a list of shared_ptr<CValidationInterface>
-//! callbacks.
-//!
-//! A std::unordered_map is used to track what callbacks are currently
-//! registered, and a std::list is to used to store the callbacks that are
-//! currently registered as well as any callbacks that are just unregistered
-//! and about to be deleted when they are done executing.
-struct MainSignalsInstance {
+std::string RemovalReasonToString(const MemPoolRemovalReason& r) noexcept;
+
+/**
+ * MainSignalsImpl manages a list of shared_ptr<CValidationInterface> callbacks.
+ *
+ * A std::unordered_map is used to track what callbacks are currently
+ * registered, and a std::list is used to store the callbacks that are
+ * currently registered as well as any callbacks that are just unregistered
+ * and about to be deleted when they are done executing.
+ */
+class MainSignalsImpl
+{
 private:
     Mutex m_mutex;
     //! List entries consist of a callback pointer and reference count. The
@@ -40,9 +47,9 @@ public:
     // our own queue here :(
     SingleThreadedSchedulerClient m_schedulerClient;
 
-    explicit MainSignalsInstance(CScheduler *pscheduler) : m_schedulerClient(pscheduler) {}
+    explicit MainSignalsImpl(CScheduler& scheduler LIFETIMEBOUND) : m_schedulerClient(scheduler) {}
 
-    void Register(std::shared_ptr<CValidationInterface> callbacks)
+    void Register(std::shared_ptr<CValidationInterface> callbacks) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
         auto inserted = m_map.emplace(callbacks.get(), m_list.end());
@@ -50,7 +57,7 @@ public:
         inserted.first->second->callbacks = std::move(callbacks);
     }
 
-    void Unregister(CValidationInterface* callbacks)
+    void Unregister(CValidationInterface* callbacks) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
         auto it = m_map.find(callbacks);
@@ -64,7 +71,7 @@ public:
     //! map entry. After this call, the list may still contain callbacks that
     //! are currently executing, but it will be cleared when they are done
     //! executing.
-    void Clear()
+    void Clear() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
         for (const auto& entry : m_map) {
@@ -73,7 +80,7 @@ public:
         m_map.clear();
     }
 
-    template<typename F> void Iterate(F&& f)
+    template<typename F> void Iterate(F&& f) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         
         WAIT_LOCK(m_mutex, lock);
@@ -93,7 +100,7 @@ static CMainSignals g_signals;
 void CMainSignals::RegisterBackgroundSignalScheduler(CScheduler& scheduler)
 {
     assert(!m_internals);
-    m_internals.reset(new MainSignalsInstance(&scheduler));
+    m_internals = std::make_unique<MainSignalsImpl>(scheduler);
 }
 
 void CMainSignals::UnregisterBackgroundSignalScheduler()
@@ -186,13 +193,13 @@ void SyncWithValidationInterfaceQueue()
 #define LOG_EVENT(fmt, ...) \
     LogPrint(BCLog::VALIDATION, fmt "\n", __VA_ARGS__)
 
-void CMainSignals::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) {
+void CMainSignals::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) {
     // Dependencies exist that require UpdatedBlockTip events to be delivered in the order in which
     // the chain actually updates. One way to ensure this is for the caller to invoke this signal
     // in the same critical section where the chain is updated
 
-    auto event = [pindexNew, pindexFork, fInitialDownload, this] {
-        m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.UpdatedBlockTip(pindexNew, pindexFork, fInitialDownload); });
+    auto event = [pindexNew, pindexFork, &chainman, fInitialDownload, this] {
+        m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.UpdatedBlockTip(pindexNew, pindexFork, chainman, fInitialDownload); });
     };
     ENQUEUE_AND_LOG_EVENT(event, "%s: new block hash=%s fork block hash=%s (in IBD=%s)", __func__,
                           pindexNew->GetBlockHash().ToString(),
@@ -213,9 +220,10 @@ void CMainSignals::TransactionRemovedFromMempool(const CTransactionRef& tx, MemP
     auto event = [tx, reason, mempool_sequence, this] {
         m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.TransactionRemovedFromMempool(tx, reason, mempool_sequence); });
     };
-    ENQUEUE_AND_LOG_EVENT(event, "%s: txid=%s wtxid=%s", __func__,
+    ENQUEUE_AND_LOG_EVENT(event, "%s: txid=%s wtxid=%s reason=%s", __func__,
                           tx->GetHash().ToString(),
-                          tx->GetWitnessHash().ToString());
+                          tx->GetWitnessHash().ToString(),
+                          RemovalReasonToString(reason));
 }
 
 void CMainSignals::BlockConnected(const std::shared_ptr<const CBlock> &pblock, const CBlockIndex *pindex) {
@@ -256,19 +264,16 @@ void CMainSignals::NewPoWValidBlock(const CBlockIndex *pindex, const std::shared
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NewPoWValidBlock(pindex, block); });
 }
 // SYSCOIN
-void CMainSignals::AcceptedBlockHeader(const CBlockIndex *pindexNew) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.AcceptedBlockHeader(pindexNew); });
+void CMainSignals::NotifyHeaderTip(const CBlockIndex *pindexNew) {
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyHeaderTip(pindexNew); });
 }
-void CMainSignals::NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyHeaderTip(pindexNew, fInitialDownload); });
+void CMainSignals::SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork) {
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.SynchronousUpdatedBlockTip(pindexNew, pindexFork); });
 }
-void CMainSignals::SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.SynchronousUpdatedBlockTip(pindexNew, pindexFork, fInitialDownload); });
-}
-void CMainSignals::NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& vote) {
+void CMainSignals::NotifyGovernanceVote(const uint256& vote) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGovernanceVote(vote); });
 }
-void CMainSignals::NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject>& object) {
+void CMainSignals::NotifyGovernanceObject(const uint256& object) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGovernanceObject(object); });
 }
 void CMainSignals::NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {
@@ -277,12 +282,15 @@ void CMainSignals::NotifyMasternodeListChanged(bool undo, const CDeterministicMN
 void CMainSignals::NotifyNEVMComms(const std::string& commMessage, bool &bResponse) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMComms(commMessage, bResponse); });
 }
-void CMainSignals::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, BlockValidationState &state, const uint256& nBlockHash) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash); });
+void CMainSignals::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation) {
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation); });
 }
-void CMainSignals::NotifyNEVMBlockDisconnect(BlockValidationState &state, const uint256& nBlockHash) {
+void CMainSignals::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockDisconnect(state, nBlockHash); });
 }
-void CMainSignals::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state) {
+void CMainSignals::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) {
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlockInfo(nHeight, state);});
+}
+void CMainSignals::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlock(evmBlock, state);});
 }

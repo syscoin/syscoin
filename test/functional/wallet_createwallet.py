@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2018-2021 The Bitcoin Core developers
+# Copyright (c) 2018-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test createwallet arguments.
@@ -16,6 +16,9 @@ from test_framework.util import (
 from test_framework.wallet_util import bytes_to_wif, generate_wif_key
 
 class CreateWalletTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.num_nodes = 1
 
@@ -25,6 +28,11 @@ class CreateWalletTest(SyscoinTestFramework):
     def run_test(self):
         node = self.nodes[0]
         self.generate(node, 1) # Leave IBD for sethdseed
+
+        self.log.info("Run createwallet with invalid parameters.")
+        # Run createwallet with invalid parameters. This must not prevent a new wallet with the same name from being created with the correct parameters.
+        assert_raises_rpc_error(-4, "Passphrase provided but private keys are disabled. A passphrase is only used to encrypt private keys, so cannot be used for wallets with private keys disabled.",
+            self.nodes[0].createwallet, wallet_name='w0', disable_private_keys=True, passphrase="passphrase")
 
         self.nodes[0].createwallet(wallet_name='w0')
         w0 = node.get_wallet_rpc('w0')
@@ -163,6 +171,11 @@ class CreateWalletTest(SyscoinTestFramework):
 
         self.log.info('Using a passphrase with private keys disabled returns error')
         assert_raises_rpc_error(-4, 'Passphrase provided but private keys are disabled. A passphrase is only used to encrypt private keys, so cannot be used for wallets with private keys disabled.', self.nodes[0].createwallet, wallet_name='w9', disable_private_keys=True, passphrase='thisisapassphrase')
+
+        if self.is_bdb_compiled():
+            self.log.info("Test legacy wallet deprecation")
+            res = self.nodes[0].createwallet(wallet_name="legacy_w0", descriptors=False, passphrase=None)
+            assert_equal(res["warning"], "Wallet created successfully. The legacy wallet type is being deprecated and support for creating and opening legacy wallets will be removed in the future.")
 
 if __name__ == '__main__':
     CreateWalletTest().main()

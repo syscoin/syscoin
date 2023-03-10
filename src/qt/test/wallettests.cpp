@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2020 The Bitcoin Core developers
+// Copyright (c) 2015-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,25 +7,27 @@
 
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
+#include <key_io.h>
 #include <qt/syscoinamountfield.h>
+#include <qt/syscoinunits.h>
 #include <qt/clientmodel.h>
 #include <qt/optionsmodel.h>
+#include <qt/overviewpage.h>
 #include <qt/platformstyle.h>
 #include <qt/qvalidatedlineedit.h>
+#include <qt/receivecoinsdialog.h>
+#include <qt/receiverequestdialog.h>
+#include <qt/recentrequeststablemodel.h>
 #include <qt/sendcoinsdialog.h>
 #include <qt/sendcoinsentry.h>
 #include <qt/transactiontablemodel.h>
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
-#include <key_io.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 #include <wallet/wallet.h>
-#include <qt/overviewpage.h>
-#include <qt/receivecoinsdialog.h>
-#include <qt/recentrequeststablemodel.h>
-#include <qt/receiverequestdialog.h>
 
+#include <chrono>
 #include <memory>
 
 #include <QAbstractButton>
@@ -38,6 +40,15 @@
 #include <QTextEdit>
 #include <QListView>
 #include <QDialogButtonBox>
+
+using wallet::AddWallet;
+using wallet::CWallet;
+using wallet::CreateMockWalletDatabase;
+using wallet::RemoveWallet;
+using wallet::WALLET_FLAG_DESCRIPTORS;
+using wallet::WalletContext;
+using wallet::WalletDescriptor;
+using wallet::WalletRescanReserver;
 
 namespace
 {
@@ -112,10 +123,17 @@ void BumpFee(TransactionView& view, const uint256& txid, bool expectDisabled, st
     if (expectError.empty()) {
         ConfirmSend(&text, cancel);
     } else {
-        ConfirmMessage(&text);
+        ConfirmMessage(&text, 0ms);
     }
     action->trigger();
     QVERIFY(text.indexOf(QString::fromStdString(expectError)) != -1);
+}
+
+void CompareBalance(WalletModel& walletModel, CAmount expected_balance, QLabel* balance_label_to_check)
+{
+    SyscoinUnit unit = walletModel.getOptionsModel()->getDisplayUnit();
+    QString balanceComparison = SyscoinUnits::formatWithUnit(unit, expected_balance, false, SyscoinUnits::SeparatorStyle::ALWAYS);
+    QCOMPARE(balance_label_to_check->text().trimmed(), balanceComparison);
 }
 
 //! Simple qt wallet tests.
@@ -138,10 +156,10 @@ void TestGUI(interfaces::Node& node)
     for (int i = 0; i < 5; ++i) {
         test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
     }
-    auto wallet_client = interfaces::MakeWalletClient(*test.m_node.chain, *Assert(test.m_node.args));
-    test.m_node.wallet_client = wallet_client.get();
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
     node.setContext(&test.m_node);
-    const std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", gArgs, CreateMockWalletDatabase());
+    const std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", CreateMockWalletDatabase());
     wallet->LoadWallet();
     wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
     {
@@ -157,14 +175,14 @@ void TestGUI(interfaces::Node& node)
         if (!wallet->AddWalletDescriptor(w_desc, provider, "", false)) assert(false);
         CTxDestination dest = GetDestinationForKey(test.coinbaseKey.GetPubKey(), wallet->m_default_address_type);
         wallet->SetAddressBook(dest, "", "receive");
-        wallet->SetLastBlockProcessed(105, node.context()->chainman->ActiveChain().Tip()->GetBlockHash());
+        wallet->SetLastBlockProcessed(105, WITH_LOCK(node.context()->chainman->GetMutex(), return node.context()->chainman->ActiveChain().Tip()->GetBlockHash()));
     }
     {
         WalletRescanReserver reserver(*wallet);
         reserver.reserve();
-        CWallet::ScanResult result = wallet->ScanForWalletTransactions(Params().GetConsensus().hashGenesisBlock, 0 /* block height */, {} /* max height */, reserver, true /* fUpdate */);
+        CWallet::ScanResult result = wallet->ScanForWalletTransactions(Params().GetConsensus().hashGenesisBlock, /*start_height=*/0, /*max_height=*/{}, reserver, /*fUpdate=*/true, /*save_progress=*/false);
         QCOMPARE(result.status, CWallet::ScanResult::SUCCESS);
-        QCOMPARE(result.last_scanned_block, node.context()->chainman->ActiveChain().Tip()->GetBlockHash());
+        QCOMPARE(result.last_scanned_block, WITH_LOCK(node.context()->chainman->GetMutex(), return node.context()->chainman->ActiveChain().Tip()->GetBlockHash()));
         QVERIFY(result.last_failed_block.IsNull());
     }
     wallet->SetBroadcastTransactions(true);
@@ -173,49 +191,42 @@ void TestGUI(interfaces::Node& node)
     std::unique_ptr<const PlatformStyle> platformStyle(PlatformStyle::instantiate("other"));
     SendCoinsDialog sendCoinsDialog(platformStyle.get());
     TransactionView transactionView(platformStyle.get());
-    OptionsModel optionsModel;
+    OptionsModel optionsModel(node);
+    bilingual_str error;
+    QVERIFY(optionsModel.Init(error));
     ClientModel clientModel(node, &optionsModel);
-    WalletContext& context = *node.walletClient().context();
+    WalletContext& context = *node.walletLoader().context();
     AddWallet(context, wallet);
     WalletModel walletModel(interfaces::MakeWallet(context, wallet), clientModel, platformStyle.get());
     RemoveWallet(context, wallet, /* load_on_start= */ std::nullopt);
     sendCoinsDialog.setModel(&walletModel);
     transactionView.setModel(&walletModel);
 
-    {
-        // Check balance in send dialog
-        QLabel* balanceLabel = sendCoinsDialog.findChild<QLabel*>("labelBalance");
-        QString balanceText = balanceLabel->text();
-        int unit = walletModel.getOptionsModel()->getDisplayUnit();
-        CAmount balance = walletModel.wallet().getBalance();
-        QString balanceComparison = SyscoinUnits::formatWithUnit(unit, balance, false, SyscoinUnits::SeparatorStyle::ALWAYS);
-        QCOMPARE(balanceText, balanceComparison);
-    }
+    // Update walletModel cached balance which will trigger an update for the 'labelBalance' QLabel.
+    walletModel.pollBalanceChanged();
+    // Check balance in send dialog
+    CompareBalance(walletModel, walletModel.wallet().getBalance(), sendCoinsDialog.findChild<QLabel*>("labelBalance"));
 
     // Send two transactions, and verify they are added to transaction list.
     TransactionTableModel* transactionTableModel = walletModel.getTransactionTableModel();
     QCOMPARE(transactionTableModel->rowCount({}), 105);
-    uint256 txid1 = SendCoins(*wallet.get(), sendCoinsDialog, PKHash(), 5 * COIN, false /* rbf */);
-    uint256 txid2 = SendCoins(*wallet.get(), sendCoinsDialog, PKHash(), 10 * COIN, true /* rbf */);
+    uint256 txid1 = SendCoins(*wallet.get(), sendCoinsDialog, PKHash(), 5 * COIN, /*rbf=*/false);
+    uint256 txid2 = SendCoins(*wallet.get(), sendCoinsDialog, PKHash(), 10 * COIN, /*rbf=*/true);
     QCOMPARE(transactionTableModel->rowCount({}), 107);
     QVERIFY(FindTx(*transactionTableModel, txid1).isValid());
     QVERIFY(FindTx(*transactionTableModel, txid2).isValid());
 
     // Call bumpfee. Test disabled, canceled, enabled, then failing cases.
-    BumpFee(transactionView, txid1, true /* expect disabled */, "not BIP 125 replaceable" /* expected error */, false /* cancel */);
-    BumpFee(transactionView, txid2, false /* expect disabled */, {} /* expected error */, true /* cancel */);
-    BumpFee(transactionView, txid2, false /* expect disabled */, {} /* expected error */, false /* cancel */);
-    BumpFee(transactionView, txid2, true /* expect disabled */, "already bumped" /* expected error */, false /* cancel */);
+    BumpFee(transactionView, txid1, /*expectDisabled=*/true, /*expectError=*/"not BIP 125 replaceable", /*cancel=*/false);
+    BumpFee(transactionView, txid2, /*expectDisabled=*/false, /*expectError=*/{}, /*cancel=*/true);
+    BumpFee(transactionView, txid2, /*expectDisabled=*/false, /*expectError=*/{}, /*cancel=*/false);
+    BumpFee(transactionView, txid2, /*expectDisabled=*/true, /*expectError=*/"already bumped", /*cancel=*/false);
 
     // Check current balance on OverviewPage
     OverviewPage overviewPage(platformStyle.get());
     overviewPage.setWalletModel(&walletModel);
-    QLabel* balanceLabel = overviewPage.findChild<QLabel*>("labelBalance");
-    QString balanceText = balanceLabel->text().trimmed();
-    int unit = walletModel.getOptionsModel()->getDisplayUnit();
-    CAmount balance = walletModel.wallet().getBalance();
-    QString balanceComparison = SyscoinUnits::formatWithUnit(unit, balance, false, SyscoinUnits::SeparatorStyle::ALWAYS);
-    QCOMPARE(balanceText, balanceComparison);
+    walletModel.pollBalanceChanged(); // Manual balance polling update
+    CompareBalance(walletModel, walletModel.wallet().getBalance(), overviewPage.findChild<QLabel*>("labelBalance"));
 
     // Check Request Payment button
     ReceiveCoinsDialog receiveCoinsDialog(platformStyle.get());
@@ -278,7 +289,7 @@ void TestGUI(interfaces::Node& node)
     std::vector<std::string> requests = walletModel.wallet().getAddressReceiveRequests();
     QCOMPARE(requests.size(), size_t{1});
     RecentRequestEntry entry;
-    CDataStream{MakeUCharSpan(requests[0]), SER_DISK, CLIENT_VERSION} >> entry;
+    DataStream{MakeUCharSpan(requests[0])} >> entry;
     QCOMPARE(entry.nVersion, int{1});
     QCOMPARE(entry.id, int64_t{1});
     QVERIFY(entry.date.isValid());
@@ -304,7 +315,7 @@ void TestGUI(interfaces::Node& node)
 
 void WalletTests::walletTests()
 {
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
     if (QApplication::platformName() == "minimal") {
         // Disable for mac on "minimal" platform to avoid crashes inside the Qt
         // framework when it tries to look up unimplemented cocoa functions,

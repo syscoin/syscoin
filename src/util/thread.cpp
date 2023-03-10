@@ -1,4 +1,4 @@
-// Copyright (c) 2021 The Bitcoin Core developers
+// Copyright (c) 2021-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,19 +9,24 @@
 #include <util/threadnames.h>
 
 #include <exception>
+#include <functional>
+#include <string>
+#include <utility>
 
-void util::TraceThread(const char* thread_name, std::function<void()> thread_func)
+void util::TraceThread(std::string_view thread_name, std::function<void()> thread_func)
 {
-    util::ThreadRename(thread_name);
+    // SYSCOIN keep copy to work with dynamic thread names in LLMQ code
+    std::string strName = std::string(thread_name);
+    util::ThreadRename(std::string{thread_name});
     try {
-        LogPrintf("%s thread start\n", thread_name);
+        LogPrintf("%s thread start\n", strName);
         thread_func();
-        LogPrintf("%s thread exit\n", thread_name);
+        LogPrintf("%s thread exit\n", strName);
     } catch (const std::exception& e) {
-        PrintExceptionContinue(&e, thread_name);
+        PrintExceptionContinue(&e, strName.c_str());
         throw;
     } catch (...) {
-        PrintExceptionContinue(nullptr, thread_name);
+        PrintExceptionContinue(nullptr, strName.c_str());
         throw;
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2009-2018 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,15 +9,13 @@
  * headers for everything under src/rpc/ */
 class CRPCTable;
 
-/** Register block chain RPC commands */
 void RegisterBlockchainRPCCommands(CRPCTable &tableRPC);
-/** Register P2P networking RPC commands */
-void RegisterNetRPCCommands(CRPCTable &tableRPC);
-/** Register miscellaneous RPC commands */
-void RegisterMiscRPCCommands(CRPCTable &tableRPC);
-/** Register mining RPC commands */
+void RegisterFeeRPCCommands(CRPCTable&);
+void RegisterMempoolRPCCommands(CRPCTable&);
 void RegisterMiningRPCCommands(CRPCTable &tableRPC);
-/** Register raw transaction RPC commands */
+void RegisterNodeRPCCommands(CRPCTable&);
+void RegisterNetRPCCommands(CRPCTable&);
+void RegisterOutputScriptRPCCommands(CRPCTable&);
 void RegisterRawTransactionRPCCommands(CRPCTable &tableRPC);
 // SYSCOIN
 /** Register Syscoin Asset RPC commands */
@@ -31,14 +29,19 @@ void RegisterEvoRPCCommands(CRPCTable &tableRPC);
 /** Register Quorums RPC commands */
 void RegisterQuorumsRPCCommands(CRPCTable &tableRPC);
 /** Register raw transaction RPC commands */
+void RegisterSignMessageRPCCommands(CRPCTable&);
 void RegisterSignerRPCCommands(CRPCTable &tableRPC);
+void RegisterTxoutProofRPCCommands(CRPCTable&);
 
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
 {
     RegisterBlockchainRPCCommands(t);
-    RegisterNetRPCCommands(t);
-    RegisterMiscRPCCommands(t);
+    RegisterFeeRPCCommands(t);
+    RegisterMempoolRPCCommands(t);
     RegisterMiningRPCCommands(t);
+    RegisterNodeRPCCommands(t);
+    RegisterNetRPCCommands(t);
+    RegisterOutputScriptRPCCommands(t);
     RegisterRawTransactionRPCCommands(t);
     // SYSCOIN
     RegisterAssetRPCCommands(t);
@@ -46,9 +49,11 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
     RegisterGovernanceRPCCommands(t);
     RegisterEvoRPCCommands(t);
     RegisterQuorumsRPCCommands(t);
+    RegisterSignMessageRPCCommands(t);
 #ifdef ENABLE_EXTERNAL_SIGNER
     RegisterSignerRPCCommands(t);
 #endif // ENABLE_EXTERNAL_SIGNER
+    RegisterTxoutProofRPCCommands(t);
 }
 
 #endif // SYSCOIN_RPC_REGISTER_H

@@ -6,7 +6,7 @@
 #include <llmq/quorums_utils.h>
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_init.h>
-
+#include <timedata.h>
 #include <bls/bls.h>
 #include <evo/deterministicmns.h>
 #include <evo/evodb.h>
@@ -16,11 +16,22 @@
 #include <validation.h>
 #include <versionbits.h>
 #include <masternode/masternodemeta.h>
-
+#include <util/ranges.h>
+#include <util/system.h>
 namespace llmq
 {
-
-
+bool CLLMQUtils::IsV19Active(const int nHeight)
+{
+    return nHeight >= Params().GetConsensus().nV19StartBlock; 
+}
+const CBlockIndex* CLLMQUtils::V19ActivationIndex(const CBlockIndex* pindex)
+{
+    assert(pindex);
+    if(!IsV19Active(pindex->nHeight)) {
+        return nullptr;
+    }
+    return pindex->GetAncestor(Params().GetConsensus().nV19StartBlock);
+}
 std::vector<CDeterministicMNCPtr> CLLMQUtils::GetAllQuorumMembers(const Consensus::LLMQParams& llmqParams, const CBlockIndex* pQuorumBaseBlockIndex)
 {
     static RecursiveMutex cs_members;
@@ -200,7 +211,7 @@ std::set<size_t> CLLMQUtils::CalcDeterministicWatchConnections(uint8_t llmqType,
 bool CLLMQUtils::EnsureQuorumConnections(const Consensus::LLMQParams& llmqParams, const CBlockIndex *pQuorumBaseBlockIndex, const uint256& myProTxHash, CConnman& connman)
 {
     auto members = GetAllQuorumMembers(llmqParams, pQuorumBaseBlockIndex);
-    bool isMember = std::find_if(members.begin(), members.end(), [&](const CDeterministicMNCPtr& dmn) { return dmn->proTxHash == myProTxHash; }) != members.end();
+    bool isMember = std::find_if(members.begin(), members.end(), [&](const auto& dmn) { return dmn->proTxHash == myProTxHash; }) != members.end();
 
     if (!isMember && !CLLMQUtils::IsWatchQuorumsEnabled()) {
         return false;
@@ -219,7 +230,7 @@ bool CLLMQUtils::EnsureQuorumConnections(const Consensus::LLMQParams& llmqParams
         relayMembers = connections;
     }
     if (!connections.empty()) {
-        if (!connman.HasMasternodeQuorumNodes(llmqParams.type, pQuorumBaseBlockIndex->GetBlockHash()) && LogAcceptCategory(BCLog::LLMQ)) {
+        if (!connman.HasMasternodeQuorumNodes(llmqParams.type, pQuorumBaseBlockIndex->GetBlockHash()) && LogAcceptCategory(BCLog::LLMQ, BCLog::Level::Debug)) {
             auto mnList = deterministicMNManager->GetListAtChainTip();
             std::string debugMsg = strprintf("CLLMQUtils::%s -- adding masternodes quorum connections for quorum %s:", __func__, pQuorumBaseBlockIndex->GetBlockHash().ToString());
             for (auto& c : connections) {
@@ -227,7 +238,7 @@ bool CLLMQUtils::EnsureQuorumConnections(const Consensus::LLMQParams& llmqParams
                 if (!dmn) {
                     debugMsg += strprintf("  %s (not in valid MN set anymore)", c.ToString());
                 } else {
-                    debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToString());
+                    debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 }
             }
             LogPrint(BCLog::NET, "%s\n", debugMsg.c_str());
@@ -253,7 +264,7 @@ void CLLMQUtils::AddQuorumProbeConnections(const Consensus::LLMQParams& llmqPara
     }
 
     auto members = GetAllQuorumMembers(llmqParams, pQuorumBaseBlockIndex);
-    auto curTime = GetAdjustedTime();
+    auto curTime = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
 
     std::set<uint256> probeConnections;
     for (const auto& dmn : members) {
@@ -261,15 +272,15 @@ void CLLMQUtils::AddQuorumProbeConnections(const Consensus::LLMQParams& llmqPara
             continue;
         }
         auto lastOutbound = mmetaman.GetMetaInfo(dmn->proTxHash)->GetLastOutboundSuccess();
-        // re-probe after 50 minutes so that the "good connection" check in the DKG doesn't fail just because we're on
+        // re-probe after 10 minutes so that the "good connection" check in the DKG doesn't fail just because we're on
         // the brink of timeout
-        if (curTime - lastOutbound > 50 * 60) {
+        if (curTime - lastOutbound > 10 * 60) {
             probeConnections.emplace(dmn->proTxHash);
         }
     }
 
     if (!probeConnections.empty()) {
-        if (LogAcceptCategory(BCLog::LLMQ)) {
+        if (LogAcceptCategory(BCLog::LLMQ, BCLog::Level::Debug)) {
             auto mnList = deterministicMNManager->GetListAtChainTip();
             std::string debugMsg = strprintf("CLLMQUtils::%s -- adding masternodes probes for quorum %s:", __func__, pQuorumBaseBlockIndex->GetBlockHash().ToString());
             for (auto& c : probeConnections) {
@@ -277,7 +288,7 @@ void CLLMQUtils::AddQuorumProbeConnections(const Consensus::LLMQParams& llmqPara
                 if (!dmn) {
                     debugMsg += strprintf("  %s (not in valid MN set anymore)", c.ToString());
                 } else {
-                    debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToString());
+                    debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 }
             }
             LogPrint(BCLog::NET, "%s\n", debugMsg.c_str());
@@ -288,21 +299,40 @@ void CLLMQUtils::AddQuorumProbeConnections(const Consensus::LLMQParams& llmqPara
 
 bool CLLMQUtils::IsQuorumActive(uint8_t llmqType, const uint256& quorumHash)
 {
+    if(!Params().GetConsensus().llmqs.count(llmqType)) {
+        return false;
+    }
     auto& params = Params().GetConsensus().llmqs.at(llmqType);
 
     // sig shares and recovered sigs are only accepted from recent/active quorums
     // we allow one more active quorum as specified in consensus, as otherwise there is a small window where things could
     // fail while we are on the brink of a new quorum
     auto quorums = quorumManager->ScanQuorums(llmqType, (int)params.signingActiveQuorumCount + 1);
-    for (const auto& q : quorums) {
-        if (q->qc->quorumHash == quorumHash) {
-            return true;
-        }
-    }
-    return false;
+    return ranges::any_of(quorums, [&quorumHash](const auto& q){ return q->qc->quorumHash == quorumHash; });
 }
 const Consensus::LLMQParams& GetLLMQParams(uint8_t llmqType)
 {
+    if(!Params().GetConsensus().llmqs.count(llmqType)) {
+        static Consensus::LLMQParams llmq_test = {
+            .type = Consensus::LLMQ_TEST,
+            .name = "llmq_test",
+            .size = 3,
+            .minSize = 2,
+            .threshold = 2,
+
+            .dkgInterval = 24, // one DKG per hour
+            .dkgPhaseBlocks = 2,
+            .dkgMiningWindowStart = 10, // dkgPhaseBlocks * 5 = after finalization
+            .dkgMiningWindowEnd = 18,
+            .dkgBadVotesThreshold = 2,
+
+            .signingActiveQuorumCount = 4, // just a few ones to allow easier testing
+
+            .keepOldConnections = 5,
+            .recoveryMembers = 3,
+        };
+        return llmq_test;
+    }
     return Params().GetConsensus().llmqs.at(llmqType);
 }
 } // namespace llmq

@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2020 The Bitcoin Core developers
+// Copyright (c) 2016-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -28,7 +28,7 @@ static RPCHelpMan rpcNestedTest_rpc()
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{""},
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue {
             return request.params.write(0, 0);
         },
     };

@@ -78,7 +78,10 @@ class AuthServiceProxy():
         passwd = None if self.__url.password is None else self.__url.password.encode('utf8')
         authpair = user + b':' + passwd
         self.__auth_header = b'Basic ' + base64.b64encode(authpair)
-        self.timeout = timeout
+        # clamp the socket timeout, since larger values can cause an
+        # "Invalid argument" exception in Python's HTTP(S) client
+        # library on some operating systems (e.g. OpenBSD, FreeBSD)
+        self.timeout = min(timeout, 2147483)
         self._set_conn(connection)
 
     def __getattr__(self, name):
@@ -131,10 +134,12 @@ class AuthServiceProxy():
             json.dumps(args or argsn, default=EncodeDecimal, ensure_ascii=self.ensure_ascii),
         ))
         if args and argsn:
-            raise ValueError('Cannot handle both named and positional arguments')
+            params = dict(args=args, **argsn)
+        else:
+            params = args or argsn
         return {'version': '1.1',
                 'method': self._service_name,
-                'params': args or argsn,
+                'params': params,
                 'id': AuthServiceProxy.__id_count}
 
     def __call__(self, *args, **argsn):

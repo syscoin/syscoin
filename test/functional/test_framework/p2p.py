@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2010 ArtForz -- public domain half-a-node
 # Copyright (c) 2012 Jeff Garzik
-# Copyright (c) 2010-2021 The Bitcoin Core developers
+# Copyright (c) 2010-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test objects for interacting with a syscoind node over the p2p protocol.
@@ -46,6 +46,9 @@ from test_framework.messages import (
     msg_getaddr,
     msg_getblocks,
     msg_getblocktxn,
+    msg_getcfcheckpt,
+    msg_getcfheaders,
+    msg_getcfilters,
     msg_getdata,
     msg_getheaders,
     msg_headers,
@@ -58,6 +61,7 @@ from test_framework.messages import (
     msg_sendaddrv2,
     msg_sendcmpct,
     msg_sendheaders,
+    msg_sendtxrcncl,
     msg_tx,
     MSG_TX,
     MSG_TYPE_MASK,
@@ -94,6 +98,9 @@ P2P_SUBVERSION = "/python-p2p-tester:0.0.3/"
 P2P_VERSION_RELAY = 1
 # SYSCOIN
 P2P_SUBVERSIONARG = "/python-p2p-tester:0.0.3%s/"
+# Delay after receiving a tx inv before requesting transactions from non-preferred peers, in seconds
+NONPREF_PEER_TX_DELAY = 2
+
 MESSAGEMAP = {
     b"addr": msg_addr,
     b"addrv2": msg_addrv2,
@@ -110,6 +117,9 @@ MESSAGEMAP = {
     b"getaddr": msg_getaddr,
     b"getblocks": msg_getblocks,
     b"getblocktxn": msg_getblocktxn,
+    b"getcfcheckpt": msg_getcfcheckpt,
+    b"getcfheaders": msg_getcfheaders,
+    b"getcfilters": msg_getcfilters,
     b"getdata": msg_getdata,
     b"getheaders": msg_getheaders,
     b"headers": msg_headers,
@@ -122,6 +132,7 @@ MESSAGEMAP = {
     b"sendaddrv2": msg_sendaddrv2,
     b"sendcmpct": msg_sendcmpct,
     b"sendheaders": msg_sendheaders,
+    b"sendtxrcncl": msg_sendtxrcncl,
     b"tx": msg_tx,
     b"verack": msg_verack,
     b"version": msg_version,
@@ -187,14 +198,14 @@ class P2PConnection(asyncio.Protocol):
         self.peer_connect_helper(dstaddr, dstport, net, timeout_factor, uacomment)
 
         loop = NetworkThread.network_event_loop
-        logger.debug('Connecting to Bitcoin Node: %s:%d' % (self.dstaddr, self.dstport))
+        logger.debug('Connecting to Syscoin Node: %s:%d' % (self.dstaddr, self.dstport))
         coroutine = loop.create_connection(lambda: self, host=self.dstaddr, port=self.dstport)
         return lambda: loop.call_soon_threadsafe(loop.create_task, coroutine)
 
     def peer_accept_connection(self, connect_id, connect_cb=lambda: None, *, net, timeout_factor):
         self.peer_connect_helper('0', 0, net, timeout_factor)
 
-        logger.debug('Listening for Bitcoin Node with id: {}'.format(connect_id))
+        logger.debug('Listening for Syscoin Node with id: {}'.format(connect_id))
         return lambda: NetworkThread.listen(self, connect_cb, idx=connect_id)
 
     def peer_disconnect(self):
@@ -399,7 +410,7 @@ class P2PInterface(P2PConnection):
                 self.message_count[msgtype] += 1
                 self.last_message[msgtype] = message
                 getattr(self, 'on_' + msgtype)(message)
-            except:
+            except Exception:
                 print("ERROR delivering %s (%s)" % (repr(message), sys.exc_info()[0]))
                 raise
 
@@ -437,6 +448,7 @@ class P2PInterface(P2PConnection):
     def on_sendaddrv2(self, message): pass
     def on_sendcmpct(self, message): pass
     def on_sendheaders(self, message): pass
+    def on_sendtxrcncl(self, message): pass
     def on_tx(self, message): pass
     def on_wtxidrelay(self, message): pass
 
@@ -466,6 +478,7 @@ class P2PInterface(P2PConnection):
             self.send_message(msg_sendaddrv2())
         self.send_message(msg_verack())
         self.nServices = message.nServices
+        self.relay = message.relay
         self.send_message(msg_getaddr())
 
     # Connection helper methods
@@ -479,7 +492,7 @@ class P2PInterface(P2PConnection):
 
     def wait_for_connect(self, timeout=60):
         test_function = lambda: self.is_connected
-        wait_until_helper(test_function, timeout=timeout, lock=p2p_lock)
+        self.wait_until(test_function, timeout=timeout, check_connected=False)
 
     def wait_for_disconnect(self, timeout=60):
         test_function = lambda: not self.is_connected

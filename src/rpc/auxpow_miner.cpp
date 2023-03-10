@@ -8,22 +8,22 @@
 #include <auxpow.h>
 #include <chainparams.h>
 #include <net.h>
-#include <node/context.h>
 #include <rpc/blockchain.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <validation.h>
-
+#include <node/context.h>
 #include <cassert>
 #include <util/check.h>
+#include <rpc/server_util.h>
+
 namespace
 {
-
-void auxMiningCheck(const JSONRPCRequest& request)
+void auxMiningCheck(const node::JSONRPCRequest& request)
 {
-  NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext (request.context);
+  node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext (request.context);
   if (!node.connman)
     throw JSONRPCError (RPC_CLIENT_P2P_DISABLED,
                         "Error: Peer-to-peer functionality missing or"
@@ -80,7 +80,7 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
 
         /* Create new block with nonce = 0 and extraNonce = 1.  */
         std::unique_ptr<CBlockTemplate> newBlock
-            = BlockAssembler (chainman.ActiveChainstate(), mempool, Params ()).CreateNewBlock (scriptPubKey);
+            = BlockAssembler (chainman.ActiveChainstate(), &mempool).CreateNewBlock (scriptPubKey);
         if (newBlock == nullptr)
           throw JSONRPCError (RPC_OUT_OF_MEMORY, "out of memory");
 
@@ -134,14 +134,14 @@ AuxpowMiner::lookupSavedBlock (const std::string& hashHex) const
 }
 
 UniValue
-AuxpowMiner::createAuxBlock (const JSONRPCRequest& request,
+AuxpowMiner::createAuxBlock (const node::JSONRPCRequest& request,
                              const CScript& scriptPubKey)
 {
   auxMiningCheck (request);
   LOCK (cs);
 
   const auto& mempool = EnsureAnyMemPool (request.nodeContext? request.nodeContext: request.context);
-  const NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
+  const node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
   uint256 target;
   const CBlock* pblock = getCurrentBlock (*node.chainman, mempool, scriptPubKey, target);
 
@@ -159,7 +159,7 @@ AuxpowMiner::createAuxBlock (const JSONRPCRequest& request,
 }
 
 bool
-AuxpowMiner::submitAuxBlock (const JSONRPCRequest& request,
+AuxpowMiner::submitAuxBlock (const node::JSONRPCRequest& request,
                              const std::string& hashHex,
                              const std::string& auxpowHex) const
 {
@@ -180,7 +180,7 @@ AuxpowMiner::submitAuxBlock (const JSONRPCRequest& request,
   shared_block->SetAuxpow (std::move (pow));
   CHECK_NONFATAL(shared_block->GetHash ().GetHex () == hashHex);
 
-  return chainman.ProcessNewBlock (Params (), shared_block, true, nullptr);
+  return chainman.ProcessNewBlock(shared_block, true, true, nullptr);
 }
 
 AuxpowMiner&

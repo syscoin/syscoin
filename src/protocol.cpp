@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -68,6 +68,7 @@ const char *QSIGREC="qsigrec";
 const char *QSIGSHARE="qsigshare";
 const char *CLSIG="clsig";
 const char *MNAUTH="mnauth";
+const char *SENDTXRCNCL="sendtxrcncl";
 } // namespace NetMsgType
 
 /** All known message types. Keep this in the same order as the list of
@@ -133,6 +134,7 @@ const static std::string allNetMessageTypes[] = {
     NetMsgType::GETCFCHECKPT,
     NetMsgType::CFCHECKPT,
     NetMsgType::WTXIDRELAY,
+    NetMsgType::SENDTXRCNCL,
 };
 const static std::vector<std::string> allNetMessageTypesVec(std::begin(allNetMessageTypes), std::end(allNetMessageTypes));
 
@@ -262,12 +264,7 @@ static std::string serviceFlagToStr(size_t bit)
     // Not using default, so we get warned when a case is missing
     }
 
-    std::ostringstream stream;
-    stream.imbue(std::locale::classic());
-    stream << "UNKNOWN[";
-    stream << "2^" << bit;
-    stream << "]";
-    return stream.str();
+    return strprintf("UNKNOWN[2^%u]", bit);
 }
 
 std::vector<std::string> serviceFlagsToStr(uint64_t flags)

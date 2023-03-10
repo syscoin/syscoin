@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2018 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -18,8 +18,10 @@
 #include <map>
 #include <set>
 
+namespace wallet {
 const int DEFAULT_MIN_DEPTH = 0;
 const int DEFAULT_MAX_DEPTH = 9999999;
+
 //! Default for -avoidpartialspends
 static constexpr bool DEFAULT_AVOIDPARTIALSPENDS = false;
 
@@ -31,12 +33,11 @@ public:
     CTxDestination destChange = CNoDestination();
     //! Override the default change type if set, ignored if destChange is set
     std::optional<OutputType> m_change_type;
-    //! If false, only selected inputs are used
-    bool m_add_inputs = true;
     //! If false, only safe inputs will be used
     bool m_include_unsafe_inputs = false;
-    //! If false, allows unselected inputs, but requires all selected inputs be used
-    bool fAllowOtherInputs = false;
+    //! If true, the selection process can add extra unselected inputs from the wallet
+    //! while requires all selected inputs be used
+    bool m_allow_other_inputs = true;
     //! Includes watch only addresses which are solvable
     bool fAllowWatchOnly = false;
     //! Override automatic min/max checks on fee, m_feerate must be set if true
@@ -57,12 +58,13 @@ public:
     int m_min_depth = DEFAULT_MIN_DEPTH;
     //! Maximum chain depth value for coin availability
     int m_max_depth = DEFAULT_MAX_DEPTH;
-    // SYSCOIN
-    //! Asset info for filtering/selecting available coins
-    std::optional<CAssetCoinInfo> assetInfo;
     //! SigningProvider that has pubkeys and scripts to do spend size estimation for external inputs
     FlatSigningProvider m_external_provider;
-
+    // SYSCOIN
+    //! Custom transaction version
+    int m_version = CTransaction::CURRENT_VERSION;
+    //! Custom poda data
+    std::vector<uint8_t> m_nevmdata;
     CCoinControl();
 
     bool HasSelected() const
@@ -116,9 +118,29 @@ public:
         vOutpoints.assign(setSelected.begin(), setSelected.end());
     }
 
+    void SetInputWeight(const COutPoint& outpoint, int64_t weight)
+    {
+        m_input_weights[outpoint] = weight;
+    }
+
+    bool HasInputWeight(const COutPoint& outpoint) const
+    {
+        return m_input_weights.count(outpoint) > 0;
+    }
+
+    int64_t GetInputWeight(const COutPoint& outpoint) const
+    {
+        auto it = m_input_weights.find(outpoint);
+        assert(it != m_input_weights.end());
+        return it->second;
+    }
+
 private:
     std::set<COutPoint> setSelected;
     std::map<COutPoint, CTxOut> m_external_txouts;
+    //! Map of COutPoints to the maximum weight for that input
+    std::map<COutPoint, int64_t> m_input_weights;
 };
+} // namespace wallet
 
 #endif // SYSCOIN_WALLET_COINCONTROL_H

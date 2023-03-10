@@ -140,9 +140,9 @@ $ FUZZ=process_message src/test/fuzz/fuzz
 There is also a runner script to execute all fuzz targets. Refer to
 `./test/fuzz/test_runner.py --help` for more details.
 
-## Overview of Bitcoin Core fuzzing
+## Overview of Syscoin Core fuzzing
 
-[Google](https://github.com/google/fuzzing/) has a good overview of fuzzing in general, with contributions from key architects of some of the most-used fuzzers. [This paper](https://agroce.github.io/bitcoin_report.pdf) includes an external overview of the status of Bitcoin Core fuzzing, as of summer 2021.  [John Regehr](https://blog.regehr.org/archives/1687) provides good advice on writing code that assists fuzzers in finding bugs, which is useful for developers to keep in mind.
+[Google](https://github.com/google/fuzzing/) has a good overview of fuzzing in general, with contributions from key architects of some of the most-used fuzzers. [This paper](https://agroce.github.io/bitcoin_report.pdf) includes an external overview of the status of Syscoin Core fuzzing, as of summer 2021.  [John Regehr](https://blog.regehr.org/archives/1687) provides good advice on writing code that assists fuzzers in finding bugs, which is useful for developers to keep in mind.
 
 ## Fuzzing harnesses and output
 
@@ -191,6 +191,15 @@ block^@M-^?M-^?M-^?M-^?M-^?nM-^?M-^?
 ```
 
 In this case the fuzzer managed to create a `block` message which when passed to `ProcessMessage(...)` increased coverage.
+
+It is possible to specify `bitcoind` arguments to the `fuzz` executable.
+Depending on the test, they may be ignored or consumed and alter the behavior
+of the test. Just make sure to use double-dash to distinguish them from the
+fuzzer's own arguments:
+
+```sh
+$ FUZZ=address_deserialize_v2 src/test/fuzz/fuzz -runs=1 fuzz_seed_corpus/address_deserialize_v2 --checkaddrman=5 --printtoconsole=1
+```
 
 ## Fuzzing corpora
 
@@ -248,10 +257,10 @@ You may also need to take care of giving the correct path for `clang` and
 `clang++`, like `CC=/path/to/clang CXX=/path/to/clang++` if the non-systems
 `clang` does not come first in your path.
 
-Full configure that was tested on macOS Catalina with `brew` installed `llvm`:
+Full configure that was tested on macOS with `brew` installed `llvm`:
 
 ```sh
-./configure --enable-fuzz --with-sanitizers=fuzzer,address,undefined CC=/usr/local/opt/llvm/bin/clang CXX=/usr/local/opt/llvm/bin/clang++ --disable-asm
+./configure --enable-fuzz --with-sanitizers=fuzzer,address,undefined --disable-asm CC=$(brew --prefix llvm)/bin/clang CXX=$(brew --prefix llvm)/bin/clang++
 ```
 
 Read the [libFuzzer documentation](https://llvm.org/docs/LibFuzzer.html) for more information. This [libFuzzer tutorial](https://github.com/google/fuzzing/blob/master/tutorial/libFuzzerTutorial.md) might also be of interest.
@@ -379,11 +388,11 @@ $ honggfuzz/honggfuzz --exit_upon_crash --quiet --timeout 4 -n 1 -Q \
                        -debug
 ```
 
-# Fuzzing Bitcoin Core using Eclipser (v1.x)
+# Fuzzing Syscoin Core using Eclipser (v1.x)
 
 ## Quickstart guide
 
-To quickly get started fuzzing Bitcoin Core using [Eclipser v1.x](https://github.com/SoftSec-KAIST/Eclipser/tree/v1.x):
+To quickly get started fuzzing Syscoin Core using [Eclipser v1.x](https://github.com/SoftSec-KAIST/Eclipser/tree/v1.x):
 
 ```sh
 $ git clone https://github.com/bitcoin/bitcoin
@@ -395,8 +404,8 @@ $ sudo apt-get install libtool libtool-bin wget automake autoconf bison gdb
 ```
 
 At this point, you must install the .NET core.  The process differs, depending on your Linux distribution.
-See [this link](https://docs.microsoft.com/en-us/dotnet/core/install/linux) for details.
-On ubuntu 20.04, the following should work:
+See [this link](https://learn.microsoft.com/en-us/dotnet/core/install/linux) for details.
+On Ubuntu 20.04, the following should work:
 
 ```sh
 $ wget -q https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
@@ -448,11 +457,11 @@ Read the [Eclipser documentation for v1.x](https://github.com/SoftSec-KAIST/Ecli
 
 # OSS-Fuzz
 
-Bitcoin Core participates in Google's [OSS-Fuzz](https://github.com/google/oss-fuzz/tree/master/projects/bitcoin-core)
+Syscoin Core participates in Google's [OSS-Fuzz](https://github.com/google/oss-fuzz/tree/master/projects/bitcoin-core)
 program, which includes a dashboard of [publicly disclosed vulnerabilities](https://bugs.chromium.org/p/oss-fuzz/issues/list?q=bitcoin-core).
 Generally, we try to disclose vulnerabilities as soon as possible after they
 are fixed to give users the knowledge they need to be protected. However,
-because Bitcoin is a live P2P network, and not just standalone local software,
+because Syscoin is a live P2P network, and not just standalone local software,
 we might not fully disclose every issue within Google's standard
 [90-day disclosure window](https://google.github.io/oss-fuzz/getting-started/bug-disclosure-guidelines/)
 if a partial or delayed disclosure is important to protect users or the

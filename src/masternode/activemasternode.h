@@ -8,9 +8,12 @@
 #include <chainparams.h>
 #include <primitives/transaction.h>
 #include <validationinterface.h>
-
+#include <netaddress.h>
 class CBLSPublicKey;
 class CBLSSecretKey;
+class CConnman;
+class ChainstateManager;
+
 struct CActiveMasternodeInfo;
 extern CActiveMasternodeInfo activeMasternodeInfo;
 extern RecursiveMutex activeMasternodeInfoCs;
@@ -48,7 +51,7 @@ private:
 public:
     CActiveMasternodeManager(CConnman& _connman): connman(_connman) {}
     virtual ~CActiveMasternodeManager() {}
-    void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) override;
+    void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, ChainstateManager& chainman, bool fInitialDownload) override;
 
     void Init(const CBlockIndex* pindex);
 

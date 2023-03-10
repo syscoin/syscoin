@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,11 +11,13 @@
 
 class ArgsManager;
 class CScheduler;
-struct WalletContext;
 
 namespace interfaces {
 class Chain;
 } // namespace interfaces
+
+namespace wallet {
+struct WalletContext;
 
 //! Responsible for reading and validating the -wallet arguments and verifying the wallet database.
 bool VerifyWallets(WalletContext& context);
@@ -34,5 +36,6 @@ void StopWallets(WalletContext& context);
 
 //! Close all wallets.
 void UnloadWallets(WalletContext& context);
+} // namespace wallet
 
 #endif // SYSCOIN_WALLET_LOAD_H

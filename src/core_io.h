@@ -1,4 +1,4 @@
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,7 +6,6 @@
 #define SYSCOIN_CORE_IO_H
 
 #include <consensus/amount.h>
-#include <attributes.h>
 
 #include <string>
 #include <vector>
@@ -16,6 +15,7 @@ class CBlockHeader;
 class CScript;
 class CTransaction;
 struct CMutableTransaction;
+class SigningProvider;
 class uint256;
 class UniValue;
 class CTxUndo;
@@ -54,9 +54,7 @@ UniValue ValueFromAmount(const CAmount amount, const uint32_t &nBaseAsset=0);
 std::string FormatScript(const CScript& script);
 std::string EncodeHexTx(const CTransaction& tx, const int serializeFlags = 0);
 std::string SighashToStr(unsigned char sighash_type);
-void ScriptPubKeyToUniv(const CScript& scriptPubKey, UniValue& out, bool fIncludeHex);
-void ScriptPubKeyToUniv(const CScript& scriptPubKey, UniValue& out, bool fIncludeHex, bool include_addresses);
-void ScriptToUniv(const CScript& script, UniValue& out, bool include_address);
-void TxToUniv(const CTransaction& tx, const uint256& hashBlock, bool include_addresses, UniValue& entry, bool include_hex = true, int serialize_flags = 0, const CTxUndo* txundo = nullptr, TxVerbosity verbosity = TxVerbosity::SHOW_DETAILS);
+void ScriptToUniv(const CScript& script, UniValue& out, bool include_hex = true, bool include_address = false, const SigningProvider* provider = nullptr);
+void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry, bool include_hex = true, int serialize_flags = 0, const CTxUndo* txundo = nullptr, TxVerbosity verbosity = TxVerbosity::SHOW_DETAILS);
 
 #endif // SYSCOIN_CORE_IO_H

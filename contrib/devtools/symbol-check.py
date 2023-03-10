@@ -15,23 +15,19 @@ from typing import List, Dict
 
 import lief #type:ignore
 
-# temporary constant, to be replaced with lief.ELF.ARCH.RISCV
-# https://github.com/lief-project/LIEF/pull/562
-LIEF_ELF_ARCH_RISCV = lief.ELF.ARCH(243)
-
-# Debian 9 (Stretch) EOL: 2022. https://wiki.debian.org/DebianReleases#Production_Releases
+# Debian 10 (Buster) EOL: 2024. https://wiki.debian.org/LTS
 #
-# - g++ version 6.3.0 (https://packages.debian.org/search?suite=stretch&arch=any&searchon=names&keywords=g%2B%2B)
-# - libc version 2.24 (https://packages.debian.org/search?suite=stretch&arch=any&searchon=names&keywords=libc6)
+# - libgcc version 8.3.0 (https://packages.debian.org/search?suite=buster&arch=any&searchon=names&keywords=libgcc1)
+# - libc version 2.28 (https://packages.debian.org/search?suite=buster&arch=any&searchon=names&keywords=libc6)
 #
-# Ubuntu 16.04 (Xenial) EOL: 2026. https://wiki.ubuntu.com/Releases
+# Ubuntu 18.04 (Bionic) EOL: 2028. https://wiki.ubuntu.com/ReleaseTeam
 #
-# - g++ version 5.3.1
-# - libc version 2.23
+# - libgcc version 8.4.0 (https://packages.ubuntu.com/bionic/libgcc1)
+# - libc version 2.27 (https://packages.ubuntu.com/bionic/libc6)
 #
 # CentOS Stream 8 EOL: 2024. https://wiki.centos.org/About/Product
 #
-# - g++ version 8.5.0 (http://mirror.centos.org/centos/8-stream/AppStream/x86_64/os/Packages/)
+# - libgcc version 8.5.0 (http://mirror.centos.org/centos/8-stream/AppStream/x86_64/os/Packages/)
 # - libc version 2.28 (http://mirror.centos.org/centos/8-stream/AppStream/x86_64/os/Packages/)
 #
 # See https://gcc.gnu.org/onlinedocs/libstdc++/manual/abi.html for more info.
@@ -39,25 +35,21 @@ LIEF_ELF_ARCH_RISCV = lief.ELF.ARCH(243)
 MAX_VERSIONS = {
 'GCC':       (4,8,0),
 'GLIBC': {
-    lief.ELF.ARCH.i386:   (2,18),
-    lief.ELF.ARCH.x86_64: (2,18),
-    lief.ELF.ARCH.ARM:    (2,18),
-    lief.ELF.ARCH.AARCH64:(2,18),
-    lief.ELF.ARCH.PPC64:  (2,18),
-    LIEF_ELF_ARCH_RISCV:  (2,27),
+    lief.ELF.ARCH.x86_64: (2,27),
+    lief.ELF.ARCH.ARM:    (2,27),
+    lief.ELF.ARCH.AARCH64:(2,27),
+    lief.ELF.ARCH.PPC64:  (2,27),
+    lief.ELF.ARCH.RISCV:  (2,27),
 },
 'LIBATOMIC': (1,0),
 'V':         (0,5,0),  # xkb (syscoin-qt only)
 }
-# See here for a description of _IO_stdin_used:
-# https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=634261#109
 
 # Ignore symbols that are exported as part of every executable
 # // SYSCOIN
 IGNORE_EXPORTS = {
-'_edata', '_end', '__end__', '_init', '__bss_start', '__bss_start__', '_bss_end__',
-'__bss_end__', '_fini', '_IO_stdin_used', 'stdin', 'stdout', 'stderr',
-'environ', '_environ', '__environ',
+'environ', '_environ', '__environ', '_fini', '_init', 'stdin',
+'stdout', 'stderr',
 }
 IGNORE_IMPORTS = {
 'fmemopen',
@@ -66,9 +58,6 @@ IGNORE_IMPORTS = {
 # Expected linker-loader names can be found here:
 # https://sourceware.org/glibc/wiki/ABIList?action=recall&rev=16
 ELF_INTERPRETER_NAMES: Dict[lief.ELF.ARCH, Dict[lief.ENDIANNESS, str]] = {
-    lief.ELF.ARCH.i386:    {
-        lief.ENDIANNESS.LITTLE: "/lib/ld-linux.so.2",
-    },
     lief.ELF.ARCH.x86_64:  {
         lief.ENDIANNESS.LITTLE: "/lib64/ld-linux-x86-64.so.2",
     },
@@ -82,7 +71,7 @@ ELF_INTERPRETER_NAMES: Dict[lief.ELF.ARCH, Dict[lief.ENDIANNESS, str]] = {
         lief.ENDIANNESS.BIG: "/lib64/ld64.so.1",
         lief.ENDIANNESS.LITTLE: "/lib64/ld64.so.2",
     },
-    LIEF_ELF_ARCH_RISCV:    {
+    lief.ELF.ARCH.RISCV:    {
         lief.ENDIANNESS.LITTLE: "/lib/ld-linux-riscv64-lp64d.so.1",
     },
 }
@@ -109,7 +98,19 @@ ELF_ALLOWED_LIBRARIES = {
 'libxkbcommon-x11.so.0', # keyboard keymapping
 'libfontconfig.so.1', # font support
 'libfreetype.so.6', # font parsing
-'libdl.so.2' # programming interface to dynamic linker
+'libdl.so.2', # programming interface to dynamic linker
+'libxcb-icccm.so.4',
+'libxcb-image.so.0',
+'libxcb-shm.so.0',
+'libxcb-keysyms.so.1',
+'libxcb-randr.so.0',
+'libxcb-render-util.so.0',
+'libxcb-render.so.0',
+'libxcb-shape.so.0',
+'libxcb-sync.so.1',
+'libxcb-xfixes.so.0',
+'libxcb-xinerama.so.0',
+'libxcb-xkb.so.1',
 }
 
 MACHO_ALLOWED_LIBRARIES = {
@@ -120,6 +121,7 @@ MACHO_ALLOWED_LIBRARIES = {
 'AppKit', # user interface
 'ApplicationServices', # common application tasks.
 'Carbon', # deprecated c back-compat API
+'ColorSync',
 'CoreFoundation', # low level func, data types
 'CoreGraphics', # 2D rendering
 'CoreServices', # operating system services
@@ -138,7 +140,6 @@ MACHO_ALLOWED_LIBRARIES = {
 PE_ALLOWED_LIBRARIES = {
 'ADVAPI32.dll', # security & registry
 'IPHLPAPI.DLL', # IP helper API
-'CRYPT32.dll', # MSFT crypto library (for libcurl)
 'KERNEL32.dll', # win32 base APIs
 'msvcrt.dll', # C standard library for MSVC
 'SHELL32.dll', # shell API
@@ -157,6 +158,7 @@ PE_ALLOWED_LIBRARIES = {
 'VERSION.dll', # version checking
 'WINMM.dll', # WinMM audio API
 'WTSAPI32.dll',
+'bcrypt.dll',
 }
 
 def check_version(max_versions, version, arch) -> bool:
@@ -195,7 +197,7 @@ def check_exported_symbols(binary) -> bool:
         if not symbol.exported:
             continue
         name = symbol.name
-        if binary.header.machine_type == LIEF_ELF_ARCH_RISCV or name in IGNORE_EXPORTS:
+        if binary.header.machine_type == lief.ELF.ARCH.RISCV or name in IGNORE_EXPORTS:
             continue
         print(f'{binary.name}: export of symbol {name} not allowed!')
         ok = False
@@ -224,7 +226,7 @@ def check_MACHO_min_os(binary) -> bool:
     return False
 
 def check_MACHO_sdk(binary) -> bool:
-    if binary.build_version.sdk == [10, 15, 6]:
+    if binary.build_version.sdk == [11, 0, 0]:
         return True
     return False
 
@@ -249,18 +251,18 @@ def check_ELF_interpreter(binary) -> bool:
     return binary.concrete.interpreter == expected_interpreter
 
 CHECKS = {
-'ELF': [
+lief.EXE_FORMATS.ELF: [
     ('IMPORTED_SYMBOLS', check_imported_symbols),
     ('EXPORTED_SYMBOLS', check_exported_symbols),
     ('LIBRARY_DEPENDENCIES', check_ELF_libraries),
     ('INTERPRETER_NAME', check_ELF_interpreter),
 ],
-'MACHO': [
+lief.EXE_FORMATS.MACHO: [
     ('DYNAMIC_LIBRARIES', check_MACHO_libraries),
     ('MIN_OS', check_MACHO_min_os),
     ('SDK', check_MACHO_sdk),
 ],
-'PE' : [
+lief.EXE_FORMATS.PE: [
     ('DYNAMIC_LIBRARIES', check_PE_libraries),
     ('SUBSYSTEM_VERSION', check_PE_subsystem_version),
 ]
@@ -271,7 +273,7 @@ if __name__ == '__main__':
     for filename in sys.argv[1:]:
         try:
             binary = lief.parse(filename)
-            etype = binary.format.name
+            etype = binary.format
             if etype == lief.EXE_FORMATS.UNKNOWN:
                 print(f'{filename}: unknown executable format')
                 retval = 1

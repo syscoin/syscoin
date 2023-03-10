@@ -17,8 +17,8 @@
 *********************************************************/
 
 
-#ifndef __ctpl_stl_thread_pool_H__
-#define __ctpl_stl_thread_pool_H__
+#ifndef SYSCOIN_CTPL_STL_H
+#define SYSCOIN_CTPL_STL_H
 
 #include <functional>
 #include <thread>
@@ -73,7 +73,7 @@ namespace ctpl {
     public:
 
         thread_pool() { this->init(); }
-        thread_pool(int nThreads) { this->init(); this->resize(nThreads); }
+        explicit thread_pool(int nThreads) { this->init(); this->resize(nThreads); }
 
         // the destructor waits for all the functions in the queue to be finished
         ~thread_pool() {
@@ -129,7 +129,7 @@ namespace ctpl {
         std::function<void(int)> pop() {
             std::function<void(int id)> * _f = nullptr;
             this->q.pop(_f);
-            std::unique_ptr<std::function<void(int id)>> func(_f); // at return, delete the function even if an exception occurred
+            [[maybe_unused]] std::unique_ptr<std::function<void(int id)>> func(_f); // at return, delete the function even if an exception occurred
             std::function<void(int)> f;
             if (_f)
                 f = *_f;
@@ -174,13 +174,14 @@ namespace ctpl {
             auto pck = std::make_shared<std::packaged_task<decltype(f(0, rest...))(int)>>(
                     std::bind(std::forward<F>(f), std::placeholders::_1, std::forward<Rest>(rest)...)
             );
+            auto fut = pck->get_future();
             auto _f = new std::function<void(int id)>([pck](int id) {
                 (*pck)(id);
             });
             this->q.push(_f);
             std::unique_lock<std::mutex> lock(this->mutex);
             this->cv.notify_one();
-            return pck->get_future();
+            return fut;
         }
 
         // run the user's function that excepts argument int - id of the running thread. returned value is templatized
@@ -188,13 +189,14 @@ namespace ctpl {
         template<typename F>
         auto push(F && f) ->std::future<decltype(f(0))> {
             auto pck = std::make_shared<std::packaged_task<decltype(f(0))(int)>>(std::forward<F>(f));
+            auto fut = pck->get_future();
             auto _f = new std::function<void(int id)>([pck](int id) {
                 (*pck)(id);
             });
             this->q.push(_f);
             std::unique_lock<std::mutex> lock(this->mutex);
             this->cv.notify_one();
-            return pck->get_future();
+            return fut;
         }
 
 
@@ -248,4 +250,4 @@ namespace ctpl {
 
 }
 
-#endif // __ctpl_stl_thread_pool_H__
+#endif // SYSCOIN_CTPL_STL_H

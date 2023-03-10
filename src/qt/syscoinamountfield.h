@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,6 +6,7 @@
 #define SYSCOIN_QT_SYSCOINAMOUNTFIELD_H
 
 #include <consensus/amount.h>
+#include <qt/syscoinunits.h>
 
 #include <QWidget>
 
@@ -52,7 +53,7 @@ public:
     bool validate();
 
     /** Change unit used to display amount. */
-    void setDisplayUnit(int unit);
+    void setDisplayUnit(SyscoinUnit new_unit);
 
     /** Make field empty and ready for new input. */
     void clear();
@@ -73,7 +74,7 @@ protected:
     bool eventFilter(QObject *object, QEvent *event) override;
 
 private:
-    AmountSpinBox *amount;
+    AmountSpinBox* amount{nullptr};
     QValueComboBox *unit;
 
 private Q_SLOTS:

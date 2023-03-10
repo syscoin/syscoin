@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2017-2019 The Bitcoin Core developers
+# Copyright (c) 2017-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -32,16 +32,15 @@ check_exists() {
 sha256_check() {
   # Args: <sha256_hash> <filename>
   #
-  if check_exists sha256sum; then
-    echo "${1}  ${2}" | sha256sum -c
+  if [ "$(uname)" = "FreeBSD" ]; then
+    # sha256sum exists on FreeBSD, but takes different arguments than the GNU version
+    sha256 -c "${1}" "${2}"
+  elif check_exists sha256sum; then
+    echo "${1} ${2}" | sha256sum -c
   elif check_exists sha256; then
-    if [ "$(uname)" = "FreeBSD" ]; then
-      sha256 -c "${1}" "${2}"
-    else
-      echo "${1}  ${2}" | sha256 -c
-    fi
+    echo "${1} ${2}" | sha256 -c
   else
-    echo "${1}  ${2}" | shasum -a 256 -c
+    echo "${1} ${2}" | shasum -a 256 -c
   fi
 }
 
@@ -55,12 +54,21 @@ http_get() {
     echo "File ${2} already exists; not downloading again"
   elif check_exists curl; then
     curl --insecure --retry 5 "${1}" -o "${2}"
-  else
+  elif check_exists wget; then
     wget --no-check-certificate "${1}" -O "${2}"
+  else
+    echo "Simple transfer utilities 'curl' and 'wget' not found. Please install one of them and try again."
+    exit 1
   fi
 
   sha256_check "${3}" "${2}"
 }
+
+# Ensure the commands we use exist on the system
+if ! check_exists patch; then
+    echo "Command-line tool 'patch' not found. Install patch and try again."
+    exit 1
+fi
 
 mkdir -p "${BDB_PREFIX}"
 http_get "${BDB_URL}" "${BDB_VERSION}.tar.gz" "${BDB_HASH}"

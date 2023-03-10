@@ -16,6 +16,7 @@ class CGovernanceManager;
 class CGovernanceTriggerManager;
 class CGovernanceObject;
 class CGovernanceVote;
+class CConnman;
 class PeerManager;
 
 extern std::unique_ptr<CGovernanceManager> governance;
@@ -30,18 +31,15 @@ class CRateCheckBuffer
 private:
     std::vector<int64_t> vecTimestamps;
 
-    int nDataStart;
+    int nDataStart{0};
 
-    int nDataEnd;
+    int nDataEnd{0};
 
-    bool fBufferEmpty;
+    bool fBufferEmpty{true};
 
 public:
     CRateCheckBuffer() :
-        vecTimestamps(RATE_BUFFER_SIZE),
-        nDataStart(0),
-        nDataEnd(0),
-        fBufferEmpty(true)
+        vecTimestamps(RATE_BUFFER_SIZE)
     {
     }
 
@@ -162,10 +160,10 @@ private:
     static const int MAX_TIME_FUTURE_DEVIATION;
     static const int RELIABLE_PROPAGATION_TIME;
 
-    int64_t nTimeLastDiff;
+    int64_t nTimeLastDiff{0};
 
     // keep track of current block height
-    int nCachedBlockHeight;
+    int nCachedBlockHeight{0};
 
     // keep track of the scanning errors
     std::map<uint256, CGovernanceObject> mapObjects;
@@ -190,7 +188,7 @@ private:
 
     hash_s_t setRequestedVotes;
 
-    bool fRateChecksEnabled;
+    bool fRateChecksEnabled{true};
 
     // used to check for changed voting keys
     CDeterministicMNListPtr lastMNListForVotingKeys;
@@ -230,7 +228,7 @@ public:
      */
     bool ConfirmInventoryRequest(const GenTxid& gtxid);
 
-    void SyncSingleObjVotes(CNode* pnode, const uint256& nProp, const CBloomFilter& filter, CConnman& connman);
+    void SyncSingleObjVotes(CNode* pnode, const uint256& nProp, const CBloomFilter& filter, CConnman& connman, PeerManager& peerman);
     void SyncObjects(CNode* pnode, CConnman& connman, PeerManager &peerman) const;
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, CConnman& connman, PeerManager& peerman);
@@ -241,9 +239,9 @@ public:
 
     // These commands are only used in RPC
     std::vector<CGovernanceVote> GetCurrentVotes(const uint256& nParentHash, const COutPoint& mnCollateralOutpointFilter) const;
-    std::vector<const CGovernanceObject*> GetAllNewerThan(int64_t nMoreThanTime) const;
+    std::vector<CGovernanceObject> GetAllNewerThan(int64_t nMoreThanTime) const;
 
-    void AddGovernanceObject(CGovernanceObject& govobj, CConnman& connman, CNode* pfrom = nullptr);
+    void AddGovernanceObject(CGovernanceObject& govobj, PeerManager& peerman, CNode* pfrom = nullptr);
 
     void UpdateCachesAndClean();
 
@@ -299,7 +297,7 @@ public:
         s >> *lastMNListForVotingKeys;
     }
 
-    void UpdatedBlockTip(const CBlockIndex* pindex, CConnman& connman);
+    void UpdatedBlockTip(const CBlockIndex* pindex, PeerManager& peerman);
     int64_t GetLastDiffTime() const { return nTimeLastDiff; }
     void UpdateLastDiffTime(int64_t nTimeIn) { nTimeLastDiff = nTimeIn; }
 
@@ -328,16 +326,9 @@ public:
 
     bool MasternodeRateCheck(const CGovernanceObject& govobj, bool fUpdateFailStatus, bool fForce, bool& fRateCheckBypassed);
 
-    bool ProcessVoteAndRelay(const CGovernanceVote& vote, CGovernanceException& exception, CConnman& connman)
-    {
-        bool fOK = ProcessVote(nullptr, vote, exception, connman);
-        if (fOK) {
-            vote.Relay(connman);
-        }
-        return fOK;
-    }
+    bool ProcessVoteAndRelay(const CGovernanceVote& vote, CGovernanceException& exception, CConnman& connman, PeerManager& peerman);
 
-    void CheckPostponedObjects(CConnman& connman);
+    void CheckPostponedObjects(PeerManager& peerman);
 
     bool AreRateChecksEnabled() const
     {
@@ -368,7 +359,7 @@ private:
 
     static bool AcceptMessage(const uint256& nHash, hash_s_t& setHash);
 
-    void CheckOrphanVotes(CGovernanceObject& govobj, CConnman& connman) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void CheckOrphanVotes(CGovernanceObject& govobj, PeerManager& peerman) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     void RebuildIndexes();
 

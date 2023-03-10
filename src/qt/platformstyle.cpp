@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2019 The Bitcoin Core developers
+// Copyright (c) 2015-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -83,8 +83,8 @@ QColor PlatformStyle::TextColor() const
 QColor PlatformStyle::SingleColor() const
 {
     if (colorizeIcons) {
-        const QColor colorHighlightBg(QApplication::palette().color(QPalette::Highlight));
-        const QColor colorHighlightFg(QApplication::palette().color(QPalette::HighlightedText));
+        QColor colorHighlightBg(QApplication::palette().color(QPalette::Highlight));
+        QColor colorHighlightFg(QApplication::palette().color(QPalette::HighlightedText));
         const QColor colorText(QApplication::palette().color(QPalette::WindowText));
         const int colorTextLightness = colorText.lightness();
         if (abs(colorHighlightBg.lightness() - colorTextLightness) < abs(colorHighlightFg.lightness() - colorTextLightness)) {

@@ -16,7 +16,6 @@ const size_t MAX_NAME_SIZE = 40;
 
 CProposalValidator::CProposalValidator(const std::string& strHexData, bool fAllowLegacyFormat) :
     objJSON(UniValue::VOBJ),
-    fJSONValid(false),
     fAllowLegacyFormat(fAllowLegacyFormat),
     strErrorMessages()
 {
@@ -108,7 +107,7 @@ bool CProposalValidator::ValidateStartEndEpoch(bool fCheckExpiration)
         return false;
     }
 
-    if (fCheckExpiration && nEndEpoch <= GetAdjustedTime()) {
+    if (fCheckExpiration && nEndEpoch <= TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime())) {
         strErrorMessages += "expired;";
         return false;
     }
@@ -240,7 +239,7 @@ bool CProposalValidator::GetDataValue(const std::string& strKey, int64_t& nValue
         const UniValue uValue = objJSON[strKey];
         switch (uValue.getType()) {
         case UniValue::VNUM:
-            nValueRet = uValue.get_int64();
+            nValueRet = uValue.getInt<int64_t>();
             fOK = true;
             break;
         default:

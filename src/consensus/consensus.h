@@ -1,17 +1,17 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2018 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_CONSENSUS_CONSENSUS_H
 #define SYSCOIN_CONSENSUS_CONSENSUS_H
 
-#include <stdlib.h>
+#include <cstdlib>
 #include <stdint.h>
-
-/** The maximum allowed size for a serialized block, in bytes (only for buffer size limits) */
 // SYSCOIN 32MB max NEVM payload
-static const unsigned int MAX_BLOCK_SERIALIZED_SIZE = 4000000 + (32 << 20);
+static const int MAX_NEVM_BLOCK_SIZE = 32 << 20;
+/** The maximum allowed size for a serialized block, in bytes (only for buffer size limits) */
+static const unsigned int MAX_BLOCK_SERIALIZED_SIZE = 4000000 + MAX_NEVM_BLOCK_SIZE;
 /** The maximum allowed weight for a block, see BIP 141 (network rule) */
 static const unsigned int MAX_BLOCK_WEIGHT = 4000000;
 /** The maximum allowed number of signature check operations in a block (network rule) */
@@ -27,7 +27,5 @@ static const size_t MIN_SERIALIZABLE_TRANSACTION_WEIGHT = WITNESS_SCALE_FACTOR *
 /** Flags for nSequence and nLockTime locks */
 /** Interpret sequence numbers as relative lock-time constraints. */
 static constexpr unsigned int LOCKTIME_VERIFY_SEQUENCE = (1 << 0);
-/** Use GetMedianTimePast() instead of nTime for end point timestamp. */
-static constexpr unsigned int LOCKTIME_MEDIAN_TIME_PAST = (1 << 1);
 
 #endif // SYSCOIN_CONSENSUS_CONSENSUS_H

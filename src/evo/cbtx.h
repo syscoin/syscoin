@@ -7,8 +7,7 @@
 
 #include <primitives/transaction.h>
 #include <univalue.h>
-#include <sync.h>
-extern RecursiveMutex cs_main;
+#include <kernel/cs_main.h>
 class CBlock;
 class CBlockIndex;
 class BlockValidationState;
@@ -16,7 +15,9 @@ class TxValidationState;
 namespace llmq 
 {
     class CFinalCommitmentTxPayload;
+    class CQuorumBlockProcessor;
 }
+
 class CCoinsViewCache;
 
 // coinbase transaction
@@ -51,8 +52,7 @@ public:
 
 bool CheckCbTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckCbTx(const CCbTx &cbTx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool CheckCbTxMerkleRoots(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckCbTxMerkleRoots(const CBlock& block, const CBlockIndex* pindex, const llmq::CQuorumBlockProcessor& quorum_block_processor, BlockValidationState& state, CCoinsViewCache& view) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CalcCbTxMerkleRootMNList(const CBlock& block, const CBlockIndex* pindexPrev, uint256& merkleRootRet, BlockValidationState& state, CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload *qcIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool CalcCbTxMerkleRootQuorums(const CBlock& block, const CBlockIndex* pindexPrev, uint256& merkleRootRet, BlockValidationState& state, const llmq::CFinalCommitmentTxPayload *qcIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-
+bool CalcCbTxMerkleRootQuorums(const CBlock& block, const CBlockIndex* pindexPrev, const llmq::CQuorumBlockProcessor& quorum_block_processor, uint256& merkleRootRet, BlockValidationState& state, const llmq::CFinalCommitmentTxPayload *qcIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 #endif // SYSCOIN_EVO_CBTX_H

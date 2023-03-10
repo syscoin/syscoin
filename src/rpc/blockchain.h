@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2020 The Bitcoin Core developers
+// Copyright (c) 2017-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,22 +7,22 @@
 
 #include <consensus/amount.h>
 #include <core_io.h>
+#include <fs.h>
 #include <streams.h>
 #include <sync.h>
+#include <validation.h>
 
 #include <any>
 #include <stdint.h>
 #include <vector>
-extern RecursiveMutex cs_main;
 
 class CBlock;
 class CBlockIndex;
-class CBlockPolicyEstimator;
-class CChainState;
-class CTxMemPool;
-class ChainstateManager;
+class Chainstate;
 class UniValue;
+namespace node {
 struct NodeContext;
+} // namespace node
 
 static constexpr int NUM_GETBLOCKSTATS_PERCENTILES = 5;
 
@@ -38,13 +38,7 @@ double GetDifficulty(const CBlockIndex* blockindex);
 void RPCNotifyBlockChange(const CBlockIndex*);
 
 /** Block description to JSON */
-UniValue blockToJSON(const CBlock& block, const CBlockIndex* tip, const CBlockIndex* blockindex, TxVerbosity verbosity, ChainstateManager* chainstate = nullptr) LOCKS_EXCLUDED(cs_main);
-
-/** Mempool information to JSON */
-UniValue MempoolInfoToJSON(const CTxMemPool& pool);
-
-/** Mempool to JSON */
-UniValue MempoolToJSON(const CTxMemPool& pool, bool verbose = false, bool include_mempool_sequence = false);
+UniValue blockToJSON(node::BlockManager& blockman, const CBlock& block, const CBlockIndex* tip, const CBlockIndex* blockindex, TxVerbosity verbosity, Chainstate* chainstate = nullptr) LOCKS_EXCLUDED(cs_main);
 
 /** Block header to JSON */
 UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex) LOCKS_EXCLUDED(cs_main);
@@ -52,21 +46,17 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
 /** Used by getblockstats to get feerates at different percentiles by weight  */
 void CalculatePercentilesByWeight(CAmount result[NUM_GETBLOCKSTATS_PERCENTILES], std::vector<std::pair<CAmount, int64_t>>& scores, int64_t total_weight);
 
-void ScriptPubKeyToUniv(const CScript& scriptPubKey, UniValue& out, bool fIncludeHex);
-void TxToUniv(const CTransaction& tx, const uint256& hashBlock, UniValue& entry, bool include_hex = true, int serialize_flags = 0, const CTxUndo* txundo = nullptr, TxVerbosity verbosity = TxVerbosity::SHOW_DETAILS);
-
-NodeContext& EnsureAnyNodeContext(const std::any& context);
-CTxMemPool& EnsureMemPool(const NodeContext& node);
-CTxMemPool& EnsureAnyMemPool(const std::any& context);
-ChainstateManager& EnsureChainman(const NodeContext& node);
-ChainstateManager& EnsureAnyChainman(const std::any& context);
-CBlockPolicyEstimator& EnsureFeeEstimator(const NodeContext& node);
-CBlockPolicyEstimator& EnsureAnyFeeEstimator(const std::any& context);
-
 /**
  * Helper to create UTXO snapshots given a chainstate and a file handle.
  * @return a UniValue map containing metadata about the snapshot.
  */
-UniValue CreateUTXOSnapshot(NodeContext& node, CChainState& chainstate, CAutoFile& afile, FILE* filejson = nullptr);
+// SYSCOIN
+UniValue CreateUTXOSnapshot(
+    node::NodeContext& node,
+    Chainstate& chainstate,
+    AutoFile& afile,
+    const fs::path& path,
+    const fs::path& tmppath,
+    FILE* filejson = nullptr);
 
 #endif // SYSCOIN_RPC_BLOCKCHAIN_H

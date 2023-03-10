@@ -360,20 +360,6 @@ inline h160 right160(h256 const& _t)
 	return ret;
 }
 
-h128 fromUUID(std::string const& _uuid);
-
-std::string toUUID(h128 const& _uuid);
-
-inline std::string toString(h256s const& _bs)
-{
-	std::ostringstream out;
-	out << "[ ";
-	for (h256 const& i: _bs)
-		out << i.abridged() << ", ";
-	out << "]";
-	return out.str();
-}
-
 }
 
 namespace std

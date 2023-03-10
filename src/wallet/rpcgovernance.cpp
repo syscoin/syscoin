@@ -6,15 +6,18 @@
 #include <governance/governancevalidators.h>
 #include <validation.h>
 #include <rpc/server.h>
-#include <wallet/rpcwallet.h>
+#include <wallet/rpc/util.h>
 #include <wallet/spend.h>
 #include <rpc/blockchain.h>
 #include <node/context.h>
 #include <evo/deterministicmns.h>
-
+#include <rpc/server_util.h>
+#include <wallet/rpc/wallet.h>
+#include <util/result.h>
+using namespace wallet;
 UniValue VoteWithMasternodes(const std::map<uint256, CKey>& keys,
                              const uint256& hash, vote_signal_enum_t eVoteSignal,
-                             vote_outcome_enum_t eVoteOutcome, CConnman& connman)
+                             vote_outcome_enum_t eVoteOutcome, CConnman& connman, PeerManager& peerman)
 {
     {
         LOCK(governance->cs);
@@ -55,7 +58,7 @@ UniValue VoteWithMasternodes(const std::map<uint256, CKey>& keys,
         }
 
         CGovernanceException exception;
-        if (governance->ProcessVoteAndRelay(vote, exception, connman)) {
+        if (governance->ProcessVoteAndRelay(vote, exception, connman, peerman)) {
             nSuccessful++;
             statusObj.pushKV("result", "success");
         } else {
@@ -86,13 +89,13 @@ static RPCHelpMan gobject_list_prepared()
                 HelpExampleCli("gobject_list_prepared", "")
             + HelpExampleRpc("gobject_list_prepared", "")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {   
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
     EnsureWalletIsUnlocked(*pwallet);
 
-    int nCount = request.params.size() > 0 ? request.params[0].get_int() : 10;
+    int nCount = request.params.size() > 0 ? request.params[0].getInt<int>() : 10;
     if (nCount < 0) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Negative count");
     }
@@ -135,11 +138,11 @@ static RPCHelpMan gobject_prepare()
                 HelpExampleCli("gobject_prepare", "")
             + HelpExampleRpc("gobject_prepare", "")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
-    NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
+    node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 
@@ -156,8 +159,8 @@ static RPCHelpMan gobject_prepare()
         hashParent = ParseHashV(request.params[0], "feeTxid");
     }
 
-    int nRevision = request.params[1].get_int();
-    int64_t nTime = request.params[2].get_int64();
+    int nRevision = request.params[1].getInt<int>();
+    int64_t nTime = request.params[2].getInt<int64_t>();
     std::string strDataHex = request.params[3].get_str();
 
     // CREATE A NEW COLLATERAL TRANSACTION FOR THIS SPECIFIC OBJECT
@@ -186,7 +189,7 @@ static RPCHelpMan gobject_prepare()
 
     LOCK(pwallet->cs_wallet);
 
-    std::string strError = "";
+    std::string strError;
     if (!govobj.IsValidLocally(*node.chainman, strError, false))
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + govobj.GetHash().ToString() + " - " + strError);
 
@@ -195,15 +198,19 @@ static RPCHelpMan gobject_prepare()
     outpoint.SetNull();
     if (!request.params[4].isNull() && !request.params[5].isNull()) {
         uint256 collateralHash = ParseHashV(request.params[4], "outputHash");
-        int32_t collateralIndex = request.params[5].get_int();
+        int32_t collateralIndex = request.params[5].getInt<int>();
         if (collateralHash.IsNull() || collateralIndex < 0) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid hash or index: %s-%d", collateralHash.ToString(), collateralIndex));
         }
         outpoint = COutPoint(collateralHash, (uint32_t)collateralIndex);
     }
-
-    CTransactionRef tx;
-    if (!GetBudgetSystemCollateralTX(*pwallet, tx, govobj.GetHash(), govobj.GetMinCollateralFee(), outpoint)) {
+    auto res = GetBudgetSystemCollateralTX(*pwallet, govobj.GetHash(), govobj.GetMinCollateralFee(), outpoint);
+    if(!res) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, util::ErrorString(res).original);
+    }
+    auto &txr = *res;
+    CTransactionRef tx = txr.tx;
+    if (!tx) {
         std::string err = "Error making collateral transaction for governance object. Please check your wallet balance and make sure your wallet is unlocked.";
         if (!request.params[4].isNull() && !request.params[5].isNull()) {
             err += "Please verify your specified output is valid and is enough for the combined proposal fee and transaction fee.";
@@ -242,12 +249,12 @@ static RPCHelpMan gobject_vote_many()
                 HelpExampleCli("gobject_vote_many", "")
             + HelpExampleRpc("gobject_vote_many", "")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
-    NodeContext& node =  request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
+    node::NodeContext& node =  request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 
@@ -275,19 +282,19 @@ static RPCHelpMan gobject_vote_many()
     // the user could have gotten from another RPC command prior to now
     pwallet->BlockUntilSyncedToCurrentChain();
     auto mnList = deterministicMNManager->GetListAtChainTip();
-    mnList.ForEachMN(true, [&](const CDeterministicMNCPtr& dmn) {
+    mnList.ForEachMN(true, [&](const auto& dmn) {
         LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet);
         LOCK2(pwallet->cs_wallet, spk_man.cs_KeyStore);
 
         EnsureWalletIsUnlocked(*pwallet);
 
         CKey key;
-        if (spk_man.GetKey(dmn->pdmnState->keyIDVoting, key)) {
-            votingKeys.emplace(dmn->proTxHash, key);
+        if (spk_man.GetKey(dmn.pdmnState->keyIDVoting, key)) {
+            votingKeys.emplace(dmn.proTxHash, key);
         }
     });
 
-    return VoteWithMasternodes(votingKeys, hash, eVoteSignal, eVoteOutcome, *node.connman);
+    return VoteWithMasternodes(votingKeys, hash, eVoteSignal, eVoteOutcome, *node.connman, *node.peerman);
 },
     };
 } 
@@ -307,12 +314,12 @@ static RPCHelpMan gobject_vote_alias()
                 HelpExampleCli("gobject_vote_alias", "")
             + HelpExampleRpc("gobject_vote_alias", "")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {   
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
-    NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
+    node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
 
@@ -358,22 +365,18 @@ static RPCHelpMan gobject_vote_alias()
     std::map<uint256, CKey> votingKeys;
     votingKeys.emplace(proTxHash, key);
 
-    return VoteWithMasternodes(votingKeys, hash, eVoteSignal, eVoteOutcome, *node.connman);
+    return VoteWithMasternodes(votingKeys, hash, eVoteSignal, eVoteOutcome, *node.connman, *node.peerman);
 },
     };
 } 
 
-Span<const CRPCCommand> GetGovernanceWalletRPCCommands()
+Span<const CRPCCommand> wallet::GetGovernanceWalletRPCCommands()
 {
-// clang-format off
-static const CRPCCommand commands[] =
-{ //  category              name                      actor (function)       
-//  --------------------- ------------------------  ----------------------- 
-    { "governancewallet",            &gobject_vote_alias,      },
-    { "governancewallet",            &gobject_vote_many,       },
-    { "governancewallet",            &gobject_prepare,         },
-    { "governancewallet",            &gobject_list_prepared,   },
-};
-// clang-format on
-    return MakeSpan(commands);
+    static const CRPCCommand commands[]{
+        {"governancewallet", &gobject_vote_alias},
+        {"governancewallet", &gobject_vote_many},
+        {"governancewallet", &gobject_prepare},
+        {"governancewallet", &gobject_list_prepared},
+    };
+    return commands;
 }

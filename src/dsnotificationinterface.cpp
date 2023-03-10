@@ -15,38 +15,35 @@
 #include <llmq/quorums_dkgsessionmgr.h>
 #include <llmq/quorums_chainlocks.h>
 #include <shutdown.h>
+#include <net_processing.h>
 void CDSNotificationInterface::InitializeCurrentBlockTip(ChainstateManager& chainman)
 {
     LOCK(cs_main);
-    SynchronousUpdatedBlockTip(chainman.ActiveChain().Tip(), nullptr, chainman.ActiveChainstate().IsInitialBlockDownload());
-    UpdatedBlockTip(chainman.ActiveChain().Tip(), nullptr, chainman.ActiveChainstate().IsInitialBlockDownload());
+    SynchronousUpdatedBlockTip(chainman.ActiveChain().Tip(), nullptr);
+    UpdatedBlockTip(chainman.ActiveChain().Tip(), nullptr, chainman, chainman.ActiveChainstate().IsInitialBlockDownload());
 }
 
-void CDSNotificationInterface::AcceptedBlockHeader(const CBlockIndex *pindexNew)
+
+void CDSNotificationInterface::NotifyHeaderTip(const CBlockIndex *pindexNew)
 {
     if(llmq::chainLocksHandler)
-        llmq::chainLocksHandler->AcceptedBlockHeader(pindexNew);
-    masternodeSync.AcceptedBlockHeader(pindexNew);
+        llmq::chainLocksHandler->NotifyHeaderTip(pindexNew);
+    masternodeSync.NotifyHeaderTip(pindexNew);
 }
 
-void CDSNotificationInterface::NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload)
-{
-    masternodeSync.NotifyHeaderTip(pindexNew, fInitialDownload, connman);
-}
-
-void CDSNotificationInterface::SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
+void CDSNotificationInterface::SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork)
 {
     if (pindexNew == pindexFork || ShutdownRequested()) // blocks were disconnected without any new ones
         return;
     if(deterministicMNManager)
         deterministicMNManager->UpdatedBlockTip(pindexNew);
 }
-void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
+void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload)
 {
     if (pindexNew == pindexFork || ShutdownRequested()) // blocks were disconnected without any new ones
         return;
 
-    masternodeSync.UpdatedBlockTip(pindexNew, fInitialDownload);
+    masternodeSync.UpdatedBlockTip(pindexNew, chainman, fInitialDownload);
 
     if (fInitialDownload)
         return;
@@ -56,7 +53,7 @@ void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, con
         llmq::quorumDKGSessionManager->UpdatedBlockTip(pindexNew, fInitialDownload);
     if(llmq::chainLocksHandler)
         llmq::chainLocksHandler->UpdatedBlockTip(pindexNew, fInitialDownload);
-    if (!fDisableGovernance && governance) governance->UpdatedBlockTip(pindexNew, connman);
+    if (!fDisableGovernance && governance) governance->UpdatedBlockTip(pindexNew, peerman);
 }
 
 void CDSNotificationInterface::NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff)

@@ -5,7 +5,6 @@
 #include <governance/governancevotedb.h>
 
 CGovernanceObjectVoteFile::CGovernanceObjectVoteFile() :
-    nMemoryVotes(0),
     listVotes(),
     mapVoteIndex()
 {
@@ -68,7 +67,7 @@ void CGovernanceObjectVoteFile::RemoveVotesFromMasternode(const COutPoint& outpo
     }
 }
 
-std::set<uint256> CGovernanceObjectVoteFile::RemoveInvalidVotes(const COutPoint& outpointMasternode, bool fProposal)
+std::set<uint256> CGovernanceObjectVoteFile::RemoveInvalidVotes(const CBlockIndex *pindex, const COutPoint& outpointMasternode, bool fProposal)
 {
     std::set<uint256> removedVotes;
 
@@ -76,7 +75,7 @@ std::set<uint256> CGovernanceObjectVoteFile::RemoveInvalidVotes(const COutPoint&
     while (it != listVotes.end()) {
         if (it->GetMasternodeOutpoint() == outpointMasternode) {
             bool useVotingKey = fProposal && (it->GetSignal() == VOTE_SIGNAL_FUNDING);
-            if (!it->IsValid(useVotingKey)) {
+            if (!it->IsValid(pindex, useVotingKey)) {
                 removedVotes.emplace(it->GetHash());
                 --nMemoryVotes;
                 mapVoteIndex.erase(it->GetHash());

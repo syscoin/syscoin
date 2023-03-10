@@ -36,11 +36,15 @@ class TestP2PConn(P2PInterface):
 
 
 class LLMQCoinbaseCommitmentsTest(DashTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.set_dash_test_params(4, 3, fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        self.skip_if_no_bdb()
 
     def run_test(self):
         self.test_node = self.nodes[0].add_p2p_connection(TestP2PConn())
@@ -64,11 +68,11 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
         expectedDeleted = []
         expectedUpdated = [new_mn.proTxHash]
         mnList = self.test_getmnlistdiff(baseBlockHash, self.nodes[0].getbestblockhash(), mnList, expectedDeleted, expectedUpdated)
-        assert(mnList[new_mn.proTxHash].confirmedHash == 0)
+        assert mnList[new_mn.proTxHash].confirmedHash == 0
         # Now let the MN get enough confirmations and verify that the MNLISTDIFF now has confirmedHash != 0
         self.confirm_mns()
         mnList = self.test_getmnlistdiff(baseBlockHash, self.nodes[0].getbestblockhash(), mnList, expectedDeleted, expectedUpdated)
-        assert(mnList[new_mn.proTxHash].confirmedHash != 0)
+        assert mnList[new_mn.proTxHash].confirmedHash != 0
 
         # Spend the collateral of the previously added MN and test if it appears in "deletedMNs"
         expectedDeleted = [new_mn.proTxHash]
@@ -83,7 +87,7 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
         #############################
         # Now start testing quorum commitment merkle roots
 
-        self.generate(self.nodes[0], 1)
+        self.generate(self.nodes[0], 5)
         oldhash = self.nodes[0].getbestblockhash()
         # Have to disable ChainLocks here because they won't let you to invalidate already locked blocks
         self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 4070908800)
@@ -258,14 +262,15 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
         self.wait_for_sporks_same()
 
         cbtx = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 2)["tx"][0]
-        assert(cbtx["cbTx"]["version"] == 2)
+        assert cbtx["cbTx"]["version"] == 2
 
-        self.generatetoaddress(self.nodes[0], nblocks=1, address=self.nodes[0].getnewaddress(label='coinbase'))
+        self.generatetoaddress(self.nodes[0], nblocks=5, address=self.nodes[0].getnewaddress(label='coinbase'))
         # NOTE: set slow_mode=True if you are activating dip8 after a huge reorg
         # or nodes might fail to catch up otherwise due to a large
         # (MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16 blocks) reorg error.
         self.log.info("Wait for dip0008 activation")
         while self.nodes[0].getblockcount() < 200:
+            self.bump_mocktime(10)
             self.generate(self.nodes[0], 10)
             if slow_mode:
                 self.sync_blocks()
@@ -274,11 +279,11 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
         # Assert that merkleRootQuorums is present and 0 (we have no quorums yet)
         cbtx = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 2)["tx"][0]
         assert_equal(cbtx["cbTx"]["version"], 2)
-        assert("merkleRootQuorums" in cbtx["cbTx"])
+        assert "merkleRootQuorums" in cbtx["cbTx"]
         merkleRootQuorums = int(cbtx["cbTx"]["merkleRootQuorums"], 16)
 
         if with_initial_quorum:
-            assert(merkleRootQuorums != 0)
+            assert merkleRootQuorums != 0
         else:
             assert_equal(merkleRootQuorums, 0)
 
@@ -289,7 +294,7 @@ class LLMQCoinbaseCommitmentsTest(DashTestFramework):
         # Mine quorum and verify that merkleRootQuorums has changed
         quorum = self.mine_quorum()
         cbtx = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 2)["tx"][0]
-        assert(int(cbtx["cbTx"]["merkleRootQuorums"], 16) != merkleRootQuorums)
+        assert int(cbtx["cbTx"]["merkleRootQuorums"], 16) != merkleRootQuorums
 
         return quorum
 

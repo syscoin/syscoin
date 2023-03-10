@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2021 The Bitcoin Core developers
+# Copyright (c) 2014-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the listtransactions API."""
+
 from decimal import Decimal
+import os
+import shutil
 
 from test_framework.messages import (
     COIN,
@@ -13,14 +16,19 @@ from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     assert_array_result,
     assert_equal,
+    assert_raises_rpc_error,
 )
 
+
 class ListTransactionsTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
-        self.num_nodes = 2
+        self.num_nodes = 3
         # This test isn't testing txn relay/timing, so set whitelist on the
         # peers for instant txn relay. This speeds up the test run time 2-3x.
-        self.extra_args = [["-whitelist=noban@127.0.0.1"]] * self.num_nodes
+        self.extra_args = [["-whitelist=noban@127.0.0.1", "-walletrbf=0"]] * self.num_nodes
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -90,8 +98,7 @@ class ListTransactionsTest(SyscoinTestFramework):
             # include_watchonly is a legacy wallet feature, so don't test it for descriptor wallets
             self.log.info("Test 'include_watchonly' feature (legacy wallet)")
             pubkey = self.nodes[1].getaddressinfo(self.nodes[1].getnewaddress())['pubkey']
-            # SYSCOIN
-            multisig = self.nodes[1].createmultisig(1, [pubkey], 'legacy')
+            multisig = self.nodes[1].createmultisig(1, [pubkey])
             self.nodes[0].importaddress(multisig["redeemScript"], "watchonly", False, True)
             txid = self.nodes[1].sendtoaddress(multisig["address"], 0.1)
             self.generate(self.nodes[1], 1)
@@ -103,7 +110,9 @@ class ListTransactionsTest(SyscoinTestFramework):
                                 {"txid": txid, "label": "watchonly"})
 
         self.run_rbf_opt_in_test()
-
+        self.run_externally_generated_address_test()
+        self.run_invalid_parameters_test()
+        self.test_op_return()
 
     def run_rbf_opt_in_test(self):
         """Test the opt-in-rbf flag for sent and received transactions."""
@@ -141,7 +150,7 @@ class ListTransactionsTest(SyscoinTestFramework):
         # Create tx2 using createrawtransaction
         inputs = [{"txid": utxo_to_use["txid"], "vout": utxo_to_use["vout"]}]
         outputs = {self.nodes[0].getnewaddress(): 0.999}
-        tx2 = self.nodes[1].createrawtransaction(inputs, outputs)
+        tx2 = self.nodes[1].createrawtransaction(inputs=inputs, outputs=outputs, replaceable=False)
         tx2_signed = self.nodes[1].signrawtransactionwithwallet(tx2)["hex"]
         txid_2 = self.nodes[1].sendrawtransaction(tx2_signed)
 
@@ -173,7 +182,7 @@ class ListTransactionsTest(SyscoinTestFramework):
         utxo_to_use = get_unconfirmed_utxo_entry(self.nodes[1], txid_3)
         inputs = [{"txid": txid_3, "vout": utxo_to_use["vout"]}]
         outputs = {self.nodes[0].getnewaddress(): 0.997}
-        tx4 = self.nodes[1].createrawtransaction(inputs, outputs)
+        tx4 = self.nodes[1].createrawtransaction(inputs=inputs, outputs=outputs, replaceable=False)
         tx4_signed = self.nodes[1].signrawtransactionwithwallet(tx4)["hex"]
         txid_4 = self.nodes[1].sendrawtransaction(tx4_signed)
 
@@ -213,10 +222,83 @@ class ListTransactionsTest(SyscoinTestFramework):
             assert_equal(txs[txid_4], "unknown")
 
         self.log.info("Test mined transactions are no longer bip125-replaceable")
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 1)
         assert txid_3b not in self.nodes[0].getrawmempool()
         assert_equal(self.nodes[0].gettransaction(txid_3b)["bip125-replaceable"], "no")
         assert_equal(self.nodes[0].gettransaction(txid_4)["bip125-replaceable"], "unknown")
+
+    def run_externally_generated_address_test(self):
+        """Test behavior when receiving address is not in the address book."""
+
+        self.log.info("Setup the same wallet on two nodes")
+        # refill keypool otherwise the second node wouldn't recognize addresses generated on the first nodes
+        self.nodes[0].keypoolrefill(1000)
+        self.stop_nodes()
+        wallet0 = os.path.join(self.nodes[0].datadir, self.chain, self.default_wallet_name, "wallet.dat")
+        wallet2 = os.path.join(self.nodes[2].datadir, self.chain, self.default_wallet_name, "wallet.dat")
+        shutil.copyfile(wallet0, wallet2)
+        self.start_nodes()
+        # reconnect nodes
+        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 2)
+        self.connect_nodes(2, 0)
+
+        addr1 = self.nodes[0].getnewaddress("pizza1", 'legacy')
+        addr2 = self.nodes[0].getnewaddress("pizza2", 'p2sh-segwit')
+        addr3 = self.nodes[0].getnewaddress("pizza3", 'bech32')
+
+        self.log.info("Send to externally generated addresses")
+        # send to an address beyond the next to be generated to test the keypool gap
+        self.nodes[1].sendtoaddress(addr3, "0.001")
+        self.generate(self.nodes[1], 1)
+
+        # send to an address that is already marked as used due to the keypool gap mechanics
+        self.nodes[1].sendtoaddress(addr2, "0.001")
+        self.generate(self.nodes[1], 1)
+
+        # send to self transaction
+        self.nodes[0].sendtoaddress(addr1, "0.001")
+        self.generate(self.nodes[0], 1)
+
+        self.log.info("Verify listtransactions is the same regardless of where the address was generated")
+        transactions0 = self.nodes[0].listtransactions()
+        transactions2 = self.nodes[2].listtransactions()
+
+        # normalize results: remove fields that normally could differ and sort
+        def normalize_list(txs):
+            for tx in txs:
+                tx.pop('label', None)
+                tx.pop('time', None)
+                tx.pop('timereceived', None)
+            txs.sort(key=lambda x: x['txid'])
+
+        normalize_list(transactions0)
+        normalize_list(transactions2)
+        assert_equal(transactions0, transactions2)
+
+        self.log.info("Verify labels are persistent on the node that generated the addresses")
+        assert_equal(['pizza1'], self.nodes[0].getaddressinfo(addr1)['labels'])
+        assert_equal(['pizza2'], self.nodes[0].getaddressinfo(addr2)['labels'])
+        assert_equal(['pizza3'], self.nodes[0].getaddressinfo(addr3)['labels'])
+
+    def run_invalid_parameters_test(self):
+        self.log.info("Test listtransactions RPC parameter validity")
+        assert_raises_rpc_error(-8, 'Label argument must be a valid label name or "*".', self.nodes[0].listtransactions, label="")
+        self.nodes[0].listtransactions(label="*")
+        assert_raises_rpc_error(-8, "Negative count", self.nodes[0].listtransactions, count=-1)
+        assert_raises_rpc_error(-8, "Negative from", self.nodes[0].listtransactions, skip=-1)
+
+    def test_op_return(self):
+        """Test if OP_RETURN outputs will be displayed correctly."""
+        raw_tx = self.nodes[0].createrawtransaction([], [{'data': 'aa'}])
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)
+        signed_tx = self.nodes[0].signrawtransactionwithwallet(funded_tx['hex'])
+        tx_id = self.nodes[0].sendrawtransaction(signed_tx['hex'])
+
+        op_ret_tx = [tx for tx in self.nodes[0].listtransactions() if tx['txid'] == tx_id][0]
+
+        assert 'address' not in op_ret_tx
+
 
 if __name__ == '__main__':
     ListTransactionsTest().main()

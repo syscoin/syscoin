@@ -1,20 +1,27 @@
-// Copyright (c) 2015-2020 The Bitcoin Core developers
+// Copyright (c) 2015-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <zmq/zmqnotificationinterface.h>
+
+#include <logging.h>
+#include <primitives/block.h>
+#include <primitives/transaction.h>
+#include <util/system.h>
+#include <validationinterface.h>
+#include <zmq/zmqabstractnotifier.h>
 #include <zmq/zmqpublishnotifier.h>
 #include <zmq/zmqutil.h>
 
 #include <zmq.h>
 
-#include <validation.h>
-#include <util/system.h>
-// SYSCOIN
-#include <governance/governancevote.h>
-#include <governance/governanceobject.h>
-// SYSCOIN
-CZMQNotificationInterface::CZMQNotificationInterface() : pcontext(nullptr), pcontextsub(nullptr)
+#include <cassert>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
+CZMQNotificationInterface::CZMQNotificationInterface()
 {
 }
 
@@ -43,19 +50,26 @@ CZMQNotificationInterface* CZMQNotificationInterface::Create()
     factories["pubrawmempooltx"] = CZMQAbstractNotifier::Create<CZMQPublishRawMempoolTransactionNotifier>;
     factories["pubhashgovernancevote"] = CZMQAbstractNotifier::Create<CZMQPublishHashGovernanceVoteNotifier>;
     factories["pubhashgovernanceobject"] = CZMQAbstractNotifier::Create<CZMQPublishHashGovernanceObjectNotifier>;
-    factories["pubrawgovernancevote"] = CZMQAbstractNotifier::Create<CZMQPublishRawGovernanceVoteNotifier>;
-    factories["pubrawgovernanceobject"] = CZMQAbstractNotifier::Create<CZMQPublishRawGovernanceObjectNotifier>;
     factories["pubsequence"] = CZMQAbstractNotifier::Create<CZMQPublishSequenceNotifier>;
     std::list<std::unique_ptr<CZMQAbstractNotifier>> notifiers;
-    const std::string &strPub = gArgs.GetArg("-zmqpubnevm", GetDefaultPubNEVM());
-    if(!strPub.empty()) {
-        std::string pubCmd = "pubnevmblock";
-        CZMQNotifierFactory factory = CZMQAbstractNotifier::Create<CZMQPublishNEVMBlockNotifier>;
+    if(!fNEVMSub.empty()) {
+        std::string pubCmd = "pubnevmblockinfo";
+        CZMQNotifierFactory factory0 = CZMQAbstractNotifier::Create<CZMQPublishNEVMBlockInfoNotifier>;
         std::string arg("-zmq" + pubCmd);
+        std::unique_ptr<CZMQAbstractNotifier> notifier0 = factory0();
+        notifier0->SetAddressSub(fNEVMSub);
+        notifier0->SetType(pubCmd);
+        notifier0->SetAddress(fNEVMSub);
+        notifier0->SetOutboundMessageHighWaterMark(static_cast<int>(gArgs.GetIntArg(arg + "hwm", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM)));
+        notifiers.push_back(std::move(notifier0));
+
+        pubCmd = "pubnevmblock";
+        CZMQNotifierFactory factory = CZMQAbstractNotifier::Create<CZMQPublishNEVMBlockNotifier>;
+        arg = std::string("-zmq" + pubCmd);
         std::unique_ptr<CZMQAbstractNotifier> notifier = factory();
-        notifier->SetAddressSub(strPub);
+        notifier->SetAddressSub(fNEVMSub);
         notifier->SetType(pubCmd);
-        notifier->SetAddress(strPub);
+        notifier->SetAddress(fNEVMSub);
         notifier->SetOutboundMessageHighWaterMark(static_cast<int>(gArgs.GetIntArg(arg + "hwm", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM)));
         notifiers.push_back(std::move(notifier));
 
@@ -63,9 +77,9 @@ CZMQNotificationInterface* CZMQNotificationInterface::Create()
         CZMQNotifierFactory factory1 = CZMQAbstractNotifier::Create<CZMQPublishNEVMBlockConnectNotifier>;
         arg = std::string("-zmq" + pubCmd);
         std::unique_ptr<CZMQAbstractNotifier> notifier1 = factory1();
-        notifier1->SetAddressSub(strPub);
+        notifier1->SetAddressSub(fNEVMSub);
         notifier1->SetType(pubCmd);
-        notifier1->SetAddress(strPub);
+        notifier1->SetAddress(fNEVMSub);
         notifier1->SetOutboundMessageHighWaterMark(static_cast<int>(gArgs.GetIntArg(arg + "hwm", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM)));
         notifiers.push_back(std::move(notifier1));
 
@@ -73,9 +87,9 @@ CZMQNotificationInterface* CZMQNotificationInterface::Create()
         CZMQNotifierFactory factory2 = CZMQAbstractNotifier::Create<CZMQPublishNEVMBlockDisconnectNotifier>;
         arg = std::string("-zmq" + pubCmd);
         std::unique_ptr<CZMQAbstractNotifier> notifier2 = factory2();
-        notifier2->SetAddressSub(strPub);
+        notifier2->SetAddressSub(fNEVMSub);
         notifier2->SetType(pubCmd);
-        notifier2->SetAddress(strPub);
+        notifier2->SetAddress(fNEVMSub);
         notifier2->SetOutboundMessageHighWaterMark(static_cast<int>(gArgs.GetIntArg(arg + "hwm", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM)));
         notifiers.push_back(std::move(notifier2));
 
@@ -83,11 +97,12 @@ CZMQNotificationInterface* CZMQNotificationInterface::Create()
         CZMQNotifierFactory factory3 = CZMQAbstractNotifier::Create<CZMQPublishNEVMCommsNotifier>;
         arg = std::string("-zmq" + pubCmd);
         std::unique_ptr<CZMQAbstractNotifier> notifier3 = factory3();
-        notifier3->SetAddressSub(strPub);
+        notifier3->SetAddressSub(fNEVMSub);
         notifier3->SetType(pubCmd);
-        notifier3->SetAddress(strPub);
+        notifier3->SetAddress(fNEVMSub);
         notifier3->SetOutboundMessageHighWaterMark(static_cast<int>(gArgs.GetIntArg(arg + "hwm", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM)));
         notifiers.push_back(std::move(notifier3));
+
     }
     
     
@@ -122,9 +137,9 @@ bool CZMQNotificationInterface::Initialize()
 {
     int major = 0, minor = 0, patch = 0;
     zmq_version(&major, &minor, &patch);
-    LogPrint(BCLog::ZMQ, "zmq: version %d.%d.%d\n", major, minor, patch);
+    LogPrint(BCLog::ZMQ, "version %d.%d.%d\n", major, minor, patch);
 
-    LogPrint(BCLog::ZMQ, "zmq: Initialize notification interface\n");
+    LogPrint(BCLog::ZMQ, "Initialize notification interface\n");
     // SYSCOIN
     assert(!pcontext && !pcontextsub);
 
@@ -139,9 +154,9 @@ bool CZMQNotificationInterface::Initialize()
 
     for (auto& notifier : notifiers) {
         if (notifier->Initialize(pcontext, pcontextsub)) {
-            LogPrint(BCLog::ZMQ, "zmq: Notifier %s ready (address = %s, subscriber address = %s)\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
+            LogPrint(BCLog::ZMQ, "Notifier %s ready (address = %s, subscriber address = %s)\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
         } else {
-            LogPrint(BCLog::ZMQ, "zmq: Notifier %s failed (address = %s, subscriber address = %s)\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
+            LogPrint(BCLog::ZMQ, "Notifier %s failed (address = %s, subscriber address = %s)\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
             return false;
         }
     }
@@ -152,11 +167,11 @@ bool CZMQNotificationInterface::Initialize()
 // Called during shutdown sequence
 void CZMQNotificationInterface::Shutdown()
 {
-    LogPrint(BCLog::ZMQ, "zmq: Shutdown notification interface\n");
+    LogPrint(BCLog::ZMQ, "Shutdown notification interface\n");
     if (pcontext)
     {
         for (auto& notifier : notifiers) {
-            LogPrint(BCLog::ZMQ, "zmq: Shutdown notifier %s at %s, subscriber: %s\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
+            LogPrint(BCLog::ZMQ, "Shutdown notifier %s at %s, subscriber: %s\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
             notifier->Shutdown();
         }
         zmq_ctx_term(pcontext);
@@ -208,25 +223,32 @@ void CZMQNotificationInterface::NotifyNEVMComms(const std::string& commMessage, 
         return notifier->NotifyNEVMComms(commMessage, bResponse);
     });
 }
-void CZMQNotificationInterface::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, BlockValidationState &state, const uint256& nBlockHash)
+void CZMQNotificationInterface::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation)
 {
-    TryForEach(notifiers, [&evmBlock, &block, &nBlockHash, &state](CZMQAbstractNotifier* notifier) {
-        return notifier->NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash);
+    TryForEach(notifiers, [&evmBlock, &block, &nBlockHash, &state, &NEVMDataVecOut, &nHeight, &bSkipValidation](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation);
     });
 }
-void CZMQNotificationInterface::NotifyNEVMBlockDisconnect(BlockValidationState &state, const uint256& nBlockHash)
+void CZMQNotificationInterface::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash)
 {
     TryForEach(notifiers, [&nBlockHash, &state](CZMQAbstractNotifier* notifier) {
         return notifier->NotifyNEVMBlockDisconnect(state, nBlockHash);
     });
 }
-void CZMQNotificationInterface::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state)
+void CZMQNotificationInterface::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state)
+{
+    TryForEach(notifiers, [&nHeight, &state](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyGetNEVMBlockInfo(nHeight, state);
+    });
+}
+
+void CZMQNotificationInterface::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state)
 {
     TryForEach(notifiers, [&evmBlock, &state](CZMQAbstractNotifier* notifier) {
         return notifier->NotifyGetNEVMBlock(evmBlock, state);
     });
 }
-void CZMQNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
+void CZMQNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload)
 {
     if (fInitialDownload || pindexNew == pindexFork) // In IBD or blocks were disconnected without any new ones
         return;
@@ -285,14 +307,14 @@ void CZMQNotificationInterface::BlockDisconnected(const std::shared_ptr<const CB
     });
 }
 // SYSCOIN
-void CZMQNotificationInterface::NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote> &vote)
+void CZMQNotificationInterface::NotifyGovernanceVote(const uint256 &vote)
 {
     TryForEachAndRemoveFailed(notifiers, [&vote](CZMQAbstractNotifier* notifier) {
         return notifier->NotifyGovernanceVote(vote);
     });
 }
 
-void CZMQNotificationInterface::NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject> &object)
+void CZMQNotificationInterface::NotifyGovernanceObject(const uint256 &object)
 {
     TryForEachAndRemoveFailed(notifiers, [&object](CZMQAbstractNotifier* notifier) {
         return notifier->NotifyGovernanceObject(object);

@@ -12,7 +12,7 @@
 
 #include <wallet/coincontrol.h>
 #include <wallet/spend.h>
-#include <wallet/rpcwallet.h>
+#include <wallet/rpc/util.h>
 
 #include <netbase.h>
 
@@ -29,7 +29,10 @@
 #include <util/translation.h>
 #include <node/context.h>
 #include <node/transaction.h>
-
+#include <wallet/rpc/spend.h>
+#include <wallet/rpc/wallet.h>
+#include <llmq/quorums_utils.h>
+using namespace wallet;
 static CKeyID ParsePubKeyIDFromAddress(const std::string& strAddress, const std::string& paramName)
 {
     CTxDestination dest = DecodeDestination(strAddress);
@@ -40,10 +43,11 @@ static CKeyID ParsePubKeyIDFromAddress(const std::string& strAddress, const std:
     return ToKeyID(*keyID);
 }
 
-static CBLSPublicKey ParseBLSPubKey(const std::string& hexKey, const std::string& paramName)
+static CBLSPublicKey ParseBLSPubKey(const std::string& hexKey, const std::string& paramName, bool is_bls_legacy_scheme = true, bool specific_legacy_bls_scheme = false)
 {
     CBLSPublicKey pubKey;
-    if (!pubKey.SetHexStr(hexKey)) {
+    bool use_legacy_bls_scheme = specific_legacy_bls_scheme || is_bls_legacy_scheme;
+    if (!pubKey.SetHexStr(hexKey, use_legacy_bls_scheme)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS public key, not %s", paramName, hexKey));
     }
     return pubKey;
@@ -59,7 +63,7 @@ static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::str
 }
 
 template<typename SpecialTxPayload>
-static void FundSpecialTx(CWallet& pwallet, CMutableTransaction& tx, const SpecialTxPayload& payload, const CTxDestination& fundDest)
+static void FundSpecialTx(wallet::CWallet& pwallet, CMutableTransaction& tx, const SpecialTxPayload& payload, const CTxDestination& fundDest)
 {
 
     // Make sure the results are valid at least up to the most recent block
@@ -84,27 +88,26 @@ static void FundSpecialTx(CWallet& pwallet, CMutableTransaction& tx, const Speci
         coinControl.destChange = fundDest;
 
         std::vector<COutput> vecOutputs;
-        AvailableCoins(pwallet, vecOutputs);
+        vecOutputs = AvailableCoins(pwallet).All();
 
         for (const auto& out : vecOutputs) {
             CTxDestination txDest;
-            if (ExtractDestination(out.tx->tx->vout[out.i].scriptPubKey, txDest) && txDest == fundDest) {
-                coinControl.Select(COutPoint(out.tx->tx->GetHash(), out.i));
+            if (ExtractDestination(out.txout.scriptPubKey, txDest) && txDest == fundDest) {
+                coinControl.Select(COutPoint(out.outpoint.hash, out.outpoint.n));
             }
         }
 
         if (!coinControl.HasSelected()) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "No funds at specified address");
         }
-        CAmount nFeeRequired = 0;
-        int nChangePosRet = -1;
-        bilingual_str error;
+        constexpr int RANDOM_CHANGE_POSITION = -1;
         CTransactionRef wtx;
-        FeeCalculation fee_calc_out;
-        bool fCreated = CreateTransaction(pwallet, vecSend, wtx, nFeeRequired, nChangePosRet, error, coinControl, fee_calc_out);
-        if (!fCreated)
-            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
-
+        auto res = CreateTransaction(pwallet, vecSend, RANDOM_CHANGE_POSITION, coinControl);
+        if (!res) {
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
+        }
+        auto &txr = *res;
+        wtx = txr.tx;
         tx.vin = wtx->vin;
         tx.vout = wtx->vout;
     }
@@ -149,12 +152,12 @@ static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxP
     uint256 hash = ::SerializeHash(payload);
     payload.sig = key.Sign(hash);
 }
-static UniValue SignAndSendSpecialTx(const JSONRPCRequest& request, const CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true)
+static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true)
 {
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     ds << tx;
 
-    JSONRPCRequest signRequest;
+    node::JSONRPCRequest signRequest;
     signRequest.context = request.context;
     signRequest.URI = request.URI;
     signRequest.params.setArray();
@@ -170,7 +173,7 @@ static UniValue SignAndSendSpecialTx(const JSONRPCRequest& request, const CWalle
     CTransactionRef txRef(MakeTransactionRef(std::move(mtx)));
 
     int64_t virtual_size = GetVirtualTransactionSize(*txRef);
-    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
+    CAmount max_raw_tx_fee = node::DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
 
     std::string err_string;
     if (!pwallet.chain().broadcastTransaction(txRef, max_raw_tx_fee, true, err_string)) {
@@ -207,15 +210,16 @@ static RPCHelpMan protx_register()
                                         "If not specified, payoutAddress is the one that is going to be used.\n"
                                         "The private key belonging to this address must be known in your wallet."},
                     {"submit", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "If true, the resulting transaction is sent to the network."},
+                    {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
                 },
                 RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
                 RPCExamples{
                     HelpExampleCli("protx_register", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 0 173.249.49.9:18369 tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r 5 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
                 + HelpExampleRpc("protx_register", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", 0, \"173.249.49.9:18369\", \"tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", 5, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
     // Make sure the results are valid at least up to the most recent block
@@ -225,19 +229,30 @@ static RPCHelpMan protx_register()
     
     size_t paramIdx = 0;
 
-
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
 
     CProRegTx ptx;
-    ptx.nVersion = CProRegTx::CURRENT_VERSION;
+    bool v19active;
+    {
+        LOCK(cs_main);
+        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+    }
+    bool specific_legacy_bls_scheme{!v19active};
+    if(request.params.size() >= 11) {
+        specific_legacy_bls_scheme = request.params[10].get_bool();
+    }
+    if (specific_legacy_bls_scheme)
+        ptx.nVersion = CProRegTx::LEGACY_BLS_VERSION;
+    else
+        ptx.nVersion = CProRegTx::GetVersion(v19active);
 
     uint256 collateralHash = ParseHashV(request.params[paramIdx], "collateralHash");
-    int32_t collateralIndex = request.params[paramIdx + 1].get_int();
+    int32_t collateralIndex = request.params[paramIdx + 1].getInt<int>();
     if (collateralHash.IsNull() || collateralIndex < 0) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid hash or index: %s-%d", collateralHash.ToString(), collateralIndex));
     }
-
+   
     ptx.collateralOutpoint = COutPoint(collateralHash, (uint32_t)collateralIndex);
     paramIdx += 2;
     CTxDestination fundDest;
@@ -254,7 +269,7 @@ static RPCHelpMan protx_register()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address");
+        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme);
         CKeyID keyIDVoting = ptx.keyIDOwner;
         if (request.params[paramIdx + 3].get_str() != "") {
             keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -321,7 +336,7 @@ static RPCHelpMan protx_register()
     CKey key;
     {
         // lets prove we own the collateral
-        LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet);
+        LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet, true);
         LOCK2(pwallet->cs_wallet, spk_man.cs_KeyStore);
         if (!spk_man.GetKey(keyID, key)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("collateral key not in wallet: %s", EncodeDestination(txDest)));
@@ -359,15 +374,16 @@ static RPCHelpMan protx_register_fund()
                                         "If not specified, payoutAddress is the one that is going to be used.\n"
                                         "The private key belonging to this address must be known in your wallet."},
                     {"submit", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "If true, the resulting transaction is sent to the network."},
+                    {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
                 },
                 RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
                 RPCExamples{
                     HelpExampleCli("protx_register_fund", "\"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\" 173.249.49.9:18369 tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r 5 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
             + HelpExampleRpc("protx_register_fund", "\"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"173.249.49.9:18369\", \"tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", 5, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
     // Make sure the results are valid at least up to the most recent block
@@ -375,15 +391,26 @@ static RPCHelpMan protx_register_fund()
     pwallet->BlockUntilSyncedToCurrentChain();
     EnsureWalletIsUnlocked(*pwallet);
     
-
     size_t paramIdx = 0;
 
 
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-
+    bool v19active;
+    {
+        LOCK(cs_main);
+        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+    }
     CProRegTx ptx;
-    ptx.nVersion = CProRegTx::CURRENT_VERSION;
+    bool specific_legacy_bls_scheme{!v19active};
+    if(request.params.size() >= 10) {
+        specific_legacy_bls_scheme = request.params[9].get_bool();
+    }
+    if (specific_legacy_bls_scheme) {
+        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+    } else {
+        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+    }
 
 
     CTxDestination collateralDest = DecodeDestination(request.params[paramIdx].get_str());
@@ -405,7 +432,7 @@ static RPCHelpMan protx_register_fund()
     }
 
     ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-    CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address");
+    CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme);
     CKeyID keyIDVoting = ptx.keyIDOwner;
     if (request.params[paramIdx + 3].get_str() != "") {
         keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -456,7 +483,13 @@ static RPCHelpMan protx_register_fund()
     ptx.collateralOutpoint.n = collateralIndex;
 
     SetTxPayload(tx, ptx);
-    return SignAndSendSpecialTx(request, *pwallet, tx, fSubmit);
+    UniValue res = SignAndSendSpecialTx(request, *pwallet, tx, fSubmit);
+    if(fSubmit) {
+        uint256 txid = ParseHashV(res,"txhash");
+        LOCK(pwallet->cs_wallet);
+        pwallet->LockCoin(COutPoint(txid, ptx.collateralOutpoint.n));
+    }
+    return res;
 },
     };
 }  
@@ -485,15 +518,16 @@ static RPCHelpMan protx_register_prepare()
                 {"fundAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                     "If not specified, payoutAddress is the one that is going to be used.\n"
                                     "The private key belonging to this address must be known in your wallet."},
+                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
             },
             RPCResult{RPCResult::Type::ANY, "", "Unsigned ProTX transaction object"},
             RPCExamples{
                 HelpExampleCli("protx_register_prepare", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 0 173.249.49.9:18369 tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r 5 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
             + HelpExampleRpc("protx_register_prepare", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", 0, \"173.249.49.9:18369\", \"tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", 5, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
             },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
@@ -501,15 +535,26 @@ static RPCHelpMan protx_register_prepare()
 
     size_t paramIdx = 0;
 
-
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-
+    bool v19active;
+    {
+        LOCK(cs_main);
+        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+    }
     CProRegTx ptx;
-    ptx.nVersion = CProRegTx::CURRENT_VERSION;
+    bool specific_legacy_bls_scheme{!v19active};
+    if(request.params.size() >= 10) {
+        specific_legacy_bls_scheme = request.params[9].get_bool();
+    }
+    if (specific_legacy_bls_scheme) {
+        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+    } else {
+        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+    }
 
     uint256 collateralHash = ParseHashV(request.params[paramIdx], "collateralHash");
-    int32_t collateralIndex = request.params[paramIdx + 1].get_int();
+    int32_t collateralIndex = request.params[paramIdx + 1].getInt<int>();
     if (collateralHash.IsNull() || collateralIndex < 0) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid hash or index: %s-%d", collateralHash.ToString(), collateralIndex));
     }
@@ -530,7 +575,7 @@ static RPCHelpMan protx_register_prepare()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address");
+        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme);
         CKeyID keyIDVoting = ptx.keyIDOwner;
         if (request.params[paramIdx + 3].get_str() != "") {
             keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -618,9 +663,9 @@ static RPCHelpMan protx_register_submit()
                 HelpExampleCli("protx_register_submit", "")
             + HelpExampleRpc("protx_register_submit", "")
             },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
     EnsureWalletIsUnlocked(*pwallet);
@@ -639,9 +684,13 @@ static RPCHelpMan protx_register_submit()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "payload signature not empty");
     }
 
-    ptx.vchSig = DecodeBase64(request.params[1].get_str().c_str());
+    ptx.vchSig = *DecodeBase64(request.params[1].get_str().c_str());
 
     SetTxPayload(tx, ptx);
+    {
+        LOCK(pwallet->cs_wallet);
+        pwallet->LockCoin(COutPoint(tx.GetHash(), ptx.collateralOutpoint.n));
+    }
     return SignAndSendSpecialTx(request, *pwallet, tx);
 },
     };
@@ -666,24 +715,37 @@ static RPCHelpMan protx_update_service()
                 {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                     "If not specified, payoutAddress is the one that is going to be used.\n"
                                     "The private key belonging to this address must be known in your wallet."},
+                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
             },
             RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
             RPCExamples{
                     HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
                 + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
             },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
     EnsureWalletIsUnlocked(*pwallet);
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
     pwallet->BlockUntilSyncedToCurrentChain();
-
     CProUpServTx ptx;
-    ptx.nVersion = CProUpServTx::CURRENT_VERSION;
+    bool v19active;
+    {
+        LOCK(cs_main);
+        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+    }
+    bool specific_legacy_bls_scheme{!v19active};
+    if(request.params.size() >= 6) {
+        specific_legacy_bls_scheme = request.params[5].get_bool();
+    }
+    if (specific_legacy_bls_scheme) {
+        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+    } else {
+        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+    }
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
 
     if (!Lookup(request.params[1].get_str().c_str(), ptx.addr, Params().GetDefaultPort(), false)) {
@@ -696,7 +758,6 @@ static RPCHelpMan protx_update_service()
     if (!dmn) {
         throw std::runtime_error(strprintf("masternode with proTxHash %s not found", ptx.proTxHash.ToString()));
     }
-
     if (keyOperator.GetPublicKey() != dmn->pdmnState->pubKeyOperator.Get()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the operator key does not belong to the registered public key"));
     }
@@ -765,24 +826,37 @@ static RPCHelpMan protx_update_registrar()
                 {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                     "If not specified, payoutAddress is the one that is going to be used.\n"
                                     "The private key belonging to this address must be known in your wallet."},
+                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
             },
             RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
             RPCExamples{
                     HelpExampleCli("protx_update_registrar", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
                 + HelpExampleRpc("protx_update_registrar", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
             },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
     pwallet->BlockUntilSyncedToCurrentChain();
     EnsureWalletIsUnlocked(*pwallet);
-
     CProUpRegTx ptx;
-    ptx.nVersion = CProUpRegTx::CURRENT_VERSION;
+    bool v19active;
+    {
+        LOCK(cs_main);
+        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+    }
+    bool specific_legacy_bls_scheme{!v19active};
+    if(request.params.size() >= 6) {
+        specific_legacy_bls_scheme = request.params[5].get_bool();
+    }
+    if (specific_legacy_bls_scheme) {
+        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+    } else {
+        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+    }
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
     auto mnList = deterministicMNManager->GetListAtChainTip();
     auto dmn = mnList.GetMN(ptx.proTxHash);
@@ -794,7 +868,7 @@ static RPCHelpMan protx_update_registrar()
     ptx.scriptPayout = dmn->pdmnState->scriptPayout;
 
     if (request.params[1].get_str() != "") {
-        ptx.pubKeyOperator = ParseBLSPubKey(request.params[1].get_str(), "operator BLS address");
+        ptx.pubKeyOperator = ParseBLSPubKey(request.params[1].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme);
     }
     if (request.params[2].get_str() != "") {
         ptx.keyIDVoting = ParsePubKeyIDFromAddress(request.params[2].get_str(), "voting address");
@@ -814,7 +888,7 @@ static RPCHelpMan protx_update_registrar()
 
     CKey keyOwner;
     {
-        LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet);
+        LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet, true);
         LOCK2(pwallet->cs_wallet, spk_man.cs_KeyStore);
         if (!spk_man.GetKey(dmn->pdmnState->keyIDOwner, keyOwner)) {
             throw std::runtime_error(strprintf("Private key for owner address %s not found in your wallet", EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDOwner))));
@@ -859,15 +933,16 @@ static RPCHelpMan protx_revoke()
                 {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                     "If not specified, payoutAddress is the one that is going to be used.\n"
                                     "The private key belonging to this address must be known in your wallet."},
+                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
             },
             RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
             RPCExamples{
-                    HelpExampleCli("protx_update_registrar", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 0 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-                + HelpExampleRpc("protx_update_registrar", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", 0, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                    HelpExampleCli("protx_revoke", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 0 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
+                + HelpExampleRpc("protx_revoke", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", 0, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
             },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
     EnsureWalletIsUnlocked(*pwallet);
@@ -875,15 +950,27 @@ static RPCHelpMan protx_revoke()
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
     pwallet->BlockUntilSyncedToCurrentChain();
-
     CProUpRevTx ptx;
-    ptx.nVersion = CProUpRevTx::CURRENT_VERSION;
+    bool v19active;
+    {
+        LOCK(cs_main);
+        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+    }
+    bool specific_legacy_bls_scheme{!v19active};
+    if(request.params.size() >= 5) {
+        specific_legacy_bls_scheme = request.params[4].get_bool();
+    }
+    if (specific_legacy_bls_scheme) {
+        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+    } else {
+        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+    }
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
 
     CBLSSecretKey keyOperator = ParseBLSSecretKey(request.params[1].get_str(), "operatorKey");
 
     if (!request.params[2].isNull()) {
-        int32_t nReason = request.params[2].get_int();
+        int32_t nReason = request.params[2].getInt<int>();
         if (nReason < 0 || nReason > CProUpRevTx::REASON_LAST) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("invalid reason %d, must be between 0 and %d", nReason, CProUpRevTx::REASON_LAST));
         }
@@ -947,23 +1034,23 @@ static bool CheckWalletOwnsScript(CWallet* pwallet, const CScript& script) {
     LOCK2(pwallet->cs_wallet, spk_man.cs_KeyStore);
     return spk_man.IsMine(script);
 }
-UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMNCPtr& dmn, int detailed)
+UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int detailed)
 {
     if (!detailed) {
-        return dmn->proTxHash.ToString();
+        return dmn.proTxHash.ToString();
     }
     UniValue o(UniValue::VOBJ);
     if(detailed == 1) {
-        const CTxDestination &voteDest = WitnessV0KeyHash(dmn->pdmnState->keyIDVoting);
-        o.pushKV("collateralHash", dmn->collateralOutpoint.hash.ToString());
-        o.pushKV("collateralIndex", (int)dmn->collateralOutpoint.n);
-        o.pushKV("collateralHeight", dmn->pdmnState->nCollateralHeight);
+        const CTxDestination &voteDest = WitnessV0KeyHash(dmn.pdmnState->keyIDVoting);
+        o.pushKV("collateralHash", dmn.collateralOutpoint.hash.ToString());
+        o.pushKV("collateralIndex", (int)dmn.collateralOutpoint.n);
+        o.pushKV("collateralHeight", dmn.pdmnState->nCollateralHeight);
         o.pushKV("votingAddress", EncodeDestination(voteDest));
         if(pwallet) {
             LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet);
             LOCK2(pwallet->cs_wallet, spk_man.cs_KeyStore);
             CKey keyVoting;
-            spk_man.GetKey(dmn->pdmnState->keyIDVoting, keyVoting);
+            spk_man.GetKey(dmn.pdmnState->keyIDVoting, keyVoting);
             o.pushKV("votingKey", EncodeSecret(keyVoting));
             const auto* address_book_entry = pwallet->FindAddressBookEntry(voteDest);
             if (address_book_entry) {
@@ -972,31 +1059,31 @@ UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMNCPtr& dmn, in
         }
         return o;
     } else if(detailed >= 2 && pwallet) {
-        dmn->ToJson(pwallet->chain(), o);
+        dmn.ToJson(pwallet->chain(), o);
         std::map<COutPoint, Coin> coins;
-        coins[dmn->collateralOutpoint]; 
+        coins[dmn.collateralOutpoint]; 
         pwallet->chain().findCoins(coins);
         int confirmations = 0;
-        const Coin &coin = coins.at(dmn->collateralOutpoint);
+        const Coin &coin = coins.at(dmn.collateralOutpoint);
         if(!coin.IsSpent()) {
             confirmations = *pwallet->chain().getHeight() - coin.nHeight;
         }
         o.pushKV("confirmations", confirmations);
         if (pwallet) {
             LOCK2(pwallet->cs_wallet, cs_main);
-            bool hasOwnerKey = CheckWalletOwnsKey(pwallet, dmn->pdmnState->keyIDOwner);
-            bool hasVotingKey = CheckWalletOwnsKey(pwallet, dmn->pdmnState->keyIDVoting);
+            bool hasOwnerKey = CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner);
+            bool hasVotingKey = CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDVoting);
 
             UniValue walletObj(UniValue::VOBJ);
             walletObj.pushKV("hasOwnerKey", hasOwnerKey);
             walletObj.pushKV("hasOperatorKey", false);
             walletObj.pushKV("hasVotingKey", hasVotingKey);
-            walletObj.pushKV("ownsPayeeScript", CheckWalletOwnsScript(pwallet, dmn->pdmnState->scriptPayout));
-            walletObj.pushKV("ownsOperatorRewardScript", CheckWalletOwnsScript(pwallet, dmn->pdmnState->scriptOperatorPayout));
+            walletObj.pushKV("ownsPayeeScript", CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptPayout));
+            walletObj.pushKV("ownsOperatorRewardScript", CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptOperatorPayout));
             o.pushKV("wallet", walletObj);
         }
 
-        auto metaInfo = mmetaman.GetMetaInfo(dmn->proTxHash);
+        auto metaInfo = mmetaman.GetMetaInfo(dmn.proTxHash);
         o.pushKV("metaInfo", metaInfo->ToJson());
     }
 
@@ -1017,10 +1104,10 @@ static RPCHelpMan protx_list_wallet()
                 HelpExampleCli("protx_list_wallet", "true")
             + HelpExampleRpc("protx_list_wallet", "true")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     CWallet* pwallet = nullptr;
-    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const wallet = GetWalletForJSONRPCRequest(request);
     if (wallet)
         pwallet = wallet.get();
 
@@ -1031,9 +1118,9 @@ static RPCHelpMan protx_list_wallet()
     }
     LOCK2(pwallet->cs_wallet, cs_main);
 
-    int detailed = !request.params[0].isNull() ? request.params[0].get_int() : 0;
+    int detailed = !request.params[0].isNull() ? request.params[0].getInt<int>() : 0;
 
-    int height = !request.params[1].isNull() ? request.params[1].get_int() : *pwallet->chain().getHeight();
+    int height = !request.params[1].isNull() ? request.params[1].getInt<int>() : *pwallet->chain().getHeight();
     if (height < 1 || height > pwallet->chain().getHeight()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid height specified");
     }
@@ -1044,13 +1131,13 @@ static RPCHelpMan protx_list_wallet()
     for (const auto& outpt : vOutpts) {
         setOutpts.emplace(outpt);
     }
-    const auto &mnList = pwallet->chain().getMNList(height);
-    mnList.ForEachMN(false, [&](const CDeterministicMNCPtr& dmn) {
-        if (setOutpts.count(dmn->collateralOutpoint) ||
-            CheckWalletOwnsKey(pwallet, dmn->pdmnState->keyIDOwner) ||
-            CheckWalletOwnsKey(pwallet, dmn->pdmnState->keyIDVoting) ||
-            CheckWalletOwnsScript(pwallet, dmn->pdmnState->scriptPayout) ||
-            CheckWalletOwnsScript(pwallet, dmn->pdmnState->scriptOperatorPayout)) {
+    CDeterministicMNList mnList = pwallet->chain().getMNList(height);
+    mnList.ForEachMN(false, [&](const auto& dmn) {
+        if (setOutpts.count(dmn.collateralOutpoint) ||
+            CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner) ||
+            CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDVoting) ||
+            CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptPayout) ||
+            CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptOperatorPayout)) {
             ret.push_back(BuildDMNListEntry(pwallet, dmn, detailed));
         }
     });
@@ -1071,10 +1158,10 @@ static RPCHelpMan protx_info_wallet()
                 HelpExampleCli("protx_info_wallet", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d")
             + HelpExampleRpc("protx_info_wallet", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\"")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     CWallet* pwallet = nullptr;
-    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    std::shared_ptr<wallet::CWallet> const wallet = GetWalletForJSONRPCRequest(request);
     if (wallet)
         pwallet = wallet.get();
     uint256 proTxHash = ParseHashV(request.params[0], "proTxHash");
@@ -1083,27 +1170,23 @@ static RPCHelpMan protx_info_wallet()
     if (!dmn) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s not found", proTxHash.ToString()));
     }
-    return BuildDMNListEntry(pwallet, dmn, 2);
+    return BuildDMNListEntry(pwallet, *dmn, 2);
 },
     };
 } 
 
-Span<const CRPCCommand> GetEvoWalletRPCCommands()
+Span<const CRPCCommand> wallet::GetEvoWalletRPCCommands()
 {
-// clang-format off
-static const CRPCCommand commands[] =
-{ //  category              name                      actor (function)
-  //  --------------------- ------------------------  -----------------------
-    { "evowallet",              &protx_list_wallet,                 },
-    { "evowallet",              &protx_info_wallet,                 },
-    { "evowallet",              &protx_register,                    },
-    { "evowallet",              &protx_register_fund,               },
-    { "evowallet",              &protx_register_prepare,            },
-    { "evowallet",              &protx_register_submit,             },
-    { "evowallet",              &protx_update_service,              },
-    { "evowallet",              &protx_update_registrar,            },
-    { "evowallet",              &protx_revoke,                      },
-};
-// clang-format on
-    return MakeSpan(commands);
+    static const CRPCCommand commands[]{
+        {"evowallet", &protx_list_wallet},
+        {"evowallet", &protx_info_wallet},
+        {"evowallet", &protx_register},
+        {"evowallet", &protx_register_fund},
+        {"evowallet", &protx_register_prepare},
+        {"evowallet", &protx_register_submit},
+        {"evowallet", &protx_update_service},
+        {"evowallet", &protx_update_registrar},
+        {"evowallet", &protx_revoke},
+    };
+    return commands;
 }

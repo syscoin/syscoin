@@ -12,6 +12,7 @@
 #include <net_processing.h>
 #include <spork.h>
 #include <validation.h>
+#include <util/system.h>
 namespace llmq
 {
 
@@ -21,22 +22,25 @@ static const std::string DB_VVEC = "qdkg_V";
 static const std::string DB_SKCONTRIB = "qdkg_S";
 static const std::string DB_ENC_CONTRIB = "qdkg_E";
 
-CDKGSessionManager::CDKGSessionManager(CBLSWorker& _blsWorker, CConnman &_connman, PeerManager& _peerman, ChainstateManager& _chainman, bool unitTests, bool fWipe) :
-    blsWorker(_blsWorker),
+CDKGSessionManager::CDKGSessionManager(CBLSWorker& blsWorker, CConnman &_connman, PeerManager& _peerman, ChainstateManager& _chainman, bool unitTests, bool fWipe) :
     connman(_connman),
     peerman(_peerman)
 {
-    db = std::make_unique<CDBWrapper>(unitTests ? "" : (gArgs.GetDataDirNet() / "llmq/dkgdb"), 1 << 20, unitTests, fWipe);
+    db = std::make_unique<CDBWrapper>(DBParams{
+        .path = gArgs.GetDataDirNet() / "llmq/dkgdb",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = unitTests,
+        .wipe_data = fWipe});
     MigrateDKG();
-
-    for (const auto& qt : Params().GetConsensus().llmqs) {
-        dkgSessionHandlers.emplace(std::piecewise_construct,
-                std::forward_as_tuple(qt.first),
-                std::forward_as_tuple(qt.second, blsWorker, *this, peerman, _chainman));
+    if(Params().GetConsensus().llmqs.empty()) {
+        return;
     }
+    const auto &llmq = GetLLMQParams(fRegTest? Consensus::LLMQ_TEST: Consensus::LLMQ_400_60);
+    dkgSessionHandlers.emplace(std::piecewise_construct,
+            std::forward_as_tuple(llmq.type),
+            std::forward_as_tuple(llmq, blsWorker, *this, peerman, _chainman));
+    
 }
-
-CDKGSessionManager::~CDKGSessionManager() = default;
 
 void CDKGSessionManager::MigrateDKG()
 {
@@ -45,7 +49,11 @@ void CDKGSessionManager::MigrateDKG()
     LogPrint(BCLog::LLMQ, "CDKGSessionManager::%d -- start\n", __func__);
 
     CDBBatch batch(*db);
-    auto oldDb = std::make_unique<CDBWrapper>(gArgs.GetDataDirNet() / "llmq", 8 << 20);
+    auto oldDb = std::make_unique<CDBWrapper>(DBParams{
+        .path = gArgs.GetDataDirNet() / "llmq",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = false});
     std::unique_ptr<CDBIterator> pcursor(oldDb->NewIterator());
 
     auto start_vvec = std::make_tuple(DB_VVEC, (uint8_t)0, uint256(), uint256());
@@ -174,16 +182,18 @@ void CDKGSessionManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         pfrom->qwatch = true;
         return;
     }
-
+    PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
     if (vRecv.empty()) {
-        peerman.Misbehaving(pfrom->GetId(), 100, "invalid recv size for DKG session");
+        if(peer)
+            peerman.Misbehaving(*peer, 100, "invalid recv size for DKG session");
         return;
     }
 
     // peek into the message and see which uint8_t it is. First byte of all messages is always the uint8_t
-    uint8_t llmqType = *vRecv.begin();
+    uint8_t llmqType = static_cast<uint8_t>(*vRecv.begin());
     if (!dkgSessionHandlers.count(llmqType)) {
-        peerman.Misbehaving(pfrom->GetId(), 100, "DKG session invalid LLMQ type");
+        if(peer)
+            peerman.Misbehaving(*peer, 100, "DKG session invalid LLMQ type");
         return;
     }
 

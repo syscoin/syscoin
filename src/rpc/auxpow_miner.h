@@ -5,10 +5,9 @@
 #ifndef SYSCOIN_RPC_AUXPOW_MINER_H
 #define SYSCOIN_RPC_AUXPOW_MINER_H
 
-#include <miner.h>
+#include <node/miner.h>
 #include <script/script.h>
 #include <script/standard.h>
-#include <sync.h>
 #include <txmempool.h>
 #include <uint256.h>
 #include <univalue.h>
@@ -17,7 +16,12 @@
 #include <memory>
 #include <string>
 #include <vector>
-extern RecursiveMutex cs_main;
+#include <kernel/cs_main.h>
+using namespace node;
+namespace node
+{
+  class JSONRPCRequest;
+}
 namespace auxpow_tests
 {
 class AuxpowMinerForTest;
@@ -39,7 +43,7 @@ private:
   /** The lock used for state in this object.  */
   mutable RecursiveMutex cs;
   /** All currently "active" block templates.  */
-  std::vector<std::unique_ptr<CBlockTemplate>> templates;
+  std::vector<std::unique_ptr<node::CBlockTemplate>> templates;
   /** Maps block hashes to pointers in vTemplates.  Does not own the memory.  */
   std::map<uint256, const CBlock*> blocks;
   /** Maps coinbase script hashes to pointers in vTemplates.  Does not own the memory.  */
@@ -79,7 +83,7 @@ public:
    * to work on with the given address for the block reward and return the
    * necessary information for the miner to construct an auxpow for it.
    */
-  UniValue createAuxBlock (const JSONRPCRequest& request,
+  UniValue createAuxBlock (const node::JSONRPCRequest& request,
                            const CScript& scriptPubKey);
 
   /**
@@ -88,7 +92,7 @@ public:
    * and try to submit it.  Returns true if all was successful and the block
    * was accepted.
    */
-  bool submitAuxBlock (const JSONRPCRequest& request,
+  bool submitAuxBlock (const node::JSONRPCRequest& request,
                        const std::string& hashHex,
                        const std::string& auxpowHex) const;
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -67,7 +67,7 @@ FreespaceChecker::FreespaceChecker(Intro *_intro)
 void FreespaceChecker::check()
 {
     QString dataDirStr = intro->getPathToCheck();
-    fs::path dataDir = GUIUtil::qstringToBoostPath(dataDirStr);
+    fs::path dataDir = GUIUtil::QStringToPath(dataDirStr);
     uint64_t freeBytesAvailable = 0;
     int replyStatus = ST_OK;
     QString replyMessage = tr("A new data directory will be created.");
@@ -122,8 +122,6 @@ int GetPruneTargetGB()
 Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_size_gb) :
     QDialog(parent, GUIUtil::dialog_flags),
     ui(new Ui::Intro),
-    thread(nullptr),
-    signalled(false),
     m_blockchain_size_gb(blockchain_size_gb),
     m_chain_state_size_gb(chain_state_size_gb),
     m_prune_target_gb{GetPruneTargetGB()}
@@ -219,7 +217,7 @@ bool Intro::showIfNeeded(bool& did_show_intro, int64_t& prune_MiB)
     if(dataDir.endsWith(QString("SyscoinCore"), Qt::CaseInsensitive))
         dataDir = defaultDir;
 
-    if(!fs::exists(GUIUtil::qstringToBoostPath(dataDir)) || gArgs.GetBoolArg("-choosedatadir", DEFAULT_CHOOSE_DATADIR) || settings.value("fReset", false).toBool() || gArgs.GetBoolArg("-resetguisettings", false))
+    if(!fs::exists(GUIUtil::QStringToPath(dataDir)) || gArgs.GetBoolArg("-choosedatadir", DEFAULT_CHOOSE_DATADIR) || settings.value("fReset", false).toBool() || gArgs.GetBoolArg("-resetguisettings", false))
     {
         /* Use selectParams here to guarantee Params() can be used by node interface */
         try {
@@ -229,7 +227,7 @@ bool Intro::showIfNeeded(bool& did_show_intro, int64_t& prune_MiB)
         }
 
         /* If current default data directory does not exist, let the user choose one */
-        Intro intro(0, Params().AssumedBlockchainSize(), Params().AssumedChainStateSize());
+        Intro intro(nullptr, Params().AssumedBlockchainSize(), Params().AssumedChainStateSize());
         intro.setDataDirectory(dataDir);
         intro.setWindowIcon(QIcon(":icons/syscoin"));
         did_show_intro = true;
@@ -243,9 +241,9 @@ bool Intro::showIfNeeded(bool& did_show_intro, int64_t& prune_MiB)
             }
             dataDir = intro.getDataDirectory();
             try {
-                if (TryCreateDirectories(GUIUtil::qstringToBoostPath(dataDir))) {
+                if (TryCreateDirectories(GUIUtil::QStringToPath(dataDir))) {
                     // If a new data directory has been created, make wallets subdirectory too
-                    TryCreateDirectories(GUIUtil::qstringToBoostPath(dataDir) / "wallets");
+                    TryCreateDirectories(GUIUtil::QStringToPath(dataDir) / "wallets");
                 }
                 break;
             } catch (const fs::filesystem_error&) {
@@ -266,7 +264,7 @@ bool Intro::showIfNeeded(bool& did_show_intro, int64_t& prune_MiB)
      * (to be consistent with syscoind behavior)
      */
     if(dataDir != GUIUtil::getDefaultDataDirectory()) {
-        gArgs.SoftSetArg("-datadir", fs::PathToString(GUIUtil::qstringToBoostPath(dataDir))); // use OS locale for path setting
+        gArgs.SoftSetArg("-datadir", fs::PathToString(GUIUtil::QStringToPath(dataDir))); // use OS locale for path setting
     }
     return true;
 }
@@ -290,7 +288,7 @@ void Intro::setStatus(int status, const QString &message, quint64 bytesAvailable
         ui->freeSpace->setText("");
     } else {
         m_bytes_available = bytesAvailable;
-        if (ui->prune->isEnabled()) {
+        if (ui->prune->isEnabled() && !(gArgs.IsArgSet("-prune") && gArgs.GetIntArg("-prune", 0) == 0)) {
             ui->prune->setChecked(m_bytes_available < (m_blockchain_size_gb + m_chain_state_size_gb + 10) * GB_BYTES);
         }
         UpdateFreeSpaceLabel();
@@ -301,12 +299,12 @@ void Intro::setStatus(int status, const QString &message, quint64 bytesAvailable
 
 void Intro::UpdateFreeSpaceLabel()
 {
-    QString freeString = tr("%1 GB of free space available").arg(m_bytes_available / GB_BYTES);
+    QString freeString = tr("%n GB of space available", "", m_bytes_available / GB_BYTES);
     if (m_bytes_available < m_required_space_gb * GB_BYTES) {
-        freeString += " " + tr("(of %1 GB needed)").arg(m_required_space_gb);
+        freeString += " " + tr("(of %n GB needed)", "", m_required_space_gb);
         ui->freeSpace->setStyleSheet("QLabel { color: #800000 }");
     } else if (m_bytes_available / GB_BYTES - m_required_space_gb < 10) {
-        freeString += " " + tr("(%1 GB needed for full chain)").arg(m_required_space_gb);
+        freeString += " " + tr("(%n GB needed for full chain)", "", m_required_space_gb);
         ui->freeSpace->setStyleSheet("QLabel { color: #999900 }");
     } else {
         ui->freeSpace->setStyleSheet("");

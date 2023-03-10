@@ -1,29 +1,26 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_VALIDATIONINTERFACE_H
 #define SYSCOIN_VALIDATIONINTERFACE_H
 
+#include <kernel/cs_main.h>
 #include <primitives/transaction.h> // CTransaction(Ref)
 #include <sync.h>
 
 #include <functional>
 #include <memory>
 
-extern RecursiveMutex cs_main;
 class BlockValidationState;
 class CBlock;
 class CBlockIndex;
 struct CBlockLocator;
-class CConnman;
 class CValidationInterface;
-class uint256;
 class CScheduler;
 // SYSCOIN
-class CGovernanceVote;
-class CGovernanceObject;
+class ChainstateManager;
 class CDeterministicMNList;
 class CDeterministicMNListDiff;
 class CNEVMBlock;
@@ -98,7 +95,7 @@ protected:
      *
      * Called on a background thread.
      */
-    virtual void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) {}
+    virtual void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) {}
     /**
      * Notifies listeners of a transaction having been added to mempool.
      *
@@ -183,22 +180,23 @@ protected:
     friend class CMainSignals;
 
     // SYSCOIN
-    virtual void AcceptedBlockHeader(const CBlockIndex *pindexNew) {}
-    virtual void NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload) {}
-    virtual void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) {}
-    virtual void NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& vote) {}
-    virtual void NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject> &object) {}
+    virtual void NotifyHeaderTip(const CBlockIndex *pindexNew) {}
+    virtual void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork) {}
+    virtual void NotifyGovernanceVote(const uint256& vote) {}
+    virtual void NotifyGovernanceObject(const uint256 &object) {}
     virtual void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {}
-    virtual void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, BlockValidationState &state, const uint256& nBlockHash) {}
-    virtual void NotifyNEVMBlockDisconnect(BlockValidationState &state, const uint256& nBlockHash) {}
-    virtual void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state) {}
+    virtual void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation) {}
+    virtual void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash) {}
+    virtual void NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) {}
+    virtual void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {}
     virtual void NotifyNEVMComms(const std::string& commMessage, bool &bResponse) {}
+    friend class ValidationInterfaceTest;
 };
 
-struct MainSignalsInstance;
+class MainSignalsImpl;
 class CMainSignals {
 private:
-    std::unique_ptr<MainSignalsInstance> m_internals;
+    std::unique_ptr<MainSignalsImpl> m_internals;
 
     friend void ::RegisterSharedValidationInterface(std::shared_ptr<CValidationInterface>);
     friend void ::UnregisterValidationInterface(CValidationInterface*);
@@ -216,11 +214,10 @@ public:
     size_t CallbacksPending();
 
 
-    void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, bool fInitialDownload);
+    void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, ChainstateManager&, bool fInitialDownload);
     // SYSCOIN
-    void AcceptedBlockHeader(const CBlockIndex *pindexNew);
-    void NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload);
-    void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload);
+    void NotifyHeaderTip(const CBlockIndex *pindexNew);
+    void SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork);
     void TransactionAddedToMempool(const CTransactionRef&, uint64_t mempool_sequence);
     void TransactionRemovedFromMempool(const CTransactionRef&, MemPoolRemovalReason, uint64_t mempool_sequence);
     void BlockConnected(const std::shared_ptr<const CBlock> &, const CBlockIndex *pindex);
@@ -228,12 +225,13 @@ public:
     void ChainStateFlushed(const CBlockLocator &);
     void BlockChecked(const CBlock&, const BlockValidationState&);
     void NewPoWValidBlock(const CBlockIndex *, const std::shared_ptr<const CBlock>&);
-    void NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& vote);
-    void NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject>& object);
+    void NotifyGovernanceVote(const uint256& vote);
+    void NotifyGovernanceObject(const uint256& object);
     void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff);
-    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, BlockValidationState &state, const uint256& nBlockHash);
-    void NotifyNEVMBlockDisconnect(BlockValidationState &state, const uint256& nBlockHash);
-    void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state);
+    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation);
+    void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash);
+    void NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state);
+    void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
     void NotifyNEVMComms(const std::string& commMessage, bool &bResponse);
 };
 

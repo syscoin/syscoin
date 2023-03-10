@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2021 The Bitcoin Core developers
+# Copyright (c) 2015-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test BIP65 (CHECKLOCKTIMEVERIFY).
@@ -8,11 +8,13 @@ Test that the CHECKLOCKTIMEVERIFY soft-fork activates.
 """
 
 from test_framework.blocktools import (
+    TIME_GENESIS_BLOCK,
     create_block,
     create_coinbase,
 )
 from test_framework.messages import (
     CTransaction,
+    SEQUENCE_FINAL,
     msg_block,
 )
 from test_framework.p2p import P2PInterface
@@ -53,16 +55,16 @@ def cltv_invalidate(tx, failure_reason):
     # 3) the lock-time type (height vs. timestamp) of the top stack item and the
     #    nLockTime field are not the same
     # 4) the top stack item is greater than the transaction's nLockTime field
-    # 5) the nSequence field of the txin is 0xffffffff
+    # 5) the nSequence field of the txin is 0xffffffff (SEQUENCE_FINAL)
     assert failure_reason in range(5)
     scheme = [
         # | Script to prepend to scriptSig                  | nSequence  | nLockTime    |
         # +-------------------------------------------------+------------+--------------+
         [[OP_CHECKLOCKTIMEVERIFY],                            None,       None],
         [[OP_1NEGATE, OP_CHECKLOCKTIMEVERIFY, OP_DROP],       None,       None],
-        [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          1296688602],  # timestamp of genesis block
+        [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          TIME_GENESIS_BLOCK],
         [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          50],
-        [[CScriptNum(50),  OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0xffffffff, 50],
+        [[CScriptNum(50),  OP_CHECKLOCKTIMEVERIFY, OP_DROP],  SEQUENCE_FINAL, 50],
     ][failure_reason]
 
     cltv_modify_tx(tx, prepend_scriptsig=scheme[0], nsequence=scheme[1], nlocktime=scheme[2])
@@ -91,7 +93,7 @@ class BIP65Test(SyscoinTestFramework):
         self.rpc_timeout = 480
 
     def test_cltv_info(self, *, is_active):
-        assert_equal(self.nodes[0].getblockchaininfo()['softforks']['bip65'], {
+        assert_equal(self.nodes[0].getdeploymentinfo()['deployments']['bip65'], {
                 "active": is_active,
                 "height": CLTV_HEIGHT,
                 "type": "buried",
@@ -114,7 +116,7 @@ class BIP65Test(SyscoinTestFramework):
         # create one invalid tx per CLTV failure reason (5 in total) and collect them
         invalid_cltv_txs = []
         for i in range(5):
-            spendtx = wallet.create_self_transfer(from_node=self.nodes[0])['tx']
+            spendtx = wallet.create_self_transfer()['tx']
             cltv_invalidate(spendtx, i)
             invalid_cltv_txs.append(spendtx)
 
@@ -145,7 +147,7 @@ class BIP65Test(SyscoinTestFramework):
 
         # create and test one invalid tx per CLTV failure reason (5 in total)
         for i in range(5):
-            spendtx = wallet.create_self_transfer(from_node=self.nodes[0])['tx']
+            spendtx = wallet.create_self_transfer()['tx']
             cltv_invalidate(spendtx, i)
 
             expected_cltv_reject_reason = [

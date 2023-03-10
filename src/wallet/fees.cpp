@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,6 +9,7 @@
 #include <wallet/wallet.h>
 
 
+namespace wallet {
 CAmount GetRequiredFee(const CWallet& wallet, unsigned int nTxBytes)
 {
     return GetRequiredFeeRate(wallet).GetFee(nTxBytes);
@@ -34,8 +35,8 @@ CFeeRate GetMinimumFeeRate(const CWallet& wallet, const CCoinControl& coin_contr
        4. m_confirm_target (user-set member variable of wallet)
        The first parameter that is set is used.
     */
-     CFeeRate feerate_needed;
-     if (coin_control.m_feerate) { // 1.
+    CFeeRate feerate_needed;
+    if (coin_control.m_feerate) { // 1.
         feerate_needed = *(coin_control.m_feerate);
         if (feeCalc) feeCalc->reason = FeeReason::PAYTXFEE;
         // Allow to override automatic min/max check over coin control instance
@@ -83,10 +84,11 @@ CFeeRate GetMinimumFeeRate(const CWallet& wallet, const CCoinControl& coin_contr
 CFeeRate GetDiscardRate(const CWallet& wallet)
 {
     unsigned int highest_target = wallet.chain().estimateMaxBlocks();
-    CFeeRate discard_rate = wallet.chain().estimateSmartFee(highest_target, false /* conservative */);
+    CFeeRate discard_rate = wallet.chain().estimateSmartFee(highest_target, /*conservative=*/false);
     // Don't let discard_rate be greater than longest possible fee estimate if we get a valid fee estimate
     discard_rate = (discard_rate == CFeeRate(0)) ? wallet.m_discard_rate : std::min(discard_rate, wallet.m_discard_rate);
-    // Discard rate must be at least dustRelayFee
+    // Discard rate must be at least dust relay feerate
     discard_rate = std::max(discard_rate, wallet.chain().relayDustFee());
     return discard_rate;
 }
+} // namespace wallet

@@ -1,8 +1,9 @@
-// Copyright (c) 2014-2020 The Bitcoin Core developers
+// Copyright (c) 2014-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <hash.h>
+#include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <util/serfloat.h>
 #include <serialize.h>
@@ -111,7 +112,7 @@ Python code to generate the below hashes:
 */
 BOOST_AUTO_TEST_CASE(doubles)
 {
-    CDataStream ss(SER_DISK, 0);
+    DataStream ss{};
     // encode
     for (int i = 0; i < 1000; i++) {
         ss << EncodeDouble(i);

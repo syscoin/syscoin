@@ -3,7 +3,6 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <validation.h>
 #include <node/blockstorage.h>
-#include <boost/algorithm/string.hpp>
 #include <rpc/util.h>
 #include <services/assetconsensus.h>
 #include <services/asset.h>
@@ -19,14 +18,17 @@
 #include <rpc/blockchain.h>
 #include <node/context.h>
 #include <node/transaction.h>
+#include <rpc/server_util.h>
+#include <interfaces/node.h>
+#include <llmq/quorums_chainlocks.h>
+#include <key_io.h>
+using node::ReadBlockFromDisk;
+using node::GetTransaction;
 extern RecursiveMutex cs_setethstatus;
-extern std::string EncodeDestination(const CTxDestination& dest);
-extern CTxDestination DecodeDestination(const std::string& str);
-
-
 bool BuildAssetJson(const CAsset& asset, const uint32_t& nBaseAsset, UniValue& oAsset) {
     oAsset.__pushKV("asset_guid", UniValue(nBaseAsset).write());
-    oAsset.__pushKV("symbol", DecodeBase64(asset.strSymbol));
+    auto decoded = DecodeBase64(asset.strSymbol);
+    oAsset.__pushKV("symbol", std::string{(*decoded).begin(), (*decoded).end()});
 	oAsset.__pushKV("public_value", AssetPublicDataToJson(asset.strPubData));
     oAsset.__pushKV("contract", asset.vchContract.empty()? "" : "0x"+HexStr(asset.vchContract));
     oAsset.__pushKV("notary_address", asset.vchNotaryKeyID.empty()? "" : EncodeDestination(WitnessV0KeyHash(uint160{asset.vchNotaryKeyID})));
@@ -47,7 +49,7 @@ bool BuildAssetJson(const CAsset& asset, const uint32_t& nBaseAsset, UniValue& o
 	return true;
 }
 bool ScanAssets(CAssetDB& passetdb, const uint32_t count, const uint32_t from, const UniValue& oOptions, UniValue& oRes) {
-	std::string strTxid = "";
+	std::string strTxid;
     uint32_t nBaseAsset = 0;
 	if (!oOptions.isNull()) {
 		const UniValue &txid = find_value(oOptions, "txid");
@@ -99,7 +101,88 @@ bool ScanAssets(CAssetDB& passetdb, const uint32_t count, const uint32_t from, c
 	}
 	return true;
 }
-
+bool ScanBlobs(CNEVMDataDB& pnevmdatadb, const uint32_t count, const uint32_t from, const UniValue& oOptions, UniValue& oRes) {
+	bool getdata = false;
+	if (!oOptions.isNull()) {
+		const UniValue &getdataObj = find_value(oOptions, "getdata");
+		if (getdataObj.isBool()) {
+			getdata = getdataObj.get_bool();
+		}
+	}
+    uint32_t index = 0;
+    const auto & mapCache = pnevmdatadb.GetMapCache();
+    for (auto const& [key, val] :mapCache) {
+        UniValue oBlob(UniValue::VOBJ);
+        oBlob.__pushKV("versionhash",  HexStr(key));
+        oBlob.__pushKV("mpt", val.second);
+        oBlob.__pushKV("datasize", (uint32_t)val.first.size());
+        if(getdata) {
+            oBlob.__pushKV("data", HexStr(val.first));
+        }
+        index += 1;
+        if (index <= from) {
+            continue;
+        }
+        oRes.push_back(oBlob);
+        if (index >= count + from)
+            return true;
+    }
+	std::unique_ptr<CDBIterator> pcursor(pnevmdatadb.NewIterator());
+	pcursor->SeekToFirst();
+	std::pair<std::vector<uint8_t>, bool> key;
+	while (pcursor->Valid()) {
+		try {
+            key.first.clear();
+			if (pcursor->GetKey(key)) {
+                // MTP
+                if(key.second == false && mapCache.find(key.first) == mapCache.end()) {
+                    UniValue oBlob(UniValue::VOBJ);
+                    uint64_t nMedianTime;
+                    if(pcursor->GetValue(nMedianTime)) {
+                        oBlob.__pushKV("versionhash",  HexStr(key.first));
+                        oBlob.__pushKV("mpt", nMedianTime);
+                        uint32_t nSize = 0;
+                        std::vector<uint8_t> vchData;
+                        if(!pnevmdatadb.ReadDataSize(key.first, nSize)) {
+                           pnevmdatadb.ReadData(key.first, vchData);
+                        }
+                        oBlob.__pushKV("datasize", nSize);
+                        if(getdata) {
+                            if(vchData.empty()) {
+                                pnevmdatadb.ReadData(key.first, vchData);
+                            }
+                            oBlob.__pushKV("data", HexStr(vchData));
+                        }
+                        oRes.push_back(oBlob); 
+                    }
+                } else {
+           			pcursor->Next();
+					continue;         
+                }
+				index += 1;
+				if (index <= from) {
+					pcursor->Next();
+					continue;
+				}
+				if (index >= count + from)
+					break;
+			}
+			pcursor->Next();
+		}
+		catch (std::exception &e) {
+			return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+		}
+	}
+	return true;
+}
+bool FillNotarySig(std::vector<CAssetOut> & voutAssets, const uint64_t& nBaseAsset, const std::vector<unsigned char> &vchSig) {
+    auto itVout = std::find_if( voutAssets.begin(), voutAssets.end(), [&nBaseAsset](const CAssetOut& element){ return GetBaseAssetID(element.key) == nBaseAsset;} );
+    if(itVout != voutAssets.end()) {
+        itVout->vchNotarySig = vchSig;
+        return true;
+    }
+    return false;
+}
 bool UpdateNotarySignature(CMutableTransaction& mtx, const uint64_t& nBaseAsset, const std::vector<unsigned char> &vchSig) {
     std::vector<unsigned char> data;
     bool bFilledNotarySig = false;
@@ -148,14 +231,14 @@ static RPCHelpMan assettransactionnotarize()
             HelpExampleCli("assettransactionnotarize", "\"hex\" 12121 \"signature\"")	
             + HelpExampleRpc("assettransactionnotarize", "\"hex\",12121,\"signature\"")	
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
 
     const std::string &hexstring = request.params[0].get_str();
     uint64_t nAsset;
     if(!ParseUInt64(request.params[1].get_str(), &nAsset))
          throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse asset_guid");
-    std::vector<unsigned char> vchSig = DecodeBase64(request.params[2].get_str().c_str());
+    auto vchSig = DecodeBase64(request.params[2].get_str().c_str());
     CMutableTransaction mtx;
     if(!DecodeHexTx(mtx, hexstring, false, true)) {
         if(!DecodeHexTx(mtx, hexstring, true, true)) {
@@ -163,7 +246,7 @@ static RPCHelpMan assettransactionnotarize()
         }
     }
     const uint64_t nBaseAsset = GetBaseAssetID(nAsset);
-    UpdateNotarySignature(mtx, nBaseAsset, vchSig);
+    UpdateNotarySignature(mtx, nBaseAsset, *vchSig);
     UniValue ret(UniValue::VOBJ);	
     ret.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
     return ret;
@@ -184,7 +267,7 @@ static RPCHelpMan getnotarysighash()
             HelpExampleCli("getnotarysighash", "\"hex\" 12121")
             + HelpExampleRpc("getnotarysighash", "\"hex\",12121")	
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {	
     const std::string &hexstring = request.params[0].get_str();
     uint64_t nAsset;
@@ -230,17 +313,30 @@ static RPCHelpMan convertaddress()
             HelpExampleCli("convertaddress", "\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"")	
             + HelpExampleRpc("convertaddress", "\"sys1qw40fdue7g7r5ugw0epzk7xy24tywncm26hu4a7\"")	
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {	
 
+    std::string error_msg;
+    std::vector<int> error_locations;
     UniValue ret(UniValue::VOBJ);	
-    CTxDestination dest = DecodeDestination(request.params[0].get_str());	
+    CTxDestination dest = DecodeDestination(request.params[0].get_str(), error_msg, &error_locations);	
+    bool isValid = IsValidDestination(dest);
+    if(!isValid) {
+        error_locations.clear();
+        error_msg.clear();
+        dest = DecodeDestination(request.params[0].get_str(), error_msg, &error_locations, true);
+        isValid = IsValidDestination(dest);
+    }
     // Make sure the destination is valid	
-    if (!IsValidDestination(dest)) {	
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");	
+    if (!isValid) {	
+        UniValue error_indices(UniValue::VARR);
+        for (int i : error_locations) error_indices.push_back(i);
+        ret.pushKV("error_locations", error_indices);
+        ret.pushKV("error", error_msg);
+        return ret;
     }	
-    std::string currentV4Address = "";	
-    std::string currentV3Address = "";	
+    std::string currentV4Address;	
+    std::string currentV3Address;	
     CTxDestination v4Dest;	
     if (auto witness_id = std::get_if<WitnessV0KeyHash>(&dest)) {	
         v4Dest = dest;	
@@ -338,7 +434,7 @@ static RPCHelpMan assetallocationverifyzdag()
             HelpExampleCli("assetallocationverifyzdag", "\"txid\"")
             + HelpExampleRpc("assetallocationverifyzdag", "\"txid\"")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
 	const UniValue &params = request.params;
     const CTxMemPool& mempool = EnsureAnyMemPool(request.context);
@@ -371,7 +467,7 @@ static RPCHelpMan syscoindecoderawtransaction()
                     {RPCResult::Type::OBJ, "", "",
                     {
                             {RPCResult::Type::STR, "address", "The address of the receiver"},
-                            {RPCResult::Type::NUM, "amount", "The amount of the transaction"},
+                            {RPCResult::Type::STR_AMOUNT, "amount", "The amount of the transaction"},
                     }},
                 }},
             {RPCResult::Type::NUM, "total", "The total amount in this transaction"},
@@ -380,10 +476,10 @@ static RPCHelpMan syscoindecoderawtransaction()
         HelpExampleCli("syscoindecoderawtransaction", "\"hexstring\"")
         + HelpExampleRpc("syscoindecoderawtransaction", "\"hexstring\"")
     },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     const UniValue &params = request.params;
-    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
 
     std::string hexstring = params[0].get_str();
     CMutableTransaction tx;
@@ -434,7 +530,7 @@ static RPCHelpMan getnevmblockchaininfo()
             HelpExampleCli("getnevmblockchaininfo", "")
             + HelpExampleRpc("getnevmblockchaininfo", "")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     UniValue oNEVM(UniValue::VOBJ);
@@ -450,7 +546,7 @@ static RPCHelpMan getnevmblockchaininfo()
         if (!pblockindex) {
             throw JSONRPCError(RPC_MISC_ERROR, tip->GetBlockHash().ToString() + " not found");
         }
-        if (IsBlockPruned(pblockindex)) {
+        if (chainman.m_blockman.IsBlockPruned(pblockindex)) {
             throw JSONRPCError(RPC_MISC_ERROR, tip->GetBlockHash().ToString() + " not available (pruned data)");
         }
         if (!ReadBlockFromDisk(block, pblockindex, Params().GetConsensus())) {
@@ -476,7 +572,7 @@ static RPCHelpMan getnevmblockchaininfo()
     UniValue arrVec(UniValue::VARR);
     arrVec.push_backV(vec);
     oNEVM.__pushKV("commandline", arrVec);
-    bool bResponse;
+    bool bResponse = false;
     GetMainSignals().NotifyNEVMComms("status", bResponse);
     oNEVM.__pushKV("status", bResponse? "online": "offline");
     return oNEVM;
@@ -484,6 +580,88 @@ static RPCHelpMan getnevmblockchaininfo()
     };
 }
 
+static RPCHelpMan getnevmblobdata()
+{
+    return RPCHelpMan{"getnevmblobdata",
+        "\nReturn NEVM blob information and status from a version hash.\n",
+        {
+            {"versionhash_or_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The version hash or txid of the NEVM blob"},
+            {"getdata", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Optional, retrieve the blob data"}
+        },
+        RPCResult{RPCResult::Type::ANY, "", ""},
+        RPCExamples{
+            HelpExampleCli("getnevmblobdata", "")
+            + HelpExampleRpc("getnevmblobdata", "")
+        },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    bool bGetData = false;
+    if(request.params.size() > 1) {
+        bGetData = request.params[1].get_bool();
+    }
+    node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    CBlockIndex* pblockindex = nullptr;
+    uint256 hashBlock;
+    uint256 txhash = ParseHashV(request.params[0], "parameter 1");
+    std::vector<uint8_t> vchVH;
+    uint32_t nSize = 0;
+    CNEVMData nevmData;
+    CTransactionRef tx;
+    {
+        LOCK(cs_main);
+        const Coin& coin = AccessByTxid(node.chainman->ActiveChainstate().CoinsTip(), txhash);
+        if (!coin.IsSpent()) {
+            pblockindex = node.chainman->ActiveChain()[coin.nHeight];
+        }
+        if (pblockindex == nullptr) {
+            uint32_t nBlockHeight;
+            if(pblockindexdb != nullptr && pblockindexdb->ReadBlockHeight(txhash, nBlockHeight)) {	    
+                pblockindex = node.chainman->ActiveChain()[nBlockHeight];
+            }
+        } 
+        hashBlock.SetNull();
+        if(pblockindex != nullptr) {
+            tx = GetTransaction(pblockindex, nullptr, txhash, Params().GetConsensus(), hashBlock);
+        }
+        if(!tx || hashBlock.IsNull()) {
+            vchVH = ParseHex(request.params[0].get_str());
+        }
+        else {
+            nevmData = CNEVMData(*tx);
+            if(nevmData.IsNull()){
+                throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse blob data from transaction");
+            }
+            vchVH = nevmData.vchVersionHash;
+        }
+    }
+    
+    UniValue oNEVM(UniValue::VOBJ);
+    BlockValidationState state;
+    std::vector<uint8_t> vchData;
+    int64_t mpt = -1;
+    if(!pnevmdatadb->ReadMTP(vchVH, mpt)) {
+        throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find MTP for versionhash %s", HexStr(vchVH)));
+    }
+    if(!pnevmdatadb->ReadDataSize(vchVH, nSize)) {
+        throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find data size for versionhash %s", HexStr(vchVH)));
+    }
+    oNEVM.__pushKV("versionhash", HexStr(vchVH));
+    oNEVM.__pushKV("mpt", mpt);
+    oNEVM.__pushKV("datasize", nSize);
+    if(pblockindex != nullptr) {
+        oNEVM.__pushKV("blockhash", pblockindex->GetBlockHash().GetHex());
+        oNEVM.__pushKV("height", pblockindex->nHeight);
+    }
+    if(bGetData) {
+        if(!pnevmdatadb->ReadData(vchVH, vchData)) {
+            throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find payload for versionhash %s", HexStr(vchVH)));
+        }
+        oNEVM.__pushKV("data", HexStr(vchData));
+    }
+    return oNEVM;
+},
+    };
+}
 static RPCHelpMan assetinfo()
 {
     return RPCHelpMan{"assetinfo",
@@ -494,22 +672,43 @@ static RPCHelpMan assetinfo()
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::STR, "asset_guid", "The guid of the asset"},
+              {RPCResult::Type::STR, "asset_guid", "The guid of the asset"},
                 {RPCResult::Type::STR, "symbol", "The asset symbol"},
-                {RPCResult::Type::STR_HEX, "txid", "The transaction id that created this asset"},
-                {RPCResult::Type::STR, "public_value", "The public value attached to this asset"},
+                {RPCResult::Type::OBJ, "public_value", "The public value attached to this asset",
+                {
+                    {RPCResult::Type::STR, "desc", /*optional=*/true, "Public description"},
+                }},
                 {RPCResult::Type::STR_HEX, "contract", "The nevm contract address"},
                 {RPCResult::Type::STR_AMOUNT, "total_supply", "The total supply of this asset"},
                 {RPCResult::Type::STR_AMOUNT, "max_supply", "The maximum supply of this asset"},
                 {RPCResult::Type::NUM, "updatecapability_flags", "The capability flag in decimal"},
                 {RPCResult::Type::NUM, "precision", "The precision of this asset"},
-                {RPCResult::Type::STR, "NFTID", "The NFT ID of the asset if applicable"},
+                {RPCResult::Type::STR, "NFTID", /*optional=*/true, "The NFT ID of the asset if applicable"},
+                {RPCResult::Type::STR, "notary_address", "Notary address if specified"},
+                {RPCResult::Type::OBJ, "notary_details", /*optional=*/true, "",
+                    {
+                        {RPCResult::Type::STR, "endpoint", "Notary endpoint"},
+                        {RPCResult::Type::NUM, "instant_transfers", "If notary supports instant confirmations"},
+                        {RPCResult::Type::NUM, "hd_required", "If notary requires HD xpub"},
+                    }},
+                {RPCResult::Type::OBJ, "auxfee", /*optional=*/true, "",
+                    {
+                        {RPCResult::Type::STR, "auxfee_address", "AuxFee address"},
+                        {RPCResult::Type::ARR, "fee_struct", "",
+                        {
+                            {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR_AMOUNT, "bound", "AuxFee bound"},
+                                {RPCResult::Type::STR, "percentage", "AuxFee percentage"},
+                            }},
+                        }},
+                    }},
             }},
         RPCExamples{
             HelpExampleCli("assetinfo", "\"assetguid\"")
             + HelpExampleRpc("assetinfo", "\"assetguid\"")
         },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     const UniValue &params = request.params;
     UniValue oAsset(UniValue::VOBJ);
@@ -551,14 +750,38 @@ static RPCHelpMan listassets()
                     {
                         {RPCResult::Type::STR, "asset_guid", "The guid of the asset"},
                         {RPCResult::Type::STR, "symbol", "The asset symbol"},
-                        {RPCResult::Type::STR, "public_value", "The public value attached to this asset"},
+                        {RPCResult::Type::OBJ, "public_value", "The public value attached to this asset",
+                        {
+                            {RPCResult::Type::STR, "desc", /*optional=*/true, "Public description"},
+                        }},
                         {RPCResult::Type::STR_HEX, "contract", "The nevm contract address"},
                         {RPCResult::Type::STR_AMOUNT, "total_supply", "The total supply of this asset"},
                         {RPCResult::Type::STR_AMOUNT, "max_supply", "The maximum supply of this asset"},
                         {RPCResult::Type::NUM, "updatecapability_flags", "The capability flag in decimal"},
                         {RPCResult::Type::NUM, "precision", "The precision of this asset"},
+                        {RPCResult::Type::STR, "NFTID", /*optional=*/true, "The NFT ID of the asset if applicable"},
+                        {RPCResult::Type::STR, "notary_address", "Notary address if specified"},
+                        {RPCResult::Type::OBJ, "notary_details", /*optional=*/true, "",
+                            {
+                                {RPCResult::Type::STR, "endpoint", "Notary endpoint"},
+                                {RPCResult::Type::NUM, "instant_transfers", "If notary supports instant confirmations"},
+                                {RPCResult::Type::NUM, "hd_required", "If notary requires HD xpub"},
+                            }},
+                        {RPCResult::Type::OBJ, "auxfee", /*optional=*/true, "",
+                            {
+                                {RPCResult::Type::STR, "auxfee_address", "AuxFee address"},
+                                {RPCResult::Type::ARR, "fee_struct", "",
+                                {
+                                    {RPCResult::Type::OBJ, "", "",
+                                    {
+                                        {RPCResult::Type::STR_AMOUNT, "bound", "AuxFee bound"},
+                                        {RPCResult::Type::STR, "percentage", "AuxFee percentage"},
+                                    }},
+                                }},
+                            },
+                        },
                     }},
-                }
+                },
             },
             RPCExamples{
             HelpExampleCli("listassets", "0")
@@ -566,20 +789,20 @@ static RPCHelpMan listassets()
             + HelpExampleCli("listassets", "0 0 '{\"asset_guid\":\"3473733\"}'")
             + HelpExampleRpc("listassets", "0, 0, '{\"asset_guid\":\"3473733\"}'")
             },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     const UniValue &params = request.params;
     UniValue options;
     uint32_t count = 10;
     uint32_t from = 0;
     if (params.size() > 0) {
-        count = params[0].get_uint();
+        count = params[0].getInt<int>();
         if (count == 0) {
             count = 10;
         }
     }
     if (params.size() > 1) {
-        from = params[1].get_uint();
+        from = params[1].getInt<int>();
     }
     if (params.size() > 2) {
         options = params[2];
@@ -592,20 +815,99 @@ static RPCHelpMan listassets()
     };
 }
 
+static RPCHelpMan settestparams() 
+{
+    return RPCHelpMan{"settestparams",
+        "\nSet test setting. Used in testing only.\n",
+        {
+            {"setting", RPCArg::Type::STR, RPCArg::Optional::NO, "DIP3 setting"}
+        },
+        RPCResult{RPCResult::Type::ANY, "", ""},
+        RPCExamples{
+            HelpExampleCli("settestparams", "\"1\"")
+            + HelpExampleRpc("settestparams", "\"1\"")
+        },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{ 
+        fTestSetting = false;
+        if(request.params[0].get_str() == "1") {
+            fTestSetting = true;
+        }
+        return "success";
+},
+    };
+}
+
+static RPCHelpMan listnevmblobdata()
+{
+    return RPCHelpMan{"listnevmblobdata",
+        "\nScan through all blobs.\n",
+        {
+            {"count", RPCArg::Type::NUM, RPCArg::Default{10}, "The number of results to return."},
+            {"from", RPCArg::Type::NUM, RPCArg::Default{0}, "The number of results to skip."},
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "A json object with options to filter results.",
+                {
+                    {"getdata", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Return data from blob"},
+                }
+                }
+            },
+            RPCResult{
+                RPCResult::Type::ARR, "", "",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "versionhash", "The version hash of the NEVM blob"},
+                        {RPCResult::Type::NUM, "datasize", "Size of data blob in bytes"},
+                        {RPCResult::Type::STR_HEX, "data", "Blob data if getdata is true"},
+                    }},
+                },
+            },
+            RPCExamples{
+            HelpExampleCli("listnevmblobdata", "0")
+            + HelpExampleCli("listnevmblobdata", "10 10")
+            + HelpExampleCli("listnevmblobdata", "0 0 '{\"getdata\":true}'")
+            + HelpExampleRpc("listnevmblobdata", "0, 0, '{\"getdata\":false}'")
+            },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    const UniValue &params = request.params;
+    UniValue options;
+    uint32_t count = 10;
+    uint32_t from = 0;
+    if (params.size() > 0) {
+        count = params[0].getInt<int>();
+        if (count == 0) {
+            count = 10;
+        }
+    }
+    if (params.size() > 1) {
+        from = params[1].getInt<int>();
+    }
+    if (params.size() > 2) {
+        options = params[2];
+    }
+    UniValue oRes(UniValue::VARR);
+    if (!ScanBlobs(*pnevmdatadb, count, from, options, oRes))
+        throw JSONRPCError(RPC_MISC_ERROR, "Scan failed");
+    return oRes;
+},
+    };
+}
+
 static RPCHelpMan syscoingetspvproof()
 {
     return RPCHelpMan{"syscoingetspvproof",
     "\nReturns SPV proof for use with inter-chain transfers.\n",
     {
         {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction that is in the block"},
-        {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED_NAMED_ARG, "If specified, looks for txid in the block with this hash"}
+        {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "If specified, looks for txid in the block with this hash"}
     },
     RPCResult{
         RPCResult::Type::ANY, "proof", "JSON representation of merkle proof (transaction index, siblings and block header and some other information useful for moving coins/assets to another chain)"},
     RPCExamples{""},
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    NodeContext& node = EnsureAnyNodeContext(request.context);
+    node::NodeContext& node = EnsureAnyNodeContext(request.context);
     CBlockIndex* pblockindex = nullptr;
     uint256 hashBlock;
     uint256 txhash = ParseHashV(request.params[0], "parameter 1");
@@ -646,8 +948,11 @@ static RPCHelpMan syscoingetspvproof()
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not yet in block");
 
     CBlock block;
-    if (IsBlockPruned(pblockindex)) {
-        throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+    {
+        LOCK(cs_main);
+        if (node.chainman->m_blockman.IsBlockPruned(pblockindex)) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+        }
     }
 
     if (!ReadBlockFromDisk(block, pblockindex, Params().GetConsensus())) {
@@ -663,8 +968,9 @@ static RPCHelpMan syscoingetspvproof()
     const std::string &rawTx = EncodeHexTx(*tx, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
     res.__pushKV("transaction",rawTx);
     res.__pushKV("blockhash", hashBlock.GetHex());
+    const auto bytesVec = MakeUCharSpan(ssBlock);
     // get first 80 bytes of header (non auxpow part)
-    res.__pushKV("header", HexStr(std::vector<unsigned char>(ssBlock.begin(), ssBlock.begin()+80)));
+    res.__pushKV("header", HexStr(std::vector<unsigned char>(bytesVec.begin(), bytesVec.begin()+80)));
     UniValue siblings(UniValue::VARR);
     // store the index of the transaction we are looking for within the block
     int nIndex = 0;
@@ -683,6 +989,9 @@ static RPCHelpMan syscoingetspvproof()
     }  
     std::reverse (evmBlock.nBlockHash.begin (), evmBlock.nBlockHash.end ()); // correct endian
     res.__pushKV("nevm_blockhash", evmBlock.nBlockHash.GetHex());
+    // SYSCOIN
+    if(llmq::chainLocksHandler)
+        res.__pushKV("chainlock", llmq::chainLocksHandler->HasChainLock(pblockindex->nHeight, hashBlock));
     return res;
 },
     };
@@ -702,7 +1011,7 @@ static RPCHelpMan syscoinstopgeth()
         HelpExampleCli("syscoinstopgeth", "")
         + HelpExampleRpc("syscoinstopgeth", "")
     },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     if(!StopGethNode())
         throw JSONRPCError(RPC_MISC_ERROR, "Could not stop Geth");
@@ -727,11 +1036,20 @@ static RPCHelpMan syscoinstartgeth()
         HelpExampleCli("syscoinstartgeth", "")
         + HelpExampleRpc("syscoinstartgeth", "")
     },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     if(!chainman.ActiveChainstate().RestartGethNode()) {
         throw JSONRPCError(RPC_MISC_ERROR, "Could not restart geth, see debug.log for more information...");
+    }
+    // SYSCOIN do not re-validate eth txroots
+    fLoaded = false;
+    BlockValidationState state;
+    chainman.ActiveChainstate().ActivateBestChain(state);
+    fLoaded = true;
+
+    if (!state.IsValid()) {
+        throw JSONRPCError(RPC_DATABASE_ERROR, state.ToString());
     }
     UniValue ret(UniValue::VOBJ);
     ret.__pushKV("status", "success");
@@ -757,11 +1075,11 @@ static RPCHelpMan syscoingettxroots()
         HelpExampleCli("syscoingettxroots", "0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
         + HelpExampleRpc("syscoingettxroots", "0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
     },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     LOCK(cs_setethstatus);
     std::string blockHashStr = request.params[0].get_str();
-    boost::erase_all(blockHashStr, "0x");  // strip 0x
+    blockHashStr = RemovePrefix(blockHashStr, "0x");  // strip 0x
     uint256 nBlockHash;
     if(!ParseHashStr(blockHashStr, nBlockHash)) {
          throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read block hash");
@@ -797,10 +1115,10 @@ static RPCHelpMan syscoincheckmint()
         HelpExampleCli("syscoincheckmint", "d8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
         + HelpExampleRpc("syscoincheckmint", "d8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
     },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     std::string strTxHash = request.params[0].get_str();
-    boost::erase_all(strTxHash, "0x");  // strip 0x
+    strTxHash = RemovePrefix(strTxHash, "0x");  // strip 0x
     uint256 sysTxid;
     if(!pnevmtxmintdb || !pnevmtxmintdb->Read(uint256S(strTxHash), sysTxid)){
        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read Syscoin txid using mint transaction hash");
@@ -812,97 +1130,27 @@ static RPCHelpMan syscoincheckmint()
     };
 }
 
-static RPCHelpMan syscoinsetethheaders()
-{
-    return RPCHelpMan{"syscoinsetethheaders",
-        "\nSets NEVM headers in Syscoin to validate transactions through the NEVM bridge. Only useful for testing in regtest mode.\n",
-        {
-            {"headers", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of arrays (block hashes, tx root) from NEVM blockchain", 
-                {
-                    {"", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "An array of [block hashes, tx root] ",
-                        {
-                            {"block_hash", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Hash of the block"},
-                            {"tx_root", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The NEVM TX root of the block height"},
-                            {"receipt_root", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The NEVM TX Receipt root of the block height"},
-                        }
-                    }
-                },
-                "[blockhash, txroot, txreceiptroot] ..."
-            }
-        },
-        RPCResult{
-            RPCResult::Type::OBJ, "", "",
-            {
-                {RPCResult::Type::STR, "status", "Result"},
-            }},
-        RPCExamples{
-            HelpExampleCli("syscoinsetethheaders", "\"[[\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\",\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\"],...]\"")
-            + HelpExampleRpc("syscoinsetethheaders", "\"[[\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\",\\\"0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10\\\"],...]\"")
-        },
-    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
-{
-    if(!fRegTest) {
-        throw JSONRPCError(RPC_INVALID_PARAMS, "This function is only available in regtest mode for testing");
-    }
-    const UniValue &params = request.params;
-    LOCK(cs_setethstatus);
-    NEVMTxRootMap txRootMap;       
-    const UniValue &headerArray = params[0].get_array();
-    for(size_t i =0;i<headerArray.size();i++){
-        NEVMTxRoot txRoot;
-        const UniValue &tupleArray = headerArray[i].get_array();
-        if(tupleArray.size() != 3)
-            throw JSONRPCError(RPC_INVALID_PARAMS, "Invalid size in a NEVM header input, should be size of 3");
-        std::string blockHashStr = tupleArray[0].get_str();
-        uint256 nBlockHash;
-        boost::erase_all(blockHashStr, "0x");  // strip 0x
-        if(!ParseHashStr(blockHashStr, nBlockHash)) {
-             throw JSONRPCError(RPC_INVALID_PARAMS, "Could not parse block hash");
-        }
-        std::string strTxRoot = tupleArray[1].get_str();
-        boost::erase_all(strTxRoot, "0x");  // strip 0x
-        // reverse endianness of root's as they are stored in eth as LE
-        std::vector<unsigned char> vchTxRoot(ParseHex(strTxRoot));
-        std::reverse(vchTxRoot.begin(), vchTxRoot.end());
-        txRoot.nTxRoot = uint256S(HexStr(vchTxRoot));
-        std::string strReceiptRoot = tupleArray[2].get_str();
-        boost::erase_all(strReceiptRoot, "0x");  // strip 0x
-        std::vector<unsigned char> vchReceiptRoot(ParseHex(strReceiptRoot));
-        std::reverse(vchReceiptRoot.begin(), vchReceiptRoot.end());
-        txRoot.nReceiptRoot = uint256S(HexStr(vchReceiptRoot));
-        txRootMap.try_emplace(nBlockHash, txRoot);
-    } 
-    bool res = pnevmtxrootsdb->FlushWrite(txRootMap);
-    UniValue ret(UniValue::VOBJ);
-    ret.__pushKV("status", res? "success": "fail");
-    return ret;
-},
-    };
-}
-
 // clang-format on
 void RegisterAssetRPCCommands(CRPCTable &t)
 {
-// clang-format off
-static const CRPCCommand commands[] =
-{ //  category              name                                actor (function)        
-    //  --------------------- ------------------------          -----------------------
-    { "syscoin",            &syscoingettxroots,             },
-    { "syscoin",            &syscoingetspvproof,            },
-    { "syscoin",            &convertaddress,                },
-    { "syscoin",            &syscoindecoderawtransaction,   },
-    { "syscoin",            &assetinfo,                     },
-    { "syscoin",            &listassets,                    },
-    { "syscoin",            &assetallocationverifyzdag,     },
-    { "syscoin",            &syscoinsetethheaders,          },
-    { "syscoin",            &syscoinstopgeth,               },
-    { "syscoin",            &syscoinstartgeth,              },
-    { "syscoin",            &syscoincheckmint,              },
-    { "syscoin",            &assettransactionnotarize,      },
-    { "syscoin",            &getnotarysighash,              },
-    { "syscoin",            &getnevmblockchaininfo,         },
-};
-// clang-format on
+    static const CRPCCommand commands[]{
+        {"syscoin", &syscoingettxroots},
+        {"syscoin", &syscoingetspvproof},
+        {"syscoin", &convertaddress},
+        {"syscoin", &syscoindecoderawtransaction},
+        {"syscoin", &assetinfo},
+        {"syscoin", &listassets},
+        {"syscoin", &listnevmblobdata},
+        {"syscoin", &assetallocationverifyzdag},
+        {"syscoin", &syscoinstopgeth},
+        {"syscoin", &syscoinstartgeth},
+        {"syscoin", &syscoincheckmint},
+        {"syscoin", &assettransactionnotarize},
+        {"syscoin", &getnotarysighash},
+        {"syscoin", &getnevmblockchaininfo},
+        {"syscoin", &getnevmblobdata},
+        {"syscoin", &settestparams},
+    };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);
     }

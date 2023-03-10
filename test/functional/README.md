@@ -23,12 +23,14 @@ don't have test cases for.
 - The oldest supported Python version is specified in [doc/dependencies.md](/doc/dependencies.md).
   Consider using [pyenv](https://github.com/pyenv/pyenv), which checks [.python-version](/.python-version),
   to prevent accidentally introducing modern syntax from an unsupported Python version.
-  The CI linter job also checks this, but [possibly not in all cases](https://github.com/bitcoin/bitcoin/pull/14884#discussion_r239585126).
-- See [the python lint script](/test/lint/lint-python.sh) that checks for violations that
+  The CI linter job also checks this, but [possibly not in all cases](https://github.com/syscoin/syscoin/pull/14884#discussion_r239585126).
+- See [the python lint script](/test/lint/lint-python.py) that checks for violations that
   could lead to bugs and issues in the test code.
 - Use [type hints](https://docs.python.org/3/library/typing.html) in your code to improve code readability
   and to detect possible bugs earlier.
-- Avoid wildcard imports
+- Avoid wildcard imports.
+- If more than one name from a module is needed, use lexicographically sorted multi-line imports
+  in order to reduce the possibility of potential merge conflicts.
 - Use a module-level docstring to describe what the test is testing, and how it
   is testing it.
 - When subclassing the SyscoinTestFramework, place overrides for the
@@ -138,7 +140,7 @@ The following are useful modules for test developers. They are located in
 [test/functional/test_framework/](test_framework).
 
 #### [authproxy.py](test_framework/authproxy.py)
-Taken from the [python-bitcoinrpc repository](https://github.com/jgarzik/python-bitcoinrpc).
+Taken from the [python-syscoinrpc repository](https://github.com/jgarzik/python-syscoinrpc).
 
 #### [test_framework.py](test_framework/test_framework.py)
 Base class for functional tests.
@@ -150,7 +152,7 @@ Generally useful functions.
 Test objects for interacting with a syscoind node over the p2p interface.
 
 #### [script.py](test_framework/script.py)
-Utilities for manipulating transaction scripts (originally from python-bitcoinlib)
+Utilities for manipulating transaction scripts (originally from python-syscoinlib)
 
 #### [key.py](test_framework/key.py)
 Test-only secp256k1 elliptic curve implementation

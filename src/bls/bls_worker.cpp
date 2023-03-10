@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2021 The Dash Core developers
+// Copyright (c) 2018-2022 The Dash Core developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,6 +6,7 @@
 #include <hash.h>
 #include <serialize.h>
 
+#include <util/ranges.h>
 #include <util/system.h>
 
 #include <memory>
@@ -61,9 +62,10 @@ CBLSWorker::~CBLSWorker()
 
 void CBLSWorker::Start()
 {
-    int workerCount = GetNumCores() / 2;
+    int workerCount = std::thread::hardware_concurrency() / 2;
     workerCount = std::max(std::min(1, workerCount), 4);
     workerPool.resize(workerCount);
+    // RenameThreadPool(workerPool, "bls-work");
 }
 
 void CBLSWorker::Stop()
@@ -72,24 +74,25 @@ void CBLSWorker::Stop()
     workerPool.stop(true);
 }
 
-bool CBLSWorker::GenerateContributions(size_t quorumThreshold, const BLSIdVector& ids, BLSVerificationVectorPtr& vvecRet, BLSSecretKeyVector& skSharesRet)
+bool CBLSWorker::GenerateContributions(int quorumThreshold, const BLSIdVector& ids, BLSVerificationVectorPtr& vvecRet, BLSSecretKeyVector& skSharesRet)
 {
-    auto svec = std::make_shared<BLSSecretKeyVector>((size_t)quorumThreshold);
+    auto svec = BLSSecretKeyVector((size_t)quorumThreshold);
     vvecRet = std::make_shared<BLSVerificationVector>((size_t)quorumThreshold);
     skSharesRet.resize(ids.size());
 
-    for (size_t i = 0; i < quorumThreshold; i++) {
-        (*svec)[i].MakeNewKey();
+    for (int i = 0; i < quorumThreshold; i++) {
+        svec[i].MakeNewKey();
     }
-    std::list<std::future<bool> > futures;
     size_t batchSize = 8;
+    std::vector<std::future<bool>> futures;
+    futures.reserve((quorumThreshold / batchSize + ids.size() / batchSize) + 2);
 
-    for (size_t i = 0; i < quorumThreshold; i += batchSize) {
+    for (size_t i = 0; i < size_t(quorumThreshold); i += batchSize) {
         size_t start = i;
         size_t count = std::min(batchSize, quorumThreshold - start);
         auto f = [&, start, count](int threadId) {
             for (size_t j = start; j < start + count; j++) {
-                (*vvecRet)[j] = (*svec)[j].GetPublicKey();
+                (*vvecRet)[j] = svec[j].GetPublicKey();
             }
             return true;
         };
@@ -101,7 +104,7 @@ bool CBLSWorker::GenerateContributions(size_t quorumThreshold, const BLSIdVector
         size_t count = std::min(batchSize, ids.size() - start);
         auto f = [&, start, count](int threadId) {
             for (size_t j = start; j < start + count; j++) {
-                if (!skSharesRet[j].SecretKeyShare(*svec, ids[j])) {
+                if (!skSharesRet[j].SecretKeyShare(svec, ids[j])) {
                     return false;
                 }
             }
@@ -109,13 +112,9 @@ bool CBLSWorker::GenerateContributions(size_t quorumThreshold, const BLSIdVector
         };
         futures.emplace_back(workerPool.push(f));
     }
-    bool success = true;
-    for (auto& f : futures) {
-        if (!f.get()) {
-            success = false;
-        }
-    }
-    return success;
+    return ranges::all_of(futures, [](auto& f){
+        return f.get();
+    });
 }
 
 // aggregates a single vector of BLS objects in parallel
@@ -123,7 +122,7 @@ bool CBLSWorker::GenerateContributions(size_t quorumThreshold, const BLSIdVector
 // when enough batches are finished to form a new batch, the new batch is queued for further parallel aggregation
 // when no more batches can be created from finished batch results, the final aggregated is created and the doneCallback
 // called.
-// The Aggregator object needs to be created on the heap and it will delete itself after calling the doneCallback
+// The Aggregator object needs to be created on the heap, and it will delete itself after calling the doneCallback
 // The input vector is not copied into the Aggregator but instead a vector of pointers to the original entries from the
 // input vector is stored. This means that the input vector must stay alive for the whole lifetime of the Aggregator
 template <typename T>
@@ -153,11 +152,11 @@ struct Aggregator : public std::enable_shared_from_this<Aggregator<T>> {
                bool _parallel,
                ctpl::thread_pool& _workerPool,
                DoneCallback _doneCallback) :
+            inputVec(std::make_shared<std::vector<const T*>>(count)),
             parallel(_parallel),
             workerPool(_workerPool),
             doneCallback(std::move(_doneCallback))
     {
-        inputVec = std::make_shared<std::vector<const T*> >(count);
         for (size_t i = 0; i < count; i++) {
             (*inputVec)[i] = pointer(_inputVec[start + i]);
         }
@@ -270,7 +269,13 @@ struct Aggregator : public std::enable_shared_from_this<Aggregator<T>> {
 
     void PushAggQueue(const T& v)
     {
-        aggQueue.push(new T(v));
+        auto copyT = new T(v);
+        try {
+            aggQueue.push(copyT);
+        } catch (...) {
+            delete copyT;
+            throw;
+        }
 
         if (++aggQueueSize >= batchSize) {
             // we've collected enough intermediate results to form a new batch.
@@ -341,7 +346,7 @@ struct VectorAggregator : public std::enable_shared_from_this<VectorAggregator<T
     bool parallel;
     ctpl::thread_pool& workerPool;
 
-    std::atomic<size_t> doneCount;
+    std::atomic<size_t> doneCount{0};
 
     VectorPtrType result;
     size_t vecSize;
@@ -355,8 +360,7 @@ struct VectorAggregator : public std::enable_shared_from_this<VectorAggregator<T
             start(_start),
             count(_count),
             parallel(_parallel),
-            workerPool(_workerPool),
-            doneCount(0)
+            workerPool(_workerPool)
     {
         assert(!vecs.empty());
         vecSize = vecs[0]->size();
@@ -416,7 +420,7 @@ struct ContributionVerifier : public std::enable_shared_from_this<ContributionVe
 
     ctpl::thread_pool& workerPool;
 
-    size_t batchCount;
+    size_t batchCount{1};
     size_t verifyCount;
 
     std::vector<BatchState> batchStates;
@@ -434,7 +438,6 @@ struct ContributionVerifier : public std::enable_shared_from_this<ContributionVe
         parallel(_parallel),
         aggregated(_aggregated),
         workerPool(_workerPool),
-        batchCount(1),
         verifyCount(_vvecs.size()),
         doneCallback(std::move(_doneCallback))
     {
@@ -475,7 +478,7 @@ struct ContributionVerifier : public std::enable_shared_from_this<ContributionVe
         size_t batchIdx = 0;
         std::vector<bool> result(vvecs.size());
         for (size_t i = 0; i < vvecs.size(); i += batchSize) {
-            auto& batchState = batchStates[batchIdx++];
+            const auto& batchState = batchStates[batchIdx++];
             for (size_t j = 0; j < batchState.count; j++) {
                 result[batchState.start + j] = batchState.verifyResults[j] != 0;
             }
@@ -697,7 +700,6 @@ std::future<CBLSSignature> CBLSWorker::AsyncAggregateSigs(const BLSSignatureVect
     return std::move(p.second);
 }
 
-
 CBLSPublicKey CBLSWorker::BuildPubKeyShare(const BLSVerificationVectorPtr& vvec, const CBLSId& id)
 {
     CBLSPublicKey pkShare;
@@ -807,13 +809,9 @@ void CBLSWorker::AsyncVerifySig(const CBLSSignature& sig, const CBLSPublicKey& p
 
     std::unique_lock<std::mutex> l(sigVerifyMutex);
 
-    bool foundDuplicate = false;
-    for (const auto& s : sigVerifyQueue) {
-        if (s.msgHash == msgHash) {
-            foundDuplicate = true;
-            break;
-        }
-    }
+    bool foundDuplicate = ranges::any_of(sigVerifyQueue, [&msgHash](const auto& job){
+        return job.msgHash == msgHash;
+    });
 
     if (foundDuplicate) {
         // batched/aggregated verification does not allow duplicate hashes, so we push what we currently have and start

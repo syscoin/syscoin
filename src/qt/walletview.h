@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,6 +8,8 @@
 #include <consensus/amount.h>
 // SYSCOIN
 #include <qt/masternodelist.h>
+#include <qt/syscoinunits.h>
+
 #include <QStackedWidget>
 
 class ClientModel;
@@ -50,7 +52,7 @@ public:
     void showOutOfSyncWarning(bool fShow);
 
 private:
-    ClientModel *clientModel;
+    ClientModel* clientModel{nullptr};
 
     //!
     //! The wallet model represents a bitcoin wallet, and offers access to
@@ -120,7 +122,7 @@ Q_SIGNALS:
     /** Encryption status of wallet changed */
     void encryptionStatusChanged();
     /** Notify that a new transaction appeared */
-    void incomingTransaction(const QString& date, int unit, const CAmount& amount, const QString& type, const QString& address, const QString& label, const QString& walletName);
+    void incomingTransaction(const QString& date, SyscoinUnit unit, const CAmount& amount, const QString& type, const QString& address, const QString& label, const QString& walletName);
     /** Notify that the out of sync warning icon has been pressed */
     void outOfSyncWarningClicked();
 };

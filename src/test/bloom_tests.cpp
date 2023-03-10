@@ -1,9 +1,9 @@
-// Copyright (c) 2012-2020 The Bitcoin Core developers
+// Copyright (c) 2012-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <common/bloom.h>
-
+#include <bls/bls.h>
 #include <clientversion.h>
 #include <key.h>
 #include <key_io.h>
@@ -12,6 +12,7 @@
 #include <random.h>
 #include <serialize.h>
 #include <streams.h>
+#include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <util/strencodings.h>
@@ -39,12 +40,13 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize)
     filter.insert(ParseHex("b9300670b4c5366e95b2699e8b18bc75e5f729c5"));
     BOOST_CHECK_MESSAGE(filter.contains(ParseHex("b9300670b4c5366e95b2699e8b18bc75e5f729c5")), "Bloom filter doesn't contain just-inserted object (3)!");
 
-    CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+    DataStream stream{};
     stream << filter;
 
     std::vector<uint8_t> expected = ParseHex("03614e9b050000000000000001");
+    auto result{MakeUCharSpan(stream)};
 
-    BOOST_CHECK_EQUAL_COLLECTIONS(stream.begin(), stream.end(), expected.begin(), expected.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(result.begin(), result.end(), expected.begin(), expected.end());
 
     BOOST_CHECK_MESSAGE( filter.contains(ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8")), "Bloom filter doesn't contain just-inserted object!");
 }
@@ -65,12 +67,13 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize_with_tweak)
     filter.insert(ParseHex("b9300670b4c5366e95b2699e8b18bc75e5f729c5"));
     BOOST_CHECK_MESSAGE(filter.contains(ParseHex("b9300670b4c5366e95b2699e8b18bc75e5f729c5")), "Bloom filter doesn't contain just-inserted object (3)!");
 
-    CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+    DataStream stream{};
     stream << filter;
 
     std::vector<uint8_t> expected = ParseHex("03ce4299050000000100008001");
+    auto result{MakeUCharSpan(stream)};
 
-    BOOST_CHECK_EQUAL_COLLECTIONS(stream.begin(), stream.end(), expected.begin(), expected.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(result.begin(), result.end(), expected.begin(), expected.end());
 }
 
 BOOST_AUTO_TEST_CASE(bloom_create_insert_key)
@@ -85,12 +88,13 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_key)
     uint160 hash = pubkey.GetID();
     filter.insert(hash);
 
-    CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+    DataStream stream{};
     stream << filter;
 
     std::vector<unsigned char> expected = ParseHex("038fc16b080000000000000001");
+    auto result{MakeUCharSpan(stream)};
 
-    BOOST_CHECK_EQUAL_COLLECTIONS(stream.begin(), stream.end(), expected.begin(), expected.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(result.begin(), result.end(), expected.begin(), expected.end());
 }
 
 BOOST_AUTO_TEST_CASE(bloom_match)
@@ -164,6 +168,8 @@ BOOST_AUTO_TEST_CASE(bloom_match)
 // SYSCOIN
 BOOST_AUTO_TEST_CASE(dip2_bloom_match)
 {
+    //TODO: Provide raw data for basic scheme as well
+    bls::bls_legacy_scheme.store(true);
     // ProRegTx from testnet (txid: a446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c5632)
     CDataStream stream(ParseHex("500000000001012fa52ec38276cc8f5376d6cbb211524851b2feec21f866966bf4ce7b7558ee910000000000feffffff020000000000000000d16a4cce01000000000031e77323502acc4c8d204d2951c6f75cfb79910afaf9deb119e6598aa9bc59b80100000000000000000000000000ffffadf9310947c154a9eed46b864772bd4aeea2165a3206d1ee4e941324af7ca7a4c4f1cf36e20d259e4724e18be0e39471db9f7d88f64748ec17583fbe591538dce8293c801e4d3410d2ed35cfddbf0573c05b33d7f24a0562b21a648d449d00001600145b1c9907188c05144fb19ba71f516bf50aec9b615b0283fd4c816f3f637b06d3d73ea5d94b859ac3f28589c9312ce5b65c05c913000bc317a804000000160014800563f22c7022b1f8b5c371e5361996d78872220247304402202879ffad1d8de66ca7bd1cac8c89551e28369005804a2ca5847a38c2f1e34c94022071109d1a1ad8cebbdb8dad33bbc0984b4f090233b27564ee946e403c55710c4e0121033fc91a933e42becc19bcff709345eff216e0f8d7129b3a91a19b0e520d4b114a00000000"), SER_DISK, CLIENT_VERSION);
     CTransaction proregtx(deserialize, stream);
@@ -234,6 +240,8 @@ BOOST_AUTO_TEST_CASE(dip2_bloom_match)
 
 BOOST_AUTO_TEST_CASE(dip2_bloom_update)
 {
+    //TODO: Provide raw data for basic scheme as well
+    bls::bls_legacy_scheme.store(true);
     // ProRegTx from testnet (txid: a446abfd1a73e451e86886dbe75ebbbeb28e4dc7989a1972442844204d0c5632)
     CDataStream stream(ParseHex("500000000001012fa52ec38276cc8f5376d6cbb211524851b2feec21f866966bf4ce7b7558ee910000000000feffffff020000000000000000d16a4cce01000000000031e77323502acc4c8d204d2951c6f75cfb79910afaf9deb119e6598aa9bc59b80100000000000000000000000000ffffadf9310947c154a9eed46b864772bd4aeea2165a3206d1ee4e941324af7ca7a4c4f1cf36e20d259e4724e18be0e39471db9f7d88f64748ec17583fbe591538dce8293c801e4d3410d2ed35cfddbf0573c05b33d7f24a0562b21a648d449d00001600145b1c9907188c05144fb19ba71f516bf50aec9b615b0283fd4c816f3f637b06d3d73ea5d94b859ac3f28589c9312ce5b65c05c913000bc317a804000000160014800563f22c7022b1f8b5c371e5361996d78872220247304402202879ffad1d8de66ca7bd1cac8c89551e28369005804a2ca5847a38c2f1e34c94022071109d1a1ad8cebbdb8dad33bbc0984b4f090233b27564ee946e403c55710c4e0121033fc91a933e42becc19bcff709345eff216e0f8d7129b3a91a19b0e520d4b114a00000000"), SER_DISK, CLIENT_VERSION);
     CTransaction proregtx(deserialize, stream);
@@ -436,13 +444,14 @@ BOOST_AUTO_TEST_CASE(merkle_block_3_and_serialize)
     BOOST_CHECK(vMatched.size() == merkleBlock.vMatchedTxn.size());
     for (unsigned int i = 0; i < vMatched.size(); i++)
         BOOST_CHECK(vMatched[i] == merkleBlock.vMatchedTxn[i].second);
-
+    // SYSCOIN
     CDataStream merkleStream(SER_NETWORK, PROTOCOL_VERSION);
     merkleStream << merkleBlock;
 
     std::vector<uint8_t> expected = ParseHex("0100000079cda856b143d9db2c1caff01d1aecc8630d30625d10e8b4b8b0000000000000b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f196367291b4d4c86041b8fa45d630100000001b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f19630101");
+    auto result{MakeUCharSpan(merkleStream)};
 
-    BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), merkleStream.begin(), merkleStream.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(expected.begin(), expected.end(), result.begin(), result.end());
 }
 
 BOOST_AUTO_TEST_CASE(merkle_block_4)

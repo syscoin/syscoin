@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2018-2021 The Bitcoin Core developers
+# Copyright (c) 2018-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test syscoin-wallet."""
@@ -19,6 +19,9 @@ BUFFER_SIZE = 16 * 1024
 
 
 class ToolWalletTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
@@ -34,7 +37,7 @@ class ToolWalletTest(SyscoinTestFramework):
         if not self.options.descriptors and 'create' in args:
             default_args.append('-legacy')
 
-        return subprocess.Popen([binary] + default_args + list(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return subprocess.Popen([binary] + default_args + list(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def assert_raises_tool_error(self, error, *args):
         p = self.syscoin_wallet_process(*args)
@@ -68,7 +71,7 @@ class ToolWalletTest(SyscoinTestFramework):
         result = 'unchanged' if new == old else 'increased!'
         self.log.debug('Wallet file timestamp {}'.format(result))
 
-    def get_expected_info_output(self, name="", transactions=0, keypool=2, address=0):
+    def get_expected_info_output(self, name="", transactions=0, keypool=2, address=0, imported_privs=0):
         wallet_name = self.default_wallet_name if name == "" else name
         if self.options.descriptors:
             output_types = 4  # p2pkh, p2sh, segwit, bech32m
@@ -83,7 +86,7 @@ class ToolWalletTest(SyscoinTestFramework):
                 Keypool Size: %d
                 Transactions: %d
                 Address Book: %d
-            ''' % (wallet_name, keypool * output_types, transactions, address))
+            ''' % (wallet_name, keypool * output_types, transactions, imported_privs * 3 + address))
         else:
             output_types = 3  # p2pkh, p2sh, segwit. Legacy wallets do not support bech32m.
             return textwrap.dedent('''\
@@ -97,7 +100,7 @@ class ToolWalletTest(SyscoinTestFramework):
                 Keypool Size: %d
                 Transactions: %d
                 Address Book: %d
-            ''' % (wallet_name, keypool, transactions, address * output_types))
+            ''' % (wallet_name, keypool, transactions, (address + imported_privs) * output_types))
 
     def read_dump(self, filename):
         dump = OrderedDict()
@@ -173,7 +176,7 @@ class ToolWalletTest(SyscoinTestFramework):
         self.assert_tool_output(load_output, *args)
         assert os.path.isdir(os.path.join(self.nodes[0].datadir, "regtest/wallets", wallet_name))
 
-        self.assert_tool_output("The dumpfile may contain private keys. To ensure the safety of your Bitcoin, do not share the dumpfile.\n", '-wallet={}'.format(wallet_name), '-dumpfile={}'.format(rt_dumppath), 'dump')
+        self.assert_tool_output("The dumpfile may contain private keys. To ensure the safety of your Syscoin, do not share the dumpfile.\n", '-wallet={}'.format(wallet_name), '-dumpfile={}'.format(rt_dumppath), 'dump')
 
         rt_dump_data = self.read_dump(rt_dumppath)
         wallet_dat = os.path.join(self.nodes[0].datadir, "regtest/wallets/", wallet_name, "wallet.dat")
@@ -219,7 +222,7 @@ class ToolWalletTest(SyscoinTestFramework):
         # shasum_before = self.wallet_shasum()
         timestamp_before = self.wallet_timestamp()
         self.log.debug('Wallet file timestamp before calling info: {}'.format(timestamp_before))
-        out = self.get_expected_info_output(address=1)
+        out = self.get_expected_info_output(imported_privs=1)
         self.assert_tool_output(out, '-wallet=' + self.default_wallet_name, 'info')
         timestamp_after = self.wallet_timestamp()
         self.log.debug('Wallet file timestamp after calling info: {}'.format(timestamp_after))
@@ -243,14 +246,14 @@ class ToolWalletTest(SyscoinTestFramework):
         """
         self.start_node(0)
         self.log.info('Generating transaction to mutate wallet')
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 1)
         self.stop_node(0)
 
         self.log.info('Calling wallet tool info after generating a transaction, testing output')
         shasum_before = self.wallet_shasum()
         timestamp_before = self.wallet_timestamp()
         self.log.debug('Wallet file timestamp before calling info: {}'.format(timestamp_before))
-        out = self.get_expected_info_output(transactions=1, address=1)
+        out = self.get_expected_info_output(transactions=1, imported_privs=1)
         self.assert_tool_output(out, '-wallet=' + self.default_wallet_name, 'info')
         shasum_after = self.wallet_shasum()
         timestamp_after = self.wallet_timestamp()
@@ -308,7 +311,7 @@ class ToolWalletTest(SyscoinTestFramework):
         self.log.debug('Wallet file shasum unchanged\n')
 
     def test_salvage(self):
-        # TODO: Check salvage actually salvages and doesn't break things. https://github.com/bitcoin/bitcoin/issues/7463
+        # TODO: Check salvage actually salvages and doesn't break things. https://github.com/syscoin/syscoin/issues/7463
         self.log.info('Check salvage')
         self.start_node(0)
         self.nodes[0].createwallet("salvage")
@@ -328,7 +331,7 @@ class ToolWalletTest(SyscoinTestFramework):
 
         self.log.info('Checking basic dump')
         wallet_dump = os.path.join(self.nodes[0].datadir, "wallet.dump")
-        self.assert_tool_output('The dumpfile may contain private keys. To ensure the safety of your Bitcoin, do not share the dumpfile.\n', '-wallet=todump', '-dumpfile={}'.format(wallet_dump), 'dump')
+        self.assert_tool_output('The dumpfile may contain private keys. To ensure the safety of your Syscoin, do not share the dumpfile.\n', '-wallet=todump', '-dumpfile={}'.format(wallet_dump), 'dump')
 
         dump_data = self.read_dump(wallet_dump)
         orig_dump = dump_data.copy()
@@ -360,12 +363,12 @@ class ToolWalletTest(SyscoinTestFramework):
         bad_ver_wallet_dump = os.path.join(self.nodes[0].datadir, "wallet-bad_ver1.dump")
         dump_data["SYSCOIN_CORE_WALLET_DUMP"] = "0"
         self.write_dump(dump_data, bad_ver_wallet_dump)
-        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of bitcoin-wallet only supports version 1 dumpfiles. Got dumpfile with version 0', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
+        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of syscoin-wallet only supports version 1 dumpfiles. Got dumpfile with version 0', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
         assert not os.path.isdir(os.path.join(self.nodes[0].datadir, "regtest/wallets", "badload"))
         bad_ver_wallet_dump = os.path.join(self.nodes[0].datadir, "wallet-bad_ver2.dump")
         dump_data["SYSCOIN_CORE_WALLET_DUMP"] = "2"
         self.write_dump(dump_data, bad_ver_wallet_dump)
-        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of bitcoin-wallet only supports version 1 dumpfiles. Got dumpfile with version 2', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
+        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of syscoin-wallet only supports version 1 dumpfiles. Got dumpfile with version 2', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
         assert not os.path.isdir(os.path.join(self.nodes[0].datadir, "regtest/wallets", "badload"))
         bad_magic_wallet_dump = os.path.join(self.nodes[0].datadir, "wallet-bad_magic.dump")
         del dump_data["SYSCOIN_CORE_WALLET_DUMP"]
@@ -390,7 +393,11 @@ class ToolWalletTest(SyscoinTestFramework):
         bad_sum_wallet_dump = os.path.join(self.nodes[0].datadir, "wallet-bad_sum3.dump")
         dump_data["checksum"] = "2" * 10
         self.write_dump(dump_data, bad_sum_wallet_dump)
-        self.assert_raises_tool_error('Error: Dumpfile checksum does not match. Computed {}, expected {}{}'.format(checksum, "2" * 10, "0" * 54), '-wallet=badload', '-dumpfile={}'.format(bad_sum_wallet_dump), 'createfromdump')
+        self.assert_raises_tool_error('Error: Checksum is not the correct size', '-wallet=badload', '-dumpfile={}'.format(bad_sum_wallet_dump), 'createfromdump')
+        assert not os.path.isdir(os.path.join(self.nodes[0].datadir, "regtest/wallets", "badload"))
+        dump_data["checksum"] = "3" * 66
+        self.write_dump(dump_data, bad_sum_wallet_dump)
+        self.assert_raises_tool_error('Error: Checksum is not the correct size', '-wallet=badload', '-dumpfile={}'.format(bad_sum_wallet_dump), 'createfromdump')
         assert not os.path.isdir(os.path.join(self.nodes[0].datadir, "regtest/wallets", "badload"))
 
 

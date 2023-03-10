@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2017-2021 The Bitcoin Core developers
+# Copyright (c) 2017-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Class for syscoind node under test"""
@@ -20,6 +20,7 @@ import urllib.parse
 import collections
 import shlex
 import sys
+from pathlib import Path
 
 from .authproxy import JSONRPCException
 from .descriptors import descsum_create
@@ -101,8 +102,12 @@ class TestNode():
             "-debug",
             "-debugexclude=libevent",
             "-debugexclude=leveldb",
+            "-debugexclude=rand",
             "-uacomment=testnode%d" % i,
         ]
+        if self.descriptors is None:
+            self.args.append("-disablewallet")
+
         if use_valgrind:
             default_suppressions_file = os.path.join(
                 os.path.dirname(os.path.realpath(__file__)),
@@ -117,6 +122,8 @@ class TestNode():
             self.args.append("-logthreadnames")
         if self.version_is_at_least(4010300):
             self.args.append("-logsourcelocations")
+        if self.version_is_at_least(4040000):
+            self.args.append("-loglevel=trace")
 
         self.cli = TestNodeCLI(syscoin_cli, self.datadir)
         self.use_cli = use_cli
@@ -333,7 +340,7 @@ class TestNode():
             return
         self.log.debug("Stopping node")
         try:
-            # Do not use wait argument when testing older nodes, e.g. in feature_backwards_compatibility.py
+            # Do not use wait argument when testing older nodes, e.g. in wallet_backwards_compatibility.py
             if self.version_is_at_least(180000):
                 self.stop(wait=wait)
             else:
@@ -383,21 +390,46 @@ class TestNode():
     def wait_until_stopped(self, timeout=SYSCOIND_PROC_WAIT_TIMEOUT):
         wait_until_helper(self.is_node_stopped, timeout=timeout, timeout_factor=self.timeout_factor)
 
+    def replace_in_config(self, replacements):
+        """
+        Perform replacements in the configuration file.
+        The substitutions are passed as a list of search-replace-tuples, e.g.
+            [("old", "new"), ("foo", "bar"), ...]
+        """
+        with open(self.syscoinconf, 'r', encoding='utf8') as conf:
+            conf_data = conf.read()
+        for replacement in replacements:
+            assert_equal(len(replacement), 2)
+            old, new = replacement[0], replacement[1]
+            conf_data = conf_data.replace(old, new)
+        with open(self.syscoinconf, 'w', encoding='utf8') as conf:
+            conf.write(conf_data)
+
+    @property
+    def chain_path(self) -> Path:
+        return Path(self.datadir) / self.chain
+
+    @property
+    def debug_log_path(self) -> Path:
+        return self.chain_path / 'debug.log'
+
+    def debug_log_bytes(self) -> int:
+        with open(self.debug_log_path, encoding='utf-8') as dl:
+            dl.seek(0, 2)
+            return dl.tell()
+
     @contextlib.contextmanager
     def assert_debug_log(self, expected_msgs, unexpected_msgs=None, timeout=2):
         if unexpected_msgs is None:
             unexpected_msgs = []
         time_end = time.time() + timeout * self.timeout_factor
-        debug_log = os.path.join(self.datadir, self.chain, 'debug.log')
-        with open(debug_log, encoding='utf-8') as dl:
-            dl.seek(0, 2)
-            prev_size = dl.tell()
+        prev_size = self.debug_log_bytes()
 
         yield
 
         while True:
             found = True
-            with open(debug_log, encoding='utf-8') as dl:
+            with open(self.debug_log_path, encoding='utf-8') as dl:
                 dl.seek(prev_size)
                 log = dl.read()
             print_log = " - " + "\n - ".join(log.splitlines())
@@ -413,6 +445,42 @@ class TestNode():
                 break
             time.sleep(0.05)
         self._raise_assertion_error('Expected messages "{}" does not partially match log:\n\n{}\n\n'.format(str(expected_msgs), print_log))
+
+    @contextlib.contextmanager
+    def wait_for_debug_log(self, expected_msgs, timeout=60):
+        """
+        Block until we see a particular debug log message fragment or until we exceed the timeout.
+        Return:
+            the number of log lines we encountered when matching
+        """
+        time_end = time.time() + timeout * self.timeout_factor
+        prev_size = self.debug_log_bytes()
+
+        yield
+
+        while True:
+            found = True
+            with open(self.debug_log_path, "rb") as dl:
+                dl.seek(prev_size)
+                log = dl.read()
+
+            for expected_msg in expected_msgs:
+                if expected_msg not in log:
+                    found = False
+
+            if found:
+                return
+
+            if time.time() >= time_end:
+                print_log = " - " + "\n - ".join(log.splitlines())
+                break
+
+            # No sleep here because we want to detect the message fragment as fast as
+            # possible.
+
+        self._raise_assertion_error(
+            'Expected messages "{}" does not partially match log:\n\n{}\n\n'.format(
+                str(expected_msgs), print_log))
 
     @contextlib.contextmanager
     def profile_with_perf(self, profile_name: str):
@@ -500,6 +568,7 @@ class TestNode():
 
         Will throw if syscoind starts without an error.
         Will throw if an expected_msg is provided and it does not match syscoind's stdout."""
+        assert not self.running
         with tempfile.NamedTemporaryFile(dir=self.stderr_dir, delete=False) as log_stderr, \
              tempfile.NamedTemporaryFile(dir=self.stdout_dir, delete=False) as log_stdout:
             try:
@@ -571,12 +640,16 @@ class TestNode():
 
         return p2p_conn
 
-    def add_outbound_p2p_connection(self, p2p_conn, *, p2p_idx, connection_type="outbound-full-relay", **kwargs):
+    def add_outbound_p2p_connection(self, p2p_conn, *, wait_for_verack=True, p2p_idx, connection_type="outbound-full-relay", **kwargs):
         """Add an outbound p2p connection from node. Must be an
-        "outbound-full-relay", "block-relay-only" or "addr-fetch" connection.
+        "outbound-full-relay", "block-relay-only", "addr-fetch" or "feeler" connection.
 
         This method adds the p2p connection to the self.p2ps list and returns
         the connection to the caller.
+
+        p2p_idx must be different for simultaneously connected peers. When reusing it for the next peer
+        after disconnecting the previous one, it is necessary to wait for the disconnect to finish to avoid
+        a race condition.
         """
 
         def addconnection_callback(address, port):
@@ -585,11 +658,17 @@ class TestNode():
 
         p2p_conn.peer_accept_connection(connect_cb=addconnection_callback, connect_id=p2p_idx + 1, net=self.chain, timeout_factor=self.timeout_factor, **kwargs)()
 
-        p2p_conn.wait_for_connect()
-        self.p2ps.append(p2p_conn)
+        if connection_type == "feeler":
+            # feeler connections are closed as soon as the node receives a `version` message
+            p2p_conn.wait_until(lambda: p2p_conn.message_count["version"] == 1, check_connected=False)
+            p2p_conn.wait_until(lambda: not p2p_conn.is_connected, check_connected=False)
+        else:
+            p2p_conn.wait_for_connect()
+            self.p2ps.append(p2p_conn)
 
-        p2p_conn.wait_for_verack()
-        p2p_conn.sync_with_ping()
+            if wait_for_verack:
+                p2p_conn.wait_for_verack()
+                p2p_conn.sync_with_ping()
 
         return p2p_conn
 
@@ -598,7 +677,8 @@ class TestNode():
         return len([peer for peer in self.getpeerinfo() if peer['subver'] == P2P_SUBVERSION])
 
     def disconnect_p2ps(self):
-        """Close all p2p connections to the node."""
+        """Close all p2p connections to the node.
+        Use only after each p2p has sent a version message to ensure the wait works."""
         for p in self.p2ps:
             p.peer_disconnect()
         del self.p2ps[:]
@@ -661,7 +741,6 @@ class TestNodeCLI():
         """Run syscoin-cli command. Deserializes returned string as python object."""
         pos_args = [arg_to_cli(arg) for arg in args]
         named_args = [str(key) + "=" + arg_to_cli(value) for (key, value) in kwargs.items()]
-        assert not (pos_args and named_args), "Cannot use positional arguments and named arguments in the same syscoin-cli call"
         p_args = [self.binary, "-datadir=" + self.datadir] + self.options
         if named_args:
             p_args += ["-named"]
@@ -669,7 +748,7 @@ class TestNodeCLI():
             p_args += [command]
         p_args += pos_args + named_args
         self.log.debug("Running syscoin-cli {}".format(p_args[2:]))
-        process = subprocess.Popen(p_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        process = subprocess.Popen(p_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         cli_stdout, cli_stderr = process.communicate(input=self.input)
         returncode = process.poll()
         if returncode:
@@ -692,6 +771,9 @@ class RPCOverloadWrapper():
 
     def __getattr__(self, name):
         return getattr(self.rpc, name)
+
+    def createwallet_passthrough(self, *args, **kwargs):
+        return self.__getattr__("createwallet")(*args, **kwargs)
 
     def createwallet(self, wallet_name, disable_private_keys=None, blank=None, passphrase='', avoid_reuse=None, descriptors=None, load_on_startup=None, external_signer=None):
         if descriptors is None:
@@ -750,7 +832,7 @@ class RPCOverloadWrapper():
             int(address ,16)
             is_hex = True
             desc = descsum_create('raw(' + address + ')')
-        except:
+        except Exception:
             desc = descsum_create('addr(' + address + ')')
         reqs = [{
             'desc': desc,

@@ -12,11 +12,12 @@
 #include <evo/cbtx.h>
 #include <evo/deterministicmns.h>
 #include <evo/specialtx.h>
-
+#include <util/time.h>
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_blockprocessor.h>
+#include <util/system.h>
 class CCoinsViewCache;
-bool CheckSpecialTx(BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck)
+bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck)
 {
 
     try {
@@ -61,7 +62,7 @@ bool IsSpecialTx(const CTransaction& tx)
     return false;
 }
 
-bool ProcessSpecialTxsInBlock(BlockManager &blockman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool fCheckCbTxMerleRoots)
+bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool fCheckCbTxMerleRoots)
 {
     try {
         static int64_t nTimeLoop = 0;
@@ -97,7 +98,7 @@ bool ProcessSpecialTxsInBlock(BlockManager &blockman, const CBlock& block, const
         int64_t nTime4 = GetTimeMicros(); nTimeDMN += nTime4 - nTime3;
         LogPrint(BCLog::BENCHMARK, "        - deterministicMNManager: %.2fms [%.2fs]\n", 0.001 * (nTime4 - nTime3), nTimeDMN * 0.000001);
 
-        if (fCheckCbTxMerleRoots && !CheckCbTxMerkleRoots(block, pindex, state, view)) {
+        if (fCheckCbTxMerleRoots && !CheckCbTxMerkleRoots(block, pindex, *llmq::quorumBlockProcessor, state, view)) {
             // pass the state returned by the function above
             return false;
         }

@@ -6,13 +6,14 @@
 
 #include <util/translation.h>
 #include <sync.h>
+#include <atomic>
 class CMasternodeSync;
 class PeerManager;
 class CBlockIndex;
 class CConnman;
 class CNode;
 class CDataStream;
-
+class ChainstateManager;
 static constexpr int MASTERNODE_SYNC_BLOCKCHAIN      = 1;
 static constexpr int MASTERNODE_SYNC_GOVERNANCE      = 4;
 static constexpr int MASTERNODE_SYNC_GOVOBJ          = 10;
@@ -21,7 +22,7 @@ static constexpr int MASTERNODE_SYNC_FINISHED        = 999;
 
 static constexpr int MASTERNODE_SYNC_TICK_SECONDS    = 6;
 static constexpr int MASTERNODE_SYNC_TIMEOUT_SECONDS = 30; // our blocks are 2.5 minutes so 30 seconds should be fine
-static constexpr int MASTERNODE_SYNC_RESET_SECONDS   = 600; // Reset fReachedBestHeader in CMasternodeSync::Reset if UpdateBlockTip hasn't been called for this seconds
+static constexpr int MASTERNODE_SYNC_RESET_SECONDS   = 900; // Reset fReachedBestHeader in CMasternodeSync::Reset if UpdateBlockTip hasn't been called for this seconds
 
 extern CMasternodeSync masternodeSync;
 
@@ -48,7 +49,7 @@ private:
     std::atomic<int64_t> nTimeLastUpdateBlockTip {0};
 
 public:
-    CMasternodeSync() = default;
+    CMasternodeSync();
 
 
     static void SendGovernanceSyncRequest(CNode* pnode, CConnman& connman);
@@ -72,9 +73,8 @@ public:
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv) const;
     void ProcessTick(CConnman& connman, const PeerManager& peerman);
-    void AcceptedBlockHeader(const CBlockIndex *pindexNew);
-    void NotifyHeaderTip(const CBlockIndex *pindexNew, bool fInitialDownload, CConnman& connman);
-    void UpdatedBlockTip(const CBlockIndex *pindexNew, bool fInitialDownload);
+    void NotifyHeaderTip(const CBlockIndex *pindexNew);
+    void UpdatedBlockTip(const CBlockIndex *pindexNew, ChainstateManager& chainman, bool fInitialDownload);
 
     void DoMaintenance(CConnman &connman, const PeerManager& peerman);
 };

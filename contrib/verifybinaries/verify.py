@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2020 The Bitcoin Core developers
+# Copyright (c) 2020-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Script for verifying Syscoin Core release binaries
@@ -21,8 +21,8 @@ from textwrap import indent
 
 WORKINGDIR = "/tmp/syscoin_verify_binaries"
 HASHFILE = "hashes.tmp"
-HOST1="https://syscoincore.org"
-HOST2="https://syscoin.org"
+HOST1 = "https://syscoincore.org"
+HOST2 = "https://syscoin.org"
 VERSIONPREFIX = "syscoin-core-"
 SIGNATUREFILENAME = "SHA256SUMS.asc"
 

@@ -23,7 +23,6 @@ class CDKGSessionManager
 
 private:
     std::unique_ptr<CDBWrapper> db{nullptr};
-    CBLSWorker& blsWorker;
     std::map<uint8_t, CDKGSessionHandler> dkgSessionHandlers;
 
     mutable RecursiveMutex contributionsCacheCs;
@@ -49,7 +48,7 @@ public:
     CConnman& connman;
     PeerManager& peerman;
     CDKGSessionManager(CBLSWorker& _blsWorker, CConnman &connman, PeerManager& peerman, ChainstateManager& chainman, bool unitTests, bool fWipe);
-    ~CDKGSessionManager();
+   ~CDKGSessionManager() = default;
 
     void StartThreads();
     void StopThreads();

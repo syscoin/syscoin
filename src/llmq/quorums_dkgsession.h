@@ -12,8 +12,9 @@
 
 #include <llmq/quorums_utils.h>
 #include <sync.h>
+#include <optional>
 class UniValue;
-
+class PeerManager;
 namespace llmq
 {
 
@@ -21,13 +22,6 @@ class CFinalCommitment;
 class CDKGSession;
 class CDKGSessionManager;
 class CDKGPendingMessages;
-
-class CDKGLogger : public CBatchedLogger
-{
-public:
-    CDKGLogger(const CDKGSession& _quorumDkg, const std::string& _func);
-    CDKGLogger(const std::string& _llmqTypeName, const uint256& _quorumHash, int _height, bool _areWeMember, const std::string& _func);
-};
 
 class CDKGContribution
 {
@@ -92,7 +86,8 @@ public:
 
 public:
     CDKGComplaint() = default;
-    explicit CDKGComplaint(const Consensus::LLMQParams& params);
+    explicit CDKGComplaint(const Consensus::LLMQParams& params) :
+            badMembers((size_t)params.size), complainForMembers((size_t)params.size) {};
 
     SERIALIZE_METHODS(CDKGComplaint, obj) {
         READWRITE(obj.llmqType, obj.quorumHash, obj.proTxHash, DYNBITSET(obj.badMembers), DYNBITSET(obj.complainForMembers), obj.sig);
@@ -112,6 +107,7 @@ public:
     uint8_t llmqType;
     uint256 quorumHash;
     uint256 proTxHash;
+    // TODO make this pair a struct with named fields
     std::vector<std::pair<uint32_t, CBLSSecretKey>> contributions;
     CBLSSignature sig;
 
@@ -148,7 +144,8 @@ public:
 
 public:
     CDKGPrematureCommitment() = default;
-    explicit CDKGPrematureCommitment(const Consensus::LLMQParams& params);
+    explicit CDKGPrematureCommitment(const Consensus::LLMQParams& params) :
+            validMembers((size_t)params.size) {};
 
     int CountValidMembers() const
     {
@@ -168,7 +165,7 @@ public:
 class CDKGMember
 {
 public:
-    CDKGMember(CDeterministicMNCPtr _dmn, size_t _idx);
+    CDKGMember(const CDeterministicMNCPtr& _dmn, size_t _idx);
 
     CDeterministicMNCPtr dmn;
     size_t idx;
@@ -234,7 +231,7 @@ private:
 
     uint256 myProTxHash;
     CBLSId myId;
-    size_t myIdx{(size_t)-1};
+    std::optional<size_t> myIdx;
 
     // all indexed by msg hash
     // we expect to only receive a single vvec and contribution per member, but we must also be able to relay
@@ -258,7 +255,7 @@ public:
 
     bool Init(const CBlockIndex* pQuorumBaseBlockIndex, const std::vector<CDeterministicMNCPtr>& mns, const uint256& _myProTxHash);
 
-    size_t GetMyMemberIndex() const { return myIdx; }
+    std::optional<size_t> GetMyMemberIndex() const { return myIdx; }
 
     /**
      * The following sets of methods are for the first 4 phases handled in the session. The flow of message calls
@@ -305,10 +302,19 @@ public:
     bool AreWeMember() const { return !myProTxHash.IsNull(); }
     void MarkBadMember(size_t idx);
 
-    void RelayOtherInvToParticipants(const CInv& inv) const;
+    void RelayOtherInvToParticipants(const CInv& inv, PeerManager& peerman) const;
 
 public:
     CDKGMember* GetMember(const uint256& proTxHash) const;
+};
+
+class CDKGLogger : public CBatchedLogger
+{
+public:
+    CDKGLogger(const CDKGSession& _quorumDkg, std::string_view _func) :
+            CDKGLogger(_quorumDkg.params.name, _quorumDkg.m_quorum_base_block_index->GetBlockHash(), _quorumDkg.m_quorum_base_block_index->nHeight, _quorumDkg.AreWeMember(), _func) {};
+    CDKGLogger(std::string_view _llmqTypeName, const uint256& _quorumHash, int _height, bool _areWeMember, std::string_view _func) :
+            CBatchedLogger(BCLog::LLMQ_DKG, strprintf("QuorumDKG(type=%s, height=%d, member=%d, func=%s)", _llmqTypeName, _height, _areWeMember, _func)) {};
 };
 
 void SetSimulatedDKGErrorRate(const std::string& type, double rate);

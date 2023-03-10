@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,7 +6,6 @@
 #include <qt/forms/ui_receiverequestdialog.h>
 
 #include <qt/syscoinunits.h>
-#include <qt/guiconstants.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/qrimagewidget.h>
@@ -19,10 +18,9 @@
 #include <config/syscoin-config.h> /* for USE_QRCODE */
 #endif
 
-ReceiveRequestDialog::ReceiveRequestDialog(QWidget *parent) :
-    QDialog(parent, GUIUtil::dialog_flags),
-    ui(new Ui::ReceiveRequestDialog),
-    model(nullptr)
+ReceiveRequestDialog::ReceiveRequestDialog(QWidget* parent)
+    : QDialog(parent, GUIUtil::dialog_flags),
+      ui(new Ui::ReceiveRequestDialog)
 {
     ui->setupUi(this);
     GUIUtil::handleCloseWindowShortcut(this);

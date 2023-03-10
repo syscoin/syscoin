@@ -1,4 +1,4 @@
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,7 +9,6 @@
 
 void initialize_descriptor_parse()
 {
-    static const ECCVerifyHandle verify_handle;
     ECC_Start();
     SelectParams(CBaseChainParams::MAIN);
 }

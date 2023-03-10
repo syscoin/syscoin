@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2021 The Bitcoin Core developers
+# Copyright (c) 2015-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test CSV soft fork activation.
@@ -104,7 +104,7 @@ class BIP68_112_113Test(SyscoinTestFramework):
 
     def create_self_transfer_from_utxo(self, input_tx):
         utxo = self.miniwallet.get_utxo(txid=input_tx.rehash(), mark_as_spent=False)
-        tx = self.miniwallet.create_self_transfer(from_node=self.nodes[0], utxo_to_spend=utxo)['tx']
+        tx = self.miniwallet.create_self_transfer(utxo_to_spend=utxo)['tx']
         return tx
 
     def create_bip112special(self, input, txversion):
@@ -112,6 +112,7 @@ class BIP68_112_113Test(SyscoinTestFramework):
         tx.nVersion = txversion
         self.miniwallet.sign_tx(tx)
         tx.vin[0].scriptSig = CScript([-1, OP_CHECKSEQUENCEVERIFY, OP_DROP] + list(CScript(tx.vin[0].scriptSig)))
+        tx.rehash()
         return tx
 
     def create_bip112emptystack(self, input, txversion):
@@ -119,6 +120,7 @@ class BIP68_112_113Test(SyscoinTestFramework):
         tx.nVersion = txversion
         self.miniwallet.sign_tx(tx)
         tx.vin[0].scriptSig = CScript([OP_CHECKSEQUENCEVERIFY] + list(CScript(tx.vin[0].scriptSig)))
+        tx.rehash()
         return tx
 
     def send_generic_input_tx(self, coinbases):
@@ -136,7 +138,6 @@ class BIP68_112_113Test(SyscoinTestFramework):
             tx.nVersion = txversion
             tx.vin[0].nSequence = locktime + locktime_delta
             self.miniwallet.sign_tx(tx)
-            tx.rehash()
             txs.append({'tx': tx, 'sdf': sdf, 'stf': stf})
 
         return txs
@@ -236,7 +237,7 @@ class BIP68_112_113Test(SyscoinTestFramework):
         bip113input = self.send_generic_input_tx(self.coinbase_blocks)
 
         self.nodes[0].setmocktime(self.last_block_time + 600)
-        inputblockhash = self.generate(self.nodes[0], 1, sync_fun=self.no_op)[0]  # 1 block generated for inputs to be in chain at height 431
+        inputblockhash = self.generate(self.nodes[0], 1)[0]  # 1 block generated for inputs to be in chain at height 431
         self.nodes[0].setmocktime(0)
         self.tip = int(inputblockhash, 16)
         self.tipheight += 1
@@ -339,20 +340,16 @@ class BIP68_112_113Test(SyscoinTestFramework):
         # BIP 113 tests should now fail regardless of version number if nLockTime isn't satisfied by new rules
         bip113tx_v1.nLockTime = self.last_block_time - 600 * 5  # = MTP of prior block (not <) but < time put on current block
         self.miniwallet.sign_tx(bip113tx_v1)
-        bip113tx_v1.rehash()
         bip113tx_v2.nLockTime = self.last_block_time - 600 * 5  # = MTP of prior block (not <) but < time put on current block
         self.miniwallet.sign_tx(bip113tx_v2)
-        bip113tx_v2.rehash()
         for bip113tx in [bip113tx_v1, bip113tx_v2]:
             self.send_blocks([self.create_test_block([bip113tx])], success=False, reject_reason='bad-txns-nonfinal')
 
         # BIP 113 tests should now pass if the locktime is < MTP
         bip113tx_v1.nLockTime = self.last_block_time - 600 * 5 - 1  # < MTP of prior block
         self.miniwallet.sign_tx(bip113tx_v1)
-        bip113tx_v1.rehash()
         bip113tx_v2.nLockTime = self.last_block_time - 600 * 5 - 1  # < MTP of prior block
         self.miniwallet.sign_tx(bip113tx_v2)
-        bip113tx_v2.rehash()
         for bip113tx in [bip113tx_v1, bip113tx_v2]:
             self.send_blocks([self.create_test_block([bip113tx])])
             self.nodes[0].invalidateblock(self.nodes[0].getbestblockhash())
@@ -477,7 +474,6 @@ class BIP68_112_113Test(SyscoinTestFramework):
         for tx in [tx['tx'] for tx in bip112txs_vary_OP_CSV_v2 if not tx['sdf'] and tx['stf']]:
             tx.vin[0].nSequence = BASE_RELATIVE_LOCKTIME | SEQ_TYPE_FLAG
             self.miniwallet.sign_tx(tx)
-            tx.rehash()
             time_txs.append(tx)
 
         self.send_blocks([self.create_test_block(time_txs)])

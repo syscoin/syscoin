@@ -1,22 +1,33 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_PRIMITIVES_TRANSACTION_H
 #define SYSCOIN_PRIMITIVES_TRANSACTION_H
 
-#include <stdint.h>
 #include <consensus/amount.h>
+#include <prevector.h>
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
-#include <prevector.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <ios>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+#include <consensus/consensus.h>
 // SYSCOIN
 class TxValidationState;
 class CHashWriter;
 class UniValue;
-#include <tuple>
+
 /**
  * This saves us from making many heap allocations when serializing
  * and deserializing compressed scripts.
@@ -33,6 +44,55 @@ using CompressedScript = prevector<33, unsigned char>;
  * or with `ADDRV2_FORMAT`.
  */
 static const int SERIALIZE_TRANSACTION_NO_WITNESS = 0x40000000;
+// SYSCOIN
+static const int SERIALIZE_TRANSACTION_PODA = 0x04000000;
+static const float NEVM_DATA_SCALE_FACTOR = 0.01;
+enum {
+    ASSET_UPDATE_DATA=1, // can you update public data field?
+    ASSET_UPDATE_CONTRACT=2, // can you update smart contract?
+    ASSET_UPDATE_SUPPLY=4, // can you update supply?
+    ASSET_UPDATE_NOTARY_KEY=8, // can you update notary?
+    ASSET_UPDATE_NOTARY_DETAILS=16, // can you update notary details?
+    ASSET_UPDATE_AUXFEE=32, // can you update aux fees?
+    ASSET_UPDATE_CAPABILITYFLAGS=64, // can you update capability flags?
+    ASSET_CAPABILITY_ALL=127,
+    ASSET_INIT=128, // set when creating an asset
+};
+
+
+const int SYSCOIN_TX_VERSION_MN_REGISTER = 80;
+const int SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE = 81;
+const int SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR = 82;
+const int SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE = 83;
+const int SYSCOIN_TX_VERSION_MN_COINBASE = 84;
+const int SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT = 85;
+
+const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN = 128;
+const int SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION = 129;
+const int SYSCOIN_TX_VERSION_ASSET_ACTIVATE = 130;
+const int SYSCOIN_TX_VERSION_ASSET_UPDATE = 131;
+const int SYSCOIN_TX_VERSION_ASSET_SEND = 132;
+const int SYSCOIN_TX_VERSION_ALLOCATION_MINT = 133;
+const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM = 134;
+const int SYSCOIN_TX_VERSION_ALLOCATION_SEND = 135;
+const int SYSCOIN_TX_VERSION_NEVM_DATA_SHA3 = 137;
+const int SYSCOIN_TX_MIN_ASSET_GUID = SYSCOIN_TX_VERSION_ALLOCATION_SEND * 10;
+const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY = 0x7400;
+const int MAX_MEMO = 256;
+const int MAX_NEVM_DATA_BLOB = 2097152; // 2MB
+const int MAX_DATA_BLOBS = 32;
+const int MAX_NEVM_DATA_BLOCK = MAX_NEVM_DATA_BLOB * MAX_DATA_BLOBS; // 64MB
+const int NEVM_DATA_EXPIRE_TIME = 21600; // 6 hour
+const int NEVM_DATA_ENFORCE_TIME_HAVE_DATA = 7200; // 2 hour
+const int NEVM_DATA_ENFORCE_TIME_NOT_HAVE_DATA = NEVM_DATA_ENFORCE_TIME_HAVE_DATA*4; // 8 hour
+enum {
+	ZDAG_NOT_FOUND = -1,
+	ZDAG_STATUS_OK = 0,
+	ZDAG_WARNING_RBF,
+    ZDAG_WARNING_NOT_ZDAG_TX,
+    ZDAG_WARNING_SIZE_OVER_POLICY,
+	ZDAG_MAJOR_CONFLICT
+};
 /** An outpoint - a combination of a transaction hash and an index n into its vout */
 class COutPoint
 {
@@ -84,25 +144,45 @@ public:
     uint32_t nSequence;
     CScriptWitness scriptWitness; //!< Only serialized through CTransaction
 
-    /* Setting nSequence to this value for every input in a transaction
-     * disables nLockTime. */
+    /**
+     * Setting nSequence to this value for every input in a transaction
+     * disables nLockTime/IsFinalTx().
+     * It fails OP_CHECKLOCKTIMEVERIFY/CheckLockTime() for any input that has
+     * it set (BIP 65).
+     * It has SEQUENCE_LOCKTIME_DISABLE_FLAG set (BIP 68/112).
+     */
     static const uint32_t SEQUENCE_FINAL = 0xffffffff;
+    /**
+     * This is the maximum sequence number that enables both nLockTime and
+     * OP_CHECKLOCKTIMEVERIFY (BIP 65).
+     * It has SEQUENCE_LOCKTIME_DISABLE_FLAG set (BIP 68/112).
+     */
+    static const uint32_t MAX_SEQUENCE_NONFINAL{SEQUENCE_FINAL - 1};
 
-    /* Below flags apply in the context of BIP 68*/
-    /* If this flag set, CTxIn::nSequence is NOT interpreted as a
-     * relative lock-time. */
+    // Below flags apply in the context of BIP 68. BIP 68 requires the tx
+    // version to be set to 2, or higher.
+    /**
+     * If this flag is set, CTxIn::nSequence is NOT interpreted as a
+     * relative lock-time.
+     * It skips SequenceLocks() for any input that has it set (BIP 68).
+     * It fails OP_CHECKSEQUENCEVERIFY/CheckSequence() for any input that has
+     * it set (BIP 112).
+     */
     static const uint32_t SEQUENCE_LOCKTIME_DISABLE_FLAG = (1U << 31);
 
-    /* If CTxIn::nSequence encodes a relative lock-time and this flag
+    /**
+     * If CTxIn::nSequence encodes a relative lock-time and this flag
      * is set, the relative lock-time has units of 512 seconds,
      * otherwise it specifies blocks with a granularity of 1. */
     static const uint32_t SEQUENCE_LOCKTIME_TYPE_FLAG = (1 << 22);
 
-    /* If CTxIn::nSequence encodes a relative lock-time, this mask is
+    /**
+     * If CTxIn::nSequence encodes a relative lock-time, this mask is
      * applied to extract that lock-time from the sequence field. */
     static const uint32_t SEQUENCE_LOCKTIME_MASK = 0x0000ffff;
 
-    /* In order to use the same number of bits to encode roughly the
+    /**
+     * In order to use the same number of bits to encode roughly the
      * same wall-clock duration, and because blocks are naturally
      * limited to occur every 600s on average, the minimum granularity
      * for time-based relative lock-time is fixed at 512 seconds.
@@ -152,14 +232,14 @@ struct CMutableTransaction;
  * - std::vector<CTxIn> vin
  * - std::vector<CTxOut> vout
  * - if (flags & 1):
- *   - CTxWitness wit;
+ *   - CScriptWitness scriptWitness; (deserialized into CTxIn)
  * - uint32_t nLockTime
  */
 template<typename Stream, typename TxType>
 inline void UnserializeTransaction(TxType& tx, Stream& s) {
     const bool fAllowWitness = !(s.GetVersion() & SERIALIZE_TRANSACTION_NO_WITNESS);
-
     s >> tx.nVersion;
+    s.SetTxVersion(tx.nVersion);
     unsigned char flags = 0;
     tx.vin.clear();
     tx.vout.clear();
@@ -195,11 +275,10 @@ inline void UnserializeTransaction(TxType& tx, Stream& s) {
     // SYSCOIN
     tx.LoadAssets();
 }
-
 template<typename Stream, typename TxType>
 inline void SerializeTransaction(const TxType& tx, Stream& s) {
     const bool fAllowWitness = !(s.GetVersion() & SERIALIZE_TRANSACTION_NO_WITNESS);
-
+    s.SetTxVersion(tx.nVersion);
     s << tx.nVersion;
     unsigned char flags = 0;
     // Consistency check
@@ -268,12 +347,12 @@ struct ScriptCompression
     void Ser(Stream &s, const CScript& script) {
         CompressedScript compr;
         if (CompressScript(script, compr)) {
-            s << MakeSpan(compr);
+            s << Span{compr};
             return;
         }
         unsigned int nSize = script.size() + nSpecialScripts;
         s << VARINT(nSize);
-        s << MakeSpan(script);
+        s << Span{script};
     }
 
     template<typename Stream>
@@ -282,7 +361,7 @@ struct ScriptCompression
         s >> VARINT(nSize);
         if (nSize < nSpecialScripts) {
             CompressedScript vch(GetSpecialScriptSize(nSize), 0x00);
-            s >> MakeSpan(vch);
+            s >> Span{vch};
             DecompressScript(script, nSize, vch);
             return;
         }
@@ -293,7 +372,7 @@ struct ScriptCompression
             s.ignore(nSize);
         } else {
             script.resize(nSize);
-            s >> MakeSpan(script);
+            s >> Span{script};
         }
     }
 };
@@ -355,7 +434,50 @@ public:
 	inline void SetNull() { nAsset = 0;}
     inline bool IsNull() const { return nAsset == 0;}
 };
+class CTransaction;
+bool IsSyscoinNEVMDataTx(const int &nVersion);
+class CNEVMData {
+public:
+    std::vector<uint8_t> vchVersionHash;
+    const std::vector<uint8_t> *vchNEVMData{nullptr};
+    CNEVMData() {
+        SetNull();
+    }
+    explicit CNEVMData(const CScript &script);
+    explicit CNEVMData(const CTransaction &tx, const int nVersion);
+    explicit CNEVMData(const CTransaction &tx);
+    explicit CNEVMData(const std::vector<uint8_t> &vchVersionHashIn, const std::vector<uint8_t> &vchNEVMDataIn): vchVersionHash(vchVersionHashIn) {
+        vchNEVMData = new std::vector<uint8_t>{vchNEVMDataIn};
+    }
+    inline void ClearData() {
+        vchVersionHash.clear();
+        if(vchNEVMData) {
+            delete vchNEVMData;
+        }
+        vchNEVMData = nullptr;
+    }
+    template<typename Stream>
+    void Ser(Stream &s) {
+        s << vchVersionHash;
+    }
 
+    template<typename Stream>
+    void Unser(Stream &s) {
+        s >> vchVersionHash;
+        const bool fAllowPoDA = (s.GetVersion() & SERIALIZE_TRANSACTION_PODA);
+        if(fAllowPoDA) {
+            std::vector<uint8_t> vchNEVMDataIn;
+            s >> vchVersionHash;
+            vchNEVMData = new std::vector<uint8_t>{vchNEVMDataIn};
+        }
+    }
+    inline void SetNull() { ClearData(); }
+    inline bool IsNull() const { return (vchVersionHash.empty()); }
+    bool UnserializeFromTx(const CTransaction &tx, const int nVersion);
+    bool UnserializeFromScript(const CScript& script);
+    int UnserializeFromData(const std::vector<unsigned char> &vchData, const int nVersion);
+    void SerializeData(std::vector<unsigned char>& vchData);
+};
 /** An output of a transaction.  It contains the public key that the next input
  * must be able to sign with to claim it.
  */
@@ -366,6 +488,7 @@ public:
     CScript scriptPubKey;
     // SYSCOIN
     CAssetCoinInfo assetInfo;
+    std::vector<uint8_t> vchNEVMData;
     CTxOut()
     {
         SetNull();
@@ -373,9 +496,81 @@ public:
     // SYSCOIN
     CTxOut(const CAmount& nValueIn, const CScript &scriptPubKeyIn);
     CTxOut(const CAmount& nValueIn, const CScript &scriptPubKeyIn, const CAssetCoinInfo &assetInfoIn) : nValue(nValueIn), scriptPubKey(scriptPubKeyIn), assetInfo(assetInfoIn) {}
+    CTxOut(const CAmount& nValueIn, const CScript &scriptPubKeyIn, const std::vector<uint8_t> &vchNEVMDataIn)  : nValue(nValueIn), scriptPubKey(scriptPubKeyIn), vchNEVMData(vchNEVMDataIn) {}
+    SERIALIZE_METHODS(CTxOut, obj)
+    {
+        READWRITE(obj.nValue, obj.scriptPubKey);
+        if(obj.scriptPubKey.IsUnspendable() && IsSyscoinNEVMDataTx(s.GetTxVersion())) {
+            if(s.GetType() == SER_NETWORK) {
+                READWRITE(obj.vchNEVMData);
+            } else {
+                if(s.GetType() == SER_SIZE) {
+                    s.seek(obj.vchNEVMData.size() * NEVM_DATA_SCALE_FACTOR);
+                }
+            }
+        }
+    }
 
-    SERIALIZE_METHODS(CTxOut, obj) { READWRITE(obj.nValue, obj.scriptPubKey); }
-  
+    void SetNull()
+    {
+        assetInfo.SetNull();
+        nValue = -1;
+        scriptPubKey.clear();
+        vchNEVMData.clear();
+    }
+
+    bool IsNull() const
+    {
+        return (nValue == -1);
+    }
+
+    friend bool operator==(const CTxOut& a, const CTxOut& b)
+    {
+        return (a.nValue       == b.nValue &&
+                a.scriptPubKey == b.scriptPubKey &&
+                a.assetInfo    == b.assetInfo &&
+                a.vchNEVMData  == b.vchNEVMData);
+    }
+
+    friend bool operator!=(const CTxOut& a, const CTxOut& b)
+    {
+        return !(a == b);
+    }
+    std::string ToString() const;
+};
+/** An output of a transaction.  It contains the public key that the next input
+ * must be able to sign with to claim it.
+ */
+class CTxOutCoin
+{
+public:
+    CAmount nValue;
+    CScript scriptPubKey;
+    // SYSCOIN
+    CAssetCoinInfo assetInfo;
+    CTxOutCoin()
+    {
+        SetNull();
+    }
+    // SYSCOIN
+    CTxOutCoin(const CTxOut& txOutIn) {
+        nValue = txOutIn.nValue;
+        scriptPubKey = txOutIn.scriptPubKey;
+        assetInfo = txOutIn.assetInfo;
+    }
+    CTxOutCoin(CTxOut&& txOutIn) {
+        nValue = std::move(txOutIn.nValue);
+        scriptPubKey = std::move(txOutIn.scriptPubKey);
+        assetInfo = std::move(txOutIn.assetInfo);
+    }
+    CTxOutCoin(const CAmount& nValueIn, const CScript &scriptPubKeyIn);
+    CTxOutCoin(const CAmount& nValueIn, const CScript &scriptPubKeyIn, const CAssetCoinInfo &assetInfoIn) : nValue(nValueIn), scriptPubKey(scriptPubKeyIn), assetInfo(assetInfoIn) {}
+    SERIALIZE_METHODS(CTxOutCoin, obj)
+    {
+        READWRITE(obj.nValue, obj.scriptPubKey);
+    }
+
+
     void SetNull()
     {
         assetInfo.SetNull();
@@ -388,14 +583,14 @@ public:
         return (nValue == -1);
     }
 
-    friend bool operator==(const CTxOut& a, const CTxOut& b)
+    friend bool operator==(const CTxOutCoin& a, const CTxOutCoin& b)
     {
         return (a.nValue       == b.nValue &&
                 a.scriptPubKey == b.scriptPubKey &&
-                a.assetInfo == b.assetInfo);
+                a.assetInfo    == b.assetInfo);
     }
 
-    friend bool operator!=(const CTxOut& a, const CTxOut& b)
+    friend bool operator!=(const CTxOutCoin& a, const CTxOutCoin& b)
     {
         return !(a == b);
     }
@@ -406,7 +601,7 @@ public:
 /** wrapper for CTxOut that provides a more compact serialization */
 struct TxOutCompression
 {
-    FORMATTER_METHODS(CTxOut, obj) { READWRITE(Using<AmountCompression>(obj.nValue), Using<ScriptCompression>(obj.scriptPubKey), Using<AssetCoinInfoCompression>(obj.assetInfo)); }
+    FORMATTER_METHODS(CTxOutCoin, obj) { READWRITE(Using<AmountCompression>(obj.nValue), Using<ScriptCompression>(obj.scriptPubKey), Using<AssetCoinInfoCompression>(obj.assetInfo)); }
 };
 
 class CAssetOutValue {
@@ -457,6 +652,14 @@ public:
 		return !(a == b);
 	}
 };
+
+template<typename TxType>
+inline CAmount CalculateOutputValue(const TxType& tx)
+{
+    return std::accumulate(tx.vout.cbegin(), tx.vout.cend(), CAmount{0}, [](CAmount sum, const auto& txout) { return sum + txout.nValue; });
+}
+
+
 /** The basic transaction that is broadcasted on the network and contained in
  * blocks.  A transaction can contain multiple inputs and outputs.
  */
@@ -489,7 +692,7 @@ private:
 public:
     /** Convert a CMutableTransaction into a CTransaction. */
     explicit CTransaction(const CMutableTransaction& tx);
-    CTransaction(CMutableTransaction&& tx);
+    explicit CTransaction(CMutableTransaction&& tx);
 
     template <typename Stream>
     inline void Serialize(Stream& s) const {
@@ -547,6 +750,7 @@ public:
     }
     // SYSCOIN
     bool HasAssets() const;
+    bool IsNEVMData() const;
     bool IsMnTx() const;
 };
 
@@ -560,7 +764,7 @@ struct CMutableTransaction
     // SYSCOIN
     std::vector<CAssetOut> voutAssets;
 
-    CMutableTransaction();
+    explicit CMutableTransaction();
     explicit CMutableTransaction(const CTransaction& tx);
 
     template <typename Stream>
@@ -595,6 +799,7 @@ struct CMutableTransaction
     }
     // SYSCOIN
     bool HasAssets() const;
+    bool IsNEVMData() const;
     bool IsMnTx() const;
     void LoadAssets();
     CAmount GetAssetValueOut(const std::vector<CAssetOutValue> &vecVout) const;
@@ -602,46 +807,7 @@ struct CMutableTransaction
 
 typedef std::shared_ptr<const CTransaction> CTransactionRef;
 template <typename Tx> static inline CTransactionRef MakeTransactionRef(Tx&& txIn) { return std::make_shared<const CTransaction>(std::forward<Tx>(txIn)); }
-// SYSCOIN
-enum {
-    ASSET_UPDATE_DATA=1, // can you update public data field?
-    ASSET_UPDATE_CONTRACT=2, // can you update smart contract?
-    ASSET_UPDATE_SUPPLY=4, // can you update supply?
-    ASSET_UPDATE_NOTARY_KEY=8, // can you update notary?
-    ASSET_UPDATE_NOTARY_DETAILS=16, // can you update notary details?
-    ASSET_UPDATE_AUXFEE=32, // can you update aux fees?
-    ASSET_UPDATE_CAPABILITYFLAGS=64, // can you update capability flags?
-    ASSET_CAPABILITY_ALL=127,
-    ASSET_INIT=128, // set when creating an asset
-};
 
-
-const int SYSCOIN_TX_VERSION_MN_REGISTER = 80;
-const int SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE = 81;
-const int SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR = 82;
-const int SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE = 83;
-const int SYSCOIN_TX_VERSION_MN_COINBASE = 84;
-const int SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT = 85;
-
-const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN = 128;
-const int SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION = 129;
-const int SYSCOIN_TX_VERSION_ASSET_ACTIVATE = 130;
-const int SYSCOIN_TX_VERSION_ASSET_UPDATE = 131;
-const int SYSCOIN_TX_VERSION_ASSET_SEND = 132;
-const int SYSCOIN_TX_VERSION_ALLOCATION_MINT = 133;
-const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM = 134;
-const int SYSCOIN_TX_VERSION_ALLOCATION_SEND = 135;
-const int SYSCOIN_TX_MIN_ASSET_GUID = SYSCOIN_TX_VERSION_ALLOCATION_SEND * 10;
-const int SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY = 0x7400;
-const int MAX_MEMO = 256;
-enum {
-	ZDAG_NOT_FOUND = -1,
-	ZDAG_STATUS_OK = 0,
-	ZDAG_WARNING_RBF,
-    ZDAG_WARNING_NOT_ZDAG_TX,
-    ZDAG_WARNING_SIZE_OVER_POLICY,
-	ZDAG_MAJOR_CONFLICT
-};
 class CAuxFee {
 public:
     CAmount nBound;
@@ -1023,8 +1189,11 @@ bool GetSyscoinData(const CTransaction &tx, std::vector<unsigned char> &vchData,
 bool GetSyscoinData(const CMutableTransaction &mtx, std::vector<unsigned char> &vchData, int& nOut);
 bool GetSyscoinData(const CScript &scriptPubKey, std::vector<unsigned char> &vchData);
 typedef std::unordered_map<uint256, uint256> NEVMMintTxMap;
+typedef std::vector<std::vector<uint8_t> > NEVMDataVec;
 typedef std::unordered_map<uint256, NEVMTxRoot> NEVMTxRootMap;
 typedef std::unordered_map<uint32_t, std::pair<std::vector<uint64_t>, CAsset > > AssetMap;
+typedef std::map<std::vector<uint8_t>, std::pair<std::vector<uint8_t>, int64_t> > PoDAMAP;
+typedef std::map<std::vector<uint8_t>, const std::vector<uint8_t>* > PoDAMAPMemory;
 /** A generic txid reference (txid or wtxid). */
 // SYSCOIN
 class GenTxid

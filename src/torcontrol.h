@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2020 The Bitcoin Core developers
+// Copyright (c) 2015-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -93,7 +93,7 @@ private:
     /** Libevent event base */
     struct event_base *base;
     /** Connection to control socket */
-    struct bufferevent *b_conn;
+    struct bufferevent* b_conn{nullptr};
     /** Message being received */
     TorControlReply message;
     /** Response handlers */
@@ -140,6 +140,8 @@ private:
     std::vector<uint8_t> clientNonce;
 
 public:
+    /** Callback for GETINFO net/listeners/socks result */
+    void get_socks_cb(TorControlConnection& conn, const TorControlReply& reply);
     /** Callback for ADD_ONION result */
     void add_onion_cb(TorControlConnection& conn, const TorControlReply& reply);
     /** Callback for AUTHENTICATE result */

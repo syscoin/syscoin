@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2020 The Dash Core developers
+// Copyright (c) 2018-2022 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -13,14 +13,16 @@
 #include <threadsafety.h>
 
 #include <immer/map.hpp>
-
 #include <unordered_map>
 #include <unordered_set>
 #include <script/standard.h>
 #include <interfaces/chain.h>
-class CBlock;
-class CBlockIndex;
-class BlockValidationState;
+#include <bls/bls.h>
+#include <kernel/cs_main.h>
+class CProRegTx;
+class UniValue;
+
+class CDeterministicMNState;
 class CSimplifiedMNListDiff;
 namespace llmq
 {
@@ -58,13 +60,13 @@ public:
 
 public:
     CDeterministicMNState() = default;
-    explicit CDeterministicMNState(const CProRegTx& proTx)
+    explicit CDeterministicMNState(const CProRegTx& proTx) :
+            keyIDOwner(proTx.keyIDOwner),
+            keyIDVoting(proTx.keyIDVoting),
+            addr(proTx.addr),
+            scriptPayout(proTx.scriptPayout)
     {
-        keyIDOwner = proTx.keyIDOwner;
         pubKeyOperator.Set(proTx.pubKeyOperator);
-        keyIDVoting = proTx.keyIDVoting;
-        addr = proTx.addr;
-        scriptPayout = proTx.scriptPayout;
     }
     template <typename Stream>
     CDeterministicMNState(deserialize_type, Stream& s)
@@ -74,9 +76,23 @@ public:
 
     SERIALIZE_METHODS(CDeterministicMNState, obj)
     {
-         READWRITE(obj.nRegisteredHeight, obj.nLastPaidHeight, obj.nPoSePenalty, obj.nPoSeRevivedHeight, obj.nPoSeBanHeight,
-         obj.nRevocationReason, obj.confirmedHash, obj.confirmedHashWithProRegTxHash, obj.keyIDOwner, obj.pubKeyOperator, obj.keyIDVoting,
-         obj.addr, obj.scriptPayout, obj.scriptOperatorPayout, obj.nCollateralHeight);
+        READWRITE(
+                obj.nRegisteredHeight,
+                obj.nLastPaidHeight,
+                obj.nPoSePenalty,
+                obj.nPoSeRevivedHeight,
+                obj.nPoSeBanHeight,
+                obj.nRevocationReason,
+                obj.confirmedHash,
+                obj.confirmedHashWithProRegTxHash,
+                obj.keyIDOwner,
+                obj.pubKeyOperator,
+                obj.keyIDVoting,
+                obj.addr,
+                obj.scriptPayout,
+                obj.scriptOperatorPayout,
+                obj.nCollateralHeight
+                );
     }
 
     void ResetOperatorFields()
@@ -173,13 +189,20 @@ public:
         DMN_STATE_DIFF_ALL_FIELDS
 #undef DMN_STATE_DIFF_LINE
     }
-    SERIALIZE_METHODS(CDeterministicMNStateDiff, obj) {
+
+    SERIALIZE_METHODS(CDeterministicMNStateDiff, obj)
+    {
         READWRITE(VARINT(obj.fields));
-        #define DMN_STATE_DIFF_LINE(f) if (obj.fields & Field_##f) READWRITE(obj.state.f);
+#define DMN_STATE_DIFF_LINE(f) \
+        if (strcmp(#f, "pubKeyOperator") == 0 && (obj.fields & Field_pubKeyOperator)) {\
+            /* TODO: implement migration to Basic BLS after the fork */ \
+            READWRITE(CBLSLazyPublicKeyVersionWrapper(const_cast<CBLSLazyPublicKey&>(obj.state.pubKeyOperator), true)); \
+        } else if (obj.fields & Field_##f) READWRITE(obj.state.f);
+
         DMN_STATE_DIFF_ALL_FIELDS
-        #undef DMN_STATE_DIFF_LINE
+#undef DMN_STATE_DIFF_LINE
     }
-    
+
     void ApplyToState(CDeterministicMNState& target) const
     {
 #define DMN_STATE_DIFF_LINE(f) if (fields & Field_##f) target.f = state.f;
@@ -209,7 +232,7 @@ public:
 
     uint256 proTxHash;
     COutPoint collateralOutpoint;
-    uint16_t nOperatorReward;
+    uint16_t nOperatorReward{0};
     CDeterministicMNStateCPtr pdmnState;
 
 public:
@@ -295,20 +318,37 @@ public:
 
     size_t GetValidMNsCount() const
     {
-        size_t count = 0;
-        for (const auto& p : mnMap) {
-            if (IsMNValid(p.second)) {
-                count++;
-            }
-        }
-        return count;
+        return ranges::count_if(mnMap, [&](const auto& p){ return IsMNValid(*p.second); });
     }
 
+    /**
+     * Execute a callback on all masternodes in the mnList. This will pass a reference
+     * of each masternode to the callback function. This should be preferred over ForEachMNShared.
+     * @param onlyValid Run on all masternodes, or only "valid" (not banned) masternodes
+     * @param cb callback to execute
+     */
     template <typename Callback>
     void ForEachMN(bool onlyValid, Callback&& cb) const
     {
         for (const auto& p : mnMap) {
-            if (!onlyValid || IsMNValid(p.second)) {
+            if (!onlyValid || IsMNValid(*p.second)) {
+                cb(*p.second);
+            }
+        }
+    }
+
+    /**
+     * Prefer ForEachMN. Execute a callback on all masternodes in the mnList.
+     * This will pass a non-null shared_ptr of each masternode to the callback function.
+     * Use this function only when a shared_ptr is needed in order to take shared ownership.
+     * @param onlyValid Run on all masternodes, or only "valid" (not banned) masternodes
+     * @param cb callback to execute
+     */
+    template <typename Callback>
+    void ForEachMNShared(bool onlyValid, Callback&& cb) const
+    {
+        for (const auto& p : mnMap) {
+            if (!onlyValid || IsMNValid(*p.second)) {
                 cb(p.second);
             }
         }
@@ -338,8 +378,8 @@ public:
 
     bool IsMNValid(const uint256& proTxHash) const;
     bool IsMNPoSeBanned(const uint256& proTxHash) const;
-    static bool IsMNValid(const CDeterministicMNCPtr& dmn);
-    static bool IsMNPoSeBanned(const CDeterministicMNCPtr& dmn);
+    static bool IsMNValid(const CDeterministicMN& dmn);
+    static bool IsMNPoSeBanned(const CDeterministicMN& dmn);
 
     bool HasMN(const uint256& proTxHash) const
     {
@@ -412,13 +452,13 @@ public:
     void PoSeDecrease(const uint256& proTxHash);
 
     CDeterministicMNListDiff BuildDiff(const CDeterministicMNList& to) const;
-    CSimplifiedMNListDiff BuildSimplifiedDiff(const CDeterministicMNList& to) const;
+    CSimplifiedMNListDiff BuildSimplifiedDiff(const CDeterministicMNList& to, const int nHeight) const;
     CDeterministicMNList ApplyDiff(const CBlockIndex* pindex, const CDeterministicMNListDiff& diff) const;
 
     void AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTotalCount = true);
-    void UpdateMN(const CDeterministicMNCPtr& oldDmn, const CDeterministicMNStateCPtr& pdmnState);
+    void UpdateMN(const CDeterministicMN& oldDmn, const CDeterministicMNStateCPtr& pdmnState);
     void UpdateMN(const uint256& proTxHash, const CDeterministicMNStateCPtr& pdmnState);
-    void UpdateMN(const CDeterministicMNCPtr& oldDmn, const CDeterministicMNStateDiff& stateDiff);
+    void UpdateMN(const CDeterministicMN& oldDmn, const CDeterministicMNStateDiff& stateDiff);
     void RemoveMN(const uint256& proTxHash);
 
     template <typename T>
@@ -439,7 +479,7 @@ public:
 private:
 
     template <typename T>
-    bool AddUniqueProperty(const CDeterministicMNCPtr& dmn, const T& v)
+    [[nodiscard]] bool AddUniqueProperty(const CDeterministicMN& dmn, const T& v)
     {
         static const T nullValue;
         if (v == nullValue) {
@@ -448,10 +488,10 @@ private:
 
         auto hash = ::SerializeHash(v);
         auto oldEntry = mnUniquePropertyMap.find(hash);
-        if (oldEntry != nullptr && oldEntry->first != dmn->proTxHash) {
+        if (oldEntry != nullptr && oldEntry->first != dmn.proTxHash) {
             return false;
         }
-        std::pair<uint256, uint32_t> newEntry(dmn->proTxHash, 1);
+        std::pair<uint256, uint32_t> newEntry(dmn.proTxHash, 1);
         if (oldEntry != nullptr) {
             newEntry.second = oldEntry->second + 1;
         }
@@ -459,7 +499,7 @@ private:
         return true;
     }
     template <typename T>
-    bool DeleteUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue)
+    [[nodiscard]] bool DeleteUniqueProperty(const CDeterministicMN& dmn, const T& oldValue)
     {
         static const T nullValue;
         if (oldValue == nullValue) {
@@ -468,18 +508,18 @@ private:
 
         auto oldHash = ::SerializeHash(oldValue);
         auto p = mnUniquePropertyMap.find(oldHash);
-        if (p == nullptr || p->first != dmn->proTxHash) {
+        if (p == nullptr || p->first != dmn.proTxHash) {
             return false;
         }
         if (p->second == 1) {
             mnUniquePropertyMap = mnUniquePropertyMap.erase(oldHash);
         } else {
-            mnUniquePropertyMap = mnUniquePropertyMap.set(oldHash, std::make_pair(dmn->proTxHash, p->second - 1));
+            mnUniquePropertyMap = mnUniquePropertyMap.set(oldHash, std::make_pair(dmn.proTxHash, p->second - 1));
         }
         return true;
     }
     template <typename T>
-    bool UpdateUniqueProperty(const CDeterministicMNCPtr& dmn, const T& oldValue, const T& newValue)
+    [[nodiscard]] bool UpdateUniqueProperty(const CDeterministicMN& dmn, const T& oldValue, const T& newValue)
     {
         if (oldValue == newValue) {
             return true;
@@ -594,5 +634,4 @@ private:
 };
 
 extern std::unique_ptr<CDeterministicMNManager> deterministicMNManager;
-
 #endif // SYSCOIN_EVO_DETERMINISTICMNS_H

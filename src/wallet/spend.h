@@ -1,4 +1,4 @@
-// Copyright (c) 2021 The Bitcoin Core developers
+// Copyright (c) 2021-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,146 +6,227 @@
 #define SYSCOIN_WALLET_SPEND_H
 
 #include <consensus/amount.h>
+#include <policy/fees.h> // for FeeCalculation
+#include <util/result.h>
 #include <wallet/coinselection.h>
 #include <wallet/transaction.h>
 #include <wallet/wallet.h>
 
-/** Get the marginal bytes if spending the specified output from this transaction */
-int GetTxSpendSize(const CWallet& wallet, const CWalletTx& wtx, unsigned int out, bool use_max_sig = false);
+#include <optional>
 
-class COutput
-{
-public:
-    const CWalletTx *tx;
-
-    /** Index in tx->vout. */
-    int i;
-
-    /**
-     * Depth in block chain.
-     * If > 0: the tx is on chain and has this many confirmations.
-     * If = 0: the tx is waiting confirmation.
-     * If < 0: a conflicting tx is on chain and has this many confirmations. */
-    int nDepth;
-
-    /** Pre-computed estimated size of this output as a fully-signed input in a transaction. Can be -1 if it could not be calculated */
-    int nInputBytes;
-
-    /** Whether we have the private keys to spend this output */
-    bool fSpendable;
-
-    /** Whether we know how to spend this output, ignoring the lack of keys */
-    bool fSolvable;
-
-    /** Whether to use the maximum sized, 72 byte signature when calculating the size of the input spend. This should only be set when watch-only outputs are allowed */
-    bool use_max_sig;
-
-    /**
-     * Whether this output is considered safe to spend. Unconfirmed transactions
-     * from outside keys and unconfirmed replacement transactions are considered
-     * unsafe and will not be used to fund new spending transactions.
-     */
-    bool fSafe;
-
-    COutput(const CWallet& wallet, const CWalletTx& wtx, int iIn, int nDepthIn, bool fSpendableIn, bool fSolvableIn, bool fSafeIn, bool use_max_sig_in = false)
-    {
-        tx = &wtx; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn; fSolvable = fSolvableIn; fSafe = fSafeIn; nInputBytes = -1; use_max_sig = use_max_sig_in;
-        // If known and signable by the given wallet, compute nInputBytes
-        // Failure will keep this value -1
-        if (fSpendable) {
-            nInputBytes = GetTxSpendSize(wallet, wtx, i, use_max_sig);
-        }
-    }
-
-    std::string ToString() const;
-
-    inline CInputCoin GetInputCoin() const
-    {
-        return CInputCoin(tx->tx, i, nInputBytes);
-    }
-};
-
-// Get the marginal bytes of spending the specified output
-int CalculateMaximumSignedInputSize(const CTxOut& txout, const CWallet* pwallet, bool use_max_sig = false);
-int CalculateMaximumSignedInputSize(const CTxOut& txout, const SigningProvider* pwallet, bool use_max_sig = false);
-
+namespace wallet {
+/** Get the marginal bytes if spending the specified output from this transaction.
+ * Use CoinControl to determine whether to expect signature grinding when calculating the size of the input spend. */
+int CalculateMaximumSignedInputSize(const CTxOut& txout, const CWallet* pwallet, const CCoinControl* coin_control);
+int CalculateMaximumSignedInputSize(const CTxOut& txout, const COutPoint outpoint, const SigningProvider* pwallet, bool can_grind_r, const CCoinControl* coin_control);
 struct TxSize {
     int64_t vsize{-1};
     int64_t weight{-1};
 };
 
-/** Calculate the size of the transaction assuming all signatures are max size
-* Use DummySignatureCreator, which inserts 71 byte signatures everywhere.
-* NOTE: this requires that all inputs must be in mapWallet (eg the tx should
-* be AllInputsMine). */
+/** Calculate the size of the transaction using CoinControl to determine
+ * whether to expect signature grinding when calculating the size of the input spend. */
 TxSize CalculateMaximumSignedTxSize(const CTransaction& tx, const CWallet* wallet, const std::vector<CTxOut>& txouts, const CCoinControl* coin_control = nullptr);
 TxSize CalculateMaximumSignedTxSize(const CTransaction& tx, const CWallet* wallet, const CCoinControl* coin_control = nullptr) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet);
 
 /**
- * populate vCoins with vector of available COutputs.
+ * COutputs available for spending, stored by OutputType.
+ * This struct is really just a wrapper around OutputType vectors with a convenient
+ * method for concatenating and returning all COutputs as one vector.
+ *
+ * Size(), Clear(), Erase(), Shuffle(), and Add() methods are implemented to
+ * allow easy interaction with the struct.
  */
-// SYSCOIN
-void AvailableCoins(const CWallet& wallet, std::vector<COutput>& vCoins, const CCoinControl* coinControl = nullptr, const CAmount& nMinimumAmount = 1, const CAmount& nMaximumAmount = MAX_MONEY, const CAmount& nMinimumSumAmount = MAX_MONEY, const CAmount& nMinimumAmountAsset = 0, const CAmount& nMaximumAmountAsset = MAX_ASSET, const CAmount& nMinimumSumAmountAsset = MAX_ASSET, const uint64_t nMaximumCount = 0, const bool bIncludeLocked = false, const CAssetCoinInfo& assetInfo=CAssetCoinInfo(), const int &txVersion=0) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+struct CoinsResult {
+    std::map<OutputType, std::vector<COutput>> coins;
+
+    /** Concatenate and return all COutputs as one vector */
+    std::vector<COutput> All() const;
+
+    /** The following methods are provided so that CoinsResult can mimic a vector,
+     * i.e., methods can work with individual OutputType vectors or on the entire object */
+    size_t Size() const;
+    /** Return how many different output types this struct stores */
+    size_t TypesCount() const { return coins.size(); }
+    void Clear();
+    void Erase(const std::unordered_set<COutPoint, SaltedOutpointHasher>& coins_to_remove);
+    void Shuffle(FastRandomContext& rng_fast);
+    void Add(OutputType type, const COutput& out);
+
+    CAmount GetTotalAmount() { return total_amount; }
+    std::optional<CAmount> GetEffectiveTotalAmount() {return total_effective_amount; }
+
+private:
+    /** Sum of all available coins raw value */
+    CAmount total_amount{0};
+    /** Sum of all available coins effective value (each output value minus fees required to spend it) */
+    std::optional<CAmount> total_effective_amount{0};
+};
+
+struct CoinFilterParams {
+    // Outputs below the minimum amount will not get selected
+    CAmount min_amount{1};
+    // Outputs above the maximum amount will not get selected
+    CAmount max_amount{MAX_MONEY};
+    // Return outputs until the minimum sum amount is covered
+    CAmount min_sum_amount{MAX_MONEY};
+    // Maximum number of outputs that can be returned
+    uint64_t max_count{0};
+    // By default, return only spendable outputs
+    bool only_spendable{true};
+    // By default, do not include immature coinbase outputs
+    bool include_immature_coinbase{false};
+    // By default, skip locked UTXOs
+    bool skip_locked{true};
+};
+
+/**
+ * Populate the CoinsResult struct with vectors of available COutputs, organized by OutputType.
+ */
+CoinsResult AvailableCoins(const CWallet& wallet,
+                           const CCoinControl* coinControl = nullptr,
+                           std::optional<CFeeRate> feerate = std::nullopt,
+                           const CoinFilterParams& params = {}) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+/**
+ * Wrapper function for AvailableCoins which skips the `feerate` and `CoinFilterParams::only_spendable` parameters. Use this function
+ * to list all available coins (e.g. listunspent RPC) while not intending to fund a transaction.
+ */
+CoinsResult AvailableCoinsListUnspent(const CWallet& wallet, const CCoinControl* coinControl = nullptr, CoinFilterParams params = {}) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
 CAmount GetAvailableBalance(const CWallet& wallet, const CCoinControl* coinControl = nullptr);
 
 /**
  * Find non-change parent output.
  */
-const CTxOut& FindNonChangeParentOutput(const CWallet& wallet, const CTransaction& tx, int output) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+const CTxOut& FindNonChangeParentOutput(const CWallet& wallet, const COutPoint& outpoint) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
 /**
  * Return list of available coins and locked coins grouped by non-change output address.
  */
 std::map<CTxDestination, std::vector<COutput>> ListCoins(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
-// SYSCOIN
-void GroupOutputs(const CWallet& wallet, const std::vector<COutput>& outputs, bool separate_coins, const CFeeRate& effective_feerate, const CFeeRate& long_term_feerate, const CoinEligibilityFilter& filter, bool positive_only, std::vector<OutputGroup> &coins_out, const CAssetCoinInfo& nTargetValueAsset=CAssetCoinInfo(), std::vector<OutputGroup> *coinsasset_out = nullptr);
+struct SelectionFilter {
+    CoinEligibilityFilter filter;
+    bool allow_mixed_output_types{true};
+};
 
 /**
- * Shuffle and select coins until nTargetValue is reached while avoiding
- * small change; This method is stochastic for some inputs and upon
- * completion the coin set and corresponding actual target value is
- * assembled
- * param@[in]   coins           Set of UTXOs to consider. These will be categorized into
- *                              OutputGroups and filtered using eligibility_filter before
- *                              selecting coins.
- * param@[out]  setCoinsRet     Populated with the coins selected if successful.
- * param@[out]  nValueRet       Used to return the total value of selected coins.
- */
-bool AttemptSelection(const CWallet& wallet, const CAmount& nTargetValue, const CoinEligibilityFilter& eligibility_filter, std::vector<COutput> coins,
-    std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, const CoinSelectionParams& coin_selection_params, bool& bnb_used);
-// SYSCOIN
-bool AttemptSelection(const CWallet& wallet, const CAmount& nTargetValue, CAssetCoinInfo nTargetValueAsset, const CoinEligibilityFilter& eligibility_filter, std::vector<COutput> coins,
-    std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& nValueRetAsset, const CoinSelectionParams& coin_selection_params, bool& bnb_used, const int& nVersion=0);
+* Group coins by the provided filters.
+*/
+FilteredOutputGroups GroupOutputs(const CWallet& wallet,
+                          const CoinsResult& coins,
+                          const CoinSelectionParams& coin_sel_params,
+                          const std::vector<SelectionFilter>& filters);
 
 /**
- * Select a set of coins such that nValueRet >= nTargetValue and at least
- * all coins from coin_control are selected; never select unconfirmed coins if they are not ours
- * param@[out]  setCoinsRet         Populated with inputs including pre-selected inputs from
- *                                  coin_control and Coin Selection if successful.
- * param@[out]  nValueRet           Total value of selected coins including pre-selected ones
- *                                  from coin_control and Coin Selection if successful.
+ * Attempt to find a valid input set that preserves privacy by not mixing OutputTypes.
+ * `ChooseSelectionResult()` will be called on each OutputType individually and the best
+ * the solution (according to the waste metric) will be chosen. If a valid input cannot be found from any
+ * single OutputType, fallback to running `ChooseSelectionResult()` over all available coins.
+ *
+ * param@[in]  nTargetValue              The target value
+ * param@[in]  groups                    The grouped outputs mapped by coin eligibility filters
+ * param@[in]  coin_selection_params     Parameters for the coin selection
+ * param@[in]  allow_mixed_output_types  Relax restriction that SelectionResults must be of the same OutputType
+ * returns                               If successful, a SelectionResult containing the input set
+ *                                       If failed, returns (1) an empty error message if the target was not reached (general "Insufficient funds")
+ *                                                  or (2) an specific error message if there was something particularly wrong (e.g. a selection
+ *                                                  result that surpassed the tx max weight size).
  */
-// SYSCOIN
-bool SelectCoins(const CWallet& wallet, const std::vector<COutput>& vAvailableCoins, const CAmount& nTargetValue, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet,
-                const CCoinControl& coin_control, CoinSelectionParams& coin_selection_params, bool& bnb_used) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+util::Result<SelectionResult> AttemptSelection(const CAmount& nTargetValue, OutputGroupTypeMap& groups,
+                        const CoinSelectionParams& coin_selection_params, bool allow_mixed_output_types);
 
-bool SelectCoins(const CWallet& wallet, const std::vector<COutput>& vAvailableCoins, const CAmount& nTargetValue, const CAssetCoinInfo& nTargetValueAsset, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& nValueRetAsset,
-                const CCoinControl& coin_control, CoinSelectionParams& coin_selection_params, bool& bnb_used, const int& nVersion=0) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+/**
+ * Attempt to find a valid input set that meets the provided eligibility filter and target.
+ * Multiple coin selection algorithms will be run and the input set that produces the least waste
+ * (according to the waste metric) will be chosen.
+ *
+ * param@[in]  nTargetValue              The target value
+ * param@[in]  groups                    The struct containing the outputs grouped by script and divided by (1) positive only outputs and (2) all outputs (positive + negative).
+ * param@[in]  coin_selection_params     Parameters for the coin selection
+ * returns                               If successful, a SelectionResult containing the input set
+ *                                       If failed, returns (1) an empty error message if the target was not reached (general "Insufficient funds")
+ *                                                  or (2) an specific error message if there was something particularly wrong (e.g. a selection
+ *                                                  result that surpassed the tx max weight size).
+ */
+util::Result<SelectionResult> ChooseSelectionResult(const CAmount& nTargetValue, Groups& groups, const CoinSelectionParams& coin_selection_params);
+
+// User manually selected inputs that must be part of the transaction
+struct PreSelectedInputs
+{
+    std::set<std::shared_ptr<COutput>> coins;
+    // If subtract fee from outputs is disabled, the 'total_amount'
+    // will be the sum of each output effective value
+    // instead of the sum of the outputs amount
+    CAmount total_amount{0};
+
+    void Insert(const COutput& output, bool subtract_fee_outputs)
+    {
+        if (subtract_fee_outputs) {
+            total_amount += output.txout.nValue;
+        } else {
+            total_amount += output.GetEffectiveValue();
+        }
+        coins.insert(std::make_shared<COutput>(output));
+    }
+};
+
+/**
+ * Fetch and validate coin control selected inputs.
+ * Coins could be internal (from the wallet) or external.
+*/
+util::Result<PreSelectedInputs> FetchSelectedInputs(const CWallet& wallet, const CCoinControl& coin_control,
+                                                    const CoinSelectionParams& coin_selection_params) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+/**
+ * Select a set of coins such that nTargetValue is met; never select unconfirmed coins if they are not ours
+ * param@[in]   wallet                 The wallet which provides data necessary to spend the selected coins
+ * param@[in]   available_coins        The struct of coins, organized by OutputType, available for selection prior to filtering
+ * param@[in]   nTargetValue           The target value
+ * param@[in]   coin_selection_params  Parameters for this coin selection such as feerates, whether to avoid partial spends,
+ *                                     and whether to subtract the fee from the outputs.
+ * returns                             If successful, a SelectionResult containing the selected coins
+ *                                     If failed, returns (1) an empty error message if the target was not reached (general "Insufficient funds")
+ *                                                or (2) an specific error message if there was something particularly wrong (e.g. a selection
+ *                                                result that surpassed the tx max weight size).
+ */
+util::Result<SelectionResult> AutomaticCoinSelection(const CWallet& wallet, CoinsResult& available_coins, const CAmount& nTargetValue, const CCoinControl& coin_control,
+                 const CoinSelectionParams& coin_selection_params) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+/**
+ * Select all coins from coin_control, and if coin_control 'm_allow_other_inputs=true', call 'AutomaticCoinSelection' to
+ * select a set of coins such that nTargetValue - pre_set_inputs.total_amount is met.
+ */
+util::Result<SelectionResult> SelectCoins(const CWallet& wallet, CoinsResult& available_coins, const PreSelectedInputs& pre_set_inputs,
+                                          const CAmount& nTargetValue, const CCoinControl& coin_control,
+                                          const CoinSelectionParams& coin_selection_params) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+struct CreatedTransactionResult
+{
+    CTransactionRef tx;
+    CAmount fee;
+    FeeCalculation fee_calc;
+    int change_pos;
+
+    CreatedTransactionResult(CTransactionRef _tx, CAmount _fee, int _change_pos, const FeeCalculation& _fee_calc)
+        : tx(_tx), fee(_fee), fee_calc(_fee_calc), change_pos(_change_pos) {}
+};
 
 /**
  * Create a new transaction paying the recipients with a set of coins
  * selected by SelectCoins(); Also create the change output, when needed
- * @note passing nChangePosInOut as -1 will result in setting a random position
+ * @note passing change_pos as -1 will result in setting a random position
  */
-// SYSCOIN
-bool CreateTransaction(CWallet& wallet, const std::vector<CRecipient>& vecSend, CTransactionRef& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, const CCoinControl& coin_control, FeeCalculation& fee_calc_out, bool sign = true, const int& nVersion = 2);
+util::Result<CreatedTransactionResult> CreateTransaction(CWallet& wallet, const std::vector<CRecipient>& vecSend, int change_pos, const CCoinControl& coin_control, bool sign = true);
 
 /**
  * Insert additional inputs into the transaction by
  * calling CreateTransaction();
  */
+bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl);
 // SYSCOIN
-bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl&);
-bool GetBudgetSystemCollateralTX(CWallet& wallet, CTransactionRef &tx, uint256 hash, CAmount amount, const COutPoint& outpoint);
+util::Result<CreatedTransactionResult> GetBudgetSystemCollateralTX(CWallet& wallet, uint256 hash, CAmount amount, const COutPoint& outpoint);
+} // namespace wallet
+
 #endif // SYSCOIN_WALLET_SPEND_H

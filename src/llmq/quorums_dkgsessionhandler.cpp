@@ -20,10 +20,6 @@
 namespace llmq
 {
 
-CDKGPendingMessages::CDKGPendingMessages(size_t _maxMessagesPerNode, PeerManager& _peerman): maxMessagesPerNode(_maxMessagesPerNode), peerman(_peerman)
-{
-}
-
 void CDKGPendingMessages::PushPendingMessage(CNode* pfrom, CDataStream& vRecv)
 {
     NodeId from = -1;
@@ -32,13 +28,15 @@ void CDKGPendingMessages::PushPendingMessage(CNode* pfrom, CDataStream& vRecv)
     // this will also consume the data, even if we bail out early
     auto pm = std::make_shared<CDataStream>(std::move(vRecv));
     CHashWriter hw(SER_GETHASH, 0);
-    hw.write((const char*)pm->data(), pm->size());
+    hw.write(MakeByteSpan(*pm));
     const uint256 &hash = hw.GetHash();
     LOCK2(cs_main, cs);
     peerman.ReceivedResponse(from, hash);
-    if(pfrom)
-        pfrom->AddKnownTx(hash);
-
+    if(pfrom) {
+        PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
+        if (peer)
+            peerman.AddKnownTx(*peer, hash);
+    }
     if (messagesPerNode[from] >= maxMessagesPerNode) {
         // TODO ban?
         LogPrint(BCLog::LLMQ_DKG, "CDKGPendingMessages::%s -- too many messages, peer=%d\n", __func__, from);
@@ -91,20 +89,17 @@ CDKGSessionHandler::CDKGSessionHandler(const Consensus::LLMQParams& _params, CBL
     blsWorker(_blsWorker),
     dkgManager(_dkgManager),
     chainman(_chainman),
-    curSession(std::make_shared<CDKGSession>(_params, _blsWorker, _dkgManager)),
+    curSession(std::make_unique<CDKGSession>(_params, _blsWorker, _dkgManager)),
     pendingContributions((size_t)_params.size * 2, _peerman), // we allow size*2 messages as we need to make sure we see bad behavior (double messages)
     pendingComplaints((size_t)_params.size * 2, _peerman),
     pendingJustifications((size_t)_params.size * 2, _peerman),
     pendingPrematureCommitments((size_t)_params.size * 2, _peerman),
     peerman(_peerman)
 {
-    m_threadName = strprintf("llmq-%d", params.type);
     if (params.type == Consensus::LLMQ_NONE) {
         throw std::runtime_error("Can't initialize CDKGSessionHandler with LLMQ_NONE type.");
     }
 }
-
-CDKGSessionHandler::~CDKGSessionHandler() = default;
 
 void CDKGSessionHandler::UpdatedBlockTip(const CBlockIndex* pindexNew)
 {
@@ -159,7 +154,7 @@ void CDKGSessionHandler::StopThread()
 
 bool CDKGSessionHandler::InitNewQuorum(const CBlockIndex* pQuorumBaseBlockIndex)
 {
-    curSession = std::make_shared<CDKGSession>(params, blsWorker, dkgManager);
+    curSession = std::make_unique<CDKGSession>(params, blsWorker, dkgManager);
 
     if (!deterministicMNManager || !deterministicMNManager->IsDIP3Enforced(pQuorumBaseBlockIndex->nHeight)) {
         return false;
@@ -271,7 +266,7 @@ void CDKGSessionHandler::SleepBeforePhase(QuorumPhase curPhase,
     // Don't expect perfect block times and thus reduce the phase time to be on the secure side (caller chooses factor)
     double adjustedPhaseSleepTimePerMember = phaseSleepTimePerMember * randomSleepFactor;
 
-    int64_t sleepTime = (int64_t)(adjustedPhaseSleepTimePerMember * curSession->GetMyMemberIndex());
+    int64_t sleepTime = (int64_t)(adjustedPhaseSleepTimePerMember * curSession->GetMyMemberIndex().value_or(0));
     int64_t endTime = GetTimeMillis() + sleepTime;
     int heightTmp{-1};
     int heightStart{-1};
@@ -379,30 +374,19 @@ std::set<NodeId> BatchVerifyMessageSigs(CDKGSession& session, const std::vector<
         messageHashes.emplace_back(msgHash);
     }
     if (!revertToSingleVerification) {
-        bool valid = aggSig.VerifyInsecureAggregated(pubKeys, messageHashes);
-        if (valid) {
+        if (aggSig.VerifyInsecureAggregated(pubKeys, messageHashes)) {
             // all good
             return ret;
         }
 
         // are all messages from the same node?
-        NodeId firstNodeId = 0;
-        first = true;
-        bool nodeIdsAllSame = true;
-        for (auto it = messages.begin(); it != messages.end(); ++it) {
-            if (first) {
-                firstNodeId = it->first;
-            } else {
-                first = false;
-                if (it->first != firstNodeId) {
-                    nodeIdsAllSame = false;
-                    break;
-                }
-            }
-        }
+        bool nodeIdsAllSame = std::adjacent_find( messages.begin(), messages.end(), [](const auto& first, const auto& second){
+            return first.first != second.first;
+        }) == messages.end();
+
         // if yes, take a short path and return a set with only him
         if (nodeIdsAllSame) {
-            ret.emplace(firstNodeId);
+            ret.emplace(messages[0].first);
             return ret;
         }
         // different nodes, let's figure out who are the bad ones
@@ -437,9 +421,11 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
     preverifiedMessages.reserve(msgs.size());
 
     for (const auto& p : msgs) {
+        PeerRef peer = peerman.GetPeerRef(p.first);
         if (!p.second) {
             LogPrint(BCLog::LLMQ_DKG, "%s -- failed to deserialize message, peer=%d\n", __func__, p.first);
-            peerman.Misbehaving(p.first, 100, "failed to deserialize message");
+            if(peer)
+                peerman.Misbehaving(*peer, 100, "failed to deserialize message");
             continue;
         }
         const auto& msg = *p.second;
@@ -458,7 +444,8 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
                     pendingMessages.peerman.ForgetTxHash(p.first, hash);
                 }
                 LogPrint(BCLog::LLMQ_DKG, "%s -- banning node due to failed preverification, peer=%d\n", __func__, p.first);
-                peerman.Misbehaving(p.first, 100, "banning node due to failed preverification");
+                if(peer)
+                    peerman.Misbehaving(*peer, 100, "banning node due to failed preverification");
             }
             LogPrint(BCLog::LLMQ_DKG, "%s -- skipping message due to failed preverification, peer=%d\n", __func__, p.first);
             continue;
@@ -477,8 +464,10 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
     auto badNodes = BatchVerifyMessageSigs(session, preverifiedMessages);
     if (!badNodes.empty()) {
         for (auto nodeId : badNodes) {
+            PeerRef peer = peerman.GetPeerRef(nodeId);
             LogPrint(BCLog::LLMQ_DKG, "%s -- failed to verify signature, peer=%d\n", __func__, nodeId);
-            peerman.Misbehaving(nodeId, 100, "failed to verify signature");
+            if(peer)
+                peerman.Misbehaving(*peer, 100, "failed to verify signature");
         }
     }
 
@@ -491,8 +480,10 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
         bool ban = false;
         session.ReceiveMessage(hashes[i], msg, ban);
         if (ban) {
+            PeerRef peer = peerman.GetPeerRef(nodeId);
             LogPrint(BCLog::LLMQ_DKG, "%s -- banning node after ReceiveMessage failed, peer=%d\n", __func__, nodeId);
-            peerman.Misbehaving(nodeId, 100, "banning node after ReceiveMessage failed");
+            if(peer)
+                peerman.Misbehaving(*peer, 100, "banning node after ReceiveMessage failed");
             badNodes.emplace(nodeId);
         }
     }

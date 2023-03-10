@@ -1,5 +1,5 @@
 // Copyright (c) 2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,32 +9,33 @@
 #include <shutdown.h>
 #include <sync.h>
 #include <util/strencodings.h>
+#include <util/string.h>
 #include <util/system.h>
+#include <util/time.h>
 
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/split.hpp>
 #include <boost/signals2/signal.hpp>
 
 #include <cassert>
-#include <memory> // for unique_ptr
+#include <chrono>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 
-static Mutex g_rpc_warmup_mutex;
+static GlobalMutex g_rpc_warmup_mutex;
 static std::atomic<bool> g_rpc_running{false};
 static bool fRPCInWarmup GUARDED_BY(g_rpc_warmup_mutex) = true;
 static std::string rpcWarmupStatus GUARDED_BY(g_rpc_warmup_mutex) = "RPC server started";
 /* Timer-creating functions */
 static RPCTimerInterface* timerInterface = nullptr;
 /* Map of name to timer. */
-static Mutex g_deadline_timers_mutex;
+static GlobalMutex g_deadline_timers_mutex;
 static std::map<std::string, std::unique_ptr<RPCTimerBase> > deadlineTimers GUARDED_BY(g_deadline_timers_mutex);
-static bool ExecuteCommand(const CRPCCommand& command, const JSONRPCRequest& request, UniValue& result, bool last_handler);
+static bool ExecuteCommand(const CRPCCommand& command, const node::JSONRPCRequest& request, UniValue& result, bool last_handler);
 
 struct RPCCommandExecutionInfo
 {
     std::string method;
-    int64_t start;
+    SteadyClock::time_point start;
 };
 
 struct RPCServerInfo
@@ -51,7 +52,7 @@ struct RPCCommandExecution
     explicit RPCCommandExecution(const std::string& method)
     {
         LOCK(g_rpc_server_info.mutex);
-        it = g_rpc_server_info.active_commands.insert(g_rpc_server_info.active_commands.end(), {method, GetTimeMicros()});
+        it = g_rpc_server_info.active_commands.insert(g_rpc_server_info.active_commands.end(), {method, SteadyClock::now()});
     }
     ~RPCCommandExecution()
     {
@@ -76,7 +77,7 @@ void RPCServer::OnStopped(std::function<void ()> slot)
     g_rpcSignals.Stopped.connect(slot);
 }
 
-std::string CRPCTable::help(const std::string& strCommand, const JSONRPCRequest& helpreq) const
+std::string CRPCTable::help(const std::string& strCommand, const node::JSONRPCRequest& helpreq) const
 {
     std::string strRet;
     std::string category;
@@ -87,8 +88,8 @@ std::string CRPCTable::help(const std::string& strCommand, const JSONRPCRequest&
         vCommands.push_back(make_pair(entry.second.front()->category + entry.first, entry.second.front()));
     sort(vCommands.begin(), vCommands.end());
 
-    JSONRPCRequest jreq = helpreq;
-    jreq.mode = JSONRPCRequest::GET_HELP;
+    node::JSONRPCRequest jreq = helpreq;
+    jreq.mode = node::JSONRPCRequest::GET_HELP;
     jreq.params = UniValue();
 
     for (const std::pair<std::string, const CRPCCommand*>& command : vCommands)
@@ -102,7 +103,7 @@ std::string CRPCTable::help(const std::string& strCommand, const JSONRPCRequest&
         {
             UniValue unused_result;
             if (setDone.insert(pcmd->unique_id).second)
-                pcmd->actor(jreq, unused_result, true /* last_handler */);
+                pcmd->actor(jreq, unused_result, /*last_handler=*/true);
         }
         catch (const std::exception& e)
         {
@@ -143,7 +144,7 @@ static RPCHelpMan help()
                     RPCResult{RPCResult::Type::ANY, "", ""},
                 },
                 RPCExamples{""},
-        [&](const RPCHelpMan& self, const JSONRPCRequest& jsonRequest) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& jsonRequest) -> UniValue
 {
     std::string strCommand;
     if (jsonRequest.params.size() > 0) {
@@ -168,17 +169,17 @@ static RPCHelpMan stop()
     // to the client (intended for testing)
                 "\nRequest a graceful shutdown of " PACKAGE_NAME ".",
                 {
-                    {"wait", RPCArg::Type::NUM, RPCArg::Optional::OMITTED_NAMED_ARG, "how long to wait in ms", "", {}, /* hidden */ true},
+                    {"wait", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "how long to wait in ms", RPCArgOptions{.hidden=true}},
                 },
                 RPCResult{RPCResult::Type::STR, "", "A string with the content '" + RESULT + "'"},
                 RPCExamples{""},
-        [&](const RPCHelpMan& self, const JSONRPCRequest& jsonRequest) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& jsonRequest) -> UniValue
 {
     // Event loop will exit after current HTTP requests have been handled, so
     // this reply will get back to the client.
     StartShutdown();
     if (jsonRequest.params[0].isNum()) {
-        UninterruptibleSleep(std::chrono::milliseconds{jsonRequest.params[0].get_int()});
+        UninterruptibleSleep(std::chrono::milliseconds{jsonRequest.params[0].getInt<int>()});
     }
     return RESULT;
 },
@@ -197,7 +198,7 @@ static RPCHelpMan uptime()
                     HelpExampleCli("uptime", "")
                 + HelpExampleRpc("uptime", "")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     return GetTime() - GetStartupTime();
 }
@@ -226,14 +227,14 @@ static RPCHelpMan getrpcinfo()
                 RPCExamples{
                     HelpExampleCli("getrpcinfo", "")
                 + HelpExampleRpc("getrpcinfo", "")},
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     LOCK(g_rpc_server_info.mutex);
     UniValue active_commands(UniValue::VARR);
     for (const RPCCommandExecutionInfo& info : g_rpc_server_info.active_commands) {
         UniValue entry(UniValue::VOBJ);
         entry.pushKV("method", info.method);
-        entry.pushKV("duration", GetTimeMicros() - info.start);
+        entry.pushKV("duration", int64_t{Ticks<std::chrono::microseconds>(SteadyClock::now() - info.start)});
         active_commands.push_back(entry);
     }
 
@@ -249,17 +250,13 @@ static RPCHelpMan getrpcinfo()
     };
 }
 
-// clang-format off
-static const CRPCCommand vRPCCommands[] =
-{ //  category               actor (function)
-  //  ---------------------  -----------------------
+static const CRPCCommand vRPCCommands[]{
     /* Overall control/query calls */
-    { "control",             &getrpcinfo,             },
-    { "control",             &help,                   },
-    { "control",             &stop,                   },
-    { "control",             &uptime,                 },
+    {"control", &getrpcinfo},
+    {"control", &help},
+    {"control", &stop},
+    {"control", &uptime},
 };
-// clang-format on
 
 CRPCTable::CRPCTable()
 {
@@ -357,7 +354,7 @@ bool IsDeprecatedRPCEnabled(const std::string& method)
     return find(enabled_methods.begin(), enabled_methods.end(), method) != enabled_methods.end();
 }
 
-static UniValue JSONRPCExecOne(JSONRPCRequest jreq, const UniValue& req)
+static UniValue JSONRPCExecOne(node::JSONRPCRequest jreq, const UniValue& req)
 {
     UniValue rpc_result(UniValue::VOBJ);
 
@@ -380,7 +377,7 @@ static UniValue JSONRPCExecOne(JSONRPCRequest jreq, const UniValue& req)
     return rpc_result;
 }
 
-std::string JSONRPCExecBatch(const JSONRPCRequest& jreq, const UniValue& vReq)
+std::string JSONRPCExecBatch(const node::JSONRPCRequest& jreq, const UniValue& vReq)
 {
     UniValue ret(UniValue::VARR);
     for (unsigned int reqIdx = 0; reqIdx < vReq.size(); reqIdx++)
@@ -393,9 +390,9 @@ std::string JSONRPCExecBatch(const JSONRPCRequest& jreq, const UniValue& vReq)
  * Process named arguments into a vector of positional arguments, based on the
  * passed-in specification for the RPC call's arguments.
  */
-static inline JSONRPCRequest transformNamedArguments(const JSONRPCRequest& in, const std::vector<std::string>& argNames)
+static inline node::JSONRPCRequest transformNamedArguments(const node::JSONRPCRequest& in, const std::vector<std::string>& argNames)
 {
-    JSONRPCRequest out = in;
+    node::JSONRPCRequest out = in;
     out.params = UniValue(UniValue::VARR);
     // Build a map of parameters, and remove ones that have been processed, so that we can throw a focused error if
     // there is an unknown one.
@@ -403,13 +400,23 @@ static inline JSONRPCRequest transformNamedArguments(const JSONRPCRequest& in, c
     const std::vector<UniValue>& values = in.params.getValues();
     std::unordered_map<std::string, const UniValue*> argsIn;
     for (size_t i=0; i<keys.size(); ++i) {
-        argsIn[keys[i]] = &values[i];
+        auto [_, inserted] = argsIn.emplace(keys[i], &values[i]);
+        if (!inserted) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Parameter " + keys[i] + " specified multiple times");
+        }
     }
-    // Process expected parameters.
+    // Process expected parameters. If any parameters were left unspecified in
+    // the request before a parameter that was specified, null values need to be
+    // inserted at the unspecifed parameter positions, and the "hole" variable
+    // below tracks the number of null values that need to be inserted.
+    // The "initial_hole_size" variable stores the size of the initial hole,
+    // i.e. how many initial positional arguments were left unspecified. This is
+    // used after the for-loop to add initial positional arguments from the
+    // "args" parameter, if present.
     int hole = 0;
+    int initial_hole_size = 0;
     for (const std::string &argNamePattern: argNames) {
-        std::vector<std::string> vargNames;
-        boost::algorithm::split(vargNames, argNamePattern, boost::algorithm::is_any_of("|"));
+        std::vector<std::string> vargNames = SplitString(argNamePattern, '|');
         auto fr = argsIn.end();
         for (const std::string & argName : vargNames) {
             fr = argsIn.find(argName);
@@ -429,6 +436,24 @@ static inline JSONRPCRequest transformNamedArguments(const JSONRPCRequest& in, c
             argsIn.erase(fr);
         } else {
             hole += 1;
+            if (out.params.empty()) initial_hole_size = hole;
+        }
+    }
+    // If leftover "args" param was found, use it as a source of positional
+    // arguments and add named arguments after. This is a convenience for
+    // clients that want to pass a combination of named and positional
+    // arguments as described in doc/JSON-RPC-interface.md#parameter-passing
+    auto positional_args{argsIn.extract("args")};
+    if (positional_args && positional_args.mapped()->isArray()) {
+        const bool has_named_arguments{initial_hole_size < (int)argNames.size()};
+        if (initial_hole_size < (int)positional_args.mapped()->size() && has_named_arguments) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Parameter " + argNames[initial_hole_size] + " specified twice both as positional and named argument");
+        }
+        // Assign positional_args to out.params and append named_args after.
+        UniValue named_args{std::move(out.params)};
+        out.params = *positional_args.mapped();
+        for (size_t i{out.params.size()}; i < named_args.size(); ++i) {
+            out.params.push_back(named_args[i]);
         }
     }
     // If there are still arguments in the argsIn map, this is an error.
@@ -439,7 +464,7 @@ static inline JSONRPCRequest transformNamedArguments(const JSONRPCRequest& in, c
     return out;
 }
 
-static bool ExecuteCommands(const std::vector<const CRPCCommand*>& commands, const JSONRPCRequest& request, UniValue& result)
+static bool ExecuteCommands(const std::vector<const CRPCCommand*>& commands, const node::JSONRPCRequest& request, UniValue& result)
 {
     for (const auto& command : commands) {
         if (ExecuteCommand(*command, request, result, &command == &commands.back())) {
@@ -449,7 +474,7 @@ static bool ExecuteCommands(const std::vector<const CRPCCommand*>& commands, con
     return false;
 }
 
-UniValue CRPCTable::execute(const JSONRPCRequest &request) const
+UniValue CRPCTable::execute(const node::JSONRPCRequest &request) const
 {
     // Return immediately if in warmup
     {
@@ -469,10 +494,9 @@ UniValue CRPCTable::execute(const JSONRPCRequest &request) const
     throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found");
 }
 
-static bool ExecuteCommand(const CRPCCommand& command, const JSONRPCRequest& request, UniValue& result, bool last_handler)
+static bool ExecuteCommand(const CRPCCommand& command, const node::JSONRPCRequest& request, UniValue& result, bool last_handler)
 {
-    try
-    {
+    try {
         RPCCommandExecution execution(request.strMethod);
         // Execute, convert arguments to array if necessary
         if (request.params.isObject()) {
@@ -480,9 +504,9 @@ static bool ExecuteCommand(const CRPCCommand& command, const JSONRPCRequest& req
         } else {
             return command.actor(request, result, last_handler);
         }
-    }
-    catch (const std::exception& e)
-    {
+    } catch (const UniValue::type_error& e) {
+        throw JSONRPCError(RPC_TYPE_ERROR, e.what());
+    } catch (const std::exception& e) {
         throw JSONRPCError(RPC_MISC_ERROR, e.what());
     }
 }
@@ -494,10 +518,10 @@ std::vector<std::string> CRPCTable::listCommands() const
     return commandList;
 }
 
-UniValue CRPCTable::dumpArgMap(const JSONRPCRequest& args_request) const
+UniValue CRPCTable::dumpArgMap(const node::JSONRPCRequest& args_request) const
 {
-    JSONRPCRequest request = args_request;
-    request.mode = JSONRPCRequest::GET_ARGS;
+    node::JSONRPCRequest request = args_request;
+    request.mode = node::JSONRPCRequest::GET_ARGS;
 
     UniValue ret{UniValue::VARR};
     for (const auto& cmd : mapCommands) {
@@ -537,13 +561,13 @@ void RPCRunLater(const std::string& name, std::function<void()> func, int64_t nS
     LogPrint(BCLog::RPC, "queue run of timer %s in %i seconds (using %s)\n", name, nSeconds, timerInterface->Name());
     deadlineTimers.emplace(name, std::unique_ptr<RPCTimerBase>(timerInterface->NewTimer(func, nSeconds*1000)));
 }
-
-int RPCSerializationFlags()
-{
-    int flag = 0;
-    if (gArgs.GetIntArg("-rpcserialversion", DEFAULT_RPC_SERIALIZE_VERSION) == 0)
-        flag |= SERIALIZE_TRANSACTION_NO_WITNESS;
-    return flag;
-}
+// SYSCOIN
+// int RPCSerializationFlags()
+// {
+//     int flag = 0;
+//     if (gArgs.GetIntArg("-rpcserialversion", DEFAULT_RPC_SERIALIZE_VERSION) == 0)
+//         flag |= SERIALIZE_TRANSACTION_NO_WITNESS;
+//     return flag;
+// }
 
 CRPCTable tableRPC;

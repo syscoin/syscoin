@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2021 The Bitcoin Core developers
+// Copyright (c) 2020-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -10,7 +10,6 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <key.h>
-#include <node/coinstats.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <pubkey.h>
@@ -47,7 +46,7 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
 {
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     CCoinsView backend_coins_view;
-    CCoinsViewCache coins_view_cache{&backend_coins_view};
+    CCoinsViewCache coins_view_cache{&backend_coins_view, /*deterministic=*/true};
     COutPoint random_out_point;
     Coin random_coin;
     CMutableTransaction random_mutable_transaction;
@@ -74,6 +73,9 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
             },
             [&] {
                 (void)coins_view_cache.Flush();
+            },
+            [&] {
+                (void)coins_view_cache.Sync();
             },
             [&] {
                 coins_view_cache.SetBestBlock(ConsumeUInt256(fuzzed_data_provider));
@@ -207,7 +209,7 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
                     return;
                 }
                 bool expected_code_path = false;
-                const int height = fuzzed_data_provider.ConsumeIntegral<int>();
+                const int height{int(fuzzed_data_provider.ConsumeIntegral<uint32_t>() >> 1)};
                 const bool possible_overwrite = fuzzed_data_provider.ConsumeBool();
                 try {
                     AddCoins(coins_view_cache, transaction, height, possible_overwrite);
@@ -221,8 +223,7 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
                 assert(expected_code_path);
             },
             [&] {
-                (void)AreInputsStandard(CTransaction{random_mutable_transaction}, coins_view_cache, false);
-                (void)AreInputsStandard(CTransaction{random_mutable_transaction}, coins_view_cache, true);
+                (void)AreInputsStandard(CTransaction{random_mutable_transaction}, coins_view_cache);
             },
             [&] {
                 TxValidationState state;
@@ -268,16 +269,6 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
                     return;
                 }
                 (void)GetTransactionSigOpCost(transaction, coins_view_cache, flags);
-            },
-            [&] {
-                CCoinsStats stats{CoinStatsHashType::HASH_SERIALIZED};
-                bool expected_code_path = false;
-                try {
-                    (void)GetUTXOStats(&coins_view_cache, WITH_LOCK(::cs_main, return std::ref(g_setup->m_node.chainman->m_blockman)), stats);
-                } catch (const std::logic_error&) {
-                    expected_code_path = true;
-                }
-                assert(expected_code_path);
             },
             [&] {
                 (void)IsWitnessStandard(CTransaction{random_mutable_transaction}, coins_view_cache);

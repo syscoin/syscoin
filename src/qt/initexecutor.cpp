@@ -1,24 +1,20 @@
-// Copyright (c) 2014-2021 The Bitcoin Core developers
+// Copyright (c) 2014-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <qt/initexecutor.h>
 
 #include <interfaces/node.h>
-#include <qt/guiutil.h>
 #include <util/system.h>
 #include <util/threadnames.h>
 
 #include <exception>
 
 #include <QDebug>
+#include <QMetaObject>
 #include <QObject>
 #include <QString>
 #include <QThread>
-// SYSCOIN
-#include <QProcess>
-#include <QStringList>
-#include <QApplication>
 InitExecutor::InitExecutor(interfaces::Node& node)
     : QObject(), m_node(node)
 {
@@ -42,7 +38,7 @@ void InitExecutor::handleRunawayException(const std::exception* e)
 
 void InitExecutor::initialize()
 {
-    GUIUtil::ObjectInvoke(&m_context, [this] {
+    QMetaObject::invokeMethod(&m_context, [this] {
         try {
             util::ThreadRename("qt-init");
             qDebug() << "Running initialization in thread";
@@ -56,31 +52,9 @@ void InitExecutor::initialize()
         }
     });
 }
-// SYSCOIN
-void InitExecutor::restart(const QStringList &args)
-{
-    static bool executing_restart{false};
-
-    if(!executing_restart) { // Only restart 1x, no matter how often a user clicks on a restart-button
-        executing_restart = true;
-        try
-        {
-            qDebug() << __func__ << ": Running Restart in thread";
-            m_node.appShutdown();
-            qDebug() << __func__ << ": Shutdown finished";
-            Q_EMIT shutdownResult();
-            CExplicitNetCleanup::callCleanup();
-            QProcess::startDetached(QApplication::applicationFilePath(), args);
-            qDebug() << __func__ << ": Restart initiated...";
-            QApplication::quit();
-        } catch (...) {
-            handleRunawayException(nullptr);
-        }
-    }
-}
 void InitExecutor::shutdown()
 {
-    GUIUtil::ObjectInvoke(&m_context, [this] {
+    QMetaObject::invokeMethod(&m_context, [this] {
         try {
             qDebug() << "Running Shutdown in thread";
             m_node.appShutdown();

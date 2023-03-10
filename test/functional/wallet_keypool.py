@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2021 The Bitcoin Core developers
+# Copyright (c) 2014-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the wallet keypool and interaction with wallet encryption/locking."""
@@ -9,11 +9,13 @@ from decimal import Decimal
 
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
-
 from test_framework.auxpow import reverseHex
 from test_framework.auxpow_testing import computeAuxpow
 
 class KeyPoolTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.num_nodes = 1
 
@@ -176,7 +178,7 @@ class KeyPoolTest(SyscoinTestFramework):
         w1.walletpassphrase('test', 100)
 
         res = w1.sendtoaddress(address=address, amount=0.00010000)
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 1)
         destination = addr.pop()
 
         # Using a fee rate (10 sat / byte) well above the minimum relay rate
@@ -206,6 +208,10 @@ class KeyPoolTest(SyscoinTestFramework):
         # creating a 10,000 sat transaction with a manual change address should be possible
         res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00010000}], options={"subtractFeeFromOutputs": [0], "feeRate": 0.00010, "changeAddress": addr.pop()})
         assert_equal("psbt" in res, True)
+
+        if not self.options.descriptors:
+            msg = "Error: Private keys are disabled for this wallet"
+            assert_raises_rpc_error(-4, msg, w2.keypoolrefill, 100)
 
 def test_auxpow(self, nodes):
     """

@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2020 The Bitcoin Core developers
+// Copyright (c) 2015-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,13 +6,18 @@
 #define SYSCOIN_ZMQ_ZMQPUBLISHNOTIFIER_H
 
 #include <zmq/zmqabstractnotifier.h>
-#include <vector>
+
+#include <cstddef>
+#include <cstdint>
+
 class CBlockIndex;
+class CTransaction;
 // SYSCOIN
 class CNEVMBlock;
 class CNEVMHeader;
 class CBlock;
 class uint256;
+class CNEVMData;
 class CZMQAbstractPublishNotifier : public CZMQAbstractNotifier
 {
 private:
@@ -44,20 +49,26 @@ class CZMQPublishNEVMCommsNotifier : public CZMQAbstractPublishNotifier
 public:
     bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse) override;
 };
+class CZMQPublishNEVMBlockInfoNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) override;
+};
 class CZMQPublishNEVMBlockNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, BlockValidationState &state) override;
+    bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) override;
 };
+
 class CZMQPublishNEVMBlockConnectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, BlockValidationState &state, const uint256& nBlockHash) override;
+    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation) override;
 };
 class CZMQPublishNEVMBlockDisconnectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyNEVMBlockDisconnect(BlockValidationState &state, const uint256& nBlockHash) override;
+    bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash) override;
 };
 class CZMQPublishHashBlockNotifier : public CZMQAbstractPublishNotifier
 {
@@ -91,25 +102,15 @@ public:
 class CZMQPublishHashGovernanceVoteNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote> &vote) override;
+    bool NotifyGovernanceVote(const uint256 &vote) override;
 };
 
 class CZMQPublishHashGovernanceObjectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject> &object) override;
-};
-class CZMQPublishRawGovernanceVoteNotifier : public CZMQAbstractPublishNotifier
-{
-public:
-    bool NotifyGovernanceVote(const std::shared_ptr<const CGovernanceVote>& vote) override;
+    bool NotifyGovernanceObject(const uint256 &object) override;
 };
 
-class CZMQPublishRawGovernanceObjectNotifier : public CZMQAbstractPublishNotifier
-{
-public:
-    bool NotifyGovernanceObject(const std::shared_ptr<const CGovernanceObject>& object) override;
-};
 class CZMQPublishSequenceNotifier : public CZMQAbstractPublishNotifier
 {
 public:

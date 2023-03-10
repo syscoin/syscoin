@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2021 The Bitcoin Core developers
+# Copyright (c) 2014-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Base class for RPC testing."""
@@ -9,6 +9,7 @@ from enum import Enum
 import argparse
 import logging
 import os
+import platform
 import pdb
 import random
 import re
@@ -27,6 +28,7 @@ from .p2p import NetworkThread
 from .test_node import TestNode
 from .util import (
     MAX_NODES,
+    MASTERNODE_COLLATERAL,
     PortSeed,
     assert_equal,
     check_json_precision,
@@ -101,6 +103,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         self.chain: str = 'regtest'
         self.setup_clean_chain: bool = False
         self.nodes: List[TestNode] = []
+        self.extra_args = None
         self.network_thread = None
         self.rpc_timeout = 60  # Wait for up to 60 seconds for the RPC server to respond
         self.supports_cli = True
@@ -119,7 +122,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         self.mocktime = None
         # By default the wallet is not required. Set to true by skip_if_no_wallet().
         # When False, we ignore wallet_names regardless of what it is.
-        self.requires_wallet = False
+        self._requires_wallet = False
         # Disable ThreadOpenConnections by default, so that adding entries to
         # addrman will not result in automatic connections to them.
         self.disable_autoconnect = True
@@ -199,12 +202,6 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
                             help="set a random seed for deterministically reproducing a previous test run")
         parser.add_argument('--timeout-factor', dest="timeout_factor", type=float, default=1.0, help='adjust test timeouts by a factor. Setting it to 0 disables all timeouts')
 
-        group = parser.add_mutually_exclusive_group()
-        group.add_argument("--descriptors", action='store_const', const=True,
-                            help="Run test using a descriptor wallet", dest='descriptors')
-        group.add_argument("--legacy-wallet", action='store_const', const=False,
-                            help="Run test using legacy wallets", dest='descriptors')
-
         self.add_options(parser)
         # Running TestShell in a Jupyter notebook causes an additional -f argument
         # To keep TestShell from failing with an "unrecognized argument" error, we add a dummy "-f" argument
@@ -217,21 +214,28 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         config.read_file(open(self.options.configfile))
         self.config = config
 
-        if self.options.descriptors is None:
-            # Prefer BDB unless it isn't available
-            if self.is_bdb_compiled():
-                self.options.descriptors = False
-            elif self.is_sqlite_compiled():
+        if "descriptors" not in self.options:
+            # Wallet is not required by the test at all and the value of self.options.descriptors won't matter.
+            # It still needs to exist and be None in order for tests to work however.
+            # So set it to None to force -disablewallet, because the wallet is not needed.
+            self.options.descriptors = None
+        elif self.options.descriptors is None:
+            # Some wallet is either required or optionally used by the test.
+            # Prefer SQLite unless it isn't available
+            if self.is_sqlite_compiled():
                 self.options.descriptors = True
+            elif self.is_bdb_compiled():
+                self.options.descriptors = False
             else:
                 # If neither are compiled, tests requiring a wallet will be skipped and the value of self.options.descriptors won't matter
                 # It still needs to exist and be None in order for tests to work however.
+                # So set it to None, which will also set -disablewallet.
                 self.options.descriptors = None
+
+        PortSeed.n = self.options.port_seed
 
     def setup(self):
         """Call this method to start up the test framework object with options set."""
-
-        PortSeed.n = self.options.port_seed
 
         check_json_precision()
 
@@ -249,8 +253,14 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             "src",
             "syscoin-cli" + config["environment"]["EXEEXT"],
         )
+        fname_syscoinutil = os.path.join(
+            config["environment"]["BUILDDIR"],
+            "src",
+            "syscoin-util" + config["environment"]["EXEEXT"],
+        )
         self.options.syscoind = os.getenv("SYSCOIND", default=fname_syscoind)
         self.options.syscoincli = os.getenv("SYSCOINCLI", default=fname_syscoincli)
+        self.options.syscoinutil = os.getenv("SYSCOINUTIL", default=fname_syscoinutil)
 
         os.environ['PATH'] = os.pathsep.join([
             os.path.join(config['environment']['BUILDDIR'], 'src'),
@@ -276,10 +286,10 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         if seed is None:
             seed = random.randrange(sys.maxsize)
         else:
-            self.log.debug("User supplied random seed {}".format(seed))
+            self.log.info("User supplied random seed {}".format(seed))
 
         random.seed(seed)
-        self.log.debug("PRNG seed is: {}".format(seed))
+        self.log.info("PRNG seed is: {}".format(seed))
 
         self.log.debug('Setting up network thread')
         self.network_thread = NetworkThread()
@@ -406,12 +416,9 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
     def setup_nodes(self):
         """Override this method to customize test node setup"""
-        extra_args = [[]] * self.num_nodes
-        if hasattr(self, "extra_args"):
-            extra_args = self.extra_args
-        self.add_nodes(self.num_nodes, extra_args)
+        self.add_nodes(self.num_nodes, self.extra_args)
         self.start_nodes()
-        if self.requires_wallet:
+        if self._requires_wallet:
             self.import_deterministic_coinbase_privkeys()
         if not self.setup_clean_chain:
             for n in self.nodes:
@@ -437,13 +444,28 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             n = self.nodes[node]
             if wallet_name is not None:
                 n.createwallet(wallet_name=wallet_name, descriptors=self.options.descriptors, load_on_startup=True)
-            n.importprivkey(privkey=n.get_deterministic_priv_key().key, label='coinbase')
+            n.importprivkey(privkey=n.get_deterministic_priv_key().key, label='coinbase', rescan=True)
 
     def run_test(self):
         """Tests must override this method to define test logic"""
         raise NotImplementedError
 
     # Public helper methods. These can be accessed by the subclass test scripts.
+
+    def add_wallet_options(self, parser, *, descriptors=True, legacy=True):
+        kwargs = {}
+        if descriptors + legacy == 1:
+            # If only one type can be chosen, set it as default
+            kwargs["default"] = descriptors
+        group = parser.add_mutually_exclusive_group(
+            # If only one type is allowed, require it to be set in test_runner.py
+            required=os.getenv("REQUIRE_WALLET_TYPE_SET") == "1" and "default" in kwargs)
+        if descriptors:
+            group.add_argument("--descriptors", action='store_const', const=True, **kwargs,
+                               help="Run test using a descriptor wallet", dest='descriptors')
+        if legacy:
+            group.add_argument("--legacy-wallet", action='store_const', const=False, **kwargs,
+                               help="Run test using legacy wallets", dest='descriptors')
     # SYSCOIN add offset
     def add_nodes(self, num_nodes: int, extra_args=None, *, rpchost=None, binary=None, binary_cli=None, versions=None, offset = None):
         """Instantiate TestNode objects.
@@ -517,11 +539,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             self.nodes.append(test_node_i)
             if not test_node_i.version_is_at_least(170000):
                 # adjust conf for pre 17
-                conf_file = test_node_i.syscoinconf
-                with open(conf_file, 'r', encoding='utf8') as conf:
-                    conf_data = conf.read()
-                with open(conf_file, 'w', encoding='utf8') as conf:
-                    conf.write(conf_data.replace('[regtest]', ''))
+                test_node_i.replace_in_config([('[regtest]', '')])
 
     def start_node(self, i, *args, **kwargs):
         """Start a syscoind"""
@@ -545,7 +563,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
                 node.start(extra_args[i], *args, **kwargs)
             for node in self.nodes:
                 node.wait_for_rpc_connection()
-        except:
+        except Exception:
             # If one node failed to start, stop the others
             self.stop_nodes()
             raise
@@ -590,26 +608,30 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         wait_until_helper(lambda: all(peer['version'] != 0 for peer in to_connection.getpeerinfo()))
         wait_until_helper(lambda: all(peer['bytesrecv_per_msg'].pop('verack', 0) == 24 for peer in from_connection.getpeerinfo()))
         wait_until_helper(lambda: all(peer['bytesrecv_per_msg'].pop('verack', 0) == 24 for peer in to_connection.getpeerinfo()))
+        # The message bytes are counted before processing the message, so make
+        # sure it was fully processed by waiting for a ping.
+        wait_until_helper(lambda: all(peer["bytesrecv_per_msg"].pop("pong", 0) >= 32 for peer in from_connection.getpeerinfo()))
+        wait_until_helper(lambda: all(peer["bytesrecv_per_msg"].pop("pong", 0) >= 32 for peer in to_connection.getpeerinfo()))
 
     def disconnect_nodes(self, a, b):
-        def disconnect_nodes_helper(from_connection, node_num):
-            def get_peer_ids():
+        def disconnect_nodes_helper(node_a, node_b):
+            def get_peer_ids(from_connection, node_num):
                 result = []
                 for peer in from_connection.getpeerinfo():
                     if "testnode{}".format(node_num) in peer['subver']:
                         result.append(peer['id'])
                 return result
 
-            peer_ids = get_peer_ids()
+            peer_ids = get_peer_ids(node_a, node_b.index)
             if not peer_ids:
                 self.log.warning("disconnect_nodes: {} and {} were not connected".format(
-                    from_connection.index,
-                    node_num,
+                    node_a.index,
+                    node_b.index,
                 ))
                 return
             for peer_id in peer_ids:
                 try:
-                    from_connection.disconnectnode(nodeid=peer_id)
+                    node_a.disconnectnode(nodeid=peer_id)
                 except JSONRPCException as e:
                     # If this node is disconnected between calculating the peer id
                     # and issuing the disconnect, don't worry about it.
@@ -618,9 +640,10 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
                         raise
 
             # wait to disconnect
-            wait_until_helper(lambda: not get_peer_ids(), timeout=5)
+            self.wait_until(lambda: not get_peer_ids(node_a, node_b.index), timeout=5)
+            self.wait_until(lambda: not get_peer_ids(node_b, node_a.index), timeout=5)
 
-        disconnect_nodes_helper(self.nodes[a], b)
+        disconnect_nodes_helper(self.nodes[a], self.nodes[b])
 
     def split_network(self):
         """
@@ -821,7 +844,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
             os.rmdir(cache_path('wallets'))  # Remove empty wallets dir
             for entry in os.listdir(cache_path()):
-                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'asset', 'assetnft', 'llmq', 'evodb']:  # Only keep chainstate and blocks folder
+                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'asset', 'assetnft', 'llmq', 'evodb', 'nevmdata']:  # Only keep chainstate and blocks folder
                     os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
@@ -845,6 +868,41 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         except ImportError:
             raise SkipTest("python3-zmq module not available.")
 
+    def skip_if_no_py_sqlite3(self):
+        """Attempt to import the sqlite3 package and skip the test if the import fails."""
+        try:
+            import sqlite3  # noqa
+        except ImportError:
+            raise SkipTest("sqlite3 module not available.")
+
+    def skip_if_no_python_bcc(self):
+        """Attempt to import the bcc package and skip the tests if the import fails."""
+        try:
+            import bcc  # type: ignore[import] # noqa: F401
+        except ImportError:
+            raise SkipTest("bcc python module not available")
+
+    def skip_if_no_syscoind_tracepoints(self):
+        """Skip the running test if syscoind has not been compiled with USDT tracepoint support."""
+        if not self.is_usdt_compiled():
+            raise SkipTest("syscoind has not been built with USDT tracepoints enabled.")
+
+    def skip_if_no_bpf_permissions(self):
+        """Skip the running test if we don't have permissions to do BPF syscalls and load BPF maps."""
+        # check for 'root' permissions
+        if os.geteuid() != 0:
+            raise SkipTest("no permissions to use BPF (please review the tests carefully before running them with higher privileges)")
+
+    def skip_if_platform_not_linux(self):
+        """Skip the running test if we are not on a Linux platform"""
+        if platform.system() != "Linux":
+            raise SkipTest("not on a Linux system")
+
+    def skip_if_platform_not_posix(self):
+        """Skip the running test if we are not on a POSIX platform"""
+        if os.name != 'posix':
+            raise SkipTest("not on a POSIX system")
+
     def skip_if_no_syscoind_zmq(self):
         """Skip the running test if syscoind has not been compiled with zmq support."""
         if not self.is_zmq_compiled():
@@ -852,7 +910,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
     def skip_if_no_wallet(self):
         """Skip the running test if wallet has not been compiled."""
-        self.requires_wallet = True
+        self._requires_wallet = True
         if not self.is_wallet_compiled():
             raise SkipTest("wallet has not been compiled.")
         if self.options.descriptors:
@@ -874,6 +932,11 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         """Skip the running test if syscoin-wallet has not been compiled."""
         if not self.is_wallet_tool_compiled():
             raise SkipTest("syscoin-wallet has not been compiled")
+
+    def skip_if_no_syscoin_util(self):
+        """Skip the running test if syscoin-util has not been compiled."""
+        if not self.is_syscoin_util_compiled():
+            raise SkipTest("syscoin-util has not been compiled")
 
     def skip_if_no_cli(self):
         """Skip the running test if syscoin-cli has not been compiled."""
@@ -910,13 +973,29 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         """Checks whether the wallet module was compiled."""
         return self.config["components"].getboolean("ENABLE_WALLET")
 
+    def is_specified_wallet_compiled(self):
+        """Checks whether wallet support for the specified type
+           (legacy or descriptor wallet) was compiled."""
+        if self.options.descriptors:
+            return self.is_sqlite_compiled()
+        else:
+            return self.is_bdb_compiled()
+
     def is_wallet_tool_compiled(self):
         """Checks whether syscoin-wallet was compiled."""
         return self.config["components"].getboolean("ENABLE_WALLET_TOOL")
 
+    def is_syscoin_util_compiled(self):
+        """Checks whether syscoin-util was compiled."""
+        return self.config["components"].getboolean("ENABLE_SYSCOIN_UTIL")
+
     def is_zmq_compiled(self):
         """Checks whether the zmq module was compiled."""
         return self.config["components"].getboolean("ENABLE_ZMQ")
+
+    def is_usdt_compiled(self):
+        """Checks whether the USDT tracepoints were compiled."""
+        return self.config["components"].getboolean("ENABLE_USDT_TRACEPOINTS")
 
     def is_sqlite_compiled(self):
         """Checks whether the wallet module was compiled with Sqlite support."""
@@ -937,7 +1016,6 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         """Checks whether the syscall sandbox was compiled."""
         return self.config["components"].getboolean("ENABLE_SYSCALL_SANDBOX")
 
-MASTERNODE_COLLATERAL = 100
 
 
 class MasternodeInfo:
@@ -980,15 +1058,11 @@ class DashTestFramework(SyscoinTestFramework):
         # LLMQ default test params (no need to pass -llmqtestparams)
         self.llmq_size = 3
         self.llmq_threshold = 2
-        # This is nRequestTimeout in syscoin-q-recovery thread
-        self.quorum_data_thread_request_timeout_seconds = 10
-        # This is EXPIRATION_TIMEOUT in CQuorumDataRequest
-        self.quorum_data_request_expiration_timeout = 300
         self.disable_autoconnect = False
 
     def confirm_mns(self):
         while True:
-            diff = self.nodes[0].protx_diff(1, self.nodes[0].getblockcount())
+            diff = self.nodes[0].protx_diff(self.nodes[0].getblockhash(1), self.nodes[0].getblockhash(self.nodes[0].getblockcount()))
             found_unconfirmed = False
             for mn in diff["mnList"]:
                 if int(mn["confirmedHash"], 16) == 0:
@@ -1019,19 +1093,24 @@ class DashTestFramework(SyscoinTestFramework):
         self.log.info("Preparing %d masternodes" % self.mn_count)
         for idx in range(0, self.mn_count):
             self.prepare_masternode(idx)
+        self.sync_all()
 
     def prepare_masternode(self, idx):
+        register_fund = (idx % 2) == 0
+
         bls = self.nodes[0].bls_generate()
         address = self.nodes[0].getnewaddress()
         txid = self.nodes[0].sendtoaddress(address, MASTERNODE_COLLATERAL)
 
-        txraw = self.nodes[0].getrawtransaction(txid, True)
         collateral_vout = 0
-        for vout_idx in range(0, len(txraw["vout"])):
-            vout = txraw["vout"][vout_idx]
-            if vout["value"] == MASTERNODE_COLLATERAL:
-                collateral_vout = vout_idx
-        self.nodes[0].lockunspent(False, [{'txid': txid, 'vout': collateral_vout}])
+        if not register_fund:
+            txraw = self.nodes[0].getrawtransaction(txid, True)
+            for vout_idx in range(0, len(txraw["vout"])):
+                vout = txraw["vout"][vout_idx]
+                if vout["value"] == MASTERNODE_COLLATERAL:
+                    collateral_vout = vout_idx
+            self.nodes[0].lockunspent(False, [{'txid': txid, 'vout': collateral_vout}])
+
 
         # send to same address to reserve some funds for fees
         self.nodes[0].sendtoaddress(address, 0.001)
@@ -1040,14 +1119,26 @@ class DashTestFramework(SyscoinTestFramework):
         votingAddr = self.nodes[0].getnewaddress()
         rewardsAddr = self.nodes[0].getnewaddress()
         port = p2p_port(len(self.nodes) + idx)
-        if (idx % 2) == 0 :
-            self.nodes[0].lockunspent(True, [{'txid': txid, 'vout': collateral_vout}])
-            proTxHash = self.nodes[0].protx_register_fund(address, '127.0.0.1:%d' % port, ownerAddr, bls['public'], votingAddr, 0, rewardsAddr, address)
+        ipAndPort = '127.0.0.1:%d' % port
+        operatorReward = idx
+        submit = (idx % 4) < 2
+        if register_fund:
+            # self.nodes[0].lockunspent(True, [{'txid': txid, 'vout': collateral_vout}])
+            protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit)
         else:
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            proTxHash = self.nodes[0].protx_register(txid, collateral_vout, '127.0.0.1:%d' % port, ownerAddr, bls['public'], votingAddr, 0, rewardsAddr, address)
+            protx_result = self.nodes[0].protx_register(txid, collateral_vout, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit)
 
-        self.generate(self.nodes[0], 1)
+        if submit:
+            proTxHash = protx_result
+        else:
+            proTxHash = self.nodes[0].sendrawtransaction(protx_result)
+
+        if operatorReward > 0:
+            self.generate(self.nodes[0], 1)
+            operatorPayoutAddress = self.nodes[0].getnewaddress()
+            self.nodes[0].protx_update_service(proTxHash, ipAndPort, bls['secret'], operatorPayoutAddress, address)
+
         self.mninfo.append(MasternodeInfo(proTxHash, ownerAddr, votingAddr, bls['public'], bls['secret'], address, txid, collateral_vout))
 
         self.log.info("Prepared masternode %d: collateral_txid=%s, collateral_vout=%d, protxHash=%s" % (idx, txid, collateral_vout, proTxHash))
@@ -1072,6 +1163,7 @@ class DashTestFramework(SyscoinTestFramework):
 
         # restart faucet node
         self.start_node(0)
+        force_finish_mnsync(self.nodes[0])
 
     def start_masternodes(self):
         self.log.info("Starting %d masternodes", self.mn_count)
@@ -1083,7 +1175,7 @@ class DashTestFramework(SyscoinTestFramework):
 
         def do_connect(idx):
             # Connect to the control node only, masternodes should take care of intra-quorum connections themselves
-            self.connect_nodes(self.mninfo[idx].node.index, 0)
+            self.connect_nodes(self.mninfo[idx].nodeIdx, 0)
 
 
         # start up nodes in parallel
@@ -1099,6 +1191,7 @@ class DashTestFramework(SyscoinTestFramework):
 
     def start_masternode(self, mninfo, extra_args=None):
         args = ['-masternodeblsprivkey=%s' % mninfo.keyOperator] + self.extra_args[mninfo.nodeIdx]
+        self.extra_args[mninfo.nodeIdx].append('-masternodeblsprivkey=%s' % mninfo.keyOperator)
         if extra_args is not None:
             args += extra_args
         self.start_node(mninfo.nodeIdx, extra_args=args)
@@ -1106,6 +1199,7 @@ class DashTestFramework(SyscoinTestFramework):
         force_finish_mnsync(mninfo.node)
 
     def setup_network(self):
+        self.options.descriptors = False
         self.log.info("Creating and starting controller node")
         self.add_nodes(1, extra_args=[self.extra_args[0]])
         self.start_node(0)
@@ -1199,38 +1293,39 @@ class DashTestFramework(SyscoinTestFramework):
         ret = {**decoded, **ret}
         return ret
 
-    def wait_for_tx(self, txid, node, expected=True, timeout=15):
-        def check_tx():
-            try:
-                self.bump_mocktime(1)
-                return node.getrawtransaction(txid)
-            except:
-                return False
-        if wait_until_helper(check_tx, timeout=timeout, sleep=0.5) and not expected:
-            raise AssertionError("waiting unexpectedly succeeded")
-
     def wait_for_chainlocked_block(self, node, block_hash, expected=True, timeout=60):
         def check_chainlocked_block():
             try:
                 self.bump_mocktime(1)
                 block = node.getblock(block_hash)
                 return block["confirmations"] > 0 and block["chainlock"] is True
-            except:
+            except Exception:
                 return False
         if wait_until_helper(check_chainlocked_block, timeout=timeout, do_assert=expected, sleep=0.5) and not expected:
             raise AssertionError("waiting unexpectedly succeeded")
 
     def wait_for_chainlocked_block_all_nodes(self, block_hash, timeout=60):
-        self.sync_blocks(self.nodes)
+        beforeTime = int(time.time())
         for node in self.nodes:
             self.wait_for_chainlocked_block(node, block_hash, timeout=timeout)
+        afterTime = int(time.time())
+        self.log.info("Chainlock found in {} seconds across {} nodes".format(int(afterTime - beforeTime), len(self.nodes)))
 
     def wait_for_most_recent_chainlock(self, node, block_hash, timeout=30):
         def check_cl():
             try:
                 self.bump_mocktime(1)
                 return node.getchainlocks()["recent_chainlock"]["blockhash"] == block_hash
-            except:
+            except Exception:
+                return False
+        wait_until_helper(check_cl, timeout=timeout, sleep=0.5)
+
+    def wait_for_most_active_chainlock(self, node, block_hash, timeout=30):
+        def check_cl():
+            try:
+                self.bump_mocktime(1)
+                return node.getchainlocks()["active_chainlock"]["blockhash"] == block_hash
+            except Exception:
                 return False
         wait_until_helper(check_cl, timeout=timeout, sleep=0.5)
 
@@ -1241,51 +1336,57 @@ class DashTestFramework(SyscoinTestFramework):
             return all(node.spork('show') == sporks for node in self.nodes)
         wait_until_helper(check_sporks_same, timeout=timeout, sleep=0.5)
 
-    def wait_for_quorum_connections(self, expected_connections, nodes, timeout = 60, wait_proc=None, done_proc=None):
+    def wait_for_quorum_connections(self, quorum_hash, expected_connections, nodes, llmq_type_name="llmq_test", timeout = 60, wait_proc=None):
         def check_quorum_connections():
             all_ok = True
             for node in nodes:
                 s = node.quorum_dkgstatus()
-                if 'llmq_test' not in s["session"]:
-                    continue
-                if "quorumConnections" not in s:
-                    all_ok = False
+                mn_ok = True
+                for qs in s:
+                    if "llmqType" not in qs:
+                        continue
+                    if qs["llmqType"] != llmq_type_name:
+                        continue
+                    if "quorumConnections" not in qs:
+                        continue
+                    qconnections = qs["quorumConnections"]
+                    if qconnections["quorumHash"] != quorum_hash:
+                        mn_ok = False
+                        continue
+                    cnt = 0
+                    for c in qconnections["quorumConnections"]:
+                        if c["connected"]:
+                            cnt += 1
+                    if cnt < expected_connections:
+                        mn_ok = False
+                        break
                     break
-                s = s["quorumConnections"]
-                if "llmq_test" not in s:
-                    all_ok = False
-                    break
-                cnt = 0
-                for c in s["llmq_test"]:
-                    if c["connected"]:
-                        cnt += 1
-                if cnt < expected_connections:
+                if not mn_ok:
                     all_ok = False
                     break
             if not all_ok and wait_proc is not None:
                 wait_proc()
-            if all_ok is True and done_proc is not None:
-                done_proc()
             return all_ok
         wait_until_helper(check_quorum_connections, timeout=timeout, sleep=1)
 
-    def wait_for_masternode_probes(self, mninfos, timeout = 30, wait_proc=None):
+    def wait_for_masternode_probes(self, mninfos, timeout = 60, wait_proc=None, llmq_type_name="llmq_test"):
         def check_probes():
             def ret():
                 if wait_proc is not None:
                     wait_proc()
                 return False
+
             for mn in mninfos:
                 s = mn.node.quorum_dkgstatus()
-                if 'llmq_test' not in s["session"]:
+                if llmq_type_name not in s["session"]:
                     continue
                 if "quorumConnections" not in s:
                     return ret()
                 s = s["quorumConnections"]
-                if "llmq_test" not in s:
+                if llmq_type_name not in s:
                     return ret()
 
-                for c in s["llmq_test"]:
+                for c in s[llmq_type_name]:
                     if c["proTxHash"] == mn.proTxHash:
                         continue
                     if not c["outbound"]:
@@ -1304,7 +1405,7 @@ class DashTestFramework(SyscoinTestFramework):
             return True
         wait_until_helper(check_probes, timeout=timeout, sleep=1)
 
-    def wait_for_quorum_phase(self, quorum_hash, phase, expected_member_count, check_received_messages, check_received_messages_count, mninfos, wait_proc=None, done_proc=None, timeout=60, sleep=0.5):
+    def wait_for_quorum_phase(self, quorum_hash, phase, expected_member_count, check_received_messages, check_received_messages_count, mninfos, wait_proc=None, llmq_type_name="llmq_test", timeout=60, sleep=0.5):
         def check_dkg_session():
             all_ok = True
             member_count = 0
@@ -1312,32 +1413,36 @@ class DashTestFramework(SyscoinTestFramework):
                 wait_proc()
             for mn in mninfos:
                 s = mn.node.quorum_dkgstatus()["session"]
-                if "llmq_test" not in s:
-                    continue
-                member_count += 1
-                s = s["llmq_test"]
-                if s["quorumHash"] != quorum_hash:
-                    all_ok = False
-                    break
-                if "phase" not in s:
-                    all_ok = False
-                    break
-                if s["phase"] != phase:
-                    all_ok = False
-                    break
-                if check_received_messages is not None:
-                    if s[check_received_messages] < check_received_messages_count:
-                        all_ok = False
+                mn_ok = True
+                for qs in s:
+                    if qs["llmqType"] != llmq_type_name:
+                        continue
+                    qstatus = qs["status"]
+                    if qstatus["quorumHash"] != quorum_hash:
+                        continue
+                    member_count += 1
+                    if "phase" not in qstatus:
+                        mn_ok = False
                         break
+                    if qstatus["phase"] != phase:
+                        mn_ok = False
+                        break
+                    if check_received_messages is not None:
+                        if qstatus[check_received_messages] < check_received_messages_count:
+                            mn_ok = False
+                            break
+                    break
+                if not mn_ok:
+                    all_ok = False
+                    break
             if all_ok and member_count != expected_member_count:
                 return False
-            if all_ok is True and done_proc is not None:
-                done_proc()
             return all_ok
         wait_until_helper(check_dkg_session, timeout=timeout, sleep=sleep)
 
-    def wait_for_quorum_commitment(self, quorum_hash, nodes, timeout = 60, wait_proc=None, done_proc=None):
+    def wait_for_quorum_commitment(self, quorum_hash, nodes, wait_proc=None, llmq_type=100, timeout=60):
         def check_dkg_comitments():
+            time.sleep(2)
             all_ok = True
             if wait_proc is not None:
                 wait_proc()
@@ -1346,30 +1451,39 @@ class DashTestFramework(SyscoinTestFramework):
                 if "minableCommitments" not in s:
                     all_ok = False
                     break
-                s = s["minableCommitments"]
-                if "llmq_test" not in s:
+                commits = s["minableCommitments"]
+                c_ok = False
+                for c in commits:
+                    if c["llmqType"] != llmq_type:
+                        continue
+                    if c["quorumHash"] != quorum_hash:
+                        continue
+                    c_ok = True
+                    break
+                if not c_ok:
                     all_ok = False
                     break
-                s = s["llmq_test"]
-                if s["quorumHash"] != quorum_hash:
-                    all_ok = False
-                    break
-            if all_ok is True and done_proc is not None:
-                done_proc()
             return all_ok
-        wait_until_helper(check_dkg_comitments, timeout=timeout)
+        wait_until_helper(check_dkg_comitments, timeout=timeout, sleep=1)
 
-    def wait_for_quorum_list(self, quorum_hash, nodes, timeout=60):
+    def wait_for_quorum_list(self, quorum_hash, nodes, timeout=60, sleep=2, llmq_type_name="llmq_test"):
         def wait_func():
-            if quorum_hash in self.nodes[0].quorum_list()["llmq_test"]:
+            self.log.info("quorums: " + str(self.nodes[0].quorum_list()))
+            if quorum_hash in self.nodes[0].quorum_list()[llmq_type_name]:
                 return True
+            self.bump_mocktime(sleep, nodes=nodes)
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            self.bump_mocktime(1, nodes=nodes)
             self.sync_blocks(nodes)
             return False
-        wait_until_helper(wait_func, timeout=timeout)
+        wait_until_helper(wait_func, timeout=timeout, sleep=sleep)
 
-    def mine_quorum(self, expected_connections=None, expected_members=None, expected_contributions=None, expected_complaints=0, expected_justifications=0, expected_commitments=None, mninfos_online=None, mninfos_valid=None, bumptime=1):
+    def move_blocks(self, nodes, num_blocks):
+        time.sleep(1)
+        self.bump_mocktime(1, nodes=nodes)
+        self.generate(self.nodes[0], num_blocks, sync_fun=self.no_op)
+        self.sync_blocks(nodes)
+
+    def mine_quorum(self, llmq_type_name="llmq_test", llmq_type=100, expected_connections=None, expected_members=None, expected_contributions=None, expected_complaints=0, expected_justifications=0, expected_commitments=None, mninfos_online=None, mninfos_valid=None, mod5=False):
         spork21_active = self.nodes[0].spork('show')['SPORK_21_QUORUM_ALL_CONNECTED'] <= 1
         spork23_active = self.nodes[0].spork('show')['SPORK_23_QUORUM_POSE'] <= 1
 
@@ -1386,68 +1500,57 @@ class DashTestFramework(SyscoinTestFramework):
         if mninfos_valid is None:
             mninfos_valid = self.mninfo.copy()
 
-        self.log.info("Mining quorum: expected_members=%d, expected_connections=%d, expected_contributions=%d, expected_complaints=%d, expected_justifications=%d, "
-                      "expected_commitments=%d" % (expected_members, expected_connections, expected_contributions, expected_complaints,
+        self.log.info("Mining quorum: llmq_type_name=%s, llmq_type=%d, expected_members=%d, expected_connections=%d, expected_contributions=%d, expected_complaints=%d, expected_justifications=%d, "
+                      "expected_commitments=%d" % (llmq_type_name, llmq_type, expected_members, expected_connections, expected_contributions, expected_complaints,
                                                    expected_justifications, expected_commitments))
 
         nodes = [self.nodes[0]] + [mn.node for mn in mninfos_online]
 
         def timeout_func():
-            self.bump_mocktime(bumptime, nodes=nodes)
-
-        def timeout_func1():
-            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            self.bump_mocktime(bumptime, nodes=nodes)
-            self.sync_blocks(nodes)
+            self.bump_mocktime(1, nodes=nodes)
 
         # move forward to next DKG
         skip_count = 24 - (self.nodes[0].getblockcount() % 24)
-        self.log.info("skip_count {}".format(skip_count))
         if skip_count != 0:
-            timeout_func()
+            self.bump_mocktime(1, nodes=nodes)
             self.generate(self.nodes[0], skip_count, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         q = self.nodes[0].getbestblockhash()
+        self.log.info("Expected quorum_hash:"+str(q))
         self.log.info("Waiting for phase 1 (init)")
-        timeout_func()
-        self.wait_for_quorum_phase(q, 1, expected_members, None, 0, mninfos_online, wait_proc=timeout_func)
-        self.wait_for_quorum_connections(expected_connections, nodes, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 1 (init)"))
+        self.wait_for_quorum_phase(q, 1, expected_members, None, 0, mninfos_online, wait_proc=timeout_func, llmq_type_name=llmq_type_name)
+        self.wait_for_quorum_connections(q, expected_connections, nodes, wait_proc=lambda: self.bump_mocktime(1, nodes=nodes), llmq_type_name=llmq_type_name)
         if spork23_active:
-            self.wait_for_masternode_probes(mninfos_valid, wait_proc=timeout_func)
-        self.bump_mocktime(1, nodes=nodes)
-        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+            self.wait_for_masternode_probes(mninfos_valid, wait_proc=lambda: self.bump_mocktime(1, nodes=nodes))
+
+        self.move_blocks(nodes, 2)
 
         self.log.info("Waiting for phase 2 (contribute)")
-        self.wait_for_quorum_phase(q, 2, expected_members, "receivedContributions", expected_contributions, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 2 (contribute)"))
-        self.bump_mocktime(1, nodes=nodes)
-        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+        self.wait_for_quorum_phase(q, 2, expected_members, "receivedContributions", expected_contributions, mninfos_online, wait_proc=timeout_func, llmq_type_name=llmq_type_name)
+
+        self.move_blocks(nodes, 2)
 
         self.log.info("Waiting for phase 3 (complain)")
-        self.wait_for_quorum_phase(q, 3, expected_members, "receivedComplaints", expected_complaints, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 3 (complain)"))
-        self.bump_mocktime(1, nodes=nodes)
-        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+        self.wait_for_quorum_phase(q, 3, expected_members, "receivedComplaints", expected_complaints, mninfos_online, wait_proc=timeout_func, llmq_type_name=llmq_type_name)
+
+        self.move_blocks(nodes, 2)
 
         self.log.info("Waiting for phase 4 (justify)")
-        self.wait_for_quorum_phase(q, 4, expected_members, "receivedJustifications", expected_justifications, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 4 (justify)"))
-        self.bump_mocktime(1, nodes=nodes)
-        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+        self.wait_for_quorum_phase(q, 4, expected_members, "receivedJustifications", expected_justifications, mninfos_online, wait_proc=timeout_func, llmq_type_name=llmq_type_name)
+
+        self.move_blocks(nodes, 2)
 
         self.log.info("Waiting for phase 5 (commit)")
-        self.wait_for_quorum_phase(q, 5, expected_members, "receivedPrematureCommitments", expected_commitments, mninfos_online, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done phase 5 (commit)"))
-        self.bump_mocktime(1, nodes=nodes)
-        self.generate(self.nodes[0], 2, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+        self.wait_for_quorum_phase(q, 5, expected_members, "receivedPrematureCommitments", expected_commitments, mninfos_online, wait_proc=timeout_func, llmq_type_name=llmq_type_name)
+
+        self.move_blocks(nodes, 2)
 
         self.log.info("Waiting for phase 6 (mining)")
-        self.wait_for_quorum_phase(q, 6, expected_members, None, 0, mninfos_online, wait_proc=timeout_func1, done_proc=lambda: self.log.info("Done phase 6 (mining))"))
+        self.wait_for_quorum_phase(q, 6, expected_members, None, 0, mninfos_online, wait_proc=timeout_func, llmq_type_name=llmq_type_name)
 
         self.log.info("Waiting final commitment")
-        self.wait_for_quorum_commitment(q, nodes, wait_proc=timeout_func, done_proc=lambda: self.log.info("Done final commitment"))
+        self.wait_for_quorum_commitment(q, nodes, wait_proc=timeout_func, llmq_type=llmq_type)
 
         self.log.info("Mining final commitment")
         self.bump_mocktime(1, nodes=nodes)
@@ -1456,14 +1559,19 @@ class DashTestFramework(SyscoinTestFramework):
         self.sync_blocks(nodes)
 
         self.log.info("Waiting for quorum to appear in the list")
-        self.wait_for_quorum_list(q, nodes)
-        new_quorum = self.nodes[0].quorum_list(1)["llmq_test"][0]
-        assert_equal(q, new_quorum)
-        quorum_info = self.nodes[0].quorum_info(100, new_quorum)
+        self.wait_for_quorum_list(q, nodes, llmq_type_name=llmq_type_name)
 
-        # Mine 8 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
-        self.generate(self.nodes[0], 8, sync_fun=self.no_op)
-        self.bump_mocktime(5, nodes=nodes)
+        new_quorum = self.nodes[0].quorum_list(1)[llmq_type_name][0]
+        assert_equal(q, new_quorum)
+        quorum_info = self.nodes[0].quorum_info(llmq_type, new_quorum)
+
+        # Mine 5 (SIGN_HEIGHT_LOOKBACK) more blocks to make sure that the new quorum gets eligible for signing sessions
+        self.generate(self.nodes[0], 5, sync_fun=self.no_op)
+        # Make sure we are mod of 5 block count before we start tests
+        skip_count = 5 - (self.nodes[0].getblockcount() % 5)
+        if skip_count != 0 and mod5 is True:
+            self.bump_mocktime(1, nodes=nodes)
+            self.generate(self.nodes[0], skip_count, sync_fun=self.no_op)
         self.sync_blocks(nodes)
 
         self.log.info("New quorum: height=%d, quorumHash=%s, minedBlock=%s" % (quorum_info["height"], new_quorum, quorum_info["minedBlock"]))
@@ -1481,7 +1589,7 @@ class DashTestFramework(SyscoinTestFramework):
                 return node.quorum_getrecsig(llmq_type, rec_sig_id, rec_sig_msg_hash)
             except JSONRPCException:
                 time.sleep(0.1)
-        assert False
+        return False
 
     def get_quorum_masternodes(self, q):
         qi = self.nodes[0].quorum_info(100, q)

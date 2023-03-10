@@ -12,7 +12,7 @@
 #include <evo/deterministicmns.h>
 
 #include <evo/specialtx.h>
-
+#include <timedata.h>
 #include <masternode/activemasternode.h>
 #include <masternode/masternodemeta.h>
 #include <chainparams.h>
@@ -22,7 +22,7 @@
 
 #include <cxxtimer.hpp>
 #include <memory>
-
+#include <net_processing.h>
 namespace llmq
 {
 
@@ -59,29 +59,7 @@ static bool ShouldSimulateError(const std::string& type)
     double rate = GetSimulatedErrorRate(type);
     return GetRandBool(rate);
 }
-
-CDKGLogger::CDKGLogger(const CDKGSession& _quorumDkg, const std::string& _func) :
-    CDKGLogger(_quorumDkg.params.name, _quorumDkg.m_quorum_base_block_index->GetBlockHash(), _quorumDkg.m_quorum_base_block_index->nHeight, _quorumDkg.AreWeMember(), _func)
-{
-}
-
-CDKGLogger::CDKGLogger(const std::string& _llmqTypeName, const uint256& _quorumHash, int _height, bool _areWeMember, const std::string& _func) :
-    CBatchedLogger(BCLog::LLMQ_DKG, strprintf("QuorumDKG(type=%s, height=%d, member=%d, func=%s)", _llmqTypeName, _height, _areWeMember, _func))
-{
-}
-
-
-CDKGComplaint::CDKGComplaint(const Consensus::LLMQParams& params) :
-    badMembers((size_t)params.size), complainForMembers((size_t)params.size)
-{
-}
-
-CDKGPrematureCommitment::CDKGPrematureCommitment(const Consensus::LLMQParams& params) :
-    validMembers((size_t)params.size)
-{
-}
-
-CDKGMember::CDKGMember(CDeterministicMNCPtr _dmn, size_t _idx) :
+CDKGMember::CDKGMember(const CDeterministicMNCPtr& _dmn, size_t _idx) :
     dmn(_dmn),
     idx(_idx),
     id(_dmn->proTxHash)
@@ -282,7 +260,7 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGContribution& qc
         member->contributions.emplace(hash);
 
         CInv inv(MSG_QUORUM_CONTRIB, hash);
-        RelayOtherInvToParticipants(inv);
+        RelayOtherInvToParticipants(inv, dkgManager.peerman);
 
         quorumDKGDebugManager->UpdateLocalMemberStatus(params.type, member->idx, [&](CDKGDebugMemberStatus& status) {
             status.statusBits.receivedContribution = true;
@@ -299,12 +277,7 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGContribution& qc
 
     receivedVvecs[member->idx] = qc.vvec;
 
-    int receivedCount = 0;
-    for (const auto& m : members) {
-        if (!m->contributions.empty()) {
-            receivedCount++;
-        }
-    }
+    int receivedCount = ranges::count_if(members, [](const auto& m){return !m->contributions.empty();});
 
     logger.Batch("received and relayed contribution. received=%d/%d, time=%d", receivedCount, members.size(), t1.count());
 
@@ -319,7 +292,7 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGContribution& qc
 
     bool complain = false;
     CBLSSecretKey skContribution;
-    if (!qc.contributions->Decrypt(myIdx, WITH_LOCK(activeMasternodeInfoCs, return *activeMasternodeInfo.blsKeyOperator), skContribution, PROTOCOL_VERSION)) {
+    if (!qc.contributions->Decrypt(*myIdx, WITH_LOCK(activeMasternodeInfoCs, return *activeMasternodeInfo.blsKeyOperator), skContribution, PROTOCOL_VERSION)) {
         logger.Batch("contribution from %s could not be decrypted", member->dmn->proTxHash.ToString());
         complain = true;
     } else if (member->idx != myIdx && ShouldSimulateError("complain-lie")) {
@@ -460,7 +433,8 @@ void CDKGSession::VerifyConnectionAndMinProtoVersions() const
     CDKGLogger logger(*this, __func__);
 
     std::unordered_map<uint256, int, StaticSaltedHasher> protoMap;
-    dkgManager.connman.ForEachNode([&](const CNode* pnode) {
+    dkgManager.connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
         auto verifiedProRegTxHash = pnode->GetVerifiedProRegTxHash();
         if (verifiedProRegTxHash.IsNull()) {
             return;
@@ -473,20 +447,17 @@ void CDKGSession::VerifyConnectionAndMinProtoVersions() const
         if (m->dmn->proTxHash == myProTxHash) {
             continue;
         }
-
-        auto it = protoMap.find(m->dmn->proTxHash);
-        if (it == protoMap.end()) {
+        if (auto it = protoMap.find(m->dmn->proTxHash); it == protoMap.end()) {
             m->badConnection = fShouldAllMembersBeConnected;
             logger.Batch("%s is not connected to us, badConnection=%b", m->dmn->proTxHash.ToString(), m->badConnection);
-        } else if (it != protoMap.end() && it->second < MIN_MASTERNODE_PROTO_VERSION) {
+        } else if (it->second < MIN_MASTERNODE_PROTO_VERSION) {
             m->badConnection = true;
             logger.Batch("%s does not have min proto version %d (has %d)", m->dmn->proTxHash.ToString(), MIN_MASTERNODE_PROTO_VERSION, it->second);
         }
 
-        auto lastOutbound = mmetaman.GetMetaInfo(m->dmn->proTxHash)->GetLastOutboundSuccess();
-        if (GetAdjustedTime() - lastOutbound > 60 * 60) {
+        if (mmetaman.GetMetaInfo(m->dmn->proTxHash)->OutboundFailedTooManyTimes()) {
             m->badConnection = true;
-            logger.Batch("%s no outbound connection since %d seconds", m->dmn->proTxHash.ToString(), GetAdjustedTime() - lastOutbound);
+            logger.Batch("%s failed to connect to it too many times", m->dmn->proTxHash.ToString());
         }
     }
 }
@@ -595,7 +566,7 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGComplaint& qc, b
         member->complaints.emplace(hash);
 
         CInv inv(MSG_QUORUM_COMPLAINT, hash);
-        RelayOtherInvToParticipants(inv);
+        RelayOtherInvToParticipants(inv, dkgManager.peerman);
 
         quorumDKGDebugManager->UpdateLocalMemberStatus(params.type, member->idx, [&](CDKGDebugMemberStatus& status) {
             status.statusBits.receivedComplaint = true;
@@ -667,7 +638,7 @@ void CDKGSession::VerifyAndJustify(CDKGPendingMessages& pendingMessages)
         }
 
         const auto& qc = WITH_LOCK(invCs, return std::move(complaints.at(*m->complaints.begin())));
-        if (qc.complainForMembers[myIdx]) {
+        if (qc.complainForMembers[*myIdx]) {
             justifyFor.emplace(qc.proTxHash);
         }
     }
@@ -805,7 +776,7 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGJustification& q
 
     // we always relay, even if further verification fails
     CInv inv(MSG_QUORUM_JUSTIFICATION, hash);
-    RelayOtherInvToParticipants(inv);
+    RelayOtherInvToParticipants(inv, dkgManager.peerman);
 
     quorumDKGDebugManager->UpdateLocalMemberStatus(params.type, member->idx, [&](CDKGDebugMemberStatus& status) {
         status.statusBits.receivedJustification = true;
@@ -870,18 +841,12 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGJustification& q
         }
     }
 
-    int receivedCount = 0;
-    int expectedCount = 0;
-
-    for (const auto& m : members) {
-        if (!m->justifications.empty()) {
-            receivedCount++;
-        }
-
-        if (m->someoneComplain) {
-            expectedCount++;
-        }
-    }
+    auto receivedCount = std::count_if(members.cbegin(), members.cend(), [](const auto& m){
+        return !m->justifications.empty();
+    });
+    auto expectedCount = std::count_if(members.cbegin(), members.cend(), [](const auto& m){
+        return m->someoneComplain;
+    });
 
     logger.Batch("verified justification: received=%d/%d time=%d", receivedCount, expectedCount, t1.count());
 }
@@ -895,7 +860,9 @@ void CDKGSession::VerifyAndCommit(CDKGPendingMessages& pendingMessages)
     CDKGLogger logger(*this, __func__);
 
     std::vector<size_t> badMembers;
+    badMembers.reserve(members.size());
     std::vector<size_t> openComplaintMembers;
+    openComplaintMembers.reserve(members.size());
 
     for (const auto& m : members) {
         if (m->bad) {
@@ -993,7 +960,7 @@ void CDKGSession::SendCommitment(CDKGPendingMessages& pendingMessages)
 
     int lieType = -1;
     if (ShouldSimulateError("commit-lie")) {
-        lieType = GetRandInt(5);
+        lieType = GetRand(5);
         logger.Batch("lying on commitment. lieType=%d", lieType);
     }
 
@@ -1166,19 +1133,14 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGPrematureCommitm
     WITH_LOCK(invCs, validCommitments.emplace(hash));
 
     CInv inv(MSG_QUORUM_PREMATURE_COMMITMENT, hash);
-    RelayOtherInvToParticipants(inv);
+    RelayOtherInvToParticipants(inv, dkgManager.peerman);
 
     quorumDKGDebugManager->UpdateLocalMemberStatus(params.type, member->idx, [&](CDKGDebugMemberStatus& status) {
         status.statusBits.receivedPrematureCommitment = true;
         return true;
     });
 
-    int receivedCount = 0;
-    for (const auto& m : members) {
-        if (!m->prematureCommitments.empty()) {
-            receivedCount++;
-        }
-    }
+    int receivedCount = ranges::count_if(members, [](const auto& m){ return !m->prematureCommitments.empty(); });
 
     t1.stop();
 
@@ -1232,6 +1194,8 @@ std::vector<CFinalCommitment> CDKGSession::FinalizeCommitments()
         fqc.validMembers = first.validMembers;
         fqc.quorumPublicKey = first.quorumPublicKey;
         fqc.quorumVvecHash = first.quorumVvecHash;
+
+        fqc.nVersion = CLLMQUtils::IsV19Active(m_quorum_base_block_index->nHeight) ? CFinalCommitment::BASIC_BLS_NON_INDEXED_QUORUM_VERSION : CFinalCommitment::LEGACY_BLS_NON_INDEXED_QUORUM_VERSION;
 
         uint256 commitmentHash = CLLMQUtils::BuildCommitmentHash(fqc.llmqType, fqc.quorumHash, fqc.validMembers, fqc.quorumPublicKey, fqc.quorumVvecHash);
 
@@ -1307,19 +1271,18 @@ void CDKGSession::MarkBadMember(size_t idx)
     member->bad = true;
 }
 
-void CDKGSession::RelayOtherInvToParticipants(const CInv& inv) const
+void CDKGSession::RelayOtherInvToParticipants(const CInv& inv, PeerManager& peerman) const
 {
-    dkgManager.connman.ForEachNode([&](CNode* pnode) {
-        bool relay = false;
-        auto verifiedProRegTxHash = pnode->GetVerifiedProRegTxHash();
-        if (pnode->qwatch) {
-            relay = true;
-        } else if (!verifiedProRegTxHash.IsNull() && relayMembers.count(verifiedProRegTxHash)) {
-            relay = true;
-        }
-        if (relay) {
-            pnode->PushOtherInventory(inv);
-        }
+    LOCK(cs_main);
+    dkgManager.connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
+        if (pnode->qwatch ||
+                (!pnode->GetVerifiedProRegTxHash().IsNull() && relayMembers.count(pnode->GetVerifiedProRegTxHash()))) {
+                PeerRef peer = peerman.GetPeerRef(pnode->GetId());
+                if(peer) {
+                    peerman.PushTxInventoryOther(*peer, inv);
+                }
+            }
     });
 }
 

@@ -1,5 +1,5 @@
 // Copyright (c) 2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,12 +9,12 @@
 #include <consensus/merkle.h>
 #include <deploymentinfo.h>
 #include <hash.h> // for signet block challenge hash
+#include <script/interpreter.h>
+#include <util/string.h>
 #include <util/system.h>
 
 #include <assert.h>
 
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/split.hpp>
 // SYSCOIN includes for gen block
 #include <uint256.h>
 #include <arith_uint256.h>
@@ -160,22 +160,25 @@ public:
         strNetworkID = CBaseChainParams::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.nSubsidyHalvingInterval = 210240; 
+        consensus.nSubsidyHalvingInterval = 210240;
         // 35% increase after ~1 year, 100% increase after sr level 2 (~2.5 years)
-        consensus.nSeniorityHeight1 = 525600; 
+        consensus.nSeniorityHeight1 = 525600;
         consensus.nSeniorityLevel1 = 0.35;
-        consensus.nSeniorityHeight2 = consensus.nSeniorityHeight1*2.5; 
-        consensus.nSeniorityLevel2 = 1.0;        
+        consensus.nSeniorityHeight2 = consensus.nSeniorityHeight1*2.5;
+        consensus.nSeniorityLevel2 = 1.0;
         consensus.nSuperblockStartBlock = 1;
         consensus.nSuperblockCycle = 17520;
-        consensus.nGovernanceMinQuorum = 10; 
+        consensus.nGovernanceMinQuorum = 10;
         consensus.nGovernanceFilterElements = 20000;
         consensus.nMasternodeMinimumConfirmations = 15;
         consensus.nMinMNSubsidySats = 527500000;
-        
+        consensus.script_flag_exceptions.emplace( // BIP16 exception
+            uint256S("0x00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"), SCRIPT_VERIFY_NONE);
+        consensus.script_flag_exceptions.emplace( // Taproot exception
+            uint256S("0x0000000000000000000f14c35b2d841e986ab5441de8c585d5ffe55ea1e395ad"), SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS);
         consensus.BIP34Height = 1;
         consensus.BIP34Hash = uint256();
-        consensus.BIP65Height = 1; 
+        consensus.BIP65Height = 1;
         consensus.BIP66Height = 1;
         consensus.CSVHeight = 1;
         consensus.SegwitHeight = 0;
@@ -202,10 +205,10 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
         // The best chain should have at least this much work.
-        consensus.nMinimumChainWork = uint256S("0x00000000000000000000000000000000000000000479f5f70d88c3979e3fcd70"); // 1213640
+        consensus.nMinimumChainWork = uint256S("0x00000000000000000000000000000000000000000abb43ed368e60a4eab7d1d9"); // 1576166
 
         // By default assume that the signatures in ancestors of this block are valid.
-        consensus.defaultAssumeValid = uint256S("0xbd9ff6428a7cc472d3813bbee6fb3ae1a9992b8b034deca1249487a4a1b8e51a"); // 1213640
+        consensus.defaultAssumeValid = uint256S("0x4b8519c2193265fe269e88361787339504dda66b4efa85613c661a431ad1624c"); // 1576166
         consensus.fStrictChainId = true;
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
@@ -215,6 +218,8 @@ public:
         consensus.vchTokenFreezeMethod = ParseHex("7ca654cf9212e4c3cf0164a529dd6159fc71113f867d0b09fdeb10aa65780732");
         consensus.nBridgeStartBlock = 348000;
         consensus.nNEVMStartBlock = 1317500;
+        consensus.nPODAStartBlock = 1586000;
+        consensus.nV19StartBlock = 1586000;
         consensus.nUTXOAssetsBlock = 1004200;
         consensus.nUTXOAssetsBlockProvisioning = consensus.nNEVMStartBlock + 10000;
         consensus.DIP0003Height = 1004200;
@@ -234,7 +239,7 @@ public:
         m_assumed_chain_state_size = 2;
 
         genesis = CreateGenesisBlock(1559520000, 1372898, 0x1e0fffff, 1, 50 * COIN);
-        
+
         /*uint256 hash;
         CBlockHeader genesisHeader = genesis.GetBlockHeader();
         GenerateGenesisBlock(genesisHeader, hash);*/
@@ -246,7 +251,7 @@ public:
         vSeeds.emplace_back("seed2.syscoin.org");
         vSeeds.emplace_back("seed3.syscoin.org");
         vSeeds.emplace_back("seed4.syscoin.org");
-        
+
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,63);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,5);
         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,128);
@@ -261,7 +266,7 @@ public:
         fRequireStandard = true;
         fRequireRoutableExternalIP = true;
         vSporkAddresses = {"sys1qx0zzzjag402apkw4kn8unr0qa0k3pv3258v4sr", "sys1qk2kq7hhp58ycaevzzu5hugh7flxs7qcg8rjjlh", "sys1qm4ka204x3mn46sk6ussrex8um87qkj0r5xakyg"};
-        nMinSporkKeys = 2;   
+        nMinSporkKeys = 2;
         // long living quorum params
         consensus.llmqs[Consensus::LLMQ_400_60] = llmq400_60;
         consensus.llmqs[Consensus::LLMQ_50_60] = llmq50_60;
@@ -292,6 +297,8 @@ public:
                 { 800000, uint256S("54bf4bd4b5c7d36323fed4b649e75e0ce4902261533d13a15c861fa2ab3c7362")},
                 { 998000, uint256S("e9599cf8d6462f63f17a8ec790803cf77028a380a1de84a976039914a45f5abb")},
                 { 1213640, uint256S("bd9ff6428a7cc472d3813bbee6fb3ae1a9992b8b034deca1249487a4a1b8e51a")},
+                { 1400000, uint256S("ca0067113d48a87eaed88c1410cacfe07441e191487383b79bf7069a678ede4a")},
+                { 1576166, uint256S("4b8519c2193265fe269e88361787339504dda66b4efa85613c661a431ad1624c")},
             }
         };
 
@@ -300,10 +307,10 @@ public:
         };
 
         chainTxData = ChainTxData{
-            // Data from rpc: getchaintxstats at block 1213640
-            /* nTime    */ 1632534583,
-            /* nTxCount */ 2140627,
-            /* dTxRate  */ 0.02015353703079101
+            // Data from rpc: getchaintxstats at block 1576166
+            /* nTime    */ 1678128149,
+            /* nTxCount */ 2726013,
+            /* dTxRate  */ 0.02301412557595973
         };
     }
 };
@@ -322,7 +329,7 @@ public:
         consensus.bTestnet = true;
         consensus.nSeniorityLevel1 = 0.35;
         consensus.nSeniorityHeight2 = consensus.nSeniorityHeight1*2.5;
-        consensus.nSeniorityLevel2 = 1.0;         
+        consensus.nSeniorityLevel2 = 1.0;
         consensus.nSuperblockStartBlock = 1;
         consensus.nSuperblockCycle = 60;
         consensus.nGovernanceMinQuorum = 1;
@@ -344,6 +351,8 @@ public:
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
         consensus.nMinerConfirmationWindow = 2016; // nPowTargetTimespan / nPowTargetSpacing
         consensus.MinBIP9WarningHeight = consensus.nMinerConfirmationWindow;
+        consensus.script_flag_exceptions.emplace( // BIP16 exception
+            uint256S("0x00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105"), SCRIPT_VERIFY_NONE);
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
@@ -356,10 +365,10 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
         // The best chain should have at least this much work.
-        consensus.nMinimumChainWork = uint256S("0x0000000000000000000000000000000000000000000000000000141f25d13472"); // 838467
+        consensus.nMinimumChainWork = uint256S("0x00000000000000000000000000000000000000000000000000002413744a0ef5"); // 1023140
 
         // By default assume that the signatures in ancestors of this block are valid.
-        consensus.defaultAssumeValid = uint256S("0x0000003243223caf052c7e5e6710fae794dbdc10949a594550f073dbf5755bd4"); // 838467
+        consensus.defaultAssumeValid = uint256S("0x0000002da4aa86462e1c60bbd7d28b89229592bb82828ff487d88a4996c6e0e2"); // 1023140
         consensus.nAuxpowStartHeight = 1;
         consensus.nAuxpowChainId = 8;
         consensus.nAuxpowOldChainId = 4096;
@@ -373,6 +382,8 @@ public:
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
         consensus.nUTXOAssetsBlock = 545000;
+        consensus.nPODAStartBlock = 1004000;
+        consensus.nV19StartBlock = 1100000;
         consensus.nUTXOAssetsBlockProvisioning = consensus.nNEVMStartBlock + 10000;
         consensus.DIP0003Height = 545000;
         consensus.DIP0003EnforcementHeight = 545000;
@@ -384,7 +395,6 @@ public:
         nPruneAfterHeight = 1000;
         m_assumed_blockchain_size = 30;
         m_assumed_chain_state_size = 2;
-
         genesis = CreateGenesisBlock(1576000000, 297648, 0x1e0fffff, 1, 50 * COIN);
         /*uint256 hash;
         CBlockHeader genesisHeader = genesis.GetBlockHeader();
@@ -415,7 +425,7 @@ public:
 
         // privKey: cU52TqHDWJg6HoL3keZHBvrJgsCLsduRvDFkPyZ5EmeMwoEHshiT
         vSporkAddresses = {"TCGpumHyMXC5BmfkaAQXwB7Bf4kbkhM9BX", "tsys1qgmafz3mqa7glqy92r549w8qmq5535uc2e8ahjm", "tsys1q68gu0fhcchr27w08sjdxwt3rtgwef0nyh9zwk0"};
-        nMinSporkKeys = 2;   
+        nMinSporkKeys = 2;
         // long living quorum params
         consensus.llmqs[Consensus::LLMQ_400_60] = llmq400_60;
         consensus.llmqs[Consensus::LLMQ_50_60] = llmq50_60;
@@ -423,25 +433,29 @@ public:
         nLLMQConnectionRetryTimeout = 60;
         nFulfilledRequestExpireTime = 5*60; // fulfilled requests expire in 5 minutes
         m_is_mockable_chain = false;
-
         checkpointData = {
             {
                 {360, uint256S("0x00000c04c5926f539074420b40088d4b099d748d07795df891ca391799b6e54c")},
                 {250000, uint256S("0x00000131e97a4cb713338f33b8fa6573c85f1772e4dd7d510ca2281cc0be86e2")},
                 {534114, uint256S("0x0000013d53482bd69c5403f344643668619f77302910e57ffe7b1d375e73cc91")},
                 {838467, uint256S("0x0000003243223caf052c7e5e6710fae794dbdc10949a594550f073dbf5755bd4")},
+                {900000, uint256S("0x000000071b620e50257980306f48a8f8f331dbf385c52b8a1bea11331d020e5e")},
+                {1000000, uint256S("0x000000236997f1bbd8b2d0d8ecf982cce3f5ec4ace44cc7853a26fffa366b6ab")},
+                {1020000, uint256S("0x00000029c0b3acda1d389c7d980a93315a8d74ccfe299621ac895358393e2f46")},
+                {1023125, uint256S("0x0000002b308601b4b68bc4ab58f434252bc6fc07c147b14e6ccc996e5a6af219")},
+                {1023126, uint256S("0x000003820d73f238c939b9c4f87ae1ad6851e346153620a5140c3d4d0a8cb442")},
+                {1023140, uint256S("0x0000002da4aa86462e1c60bbd7d28b89229592bb82828ff487d88a4996c6e0e2")},
             }
         };
 
         m_assumeutxo_data = MapAssumeutxo{
             // TODO to be specified in a future patch.
         };
-
         chainTxData = ChainTxData{
             // Data from rpc: getchaintxstats 4096 0000000000000037a8cd3e06cd5edbfe9dd1dbcc5dacab279376ef7cfc2b4c75
-            /* nTime    */ 1610136593,
-            /* nTxCount */ 538904,
-            /* dTxRate  */ 0.01666588574531774
+            /* nTime    */ 1669101140,
+            /* nTxCount */ 1043445,
+            /* dTxRate  */ 0.001586750190549993
         };
     }
 };
@@ -501,7 +515,7 @@ public:
         consensus.nSeniorityHeight1 = 60;
         consensus.nSeniorityLevel1 = 0.35;
         consensus.nSeniorityHeight2 = consensus.nSeniorityHeight1*2.5;
-        consensus.nSeniorityLevel2 = 1.0;         
+        consensus.nSeniorityLevel2 = 1.0;
         consensus.nSuperblockStartBlock = 1;
         consensus.nSuperblockCycle = 60;
         consensus.nGovernanceMinQuorum = 1;
@@ -516,6 +530,8 @@ public:
         consensus.vchTokenFreezeMethod = ParseHex("7ca654cf9212e4c3cf0164a529dd6159fc71113f867d0b09fdeb10aa65780732");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 1348000;
+        consensus.nPODAStartBlock = 1450000;
+        consensus.nV19StartBlock = 1450000;
         consensus.nUTXOAssetsBlock = 0;
         consensus.nUTXOAssetsBlockProvisioning = consensus.nNEVMStartBlock + 10000;
         consensus.DIP0003Height = 200;
@@ -526,7 +542,6 @@ public:
         consensus.fStrictChainId = false;
         consensus.signet_challenge.assign(bin.begin(), bin.end());
         consensus.nSubsidyHalvingInterval = 210000;
-        consensus.BIP16Exception = uint256{};
         consensus.BIP34Height = 500;
         consensus.BIP34Hash = uint256{};
         consensus.BIP65Height = 1351;
@@ -553,7 +568,7 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
         // message start is defined as the first 4 bytes of the sha256d of the block script
-        CHashWriter h(SER_DISK, 0);
+        HashWriter h{};
         h << consensus.signet_challenge;
         uint256 hash = h.GetHash();
         memcpy(pchMessageStart, hash.begin(), 4);
@@ -579,6 +594,8 @@ public:
         vSporkAddresses = {"tsys1qc28aan6qkuhuj30cpx3jet3l0mrr9sfp8a9typ"};
         nMinSporkKeys = 1;
         // long living quorum params
+        consensus.llmqs[Consensus::LLMQ_400_60] = llmq400_60;
+        consensus.llmqs[Consensus::LLMQ_50_60] = llmq50_60;
         consensus.llmqs[Consensus::LLMQ_TEST] = llmq_test;
         consensus.llmqTypeChainLocks = Consensus::LLMQ_TEST;
         nLLMQConnectionRetryTimeout = 1; // must be lower then the LLMQ signing session timeout so that tests have control over failing behavior
@@ -600,26 +617,25 @@ public:
         strNetworkID =  CBaseChainParams::REGTEST;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.BIP16Exception = uint256();
         consensus.BIP34Height = 1; // Always active unless overridden
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 1;  // Always active unless overridden
         consensus.BIP66Height = 1;  // Always active unless overridden
         consensus.CSVHeight = 1;    // Always active unless overridden
-        consensus.SegwitHeight = 1; // Always active unless overridden
+        consensus.SegwitHeight = 0; // Always active unless overridden
         consensus.MinBIP9WarningHeight = 0;
         consensus.nSubsidyHalvingInterval = 150;
         consensus.nSeniorityHeight1 = 60;
         consensus.nSeniorityLevel1 = 0.35;
         consensus.nSeniorityHeight2 = consensus.nSeniorityHeight1*2.5;
-        consensus.nSeniorityLevel2 = 1.0;      
+        consensus.nSeniorityLevel2 = 1.0;
         consensus.nSuperblockStartBlock = 1;
         consensus.nSuperblockCycle = 10;
         consensus.nGovernanceMinQuorum = 1;
         consensus.nGovernanceFilterElements = 100;
         consensus.nMasternodeMinimumConfirmations = 1;
         consensus.nMinMNSubsidySats = 527500000;
-        
+
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.nPowTargetTimespan = 6 * 60 * 60;
         consensus.nPowTargetSpacing = 2.5 * 60; // Syscoin: 2.5 minute
@@ -654,6 +670,8 @@ public:
         consensus.vchTokenFreezeMethod = ParseHex("7ca654cf9212e4c3cf0164a529dd6159fc71113f867d0b09fdeb10aa65780732");
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = 205;
+        consensus.nPODAStartBlock = 0;
+        consensus.nV19StartBlock = 0;
         consensus.nUTXOAssetsBlock = 0;
         consensus.nUTXOAssetsBlockProvisioning = 1000;
         consensus.DIP0003Height = 432;
@@ -670,7 +688,7 @@ public:
         UpdateActivationParametersFromArgs(args);
 
         genesis = CreateGenesisBlock(1553040331, 3, 0x207fffff, 1, 50 * COIN);
-        
+
         /*uint256 hash;
         CBlockHeader genesisHeader = genesis.GetBlockHeader();
         GenerateGenesisBlock(genesisHeader, hash);*/
@@ -689,14 +707,14 @@ public:
         m_is_mockable_chain = true;
         // privKey: cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW
         vSporkAddresses = {"mjTkW3DjgyZck4KbiRusZsqTgaYTxdSz6z"};
-        nMinSporkKeys = 1; 
+        nMinSporkKeys = 1;
         // long living quorum params
         consensus.llmqs[Consensus::LLMQ_TEST] = llmq_test;
         consensus.llmqTypeChainLocks = Consensus::LLMQ_TEST;
         nLLMQConnectionRetryTimeout = 1; // must be lower then the LLMQ signing session timeout so that tests have control over failing behavior
         nFulfilledRequestExpireTime = 5*60; // fulfilled requests expire in 5 minutes
-       /* 
-        
+       /*
+
 
         checkpointData = {
             {
@@ -780,8 +798,7 @@ void CRegTestParams::UpdateActivationParametersFromArgs(const ArgsManager& args)
     }
     if (args.IsArgSet("-dip3params")) {
         std::string strDIP3Params = args.GetArg("-dip3params", "");
-        std::vector<std::string> vDIP3Params;
-        boost::split(vDIP3Params, strDIP3Params, boost::is_any_of(":"));
+        std::vector<std::string> vDIP3Params = SplitString(strDIP3Params, ':');
         if (vDIP3Params.size() != 2) {
             throw std::runtime_error("DIP3 parameters malformed, expecting DIP3ActivationHeight:DIP3EnforcementHeight");
         }
@@ -799,8 +816,7 @@ void CRegTestParams::UpdateActivationParametersFromArgs(const ArgsManager& args)
     if (!args.IsArgSet("-vbparams")) return;
 
     for (const std::string& strDeployment : args.GetArgs("-vbparams")) {
-        std::vector<std::string> vDeploymentParams;
-        boost::split(vDeploymentParams, strDeployment, boost::is_any_of(":"));
+        std::vector<std::string> vDeploymentParams = SplitString(strDeployment, ':');
         if (vDeploymentParams.size() < 3 || 4 < vDeploymentParams.size()) {
             throw std::runtime_error("Version bits parameters malformed, expecting deployment:start:end[:min_activation_height]");
         }

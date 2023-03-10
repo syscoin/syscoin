@@ -29,7 +29,7 @@ public: // Types
     using vote_m_t = std::map<uint256, vote_l_t::iterator>;
 
 private:
-    int nMemoryVotes;
+    int nMemoryVotes{0};
 
     vote_l_t listVotes;
 
@@ -63,7 +63,7 @@ public:
     std::vector<CGovernanceVote> GetVotes() const;
 
     void RemoveVotesFromMasternode(const COutPoint& outpointMasternode);
-    std::set<uint256> RemoveInvalidVotes(const COutPoint& outpointMasternode, bool fProposal);
+    std::set<uint256> RemoveInvalidVotes(const CBlockIndex *pindex, const COutPoint& outpointMasternode, bool fProposal);
 
     template<typename Stream>
     void Serialize(Stream& s) const

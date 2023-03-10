@@ -8,16 +8,17 @@
 #include <primitives/transaction.h>
 #include <streams.h>
 #include <version.h>
-#include <sync.h>
-extern RecursiveMutex cs_main;
+#include <kernel/cs_main.h>
 class CBlock;
 class CBlockIndex;
 class TxValidationState;
 class BlockValidationState;
 class CCoinsViewCache;
+namespace node {
 class BlockManager;
-bool CheckSpecialTx(BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool ProcessSpecialTxsInBlock(BlockManager &blockman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool fCheckCbTxMerleRoots) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+}
+bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool fCheckCbTxMerleRoots) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 template <typename T>
@@ -53,7 +54,8 @@ void SetTxPayload(CMutableTransaction& tx, const T& payload)
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     ds << payload;
     CScript scriptData;
-    scriptData << OP_RETURN << std::vector<unsigned char>(ds.begin(), ds.end());
+    const auto bytesVec = MakeUCharSpan(ds);
+    scriptData << OP_RETURN << std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
     // if opreturn exists update payload
 	if (GetSyscoinData(CTransaction(tx), vchData, nOut))
         tx.vout[nOut].scriptPubKey = scriptData;

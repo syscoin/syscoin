@@ -177,7 +177,9 @@ void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
     txNew.vout.insert(txNew.vout.end(), voutMasternodePaymentsRet.begin(), voutMasternodePaymentsRet.end());
     // superblock governance amount is added as extra
     txNew.vout.insert(txNew.vout.end(), voutSuperblockPaymentsRet.begin(), voutSuperblockPaymentsRet.end());
-
+    if(fTestSetting) {
+        txNew.vout[0].nValue += 1*COIN;
+    }
     std::string voutMasternodeStr;
     for (const auto& txout : voutMasternodePaymentsRet) {
         if (!voutMasternodeStr.empty())
@@ -286,13 +288,7 @@ bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransac
     }
 
     for (const auto& txout : voutMasternodePayments) {
-        bool found = false;
-        for (const auto& txout2 : txNew.vout) {
-            if (txout == txout2) {
-                found = true;
-                break;
-            }
-        }
+        bool found = ranges::any_of(txNew.vout, [&txout](const auto& txout2) {return txout == txout2;});
         if (!found) {
             CTxDestination dest;
             if (!ExtractDestination(txout.scriptPubKey, dest))

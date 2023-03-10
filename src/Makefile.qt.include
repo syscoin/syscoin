@@ -275,6 +275,7 @@ SYSCOIN_QT_WALLET_CPP = \
   qt/transactiondesc.cpp \
   qt/transactiondescdialog.cpp \
   qt/transactionfilterproxy.cpp \
+  qt/transactionoverviewwidget.cpp \
   qt/transactionrecord.cpp \
   qt/transactiontablemodel.cpp \
   qt/transactionview.cpp \
@@ -299,7 +300,7 @@ SYSCOIN_QT_RC = qt/res/syscoin-qt-res.rc
 SYSCOIN_QT_INCLUDES = -DQT_NO_KEYWORDS -DQT_USE_QSTRINGBUILDER
 
 qt_libsyscoinqt_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(SYSCOIN_QT_INCLUDES) \
-  $(QT_INCLUDES) $(QT_DBUS_INCLUDES) $(QR_CFLAGS)
+  $(QT_INCLUDES) $(QT_DBUS_INCLUDES) $(QR_CFLAGS) $(BOOST_CPPFLAGS)
 qt_libsyscoinqt_a_CXXFLAGS = $(AM_CXXFLAGS) $(QT_PIE_FLAGS)
 qt_libsyscoinqt_a_OBJCXXFLAGS = $(AM_OBJCXXFLAGS) $(QT_PIE_FLAGS)
 
@@ -328,19 +329,18 @@ syscoin_qt_sources = qt/main.cpp
 if TARGET_WINDOWS
   syscoin_qt_sources += $(SYSCOIN_QT_RC)
 endif
-syscoin_qt_ldadd = qt/libsyscoinqt.a $(LIBSYSCOIN_SERVER)
+syscoin_qt_ldadd = qt/libsyscoinqt.a $(LIBSYSCOIN_NODE)
 if ENABLE_WALLET
 syscoin_qt_ldadd += $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_WALLET)
 endif
 if ENABLE_ZMQ
 syscoin_qt_ldadd += $(LIBSYSCOIN_ZMQ) $(ZMQ_LIBS)
 endif
-syscoin_qt_ldadd += $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_BLS) $(LIBCHIABLS) $(LIBSYSCOIN_CONSENSUS) $(LIBUNIVALUE) $(LIBLEVELDB) $(LIBLEVELDB_SSE42) $(LIBMEMENV) \
-  $(BOOST_LIBS) $(QT_LIBS) $(QT_DBUS_LIBS) $(QR_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(LIBSYSCOIN_CRYPTO) $(NATPMP_LIBS) $(LIBSECP256K1) \
-  $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(LIBNEVM) $(SQLITE_LIBS)
+syscoin_qt_ldadd += $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_CONSENSUS) $(LIBSYSCOIN_CRYPTO) $(LIBBLS) $(LIBUNIVALUE) $(LIBLEVELDB) $(LIBMEMENV) \
+  $(QT_LIBS) $(QT_DBUS_LIBS) $(QR_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(LIBSECP256K1) \
+  $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(SQLITE_LIBS) $(LIBNEVM) $(GMP_LIBS)
 syscoin_qt_ldflags = $(RELDFLAGS) $(AM_LDFLAGS) $(QT_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 syscoin_qt_libtoolflags = $(AM_LIBTOOLFLAGS) --tag CXX
-
 
 qt_syscoin_qt_CPPFLAGS = $(syscoin_qt_cppflags)
 qt_syscoin_qt_CXXFLAGS = $(syscoin_qt_cxxflags)
@@ -363,13 +363,17 @@ SECONDARY: $(QT_QM)
 
 $(srcdir)/qt/syscoinstrings.cpp: FORCE
 	@test -n $(XGETTEXT) || echo "xgettext is required for updating translations"
-	$(AM_V_GEN) cd $(srcdir); XGETTEXT=$(XGETTEXT) COPYRIGHT_HOLDERS="$(COPYRIGHT_HOLDERS)" $(PYTHON) ../share/qt/extract_strings_qt.py $(libsyscoin_server_a_SOURCES) $(libsyscoin_wallet_a_SOURCES) $(libsyscoin_common_a_SOURCES) $(libsyscoin_zmq_a_SOURCES) $(libsyscoin_consensus_a_SOURCES) $(libsyscoin_util_a_SOURCES)
+	$(AM_V_GEN) cd $(srcdir); XGETTEXT=$(XGETTEXT) COPYRIGHT_HOLDERS="$(COPYRIGHT_HOLDERS)" $(PYTHON) ../share/qt/extract_strings_qt.py $(libsyscoin_node_a_SOURCES) $(libsyscoin_wallet_a_SOURCES) $(libsyscoin_common_a_SOURCES) $(libsyscoin_zmq_a_SOURCES) $(libsyscoin_consensus_a_SOURCES) $(libsyscoin_util_a_SOURCES)
 
+# The resulted syscoin_en.xlf source file should follow Transifex requirements.
+# See: https://docs.transifex.com/formats/xliff#how-to-distinguish-between-a-source-file-and-a-translation-file
 translate: $(srcdir)/qt/syscoinstrings.cpp $(QT_FORMS_UI) $(QT_FORMS_UI) $(SYSCOIN_QT_BASE_CPP) qt/syscoin.cpp $(SYSCOIN_QT_WINDOWS_CPP) $(SYSCOIN_QT_WALLET_CPP) $(SYSCOIN_QT_H) $(SYSCOIN_MM)
 	@test -n $(LUPDATE) || echo "lupdate is required for updating translations"
 	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(LUPDATE) -no-obsolete -I $(srcdir) -locations relative $^ -ts $(srcdir)/qt/locale/syscoin_en.ts
 	@test -n $(LCONVERT) || echo "lconvert is required for updating translations"
-	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(LCONVERT) -o $(srcdir)/qt/locale/syscoin_en.xlf -i $(srcdir)/qt/locale/syscoin_en.ts
+	$(AM_V_GEN) QT_SELECT=$(QT_SELECT) $(LCONVERT) -drop-translations -o $(srcdir)/qt/locale/syscoin_en.xlf -i $(srcdir)/qt/locale/syscoin_en.ts
+	@$(SED) -i.old -e 's|source-language="en" target-language="en"|source-language="en"|' -e '/<target xml:space="preserve"><\/target>/d' $(srcdir)/qt/locale/syscoin_en.xlf
+	@rm -f $(srcdir)/qt/locale/syscoin_en.xlf.old
 
 $(QT_QRC_LOCALE_CPP): $(QT_QRC_LOCALE) $(QT_QM)
 	@test -f $(RCC)
@@ -400,8 +404,7 @@ syscoin_qt_apk: FORCE
 	cp $(dir $(lastword $(CC)))../sysroot/usr/lib/$(host_alias)/libc++_shared.so $(APK_LIB_DIR)
 	tar xf $(QT_BASE_PATH) -C qt/android/src/ $(QT_BASE_TLD)src/android/jar/src --strip-components=5
 	tar xf $(QT_BASE_PATH) -C qt/android/src/ $(QT_BASE_TLD)src/android/java/src --strip-components=5
-	tar xf $(QT_BASE_PATH) -C qt/android/res/ $(QT_BASE_TLD)src/android/java/res --strip-components=5
-	cp qt/syscoin-qt $(APK_LIB_DIR)/libsyscoin-qt.so
+	cp qt/syscoin-qt $(APK_LIB_DIR)/libsyscoin-qt_$(ANDROID_ARCH).so
 	cd qt/android && gradle wrapper --gradle-version=6.6.1
 	cd qt/android && ./gradlew build
 

@@ -16,10 +16,10 @@
 #include <netmessagemaker.h>
 #include <scheduler.h>
 #include <validation.h>
-
+#include <timedata.h>
 #include <algorithm>
 #include <unordered_set>
-
+#include <util/system.h>
 namespace llmq
 {
 
@@ -39,7 +39,11 @@ UniValue CRecoveredSig::ToJson() const
 
 CRecoveredSigsDb::CRecoveredSigsDb(bool fMemory, bool fWipe)
 {
-    db = std::make_unique<CDBWrapper>(fMemory ? "" : (gArgs.GetDataDirNet() / "llmq/recsigdb"), 8 << 20, fMemory, fWipe);
+    db = std::make_unique<CDBWrapper>(DBParams{
+        .path = gArgs.GetDataDirNet() / "llmq/recsigdb",
+        .cache_bytes = static_cast<size_t>(8 << 20),
+        .memory_only = fMemory,
+        .wipe_data = fWipe});
     MigrateRecoveredSigs();
 }
 
@@ -50,7 +54,11 @@ void CRecoveredSigsDb::MigrateRecoveredSigs()
     LogPrint(BCLog::LLMQ, "CRecoveredSigsDb::%d -- start\n", __func__);
 
     CDBBatch batch(*db);
-    auto oldDb = std::make_unique<CDBWrapper>(gArgs.GetDataDirNet() / "llmq", 8 << 20);
+    auto oldDb = std::make_unique<CDBWrapper>(DBParams{
+        .path = gArgs.GetDataDirNet() / "llmq",
+        .cache_bytes = static_cast<size_t>(8 << 20),
+        .memory_only = false,
+        .wipe_data = false});
     std::unique_ptr<CDBIterator> pcursor(oldDb->NewIterator());
 
     auto start_h = std::make_tuple(std::string("rs_h"), uint256());
@@ -327,7 +335,7 @@ void CRecoveredSigsDb::WriteRecoveredSig(const llmq::CRecoveredSig& recSig)
 {
     CDBBatch batch(*db);
 
-    uint32_t curTime = GetAdjustedTime();
+    uint32_t curTime = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
 
     // we put these close to each other to leverage leveldb's key compaction
     // this way, the second key can be used for fast HasRecoveredSig checks while the first key stores the recSig
@@ -424,7 +432,7 @@ void CRecoveredSigsDb::CleanupOldRecoveredSigs(int64_t maxAge)
     std::unique_ptr<CDBIterator> pcursor(db->NewIterator());
 
     auto start = std::make_tuple(std::string("rs_t"), (uint32_t)0, (uint8_t)0, uint256());
-    uint32_t endTime = (uint32_t)(GetAdjustedTime() - maxAge);
+    uint32_t endTime = (uint32_t)(TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime()) - maxAge);
     pcursor->Seek(start);
 
     std::vector<std::pair<uint8_t, uint256>> toDelete;
@@ -488,7 +496,7 @@ bool CRecoveredSigsDb::GetVoteForId(uint8_t llmqType, const uint256& id, uint256
 void CRecoveredSigsDb::WriteVoteForId(uint8_t llmqType, const uint256& id, const uint256& msgHash)
 {
     auto k1 = std::make_tuple(std::string("rs_v"), llmqType, id);
-    auto k2 = std::make_tuple(std::string("rs_vt"), (uint32_t)htobe32(GetAdjustedTime()), llmqType, id);
+    auto k2 = std::make_tuple(std::string("rs_vt"), (uint32_t)htobe32(TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime())), llmqType, id);
 
     CDBBatch batch(*db);
     batch.Write(k1, msgHash);
@@ -502,7 +510,7 @@ void CRecoveredSigsDb::CleanupOldVotes(int64_t maxAge)
     std::unique_ptr<CDBIterator> pcursor(db->NewIterator());
 
     auto start = std::make_tuple(std::string("rs_vt"), (uint32_t)0, (uint8_t)0, uint256());
-    uint32_t endTime = (uint32_t)(GetAdjustedTime() - maxAge);
+    uint32_t endTime = (uint32_t)(TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime()) - maxAge);
     pcursor->Seek(start);
 
     CDBBatch batch(*db);
@@ -584,9 +592,11 @@ void CSigningManager::ProcessMessage(CNode* pfrom, const std::string& strCommand
 void CSigningManager::ProcessMessageRecoveredSig(CNode* pfrom, const std::shared_ptr<const CRecoveredSig>& recoveredSig)
 {
     const uint256& hash = recoveredSig->GetHash();
+    PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
+    if (peer)
+        peerman.AddKnownTx(*peer, hash);
     {
         LOCK(cs_main);
-        pfrom->AddKnownTx(hash);
         peerman.ReceivedResponse(pfrom->GetId(), hash);
     }
     bool ban = false;
@@ -596,7 +606,8 @@ void CSigningManager::ProcessMessageRecoveredSig(CNode* pfrom, const std::shared
                 LOCK(cs_main);
                 peerman.ForgetTxHash(pfrom->GetId(), hash);
             }
-            peerman.Misbehaving(pfrom->GetId(), 100, "error PreVerifyRecoveredSig");
+            if(peer)
+                peerman.Misbehaving(*peer, 100, "error PreVerifyRecoveredSig");
         }
         return;
     }
@@ -776,10 +787,11 @@ bool CSigningManager::ProcessPendingRecoveredSigs()
     for (const auto& p : recSigsByNode) {
         NodeId nodeId = p.first;
         const auto& v = p.second;
-
+        PeerRef peer = peerman.GetPeerRef(nodeId);
         if (batchVerifier.badSources.count(nodeId)) {
             LogPrint(BCLog::LLMQ, "CSigningManager::%s -- invalid recSig from other node, banning peer=%d\n", __func__, nodeId);
-            peerman.Misbehaving(nodeId, 100, "invalid recSig from other node");
+            if(peer)
+                peerman.Misbehaving(*peer, 100, "invalid recSig from other node");
             continue;
         }
 
@@ -804,6 +816,33 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
     {
         LOCK(cs_main);
         peerman.ReceivedResponse(nodeId, hash);
+        // make sure block or header exists before accepting recovered sig
+        auto* pindex = chainman.m_blockman.LookupBlockIndex(recoveredSig->msgHash);
+        if (pindex == nullptr) {
+            LogPrintf("CSigningManager::%s -- block of recovered signature (%s) does not exist\n",
+                    __func__, recoveredSig->id.ToString());
+            peerman.ForgetTxHash(nodeId, hash);
+            return;
+        }
+        if((pindex->nHeight%SIGN_HEIGHT_LOOKBACK) != 0) {
+            LogPrintf("CSigningManager::%s -- block height(%d) of recovered signature (%s) is not a factor of 5\n",
+                    __func__, pindex->nHeight, recoveredSig->id.ToString());
+            PeerRef peer = peerman.GetPeerRef(nodeId);
+            if(peer)
+                peerman.Misbehaving(*peer, 10, "invalid CLSIG");
+            return;
+        }
+        if(chainman.m_best_header) {
+            const auto& nHeightDiff = chainman.m_best_header->nHeight - pindex->nHeight;
+            // height from best known header does not look back enough (SIGN_HEIGHT_LOOKBACK blocks). MNs should be locking active chain - SIGN_HEIGHT_LOOKBACK block height
+            if(nHeightDiff < SIGN_HEIGHT_LOOKBACK) {
+                // too far into the future
+                LogPrint(BCLog::CHAINLOCKS, "CSigningManager::%s -- block of recovered signature (%s) is too far into the future\n",
+                        __func__, recoveredSig->id.ToString());
+                peerman.ForgetTxHash(nodeId, hash);
+                return;
+            }
+        }
     }
 
     if (db.HasRecoveredSigForHash(hash)) {
@@ -824,7 +863,7 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
         auto signHash = CLLMQUtils::BuildSignHash(*recoveredSig);
 
         LogPrint(BCLog::LLMQ, "CSigningManager::%s -- valid recSig. signHash=%s, id=%s, msgHash=%s\n", __func__,
-                signHash.ToString(), recoveredSig->id   .ToString(), recoveredSig->msgHash.ToString());
+                signHash.ToString(), recoveredSig->id.ToString(), recoveredSig->msgHash.ToString());
         if (db.HasRecoveredSigForId(llmqType, recoveredSig->id)) {
             CRecoveredSig otherRecoveredSig;
             if (db.GetRecoveredSigById(llmqType, recoveredSig->id, otherRecoveredSig)) {
@@ -864,9 +903,14 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
         }
     }
     if (fMasternodeMode) {
-        connman.ForEachNode([&](CNode* pnode) {
+        LOCK(cs_main);
+        connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            AssertLockHeld(::cs_main);
             if (pnode->fSendRecSigs) {
-                pnode->PushOtherInventory(inv);
+                PeerRef peer = peerman.GetPeerRef(pnode->GetId());
+                if(peer) {
+                    peerman.PushTxInventoryOther(*peer, inv);
+                }
             }
         });
     }
@@ -890,7 +934,12 @@ void CSigningManager::TruncateRecoveredSig(uint8_t llmqType, const uint256& id)
 {
     db.TruncateRecoveredSig(llmqType, id);
 }
-
+void CSigningManager::Clear()
+{
+    int64_t maxAge = 0;
+    db.CleanupOldRecoveredSigs(maxAge);
+    db.CleanupOldVotes(maxAge);  
+}
 void CSigningManager::Cleanup()
 {
     int64_t now = GetTimeMillis();
@@ -1034,6 +1083,9 @@ bool CSigningManager::GetVoteForId(uint8_t llmqType, const uint256& id, uint256&
 
 CQuorumCPtr CSigningManager::SelectQuorumForSigning(ChainstateManager& chainman, uint8_t llmqType, const uint256& selectionHash, int signHeight, int signOffset)
 {
+    if(!Params().GetConsensus().llmqs.count(llmqType)) {
+        return {};
+    }
     auto& llmqParams = Params().GetConsensus().llmqs.at(llmqType);
     size_t poolSize = (size_t)llmqParams.signingActiveQuorumCount;
     CBlockIndex* pindexStart;

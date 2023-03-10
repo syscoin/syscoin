@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2018-2021 The Bitcoin Core developers
+# Copyright (c) 2018-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test wallet group functionality."""
@@ -16,6 +16,9 @@ from test_framework.util import (
 
 
 class WalletGroupTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 5
@@ -26,6 +29,11 @@ class WalletGroupTest(SyscoinTestFramework):
             ["-maxapsfee=0.00002719"],
             ["-maxapsfee=0.00002720"],
         ]
+
+        for args in self.extra_args:
+            args.append("-whitelist=noban@127.0.0.1")   # whitelist peers to speed up tx relay / mempool sync
+            args.append(f"-paytxfee={20 * 1e3 / 1e8}")  # apply feerate of 20 sats/vB across all nodes
+
         self.rpc_timeout = 480
 
     def skip_test_if_missing_module(self):
@@ -33,6 +41,11 @@ class WalletGroupTest(SyscoinTestFramework):
 
     def run_test(self):
         self.log.info("Setting up")
+        # To take full use of immediate tx relay, all nodes need to be reachable
+        # via inbound peers, i.e. connect first to last to close the circle
+        # (the default test network topology looks like this:
+        #  node0 <-- node1 <-- node2 <-- node3 <-- node4 <-- node5)
+        self.connect_nodes(0, self.num_nodes - 1)
         # Mine some coins
         self.generate(self.nodes[0], COINBASE_MATURITY + 1)
 
@@ -76,7 +89,7 @@ class WalletGroupTest(SyscoinTestFramework):
 
         self.log.info("Test avoiding partial spends if warranted, even if avoidpartialspends is disabled")
         self.sync_all()
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 1)
         # Nodes 1-2 now have confirmed UTXOs (letters denote destinations):
         # Node #1:      Node #2:
         # - A  1.0      - D0 1.0
@@ -87,7 +100,7 @@ class WalletGroupTest(SyscoinTestFramework):
         # - D ~0.3
         assert_approx(self.nodes[1].getbalance(), vexp=4.3, vspan=0.0001)
         assert_approx(self.nodes[2].getbalance(), vexp=4.3, vspan=0.0001)
-        # Sending 1.4 btc should pick one 1.0 + one more. For node #1,
+        # Sending 1.4 sys should pick one 1.0 + one more. For node #1,
         # this could be (A / B0 / C0) + (B1 / C1 / D). We ensure that it is
         # B0 + B1 or C0 + C1, because this avoids partial spends while not being
         # detrimental to transaction cost
@@ -108,17 +121,10 @@ class WalletGroupTest(SyscoinTestFramework):
         assert_equal(input_addrs[0], input_addrs[1])
         # Node 2 enforces avoidpartialspends so needs no checking here
 
-        if self.options.descriptors:
-            # Descriptor wallets will use Taproot change by default which has different fees
-            tx4_ungrouped_fee = 3060
-            tx4_grouped_fee = 4400
-            tx5_6_ungrouped_fee = 5760
-            tx5_6_grouped_fee = 8480
-        else:
-            tx4_ungrouped_fee = 2820
-            tx4_grouped_fee = 4160
-            tx5_6_ungrouped_fee = 5520
-            tx5_6_grouped_fee = 8240
+        tx4_ungrouped_fee = 2820
+        tx4_grouped_fee = 4160
+        tx5_6_ungrouped_fee = 5520
+        tx5_6_grouped_fee = 8240
 
         self.log.info("Test wallet option maxapsfee")
         addr_aps = self.nodes[3].getnewaddress()
@@ -157,9 +163,9 @@ class WalletGroupTest(SyscoinTestFramework):
         assert_equal(2, len(tx6["vout"]))
 
         # Empty out node2's wallet
-        self.nodes[2].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=self.nodes[2].getbalance(), subtractfeefromamount=True)
+        self.nodes[2].sendall(recipients=[self.nodes[0].getnewaddress()])
         self.sync_all()
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 1)
 
         self.log.info("Fill a wallet with 10,000 outputs corresponding to the same scriptPubKey")
         for _ in range(5):

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2020 The Bitcoin Core developers
+// Copyright (c) 2017-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -257,67 +257,6 @@ BOOST_AUTO_TEST_CASE(script_standard_ExtractDestination)
     BOOST_CHECK(std::get<WitnessUnknown>(address) == unk);
 }
 
-BOOST_AUTO_TEST_CASE(script_standard_ExtractDestinations)
-{
-    CKey keys[3];
-    CPubKey pubkeys[3];
-    for (int i = 0; i < 3; i++) {
-        keys[i].MakeNewKey(true);
-        pubkeys[i] = keys[i].GetPubKey();
-    }
-
-    CScript s;
-    TxoutType whichType;
-    std::vector<CTxDestination> addresses;
-    int nRequired;
-
-    // TxoutType::PUBKEY
-    s.clear();
-    s << ToByteVector(pubkeys[0]) << OP_CHECKSIG;
-    BOOST_CHECK(ExtractDestinations(s, whichType, addresses, nRequired));
-    BOOST_CHECK_EQUAL(whichType, TxoutType::PUBKEY);
-    BOOST_CHECK_EQUAL(addresses.size(), 1U);
-    BOOST_CHECK_EQUAL(nRequired, 1);
-    BOOST_CHECK(std::get<PKHash>(addresses[0]) == PKHash(pubkeys[0]));
-
-    // TxoutType::PUBKEYHASH
-    s.clear();
-    s << OP_DUP << OP_HASH160 << ToByteVector(pubkeys[0].GetID()) << OP_EQUALVERIFY << OP_CHECKSIG;
-    BOOST_CHECK(ExtractDestinations(s, whichType, addresses, nRequired));
-    BOOST_CHECK_EQUAL(whichType, TxoutType::PUBKEYHASH);
-    BOOST_CHECK_EQUAL(addresses.size(), 1U);
-    BOOST_CHECK_EQUAL(nRequired, 1);
-    BOOST_CHECK(std::get<PKHash>(addresses[0]) == PKHash(pubkeys[0]));
-
-    // TxoutType::SCRIPTHASH
-    CScript redeemScript(s); // initialize with leftover P2PKH script
-    s.clear();
-    s << OP_HASH160 << ToByteVector(CScriptID(redeemScript)) << OP_EQUAL;
-    BOOST_CHECK(ExtractDestinations(s, whichType, addresses, nRequired));
-    BOOST_CHECK_EQUAL(whichType, TxoutType::SCRIPTHASH);
-    BOOST_CHECK_EQUAL(addresses.size(), 1U);
-    BOOST_CHECK_EQUAL(nRequired, 1);
-    BOOST_CHECK(std::get<ScriptHash>(addresses[0]) == ScriptHash(redeemScript));
-
-    // TxoutType::MULTISIG
-    s.clear();
-    s << OP_2 <<
-        ToByteVector(pubkeys[0]) <<
-        ToByteVector(pubkeys[1]) <<
-        OP_2 << OP_CHECKMULTISIG;
-    BOOST_CHECK(ExtractDestinations(s, whichType, addresses, nRequired));
-    BOOST_CHECK_EQUAL(whichType, TxoutType::MULTISIG);
-    BOOST_CHECK_EQUAL(addresses.size(), 2U);
-    BOOST_CHECK_EQUAL(nRequired, 2);
-    BOOST_CHECK(std::get<PKHash>(addresses[0]) == PKHash(pubkeys[0]));
-    BOOST_CHECK(std::get<PKHash>(addresses[1]) == PKHash(pubkeys[1]));
-
-    // TxoutType::NULL_DATA
-    s.clear();
-    s << OP_RETURN << std::vector<unsigned char>({75});
-    BOOST_CHECK(!ExtractDestinations(s, whichType, addresses, nRequired));
-}
-
 BOOST_AUTO_TEST_CASE(script_standard_GetScriptFor_)
 {
     CKey keys[3];
@@ -463,14 +402,13 @@ BOOST_AUTO_TEST_CASE(bip341_spk_test_vectors)
 
     for (const auto& vec : vectors.getValues()) {
         TaprootBuilder spktest;
-        std::map<std::pair<CScript, int>, int> scriptposes;
+        std::map<std::pair<std::vector<unsigned char>, int>, int> scriptposes;
         std::function<void (const UniValue&, int)> parse_tree = [&](const UniValue& node, int depth) {
             if (node.isNull()) return;
             if (node.isObject()) {
-                auto script_bytes = ParseHex(node["script"].get_str());
-                CScript script(script_bytes.begin(), script_bytes.end());
-                int idx = node["id"].get_int();
-                int leaf_version = node["leafVersion"].get_int();
+                auto script = ParseHex(node["script"].get_str());
+                int idx = node["id"].getInt<int>();
+                int leaf_version = node["leafVersion"].getInt<int>();
                 scriptposes[{script, leaf_version}] = idx;
                 spktest.Add(depth, script, leaf_version);
             } else {

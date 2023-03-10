@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2018-2021 The Bitcoin Core developers
+# Copyright (c) 2018-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the avoid_reuse and setwalletflag features."""
@@ -63,6 +63,8 @@ def assert_balances(node, mine, margin=0.001):
         assert_approx(got[k], v, margin)
 
 class AvoidReuseTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
 
     def set_test_params(self):
         self.num_nodes = 2
@@ -117,6 +119,19 @@ class AvoidReuseTest(SyscoinTestFramework):
         # Attempting to set flag to its current state should throw
         assert_raises_rpc_error(-8, "Wallet flag is already set to false", self.nodes[0].setwalletflag, 'avoid_reuse', False)
         assert_raises_rpc_error(-8, "Wallet flag is already set to true", self.nodes[1].setwalletflag, 'avoid_reuse', True)
+
+        assert_raises_rpc_error(-8, "Unknown wallet flag: abc", self.nodes[0].setwalletflag, 'abc', True)
+
+        # Create a wallet with avoid reuse, and test that disabling it afterwards persists
+        self.nodes[1].createwallet(wallet_name="avoid_reuse_persist", avoid_reuse=True)
+        w = self.nodes[1].get_wallet_rpc("avoid_reuse_persist")
+        assert_equal(w.getwalletinfo()["avoid_reuse"], True)
+        w.setwalletflag("avoid_reuse", False)
+        assert_equal(w.getwalletinfo()["avoid_reuse"], False)
+        w.unloadwallet()
+        self.nodes[1].loadwallet("avoid_reuse_persist")
+        assert_equal(w.getwalletinfo()["avoid_reuse"], False)
+        w.unloadwallet()
 
     def test_immutable(self):
         '''Test immutable wallet flags'''
@@ -180,7 +195,7 @@ class AvoidReuseTest(SyscoinTestFramework):
         # getbalances should show no used, 10 sys trusted
         assert_balances(self.nodes[1], mine={"used": 0, "trusted": 10})
         # node 0 should not show a used entry, as it does not enable avoid_reuse
-        assert("used" not in self.nodes[0].getbalances()["mine"])
+        assert "used" not in self.nodes[0].getbalances()["mine"]
 
         self.nodes[1].sendtoaddress(retaddr, 5)
         self.generate(self.nodes[0], 1)
@@ -255,9 +270,9 @@ class AvoidReuseTest(SyscoinTestFramework):
             self.nodes[0].sendtoaddress(new_fundaddr, 10)
             self.generate(self.nodes[0], 1)
 
-            # listunspent should show 2 total outputs (5, 10 btc), one unused (5), one reused (10)
+            # listunspent should show 2 total outputs (5, 10 sys), one unused (5), one reused (10)
             assert_unspent(self.nodes[1], total_count=2, total_sum=15, reused_count=1, reused_sum=10)
-            # getbalances should show 10 used, 5 btc trusted
+            # getbalances should show 10 used, 5 sys trusted
             assert_balances(self.nodes[1], mine={"used": 10, "trusted": 5})
 
             # node 1 should now have a balance of 5 (no dirty) or 15 (including dirty)
@@ -268,12 +283,12 @@ class AvoidReuseTest(SyscoinTestFramework):
 
             self.nodes[1].sendtoaddress(retaddr, 4)
 
-            # listunspent should show 2 total outputs (1, 10 btc), one unused (1), one reused (10)
+            # listunspent should show 2 total outputs (1, 10 sys), one unused (1), one reused (10)
             assert_unspent(self.nodes[1], total_count=2, total_sum=11, reused_count=1, reused_sum=10)
-            # getbalances should show 10 used, 1 btc trusted
+            # getbalances should show 10 used, 1 sys trusted
             assert_balances(self.nodes[1], mine={"used": 10, "trusted": 1})
 
-            # node 1 should now have about 1 btc left (no dirty) and 11 (including dirty)
+            # node 1 should now have about 1 sys left (no dirty) and 11 (including dirty)
             assert_approx(self.nodes[1].getbalance(), 1, 0.001)
             assert_approx(self.nodes[1].getbalance(avoid_reuse=False), 11, 0.001)
 

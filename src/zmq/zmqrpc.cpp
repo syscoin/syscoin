@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2020 The Bitcoin Core developers
+// Copyright (c) 2018-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -10,6 +10,11 @@
 #include <zmq/zmqnotificationinterface.h>
 
 #include <univalue.h>
+
+#include <list>
+#include <string>
+
+class JSONRPCRequest;
 
 namespace {
 
@@ -25,7 +30,7 @@ static RPCHelpMan getzmqnotifications()
                         {
                             {RPCResult::Type::STR, "type", "Type of notification"},
                             {RPCResult::Type::STR, "address", "Address of the publisher"},
-                            {RPCResult::Type::STR, "addresssub", "Address of the subscriber, omitted if there is no subscriber assigned to this notification"},
+                            {RPCResult::Type::STR, "addresssub", /*optional=*/true, "Address of the subscriber, omitted if there is no subscriber assigned to this notification"},
                             {RPCResult::Type::NUM, "hwm", "Outbound message high water mark"},
                         }},
                     }
@@ -34,7 +39,7 @@ static RPCHelpMan getzmqnotifications()
                     HelpExampleCli("getzmqnotifications", "")
             + HelpExampleRpc("getzmqnotifications", "")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     UniValue result(UniValue::VARR);
     if (g_zmq_notification_interface != nullptr) {
@@ -56,10 +61,8 @@ static RPCHelpMan getzmqnotifications()
     };
 }
 
-const CRPCCommand commands[] =
-{ //  category           actor (function)
-  //  -----------------  -----------------------
-    { "zmq",             &getzmqnotifications,    },
+const CRPCCommand commands[]{
+    {"zmq", &getzmqnotifications},
 };
 
 } // anonymous namespace

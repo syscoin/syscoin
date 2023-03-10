@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2021 The Bitcoin Core developers
+# Copyright (c) 2014-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the pruning code.
@@ -10,8 +10,11 @@ This test takes 30 mins or more (up to 2 hours)
 """
 import os
 
-from test_framework.blocktools import create_coinbase
-from test_framework.messages import CBlock
+from test_framework.blocktools import (
+    MIN_BLOCKS_TO_KEEP,
+    create_block,
+    create_coinbase,
+)
 from test_framework.script import (
     CScript,
     OP_NOP,
@@ -48,21 +51,8 @@ def mine_large_blocks(node, n):
     previousblockhash = int(best_block["hash"], 16)
 
     for _ in range(n):
-        # Build the coinbase transaction (with large scriptPubKey)
-        coinbase_tx = create_coinbase(height, dip3height=9000)
-        coinbase_tx.vin[0].nSequence = 2 ** 32 - 1
-        coinbase_tx.vout[0].scriptPubKey = big_script
-        coinbase_tx.rehash()
-
-        # Build the block
-        block = CBlock()
-        block.nVersion = best_block["version"]
-        block.hashPrevBlock = previousblockhash
-        block.nTime = mine_large_blocks.nTime
-        block.nBits = int('207fffff', 16)
-        block.nNonce = 0
-        block.vtx = [coinbase_tx]
-        block.hashMerkleRoot = block.calc_merkle_root()
+        # SYSCOIN
+        block = create_block(hashprev=previousblockhash, ntime=mine_large_blocks.nTime, coinbase=create_coinbase(height, script_pubkey=big_script, dip3height=9000))
         block.solve()
 
         # Submit to the node
@@ -76,6 +66,9 @@ def calc_usage(blockdir):
     return sum(os.path.getsize(blockdir + f) for f in os.listdir(blockdir) if os.path.isfile(os.path.join(blockdir, f))) / (1024. * 1024.)
 
 class PruneTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 6
@@ -92,12 +85,9 @@ class PruneTest(SyscoinTestFramework):
             ["-dip3params=2000:2000","-maxreceivebuffer=20000", "-prune=550"],
             ["-dip3params=2000:2000","-maxreceivebuffer=20000"],
             ["-dip3params=2000:2000","-maxreceivebuffer=20000"],
-            ["-dip3params=2000:2000","-prune=550"],
+            ["-dip3params=2000:2000","-prune=550", "-blockfilterindex=1"],
         ]
         self.rpc_timeout = 120
-
-    def skip_test_if_missing_module(self):
-        self.skip_if_no_wallet()
 
     def setup_network(self):
         self.setup_nodes()
@@ -114,7 +104,8 @@ class PruneTest(SyscoinTestFramework):
     def setup_nodes(self):
         self.add_nodes(self.num_nodes, self.extra_args)
         self.start_nodes()
-        self.import_deterministic_coinbase_privkeys()
+        if self.is_wallet_compiled():
+            self.import_deterministic_coinbase_privkeys()
 
     def create_big_chain(self):
         # Start by creating some coinbases we can spend later
@@ -127,6 +118,7 @@ class PruneTest(SyscoinTestFramework):
         self.sync_blocks(self.nodes[0:5])
 
     def test_invalid_command_line_options(self):
+        self.stop_node(0)
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune cannot be configured with a negative value.',
             extra_args=['-prune=-1'],
@@ -140,8 +132,8 @@ class PruneTest(SyscoinTestFramework):
             extra_args=['-prune=550', '-txindex'],
         )
         self.nodes[0].assert_start_raises_init_error(
-            expected_msg='Error: Prune mode is incompatible with -coinstatsindex.',
-            extra_args=['-prune=550', '-coinstatsindex'],
+            expected_msg='Error: Prune mode is incompatible with -reindex-chainstate. Use full -reindex instead.',
+            extra_args=['-prune=550', '-reindex-chainstate'],
         )
 
     def test_height_min(self):
@@ -232,8 +224,8 @@ class PruneTest(SyscoinTestFramework):
     def reorg_back(self):
         # Verify that a block on the old main chain fork has been pruned away
         assert_raises_rpc_error(-1, "Block not available (pruned data)", self.nodes[2].getblock, self.forkhash)
-        with self.nodes[2].assert_debug_log(expected_msgs=['block verification stopping at height', '(pruning, no data)']):
-            self.nodes[2].verifychain(checklevel=4, nblocks=0)
+        with self.nodes[2].assert_debug_log(expected_msgs=['block verification stopping at height', '(no data)']):
+            assert not self.nodes[2].verifychain(checklevel=4, nblocks=0)
         self.log.info(f"Will need to redownload block {self.forkheight}")
 
         # Verify that we have enough history to reorg back to the fork point
@@ -277,7 +269,7 @@ class PruneTest(SyscoinTestFramework):
         self.start_node(node_number)
         node = self.nodes[node_number]
         assert_equal(node.getblockcount(), 995)
-        assert_raises_rpc_error(-1, "not in prune mode", node.pruneblockchain, 500)
+        assert_raises_rpc_error(-1, "Cannot prune blocks because node is not in prune mode", node.pruneblockchain, 500)
 
         # now re-start in manual pruning mode
         self.restart_node(node_number, extra_args=["-prune=1"])
@@ -292,7 +284,7 @@ class PruneTest(SyscoinTestFramework):
 
         def prune(index):
             ret = node.pruneblockchain(height=height(index))
-            assert_equal(ret, node.getblockchaininfo()['pruneheight'])
+            assert_equal(ret + 1, node.getblockchaininfo()['pruneheight'])
 
         def has_block(index):
             return os.path.isfile(os.path.join(self.nodes[node_number].datadir, self.chain, "blocks", f"blk{index:05}.dat"))
@@ -308,11 +300,18 @@ class PruneTest(SyscoinTestFramework):
         self.generate(node, 6, sync_fun=self.no_op)
         assert_equal(node.getblockchaininfo()["blocks"], 1001)
 
+        # prune parameter in the future (block or timestamp) should raise an exception
+        future_parameter = height(1001) + 5
+        if use_timestamp:
+            assert_raises_rpc_error(-8, "Could not find block with at least the specified timestamp", node.pruneblockchain, future_parameter)
+        else:
+            assert_raises_rpc_error(-8, "Blockchain is shorter than the attempted prune height", node.pruneblockchain, future_parameter)
+
         # Pruned block should still know the number of transactions
         assert_equal(node.getblockheader(node.getblockhash(1))["nTx"], block1_details["nTx"])
 
         # negative heights should raise an exception
-        assert_raises_rpc_error(-8, "Negative", node.pruneblockchain, -10)
+        assert_raises_rpc_error(-8, "Negative block height", node.pruneblockchain, -10)
 
         # height=100 too low to prune first block file so this is a no-op
         prune(100)
@@ -336,7 +335,7 @@ class PruneTest(SyscoinTestFramework):
         assert has_block(2), "blk00002.dat is still there, should be pruned by now"
 
         # advance the tip so blk00002.dat and blk00003.dat can be pruned (the last 288 blocks should now be in blk00004.dat)
-        self.generate(node, 288, sync_fun=self.no_op)
+        self.generate(node, MIN_BLOCKS_TO_KEEP, sync_fun=self.no_op)
         prune(1000)
         assert not has_block(2), "blk00002.dat is still there, should be pruned by now"
         assert not has_block(3), "blk00003.dat is still there, should be pruned by now"
@@ -358,7 +357,7 @@ class PruneTest(SyscoinTestFramework):
         self.connect_nodes(0, 5)
         nds = [self.nodes[0], self.nodes[5]]
         self.sync_blocks(nds, wait=5, timeout=300)
-        self.restart_node(5, extra_args=["-prune=550"]) # restart to trigger rescan
+        self.restart_node(5, extra_args=["-prune=550", "-blockfilterindex=1"]) # restart to trigger rescan
         self.log.info("Success")
 
     def run_test(self):
@@ -467,13 +466,27 @@ class PruneTest(SyscoinTestFramework):
         self.log.info("Test manual pruning with timestamps")
         self.manual_test(4, use_timestamp=True)
 
-        self.log.info("Test wallet re-scan")
-        self.wallet_test()
+        if self.is_wallet_compiled():
+            self.log.info("Test wallet re-scan")
+            self.wallet_test()
 
         self.log.info("Test invalid pruning command line options")
         self.test_invalid_command_line_options()
+        # SYSCOIN
+        # self.test_scanblocks_pruned()
 
         self.log.info("Done")
+
+    def test_scanblocks_pruned(self):
+        node = self.nodes[5]
+        genesis_blockhash = node.getblockhash(0)
+        false_positive_spk = bytes.fromhex("001400000000000000000000000000000000000cadcb")
+
+        assert genesis_blockhash in node.scanblocks(
+            "start", [{"desc": f"raw({false_positive_spk.hex()})"}], 0, 0)['relevant_blocks']
+
+        assert_raises_rpc_error(-1, "Block not available (pruned data)", node.scanblocks,
+            "start", [{"desc": f"raw({false_positive_spk.hex()})"}], 0, 0, "basic", {"filter_false_positives": True})
 
 if __name__ == '__main__':
     PruneTest().main()

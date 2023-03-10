@@ -13,11 +13,15 @@ Simulate and check DKG errors
 '''
 
 class LLMQDKGErrors(DashTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.set_dash_test_params(4, 3, [["-whitelist=noban@127.0.0.1"]] * 4, fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        self.skip_if_no_bdb()
 
     def run_test(self):
         self.sync_blocks(self.nodes, timeout=60*5)
@@ -80,11 +84,11 @@ class LLMQDKGErrors(DashTestFramework):
         for m in q['members']:
             if m['proTxHash'] == proTxHash:
                 if expectedValid:
-                    assert(m['valid'])
+                    assert m['valid']
                 else:
-                    assert(not m['valid'])
+                    assert not m['valid']
             else:
-                assert(m['valid'])
+                assert m['valid']
 
     def heal_masternodes(self, blockCount):
         # We're not testing PoSe here, so lets heal the MNs :)

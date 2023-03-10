@@ -13,6 +13,8 @@
 
 #include <evo/cbtx.h>
 #include <logging.h>
+#include <node/blockstorage.h>
+#include <util/system.h>
 namespace llmq
 {
 
@@ -25,15 +27,18 @@ CFinalCommitment::CFinalCommitment(const Consensus::LLMQParams& params, const ui
 }
 
 #define LogPrintfFinalCommitment(...) do { \
-    LogInstance().LogPrintStr(strprintf("CFinalCommitment::%s -- %s", __func__, tinyformat::format(__VA_ARGS__)), __func__, "", 0); \
+    LogInstance().LogPrintStr(strprintf("CFinalCommitment::%s -- %s", __func__, tinyformat::format(__VA_ARGS__)), __func__, "", 0, BCLog::LogFlags::LLMQ_DKG, BCLog::Level::Debug); \
 } while(0)
 
 bool CFinalCommitment::Verify(const CBlockIndex* pQuorumBaseBlockIndex, bool checkSigs) const
 {
-    if (nVersion == 0 || nVersion > CURRENT_VERSION) {
+    uint16_t expected_nversion{CFinalCommitment::LEGACY_BLS_NON_INDEXED_QUORUM_VERSION};
+    expected_nversion = CLLMQUtils::IsV19Active(pQuorumBaseBlockIndex->nHeight) ? CFinalCommitment::BASIC_BLS_NON_INDEXED_QUORUM_VERSION : CFinalCommitment::LEGACY_BLS_NON_INDEXED_QUORUM_VERSION;
+    
+    if (nVersion == 0 || nVersion != expected_nversion) {
+        LogPrintfFinalCommitment("q[%s] invalid nVersion=%d expectednVersion\n", quorumHash.ToString(), nVersion, expected_nversion);
         return false;
     }
-
     if (!Params().GetConsensus().llmqs.count(llmqType)) {
         LogPrintfFinalCommitment("invalid llmqType=%d\n", llmqType);
         return false;
@@ -135,9 +140,9 @@ bool CFinalCommitment::VerifySizes(const Consensus::LLMQParams& params) const
     return true;
 }
 
-bool CheckLLMQCommitment(BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
+bool CheckLLMQCommitment(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
 {
-    AssertLockHeld(cs_main);
+    AssertLockHeld(::cs_main);
     if (!tx.IsCoinBase()) {
         return FormatSyscoinErrorMessage(state, "bad-qctx-invalid", fJustCheck);
     }

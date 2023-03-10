@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -42,13 +42,8 @@ public:
     void setMinAmount(const CAmount& minimum);
     void setWatchOnlyFilter(WatchOnlyFilter filter);
 
-    /** Set maximum number of rows returned, -1 if unlimited. */
-    void setLimit(int limit);
-
     /** Set whether to show conflicted transactions. */
     void setShowInactive(bool showInactive);
-
-    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
 
 protected:
     bool filterAcceptsRow(int source_row, const QModelIndex & source_parent) const override;
@@ -58,10 +53,9 @@ private:
     std::optional<QDateTime> dateTo;
     QString m_search_string;
     quint32 typeFilter;
-    WatchOnlyFilter watchOnlyFilter;
-    CAmount minAmount;
-    int limitRows;
-    bool showInactive;
+    WatchOnlyFilter watchOnlyFilter{WatchOnlyFilter_All};
+    CAmount minAmount{0};
+    bool showInactive{true};
 };
 
 #endif // SYSCOIN_QT_TRANSACTIONFILTERPROXY_H

@@ -10,9 +10,10 @@
 class CGovernanceVote;
 class CBLSPublicKey;
 class CBLSSecretKey;
-class CConnman;
+class PeerManager;
 class CKey;
 class CKeyID;
+class CBlockIndex;
 
 // INTENTION OF MASTERNODES REGARDING ITEM
 enum vote_outcome_enum_t {
@@ -100,9 +101,9 @@ public:
     bool Sign(const CKey& key, const CKeyID& keyID);
     bool CheckSignature(const CKeyID& keyID) const;
     bool Sign(const CBLSSecretKey& key);
-    bool CheckSignature(const CBLSPublicKey& pubKey) const;
-    bool IsValid(bool useVotingKey) const;
-    void Relay(CConnman& connman) const;
+    bool CheckSignature(const CBlockIndex* pindex, const CBLSPublicKey& pubKey) const;
+    bool IsValid(const CBlockIndex* pindex, bool useVotingKey) const;
+    void Relay(PeerManager& peerman) const;
 
     const COutPoint& GetMasternodeOutpoint() const { return masternodeOutpoint; }
 
