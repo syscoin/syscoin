@@ -9,6 +9,7 @@ src/syscoin-gui
 src/syscoin-node
 src/syscoin-tx
 src/syscoin-util
+src/syscoin-chainstate
 src/syscoin-wallet
 src/test/fuzz/fuzz
 src/test/test_syscoin
@@ -43,8 +44,6 @@ src/obj
 share/setup.nsi
 share/qt/Info.plist
 
-src/univalue/gen
-
 src/qt/*.moc
 src/qt/moc_*.cpp
 src/qt/forms/ui_*.h
@@ -61,7 +60,7 @@ src/qt/syscoin-qt.includes
 .dirstamp
 .libs
 .*.swp
-*.*~*
+*~
 *.bak
 *.rej
 *.orig
@@ -76,13 +75,13 @@ src/qt/syscoin-qt.includes
 *.log
 *.trs
 *.dmg
-*.iso
 
 *.json.h
 *.raw.h
 
 # Only ignore unexpected patches
 *.patch
+!contrib/guix/patches/*.patch
 !depends/patches/**/*.patch
 
 #libtool object files
@@ -94,9 +93,7 @@ src/qt/syscoin-qt.includes
 Makefile
 !depends/Makefile
 src/qt/syscoin-qt
-src/syscoin-qt
 Syscoin-Qt.app
-background.tiff*
 
 # Qt Creator
 Makefile.am.user
@@ -158,6 +155,7 @@ db4/
 
 osx_volname
 dist/
-*.background.tiff
 
 /guix-build-*
+
+/ci/scratch/
