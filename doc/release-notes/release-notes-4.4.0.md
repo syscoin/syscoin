@@ -40,7 +40,7 @@ This will happen at approximately March 23rd 2023.
 
 Nodes not upgraded to Syscoin Core 4.4 will NOT be able to sync up to the network past block 1586000
 After the block height, 3 new changes will be activated on the network
-1. Syscoin PODA will launch which adds logic to consensus code related to keccack based blobs and an NEVM precompile to access it read <https://syscoin.org/news/revealing-the-method-in-the-madness>
+1. Syscoin PODA will launch which adds logic to consensus code related to keccak based blobs and an NEVM precompile to access it read <https://syscoin.org/news/revealing-the-method-in-the-madness>
 2. V19 BLS upgrade to the standard IETF spec <https://datatracker.ietf.org/doc/draft-irtf-cfrg-bls-signature/>
 3. Specific NEVM upgrades:
   - EIP-3651 warm COINBASE <https://eips.ethereum.org/EIPS/eip-3651>
