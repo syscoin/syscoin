@@ -28,6 +28,8 @@ or `syscoind`/`syscoin-qt` (on Linux).
 
 If you are upgrading from a version older than 4.2.0, PLEASE READ: <https://syscoin.readme.io/v4.2.0/docs/syscoin-42-upgrade-guide>
 
+If you are building syscoin then make sure you use `make install` to ensure the binaries are copied to your binary path (so that sysgeth can be found during runtime by syscoind)
+
 Compatibility
 ==============
 
