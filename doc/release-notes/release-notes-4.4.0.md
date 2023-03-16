@@ -24,7 +24,7 @@ How to Upgrade
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
 installer (on Windows) or just copy over `/Applications/Syscoin-Qt` (on Mac)
-or `syscoind`/`syscoin-qt` (on Linux).
+or `syscoind`/`syscoin-qt` (on Linux). Also make sure you copy `sysgeth` as well to the same place your other binaries are placed.
 
 If you are upgrading from a version older than 4.2.0, PLEASE READ: <https://syscoin.readme.io/v4.2.0/docs/syscoin-42-upgrade-guide>
 
