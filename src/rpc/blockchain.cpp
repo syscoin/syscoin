@@ -1033,6 +1033,65 @@ static std::optional<kernel::CCoinsStats> GetUTXOStats(CCoinsView* view, node::B
     return kernel::ComputeUTXOStats(hash_type, view, blockman, interruption_point);
 }
 
+static RPCHelpMan getutxostats()
+{
+    return RPCHelpMan{"getutxostats",
+                "\nReturns statistics about the unspent transaction output (UTXO) set\n",
+                {},
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "height", "The current block height (index)"},
+                        {RPCResult::Type::NUM, "transactions", "The number of transactions with unspent outputs"},
+                        {RPCResult::Type::NUM, "txouts", "The number of unspent transaction outputs"},
+                        {RPCResult::Type::NUM, "bogosize", "A meaningless metric for UTXO set size"},
+                        {RPCResult::Type::STR_AMOUNT, "total_amount", "The total amount"},
+                        {RPCResult::Type::NUM, "total_addresses", "The total number of addresses holding coins"},
+                    },
+                },
+                RPCExamples{
+                    HelpExampleCli("getutxostats", "")
+            + HelpExampleRpc("getutxostats", "")
+                },
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+    Chainstate& active_chainstate = chainman.ActiveChainstate();
+    active_chainstate.ForceFlushStateToDisk();
+
+    CCoinsView* coins_view;
+    node::BlockManager* blockman;
+    const CBlockIndex* pindex{nullptr};
+
+    {
+        LOCK(::cs_main);
+        coins_view = &active_chainstate.CoinsDB();
+        blockman = &active_chainstate.m_blockman;
+        pindex = blockman->LookupBlockIndex(coins_view->GetBestBlock());
+    }
+
+    const std::optional<CCoinsStats> maybe_stats = GetUTXOStats(coins_view, *blockman, CoinStatsHashType::HASH_SERIALIZED, node.rpc_interruption_point, pindex, true);
+    if (!maybe_stats.has_value()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
+    }
+
+    const CCoinsStats& stats = maybe_stats.value();
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("height", int(stats.nHeight));
+    ret.pushKV("transactions", int64_t(stats.nTransactions));
+    ret.pushKV("txouts", int64_t(stats.nTransactionOutputs));
+    ret.pushKV("bogosize", int64_t(stats.nBogoSize));
+    if (stats.total_amount.has_value()) {
+        ret.pushKV("total_amount", ValueFromAmount(stats.total_amount.value()));
+    }
+    ret.pushKV("total_addresses", int64_t(stats.uniqueScriptPubKeys.size()));
+
+    return ret;
+},
+    };
+}
+
 static RPCHelpMan gettxoutsetinfo()
 {
     return RPCHelpMan{"gettxoutsetinfo",
@@ -2925,6 +2984,7 @@ void RegisterBlockchainRPCCommands(CRPCTable& t)
         {"blockchain", &getblockfilter},
         // SYSCOIN
         {"blockchain", &getchainlocks},
+        {"blockchain", &getutxostats},
         {"hidden", &invalidateblock},
         {"hidden", &reconsiderblock},
         {"hidden", &waitfornewblock},

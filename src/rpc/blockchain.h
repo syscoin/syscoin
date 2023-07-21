@@ -5,6 +5,8 @@
 #ifndef SYSCOIN_RPC_BLOCKCHAIN_H
 #define SYSCOIN_RPC_BLOCKCHAIN_H
 
+#include <kernel/coinstats.h>
+
 #include <consensus/amount.h>
 #include <core_io.h>
 #include <streams.h>

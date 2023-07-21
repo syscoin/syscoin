@@ -16,6 +16,7 @@ Test the following RPCs:
     - getblock
     - getblockhash
     - getbestblockhash
+    - getutxostats
     - verifychain
 
 Tests correspond to code in rpc/blockchain.cpp.
@@ -86,6 +87,7 @@ class BlockchainTest(SyscoinTestFramework):
         self._test_getblockheader()
         self._test_getdifficulty()
         self._test_getnetworkhashps()
+        self._test_getutxostats()
         self._test_stopatheight()
         self._test_waitforblockheight()
         self._test_getblock()
@@ -595,6 +597,24 @@ class BlockchainTest(SyscoinTestFramework):
         assert 'previousblockhash' not in node.getblock(node.getblockhash(0))
         assert 'nextblockhash' not in node.getblock(node.getbestblockhash())
 
+    def _test_getutxostats(self):
+        self.log.info("Test getutxostats")
+        node = self.nodes[0]
+
+        # Call getutxostats with default arguments
+        res = node.getutxostats()
+
+        # Check that the result includes the expected keys
+        expected_keys = ['height', 'transactions', 'txouts', 'bogosize', 'total_amount', 'total_addresses']
+        assert_equal(sorted(res.keys()), sorted(expected_keys))
+
+        # Check that the values are of the correct types
+        assert isinstance(res['height'], int)
+        assert isinstance(res['transactions'], int)
+        assert isinstance(res['txouts'], int)
+        assert isinstance(res['bogosize'], int)
+        assert isinstance(res['total_amount'], Decimal)
+        assert isinstance(res['total_addresses'], int)
 
 if __name__ == '__main__':
     BlockchainTest().main()

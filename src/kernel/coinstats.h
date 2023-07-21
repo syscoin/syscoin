@@ -39,6 +39,9 @@ struct CCoinsStats {
     //! The total amount, or nullopt if an overflow occurred calculating it
     std::optional<CAmount> total_amount{0};
 
+    //! The set of unique scriptPubKeys in the UTXO set. Used to estimate the number of addresses holding coins.
+    std::set<CScript> uniqueScriptPubKeys;
+
     //! The number of coins contained.
     uint64_t coins_count{0};
 

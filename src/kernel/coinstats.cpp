@@ -142,6 +142,9 @@ static bool ComputeUTXOStats(CCoinsView* view, CCoinsStats& stats, T hash_obj, c
             prevkey = key.hash;
             outputs[key.n] = std::move(coin);
             stats.coins_count++;
+
+            // Add the scriptPubKey to the set of unique scriptPubKeys
+            stats.uniqueScriptPubKeys.insert(coin.out.scriptPubKey);
         } else {
             return error("%s: unable to read value", __func__);
         }
