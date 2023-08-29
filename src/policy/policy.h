@@ -91,7 +91,7 @@ static const unsigned int MANDATORY_SCRIPT_VERIFY_FLAGS = SCRIPT_VERIFY_P2SH;
 /**
  * Standard script verification flags that standard transactions will comply
  * with. However we do not ban/disconnect nodes that forward txs violating
- * these rules, for better forwards and backwards compatability.
+ * these rules, for better forwards and backwards compatibility.
  */
 static constexpr unsigned int STANDARD_SCRIPT_VERIFY_FLAGS{MANDATORY_SCRIPT_VERIFY_FLAGS |
                                                              SCRIPT_VERIFY_DERSIG |
@@ -133,7 +133,7 @@ bool IsStandard(const CScript& scriptPubKey, const std::optional<unsigned>& max_
 static constexpr decltype(CTransaction::nVersion) TX_MAX_STANDARD_VERSION{2};
 // SYSCOIN consensus is driven by version, the highest version is SYSCOIN_TX_VERSION_NEVM_DATA_SHA3(137)
 static constexpr decltype(CTransaction::nVersion) TX_MAX_SYSCOIN_STANDARD_VERSION{137};
-    
+
 
 /**
 * Check for standard transaction types
