@@ -19,6 +19,7 @@
 #include <util/ranges.h>
 #include <common/args.h>
 #include <logging.h>
+#include <unordered_lru_cache.h>
 namespace llmq
 {
 bool CLLMQUtils::IsV19Active(const int nHeight)
@@ -86,12 +87,12 @@ static bool EvalSpork(int64_t spork_value)
 
 bool CLLMQUtils::IsAllMembersConnectedEnabled()
 {
-    return EvalSpork(sporkManager.GetSporkValue(SPORK_21_QUORUM_ALL_CONNECTED));
+    return EvalSpork(sporkManager->GetSporkValue(SPORK_21_QUORUM_ALL_CONNECTED));
 }
 
 bool CLLMQUtils::IsQuorumPoseEnabled()
 {
-    return EvalSpork(sporkManager.GetSporkValue(SPORK_23_QUORUM_POSE));
+    return EvalSpork(sporkManager->GetSporkValue(SPORK_23_QUORUM_POSE));
 }
 
 uint256 CLLMQUtils::DeterministicOutboundConnection(const uint256& proTxHash1, const uint256& proTxHash2)
@@ -206,6 +207,7 @@ std::set<size_t> CLLMQUtils::CalcDeterministicWatchConnections(const CBlockIndex
 
 bool CLLMQUtils::EnsureQuorumConnections(const CBlockIndex *pQuorumBaseBlockIndex, const uint256& myProTxHash, CConnman& connman)
 {
+    if (!fMasternodeMode && !CLLMQUtils::IsWatchQuorumsEnabled()) return false;
     auto members = GetAllQuorumMembers(pQuorumBaseBlockIndex);
     bool isMember = std::find_if(members.begin(), members.end(), [&](const auto& dmn) { return dmn->proTxHash == myProTxHash; }) != members.end();
 
@@ -267,7 +269,7 @@ void CLLMQUtils::AddQuorumProbeConnections(const CBlockIndex *pQuorumBaseBlockIn
         if (dmn->proTxHash == myProTxHash) {
             continue;
         }
-        auto lastOutbound = mmetaman.GetMetaInfo(dmn->proTxHash)->GetLastOutboundSuccess();
+        auto lastOutbound = mmetaman->GetMetaInfo(dmn->proTxHash)->GetLastOutboundSuccess();
         // re-probe after 10 minutes so that the "good connection" check in the DKG doesn't fail just because we're on
         // the brink of timeout
         if (curTime - lastOutbound > 10 * 60) {

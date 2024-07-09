@@ -30,7 +30,7 @@ namespace llmq
 CQuorumBlockProcessor* quorumBlockProcessor;
 
 
-CQuorumBlockProcessor::CQuorumBlockProcessor(const DBParams& db_commitment_params, const DBParams& db_inverse_height_params, PeerManager &_peerman, ChainstateManager& _chainman) : peerman(_peerman), chainman(_chainman), m_commitment_evoDb(db_commitment_params, 10), m_inverse_height_evoDb(db_inverse_height_params, 10)
+CQuorumBlockProcessor::CQuorumBlockProcessor(const DBParams& db_commitment_params, PeerManager &_peerman, ChainstateManager& _chainman) : peerman(_peerman), chainman(_chainman), m_commitment_evoDb(db_commitment_params, 10)
 {
 }
 
@@ -119,6 +119,7 @@ void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strC
         if(bReturn) {
             LOCK(cs_main);
             peerman.ForgetTxHash(pfrom->GetId(), hash);
+            return;
         }
 
        if (!qc.Verify(pQuorumBaseBlockIndex, true)) {
@@ -238,7 +239,6 @@ bool CQuorumBlockProcessor::ProcessCommitment(int nHeight, const uint256& blockH
 
     // Store commitment in DB
     m_commitment_evoDb.WriteCache(quorumHash, std::make_pair(qc, blockHash));
-    m_inverse_height_evoDb.WriteCache(nHeight, pQuorumBaseBlockIndex->nHeight);
 
     {
         LOCK(minableCommitmentsCs);
@@ -268,7 +268,6 @@ bool CQuorumBlockProcessor::UndoBlock(const CBlock& block, const CBlockIndex* pi
     }
 
     m_commitment_evoDb.EraseCache(qc.quorumHash);
-    m_inverse_height_evoDb.EraseCache(pindex->nHeight);
 
     // if a reorg happened, we should allow to mine this commitment later
     AddMineableCommitment(qc);
@@ -313,7 +312,6 @@ bool CQuorumBlockProcessor::IsCommitmentRequired(int nHeight) const
 
     // did we already mine a non-null commitment for this session?
     bool hasMinedCommitment = !quorumHash.IsNull() && HasMinedCommitment(quorumHash);
-
     return isMiningPhase && !hasMinedCommitment;
 }
 
@@ -345,30 +343,6 @@ CFinalCommitmentPtr CQuorumBlockProcessor::GetMinedCommitment(const uint256& quo
     return std::make_unique<CFinalCommitment>(p.first);
 }
 
-// The returned quorums are in reversed order, so the most recent one is at index 0
-std::vector<const CBlockIndex*> CQuorumBlockProcessor::GetMinedCommitmentsUntilBlock(const CBlockIndex* pindex, size_t maxCount)
-{
-    int currentHeight = pindex->nHeight;
-    std::vector<const CBlockIndex*> ret;
-    ret.reserve(maxCount);
-    while (currentHeight >= 0 && ret.size() < maxCount) {
-        int quorumHeight;
-        if(!m_inverse_height_evoDb.ExistsCache(currentHeight)) {
-            currentHeight--;
-            continue;
-        }
-        if (!m_inverse_height_evoDb.ReadCache(currentHeight, quorumHeight)) {
-            break;
-        }
-
-        auto pQuorumBaseBlockIndex = pindex->GetAncestor(quorumHeight);
-        assert(pQuorumBaseBlockIndex);
-        ret.emplace_back(pQuorumBaseBlockIndex);
-        currentHeight--;
-    }
-    return ret;
-}
-
 bool CQuorumBlockProcessor::HasMineableCommitment(const uint256& hash) const
 {
     LOCK(minableCommitmentsCs);
@@ -377,26 +351,29 @@ bool CQuorumBlockProcessor::HasMineableCommitment(const uint256& hash) const
 
 void CQuorumBlockProcessor::AddMineableCommitment(const CFinalCommitment& fqc)
 {
-    bool relay = false;
-    uint256 commitmentHash = ::SerializeHash(fqc);
+    const uint256 commitmentHash = ::SerializeHash(fqc);
 
-    {
+    const bool relay = [&]() {
         LOCK(minableCommitmentsCs);
-        auto ins = minableCommitmentsByQuorum.emplace(fqc.quorumHash, commitmentHash);
-        if (ins.second) {
-            minableCommitments.emplace(commitmentHash, fqc);
-            relay = true;
+
+        auto k = fqc.quorumHash;
+        auto [itInserted, successfullyInserted] = minableCommitmentsByQuorum.try_emplace(k, commitmentHash);
+        if (successfullyInserted) {
+            minableCommitments.try_emplace(commitmentHash, fqc);
+            return true;
         } else {
-            const auto& oldFqc = minableCommitments.at(ins.first->second);
+            auto& insertedQuorumHash = itInserted->second;
+            const auto& oldFqc = minableCommitments.at(insertedQuorumHash);
             if (fqc.CountSigners() > oldFqc.CountSigners()) {
                 // new commitment has more signers, so override the known one
-                ins.first->second = commitmentHash;
-                minableCommitments.erase(ins.first->second);
-                minableCommitments.emplace(commitmentHash, fqc);
-                relay = true;
+                insertedQuorumHash = commitmentHash;
+                minableCommitments.erase(insertedQuorumHash);
+                minableCommitments.try_emplace(commitmentHash, fqc);
+                return true;
             }
         }
-    }
+        return false;
+    }();
 
     // We only relay the new commitment if it's new or better then the old one
     if (relay) {
@@ -446,7 +423,7 @@ bool CQuorumBlockProcessor::GetMinableCommitment(int nHeight, CFinalCommitment& 
     return true;
 }
 bool CQuorumBlockProcessor::FlushCacheToDisk() {
-    return m_commitment_evoDb.FlushCacheToDisk() && m_inverse_height_evoDb.FlushCacheToDisk();
+    return m_commitment_evoDb.FlushCacheToDisk();
 }
 
 } // namespace llmq

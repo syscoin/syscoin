@@ -41,6 +41,10 @@ CDKGSessionManager::CDKGSessionManager(CBLSWorker& blsWorker, CConnman &_connman
 
 void CDKGSessionManager::StartThreads()
 {
+    if (!fMasternodeMode && !CLLMQUtils::IsWatchQuorumsEnabled()) {
+        // Regular nodes do not care about any DKG internals, bail out
+        return;
+    }
     dkgSessionHandler->StartThread();
 }
 
@@ -320,7 +324,7 @@ void CDKGSessionManager::CleanupOldContributions(ChainstateManager& chainstate) 
 
 bool IsQuorumDKGEnabled()
 {
-    return sporkManager.IsSporkActive(SPORK_17_QUORUM_DKG_ENABLED);
+    return sporkManager->IsSporkActive(SPORK_17_QUORUM_DKG_ENABLED);
 }
 
 } // namespace llmq
