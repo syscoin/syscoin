@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <span>
 #include <type_traits>
 
 #ifdef DEBUG
