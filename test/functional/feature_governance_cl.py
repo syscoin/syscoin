@@ -5,7 +5,6 @@
 """Tests governance checks can be skipped for blocks covered by the best chainlock."""
 
 import json
-import time
 from test_framework.test_framework import DashTestFramework
 from test_framework.util import assert_equal, force_finish_mnsync, satoshi_round
 
@@ -18,7 +17,6 @@ class SyscoinGovernanceTest (DashTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
-        self.skip_if_no_bdb()
 
     def prepare_object(self, object_type, parent_hash, creation_time, revision, name, amount, payment_address):
         proposal_rev = revision
@@ -130,8 +128,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         # Move remaining n blocks until the next Superblock
         for _ in range(n - 1):
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            self.bump_mocktime(10, nodes=self.nodes[0:5])
-            time.sleep(0.1)
+            self.bump_mocktime(156, nodes=self.nodes[0:5])
             self.sync_blocks(self.nodes[0:5])
 
         self.log.info("Wait for new trigger and votes on non-isolated nodes")
@@ -140,7 +137,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         # Mine superblock
         cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 6, sync_fun=self.no_op)
-        #self.bump_mocktime(156, nodes=self.nodes[0:5])
+        self.bump_mocktime(156, nodes=self.nodes[0:5])
         self.sync_blocks(self.nodes[0:5])
         self.wait_for_chainlocked_block(self.nodes[0], cl)
 
