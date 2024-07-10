@@ -102,19 +102,16 @@ static RPCHelpMan gobject_list_prepared()
     }
     // Get a list of all prepared governance objects stored in the wallet
     LOCK(pwallet->cs_wallet);
-    std::vector<const CGovernanceObject*> vecObjects = pwallet->GetGovernanceObjects();
+    std::vector<const Governance::Object*> vecObjects = pwallet->GetGovernanceObjects();
     // Sort the vector by the object creation time/hex data
-    std::sort(vecObjects.begin(), vecObjects.end(), [](const CGovernanceObject* a, const CGovernanceObject* b) {
-        bool fGreater = a->GetCreationTime() > b->GetCreationTime();
-        bool fEqual = a->GetCreationTime() == b->GetCreationTime();
-        bool fHexGreater = a->GetDataAsHexString() > b->GetDataAsHexString();
-        return fGreater || (fEqual && fHexGreater);
+    std::sort(vecObjects.begin(), vecObjects.end(), [](const Governance::Object* a, const Governance::Object* b) {
+        if (a->time != b->time) return a->time < b->time;
+        return a->GetDataAsHexString() < b->GetDataAsHexString();
     });
 
     UniValue jsonArray(UniValue::VARR);
-    auto it = vecObjects.rbegin() + std::max<int>(0, ((int)vecObjects.size()) - nCount);
-    while (it != vecObjects.rend()) {
-        jsonArray.push_back((*it++)->ToJson());
+    for (auto it = vecObjects.begin() + std::max<int>(0, vecObjects.size() - nCount); it != vecObjects.end(); ++it) {
+        jsonArray.push_back((*it)->ToJson());
     }
 
     return jsonArray;
@@ -219,7 +216,7 @@ static RPCHelpMan gobject_prepare()
         throw JSONRPCError(RPC_INTERNAL_ERROR, err);
     }
 
-    if (!pwallet->WriteGovernanceObject({hashParent, nRevision, nTime, tx->GetHash(), strDataHex})) {
+    if (!pwallet->WriteGovernanceObject(Governance::Object{hashParent, nRevision, nTime, tx->GetHash(), strDataHex})) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "WriteGovernanceObject failed");
     }
 

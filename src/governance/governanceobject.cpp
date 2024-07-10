@@ -531,12 +531,7 @@ bool CGovernanceObject::IsCollateralValid(ChainstateManager &chainman, std::stri
     for (const auto& output : txCollateral->vout) {
         LogPrint(BCLog::GOBJECT, "CGovernanceObject::IsCollateralValid -- txout = %s, output.nValue = %lld, output.scriptPubKey = %s\n",
                     output.ToString(), output.nValue, ScriptToAsmStr(output.scriptPubKey, false));
-        if (!output.scriptPubKey.IsUnspendable()) {
-            strError = strprintf("Invalid Script %s", txCollateral->ToString());
-            LogPrintf("CGovernanceObject::IsCollateralValid -- %s\n", strError);
-            return false;
-        }
-        if (output.scriptPubKey == findScript && output.nValue >= nMinFee) {
+        if (output.scriptPubKey.IsUnspendable() && output.scriptPubKey == findScript && output.nValue >= nMinFee) {
             foundOpReturn = true;
         }
     }

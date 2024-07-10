@@ -697,7 +697,7 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
     if (!sb_opt.has_value()) return std::nullopt;
 
     //TODO: Check if nHashParentIn, nRevision and nCollateralHashIn are correct
-    //LOCK2(cs_main, cs);
+    LOCK2(cs_main, cs);
 
     // Check if identical trigger (equal DataHash()) is already created (signed by other masternode)
     CGovernanceObject gov_sb(uint256(), 1, TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime()), uint256(), sb_opt.value().GetHexStrData());

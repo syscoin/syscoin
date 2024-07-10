@@ -20,7 +20,11 @@ class uint160;
 class uint256;
 struct CBlockLocator;
 // SYSCOIN
-class CGovernanceObject;
+namespace Governance
+{
+    class Object;
+} // namespace Governance
+
 namespace wallet {
 class CKeyPool;
 class CMasterKey;
@@ -296,7 +300,7 @@ public:
     bool TxnAbort();
     // SYSCOIN
     //! Write a CGovernanceObject to the database
-    bool WriteGovernanceObject(const CGovernanceObject& obj);
+    bool WriteGovernanceObject(const Governance::Object& obj);
 private:
     std::unique_ptr<DatabaseBatch> m_batch;
     WalletDatabase& m_database;

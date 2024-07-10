@@ -28,7 +28,7 @@
 #include <optional>
 #include <string>
 // SYSCOIN
-#include <governance/governanceobject.h>
+#include <governance/governancecommon.h>
 
 namespace wallet {
 namespace DBKeys {
@@ -257,7 +257,7 @@ bool WalletBatch::WriteDescriptorDerivedCache(const CExtPubKey& xpub, const uint
     return WriteIC(std::make_pair(std::make_pair(DBKeys::WALLETDESCRIPTORCACHE, desc_id), std::make_pair(key_exp_index, der_index)), ser_xpub);
 }
 // SYSCOIN
-bool WalletBatch::WriteGovernanceObject(const CGovernanceObject& obj)
+bool WalletBatch::WriteGovernanceObject(const Governance::Object& obj)
 {
     return WriteIC(std::make_pair(DBKeys::GOBJECT, obj.GetHash()), obj, false);
 }
@@ -1082,7 +1082,7 @@ static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vecto
     LoadResult gobject_res = LoadRecords(pwallet, batch, DBKeys::GOBJECT,
         [] (CWallet* pwallet, DataStream& key, CDataStream& value, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet) {
         uint256 nObjectHash;
-        CGovernanceObject obj;
+        Governance::Object obj;
         key >> nObjectHash;
         value >> obj;
         if (obj.GetHash() != nObjectHash) {

@@ -157,6 +157,7 @@ public:
         int v19startblock{0};
         int dip3startblock{432};
         int dip3enforcement{432};
+
     };
     // SYSCOIN
     struct MainNetOptions {
@@ -176,8 +177,6 @@ public:
     bool RequireRoutableExternalIP() const { return fRequireRoutableExternalIP; }
     /** How long to wait until we allow retrying of a LLMQ connection  */
     int LLMQConnectionRetryTimeout() const { return nLLMQConnectionRetryTimeout; }
-    void UpdateDIP3Parameters(int nActivationHeight, int nEnforcementHeight);
-    void UpdateDIP19Parameters(int nActivationHeight);
     virtual ~CChainParams() {}
 protected:
     CChainParams() {}

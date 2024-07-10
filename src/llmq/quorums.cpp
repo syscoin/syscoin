@@ -287,26 +287,21 @@ std::vector<CQuorumCPtr> CQuorumManager::ScanQuorums(const CBlockIndex* pindexSt
     const CBlockIndex* pIndex = pindexStart;
     // Adjust pindexStart to the nearest previous block that aligns with the dkgInterval boundary
     int offset = pIndex->nHeight % nDKGInterval;
-    LogPrintf("CQuorumManager::ScanQuorums starting to look at pIndex height %d offset to dkg interval %d\n", pIndex->nHeight, offset);
     if (offset != 0) {
         pIndex = pIndex->GetAncestor(pIndex->nHeight - offset);
     }
-    LogPrintf("CQuorumManager::ScanQuorums new index %d\n", pIndex->nHeight);
     {
         LOCK(cs_quorums);
         // Iterate through blocks using dkgInterval to gather the required number of quorums
         while (vecResultQuorums.size() < nCountRequested && pIndex != nullptr) {
             CQuorumCPtr quorum = GetQuorum(pIndex);
-            LogPrintf("CQuorumManager::ScanQuorums get quorum at %d\n", pIndex->nHeight);
             if (quorum != nullptr) {
                 vecResultQuorums.emplace_back(quorum);
-                LogPrintf("CQuorumManager::ScanQuorums, adding quorum size %d vs nCountRequested %d\n", vecResultQuorums.size(), nCountRequested);
             }
             // Move to the previous block at the interval of nDKGInterval
             pIndex = pIndex->GetAncestor(pIndex->nHeight - nDKGInterval);
         }
     }
-    LogPrintf("CQuorumManager::ScanQuorums return\n");
     return vecResultQuorums;
 }
 
