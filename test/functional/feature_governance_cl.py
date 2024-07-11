@@ -139,7 +139,7 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         self.log.info("Reconnect isolated node and confirm the next ChainLock will let it sync")
         self.reconnect_isolated_node(self.nodes[5], 0)
-        # Force isolated node to be fully synced so that it would not request gov objects when reconnected
+        # Force isolated node to be fully synced so that it will request gov objects when reconnected
         assert_equal(self.nodes[5].mnsync("status")["IsSynced"], False)
         force_finish_mnsync(self.nodes[5])
         self.generate(self.nodes[0], 1)
