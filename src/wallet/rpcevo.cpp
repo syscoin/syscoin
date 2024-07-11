@@ -811,6 +811,11 @@ static RPCHelpMan protx_update_service()
     FundSpecialTx(*pwallet, tx, ptx, feeSource);
 
     SignSpecialTxPayloadByHash(tx, ptx, keyOperator);
+    TxValidationState state;
+    if(!CheckHashSig(ptx, keyOperator.GetPublicKey(), state, true)) {
+        throw std::runtime_error("BLS signature verificiation failed");
+
+    }
     SetTxPayload(tx, ptx);
 
     return SignAndSendSpecialTx(request, *pwallet, tx);
