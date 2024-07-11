@@ -3461,11 +3461,10 @@ void Discover()
 
 void CConnman::SetNetworkActive(bool active)
 {
-    LogPrintf("%s: %s\n", __func__, active);
-
     if (fNetworkActive == active) {
         return;
     }
+    LogPrintf("%s: %s\n", __func__, active);
 
     fNetworkActive = active;
     // SYSCOIN Always call the Reset() if the network gets enabled/disabled to make sure the sync process
