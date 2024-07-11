@@ -2903,7 +2903,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         std::string strError;
         // add seniority to reward when checking for limit
         if (!fTestSetting && !IsBlockValueValid(block, pindex->nHeight, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
-            LogPrintf("ERROR: ConnectBlock(): coinbase pays too much (actual=%lld vs limit=%lld)\n", block.vtx[0]->GetValueOut(), blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet);
+            LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             // hack for feature_signet.py to pass which uses bitcoin blocks signed by the signet witness
             if(!fSigNet || pindex->nHeight > 100) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-amount");
