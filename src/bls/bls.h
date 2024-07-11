@@ -25,7 +25,7 @@
 #include <array>
 #include <mutex>
 #include <unistd.h>
-#include <logging.h>
+
 #include <atomic>
 
 namespace bls {
@@ -148,7 +148,6 @@ public:
     }
     bool SetHexStr(const std::string& str)
     {
-        LogPrintf("bls::bls_legacy_scheme.load() %d\n", bls::bls_legacy_scheme.load());
         return SetHexStr(str, bls::bls_legacy_scheme.load());
     }
     bool SetHexStr(const std::string& str, const bool specificLegacyScheme)
