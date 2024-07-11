@@ -106,17 +106,20 @@ public:
     void SetByteVector(Span<const uint8_t> vecBytes, const bool specificLegacyScheme)
     {
         if (vecBytes.size() != SerSize) {
+            LogPrintf("SetByteVector vecBytes.size() %d != SerSize %d\n", vecBytes.size(), SerSize);
             Reset();
             return;
         }
 
         if (ranges::all_of(vecBytes, [](uint8_t c) { return c == 0; })) {
+            LogPrintf("SetByteVector range 0 check failed\n");
             Reset();
         } else {
             try {
                 impl = ImplType::FromBytes(bls::Bytes(vecBytes.data(), vecBytes.size()), specificLegacyScheme);
                 fValid = true;
             } catch (...) {
+                LogPrintf("SetByteVector FromBytes failed\n");
                 Reset();
             }
         }
@@ -154,11 +157,13 @@ public:
     bool SetHexStr(const std::string& str, const bool specificLegacyScheme)
     {
         if (!IsHex(str)) {
+            LogPrintf("SetHexStr not hex\n");
             Reset();
             return false;
         }
         auto b = ParseHex(str);
         if (b.size() != SerSize) {
+            LogPrintf("SetHexStr b.size() not ser size %d\n", b.size(), SerSize);
             Reset();
             return false;
         }
