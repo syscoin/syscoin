@@ -145,7 +145,6 @@ static RPCHelpMan bls_generate()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext (request.context);
     CBLSSecretKey sk;
     sk.MakeNewKey();
     bool bls_legacy_scheme;
