@@ -693,7 +693,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
     def reconnect_isolated_node(self, node, node_num):
         node.setnetworkactive(True)
-        self.connect_nodes(node.index, node_num, peer_advertises_v2=False)
+        self.connect_nodes(node.index, node_num, wait_for_connect=False)
 
     def no_op(self):
         pass
