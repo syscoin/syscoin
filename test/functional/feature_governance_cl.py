@@ -114,10 +114,8 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         self.log.info("Vote proposals")
 
-        ret = self.nodes[0].gobject_vote_many(self.p0_hash, "funding", "yes")
-        self.log.info(f'ret {ret}')
-        ret = self.nodes[0].gobject_vote_many(self.p1_hash, "funding", "yes")
-        self.log.info(f'ret {ret}')
+        self.nodes[0].gobject_vote_many(self.p0_hash, "funding", "yes")
+        self.nodes[0].gobject_vote_many(self.p1_hash, "funding", "yes")
         assert_equal(self.nodes[0].gobject_get(self.p0_hash)["FundingResult"]["YesCount"], self.mn_count)
         assert_equal(self.nodes[0].gobject_get(self.p1_hash)["FundingResult"]["YesCount"], self.mn_count)
 

@@ -151,7 +151,7 @@ static RPCHelpMan bls_generate()
     bool bls_legacy_scheme;
     {
         LOCK(cs_main);
-        bls_legacy_scheme = !llmq::CLLMQUtils::IsV19Active(node.chainman->ActiveHeight());
+        bls_legacy_scheme = false;
         if (!request.params[0].isNull()) {
             bls_legacy_scheme = request.params[0].get_bool();
         }

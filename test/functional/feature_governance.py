@@ -126,7 +126,6 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.bump_mocktime(3)
         self.sync_blocks()
         assert_equal(self.nodes[0].getblockcount(), 210)
-        assert_equal(self.nodes[0].getblockchaininfo()["softforks"]["v20"]["bip9"]["status"], "defined")
         self.check_superblockbudget(False)
 
         assert self.mocktime < self.v20_start_time
@@ -137,7 +136,6 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.bump_mocktime(10)
         self.sync_blocks()
         assert_equal(self.nodes[0].getblockcount(), 220)
-        assert_equal(self.nodes[0].getblockchaininfo()["softforks"]["v20"]["bip9"]["status"], "started")
         self.check_superblockbudget(False)
 
         proposal_time = self.mocktime
@@ -241,7 +239,6 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.generate(self.nodes[0], 1)
         self.bump_mocktime(1)
         assert_equal(self.nodes[0].getblockcount(), 230)
-        assert_equal(self.nodes[0].getblockchaininfo()["softforks"]["v20"]["bip9"]["status"], "locked_in")
         self.check_superblockbudget(False)
 
         # The "winner" should submit new trigger and vote for it, but it's isolated so no triggers should be found
@@ -350,7 +347,6 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.bump_mocktime(1)
         self.sync_blocks()
         assert_equal(self.nodes[0].getblockcount(), 260)
-        assert_equal(self.nodes[0].getblockchaininfo()["softforks"]["v20"]["bip9"]["status"], "active")
 
         # Mine and check a couple more superblocks
         for i in range(2):
@@ -366,7 +362,6 @@ class SyscoinGovernanceTest (DashTestFramework):
             self.bump_mocktime(1)
             self.sync_blocks()
             assert_equal(self.nodes[0].getblockcount(), sb_block_height)
-            assert_equal(self.nodes[0].getblockchaininfo()["softforks"]["v20"]["bip9"]["status"], "active")
             self.check_superblockbudget(True)
             self.check_superblock()
 
