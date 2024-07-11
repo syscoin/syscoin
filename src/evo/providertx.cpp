@@ -80,7 +80,7 @@ template <typename ProTx>
 static bool CheckHashSig(const ProTx& proTx, const CKeyID& keyID, TxValidationState& state, bool fJustCheck)
 {
     if (!CHashSigner::VerifyHash(::SerializeHash(proTx), keyID, proTx.vchSig)) {
-        return FormatSyscoinErrorMessage(state, "bad-protx-sig", fJustCheck);
+        return FormatSyscoinErrorMessage(state, "bad-protx-hash-sig", fJustCheck);
     }
     return true;
 }
@@ -89,7 +89,7 @@ template <typename ProTx>
 static bool CheckStringSig(const ProTx& proTx, const CKeyID& keyID, TxValidationState& state, bool fJustCheck)
 {
     if (!CMessageSigner::VerifyMessage(keyID, proTx.vchSig, proTx.MakeSignString())) {
-        return FormatSyscoinErrorMessage(state, "bad-protx-sig", fJustCheck);
+        return FormatSyscoinErrorMessage(state, "bad-protx-message-sig", fJustCheck);
     }
     return true;
 }
@@ -98,7 +98,7 @@ template <typename ProTx>
 static bool CheckHashSig(const ProTx& proTx, const CBLSPublicKey& pubKey, TxValidationState& state, bool fJustCheck)
 {
     if (!proTx.sig.VerifyInsecure(pubKey, ::SerializeHash(proTx))) {
-        return FormatSyscoinErrorMessage(state, "bad-protx-sig", fJustCheck);
+        return FormatSyscoinErrorMessage(state, "bad-protx-bls-sig", fJustCheck);
     }
     return true;
 }
