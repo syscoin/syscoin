@@ -296,12 +296,14 @@ void CBLSSignature::SubInsecure(const CBLSSignature& o)
 bool CBLSSignature::VerifyInsecure(const CBLSPublicKey& pubKey, const uint256& hash, const bool specificLegacyScheme) const
 {
     if (!IsValid() || !pubKey.IsValid()) {
+        LogPrintf("isvalid false or pubkey isnt valid\n");
         return false;
     }
 
     try {
         return Scheme(specificLegacyScheme)->Verify(pubKey.impl, bls::Bytes(hash.begin(), hash.size()), impl);
     } catch (...) {
+        LogPrintf("VerifyInsecure exception\n");
         return false;
     }
 }
