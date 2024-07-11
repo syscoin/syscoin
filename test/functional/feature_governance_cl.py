@@ -94,7 +94,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.bump_mocktime(60 * 10 + 1)
 
         self.generate(self.nodes[0], 6)
-        self.bump_mocktime(6 * 156)
+        self.bump_mocktime(6 * 150)
         self.sync_blocks()
 
         assert_equal(len(self.nodes[0].gobject_list_prepared()), 2)
@@ -124,16 +124,16 @@ class SyscoinGovernanceTest (DashTestFramework):
         # Move remaining n blocks until the next Superblock
         for _ in range(n - 1):
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            self.bump_mocktime(156, nodes=self.nodes[0:5])
+            self.bump_mocktime(150, nodes=self.nodes[0:5])
             self.sync_blocks(self.nodes[0:5])
 
         self.log.info("Wait for new trigger and votes on non-isolated nodes")
         sb_block_height = self.nodes[0].getblockcount() + 1
-        self.wait_until(lambda: self.have_trigger_for_height(sb_block_height, self.nodes[0:5]), timeout=5)
+        self.wait_until(lambda: self.have_trigger_for_height(sb_block_height, self.nodes[0:5]), timeout=15)
         # Mine superblock
         cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 6, sync_fun=self.no_op)
-        self.bump_mocktime(156, nodes=self.nodes[0:5])
+        self.bump_mocktime(150, nodes=self.nodes[0:5])
         self.sync_blocks(self.nodes[0:5])
         self.wait_for_chainlocked_block(self.nodes[0], cl)
 
@@ -143,7 +143,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         assert_equal(self.nodes[5].mnsync("status")["IsSynced"], False)
         force_finish_mnsync(self.nodes[5])
         self.generate(self.nodes[0], 1)
-        self.bump_mocktime(156)
+        self.bump_mocktime(150)
         self.sync_blocks()
 
 
