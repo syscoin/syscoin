@@ -141,7 +141,17 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.reconnect_isolated_node(self.nodes[5], 0)
         # Force isolated node to be fully synced so that it will request gov objects when reconnected
         assert_equal(self.nodes[5].mnsync("status")["IsSynced"], False)
-        force_finish_mnsync(self.nodes[5])
+        self.sync_blocks()
+
+        # re-sync helper
+        def sync_gov(node):
+            self.bump_mocktime(1)
+            return node.mnsync("status")["IsSynced"]
+
+        # make sure isolated node is fully synced at this point
+        self.wait_until(lambda: sync_gov(self.nodes[5]))
+        # let all fulfilled requests expire for re-sync to work correctly
+        self.bump_mocktime(5 * 60)
         self.generate(self.nodes[0], 1)
         self.bump_mocktime(150)
         self.sync_blocks()

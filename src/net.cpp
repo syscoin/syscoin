@@ -3469,7 +3469,7 @@ void CConnman::SetNetworkActive(bool active)
     fNetworkActive = active;
     // SYSCOIN Always call the Reset() if the network gets enabled/disabled to make sure the sync process
     // gets a reset if its outdated..
-    masternodeSync.Reset();
+    masternodeSync.Reset(true);
     if (m_client_interface) {
         m_client_interface->NotifyNetworkActiveChanged(fNetworkActive);
     }
