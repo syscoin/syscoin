@@ -755,6 +755,7 @@ static RPCHelpMan protx_update_service()
     } else {
         ptx.nVersion = CProUpServTx::GetVersion(v19active);
     }
+    LogPrintf("protx_update_service v19active %d specific_legacy_bls_scheme %d ptx.nVersion %d\n", v19active, specific_legacy_bls_scheme, ptx.nVersion);
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
     std::optional<CService> addr = Lookup(request.params[1].get_str().c_str(), Params().GetDefaultPort(), false);
     if (!addr.has_value()) {
