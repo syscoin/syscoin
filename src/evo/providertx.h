@@ -18,7 +18,6 @@
 #include <kernel/cs_main.h>
 class CBlockIndex;
 class CCoinsViewCache;
-class CBLSPublicKey;
 class CProRegTx
 {
 public:
@@ -294,6 +293,5 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
 bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-template <typename ProTx>
-bool CheckHashSig(const ProTx& proTx, const CBLSPublicKey& pubKey, TxValidationState& state, bool fJustCheck);
+
 #endif // SYSCOIN_EVO_PROVIDERTX_H

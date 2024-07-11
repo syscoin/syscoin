@@ -95,7 +95,7 @@ static bool CheckStringSig(const ProTx& proTx, const CKeyID& keyID, TxValidation
 }
 
 template <typename ProTx>
-bool CheckHashSig(const ProTx& proTx, const CBLSPublicKey& pubKey, TxValidationState& state, bool fJustCheck)
+static bool CheckHashSig(const ProTx& proTx, const CBLSPublicKey& pubKey, TxValidationState& state, bool fJustCheck)
 {
     if (!proTx.sig.VerifyInsecure(pubKey, ::SerializeHash(proTx))) {
         return FormatSyscoinErrorMessage(state, "bad-protx-bls-sig", fJustCheck);
