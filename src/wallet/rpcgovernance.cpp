@@ -15,6 +15,7 @@
 #include <wallet/rpc/wallet.h>
 #include <util/result.h>
 #include <governance/governance.h>
+#include <index/txindex.h>
 using namespace wallet;
 UniValue VoteWithMasternodes(const std::map<uint256, CKey>& keys,
                              const uint256& hash, vote_signal_enum_t eVoteSignal,
@@ -183,6 +184,10 @@ static RPCHelpMan gobject_prepare()
 
     if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Trigger objects need not be prepared (however only masternodes can create them)");
+    }
+
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
     }
 
     LOCK(pwallet->cs_wallet);

@@ -340,6 +340,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "protx_revoke", 2, "reason" },
     { "protx_revoke", 4, "legacy" },
     { "quorum_list", 0, "count" },
+    { "gettxchainlocks", 0, "txids" },
     { "quorum_info", 1, "includeSkShare" },
     { "quorum_dkgstatus", 0, "detail_level" },
     { "quorum_memberof", 1, "scanQuorumsCount" },

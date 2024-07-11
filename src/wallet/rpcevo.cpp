@@ -32,6 +32,7 @@
 #include <wallet/rpc/wallet.h>
 #include <llmq/quorums_utils.h>
 #include <common/args.h>
+#include <index/txindex.h>
 using namespace wallet;
 static CKeyID ParsePubKeyIDFromAddress(const std::string& strAddress, const std::string& paramName)
 {
@@ -1120,6 +1121,9 @@ static RPCHelpMan protx_list_wallet()
     if (wallet)
         pwallet = wallet.get();
 
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
     UniValue ret(UniValue::VARR);
 
     if (!pwallet) {

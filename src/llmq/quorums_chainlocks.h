@@ -29,6 +29,13 @@ public:
     std::vector<bool> signers;
 
 public:
+    CChainLockSig(int32_t nHeight, const uint256& blockHash, const CBLSSignature& sig, const std::vector<bool> signers) :
+        nHeight(nHeight),
+        blockHash(blockHash),
+        sig(sig),
+        signers(signers)
+    {}
+    CChainLockSig() = default;
     SERIALIZE_METHODS(CChainLockSig, obj) {
         READWRITE(obj.nHeight, obj.blockHash, obj.sig);
         READWRITE(DYNBITSET(obj.signers));
@@ -103,7 +110,7 @@ public:
     bool HasChainLock(int nHeight, const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool HasConflictingChainLock(int nHeight, const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void SetToPreviousChainLock() EXCLUSIVE_LOCKS_REQUIRED(!cs);
-
+    bool VerifyAggregatedChainLock(const CChainLockSig& clsig, const CBlockIndex* pindexScan) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     // these require locks to be held already
     bool InternalHasChainLock(int nHeight, const uint256& blockHash) const EXCLUSIVE_LOCKS_REQUIRED(cs);
@@ -111,7 +118,6 @@ private:
 
     bool TryUpdateBestChainLock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool VerifyChainLockShare(const CChainLockSig& clsig, const CBlockIndex* pindexScan, const uint256& idIn, std::pair<int, CQuorumCPtr>& ret) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool VerifyAggregatedChainLock(const CChainLockSig& clsig, const CBlockIndex* pindexScan) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void Cleanup() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };
 

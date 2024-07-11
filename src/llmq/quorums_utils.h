@@ -92,6 +92,24 @@ public:
         }
         return HexStr(vBytes);
     }
+
+    static std::optional<std::vector<bool>> HexStrToBits(const std::string& hex, size_t expectedBits) {
+        const auto vBytes{TryParseHex<uint8_t>(hex)};
+        if (!vBytes) {
+            return std::nullopt;
+        }
+        std::vector<bool> vBits(expectedBits);
+        for (size_t i = 0; i < vBytes->size(); ++i) {
+            for (size_t bit = 0; bit < 8; ++bit) {
+                size_t bitIndex = i * 8 + bit;
+                if (bitIndex < expectedBits) {
+                    vBits[bitIndex] = ((*vBytes)[i] >> bit) & 1;
+                }
+            }
+        }
+        return vBits;
+    }
+
 };
 
 } // namespace llmq

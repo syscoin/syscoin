@@ -16,11 +16,14 @@
 #include <llmq/quorums_dkgsession.h>
 #include <llmq/quorums_signing.h>
 #include <llmq/quorums_signing_shares.h>
+#include <llmq/quorums_chainlocks.h>
+#include <llmq/quorums_utils.h>
 #include <rpc/util.h>
 #include <net.h>
 #include <rpc/blockchain.h>
 #include <node/context.h>
 #include <rpc/server_util.h>
+#include <index/txindex.h>
 static RPCHelpMan quorum_list()
 {
     return RPCHelpMan{"quorum_list",
@@ -549,6 +552,214 @@ static RPCHelpMan quorum_dkgsimerror()
     };
 } 
 
+
+static RPCHelpMan verifychainlock()
+{
+    return RPCHelpMan{"verifychainlock",
+        "\nTest if a quorum signature is valid for a ChainLock.\n",
+        {
+            {"blockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the ChainLock."},
+            {"signature", RPCArg::Type::STR, RPCArg::Optional::NO, "The signature of the ChainLock."},
+            {"signers", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The quorum signers of the ChainLock."}
+        },
+        RPCResult{RPCResult::Type::ANY, "", ""},
+        RPCExamples{
+                HelpExampleCli("verifychainlock", "0x0 0x0 0x0")
+            + HelpExampleRpc("verifychainlock", "\"0x0\", \"0x0\", \"0x0\"")
+        },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    const uint256 nBlockHash(ParseHashV(request.params[0], "blockHash"));
+
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    const ChainstateManager& chainman = EnsureChainman(node);
+
+    int nBlockHeight;
+    const CBlockIndex* pIndex = WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(nBlockHash));
+    if (pIndex == nullptr) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "blockHash not found");
+    }
+    nBlockHeight = pIndex->nHeight;
+
+
+    CBLSSignature sig;
+    if (!sig.SetHexStr(request.params[1].get_str())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
+    }
+    
+    const auto signers = llmq::CLLMQUtils::HexStrToBits(request.params[2].get_str(), Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount);
+    if (!signers) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signers");
+    }
+    return llmq::chainLocksHandler->VerifyAggregatedChainLock(llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers), pIndex);
+},
+    };
+} 
+
+
+static RPCHelpMan gettxchainlocks()
+{
+    return RPCHelpMan{
+        "gettxchainlocks",
+        "\nReturns the block height at which each transaction was mined, and indicates whether it is in the mempool, ChainLocked, or neither.\n",
+        {
+            {"txids", RPCArg::Type::ARR, RPCArg::Optional::NO, "The transaction ids (no more than 100)",
+                {
+                    {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "A transaction hash"},
+                },
+            },
+        },
+        RPCResult{
+            RPCResult::Type::ARR, "", "Response is an array with the same size as the input txids",
+            {
+                {RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::NUM, "height", "The block height"},
+                    {RPCResult::Type::BOOL, "chainlock", "The state of the corresponding block ChainLock"},
+                    {RPCResult::Type::BOOL, "mempool", "Mempool status for the transaction"},
+                }},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("gettxchainlocks", "'[\"mytxid\",...]'")
+        + HelpExampleRpc("gettxchainlocks", "[\"mytxid\",...]")
+        },
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    const ChainstateManager& chainman = EnsureChainman(node);
+
+    UniValue result_arr(UniValue::VARR);
+    UniValue txids = request.params[0].get_array();
+    if (txids.size() > 100) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Up to 100 txids only");
+    }
+
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
+    LOCK(cs_main);
+    for (size_t idx = 0;idx < txids.size();idx++) {
+        UniValue result(UniValue::VOBJ);
+        const uint256 txid(ParseHashV(txids[idx], "txid"));
+        if (txid == Params().GenesisBlock().hashMerkleRoot) {
+            // Special exception for the genesis block coinbase transaction
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The genesis block coinbase is not considered an ordinary transaction and cannot be retrieved");
+        }
+
+        uint256 hash_block;
+        const CBlockIndex* pindex{nullptr};
+        uint32_t nBlockHeight{0};
+        if(pblockindexdb->ReadBlockHeight(txid, nBlockHeight)) {	
+            pindex = chainman.ActiveChain()[nBlockHeight];	
+        }
+        const auto tx_ref = GetTransaction(pindex, node.mempool.get(), txid, hash_block, chainman.m_blockman);
+        if (tx_ref == nullptr) {
+            result.pushKV("height", 0);
+            result.pushKV("chainlock", false);
+            result.pushKV("mempool", false);
+            result_arr.push_back(result);
+            continue;
+        }
+        result.pushKV("height", nBlockHeight);
+        result.pushKV("chainlock", pindex? llmq::chainLocksHandler->HasChainLock(nBlockHeight, hash_block): false);
+        result.pushKV("mempool", pindex == nullptr);
+        result_arr.push_back(result);
+    }
+    return result_arr;
+},
+    };
+}
+
+static RPCHelpMan getbestchainlock()
+{
+    return RPCHelpMan{"getbestchainlock",
+        "\nReturns information about the best ChainLock. Throws an error if there is no known ChainLock yet.",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "blockhash", "The block hash hex-encoded"},
+                {RPCResult::Type::NUM, "height", "The block height or index"},
+                {RPCResult::Type::STR_HEX, "signature", "The ChainLock's BLS signature"},
+                {RPCResult::Type::STR_HEX, "signers", "The ChainLock's quorum signers"},
+                {RPCResult::Type::BOOL, "known_block", "True if the block is known by our node"},
+            }},
+        RPCExamples{
+            HelpExampleCli("getbestchainlock", "")
+            + HelpExampleRpc("getbestchainlock", "")
+        },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    UniValue result(UniValue::VOBJ);
+
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
+
+    llmq::CChainLockSig clsig = llmq::chainLocksHandler->GetBestChainLock();
+    if (clsig.IsNull()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to find any ChainLock");
+    }
+    result.pushKV("blockhash", clsig.blockHash.GetHex());
+    result.pushKV("height", clsig.nHeight);
+    result.pushKV("signature", clsig.sig.ToString());
+    result.pushKV("signers", llmq::CLLMQUtils::ToHexStr(clsig.signers));
+    ChainstateManager& chainman = EnsureChainman(node);
+    LOCK(cs_main);
+    result.pushKV("known_block", chainman.m_blockman.LookupBlockIndex(clsig.blockHash) != nullptr);
+    return result;
+},
+    };
+}
+
+static RPCHelpMan submitchainlock()
+{
+    
+    return RPCHelpMan{"submitchainlock",
+               "Submit a ChainLock signature if needed\n",
+               {
+                       {"blockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the ChainLock."},
+                       {"signature", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The signature of the ChainLock."},
+                       {"signers", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The quorum signers of the ChainLock."},
+               },
+               RPCResult{
+                    RPCResult::Type::NUM, "", "The height of the current best ChainLock"},
+               RPCExamples{""},
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    const uint256 nBlockHash(ParseHashV(request.params[0], "blockHash"));
+    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    const ChainstateManager& chainman = EnsureChainman(node);
+    int nBlockHeight;
+    const CBlockIndex* pIndex = WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(nBlockHash));
+    if (pIndex == nullptr) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "blockHash not found");
+    }
+    nBlockHeight = pIndex->nHeight;
+   
+    const auto signers = llmq::CLLMQUtils::HexStrToBits(request.params[2].get_str(), Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount);
+    if (!signers) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signers");
+    }
+    const int32_t bestCLHeight = llmq::chainLocksHandler->GetBestChainLock().nHeight;
+    if (nBlockHeight <= bestCLHeight) return bestCLHeight;
+
+    CBLSSignature sig;
+    if (!sig.SetHexStr(request.params[1].get_str())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
+    }
+    auto clsig = llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers);
+
+    if (!llmq::chainLocksHandler->VerifyAggregatedChainLock(clsig, pIndex)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature");
+    }
+    
+
+    llmq::chainLocksHandler->ProcessNewChainLock(0, clsig, ::SerializeHash(clsig));
+    return llmq::chainLocksHandler->GetBestChainLock().nHeight;
+},
+    };
+}
+
 void RegisterQuorumsRPCCommands(CRPCTable &t)
 {
     static const CRPCCommand commands[] =
@@ -564,6 +775,10 @@ void RegisterQuorumsRPCCommands(CRPCTable &t)
         {"evo", &quorum_getrecsig},
         {"evo", &quorum_isconflicting},
         {"evo", &quorum_sign},
+        {"evo", &submitchainlock},
+        {"evo", &verifychainlock},
+        {"evo", &getbestchainlock},
+        {"evo", &gettxchainlocks},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);

@@ -189,6 +189,7 @@ BASE_SCRIPTS = [
     'interface_zmq_nevm.py',
     'rpc_invalid_address_message.py',
     'rpc_validateaddress.py',
+    'rpc_verifychainlock.py',
     'interface_syscoin_cli.py --legacy-wallet',
     'interface_syscoin_cli.py --descriptors',
     'feature_bind_extra.py',

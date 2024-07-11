@@ -19,6 +19,7 @@
 #include <node/context.h>
 #include <rpc/server_util.h>
 #include <llmq/quorums_utils.h>
+#include <index/txindex.h>
 UniValue BuildDMNListEntry(const node::NodeContext& node, const CDeterministicMN& dmn, bool detailed)
 {
     if (!detailed) {
@@ -71,7 +72,9 @@ static RPCHelpMan protx_list()
     }
 
     UniValue ret(UniValue::VARR);
-
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
     if (type == "valid" || type == "registered") {
         CDeterministicMNList mnList;
         bool detailed = !request.params[1].isNull() ? request.params[1].get_bool() : false;
@@ -112,6 +115,9 @@ static RPCHelpMan protx_info()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
     const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     uint256 proTxHash = ParseHashV(request.params[0], "proTxHash");
     auto mnList = deterministicMNManager->GetListAtChainTip();

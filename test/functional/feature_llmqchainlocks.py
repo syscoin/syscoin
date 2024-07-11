@@ -97,7 +97,32 @@ class LLMQChainLocksTest(DashTestFramework):
         self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
         self.wait_for_chainlocked_block(self.nodes[0], cl)
 
-
+        self.log.info("Isolate node, mine on another, reconnect and submit CL via RPC")
+        self.isolate_node(self.nodes[0])
+        cl = self.nodes[1].getbestblockhash()
+        self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
+        self.wait_for_chainlocked_block(self.nodes[1], cl)
+        best_0 = self.nodes[0].getbestchainlock()
+        best_1 = self.nodes[1].getbestchainlock()
+        assert best_0['blockhash'] != best_1['blockhash']
+        assert best_0['height'] != best_1['height']
+        assert best_0['signature'] != best_1['signature']
+        assert_equal(best_0['known_block'], True)
+        node_height = self.nodes[1].submitchainlock(best_0['blockhash'], best_0['signature'], best_0['signers'])
+        # future CLSIG, will not submit
+        rpc_height = self.nodes[0].submitchainlock(best_1['blockhash'], best_1['signature'], best_1['signers'])
+        assert_equal(best_1['height'], node_height)
+        assert_equal(best_0['height'], rpc_height)
+        best_0 = self.nodes[0].getbestchainlock()
+        assert best_0['blockhash'] != best_1['blockhash']
+        assert best_0['height'] != best_1['height']
+        assert best_0['signature'] != best_1['signature']
+        assert_equal(best_0['known_block'], True)
+        self.reconnect_isolated_node(self.nodes[0], 1)
+        cl = self.nodes[1].getbestblockhash()
+        self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
+        self.wait_for_chainlocked_block(self.nodes[0], cl)
+        
         self.log.info("Isolate node, mine on both parts of the network, and reconnect")
         self.isolate_node(self.nodes[0])
         bad_cl =  self.generate(self.nodes[0], 15, sync_fun=self.no_op)[-6]

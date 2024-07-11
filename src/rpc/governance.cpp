@@ -15,6 +15,7 @@
 #include <node/context.h>
 #include <timedata.h>
 #include <rpc/server_util.h>
+#include <index/txindex.h>
 static RPCHelpMan gobject_count()
 {
     return RPCHelpMan{"gobject_count",
@@ -181,7 +182,9 @@ static RPCHelpMan gobject_submit()
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid proposal data, error messages:" + validator.GetErrorMessages());
         }
     }
-
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
     std::string strHash = govobj.GetHash().ToString();
 
     std::string strError;
@@ -221,7 +224,9 @@ UniValue ListObjects(ChainstateManager& chainman, const CDeterministicMNList& ti
     UniValue objResult(UniValue::VOBJ);
 
     // GET MATCHING GOVERNANCE OBJECTS
-
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
     LOCK(governance->cs);
 
     std::vector<CGovernanceObject> objs;
@@ -358,6 +363,9 @@ static RPCHelpMan gobject_get()
 {
     // COLLECT VARIABLES FROM OUR USER
     uint256 hash = ParseHashV(request.params[0], "GovObj hash");
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
     node::NodeContext& node = EnsureAnyNodeContext(request.context);
     LOCK(governance->cs);
 

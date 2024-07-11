@@ -15,6 +15,7 @@
 #include <node/transaction.h>
 #include <rpc/server_util.h>
 #include <llmq/quorums_chainlocks.h>
+#include <index/txindex.h>
 using node::GetTransaction;
 RPCHelpMan masternodelist();
 
@@ -472,6 +473,9 @@ RPCHelpMan masternode_payments()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
+    if (g_txindex) {
+        g_txindex->BlockUntilSyncedToCurrentChain();
+    }
     CBlockIndex* pindex{nullptr};
     const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     if (request.params[0].isNull()) {
