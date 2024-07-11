@@ -154,6 +154,9 @@ static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxP
 
     uint256 hash = ::SerializeHash(payload);
     payload.sig = key.Sign(hash);
+    if (!payload.sig.VerifyInsecure(key.GetPublicKey(), ::SerializeHash(payload))) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "SignSpecialTxPayloadByHash: BLS sig failed!");
+    }
 }
 static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true)
 {
