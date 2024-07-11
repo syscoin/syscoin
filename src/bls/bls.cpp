@@ -124,7 +124,9 @@ CBLSSignature CBLSSecretKey::Sign(const uint256& hash) const
 
 CBLSSignature CBLSSecretKey::Sign(const uint256& hash, const bool specificLegacyScheme) const
 {
+    LogPrintf("CBLSSecretKey::Sign hash %s specificLegacyScheme %d\n", hash.ToString(), specificLegacyScheme);
     if (!IsValid()) {
+        LogPrintf("CBLSSecretKey::Sign not valid secret key!\n");
         return {};
     }
 
@@ -133,11 +135,12 @@ CBLSSignature CBLSSecretKey::Sign(const uint256& hash, const bool specificLegacy
         sigRet.impl = Scheme(specificLegacyScheme)->Sign(impl, bls::Bytes(hash.begin(), hash.size()));
         sigRet.fValid = true;
     } catch (...) {
+        LogPrintf("CBLSSecretKey::Sign exception!\n");
         sigRet.fValid = false;
     }
 
     sigRet.cachedHash.SetNull();
-
+    LogPrintf("CBLSSecretKey::Sign complete\n");
     return sigRet;
 }
 
