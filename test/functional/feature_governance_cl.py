@@ -48,12 +48,9 @@ class SyscoinGovernanceTest (DashTestFramework):
         count = 0
         for node in nodes:
             valid_triggers = node.gobject_list("valid", "triggers")
-            self.log.info(f'node {node.index} valid_triggers {valid_triggers}')
             for trigger in list(valid_triggers.values()):
                 if json.loads(trigger["DataString"])["event_block_height"] != sb_block_height:
-                    self.log.info(f'json.loads(trigger["DataString"])["event_block_height"] {json.loads(trigger["DataString"])["event_block_height"]} vs sb_block_height {sb_block_height}')
                     continue
-                self.log.info(f'node {node.index} trigger {trigger}')
                 if trigger['AbsoluteYesCount'] > 0:
                     count = count + 1
                     break

@@ -399,6 +399,7 @@ UniValue CGovernanceObject::ToJson() const
 
 void CGovernanceObject::UpdateLocalValidity(ChainstateManager &chainman, const CDeterministicMNList& tip_mn_list)
 {
+    AssertLockHeld(cs_main);
     // THIS DOES NOT CHECK COLLATERAL, THIS IS CHECKED UPON ORIGINAL ARRIVAL
     fCachedLocalValidity = IsValidLocally(chainman, tip_mn_list, strLocalValidityError, false);
 }
@@ -413,8 +414,8 @@ bool CGovernanceObject::IsValidLocally(ChainstateManager &chainman, const CDeter
 
 bool CGovernanceObject::IsValidLocally(ChainstateManager &chainman, const CDeterministicMNList& tip_mn_list, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral) const
 {
+    AssertLockHeld(cs_main);
     fMissingConfirmations = false;
-
     if (fUnparsable) {
         strError = "Object data unparsable";
         return false;
@@ -482,7 +483,7 @@ CAmount CGovernanceObject::GetMinCollateralFee() const
 
 bool CGovernanceObject::IsCollateralValid(ChainstateManager &chainman, std::string& strError, bool& fMissingConfirmations) const
 {
-    LOCK(cs_main);
+    AssertLockHeld(cs_main);
     strError = "";
     fMissingConfirmations = false;
     const uint256 &nExpectedHash = GetHash();

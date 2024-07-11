@@ -228,14 +228,14 @@ public:
 
     // CORE OBJECT FUNCTIONS
 
-    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool fCheckCollateral) const;
+    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool fCheckCollateral) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral) const;
+    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /// Check the collateral transaction for the budget proposal/finalized budget
-    bool IsCollateralValid(ChainstateManager &chainman, std::string& strError, bool& fMissingConfirmations) const;
+    bool IsCollateralValid(ChainstateManager &chainman, std::string& strError, bool& fMissingConfirmations) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    void UpdateLocalValidity(ChainstateManager &chainman, const CDeterministicMNList& tip_mn_list);
+    void UpdateLocalValidity(ChainstateManager &chainman, const CDeterministicMNList& tip_mn_list) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void UpdateSentinelVariables(const CDeterministicMNList& tip_mn_list);
 

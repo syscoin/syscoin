@@ -189,12 +189,13 @@ static RPCHelpMan gobject_submit()
 
     std::string strError;
     bool fMissingConfirmations;
-    
-    if (!govobj.IsValidLocally(*node.chainman, deterministicMNManager->GetListAtChainTip(), strError, fMissingConfirmations, true) && !fMissingConfirmations) {
-        LogPrintf("gobject(submit) -- Object submission rejected because object is not valid - hash = %s, strError = %s\n", strHash, strError);
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + strHash + " - " + strError);
+    {
+        LOCK2(cs_main, node.mempool->cs);
+        if (!govobj.IsValidLocally(*node.chainman, deterministicMNManager->GetListAtChainTip(), strError, fMissingConfirmations, true) && !fMissingConfirmations) {
+            LogPrintf("gobject(submit) -- Object submission rejected because object is not valid - hash = %s, strError = %s\n", strHash, strError);
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + strHash + " - " + strError);
+        }
     }
-    
 
     // RELAY THIS OBJECT
     // Reject if rate check fails but don't update buffer
@@ -227,7 +228,7 @@ UniValue ListObjects(ChainstateManager& chainman, const CDeterministicMNList& ti
     if (g_txindex) {
         g_txindex->BlockUntilSyncedToCurrentChain();
     }
-    LOCK(governance->cs);
+    LOCK2(cs_main, governance->cs);
 
     std::vector<CGovernanceObject> objs;
     governance->GetAllNewerThan(objs, nStartTime);
@@ -367,7 +368,7 @@ static RPCHelpMan gobject_get()
         g_txindex->BlockUntilSyncedToCurrentChain();
     }
     node::NodeContext& node = EnsureAnyNodeContext(request.context);
-    LOCK(governance->cs);
+    LOCK2(cs_main, governance->cs);
 
     // FIND THE GOVERNANCE OBJECT THE USER IS LOOKING FOR
     CGovernanceObject* pGovObj = governance->FindGovernanceObject(hash);

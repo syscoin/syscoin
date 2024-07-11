@@ -175,21 +175,15 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
             LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- Received unrequested object: %s\n", strHash);
             return;
         }
+        LOCK2(cs_main, cs);
 
-        bool bReturn = false;
-        {
-            LOCK(cs);
-            if (mapObjects.count(nHash) || mapPostponedObjects.count(nHash) || mapErasedGovernanceObjects.count(nHash)) {
-                // TODO - print error code? what if it's GOVOBJ_ERROR_IMMATURE?
-                LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- Received already seen object: %s\n", strHash);
-                bReturn = true;
-            }
-        }
-        if(bReturn) {
-            LOCK(cs_main);
+        if (mapObjects.count(nHash) || mapPostponedObjects.count(nHash) || mapErasedGovernanceObjects.count(nHash)) {
+            // TODO - print error code? what if it's GOVOBJ_ERROR_IMMATURE?
+            LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- Received already seen object: %s\n", strHash);
             peerman.ForgetTxHash(pfrom->GetId(), nHash);
             return;
         }
+        
 
         bool fRateCheckBypassed = false;
         if (!MasternodeRateCheck(govobj, true, false, fRateCheckBypassed)) {
@@ -213,7 +207,6 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                 AddPostponedObject(govobj);
                 LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- Not enough fee confirmations for: %s, strError = %s\n", strHash, strError);
             } else {
-                LOCK(cs_main);
                 peerman.ForgetTxHash(pfrom->GetId(), nHash);
                 LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- Governance object is invalid - %s\n", strError);
                 // apply node's ban score
@@ -317,7 +310,7 @@ void CGovernanceManager::AddGovernanceObject(CGovernanceObject& govobj, PeerMana
     // UPDATE CACHED VARIABLES FOR THIS OBJECT AND ADD IT TO OUR MANAGED DATA
 
     govobj.UpdateSentinelVariables(tip_mn_list); //this sets local vars in object
-
+    LOCK2(cs_main, cs);
     std::string strError;
 
     // MAKE SURE THIS OBJECT IS OK
@@ -326,43 +319,43 @@ void CGovernanceManager::AddGovernanceObject(CGovernanceObject& govobj, PeerMana
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- invalid governance object - %s - (nCachedBlockHeight %d) \n", strError, nCachedBlockHeight);
         return;
     }
-    {
-        LOCK(cs);
-        LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Adding object: hash = %s, type = %d\n", nHash.ToString(),
-                govobj.GetObjectType());
+    
+       
+    LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Adding object: hash = %s, type = %d\n", nHash.ToString(),
+            govobj.GetObjectType());
 
-        // INSERT INTO OUR GOVERNANCE OBJECT MEMORY
-        // IF WE HAVE THIS OBJECT ALREADY, WE DON'T WANT ANOTHER COPY
-        auto objpair = mapObjects.emplace(nHash, govobj);
+    // INSERT INTO OUR GOVERNANCE OBJECT MEMORY
+    // IF WE HAVE THIS OBJECT ALREADY, WE DON'T WANT ANOTHER COPY
+    auto objpair = mapObjects.emplace(nHash, govobj);
 
-        if (!objpair.second) {
-            LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- already have governance object %s\n", nHash.ToString());
-            return;
-        }
-
-        // SHOULD WE ADD THIS OBJECT TO ANY OTHER MANAGERS?
-
-        LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Before trigger block, GetDataAsPlainString = %s, nObjectType = %d\n",
-                    govobj.GetDataAsPlainString(), govobj.GetObjectType());
-
-        if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER && !AddNewTrigger(nHash)) {
-            LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- undo adding invalid trigger object: hash = %s\n", nHash.ToString());
-            objpair.first->second.PrepareDeletion(GetTime<std::chrono::seconds>().count());
-            return;
-        }
-
-        LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- %s new, received from peer %s\n", strHash, pfrom ? pfrom->addr.ToStringAddr() : "nullptr");
-        govobj.Relay(peerman);
-
-        // Update the rate buffer
-        MasternodeRateUpdate(govobj);
-
-        masternodeSync.BumpAssetLastTime("CGovernanceManager::AddGovernanceObject");
-
-        // WE MIGHT HAVE PENDING/ORPHAN VOTES FOR THIS OBJECT
-
-        CheckOrphanVotes(govobj, peerman);
+    if (!objpair.second) {
+        LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- already have governance object %s\n", nHash.ToString());
+        return;
     }
+
+    // SHOULD WE ADD THIS OBJECT TO ANY OTHER MANAGERS?
+
+    LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Before trigger block, GetDataAsPlainString = %s, nObjectType = %d\n",
+                govobj.GetDataAsPlainString(), govobj.GetObjectType());
+
+    if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER && !AddNewTrigger(nHash)) {
+        LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- undo adding invalid trigger object: hash = %s\n", nHash.ToString());
+        objpair.first->second.PrepareDeletion(GetTime<std::chrono::seconds>().count());
+        return;
+    }
+
+    LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- %s new, received from peer %s\n", strHash, pfrom ? pfrom->addr.ToStringAddr() : "nullptr");
+    govobj.Relay(peerman);
+
+    // Update the rate buffer
+    MasternodeRateUpdate(govobj);
+
+    masternodeSync.BumpAssetLastTime("CGovernanceManager::AddGovernanceObject");
+
+    // WE MIGHT HAVE PENDING/ORPHAN VOTES FOR THIS OBJECT
+
+    CheckOrphanVotes(govobj, peerman);
+    
 
     // SEND NOTIFICATION TO SCRIPT/ZMQ
     GetMainSignals().NotifyGovernanceObject(nHash);
@@ -378,7 +371,7 @@ void CGovernanceManager::CheckAndRemove()
     std::vector<uint256> vecDirtyHashes = mmetaman->GetAndClearDirtyGovernanceObjectHashes();
     int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight());
     const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
-    LOCK(cs);
+    LOCK2(cs_main, cs);
 
     for (const uint256& nHash : vecDirtyHashes) {
         auto it = mapObjects.find(nHash);
@@ -742,7 +735,7 @@ void CGovernanceManager::VoteGovernanceTriggers(const std::optional<const CGover
     // only active masternodes can vote on triggers
     if (activeMasternodeInfo.proTxHash.IsNull()) return;
 
-    LOCK(cs);
+    LOCK2(cs_main, cs);
 
     if (trigger_opt.has_value()) {
         // We should never vote "yes" on another trigger or the same trigger twice

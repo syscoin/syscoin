@@ -189,13 +189,14 @@ static RPCHelpMan gobject_prepare()
     if (g_txindex) {
         g_txindex->BlockUntilSyncedToCurrentChain();
     }
-
     LOCK(pwallet->cs_wallet);
-
-    std::string strError;
-    if (!govobj.IsValidLocally(*node.chainman, deterministicMNManager->GetListAtChainTip(), strError, false))
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + govobj.GetHash().ToString() + " - " + strError);
-
+    {
+        LOCK(cs_main);
+        std::string strError;
+        if (!govobj.IsValidLocally(*node.chainman, deterministicMNManager->GetListAtChainTip(), strError, false))
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + govobj.GetHash().ToString() + " - " + strError);
+    }
+    
     // If specified, spend this outpoint as the proposal fee
     COutPoint outpoint;
     outpoint.SetNull();
