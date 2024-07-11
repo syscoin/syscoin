@@ -60,6 +60,7 @@ static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::str
     if (!secKey.SetHexStr(hexKey)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
     }
+    LogPrintf("secKey.IsValid() %d secKey.GetPublicKey().IsValid() %d\n", secKey.IsValid(), secKey.GetPublicKey().IsValid());
     return secKey;
 }
 
@@ -154,6 +155,7 @@ static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxP
 
     uint256 hash = ::SerializeHash(payload);
     payload.sig = key.Sign(hash);
+    LogPrintf("payload.sig valid %d key.GetPublicKey() valid %d key valid %d\n", payload.sig.IsValid(), key.GetPublicKey().IsValid(), key.IsValid());
     if (!payload.sig.VerifyInsecure(key.GetPublicKey(), hash)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "SignSpecialTxPayloadByHash: BLS sig failed!");
     }
