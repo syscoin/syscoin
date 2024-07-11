@@ -503,53 +503,19 @@ BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)
 BOOST_AUTO_TEST_CASE(rpc_bls)
 {
     UniValue r;
-
     BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_generate")));
     auto obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_generate true")));
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    std::string secret_legacy = obj.find_value("secret").get_str();
-    std::string public_legacy = obj.find_value("public").get_str();
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_generate false")));
-    obj = r.get_obj();
     BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
     std::string secret_basic = obj.find_value("secret").get_str();
     std::string public_basic = obj.find_value("public").get_str();
 
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_legacy));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), public_legacy);
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_legacy + std::string(" true")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), public_legacy);
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_legacy + std::string(" false")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
-    BOOST_CHECK(obj.find_value("public").get_str() != public_legacy);
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_basic + std::string(" false")));
+    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_basic));
     obj = r.get_obj();
     BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
     BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), public_basic);
 
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_basic + std::string(" true")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    BOOST_CHECK(obj.find_value("public").get_str() != public_basic);
-
     std::string secret = "0b072b1b8b28335b0460aa695ee8ce1f60dc01e6eb12655ece2a877379dfdb51";
     BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), "9379c28e0f50546906fe733f1222c8f7e39574d513790034f1fec1476286eb652a350c8c0e630cd2cc60d10c26d6f6ee");
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret + " false"));
     obj = r.get_obj();
     BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
     BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), "b379c28e0f50546906fe733f1222c8f7e39574d513790034f1fec1476286eb652a350c8c0e630cd2cc60d10c26d6f6ee");
