@@ -281,7 +281,6 @@ void CGovernanceManager::CheckOrphanVotes(CGovernanceObject& govobj, PeerManager
     uint256 nHash = govobj.GetHash();
     std::vector<vote_time_pair_t> vecVotePairs;
     cmmapOrphanVotes.GetAll(nHash, vecVotePairs);
-
     ScopedLockBool guard(cs, fRateChecksEnabled, false);
     const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
     int64_t nNow = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
@@ -300,64 +299,59 @@ void CGovernanceManager::CheckOrphanVotes(CGovernanceObject& govobj, PeerManager
         }
     }
 }
-
 void CGovernanceManager::AddGovernanceObject(CGovernanceObject& govobj, PeerManager& peerman, const CNode* pfrom)
 {
     uint256 nHash = govobj.GetHash();
     std::string strHash = nHash.ToString();
-
+    
     const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
-    // UPDATE CACHED VARIABLES FOR THIS OBJECT AND ADD IT TO OUR MANAGED DATA
 
-    govobj.UpdateSentinelVariables(tip_mn_list); //this sets local vars in object
+    // Update cached variables for this object and add it to our managed data
+    govobj.UpdateSentinelVariables(tip_mn_list); // This sets local vars in object
+
     LOCK2(cs_main, cs);
     std::string strError;
 
-    // MAKE SURE THIS OBJECT IS OK
-
+    // Make sure this object is valid locally
     if (!govobj.IsValidLocally(chainman, tip_mn_list, strError, true)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- invalid governance object - %s - (nCachedBlockHeight %d) \n", strError, nCachedBlockHeight);
         return;
     }
     
-       
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Adding object: hash = %s, type = %d\n", nHash.ToString(),
-            govobj.GetObjectType());
+    LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Adding object: hash = %s, type = %d\n", nHash.ToString(), govobj.GetObjectType());
 
-    // INSERT INTO OUR GOVERNANCE OBJECT MEMORY
-    // IF WE HAVE THIS OBJECT ALREADY, WE DON'T WANT ANOTHER COPY
-    auto objpair = mapObjects.emplace(nHash, govobj);
+    // Insert into our governance object memory; if we have this object already, we don't want another copy
+    auto objpair = mapObjects.try_emplace(nHash, std::move(govobj));
 
     if (!objpair.second) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- already have governance object %s\n", nHash.ToString());
         return;
     }
 
-    // SHOULD WE ADD THIS OBJECT TO ANY OTHER MANAGERS?
+    CGovernanceObject& govObjRef = objpair.first->second;
 
+    // Should we add this object to any other managers?
     LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Before trigger block, GetDataAsPlainString = %s, nObjectType = %d\n",
-                govobj.GetDataAsPlainString(), govobj.GetObjectType());
+                govObjRef.GetDataAsPlainString(), govObjRef.GetObjectType());
 
-    if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER && !AddNewTrigger(nHash)) {
+    if (govObjRef.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER && !AddNewTrigger(nHash)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- undo adding invalid trigger object: hash = %s\n", nHash.ToString());
-        objpair.first->second.PrepareDeletion(GetTime<std::chrono::seconds>().count());
+        govObjRef.PrepareDeletion(GetTime<std::chrono::seconds>().count());
         return;
     }
 
     LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- %s new, received from peer %s\n", strHash, pfrom ? pfrom->addr.ToStringAddr() : "nullptr");
-    govobj.Relay(peerman);
+    govObjRef.Relay(peerman);
 
     // Update the rate buffer
-    MasternodeRateUpdate(govobj);
+    MasternodeRateUpdate(govObjRef);
 
     masternodeSync.BumpAssetLastTime("CGovernanceManager::AddGovernanceObject");
 
-    // WE MIGHT HAVE PENDING/ORPHAN VOTES FOR THIS OBJECT
+    // We might have pending/orphan votes for this object
+    CheckOrphanVotes(govObjRef, peerman);
 
-    CheckOrphanVotes(govobj, peerman);
-    
-
-    // SEND NOTIFICATION TO SCRIPT/ZMQ
+    // Send notification to script/ZMQ
     GetMainSignals().NotifyGovernanceObject(nHash);
 }
 
@@ -581,7 +575,6 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
     if (!masternodeSync.IsSynced()) return std::nullopt;
     if (nHeight % Params().GetConsensus().SuperBlockCycle(nHeight) < Params().GetConsensus().SuperBlockCycle(nHeight) - Params().GetConsensus().nSuperblockMaturityWindow) return std::nullopt;
     if (HasAlreadyVotedFundingTrigger()) return std::nullopt;
-
     // A proposal is considered passing if (YES votes) >= (Total Weight of Masternodes / 10),
     // count total valid (ENABLED) masternodes to determine passing threshold.
     const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
@@ -604,7 +597,6 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
             approvedProposals.emplace_back(std::make_shared<const CGovernanceObject>(object));
         }
     } // cs
-
     // Sort approved proposals by absolute Yes votes descending
     std::sort(approvedProposals.begin(), approvedProposals.end(), [](std::shared_ptr<const CGovernanceObject> a, std::shared_ptr<const CGovernanceObject> b) {
         const auto a_yes = a->GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING);
@@ -616,7 +608,6 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s nHeight:%d empty approvedProposals\n", __func__, nHeight);
         return std::nullopt;
     }
-
     std::vector<CGovernancePayment> payments;
     int nLastSuperblock;
     int nNextSuperblock;
@@ -674,7 +665,6 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s CreateSuperblockCandidate nHeight:%d empty payments\n", __func__, nHeight);
         return std::nullopt;
     }
-
     // Sort by proposal hash descending
     std::sort(payments.begin(), payments.end(), [](const CGovernancePayment& a, const CGovernancePayment& b) {
         return UintToArith256(a.proposalHash) > UintToArith256(b.proposalHash);
@@ -1489,7 +1479,6 @@ void CGovernanceManager::UpdatedBlockTip(const CBlockIndex* pindex, CConnman& co
         const auto trigger_opt = CreateGovernanceTrigger(sb_opt, peerman);
         VoteGovernanceTriggers(trigger_opt, connman, peerman);
     }
-
     nCachedBlockHeight = pindex->nHeight;
     LogPrint(BCLog::GOBJECT, "CGovernanceManager::UpdatedBlockTip -- nCachedBlockHeight: %d\n", nCachedBlockHeight);
 

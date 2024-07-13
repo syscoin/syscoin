@@ -274,7 +274,6 @@ UniValue ListObjects(ChainstateManager& chainman, const CDeterministicMNList& ti
 
         objResult.pushKV(govObj.GetHash().ToString(), bObj);
     }
-
     return objResult;
 }
 
@@ -588,8 +587,11 @@ static RPCHelpMan getgovernanceinfo()
                 {RPCResult::Type::NUM, "governanceminquorum", "The absolute minimum number of votes needed to trigger a governance action"},
                 {RPCResult::Type::NUM, "proposalfee", "The collateral transaction fee which must be paid to create a proposal in " + CURRENCY_UNIT},
                 {RPCResult::Type::NUM, "superblockcycle", "The number of blocks between superblocks"},
+                {RPCResult::Type::NUM, "superblockmaturitywindow", "the superblock trigger creation window"},
                 {RPCResult::Type::NUM, "lastsuperblock", "The block number of the last superblock"},
                 {RPCResult::Type::NUM, "nextsuperblock", "The block number of the next superblock"},
+                {RPCResult::Type::NUM, "fundingthreshold", "the number of absolute yes votes required for a proposal to be passing"},
+                {RPCResult::Type::NUM, "governancebudget", "the governance budget for the next superblock in " + CURRENCY_UNIT + ""},
             },
         },
         RPCExamples{
@@ -612,6 +614,8 @@ static RPCHelpMan getgovernanceinfo()
     obj.pushKV("superblockmaturitywindow", Params().GetConsensus().nSuperblockMaturityWindow);
     obj.pushKV("lastsuperblock", nLastSuperblock);
     obj.pushKV("nextsuperblock", nNextSuperblock);
+    obj.pushKV("fundingthreshold", int(deterministicMNManager->GetListAtChainTip().GetValidMNsCount() / 10));
+    obj.pushKV("governancebudget", ValueFromAmount(CSuperblock::GetPaymentsLimit(nNextSuperblock)));
 
     return obj;
 },

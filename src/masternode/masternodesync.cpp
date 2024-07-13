@@ -144,7 +144,6 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
     double nSyncProgress = double(nTriedPeerCount + (nMode - 1) * 8) / (8*4);
     LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nCurrentAsset %d nTriedPeerCount %d nSyncProgress %f\n", nTick, nMode, nTriedPeerCount, nSyncProgress);
     uiInterface.NotifyAdditionalDataSyncProgressChanged(nSyncProgress);
-
     for (auto& pnode : snap.Nodes())
     {
         CNetMsgMaker msgMaker(pnode->GetCommonVersion());
@@ -160,11 +159,30 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
             if (nMode == MASTERNODE_SYNC_BLOCKCHAIN) {
                 connman.PushMessage(pnode, msgMaker.Make(NetMsgType::GETSPORKS)); //get current network sporks
                 SwitchToNextAsset(connman);
+                return;
             } else if (nMode == MASTERNODE_SYNC_GOVERNANCE) {
+                if (!governance->IsValid()) {
+                    SwitchToNextAsset(connman);
+                    return;
+                }
+                // check for timeout first
+                if(GetTime() - GetTimeLastBumped() > MASTERNODE_SYNC_TIMEOUT_SECONDS) {
+                    SwitchToNextAsset(connman);
+                    return;
+                }
+
+                // only request obj sync once from each peer
+                if(netfulfilledman->HasFulfilledRequest(pnode->addr, "governance-sync")) {
+                    // will request votes on per-obj basis from each node in a separate loop below
+                    // to avoid deadlocks here
+                    continue;
+                }
+                netfulfilledman->AddFulfilledRequest(pnode->addr, "governance-sync");
+
+                nTriedPeerCount++;
                 SendGovernanceSyncRequest(pnode, connman);
-                SwitchToNextAsset(connman);
+                continue; //this will cause each peer to get one request each six seconds for the various assets we need
             }
-            return;
         }
 
         // NORMAL NETWORK MODE - TESTNET/MAINNET
@@ -223,6 +241,10 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
             // GOVOBJ : SYNC GOVERNANCE ITEMS FROM OUR PEERS
 
             if(nMode == MASTERNODE_SYNC_GOVERNANCE) {
+                if (!governance->IsValid()) {
+                    SwitchToNextAsset(connman);
+                    return;
+                }
                 LogPrint(BCLog::GOBJECT, "CMasternodeSync::ProcessTick -- nTick %d nMode %d nTimeLastBumped %lld GetTime() %lld diff %lld\n", nTick, nMode, GetTimeLastBumped(), GetTime(), GetTime() - GetTimeLastBumped());
 
                 // check for timeout first
