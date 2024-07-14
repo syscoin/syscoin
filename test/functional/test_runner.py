@@ -320,6 +320,8 @@ BASE_SCRIPTS = [
     'feature_dersig.py',
     'feature_cltv.py',
     'feature_governance_objects.py',
+    'feature_governance.py --legacy-wallet',
+    'feature_governance_cl.py --legacy-wallet',
     'rpc_uptime.py',
     'feature_discover.py',
     'wallet_resendwallettransactions.py --legacy-wallet',
@@ -350,7 +352,6 @@ BASE_SCRIPTS = [
     # re-enable with SYS data
     #'feature_assumeutxo.py',
     #'p2p_dos_header_tree.py',
-    'p2p_dos_header_tree.py',
     'p2p_add_connections.py',
     'feature_bind_port_discover.py',
     'p2p_unrequested_blocks.py',

@@ -50,12 +50,12 @@ class RejectLowDifficultyHeadersTest(SyscoinTestFramework):
         self.disconnect_nodes(0, 3)
 
     def reconnect_all(self):
-        self.connect_nodes(0, 1)
-        self.connect_nodes(0, 2)
-        self.connect_nodes(0, 3)
-        self.connect_nodes(1, 0)
-        self.connect_nodes(1, 2)
-        self.connect_nodes(1, 3)
+        self.connect_nodes(0, 1, wait_for_connect=False)
+        self.connect_nodes(0, 2, wait_for_connect=False)
+        self.connect_nodes(0, 3, wait_for_connect=False)
+        self.connect_nodes(1, 0, wait_for_connect=False)
+        self.connect_nodes(1, 2, wait_for_connect=False)
+        self.connect_nodes(1, 3, wait_for_connect=False)
         force_finish_mnsync(self.nodes[0])
         force_finish_mnsync(self.nodes[1])
         force_finish_mnsync(self.nodes[2])
