@@ -13,6 +13,13 @@ class SyscoinGovernanceTest (DashTestFramework):
         # using adjusted v20 deployment params to test an edge case where superblock maturity window is equal to deployment window size
         self.set_dash_test_params(6, 5, [["-whitelist=noban@127.0.0.1"]] * 6, fast_dip3_enforcement=True)
 
+    def skip_test_if_missing_module(self):
+        self.skip_if_no_wallet()
+        self.skip_if_no_bdb()
+
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+        
     def prepare_object(self, object_type, parent_hash, creation_time, revision, name, amount, payment_address):
         proposal_rev = revision
         proposal_time = int(creation_time)
