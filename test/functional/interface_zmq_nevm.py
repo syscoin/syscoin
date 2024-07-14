@@ -64,7 +64,7 @@ def receive_thread_nevm(self, idx, subscriber):
 
 def thread_generate(self, node):
     self.log.info('thread_generate start')
-    self.generatetoaddress(node, 1, ADDRESS_BCRT1_UNSPENDABLE)
+    self.generatetoaddress(node, 1, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
     self.log.info('thread_generate done')
 
 # Test may be skipped and not have zmq installed
@@ -171,8 +171,8 @@ class ZMQTest (SyscoinTestFramework):
         return subscriber
 
     def test_basic(self):
-        address = 'tcp://127.0.0.1:29445'
-        address1 = 'tcp://127.0.0.1:29443'
+        address = 'tcp://127.0.0.1:29446'
+        address1 = 'tcp://127.0.0.1:29447'
 
         self.log.info("setup subscribers...")
         nevmsub  = self.setup_zmq_test(address, 0)
@@ -250,14 +250,14 @@ class ZMQTest (SyscoinTestFramework):
         # reorg test
         self.disconnect_nodes(0, 1)
         self.log.info("Mine 4 blocks on Node 0")
-        self.generatetoaddress(self.nodes[0], 4, ADDRESS_BCRT1_UNSPENDABLE)
+        self.generatetoaddress(self.nodes[0], 4, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
         # node1 should have 210 because its disconnected and node0 should have 4 more (214)
         assert_equal(self.nodes[1].getblockcount(), 210)
         assert_equal(self.nodes[0].getblockcount(), 214)
         besthash_n0 = self.nodes[0].getbestblockhash()
 
         self.log.info("Mine competing 6 blocks on Node 1")
-        self.generatetoaddress(self.nodes[1], 6, ADDRESS_BCRT1_UNSPENDABLE)
+        self.generatetoaddress(self.nodes[1], 6, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
         assert_equal(self.nodes[1].getblockcount(), 216)
 
         self.log.info("Connect nodes to force a reorg")
@@ -278,7 +278,7 @@ class ZMQTest (SyscoinTestFramework):
         self.log.info("Generating on node0 in separate thread")
         Thread(target=thread_generate, args=(self, self.nodes[0],)).start()
         self.log.info("Creating re-org and letting node1 become longest chain, node0 should re-org to node0")
-        self.generatetoaddress(self.nodes[1], 10, ADDRESS_BCRT1_UNSPENDABLE)
+        self.generatetoaddress(self.nodes[1], 10, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
         besthash = self.nodes[1].getbestblockhash()
         nevmsub.artificialDelay = False
         sleep(1)

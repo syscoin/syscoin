@@ -1795,7 +1795,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     LogPrintf("NEVM connection %d\n", fNEVMConnection? 1: 0);
     if(args.IsArgSet("-hrp"))
         fNEVMConnection = false;
-    if(fNEVMConnection) {
+    if(fNEVMConnection && !fRegTest) {
         uiInterface.InitMessage("Loading Geth...");
         UninterruptibleSleep(std::chrono::milliseconds{5000});
         uint64_t nHeightFromGeth{0};
