@@ -226,7 +226,7 @@ class LLMQSigningTest(DashTestFramework):
             force_finish_mnsync(mn.node)
             # Make sure intra-quorum connections were also restored
             self.bump_mocktime(1)  # need this to bypass quorum connection retry timeout
-            wait_until_helper_internal(lambda: mn.node.getconnectioncount() == 5, timeout=10, sleep=2)
+            wait_until_helper_internal(lambda: mn.node.getconnectioncount() == 5, timeout=10)
             mn.node.ping()
             self.wait_until(lambda: all('pingwait' not in peer for peer in mn.node.getpeerinfo()))
             self.generate(self.nodes[0], 5)
