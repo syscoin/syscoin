@@ -6981,7 +6981,7 @@ bool Chainstate::StartGethNode()
 }
 bool Chainstate::StopGethNode(bool bOnStart)
 {
-    if(!fNEVMConnection) {
+    if(!fNEVMConnection || fRegTest) {
         return false;
     }
     if(!bOnStart) {
