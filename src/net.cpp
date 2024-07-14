@@ -877,7 +877,7 @@ bool V1Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
 
     // serialize header
     m_header_to_send.clear();
-    CVectorWriter{INIT_PROTO_VERSION, m_header_to_send, 0, hdr};
+    CVectorWriter{SER_NETWORK, INIT_PROTO_VERSION, m_header_to_send, 0, hdr};
 
     // update state
     m_message_to_send = std::move(msg);
@@ -3461,10 +3461,10 @@ void Discover()
 
 void CConnman::SetNetworkActive(bool active)
 {
+    LogPrintf("%s: %s\n", __func__, active);
     if (fNetworkActive == active) {
         return;
     }
-    LogPrintf("%s: %s\n", __func__, active);
 
     fNetworkActive = active;
     // SYSCOIN Always call the Reset() if the network gets enabled/disabled to make sure the sync process
