@@ -85,6 +85,9 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
             throw std::runtime_error(strprintf("Invalid nDIP19ActivationHeight (%s)", strDIP19Params));
         }
     }
+    if (args.IsArgSet("-nevmstartheight")) {
+        options.nevmstartblock = args.GetIntArg("-nevmstartheight", 2050);
+    }
     if (!args.IsArgSet("-vbparams")) return;
 
     for (const std::string& strDeployment : args.GetArgs("-vbparams")) {

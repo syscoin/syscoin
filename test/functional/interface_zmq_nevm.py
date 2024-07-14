@@ -131,7 +131,7 @@ class ZMQTest(SyscoinTestFramework):
         self.num_nodes = 2
         if self.is_wallet_compiled():
             self.requires_wallet = True
-        self.extra_args = [["-whitelist=noban@127.0.0.1"]] * self.num_nodes
+        self.extra_args = [["-whitelist=noban@127.0.0.1", "-nevmstartheight=205"], ["-whitelist=noban@127.0.0.1", "-nevmstartheight=205"]]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_py3_zmq()
@@ -156,10 +156,10 @@ class ZMQTest(SyscoinTestFramework):
             for t in self.threads:
                 t.join()
 
-    def setup_zmq_test(self, address, idx, *, recv_timeout=60, sync_blocks=True):
+    def setup_zmq_test(self, address, idx, *, recv_timeout=60):
         socket = self.ctx.socket(zmq.REP)
         subscriber = ZMQPublisher(socket)
-        self.extra_args[idx] = ["-zmqpubnevm=%s" % address]
+        self.extra_args[idx] += ["-zmqpubnevm=%s" % address]
 
         self.restart_node(idx, self.extra_args[idx])
 
@@ -168,8 +168,8 @@ class ZMQTest(SyscoinTestFramework):
         return subscriber
 
     def test_basic(self):
-        address = 'tcp://127.0.0.1:29446'
-        address1 = 'tcp://127.0.0.1:29447'
+        address = 'tcp://127.0.0.1:29456'
+        address1 = 'tcp://127.0.0.1:29457'
 
         self.log.info("setup subscribers...")
         nevmsub  = self.setup_zmq_test(address, 0)

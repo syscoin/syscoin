@@ -157,6 +157,7 @@ public:
         int v19startblock{0};
         int dip3startblock{432};
         int dip3enforcement{432};
+        int nevmstartblock{2050};
 
     };
     // SYSCOIN
