@@ -143,8 +143,8 @@ TxSize CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *walle
     // Segwit marker and flag
     if (is_segwit) weight += 2;
 
-    // Add the size of the transaction outputs.
-    for (const auto& txo : tx.vout) weight += GetSerializeSize(txo) * WITNESS_SCALE_FACTOR;
+    // SYSCOIN Add the size of the transaction outputs.
+    for (const auto& txo : tx.vout) weight += GetSerializeSize(txo, PROTOCOL_VERSION, SER_SIZE, tx.nVersion) * WITNESS_SCALE_FACTOR;
 
     // Add the size of the transaction inputs as if they were signed.
     for (uint32_t i = 0; i < txouts.size(); i++) {
