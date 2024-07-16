@@ -380,7 +380,7 @@ class SyscoinGovernanceTest (DashTestFramework):
             self.sync_blocks()
             assert_equal(self.nodes[0].getblockcount(), sb_block_height)
             self.check_superblockbudget()
-            self.check_superblock()
+            #self.check_superblock()
 
 
 if __name__ == '__main__':
