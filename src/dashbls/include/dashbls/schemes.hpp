@@ -227,6 +227,14 @@ class LegacySchemeMPL final : public CoreMPL {
 public:
     LegacySchemeMPL() : CoreMPL(std::string{}) {}
 
+    using CoreMPL::SkToPk;
+    using CoreMPL::Sign;
+    using CoreMPL::Verify;
+    using CoreMPL::Aggregate;
+    using CoreMPL::AggregateSecure;
+    using CoreMPL::VerifySecure;
+    using CoreMPL::AggregateVerify;
+
     virtual vector<uint8_t> SkToPk(const PrivateKey &seckey) final { throw std::runtime_error("Not supported in LegacySchemeMPL"); }
 
     G2Element Sign(const PrivateKey &seckey, const vector<uint8_t> &message) final { throw std::runtime_error("Not supported in LegacySchemeMPL"); }
