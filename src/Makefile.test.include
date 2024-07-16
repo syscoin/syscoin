@@ -28,6 +28,8 @@ JSON_TEST_FILES = \
   test/data/utxo.json \
   test/data/nevmspv_valid.json \
   test/data/nevmspv_invalid.json \
+  test/data/proposals_valid.json \
+  test/data/proposals_invalid.json \
   test/data/tx_valid.json
 
 RAW_TEST_FILES = \
