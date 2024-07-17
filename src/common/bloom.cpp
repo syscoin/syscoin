@@ -162,7 +162,7 @@ bool CBloomFilter::CheckSpecialTransactionMatchesAndUpdate(const CTransaction &t
         }
         return false;
     }
-    case(SYSCOIN_TX_VERSION_MN_COINBASE):
+    case(SYSCOIN_TX_VERSION_MN_CLSIG):
     case(SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT):
         // No additional checks for these transaction types
         return false;

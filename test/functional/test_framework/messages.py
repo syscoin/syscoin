@@ -1318,38 +1318,6 @@ class CMerkleBlock:
     def __repr__(self):
         return "CMerkleBlock(header=%s, txn=%s)" % (repr(self.header), repr(self.txn))
 
-# SYSCOIN
-class CCbTx:
-    def __init__(self, version=None, height=None, merkleRootMNList=None, merkleRootQuorums=None):
-        self.set_null()
-        if version is not None:
-            self.version = version
-        if height is not None:
-            self.height = height
-        if merkleRootMNList is not None:
-            self.merkleRootMNList = merkleRootMNList
-        if merkleRootQuorums is not None:
-            self.merkleRootQuorums = merkleRootQuorums
-
-    def set_null(self):
-        self.version = 0
-        self.height = 0
-        self.merkleRootMNList = None
-
-    def deserialize(self, f):
-        self.version = struct.unpack("<H", f.read(2))[0]
-        self.height = struct.unpack("<i", f.read(4))[0]
-        self.merkleRootMNList = deser_uint256(f)
-        self.merkleRootQuorums = deser_uint256(f)
-
-    def serialize(self):
-        r = b""
-        r += struct.pack("<H", self.version)
-        r += struct.pack("<i", self.height)
-        r += ser_uint256(self.merkleRootMNList)
-        r += ser_uint256(self.merkleRootQuorums)
-        return r
-
 
 class CFinalCommitment:
     def __init__(self):

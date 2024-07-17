@@ -193,17 +193,25 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     if(fDIP0003Active_context) {
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate
-        //coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_COINBASE;
-        CCbTx cbTx;
-        cbTx.nVersion = 2;
-        cbTx.nHeight = nHeight;
-        llmq::CFinalCommitmentTxPayload qc;
+        llmq::CFinalCommitmentTxPayload qcTx;
         // create commitment payload if quorum commitment is needed
         llmq::CFinalCommitment commitment;
-        if (llmq::quorumBlockProcessor->GetMinableCommitment(nHeight, qc.commitment)) {
+        const auto& nMidDKGHeight = Params().GetConsensus().llmqTypeChainLocks.dkgInterval/2;
+        const auto &nModHeight = nMidDKGHeight - nMidDKGHeight%5;
+        if (llmq::quorumBlockProcessor->GetMinableCommitment(nHeight, qcTx.commitment)) {
+            qcTx.nHeight = nHeight;
             coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
-            qc.cbTx = cbTx;
-            ds << qc;
+            ds << qcTx;
+        } else if((pindexPrev->nHeight % nModHeight) == 0) {
+            CCbTxCLSIG cbTx;
+            coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_CLSIG;
+            if (CalcCbTxBestChainlock(pindexPrev, cbTx.cl)) {
+                LogPrintf("CreateNewBlock() h[%d] CbTx nHeight[%d] CLSig[%s]\n", nHeight, cbTx.cl.ToString());
+            } else {
+                // not an error
+                LogPrintf("CreateNewBlock() h[%d] CbTx failed to find best CL. Inserting null CL\n", nHeight);
+            }
+            ds << cbTx;
         }
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate

@@ -144,7 +144,7 @@ void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strC
     }
 }
 
-bool CQuorumBlockProcessor::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, bool fJustCheck, bool fBLSChecks)
+bool CQuorumBlockProcessor::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, llmq::CFinalCommitmentTxPayload &qcTx, bool fJustCheck, bool fBLSChecks)
 {
     AssertLockHeld(cs_main);
     
@@ -154,8 +154,8 @@ bool CQuorumBlockProcessor::ProcessBlock(const CBlock& block, const CBlockIndex*
     if (!fBLSChecks || !fDIP0003Active) {
         return true;
     }
-    CFinalCommitment qc;
-    if (!GetCommitmentsFromBlock(block, pindex->nHeight, qc, state)) {
+
+    if (!GetCommitmentsFromBlock(block, pindex->nHeight, qcTx, state)) {
         return false;
     }
 
@@ -169,7 +169,7 @@ bool CQuorumBlockProcessor::ProcessBlock(const CBlock& block, const CBlockIndex*
 
     
     // does the currently processed block contain a (possibly null) commitment for the current session?
-    bool hasCommitmentInNewBlock = !qc.quorumHash.IsNull();
+    bool hasCommitmentInNewBlock = !qcTx.IsNull();
     bool isCommitmentRequired = IsCommitmentRequired(pindex->nHeight);
     
     if (hasCommitmentInNewBlock && !isCommitmentRequired) {
@@ -184,7 +184,7 @@ bool CQuorumBlockProcessor::ProcessBlock(const CBlock& block, const CBlockIndex*
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-missing");
     }
     
-    if (!qc.quorumHash.IsNull() && !ProcessCommitment(pindex->nHeight, block.GetHash(), qc, state, fJustCheck, fBLSChecks)) {
+    if (hasCommitmentInNewBlock && !ProcessCommitment(pindex->nHeight, block.GetHash(), qcTx.commitment, state, fJustCheck, fBLSChecks)) {
         return false;
     }
     return true;
@@ -257,24 +257,24 @@ bool CQuorumBlockProcessor::UndoBlock(const CBlock& block, const CBlockIndex* pi
     AssertLockHeld(cs_main);
     if (!CLLMQUtils::IsV19Active(pindex->pprev->nHeight))
         bls::bls_legacy_scheme.store(true);
-    CFinalCommitment qc;
+    CFinalCommitmentTxPayload qcTx;
     BlockValidationState dummy;
-    if (!GetCommitmentsFromBlock(block, pindex->nHeight, qc, dummy)) {
+    if (!GetCommitmentsFromBlock(block, pindex->nHeight, qcTx, dummy)) {
         return false;
     }
 
-    if (qc.IsNull()) {
+    if (qcTx.commitment.IsNull()) {
         return true;
     }
 
-    m_commitment_evoDb.EraseCache(qc.quorumHash);
+    m_commitment_evoDb.EraseCache(qcTx.commitment.quorumHash);
 
     // if a reorg happened, we should allow to mine this commitment later
-    AddMineableCommitment(qc);
+    AddMineableCommitment(qcTx.commitment);
     return true;
 }
 
-bool CQuorumBlockProcessor::GetCommitmentsFromBlock(const CBlock& block, const uint32_t& nHeight, CFinalCommitment& ret, BlockValidationState& state)
+bool CQuorumBlockProcessor::GetCommitmentsFromBlock(const CBlock& block, const uint32_t& nHeight, llmq::CFinalCommitmentTxPayload &qcTxRet, BlockValidationState& state)
 {
     auto& consensus = Params().GetConsensus();
     bool fDIP0003Active = nHeight >= (uint32_t)consensus.DIP0003Height;
@@ -282,12 +282,18 @@ bool CQuorumBlockProcessor::GetCommitmentsFromBlock(const CBlock& block, const u
         if (!fDIP0003Active) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-premature");
         }
-        CFinalCommitmentTxPayload qc;
-        if (!GetTxPayload(*block.vtx[0], qc)) {
+        CFinalCommitmentTxPayload qcTx;
+        if (!GetTxPayload(*block.vtx[0], qcTx)) {
             // should not happen as it was verified before processing the block
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-payload");
         }
-        ret = std::move(qc.commitment);
+        if (qcTx.nVersion != CFinalCommitmentTxPayload::CURRENT_VERSION) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-cbtx-version");
+        }
+        if (qcTx.nHeight != nHeight) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-cbtx-height");
+        }
+        qcTxRet = std::move(qcTx);
     }
     return true;
 }

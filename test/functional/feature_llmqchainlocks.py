@@ -110,9 +110,8 @@ class LLMQChainLocksTest(DashTestFramework):
         assert_equal(best_0['known_block'], True)
         node_height = self.nodes[1].submitchainlock(best_0['blockhash'], best_0['signature'], best_0['signers'])
         # future CLSIG, will not submit
-        rpc_height = self.nodes[0].submitchainlock(best_1['blockhash'], best_1['signature'], best_1['signers'])
+        assert_raises_rpc_error(-8, 'future-clsig', self.nodes[0].submitchainlock, best_1['blockhash'], best_1['signature'], best_1['signers'])
         assert_equal(best_1['height'], node_height)
-        assert_equal(best_0['height'], rpc_height)
         best_0 = self.nodes[0].getbestchainlock()
         assert best_0['blockhash'] != best_1['blockhash']
         assert best_0['height'] != best_1['height']
@@ -125,10 +124,11 @@ class LLMQChainLocksTest(DashTestFramework):
         
         self.log.info("Isolate node, mine on both parts of the network, and reconnect")
         self.isolate_node(self.nodes[0])
+        # node 0 creates longer chain of 15 blocks but no chainlocks
         bad_cl =  self.generate(self.nodes[0], 15, sync_fun=self.no_op)[-6]
         bad_tip = self.nodes[0].getbestblockhash()
-        good_cl = self.nodes[1].getbestblockhash()
-        self.generatetoaddress(self.nodes[1], 10, node0_mining_addr, sync_fun=self.no_op)
+        # node 1 creates shorter chain of 10 blocks which is chainlocked (this is the canonical chain because sentry nodes see it)
+        good_cl = self.generatetoaddress(self.nodes[1], 10, node0_mining_addr, sync_fun=self.no_op)[-6]
         self.wait_for_chainlocked_block(self.nodes[1], good_cl)
         assert not self.nodes[0].getblock(bad_cl)["chainlock"]
         self.reconnect_isolated_node(self.nodes[0], 1)
@@ -136,7 +136,7 @@ class LLMQChainLocksTest(DashTestFramework):
         good_cl = self.nodes[1].getbestblockhash()
         # create a new CLSIG
         good_tip = self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)[-1]
-        # since shorter chain was chainlocked and its a valid chain, node with longer chain should switch to it
+        # since shorter chain was chainlocked and its the canonical valid chain, node with longer chain should switch to it
         self.wait_for_chainlocked_block(self.nodes[0], good_cl)
         self.wait_until(lambda: self.nodes[0].getbestblockhash() == good_tip)
         assert self.nodes[1].getbestblockhash() == good_tip
@@ -293,6 +293,7 @@ class LLMQChainLocksTest(DashTestFramework):
         new_cl = self.nodes[0].getblockhash(self.nodes[0].getblockcount() - 5)
         self.wait_for_chainlocked_block_all_nodes(new_cl, timeout=30)
         self.nodes[0].disconnect_p2ps()
+        assert(False)
 
     def create_fake_clsig(self, height_offset):
         # create a fake block height_offset blocks ahead of the tip

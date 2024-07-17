@@ -14,58 +14,59 @@
 #include <validation.h>
 #include <util/time.h>
 #include <logging.h>
-bool CheckCbTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
+
+bool CheckCbTxBestChainlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, bool fJustCheck)
 {
-    if (tx.nVersion != SYSCOIN_TX_VERSION_MN_COINBASE) {
-        return FormatSyscoinErrorMessage(state, "bad-cbtx-type", fJustCheck);
+    if (block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
+        return true;
     }
-
-    if (!tx.IsCoinBase()) {
-        return FormatSyscoinErrorMessage(state, "bad-cbtx-invalid", fJustCheck);
+    // atleast 2 CLSIG validation per DKG interval for transitions to validate in ZK light client
+    const auto& nMidDKGHeight = Params().GetConsensus().llmqTypeChainLocks.dkgInterval/2;
+    const auto &nModHeight = nMidDKGHeight - nMidDKGHeight%5;
+    if ((pindex->pprev->nHeight % nModHeight) != 0) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cbtx-height");
     }
-
-    CCbTx cbTx;
-    if (!GetTxPayload(tx, cbTx)) {
-        return FormatSyscoinErrorMessage(state, "bad-cbtx-payload", fJustCheck);
+    CCbTxCLSIG cbTx;
+    if (!GetTxPayload(*block.vtx[0], cbTx)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cbtx-payload");
     }
-
-    if (cbTx.nVersion == 0 || cbTx.nVersion > CCbTx::CURRENT_VERSION) {
-        return FormatSyscoinErrorMessage(state, "bad-cbtx-version", fJustCheck);
+    if (cbTx.nVersion != CCbTxCLSIG::CURRENT_VERSION) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cbtx-version");
     }
-
-    if (pindexPrev && pindexPrev->nHeight + 1 != cbTx.nHeight) {
-        return FormatSyscoinErrorMessage(state, "bad-cbtx-height", fJustCheck);
-    }
-
-    if (pindexPrev) {
-        if (cbTx.nVersion < 2) {
-            return FormatSyscoinErrorMessage(state, "bad-cbtx-version", fJustCheck);
+    llmq::CChainLockSig bestCL;
+    if(!CalcCbTxBestChainlock(pindex->pprev, bestCL)) {
+        // if local node has chainlock enforce miner to include the same one otherwise CL can be null (no CL's forming)
+        if(!cbTx.cl.IsNull()) {
+            // no chainlock found so we cannot enforce, instead just verify correctness
+            const auto curBlockCoinbaseCLIndex = pindex->GetAncestor(cbTx.cl.nHeight);
+            if (!llmq::chainLocksHandler->VerifyAggregatedChainLock(cbTx.cl, curBlockCoinbaseCLIndex)) {
+                return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-cbtx-invalid-clsig");
+            }
         }
+        return true;
     }
-
-    return true;
-}
-bool CheckCbTx(const CCbTx &cbTx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
-{
-    if (cbTx.nVersion == 0 || cbTx.nVersion > CCbTx::CURRENT_VERSION) {
-        return FormatSyscoinErrorMessage(state, "bad-cbtx-version", fJustCheck);
+    LogPrintf("CheckCbTxBestChainlock check cl matc bestCL %s\n", bestCL.ToString());
+    // here we have a locked chain with chainlock so we make sure the CLSIG in the chain matches our locked chain
+    if(cbTx.cl != bestCL) {
+        return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-cbtx-clsig");
     }
-
-    if (pindexPrev && pindexPrev->nHeight + 1 != cbTx.nHeight) {
-        return FormatSyscoinErrorMessage(state, "bad-cbtx-height", fJustCheck);
-    }
-
-    if (pindexPrev) {
-        if (cbTx.nVersion < 2) {
-            return FormatSyscoinErrorMessage(state, "bad-cbtx-version", fJustCheck);
-        }
-    }
-
     return true;
 }
 
-std::string CCbTx::ToString() const
+bool CalcCbTxBestChainlock(const CBlockIndex* pindexPrev, llmq::CChainLockSig& bestCL)
 {
-    return strprintf("CCbTx(nVersion=%d, nHeight=%d)",
-        nVersion, nHeight);
+    const auto best_clsig = llmq::chainLocksHandler->GetBestChainLock();
+    if (!best_clsig.IsNull() && best_clsig.blockHash == pindexPrev->GetAncestor(pindexPrev->nHeight - 5)->GetBlockHash()) {
+        // Our best CL is the newest one possible
+        bestCL = best_clsig;
+        return true;
+    }
+    return false;
+}
+
+
+std::string CCbTxCLSIG::ToString() const
+{
+    return strprintf("CCbTxCLSIG(nVersion=%d, cl=%s)",
+        static_cast<uint16_t>(nVersion), cl.ToString());
 }

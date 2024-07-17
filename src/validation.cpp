@@ -2792,9 +2792,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     fScriptChecks = fScriptChecks && RolluxContext; 
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     if (!ProcessSpecialTxsInBlock(m_blockman, block, pindex, state, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {
-        printf("ERROR: ConnectBlock(): ProcessSpecialTxsInBlock for block %s failed with %s\n",
+        LogPrintf("ERROR: %s: ProcessSpecialTxsInBlock for block %s failed with %s\n", __func__,
                      pindex->GetBlockHash().ToString().c_str(), state.ToString().c_str());
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-process-mn");
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, state.ToString());
     }
 
     for (unsigned int i = 0; i < block.vtx.size(); i++)
@@ -4641,12 +4641,16 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     }
     // SYSCOIN
     bool fDIP0003Active_context = nHeight >= consensusParams.DIP0003Height;
-    if(fDIP0003Active_context && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_COINBASE && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
-        //return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-cb-type", strprintf("%s : Incorrect version of coinbase transaction", __func__));
+    if(fDIP0003Active_context) {
+        const auto& nMidDKGHeight = Params().GetConsensus().llmqTypeChainLocks.dkgInterval/2;
+        const auto &nModHeight = nMidDKGHeight - nMidDKGHeight%5;
+        if((pindexPrev->nHeight % nModHeight) == 0 && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-cb-type", strprintf("%s : Incorrect version of coinbase transaction", __func__));
+        }
     }
     for (const auto& txRef : block.vtx)
     {
-        if (!txRef->IsCoinBase() && (txRef->nVersion == SYSCOIN_TX_VERSION_MN_COINBASE || txRef->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT)) {
+        if (!txRef->IsCoinBase() && (txRef->nVersion == SYSCOIN_TX_VERSION_MN_CLSIG || txRef->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT)) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-mn-version", "Bad version for non-coinbase masternode transaction");
         }
     }

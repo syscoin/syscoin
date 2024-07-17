@@ -5,34 +5,25 @@
 #ifndef SYSCOIN_EVO_CBTX_H
 #define SYSCOIN_EVO_CBTX_H
 
-#include <primitives/transaction.h>
 #include <univalue.h>
-#include <kernel/cs_main.h>
+#include <llmq/quorums_chainlocks.h>
 class CBlock;
 class CBlockIndex;
 class BlockValidationState;
-class TxValidationState;
-namespace llmq 
-{
-    class CFinalCommitmentTxPayload;
-    class CQuorumBlockProcessor;
-}
-
-class CCoinsViewCache;
 
 // coinbase transaction
-class CCbTx
+class CCbTxCLSIG
 {
 public:
     static constexpr uint16_t CURRENT_VERSION = 2;
 
 public:
     uint16_t nVersion{CURRENT_VERSION};
-    int32_t nHeight{0};
+    llmq::CChainLockSig cl;
 
 public:
-    SERIALIZE_METHODS(CCbTx, obj) {
-        READWRITE(obj.nVersion, obj.nHeight);
+    SERIALIZE_METHODS(CCbTxCLSIG, obj) {
+        READWRITE(obj.nVersion, obj.cl);
     }
 
     std::string ToString() const;
@@ -42,13 +33,11 @@ public:
         obj.clear();
         obj.setObject();
         obj.pushKV("version", (int)nVersion);
-        obj.pushKV("height", nHeight);
-    }
-    bool IsNull() const {
-        return nHeight == 0;
+        obj.pushKV("chainlock", cl.ToString());
     }
 };
 
-bool CheckCbTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool CheckCbTx(const CCbTx &cbTx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckCbTxBestChainlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, bool fJustCheck);
+bool CalcCbTxBestChainlock(const CBlockIndex* pindexPrev, llmq::CChainLockSig& bestCL);
+
 #endif // SYSCOIN_EVO_CBTX_H

@@ -469,12 +469,12 @@ public:
     ~CDeterministicMNManager() = default;
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state,
-                      const CCoinsViewCache& view, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+                      const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool UndoBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,
-                               CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet, const llmq::CFinalCommitmentTxPayload *qcIn = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+                               CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet, const llmq::CFinalCommitmentTxPayload &qcTx) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease);
 

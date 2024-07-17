@@ -497,7 +497,7 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
     m_changed = true;
 }
 
-bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& _state, const CCoinsViewCache& view, bool fJustCheck, bool ibd)
+bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& _state, const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, bool fJustCheck, bool ibd)
 {
     const auto& consensusParams = Params().GetConsensus();
     bool fDIP0003Active = pindex->nHeight >= consensusParams.DIP0003Height;
@@ -511,7 +511,7 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
     int nHeight = pindex->nHeight;
     try {
 
-        if (!BuildNewListFromBlock(block, pindex->pprev, _state, view, newList, oldList)) {
+        if (!BuildNewListFromBlock(block, pindex->pprev, _state, view, newList, oldList, qcTx)) {
             // pass the state returned by the function above
             return false;
         }
@@ -574,7 +574,7 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex)
     return true;
 }
 
-bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& _state, const CCoinsViewCache& view, CDeterministicMNList& mnListRet, CDeterministicMNList& oldList, const llmq::CFinalCommitmentTxPayload *qcIn)
+bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& _state, const CCoinsViewCache& view, CDeterministicMNList& mnListRet, CDeterministicMNList& oldList, const llmq::CFinalCommitmentTxPayload &qcTxIn)
 {
 
     int nHeight = pindexPrev->nHeight + 1;
@@ -623,34 +623,17 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
         DecreasePoSePenalties(newList, toDecrease);
     }
 
-    bool fRollActive = nHeight >= Params().GetConsensus().nRolluxStartBlock;
-
-    if(fRollActive) {
-        // coinbase can be quorum commitments
-        // qcIn passed in by createnewblock, but connectblock will pass in null, use gettxpayload there if version is for mn quorum
-        const bool &IsQCIn = qcIn && !qcIn->IsNull();
-        if(IsQCIn || (block.vtx[0] && block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT)) {
-            llmq::CFinalCommitmentTxPayload qc;
-            if(IsQCIn)
-                qc = *qcIn;
-            else if (!GetTxPayload(*block.vtx[0], qc)) {
-                return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-payload");
-            }
-    
-            if (!qc.commitment.IsNull()) {
-                const auto& params = Params().GetConsensus().llmqTypeChainLocks;
-                uint32_t quorumHeight = qc.cbTx.nHeight - (qc.cbTx.nHeight % params.dkgInterval);
-                auto quorumIndex = pindexPrev->GetAncestor(quorumHeight);
-                if (!quorumIndex || quorumIndex->GetBlockHash() != qc.commitment.quorumHash) {
-                    // we should actually never get into this case as validation should have caught it...but let's be sure
-                    return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-quorum-hash");
-                }
-
-                HandleQuorumCommitment(qc.commitment, quorumIndex, newList);
-            }
-            
+    if(!qcTxIn.commitment.IsNull()) {
+        const auto& params = Params().GetConsensus().llmqTypeChainLocks;
+        uint32_t quorumHeight = qcTxIn.nHeight - (qcTxIn.nHeight % params.dkgInterval);
+        auto quorumIndex = pindexPrev->GetAncestor(quorumHeight);
+        if (!quorumIndex || quorumIndex->GetBlockHash() != qcTxIn.commitment.quorumHash) {
+            // we should actually never get into this case as validation should have caught it...but let's be sure
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-quorum-hash");
         }
+        HandleQuorumCommitment(qcTxIn.commitment, quorumIndex, newList);            
     }
+    
     // for all other tx's MN register/update tx handling
     for (int i = 1; i < (int)block.vtx.size(); i++) {
         const CTransaction& tx = *block.vtx[i];

@@ -27,8 +27,7 @@ from .messages import (
     hash256,
     ser_uint256,
     tx_from_hex,
-    uint256_from_str,
-    CCbTx,
+    uint256_from_str
 )
 from .script import (
     CScript,
@@ -57,7 +56,7 @@ SYSCOIN_TX_VERSION_MN_REGISTER = 80
 SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE = 81
 SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR = 82
 SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE = 83
-SYSCOIN_TX_VERSION_MN_COINBASE = 84
+SYSCOIN_TX_VERSION_MN_CLSIG = 84
 SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT = 85
 
 SYSCOIN_TX_VERSION_MINT = 138
@@ -163,14 +162,6 @@ def create_coinbase(height, pubkey=None, *, script_pubkey=None, extra_output_scr
     else:
         coinbaseoutput.scriptPubKey = CScript([OP_TRUE])
     coinbase.vout = [coinbaseoutput]
-    # SYSCOIN
-    if height >= dip3height:
-        coinbase.nVersion = SYSCOIN_TX_VERSION_MN_COINBASE
-        cbtx_payload = CCbTx(2, height, 0, 0)
-        if witness is not None:
-            coinbase.extraData = cbtx_payload.serialize()
-        else:
-            coinbase.vout.append(CTxOut(0, CScript([OP_RETURN, cbtx_payload.serialize()])))
     if extra_output_script is not None:
         coinbaseoutput2 = CTxOut()
         coinbaseoutput2.nValue = 0

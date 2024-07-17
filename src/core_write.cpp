@@ -316,8 +316,8 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
             proTx.ToJson(obj);
             entry.pushKV("proUpRevTx", obj);
         }
-    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_COINBASE) {
-        CCbTx cbTx;
+    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_CLSIG) {
+        CCbTxCLSIG cbTx;
         if (GetTxPayload(tx, cbTx)) {
             UniValue obj;
             cbTx.ToJson(obj);
@@ -327,9 +327,6 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
         llmq::CFinalCommitmentTxPayload qcTx;
         if (GetTxPayload(tx, qcTx)) {
             UniValue obj;
-            UniValue cbObj;
-            qcTx.cbTx.ToJson(cbObj);
-            entry.pushKV("cbTx", cbObj);
             qcTx.ToJson(obj);
             entry.pushKV("qcTx", obj);
         }

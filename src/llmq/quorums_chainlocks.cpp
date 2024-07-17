@@ -148,6 +148,11 @@ const CBlockIndex* CChainLocksHandler::GetPreviousChainLock()
     LOCK(cs);
     return bestChainLockBlockIndexPrev;
 }
+CChainLockSig CChainLocksHandler::GetBestChainLockPrev()
+{
+    LOCK(cs);
+    return bestChainLockWithKnownBlockPrev;
+}
 std::map<CQuorumCPtr, CChainLockSigCPtr> CChainLocksHandler::GetBestChainLockShares()
 {
 
@@ -324,14 +329,15 @@ void CChainLocksHandler::ProcessMessage(CNode* pfrom, const std::string& strComm
     if (strCommand == NetMsgType::CLSIG) {
         CChainLockSig clsig;
         vRecv >> clsig;
-
-        ProcessNewChainLock(pfrom->GetId(), clsig, ::SerializeHash(clsig));
+        BlockValidationState state;
+        ProcessNewChainLock(pfrom->GetId(), clsig, state, ::SerializeHash(clsig));
     }
 }
 
-void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLockSig& clsig, const uint256&hash, const uint256& idIn )
+bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLockSig& clsig, BlockValidationState& state, const uint256& hash, const bool bCheckBlock, const uint256& idIn, bool fJustCheck )
 {
-    assert((from == -1) ^ idIn.IsNull());
+    if(!bCheckBlock)
+        assert((from == -1) ^ idIn.IsNull());
     if (from != -1) {
         LOCK(cs_main);
         peerman.ReceivedResponse(from, hash);
@@ -356,7 +362,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
         peerman.ForgetTxHash(from, hash);
     }
     if(bReturn) {
-        return;
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "existing-clsig-height");
     }
     CBlockIndex* pindexScan{nullptr};
     const CBlockIndex* bestIndex;
@@ -372,7 +378,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             if(nHeightDiff < CSigningManager::SIGN_HEIGHT_LOOKBACK) {
                 // too far into the future
                 LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- future CLSIG (%s), peer=%d\n", __func__, clsig.ToString(), from);
-                return;
+                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "future-clsig");
             }
             // if best known header has moved on 2 more blocks from when it should have locked then also reject
             // this means there is a window of time of 2 blocks when a chainlock should be formed, completed and propagated
@@ -380,7 +386,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             if(nHeightDiff > (CSigningManager::SIGN_HEIGHT_LOOKBACK+2)) {
                 // too far into the past
                 LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- old CLSIG (%s), peer=%d\n", __func__, clsig.ToString(), from);
-                return;
+                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "old-clsig");
             }
         }
         pindexScan = chainman.m_blockman.LookupBlockIndex(clsig.blockHash);
@@ -388,7 +394,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
         if (pindexScan == nullptr) {
             LogPrintf("CChainLocksHandler::%s -- block of CLSIG (%s) does not exist\n",
                     __func__, clsig.ToString());
-            return;
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-block");
         }
         if (pindexScan != nullptr && pindexScan->nHeight != clsig.nHeight) {
             // Should not happen
@@ -398,7 +404,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 if(peer)
                     peerman.Misbehaving(*peer, 10, "invalid CLSIG");
             }
-            return;
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-height");
         }
         if ((clsig.nHeight%CSigningManager::SIGN_HEIGHT_LOOKBACK) != 0) {
             // Should not happen
@@ -408,7 +414,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 if(peer)
                     peerman.Misbehaving(*peer, 10, "invalid CLSIG");
             }
-            return;
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-height-align");
         }
         // current chainlock should be confirmed before trying to make new one (don't let headers-only be locked by more than 1 CL)
         if (bestIndex && !chainman.ActiveChain().Contains(bestIndex)) {
@@ -419,7 +425,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 if(peer)
                     peerman.Misbehaving(*peer, 10, "invalid CLSIG");
             }
-            return;
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-chainstate-missing");
         }
     }
     bool bConflict{false};
@@ -436,7 +442,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             if(peer)
                 peerman.Misbehaving(*peer, 10, "invalid CLSIG");
         }
-        return;
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-conflict");
     }
     const auto& consensus = Params().GetConsensus();
     const auto& llmqParams = consensus.llmqTypeChainLocks;
@@ -446,9 +452,9 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- invalid signers count (%d) for CLSIG (%s), peer=%d\n", __func__, signers_count, clsig.ToString(), from);
         if(peer)
             peerman.Misbehaving(*peer, 10, "invalid CLSIG");
-        return;
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-invalid-signers-count");
     }
-    if (from == -1 || signers_count == 1) {
+    if (!bCheckBlock && (from == -1 || signers_count == 1)) {
         // A part of a multi-quorum CLSIG signed by a single quorum
         std::pair<int, CQuorumCPtr> ret;
         clsig.signers.resize(signingActiveQuorumCount, false);
@@ -458,7 +464,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 if(peer)
                     peerman.Misbehaving(*peer, 10, "invalid CLSIG");
             }
-            return;
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-invalid-share-sig");
         }
         CInv clsigAggInv;
         {
@@ -467,7 +473,7 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             if (std::count(clsig.signers.begin(), clsig.signers.end(), true) > 1) {
                 // this should never happen
                 LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- ERROR in VerifyChainLockShare, CLSIG (%s), peer=%d\n", __func__, clsig.ToString(), from);
-                return;
+                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-invalid-signer-count");
             }
             auto it = bestChainLockShares.find(clsig.nHeight);
             if (it == bestChainLockShares.end()) {
@@ -511,33 +517,38 @@ void CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 if(peer)
                     peerman.Misbehaving(*peer, 10, "invalid CLSIG");
             }
-            return;
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-invalid-sig");
         }
-        {
-            LOCK(cs);
-            bestChainLockCandidates[clsig.nHeight] = std::make_shared<const CChainLockSig>(clsig);
-            mostRecentChainLockShare = clsig;
-            TryUpdateBestChainLock(pindexScan);
+        if(!fJustCheck) {
+            {
+                LOCK(cs);
+                bestChainLockCandidates[clsig.nHeight] = std::make_shared<const CChainLockSig>(clsig);
+                mostRecentChainLockShare = clsig;
+                TryUpdateBestChainLock(pindexScan);
+            }
+            if(!bCheckBlock)
+                peerman.RelayTransactionOther(clsigInv);
         }
-        peerman.RelayTransactionOther(clsigInv);
     }
-    
-    bool bChainLockMatchSigIndex = WITH_LOCK(cs, return bestChainLockBlockIndex == pindexScan);
-    if (bChainLockMatchSigIndex) {
-        CheckActiveState();
-        bool enforced = false;
-        const CBlockIndex* pindex;
-        {       
-            LOCK(cs);
-            pindex = bestChainLockBlockIndex;
-            enforced = isEnforced;
+    if(!fJustCheck) {
+        bool bChainLockMatchSigIndex = WITH_LOCK(cs, return bestChainLockBlockIndex == pindexScan);
+        if (bChainLockMatchSigIndex) {
+            CheckActiveState();
+            bool enforced = false;
+            const CBlockIndex* pindex;
+            {       
+                LOCK(cs);
+                pindex = bestChainLockBlockIndex;
+                enforced = isEnforced;
+            }
+            if(enforced) {
+                chainman.ActiveChainstate().EnforceBestChainLock(pindex);
+            }
+            LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- processed new CLSIG (%s), peer=%d\n",
+                __func__, clsig.ToString(), from);
         }
-        if(enforced) {
-            chainman.ActiveChainstate().EnforceBestChainLock(pindex);
-        }
-        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- processed new CLSIG (%s), peer=%d\n",
-              __func__, clsig.ToString(), from);
     }
+    return true;
 }
 
 void CChainLocksHandler::NotifyHeaderTip(const CBlockIndex* pindexNew)
@@ -822,7 +833,8 @@ void CChainLocksHandler::HandleNewRecoveredSig(const llmq::CRecoveredSig& recove
         clsig.sig = recoveredSig.sig.Get();
         mapSignedRequestIds.erase(recoveredSig.id);
     }
-    ProcessNewChainLock(-1, clsig, ::SerializeHash(clsig), recoveredSig.id);
+    BlockValidationState state;
+    ProcessNewChainLock(-1, clsig, state, ::SerializeHash(clsig), false, recoveredSig.id);
 }
 
 bool CChainLocksHandler::HasChainLock(int nHeight, const uint256& blockHash)

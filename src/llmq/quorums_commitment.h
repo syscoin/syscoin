@@ -112,24 +112,26 @@ using CFinalCommitmentPtr = std::unique_ptr<CFinalCommitment>;
 class CFinalCommitmentTxPayload
 {
 public:
-    CCbTx cbTx;
+    static constexpr uint16_t CURRENT_VERSION = 2;
+    uint16_t nVersion{CURRENT_VERSION};
+    uint32_t nHeight{0};
     CFinalCommitment commitment;
 
 public:
     SERIALIZE_METHODS(CFinalCommitmentTxPayload, obj) {
-        READWRITE(obj.cbTx, obj.commitment);
+        READWRITE(obj.nVersion, obj.nHeight, obj.commitment);
     }   
 
     void ToJson(UniValue& obj) const
     {
         UniValue qcObj;
         commitment.ToJson(qcObj);
+        obj.pushKV("version", nVersion);
+        obj.pushKV("height", nHeight);
         obj.pushKV("commitment", qcObj);
     }
-    inline bool IsNull() const {return cbTx.IsNull() && commitment.IsNull();}
+    inline bool IsNull() const {return nHeight == 0;}
 };
-
-bool CheckLLMQCommitment(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)  EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 } // namespace llmq
 

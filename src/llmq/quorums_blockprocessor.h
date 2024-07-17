@@ -17,6 +17,7 @@ class ChainstateManager;
 namespace llmq
 {
 class CFinalCommitment;
+class CFinalCommitmentTxPayload;
 using CFinalCommitmentPtr = std::unique_ptr<CFinalCommitment>;
 
 class CQuorumBlockProcessor
@@ -34,7 +35,7 @@ public:
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, PeerManager& peerman);
 
-    bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, bool fJustCheck, bool fBLSChecks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, llmq::CFinalCommitmentTxPayload& qcTx, bool fJustCheck, bool fBLSChecks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool UndoBlock(const CBlock& block, const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     void AddMineableCommitment(const CFinalCommitment& fqc);
@@ -47,7 +48,7 @@ public:
 
     bool FlushCacheToDisk();
 private:
-    static bool GetCommitmentsFromBlock(const CBlock& block, const uint32_t& nHeight, CFinalCommitment& ret, BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    static bool GetCommitmentsFromBlock(const CBlock& block, const uint32_t& nHeight, llmq::CFinalCommitmentTxPayload &qcRet, BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ProcessCommitment(int nHeight, const uint256& blockHash, const CFinalCommitment& qc, BlockValidationState& state, bool fJustCheck, bool fBLSChecks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     static bool IsMiningPhase(int nHeight);
     bool IsCommitmentRequired(int nHeight) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

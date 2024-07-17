@@ -748,13 +748,18 @@ static RPCHelpMan submitchainlock()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
     }
     auto clsig = llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers);
-
-    if (!llmq::chainLocksHandler->VerifyAggregatedChainLock(clsig, pIndex)) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature");
-    }
     
-
-    llmq::chainLocksHandler->ProcessNewChainLock(0, clsig, ::SerializeHash(clsig));
+    int from = -1;
+    bool bCheckBlock = false;
+    if(fRegTest) {
+        from = 0;
+    } else {
+        bCheckBlock = true;
+    }
+    BlockValidationState state;
+    if(!llmq::chainLocksHandler->ProcessNewChainLock(from, clsig, state, ::SerializeHash(clsig), bCheckBlock)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, state.GetRejectReason());
+    }
     return llmq::chainLocksHandler->GetBestChainLock().nHeight;
 },
     };

@@ -6,9 +6,6 @@
 #define SYSCOIN_LLMQ_QUORUMS_CHAINLOCKS_H
 
 #include <llmq/quorums_signing.h>
-
-#include <chainparams.h>
-
 #include <atomic>
 
 
@@ -17,6 +14,7 @@ class CConnman;
 class PeerManager;
 class CScheduler;
 class ChainstateManager;
+class BlockValidationState;
 namespace llmq
 {
 
@@ -40,7 +38,20 @@ public:
         READWRITE(obj.nHeight, obj.blockHash, obj.sig);
         READWRITE(DYNBITSET(obj.signers));
     }
+    // Equality operator
+    bool operator==(const CChainLockSig& other) const
+    {
+        return nHeight == other.nHeight &&
+               blockHash == other.blockHash &&
+               sig == other.sig &&
+               signers == other.signers;
+    }
 
+    // Inequality operator
+    bool operator!=(const CChainLockSig& other) const
+    {
+        return !(*this == other);
+    }
     bool IsNull() const;
     std::string ToString() const;
 };
@@ -96,11 +107,12 @@ public:
     bool GetChainLockByHash(const uint256& hash, CChainLockSig& ret) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     CChainLockSig GetMostRecentChainLock() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     CChainLockSig GetBestChainLock() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    CChainLockSig GetBestChainLockPrev() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     const CBlockIndex* GetPreviousChainLock() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     std::map<CQuorumCPtr, CChainLockSigCPtr> GetBestChainLockShares() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    void ProcessNewChainLock(NodeId from, CChainLockSig& clsig, const uint256& hash, const uint256& idIn = uint256()) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool ProcessNewChainLock(NodeId from, CChainLockSig& clsig, BlockValidationState& state, const uint256& hash, const bool bCheckBlock = false, const uint256& idIn = uint256(), bool fJustCheck = false) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void NotifyHeaderTip(const CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload);
     void CheckActiveState() EXCLUSIVE_LOCKS_REQUIRED(!cs);

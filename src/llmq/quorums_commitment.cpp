@@ -129,45 +129,5 @@ bool CFinalCommitment::VerifySizes() const
     return true;
 }
 
-bool CheckLLMQCommitment(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck)
-{
-    AssertLockHeld(::cs_main);
-    if (!tx.IsCoinBase()) {
-        return FormatSyscoinErrorMessage(state, "bad-qctx-invalid", fJustCheck);
-    }
-    if(pindexPrev->nHeight <= Params().GetConsensus().nRolluxStartBlock) {
-        return true;
-    }
-    CFinalCommitmentTxPayload qcTx;
-    if (!GetTxPayload(tx, qcTx)) {
-        return FormatSyscoinErrorMessage(state, "bad-qc-payload", fJustCheck);
-    }
-    
-    if (!CheckCbTx(qcTx.cbTx, pindexPrev, state, fJustCheck)) {
-        return FormatSyscoinErrorMessage(state, "bad-qc-cbtx", fJustCheck);
-    }
-
-    const CBlockIndex* pQuorumBaseBlockIndex = blockman.LookupBlockIndex(qcTx.commitment.quorumHash);
-    if(!pQuorumBaseBlockIndex) {
-        return FormatSyscoinErrorMessage(state, "bad-qc-quorum-hash", fJustCheck);
-    }
-    if (pQuorumBaseBlockIndex != pindexPrev->GetAncestor(pQuorumBaseBlockIndex->nHeight)) {
-        // not part of active chain
-        return FormatSyscoinErrorMessage(state, "bad-qc-quorum-hash", fJustCheck);
-    }
-
-    if (qcTx.commitment.IsNull()) {
-        if (!qcTx.commitment.VerifyNull()) {
-            return FormatSyscoinErrorMessage(state, "bad-qc-invalid-null", fJustCheck);
-        }
-        return true;
-    }
-    if (!qcTx.commitment.Verify(pQuorumBaseBlockIndex, false)) {
-        return FormatSyscoinErrorMessage(state, "bad-qc-invalid", fJustCheck);
-    }
-    
-
-    return true;
-}
 
 } // namespace llmq

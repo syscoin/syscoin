@@ -166,8 +166,7 @@ bool IsSyscoinNEVMDataTx(const int &nVersion) {
     return nVersion == SYSCOIN_TX_VERSION_NEVM_DATA_SHA3;
 }
 bool IsMasternodeTx(const int &nVersion) {
-    return nVersion == SYSCOIN_TX_VERSION_MN_COINBASE ||
-     nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT ||
+    return 
      nVersion == SYSCOIN_TX_VERSION_MN_REGISTER ||
      nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
      nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||

@@ -30,10 +30,6 @@ bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const 
             return CheckProUpRegTx(tx, pindexPrev, state, view, fJustCheck, check_sigs);
         case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE:
             return CheckProUpRevTx(tx, pindexPrev, state, fJustCheck, check_sigs);
-        case SYSCOIN_TX_VERSION_MN_COINBASE:
-            return CheckCbTx(tx, pindexPrev, state, fJustCheck);
-        case SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT:
-            return llmq::CheckLLMQCommitment(blockman, tx, pindexPrev, state, fJustCheck);
         default:
             return true;
         }
@@ -45,22 +41,6 @@ bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const 
     return FormatSyscoinErrorMessage(state, "bad-tx-type-check", fJustCheck);
 }
 
-bool IsSpecialTx(const CTransaction& tx)
-{
-    switch (tx.nVersion) {
-    case SYSCOIN_TX_VERSION_MN_REGISTER:
-    case SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE:
-    case SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR:
-    case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE:
-    case SYSCOIN_TX_VERSION_MN_COINBASE:
-    case SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT:
-        return true;
-    default:
-        return false;
-    }
-
-    return false;
-}
 
 bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, bool ibd)
 {
@@ -68,9 +48,10 @@ bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block,
         static SteadyClock::duration nTimeLoop{};
         static SteadyClock::duration nTimeQuorum{};
         static SteadyClock::duration nTimeDMN{};
+        static SteadyClock::duration nTimeCbTxCL{};
 
         auto nTime1 = SystemClock::now();
-
+        llmq::CFinalCommitmentTxPayload qcTx;
         for (const auto& ptr_tx : block.vtx) {
             TxValidationState txstate;
             if (!CheckSpecialTx(blockman, *ptr_tx, pindex->pprev, txstate, view, false, check_sigs)) {
@@ -81,7 +62,7 @@ bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block,
         auto nTime2 = SystemClock::now(); nTimeLoop += nTime2 - nTime1;
         LogPrint(BCLog::BENCHMARK, "        - Loop: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime2 - nTime1), Ticks<SecondsDouble>(nTimeLoop));
 
-        if (!llmq::quorumBlockProcessor->ProcessBlock(block, pindex, state, fJustCheck, check_sigs)) {
+        if (!llmq::quorumBlockProcessor->ProcessBlock(block, pindex, state, qcTx, fJustCheck, check_sigs)) {
             // pass the state returned by the function above
             return false;
         }
@@ -89,13 +70,20 @@ bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block,
         auto nTime3 = SystemClock::now(); nTimeQuorum += nTime3 - nTime2;
         LogPrint(BCLog::BENCHMARK, "        - quorumBlockProcessor: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime3 - nTime2), Ticks<SecondsDouble>(nTimeQuorum));
 
-        if (!deterministicMNManager || !deterministicMNManager->ProcessBlock(block, pindex, state, view, fJustCheck, ibd)) {
+        if (!deterministicMNManager || !deterministicMNManager->ProcessBlock(block, pindex, state, view, qcTx, fJustCheck, ibd)) {
             // pass the state returned by the function above
             return false;
         }
 
         auto nTime4 = SystemClock::now(); nTimeDMN += nTime4 - nTime3;
         LogPrint(BCLog::BENCHMARK, "        - deterministicMNManager: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime4 - nTime3), Ticks<SecondsDouble>(nTimeDMN));
+        if (check_sigs && !CheckCbTxBestChainlock(block, pindex, state, fJustCheck)) {
+            // pass the state returned by the function above
+            return false;
+        }
+
+        auto nTime5 = SystemClock::now(); nTimeCbTxCL += nTime5 - nTime4;
+        LogPrint(BCLog::BENCHMARK, "        - CheckCbTxBestChainlock: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime5 - nTime4), Ticks<SecondsDouble>(nTimeCbTxCL));
 
     } catch (const std::exception& e) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "failed-procspectxsinblock");

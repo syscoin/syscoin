@@ -12,13 +12,12 @@
 #include <univalue.h>
 #include <unordered_lru_cache.h>
 
-#include <evo/evodb.h>
-
 #include <unordered_map>
 #include <sync.h>
 #include <random.h>
 #include <streams.h>
 #include <threadsafety.h>
+#include <dbwrapper.h>
 using NodeId = int64_t;
 class CNode;
 class CConnman;

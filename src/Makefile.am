@@ -835,6 +835,7 @@ libsyscoin_common_a_SOURCES = \
   kernel/chainparams.cpp \
   key.cpp \
   key_io.cpp \
+  llmq/quorums_chainlocks.cpp \
   merkleblock.cpp \
   messagesigner.cpp \
   net_types.cpp \
