@@ -11,7 +11,7 @@ from test_framework.util import assert_equal, satoshi_round, wait_until_helper_i
 class SyscoinGovernanceTest (DashTestFramework):
     def set_test_params(self):
         # using adjusted v20 deployment params to test an edge case where superblock maturity window is equal to deployment window size
-        self.set_dash_test_params(6, 5, [["-whitelist=noban@127.0.0.1"]] * 6, fast_dip3_enforcement=True)
+        self.set_dash_test_params(6, 5, fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()

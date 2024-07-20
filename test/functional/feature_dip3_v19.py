@@ -19,7 +19,7 @@ from test_framework.util import (
 
 class DIP3V19Test(DashTestFramework):
     def set_test_params(self):
-        self.set_dash_test_params(6, 5, [["-whitelist=noban@127.0.0.1"]] * 6, fast_dip3_enforcement=True)
+        self.set_dash_test_params(6, 5, fast_dip3_enforcement=True)
         self.extra_args += [['-dip19params=200'],['-dip19params=200'],['-dip19params=200'],['-dip19params=200'],['-dip19params=200'],['-dip19params=200']]
 
     def skip_test_if_missing_module(self):
