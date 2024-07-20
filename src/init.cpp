@@ -134,6 +134,7 @@
 #include <netfulfilledman.h>
 #include <masternode/masternodemeta.h>
 #include <llmq/quorums_dkgsessionmgr.h>
+#include <llmq/quorums_chainlocks.h>
 static CDSNotificationInterface* pdsNotificationInterface = nullptr;
 
 using kernel::DumpMempool;
@@ -2043,7 +2044,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (ShutdownRequested()) {
         return false;
     }
-
     node.scheduler->scheduleEvery([&] { netfulfilledman->DoMaintenance(); }, std::chrono::minutes{1});
     node.scheduler->scheduleEvery([&] { masternodeSync.DoMaintenance(*node.connman, *node.peerman); }, std::chrono::seconds{1});
     node.scheduler->scheduleEvery(std::bind(CMasternodeUtils::DoMaintenance, std::ref(*node.connman)), std::chrono::minutes{1});
@@ -2051,6 +2051,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     node.scheduler->scheduleEvery([&] { deterministicMNManager->DoMaintenance(); }, std::chrono::hours{1});
     if (activeMasternodeManager) {
         node.scheduler->scheduleEvery([&] { llmq::quorumDKGSessionManager->CleanupOldContributions(*node.chainman); }, std::chrono::hours{1});
+    }
+    {
+        LOCK2(cs_main, llmq::chainLocksHandler->cs);
+        llmq::chainLocksHandler->RestoreState();
     }
     llmq::StartLLMQSystem();
     // ********************************************************* Step 12: start node

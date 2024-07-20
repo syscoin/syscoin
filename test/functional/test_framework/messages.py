@@ -82,6 +82,7 @@ MSG_QUORUM_JUSTIFICATION = 17
 MSG_QUORUM_PREMATURE_COMMITMENT = 18
 MSG_QUORUM_RECOVERED_SIG = 19
 MSG_CLSIG = 20
+MSG_GET_CLSIG = 21
 VERSION_NEVM = (1 << 7)
 # Constants for the auxpow block version.
 VERSION_AUXPOW = (1 << 8)
@@ -510,7 +511,8 @@ class CInv:
         MSG_QUORUM_JUSTIFICATION: "qjustify",
         MSG_QUORUM_PREMATURE_COMMITMENT: "qpcommit",
         MSG_QUORUM_RECOVERED_SIG: "qsigrec",
-        MSG_CLSIG: "clsig"
+        MSG_CLSIG: "clsig",
+        MSG_GET_CLSIG: "getclsig"
     }
 
     def __init__(self, t=0, h=0):
@@ -2059,9 +2061,10 @@ class msg_qsendrecsigs():
 class msg_clsig():
     msgtype = b"clsig"
 
-    def __init__(self, height=0, blockHash=0, sig=b'\\x0' * 96, signers=None):
+    def __init__(self, height=0, blockHash=0, prevBlockHash=0, sig=b'\\x0' * 96, signers=None):
         self.height = height
         self.blockHash = blockHash
+        self.prevBlockHash = prevBlockHash
         self.sig = sig
         if signers is None:
             signers = []
@@ -2070,6 +2073,7 @@ class msg_clsig():
     def deserialize(self, f):
         self.height = struct.unpack('<i', f.read(4))[0]
         self.blockHash = deser_uint256(f)
+        self.prevBlockHash = deser_uint256(f)
         self.sig = f.read(96)
         self.signers = deser_dyn_bitset(f, False)
 
@@ -2078,12 +2082,13 @@ class msg_clsig():
         r = b""
         r += struct.pack('<i', self.height)
         r += ser_uint256(self.blockHash)
+        r += ser_uint256(self.prevBlockHash)
         r += self.sig
         r += ser_dyn_bitset(self.signers, False)
         return r
 
     def __repr__(self):
-        return "msg_clsig(height=%d, blockHash=%064x)" % (self.height, self.blockHash)
+        return "msg_clsig(height=%d, blockHash=%064x prevBlockHash=%064x)" % (self.height, self.blockHash, self.prevBlockHash)
 
 class msg_no_witness_blocktxn(msg_blocktxn):
     __slots__ = ()

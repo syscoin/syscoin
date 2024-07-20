@@ -280,6 +280,7 @@ extern const char *QBSIGSHARES;
 extern const char *QSIGREC;
 extern const char *QSIGSHARE;
 extern const char *CLSIG;
+extern const char *GET_CLSIG;
 extern const char *MNAUTH;
 /**
  * Contains a 4-byte version number and an 8-byte salt.
@@ -510,6 +511,7 @@ enum GetDataMsg : uint32_t {
     MSG_QUORUM_PREMATURE_COMMITMENT = 18,
     MSG_QUORUM_RECOVERED_SIG = 19,
     MSG_CLSIG = 20,
+    MSG_GET_CLSIG = 21,
     MSG_WITNESS_BLOCK = MSG_BLOCK | MSG_WITNESS_FLAG, //!< Defined in BIP144
     MSG_WITNESS_TX = MSG_TX | MSG_WITNESS_FLAG,       //!< Defined in BIP144
     // MSG_FILTERED_WITNESS_BLOCK is defined in BIP144 as reserved for future
@@ -546,7 +548,7 @@ public:
         if(bJustTx || bJustTxInternal) {
             return bJustTxInternal;
         }
-        return type >= MSG_SPORK && type <= MSG_CLSIG;
+        return type >= MSG_SPORK && type <= MSG_GET_CLSIG;
     }
     bool IsGenBlkMsg() const
     {

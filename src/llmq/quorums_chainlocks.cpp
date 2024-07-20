@@ -33,21 +33,45 @@ bool CChainLockSig::IsNull() const
 
 std::string CChainLockSig::ToString() const
 {
-    return strprintf("CChainLockSig(nHeight=%d, blockHash=%s, signers: hex=%s size=%d count=%d)",
-                nHeight, blockHash.ToString(), CLLMQUtils::ToHexStr(signers), signers.size(),
+    return strprintf("CChainLockSig(nHeight=%d, blockHash=%s, prevBlockHash=%s, signature=%s signers: hex=%s size=%d count=%d)",
+                nHeight, blockHash.ToString(), prevCLBlockHash.ToString(), sig.ToString(), CLLMQUtils::ToHexStr(signers), signers.size(),
                 std::count(signers.begin(), signers.end(), true));
 }
-
-CChainLocksHandler::CChainLocksHandler(CConnman& _connman, PeerManager& _peerman, ChainstateManager& _chainman):     
+CChainLocksHandler::CChainLocksHandler(const DBParams& db_params, CConnman& _connman, PeerManager& _peerman, ChainstateManager& _chainman):     
     connman(_connman),
     peerman(_peerman),
-    chainman(_chainman)
+    chainman(_chainman),
+    m_clDb(std::make_unique<CEvoDB<uint256, CChainLockSig>>(db_params))
 {
     scheduler = new CScheduler();
     CScheduler::Function serviceLoop = std::bind(&CScheduler::serviceQueue, scheduler);
     scheduler_thread = new std::thread(&util::TraceThread, "cl-schdlr", serviceLoop);
 }
+void CChainLocksHandler::RestoreState()
+{
+    if(m_clDb->ReadCache(uint256::ZEROV, bestChainLockWithKnownBlock)) {
+        if(!bestChainLockWithKnownBlock.prevCLBlockHash.IsNull()) {
+            if(m_clDb->ReadCache(bestChainLockWithKnownBlock.prevCLBlockHash, bestChainLockWithKnownBlockPrev)) {
+                bestChainLockBlockIndexPrev = chainman.m_blockman.LookupBlockIndex(bestChainLockWithKnownBlock.prevCLBlockHash);
+                if(!bestChainLockBlockIndexPrev) {
+                    LogPrintf("%s -- Could not get block index of previous block hash %s from CL %s\n", __func__, bestChainLockWithKnownBlock.prevCLBlockHash.ToString(), bestChainLockWithKnownBlock.ToString());
+                }
+            } else {
+                LogPrintf("%s -- Could not read previous block hash %s of CL %s from DB %s\n", __func__, bestChainLockWithKnownBlock.prevCLBlockHash.ToString(), bestChainLockWithKnownBlock.ToString());
+            }
+        }
+        bestChainLockBlockIndex = chainman.m_blockman.LookupBlockIndex(bestChainLockWithKnownBlock.blockHash);
+        if(!bestChainLockBlockIndex) {
+            LogPrintf("%s -- Could not get block index of block hash %s from CL %s\n", __func__, bestChainLockWithKnownBlock.blockHash.ToString(), bestChainLockWithKnownBlock.ToString());
+        }
+    }
+    scheduler->scheduleFromNow([&]() {
+        CheckState();
+    }, std::chrono::seconds{0});
 
+    LogPrintf("%s -- Restored current CL %s and prev CL %s\n", __func__, bestChainLockWithKnownBlock.ToString(), bestChainLockWithKnownBlockPrev.ToString());
+
+}
 CChainLocksHandler::~CChainLocksHandler()
 {
     if(scheduler)
@@ -66,20 +90,7 @@ void CChainLocksHandler::Start()
             return;
         }
         tryLockChainTipScheduled = true;
-        CheckActiveState();
-        bool enforced = false;
-        const CBlockIndex* pindex;
-        {       
-            LOCK(cs);
-            pindex = bestChainLockBlockIndex;
-            enforced = isEnforced;
-        }
-        bool bEnforce = false;
-        if(enforced) {
-            bEnforce = chainman.ActiveChainstate().EnforceBestChainLock(pindex);
-        }
-        if(bEnforce)
-            TrySignChainTip();
+        CheckState();
         tryLockChainTipScheduled = false;
     }, std::chrono::seconds{5});
 }
@@ -98,11 +109,14 @@ bool CChainLocksHandler::AlreadyHave(const uint256& hash)
     LOCK(cs);
     return seenChainLocks.count(hash) != 0;
 }
+bool CChainLocksHandler::AlreadyHaveDB(const uint256& hash)
+{
+    return m_clDb->Exists(hash);
+}
 
 bool CChainLocksHandler::GetChainLockByHash(const uint256& hash, llmq::CChainLockSig& ret)
 {
     LOCK(cs);
-
     if (::SerializeHash(mostRecentChainLockShare) == hash) {
         ret = mostRecentChainLockShare;
         return true;
@@ -128,10 +142,13 @@ bool CChainLocksHandler::GetChainLockByHash(const uint256& hash, llmq::CChainLoc
             }
         }
     }
-
     return false;
 }
 
+bool CChainLocksHandler::GetChainLockFromDB(const uint256& hash, llmq::CChainLockSig& ret)
+{
+    return m_clDb->Exists(hash) && m_clDb->Read(hash, ret);
+}
 
 CChainLockSig CChainLocksHandler::GetMostRecentChainLock()
 {
@@ -148,11 +165,7 @@ const CBlockIndex* CChainLocksHandler::GetPreviousChainLock()
     LOCK(cs);
     return bestChainLockBlockIndexPrev;
 }
-CChainLockSig CChainLocksHandler::GetBestChainLockPrev()
-{
-    LOCK(cs);
-    return bestChainLockWithKnownBlockPrev;
-}
+
 std::map<CQuorumCPtr, CChainLockSigCPtr> CChainLocksHandler::GetBestChainLockShares()
 {
 
@@ -179,10 +192,14 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
         if(bestChainLockBlockIndex && !pnevmdatadb->Prune(bestChainLockBlockIndex->GetMedianTimePast())) {
             LogPrintf("CChainLocksHandler::%s -- CNEVMDataDB::Prune failed\n", __func__);
         }
-        bestChainLockWithKnownBlockPrev = bestChainLockWithKnownBlock;
-        bestChainLockBlockIndexPrev = bestChainLockBlockIndex;
+        if(!bestChainLockWithKnownBlock.prevCLBlockHash.IsNull()) {
+            bestChainLockWithKnownBlockPrev = bestChainLockWithKnownBlock;
+            bestChainLockBlockIndexPrev = bestChainLockBlockIndex;
+        }
         bestChainLockWithKnownBlock = *it1->second;
         bestChainLockBlockIndex = pindex;
+        m_clDb->WriteCache(bestChainLockWithKnownBlock.blockHash, bestChainLockWithKnownBlock);
+        m_clDb->WriteCache(uint256::ZEROV, bestChainLockWithKnownBlock);
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG from candidates (%s)\n", __func__, bestChainLockWithKnownBlock.ToString());
         return true;
     }
@@ -216,9 +233,13 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
                 }
                 // all sigs should be validated already
                 clsigAgg.sig = CBLSSignature::AggregateInsecure(sigs);
-                bestChainLockWithKnownBlockPrev = bestChainLockWithKnownBlock;
-                bestChainLockBlockIndexPrev = bestChainLockBlockIndex;
+                if(!bestChainLockWithKnownBlock.prevCLBlockHash.IsNull()) {
+                    bestChainLockWithKnownBlockPrev = bestChainLockWithKnownBlock;
+                    bestChainLockBlockIndexPrev = bestChainLockBlockIndex;
+                }
                 bestChainLockWithKnownBlock = clsigAgg;
+                m_clDb->WriteCache(bestChainLockWithKnownBlock.blockHash, bestChainLockWithKnownBlock);
+                m_clDb->WriteCache(uint256::ZEROV, bestChainLockWithKnownBlock);
                 bestChainLockBlockIndex = pindex;
                 bestChainLockCandidates[clsigAgg.nHeight] = std::make_shared<const CChainLockSig>(clsigAgg);
                 LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG aggregated (%s)\n", __func__, bestChainLockWithKnownBlock.ToString());
@@ -252,7 +273,7 @@ bool CChainLocksHandler::VerifyChainLockShare(const CChainLockSig& clsig, const 
         if (quorum == nullptr) {
             return false;
         }
-        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash));
+        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash, clsig.prevCLBlockHash));
         if ((!idIn.IsNull() && idIn != requestId)) {
             continue;
         }
@@ -311,7 +332,7 @@ bool CChainLocksHandler::VerifyAggregatedChainLock(const CChainLockSig& clsig, c
             continue;
         }
         quorumPublicKeys.emplace_back(quorum->qc->quorumPublicKey);
-        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash));
+        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash, clsig.prevCLBlockHash));
         uint256 signHash = CLLMQUtils::BuildSignHash(quorum->qc->quorumHash, requestId, clsig.blockHash);
         hashes.emplace_back(signHash);
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) requestId=%s, signHash=%s\n",
@@ -331,13 +352,43 @@ void CChainLocksHandler::ProcessMessage(CNode* pfrom, const std::string& strComm
         vRecv >> clsig;
         BlockValidationState state;
         ProcessNewChainLock(pfrom->GetId(), clsig, state, ::SerializeHash(clsig));
+    } else if (strCommand == NetMsgType::GET_CLSIG) {
+        const NodeId& from = pfrom->GetId();
+        PeerRef peer = peerman.GetPeerRef(from);
+        CChainLockSig clsig;
+        vRecv >> clsig;
+        {
+            LOCK(cs_main);
+            peerman.ReceivedResponse(from, clsig.blockHash);
+            peerman.ForgetTxHash(from, clsig.blockHash);
+        }
+        // validate CLSIG then add it to DB
+        if(!m_clDb->ExistsCache(clsig.blockHash)) {
+            const CBlockIndex *pindexScan;
+            {
+                LOCK(cs_main);
+                pindexScan = chainman.m_blockman.LookupBlockIndex(clsig.blockHash);
+            }
+            if(pindexScan) {
+                if(VerifyAggregatedChainLock(clsig, pindexScan)) {
+                    m_clDb->WriteCache(clsig.blockHash, clsig);
+                } else {
+                    LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- bad CLSIG (%s), peer=%d\n", __func__, clsig.ToString(), from);
+                    if(peer)
+                        peerman.Misbehaving(*peer, 10, "invalid received CLSIG");
+                }
+            } else {
+                LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- invalid CLSIG block index (%s), peer=%d\n", __func__, clsig.ToString(), from);
+                if(peer)
+                    peerman.Misbehaving(*peer, 10, "invalid CLSIG");
+            }
+        }
     }
 }
 
-bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLockSig& clsig, BlockValidationState& state, const uint256& hash, const bool bCheckBlock, const uint256& idIn, bool fJustCheck )
+bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLockSig& clsig, BlockValidationState& state, const uint256& hash, const uint256& idIn)
 {
-    if(!bCheckBlock)
-        assert((from == -1) ^ idIn.IsNull());
+    assert((from == -1) ^ idIn.IsNull());
     if (from != -1) {
         LOCK(cs_main);
         peerman.ReceivedResponse(from, hash);
@@ -347,10 +398,9 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
     bool bReturn = false;
     {
         LOCK(cs);
-        if (!seenChainLocks.emplace(hash, TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now())).second) {
+        if (seenChainLocks.find(hash) != seenChainLocks.end()) {
             bReturn = true;
         }
-
         if (!bestChainLockWithKnownBlock.IsNull() && clsig.nHeight <= bestChainLockWithKnownBlock.nHeight) {
             // no need to process/relay older CLSIGs
             bReturn = true;
@@ -454,7 +504,7 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             peerman.Misbehaving(*peer, 10, "invalid CLSIG");
         return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-invalid-signers-count");
     }
-    if (!bCheckBlock && (from == -1 || signers_count == 1)) {
+    if (from == -1 || signers_count == 1) {
         // A part of a multi-quorum CLSIG signed by a single quorum
         std::pair<int, CQuorumCPtr> ret;
         clsig.signers.resize(signingActiveQuorumCount, false);
@@ -519,34 +569,23 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             }
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-invalid-sig");
         }
-        if(!fJustCheck) {
-            {
-                LOCK(cs);
-                bestChainLockCandidates[clsig.nHeight] = std::make_shared<const CChainLockSig>(clsig);
-                mostRecentChainLockShare = clsig;
-                TryUpdateBestChainLock(pindexScan);
-            }
-            if(!bCheckBlock)
-                peerman.RelayTransactionOther(clsigInv);
+        {
+            LOCK(cs);
+            bestChainLockCandidates[clsig.nHeight] = std::make_shared<const CChainLockSig>(clsig);
+            mostRecentChainLockShare = clsig;
+            TryUpdateBestChainLock(pindexScan);
         }
+        peerman.RelayTransactionOther(clsigInv);
     }
-    if(!fJustCheck) {
-        bool bChainLockMatchSigIndex = WITH_LOCK(cs, return bestChainLockBlockIndex == pindexScan);
-        if (bChainLockMatchSigIndex) {
-            CheckActiveState();
-            bool enforced = false;
-            const CBlockIndex* pindex;
-            {       
-                LOCK(cs);
-                pindex = bestChainLockBlockIndex;
-                enforced = isEnforced;
-            }
-            if(enforced) {
-                chainman.ActiveChainstate().EnforceBestChainLock(pindex);
-            }
-            LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- processed new CLSIG (%s), peer=%d\n",
-                __func__, clsig.ToString(), from);
-        }
+    bool bChainLockMatchSigIndex = WITH_LOCK(cs, return bestChainLockBlockIndex == pindexScan);
+    if (bChainLockMatchSigIndex) {
+        CheckState(false);
+        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- processed new CLSIG (%s), peer=%d\n",
+            __func__, clsig.ToString(), from);
+    }
+    {
+        LOCK(cs);
+        seenChainLocks.emplace(hash, TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()));
     }
     return true;
 }
@@ -567,11 +606,27 @@ void CChainLocksHandler::NotifyHeaderTip(const CBlockIndex* pindexNew)
     // block processing logic will handle this when the block arrives
     TryUpdateBestChainLock(pindexNew);
 }
-
+void CChainLocksHandler::CheckState(bool bSignTip) {
+    CheckActiveState();
+    bool enforced = false;
+    const CBlockIndex* pindex;
+    {       
+        LOCK(cs);
+        pindex = bestChainLockBlockIndex;
+        enforced = isEnforced;
+    }
+    bool bEnforce = false;
+    if(enforced) {
+        bEnforce = chainman.ActiveChainstate().EnforceBestChainLock(pindex);
+    }
+    if(bEnforce && bSignTip)
+        TrySignChainTip();
+}
 void CChainLocksHandler::UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload)
 {
     if(fInitialDownload)
         return;
+    
     // don't call TrySignChainTip directly but instead let the scheduler call it. This way we ensure that cs_main is
     // never locked and TrySignChainTip is not called twice in parallel. Also avoids recursive calls due to
     // EnforceBestChainLock switching chains.
@@ -579,43 +634,9 @@ void CChainLocksHandler::UpdatedBlockTip(const CBlockIndex* pindexNew, bool fIni
     if (!tryLockChainTipScheduled) {
         tryLockChainTipScheduled = true;
         scheduler->scheduleFromNow([&]() {
-            CheckActiveState();
-            bool enforced = false;
-            const CBlockIndex* pindex;
-            {       
-                LOCK(cs);
-                pindex = bestChainLockBlockIndex;
-                enforced = isEnforced;
-            }
-            bool bEnforce = false;
-            if(enforced) {
-                bEnforce = chainman.ActiveChainstate().EnforceBestChainLock(pindex);
-            }
-            if(bEnforce)
-                TrySignChainTip();
+            CheckState();
             tryLockChainTipScheduled = false;
         }, std::chrono::seconds{0});
-    }
-}
-
-void CChainLocksHandler::CheckActiveState()
-{
-    bool sporkActive = AreChainLocksEnabled();
-    {
-        LOCK(cs);
-        bool oldIsEnforced = isEnforced;
-        isEnabled = sporkActive;
-        isEnforced = isEnabled;
-        if (!oldIsEnforced && isEnforced) {
-            
-            // ChainLocks got activated just recently, but it's possible that it was already running before, leaving
-            // us with some stale values which we should not try to enforce anymore (there probably was a good reason
-            // to disable spork19)
-            mostRecentChainLockShare = bestChainLockWithKnownBlock = bestChainLockWithKnownBlockPrev = CChainLockSig();
-            bestChainLockBlockIndex = bestChainLockBlockIndexPrev = nullptr;
-            bestChainLockCandidates.clear();
-            bestChainLockShares.clear();
-        }
     }
 }
 
@@ -651,6 +672,33 @@ public:
         return attempt;
     }
 } signingState;
+
+void CChainLocksHandler::CheckActiveState()
+{
+    bool sporkActive = AreChainLocksEnabled();
+    {
+        LOCK(cs);
+        if (!sporkActive) {
+            // ChainLocks got activated just recently, but it's possible that it was already running before, leaving
+            // us with some stale values which we should not try to enforce anymore (there probably was a good reason
+            // to disable spork19)
+            mostRecentChainLockShare = bestChainLockWithKnownBlock = bestChainLockWithKnownBlockPrev = CChainLockSig();
+            bestChainLockBlockIndex = bestChainLockBlockIndexPrev = nullptr;
+            bestChainLockCandidates.clear();
+            bestChainLockShares.clear();
+            seenChainLocks.clear();
+            mapSignedRequestIds.clear();
+            signingState.SetLastSignedHeight(-1);
+            isEnforced = false;
+            isEnabled = false;
+            LogPrintf("%s -- Clearing CL state\n", __func__);
+        } else {
+            isEnforced = true;
+            isEnabled = true;
+        }
+    }
+}
+
 
 void CChainLocksHandler::TrySignChainTip()
 {
@@ -790,9 +838,10 @@ void CChainLocksHandler::TrySignChainTip()
         }
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- use quorum (%d, %s) and try to sign %s at height %d\n",
                 __func__, nQuorumIndex, quorums_scanned[nQuorumIndex]->qc->quorumHash.ToString(), msgHash.ToString(), nHeight);
-        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, nHeight, quorum->qc->quorumHash));
+        uint256 requestId;
         {
             LOCK(cs);
+            requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, nHeight, quorum->qc->quorumHash, bestChainLockWithKnownBlock.blockHash));
             if (bestChainLockWithKnownBlock.nHeight >= nHeight) {
                 // might have happened while we didn't hold cs
                 return;
@@ -830,11 +879,12 @@ void CChainLocksHandler::HandleNewRecoveredSig(const llmq::CRecoveredSig& recove
 
         clsig.nHeight = it->second.first;
         clsig.blockHash = it->second.second;
+        clsig.prevCLBlockHash = bestChainLockWithKnownBlock.blockHash;
         clsig.sig = recoveredSig.sig.Get();
         mapSignedRequestIds.erase(recoveredSig.id);
     }
     BlockValidationState state;
-    ProcessNewChainLock(-1, clsig, state, ::SerializeHash(clsig), false, recoveredSig.id);
+    ProcessNewChainLock(-1, clsig, state, ::SerializeHash(clsig), recoveredSig.id);
 }
 
 bool CChainLocksHandler::HasChainLock(int nHeight, const uint256& blockHash)
@@ -875,6 +925,8 @@ void CChainLocksHandler::SetToPreviousChainLock()
         return;
     }
     LOCK(cs);
+    m_clDb->EraseCache(bestChainLockWithKnownBlock.blockHash);
+    m_clDb->WriteCache(uint256::ZEROV, bestChainLockWithKnownBlockPrev);
     bestChainLockShares.erase(bestChainLockBlockIndex->nHeight);
     bestChainLockWithKnownBlock = bestChainLockWithKnownBlockPrev;
     // move index back to previous lock position so chain cannot reorg farther than 2 chainlocks no matter what
@@ -957,5 +1009,8 @@ bool AreChainLocksEnabled()
 {
     return sporkManager->IsSporkActive(SPORK_19_CHAINLOCKS_ENABLED);
 }
-
+bool CChainLocksHandler::FlushCacheToDisk() 
+{
+     return m_clDb->FlushCacheToDisk();
+}
 } // namespace llmq

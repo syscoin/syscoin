@@ -13,6 +13,7 @@
 #include <list>
 #include <utility>
 #include <logging.h>
+#include <limits>
 
 template <typename K, typename V>
 class CEvoDB : public CDBWrapper {
@@ -20,7 +21,7 @@ class CEvoDB : public CDBWrapper {
     std::list<std::pair<K, V>> fifoList;
     std::unordered_set<K> setEraseCache;
     mutable RecursiveMutex cs;
-    size_t maxCacheSize{0};
+    size_t maxCacheSize{std::numeric_limits<size_t>::max()};
     DBParams m_db_params;
 public:
     using CDBWrapper::CDBWrapper;

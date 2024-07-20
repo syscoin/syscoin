@@ -7,8 +7,8 @@
 
 #include <llmq/quorums_signing.h>
 #include <atomic>
-
-
+#include <evo/evodb.h>
+#include <kernel/cs_main.h>
 class CBlockIndex;
 class CConnman;
 class PeerManager;
@@ -23,19 +23,21 @@ class CChainLockSig
 public:
     int32_t nHeight{-1};
     uint256 blockHash;
+    uint256 prevCLBlockHash;
     CBLSSignature sig;
     std::vector<bool> signers;
 
 public:
-    CChainLockSig(int32_t nHeight, const uint256& blockHash, const CBLSSignature& sig, const std::vector<bool> signers) :
+    CChainLockSig(int32_t nHeight, const uint256& blockHash, const uint256& prevCLBlockHash, const CBLSSignature& sig, const std::vector<bool> signers) :
         nHeight(nHeight),
         blockHash(blockHash),
+        prevCLBlockHash(prevCLBlockHash),
         sig(sig),
         signers(signers)
     {}
     CChainLockSig() = default;
     SERIALIZE_METHODS(CChainLockSig, obj) {
-        READWRITE(obj.nHeight, obj.blockHash, obj.sig);
+        READWRITE(obj.nHeight, obj.blockHash, obj.prevCLBlockHash, obj.sig);
         READWRITE(DYNBITSET(obj.signers));
     }
     // Equality operator
@@ -43,6 +45,7 @@ public:
     {
         return nHeight == other.nHeight &&
                blockHash == other.blockHash &&
+               prevCLBlockHash == other.prevCLBlockHash &&
                sig == other.sig &&
                signers == other.signers;
     }
@@ -70,11 +73,9 @@ class CChainLocksHandler : public CRecoveredSigsListener
     static const int64_t CLEANUP_INTERVAL = 1000 * 30;
     static const int64_t CLEANUP_SEEN_TIMEOUT = 24 * 60 * 60 * 1000;
 
-
 private:
     CScheduler* scheduler;
     std::thread* scheduler_thread;
-    Mutex cs;
     bool isEnabled GUARDED_BY(cs) {false};
     bool isEnforced GUARDED_BY(cs) {false};
     std::atomic_bool tryLockChainTipScheduled {false};
@@ -90,14 +91,15 @@ private:
 
     std::map<uint256, std::pair<int, uint256> > mapSignedRequestIds GUARDED_BY(cs);
     std::map<uint256, int64_t> seenChainLocks GUARDED_BY(cs);
-
     int64_t lastCleanupTime GUARDED_BY(cs) {0};
 
 public:
+    Mutex cs;
     CConnman& connman;
     PeerManager& peerman;
     ChainstateManager& chainman;
-    explicit CChainLocksHandler(CConnman &connman, PeerManager& peerman, ChainstateManager& chainman);
+    std::unique_ptr<CEvoDB<uint256, CChainLockSig>> m_clDb;
+    explicit CChainLocksHandler(const DBParams& db_params, CConnman &connman, PeerManager& peerman, ChainstateManager& chainman);
     ~CChainLocksHandler();
 
     void Start() EXCLUSIVE_LOCKS_REQUIRED(!cs);
@@ -112,7 +114,7 @@ public:
     std::map<CQuorumCPtr, CChainLockSigCPtr> GetBestChainLockShares() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool ProcessNewChainLock(NodeId from, CChainLockSig& clsig, BlockValidationState& state, const uint256& hash, const bool bCheckBlock = false, const uint256& idIn = uint256(), bool fJustCheck = false) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool ProcessNewChainLock(NodeId from, CChainLockSig& clsig, BlockValidationState& state, const uint256& hash, const uint256& idIn = uint256()) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void NotifyHeaderTip(const CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitialDownload);
     void CheckActiveState() EXCLUSIVE_LOCKS_REQUIRED(!cs);
@@ -123,7 +125,13 @@ public:
     bool HasConflictingChainLock(int nHeight, const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void SetToPreviousChainLock() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool VerifyAggregatedChainLock(const CChainLockSig& clsig, const CBlockIndex* pindexScan) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool FlushCacheToDisk();
+    bool GetChainLockFromDB(const uint256& hash, llmq::CChainLockSig& ret);
+    bool AlreadyHaveDB(const uint256& hash);
+    uint256 GetLastRequestedBlockHash();
+    void RestoreState() EXCLUSIVE_LOCKS_REQUIRED(cs_main, cs);
 private:
+    void CheckState(bool bSignTip = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     // these require locks to be held already
     bool InternalHasChainLock(int nHeight, const uint256& blockHash) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool InternalHasConflictingChainLock(int nHeight, const uint256& blockHash) const EXCLUSIVE_LOCKS_REQUIRED(cs);

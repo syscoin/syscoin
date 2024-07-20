@@ -143,6 +143,7 @@ MESSAGEMAP = {
     b"wtxidrelay": msg_wtxidrelay,
     # Syscoin Specific
     b"clsig": msg_clsig,
+    b"getclsig": msg_clsig,
     b"getsporks": None,
     b"govsync": None,
     b"qfcommit": None,

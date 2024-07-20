@@ -459,10 +459,9 @@ private:
     std::atomic<int> to_cleanup {0};
 
     const CBlockIndex* tipIndex GUARDED_BY(cs) {nullptr};
-    const CBlockIndex* m_initial_snapshot_index GUARDED_BY(cs) {nullptr};
 
 public:
-    std::unique_ptr<CEvoDB<uint256, CDeterministicMNList>> m_evoDb GUARDED_BY(cs);
+    std::unique_ptr<CEvoDB<uint256, CDeterministicMNList>> m_evoDb;
     explicit CDeterministicMNManager(const DBParams& db_params)
         : m_evoDb(std::make_unique<CEvoDB<uint256, CDeterministicMNList>>(db_params, LIST_CACHE_SIZE)) {}
        
@@ -470,7 +469,7 @@ public:
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state,
                       const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
-    bool UndoBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+    bool UndoBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,
@@ -478,9 +477,9 @@ public:
     void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease);
 
-    const CDeterministicMNList GetListForBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    void GetListForBlock(const CBlockIndex* pindex, CDeterministicMNList& list) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    const CDeterministicMNList GetListAtChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    const CDeterministicMNList GetListForBlock(const CBlockIndex* pindex);
+    void GetListForBlock(const CBlockIndex* pindex, CDeterministicMNList& list);
+    const CDeterministicMNList GetListAtChainTip();
 
     // Test if given TX is a ProRegTx which also contains the collateral at index n
     static bool IsProTxWithCollateral(const CTransactionRef& tx, uint32_t n);
@@ -489,7 +488,7 @@ public:
     void DoMaintenance() EXCLUSIVE_LOCKS_REQUIRED(!cs_cleanup, !cs);
     void UpdatedBlockTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
-    const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex);
 };
 extern int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE; // keep them for a week
 extern std::unique_ptr<CDeterministicMNManager> deterministicMNManager;

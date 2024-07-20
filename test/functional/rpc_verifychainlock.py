@@ -64,18 +64,22 @@ class RPCVerifyChainLockTest(DashTestFramework):
 
         chainlock = node0.getbestchainlock()
         block_hash = chainlock["blockhash"]
+        prevblock_hash = chainlock["prevblockhash"]
         chainlock_signature = chainlock["signature"]
         chainlock_signers = chainlock["signers"]
         block_hash_prev = chainlock["blockhash"]
+        prevblock_hash_prev = chainlock["prevblockhash"]
         chainlock_signature_prev = chainlock["signature"]
         chainlock_signers_prev = chainlock["signers"]
-        assert node0.verifychainlock(block_hash, chainlock_signature, chainlock_signers)
+        assert node0.verifychainlock(block_hash, prevblock_hash, chainlock_signature, chainlock_signers)
         # Invalid "blockHash"
-        assert not node0.verifychainlock(node0.getblockhash(0), chainlock_signature, chainlock_signers)
+        assert not node0.verifychainlock(node0.getblockhash(0), prevblock_hash, chainlock_signature, chainlock_signers)
+        # Invalid "prevBlockHash"
+        assert not node0.verifychainlock(block_hash, node0.getblockhash(0), chainlock_signature, chainlock_signers)
         # Invalid "signers"
-        assert not node0.verifychainlock(block_hash, chainlock_signature, "")
+        assert not node0.verifychainlock(block_hash, prevblock_hash, chainlock_signature, "")
         # Invalid "sig"
-        assert_raises_rpc_error(-8, "invalid signature format", node0.verifychainlock, block_hash, self.mutate_signature(chainlock_signature), chainlock_signers)
+        assert_raises_rpc_error(-8, "invalid signature format", node0.verifychainlock, block_hash, prevblock_hash, self.mutate_signature(chainlock_signature), chainlock_signers)
         # Isolate node1, mine a block on node0 and wait for its ChainLock
         node1.setnetworkactive(False)
         self.generate(self.nodes[0], 5, sync_fun=self.no_op)
@@ -88,15 +92,16 @@ class RPCVerifyChainLockTest(DashTestFramework):
         chainlock = node0.getbestchainlock()
         assert chainlock != node1.getbestchainlock()
         block_hash = chainlock["blockhash"]
+        prevblock_hash = chainlock["prevblockhash"]
         chainlock_signature = chainlock["signature"]
         chainlock_signers = chainlock["signers"]
         height0 = chainlock["height"]
         # Now it should verify on node0 but fail on node1
-        assert node0.verifychainlock(block_hash, chainlock_signature, chainlock_signers)
-        assert_raises_rpc_error(-32603, "blockHash not found", node1.verifychainlock, block_hash, chainlock_signature, chainlock_signers)
+        assert node0.verifychainlock(block_hash, prevblock_hash, chainlock_signature, chainlock_signers)
+        assert_raises_rpc_error(-32603, "blockHash not found", node1.verifychainlock, block_hash, prevblock_hash, chainlock_signature, chainlock_signers)
 
         # node1 can verify the previous one still
-        assert node1.verifychainlock(block_hash_prev, chainlock_signature_prev, chainlock_signers_prev)
+        assert node1.verifychainlock(block_hash_prev, prevblock_hash_prev, chainlock_signature_prev, chainlock_signers_prev)
         self.generate(self.nodes[1], 5, sync_fun=self.no_op)
         cl1 = self.nodes[1].getbestblockhash()
         height1 = self.nodes[1].getblockcount()

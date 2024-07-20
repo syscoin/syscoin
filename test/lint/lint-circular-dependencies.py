@@ -35,8 +35,6 @@ EXPECTED_CIRCULAR_DEPENDENCIES = (
     "chainparams -> kernel/chainparams -> chainparams",
     "common/args -> logging -> common/args",
     "core_io -> evo/providertx -> core_io",
-    "evo/cbtx -> evo/specialtx -> evo/cbtx",
-    "evo/cbtx -> llmq/quorums_commitment -> evo/cbtx",
     "evo/deterministicmns -> evo/providertx -> evo/deterministicmns",
     "evo/deterministicmns -> evo/specialtx -> evo/deterministicmns",
     "evo/deterministicmns -> llmq/quorums_commitment -> evo/deterministicmns",
@@ -78,7 +76,6 @@ EXPECTED_CIRCULAR_DEPENDENCIES = (
     "chain -> validation -> validationinterface -> chain",
     "chain -> validation -> versionbits -> chain",
     "consensus/tx_verify -> services/nevmconsensus -> validation -> consensus/tx_verify",
-    "core_io -> evo/cbtx -> evo/deterministicmns -> core_io",
     "dsnotificationinterface -> governance/governance -> init -> dsnotificationinterface",
     "dsnotificationinterface -> net_processing -> node/blockstorage -> dsnotificationinterface",
     "evo/deterministicmns -> validation -> txmempool -> evo/deterministicmns",
@@ -104,17 +101,12 @@ EXPECTED_CIRCULAR_DEPENDENCIES = (
     "node/blockstorage -> validation -> validationinterface -> node/blockstorage",
     "chain -> node/blockstorage -> node/context -> node/kernel_notifications -> chain",
     "chain -> validation -> zmq/zmqnotificationinterface -> zmq/zmqpublishnotifier -> chain",
-    "common/bloom -> evo/cbtx -> llmq/quorums_blockprocessor -> net -> common/bloom",
     "consensus/tx_verify -> services/nevmconsensus -> validation -> txmempool -> consensus/tx_verify",
     "core_io -> llmq/quorums_commitment -> node/blockstorage -> signet -> core_io",
     "net -> rpc/server -> rpc/util -> node/transaction -> net",
     "node/blockstorage -> validation -> zmq/zmqnotificationinterface -> zmq/zmqpublishnotifier -> node/blockstorage",
     "node/transaction -> validation -> zmq/zmqrpc -> rpc/util -> node/transaction",
-    "banman -> common/bloom -> evo/cbtx -> llmq/quorums_blockprocessor -> net -> banman",
-    "banman -> common/bloom -> evo/cbtx -> llmq/quorums_blockprocessor -> net_processing -> banman",
-    "banman -> common/bloom -> llmq/quorums_commitment -> node/blockstorage -> node/context -> banman",
-    "core_io -> evo/cbtx -> validation -> zmq/zmqrpc -> rpc/util -> core_io",
-    "core_io -> evo/cbtx -> llmq/quorums_blockprocessor -> net_processing -> masternode/masternodepayments -> governance/governanceclasses -> core_io"
+    "banman -> common/bloom -> llmq/quorums_commitment -> node/blockstorage -> node/context -> banman"
 )
 
 CODE_DIR = "src"
