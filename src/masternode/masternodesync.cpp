@@ -14,6 +14,9 @@
 #include <util/translation.h>
 #include <timedata.h>
 #include <net.h>
+#include <node/mempool_persist_args.h>
+#include <common/args.h>
+using node::ShouldSyncMempool;
 class CMasternodeSync;
 CMasternodeSync masternodeSync;
 
@@ -225,14 +228,15 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                     // We must be at the tip already, let's move to the next asset.
                     SwitchToNextAsset(connman);
                     uiInterface.NotifyAdditionalDataSyncProgressChanged(nSyncProgress);
-                    
-                    // Now that the blockchain is synced request the mempool from the connected outbound nodes if possible
-                    for (auto pNodeTmp : snap.Nodes()) {
-                        bool fRequestedEarlier = netfulfilledman->HasFulfilledRequest(pNodeTmp->addr, "mempool-sync");
-                        if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
-                            netfulfilledman->AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
-                            connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::MEMPOOL));
-                            LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
+                    if (ShouldSyncMempool(gArgs)) {
+                        // Now that the blockchain is synced request the mempool from the connected outbound nodes if possible
+                        for (auto pNodeTmp : snap.Nodes()) {
+                            bool fRequestedEarlier = netfulfilledman->HasFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                            if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
+                                netfulfilledman->AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                                connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::MEMPOOL));
+                                LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
+                            }
                         }
                     }
                 }

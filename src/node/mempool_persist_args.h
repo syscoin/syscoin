@@ -16,8 +16,10 @@ namespace node {
  * automatically load the mempool on start and save to disk on shutdown
  */
 static constexpr bool DEFAULT_PERSIST_MEMPOOL{true};
+static constexpr bool DEFAULT_SYNC_MEMPOOL{false};
 
 bool ShouldPersistMempool(const ArgsManager& argsman);
+bool ShouldSyncMempool(const ArgsManager& argsman);
 fs::path MempoolPath(const ArgsManager& argsman);
 
 } // namespace node
