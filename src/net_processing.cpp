@@ -6058,6 +6058,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                             vInv.clear();
                         }
                     }
+                    // SYSCOIN Send an inv for the best ChainLock we have
+                    const auto& clsig = llmq::chainLocksHandler->GetBestChainLock();
+                    if (!clsig.IsNull()) {
+                        CInv inv(MSG_CLSIG, ::SerializeHash(clsig));
+                        vInv.push_back(inv);
+                        tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
+                        if (vInv.size() == MAX_INV_SZ) {
+                            m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::INV, vInv));
+                            vInv.clear();
+                        }
+                    }
+
                 }
 
                 // Determine transactions to relay
