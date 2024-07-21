@@ -3,7 +3,6 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 import secrets
-import time
 from test_framework.test_framework import DashTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error, force_finish_mnsync
 from test_framework.messages import NEVM_DATA_EXPIRE_TIME, MAX_DATA_BLOBS, MAX_NEVM_DATA_BLOB
@@ -13,19 +12,33 @@ class NEVMDataTest(DashTestFramework):
         self.add_wallet_options(parser)
 
     def set_test_params(self):
-        self.setup_clean_chain = True
         self.set_dash_test_params(5, 4, [["-disablewallet=0","-walletrejectlongchains=0","-whitelist=noban@127.0.0.1"]] * 5, fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
         self.skip_if_no_bdb()
 
+    # re-sync helpers
+    def sync_mempools_helper(self, nodes):
+        try:
+            self.bump_mocktime(1, nodes=nodes)
+            self.sync_mempools(timeout=1, nodes=nodes)
+        except:
+            return False
+        return True
+    def sync_blocks_helper(self, nodes):
+        try:
+            self.bump_mocktime(1, nodes=nodes)
+            self.sync_blocks(timeout=1, nodes=nodes)
+        except:
+            return False
+        return True
     def nevm_data_max_size_blob(self):
         print('Testing for max size of a blob (2MB)')
         blobDataMax = secrets.token_hex(MAX_NEVM_DATA_BLOB)
         print('Creating large blob (2MB)...')
         vh = self.nodes[0].syscoincreatenevmblob(blobDataMax)['versionhash']
-        self.sync_mempools()
+        self.wait_until(lambda: self.sync_mempools_helper(self.nodes))
         print('Generating block...')
         cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 5)
@@ -47,7 +60,7 @@ class NEVMDataTest(DashTestFramework):
             blobDataMax = secrets.token_hex(MAX_NEVM_DATA_BLOB)
             vh = self.nodes[0].syscoincreatenevmblob(blobDataMax)['versionhash']
             self.blobVHs.append(vh)
-        self.sync_mempools()
+        self.wait_until(lambda: self.sync_mempools_helper(self.nodes))
         print('Generating block...')
         cl = self.nodes[0].getbestblockhash()
         tip = self.generate(self.nodes[0], 1)[-1]
@@ -55,7 +68,7 @@ class NEVMDataTest(DashTestFramework):
         print('Ensure fees will be properly calculated due to the block size being correctly calculated based on PoDA policy (100x factor of blob data)...')
         assert rpc_details["size"] > 670000 and rpc_details["size"]  < 680000
         foundCount = 0
-        self.sync_blocks()
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
         print('Testing nodes to see if MAX_DATA_BLOBS blobs exist at 2MB each...')
         for i, blobVH in enumerate(self.blobVHs):
             mpt = 0
@@ -94,7 +107,7 @@ class NEVMDataTest(DashTestFramework):
         for i in range(0, MAX_DATA_BLOBS*2):
             vh = self.nodes[0].syscoincreatenevmblob(secrets.token_hex(55))['versionhash']
             self.blobVHs.append(vh)
-        self.sync_mempools()
+        self.wait_until(lambda: self.sync_mempools_helper(self.nodes))
         print('Generating block...')
         cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 1)
@@ -149,24 +162,17 @@ class NEVMDataTest(DashTestFramework):
         self.nodes[3].syscoincreatenevmblob(secrets.token_hex(55))
         print('Checking for duplicate versionhash...')
         assert vhTxid != self.nodes[3].syscoincreaterawnevmblob(vh, vhData)['txid']
-        self.bump_mocktime(5, nodes=self.nodes[0:4])
-        self.sync_mempools(self.nodes[0:4])
+        self.wait_until(lambda: self.sync_mempools_helper(self.nodes[0:4]))
         self.nodes[3].syscoincreatenevmblob(secrets.token_hex(55))['txid']
         print('Generating blocks without waiting for mempools to sync...')
         self.generate(self.nodes[2], 5, sync_fun=self.no_op)
-        self.sync_blocks(self.nodes[0:4])
-        self.bump_mocktime(5, nodes=self.nodes[0:4])
-        time.sleep(1)
-        self.sync_mempools(self.nodes[0:4])
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:4]))
         self.generate(self.nodes[2], 5, sync_fun=self.no_op)
-        self.bump_mocktime(5, nodes=self.nodes[0:4])
         print('Check for consistency...')
         self.nodes[3].syscoincreatenevmblob(secrets.token_hex(55))
-        self.bump_mocktime(5, nodes=self.nodes[0:4])
-        self.sync_mempools(self.nodes[0:4])
+        self.wait_until(lambda: self.sync_mempools_helper(self.nodes[0:4]))
         self.nodes[3].syscoincreatenevmblob(secrets.token_hex(55))
-        self.bump_mocktime(5, nodes=self.nodes[0:4])
-        self.sync_mempools(self.nodes[0:4])
+        self.wait_until(lambda: self.sync_mempools_helper(self.nodes[0:4]))
         assert_equal(self.nodes[0].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid, True)['data'], txidData)
@@ -187,41 +193,51 @@ class NEVMDataTest(DashTestFramework):
             blobDataMax = secrets.token_hex(MAX_NEVM_DATA_BLOB)
             self.nodes[0].syscoincreatenevmblob(blobDataMax)
         print('Generating blocks after waiting for mempools to sync...')
-        self.sync_mempools(self.nodes[0:4])
+        self.wait_until(lambda: self.sync_mempools_helper(self.nodes[0:4]))
         self.generate(self.nodes[2], 5, sync_fun=self.no_op)
         self.starttime = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())['time']
-        self.sync_blocks(self.nodes[0:4])
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:4]))
         print('Test reindex...')
         self.restart_node(1, extra_args=self.extra_args[1] + ["-reindex"])
-        force_finish_mnsync(self.nodes[0])
-        self.connect_nodes(1, 0, wait_for_connect=False)
-        self.connect_nodes(0, 1, wait_for_connect=False)
-        self.bump_mocktime(5, nodes=self.nodes[0:3])
-        time.sleep(1)
+        force_finish_mnsync(self.nodes[1])
+        for i in range(len(self.nodes[0:4])):
+            if i != 1:
+                self.connect_nodes(i, 1, wait_for_connect=False)
+                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 0:
+                self.connect_nodes(i, 0, wait_for_connect=False)
+                self.connect_nodes(1, 0, wait_for_connect=False)
         self.generate(self.nodes[0], 5, sync_fun=self.no_op)
-        self.sync_blocks(self.nodes[0:3])
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:3]))
         assert_equal(self.nodes[1].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid1, True)['data'], txid1Data)
         print('Start node 4...')
         self.start_node(4, extra_args=self.extra_args[4])
         force_finish_mnsync(self.nodes[4])
-        self.connect_nodes(4, 0, wait_for_connect=False)
-        self.connect_nodes(3, 0, wait_for_connect=False)
-        self.connect_nodes(2, 0, wait_for_connect=False)
-        self.connect_nodes(1, 0, wait_for_connect=False)
-        self.connect_nodes(0, 1, wait_for_connect=False)
-        self.connect_nodes(0, 2, wait_for_connect=False)
-        self.connect_nodes(0, 3, wait_for_connect=False)
-        self.connect_nodes(0, 4, wait_for_connect=False)
-        self.sync_blocks()
+        for i in range(len(self.nodes)):
+            if i != 1:
+                self.connect_nodes(i, 1, wait_for_connect=False)
+                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 0:
+                self.connect_nodes(i, 0, wait_for_connect=False)
+                self.connect_nodes(1, 0, wait_for_connect=False)
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
         assert_equal(self.nodes[4].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[4].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[4].getnevmblobdata(txid1, True)['data'], txid1Data)
         print('Test blob expiry...')
         self.mocktime = self.starttime
         self.bump_mocktime(NEVM_DATA_EXPIRE_TIME-1) # right before expiry
-        time.sleep(1)
+        for i in range(len(self.nodes)):
+            force_finish_mnsync(self.nodes[i])
+        for i in range(len(self.nodes)):
+            if i != 1:
+                self.connect_nodes(i, 1, wait_for_connect=False)
+                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 0:
+                self.connect_nodes(i, 0, wait_for_connect=False)
+                self.connect_nodes(1, 0, wait_for_connect=False)
         cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
@@ -229,13 +245,10 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[2].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[3].getnevmblobdata(txid1, True)['data'], txid1Data)
         self.bump_mocktime(3) # push median time over expiry
-        time.sleep(1)
         cl = self.generate(self.nodes[0], 10)[-6]
-        time.sleep(1)
         self.wait_for_chainlocked_block_all_nodes(cl)
         self.bump_mocktime(2) # push median time over expiry
         cl = self.generate(self.nodes[0], 10)[-6]
-        time.sleep(1)
         self.wait_for_chainlocked_block_all_nodes(cl)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, txid)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, vh)
@@ -245,7 +258,7 @@ class NEVMDataTest(DashTestFramework):
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[2].getnevmblobdata, txid1)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[1].getnevmblobdata, txid1)
         nowblockhash = self.nodes[0].getbestblockhash()
-        print('Checking for reorg with chainlocks in-place so pruned blobs are mined again...')
+        print('Checking for reorg with chainlocks')
         print('Invalidating back to the original blockhash {}'.format(startblockhash))
         self.nodes[0].invalidateblock(startblockhash)
         print('Reconsidering block')
@@ -269,17 +282,22 @@ class NEVMDataTest(DashTestFramework):
         self.nodes[1].createwallet("")
         self.nodes[2].createwallet("")
         self.nodes[3].createwallet("")
-        force_finish_mnsync(self.nodes[0])
-        force_finish_mnsync(self.nodes[1])
-        force_finish_mnsync(self.nodes[2])
-        force_finish_mnsync(self.nodes[3])
-        force_finish_mnsync(self.nodes[4])
-        self.generate(self.nodes[0], 10)
-        self.sync_blocks(self.nodes, timeout=60*5)
+        for i in range(len(self.nodes)):
+            force_finish_mnsync(self.nodes[i])
+        # Connect all nodes to node1 so that we always have the whole network connected
+        # Otherwise only masternode connections will be established between nodes, which won't propagate TXs/blocks
+        for i in range(len(self.nodes)):
+            if i != 1:
+                self.connect_nodes(i, 1, wait_for_connect=False)
+                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 0:
+                self.connect_nodes(i, 0, wait_for_connect=False)
+                self.connect_nodes(1, 0, wait_for_connect=False)
+        self.generate(self.nodes[0], 10, sync_fun=self.no_op)
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 0)
         self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 4070908800)
         self.wait_for_sporks_same()
-
         self.log.info("Mining 4 quorums")
         for i in range(4):
             self.mine_quorum(mod5=True)
@@ -290,13 +308,12 @@ class NEVMDataTest(DashTestFramework):
         self.generate(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
         self.generate(self.nodes[1], 10)
-        self.sync_blocks()
-        self.generate(self.nodes[3], 100)
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
         self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 1)
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 1)
         self.nodes[0].sendtoaddress(self.nodes[3].getnewaddress(), 1)
         self.generate(self.nodes[0], 5)
-        self.sync_blocks()
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
         self.nevm_data_max_size_blob()
         self.nevm_data_block_max_blobs()
         self.basic_nevm_data()
