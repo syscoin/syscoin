@@ -526,12 +526,12 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         newList.SetBlockHash(pindex->GetBlockHash());
         {
             LOCK(cs);
+            if(!ibd) {
+                diff = oldList.BuildDiff(newList);
+            }
+            m_evoDb->WriteCache(newList.GetBlockHash(), ibd? std::move(newList): newList);
             tipIndex = pindex;
         }
-        if(!ibd) {
-            diff = oldList.BuildDiff(newList);
-        }
-        m_evoDb->WriteCache(newList.GetBlockHash(), ibd? std::move(newList): newList);
        
     } catch (const std::exception& e) {
         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- internal error: %s\n", __func__, e.what());
@@ -554,17 +554,16 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex)
 
     CDeterministicMNList curList;
     CDeterministicMNList prevList;
-     
-    if(m_evoDb->ReadCache(blockHash, curList)) {
-        if (curList.HasChanges()) {
-            prevList = GetListForBlockInternal(pindex->pprev);
-        } 
-        {
-            LOCK(cs);
+    {
+        LOCK(cs);
+        if(m_evoDb->ReadCache(blockHash, curList)) {
+            if (curList.HasChanges()) {
+                prevList = GetListForBlockInternal(pindex->pprev);
+            }
+
             tipIndex = pindex->pprev;
         }
     }
-    
 
     if (curList.HasChanges()) {
         CDeterministicMNListDiff inversedDiff = curList.BuildDiff(prevList);
@@ -836,6 +835,7 @@ void CDeterministicMNManager::DecreasePoSePenalties(CDeterministicMNList& mnList
 
 const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(const CBlockIndex* pindex)
 {
+    AssertLockHeld(cs);
     CDeterministicMNList snapshot;
     const auto& consensusParams = Params().GetConsensus();
     bool fDIP0003Active = pindex->nHeight >= consensusParams.DIP0003Height;
@@ -844,6 +844,8 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(cons
     }
 
     if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot)) {
+        // no snapshot and no diff on disk means that it's the initial snapshot
+        m_initial_snapshot_index = pindex;
         snapshot = CDeterministicMNList(pindex->GetBlockHash(), pindex->nHeight, 0);
         m_evoDb->WriteCache(pindex->GetBlockHash(), snapshot);
         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- initial snapshot. blockHash=%s nHeight=%d\n", __func__,
@@ -854,10 +856,11 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(cons
     return snapshot;
 }
 const CDeterministicMNList CDeterministicMNManager::GetListForBlock(const CBlockIndex* pindex) {
-    return GetListForBlockInternal(pindex);
+    return WITH_LOCK(cs, return GetListForBlockInternal(pindex));
 };
 const CDeterministicMNList CDeterministicMNManager::GetListAtChainTip()
 {
+    LOCK(cs);
     if (!tipIndex) {
         return CDeterministicMNList();
     }

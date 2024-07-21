@@ -1305,7 +1305,6 @@ std::chrono::microseconds GetAdditionalTxRequestDelay(uint32_t invType)
     {
         case MSG_QUORUM_RECOVERED_SIG:
             return GETDATA_OTHER_INTERVAL;
-        case MSG_GET_CLSIG:
         case MSG_CLSIG:
             return std::chrono::milliseconds{100};
         default:
@@ -2036,8 +2035,6 @@ bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid)
         return llmq::quorumSigningManager->AlreadyHave(hash);
     case MSG_CLSIG:
         return llmq::chainLocksHandler->AlreadyHave(hash);
-    case MSG_GET_CLSIG:
-        return llmq::chainLocksHandler->AlreadyHaveDB(hash);
     }
 
     if (m_orphanage.HaveTx(gtxid)) return true;
@@ -2483,14 +2480,6 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                     llmq::CChainLockSig o;
                     if (llmq::chainLocksHandler->GetChainLockByHash(inv.hash, o)) {
                         m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::CLSIG, o));
-                        push = true;
-                    }
-                    break;
-                }
-                case(MSG_GET_CLSIG): {
-                    llmq::CChainLockSig o;
-                    if (llmq::chainLocksHandler->GetChainLockFromDB(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GET_CLSIG, o));
                         push = true;
                     }
                     break;
@@ -5196,7 +5185,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     } else if(msg_type == NetMsgType::QSIGREC) {
         llmq::quorumSigningManager->ProcessMessage(&pfrom, msg_type, vRecv);
         return;
-    } else if(msg_type == NetMsgType::CLSIG || msg_type == NetMsgType::GET_CLSIG) {
+    } else if(msg_type == NetMsgType::CLSIG) {
         llmq::chainLocksHandler->ProcessMessage(&pfrom, msg_type, vRecv);
         return;
     } else if(msg_type == NetMsgType::QCONTRIB ||

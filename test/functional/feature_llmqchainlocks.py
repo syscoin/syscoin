@@ -58,7 +58,7 @@ class LLMQChainLocksTest(DashTestFramework):
         for i in range(len(self.nodes)):
             if i != 1:
                 self.connect_nodes(i, 1)
-        self.generate(self.nodes[0], 10, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 10)
         self.sync_blocks(self.nodes, timeout=60*5)
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 0)
         self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 4070908800)
@@ -71,15 +71,14 @@ class LLMQChainLocksTest(DashTestFramework):
         self.wait_for_sporks_same()
         self.log.info("Mine single block, wait for chainlock")
         cl = self.nodes[0].getbestblockhash()
-        self.generate(self.nodes[0], 5, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 5)
 
         self.wait_for_chainlocked_block_all_nodes(cl)
 
         self.log.info("Mine many blocks, wait for chainlock")
-        prevcl = cl
-        cl0 = self.generate(self.nodes[0], 20, sync_fun=self.no_op)[-6]
+        cl = self.generate(self.nodes[0], 20)[-6]
         # We need more time here due to 20 blocks being generated at once
-        self.wait_for_chainlocked_block_all_nodes(cl0, timeout=30)
+        self.wait_for_chainlocked_block_all_nodes(cl, timeout=30)
 
         self.log.info("Assert that all blocks up until the lookback are chainlocked")
         for h in range(1, self.nodes[0].getblockcount()-5):
@@ -91,50 +90,34 @@ class LLMQChainLocksTest(DashTestFramework):
         self.isolate_node(self.nodes[0])
         node0_tip = self.nodes[0].getbestblockhash()
         cl = self.generatetoaddress(self.nodes[1], 10, node0_mining_addr, sync_fun=self.no_op)[-6]
-
         self.wait_for_chainlocked_block(self.nodes[1], cl)
-        best_1 = self.nodes[1].getbestchainlock()
         assert self.nodes[0].getbestblockhash() == node0_tip
         self.reconnect_isolated_node(self.nodes[0], 1)
-        self.bump_mocktime(5, nodes=self.nodes)
-        self.sync_blocks()
-        node_height = self.nodes[0].submitchainlock(best_1['blockhash'], best_1['prevblockhash'], best_1['signature'], best_1['signers'])
-        prevcl = cl
         cl = self.nodes[1].getbestblockhash()
-
         self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
         self.wait_for_chainlocked_block(self.nodes[0], cl)
+
         self.log.info("Isolate node, mine on another, reconnect and submit CL via RPC")
         self.isolate_node(self.nodes[0])
-        prevcl1 = cl
         cl = self.nodes[1].getbestblockhash()
         self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
         self.wait_for_chainlocked_block(self.nodes[1], cl)
         best_0 = self.nodes[0].getbestchainlock()
         best_1 = self.nodes[1].getbestchainlock()
-
         assert best_0['blockhash'] != best_1['blockhash']
         assert best_0['height'] != best_1['height']
         assert best_0['signature'] != best_1['signature']
-        assert best_0['prevblockhash'] != best_1['prevblockhash']
         assert_equal(best_0['known_block'], True)
-        # this is a no-op as node1 already has a better CL
-        node_height = self.nodes[1].submitchainlock(best_0['blockhash'], best_0['prevblockhash'], best_0['signature'], best_0['signers'])
+        node_height = self.nodes[1].submitchainlock(best_0['blockhash'], best_0['signature'], best_0['signers'])
         # future CLSIG, will not submit
-        assert_raises_rpc_error(-8, 'future-clsig', self.nodes[0].submitchainlock, best_1['blockhash'], best_1['prevblockhash'], best_1['signature'], best_1['signers'])
+        assert_raises_rpc_error(-8, 'future-clsig', self.nodes[0].submitchainlock, best_1['blockhash'], best_1['signature'], best_1['signers'])
         assert_equal(best_1['height'], node_height)
-        assert_equal(best_1['prevblockhash'], prevcl1)
         best_0 = self.nodes[0].getbestchainlock()
         assert best_0['blockhash'] != best_1['blockhash']
         assert best_0['height'] != best_1['height']
         assert best_0['signature'] != best_1['signature']
-        assert best_0['prevblockhash'] != best_1['prevblockhash']
-        #assert_equal(best_0['prevblockhash'], prevcl)
         assert_equal(best_0['known_block'], True)
         self.reconnect_isolated_node(self.nodes[0], 1)
-        self.bump_mocktime(5, nodes=self.nodes)
-        self.sync_blocks()
-        node_height = self.nodes[0].submitchainlock(best_1['blockhash'], best_1['prevblockhash'], best_1['signature'], best_1['signers'])
         cl = self.nodes[1].getbestblockhash()
         self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
         self.wait_for_chainlocked_block(self.nodes[0], cl)
@@ -150,15 +133,12 @@ class LLMQChainLocksTest(DashTestFramework):
         assert not self.nodes[0].getblock(bad_cl)["chainlock"]
         self.reconnect_isolated_node(self.nodes[0], 1)
         self.bump_mocktime(5, nodes=self.nodes)
-        time.sleep(5)
-
         good_cl = self.nodes[1].getbestblockhash()
         # create a new CLSIG
         good_tip = self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)[-1]
         # since shorter chain was chainlocked and its the canonical valid chain, node with longer chain should switch to it
         self.wait_for_chainlocked_block(self.nodes[0], good_cl)
         self.wait_until(lambda: self.nodes[0].getbestblockhash() == good_tip)
-        
         assert self.nodes[1].getbestblockhash() == good_tip
         self.log.info("The tip mined while this node was isolated should be marked conflicting now")
         found = False
@@ -173,7 +153,7 @@ class LLMQChainLocksTest(DashTestFramework):
         # set flag create and accept invalid blocks
         for i in range(len(self.nodes)):
             self.nodes[i].settestparams(True)
-        cl = self.generate(self.nodes[0], 10, sync_fun=self.no_op)[-6]
+        cl = self.generate(self.nodes[0], 10)[-6]
         bad_tip = self.nodes[0].getbestblockhash()
         self.wait_for_chainlocked_block_all_nodes(cl, timeout=30)
         # clear the invalid flag
@@ -188,9 +168,8 @@ class LLMQChainLocksTest(DashTestFramework):
             assert self.nodes[i].getbestblockhash() == good_tip
 
         cl = self.nodes[0].getbestblockhash()
-        self.generate(self.nodes[0], 5, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl, timeout=30)
-
 
         self.log.info("bad tip mined while being locked should be invalid now")
         found = False
@@ -201,44 +180,60 @@ class LLMQChainLocksTest(DashTestFramework):
                 break
         assert found
 
-        self.log.info("Try to reorg a CL")
-
+        self.log.info("Keep node connected and let it try to reorg the chain")
         good_cl = self.nodes[0].getbestblockhash()
-        good_tip = self.generate(self.nodes[0], 5, sync_fun=self.no_op)[-1]
+        good_tip = self.generate(self.nodes[0], 5)[-1]
         self.wait_for_chainlocked_block_all_nodes(good_cl, timeout=30)
+        self.log.info("Restart it so that it forgets all the chainlock messages from the past")
         self.stop_node(0)
         self.start_node(0)
         self.connect_nodes(0, 1)
         force_finish_mnsync(self.nodes[0])
         assert self.nodes[0].getbestblockhash() == good_tip
         self.nodes[0].invalidateblock(good_cl)
-        self.bump_mocktime(5, nodes=self.nodes)
-        assert_raises_rpc_error(-1, 'conflicting-with-chainlock', self.generate, self.nodes[0], 5)
-        self.wait_for_chainlocked_block_all_nodes(good_cl, timeout=30)
+        self.log.info("Now try to reorg the chain")
+        self.generatetoaddress(self.nodes[0], 5, node0_mining_addr, sync_fun=self.no_op)
+        self.wait_until(lambda: self.nodes[1].getbestblockhash() == good_tip)
+        bad_cl = self.nodes[0].getbestblockhash()
+        bad_tip = self.generatetoaddress(self.nodes[0], 5, node0_mining_addr, sync_fun=self.no_op)[-1]
+        self.wait_until(lambda: self.nodes[0].getbestblockhash() == bad_tip)
+        self.wait_until(lambda: self.nodes[1].getbestblockhash() == good_tip)
+
+        self.log.info("Now let the node which is on the wrong chain reorg back to the locked chain")
+        self.nodes[0].reconsiderblock(good_tip)
+        assert self.nodes[0].getbestblockhash() != good_tip
+        good_cl = self.nodes[1].getbestblockhash()
+        good_tip = self.generatetoaddress(self.nodes[1], 5, node0_mining_addr)[-1]
+        self.wait_for_chainlocked_block(self.nodes[0], good_cl)
+        assert self.nodes[0].getbestblockhash() == good_tip
         found = False
         foundConflict = False
         for tip in self.nodes[0].getchaintips():
+            if tip["hash"] == good_tip:
+                assert tip["status"] == "active"
+                found = True
             if tip["status"] == "conflicting":
                 foundConflict = True
+            if tip["status"] == "valid-fork":
+                forkChain = tip["hash"]
 
-        assert foundConflict
-        self.log.info("Restart and try again")
+        assert found and foundConflict
+        self.log.info("Should switch to the locked tip on invalidate and stay there across restarts until reconsider is called again")
         self.stop_node(0)
         self.start_node(0)
+        # will set valid-fork to active
         self.nodes[0].invalidateblock(good_cl)
+        assert self.nodes[0].getbestblockhash() == forkChain
         self.stop_node(0)
         self.start_node(0)
-        self.connect_nodes(0, 1)
-        force_finish_mnsync(self.nodes[0])
-        self.bump_mocktime(10, nodes=self.nodes)
-        prev_cl = good_cl
-        good_cl = self.nodes[0].getbestblockhash()
-        prev_blockcount = self.nodes[0].getblockcount()
-        self.generate(self.nodes[0], 5)
-        self.wait_for_chainlocked_block_all_nodes(good_cl, timeout=30)
-        best_cl = self.nodes[0].getbestchainlock()
-        assert_equal(prev_blockcount + 5,  self.nodes[0].getblockcount())
-        assert_equal(best_cl["prevblockhash"], prev_cl)
+        found = False
+        assert self.nodes[0].getbestblockhash() == forkChain
+        # reconsider to switch to good_tip but chainlocks should be cleared (invalidate block sets invalid flag on block but not chainlock failure so clear happens)
+        self.nodes[0].reconsiderblock(good_cl)
+        # back on the good_tip but no locks present anymore
+        assert self.nodes[0].getbestblockhash() == good_tip
+        # make sure chainlocks are cleared due to chainlocked invalid block
+        assert_raises_rpc_error(-32603, 'Unable to find any chainlock', self.nodes[0].getchainlocks)
 
         self.isolate_node(self.nodes[0])
         txs = []
@@ -253,7 +248,6 @@ class LLMQChainLocksTest(DashTestFramework):
             assert "confirmations" in tx
         node0_cl_block = self.nodes[0].getblock(node0_cl)
         assert not node0_cl_block["chainlock"]
-        prevcl = node0_cl
         node0_cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 5, sync_fun=self.no_op)
         self.log.info("Assert that TXs got included now")
@@ -264,8 +258,6 @@ class LLMQChainLocksTest(DashTestFramework):
         # for the mined TXs, which will then allow the network to create a CLSIG
         self.log.info("Re-enable network on first node and wait for chainlock")
         self.reconnect_isolated_node(self.nodes[0], 1)
-        self.bump_mocktime(5, nodes=self.nodes)
-        self.sync_blocks()
         self.wait_for_chainlocked_block(self.nodes[0], node0_cl)
 
         self.log.info("Send fake future clsigs and see if this breaks ChainLocks")
@@ -277,33 +269,33 @@ class LLMQChainLocksTest(DashTestFramework):
         self.wait_for_chainlocked_block_all_nodes(node0_cl, timeout=30)
 
         self.log.info("Shouldn't accept fake clsig when block isn't valid")
-        self.create_fake_clsig(1, prevcl)
+        self.create_fake_clsig(1)
         self.bump_mocktime(5, nodes=self.nodes)
         # no locks formed
         for node in self.nodes:
-            self.wait_until(lambda: node.getchainlocks()["recent_chainlock"]["blockhash"] == node0_cl)
-            self.wait_until(lambda: node.getchainlocks()["active_chainlock"]["blockhash"] == node0_cl)
+            self.wait_until(lambda: self.nodes[0].getchainlocks()["recent_chainlock"]["blockhash"] == node0_cl)
+            self.wait_until(lambda: self.nodes[0].getchainlocks()["active_chainlock"]["blockhash"] == node0_cl)
         # lock as normal on new block
         tip = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 5, sync_fun=self.no_op)
         self.bump_mocktime(5, nodes=self.nodes)
         self.wait_for_chainlocked_block_all_nodes(tip, timeout=30)
         self.log.info("Allow signing on competing chains")
-        new_cl = self.nodes[0].getbestblockhash()
-        self.generate(self.nodes[2], 2, sync_fun=self.no_op)
+        self.generate(self.nodes[2], 5, sync_fun=self.no_op)
         # create a fork
-        self.generate(self.nodes[1], 2, sync_fun=self.no_op)
+        self.generate(self.nodes[1], 5, sync_fun=self.no_op)
         time.sleep(5)
         # this just ensures all nodes are on the same tip and continue on getting locked
         # Make sure we are mod of 5 block count before checking for CL
         skip_count = 5 - (self.nodes[0].getblockcount() % 5)
         if skip_count != 0:
-            self.generate(self.nodes[0], skip_count, sync_fun=self.no_op)
-
+            self.generate(self.nodes[0], skip_count)
+        new_cl = self.nodes[0].getblockhash(self.nodes[0].getblockcount() - 5)
         self.wait_for_chainlocked_block_all_nodes(new_cl, timeout=30)
         self.nodes[0].disconnect_p2ps()
+        assert(False)
 
-    def create_fake_clsig(self, height_offset, prevblockhash):
+    def create_fake_clsig(self, height_offset):
         # create a fake block height_offset blocks ahead of the tip
         height = self.nodes[0].getblockcount() + height_offset
         fake_block = create_block(0xff, create_coinbase(height))
@@ -311,8 +303,8 @@ class LLMQChainLocksTest(DashTestFramework):
         quorum_hash = self.nodes[0].quorum_list(1)["quorums"][0]
         request_id_buf = ser_string(b"clsig") + struct.pack("<I", height)
         request_id_buf += bytes.fromhex(quorum_hash)[::-1]
-        request_id_buf += bytes.fromhex(prevblockhash)[::-1]
         request_id = hash256(request_id_buf)[::-1].hex()
+        quorum_hash = self.nodes[0].quorum_list(1)["quorums"][0]
         for mn in self.mninfo:
             mn.node.quorum_sign(request_id, fake_block.hash, quorum_hash)
         rec_sig = self.get_recovered_sig(request_id, fake_block.hash)

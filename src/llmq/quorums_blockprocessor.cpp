@@ -291,7 +291,7 @@ bool CQuorumBlockProcessor::GetCommitmentsFromBlock(const CBlock& block, const u
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-cbtx-version");
         }
         if (qcTx.nHeight != nHeight) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-cbtx-version");
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-cbtx-height");
         }
         qcTxRet = std::move(qcTx);
     }

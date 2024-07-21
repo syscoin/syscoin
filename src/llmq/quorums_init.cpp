@@ -21,7 +21,7 @@ namespace llmq
 CBLSWorker* blsWorker;
 
 
-void InitLLMQSystem(const DBParams& clDB, const DBParams& quorumCommitmentDB, const DBParams& quorumVectorDB, const DBParams& quorumSkDB, bool unitTests, CConnman& connman, BanMan& banman, PeerManager& peerman, ChainstateManager& chainman, bool fWipe)
+void InitLLMQSystem(const DBParams& quorumCommitmentDB, const DBParams& quorumVectorDB, const DBParams& quorumSkDB, bool unitTests, CConnman& connman, BanMan& banman, PeerManager& peerman, ChainstateManager& chainman, bool fWipe)
 {
     blsWorker = new CBLSWorker();
 
@@ -31,7 +31,7 @@ void InitLLMQSystem(const DBParams& clDB, const DBParams& quorumCommitmentDB, co
     quorumManager = new CQuorumManager(quorumVectorDB, quorumSkDB, *blsWorker, *quorumDKGSessionManager, chainman);
     quorumSigSharesManager = new CSigSharesManager(connman, banman, peerman);
     quorumSigningManager = new CSigningManager(unitTests, connman, peerman, chainman, fWipe);
-    chainLocksHandler = new CChainLocksHandler(clDB, connman, peerman, chainman);
+    chainLocksHandler = new CChainLocksHandler(connman, peerman, chainman);
 }
 
 void DestroyLLMQSystem()

@@ -65,6 +65,7 @@
 // SYSCOIN
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
+#include <evo/cbtx.h>
 #include <llmq/quorums_init.h>
 #include <llmq/quorums_commitment.h>
 #include <governance/governance.h>

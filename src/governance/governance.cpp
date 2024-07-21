@@ -248,12 +248,6 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         if (!AcceptVoteMessage(nHash)) {
             LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECTVOTE -- Received unrequested vote object: %s, hash: %s, peer = %d\n",
                 vote.ToString(), strHash, pfrom->GetId());
-            {
-                LOCK(cs_main);
-                peerman.ForgetTxHash(pfrom->GetId(), nHash);
-            }
-            if(peer)
-                peerman.Misbehaving(*peer, 10, "unrequested vote");
             return;
         }
 
@@ -823,7 +817,7 @@ bool CGovernanceManager::ConfirmInventoryRequest(const GenTxid& gtxid)
     // First check if we've already recorded this object
     switch (type) {
     case MSG_GOVERNANCE_OBJECT: {
-        if (mapObjects.count(hash) || mapPostponedObjects.count(hash) || mapErasedGovernanceObjects.count(hash)) {
+        if (mapObjects.count(hash) == 1 || mapPostponedObjects.count(hash) == 1) {
             LogPrint(BCLog::GOBJECT, "CGovernanceManager::ConfirmInventoryRequest already have governance object, returning false\n");
             return false;
         }

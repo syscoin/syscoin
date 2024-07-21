@@ -34,7 +34,6 @@
 #include <limits>
 #include <memory>
 #include <vector>
-#include <llmq/quorums_chainlocks.h>
 
 namespace node {
 // Complete initialization of chainstates after the initial call has been made
@@ -63,12 +62,6 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     netfulfilledman.reset(new CNetFulfilledRequestManager());
     mmetaman.reset();
     mmetaman.reset(new CMasternodeMetaMan());
-    auto clDB = DBParams{
-        .path = chainman.m_options.datadir / "cldb",
-        .cache_bytes = static_cast<size_t>(cache_sizes.cl_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = false,
-        .options = chainman.m_options.block_tree_db};
     auto quorumCommitmentDB = DBParams{
         .path = chainman.m_options.datadir / "evodb_qc",
         .cache_bytes = static_cast<size_t>(cache_sizes.evo_qc_db),
@@ -87,7 +80,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         .memory_only = options.block_tree_db_in_memory,
         .wipe_data = options.fReindexGeth,
         .options = chainman.m_options.block_tree_db};
-    llmq::InitLLMQSystem(clDB, quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, options.fReindexGeth);
+    llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, options.fReindexGeth);
     pnevmtxrootsdb.reset();
     pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
         .path = chainman.m_options.datadir / "nevmtxroots",
@@ -258,13 +251,6 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         netfulfilledman.reset(new CNetFulfilledRequestManager());
         mmetaman.reset();
         mmetaman.reset(new CMasternodeMetaMan());
-        auto clDB = DBParams{
-        .path = chainman.m_options.datadir / "cldb",
-        .cache_bytes = static_cast<size_t>(cache_sizes.cl_db),
-        .memory_only = options.block_tree_db_in_memory,
-        // never wipe CL db
-        .wipe_data = false,
-        .options = chainman.m_options.block_tree_db};
         auto quorumCommitmentDB = DBParams{
         .path = chainman.m_options.datadir / "evodb_qc",
         .cache_bytes = static_cast<size_t>(cache_sizes.evo_qc_db),
@@ -283,7 +269,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             .memory_only = options.block_tree_db_in_memory,
             .wipe_data = coinsViewEmpty,
             .options = chainman.m_options.block_tree_db};
-        llmq::InitLLMQSystem(clDB, quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, coinsViewEmpty);
+        llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, coinsViewEmpty);
         pnevmtxrootsdb.reset();
         pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
             .path = chainman.m_options.datadir / "nevmtxroots",
@@ -318,6 +304,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // disk, rebalance the coins caches to desired levels based
     // on the condition of each chainstate.
     chainman.MaybeRebalanceCaches();
+
     return {ChainstateLoadStatus::SUCCESS, {}};
 }
 

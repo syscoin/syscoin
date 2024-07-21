@@ -11,6 +11,7 @@
 #include <chainparams.h>
 #include <validation.h>
 
+#include <evo/cbtx.h>
 #include <logging.h>
 #include <node/blockstorage.h>
 namespace llmq

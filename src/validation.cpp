@@ -2910,7 +2910,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
         }
         if (pindex->pprev && pindex->phashBlock && llmq::chainLocksHandler->HasConflictingChainLock(pindex->nHeight, pindex->GetBlockHash())) {
-            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "conflicting-with-chainlock");
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-chainlock");
         }
     }
     // END SYSCOIN
@@ -3102,9 +3102,6 @@ bool Chainstate::FlushStateToDisk(
             // SYSCOIN
             if (pnevmdatadb && !pnevmdatadb->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit PoDA");
-            }
-            if (llmq::chainLocksHandler && !llmq::chainLocksHandler->FlushCacheToDisk()) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit CL DB");
             }
             if (pblockindexdb && !pblockindexdb->FlushCacheToDisk((uint32_t)m_chainman.ActiveHeight())) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to block index db");
@@ -4643,9 +4640,17 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
     }
     // SYSCOIN
+    bool fDIP0003Active_context = nHeight >= consensusParams.DIP0003Height;
+    if(fDIP0003Active_context) {
+        const auto& nMidDKGHeight = Params().GetConsensus().llmqTypeChainLocks.dkgInterval/2;
+        const auto &nModHeight = nMidDKGHeight - nMidDKGHeight%5;
+        if((pindexPrev->nHeight % nModHeight) == 0 && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-cb-type", strprintf("%s : Incorrect version of coinbase transaction", __func__));
+        }
+    }
     for (const auto& txRef : block.vtx)
     {
-        if (!txRef->IsCoinBase() && txRef->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
+        if (!txRef->IsCoinBase() && (txRef->nVersion == SYSCOIN_TX_VERSION_MN_CLSIG || txRef->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT)) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-mn-version", "Bad version for non-coinbase masternode transaction");
         }
     }
@@ -4758,7 +4763,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 
                 if (ppindex)
                     *ppindex = pindex;
-                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "conflicting-with-chainlock");
+                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-chainlock");
             }
         }
     }
@@ -5025,7 +5030,7 @@ bool TestBlockValidity(BlockValidationState& state,
     // SYSCOIN
     uint256 block_hash(block.GetHash());
     if (llmq::chainLocksHandler->HasConflictingChainLock(pindexPrev->nHeight + 1, block_hash)) {
-        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "conflicting-with-chainlock");
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-chainlock");
     }
 
     CBlockIndex indexDummy(block);

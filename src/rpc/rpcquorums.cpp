@@ -24,7 +24,6 @@
 #include <node/context.h>
 #include <rpc/server_util.h>
 #include <index/txindex.h>
-#include <net_processing.h>
 static RPCHelpMan quorum_list()
 {
     return RPCHelpMan{"quorum_list",
@@ -560,7 +559,6 @@ static RPCHelpMan verifychainlock()
         "\nTest if a quorum signature is valid for a ChainLock.\n",
         {
             {"blockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the ChainLock."},
-            {"prevBlockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the previous ChainLock."},
             {"signature", RPCArg::Type::STR, RPCArg::Optional::NO, "The signature of the ChainLock."},
             {"signers", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The quorum signers of the ChainLock."}
         },
@@ -572,7 +570,6 @@ static RPCHelpMan verifychainlock()
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     const uint256 nBlockHash(ParseHashV(request.params[0], "blockHash"));
-    const uint256 nPrevBlockHash(ParseHashV(request.params[1], "prevBlockHash"));
 
     const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     const ChainstateManager& chainman = EnsureChainman(node);
@@ -586,15 +583,15 @@ static RPCHelpMan verifychainlock()
 
 
     CBLSSignature sig;
-    if (!sig.SetHexStr(request.params[2].get_str())) {
+    if (!sig.SetHexStr(request.params[1].get_str())) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
     }
     
-    const auto signers = llmq::CLLMQUtils::HexStrToBits(request.params[3].get_str(), Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount);
+    const auto signers = llmq::CLLMQUtils::HexStrToBits(request.params[2].get_str(), Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount);
     if (!signers) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signers");
     }
-    return llmq::chainLocksHandler->VerifyAggregatedChainLock(llmq::CChainLockSig(nBlockHeight, nBlockHash, nPrevBlockHash, sig, *signers), pIndex);
+    return llmq::chainLocksHandler->VerifyAggregatedChainLock(llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers), pIndex);
 },
     };
 } 
@@ -674,60 +671,6 @@ static RPCHelpMan gettxchainlocks()
     };
 }
 
-
-static RPCHelpMan requestchainlock()
-{
-    return RPCHelpMan{"requestchainlock",
-        "\nRequest validated historical ChainLock from network.\n",
-        {
-            {"blockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the ChainLock."}
-        },
-        RPCResult{RPCResult::Type::ANY, "", ""},
-        RPCExamples{
-                HelpExampleCli("requestchainlock", "0x0")
-            + HelpExampleRpc("requestchainlock", "\"0x0\"")
-        },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    node::NodeContext& node = EnsureAnyNodeContext(request.context);
-    PeerManager& peerman = EnsurePeerman(node);
-    const uint256 nBlockHash(ParseHashV(request.params[0], "blockHash"));
-    llmq::CChainLockSig ret;
-    if(!llmq::chainLocksHandler->GetChainLockFromDB(nBlockHash, ret)) {
-        peerman.RelayTransactionOther(CInv(MSG_GET_CLSIG, nBlockHash));
-        return "success";
-    } else {
-        return "You have the chainlock already, call getchainlock() to retrieve.";
-    }
-},
-    };
-} 
-
-
-static RPCHelpMan getchainlock()
-{
-    return RPCHelpMan{"getchainlock",
-        "\nGet ChainLock.\n",
-        {
-            {"blockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the ChainLock."}
-        },
-        RPCResult{RPCResult::Type::ANY, "", ""},
-        RPCExamples{
-                HelpExampleCli("getchainlock", "0x0")
-            + HelpExampleRpc("getchainlock", "\"0x0\"")
-        },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    const uint256 nBlockHash(ParseHashV(request.params[0], "blockHash"));
-    llmq::CChainLockSig ret;
-    if(!llmq::chainLocksHandler->GetChainLockFromDB(nBlockHash, ret)) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Chainlock not found");
-    }
-    return ret.ToString();
-},
-    };
-} 
-
 static RPCHelpMan getbestchainlock()
 {
     return RPCHelpMan{"getbestchainlock",
@@ -736,8 +679,7 @@ static RPCHelpMan getbestchainlock()
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::STR_HEX, "blockhash", "The Chainlock block hash hex-encoded"},
-                {RPCResult::Type::STR_HEX, "prevblockhash", "The previous Chainlock block hash hex-encoded"},
+                {RPCResult::Type::STR_HEX, "blockhash", "The block hash hex-encoded"},
                 {RPCResult::Type::NUM, "height", "The block height or index"},
                 {RPCResult::Type::STR_HEX, "signature", "The ChainLock's BLS signature"},
                 {RPCResult::Type::STR_HEX, "signers", "The ChainLock's quorum signers"},
@@ -758,7 +700,6 @@ static RPCHelpMan getbestchainlock()
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to find any ChainLock");
     }
     result.pushKV("blockhash", clsig.blockHash.GetHex());
-    result.pushKV("prevblockhash", clsig.prevCLBlockHash.GetHex());
     result.pushKV("height", clsig.nHeight);
     result.pushKV("signature", clsig.sig.ToString());
     result.pushKV("signers", llmq::CLLMQUtils::ToHexStr(clsig.signers));
@@ -777,7 +718,6 @@ static RPCHelpMan submitchainlock()
                "Submit a ChainLock signature if needed\n",
                {
                        {"blockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the ChainLock."},
-                       {"prevCLBlockHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash of the previous ChainLock."},
                        {"signature", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The signature of the ChainLock."},
                        {"signers", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The quorum signers of the ChainLock."},
                },
@@ -787,7 +727,6 @@ static RPCHelpMan submitchainlock()
         [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     const uint256 nBlockHash(ParseHashV(request.params[0], "blockHash"));
-    const uint256 nPrevBlockHash(ParseHashV(request.params[1], "prevCLBlockHash"));
     const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     const ChainstateManager& chainman = EnsureChainman(node);
     int nBlockHeight;
@@ -797,7 +736,7 @@ static RPCHelpMan submitchainlock()
     }
     nBlockHeight = pIndex->nHeight;
    
-    const auto signers = llmq::CLLMQUtils::HexStrToBits(request.params[3].get_str(), Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount);
+    const auto signers = llmq::CLLMQUtils::HexStrToBits(request.params[2].get_str(), Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount);
     if (!signers) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signers");
     }
@@ -805,13 +744,20 @@ static RPCHelpMan submitchainlock()
     if (nBlockHeight <= bestCLHeight) return bestCLHeight;
 
     CBLSSignature sig;
-    if (!sig.SetHexStr(request.params[2].get_str())) {
+    if (!sig.SetHexStr(request.params[1].get_str())) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
     }
-    auto clsig = llmq::CChainLockSig(nBlockHeight, nBlockHash, nPrevBlockHash, sig, *signers);
+    auto clsig = llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers);
     
+    int from = -1;
+    bool bCheckBlock = false;
+    if(fRegTest) {
+        from = 0;
+    } else {
+        bCheckBlock = true;
+    }
     BlockValidationState state;
-    if(!llmq::chainLocksHandler->ProcessNewChainLock(0, clsig, state, ::SerializeHash(clsig))) {
+    if(!llmq::chainLocksHandler->ProcessNewChainLock(from, clsig, state, ::SerializeHash(clsig), bCheckBlock)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, state.GetRejectReason());
     }
     return llmq::chainLocksHandler->GetBestChainLock().nHeight;
@@ -838,8 +784,6 @@ void RegisterQuorumsRPCCommands(CRPCTable &t)
         {"evo", &verifychainlock},
         {"evo", &getbestchainlock},
         {"evo", &gettxchainlocks},
-        {"evo", &requestchainlock},
-        {"evo", &getchainlock}
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);
