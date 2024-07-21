@@ -395,20 +395,24 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
     }
     CheckActiveState();
     PeerRef peer = peerman.GetPeerRef(from);
+    bool bReturn = false;
+    {
+        LOCK(cs);
+        if (seenChainLocks.find(hash) != seenChainLocks.end()) {
+            bReturn = true;
+        }
+        if (!bestChainLockWithKnownBlock.IsNull() && clsig.nHeight <= bestChainLockWithKnownBlock.nHeight) {
+            // no need to process/relay older CLSIGs
+            bReturn = true;
+        }
+    }
     // don't hold lock while relaying which locks nodes/mempool
     if (from != -1) {
         LOCK(cs_main);
         peerman.ForgetTxHash(from, hash);
     }
-    {
-        LOCK(cs);
-        if (!seenChainLocks.emplace(hash, TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now())).second) {
-            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "existing-clsig");
-        }
-        if (!bestChainLockWithKnownBlock.IsNull() && clsig.nHeight <= bestChainLockWithKnownBlock.nHeight) {
-            // no need to process/relay older CLSIGs
-            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "existing-clsig-height");
-        }
+    if(bReturn) {
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "existing-clsig-height");
     }
     CBlockIndex* pindexScan{nullptr};
     const CBlockIndex* bestIndex;
@@ -424,8 +428,6 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             if(nHeightDiff < CSigningManager::SIGN_HEIGHT_LOOKBACK) {
                 // too far into the future
                 LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- future CLSIG (%s), peer=%d\n", __func__, clsig.ToString(), from);
-                LOCK(cs);
-                seenChainLocks.erase(hash);
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "future-clsig");
             }
             // if best known header has moved on 2 more blocks from when it should have locked then also reject
@@ -442,8 +444,6 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
         if (pindexScan == nullptr) {
             LogPrintf("CChainLocksHandler::%s -- block of CLSIG (%s) does not exist\n",
                     __func__, clsig.ToString());
-            LOCK(cs);
-            seenChainLocks.erase(hash);
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-block");
         }
         if (pindexScan != nullptr && pindexScan->nHeight != clsig.nHeight) {
@@ -582,6 +582,10 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
         CheckState(false);
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- processed new CLSIG (%s), peer=%d\n",
             __func__, clsig.ToString(), from);
+    }
+    {
+        LOCK(cs);
+        seenChainLocks.emplace(hash, TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()));
     }
     return true;
 }
