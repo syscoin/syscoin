@@ -42,7 +42,7 @@ bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const 
 }
 
 
-bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, bool ibd)
+bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, bool ibd)
 {
     try {
         static SteadyClock::duration nTimeLoop{};
@@ -54,7 +54,7 @@ bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block,
         llmq::CFinalCommitmentTxPayload qcTx;
         for (const auto& ptr_tx : block.vtx) {
             TxValidationState txstate;
-            if (!CheckSpecialTx(blockman, *ptr_tx, pindex->pprev, txstate, view, false, check_sigs)) {
+            if (!CheckSpecialTx(chainman.m_blockman, *ptr_tx, pindex->pprev, txstate, view, false, check_sigs)) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, txstate.GetRejectReason());
             }
         }
@@ -77,7 +77,7 @@ bool ProcessSpecialTxsInBlock(node::BlockManager &blockman, const CBlock& block,
 
         auto nTime4 = SystemClock::now(); nTimeDMN += nTime4 - nTime3;
         LogPrint(BCLog::BENCHMARK, "        - deterministicMNManager: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime4 - nTime3), Ticks<SecondsDouble>(nTimeDMN));
-        if (check_sigs && !CheckCbTxBestChainlock(block, pindex, state, fJustCheck)) {
+        if (check_sigs && !CheckCbTxBestChainlock(chainman, block, pindex, state, fJustCheck)) {
             // pass the state returned by the function above
             return false;
         }

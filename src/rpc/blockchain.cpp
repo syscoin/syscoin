@@ -299,11 +299,6 @@ static RPCHelpMan getchainlocks()
             RPCResult{
                 RPCResult::Type::OBJ, "", "",
                 {
-                    {RPCResult::Type::OBJ, "previous_chainlock", "previous chainlock information",
-                    {
-                        {RPCResult::Type::STR_HEX, "blockhash", "Block Hash"},
-                        {RPCResult::Type::NUM, "height", "Block Height"},
-                    }},
                     {RPCResult::Type::OBJ, "recent_chainlock", "Most recent chainlock information",
                     {
                         {RPCResult::Type::STR_HEX, "blockhash", "Block Hash"},
@@ -339,11 +334,6 @@ static RPCHelpMan getchainlocks()
     UniValue recentChainlock(UniValue::VOBJ);
     UniValue activeChainlock(UniValue::VOBJ);
     UniValue activeChainlockShares(UniValue::VARR);
-
-    const CBlockIndex* prevCLIndex = llmq::chainLocksHandler->GetPreviousChainLock();
-    recentChainlock.pushKV("blockhash", prevCLIndex? prevCLIndex->GetBlockHash().GetHex(): "");
-    recentChainlock.pushKV("height", prevCLIndex? prevCLIndex->nHeight: 0);
-    result.pushKV("previous_chainlock", recentChainlock);
 
     llmq::CChainLockSig clsigRecent = llmq::chainLocksHandler->GetMostRecentChainLock();
     recentChainlock.pushKV("blockhash", clsigRecent.blockHash.GetHex());

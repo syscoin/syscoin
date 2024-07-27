@@ -469,7 +469,7 @@ public:
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state,
                       const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
-    bool UndoBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool UndoBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,
@@ -479,7 +479,7 @@ public:
 
     const CDeterministicMNList GetListForBlock(const CBlockIndex* pindex);
     void GetListForBlock(const CBlockIndex* pindex, CDeterministicMNList& list);
-    const CDeterministicMNList GetListAtChainTip();
+    const CDeterministicMNList GetListAtChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     // Test if given TX is a ProRegTx which also contains the collateral at index n
     static bool IsProTxWithCollateral(const CTransactionRef& tx, uint32_t n);

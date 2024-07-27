@@ -61,13 +61,13 @@ class LLMQChainLocksTest(DashTestFramework):
         self.generate(self.nodes[0], 10)
         self.sync_blocks(self.nodes, timeout=60*5)
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 0)
-        self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 4070908800)
+        self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
         self.wait_for_sporks_same()
 
         self.log.info("Mining 4 quorums")
         for i in range(4):
             self.mine_quorum(mod5=True)
-        self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
+
         self.wait_for_sporks_same()
         self.log.info("Mine single block, wait for chainlock")
         cl = self.nodes[0].getbestblockhash()
@@ -110,7 +110,7 @@ class LLMQChainLocksTest(DashTestFramework):
         assert_equal(best_0['known_block'], True)
         node_height = self.nodes[1].submitchainlock(best_0['blockhash'], best_0['signature'], best_0['signers'])
         # future CLSIG, will not submit
-        assert_raises_rpc_error(-8, 'future-clsig', self.nodes[0].submitchainlock, best_1['blockhash'], best_1['signature'], best_1['signers'])
+        assert_raises_rpc_error(-8, 'mismatch-clsig-height', self.nodes[0].submitchainlock, best_1['blockhash'], best_1['signature'], best_1['signers'])
         assert_equal(best_1['height'], node_height)
         best_0 = self.nodes[0].getbestchainlock()
         assert best_0['blockhash'] != best_1['blockhash']

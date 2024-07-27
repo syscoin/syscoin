@@ -161,6 +161,8 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         }
 
         if (!masternodeSync.IsBlockchainSynced()) {
+            LOCK(cs_main);
+            peerman.ForgetTxHash(pfrom->GetId(), nHash);
             LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- masternode list not synced\n");
             return;
         }

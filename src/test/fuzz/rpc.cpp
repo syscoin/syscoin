@@ -101,8 +101,6 @@ const std::vector<std::string> RPC_COMMANDS_SAFE_FOR_FUZZING{
     "masternode_winner",
     "masternode_status",
     "masternode_current",
-    "masternode_sign",
-    "masternode_verify",
     "getgovernanceinfo",
     "getsuperblockbudget",
     "gobject_count",

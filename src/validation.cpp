@@ -1938,15 +1938,6 @@ void Chainstate::ConflictingChainFound(CBlockIndex* pindexNew)
 // which does its own setBlockIndexCandidates management.
 void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state)
 {
-    // because chainlock is the last thing we check in CheckBlock() if we get any other error
-    // prevent situation where an invalid header or block can be locked and force clients to be stuck on that chain
-    // which will never be accepted
-    if (state.GetResult() != BlockValidationResult::BLOCK_CHAINLOCK) {
-        // if its any other error other than chainlock and we have a conflict then move back to previous known good chainlock
-        if (llmq::chainLocksHandler->HasChainLock(pindex->nHeight, pindex->GetBlockHash())) {
-            llmq::chainLocksHandler->SetToPreviousChainLock();
-        }
-    }
     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_chainman.m_failed_blocks.insert(pindex);
@@ -2295,10 +2286,9 @@ static CCheckQueue<CBlobCheck> blobcheckqueue(MAX_DATA_BLOBS);
 bool ProcessNEVMDataHelper(const BlockManager& blockman, const std::vector<CNEVMData> &vecNevmDataPayload, const int64_t &nMedianTime, const int64_t &nTimeNow, PoDAMAPMemory &mapPoDA) {
     int64_t nMedianTimeCL = 0;
     if(llmq::chainLocksHandler) {
-        // use previous chainlock because chain can technically rollback up to previous lock
-        const CBlockIndex* prevCLIndex = llmq::chainLocksHandler->GetPreviousChainLock();
-        if (prevCLIndex) {
-            nMedianTimeCL = prevCLIndex->GetMedianTimePast();
+        const CBlockIndex* CLIndex = llmq::chainLocksHandler->GetBestChainLockIndex();
+        if (CLIndex) {
+            nMedianTimeCL = CLIndex->GetMedianTimePast();
         }
     }
     // first sanity test times to ensure data should or shouldn't exist and save to another vector
@@ -2791,7 +2781,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     bool RolluxContext = pindex->nHeight >= params.GetConsensus().nRolluxStartBlock;
     fScriptChecks = fScriptChecks && RolluxContext; 
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
-    if (!ProcessSpecialTxsInBlock(m_blockman, block, pindex, state, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {
+    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {
         LogPrintf("ERROR: %s: ProcessSpecialTxsInBlock for block %s failed with %s\n", __func__,
                      pindex->GetBlockHash().ToString().c_str(), state.ToString().c_str());
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, state.ToString());
@@ -4641,10 +4631,14 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     }
     // SYSCOIN
     bool fDIP0003Active_context = nHeight >= consensusParams.DIP0003Height;
+    // if commitment doesn't exist and is required make sure commitment tx is in coinbase
+    // otherwise if outside of commitment mining interval and we are in last block of DKG ensure we create SYSCOIN_TX_VERSION_MN_CLSIG tx
     if(fDIP0003Active_context) {
-        const auto& nMidDKGHeight = Params().GetConsensus().llmqTypeChainLocks.dkgInterval/2;
-        const auto &nModHeight = nMidDKGHeight - nMidDKGHeight%5;
-        if((pindexPrev->nHeight % nModHeight) == 0 && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
+        // last height before new DKG starts
+        const auto& nQuorumEndHeight = nHeight + (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
+        // last possible block before new quorum can be mined
+        const auto& nLastDKGHeight = nQuorumEndHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
+        if((nHeight % nLastDKGHeight) == 0 && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-cb-type", strprintf("%s : Incorrect version of coinbase transaction", __func__));
         }
     }
@@ -5259,7 +5253,7 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
     // SYSCOIN
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     BlockValidationState state;
-    if (!ProcessSpecialTxsInBlock(m_blockman, block, pindex, state, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, m_chainman.IsInitialBlockDownload())) {
+    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, m_chainman.IsInitialBlockDownload())) {
         return error("%s: ProcessSpecialTxsInBlock for block %s failed with %s", __func__,
             pindex->GetBlockHash().ToString(), state.ToString());
     }

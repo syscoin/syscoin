@@ -35,6 +35,7 @@
 #include <llmq/quorums_blockprocessor.h>
 #include <llmq/quorums_commitment.h>
 #include <validationinterface.h>
+#include <llmq/quorums.h>
 namespace node {
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
 {
@@ -182,31 +183,38 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     coinbaseTx.vout[0].nValue = blockReward + nFees;
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
     // SYSCOIN
-    if (!fRegTest && !fSigNet && !chainparams.MineBlocksOnDemand()) {
-        if (!masternodeSync.IsSynced()) {	
-            throw std::runtime_error("Masternode information has not synced, please wait until it finishes before mining!");	
-        }
-    }
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     CDataStream dsNEVM(SER_NETWORK, PROTOCOL_VERSION);
     BlockValidationState state;
     if(fDIP0003Active_context) {
+        if (!fSigNet && !masternodeSync.IsSynced()) {	
+            throw std::runtime_error("Masternode information has not synced, please wait until it finishes before mining!");	
+        }
+        const size_t& threshold = Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount / 2 + 1;
+        const auto quorums_scanned = llmq::quorumManager->ScanQuorums(pindexPrev, threshold);
+        if(quorums_scanned.size() >= threshold) {
+            if(llmq::chainLocksHandler->GetBestChainLock().IsNull()) {
+                //throw std::runtime_error("Waiting for chainlock...");
+            }
+        }
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate
         llmq::CFinalCommitmentTxPayload qcTx;
         // create commitment payload if quorum commitment is needed
         llmq::CFinalCommitment commitment;
-        const auto& nMidDKGHeight = Params().GetConsensus().llmqTypeChainLocks.dkgInterval/2;
-        const auto &nModHeight = nMidDKGHeight - nMidDKGHeight%5;
+        // last height before new DKG starts
+        const auto& nQuorumEndHeight = nHeight + (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
+        // last possible block before new quorum can be mined
+        const auto& nLastDKGHeight = nQuorumEndHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
         if (llmq::quorumBlockProcessor->GetMinableCommitment(nHeight, qcTx.commitment)) {
             qcTx.nHeight = nHeight;
             coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
             ds << qcTx;
-        } else if((pindexPrev->nHeight % nModHeight) == 0) {
+        } else if((nHeight % nLastDKGHeight) == 0) {
             CCbTxCLSIG cbTx;
             coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_CLSIG;
             if (CalcCbTxBestChainlock(pindexPrev, cbTx.cl)) {
-                LogPrintf("CreateNewBlock() h[%d] CbTx nHeight[%d] CLSig[%s]\n", nHeight, cbTx.cl.ToString());
+                LogPrintf("CreateNewBlock() h[%d] CbTx CLSig[%s]\n", nHeight, cbTx.cl.ToString());
             } else {
                 // not an error
                 LogPrintf("CreateNewBlock() h[%d] CbTx failed to find best CL. Inserting null CL\n", nHeight);

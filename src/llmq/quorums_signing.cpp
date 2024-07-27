@@ -602,34 +602,38 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
     const uint256& hash = recoveredSig->GetHash();
     CInv inv(MSG_QUORUM_RECOVERED_SIG, hash);
     {
+        PeerRef peer = peerman.GetPeerRef(nodeId);
+        if (peer)
+            peerman.AddKnownTx(*peer, hash);
         LOCK(cs_main);
         peerman.ReceivedResponse(nodeId, hash);
-        // make sure block or header exists before accepting recovered sig
+        // make sure CL block exists before accepting recovered sig
         auto* pindex = chainman.m_blockman.LookupBlockIndex(recoveredSig->msgHash);
         if (pindex == nullptr) {
             LogPrintf("CSigningManager::%s -- block of recovered signature (%s) does not exist\n",
                     __func__, recoveredSig->id.ToString());
             peerman.ForgetTxHash(nodeId, hash);
+            if(peer)
+                peerman.Misbehaving(*peer, 10, "invalid recovered signature");
             return;
         }
+        
         if((pindex->nHeight%SIGN_HEIGHT_LOOKBACK) != 0) {
             LogPrintf("CSigningManager::%s -- block height(%d) of recovered signature (%s) is not a factor of 5\n",
                     __func__, pindex->nHeight, recoveredSig->id.ToString());
-            PeerRef peer = peerman.GetPeerRef(nodeId);
+            peerman.ForgetTxHash(nodeId, hash);
             if(peer)
-                peerman.Misbehaving(*peer, 10, "invalid CLSIG");
+                peerman.Misbehaving(*peer, 10, "invalid recovered signature block height");
             return;
         }
-        if(chainman.m_best_header) {
-            const auto& nHeightDiff = chainman.m_best_header->nHeight - pindex->nHeight;
-            // height from best known header does not look back enough (SIGN_HEIGHT_LOOKBACK blocks). MNs should be locking active chain - SIGN_HEIGHT_LOOKBACK block height
-            if(nHeightDiff < SIGN_HEIGHT_LOOKBACK) {
-                // too far into the future
-                LogPrint(BCLog::CHAINLOCKS, "CSigningManager::%s -- block of recovered signature (%s) is too far into the future\n",
-                        __func__, recoveredSig->id.ToString());
-                peerman.ForgetTxHash(nodeId, hash);
-                return;
-            }
+        if (!chainman.ActiveChain().Contains(pindex) || !pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
+            // Should not happen
+            LogPrintf("CSigningManager::%s -- CL block not valid or confirmed in active chain. Block (%s) rejected\n",
+                    __func__, pindex->ToString());
+            peerman.ForgetTxHash(nodeId, hash);
+            if(peer)
+                peerman.Misbehaving(*peer, 10, "recovered signature of unconfirmed block");
+            return;
         }
     }
 
@@ -666,6 +670,10 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
                     bAlreadyKnownReturn = true;
                 }
                 if(!bAlreadyKnown) {
+                    {
+                        LOCK(cs_main);
+                        peerman.ForgetTxHash(nodeId, hash);
+                    }
                     return;
                 }
             } else {

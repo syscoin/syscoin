@@ -7,9 +7,11 @@
 
 #include <univalue.h>
 #include <llmq/quorums_chainlocks.h>
+#include <kernel/cs_main.h>
 class CBlock;
 class CBlockIndex;
 class BlockValidationState;
+class ChainstateManager;
 
 // coinbase transaction
 class CCbTxCLSIG
@@ -37,7 +39,7 @@ public:
     }
 };
 
-bool CheckCbTxBestChainlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, bool fJustCheck);
+bool CheckCbTxBestChainlock(ChainstateManager &chainman, const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CalcCbTxBestChainlock(const CBlockIndex* pindexPrev, llmq::CChainLockSig& bestCL);
 
 #endif // SYSCOIN_EVO_CBTX_H

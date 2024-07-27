@@ -350,6 +350,7 @@ TestChain100Setup::TestChain100Setup(
     {
         LOCK(::cs_main);
         // SYSCOIN
+        printf("m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() %s\n", m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString().c_str());
        assert(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
             "722b456b5005377859a8320f3b3001c8a941643a246d7e5da64c8beeb17b3254" ||
@@ -358,7 +359,7 @@ TestChain100Setup::TestChain100Setup(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
             "2d29a46dc059cf2266f484afc0db7c1898ef444d64859926ca89bd0cd4bd6837"  ||
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "0dfc06c015b1efa95e8579f952846596495d92dedf9aa74dd79bc05bfea063e4" );
+            "0618f15a4a98f0d174553484273cd0daaddd1b0ce292b1f2cf2ea1c0710af589" );
     }
 }
 
@@ -398,7 +399,16 @@ CBlock TestChain100Setup::CreateBlock(
         const auto &bytesVec = MakeUCharSpan(ds);
         vchCoinbaseCommitmentExtra = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
 
+    } else if (block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_CLSIG) {
+        CCbTxCLSIG cbTx;
+        if (!GetTxPayload(*block.vtx[0], cbTx)) {
+            assert(false);
+        }
+        ds << cbTx;
+        const auto &bytesVec = MakeUCharSpan(ds);
+        vchCoinbaseCommitmentExtra = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
     }
+
     RegenerateCommitments(block, *Assert(m_node.chainman), vchCoinbaseCommitmentExtra);
     while (!CheckProofOfWork(block.GetHash(), block.nBits, m_node.chainman->GetConsensus())) ++block.nNonce;
 

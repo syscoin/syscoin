@@ -71,6 +71,7 @@ void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strC
                         qc.quorumHash.ToString(), pfrom->GetId());
                 // can't really punish the node here, as we might simply be the one that is on the wrong chain or not
                 // fully synced
+                peerman.ForgetTxHash(pfrom->GetId(), hash);
                 return;
             }
             if (chainman.ActiveTip()->GetAncestor(pQuorumBaseBlockIndex->nHeight) != pQuorumBaseBlockIndex) {
@@ -100,6 +101,7 @@ void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strC
                 LogPrint(BCLog::LLMQ, "CQuorumBlockProcessor::%s -- commitment for quorum hash[%s], is already mined, peer=%d\n",
                         __func__, qc.quorumHash.ToString(), pfrom->GetId());
                 // NOTE: do not punish here
+                peerman.ForgetTxHash(pfrom->GetId(), hash);
                 return;
             }
         }
@@ -347,6 +349,14 @@ CFinalCommitmentPtr CQuorumBlockProcessor::GetMinedCommitment(const uint256& quo
     }
     retMinedBlockHash = p.second;
     return std::make_unique<CFinalCommitment>(p.first);
+}
+uint256 CQuorumBlockProcessor::GetMinedCommitmentBlockHash(const uint256& quorumHash) const
+{
+    std::pair<CFinalCommitment, uint256> p;
+    if (!m_commitment_evoDb.ReadCache(quorumHash, p)) {
+        return uint256();
+    }
+    return p.second;
 }
 
 bool CQuorumBlockProcessor::HasMineableCommitment(const uint256& hash) const

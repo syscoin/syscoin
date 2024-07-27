@@ -31,12 +31,12 @@ void CDKGPendingMessages::PushPendingMessage(CNode* pfrom, CDataStream& vRecv)
     hw << Span{*pm};
     const uint256 &hash = hw.GetHash();
     LOCK2(cs_main, cs);
-    peerman.ReceivedResponse(from, hash);
     if(pfrom) {
         PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
         if (peer)
             peerman.AddKnownTx(*peer, hash);
     }
+    peerman.ReceivedResponse(from, hash);
     if (messagesPerNode[from] >= maxMessagesPerNode) {
         // TODO ban?
         LogPrint(BCLog::LLMQ_DKG, "CDKGPendingMessages::%s -- too many messages, peer=%d\n", __func__, from);
@@ -429,9 +429,11 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
         const auto& msg = *p.second;
 
         const uint256& hash = ::SerializeHash(msg);
+        if (peer)
+            peerman.AddKnownTx(*peer, hash);
         {
             LOCK(cs_main);
-            pendingMessages.peerman.ReceivedResponse(p.first, hash);
+            peerman.ReceivedResponse(p.first, hash);
         }
 
         bool ban = false;
@@ -439,7 +441,7 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
             if (ban) {
                 {
                     LOCK(cs_main);
-                    pendingMessages.peerman.ForgetTxHash(p.first, hash);
+                    peerman.ForgetTxHash(p.first, hash);
                 }
                 LogPrint(BCLog::LLMQ_DKG, "%s -- banning node due to failed preverification, peer=%d\n", __func__, p.first);
                 if(peer)
@@ -452,7 +454,7 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
         preverifiedMessages.emplace_back(p);
         {
             LOCK(cs_main);
-            pendingMessages.peerman.ForgetTxHash(p.first, hash);
+            peerman.ForgetTxHash(p.first, hash);
         }
     }
     if (preverifiedMessages.empty()) {

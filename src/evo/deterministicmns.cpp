@@ -857,6 +857,7 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlock(const CBlock
 };
 const CDeterministicMNList CDeterministicMNManager::GetListAtChainTip()
 {
+    LOCK(cs);
     if (!tipIndex) {
         return CDeterministicMNList();
     }

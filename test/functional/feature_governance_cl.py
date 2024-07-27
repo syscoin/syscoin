@@ -73,7 +73,9 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.log.info("Mining 4 quorums")
         for i in range(4):
             self.mine_quorum(mod5=True)
+
         cl = self.nodes[0].getbestblockhash()
+        self.log.info(f'cl {cl} count {self.nodes[0].getblockcount()}')
         self.generate(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
         
@@ -120,28 +122,28 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         n = sb_cycle - self.nodes[0].getblockcount() % sb_cycle
         assert n > 1
-
         # Move remaining n blocks until the next Superblock
         for _ in range(n - 1):
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
             self.bump_mocktime(156)
-            self.sync_blocks(self.nodes[0:5])
-
+            self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:5]))
         self.log.info("Wait for new trigger and votes on non-isolated nodes")
         sb_block_height = self.nodes[0].getblockcount() + 1
         self.wait_until(lambda: self.have_trigger_for_height(sb_block_height, self.nodes[0:5]), timeout=15)
         # Mine superblock
-        cl = self.nodes[0].getbestblockhash()
-        self.generate(self.nodes[0], 6, sync_fun=self.no_op)
+        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.bump_mocktime(156)
-        self.sync_blocks(self.nodes[0:5])
+        cl = self.nodes[0].getbestblockhash()
+        self.log.info(f'getblockcount {self.nodes[0].getblockcount()}')
+        self.generate(self.nodes[0], 5, sync_fun=self.no_op)
+        self.sync_all_helper(self.nodes[0:5])
         self.wait_for_chainlocked_block(self.nodes[0], cl)
 
         self.log.info("Reconnect isolated node and confirm the next ChainLock will let it sync")
         self.reconnect_isolated_node(self.nodes[5], 0)
         # Force isolated node to be fully synced so that it will request gov objects when reconnected
         assert_equal(self.nodes[5].mnsync("status")["IsSynced"], False)
-        self.sync_blocks()
+        self.sync_all_helper(self.nodes)
 
         # re-sync helper
         def sync_gov(node):
@@ -154,7 +156,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.bump_mocktime(5 * 60)
         self.generate(self.nodes[0], 1)
         self.bump_mocktime(150)
-        self.sync_blocks()
+        self.sync_all_helper(self.nodes)
 
 
 if __name__ == '__main__':

@@ -18,21 +18,6 @@ class NEVMDataTest(DashTestFramework):
         self.skip_if_no_wallet()
         self.skip_if_no_bdb()
 
-    # re-sync helpers
-    def sync_mempools_helper(self, nodes):
-        try:
-            self.bump_mocktime(1, nodes=nodes)
-            self.sync_mempools(timeout=1, nodes=nodes)
-        except:
-            return False
-        return True
-    def sync_blocks_helper(self, nodes):
-        try:
-            self.bump_mocktime(1, nodes=nodes)
-            self.sync_blocks(timeout=1, nodes=nodes)
-        except:
-            return False
-        return True
     def nevm_data_max_size_blob(self):
         print('Testing for max size of a blob (2MB)')
         blobDataMax = secrets.token_hex(MAX_NEVM_DATA_BLOB)

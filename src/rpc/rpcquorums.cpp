@@ -591,7 +591,8 @@ static RPCHelpMan verifychainlock()
     if (!signers) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signers");
     }
-    return llmq::chainLocksHandler->VerifyAggregatedChainLock(llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers), pIndex);
+    const auto clSig = llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers);
+    return llmq::chainLocksHandler->VerifyAggregatedChainLock(clSig, pIndex, SerializeHash(clSig));
 },
     };
 } 
@@ -749,15 +750,8 @@ static RPCHelpMan submitchainlock()
     }
     auto clsig = llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers);
     
-    int from = -1;
-    bool bCheckBlock = false;
-    if(fRegTest) {
-        from = 0;
-    } else {
-        bCheckBlock = true;
-    }
     BlockValidationState state;
-    if(!llmq::chainLocksHandler->ProcessNewChainLock(from, clsig, state, ::SerializeHash(clsig), bCheckBlock)) {
+    if(!llmq::chainLocksHandler->ProcessNewChainLock(0, clsig, state, ::SerializeHash(clsig))) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, state.GetRejectReason());
     }
     return llmq::chainLocksHandler->GetBestChainLock().nHeight;

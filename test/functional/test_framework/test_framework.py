@@ -1217,6 +1217,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.num_nodes = num_nodes_copy
         required_balance = MASTERNODE_COLLATERAL * self.mn_count + 1
         self.log.info("Generating %d coins" % required_balance)
+        force_finish_mnsync(self.nodes[0])
         while self.nodes[0].getbalance() < required_balance:
             self.bump_mocktime(1)
             self.generatetoaddress(self.nodes[0], 10, self.nodes[0].getnewaddress())
@@ -1452,14 +1453,52 @@ class DashTestFramework(SyscoinTestFramework):
             return True
 
         wait_until_helper_internal(check_dkg_comitments, timeout=timeout)
-        
+
+    def sync_mempools_helper(self, nodes):
+        try:
+            self.bump_mocktime(1, nodes=nodes)
+            self.sync_mempools(timeout=1, nodes=nodes)
+        except:
+            return False
+        return True
+
+    def sync_blocks_helper(self, nodes):
+        try:
+            self.bump_mocktime(1, nodes=nodes)
+            self.sync_blocks(timeout=1, nodes=nodes)
+        except:
+            return False
+        return True
+ 
+    def sync_all_helper(self, nodes):
+        try:
+            self.wait_until(lambda: self.sync_mempools_helper(nodes=nodes))
+            self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
+        except:
+            return False
+        return True
+
+    def generate_block_helper(self, node, number, sync_fun):
+        try:
+            self.log.info('try generating block...')
+            time.sleep(1)
+            self.bump_mocktime(1)
+            self.generate(node, number, sync_fun=sync_fun)
+        except JSONRPCException as e:
+            if e.error["code"] == -1 and "Waiting for chainlock..." in e.error["message"]:
+                return False
+        return True
+
+    def generate_helper(self, node, number, sync_fun):
+        self.wait_until(lambda: self.generate_block_helper(node, number, sync_fun))
+
     def wait_for_quorum_list(self, quorum_hash, nodes, timeout=60):
         def wait_func():
             if quorum_hash in self.nodes[0].quorum_list()["quorums"]:
                 return True
             self.bump_mocktime(2, nodes=nodes)
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            self.sync_blocks(nodes)
+            self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
             return False
         wait_until_helper_internal(wait_func, timeout=timeout)
 
@@ -1467,7 +1506,7 @@ class DashTestFramework(SyscoinTestFramework):
         time.sleep(1)
         self.bump_mocktime(1, nodes=nodes)
         self.generate(self.nodes[0], num_blocks, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
 
     def mine_quorum(self, expected_connections=None, expected_members=None, expected_contributions=None, expected_complaints=0, expected_justifications=0, expected_commitments=None, mninfos_online=None, mninfos_valid=None, mod5=False):
         spork21_active = self.nodes[0].spork('show')['SPORK_21_QUORUM_ALL_CONNECTED'] <= 1
@@ -1499,8 +1538,8 @@ class DashTestFramework(SyscoinTestFramework):
         skip_count = 24 - (self.nodes[0].getblockcount() % 24)
         if skip_count != 0:
             self.bump_mocktime(1, nodes=nodes)
-            self.generate(self.nodes[0], skip_count, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+            self.generate_helper(self.nodes[0], skip_count, sync_fun=self.no_op)
+        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
 
         q = self.nodes[0].getbestblockhash()
         self.log.info("Expected quorum_hash:"+str(q))
@@ -1542,7 +1581,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.bump_mocktime(1, nodes=nodes)
         self.nodes[0].getblocktemplate({"rules": ["segwit"]}) # this calls CreateNewBlock
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
 
         self.log.info("Waiting for quorum to appear in the list")
         self.wait_for_quorum_list(q, nodes)
@@ -1552,13 +1591,11 @@ class DashTestFramework(SyscoinTestFramework):
         quorum_info = self.nodes[0].quorum_info(new_quorum)
 
         # Mine 5 (SIGN_HEIGHT_LOOKBACK) more blocks to make sure that the new quorum gets eligible for signing sessions
-        self.generate(self.nodes[0], 5, sync_fun=self.no_op)
-        # Make sure we are mod of 5 block count before we start tests
         skip_count = 5 - (self.nodes[0].getblockcount() % 5)
-        if skip_count != 0 and mod5 is True:
-            self.bump_mocktime(1, nodes=nodes)
-            self.generate(self.nodes[0], skip_count, sync_fun=self.no_op)
-        self.sync_blocks(nodes)
+        if skip_count:
+            self.generate_helper(self.nodes[0], skip_count, sync_fun=self.no_op)
+        self.sync_all_helper(nodes=nodes)
+
 
         self.log.info("New quorum: height=%d, quorumHash=%s, minedBlock=%s" % (quorum_info["height"], new_quorum, quorum_info["minedBlock"]))
 
@@ -1575,7 +1612,7 @@ class DashTestFramework(SyscoinTestFramework):
         if skip_count != 0:
             self.bump_mocktime(1, nodes=nodes)
             self.generate(self.nodes[0], skip_count)
-        self.sync_blocks(nodes)
+        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
         time.sleep(1)
         self.log.info('Moved from block %d to %d' % (cur_block, self.nodes[0].getblockcount()))
 
