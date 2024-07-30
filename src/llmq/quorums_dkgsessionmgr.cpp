@@ -20,7 +20,6 @@ CDKGSessionManager* quorumDKGSessionManager;
 
 static const std::string DB_VVEC = "qdkg_V";
 static const std::string DB_SKCONTRIB = "qdkg_S";
-static const std::string DB_ENC_CONTRIB = "qdkg_E";
 
 CDKGSessionManager::CDKGSessionManager(CBLSWorker& blsWorker, CConnman &_connman, PeerManager& _peerman, ChainstateManager& _chainman, bool unitTests, bool fWipe) :
     connman(_connman),
@@ -199,10 +198,7 @@ void CDKGSessionManager::WriteVerifiedSkContribution(const uint256& hashQuorum, 
 {
     db->Write(std::make_tuple(DB_SKCONTRIB, hashQuorum, proTxHash), skContribution);
 }
-void CDKGSessionManager::WriteEncryptedContributions(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& proTxHash, const CBLSIESMultiRecipientObjects<CBLSSecretKey>& contributions)
-{
-    db->Write(std::make_tuple(DB_ENC_CONTRIB, pQuorumBaseBlockIndex->GetBlockHash(), proTxHash), contributions);
-}
+
 bool CDKGSessionManager::GetVerifiedContributions(const CBlockIndex* pQuorumBaseBlockIndex, const std::vector<bool>& validMembers, std::vector<uint16_t>& memberIndexesRet, std::vector<BLSVerificationVectorPtr>& vvecsRet, std::vector<CBLSSecretKey>& skContributionsRet) const
 {
     LOCK(contributionsCacheCs);
@@ -238,36 +234,6 @@ bool CDKGSessionManager::GetVerifiedContributions(const CBlockIndex* pQuorumBase
     return true;
 }
 
-bool CDKGSessionManager::GetEncryptedContributions(const CBlockIndex* pQuorumBaseBlockIndex, const std::vector<bool>& validMembers, const uint256& nProTxHash, std::vector<CBLSIESEncryptedObject<CBLSSecretKey>>& vecRet) const
-{
-    auto members = CLLMQUtils::GetAllQuorumMembers(pQuorumBaseBlockIndex);
-
-    vecRet.clear();
-    vecRet.reserve(members.size());
-
-    size_t nRequestedMemberIdx{std::numeric_limits<size_t>::max()};
-    for (size_t i = 0; i < members.size(); i++) {
-        if (members[i]->proTxHash == nProTxHash) {
-            nRequestedMemberIdx = i;
-            break;
-        }
-    }
-    if (nRequestedMemberIdx == std::numeric_limits<size_t>::max()) {
-        return false;
-    }
-
-    for (size_t i = 0; i < members.size(); i++) {
-        if (validMembers[i]) {
-            CBLSIESMultiRecipientObjects<CBLSSecretKey> encryptedContributions;
-            if (!db->Read(std::make_tuple(DB_ENC_CONTRIB, pQuorumBaseBlockIndex->GetBlockHash(), members[i]->proTxHash), encryptedContributions)) {
-                return false;
-            }
-            vecRet.emplace_back(encryptedContributions.Get(nRequestedMemberIdx));
-        }
-    }
-    return true;
-}
-
 void CDKGSessionManager::CleanupCache() const
 {
     LOCK(contributionsCacheCs);
@@ -287,7 +253,7 @@ void CDKGSessionManager::CleanupOldContributions(ChainstateManager& chainstate) 
         return;
     }
 
-    const auto prefixes = {DB_VVEC, DB_SKCONTRIB, DB_ENC_CONTRIB};
+    const auto prefixes = {DB_VVEC, DB_SKCONTRIB};
 
     LogPrint(BCLog::LLMQ, "CDKGSessionManager::%s -- looking for old entries\n", __func__);
     auto &params = Params().GetConsensus().llmqTypeChainLocks;
