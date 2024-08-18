@@ -31,7 +31,7 @@ namespace Consensus { struct Params; };
 
 namespace node {
 static const bool DEFAULT_PRINTPRIORITY = false;
-
+static const bool DEFAULT_SKIPCHAINLOCKMINER = false;
 struct CBlockTemplate
 {
     CBlock block;

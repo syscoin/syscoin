@@ -238,7 +238,6 @@ const std::vector<std::string> RPC_COMMANDS_SAFE_FOR_FUZZING{
     "protx_register_prepare",
     "protx_update_registrar",
     "protx_list_wallet",
-    "settestparams",
     "signmessagebech32",
     "getauxblock",
     "protx_info_wallet",

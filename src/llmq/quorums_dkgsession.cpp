@@ -160,7 +160,7 @@ void CDKGSession::SendContributions(CDKGPendingMessages& pendingMessages)
 
     for (size_t i = 0; i < members.size(); i++) {
         const auto& m = members[i];
-        CBLSSecretKey &skContrib = skContributions[i];
+        CBLSSecretKey &skContrib = (*qc.contributions)[i];
 
         if (i != myIdx && ShouldSimulateError(DKGError::type::CONTRIBUTION_LIE)) {
             logger.Batch("lying for %s", m->dmn->proTxHash.ToString());

@@ -46,8 +46,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
 
         self.nodes[0].spork("SPORK_21_QUORUM_ALL_CONNECTED", 0)
         self.nodes[0].spork("SPORK_23_QUORUM_POSE", 0)
-        self.bump_mocktime(60)
-        self.generate(self.nodes[0], 1)
+        self.generate_helper(self.nodes[0], 5)
         self.wait_for_sporks_same()
 
         self.reset_probe_timeouts()

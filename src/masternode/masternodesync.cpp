@@ -162,6 +162,15 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
             if (nMode == MASTERNODE_SYNC_BLOCKCHAIN) {
                 connman.PushMessage(pnode, msgMaker.Make(NetMsgType::GETSPORKS)); //get current network sporks
                 SwitchToNextAsset(connman);
+                // Now that the blockchain is synced request the mempool from the connected outbound nodes if possible
+                for (auto pNodeTmp : snap.Nodes()) {
+                    bool fRequestedEarlier = netfulfilledman->HasFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                    if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
+                        netfulfilledman->AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                        connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETCLSIG));
+                        LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
+                    }
+                }
                 return;
             } else if (nMode == MASTERNODE_SYNC_GOVERNANCE) {
                 if (!governance->IsValid()) {
@@ -228,15 +237,17 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                     // We must be at the tip already, let's move to the next asset.
                     SwitchToNextAsset(connman);
                     uiInterface.NotifyAdditionalDataSyncProgressChanged(nSyncProgress);
-                    if (ShouldSyncMempool(gArgs)) {
-                        // Now that the blockchain is synced request the mempool from the connected outbound nodes if possible
-                        for (auto pNodeTmp : snap.Nodes()) {
-                            bool fRequestedEarlier = netfulfilledman->HasFulfilledRequest(pNodeTmp->addr, "mempool-sync");
-                            if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
-                                netfulfilledman->AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                    bool bShouldSyncMempool = ShouldSyncMempool(gArgs);
+                    // Now that the blockchain is synced request the mempool from the connected outbound nodes if possible
+                    for (auto pNodeTmp : snap.Nodes()) {
+                        bool fRequestedEarlier = netfulfilledman->HasFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                        if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
+                            netfulfilledman->AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
+                            if(bShouldSyncMempool) {
                                 connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::MEMPOOL));
-                                LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
                             }
+                            connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETCLSIG));
+                            LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
                         }
                     }
                 }

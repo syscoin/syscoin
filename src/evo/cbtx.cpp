@@ -3,6 +3,7 @@
 #include <llmq/quorums_blockprocessor.h>
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_signing.h>
+#include <llmq/quorums.h>
 #include <evo/specialtx.h>
 
 #include <chainparams.h>
@@ -19,15 +20,22 @@ bool CheckCbTxBestChainlock(ChainstateManager &chainman, const CBlock& block, co
     if (block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
         return true;
     }
-    // last height before new DKG starts
-    const auto& nQuorumEndHeight = pindex->nHeight + (pindex->nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
+    // this quorum period start
     const auto& nQuorumStartHeight = pindex->nHeight - (pindex->nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
-    // last possible block before new quorum can be mined
-    const auto& nLastDKGHeight = nQuorumEndHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
-    if ((pindex->nHeight % nLastDKGHeight) != 0) {
+    // last quorum period start
+    const auto& nQuorumLastStartHeight = (nQuorumStartHeight - Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
+    // first possible height where CL would be gauranteed to be part of the last quorum period
+    const auto& nQuorumLastMiningEnd = nQuorumLastStartHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowEnd + 1;
+    // last possible block for last quorum period
+    const auto& nLastDKGHeight = nQuorumStartHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
+    if (pindex->nHeight != nLastDKGHeight) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-bad-mining-height");
     }
-
+    // must have had no new quorums and thus the transition doesn't need to be checked
+    if (!llmq::quorumBlockProcessor->HasMinedCommitment(pindex->GetAncestor(nQuorumLastStartHeight)->GetBlockHash())) {
+        LogPrint(BCLog::CHAINLOCKS, "%s -- CLSIG (%s) mined commitment doesn't exist for this DKG interval, skipping checks...\n", __func__);
+        return true;
+    }
     CCbTxCLSIG cbTx;
     if (!GetTxPayload(*block.vtx[0], cbTx)) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-bad-payload");
@@ -35,34 +43,18 @@ bool CheckCbTxBestChainlock(ChainstateManager &chainman, const CBlock& block, co
     if (cbTx.nVersion != CCbTxCLSIG::CURRENT_VERSION) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-bad-version");
     }
-    // if there was no mined commitment this DKG interval we can skip and assume quorums stayed the same (no new quorum)
-    if (!llmq::quorumBlockProcessor->HasMinedCommitment(pindex->GetAncestor(nQuorumStartHeight)->GetBlockHash())) {
-        // shouldn't happen on regtest
-        if(fRegTest) {
-            assert(false);
-        }
-        // if there is no mined commitment, the CLSIG should be null as otherwise it would not belong to this DKG interval
-        return cbTx.cl.IsNull();
-    }
-    const uint256 minedCommitmentHash = llmq::quorumBlockProcessor->GetMinedCommitmentBlockHash(pindex->GetAncestor(nQuorumStartHeight)->GetBlockHash());
-    if(minedCommitmentHash.IsNull()) {
-        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) mined commitment doesn't exist yet, not allowed)\n", __func__, cbTx.cl.ToString());
-        return false;
-    }
-    const auto pindexCommitment = chainman.m_blockman.LookupBlockIndex(minedCommitmentHash);
-    if(cbTx.cl.nHeight <= pindexCommitment->nHeight) {
-        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) height must be higher than the mined commitment for this DKG interval (%d)\n", __func__, cbTx.cl.ToString(), pindexCommitment->nHeight);
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-clsig-bad-height");
-    }
 
     const auto latestChainLock = llmq::chainLocksHandler->GetBestChainLock();
     // if chainlock exists and it is part of this DKG interval validate that the CLSIG provided is valid and also part of this DKG interval
-    if (!latestChainLock.IsNull() && latestChainLock.nHeight >= pindexCommitment->nHeight) {
+    if (!latestChainLock.IsNull() && latestChainLock.nHeight >= nQuorumLastMiningEnd && latestChainLock.nHeight <= nLastDKGHeight) {
         // Enforce non-null chainlocks if a valid local chainlock exists in this DKG interval
         if(cbTx.cl.IsNull()) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-missing-clsig");
         }
-        LogPrintf("CheckCbTxBestChainlock check cl match latestChainLock %s cbTx.cl %s fJustCheck %d\n", latestChainLock.ToString(), cbTx.cl.ToString(), fJustCheck);
+        if(!(cbTx.cl.nHeight >= nQuorumLastMiningEnd && cbTx.cl.nHeight <= nLastDKGHeight)) {
+            LogPrint(BCLog::CHAINLOCKS, "%s -- CLSIG (%s) height must be between nQuorumLastMiningEnd (%d) and nLastDKGHeight (%d) but found %d\n", __func__, cbTx.cl.ToString(), nQuorumLastMiningEnd, nLastDKGHeight, cbTx.cl.nHeight);
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-clsig-bad-height");
+        }
         // simply check against local validated chainlock if not then try to accept block version which should be valid
         if (cbTx.cl != latestChainLock) {
             const auto chainLockBlockIndex = chainman.m_blockman.LookupBlockIndex(cbTx.cl.blockHash);
@@ -73,47 +65,73 @@ bool CheckCbTxBestChainlock(ChainstateManager &chainman, const CBlock& block, co
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-clsig-height-mismatch");
             }
             if (!llmq::chainLocksHandler->VerifyAggregatedChainLock(cbTx.cl, chainLockBlockIndex, ::SerializeHash(cbTx.cl))) {
-                LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- invalid CLSIG (%s)\n", __func__, cbTx.cl.ToString());
+                LogPrint(BCLog::CHAINLOCKS, "%s -- invalid CLSIG (%s)\n", __func__, cbTx.cl.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-clsig-invalid-sig");
             }
-        }  
+        }
+        return true;
     }
     // If no valid local chainlock, verify the chainlock in the block against the active chain
     else if (!cbTx.cl.IsNull()) {
-        LogPrintf("CheckCbTxBestChainlock no local CL found, check new one %s fJustCheck %d\n", cbTx.cl.ToString(), fJustCheck);
         const auto chainLockBlockIndex = chainman.m_blockman.LookupBlockIndex(cbTx.cl.blockHash);
         if (!chainLockBlockIndex || !chainman.ActiveChain().Contains(chainLockBlockIndex) || !chainLockBlockIndex->IsValid(BLOCK_VALID_SCRIPTS)) {
             return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "clsig-bad-block");
+        }
+        if(!(cbTx.cl.nHeight >= nQuorumLastMiningEnd && cbTx.cl.nHeight <= nLastDKGHeight)) {
+            LogPrint(BCLog::CHAINLOCKS, "%s -- CLSIG (%s) following active chain: height must be between nQuorumLastMiningEnd (%d) and nLastDKGHeight (%d) but found %d\n", __func__, cbTx.cl.ToString(), nQuorumLastMiningEnd, nLastDKGHeight, cbTx.cl.nHeight);
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-clsig-bad-height");
         }
         if(chainLockBlockIndex->nHeight != cbTx.cl.nHeight) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-clsig-height-mismatch");
         }
         if (!llmq::chainLocksHandler->VerifyAggregatedChainLock(cbTx.cl, chainLockBlockIndex, ::SerializeHash(cbTx.cl))) {
-            LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- invalid CLSIG (%s)\n", __func__, cbTx.cl.ToString());
+            LogPrint(BCLog::CHAINLOCKS, "%s -- invalid CLSIG (%s)\n", __func__, cbTx.cl.ToString());
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "cbtx-clsig-invalid-sig");
         }
+        return true;
     }
-
     return true;
 }
 
 bool CalcCbTxBestChainlock(const CBlockIndex* pindexPrev, llmq::CChainLockSig& bestCL)
 {
+    int nHeight = pindexPrev->nHeight + 1;
+    // this quorum period start
+    const auto& nQuorumStartHeight = nHeight - (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
+    // last quorum period start
+    const auto& nQuorumLastStartHeight = (nQuorumStartHeight - Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
+    // first possible height where CL would be gauranteed to be part of the last quorum period
+    const auto& nQuorumLastMiningEnd = nQuorumLastStartHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowEnd + 1;
+    // last possible block for last quorum period
+    const auto& nLastDKGHeight = nQuorumStartHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
+    if(nHeight != nLastDKGHeight) {
+        return false;
+    }
+    bool bHasCommitment = llmq::quorumBlockProcessor->HasMinedCommitment(pindexPrev->GetAncestor(nQuorumLastStartHeight)->GetBlockHash());
     const auto best_clsig = llmq::chainLocksHandler->GetBestChainLock();
     if (!best_clsig.IsNull()) {
-        // cannot have a CLSIG if there is no mined commitment for that DKG interval (must be an old CLSIG)
-        if(!llmq::quorumBlockProcessor->HasMinedCommitment(pindexPrev->GetAncestor(pindexPrev->nHeight - (pindexPrev->nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval))->GetBlockHash())) {
-            // shouldn't happen in tests
-            if(fRegTest) {
-                assert(false);
-            }
+        // if no mined commitment, we did not get a new quorum during this transition.
+        if(!bHasCommitment) {
+            return true;
+        }
+        // if there is a mined commitment make sure the CLSIG is from the period of blocks where its gauranteed to use the new quorum
+        if(!(best_clsig.nHeight >= nQuorumLastMiningEnd && best_clsig.nHeight <= nLastDKGHeight)) {
+            LogPrint(BCLog::CHAINLOCKS, "%s -- CLSIG (%s) height must be between nQuorumLastMiningEnd (%d) and nLastDKGHeight (%d) but found %d\n", __func__, best_clsig.ToString(), nQuorumLastMiningEnd, nLastDKGHeight, best_clsig.nHeight);
             return false;
         }
         // Return the latest known chainlock
         bestCL = best_clsig;
         return true;
+    } else {
+        const size_t& threshold = Params().GetConsensus().llmqTypeChainLocks.signingActiveQuorumCount / 2 + 1;
+        // ensure we have atleast enough quorums to sign a chainlock
+        const auto quorums_scanned = llmq::quorumManager->ScanQuorums(pindexPrev, threshold);
+        // at this point we have enough quorums, and a recent commitment yet still no chainlock so return false so one can get fetched by peers or forced to push through by miners if actually no finality exists for this transition
+        if (bHasCommitment && quorums_scanned.size() >= threshold) {
+            return false;
+        }
     }
-    return false;
+    return true;
 }
 
 std::string CCbTxCLSIG::ToString() const

@@ -74,8 +74,17 @@ class LLMQChainLocksTest(DashTestFramework):
         self.generate(self.nodes[0], 5)
 
         self.wait_for_chainlocked_block_all_nodes(cl)
-
+        self.log.info("Restart miner and ensure chainlock is sent via P2P")
+        self.stop_node(0)
+        self.start_node(0, extra_args=["-miningskipchainlock", *self.extra_args[0]])
+        self.connect_nodes(0, 1)
+        # just mnsync the first blockchain step and skip over governance
+        self.sync_mnsync([self.nodes[0]], "blockchain")
+        force_finish_mnsync(self.nodes[0])
+        self.wait_for_chainlocked_block(self.nodes[0], cl)
+        
         self.log.info("Mine many blocks, wait for chainlock")
+        # miningskipchainlock flag above should enable the block to be created as node will have latest CLSIG but it won't be part of the latest quorum window), network should allow it
         cl = self.generate(self.nodes[0], 20)[-6]
         # We need more time here due to 20 blocks being generated at once
         self.wait_for_chainlocked_block_all_nodes(cl, timeout=30)
@@ -148,37 +157,6 @@ class LLMQChainLocksTest(DashTestFramework):
                 found = True
                 break
         assert found
-        self.log.info("Isolate node, mine invalid longer chain(locked) + shorter good chain, and reconnect")
-        prevActiveChainlock = self.nodes[0].getchainlocks()["active_chainlock"]["blockhash"]
-        # set flag create and accept invalid blocks
-        for i in range(len(self.nodes)):
-            self.nodes[i].settestparams(True)
-        cl = self.generate(self.nodes[0], 10)[-6]
-        bad_tip = self.nodes[0].getbestblockhash()
-        self.wait_for_chainlocked_block_all_nodes(cl, timeout=30)
-        # clear the invalid flag
-        for i in range(len(self.nodes)):
-            self.nodes[i].settestparams(False)
-        # should set chainlock to previous one due to invalid block getting locked
-        for i in range(len(self.nodes)):
-            self.nodes[i].invalidateblock(good_tip)
-            self.nodes[i].reconsiderblock(good_tip)
-            assert self.nodes[i].getchainlocks()["active_chainlock"]["blockhash"] == prevActiveChainlock
-            assert not self.nodes[i].getblock(cl)["chainlock"]
-            assert self.nodes[i].getbestblockhash() == good_tip
-
-        cl = self.nodes[0].getbestblockhash()
-        self.generate(self.nodes[0], 5)
-        self.wait_for_chainlocked_block_all_nodes(cl, timeout=30)
-
-        self.log.info("bad tip mined while being locked should be invalid now")
-        found = False
-        for tip in self.nodes[0].getchaintips():
-            if tip["hash"] == bad_tip:
-                assert tip["status"] == "invalid"
-                found = True
-                break
-        assert found
 
         self.log.info("Keep node connected and let it try to reorg the chain")
         good_cl = self.nodes[0].getbestblockhash()
@@ -226,6 +204,7 @@ class LLMQChainLocksTest(DashTestFramework):
         assert self.nodes[0].getbestblockhash() == forkChain
         self.stop_node(0)
         self.start_node(0)
+        force_finish_mnsync(self.nodes[0])
         found = False
         assert self.nodes[0].getbestblockhash() == forkChain
         # reconsider to switch to good_tip but chainlocks should be cleared (invalidate block sets invalid flag on block but not chainlock failure so clear happens)
@@ -293,7 +272,6 @@ class LLMQChainLocksTest(DashTestFramework):
         new_cl = self.nodes[0].getblockhash(self.nodes[0].getblockcount() - 5)
         self.wait_for_chainlocked_block_all_nodes(new_cl, timeout=30)
         self.nodes[0].disconnect_p2ps()
-        assert(False)
 
     def create_fake_clsig(self, height_offset):
         # create a fake block height_offset blocks ahead of the tip

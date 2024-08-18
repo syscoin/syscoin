@@ -93,9 +93,8 @@ class LLMQDKGErrors(DashTestFramework):
         # We're not testing PoSe here, so lets heal the MNs :)
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 4070908800)
         self.wait_for_sporks_same()
-        for i in range(blockCount):
-            self.bump_mocktime(1)
-            self.generate(self.nodes[0], 1)
+        self.bump_mocktime(blockCount)
+        self.wait_until(lambda: self.generate_block_helper(self.nodes[0], blockCount, sync_fun=self.no_op))
         self.sync_all()
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 0)
         self.wait_for_sporks_same()

@@ -350,14 +350,6 @@ CFinalCommitmentPtr CQuorumBlockProcessor::GetMinedCommitment(const uint256& quo
     retMinedBlockHash = p.second;
     return std::make_unique<CFinalCommitment>(p.first);
 }
-uint256 CQuorumBlockProcessor::GetMinedCommitmentBlockHash(const uint256& quorumHash) const
-{
-    std::pair<CFinalCommitment, uint256> p;
-    if (!m_commitment_evoDb.ReadCache(quorumHash, p)) {
-        return uint256();
-    }
-    return p.second;
-}
 
 bool CQuorumBlockProcessor::HasMineableCommitment(const uint256& hash) const
 {

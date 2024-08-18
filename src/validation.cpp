@@ -105,7 +105,6 @@ HANDLE hProcessGeth = NULL;
 RecursiveMutex cs_geth;
 NEVMMintTxMap mapMintKeysMempool;
 std::map<uint256, int64_t> mapRejectedBlocks GUARDED_BY(cs_main);
-bool fTestSetting{false};
 
 using kernel::CCoinsStats;
 using kernel::CoinStatsHashType;
@@ -2385,7 +2384,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         return DISCONNECT_FAILED;
     }
     // SYSCOIN
-    if (!UndoSpecialTxsInBlock(block, pindex)) {
+    if (bReverify && !UndoSpecialTxsInBlock(block, pindex)) {
         return DISCONNECT_FAILED;
     }
 
@@ -2892,7 +2891,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
         std::string strError;
         // add seniority to reward when checking for limit
-        if (!fTestSetting && !IsBlockValueValid(block, pindex->nHeight, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
+        if (!IsBlockValueValid(block, pindex->nHeight, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
             LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             // hack for feature_signet.py to pass which uses bitcoin blocks signed by the signet witness
             if(!fSigNet || pindex->nHeight > 100) {
@@ -4634,11 +4633,11 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     // if commitment doesn't exist and is required make sure commitment tx is in coinbase
     // otherwise if outside of commitment mining interval and we are in last block of DKG ensure we create SYSCOIN_TX_VERSION_MN_CLSIG tx
     if(fDIP0003Active_context) {
-        // last height before new DKG starts
-        const auto& nQuorumEndHeight = nHeight + (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
-        // last possible block before new quorum can be mined
-        const auto& nLastDKGHeight = nQuorumEndHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
-        if((nHeight % nLastDKGHeight) == 0 && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
+        // this quorum period start
+        const auto& nQuorumStartHeight = nHeight - (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
+        // last possible block for last quorum period
+        const auto& nLastDKGHeight = nQuorumStartHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
+        if(nHeight == nLastDKGHeight && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-cb-type", strprintf("%s : Incorrect version of coinbase transaction", __func__));
         }
     }

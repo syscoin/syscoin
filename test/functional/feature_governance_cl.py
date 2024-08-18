@@ -58,7 +58,8 @@ class SyscoinGovernanceTest (DashTestFramework):
 
     def run_test(self):
         sb_cycle = 25
-
+        for i in range(len(self.nodes)):
+            force_finish_mnsync(self.nodes[i])
         self.log.info("Make sure ChainLocks are active")
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 0)
         self.wait_for_sporks_same()
@@ -124,7 +125,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         assert n > 1
         # Move remaining n blocks until the next Superblock
         for _ in range(n - 1):
-            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+            self.generate_helper(self.nodes[0], 1, sync_fun=self.no_op)
             self.bump_mocktime(156)
             self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:5]))
         self.log.info("Wait for new trigger and votes on non-isolated nodes")
@@ -134,7 +135,6 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.bump_mocktime(156)
         cl = self.nodes[0].getbestblockhash()
-        self.log.info(f'getblockcount {self.nodes[0].getblockcount()}')
         self.generate(self.nodes[0], 5, sync_fun=self.no_op)
         self.sync_all_helper(self.nodes[0:5])
         self.wait_for_chainlocked_block(self.nodes[0], cl)

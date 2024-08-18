@@ -280,6 +280,7 @@ extern const char *QBSIGSHARES;
 extern const char *QSIGREC;
 extern const char *QSIGSHARE;
 extern const char *CLSIG;
+extern const char *GETCLSIG;
 extern const char *MNAUTH;
 /**
  * Contains a 4-byte version number and an 8-byte salt.

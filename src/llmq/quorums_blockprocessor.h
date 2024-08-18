@@ -45,7 +45,6 @@ public:
 
     bool HasMinedCommitment(const uint256& quorumHash) const;
     CFinalCommitmentPtr GetMinedCommitment(const uint256& quorumHash, uint256& retMinedBlockHash) const;
-    uint256 GetMinedCommitmentBlockHash(const uint256& quorumHash) const;
     bool FlushCacheToDisk();
     static bool IsMiningPhase(int nHeight);
 private:

@@ -20,6 +20,7 @@
 #include <evo/deterministicmns.h>
 #include <logging.h>
 #include <llmq/quorums_blockprocessor.h>
+#include <netmessagemaker.h>
 namespace llmq
 {
 
@@ -59,6 +60,15 @@ CChainLocksHandler::~CChainLocksHandler()
     delete scheduler;
 }
 
+bool CChainLocksHandler::GetCLSIGFromPeers() {
+    LogPrint(BCLog::CHAINLOCKS, "%s -- Get CLSIG\n", __func__);
+    const CNetMsgMaker msgMaker(PROTOCOL_VERSION);
+    const CConnman::NodesSnapshot snap{connman, /* filter = */ FullyConnectedOnly};
+    for (auto pNodeTmp : snap.Nodes()) {
+        connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETCLSIG));        
+    }
+    return true;
+}
 void CChainLocksHandler::Start()
 {
     quorumSigningManager->RegisterRecoveredSigsListener(this);
@@ -220,13 +230,6 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
     return false;
 }
 
-uint256 CChainLocksHandler::GetAggregatePubKeyHash(const std::vector<CQuorumCPtr> &quorums_scanned) {
-    CHashWriter h(SER_GETHASH, 0);
-    for(const auto& quorum: quorums_scanned) {
-        h << quorum->qc->quorumPublicKey;
-    }
-    return h.GetHash();
-}
 
 bool CChainLocksHandler::VerifyChainLockShare(const CChainLockSig& clsig, const CBlockIndex* pindexScan, const uint256& idIn, std::pair<int, CQuorumCPtr>& ret, const uint256& hash)
 {
@@ -251,13 +254,12 @@ bool CChainLocksHandler::VerifyChainLockShare(const CChainLockSig& clsig, const 
     }
     bool fHaveSigner{std::count(clsig.signers.begin(), clsig.signers.end(), true) > 0};
     const auto quorums_scanned = llmq::quorumManager->ScanQuorums(pindexScan, signingActiveQuorumCount);
-    const auto &aggregateQuorumPubKeyHash = GetAggregatePubKeyHash(quorums_scanned);
     for (size_t i = 0; i < quorums_scanned.size(); ++i) {
         const CQuorumCPtr& quorum = quorums_scanned[i];
         if (quorum == nullptr) {
             return false;
         }
-        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash, aggregateQuorumPubKeyHash));
+        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash));
         if ((!idIn.IsNull() && idIn != requestId)) {
             continue;
         }
@@ -265,8 +267,8 @@ bool CChainLocksHandler::VerifyChainLockShare(const CChainLockSig& clsig, const 
             continue;
         }
         uint256 signHash = CLLMQUtils::BuildSignHash(quorum->qc->quorumHash, requestId, clsig.blockHash);
-        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) requestId=%s, signHash=%s aggregateQuorumPubKeyHash=%s\n",
-                __func__, clsig.ToString(), requestId.ToString(), signHash.ToString(), aggregateQuorumPubKeyHash.ToString());
+        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) requestId=%s, signHash=%s\n",
+                __func__, clsig.ToString(), requestId.ToString(), signHash.ToString());
 
         if (clsig.sig.VerifyInsecure(quorum->qc->quorumPublicKey, signHash)) {
             if (idIn.IsNull() && !quorumSigningManager->HasRecoveredSigForId(requestId)) {
@@ -317,21 +319,7 @@ bool CChainLocksHandler::VerifyAggregatedChainLock(const CChainLockSig& clsig, c
     if(quorums_scanned.empty()) {
         return false;
     }
-    int offset = pindexScan->nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval;
-    const uint256 minedCommitmentHash = quorumBlockProcessor->GetMinedCommitmentBlockHash(pindexScan->GetAncestor(pindexScan->nHeight - offset)->GetBlockHash());
-    if(minedCommitmentHash.IsNull()) {
-        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) mined commitment doesn't exist yet, not allowed)\n", __func__, clsig.ToString());
-        return false;
-    }
-    {
-        LOCK(cs_main);
-        const auto pindexCommitment = chainman.m_blockman.LookupBlockIndex(minedCommitmentHash);
-        if(clsig.nHeight <= pindexCommitment->nHeight) {
-            LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) height must be higher than the mined commitment for this DKG interval (%d)\n", __func__, clsig.ToString(), pindexCommitment->nHeight);
-            return false;    
-        }
-    }
-    const auto &aggregateQuorumPubKeyHash = GetAggregatePubKeyHash(quorums_scanned);
+    
     for (size_t i = 0; i < quorums_scanned.size(); ++i) {
         const CQuorumCPtr& quorum = quorums_scanned[i];
         if (quorum == nullptr) {
@@ -341,11 +329,11 @@ bool CChainLocksHandler::VerifyAggregatedChainLock(const CChainLockSig& clsig, c
             continue;
         }
         quorumPublicKeys.emplace_back(quorum->qc->quorumPublicKey);
-        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash, aggregateQuorumPubKeyHash));
+        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash));
         uint256 signHash = CLLMQUtils::BuildSignHash(quorum->qc->quorumHash, requestId, clsig.blockHash);
         hashes.emplace_back(signHash);
-        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- index %d CLSIG (%s) pindexScan=%s requestId=%s (clsig.nHeight %d, quorum->qc->quorumHash %s), signHash=%s (quorum->qc->quorumHash, requestId, clsig.blockHash) aggregateQuorumPubKeyHash=%s\n",
-                __func__, i, clsig.ToString(), pindexScan->GetBlockHash().ToString(), requestId.ToString(), clsig.nHeight, quorum->qc->quorumHash.ToString(), signHash.ToString(), aggregateQuorumPubKeyHash.ToString());
+        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- index %d CLSIG (%s) pindexScan=%s requestId=%s (clsig.nHeight %d, quorum->qc->quorumHash %s), signHash=%s (quorum->qc->quorumHash, requestId, clsig.blockHash)\n",
+                __func__, i, clsig.ToString(), pindexScan->GetBlockHash().ToString(), requestId.ToString(), clsig.nHeight, quorum->qc->quorumHash.ToString(), signHash.ToString());
     }
     bool result = clsig.sig.VerifyInsecureAggregated(quorumPublicKeys, hashes);
     if(result) {
@@ -449,17 +437,6 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 peerman.ForgetTxHash(from, hash);
             }
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-chainstate-missing");
-        }
-        int offset = pindexScan->nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval;
-        const uint256 minedCommitmentHash = quorumBlockProcessor->GetMinedCommitmentBlockHash(pindexScan->GetAncestor(pindexScan->nHeight - offset)->GetBlockHash());
-        if(minedCommitmentHash.IsNull()) {
-            LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) mined commitment doesn't exist yet, not allowed)\n", __func__, clsig.ToString());
-            return false;
-        }
-        const auto pindexCommitment = chainman.m_blockman.LookupBlockIndex(minedCommitmentHash);
-        if(clsig.nHeight > 0 && clsig.nHeight <= pindexCommitment->nHeight) {
-            LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) height must be higher than the mined commitment for this DKG interval (%d)\n", __func__, clsig.ToString(), pindexCommitment->nHeight);
-            return false;    
         }
     }
     bool bConflict{false};
@@ -722,11 +699,6 @@ void CChainLocksHandler::TrySignChainTip()
             LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandle pindex not valid\n");
             return;
         }
-        int offset = pindex->nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval;
-        if(!quorumBlockProcessor->HasMinedCommitment(pindex->GetAncestor(pindex->nHeight - offset)->GetBlockHash())) {
-            LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- mined commitment doesn't exist yet, not allowed)\n", __func__);
-            return;
-        }
     }
 
     const uint256 msgHash = pindex->GetBlockHash();
@@ -784,9 +756,6 @@ void CChainLocksHandler::TrySignChainTip()
     const auto& signingActiveQuorumCount = llmqParams.signingActiveQuorumCount;
     
     const auto quorums_scanned = llmq::quorumManager->ScanQuorums(pindex, signingActiveQuorumCount);
-    // sign on the aggregate pubkey hash to ensure quorums agree to who the others are in the aggregate quorum signature
-    // this is important for the zk light client which validates the new quorum hash (and thus the active quorums) from the CLSIG in each DKG interval recorded in the chain
-    const auto &aggregateQuorumPubKeyHash = GetAggregatePubKeyHash(quorums_scanned);
     std::map<CQuorumCPtr, CChainLockSigCPtr> mapSharesAtTip;
     {
         LOCK(cs);
@@ -854,9 +823,9 @@ void CChainLocksHandler::TrySignChainTip()
                 // just sign whatever we think is a good tip
             }
         }
-        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- use quorum (%d, %s) and try to sign %s at height %d aggregateQuorumPubKeyHash %s\n",
-                __func__, nQuorumIndex, quorum->qc->quorumHash.ToString(), msgHash.ToString(), nHeight, aggregateQuorumPubKeyHash.ToString());
-        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, nHeight, quorum->qc->quorumHash, aggregateQuorumPubKeyHash));
+        LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- use quorum (%d, %s) and try to sign %s at height %d\n",
+                __func__, nQuorumIndex, quorum->qc->quorumHash.ToString(), msgHash.ToString(), nHeight);
+        uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, nHeight, quorum->qc->quorumHash));
         {
             LOCK(cs);
             if (bestChainLockWithKnownBlock.nHeight >= nHeight) {

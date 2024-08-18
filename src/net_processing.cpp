@@ -4944,7 +4944,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         return;
     }
-
+    if (msg_type == NetMsgType::GETCLSIG) {
+        if (auto tx_relay = peer->GetTxRelay(); tx_relay != nullptr) {
+            LOCK(tx_relay->m_tx_inventory_mutex);
+            tx_relay->m_send_clsig = true;
+        }
+        return;
+    }
     if (msg_type == NetMsgType::MEMPOOL) {
         // Only process received mempool messages if we advertise NODE_BLOOM
         // or if the peer has mempool permissions.
@@ -6047,6 +6053,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                             vInv.clear();
                         }
                     }
+
+                }
+                if (fSendTrickle && tx_relay->m_send_clsig) {
+                    tx_relay->m_send_clsig = false;
                     // SYSCOIN Send an inv for the best ChainLock we have
                     const auto& clsig = llmq::chainLocksHandler->GetBestChainLock();
                     if (!clsig.IsNull()) {
@@ -6058,9 +6068,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                             vInv.clear();
                         }
                     }
-
                 }
-
                 // Determine transactions to relay
                 if (fSendTrickle) {
                     // Produce a vector with all candidates for sending

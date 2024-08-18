@@ -116,12 +116,11 @@ public:
     void CheckActiveState() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void TrySignChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void HandleNewRecoveredSig(const CRecoveredSig& recoveredSig) override EXCLUSIVE_LOCKS_REQUIRED(!cs);
-
+    bool GetCLSIGFromPeers();
     bool HasChainLock(int nHeight, const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool HasConflictingChainLock(int nHeight, const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool VerifyAggregatedChainLock(const CChainLockSig& clsig, const CBlockIndex* pindexScan, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
-    uint256 GetAggregatePubKeyHash(const std::vector<CQuorumCPtr> &quorums_scanned);
     // these require locks to be held already
     bool InternalHasChainLock(int nHeight, const uint256& blockHash) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool InternalHasConflictingChainLock(int nHeight, const uint256& blockHash) const EXCLUSIVE_LOCKS_REQUIRED(cs);

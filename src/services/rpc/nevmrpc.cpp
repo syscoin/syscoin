@@ -230,25 +230,7 @@ static RPCHelpMan getnevmblobdata()
     };
 }
 
-static RPCHelpMan settestparams()
-{
-    return RPCHelpMan{"settestparams",
-        "\nSet test setting. Used in testing only.\n",
-        {
-            {"setting", RPCArg::Type::BOOL, RPCArg::Optional::NO, "Test setting"}
-        },
-        RPCResult{RPCResult::Type::ANY, "", ""},
-        RPCExamples{
-            HelpExampleCli("settestparams", "false")
-            + HelpExampleRpc("settestparams", "true")
-        },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-        fTestSetting = request.params[0].get_bool();
-        return "success";
-},
-    };
-}
+
 bool ScanBlobs(CNEVMDataDB& pnevmdatadb, const uint32_t count, const uint32_t from, const UniValue& oOptions, UniValue& oRes) {
 	bool getdata = false;
 	if (!oOptions.isNull()) {
@@ -627,7 +609,6 @@ void RegisterNEVMRPCCommands(CRPCTable &t)
         {"syscoin", &syscoincheckmint},
         {"syscoin", &getnevmblockchaininfo},
         {"syscoin", &getnevmblobdata},
-        {"syscoin", &settestparams},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);

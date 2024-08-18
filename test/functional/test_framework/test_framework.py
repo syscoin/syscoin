@@ -1470,6 +1470,37 @@ class DashTestFramework(SyscoinTestFramework):
             return False
         return True
  
+    def sync_gov(self,  mode="all", nodes=None, wait=1, timeout=60):
+        rpc_connections = nodes or self.nodes
+        timeout = int(timeout * self.options.timeout_factor)
+        stop_time = time.time() + timeout
+        while time.time() <= stop_time:
+            if mode == "all":
+                if all([x.mnsync("status")["IsSynced"] for x in rpc_connections]):
+                    return
+            elif mode == "blockchain":
+                if all([x.mnsync("status")["IsBlockchainSynced"] for x in rpc_connections]):
+                    return
+            time.sleep(wait)
+        raise AssertionError("mnsync timed out after {}s".format(
+            timeout
+        ))
+
+    def sync_mnsync_helper(self, nodes, mode="all"):
+        try:
+            self.bump_mocktime(1, nodes=nodes)
+            self.sync_gov(timeout=1, mode=mode, nodes=nodes)
+        except:
+            return False
+        return True
+    
+    def sync_mnsync(self, nodes, mode="all"):
+        try:
+            self.wait_until(lambda: self.sync_mnsync_helper(nodes=nodes, mode=mode))
+        except:
+            return False
+        return True  
+
     def sync_all_helper(self, nodes):
         try:
             self.wait_until(lambda: self.sync_mempools_helper(nodes=nodes))
@@ -1478,19 +1509,20 @@ class DashTestFramework(SyscoinTestFramework):
             return False
         return True
 
-    def generate_block_helper(self, node, number, sync_fun):
+    def generate_block_helper(self, node, number, sync_fun, nodes=None):
         try:
-            self.log.info('try generating block...')
-            time.sleep(1)
-            self.bump_mocktime(1)
+            self.bump_mocktime(1, nodes=nodes)
             self.generate(node, number, sync_fun=sync_fun)
         except JSONRPCException as e:
-            if e.error["code"] == -1 and "Waiting for chainlock..." in e.error["message"]:
+            if e.error["code"] == -1 and "CalcCbTxBestChainlock failed!" in e.error["message"]:
                 return False
         return True
 
-    def generate_helper(self, node, number, sync_fun):
-        self.wait_until(lambda: self.generate_block_helper(node, number, sync_fun))
+    def generate_helper(self, node, number, sync_fun=None, nodes=None):
+        self.log.info('try generating blocks...')
+        time.sleep(1)
+        for i in range(number):
+            self.wait_until(lambda: self.generate_block_helper(node, 1, sync_fun, nodes))
 
     def wait_for_quorum_list(self, quorum_hash, nodes, timeout=60):
         def wait_func():
@@ -1503,9 +1535,7 @@ class DashTestFramework(SyscoinTestFramework):
         wait_until_helper_internal(wait_func, timeout=timeout)
 
     def move_blocks(self, nodes, num_blocks):
-        time.sleep(1)
-        self.bump_mocktime(1, nodes=nodes)
-        self.generate(self.nodes[0], num_blocks, sync_fun=self.no_op)
+        self.generate_helper(self.nodes[0], num_blocks, sync_fun=self.no_op)
         self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
 
     def mine_quorum(self, expected_connections=None, expected_members=None, expected_contributions=None, expected_complaints=0, expected_justifications=0, expected_commitments=None, mninfos_online=None, mninfos_valid=None, mod5=False):
