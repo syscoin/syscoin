@@ -28,9 +28,9 @@ class TransactionTimeRescanTest(SyscoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = False
         self.num_nodes = 3
-        self.extra_args = [["-keypool=400"],
-                           ["-keypool=400"],
-                           []
+        self.extra_args = [["-keypool=400", "-dip3params=9000:9000"],
+                           ["-keypool=400", "-dip3params=9000:9000"],
+                           ["-dip3params=9000:9000"]
                           ]
 
     def skip_test_if_missing_module(self):

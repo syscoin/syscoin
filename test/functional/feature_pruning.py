@@ -76,9 +76,11 @@ class PruneTest(SyscoinTestFramework):
 
         # Create nodes 0 and 1 to mine.
         # Create node 2 to test pruning.
+        # SYSCOIN
         self.full_node_default_args = ["-dip3params=2000:2000","-maxreceivebuffer=20000", "-checkblocks=5"]
         # Create nodes 3 and 4 to test manual pruning (they will be re-started with manual pruning later)
         # Create nodes 5 to test wallet in prune mode, but do not connect
+        # SYSCOIN
         self.extra_args = [
             self.full_node_default_args,
             self.full_node_default_args,

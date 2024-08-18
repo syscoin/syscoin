@@ -51,6 +51,7 @@ class FeatureIndexPruneTest(SyscoinTestFramework):
 
     def restart_without_indices(self):
         for i in range(3):
+            # SYSCOIN
             self.restart_node(i, extra_args=["-fastprune", "-prune=1","-dip3params=9000:9000"])
         self.reconnect_nodes()
 

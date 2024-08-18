@@ -229,7 +229,7 @@ class LLMQSigningTest(DashTestFramework):
             wait_until_helper_internal(lambda: mn.node.getconnectioncount() == 5, timeout=10)
             mn.node.ping()
             self.wait_until(lambda: all('pingwait' not in peer for peer in mn.node.getpeerinfo()))
-            self.generate(self.nodes[0], 5)
+            self.generate_helper(self.nodes[0], 5)
             self.sync_blocks()
             self.bump_mocktime(5)
             wait_for_sigs(True, False, True, 15)

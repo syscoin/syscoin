@@ -10,7 +10,8 @@ from test_framework.test_framework import SyscoinTestFramework
 class FeatureRemovePrunedFilesOnStartupTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [["-fastprune", "-prune=1"]]
+        # SYSCOIN
+        self.extra_args = [["-fastprune", "-prune=1", "-dip3params=9000:9000"]]
 
     def mine_batches(self, blocks):
         n = blocks // 250

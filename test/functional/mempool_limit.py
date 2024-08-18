@@ -28,9 +28,11 @@ class MempoolLimitTest(SyscoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
+        # SYSCOIN
         self.extra_args = [[
             "-datacarriersize=100000",
             "-maxmempool=5",
+            "-dip3params=9000:9000",
         ]]
         self.supports_cli = False
 

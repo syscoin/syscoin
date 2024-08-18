@@ -27,6 +27,7 @@ class WalletPruningTest(SyscoinTestFramework):
         self.setup_clean_chain = True
         self.num_nodes = 2
         self.wallet_names = []
+        # SYSCOIN
         self.extra_args = [
             ['-dip3params=2000:2000'], # node dedicated to mining
             ['-dip3params=2000:2000', '-prune=550'], # node dedicated to testing pruning
