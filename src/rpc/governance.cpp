@@ -248,7 +248,7 @@ UniValue ListObjects(ChainstateManager& chainman, const CDeterministicMNList& ti
         UniValue bObj(UniValue::VOBJ);
         bObj.pushKV("DataHex",  govObj.GetDataAsHexString());
         bObj.pushKV("DataString",  govObj.GetDataAsPlainString());
-        bObj.pushKV("Hash",  govObj.GetHash().ToString());
+        bObj.pushKV("Hash",  govObj.GetDataHash().ToString());
         bObj.pushKV("CollateralHash",  govObj.GetCollateralHash().ToString());
         bObj.pushKV("ObjectType", govObj.GetObjectType());
         bObj.pushKV("CreationTime", govObj.GetCreationTime());
@@ -628,7 +628,7 @@ static RPCHelpMan getsuperblockbudget()
     return RPCHelpMan{"getsuperblockbudget",
         "\nReturns the absolute maximum sum of superblock payments allowed.\n",
         {      
-            {"index", RPCArg::Type::NUM, RPCArg::Optional::NO, "The block index."},           
+                    
         },
         RPCResult{RPCResult::Type::NUM, "n", "The absolute maximum sum of superblock payments allowed, in " + CURRENCY_UNIT},
         RPCExamples{
@@ -637,15 +637,12 @@ static RPCHelpMan getsuperblockbudget()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    int nBlockHeight = request.params[0].getInt<int>();
-    if (nBlockHeight < 0) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
-    }
 
-    return ValueFromAmount(CSuperblock::GetPaymentsLimit(nBlockHeight));
+    return ValueFromAmount(CSuperblock::GetPaymentsLimit(Params().GetConsensus().SuperBlockCycle(0)));
 },
     };
-} 
+}
+
 
 
 void RegisterGovernanceRPCCommands(CRPCTable &t)

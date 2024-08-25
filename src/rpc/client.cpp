@@ -305,7 +305,6 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "sendmsgtopeer", 0, "peer_id" },
     { "stop", 0, "wait" },
     { "addnode", 2, "v2transport" },
-    { "getsuperblockbudget", 0, "index" },
     { "spork", 1, "value" },
     { "voteraw", 1, "collateralTxIndex" },
     { "voteraw", 5, "time" },

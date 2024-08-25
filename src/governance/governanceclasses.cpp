@@ -97,14 +97,12 @@ CAmount ParsePaymentAmount(const std::string& strAmount)
 bool CGovernanceManager::AddNewTrigger(uint256 nHash)
 {
     AssertLockHeld(cs);
-
     // IF WE ALREADY HAVE THIS HASH, RETURN
     if (mapTrigger.count(nHash)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- Already have hash, nHash = %s, count = %d, size = %s\n",
                     __func__, nHash.GetHex(), mapTrigger.count(nHash), mapTrigger.size());
         return false;
     }
-
     CSuperblock_sptr pSuperblock;
     try {
         auto pSuperblockTmp = std::make_shared<CSuperblock>(nHash);
@@ -118,7 +116,6 @@ bool CGovernanceManager::AddNewTrigger(uint256 nHash)
     }
 
     pSuperblock->SetStatus(SeenObjectStatus::Valid);
-
     mapTrigger.insert(std::make_pair(nHash, pSuperblock));
 
     return !pSuperblock->IsExpired();
@@ -356,14 +353,14 @@ bool CSuperblockManager::GetSuperblockPayments(int nBlockHeight, std::vector<CTx
     return true;
 }
 
-bool CSuperblockManager::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward)
+bool CSuperblockManager::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nSuperblockPaymentFromBlock)
 {
     // GET BEST SUPERBLOCK, SHOULD MATCH
     LOCK(governance->cs);
 
     CSuperblock_sptr pSuperblock;
     if (CSuperblockManager::GetBestSuperblock(pSuperblock, nBlockHeight)) {
-        return pSuperblock->IsValid(txNew, nBlockHeight, blockReward);
+        return pSuperblock->IsValid(txNew, nBlockHeight, blockReward, nSuperblockPaymentFromBlock);
     }
 
     return false;
@@ -375,7 +372,7 @@ void CSuperblockManager::ExecuteBestSuperblock(int nBlockHeight)
 
     CSuperblock_sptr pSuperblock;
     if (GetBestSuperblock(pSuperblock, nBlockHeight)) {
-        // All checks are done in CSuperblock::IsValid via IsBlockValueValid and IsBlockPayeeValid,
+        // All checks are done in CSuperblock::IsValid via IsBlockValueValid,
         // tip wouldn't be updated if anything was wrong. Mark this trigger as executed.
         pSuperblock->SetExecuted();
         governance->ResetVotedFundingTrigger();
@@ -425,7 +422,6 @@ CSuperblock::
     std::string strAmounts = obj["payment_amounts"].get_str();
     std::string strProposalHashes = obj["proposal_hashes"].get_str();
     ParsePaymentSchedule(strAddresses, strAmounts, strProposalHashes);
-
     LogPrint(BCLog::GOBJECT, "CSuperblock -- nBlockHeight = %d, strAddresses = %s, strAmounts = %s, vecPayments.size() = %d\n",
         nBlockHeight, strAddresses, strAmounts, vecPayments.size());
 }
@@ -478,385 +474,12 @@ void CSuperblock::GetNearestSuperblocksHeights(int nBlockHeight, int& nLastSuper
 
 CAmount CSuperblock::GetPaymentsLimit(int nBlockHeight)
 {
-    const CChainParams& chainParams = Params();
-    const Consensus::Params& consensusParams = chainParams.GetConsensus();
     if (!IsValidBlockHeight(nBlockHeight)) {
         return 0;
     }
-
-   const int nSuperblock = nBlockHeight / consensusParams.SuperBlockCycle(nBlockHeight);
     CAmount nPaymentsLimit = 0;
-    if(nSuperblock > 120){
-    	// some part of all blocks issued during the cycle goes to superblock, see GetBlockSubsidy
-    	const CAmount &nSuperblockPartOfSubsidy = GetBlockSubsidy(nBlockHeight, chainParams.GetConsensus(), true);
-    	nPaymentsLimit = nSuperblockPartOfSubsidy * consensusParams.SuperBlockCycle(nBlockHeight);
-    }
-    // bootstrapping period
-    else {
-        switch(nSuperblock)
-        {
-            case 1:
-                        nPaymentsLimit =  1500000.00 *COIN;
-                        break;
-            case 2:
-                        nPaymentsLimit =  1470000.00 *COIN;
-                        break;
-            case 3:
-                        nPaymentsLimit =  1440600.00 *COIN;
-                        break;
-            case 4:
-                        nPaymentsLimit =  1411788.00 *COIN;
-                        break;
-            case 5:
-                        nPaymentsLimit =  1383552.24 *COIN;
-                        break;
-            case 6:
-                        nPaymentsLimit =  1355881.20 *COIN;
-                        break;
-            case 7:
-                        nPaymentsLimit =  1328763.57 *COIN;
-                        break;
-            case 8:
-                        nPaymentsLimit =  1302188.30 *COIN;
-                        break;
-            case 9:
-                        nPaymentsLimit =  1276144.53 *COIN;
-                        break;
-            case 10:
-                        nPaymentsLimit =  1186814.42 *COIN;
-                        break;
-            case 11:
-                        nPaymentsLimit =  1103737.41 *COIN;
-                        break;
-            case 12:
-                        nPaymentsLimit =  1026475.79 *COIN;
-                        break;
-            case 13:
-                        nPaymentsLimit =  954622.48 *COIN;
-                        break;
-            case 14:
-                        nPaymentsLimit =  840067.79 *COIN;
-                        break;
-            case 15:
-                        nPaymentsLimit =  739259.65 *COIN;
-                        break;
-            case 16:
-                        nPaymentsLimit =  650548.49 *COIN;
-                        break;
-            case 17:
-                        nPaymentsLimit =  572482.67 *COIN;
-                        break;
-            case 18:
-                        nPaymentsLimit =  503784.75 *COIN;
-                        break;
-            case 19:
-                        nPaymentsLimit =  443330.58 *COIN;
-                        break;
-            case 20:
-                        nPaymentsLimit =  376831.00 *COIN;
-                        break;
-            case 21:
-                        nPaymentsLimit =  320306.35 *COIN;
-                        break;
-            case 22:
-                        nPaymentsLimit =  272260.39 *COIN;
-                        break;
-            case 23:
-                        nPaymentsLimit =  0;
-                        break;
-            case 24:
-                        /* Syscoin 4.2 Upgrade - combine superblock 23 and 24 */
-                        nPaymentsLimit =  (231421.33 + 196708.13) *COIN;
-                        break;
-            case 25:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 26:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 27:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 28:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 29:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 30:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 31:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 32:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 33:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 34:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 35:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 36:
-                        nPaymentsLimit =  151767.00 *COIN;
-                        break;
-            case 37:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 38:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 39:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 40:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 41:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 42:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 43:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 44:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 45:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 46:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 47:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 48:
-                        nPaymentsLimit =  144178.65 *COIN;
-                        break;
-            case 49:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 50:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 51:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 52:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 53:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 54:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 55:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 56:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 57:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 58:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 59:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 60:
-                        nPaymentsLimit =  136969.72 *COIN;
-                        break;
-            case 61:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 62:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 63:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 64:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 65:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 66:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 67:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 68:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 69:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 70:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 71:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 72:
-                        nPaymentsLimit =  130121.23 *COIN;
-                        break;
-            case 73:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 74:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 75:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 76:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 77:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 78:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 79:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 80:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 81:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 82:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 83:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 84:
-                        nPaymentsLimit =  123615.17 *COIN;
-                        break;
-            case 85:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 86:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 87:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 88:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 89:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 90:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 91:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 92:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 93:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 94:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 95:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 96:
-                        nPaymentsLimit =  117434.41 *COIN;
-                        break;
-            case 97:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 98:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 99:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 100:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 101:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 102:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 103:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 104:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 105:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 106:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 107:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 108:
-                        nPaymentsLimit =  111562.69 *COIN;
-                        break;
-            case 109:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 110:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 111:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 112:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 113:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 114:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 115:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 116:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 117:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 118:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 119:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-            case 120:
-                        nPaymentsLimit =  105984.56 *COIN;
-                        break;
-        }
+    if(!governance->m_sb->ReadCache(uint256(), nPaymentsLimit)) {
+        nPaymentsLimit = CSuperblock::SUPERBLOCK_INITIAL_BUDGET;
     }
     return nPaymentsLimit;
 }
@@ -957,7 +580,7 @@ CAmount CSuperblock::GetPaymentsTotalAmount()
 *   - Does this transaction match the superblock?
 */
 
-bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward)
+bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nSuperblockPaymentFromBlock)
 {
     // TODO : LOCK(cs);
     // No reason for a lock here now since this method only accesses data
@@ -992,18 +615,10 @@ bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAm
     }
 
     // payments should not exceed limit
-    CAmount nPaymentsTotalAmount = GetPaymentsTotalAmount();
-    CAmount nPaymentsLimit = GetPaymentsLimit(nBlockHeight);
-    if (nPaymentsTotalAmount > nPaymentsLimit) {
-        LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, payments limit exceeded: payments %lld, limit %lld\n", nPaymentsTotalAmount, nPaymentsLimit);
-        return false;
-    }
-
-    // miner and masternodes should not get more than they would usually get
-    CAmount nBlockValue = txNew.GetValueOut();
-    if (nBlockValue > blockReward + nPaymentsTotalAmount) {
-        LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, block value limit exceeded: block %lld, limit %lld\n", nBlockValue, blockReward + nPaymentsTotalAmount);
-        return false;
+    const CAmount &nPaymentsTotalAmount = GetPaymentsTotalAmount();
+    if(nSuperblockPaymentFromBlock != nPaymentsTotalAmount) {
+        LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, superblock payment and block payment mismatch: payment limit from block %lld, payment limit from superblock %lld\n", nSuperblockPaymentFromBlock, nPaymentsTotalAmount);
+        return false;    
     }
 
     int nVoutIndex = 0;
@@ -1103,7 +718,7 @@ std::string CSuperblock::GetHexStrData() const
     ss << "\"payment_addresses\": \"" << str_addresses << "\", ";
     ss << "\"payment_amounts\": \"" << str_amounts << "\", ";
     ss << "\"proposal_hashes\": \"" << str_hashes << "\", ";
-    ss << "\"type\":" << 2;
+    ss << "\"type\":" << GOVERNANCE_OBJECT_TRIGGER;
     ss << "}";
 
     return HexStr(ss.str());

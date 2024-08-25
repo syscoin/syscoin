@@ -48,6 +48,7 @@ struct ChainstateManagerOpts {
     // SYSCOIN
     std::vector<std::string> geth_commandline{std::vector<std::string>()};
     fs::path datadir_base{};
+    bool reindex{false};
 };
 
 } // namespace kernel

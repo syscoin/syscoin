@@ -2883,6 +2883,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         const CAmount &blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
         CAmount nMNSeniorityRet = 0;
         CAmount nMNFloorDiffRet = 0;
+        const bool check_superblock = llmq::chainLocksHandler->GetBestChainLock().nHeight < pindex->nHeight;
         // detect MN was paid properly, accounting for seniority which is added to subsidy
         if (!IsBlockPayeeValid(m_chain, *block.vtx[0], pindex->nHeight, blockReward, nFees, nMNSeniorityRet, nMNFloorDiffRet)) {
             LogPrintf("ERROR: ConnectBlock(): couldn't find masternode or superblock payments\n");
@@ -2891,7 +2892,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
         std::string strError;
         // add seniority to reward when checking for limit
-        if (!IsBlockValueValid(block, pindex->nHeight, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
+        if (!IsBlockValueValid(block, pindex->nHeight, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError, fJustCheck, check_superblock) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
             LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             // hack for feature_signet.py to pass which uses bitcoin blocks signed by the signet witness
             if(!fSigNet || pindex->nHeight > 100) {

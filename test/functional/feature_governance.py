@@ -7,6 +7,7 @@
 import json
 from test_framework.test_framework import DashTestFramework
 from test_framework.util import assert_equal, satoshi_round, wait_until_helper_internal
+from decimal import Decimal
 
 class SyscoinGovernanceTest (DashTestFramework):
     def set_test_params(self):
@@ -44,34 +45,36 @@ class SyscoinGovernanceTest (DashTestFramework):
         }
 
     def check_superblockbudget(self):
-        assert_equal(self.nodes[0].getsuperblockbudget(100), satoshi_round("1411788.00000000"))
-        assert_equal(self.nodes[0].getsuperblockbudget(125), satoshi_round("1383552.24"))
-        assert_equal(self.nodes[0].getsuperblockbudget(150), satoshi_round("1355881.20"))
-        assert_equal(self.nodes[0].getsuperblockbudget(175), satoshi_round("1328763.57"))
-        assert_equal(self.nodes[0].getsuperblockbudget(200), satoshi_round("1302188.30"))
+        assert_equal(self.nodes[0].getsuperblockbudget(), self.budget)
 
     def check_superblock(self):
         # Make sure Superblock has only payments that fit into the budget
         # p0 must always be included because it has most votes
         # p1 and p2 have equal number of votes (but less votes than p0)
         # so only one of them can be included (depends on proposal hashes).
-
         coinbase_outputs = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 2)["tx"][0]["vout"]
         payments_found = 0
+        payment_value = 0
         for txout in coinbase_outputs:
             if txout["value"] == self.p0_amount and txout["scriptPubKey"]["address"] == self.p0_payout_address:
                 payments_found += 1
+                payment_value += self.p0_amount
             if txout["value"] == self.p1_amount and txout["scriptPubKey"]["address"] == self.p1_payout_address:
                 if self.p1_hash > self.p2_hash:
                     payments_found += 1
                 else:
                     assert False
+                payment_value += self.p1_amount
             if txout["value"] == self.p2_amount and txout["scriptPubKey"]["address"] == self.p2_payout_address:
                 if self.p2_hash > self.p1_hash:
                     payments_found += 1
                 else:
                     assert False
-
+                payment_value += self.p2_amount
+        if payment_value <= self.budget*Decimal("0.95"):
+            self.budget = self.budget*Decimal("0.9")
+        elif payment_value >= self.budget*Decimal("1.05"):
+            self.budget = self.budget*Decimal("1.1")
         assert_equal(payments_found, 2)
 
     def have_trigger_for_height(self, sb_block_height):
@@ -87,6 +90,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         return count == len(self.nodes)
 
     def run_test(self):
+        self.budget = satoshi_round("1500000.00")
         governance_info = self.nodes[0].getgovernanceinfo()
         assert_equal(governance_info['governanceminquorum'], 1)
         assert_equal(governance_info['proposalfee'], 150.0)
@@ -94,7 +98,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         assert_equal(governance_info['superblockmaturitywindow'], 5)
         assert_equal(governance_info['lastsuperblock'], 125)
         assert_equal(governance_info['nextsuperblock'], governance_info['lastsuperblock'] + governance_info['superblockcycle'])
-        assert_equal(float(governance_info['governancebudget']), float(1355881.20000000))
+        assert_equal(governance_info['governancebudget'], self.budget)
 
         map_vote_outcomes = {
             0: "none",
@@ -112,7 +116,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         sb_cycle = governance_info['superblockcycle']
         sb_maturity_window = governance_info['superblockmaturitywindow']
         sb_immaturity_window = sb_cycle - sb_maturity_window
-        self.expected_v20_budget = satoshi_round("1355881.20")
+        self.expected_v20_budget = satoshi_round("1650000.00")
 
 
         self.nodes[0].spork("SPORK_9_SUPERBLOCKS_ENABLED", 0)
@@ -189,13 +193,11 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         # Move until 1 block before the Superblock maturity window starts
         n = sb_immaturity_window - block_count % sb_cycle
- 
         assert block_count + n < 150
         for _ in range(n - 1):
             self.generate(self.nodes[0], 1)
             self.bump_mocktime(1)
             self.sync_blocks()
-            self.check_superblockbudget()
 
         assert_equal(len(self.nodes[0].gobject_list("valid", "triggers")), 0)
 
@@ -246,7 +248,6 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.sync_all(nodes=non_isolated_nodes)
         self.bump_mocktime(1)
         assert_equal(self.nodes[0].getblockcount(), 145)
-        self.check_superblockbudget()
 
         # The "winner" should submit new trigger and vote for it, but payee which is same as last is isolated so non-isolated nodes will not be in payee list
         has_trigger = wait_until_helper_internal(lambda: len(self.nodes[0].gobject_list("valid", "triggers")) >= 1, timeout=5, do_assert=False)
@@ -334,10 +335,9 @@ class SyscoinGovernanceTest (DashTestFramework):
             self.generate(self.nodes[0], 1)
             self.bump_mocktime(1)
             self.sync_blocks()
-            self.check_superblockbudget()
 
-        self.check_superblockbudget()
         self.check_superblock()
+        self.check_superblockbudget()
 
         # Move a few block past the recent superblock height and make sure we have no new votes
         for _ in range(5):
@@ -364,7 +364,8 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.bump_mocktime(1)
         self.sync_blocks()
         assert_equal(self.nodes[0].getblockcount(), 175)
-
+        self.check_superblock()
+        self.check_superblockbudget()
         # Mine and check a couple more superblocks
         for i in range(2):
             for _ in range(sb_cycle - 1):
@@ -379,8 +380,8 @@ class SyscoinGovernanceTest (DashTestFramework):
             self.bump_mocktime(1)
             self.sync_blocks()
             assert_equal(self.nodes[0].getblockcount(), sb_block_height)
+            self.check_superblock()
             self.check_superblockbudget()
-            #self.check_superblock()
 
 
 if __name__ == '__main__':

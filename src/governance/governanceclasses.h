@@ -10,7 +10,6 @@
 #include <uint256.h>
 #include <addresstype.h>
 #include <kernel/cs_main.h>
-
 class CTxOut;
 class CTransaction;
 
@@ -18,7 +17,6 @@ class CSuperblock;
 class CSuperblockManager;
 
 using CSuperblock_sptr = std::shared_ptr<CSuperblock>;
-
 CAmount ParsePaymentAmount(const std::string& strAmount);
 
 /**
@@ -37,8 +35,7 @@ public:
 
     static bool GetSuperblockPayments(int nBlockHeight, std::vector<CTxOut>& voutSuperblockRet);
     static void ExecuteBestSuperblock(int nBlockHeight);
-
-    static bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward);
+    static bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nSuperblockPaymentFromBlock);
 };
 
 /**
@@ -86,7 +83,6 @@ public:
 *       "payment_amounts"   : "amount1|amount2|amount3"
 *   }
 */
-
 class CSuperblock : public CGovernanceObject
 {
 private:
@@ -95,10 +91,13 @@ private:
     int nBlockHeight;
     SeenObjectStatus nStatus;
     std::vector<CGovernancePayment> vecPayments;
-
     void ParsePaymentSchedule(const std::string& strPaymentAddresses, const std::string& strPaymentAmounts, const std::string& strProposalHashes);
 
 public:
+    static constexpr int SUPERBLOCK_PAYMENT_LIMIT_UP = 10;
+    static constexpr int SUPERBLOCK_PAYMENT_LIMIT_DOWN = -10;
+    static constexpr int SUPERBLOCK_PAYMENT_LIMIT_SAME = 0;
+    static constexpr CAmount SUPERBLOCK_INITIAL_BUDGET = 1500000.00*COIN;
     CSuperblock();
     CSuperblock(int nBlockHeight, std::vector<CGovernancePayment> vecPayments);
     explicit CSuperblock(uint256& nHash);
@@ -106,7 +105,6 @@ public:
     static bool IsValidBlockHeight(int nBlockHeight);
     static void GetNearestSuperblocksHeights(int nBlockHeight, int& nLastSuperblockRet, int& nNextSuperblockRet);
     static CAmount GetPaymentsLimit(int nBlockHeight);
-
     SeenObjectStatus GetStatus() const { return nStatus; }
     void SetStatus(SeenObjectStatus nStatusIn) { nStatus = nStatusIn; }
 
@@ -126,10 +124,9 @@ public:
     bool GetPayment(int nPaymentIndex, CGovernancePayment& paymentRet);
     CAmount GetPaymentsTotalAmount();
 
-    bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward);
+    bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nSuperblockPaymentFromBlock);
     bool IsExpired() const;
 
     std::vector<uint256> GetProposalHashes() const;
 };
-
 #endif // SYSCOIN_GOVERNANCE_GOVERNANCECLASSES_H

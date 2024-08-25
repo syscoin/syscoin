@@ -12,12 +12,11 @@
 #include <validation.h>
 
 #include <evo/deterministicmns.h>
-
+#include <evo/cbtx.h>
+#include <evo/specialtx.h>
 #include <string>
 
 CMasternodePayments mnpayments;
-
-
 /**
 * IsBlockValueValid
 *
@@ -29,19 +28,16 @@ CMasternodePayments mnpayments;
 *   - When non-superblocks are detected, the normal schedule should be maintained
 */
 
-bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blockReward, std::string& strErrorRet)
+bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock)
 {
     bool isBlockRewardValueMet = (block.vtx[0]->GetValueOut() <= blockReward);
 
     strErrorRet = "";
     
     LogPrint(BCLog::MNPAYMENTS, "block.vtx[0]->GetValueOut() %lld <= blockReward %lld\n", block.vtx[0]->GetValueOut(), blockReward);
-
-    CAmount nSuperblockMaxValue =  blockReward + CSuperblock::GetPaymentsLimit(nBlockHeight);
-    bool isSuperblockMaxValueMet = (block.vtx[0]->GetValueOut() <= nSuperblockMaxValue);
-
-    LogPrint(BCLog::GOBJECT, "block.vtx[0]->GetValueOut() %lld <= nSuperblockMaxValue %lld\n", block.vtx[0]->GetValueOut(), nSuperblockMaxValue);
-
+    if(nBlockHeight < Params().GetConsensus().DIP0003Height) {
+        return true;
+    }
     if (!CSuperblock::IsValidBlockHeight(nBlockHeight)) {
         // can't possibly be a superblock, so lets just check for block reward limits
         if (!isBlockRewardValueMet) {
@@ -50,6 +46,19 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         }
         return isBlockRewardValueMet;
     }
+    
+    const CAmount &nSuperblockPayment = block.vtx[0]->GetValueOut() - blockReward;
+    const CAmount &nPaymentLimit = CSuperblock::GetPaymentsLimit(nBlockHeight);
+    // Initial thresholds
+    const CAmount &nPaymentsLimitUp = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 2) / 100.0));
+    const CAmount &nPaymentsLimitDown = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 2) / 100.0));
+    const CAmount &nGovernanceBudgetDown = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 100.0));
+    const CAmount &nGovernanceBudget = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
+
+    const CAmount &nSuperblockMaxValue =  blockReward + nGovernanceBudget;
+
+    bool isSuperblockMaxValueMet = block.vtx[0]->GetValueOut() <= nSuperblockMaxValue;
+    LogPrint(BCLog::GOBJECT, "block.vtx[0]->GetValueOut() %lld <= nSuperblockMaxValue %lld (nGovernanceBudget %lld) nSuperblockPayment %lld\n", block.vtx[0]->GetValueOut(), nSuperblockMaxValue, nGovernanceBudget, nSuperblockPayment);
 
     // bail out in case superblock limits were exceeded
     if (!isSuperblockMaxValueMet) {
@@ -62,6 +71,16 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         LogPrint(BCLog::MNPAYMENTS, "%s -- WARNING: Not enough data, checked superblock max bounds only\n", __func__);
         // not enough data for full checks but at least we know that the superblock limits were honored.
         // We rely on the network to have followed the correct chain in this case
+        // follow longest chain as IsValid() doesn't get to validate nSuperblockPayment via the superblock
+        if(!fJustCheck && nSuperblockPayment > 0) {
+            CAmount nAdjustment = nPaymentLimit;
+            if(nSuperblockPayment <= nPaymentsLimitDown) {
+                nAdjustment = nGovernanceBudgetDown;
+            } else if(nSuperblockPayment >= nPaymentsLimitUp) {
+                nAdjustment = nGovernanceBudget;
+            }
+            governance->m_sb->WriteCache(uint256(), nAdjustment);
+        }
         return true;
     }
 
@@ -77,7 +96,18 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         }
         return isBlockRewardValueMet;
     }
-
+    if (!check_superblock) {
+        if(!fJustCheck && nSuperblockPayment > 0) {
+            CAmount nAdjustment = nPaymentLimit;
+            if(nSuperblockPayment <= nPaymentsLimitDown) {
+                nAdjustment = nGovernanceBudgetDown;
+            } else if(nSuperblockPayment >= nPaymentsLimitUp) {
+                nAdjustment = nGovernanceBudget;
+            }
+            governance->m_sb->WriteCache(uint256(), nAdjustment);
+        }
+        return true;
+    }
     if (!CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
         // we are on a valid superblock height but a superblock was not triggered
         // revert to block reward limits in this case
@@ -87,16 +117,24 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         }
         return isBlockRewardValueMet;
     }
-
     // this actually also checks for correct payees and not only amount
-    if (!CSuperblockManager::IsValid(*block.vtx[0], nBlockHeight, blockReward)) {
+    if (!CSuperblockManager::IsValid(*block.vtx[0], nBlockHeight, blockReward, nSuperblockPayment)) {
         // triggered but invalid? that's weird
         LogPrintf("%s -- ERROR: Invalid superblock detected at height %d: %s", __func__, nBlockHeight, block.vtx[0]->ToString()); /* Continued */
         // should NOT allow invalid superblocks, when superblocks are enabled
         strErrorRet = strprintf("invalid superblock detected at height %d", nBlockHeight);
         return false;
     }
-
+    // only store new limit if there was some governance
+    if(!fJustCheck && nSuperblockPayment > 0) {
+        CAmount nAdjustment = nPaymentLimit;
+        if(nSuperblockPayment <= nPaymentsLimitDown) {
+            nAdjustment = nGovernanceBudgetDown;
+        } else if(nSuperblockPayment >= nPaymentsLimitUp) {
+            nAdjustment = nGovernanceBudget;
+        }
+        governance->m_sb->WriteCache(uint256(), nAdjustment);
+    }
     // we got a valid superblock
     return true;
 }
@@ -123,27 +161,6 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
         LogPrint(BCLog::MNPAYMENTS, "%s -- Valid masternode payment at height %d\n", __func__, nBlockHeight);
         return true;
     }
-    // superblocks started
-    // SEE IF THIS IS A VALID SUPERBLOCK
-
-    if(AreSuperblocksEnabled()) {
-        if(CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
-            if(CSuperblockManager::IsValid(txNew, nBlockHeight, blockReward+nMNSeniorityRet+nMNFloorDiffRet)) {
-                LogPrint(BCLog::GOBJECT, "%s -- Valid superblock at height %d\n", __func__, nBlockHeight);
-                // continue validation, should also pay MN
-            } else {
-                LogPrintf("%s -- ERROR: Invalid superblock detected at height %d\n", __func__, nBlockHeight); /* Continued */
-                // should NOT allow such superblocks, when superblocks are enabled
-                return false;
-            }
-        } else {
-            LogPrint(BCLog::GOBJECT, "%s -- No triggered superblock detected at height %d\n", __func__, nBlockHeight);
-        }
-    } else {
-        // should NOT allow superblocks at all, when superblocks are disabled
-        LogPrint(BCLog::GOBJECT, "%s -- Superblocks are disabled, no superblocks allowed\n", __func__);
-    }
-
     LogPrintf("%s -- ERROR: Invalid masternode payment detected at height %d\n", __func__, nBlockHeight); /* Continued */
     return false;
 }

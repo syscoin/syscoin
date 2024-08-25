@@ -27,6 +27,9 @@ public:
     explicit CEvoDB(const DBParams &db_params, size_t maxCacheSizeIn) : CDBWrapper(db_params), maxCacheSize(maxCacheSizeIn), m_db_params(db_params) {
         assert(maxCacheSize > 0);
     }
+    ~CEvoDB() {
+        FlushCacheToDisk();
+    }
     bool IsCacheFull() const {
         return mapCache.size() >= maxCacheSize;
     }

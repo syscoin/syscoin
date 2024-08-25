@@ -53,7 +53,8 @@ CGovernanceManager::CGovernanceManager(ChainstateManager& _chainman) :
     setRequestedObjects(),
     fRateChecksEnabled(true),
     votedFundingYesTriggerHash(std::nullopt),
-    mapTrigger{}
+    mapTrigger{},
+    m_sb(std::make_unique<CEvoDB<uint256, CAmount>>(DBParams{.path = chainman.m_options.datadir / "evodb_sb", .wipe_data = chainman.m_options.reindex}, 1))
 {
 }
 
@@ -370,18 +371,10 @@ void CGovernanceManager::CheckAndRemove()
 
     LogPrint(BCLog::GOBJECT, "CGovernanceManager::UpdateCachesAndClean\n");
 
-    std::vector<uint256> vecDirtyHashes = mmetaman->GetAndClearDirtyGovernanceObjectHashes();
     int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight());
     const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
     LOCK2(cs_main, cs);
 
-    for (const uint256& nHash : vecDirtyHashes) {
-        auto it = mapObjects.find(nHash);
-        if (it == mapObjects.end()) {
-            continue;
-        }
-        it->second.ClearMasternodeVotes(tip_mn_list);
-    }
 
     ScopedLockBool guard(cs, fRateChecksEnabled, false);
 
@@ -566,19 +559,10 @@ void CGovernanceManager::GetAllNewerThan(std::vector<CGovernanceObject>& objs, i
     }
 }
 
-//
-// Sort by votes, if there's a tie sort by their feeHash TX
-//
-struct sortProposalsByVotes {
-    bool operator()(const std::pair<CGovernanceObject*, int>& left, const std::pair<CGovernanceObject*, int>& right) const
-    {
-        if (left.second != right.second) return (left.second > right.second);
-        return (UintToArith256(left.first->GetCollateralHash()) > UintToArith256(right.first->GetCollateralHash()));
-    }
-};
 
 std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(int nHeight) const
 {
+    AssertLockNotHeld(cs);
     if (!IsValid()) return std::nullopt;
     if (!masternodeSync.IsSynced()) return std::nullopt;
     if (nHeight % Params().GetConsensus().SuperBlockCycle(nHeight) < Params().GetConsensus().SuperBlockCycle(nHeight) - Params().GetConsensus().nSuperblockMaturityWindow) return std::nullopt;
@@ -619,10 +603,10 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
     std::vector<CGovernancePayment> payments;
     int nLastSuperblock;
     int nNextSuperblock;
-
     CSuperblock::GetNearestSuperblocksHeights(nHeight, nLastSuperblock, nNextSuperblock);
     auto SBEpochTime = static_cast<int64_t>(GetTime<std::chrono::seconds>().count() + (nNextSuperblock - nHeight) * 2.5 * 60);
-    auto governanceBudget = CSuperblock::GetPaymentsLimit(nNextSuperblock);
+    // fund up to the next limit which is governed by IsBlockValueValid block validation
+    const CAmount& governanceBudget = CSuperblock::GetPaymentsLimit(nNextSuperblock) * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
 
     CAmount budgetAllocated{};
     for (const auto& proposal : approvedProposals) {
@@ -637,7 +621,7 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
             nAmount = ParsePaymentAmount(jproposal["payment_amount"].getValStr());
         }
         catch (const std::runtime_error& e) {
-            LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s nHeight:%d Skipping payment exception:%s\n", __func__,nHeight, e.what());
+            LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s nHeight:%d Skipping payment exception:%s\n", __func__, nHeight, e.what());
             continue;
         }
 
@@ -686,7 +670,7 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
 {
     // no sb_opt, no trigger
     if (!sb_opt.has_value()) return std::nullopt;
-
+    AssertLockNotHeld(cs);
     //TODO: Check if nHashParentIn, nRevision and nCollateralHashIn are correct
     LOCK2(cs_main, cs);
 
@@ -696,7 +680,6 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
         // Somebody submitted a trigger with the same data, support it instead of submitting a duplicate
         return std::make_optional<CGovernanceObject>(*identical_sb);
     }
-
     // Nobody submitted a trigger we'd like to see, so let's do it but only if we are the payee
     const auto mnList = deterministicMNManager->GetListAtChainTip();
     const auto mn_payees = mnList.GetProjectedMNPayees();
@@ -710,6 +693,7 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s we are not the payee, skipping\n", __func__);
         return std::nullopt;
     }
+
     gov_sb.SetMasternodeOutpoint(activeMasternodeInfo.outpoint);
     gov_sb.Sign();
 
@@ -722,7 +706,6 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s Trigger rejected because of rate check failure hash(%s)\n", __func__, gov_sb.GetHash().ToString());
         return std::nullopt;
     }
-
     // The trigger we just created looks good, submit it
     AddGovernanceObject(gov_sb, peerman);
     return std::make_optional<CGovernanceObject>(gov_sb);
@@ -732,7 +715,7 @@ void CGovernanceManager::VoteGovernanceTriggers(const std::optional<const CGover
 {
     // only active masternodes can vote on triggers
     if (activeMasternodeInfo.proTxHash.IsNull()) return;
-
+    AssertLockNotHeld(cs);
     LOCK2(cs_main, cs);
 
     if (trigger_opt.has_value()) {

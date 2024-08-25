@@ -41,6 +41,9 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     auto value{args.GetArgs("-gethcommandline")};
     if (!value.empty()) opts.geth_commandline = value;
 
+    if (auto value{args.GetBoolArg("-reindex")}) opts.reindex = *value;
+    else if (auto value{args.GetBoolArg("-reindex-chainstate")}) opts.reindex = *value;
+
     opts.datadir_base = args.GetDataDirBase();
 
     ReadDatabaseArgs(args, opts.block_tree_db);

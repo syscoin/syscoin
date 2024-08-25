@@ -137,7 +137,6 @@ private:
     const std::unique_ptr<db_type> m_db;
     bool is_valid{false};
 
-    std::vector<uint256> vecDirtyGovernanceObjectHashes GUARDED_BY(cs);
 
 public:
     explicit CMasternodeMetaMan();
@@ -151,8 +150,6 @@ public:
 
     bool AddGovernanceVote(const uint256& proTxHash, const uint256& nGovernanceObjectHash);
     void RemoveGovernanceObject(const uint256& nGovernanceObjectHash);
-
-    std::vector<uint256> GetAndClearDirtyGovernanceObjectHashes();
 };
 
 extern std::unique_ptr<CMasternodeMetaMan> mmetaman;

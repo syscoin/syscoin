@@ -89,14 +89,6 @@ void CMasternodeMetaMan::RemoveGovernanceObject(const uint256& nGovernanceObject
     }
 }
 
-std::vector<uint256> CMasternodeMetaMan::GetAndClearDirtyGovernanceObjectHashes()
-{
-    LOCK(cs);
-    std::vector<uint256> vecTmp = std::move(vecDirtyGovernanceObjectHashes);
-    vecDirtyGovernanceObjectHashes.clear();
-    return vecTmp;
-}
-
 std::string MasternodeMetaStore::ToString() const
 {
     std::ostringstream info;

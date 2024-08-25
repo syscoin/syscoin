@@ -33,7 +33,7 @@ bool CheckCbTxBestChainlock(ChainstateManager &chainman, const CBlock& block, co
     }
     // must have had no new quorums and thus the transition doesn't need to be checked
     if (!llmq::quorumBlockProcessor->HasMinedCommitment(pindex->GetAncestor(nQuorumLastStartHeight)->GetBlockHash())) {
-        LogPrint(BCLog::CHAINLOCKS, "%s -- CLSIG (%s) mined commitment doesn't exist for this DKG interval, skipping checks...\n", __func__);
+        LogPrint(BCLog::CHAINLOCKS, "%s -- CLSIG mined commitment doesn't exist for this DKG interval, skipping checks...\n", __func__);
         return true;
     }
     CCbTxCLSIG cbTx;
