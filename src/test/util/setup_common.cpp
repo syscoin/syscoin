@@ -75,6 +75,7 @@
 #include <spork.h>
 #include <netfulfilledman.h>
 #include <masternode/masternodemeta.h>
+#include <masternode/masternodesync.h>
 
 using kernel::BlockTreeDB;
 using kernel::ValidationCacheSizes;
@@ -350,7 +351,7 @@ TestChain100Setup::TestChain100Setup(
     {
         LOCK(::cs_main);
         // SYSCOIN
-        printf("m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() %s\n", m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString().c_str());
+        //printf("m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() %s\n", m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString().c_str());
        assert(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
             "722b456b5005377859a8320f3b3001c8a941643a246d7e5da64c8beeb17b3254" ||
@@ -359,7 +360,7 @@ TestChain100Setup::TestChain100Setup(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
             "2d29a46dc059cf2266f484afc0db7c1898ef444d64859926ca89bd0cd4bd6837"  ||
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "0618f15a4a98f0d174553484273cd0daaddd1b0ce292b1f2cf2ea1c0710af589" );
+            "59f4a9d71c05414c08d56b768ae301746a996f393be2395f42ca9ac90ff71bc1" );
     }
 }
 
@@ -379,6 +380,10 @@ CBlock TestChain100Setup::CreateBlock(
     const CScript& scriptPubKey,
     Chainstate& chainstate)
 {
+    // SYSCOIN
+    while(!masternodeSync.IsSynced()) {
+        masternodeSync.SwitchToNextAsset(*m_node.connman);
+    }
     CBlock block = BlockAssembler{chainstate, nullptr}.CreateNewBlock(scriptPubKey)->block;
 
     Assert(block.vtx.size() == 1);
@@ -423,7 +428,6 @@ CBlock TestChain100Setup::CreateAndProcessBlock(
     if (!chainstate) {
         chainstate = &Assert(m_node.chainman)->ActiveChainstate();
     }
-
     CBlock block = this->CreateBlock(txns, scriptPubKey, *chainstate);
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
     Assert(m_node.chainman)->ProcessNewBlock(shared_pblock, true, true, nullptr);

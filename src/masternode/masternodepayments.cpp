@@ -35,9 +35,6 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
     strErrorRet = "";
     
     LogPrint(BCLog::MNPAYMENTS, "block.vtx[0]->GetValueOut() %lld <= blockReward %lld\n", block.vtx[0]->GetValueOut(), blockReward);
-    if(nBlockHeight < Params().GetConsensus().DIP0003Height) {
-        return true;
-    }
     if (!CSuperblock::IsValidBlockHeight(nBlockHeight)) {
         // can't possibly be a superblock, so lets just check for block reward limits
         if (!isBlockRewardValueMet) {
@@ -46,7 +43,9 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         }
         return isBlockRewardValueMet;
     }
-    
+    if(nBlockHeight < Params().GetConsensus().DIP0003Height) {
+        return true;
+    }
     const CAmount &nSuperblockPayment = block.vtx[0]->GetValueOut() - blockReward;
     const CAmount &nPaymentLimit = CSuperblock::GetPaymentsLimit(nBlockHeight);
     // Initial thresholds
