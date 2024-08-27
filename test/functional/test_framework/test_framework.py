@@ -1319,24 +1319,6 @@ class DashTestFramework(SyscoinTestFramework):
         afterTime = int(time.time())
         self.log.info("Chainlock found in {} seconds across {} nodes".format(int(afterTime - beforeTime), len(self.nodes)))
 
-    def wait_for_most_recent_chainlock(self, node, block_hash, timeout=30):
-        def check_cl():
-            try:
-                self.bump_mocktime(1)
-                return node.getchainlocks()["recent_chainlock"]["blockhash"] == block_hash
-            except Exception:
-                return False
-        wait_until_helper_internal(check_cl, timeout=timeout)
-
-    def wait_for_most_active_chainlock(self, node, block_hash, timeout=30):
-        def check_cl():
-            try:
-                self.bump_mocktime(1)
-                return node.getchainlocks()["active_chainlock"]["blockhash"] == block_hash
-            except Exception:
-                return False
-        wait_until_helper_internal(check_cl, timeout=timeout)
-
     def wait_for_sporks_same(self, timeout=30):
         def check_sporks_same():
             self.bump_mocktime(1)

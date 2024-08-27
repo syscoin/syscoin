@@ -227,16 +227,16 @@ void CZMQNotificationInterface::NotifyNEVMComms(const std::string& commMessage, 
         return notifier->NotifyNEVMComms(commMessage, bResponse);
     });
 }
-void CZMQNotificationInterface::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation)
+void CZMQNotificationInterface::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const CDeterministicMNListNEVMAddressDiff &diff)
 {
-    TryForEach(notifiers, [&evmBlock, &block, &nBlockHash, &state, &NEVMDataVecOut, &nHeight, &bSkipValidation](CZMQAbstractNotifier* notifier) {
-        return notifier->NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation);
+    TryForEach(notifiers, [&evmBlock, &block, &nBlockHash, &state, &NEVMDataVecOut, &nHeight, &bSkipValidation, &diff](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, diff);
     });
 }
-void CZMQNotificationInterface::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash)
+void CZMQNotificationInterface::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff)
 {
-    TryForEach(notifiers, [&nBlockHash, &state](CZMQAbstractNotifier* notifier) {
-        return notifier->NotifyNEVMBlockDisconnect(state, nBlockHash);
+    TryForEach(notifiers, [&nBlockHash, &state, &diff](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyNEVMBlockDisconnect(state, nBlockHash, diff);
     });
 }
 void CZMQNotificationInterface::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state)

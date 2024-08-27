@@ -20,6 +20,7 @@ class CNEVMHeader;
 class CBlock;
 class uint256;
 class CNEVMData;
+class CDeterministicMNListNEVMAddressDiff;
 class CZMQAbstractPublishNotifier : public CZMQAbstractNotifier
 {
 private:
@@ -66,12 +67,12 @@ public:
 class CZMQPublishNEVMBlockConnectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation) override;
+    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const CDeterministicMNListNEVMAddressDiff &diff) override;
 };
 class CZMQPublishNEVMBlockDisconnectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash) override;
+    bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) override;
 };
 class CZMQPublishHashBlockNotifier : public CZMQAbstractPublishNotifier
 {

@@ -412,9 +412,9 @@ static RPCHelpMan protx_register_fund()
         specific_legacy_bls_scheme = request.params[9].get_bool();
     }
     if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+        ptx.nVersion = CProRegTx::LEGACY_BLS_VERSION;
     } else {
-        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+        ptx.nVersion = CProRegTx::GetVersion(v19active);
     }
 
 
@@ -555,9 +555,9 @@ static RPCHelpMan protx_register_prepare()
         specific_legacy_bls_scheme = request.params[9].get_bool();
     }
     if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+        ptx.nVersion = CProRegTx::LEGACY_BLS_VERSION;
     } else {
-        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+        ptx.nVersion = CProRegTx::GetVersion(v19active);
     }
 
     uint256 collateralHash = ParseHashV(request.params[paramIdx], "collateralHash");
@@ -703,43 +703,43 @@ static RPCHelpMan protx_register_submit()
     return SignAndSendSpecialTx(request, *pwallet, tx);
 },
     };
-}  
+} 
 
 static RPCHelpMan protx_update_service()
 {
-
-   return RPCHelpMan{"protx_update_service",
-            "\nCreates and sends a ProUpServTx to the network. This will update the IP address\n"
-            "of a masternode.\n"
-            "If this is done for a masternode that got PoSe-banned, the ProUpServTx will also revive this masternode.\n",
-            {
-                {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
-                {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO, "IP and port in the form \"IP:PORT\".\n"
-                                    "Must be unique on the network. Can be set to 0, which will require a ProUpServTx afterwards."},
-                {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS private key associated with the\n"
-                                    "registered operator public key."},                   
-                {"operatorPayoutAddress", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "The address used for operator reward payments.\n"
-                                    "Only allowed when the ProRegTx had a non-zero operatorReward value.\n"
-                                    "If set to an empty string, the currently active payout address is reused."}, 
-                {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
-                                    "If not specified, payoutAddress is the one that is going to be used.\n"
-                                    "The private key belonging to this address must be known in your wallet."},
-                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
-            },
-            RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
-            RPCExamples{
-                    HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-                + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
-            },
+    return RPCHelpMan{"protx_update_service",
+        "\nCreates and sends a ProUpServTx to the network. This will update the IP address\n"
+        "of a masternode.\n"
+        "If this is done for a masternode that got PoSe-banned, the ProUpServTx will also revive this masternode.\n",
+        {
+            {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
+            {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO, "IP and port in the form \"IP:PORT\".\n"
+                "Must be unique on the network. Can be set to 0, which will require a ProUpServTx afterwards."},
+            {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS private key associated with the\n"
+                "registered operator public key."},
+            {"operatorPayoutAddress", RPCArg::Type::STR, RPCArg::Default{""}, "The address used for operator reward payments.\n"
+                "Only allowed when the ProRegTx had a non-zero operatorReward value.\n"
+                "If set to an empty string, the currently active payout address is reused."},
+            {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified, the wallet will only use coins from this address to fund ProTx.\n"
+                "If not specified, payoutAddress is the one that is going to be used.\n"
+                "The private key belonging to this address must be known in your wallet."},
+            {"nevmAddress", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The NEVM address to associate with smart contracts."},
+            {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default)"},
+        },
+        RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
+        RPCExamples{
+            HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r \"<NEVM address>\"")
+            + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"<NEVM address>\")")
+        },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
     EnsureWalletIsUnlocked(*pwallet);
-    // Make sure the results are valid at least up to the most recent block
-    // the user could have gotten from another RPC command prior to now
+
     pwallet->BlockUntilSyncedToCurrentChain();
+
     CProUpServTx ptx;
     bool v19active;
     {
@@ -747,8 +747,8 @@ static RPCHelpMan protx_update_service()
         v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
     }
     bool specific_legacy_bls_scheme{!v19active};
-    if(request.params.size() >= 6) {
-        specific_legacy_bls_scheme = request.params[5].get_bool();
+    if(request.params.size() >= 7) {
+        specific_legacy_bls_scheme = request.params[6].get_bool();
     }
     if (specific_legacy_bls_scheme) {
         ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
@@ -758,7 +758,7 @@ static RPCHelpMan protx_update_service()
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
     std::optional<CService> addr = Lookup(request.params[1].get_str().c_str(), Params().GetDefaultPort(), false);
     if (!addr.has_value()) {
-        throw std::runtime_error(strprintf("invalid network address %s", request.params[1].get_str()));
+        throw std::runtime_error(strprintf("Invalid network address %s", request.params[1].get_str()));
     }
     ptx.addr = addr.value();
 
@@ -766,10 +766,10 @@ static RPCHelpMan protx_update_service()
     auto mnList = deterministicMNManager->GetListAtChainTip();
     auto dmn = mnList.GetMN(ptx.proTxHash);
     if (!dmn) {
-        throw std::runtime_error(strprintf("masternode with proTxHash %s not found", ptx.proTxHash.ToString()));
+        throw std::runtime_error(strprintf("Masternode with proTxHash %s not found", ptx.proTxHash.ToString()));
     }
     if (keyOperator.GetPublicKey() != dmn->pdmnState->pubKeyOperator.Get()) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the operator key does not belong to the registered public key"));
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The operator key does not belong to the registered public key"));
     }
 
     CMutableTransaction tx;
@@ -782,7 +782,7 @@ static RPCHelpMan protx_update_service()
         } else {
             CTxDestination payoutDest = DecodeDestination(request.params[3].get_str());
             if (!IsValidDestination(payoutDest)) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid operator payout address: %s", request.params[3].get_str()));
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid operator payout address: %s", request.params[3].get_str()));
             }
             ptx.scriptOperatorPayout = GetScriptForDestination(payoutDest);
         }
@@ -807,6 +807,18 @@ static RPCHelpMan protx_update_service()
         }
     }
 
+    if (!request.params[5].isNull()) {
+        std::string nevmAddressStr = request.params[5].get_str();
+
+        // Check if the string starts with "0x" and remove it if present
+        if (nevmAddressStr.rfind("0x", 0) == 0) {
+            nevmAddressStr = nevmAddressStr.substr(2);
+        }
+
+        // Parse the remaining string as hex
+        ptx.vchNEVMAddress = ParseHex(nevmAddressStr);
+    }
+
     FundSpecialTx(*pwallet, tx, ptx, feeSource);
 
     SignSpecialTxPayloadByHash(tx, ptx, keyOperator);
@@ -815,7 +827,7 @@ static RPCHelpMan protx_update_service()
     return SignAndSendSpecialTx(request, *pwallet, tx);
 },
     };
-}  
+}
 
 static RPCHelpMan protx_update_registrar()
 {
@@ -863,9 +875,9 @@ static RPCHelpMan protx_update_registrar()
         specific_legacy_bls_scheme = request.params[5].get_bool();
     }
     if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+        ptx.nVersion = CProUpRegTx::LEGACY_BLS_VERSION;
     } else {
-        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+        ptx.nVersion = CProUpRegTx::GetVersion(v19active);
     }
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
     auto mnList = deterministicMNManager->GetListAtChainTip();
@@ -971,9 +983,9 @@ static RPCHelpMan protx_revoke()
         specific_legacy_bls_scheme = request.params[4].get_bool();
     }
     if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+        ptx.nVersion = CProUpRevTx::LEGACY_BLS_VERSION;
     } else {
-        ptx.nVersion = CProUpServTx::GetVersion(v19active);
+        ptx.nVersion = CProUpRevTx::GetVersion(v19active);
     }
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
 

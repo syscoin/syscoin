@@ -42,7 +42,7 @@ bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const 
 }
 
 
-bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, bool ibd)
+bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CDeterministicMNListNEVMAddressDiff &diff, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, bool ibd)
 {
     try {
         static SteadyClock::duration nTimeLoop{};
@@ -70,7 +70,7 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
         auto nTime3 = SystemClock::now(); nTimeQuorum += nTime3 - nTime2;
         LogPrint(BCLog::BENCHMARK, "        - quorumBlockProcessor: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime3 - nTime2), Ticks<SecondsDouble>(nTimeQuorum));
 
-        if (!deterministicMNManager || !deterministicMNManager->ProcessBlock(block, pindex, state, view, qcTx, fJustCheck, ibd)) {
+        if (!deterministicMNManager || !deterministicMNManager->ProcessBlock(block, pindex, state, view, qcTx, diff, fJustCheck, ibd)) {
             // pass the state returned by the function above
             return false;
         }
@@ -92,10 +92,10 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
     return true;
 }
 
-bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex)
+bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM)
 {
     try {
-        if (!deterministicMNManager || !deterministicMNManager->UndoBlock(pindex)) {
+        if (!deterministicMNManager || !deterministicMNManager->UndoBlock(pindex, diffNEVM)) {
             return false;
         }
 

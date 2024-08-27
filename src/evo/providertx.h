@@ -103,10 +103,11 @@ public:
     static constexpr auto SPECIALTX_TYPE = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
     static constexpr uint16_t LEGACY_BLS_VERSION = 1;
     static constexpr uint16_t BASIC_BLS_VERSION = 2;
+    static constexpr uint16_t UPDATE_NEVM_VERSION = 3;
 
     [[nodiscard]] static constexpr auto GetVersion(const bool is_basic_scheme_active) -> uint16_t
     {
-        return is_basic_scheme_active ? BASIC_BLS_VERSION : LEGACY_BLS_VERSION;
+        return is_basic_scheme_active ? UPDATE_NEVM_VERSION : LEGACY_BLS_VERSION;
     }
 
     uint16_t nVersion{LEGACY_BLS_VERSION}; // message version
@@ -115,13 +116,14 @@ public:
     CScript scriptOperatorPayout;
     uint256 inputsHash; // replay protection
     CBLSSignature sig;
+    std::vector<unsigned char> vchNEVMAddress;
 
     SERIALIZE_METHODS(CProUpServTx, obj)
     {
         READWRITE(
                 obj.nVersion
         );
-        if (obj.nVersion == 0 || obj.nVersion > BASIC_BLS_VERSION) {
+        if (obj.nVersion == 0 || obj.nVersion > UPDATE_NEVM_VERSION) {
             // unknown version, bail out early
             return;
         }
@@ -135,6 +137,9 @@ public:
             READWRITE(
                     CBLSSignatureVersionWrapper(const_cast<CBLSSignature&>(obj.sig), (obj.nVersion == LEGACY_BLS_VERSION))
             );
+        }
+        if (obj.nVersion >= UPDATE_NEVM_VERSION) {
+             READWRITE(obj.vchNEVMAddress);
         }
     }
 
@@ -153,6 +158,7 @@ public:
             obj.pushKV("operatorPayoutAddress", EncodeDestination(dest));
         }
         obj.pushKV("inputsHash", inputsHash.ToString());
+        obj.pushKV("nevmAddress", HexStr(vchNEVMAddress));
     }
 
     bool IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const;

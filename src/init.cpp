@@ -1792,7 +1792,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     fRPCSerialVersion = gArgs.GetIntArg("-rpcserialversion", DEFAULT_RPC_SERIALIZE_VERSION);
-    if(fNEVMConnection) {
+    if(fNEVMConnection && !fRegTest) {
         if(!node.chainman->ActiveChainstate().DoGethStartupProcedure()) {
             fNEVMConnection = false;
             LogPrintf("NEVM not detected, setting fNEVMConnection to false...\n");

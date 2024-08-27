@@ -53,6 +53,7 @@ class CTxMemPool;
 class ChainstateManager;
 struct ChainTxData;
 class DisconnectedBlockTransactions;
+class CDeterministicMNListNEVMAddressDiff;
 struct PrecomputedTransactionData;
 struct LockPoints;
 // SYSCOIN
@@ -785,7 +786,7 @@ private:
     void UpdateTip(const CBlockIndex* pindexNew)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     // SYSCOIN
-    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
@@ -1304,7 +1305,7 @@ extern std::unique_ptr<CBlockIndexDB> pblockindexdb;
 // SYSCOIN
 static const unsigned int DEFAULT_RPC_SERIALIZE_VERSION = 1;
 int RPCSerializationFlags();
-bool DisconnectNEVMCommitment(BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+bool DisconnectNEVMCommitment(BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &evmBlock);
 bool FillNEVMData(const CTransactionRef &tx);
 bool EraseNEVMData(const NEVMDataVec &NEVMDataVecOut);

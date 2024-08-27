@@ -280,68 +280,168 @@ def from_binary(cls, stream):
 
 # Objects that map to syscoind objects, which can be serialized/deserialized
 # SYSCOIN
-class CNEVMBlock:
-    __slots__ = ("blockhash", "txroot", "receiptroot", "blockdata")
-    def __init__(self, blockhash=0, txroot=0, receiptroot=0, blockdata=b""):
-        self.blockhash = blockhash
-        self.txroot = txroot
-        self.receiptroot = receiptroot
-        self.blockdata = blockdata
 
-    def deserialize(self, f):
-        self.blockhash = deser_uint256(f)
-        self.txroot = deser_uint256(f)
-        self.receiptroot = deser_uint256(f)
-        self.blockdata = deser_string(f)
-
-    def serialize(self):
-        r = b""
-        r += ser_uint256(self.blockhash)
-        r += ser_uint256(self.txroot)
-        r += ser_uint256(self.receiptroot)
-        r += ser_string(self.blockdata)
-        return r
-
-    def __repr__(self):
-        return "CEVMBlock(blockhash=%064x txroot=%064x receiptroot=%064x blockdata=%s)" % (self.blockhash, self.txroot, self.receiptroot, self.blockdata)
-
-class CNEVMBlockConnect(CNEVMBlock):
-    __slots__ = ("sysblockhash")
+class CNEVMAddressEntry:
     def __init__(self):
-        super(CNEVMBlockConnect, self).__init__()
-        self.sysblockhash = 0
+        self.address = None
+        self.collateralHeight = None
 
     def deserialize(self, f):
-        super(CNEVMBlockConnect, self).deserialize(f)
-        self.sysblockhash = deser_uint256(f)
+        self.address = deser_string(f)
+        self.collateralHeight = struct.unpack("<I", f.read(4))[0]
 
-# Objects that map to syscoind objects, which can be serialized/deserialized
+    def __repr__(self):
+        return "CNEVMAddressEntry(address=%s, collateralHeight=%d)" % (self.address.hex(), self.collateralHeight)
+
+class CNEVMAddressUpdateEntry:
+    def __init__(self):
+        self.oldAddress = None
+        self.newAddress = None
+
+    def deserialize(self, f):
+        self.oldAddress = deser_string(f)
+        self.newAddress = deser_string(f)
+        
+    def __repr__(self):
+        return "CNEVMAddressUpdateEntry(oldAddress=%s, newAddress=%s)" % (self.oldAddress.hex(), self.newAddress.hex())
+
+class CNEVMRemoveEntry:
+    def __init__(self):
+        self.address = None
+
+    def deserialize(self, f):
+        self.address = deser_string(f)
+        
+    def __repr__(self):
+        return "CNEVMRemoveEntry(address=%s)" % (self.address.hex())
+          
+class CDeterministicMNListNEVMAddressDiff:
+    __slots__ = ("addedMNNEVM", "updatedMNNEVM", "removedMNNEVM")
+
+    def __init__(self):
+        self.addedMNNEVM = []
+        self.updatedMNNEVM = []
+        self.removedMNNEVM = []
+
+    def deserialize(self, f):
+        # Deserialize addedMNNEVM as a list of (address, collateralHeight)
+        self.addedMNNEVM = deser_vector(f, CNEVMAddressEntry)
+
+        # Deserialize updatedMNNEVM as a list of (oldAddress, newAddress)
+        self.updatedMNNEVM = deser_vector(f, CNEVMAddressUpdateEntry)
+
+        # Deserialize removedMNNEVM as a list of addresses
+        self.removedMNNEVM = deser_vector(f, CNEVMRemoveEntry)
+
+    def __repr__(self):
+        return "CDeterministicMNListNEVMAddressDiff(addedMNNEVM=%s, updatedMNNEVM=%s, removedMNNEVM=%s)" % (
+            repr(self.addedMNNEVM), repr(self.updatedMNNEVM), repr(self.removedMNNEVM)
+        )
+
+class NEVMDataVec:
+    def __init__(self):
+        self.data = []
+
+    def deserialize(self, f):
+        self.data = deser_vector(f, deser_string)
+
+    def serialize(self):
+        return ser_vector(self.data, ser_string)
+
+    def __repr__(self):
+        return "NEVMDataVec(data=%s)" % repr(self.data)
+
+class CNEVMHeader:
+    __slots__ = ("nBlockHash", "nTxRoot", "nReceiptRoot")
+
+    def __init__(self):
+        self.nBlockHash = 0
+        self.nTxRoot = 0
+        self.nReceiptRoot = 0
+
+    def deserialize(self, f):
+        self.nBlockHash = deser_uint256(f)
+        self.nTxRoot = deser_uint256(f)
+        self.nReceiptRoot = deser_uint256(f)
 
     def serialize(self):
         r = b""
-        r += super(CNEVMBlockConnect, self).serialize()
-        r += ser_uint256(self.sysblockhash)
+        r += ser_uint256(self.nBlockHash)
+        r += ser_uint256(self.nTxRoot)
+        r += ser_uint256(self.nReceiptRoot)
+        return r
+
+    def set_null(self):
+        self.nBlockHash = 0
+        self.nTxRoot = 0
+        self.nReceiptRoot = 0
+
+    def __repr__(self):
+        return "CNEVMHeader(nBlockHash=%064x, nTxRoot=%064x, nReceiptRoot=%064x)" % (
+            self.nBlockHash, self.nTxRoot, self.nReceiptRoot)
+
+class CNEVMBlock(CNEVMHeader):
+    __slots__ = ("vchNEVMBlockData",)
+
+    def __init__(self):
+        super().__init__()
+        self.vchNEVMBlockData = b""
+
+    def deserialize(self, f):
+        super().deserialize(f)
+        self.vchNEVMBlockData = deser_string(f)
+
+    def serialize(self):
+        r = b""
+        r += super().serialize()
+        r += ser_string(self.vchNEVMBlockData)
         return r
 
     def __repr__(self):
-        return "CNEVMBlockConnect(blockhash=%064x sysblockhash=%064x txroot=%064x receiptroot=%064x blockdata=%s)" % (self.blockhash,  self.sysblockhash, self.txroot, self.receiptroot, self.blockdata)
+        return "CNEVMBlock(nBlockHash=%064x, nTxRoot=%064x, nReceiptRoot=%064x, vchNEVMBlockData=%s)" % (
+            self.nBlockHash, self.nTxRoot, self.nReceiptRoot, self.vchNEVMBlockData.hex())
 
-class CNEVMBlockDisconnect():
-    __slots__ = ("sysblockhash")
+class CNEVMBlockConnect:
+    __slots__ = ("evmBlock", "sysblockhash", "NEVMDataVecOut", "diff")
+
+    def __init__(self):
+        self.evmBlock = CNEVMBlock()
+        self.sysblockhash = 0
+        self.NEVMDataVecOut = NEVMDataVec()
+        self.diff = CDeterministicMNListNEVMAddressDiff()
+
+    def deserialize(self, f):
+        self.evmBlock.deserialize(f)
+        self.sysblockhash = deser_uint256(f)
+        self.NEVMDataVecOut.deserialize(f)
+        self.diff.deserialize(f)
+
+    def serialize(self):
+        r = b""
+        r += self.evmBlock.serialize()
+        r += ser_uint256(self.sysblockhash)
+        r += self.NEVMDataVecOut.serialize()
+        r += self.diff.serialize()
+        return r
+
+    def __repr__(self):
+        return "CNEVMBlockConnect(evmBlock=%s, sysblockhash=%064x, NEVMDataVecOut=%s, diff=%s)" % (
+            repr(self.evmBlock), self.sysblockhash, repr(self.NEVMDataVecOut), repr(self.diff))
+
+class CNEVMBlockDisconnect:
+    __slots__ = ("sysblockhash", "diff")
+
     def __init__(self):
         self.sysblockhash = 0
+        self.diff = CDeterministicMNListNEVMAddressDiff()
 
     def deserialize(self, f):
         self.sysblockhash = deser_uint256(f)
-
-    def serialize(self):
-        r = b""
-        r += ser_uint256(self.sysblockhash)
-        return r
+        self.diff.deserialize(f)
 
     def __repr__(self):
-        return "CNEVMBlockDisconnect(sysblockhash=%064x)" % (self.sysblockhash)
-
+        return "CNEVMBlockDisconnect(sysblockhash=%064x, diff=%s)" % (
+            self.sysblockhash, repr(self.diff))
 
 class CService:
     __slots__ = ("ip", "port")

@@ -22,6 +22,7 @@ class CNEVMHeader;
 class CBlock;
 class uint256;
 class ChainstateManager;
+class CDeterministicMNListNEVMAddressDiff;
 class CZMQNotificationInterface final : public CValidationInterface
 {
 public:
@@ -44,8 +45,8 @@ protected:
     // SYSCOIN
     void NotifyGovernanceVote(const uint256& vote) override;
     void NotifyGovernanceObject(const uint256& object) override;
-    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation) override;
-    void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash) override;
+    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const CDeterministicMNListNEVMAddressDiff &diff) override;
+    void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) override;
     void NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string& state) override;
     void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string& state) override;
     void NotifyNEVMComms(const std::string& commMessage, bool &bResponse) override;

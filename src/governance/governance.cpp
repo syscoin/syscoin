@@ -1536,7 +1536,10 @@ void CGovernanceManager::RemoveInvalidVotes()
     LOCK(cs);
 
     const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
-    auto diff = lastMNListForVotingKeys->BuildDiff(tip_mn_list);
+    CDeterministicMNListDiff diff;
+    CDeterministicMNListNEVMAddressDiff diffRetNEVMAddress;
+
+    lastMNListForVotingKeys->BuildDiff(tip_mn_list, diff, diffRetNEVMAddress);
 
     std::vector<COutPoint> changedKeyMNs;
     for (const auto& p : diff.updatedMNs) {

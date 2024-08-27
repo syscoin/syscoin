@@ -73,6 +73,7 @@ public:
 using CDeterministicMNCPtr = std::shared_ptr<const CDeterministicMN>;
 
 class CDeterministicMNListDiff;
+class CDeterministicMNListNEVMAddressDiff;
 
 
 class CDeterministicMNList
@@ -83,7 +84,7 @@ public:
     using MnMap = immer::map<uint256, CDeterministicMNCPtr>;
     using MnInternalIdMap = immer::map<uint64_t, uint256>;
     using MnUniquePropertyMap = immer::map<uint256, std::pair<uint256, uint32_t>>;
-
+    bool m_changed_nevm_address{false};
 private:
     uint256 blockHash;
     int nHeight{-1};
@@ -94,7 +95,6 @@ private:
     // map of unique properties like address and keys
     // we keep track of this as checking for duplicates would otherwise be painfully slow
     MnUniquePropertyMap mnUniquePropertyMap;
-    bool m_changed;
 
 public:
     CDeterministicMNList() = default;
@@ -140,9 +140,7 @@ public:
         blockHash.SetNull();
         nHeight = -1;
         nTotalRegisteredCount = 0;
-    }
-    [[nodiscard]] bool HasChanges() const {
-        return m_changed;
+        m_changed_nevm_address = false;
     }
     [[nodiscard]] size_t GetAllMNsCount() const
     {
@@ -288,7 +286,7 @@ public:
      */
     void PoSeDecrease(const CDeterministicMN& dmn);
 
-    [[nodiscard]] CDeterministicMNListDiff BuildDiff(const CDeterministicMNList& to) const;
+    void BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const;
     [[nodiscard]] CDeterministicMNList ApplyDiff(const CBlockIndex* pindex, const CDeterministicMNListDiff& diff) const;
 
     void AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTotalCount = true);
@@ -388,6 +386,20 @@ private:
     }
 };
 
+
+class CDeterministicMNListNEVMAddressDiff
+{
+public:
+    std::vector<std::pair<std::vector<unsigned char>, int>> addedMNNEVM;
+    std::vector<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>> updatedMNNEVM;
+    std::vector<std::vector<unsigned char>> removedMNNEVM;
+
+    SERIALIZE_METHODS(CDeterministicMNListNEVMAddressDiff, obj) {
+        READWRITE(obj.addedMNNEVM, obj.updatedMNNEVM, obj.removedMNNEVM);
+    }
+    std::string ToString() const;
+};
+
 class CDeterministicMNListDiff
 {
 public:
@@ -468,8 +480,8 @@ public:
     ~CDeterministicMNManager() = default;
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state,
-                      const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
-    bool UndoBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+                      const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, CDeterministicMNListNEVMAddressDiff &diff, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+    bool UndoBlock(const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff &inversedDiffNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,

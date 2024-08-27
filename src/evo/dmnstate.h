@@ -28,7 +28,6 @@ private:
     int nPoSeBanHeight{-1};
 
     friend class CDeterministicMNStateDiff;
-
 public:
     int nVersion{CProRegTx::LEGACY_BLS_VERSION};
 
@@ -51,7 +50,8 @@ public:
     CService addr;
     CScript scriptPayout;
     CScript scriptOperatorPayout;
-
+    std::vector<unsigned char> vchNEVMAddress;
+    bool m_changed_nevm_address{false};
 
 public:
     CDeterministicMNState() = default;
@@ -91,6 +91,9 @@ public:
             obj.scriptPayout,
             obj.scriptOperatorPayout,
             obj.nCollateralHeight);
+        if (obj.nVersion >= CProUpServTx::UPDATE_NEVM_VERSION) {
+             READWRITE(obj.vchNEVMAddress);
+        }
     }
 
     void ResetOperatorFields()
@@ -105,6 +108,8 @@ public:
     {
         if (!IsBanned()) {
             nPoSeBanHeight = height;
+            vchNEVMAddress.clear();
+            
         }
     }
     int GetBannedHeight() const

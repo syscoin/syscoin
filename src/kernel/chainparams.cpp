@@ -203,7 +203,7 @@ public:
         consensus.nNEVMStartBlock = 1317500;
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
-        consensus.nRolluxStartBlock = 2000000;
+        consensus.nNexusStartBlock = 2000000;
         consensus.nUTXOAssetsBlock = 1004200;
         consensus.DIP0003Height = 1004200;
         consensus.DIP0003EnforcementHeight = 1004200;
@@ -364,7 +364,7 @@ public:
         consensus.nNEVMStartBlock = 840000;
         consensus.nUTXOAssetsBlock = 545000;
         consensus.nPODAStartBlock = 1004000;
-        consensus.nRolluxStartBlock = 1350000;
+        consensus.nNexusStartBlock = 1350000;
         consensus.nV19StartBlock = 1100000;
         consensus.DIP0003Height = 545000;
         consensus.DIP0003EnforcementHeight = 545000;
@@ -601,7 +601,7 @@ public:
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nPODAStartBlock = 0;
-        consensus.nRolluxStartBlock = 0;
+        consensus.nNexusStartBlock = 0;
         consensus.nV19StartBlock = opts.v19startblock;
         consensus.nUTXOAssetsBlock = 0;
         consensus.DIP0003Height = opts.dip3startblock;

@@ -2153,7 +2153,7 @@ bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &
     }
     return true;
 }
-bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA) {
+bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff) {
     CNEVMHeader nevmBlockHeader;
     if(!GetNEVMData(state, block, nevmBlockHeader)) {
         return false; //state filled by GetNEVMData
@@ -2172,7 +2172,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     }
     std::string stateStr;
     if(fNEVMConnection) {
-        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation);
+        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, diff);
         if(!stateStr.empty()) {
             state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
             if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
@@ -2194,7 +2194,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             if(!bResponse) {
                 if(RestartGethNode()) {
                     // try again after resetting connection
-                    GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation);
+                    GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, diff);
                     if(!stateStr.empty()) {
                         state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
                         if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
@@ -2221,14 +2221,14 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
 
     return res;
 }
-bool DisconnectNEVMCommitment(BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const uint256& nBlockHash) {
+bool DisconnectNEVMCommitment(BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
     CNEVMHeader evmBlock;
     if(!GetNEVMData(state, block, evmBlock)) {
         return false; // state filled by GetNEVMData
     }
     if(fNEVMConnection) {
         std::string stateStr;
-        GetMainSignals().NotifyNEVMBlockDisconnect(stateStr, nBlockHash);
+        GetMainSignals().NotifyNEVMBlockDisconnect(stateStr, nBlockHash, diff);
         if(!stateStr.empty()) {
             state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
         }
@@ -2372,7 +2372,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     // SYSCOIN
     const auto& params = Params().GetConsensus();
     bool fClean = true;
-
+    CDeterministicMNListNEVMAddressDiff diffNEVM;
     CBlockUndo blockUndo;
     if (!m_blockman.UndoReadFromDisk(blockUndo, *pindex)) {
         error("DisconnectBlock(): failure reading undo data");
@@ -2384,7 +2384,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         return DISCONNECT_FAILED;
     }
     // SYSCOIN
-    if (bReverify && !UndoSpecialTxsInBlock(block, pindex)) {
+    if (bReverify && !UndoSpecialTxsInBlock(block, pindex, diffNEVM)) {
         return DISCONNECT_FAILED;
     }
 
@@ -2441,7 +2441,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     }
     BlockValidationState state;
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(state, vecNEVMBlocks, block, block.GetHash())) {
+    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(state, vecNEVMBlocks, block, block.GetHash(), diffNEVM)) {
         const std::string &errStr = strprintf("DisconnectBlock(): NEVM block failed to disconnect: %s\n", state.ToString().c_str());
         error(errStr.c_str());
         return DISCONNECT_FAILED;
@@ -2777,10 +2777,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     // SYSCOIN
     const uint256& blockHash = block.GetHash();
-    bool RolluxContext = pindex->nHeight >= params.GetConsensus().nRolluxStartBlock;
-    fScriptChecks = fScriptChecks && RolluxContext; 
+    bool NexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock;
+    fScriptChecks = fScriptChecks && NexusContext;
+    CDeterministicMNListNEVMAddressDiff diff;
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
-    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {
+    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {
         LogPrintf("ERROR: %s: ProcessSpecialTxsInBlock for block %s failed with %s\n", __func__,
                      pindex->GetBlockHash().ToString().c_str(), state.ToString().c_str());
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, state.ToString());
@@ -2799,7 +2800,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         {
             TxValidationState tx_state;
             CAmount txfee = 0;
-            if (RolluxContext && !Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, fJustCheck, mapMintKeys)) {
+            if (NexusContext && !Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, fJustCheck, mapMintKeys)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                             tx_state.GetRejectReason(), tx_state.GetDebugMessage());
@@ -2862,7 +2863,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
 
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock && !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA)) {
+    if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock && !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff)) {
         return false; // state filled by ConnectNEVMCommitment
     }
     const auto time_3{SteadyClock::now()};
@@ -5253,7 +5254,8 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
     // SYSCOIN
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     BlockValidationState state;
-    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, m_chainman.IsInitialBlockDownload())) {
+    CDeterministicMNListNEVMAddressDiff diff;
+    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, m_chainman.IsInitialBlockDownload())) {
         return error("%s: ProcessSpecialTxsInBlock for block %s failed with %s", __func__,
             pindex->GetBlockHash().ToString(), state.ToString());
     }
@@ -5281,7 +5283,7 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         AddCoins(inputs, *tx, pindex->nHeight, true);
     }
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock && !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA)) {
+    if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock && !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff)) {
         return error("RollforwardBlock(): ConnectNEVMCommitment() failed at %d, hash=%s state=%s", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
     }
     return true;

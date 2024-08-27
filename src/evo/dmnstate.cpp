@@ -25,9 +25,9 @@ std::string CDeterministicMNState::ToString() const
     }
 
     return strprintf("CDeterministicMNState(nVersion=%d, nRegisteredHeight=%d, nLastPaidHeight=%d, nPoSePenalty=%d, nPoSeRevivedHeight=%d, nPoSeBanHeight=%d, nRevocationReason=%d, "
-                     "ownerAddress=%s, pubKeyOperator=%s, votingAddress=%s, addr=%s, payoutAddress=%s, operatorPayoutAddress=%s)",
+                     "ownerAddress=%s, pubKeyOperator=%s, votingAddress=%s, addr=%s, payoutAddress=%s, operatorPayoutAddress=%s, nevmAddress=%s)",
                      nVersion, nRegisteredHeight, nLastPaidHeight, nPoSePenalty, nPoSeRevivedHeight, nPoSeBanHeight, nRevocationReason,
-                     EncodeDestination(WitnessV0KeyHash(keyIDOwner)), pubKeyOperator.ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), addr.ToStringAddrPort(), payoutAddress, operatorPayoutAddress);
+                     EncodeDestination(WitnessV0KeyHash(keyIDOwner)), pubKeyOperator.ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), addr.ToStringAddrPort(), payoutAddress, operatorPayoutAddress, HexStr(vchNEVMAddress));
 }
 
 void CDeterministicMNState::ToJson(UniValue& obj) const
@@ -54,6 +54,7 @@ void CDeterministicMNState::ToJson(UniValue& obj) const
     if (ExtractDestination(scriptOperatorPayout, dest)) {
         obj.pushKV("operatorPayoutAddress", EncodeDestination(dest));
     }
+    obj.pushKV("nevmAddress", HexStr(vchNEVMAddress));
 }
 
 UniValue CDeterministicMNStateDiff::ToJson() const
