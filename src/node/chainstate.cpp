@@ -44,7 +44,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     const ChainstateLoadOptions& options) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     auto& pblocktree{chainman.m_blockman.m_block_tree_db};
-    LogPrintf("Creating LLMQ and asset databases...\n");
+    LogPrintf("Creating LLMQ databases...\n");
     llmq::DestroyLLMQSystem();
     auto evoDmnDbParams = DBParams{
         .path = chainman.m_options.datadir / "evodb_dmn",

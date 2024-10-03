@@ -4631,10 +4631,10 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
     }
     // SYSCOIN
-    bool fDIP0003Active_context = nHeight >= consensusParams.DIP0003Height;
+    bool fNexusActive_context = nHeight >= consensusParams.nNexusStartBlock;
     // if commitment doesn't exist and is required make sure commitment tx is in coinbase
     // otherwise if outside of commitment mining interval and we are in last block of DKG ensure we create SYSCOIN_TX_VERSION_MN_CLSIG tx
-    if(fDIP0003Active_context) {
+    if(fNexusActive_context) {
         // this quorum period start
         const auto& nQuorumStartHeight = nHeight - (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
         // last possible block for last quorum period
