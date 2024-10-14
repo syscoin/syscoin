@@ -6741,12 +6741,16 @@ std::vector<std::string> SanitizeGethCmdLine(const std::vector<std::string> &cmd
     for(const auto &cmd: cmdLine){
         cmdLineRet.push_back(cmd);
     }
+    cmdLineRet.push_back("--db.engine");
+    cmdLineRet.push_back("leveldb");
+    cmdLineRet.push_back("--state.scheme");
+    cmdLineRet.push_back("hash");
     cmdLineRet.push_back("--datadir");
     cmdLineRet.push_back(fs::PathToString(dataDir));
     if(fTestNet || fRegTest) {
         cmdLineRet.push_back("--tanenbaum");
     } else {
-        cmdLineRet.push_back("--mainnet");
+        cmdLineRet.push_back("--syscoin");
     }
     // Geth should subscribe to our publisher
     cmdLineRet.push_back("--nevmpub");
