@@ -858,6 +858,7 @@ libsyscoin_common_a_SOURCES = \
   script/sign.cpp \
   script/signingprovider.cpp \
   script/solver.cpp \
+  sync.cpp \
   warnings.cpp \
   $(SYSCOIN_CORE_H)
 
