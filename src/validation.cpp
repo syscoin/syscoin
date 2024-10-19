@@ -2166,7 +2166,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     for (auto const& [key, val] : mapPoDA) {
         NEVMDataVecOut.emplace_back(key);
     }
-    bool bSkipValidation = nHeight <= nLastKnownHeightOnStart;
+    bool bSkipValidation = false;
     if(bSkipValidation) {
         LogPrintf("ConnectNEVMCommitment: skipping validation result...\n");
     }
@@ -2800,7 +2800,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         {
             TxValidationState tx_state;
             CAmount txfee = 0;
-            if (NexusContext && !Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, fJustCheck, mapMintKeys)) {
+            if (fNexusContext && !Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, fJustCheck, mapMintKeys)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                             tx_state.GetRejectReason(), tx_state.GetDebugMessage());
