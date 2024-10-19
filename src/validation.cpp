@@ -2777,8 +2777,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     // SYSCOIN
     const uint256& blockHash = block.GetHash();
-    bool NexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock;
-    fScriptChecks = fScriptChecks && NexusContext;
+    bool fNexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock;
+    fScriptChecks = fScriptChecks && fNexusContext;
     CDeterministicMNListNEVMAddressDiff diff;
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {

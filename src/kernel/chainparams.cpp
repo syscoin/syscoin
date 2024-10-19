@@ -599,7 +599,7 @@ public:
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nPODAStartBlock = 0;
-        consensus.nNexusStartBlock = opts.nevmstartblock;
+        consensus.nNexusStartBlock = opts.dip3startblock;
         consensus.nV19StartBlock = opts.v19startblock;
         consensus.DIP0003Height = opts.dip3startblock;
         consensus.DIP0003EnforcementHeight = opts.dip3enforcement;
