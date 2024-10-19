@@ -170,7 +170,6 @@ struct Params {
     int nPODAStartBlock;
     int nNexusStartBlock;
     int nV19StartBlock;
-    int nUTXOAssetsBlock;
     uint64_t nMinMNSubsidySats;
         
     int nSuperblockStartBlock;

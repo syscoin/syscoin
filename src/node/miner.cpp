@@ -140,7 +140,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // SYSCOIN
     bool fDIP0003Active_context = nHeight >= chainparams.GetConsensus().DIP0003Height;
     bool NEVMActive_context = nHeight >= chainparams.GetConsensus().nNEVMStartBlock;
-    if(nHeight >= chainparams.GetConsensus().nUTXOAssetsBlock) {
+    if(fDIP0003Active_context) {
         const int32_t nChainId = chainparams.GetConsensus ().nAuxpowChainId;
         const int32_t nVersion = m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
         pblock->SetBaseVersion(nVersion, nChainId);

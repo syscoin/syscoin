@@ -4523,8 +4523,8 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     // Reject outdated version blocks when 95% (75% on testnet) of the network has upgraded:
     // check for version 2, 3 and 4 upgrades
     // SYSCOIN
-    if(nHeight >= consensusParams.nUTXOAssetsBlock) {
-        // if valid Chain ID (> 0) then it should always be nAuxpowChainId after nUTXOAssetsBlock block
+    if(nHeight >= consensusParams.DIP0003Height) {
+        // if valid Chain ID (> 0) then it should always be nAuxpowChainId after DIP0003Height block
         const int32_t& nChainID = block.GetChainId();
         const auto& baseVer = block.GetBaseVersion();
         if(!fTestNet && ((baseVer < 2 && nHeight >= consensusParams.BIP34Height) ||

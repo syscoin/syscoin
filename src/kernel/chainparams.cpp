@@ -204,7 +204,6 @@ public:
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
         consensus.nNexusStartBlock = 2000000;
-        consensus.nUTXOAssetsBlock = 1004200;
         consensus.DIP0003Height = 1004200;
         consensus.DIP0003EnforcementHeight = 1004200;
         /**
@@ -362,7 +361,6 @@ public:
         consensus.vchTokenFreezeMethod = ParseHex("7ca654cf9212e4c3cf0164a529dd6159fc71113f867d0b09fdeb10aa65780732");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
-        consensus.nUTXOAssetsBlock = 545000;
         consensus.nPODAStartBlock = 1004000;
         consensus.nNexusStartBlock = 1350000;
         consensus.nV19StartBlock = 1100000;
@@ -601,9 +599,8 @@ public:
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nPODAStartBlock = 0;
-        consensus.nNexusStartBlock = 0;
+        consensus.nNexusStartBlock = opts.nevmstartblock;
         consensus.nV19StartBlock = opts.v19startblock;
-        consensus.nUTXOAssetsBlock = 0;
         consensus.DIP0003Height = opts.dip3startblock;
         consensus.DIP0003EnforcementHeight = opts.dip3enforcement;
 

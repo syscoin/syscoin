@@ -351,16 +351,16 @@ TestChain100Setup::TestChain100Setup(
     {
         LOCK(::cs_main);
         // SYSCOIN
-        //printf("m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() %s\n", m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString().c_str());
-       assert(
+        // printf("m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() %s\n", m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString().c_str());
+        assert(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "722b456b5005377859a8320f3b3001c8a941643a246d7e5da64c8beeb17b3254" ||
+            "257e6f4da68ba7926cecb2ec170f78a84dc1a4f5459397c8cae1d01b85a97cf2" ||
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "7b923c7931fbbd3e65e1737a4986810935ca4b911e3e9d527d9c62a512bf7f63" ||
+            "4f7cd1197ecea16812d68f398659780d3b282443f656217565ec5bda01d179e2" ||
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "2d29a46dc059cf2266f484afc0db7c1898ef444d64859926ca89bd0cd4bd6837"  ||
+            "7c6b2a656a3bf93c2a852531b2be1bc5cdfa776c0f2e12ee06f713021e24eb82"  ||
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "59f4a9d71c05414c08d56b768ae301746a996f393be2395f42ca9ac90ff71bc1" );
+            "1f9af1d58cd44a9462201ff1eea5d214c725365789afb5af05a5e0534230a7cf");
     }
 }
 
