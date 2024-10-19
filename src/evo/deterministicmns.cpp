@@ -575,7 +575,10 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         if(!ibd || (fNEVMConnection && fNexusActive && newList.m_changed_nevm_address)) {
             oldList.BuildDiff(newList, diff, diffNEVM);
         }
-        m_evoDb->WriteCache(newList.GetBlockHash(), ibd? std::move(newList): newList);
+        {
+            LOCK(cs);
+            m_evoDb->WriteCache(newList.GetBlockHash(), ibd? std::move(newList): newList);
+        }
        
     } catch (const std::exception& e) {
         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- internal error: %s\n", __func__, e.what());
@@ -588,7 +591,6 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         // always update interface for payment detail changes
         uiInterface.NotifyMasternodeListChanged(newList);
     }
-    if (nHeight > to_cleanup) to_cleanup = nHeight;
     return true;
 }
 
@@ -599,9 +601,14 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
 
     CDeterministicMNList curList;
     CDeterministicMNList prevList;
-
-    if(m_evoDb->ReadCache(blockHash, curList)) {
-        prevList = GetListForBlockInternal(pindex->pprev);
+    bool readCache = false;
+    bool skipFlushOnRead = true;
+    {
+        LOCK(cs);
+        readCache = m_evoDb->ReadCache(blockHash, curList, skipFlushOnRead);
+    }
+    if(readCache) {
+        prevList = GetListForBlockInternal(pindex->pprev, skipFlushOnRead);
         {
             LOCK(cs);
             tipIndex = pindex->pprev;
@@ -611,11 +618,13 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
         if(inversedDiff.HasChanges()) {
             GetMainSignals().NotifyMasternodeListChanged(true, prevList, inversedDiff);
         }
-        
+         {
+            LOCK(cs);
+            m_evoDb->EraseCache(blockHash, true);
+        }
         // SYSCOIN always update interface
         uiInterface.NotifyMasternodeListChanged(prevList);
     }
-
     return true;
 }
 
@@ -901,7 +910,7 @@ void CDeterministicMNManager::DecreasePoSePenalties(CDeterministicMNList& mnList
     }
 }
 
-const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(const CBlockIndex* pindex)
+const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(const CBlockIndex* pindex, bool skipFlushOnRead)
 {
     CDeterministicMNList snapshot;
     const auto& consensusParams = Params().GetConsensus();
@@ -909,13 +918,15 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(cons
     if (!fDIP0003Active) {
         return snapshot;
     }
-
-    if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot)) {
-        snapshot = CDeterministicMNList(pindex->GetBlockHash(), pindex->nHeight, 0);
-        m_evoDb->WriteCache(pindex->GetBlockHash(), snapshot);
-        LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- initial snapshot. blockHash=%s nHeight=%d\n", __func__,
-                    snapshot.GetBlockHash().ToString(), snapshot.GetHeight());
-        return snapshot;
+    {
+        LOCK(cs);
+        if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot, skipFlushOnRead)) {
+            snapshot = CDeterministicMNList(pindex->GetBlockHash(), pindex->nHeight, 0);
+            m_evoDb->WriteCache(pindex->GetBlockHash(), snapshot);
+            LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- initial snapshot. blockHash=%s nHeight=%d\n", __func__,
+                        snapshot.GetBlockHash().ToString(), snapshot.GetHeight());
+            return snapshot;
+        }
     }
     assert(snapshot.GetHeight() != -1);
     return snapshot;
@@ -925,11 +936,15 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlock(const CBlock
 };
 const CDeterministicMNList CDeterministicMNManager::GetListAtChainTip()
 {
-    LOCK(cs);
-    if (!tipIndex) {
+    const CBlockIndex* pindex;
+    {
+        LOCK(cs);
+        pindex = tipIndex;
+    }
+    if (!pindex) {
         return CDeterministicMNList();
     }
-    return GetListForBlockInternal(tipIndex);
+    return GetListForBlockInternal(pindex);
 }
 
 void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {
@@ -964,9 +979,7 @@ bool CDeterministicMNManager::IsDIP3Enforced(int nHeight)
 }
 
 void CDeterministicMNManager::DoMaintenance() {
-    LOCK2(cs, cs_cleanup);
-    int loc_to_cleanup = to_cleanup.load();
-    if (loc_to_cleanup <= did_cleanup) return;
+    LOCK(cs);
     if (m_evoDb->IsCacheFull()) {
         DBParams db_params = m_evoDb->GetDBParams();
         // Create copies of the current caches
@@ -978,9 +991,8 @@ void CDeterministicMNManager::DoMaintenance() {
         m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList>>(db_params, LIST_CACHE_SIZE);
         // Restore the caches from the copies
         m_evoDb->RestoreCaches(mapCacheCopy, eraseCacheCopy);
-        LogPrint(BCLog::MNLIST, "DMN Database successfully wiped and recreated.\n");
+        LogPrintf("CDeterministicMNManager::DoMaintenance Database successfully wiped and recreated.\n");
     }
-    did_cleanup = loc_to_cleanup;
 }
 bool CDeterministicMNManager::FlushCacheToDisk() {
     DoMaintenance();

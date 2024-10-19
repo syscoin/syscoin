@@ -110,7 +110,7 @@ void CQuorum::WriteContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& ev
     }
 }
 
-bool CQuorum::ReadContributions(const CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, const CEvoDB<uint256, CBLSSecretKey>& evoDb_sk)
+bool CQuorum::ReadContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk)
 {
     uint256 dbKey = MakeQuorumKey(*this);
     std::vector<CBLSPublicKey> qv;

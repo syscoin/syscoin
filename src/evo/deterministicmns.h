@@ -464,9 +464,6 @@ class CDeterministicMNManager
 
 private:
     Mutex cs;
-    Mutex cs_cleanup;
-    // We have performed CleanupCache() on this height.
-    int did_cleanup GUARDED_BY(cs_cleanup) {0};
     // Main thread has indicated we should perform cleanup up to this height
     std::atomic<int> to_cleanup {0};
 
@@ -489,18 +486,18 @@ public:
     void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease);
 
-    const CDeterministicMNList GetListForBlock(const CBlockIndex* pindex);
+    const CDeterministicMNList GetListForBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void GetListForBlock(const CBlockIndex* pindex, CDeterministicMNList& list);
     const CDeterministicMNList GetListAtChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     // Test if given TX is a ProRegTx which also contains the collateral at index n
     static bool IsProTxWithCollateral(const CTransactionRef& tx, uint32_t n);
     bool IsDIP3Enforced(int nHeight = -1) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool FlushCacheToDisk() EXCLUSIVE_LOCKS_REQUIRED(!cs_cleanup, !cs);
-    void DoMaintenance() EXCLUSIVE_LOCKS_REQUIRED(!cs_cleanup, !cs);
+    bool FlushCacheToDisk() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    void DoMaintenance() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
-    const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex);
+    const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex, bool skipFlushOnRead = false) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };
 extern int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE; // keep them for a week
 extern std::unique_ptr<CDeterministicMNManager> deterministicMNManager;

@@ -22,6 +22,7 @@ class CEvoDB : public CDBWrapper {
     mutable RecursiveMutex cs;
     size_t maxCacheSize{0};
     DBParams m_db_params;
+    bool bFlushOnNextRead{false};
 public:
     using CDBWrapper::CDBWrapper;
     explicit CEvoDB(const DBParams &db_params, size_t maxCacheSizeIn) : CDBWrapper(db_params), maxCacheSize(maxCacheSizeIn), m_db_params(db_params) {
@@ -31,13 +32,19 @@ public:
         FlushCacheToDisk();
     }
     bool IsCacheFull() const {
-        return mapCache.size() >= maxCacheSize;
+        LOCK(cs);
+        return (mapCache.size()+setEraseCache.size()) >= maxCacheSize;
     }
     DBParams GetDBParams() const {
         return m_db_params;
     }
-    bool ReadCache(const K& key, V& value) const {
+    bool ReadCache(const K& key, V& value, bool skipFlushOnNextRead = false) {
         LOCK(cs);
+        if(!skipFlushOnNextRead && bFlushOnNextRead) {
+            bFlushOnNextRead = false;
+            LogPrintf("Evodb::ReadCache flushing cache before read\n");
+            FlushCacheToDisk();
+        }
         auto it = mapCache.find(key);
         if (it != mapCache.end()) {
             value = it->second->second;
@@ -108,8 +115,9 @@ public:
         return (mapCache.find(key) != mapCache.end() || Exists(key));
     }
 
-    void EraseCache(const K& key) {
+    void EraseCache(const K& key, bool flushOnNextRead = false) {
         LOCK(cs);
+        bFlushOnNextRead = flushOnNextRead;
         auto it = mapCache.find(key);
         if (it != mapCache.end()) {
             fifoList.erase(it->second);

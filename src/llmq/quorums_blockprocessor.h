@@ -44,7 +44,7 @@ public:
     bool GetMinableCommitment(int nHeight, CFinalCommitment& ret) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     bool HasMinedCommitment(const uint256& quorumHash) const;
-    CFinalCommitmentPtr GetMinedCommitment(const uint256& quorumHash, uint256& retMinedBlockHash) const;
+    CFinalCommitmentPtr GetMinedCommitment(const uint256& quorumHash, uint256& retMinedBlockHash);
     bool FlushCacheToDisk();
     static bool IsMiningPhase(int nHeight);
 private:

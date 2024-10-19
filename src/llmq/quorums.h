@@ -81,7 +81,7 @@ public:
 
 private:
     void WriteContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk);
-    bool ReadContributions(const CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, const CEvoDB<uint256, CBLSSecretKey>& evoDb_sk);
+    bool ReadContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk);
 };
 
 /**

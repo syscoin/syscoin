@@ -260,6 +260,10 @@ bool CQuorumBlockProcessor::UndoBlock(const CBlock& block, const CBlockIndex* pi
     AssertLockHeld(cs_main);
     if (!CLLMQUtils::IsV19Active(pindex->pprev->nHeight))
         bls::bls_legacy_scheme.store(true);
+    bool fNexusActive = pindex->nHeight >= Params().GetConsensus().nNexusStartBlock;
+    if (!fNexusActive) {
+        return true;
+    }
     CFinalCommitmentTxPayload qcTx;
     BlockValidationState dummy;
     if (!GetCommitmentsFromBlock(block, pindex->nHeight, qcTx, dummy)) {
@@ -270,7 +274,7 @@ bool CQuorumBlockProcessor::UndoBlock(const CBlock& block, const CBlockIndex* pi
         return true;
     }
 
-    m_commitment_evoDb.EraseCache(qcTx.commitment.quorumHash);
+    m_commitment_evoDb.EraseCache(qcTx.commitment.quorumHash, true);
 
     // if a reorg happened, we should allow to mine this commitment later
     AddMineableCommitment(qcTx.commitment);
@@ -342,7 +346,7 @@ bool CQuorumBlockProcessor::HasMinedCommitment(const uint256& quorumHash) const
     return m_commitment_evoDb.ExistsCache(quorumHash);
 }
 
-CFinalCommitmentPtr CQuorumBlockProcessor::GetMinedCommitment(const uint256& quorumHash, uint256& retMinedBlockHash) const
+CFinalCommitmentPtr CQuorumBlockProcessor::GetMinedCommitment(const uint256& quorumHash, uint256& retMinedBlockHash)
 {
     std::pair<CFinalCommitment, uint256> p;
     if (!m_commitment_evoDb.ReadCache(quorumHash, p)) {
