@@ -606,7 +606,7 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
     CSuperblock::GetNearestSuperblocksHeights(nHeight, nLastSuperblock, nNextSuperblock);
     auto SBEpochTime = static_cast<int64_t>(GetTime<std::chrono::seconds>().count() + (nNextSuperblock - nHeight) * 2.5 * 60);
     // fund up to the next limit which is governed by IsBlockValueValid block validation
-    const CAmount& governanceBudget = CSuperblock::GetPaymentsLimit(nNextSuperblock) * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
+    CAmount governanceBudget = CSuperblock::GetPaymentsLimit(nNextSuperblock) * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
 
     CAmount budgetAllocated{};
     for (const auto& proposal : approvedProposals) {
