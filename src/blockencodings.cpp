@@ -189,8 +189,8 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     assert(index < txn_available.size());
     return txn_available[index] != nullptr;
 }
-
-ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing)
+// SYSCOIN
+ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, int nHeight)
 {
     if (header.IsNull()) return READ_STATUS_INVALID;
 
@@ -220,7 +220,8 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
 
     BlockValidationState state;
     CheckBlockFn check_block = m_check_block_mock ? m_check_block_mock : CheckBlock;
-    if (!check_block(block, state, Params().GetConsensus(), /*fCheckPoW=*/true, /*fCheckMerkleRoot=*/true)) {
+    // SYSCOIN
+    if (!check_block(block, state, Params().GetConsensus(), /*fCheckPoW=*/true, /*fCheckMerkleRoot=*/true, nHeight + 1)) {
         // TODO: We really want to just check merkle tree manually here,
         // but that is expensive, and CheckBlock caches a block's
         // "checked-status" (in the CBlock?). CBlock should be able to

@@ -3397,7 +3397,8 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         }
 
         PartiallyDownloadedBlock& partialBlock = *range_flight.first->second.second->partialBlock;
-        ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn);
+        // SYSCOIN
+        ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn, m_chainman.ActiveHeight());
         if (status == READ_STATUS_INVALID) {
             RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
             Misbehaving(peer, 100, "invalid compact block/non-matching block transactions");
@@ -4748,7 +4749,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     return;
                 }
                 std::vector<CTransactionRef> dummy;
-                status = tempBlock.FillBlock(*pblock, dummy);
+                // SYSCOIN
+                status = tempBlock.FillBlock(*pblock, dummy, m_chainman.ActiveHeight());
                 if (status == READ_STATUS_OK) {
                     fBlockReconstructed = true;
                 }
