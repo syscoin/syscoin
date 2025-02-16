@@ -29,7 +29,7 @@ class CAuxPowForTest;
 
 /** Header for merge-mining data in the coinbase.  */
 static const unsigned char pchMergedMiningHeader[] = { 0xfa, 0xbe, 'm', 'm' };
-
+static const unsigned char pchSyscoinHeader[] = { 's', 'y', 's', 'c', 'o', 'i', 'n' };
 /**
  * Data for the merge-mining auxpow.  This uses a merkle tx (the parent block's
  * coinbase tx) and a second merkle branch to link the actual Syscoin block
