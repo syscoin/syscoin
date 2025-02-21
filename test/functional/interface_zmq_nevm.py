@@ -116,6 +116,12 @@ class ZMQPublisher:
 
                 
     def addBlock(self, evmBlockConnect):
+        # Process NEVM address diff
+        self._process_nevm_address_diff(
+            evmBlockConnect.diff.addedMNNEVM,
+            evmBlockConnect.diff.updatedMNNEVM,
+            evmBlockConnect.diff.removedMNNEVM
+        )
         if evmBlockConnect.sysblockhash == 0:
             return True
         if (evmBlockConnect.sysblockhash in self.sysToNEVMBlockMapping or 
@@ -125,16 +131,17 @@ class ZMQPublisher:
         self.sysToNEVMBlockMapping[evmBlockConnect.sysblockhash] = evmBlockConnect
         self.NEVMToSysBlockMapping[evmBlockConnect.evmBlock.nBlockHash] = evmBlockConnect.sysblockhash
         
-        # Process NEVM address diff
-        self._process_nevm_address_diff(
-            evmBlockConnect.diff.addedMNNEVM,
-            evmBlockConnect.diff.updatedMNNEVM,
-            evmBlockConnect.diff.removedMNNEVM
-        )
+
         
         return True
 
     def deleteBlock(self, evmBlockDisconnect):
+        # Process NEVM address diff (no need to reverse anything)
+        self._process_nevm_address_diff(
+            evmBlockDisconnect.diff.addedMNNEVM,
+            evmBlockDisconnect.diff.updatedMNNEVM,
+            evmBlockDisconnect.diff.removedMNNEVM
+        )
         nevmConnect = self.sysToNEVMBlockMapping.get(evmBlockDisconnect.sysblockhash)
         if nevmConnect is None:
             return False
@@ -143,12 +150,7 @@ class ZMQPublisher:
         if sysMappingHash is None or sysMappingHash != nevmConnect.sysblockhash:
             return False
         
-        # Process NEVM address diff (no need to reverse anything)
-        self._process_nevm_address_diff(
-            evmBlockDisconnect.diff.addedMNNEVM,
-            evmBlockDisconnect.diff.updatedMNNEVM,
-            evmBlockDisconnect.diff.removedMNNEVM
-        )
+
         
         # Remove the block from the mapping
         del self.sysToNEVMBlockMapping[evmBlockDisconnect.sysblockhash]
@@ -223,7 +225,7 @@ class ZMQTest(SyscoinTestFramework):
                 force_finish_mnsync(self.nodes[i])
             self.generatetoaddress(self.nodes[0], num_blocks, ADDRESS_BCRT1_UNSPENDABLE)
             self.sync_blocks()
-            #self.test_basic(nevmsub, nevmsub1)
+            self.test_basic(nevmsub, nevmsub1)
             self.test_nevm_mapping(nevmsub)
         finally:
             self.running = False

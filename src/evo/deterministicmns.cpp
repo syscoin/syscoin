@@ -318,41 +318,86 @@ void CDeterministicMNList::PoSeDecrease(const CDeterministicMN& dmn)
 
 void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const
 {
-    to.ForEachMNShared(false, [this, &diffRet, &diffRetNEVMAddress](const CDeterministicMNCPtr& toPtr) {
+    std::unordered_map<uint256, NEVMDiffEntry, StaticSaltedHasher> nevmDiffMap;
+  // Process MNs from the new list (adds and updates)
+    to.ForEachMNShared(false, [&](const CDeterministicMNCPtr& toPtr) {
         auto fromPtr = GetMN(toPtr->proTxHash);
         if (fromPtr == nullptr) {
+            // Masternode is newly added.
+            if (!toPtr->pdmnState->vchNEVMAddress.empty()) {
+                NEVMDiffEntry entry;
+                entry.type = NEVMDiffType::Added;
+                entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
+                entry.collateralHeight = toPtr->pdmnState->nCollateralHeight;
+                nevmDiffMap[toPtr->proTxHash] = entry;
+            }
             diffRet.addedMNs.emplace_back(toPtr);
-            if(!toPtr->pdmnState->vchNEVMAddress.empty()) {
-                diffRetNEVMAddress.addedMNNEVM.emplace_back(std::make_pair(toPtr->pdmnState->vchNEVMAddress, toPtr->pdmnState->nCollateralHeight));
-            }
         } else if (fromPtr != toPtr || fromPtr->pdmnState != toPtr->pdmnState) {
+            // MN exists in both lists but has been updated.
             CDeterministicMNStateDiff stateDiff(*fromPtr->pdmnState, *toPtr->pdmnState);
-            if (stateDiff.fields) {
-                diffRet.updatedMNs.emplace(toPtr->GetInternalId(), std::move(stateDiff));
-            }
-            // if nevm address was changed
-            if(fromPtr->pdmnState->vchNEVMAddress != toPtr->pdmnState->vchNEVMAddress) {
-                // if address was set to empty remove it instead of updating
-                if(toPtr->pdmnState->vchNEVMAddress.empty()) {
-                    diffRetNEVMAddress.removedMNNEVM.emplace_back(fromPtr->pdmnState->vchNEVMAddress);
-                // if we are adding address and it didn't exist prior
-                } else if(fromPtr->pdmnState->vchNEVMAddress.empty()) {
-                    diffRetNEVMAddress.addedMNNEVM.emplace_back(std::make_pair(toPtr->pdmnState->vchNEVMAddress, fromPtr->pdmnState->nCollateralHeight));
-                } else {
-                    diffRetNEVMAddress.updatedMNNEVM.emplace_back(std::make_pair(fromPtr->pdmnState->vchNEVMAddress, toPtr->pdmnState->vchNEVMAddress));
+            if(stateDiff.fields) {
+                if (stateDiff.fields & CDeterministicMNStateDiff::Field_vchNEVMAddress) {
+                    NEVMDiffEntry entry;
+                    if (toPtr->pdmnState->vchNEVMAddress.empty()) {
+                        // Address was removed.
+                        entry.type = NEVMDiffType::Removed;
+                        entry.oldAddress = fromPtr->pdmnState->vchNEVMAddress;
+                    } else if (fromPtr->pdmnState->vchNEVMAddress.empty()) {
+                        // Address was added.
+                        entry.type = NEVMDiffType::Added;
+                        entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
+                        entry.collateralHeight = toPtr->pdmnState->nCollateralHeight;
+                    } else {
+                        // Address was updated.
+                        entry.type = NEVMDiffType::Updated;
+                        entry.oldAddress = fromPtr->pdmnState->vchNEVMAddress;
+                        entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
+                    }
+                    nevmDiffMap[toPtr->proTxHash] = entry;
                 }
+                diffRet.updatedMNs.emplace(toPtr->GetInternalId(), std::move(stateDiff));
             }
         }
     });
+
+    // Process removals from the old list.
     ForEachMN(false, [&](auto& fromPtr) {
         auto toPtr = to.GetMN(fromPtr.proTxHash);
         if (toPtr == nullptr) {
-            diffRet.removedMns.emplace(fromPtr.GetInternalId());
-            if(!fromPtr.pdmnState->vchNEVMAddress.empty()) {
-                diffRetNEVMAddress.removedMNNEVM.emplace_back(fromPtr.pdmnState->vchNEVMAddress);
+            // Masternode removed entirely.
+            if (!fromPtr.pdmnState->vchNEVMAddress.empty()) {
+                NEVMDiffEntry entry;
+                entry.type = NEVMDiffType::Removed;
+                entry.oldAddress = fromPtr.pdmnState->vchNEVMAddress;
+                nevmDiffMap[fromPtr.proTxHash] = entry;
             }
+            diffRet.removedMns.emplace(fromPtr.GetInternalId());
+        } else if (toPtr->pdmnState->vchNEVMAddress.empty() && !fromPtr.pdmnState->vchNEVMAddress.empty()) {
+            // Masternode still exists but its NEVM address was cleared.
+            NEVMDiffEntry entry;
+            entry.type = NEVMDiffType::Removed;
+            entry.oldAddress = fromPtr.pdmnState->vchNEVMAddress;
+            nevmDiffMap[fromPtr.proTxHash] = entry;
         }
     });
+
+    // Now convert the deduplicated map into the diff vectors.
+    for (const auto& pair : nevmDiffMap) {
+        const NEVMDiffEntry& entry = pair.second;
+        switch (entry.type) {
+            case NEVMDiffType::Added:
+                diffRetNEVMAddress.addedMNNEVM.emplace_back(entry.newAddress, entry.collateralHeight);
+                break;
+            case NEVMDiffType::Updated:
+                diffRetNEVMAddress.updatedMNNEVM.emplace_back(entry.oldAddress, entry.newAddress);
+                break;
+            case NEVMDiffType::Removed:
+                diffRetNEVMAddress.removedMNNEVM.emplace_back(entry.oldAddress);
+                break;
+            default:
+                break;
+        }
+    }
 
     // added MNs need to be sorted by internalId so that these are added in correct order when the diff is applied later
     // otherwise internalIds will not match with the original list
@@ -602,13 +647,13 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
     CDeterministicMNList curList;
     CDeterministicMNList prevList;
     bool readCache = false;
-    bool skipFlushOnRead = true;
     {
         LOCK(cs);
-        readCache = m_evoDb->ReadCache(blockHash, curList, skipFlushOnRead);
+        readCache = m_evoDb->ReadCache(blockHash, curList);
     }
+    LogPrintf("UndoBlock blockHash %s readCache %d\n", blockHash.ToString(), readCache);
     if(readCache) {
-        prevList = GetListForBlockInternal(pindex->pprev, skipFlushOnRead);
+        prevList = GetListForBlockInternal(pindex->pprev);
         {
             LOCK(cs);
             tipIndex = pindex->pprev;
@@ -616,11 +661,8 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
         CDeterministicMNListDiff inversedDiff;
         curList.BuildDiff(prevList, inversedDiff, inversedDiffNEVMAddress);
         if(inversedDiff.HasChanges()) {
+            LogPrintf("UndoBlock haschanges inversedDiff %d %d %d inversedDiffNEVMAddress %s\n", inversedDiff.addedMNs.size(), inversedDiff.updatedMNs.size(), inversedDiff.removedMns.size(),inversedDiffNEVMAddress.ToString());
             GetMainSignals().NotifyMasternodeListChanged(true, prevList, inversedDiff);
-        }
-         {
-            LOCK(cs);
-            m_evoDb->EraseCache(blockHash, true);
         }
         // SYSCOIN always update interface
         uiInterface.NotifyMasternodeListChanged(prevList);
@@ -910,7 +952,7 @@ void CDeterministicMNManager::DecreasePoSePenalties(CDeterministicMNList& mnList
     }
 }
 
-const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(const CBlockIndex* pindex, bool skipFlushOnRead)
+const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(const CBlockIndex* pindex)
 {
     CDeterministicMNList snapshot;
     const auto& consensusParams = Params().GetConsensus();
@@ -920,7 +962,7 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(cons
     }
     {
         LOCK(cs);
-        if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot, skipFlushOnRead)) {
+        if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot)) {
             snapshot = CDeterministicMNList(pindex->GetBlockHash(), pindex->nHeight, 0);
             m_evoDb->WriteCache(pindex->GetBlockHash(), snapshot);
             LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- initial snapshot. blockHash=%s nHeight=%d\n", __func__,

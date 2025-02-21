@@ -399,7 +399,24 @@ public:
     }
     std::string ToString() const;
 };
+// Temporary map to collect and deduplicate NEVM address changes.
+// Keyed by masternode proTxHash.
+enum class NEVMDiffType {
+    None,
+    Added,
+    Updated,
+    Removed
+};
 
+struct NEVMDiffEntry {
+    NEVMDiffType type = NEVMDiffType::None;
+    // For an update, both addresses are set;
+    // For an add, only newAddress and collateral height are relevant;
+    // For a removal, only oldAddress is needed.
+    std::vector<unsigned char> oldAddress;
+    std::vector<unsigned char> newAddress;
+    int collateralHeight = 0;
+};
 class CDeterministicMNListDiff
 {
 public:
@@ -497,7 +514,7 @@ public:
     void DoMaintenance() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
-    const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex, bool skipFlushOnRead = false) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };
 extern int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE; // keep them for a week
 extern std::unique_ptr<CDeterministicMNManager> deterministicMNManager;

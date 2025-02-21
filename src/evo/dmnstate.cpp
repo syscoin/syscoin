@@ -109,5 +109,8 @@ UniValue CDeterministicMNStateDiff::ToJson() const
     if (fields & Field_pubKeyOperator) {
         obj.pushKV("pubKeyOperator", state.pubKeyOperator.ToString());
     }
+    if (fields & Field_vchNEVMAddress) {
+        obj.pushKV("nevmAddress", HexStr(state.vchNEVMAddress));
+    }
     return obj;
 }

@@ -29,7 +29,7 @@ private:
 
     friend class CDeterministicMNStateDiff;
 public:
-    int nVersion{CProRegTx::LEGACY_BLS_VERSION};
+    int nVersion{CProUpServTx::UPDATE_NEVM_VERSION};
 
     int nRegisteredHeight{-1};
     int nCollateralHeight{-1};
@@ -90,15 +90,13 @@ public:
             obj.addr,
             obj.scriptPayout,
             obj.scriptOperatorPayout,
-            obj.nCollateralHeight);
-        if (obj.nVersion >= CProUpServTx::UPDATE_NEVM_VERSION) {
-             READWRITE(obj.vchNEVMAddress);
-        }
+            obj.nCollateralHeight,
+            obj.vchNEVMAddress);
     }
 
     void ResetOperatorFields()
     {
-        nVersion = CProRegTx::LEGACY_BLS_VERSION;
+        nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
         pubKeyOperator = CBLSLazyPublicKey();
         addr = CService();
         scriptOperatorPayout = CScript();
@@ -143,7 +141,7 @@ public:
 class CDeterministicMNStateDiff
 {
 public:
-    enum Field : uint32_t {
+    enum Field : uint64_t {
         Field_nRegisteredHeight = 0x0001,
         Field_nLastPaidHeight = 0x0002,
         Field_nPoSePenalty = 0x0004,
@@ -160,6 +158,7 @@ public:
         Field_scriptOperatorPayout = 0x2000,
         Field_nCollateralHeight = 0x4000,
         Field_nVersion = 0x8000,
+        Field_vchNEVMAddress = 0x10000,
     };
 
 #define DMN_STATE_DIFF_ALL_FIELDS                      \
@@ -178,7 +177,8 @@ public:
     DMN_STATE_DIFF_LINE(scriptPayout)                  \
     DMN_STATE_DIFF_LINE(scriptOperatorPayout)          \
     DMN_STATE_DIFF_LINE(nCollateralHeight)             \
-    DMN_STATE_DIFF_LINE(nVersion)
+    DMN_STATE_DIFF_LINE(nVersion)                      \
+    DMN_STATE_DIFF_LINE(vchNEVMAddress)
 
 public:
     uint32_t fields{0};
