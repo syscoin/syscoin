@@ -179,6 +179,7 @@ class ZMQPublisher:
         assert self.mnNEVMAddressMapping == expected_mn_mapping, "MN mapping did not match expected state"
 
 class ZMQTest(SyscoinTestFramework):
+
     def add_options(self, parser):
         self.add_wallet_options(parser)
 
@@ -225,8 +226,10 @@ class ZMQTest(SyscoinTestFramework):
                 force_finish_mnsync(self.nodes[i])
             self.generatetoaddress(self.nodes[0], num_blocks, ADDRESS_BCRT1_UNSPENDABLE)
             self.sync_blocks()
+            self.mn_count = 0
             self.test_basic(nevmsub, nevmsub1)
             self.test_nevm_mapping(nevmsub)
+            self.test_nevm_edge_cases(nevmsub)
         finally:
             self.running = False
             self.log.debug("Destroying ZMQ context")
@@ -434,6 +437,70 @@ class ZMQTest(SyscoinTestFramework):
         nevmsub.assertMNList(expected_mapping)
         self.log.info('NEVM address mapping tests done')
 
+    def test_nevm_edge_cases(self, nevmsub):
+        """
+        Additional tests for:
+         - Multiple NEVM updates in one block (only the final value should be registered)
+         - Reorg (undo) scenarios that revert NEVM changes
+         - Mempool conflict check for duplicate NEVM addresses
+        """
+        self.log.info("Starting NEVM edge case tests")
+        # Clear any previous state.
+        nevmsub.clearMappings()
+        start_height = self.nodes[0].getblockcount() + 1
+        self.mns = []
+    
+        # Create an MN with an initial NEVM address.
+        self.log.info("Edge Case 1: Create MN with NEVM address")
+        mn1_nevm_address = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        mn = self.create_mn_with_nevm(3, "edge-nevm-mn", mn1_nevm_address)
+        self.mns.append(mn)
+        self.sync_blocks()
+        expected_mapping = {mn1_nevm_address: self.mns[0].collateral_height}
+        nevmsub.assertMNList(expected_mapping)
+    
+        # Update the same MN with two successive updates in one block.
+        self.log.info("Edge Case 2: Multiple updates in one block")
+        self.update_mn_set_nevm(self.mns[0], "0x1111111111111111111111111111111111111111")
+        self.update_mn_set_nevm(self.mns[0], "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        self.sync_blocks()
+        # Expect that the final state is as originally set.
+        nevmsub.assertMNList(expected_mapping)
+    
+        # Force a reorg that undoes the update.
+        self.log.info("Edge Case 3: Reorg to undo MN update")
+        block_to_invalidate = self.reorg(start_height)
+        # After reorg, the MN should be in the state prior to the update.
+        expected_mapping_reorg = {}  # If this MN wasn't confirmed in the old chain, mapping is empty.
+        nevmsub.assertMNList(expected_mapping_reorg)
+        self.nodes[0].reconsiderblock(block_to_invalidate)
+        self.sync_blocks()
+        # Mapping should be restored.
+        nevmsub.assertMNList(expected_mapping)
+    
+        # Test mempool conflict: attempt to update another MN with a duplicate NEVM address.
+        self.log.info("Edge Case 4: Mempool duplicate NEVM conflict")
+        mn = self.create_mn_with_nevm(4, "edge-non-nevm-mn")
+        self.mns.append(mn)
+        self.sync_blocks()
+        # Update mn2 to set its NEVM address.
+        mn2_nevm_address = "0xcafebabecafebabecafebabecafebabecafebabe"
+        self.update_mn_set_nevm(self.mns[1], mn2_nevm_address)
+        self.sync_blocks()
+        expected_mapping[mn2_nevm_address] = self.mns[1].collateral_height
+        nevmsub.assertMNList(expected_mapping)
+        # Now attempt to update mn2 (or a different MN) with the same NEVM address as mn1.
+        assert_raises_rpc_error(-4, 'bad-protx-dup-nevm-address', 
+                                self.nodes[0].protx_update_service,  
+                                self.mns[1].protx_hash, 
+                                '127.0.0.2:%d' % self.mns[1].p2p_port,
+                                self.mns[1].blsMnkey,
+                                "",
+                                self.mns[1].fundsAddr,
+                                mn1_nevm_address)
+    
+        self.log.info("NEVM edge case tests passed successfully.")
+
     def prepare_mn(self, node, idx, alias):
         mn = Masternode()
         mn.idx = idx
@@ -467,15 +534,16 @@ class ZMQTest(SyscoinTestFramework):
                 break
         assert mn.collateral_vout != -1
         mn.collateral_height = self.nodes[0].getblockcount() + 1
+        self.mn_count = self.mn_count + 1
         if nevm_address is not None:
             # 2 rounds of payments of 2 nodes atleast before MN is "confirmed"
             self.generate(self.nodes[0], 1)
             assert_raises_rpc_error(-4, 'bad-protx-unconfirmed-nevm-address', self.update_mn_set_nevm, mn, nevm_address)
-            self.generate(self.nodes[0], (len(self.mns)+1)*2 + 1)
+            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
             self.update_mn_set_nevm(mn, nevm_address)
         else:
             self.generate(self.nodes[0], 1)
-            self.generate(self.nodes[0], (len(self.mns)+1)*2 + 1)
+            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
         return mn
 
     def update_mn_set_nevm(self, mn, nevm_address):
@@ -492,7 +560,7 @@ class ZMQTest(SyscoinTestFramework):
             assert_raises_rpc_error(-4, 'protx-dup', self.nodes[0].protx_update_service,  mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, "", mn.fundsAddr, nevm_address)
         self.generate(self.nodes[0], 1)
         # ensure after a block MNList will enforce no duplicates
-        if len(self.mns) > 0 and nevm_address:
+        if len(self.mns) > 1 and nevm_address:
             otherMn = self.mns[-1]
             if otherMn.idx == mn.idx and len(self.mns) > 1:
                 otherMn = self.mns[-2]
