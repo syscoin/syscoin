@@ -30,7 +30,6 @@
 #include <masternode/masternodepayments.h>
 #include <masternode/masternodesync.h>
 #include <evo/specialtx.h>
-#include <evo/cbtx.h>
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <llmq/quorums_commitment.h>
@@ -196,28 +195,10 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         // create commitment payload if quorum commitment is needed
         llmq::CFinalCommitment commitment;
         // this quorum period start
-        const auto& nQuorumStartHeight = nHeight - (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
-        // last possible block for last quorum period
-        const auto& nLastDKGHeight = nQuorumStartHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
         if (llmq::quorumBlockProcessor->GetMinableCommitment(nHeight, qcTx.commitment)) {
             qcTx.nHeight = nHeight;
             coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
             ds << qcTx;
-        } else if(nHeight == nLastDKGHeight) {
-            CCbTxCLSIG cbTx;
-            coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_CLSIG;
-            if (CalcCbTxBestChainlock(pindexPrev, cbTx.cl)) {
-                LogPrintf("CreateNewBlock() h[%d] CbTx CLSig[%s]\n", nHeight, cbTx.cl.ToString());
-            } else {
-                // at end of DKG cycle if mined commitment exists we should get a CLSIG, if not then finality has stopped, miners should stop until they decide they want to push through with a flag
-                llmq::chainLocksHandler->GetCLSIGFromPeers();
-                bool bSkipMinerChainlockCheck = gArgs.GetBoolArg("-miningskipchainlock", DEFAULT_SKIPCHAINLOCKMINER);
-                if(!bSkipMinerChainlockCheck) {
-                    // if miner is sure network doesn't have finality he can try to push through the block, otherwise should wait until he gets finality from peer
-                    throw std::runtime_error("CalcCbTxBestChainlock failed!");	
-                }
-            }
-            ds << cbTx;
         }
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate

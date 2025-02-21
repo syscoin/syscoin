@@ -2591,8 +2591,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // is enforced in ContextualCheckBlockHeader(); we wouldn't want to
     // re-enforce that rule here (at least until we make it impossible for
     // m_adjusted_time_callback() to go backward).
-    // SYSCOIN
-    if (!CheckBlock(block, state, params.GetConsensus(), !fJustCheck, !fJustCheck, pindex->nHeight)) {
+    if (!CheckBlock(block, state, params.GetConsensus(), !fJustCheck, !fJustCheck)) {
         if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED) {
             // We don't write down blocks to disk if they may have been
             // corrupted, so this should be impossible unless we're having hardware
@@ -2778,7 +2777,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     // SYSCOIN
     const uint256& blockHash = block.GetHash();
-    bool fNexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock;
+    bool fNexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock || fRegTest;
     fScriptChecks = fScriptChecks && fNexusContext;
     CDeterministicMNListNEVMAddressDiff diff;
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
@@ -2786,6 +2785,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         LogPrintf("ERROR: %s: ProcessSpecialTxsInBlock for block %s failed with %s\n", __func__,
                      pindex->GetBlockHash().ToString().c_str(), state.ToString().c_str());
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, state.ToString());
+    }
+    if (fNexusContext && (!(block.vtx[0]->nVersion <= CTransaction::CURRENT_VERSION || 
+        block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT))) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-version", 
+                            strprintf("Coinbase transaction must be standard or explicitly allowed MN versions: %d", block.vtx[0]->nVersion));
     }
 
     for (unsigned int i = 0; i < block.vtx.size(); i++)
@@ -2831,7 +2835,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // * legacy (always)
         // * p2sh (when P2SH enabled in flags and excludes coinbase)
         // * witness (when witness enabled in flags and excludes coinbase)
-        // SYSCOIN
         nSigOpsCost += GetTransactionSigOpCost(tx, view, flags);
         if (nSigOpsCost > MAX_BLOCK_SIGOPS_COST) {
             LogPrintf("ERROR: ConnectBlock(): too many sigops\n");
@@ -3604,7 +3607,6 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             // This is likely a fatal error, but keep the mempool consistent,
             // just in case. Only remove from the mempool in this case.
             MaybeUpdateMempoolForReorg(disconnectpool, false);
-
             // If we're unable to disconnect a block during normal operation,
             // then that is a failure of our local system -- we should abort
             // rather than stay on a less work chain.
@@ -4328,8 +4330,8 @@ static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& st
 
     return true;
 }
-// SYSCOIN
-bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW, bool fCheckMerkleRoot, int nHeight)
+
+bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW, bool fCheckMerkleRoot)
 {
     // These are checks that are independent of context.
 
@@ -4377,22 +4379,7 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     if(block.IsNEVM() && block.vchNEVMBlockData.empty() && !fRegTest) {
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "nevm-data-not-found");
     }
-    // Reject if coinbase is not the expected version in the last DKG height
-    bool fNexusActive_context = nHeight >= consensusParams.nNexusStartBlock;
-    if (fNexusActive_context) { 
-        const auto& nQuorumStartHeight = nHeight - (nHeight % consensusParams.llmqTypeChainLocks.dkgInterval);
-        const auto& nLastDKGHeight = nQuorumStartHeight + consensusParams.llmqTypeChainLocks.dkgMiningWindowStart - 1;
-        if (nHeight == nLastDKGHeight && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-cb-type", "Incorrect coinbase transaction version at DKG height");
-        }
-    }
-    // Ensure the coinbase transaction is either standard or explicitly allowed
-    if (!(block.vtx[0]->nVersion <= CTransaction::CURRENT_VERSION || 
-        block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_CLSIG || 
-        block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT)) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-version", 
-                            strprintf("Coinbase transaction must be standard or explicitly allowed MN versions: %d", block.vtx[0]->nVersion));
-    }
+
     if(block.vchNEVMBlockData.size() > MAX_NEVM_BLOCK_SIZE) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "nevm-block-size");
     }
@@ -4647,30 +4634,17 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     if ((fRegTest || nevmContext) && GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
     }
-    // SYSCOIN
     bool fNexusActive_context = nHeight >= consensusParams.nNexusStartBlock;
-    // if commitment doesn't exist and is required make sure commitment tx is in coinbase
-    // otherwise if outside of commitment mining interval and we are in last block of DKG ensure we create SYSCOIN_TX_VERSION_MN_CLSIG tx
-    if(fNexusActive_context) {
-        // this quorum period start
-        const auto& nQuorumStartHeight = nHeight - (nHeight % Params().GetConsensus().llmqTypeChainLocks.dkgInterval);
-        // last possible block for last quorum period
-        const auto& nLastDKGHeight = nQuorumStartHeight + Params().GetConsensus().llmqTypeChainLocks.dkgMiningWindowStart - 1;
-        if(nHeight == nLastDKGHeight && block.vtx[0]->nVersion != SYSCOIN_TX_VERSION_MN_CLSIG) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-cb-type", strprintf("%s : Incorrect version of coinbase transaction", __func__));
-        }
-    }
     // Ensure the coinbase transaction is either standard or explicitly allowed
-    if (!(block.vtx[0]->nVersion <= CTransaction::CURRENT_VERSION || 
-        block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_CLSIG || 
-        block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT)) {
+    if (fNexusActive_context && (!(block.vtx[0]->nVersion <= CTransaction::CURRENT_VERSION || 
+        block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT))) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-version", 
                             strprintf("Coinbase transaction must be standard or explicitly allowed MN versions: %d", block.vtx[0]->nVersion));
     }
 
     for (const auto& txRef : block.vtx)
     {
-        if (!txRef->IsCoinBase() && (txRef->nVersion == SYSCOIN_TX_VERSION_MN_CLSIG || txRef->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT)) {
+        if (!txRef->IsCoinBase() && txRef->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-mn-version", "Bad version for non-coinbase masternode transaction");
         }
     }
@@ -4924,8 +4898,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     }
 
     const CChainParams& params{GetParams()};
-    // SYSCOIN
-    if (!CheckBlock(block, state, params.GetConsensus(), true, true, pindex->nHeight) ||
+    if (!CheckBlock(block, state, params.GetConsensus(), true, true) ||
         !ContextualCheckBlock(block, state, *this, pindex->pprev)) {
         if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
@@ -4994,8 +4967,7 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         // malleability that cause CheckBlock() to fail; see e.g. CVE-2012-2459 and
         // https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2019-February/016697.html.  Because CheckBlock() is
         // not very expensive, the anti-DoS benefits of caching failure (of a definitely-invalid block) are not substantial.
-        // SYSCOIN
-        bool ret = CheckBlock(*block, state, GetConsensus(), true, true, ActiveHeight() + 1);
+        bool ret = CheckBlock(*block, state, GetConsensus(), true, true);
         if (ret) {
             // Store to disk
             ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked);
@@ -5062,8 +5034,7 @@ bool TestBlockValidity(BlockValidationState& state,
     // NOTE: CheckBlockHeader is called by CheckBlock
     if (!ContextualCheckBlockHeader(block, state, chainstate.m_blockman, chainstate.m_chainman, pindexPrev, adjusted_time_callback()))
         return error("%s: Consensus::ContextualCheckBlockHeader: %s", __func__, state.ToString());
-    // SYSCOIN
-    if (!CheckBlock(block, state, chainparams.GetConsensus(), fCheckPOW, fCheckMerkleRoot, pindexPrev->nHeight + 1))
+    if (!CheckBlock(block, state, chainparams.GetConsensus(), fCheckPOW, fCheckMerkleRoot))
         return error("%s: Consensus::CheckBlock: %s", __func__, state.ToString());
     if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev))
         return error("%s: Consensus::ContextualCheckBlock: %s", __func__, state.ToString());
@@ -5182,8 +5153,8 @@ VerifyDBResult CVerifyDB::VerifyDB(
             LogPrintf("Verification error: ReadBlockFromDisk failed at %d, hash=%s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
             return VerifyDBResult::CORRUPTED_BLOCK_DB;
         }
-        // SYSCOIN check level 1: verify block validity
-        if (nCheckLevel >= 1 && !CheckBlock(block, state, consensus_params, true, true, pindex->nHeight)) {
+        // check level 1: verify block validity
+        if (nCheckLevel >= 1 && !CheckBlock(block, state, consensus_params, true, true)) {
             LogPrintf("Verification error: found bad block at %d, hash=%s (%s)\n",
                       pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
             return VerifyDBResult::CORRUPTED_BLOCK_DB;

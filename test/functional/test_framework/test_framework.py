@@ -1492,12 +1492,8 @@ class DashTestFramework(SyscoinTestFramework):
         return True
 
     def generate_block_helper(self, node, number, sync_fun, nodes=None):
-        try:
-            self.bump_mocktime(1, nodes=nodes)
-            self.generate(node, number, sync_fun=sync_fun)
-        except JSONRPCException as e:
-            if e.error["code"] == -1 and "CalcCbTxBestChainlock failed!" in e.error["message"]:
-                return False
+        self.bump_mocktime(1, nodes=nodes)
+        self.generate(node, number, sync_fun=sync_fun)
         return True
 
     def generate_helper(self, node, number, sync_fun=None, nodes=None):

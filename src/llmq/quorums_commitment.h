@@ -10,7 +10,6 @@
 #include <bls/bls.h>
 
 #include <univalue.h>
-#include <evo/cbtx.h>
 namespace node {
 class BlockManager;
 }

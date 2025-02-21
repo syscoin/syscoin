@@ -148,7 +148,6 @@ using node::DEFAULT_PERSIST_MEMPOOL;
 using node::DEFAULT_SYNC_MEMPOOL;
 using node::DEFAULT_PRINTPRIORITY;
 // SYSCOIN
-using node::DEFAULT_SKIPCHAINLOCKMINER;
 using node::DEFAULT_STOPATHEIGHT;
 using node::fReindex;
 using node::KernelNotifications;
@@ -556,7 +555,6 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-sporkkey=<key>", strprintf("Private key for use with sporks"), ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
     argsman.AddArg("-watchquorums=<n>", strprintf("Watch and validate quorum communication (default: %u)", llmq::DEFAULT_WATCH_QUORUMS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pushversion=<n>", "Specify running with a protocol version. Only useful for regtest", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-miningskipchainlock", strprintf("Skip miner check for chainlocks prior to submission. If miner does not have a chainlock but knows the network doesn't have one either for current quorum transition, he can try to push it through the network as it should validate. (default: %u)", DEFAULT_SKIPCHAINLOCKMINER), ArgsManager::ALLOW_ANY, OptionsCategory::BLOCK_CREATION);
     argsman.AddArg("-blockfilterindex=<type>",
                  strprintf("Maintain an index of compact filters by block (default: %s, values: %s).", DEFAULT_BLOCKFILTERINDEX, ListBlockFilterTypes()) +
                  " If <type> is not supplied or if <type> = 1, indexes for all known types are enabled.",

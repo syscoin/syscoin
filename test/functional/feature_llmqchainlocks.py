@@ -76,7 +76,7 @@ class LLMQChainLocksTest(DashTestFramework):
         self.wait_for_chainlocked_block_all_nodes(cl)
         self.log.info("Restart miner and ensure chainlock is sent via P2P")
         self.stop_node(0)
-        self.start_node(0, extra_args=["-miningskipchainlock", *self.extra_args[0]])
+        self.start_node(0)
         self.connect_nodes(0, 1)
         # just mnsync the first blockchain step and skip over governance
         self.sync_mnsync([self.nodes[0]], "blockchain")
@@ -84,7 +84,6 @@ class LLMQChainLocksTest(DashTestFramework):
         self.wait_for_chainlocked_block(self.nodes[0], cl)
         
         self.log.info("Mine many blocks, wait for chainlock")
-        # miningskipchainlock flag above should enable the block to be created as node will have latest CLSIG but it won't be part of the latest quorum window), network should allow it
         cl = self.generate(self.nodes[0], 20)[-6]
         # We need more time here due to 20 blocks being generated at once
         self.wait_for_chainlocked_block_all_nodes(cl, timeout=30)

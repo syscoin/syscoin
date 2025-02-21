@@ -12,7 +12,6 @@
 #include <validation.h>
 
 #include <evo/deterministicmns.h>
-#include <evo/cbtx.h>
 #include <evo/specialtx.h>
 #include <string>
 

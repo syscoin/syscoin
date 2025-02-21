@@ -65,7 +65,6 @@
 // SYSCOIN
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
-#include <evo/cbtx.h>
 #include <llmq/quorums_init.h>
 #include <llmq/quorums_commitment.h>
 #include <governance/governance.h>
@@ -351,7 +350,7 @@ TestChain100Setup::TestChain100Setup(
     {
         LOCK(::cs_main);
         // SYSCOIN
-        // printf("m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() %s\n", m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString().c_str());
+        //printf("m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() %s\n", m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString().c_str());
         assert(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
             "257e6f4da68ba7926cecb2ec170f78a84dc1a4f5459397c8cae1d01b85a97cf2" ||
@@ -360,7 +359,7 @@ TestChain100Setup::TestChain100Setup(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
             "7c6b2a656a3bf93c2a852531b2be1bc5cdfa776c0f2e12ee06f713021e24eb82"  ||
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "1f9af1d58cd44a9462201ff1eea5d214c725365789afb5af05a5e0534230a7cf");
+            "1006fb4968213b82b3a54a150c0de8291b483c37b7b0d5718d44b8efbfd34d2f");
     }
 }
 
@@ -404,14 +403,6 @@ CBlock TestChain100Setup::CreateBlock(
         const auto &bytesVec = MakeUCharSpan(ds);
         vchCoinbaseCommitmentExtra = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
 
-    } else if (block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_CLSIG) {
-        CCbTxCLSIG cbTx;
-        if (!GetTxPayload(*block.vtx[0], cbTx)) {
-            assert(false);
-        }
-        ds << cbTx;
-        const auto &bytesVec = MakeUCharSpan(ds);
-        vchCoinbaseCommitmentExtra = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
     }
 
     RegenerateCommitments(block, *Assert(m_node.chainman), vchCoinbaseCommitmentExtra);

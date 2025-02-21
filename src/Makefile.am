@@ -140,7 +140,6 @@ SYSCOIN_CORE_H = \
   governance/governancevote.h \
   governance/governancevotedb.h \
   cxxtimer.hpp \
-  evo/cbtx.h \
   evo/deterministicmns.h \
   evo/evodb.h \
   evo/mnauth.h \
@@ -479,7 +478,6 @@ libsyscoin_node_a_SOURCES = \
   governance/governancevalidators.cpp \
   governance/governancevote.cpp \
   governance/governancevotedb.cpp \
-  evo/cbtx.cpp \
   evo/deterministicmns.cpp \
   evo/mnauth.cpp \
   evo/dmnstate.cpp \

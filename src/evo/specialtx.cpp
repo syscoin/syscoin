@@ -9,7 +9,6 @@
 #include <primitives/transaction.h>
 #include <validation.h>
 
-#include <evo/cbtx.h>
 #include <evo/deterministicmns.h>
 #include <evo/specialtx.h>
 #include <util/time.h>
@@ -47,8 +46,6 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
     try {
         static SteadyClock::duration nTimeLoop{};
         static SteadyClock::duration nTimeQuorum{};
-        static SteadyClock::duration nTimeDMN{};
-        static SteadyClock::duration nTimeCbTxCL{};
 
         auto nTime1 = SystemClock::now();
         llmq::CFinalCommitmentTxPayload qcTx;
@@ -74,17 +71,6 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
             // pass the state returned by the function above
             return false;
         }
-
-        auto nTime4 = SystemClock::now(); nTimeDMN += nTime4 - nTime3;
-        LogPrint(BCLog::BENCHMARK, "        - deterministicMNManager: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime4 - nTime3), Ticks<SecondsDouble>(nTimeDMN));
-        if (check_sigs && !CheckCbTxBestChainlock(chainman, block, pindex, state, fJustCheck)) {
-            // pass the state returned by the function above
-            return false;
-        }
-
-        auto nTime5 = SystemClock::now(); nTimeCbTxCL += nTime5 - nTime4;
-        LogPrint(BCLog::BENCHMARK, "        - CheckCbTxBestChainlock: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime5 - nTime4), Ticks<SecondsDouble>(nTimeCbTxCL));
-
     } catch (const std::exception& e) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "failed-procspectxsinblock");
     }

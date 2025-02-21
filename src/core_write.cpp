@@ -19,7 +19,6 @@
 #include <util/check.h>
 #include <util/strencodings.h>
 // SYSCOIN
-#include <evo/cbtx.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <llmq/quorums_commitment.h>
@@ -315,13 +314,6 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
             UniValue obj;
             proTx.ToJson(obj);
             entry.pushKV("proUpRevTx", obj);
-        }
-    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_CLSIG) {
-        CCbTxCLSIG cbTx;
-        if (GetTxPayload(tx, cbTx)) {
-            UniValue obj;
-            cbTx.ToJson(obj);
-            entry.pushKV("cbTx", obj);
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
         llmq::CFinalCommitmentTxPayload qcTx;
