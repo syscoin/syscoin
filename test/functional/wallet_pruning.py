@@ -49,8 +49,7 @@ class WalletPruningTest(SyscoinTestFramework):
             if i.running:
                 i.setmocktime(self.nTime + 150 * n)
         for _ in range(n):
-            # SYSCOIN
-            block = create_block(hashprev=previousblockhash, ntime=self.nTime, coinbase=create_coinbase(height, script_pubkey=big_script, dip3height=9000))
+            block = create_block(hashprev=previousblockhash, ntime=self.nTime, coinbase=create_coinbase(height, script_pubkey=big_script))
             block.solve()
 
             # Submit to the node

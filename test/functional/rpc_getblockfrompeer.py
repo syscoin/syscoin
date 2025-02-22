@@ -146,7 +146,7 @@ class GetBlockFromPeerTest(SyscoinTestFramework):
         # SYSCOIN
         pruneheight += 250
         assert_equal(pruned_node.pruneblockchain(700), pruneheight)
-        assert_equal(pruned_node.getblock(pruned_block)["hash"], "69ee8c8b669ff3fdfb938e4cc1a4381b44179dc3d99f10ec063c1894193f5016")
+        assert_equal(pruned_node.getblock(pruned_block)["hash"], "7e1277339793bb0ac209b52cbaaaa6e648085fd68365b25855da0deedc09120c")
 
         self.log.info("Fetched block can be pruned again when prune height exceeds the height of the tip at the time when the block was fetched")
         self.generate(self.nodes[0], 250, sync_fun=self.no_op)

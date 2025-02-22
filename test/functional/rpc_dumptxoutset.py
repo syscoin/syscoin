@@ -39,12 +39,12 @@ class DumptxoutsetTest(SyscoinTestFramework):
         # SYSCOIN
         assert_equal(
             out['base_hash'],
-            '4467b30ba5ffd3ef65ededf39e0bdb0e250606741713a07f7e9bf0335b20088d')
+            '0988393aa1ef9b532f79b4f00d61f3b6c3ca2482cab1657e0d85a5b50b0457a8')
 
         # SYSCOIN UTXO snapshot hash should be deterministic based on mocked time.
         assert_equal(
             sha256sum_file(str(expected_path)).hex(),
-            'af047c760ed3e729599f6374a54c25032dd71e0d0a6073320c31cffdd5d8ed64')
+            '32145f8e86a69f89fb4325046e7aeff764f73f987dde4d42691cf3cace27defa')
 
         assert_equal(
             out['txoutset_hash'], '4c404a06b9d8f099eed7529f0f62ffb0e350b89c98eb310851b2efb7067a1550')

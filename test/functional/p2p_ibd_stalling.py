@@ -63,8 +63,7 @@ class P2PIBDStallingTest(SyscoinTestFramework):
         self.log.info("Prepare blocks without sending them to the node")
         block_dict = {}
         for _ in range(NUM_BLOCKS):
-            # SYSCOIN
-            blocks.append(create_block(tip, create_coinbase(height, dip3height=9000), block_time))
+            blocks.append(create_block(tip, create_coinbase(height), block_time))
             blocks[-1].solve()
             tip = blocks[-1].sha256
             block_time += 1

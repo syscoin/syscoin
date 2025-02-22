@@ -1306,8 +1306,9 @@ class FullBlockTest(SyscoinTestFramework):
         self.send_blocks([block], True, timeout=2440)
 
         self.log.info("Reject a block with an invalid block header version")
-        b_v1 = self.next_block('b_v1', version=1)
-        self.send_blocks([b_v1], success=False, force_send=True, reject_reason='bad-version(0x00000001)', reconnect=True)
+        # SYSCOIN
+        b_v1 = self.next_block('b_v1', version=2)
+        self.send_blocks([b_v1], success=False, force_send=True, reject_reason='bad-version(0x00000002)', reconnect=True)
 
         self.move_tip(chain1_tip + 2)
         b_cb34 = self.next_block('b_cb34')

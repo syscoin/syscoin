@@ -51,7 +51,7 @@ class LLMQDKGErrors(DashTestFramework):
         self.assert_member_valid(qh, self.mninfo[0].proTxHash, False)
 
         self.log.info("Heal some damage (don't get PoSe banned)")
-        self.heal_masternodes(33)
+        self.heal_masternodes(35)
 
         self.log.info("Lets lie in the contribution and then also lie in the justification")
         self.mninfo[0].node.quorum_dkgsimerror('justify-omit', 0)

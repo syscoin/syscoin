@@ -91,6 +91,10 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
 
         /* Finalise it by setting the version and building the merkle root.  */
         IncrementExtraNonce (&newBlock->block, pindexPrev, extraNonce);
+        // SYSCOIN
+        const int32_t nChainId = chainman.GetConsensus ().nAuxpowChainId;
+        const int32_t nVersion = chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainman.GetConsensus ());
+        newBlock->block.SetBaseVersion(nVersion, nChainId);
         newBlock->block.SetAuxpowVersion (true);
 
         /* Save in our map of constructed blocks.  */

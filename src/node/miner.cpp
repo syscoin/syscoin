@@ -144,7 +144,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         const int32_t nVersion = m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
         pblock->SetBaseVersion(nVersion, nChainId);
     } else {
-        pblock->SetOldBaseVersion(4, chainparams.GetConsensus ().nAuxpowOldChainId);
+        pblock->nVersion = m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
     }
     if(NEVMActive_context && (!fRegTest || fNEVMConnection)) {
         pblock->SetNEVMVersion();
@@ -182,13 +182,15 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     coinbaseTx.vout[0].nValue = blockReward + nFees;
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
     // SYSCOIN
+    if (!fRegTest && !fSigNet && !chainparams.MineBlocksOnDemand()) {
+        if (!masternodeSync.IsSynced()) {	
+            throw std::runtime_error("Masternode information has not synced, please wait until it finishes before mining!");	
+        }
+    }
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     CDataStream dsNEVM(SER_NETWORK, PROTOCOL_VERSION);
     BlockValidationState state;
     if(fDIP0003Active_context) {
-        if (!fSigNet && !masternodeSync.IsSynced()) {	
-            throw std::runtime_error("Masternode information has not synced, please wait until it finishes before mining!");	
-        }
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate
         llmq::CFinalCommitmentTxPayload qcTx;

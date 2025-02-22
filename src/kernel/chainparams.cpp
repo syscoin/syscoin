@@ -678,7 +678,7 @@ public:
                 .height = 200,
                 .hash_serialized = AssumeutxoHash{uint256S("0x51c8d11d8b5c1de51543c579736e786aa2736206d1e11e627568029ce092cf62")},
                 .nChainTx = 201,
-                .blockhash = uint256S("0x061e22937c3dc23a1ac5abba9ddb5df892b5215230446aea731b73337879e25a")
+                .blockhash = uint256S("0x4714f69f1351cec30da58e04dfb6e8435684fd0b500ed80fee44876a2dc41bab")
             }
             /*{
                 // For use by test/functional/feature_assumeutxo.py

@@ -23,7 +23,8 @@ class WalletCrossChain(SyscoinTestFramework):
 
         # Switch node 1 to testnet before starting it.
         self.nodes[1].chain = 'testnet3'
-        self.nodes[1].extra_args = ['-maxconnections=0', '-prune=550'] # disable testnet sync
+        # SYSCOIN
+        self.nodes[1].extra_args = ['-zmqpubnevm=', '-maxconnections=0', '-prune=550'] # disable testnet sync
         self.nodes[1].replace_in_config([('regtest=', 'testnet='), ('[regtest]', '[test]')])
         self.start_nodes()
 

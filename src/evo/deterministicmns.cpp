@@ -651,7 +651,6 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
         LOCK(cs);
         readCache = m_evoDb->ReadCache(blockHash, curList);
     }
-    LogPrintf("UndoBlock blockHash %s readCache %d\n", blockHash.ToString(), readCache);
     if(readCache) {
         prevList = GetListForBlockInternal(pindex->pprev);
         {
@@ -661,7 +660,6 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
         CDeterministicMNListDiff inversedDiff;
         curList.BuildDiff(prevList, inversedDiff, inversedDiffNEVMAddress);
         if(inversedDiff.HasChanges()) {
-            LogPrintf("UndoBlock haschanges inversedDiff %d %d %d inversedDiffNEVMAddress %s\n", inversedDiff.addedMNs.size(), inversedDiff.updatedMNs.size(), inversedDiff.removedMns.size(),inversedDiffNEVMAddress.ToString());
             GetMainSignals().NotifyMasternodeListChanged(true, prevList, inversedDiff);
         }
         // SYSCOIN always update interface
