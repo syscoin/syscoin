@@ -123,6 +123,8 @@ public:
 
     void ToJson(UniValue& obj) const
     {
+        obj.clear();
+        obj.setObject();
         UniValue qcObj;
         commitment.ToJson(qcObj);
         obj.pushKV("version", nVersion);
