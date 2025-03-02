@@ -3,7 +3,7 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Tests around dash governance."""
-
+import time
 import json
 from test_framework.test_framework import DashTestFramework
 from test_framework.util import assert_equal, satoshi_round, wait_until_helper_internal
@@ -89,8 +89,19 @@ class SyscoinGovernanceTest (DashTestFramework):
                     break
         return count == len(self.nodes)
 
+    def wait_for_trigger(self, sb_block_height, timeout=10):
+        def check_for_trigger():
+            if((self.nodes[0].getblockcount()+1) >= sb_block_height):
+                return False
+            self.bump_mocktime(6)
+            self.sync_blocks()
+            time.sleep(2)
+            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+            return self.have_trigger_for_height(sb_block_height)
+        wait_until_helper_internal(check_for_trigger, timeout=timeout)
+        
     def run_test(self):
-        self.budget = satoshi_round("1500000.00")
+        self.budget = satoshi_round("2000000.00")
         governance_info = self.nodes[0].getgovernanceinfo()
         assert_equal(governance_info['governanceminquorum'], 1)
         assert_equal(governance_info['proposalfee'], 150.0)
@@ -116,7 +127,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         sb_cycle = governance_info['superblockcycle']
         sb_maturity_window = governance_info['superblockmaturitywindow']
         sb_immaturity_window = sb_cycle - sb_maturity_window
-        self.expected_v20_budget = satoshi_round("1650000.00")
+        self.expected_v20_budget = satoshi_round("2200000.00")
 
 
         self.nodes[0].spork("SPORK_9_SUPERBLOCKS_ENABLED", 0)
@@ -350,36 +361,42 @@ class SyscoinGovernanceTest (DashTestFramework):
             assert_equal(self.nodes[0].gobject_list("valid", "triggers")[isolated_trigger_hash]['NoCount'], self.mn_count - 1)
 
         block_count = self.nodes[0].getblockcount()
-        n = sb_cycle - block_count % sb_cycle
+        gov_info = self.nodes[0].getgovernanceinfo()
+        sb_cycle = gov_info['superblockcycle']
+        sb_height = gov_info['nextsuperblock']
 
-        # Move remaining n blocks until the next Superblock
-        for _ in range(n - 1):
-            self.generate(self.nodes[0], 1)
-            self.bump_mocktime(1)
-            self.sync_blocks()
-        # Wait for new trigger and votes
-        self.wait_until(lambda: self.have_trigger_for_height(175), timeout=5)
+        # Move until 1 block before the Superblock maturity window starts
+        n = sb_immaturity_window - block_count % sb_cycle
+        self.generate(self.nodes[0], n - 1)
+        self.log.info(f"Waiting for trigger")
+        self.wait_for_trigger(sb_height)
+        
         # Mine superblock
-        self.generate(self.nodes[0], 1)
-        self.bump_mocktime(1)
-        self.sync_blocks()
+        block_count = self.nodes[0].getblockcount()
+        n = sb_height - block_count
+        if n > 0:
+            self.generate(self.nodes[0], n)
         assert_equal(self.nodes[0].getblockcount(), 175)
         self.check_superblock()
         self.check_superblockbudget()
         # Mine and check a couple more superblocks
         for i in range(2):
-            for _ in range(sb_cycle - 1):
-                self.generate(self.nodes[0], 1)
-                self.bump_mocktime(1)
-                self.sync_blocks()
-            # Wait for new trigger and votes
-            sb_block_height = 175 + (i + 1) * sb_cycle
-            self.wait_until(lambda: self.have_trigger_for_height(sb_block_height), timeout=5)
-            # Mine superblock
-            self.generate(self.nodes[0], 1)
-            self.bump_mocktime(1)
-            self.sync_blocks()
-            assert_equal(self.nodes[0].getblockcount(), sb_block_height)
+            block_count = self.nodes[0].getblockcount()
+            gov_info = self.nodes[0].getgovernanceinfo()
+            sb_cycle = gov_info['superblockcycle']
+            sb_height = gov_info['nextsuperblock']
+
+            # Move until 1 block before the Superblock maturity window starts
+            n = sb_immaturity_window - block_count % sb_cycle
+            self.generate(self.nodes[0], n - 1)
+            self.log.info(f"Waiting for trigger")
+            self.wait_for_trigger(sb_height)
+            block_count = self.nodes[0].getblockcount()
+            n = sb_height - block_count
+            if n > 0:
+                self.generate(self.nodes[0], n)
+            self.log.info(f"Mined superblock at height {sb_height}")
+            assert_equal(self.nodes[0].getblockcount(), sb_height)
             self.check_superblock()
             self.check_superblockbudget()
 

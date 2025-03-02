@@ -51,8 +51,10 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
     const CAmount &nPaymentsLimitUp = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 2) / 100.0));
     const CAmount &nPaymentsLimitDown = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 2) / 100.0));
     const CAmount &nGovernanceBudgetDown = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 100.0));
-    const CAmount &nGovernanceBudget = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
-
+    CAmount nGovernanceBudget = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
+    if (nGovernanceBudget > CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MAX) {
+        nGovernanceBudget = CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MAX;
+    }
     const CAmount &nSuperblockMaxValue =  blockReward + nGovernanceBudget;
 
     bool isSuperblockMaxValueMet = block.vtx[0]->GetValueOut() <= nSuperblockMaxValue;
