@@ -808,9 +808,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 if (newList.HasUniqueProperty(proTx.addr) && newList.GetUniquePropertyMN(proTx.addr)->proTxHash != proTx.proTxHash) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-addr");
                 }
-                if (newList.HasUniqueProperty(proTx.vchNEVMAddress) && newList.GetUniquePropertyMN(proTx.vchNEVMAddress)->proTxHash != proTx.proTxHash) {
-                    return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-nevm-address");
-                }
 
                 CDeterministicMNCPtr dmn = newList.GetMN(proTx.proTxHash);
                 if (!dmn) {
@@ -819,13 +816,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
                 newState->addr = proTx.addr;
                 newState->scriptOperatorPayout = proTx.scriptOperatorPayout;
-                if(newState->confirmedHash.IsNull() && !proTx.vchNEVMAddress.empty()) {
-                    return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-unconfirmed-nevm-address");
-                }
-                if (newState->vchNEVMAddress != proTx.vchNEVMAddress) {
-                    newState->m_changed_nevm_address = true;
-                    newState->vchNEVMAddress = proTx.vchNEVMAddress;
-                }
 
                 if (newState->IsBanned()) {
                     // only revive when all keys are set
@@ -840,35 +830,55 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                         __func__, proTx.proTxHash.ToString(), nHeight, proTx.ToString());
                 break;
             } 
-            case(SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR): {
+            case (SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR): {
                 CProUpRegTx proTx;
                 if (!GetTxPayload(tx, proTx)) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-payload");
                 }
-
+            
                 CDeterministicMNCPtr dmn = newList.GetMN(proTx.proTxHash);
                 if (!dmn) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-hash");
                 }
-                auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
-                if (newState->pubKeyOperator != proTx.pubKeyOperator) {
-                    // reset all operator related fields and put MN into PoSe-banned state in case the operator key changes
-                    newState->ResetOperatorFields();
-                    if(!newState->vchNEVMAddress.empty()) {
-                        newList.m_changed_nevm_address = true;
+            
+                // Validate NEVM address only if non-empty
+                if (!proTx.vchNEVMAddress.empty()) {
+                    if (proTx.vchNEVMAddress.size() != 20) {
+                        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-invalid-nevmaddress-size");
                     }
+                    if (newList.HasUniqueProperty(proTx.vchNEVMAddress) && 
+                        newList.GetUniquePropertyMN(proTx.vchNEVMAddress)->proTxHash != proTx.proTxHash) {
+                        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-nevm-address");
+                    }
+                }
+            
+                auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
+            
+                // Handle pubKeyOperator changes
+                if (newState->pubKeyOperator != proTx.pubKeyOperator) {
+                    newState->ResetOperatorFields();
                     newState->BanIfNotBanned(nHeight);
-                    // we update pubKeyOperator here, make sure state version matches
                     newState->nVersion = proTx.nVersion;
                     newState->pubKeyOperator = proTx.pubKeyOperator;
                 }
+            
+                // Always handle NEVM address changes, regardless of operator key change
+                if (newState->vchNEVMAddress != proTx.vchNEVMAddress) {
+                    if (!proTx.vchNEVMAddress.empty() && newState->confirmedHash.IsNull()) {
+                        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-unconfirmed-nevm-address");
+                    }
+                    newState->m_changed_nevm_address = true;
+                    newState->vchNEVMAddress = proTx.vchNEVMAddress;
+                }
+            
                 newState->keyIDVoting = proTx.keyIDVoting;
                 newState->scriptPayout = proTx.scriptPayout;
                 newList.UpdateMN(proTx.proTxHash, newState);
+            
                 LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s updated at height %d: %s\n",
-                        __func__, proTx.proTxHash.ToString(), nHeight, proTx.ToString());
+                         __func__, proTx.proTxHash.ToString(), nHeight, proTx.ToString());
                 break;
-            } 
+            }            
             case(SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE): {
                 CProUpRevTx proTx;
                 if (!GetTxPayload(tx, proTx)) {

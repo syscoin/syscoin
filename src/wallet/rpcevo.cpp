@@ -723,13 +723,12 @@ static RPCHelpMan protx_update_service()
             {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified, the wallet will only use coins from this address to fund ProTx.\n"
                 "If not specified, payoutAddress is the one that is going to be used.\n"
                 "The private key belonging to this address must be known in your wallet."},
-            {"nevmAddress", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The NEVM address to associate with smart contracts."},
             {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default)"},
         },
         RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
         RPCExamples{
-            HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r \"<NEVM address>\"")
-            + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"<NEVM address>\")")
+            HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
+            + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\")")
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -807,18 +806,6 @@ static RPCHelpMan protx_update_service()
         }
     }
 
-    if (!request.params[5].isNull()) {
-        std::string nevmAddressStr = request.params[5].get_str();
-
-        // Check if the string starts with "0x" and remove it if present
-        if (nevmAddressStr.rfind("0x", 0) == 0) {
-            nevmAddressStr = nevmAddressStr.substr(2);
-        }
-
-        // Parse the remaining string as hex
-        ptx.vchNEVMAddress = ParseHex(nevmAddressStr);
-    }
-
     FundSpecialTx(*pwallet, tx, ptx, feeSource);
 
     SignSpecialTxPayloadByHash(tx, ptx, keyOperator);
@@ -829,115 +816,135 @@ static RPCHelpMan protx_update_service()
     };
 }
 
-static RPCHelpMan protx_update_registrar()
-{
-        return RPCHelpMan{"protx_update_registrar",
-            "\nCreates and sends a ProUpRegTx to the network. This will update the operator key, voting key and payout\n"
-            "address of the masternode specified by \"proTxHash\".\n"
-            "The owner key of the masternode must be known to your wallet.\n",
-            {
-                {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
-                {"operatorPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS public key. The BLS private key does not have to be known.\n"
-                                "It has to match the BLS private key which is later used when operating the masternode.\n"
-                                "If set to an empty string, the currently active operator BLS public key is reused."},                   
-                {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                "It has to match the private key which is later used when voting on proposals.\n"
-                                "If set to an empty string, the currently active voting key address is reused."}, 
-                {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments.\n"
-                                 "If set to an empty string, the currently active payout address is reused."}, 
-                {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
-                                    "If not specified, payoutAddress is the one that is going to be used.\n"
-                                    "The private key belonging to this address must be known in your wallet."},
-                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
-            },
-            RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
-            RPCExamples{
-                    HelpExampleCli("protx_update_registrar", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-                + HelpExampleRpc("protx_update_registrar", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
-            },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
-    if (!pwallet) return NullUniValue;
-
-    // Make sure the results are valid at least up to the most recent block
-    // the user could have gotten from another RPC command prior to now
-    pwallet->BlockUntilSyncedToCurrentChain();
-    EnsureWalletIsUnlocked(*pwallet);
-    CProUpRegTx ptx;
-    bool v19active;
+    static RPCHelpMan protx_update_registrar()
     {
-        LOCK(cs_main);
-        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
-    }
-    bool specific_legacy_bls_scheme{!v19active};
-    if(request.params.size() >= 6) {
-        specific_legacy_bls_scheme = request.params[5].get_bool();
-    }
-    if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProUpRegTx::LEGACY_BLS_VERSION;
-    } else {
-        ptx.nVersion = CProUpRegTx::GetVersion(v19active);
-    }
-    ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
-    auto mnList = deterministicMNManager->GetListAtChainTip();
-    auto dmn = mnList.GetMN(ptx.proTxHash);
-    if (!dmn) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
-    }
-    ptx.pubKeyOperator = dmn->pdmnState->pubKeyOperator;
-    ptx.keyIDVoting = dmn->pdmnState->keyIDVoting;
-    ptx.scriptPayout = dmn->pdmnState->scriptPayout;
-
-    if (request.params[1].get_str() != "") {
-        ptx.pubKeyOperator.Set(ParseBLSPubKey(request.params[1].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme), ptx.nVersion == CProUpServTx::LEGACY_BLS_VERSION);
-    }
-    if (request.params[2].get_str() != "") {
-        ptx.keyIDVoting = ParsePubKeyIDFromAddress(request.params[2].get_str(), "voting address");
-    }
-
-    CTxDestination payoutDest;
-    ExtractDestination(ptx.scriptPayout, payoutDest);
-    if (request.params[3].get_str() != "") {
-        payoutDest = DecodeDestination(request.params[3].get_str());
-        if (!IsValidDestination(payoutDest)) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[3].get_str()));
-        }
-        ptx.scriptPayout = GetScriptForDestination(payoutDest);
-    }
-    
-    
-
-    CKey keyOwner;
+            return RPCHelpMan{"protx_update_registrar",
+                "\nCreates and sends a ProUpRegTx to the network. This will update the operator key, voting key, payout and NEVM address\n"
+                "address of the masternode specified by \"proTxHash\".\n"
+                "The owner key of the masternode must be known to your wallet.\n",
+                {
+                    {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
+                    {"operatorPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS public key. The BLS private key does not have to be known.\n"
+                                    "It has to match the BLS private key which is later used when operating the masternode.\n"
+                                    "If set to an empty string, the currently active operator BLS public key is reused."},                   
+                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
+                                    "It has to match the private key which is later used when voting on proposals.\n"
+                                    "If set to an empty string, the currently active voting key address is reused."}, 
+                    {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments.\n"
+                                    "If set to an empty string, the currently active payout address is reused."}, 
+                    {"nevmAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The NEVM address to associate with NEVM registry.\n"
+                                    "If set to an empty string, any existing NEVM registry entry will be removed."},
+                    {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
+                                        "If not specified, payoutAddress is the one that is going to be used.\n"
+                                        "The private key belonging to this address must be known in your wallet."},
+                    {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
+                },
+                RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
+                RPCExamples{
+                        HelpExampleCli("protx_update_registrar", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r <NEVM address> tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
+                    + HelpExampleRpc("protx_update_registrar", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"<NEVM address>\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                },
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
     {
-        LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet, true);
-        LOCK2(pwallet->cs_wallet, spk_man.cs_KeyStore);
-        if (!spk_man.GetKey(dmn->pdmnState->keyIDOwner, keyOwner)) {
-            throw std::runtime_error(strprintf("Private key for owner address %s not found in your wallet", EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDOwner))));
+        std::shared_ptr<wallet::CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+        if (!pwallet) return NullUniValue;
+
+        // Make sure the results are valid at least up to the most recent block
+        // the user could have gotten from another RPC command prior to now
+        pwallet->BlockUntilSyncedToCurrentChain();
+        EnsureWalletIsUnlocked(*pwallet);
+        CProUpRegTx ptx;
+        bool v19active;
+        {
+            LOCK(cs_main);
+            v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
         }
-    }
+        bool specific_legacy_bls_scheme{!v19active};
+        if(request.params.size() >= 7) {
+            specific_legacy_bls_scheme = request.params[6].get_bool();
+        }
+        if (specific_legacy_bls_scheme) {
+            ptx.nVersion = CProUpRegTx::LEGACY_BLS_VERSION;
+        } else {
+            ptx.nVersion = CProUpRegTx::GetVersion(v19active);
+        }
+        ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
+        auto mnList = deterministicMNManager->GetListAtChainTip();
+        auto dmn = mnList.GetMN(ptx.proTxHash);
+        if (!dmn) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
+        }
+        ptx.pubKeyOperator = dmn->pdmnState->pubKeyOperator;
+        ptx.keyIDVoting = dmn->pdmnState->keyIDVoting;
+        ptx.scriptPayout = dmn->pdmnState->scriptPayout;
 
-    CMutableTransaction tx;
-    tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+        if (request.params[1].get_str() != "") {
+            ptx.pubKeyOperator.Set(ParseBLSPubKey(request.params[1].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme), ptx.nVersion == CProUpServTx::LEGACY_BLS_VERSION);
+        }
+        if (request.params[2].get_str() != "") {
+            ptx.keyIDVoting = ParsePubKeyIDFromAddress(request.params[2].get_str(), "voting address");
+        }
 
-    // make sure we get anough fees added
-    ptx.vchSig.resize(65);
+        CTxDestination payoutDest;
+        ExtractDestination(ptx.scriptPayout, payoutDest);
+        if (request.params[3].get_str() != "") {
+            payoutDest = DecodeDestination(request.params[3].get_str());
+            if (!IsValidDestination(payoutDest)) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[3].get_str()));
+            }
+            ptx.scriptPayout = GetScriptForDestination(payoutDest);
+        }
+        
+        
 
-    CTxDestination feeSourceDest = payoutDest;
-    if (!request.params[4].isNull()) {
-        feeSourceDest = DecodeDestination(request.params[4].get_str());
-        if (!IsValidDestination(feeSourceDest))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Syscoin address: ") + request.params[5].get_str());
-    }
+        CKey keyOwner;
+        {
+            LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*pwallet, true);
+            LOCK2(pwallet->cs_wallet, spk_man.cs_KeyStore);
+            if (!spk_man.GetKey(dmn->pdmnState->keyIDOwner, keyOwner)) {
+                throw std::runtime_error(strprintf("Private key for owner address %s not found in your wallet", EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDOwner))));
+            }
+        }
 
-    FundSpecialTx(*pwallet, tx, ptx, feeSourceDest);
-    SignSpecialTxPayloadByHash(tx, ptx, keyOwner);
-    SetTxPayload(tx, ptx);
+        CMutableTransaction tx;
+        tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
 
-    return SignAndSendSpecialTx(request, *pwallet, tx);
-},
-    };
-}  
+        // make sure we get anough fees added
+        ptx.vchSig.resize(65);
+
+        if (!request.params[4].isNull()) {
+            std::string nevmAddressStr = request.params[4].get_str();
+            if(nevmAddressStr.size() > 0) {
+                // Check if the string starts with "0x" and remove it
+                if (nevmAddressStr.rfind("0x", 0) == 0) {
+                    nevmAddressStr = nevmAddressStr.substr(2);
+                } else {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid NEVM address (should start with 0x): ") + request.params[4].get_str());
+                }
+            
+                // Ethereum address must be exactly 20 bytes (40 hex characters)
+                if (nevmAddressStr.length() != 40 || !IsHex(nevmAddressStr)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid NEVM address (must be 20 bytes / 40 hex chars): ") + request.params[4].get_str());
+                }
+            
+                // Parse the hex address into bytes
+                ptx.vchNEVMAddress = ParseHex(nevmAddressStr);
+            }
+        }
+        CTxDestination feeSourceDest = payoutDest;
+        if (!request.params[5].isNull()) {
+            feeSourceDest = DecodeDestination(request.params[5].get_str());
+            if (!IsValidDestination(feeSourceDest))
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Syscoin address: ") + request.params[5].get_str());
+        }
+        FundSpecialTx(*pwallet, tx, ptx, feeSourceDest);
+        SignSpecialTxPayloadByHash(tx, ptx, keyOwner);
+        SetTxPayload(tx, ptx);
+
+        return SignAndSendSpecialTx(request, *pwallet, tx);
+    },
+        };
+    }  
 
 
 static RPCHelpMan protx_revoke()

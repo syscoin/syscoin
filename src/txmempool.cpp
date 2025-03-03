@@ -512,15 +512,15 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx.GetHash());
             mapProTxAddresses.emplace(proTx.addr, tx.GetHash());
-            if(!proTx.vchNEVMAddress.empty()) {
-                mapProTxNEVMAddresses.emplace(proTx.vchNEVMAddress, tx.GetHash());
-            }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx.GetHash());
             mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx.GetHash());
+            if(!proTx.vchNEVMAddress.empty()) {
+                mapProTxNEVMAddresses.emplace(proTx.vchNEVMAddress, tx.GetHash());
+            }
             auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
             if(dmn) {
                 newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
@@ -620,15 +620,15 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         if (GetTxPayload(it->GetTx(), proTx)) {
             eraseProTxRef(proTx.proTxHash, it->GetTx().GetHash());
             mapProTxAddresses.erase(proTx.addr);
-            if(!proTx.vchNEVMAddress.empty()) {
-                mapProTxNEVMAddresses.erase(proTx.vchNEVMAddress);
-            }
         }
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) { 
             eraseProTxRef(proTx.proTxHash, it->GetTx().GetHash());
             mapProTxBlsPubKeyHashes.erase(proTx.pubKeyOperator.GetHash());
+            if(!proTx.vchNEVMAddress.empty()) {
+                mapProTxNEVMAddresses.erase(proTx.vchNEVMAddress);
+            }
         }
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
@@ -770,6 +770,15 @@ void CTxMemPool::removeConflicts(const CTransaction &tx)
         }
     }
 }
+void CTxMemPool::removeProTxNEVMKeyConflicts(const CTransaction &tx, const std::vector<unsigned char> &vchNEVMAddress)
+{
+    if (!vchNEVMAddress.empty() && mapProTxNEVMAddresses.count(vchNEVMAddress)) {
+        uint256 conflictHash = mapProTxNEVMAddresses[vchNEVMAddress];
+        if (conflictHash != tx.GetHash() && mapTx.count(conflictHash)) {
+            removeRecursive(mapTx.find(conflictHash)->GetTx(), MemPoolRemovalReason::CONFLICT);
+        }
+    }
+}
 
 void CTxMemPool::removeProTxPubKeyConflicts(const CTransaction &tx, const CKeyID &keyId)
 {
@@ -897,12 +906,6 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
                 removeRecursive(mapTx.find(conflictHash)->GetTx(), MemPoolRemovalReason::CONFLICT);
             }
         }
-        if (!proTx.vchNEVMAddress.empty() && mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
-            uint256 conflictHash = mapProTxNEVMAddresses[proTx.vchNEVMAddress];
-            if (conflictHash != tx.GetHash() && mapTx.count(conflictHash)) {
-                removeRecursive(mapTx.find(conflictHash)->GetTx(), MemPoolRemovalReason::CONFLICT);
-            }
-        }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
@@ -912,6 +915,7 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
 
         removeProTxPubKeyConflicts(tx, proTx.pubKeyOperator);
         removeProTxKeyChangedConflicts(tx, proTx.proTxHash, ::SerializeHash(proTx.pubKeyOperator));
+        removeProTxNEVMKeyConflicts(tx, proTx.vchNEVMAddress);
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if (!GetTxPayload(tx, proTx)) {
@@ -1207,12 +1211,6 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
             return true; // i.e. can't decode payload == conflict
         }
-        if(!proTx.vchNEVMAddress.empty()) {
-            if(mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
-                return true;
-            }
-        }
         if(proTx.addr != CService()) {
             if(mapProTxAddresses.count(proTx.addr)) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx.GetHash().ToString());
@@ -1223,26 +1221,41 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
         CProUpRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
-            return true; // i.e. can't decode payload == conflict
+            return true;
         }
-
-        // this method should only be called with validated ProTxs
+    
         auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
         if (!dmn) {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
-            return true; // i.e. failed to find validated ProTx == conflict
+            return true;
         }
-        // only allow one operator key change in the mempool
-        if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
-            if (hasKeyChangeInMempool(proTx.proTxHash)) {
-                return true;
-            }
+    
+        // Check confirmed hash (if required)
+        if (!proTx.vchNEVMAddress.empty() && dmn->pdmnState->confirmedHash.IsNull()) {
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: unconfirmed state for NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
+            return true;
         }
-        if(proTx.pubKeyOperator.Get().IsValid()) {
-            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
-                return true;
-            }
+    
+        // Check NEVM address size
+        if (!proTx.vchNEVMAddress.empty() && proTx.vchNEVMAddress.size() != 20) {
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid NEVM address size, tx: %s\n", __func__, tx.GetHash().ToString());
+            return true;
+        }
+    
+        // Check NEVM address uniqueness
+        if (!proTx.vchNEVMAddress.empty() && mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
+            return true;
+        }
+    
+        // Existing operator key conflict checks
+        if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator && hasKeyChangeInMempool(proTx.proTxHash)) {
+            return true;
+        }
+    
+        if (proTx.pubKeyOperator.Get().IsValid() && mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
+            return true;
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;

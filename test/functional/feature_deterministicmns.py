@@ -215,7 +215,7 @@ class DIP3Test(SyscoinTestFramework):
         assert old_voting_address != new_voting_address
         # also check if funds from payout address are used when no fee source address is specified
         node.sendtoaddress(mn.rewards_address, 0.001)
-        node.protx_update_registrar(mn.protx_hash, "", new_voting_address, "")
+        node.protx_update_registrar(mn.protx_hash, "", new_voting_address, "", "")
         self.generate(node, 1)
         new_dmnState = mn.node.masternode_status()["dmnState"]
         new_voting_address_from_rpc = new_dmnState["votingAddress"]
@@ -298,7 +298,7 @@ class DIP3Test(SyscoinTestFramework):
 
     def update_mn_payee(self, mn, payee):
         self.nodes[0].sendtoaddress(mn.fundsAddr, 0.001)
-        self.nodes[0].protx_update_registrar(mn.protx_hash, '', '', payee, mn.fundsAddr)
+        self.nodes[0].protx_update_registrar(mn.protx_hash, '', '', payee, "", mn.fundsAddr)
         self.generate(self.nodes[0], 1)
         info = self.nodes[0].protx_info(mn.protx_hash)
         assert info['state']['payoutAddress'] == payee

@@ -174,6 +174,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
             {RPCResult::Type::NUM, "version", "Version"},
             {RPCResult::Type::STR_HEX, "proTxHash", "proTxHash"},
             {RPCResult::Type::STR, "votingAddress", "Voting Address"},
+            {RPCResult::Type::STR, "nevmAddress", "NEVM Address"},
             {RPCResult::Type::STR, "payoutAddress", /*optional=*/true, "Payout Address"},
             {RPCResult::Type::STR_HEX, "pubKeyOperator", "Operator public key"},
             {RPCResult::Type::STR_HEX, "inputsHash", "Inputs Hash"}

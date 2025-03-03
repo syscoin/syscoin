@@ -35,6 +35,7 @@ static RPCHelpMan masternode_list()
             "  lastpaidblock  - Print the last block height a node was paid on the network\n"
             "  lastpaidtime   - Print the last time a node was paid on the network\n"
             "  owneraddress   - Print the masternode owner Syscoin address\n"
+            "  nevmaddress    - Print the masternode registered Syscoin NEVM address\n"
             "  payee          - Print the masternode payout Syscoin address (can be additionally filtered,\n"
             "                   partial match)\n"
             "  pubKeyOperator - Print the masternode operator public key\n"
@@ -462,7 +463,7 @@ RPCHelpMan masternodelist()
     strMode = ToLower(strMode);
 
     if (strMode != "addr" && strMode != "full" && strMode != "info" && strMode != "json" &&
-                strMode != "owneraddress" && strMode != "votingaddress" &&
+                strMode != "owneraddress" && strMode != "nevmaddress" && strMode != "votingaddress" &&
                 strMode != "lastpaidtime" && strMode != "lastpaidblock" &&
                 strMode != "payee" && strMode != "pubkeyoperator" &&
                 strMode != "status")
@@ -564,6 +565,7 @@ RPCHelpMan masternodelist()
             objMN.pushKV("lastpaidblock", dmn.pdmnState->nLastPaidHeight);
             objMN.pushKV("owneraddress", EncodeDestination(WitnessV0KeyHash(dmn.pdmnState->keyIDOwner)));
             objMN.pushKV("votingaddress", EncodeDestination(WitnessV0KeyHash(dmn.pdmnState->keyIDVoting)));
+            objMN.pushKV("nevmaddress", dmn.pdmnState->vchNEVMAddress.empty()? "" : "0x" + HexStr(dmn.pdmnState->vchNEVMAddress));
             objMN.pushKV("collateraladdress", collateralAddressStr);
             objMN.pushKV("pubkeyoperator", dmn.pdmnState->pubKeyOperator.Get().ToString());
             obj.pushKV(strOutpoint, objMN);
@@ -591,7 +593,10 @@ RPCHelpMan masternodelist()
         } else if (strMode == "votingaddress") {
             if (strFilter !="" && strOutpoint.find(strFilter) == std::string::npos) return;
             obj.pushKV(strOutpoint, EncodeDestination(WitnessV0KeyHash(dmn.pdmnState->keyIDVoting)));
-        }
+        } else if (strMode == "nevmaddress") {
+            if (strFilter !="" && strOutpoint.find(strFilter) == std::string::npos) return;
+            obj.pushKV(strOutpoint, dmn.pdmnState->vchNEVMAddress.empty()? "": "0x" + HexStr(dmn.pdmnState->vchNEVMAddress));
+        }  
     });
 
     return obj;

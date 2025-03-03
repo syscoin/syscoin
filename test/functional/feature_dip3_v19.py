@@ -80,7 +80,7 @@ class DIP3V19Test(DashTestFramework):
 
     def update_mn_payee(self, mn, payee):
         self.nodes[0].sendtoaddress(mn.collateral_address, 0.001)
-        self.nodes[0].protx_update_registrar(mn.proTxHash, '', '', payee, mn.collateral_address)
+        self.nodes[0].protx_update_registrar(mn.proTxHash, '', '', payee, "", mn.collateral_address)
         self.generate(self.nodes[0], 1)
         info = self.nodes[0].protx_info(mn.proTxHash)
         assert info['state']['payoutAddress'] == payee

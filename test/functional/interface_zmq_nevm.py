@@ -360,11 +360,11 @@ class ZMQTest(SyscoinTestFramework):
         self.mns = []
         # Test case 1: Create MN with NEVM address (should add)
         self.log.info("Creating MN with NEVM address")
-        mn1_nevm_address = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        mn1_nevm_address = "0x000000000000000000000000000000000000bEEF"
         mn = self.create_mn_with_nevm(1, "nevm-mn", mn1_nevm_address)
         self.mns.append(mn)
         self.sync_blocks()
-        expected_mapping = {mn1_nevm_address: self.mns[0].collateral_height}
+        expected_mapping = {mn1_nevm_address.lower(): self.mns[0].collateral_height}
         nevmsub.assertMNList(expected_mapping)
     
         # Test case 2: Create MN without NEVM address
@@ -376,21 +376,21 @@ class ZMQTest(SyscoinTestFramework):
 
         # Test case 3: Update MN to set NEVM address (should add)
         self.log.info("Updating MN to set NEVM address")
-        mn2_nevm_address = "0xcafebabecafebabecafebabecafebabecafebabe"
+        mn2_nevm_address = "0x00000000000000000000000000000000dEaDbEEF"
         self.update_mn_set_nevm(self.mns[1], mn2_nevm_address)
         self.sync_blocks()
         self.mns[1].last_update_height = self.nodes[0].getblockcount()
-        expected_mapping[mn2_nevm_address] = self.mns[1].collateral_height
+        expected_mapping[mn2_nevm_address.lower()] = self.mns[1].collateral_height
         nevmsub.assertMNList(expected_mapping)
 
         # Test case 4: Update MN to change NEVM address (should update)
         self.log.info("Updating MN to change NEVM address")
-        new_mn1_nevm_address = "0xbeefcafebeefcafebeefcafebeefcafebeefcafe"
+        new_mn1_nevm_address = "0x000000000000000000000000000000000000dEaD"
         self.update_mn_set_nevm(self.mns[0], new_mn1_nevm_address)
         self.sync_blocks()
         self.mns[0].last_update_height = self.nodes[0].getblockcount()
-        del expected_mapping[mn1_nevm_address]
-        expected_mapping[new_mn1_nevm_address] = self.mns[0].collateral_height
+        del expected_mapping[mn1_nevm_address.lower()]
+        expected_mapping[new_mn1_nevm_address.lower()] = self.mns[0].collateral_height
         nevmsub.assertMNList(expected_mapping)
 
         # Test case 5: Update MN to remove NEVM address (should remove)
@@ -398,7 +398,7 @@ class ZMQTest(SyscoinTestFramework):
         self.update_mn_set_nevm(self.mns[1], '')
         self.sync_blocks()
         self.mns[1].last_update_height = self.nodes[0].getblockcount()
-        del expected_mapping[mn2_nevm_address]
+        del expected_mapping[mn2_nevm_address.lower()]
         nevmsub.assertMNList(expected_mapping)
 
         # Test case 6: Remove MN (should remove NEVM address)
@@ -406,7 +406,7 @@ class ZMQTest(SyscoinTestFramework):
         self.remove_mn(self.mns[0])
         self.sync_blocks()
         self.mns[1].removal_height = self.nodes[0].getblockcount()
-        del expected_mapping[new_mn1_nevm_address]
+        del expected_mapping[new_mn1_nevm_address.lower()]
         nevmsub.assertMNList(expected_mapping)
 
         # Test case 7: Reorg that undoes an MN creation (should remove NEVM address)
@@ -421,7 +421,7 @@ class ZMQTest(SyscoinTestFramework):
         # Test case 8: Reorg that undoes an MN update (should revert to previous NEVM address)
         self.log.info("Reorg to undo MN update")
         invalidblock = self.reorg(self.mns[0].last_update_height)
-        nevmsub.assertMNList({mn1_nevm_address: self.mns[0].collateral_height, mn2_nevm_address: self.mns[1].collateral_height})
+        nevmsub.assertMNList({mn1_nevm_address.lower(): self.mns[0].collateral_height, mn2_nevm_address.lower(): self.mns[1].collateral_height})
         # sync back to tip
         self.nodes[0].reconsiderblock(invalidblock)
         self.sync_blocks()
@@ -430,7 +430,7 @@ class ZMQTest(SyscoinTestFramework):
         # Test case 9: Reorg that undoes an MN removal (should re-add NEVM address)
         self.log.info("Reorg to undo MN removal")
         self.reorg(self.mns[1].removal_height)
-        nevmsub.assertMNList({new_mn1_nevm_address: self.mns[0].collateral_height})
+        nevmsub.assertMNList({new_mn1_nevm_address.lower(): self.mns[0].collateral_height})
         # sync back to tip
         self.nodes[0].reconsiderblock(invalidblock)
         self.sync_blocks()
@@ -452,17 +452,18 @@ class ZMQTest(SyscoinTestFramework):
     
         # Create an MN with an initial NEVM address.
         self.log.info("Edge Case 1: Create MN with NEVM address")
-        mn1_nevm_address = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        mn1_nevm_address = "0x000000000000000000000000000000000000bEEF"
         mn = self.create_mn_with_nevm(3, "edge-nevm-mn", mn1_nevm_address)
         self.mns.append(mn)
         self.sync_blocks()
-        expected_mapping = {mn1_nevm_address: self.mns[0].collateral_height}
+        expected_mapping = {mn1_nevm_address.lower(): self.mns[0].collateral_height}
         nevmsub.assertMNList(expected_mapping)
     
-        # Update the same MN with two successive updates in one block.
-        self.log.info("Edge Case 2: Multiple updates in one block")
+        # Update the same MN with two successive updates.
+        self.log.info("Edge Case 2: Multiple updates in succession")
         self.update_mn_set_nevm(self.mns[0], "0x1111111111111111111111111111111111111111")
-        self.update_mn_set_nevm(self.mns[0], "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        # Ensure global uniqueness updates - mn1_nevm_address should be available again after previous update
+        self.update_mn_set_nevm(self.mns[0], mn1_nevm_address)
         self.sync_blocks()
         # Expect that the final state is as originally set.
         nevmsub.assertMNList(expected_mapping)
@@ -484,21 +485,17 @@ class ZMQTest(SyscoinTestFramework):
         self.mns.append(mn)
         self.sync_blocks()
         # Update mn2 to set its NEVM address.
-        mn2_nevm_address = "0xcafebabecafebabecafebabecafebabecafebabe"
+        mn2_nevm_address = "0x1111111111111111111111111111111111111111"
         self.update_mn_set_nevm(self.mns[1], mn2_nevm_address)
         self.sync_blocks()
-        expected_mapping[mn2_nevm_address] = self.mns[1].collateral_height
+        expected_mapping[mn2_nevm_address.lower()] = self.mns[1].collateral_height
         nevmsub.assertMNList(expected_mapping)
         # Now attempt to update mn2 (or a different MN) with the same NEVM address as mn1.
         assert_raises_rpc_error(-4, 'bad-protx-dup-nevm-address', 
-                                self.nodes[0].protx_update_service,  
+                                self.nodes[0].protx_update_registrar,  
                                 self.mns[1].protx_hash, 
-                                '127.0.0.2:%d' % self.mns[1].p2p_port,
-                                self.mns[1].blsMnkey,
-                                "",
-                                self.mns[1].fundsAddr,
+                                "", "", "",
                                 mn1_nevm_address)
-    
         self.log.info("NEVM edge case tests passed successfully.")
 
     def prepare_mn(self, node, idx, alias):
@@ -522,6 +519,7 @@ class ZMQTest(SyscoinTestFramework):
         self.nodes[0].sendtoaddress(mn.fundsAddr, 100.001)
         mn.collateral_address = self.nodes[0].getnewaddress()
         mn.rewards_address = self.nodes[0].getnewaddress()
+        self.nodes[0].sendtoaddress(mn.rewards_address, 0.001)
 
         mn.protx_hash = self.nodes[0].protx_register_fund( mn.collateral_address, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, mn.operatorAddr, mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
         mn.collateral_txid = mn.protx_hash
@@ -548,24 +546,24 @@ class ZMQTest(SyscoinTestFramework):
 
     def update_mn_set_nevm(self, mn, nevm_address):
         """Update an MN to set an NEVM address"""
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(7), mn.blsMnkey, "", mn.fundsAddr, "000ebabecafebabecafebabecafebabecafebabe")
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(8), mn.blsMnkey, "", mn.fundsAddr, "0x0000babecafebabecafebabecafebabecafebabe")
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(9), mn.blsMnkey, "", mn.fundsAddr, "0x00000abecafebabecafebabecafebabecafebabe")
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(10), mn.blsMnkey, "", mn.fundsAddr, "0x000000becafebabecafebabecafebabecafebabe")
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(11), mn.blsMnkey, "", mn.fundsAddr)
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, "", mn.fundsAddr, nevm_address)
+        self.nodes[0].protx_update_registrar( mn.protx_hash, "", "", "", nevm_address)
 
         # dis-allow multiple in mempool from same MN
         if nevm_address:
-            assert_raises_rpc_error(-4, 'protx-dup', self.nodes[0].protx_update_service,  mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, "", mn.fundsAddr, nevm_address)
+            assert_raises_rpc_error(-4, 'protx-dup', self.nodes[0].protx_update_registrar,  mn.protx_hash, "", "", "", nevm_address)
         self.generate(self.nodes[0], 1)
-        # ensure after a block MNList will enforce no duplicates
-        if len(self.mns) > 1 and nevm_address:
-            otherMn = self.mns[-1]
-            if otherMn.idx == mn.idx and len(self.mns) > 1:
-                otherMn = self.mns[-2]
-            assert_raises_rpc_error(-4, 'bad-protx-dup-nevm-address', self.nodes[0].protx_update_service,  otherMn.protx_hash, '127.0.0.2:%d' % otherMn.p2p_port, otherMn.blsMnkey, "", otherMn.fundsAddr, nevm_address)
+        # Verify NEVM address was set correctly
+        mn_info = self.nodes[0].masternode_list("nevmaddress", f"{mn.collateral_txid}-{mn.collateral_vout}")
+        mn_outpoint = f"{mn.collateral_txid}-{mn.collateral_vout}"
+        assert mn_outpoint in mn_info, f"Masternode {mn_outpoint} not found in masternodelist"
 
+        # Handle the empty address case safely
+        info_parts = mn_info[mn_outpoint].split()
+        actual_nevm_address = info_parts[-1] if info_parts else ''
+
+        assert actual_nevm_address.lower() == nevm_address.lower(), (
+            f"NEVM address mismatch: expected '{nevm_address}', got '{actual_nevm_address}'"
+        )
 
     def spend_input(self, txid, vout, amount):
         address = self.nodes[0].getnewaddress()
