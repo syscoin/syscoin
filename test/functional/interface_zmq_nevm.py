@@ -492,10 +492,31 @@ class ZMQTest(SyscoinTestFramework):
         nevmsub.assertMNList(expected_mapping)
         # Now attempt to update mn2 (or a different MN) with the same NEVM address as mn1.
         assert_raises_rpc_error(-4, 'bad-protx-dup-nevm-address', 
-                                self.nodes[0].protx_update_registrar,  
+                                self.nodes[0].protx_update_service,  
                                 self.mns[1].protx_hash, 
-                                "", "", "",
-                                mn1_nevm_address)
+                                '127.0.0.2:%d' % self.mns[1].p2p_port,
+                                self.mns[1].blsMnkey,
+                                mn1_nevm_address,
+                                "",
+                                self.mns[1].fundsAddr)
+        # not 20 bytes
+        assert_raises_rpc_error(-5, 'Invalid NEVM address (must be 20 bytes / 40 hex chars)', 
+                        self.nodes[0].protx_update_service,  
+                        self.mns[0].protx_hash, 
+                        '127.0.0.2:%d' % self.mns[0].p2p_port,
+                        self.mns[0].blsMnkey,
+                        "0x11111111111111111111111111111111111111",
+                        "",
+                        self.mns[1].fundsAddr)
+        # not hex
+        assert_raises_rpc_error(-5, 'Invalid NEVM address (must be 20 bytes / 40 hex chars)', 
+                        self.nodes[0].protx_update_service,  
+                        self.mns[0].protx_hash, 
+                        '127.0.0.2:%d' % self.mns[0].p2p_port,
+                        self.mns[0].blsMnkey,
+                        "0x1111111111111111111111111111111111111L",
+                        "",
+                        self.mns[1].fundsAddr)
         self.log.info("NEVM edge case tests passed successfully.")
 
     def prepare_mn(self, node, idx, alias):
@@ -546,11 +567,16 @@ class ZMQTest(SyscoinTestFramework):
 
     def update_mn_set_nevm(self, mn, nevm_address):
         """Update an MN to set an NEVM address"""
-        self.nodes[0].protx_update_registrar( mn.protx_hash, "", "", "", nevm_address)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(7), mn.blsMnkey, "0x1111111111111111111111111111111111111110", "", mn.fundsAddr)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(8), mn.blsMnkey, "0x1111111111111111111111111111111111111112", "", mn.fundsAddr)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(9), mn.blsMnkey, "0x1111111111111111111111111111111111111113", "", mn.fundsAddr)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(10), mn.blsMnkey,"0x1111111111111111111111111111111111111114", "", mn.fundsAddr)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(11), mn.blsMnkey, "", "", mn.fundsAddr)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, nevm_address,  "", mn.fundsAddr)
 
         # dis-allow multiple in mempool from same MN
         if nevm_address:
-            assert_raises_rpc_error(-4, 'protx-dup', self.nodes[0].protx_update_registrar,  mn.protx_hash, "", "", "", nevm_address)
+            assert_raises_rpc_error(-4, 'protx-dup', self.nodes[0].protx_update_service,  mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, nevm_address, "", mn.fundsAddr)
         self.generate(self.nodes[0], 1)
         # Verify NEVM address was set correctly
         mn_info = self.nodes[0].masternode_list("nevmaddress", f"{mn.collateral_txid}-{mn.collateral_vout}")

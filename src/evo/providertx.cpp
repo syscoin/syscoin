@@ -251,7 +251,27 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
         if (mnList.HasUniqueProperty(ptx.addr) && mnList.GetUniquePropertyMN(ptx.addr)->proTxHash != ptx.proTxHash) {
             return FormatSyscoinErrorMessage(state, "bad-protx-dup-addr", fJustCheck);
         }
-
+        
+        if(ptx.vchNEVMAddress != mn->pdmnState->vchNEVMAddress) {
+            if (mn->pdmnState->confirmedHash.IsNull()) {
+                return FormatSyscoinErrorMessage(state, "bad-protx-unconfirmed-nevm-address", fJustCheck);
+            }
+            if(mn->pdmnState->IsBanned()) {
+                return FormatSyscoinErrorMessage(state, "bad-protx-banned-nevm-address", fJustCheck);
+            }
+        }
+        if(!ptx.vchNEVMAddress.empty()) {
+            if (ptx.vchNEVMAddress.size() != 20) {
+                return FormatSyscoinErrorMessage(state, "bad-protx-invalid-nevmaddress-size", fJustCheck);
+            }
+            if (mnList.HasUniqueProperty(ptx.vchNEVMAddress)) {
+                auto otherDmn = mnList.GetUniquePropertyMN(ptx.vchNEVMAddress);
+                if (ptx.proTxHash != otherDmn->proTxHash) {
+                    return FormatSyscoinErrorMessage(state, "bad-protx-dup-nevm-address", fJustCheck);
+                }
+            }
+        }
+        
         if (ptx.scriptOperatorPayout != CScript()) {
             if (mn->nOperatorReward == 0) {
                 // don't allow to set operator reward payee in case no operatorReward was set
@@ -330,20 +350,6 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
             auto otherDmn = mnList.GetUniquePropertyMN(ptx.pubKeyOperator);
             if (ptx.proTxHash != otherDmn->proTxHash) {
                 return FormatSyscoinErrorMessage(state, "bad-protx-dup-key", fJustCheck);
-            }
-        }
-        if(!ptx.vchNEVMAddress.empty()) {
-            if (dmn->pdmnState->confirmedHash.IsNull()) {
-                return FormatSyscoinErrorMessage(state, "bad-protx-unconfirmed-nevm-address", fJustCheck);
-            }
-            if (ptx.vchNEVMAddress.size() != 20) {
-                return FormatSyscoinErrorMessage(state, "bad-protx-invalid-nevmaddress-size", fJustCheck);
-            }
-            if (mnList.HasUniqueProperty(ptx.vchNEVMAddress)) {
-                auto otherDmn = mnList.GetUniquePropertyMN(ptx.vchNEVMAddress);
-                if (ptx.proTxHash != otherDmn->proTxHash) {
-                    return FormatSyscoinErrorMessage(state, "bad-protx-dup-nevm-address", fJustCheck);
-                }
             }
         }
  
@@ -448,8 +454,8 @@ std::string CProUpServTx::ToString() const
         payee = EncodeDestination(dest);
     }
 
-    return strprintf("CProUpServTx(nVersion=%d, proTxHash=%s, addr=%s, operatorPayoutAddress=%s)",
-        nVersion, proTxHash.ToString(), addr.ToStringAddr(), payee);
+    return strprintf("CProUpServTx(nVersion=%d, proTxHash=%s, addr=%s, operatorPayoutAddress=%s, nevmAddress=%s)",
+        nVersion, proTxHash.ToString(), addr.ToStringAddr(), payee, vchNEVMAddress.empty()? "" : "0x"+HexStr(vchNEVMAddress));
 }
 
 bool CProUpRegTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const
@@ -478,8 +484,8 @@ std::string CProUpRegTx::ToString() const
         payee = EncodeDestination(dest);
     }
 
-    return strprintf("CProUpRegTx(nVersion=%d, proTxHash=%s, pubKeyOperator=%s, votingAddress=%s, payoutAddress=%s, nevmAddrss=%s)",
-        nVersion, proTxHash.ToString(), pubKeyOperator.ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), payee, vchNEVMAddress.empty()? "" : "0x"+HexStr(vchNEVMAddress));
+    return strprintf("CProUpRegTx(nVersion=%d, proTxHash=%s, pubKeyOperator=%s, votingAddress=%s, payoutAddress=%s)",
+        nVersion, proTxHash.ToString(), pubKeyOperator.ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), payee);
 }
 
 bool CProUpRevTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const

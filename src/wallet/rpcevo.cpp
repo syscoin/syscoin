@@ -717,6 +717,8 @@ static RPCHelpMan protx_update_service()
                 "Must be unique on the network. Can be set to 0, which will require a ProUpServTx afterwards."},
             {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS private key associated with the\n"
                 "registered operator public key."},
+            {"nevmAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The NEVM address to associate with NEVM registry.\n"
+                    "If set to an empty string, any existing NEVM registry entry will be removed."},
             {"operatorPayoutAddress", RPCArg::Type::STR, RPCArg::Default{""}, "The address used for operator reward payments.\n"
                 "Only allowed when the ProRegTx had a non-zero operatorReward value.\n"
                 "If set to an empty string, the currently active payout address is reused."},
@@ -727,8 +729,8 @@ static RPCHelpMan protx_update_service()
         },
         RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
         RPCExamples{
-            HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-            + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\")")
+            HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 <NEVM address> 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
+            + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"<NEVM Address>\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\")")
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -774,14 +776,33 @@ static RPCHelpMan protx_update_service()
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
 
-    // param operatorPayoutAddress
     if (!request.params[3].isNull()) {
-        if (request.params[3].get_str().empty()) {
+        std::string nevmAddressStr = request.params[3].get_str();
+        if(nevmAddressStr.size() > 0) {
+            // Check if the string starts with "0x" and remove it
+            if (nevmAddressStr.rfind("0x", 0) == 0) {
+                nevmAddressStr = nevmAddressStr.substr(2);
+            } else {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid NEVM address (should start with 0x): ") + request.params[3].get_str());
+            }
+        
+            // Ethereum address must be exactly 20 bytes (40 hex characters)
+            if (nevmAddressStr.length() != 40 || !IsHex(nevmAddressStr)) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid NEVM address (must be 20 bytes / 40 hex chars): ") + request.params[3].get_str());
+            }
+        
+            // Parse the hex address into bytes
+            ptx.vchNEVMAddress = ParseHex(nevmAddressStr);
+        }
+    }
+    // param operatorPayoutAddress
+    if (!request.params[4].isNull()) {
+        if (request.params[4].get_str().empty()) {
             ptx.scriptOperatorPayout = dmn->pdmnState->scriptOperatorPayout;
         } else {
-            CTxDestination payoutDest = DecodeDestination(request.params[3].get_str());
+            CTxDestination payoutDest = DecodeDestination(request.params[4].get_str());
             if (!IsValidDestination(payoutDest)) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid operator payout address: %s", request.params[3].get_str()));
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid operator payout address: %s", request.params[4].get_str()));
             }
             ptx.scriptOperatorPayout = GetScriptForDestination(payoutDest);
         }
@@ -792,10 +813,10 @@ static RPCHelpMan protx_update_service()
     CTxDestination feeSource;
 
     // param feeSourceAddress
-    if (!request.params[4].isNull()) {
-        feeSource = DecodeDestination(request.params[4].get_str());
+    if (!request.params[5].isNull()) {
+        feeSource = DecodeDestination(request.params[5].get_str());
         if (!IsValidDestination(feeSource))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Syscoin address: ") + request.params[4].get_str());
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Syscoin address: ") + request.params[5].get_str());
     } else {
         if (ptx.scriptOperatorPayout != CScript()) {
             // use operator reward address as default source for fees
@@ -819,7 +840,7 @@ static RPCHelpMan protx_update_service()
     static RPCHelpMan protx_update_registrar()
     {
             return RPCHelpMan{"protx_update_registrar",
-                "\nCreates and sends a ProUpRegTx to the network. This will update the operator key, voting key, payout and NEVM address\n"
+                "\nCreates and sends a ProUpRegTx to the network. This will update the operator key, voting key, payout\n"
                 "address of the masternode specified by \"proTxHash\".\n"
                 "The owner key of the masternode must be known to your wallet.\n",
                 {
@@ -832,8 +853,6 @@ static RPCHelpMan protx_update_service()
                                     "If set to an empty string, the currently active voting key address is reused."}, 
                     {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments.\n"
                                     "If set to an empty string, the currently active payout address is reused."}, 
-                    {"nevmAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The NEVM address to associate with NEVM registry.\n"
-                                    "If set to an empty string, any existing NEVM registry entry will be removed."},
                     {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                         "If not specified, payoutAddress is the one that is going to be used.\n"
                                         "The private key belonging to this address must be known in your wallet."},
@@ -841,8 +860,8 @@ static RPCHelpMan protx_update_service()
                 },
                 RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
                 RPCExamples{
-                        HelpExampleCli("protx_update_registrar", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r <NEVM address> tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-                    + HelpExampleRpc("protx_update_registrar", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"<NEVM address>\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                        HelpExampleCli("protx_update_registrar", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
+                    + HelpExampleRpc("protx_update_registrar", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
                 },
         [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
     {
@@ -860,8 +879,8 @@ static RPCHelpMan protx_update_service()
             v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
         }
         bool specific_legacy_bls_scheme{!v19active};
-        if(request.params.size() >= 7) {
-            specific_legacy_bls_scheme = request.params[6].get_bool();
+        if(request.params.size() >= 6) {
+            specific_legacy_bls_scheme = request.params[5].get_bool();
         }
         if (specific_legacy_bls_scheme) {
             ptx.nVersion = CProUpRegTx::LEGACY_BLS_VERSION;
@@ -912,28 +931,9 @@ static RPCHelpMan protx_update_service()
         // make sure we get anough fees added
         ptx.vchSig.resize(65);
 
-        if (!request.params[4].isNull()) {
-            std::string nevmAddressStr = request.params[4].get_str();
-            if(nevmAddressStr.size() > 0) {
-                // Check if the string starts with "0x" and remove it
-                if (nevmAddressStr.rfind("0x", 0) == 0) {
-                    nevmAddressStr = nevmAddressStr.substr(2);
-                } else {
-                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid NEVM address (should start with 0x): ") + request.params[4].get_str());
-                }
-            
-                // Ethereum address must be exactly 20 bytes (40 hex characters)
-                if (nevmAddressStr.length() != 40 || !IsHex(nevmAddressStr)) {
-                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid NEVM address (must be 20 bytes / 40 hex chars): ") + request.params[4].get_str());
-                }
-            
-                // Parse the hex address into bytes
-                ptx.vchNEVMAddress = ParseHex(nevmAddressStr);
-            }
-        }
         CTxDestination feeSourceDest = payoutDest;
-        if (!request.params[5].isNull()) {
-            feeSourceDest = DecodeDestination(request.params[5].get_str());
+        if (!request.params[4].isNull()) {
+            feeSourceDest = DecodeDestination(request.params[4].get_str());
             if (!IsValidDestination(feeSourceDest))
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Syscoin address: ") + request.params[5].get_str());
         }

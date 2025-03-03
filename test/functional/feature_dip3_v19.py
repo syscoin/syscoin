@@ -80,21 +80,21 @@ class DIP3V19Test(DashTestFramework):
 
     def update_mn_payee(self, mn, payee):
         self.nodes[0].sendtoaddress(mn.collateral_address, 0.001)
-        self.nodes[0].protx_update_registrar(mn.proTxHash, '', '', payee, "", mn.collateral_address)
+        self.nodes[0].protx_update_registrar(mn.proTxHash, '', '', payee, mn.collateral_address)
         self.generate(self.nodes[0], 1)
         info = self.nodes[0].protx_info(mn.proTxHash)
         assert info['state']['payoutAddress'] == payee
 
     def test_protx_update_service(self, mn):
         self.nodes[0].sendtoaddress(mn.collateral_address, 0.001)
-        self.nodes[0].protx_update_service( mn.proTxHash, '127.0.0.2:%d' % p2p_port(mn.nodeIdx), mn.keyOperator, "", mn.collateral_address)
+        self.nodes[0].protx_update_service( mn.proTxHash, '127.0.0.2:%d' % p2p_port(mn.nodeIdx), mn.keyOperator, "", "", mn.collateral_address)
         self.generate(self.nodes[0], 1)
         for node in self.nodes:
             protx_info = node.protx_info( mn.proTxHash)
             assert_equal(protx_info['state']['service'], '127.0.0.2:%d' % p2p_port(mn.nodeIdx))
 
         # undo
-        self.nodes[0].protx_update_service(mn.proTxHash, '127.0.0.1:%d' % p2p_port(mn.nodeIdx), mn.keyOperator, "", mn.collateral_address)
+        self.nodes[0].protx_update_service(mn.proTxHash, '127.0.0.1:%d' % p2p_port(mn.nodeIdx), mn.keyOperator, "", "", mn.collateral_address)
         self.generate(self.nodes[0], 1)
 
 

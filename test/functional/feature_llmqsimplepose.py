@@ -5,7 +5,7 @@
 import time
 
 from test_framework.test_framework import DashTestFramework
-from test_framework.util import force_finish_mnsync, p2p_port
+from test_framework.util import force_finish_mnsync, p2p_port, assert_raises_rpc_error
 
 
 '''
@@ -132,6 +132,12 @@ class LLMQSimplePoSeTest(DashTestFramework):
             if not went_offline:
                 # we do not include PoSe banned mns in quorums, so the next one should have 1 contributor less
                 expected_contributors -= 1
+            assert_raises_rpc_error(-4, 'bad-protx-banned-nevm-address', 
+                self.nodes[0].protx_update_service,  
+                mn.proTxHash, 
+                '127.0.0.2:%d' % p2p_port(mn.node.index),
+                mn.keyOperator,
+                "0x1111111111111111111111111111111111111111")
 
     def repair_masternodes(self, restart):
         # Repair all nodes

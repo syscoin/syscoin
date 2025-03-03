@@ -1144,7 +1144,8 @@ class DashTestFramework(SyscoinTestFramework):
         if operatorReward > 0:
             self.generate(self.nodes[0], 1)
             operatorPayoutAddress = self.nodes[0].getnewaddress()
-            self.nodes[0].protx_update_service(proTxHash, ipAndPort, bls['secret'], operatorPayoutAddress, address)
+            nevmAddress = ""
+            self.nodes[0].protx_update_service(proTxHash, ipAndPort, bls['secret'], nevmAddress, operatorPayoutAddress, address)
 
         self.mninfo.append(MasternodeInfo(proTxHash, ownerAddr, votingAddr, bls['public'], bls['secret'], address, txid, collateral_vout))
 
