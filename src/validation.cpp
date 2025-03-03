@@ -4576,7 +4576,6 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 if (pcHead != txout.scriptPubKey.end())
                 {
                     // Combine hash + height into one data chunk for validation
-                    // Append height explicitly
                     CDataStream ssData(SER_NETWORK, PROTOCOL_VERSION);
                     ssData << expectedTagHash;
                     ssData << expectedTagHeight;
