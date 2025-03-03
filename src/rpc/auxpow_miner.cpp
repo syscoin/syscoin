@@ -96,7 +96,6 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
         const int32_t nVersion = chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainman.GetConsensus ());
         newBlock->block.SetBaseVersion(nVersion, nChainId);
         newBlock->block.SetAuxpowVersion (true);
-
         /* Save in our map of constructed blocks.  */
         pblockCur = &newBlock->block;
         curBlocks.try_emplace(scriptID, pblockCur);
@@ -136,6 +135,21 @@ AuxpowMiner::lookupSavedBlock (const std::string& hashHex) const
 
   return iter->second;
 }
+// SYSCOIN
+const CScript AuxpowMiner::createScriptPubKey(const uint256& auxRoot)
+{
+  CScript sysCommitScript;
+  std::vector<unsigned char> commitData;
+  // Append "SYSCOIN" tag (7 bytes)
+  commitData.insert(commitData.end(), pchSyscoinHeader, pchSyscoinHeader + 7);
+  // Append 32-byte block hash
+  std::vector<unsigned char> hashBE(auxRoot.begin(), auxRoot.end());
+  std::reverse(hashBE.begin(), hashBE.end());
+  commitData.insert(commitData.end(), hashBE.begin(), hashBE.end());
+  // Build OP_RETURN output script
+  sysCommitScript << OP_RETURN << commitData;
+  return sysCommitScript;
+}
 
 UniValue
 AuxpowMiner::createAuxBlock (const node::JSONRPCRequest& request,
@@ -155,6 +169,8 @@ AuxpowMiner::createAuxBlock (const node::JSONRPCRequest& request,
   result.pushKV ("previousblockhash", pblock->hashPrevBlock.GetHex ());
   result.pushKV ("coinbasevalue",
                  static_cast<int64_t> (pblock->vtx[0]->vout[0].nValue));
+  // SYSCOIN
+  result.pushKV ("coinbasescript", HexStr(createScriptPubKey(pblock->GetHash ())));
   result.pushKV ("bits", strprintf ("%08x", pblock->nBits));
   result.pushKV ("height", static_cast<int64_t> (pindexPrev->nHeight + 1));
   result.pushKV ("_target", HexStr (target));

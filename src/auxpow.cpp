@@ -36,8 +36,7 @@ DecodeLE32 (const unsigned char* bytes)
 
 } // anonymous namespace
 
-bool
-CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
+bool CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
                 const Consensus::Params& params) const
 {
     if (params.fStrictChainId) {
@@ -56,10 +55,9 @@ CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
         return error("Aux POW chain merkle branch too long");
 
     // Check that the chain merkle root is in the coinbase
-    const uint256 &nRootHash
-      = CheckMerkleBranch (hashAuxBlock, vChainMerkleBranch, nChainIndex);
-    valtype vchRootHash(nRootHash.begin (), nRootHash.end ());
-    std::reverse (vchRootHash.begin (), vchRootHash.end ()); // correct endian
+    const uint256 &nRootHash = CheckMerkleBranch (hashAuxBlock, vChainMerkleBranch, nChainIndex);
+    valtype vchRootHash(nRootHash.begin(), nRootHash.end());
+    std::reverse(vchRootHash.begin(), vchRootHash.end()); // correct endian
 
     // Check that we are in the parent block merkle tree
     if (CheckMerkleBranch(coinbaseTx->GetHash(), vMerkleBranch, 0)
@@ -72,17 +70,11 @@ CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
 
     const CScript &script = coinbaseTx->vin[0].scriptSig;
 
-    // Check that the same work is not submitted twice to our chain.
-    //
-
+    // Existing merged-mining header and chain merkle root checks.
     const unsigned char* const mmHeaderBegin = pchMergedMiningHeader;
-    const unsigned char* const mmHeaderEnd
-        = mmHeaderBegin + sizeof (pchMergedMiningHeader);
-    CScript::const_iterator pcHead =
-        std::search(script.begin(), script.end(), mmHeaderBegin, mmHeaderEnd);
-
-    CScript::const_iterator pc =
-        std::search(script.begin(), script.end(), vchRootHash.begin(), vchRootHash.end());
+    const unsigned char* const mmHeaderEnd = mmHeaderBegin + sizeof(pchMergedMiningHeader);
+    CScript::const_iterator pcHead = std::search(script.begin(), script.end(), mmHeaderBegin, mmHeaderEnd);
+    CScript::const_iterator pc = std::search(script.begin(), script.end(), vchRootHash.begin(), vchRootHash.end());
 
     if (pc == script.end())
         return error("Aux POW missing chain merkle root in parent coinbase");
@@ -102,21 +94,50 @@ CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
         return error("Missing auxpow header");
     }
 
-
     // Ensure we are at a deterministic point in the merkle leaves by hashing
     // a nonce and our chain ID and comparing to the index.
     pc += vchRootHash.size();
     if (script.end() - pc < 8)
         return error("Aux POW missing chain merkle tree size and nonce in parent coinbase");
 
-    const uint32_t &nSize = DecodeLE32 (&pc[0]);
-    const unsigned &merkleHeight = vChainMerkleBranch.size ();
+    const uint32_t &nSize = DecodeLE32(&pc[0]);
+    const unsigned &merkleHeight = vChainMerkleBranch.size();
     if (nSize != (1u << merkleHeight))
         return error("Aux POW merkle branch size does not match parent coinbase");
 
-    const uint32_t &nNonce = DecodeLE32 (&pc[4]);
-    if (nChainIndex != getExpectedIndex (nNonce, nChainId, merkleHeight))
+    const uint32_t &nNonce = DecodeLE32(&pc[4]);
+    if (nChainIndex != getExpectedIndex(nNonce, nChainId, merkleHeight))
         return error("Aux POW wrong index");
+
+        // Existing syscoin header and auxpow hash
+    const unsigned char* const sysHeaderBegin = pchSyscoinHeader;
+    const unsigned char* const sysHeaderEnd = sysHeaderBegin + sizeof(pchSyscoinHeader);
+    
+
+    // Scan the coinbase transaction outputs for a single SYSCOIN commitment.
+    bool foundSysTag = false;
+    size_t tagLen = sysHeaderEnd - sysHeaderBegin;
+    // [7 bytes "SYSCOIN"] [32 bytes block hash]
+    for (const auto &txout : coinbaseTx->vout)
+    {
+        // Check if the output is an OP_RETURN.
+        if (txout.scriptPubKey.IsUnspendable()) {
+          CScript::const_iterator pcHead = std::search(txout.scriptPubKey.begin(), txout.scriptPubKey.end(), sysHeaderBegin, sysHeaderEnd);
+          if (pcHead != txout.scriptPubKey.end())
+          {
+            valtype vchAuxHash(hashAuxBlock.begin(), hashAuxBlock.end());
+            std::reverse(vchAuxHash.begin(), vchAuxHash.end()); // correct endian
+            CScript::const_iterator pc = std::search(pcHead + tagLen, txout.scriptPubKey.end(), vchAuxHash.begin(), vchAuxHash.end());
+              if (foundSysTag) 
+                return error("Multiple Syscoin commitments found in Aux POW parent coinbase");
+              if (pc == txout.scriptPubKey.end())
+                return error("Aux POW missing blockhash in parent coinbase");
+              foundSysTag = true;
+          }
+        }
+    }
+    if (!foundSysTag)
+        return error("Aux POW missing SYSCOIN tag in coinbase outputs");
 
     return true;
 }

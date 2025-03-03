@@ -58,6 +58,8 @@ class AuxpowMiningTest (SyscoinTestFramework):
     # Verify data that can be found in another way.
     auxblock = create ()
     assert_equal (auxblock['chainid'], CHAIN_ID)
+    # SYCOIN
+    assert 'coinbasescript' in auxblock and auxblock['coinbasescript']
     assert_equal (auxblock['height'], self.nodes[0].getblockcount () + 1)
     assert_equal (auxblock['previousblockhash'],
                   self.nodes[0].getblockhash (auxblock['height'] - 1))
