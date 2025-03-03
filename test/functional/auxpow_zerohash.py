@@ -29,11 +29,14 @@ from test_framework.util import (
   assert_equal,
   wait_until_helper_internal,
 )
-
+from test_framework.script import (
+    CScript,
+    OP_RETURN,
+)
 from test_framework.auxpow_testing import computeAuxpow
 
 from io import BytesIO
-
+import struct
 
 class P2PBlockGetter (P2PInterface):
   """
@@ -61,6 +64,8 @@ class AuxpowZeroHashTest (SyscoinTestFramework):
 
   def run_test (self):
     node = self.nodes[0]
+    # SYSCOIN
+    self.generate(node, 20)
     p2pStore = node.add_p2p_connection (P2PDataStore ())
     p2pGetter = node.add_p2p_connection (P2PBlockGetter ())
 
@@ -123,7 +128,13 @@ class AuxpowZeroHashTest (SyscoinTestFramework):
     newHash = "%064x" % block.sha256
 
     target = b"%064x" % uint256_from_compact (block.nBits)
-    auxpowHex = computeAuxpow (newHash, target, True)
+    # SYSCOIN
+    auxpow_height = bestBlock["height"] - (bestBlock["height"] % 10) - 10
+    auxpow_tag_hash = self.nodes[0].getblockhash(auxpow_height)
+    auxpow_tag_bytes = bytes.fromhex(auxpow_tag_hash)[::-1]
+    height_bytes = struct.pack('<I', auxpow_height) 
+    auxpow_scriptPubKey = CScript([OP_RETURN, b"sys" + auxpow_tag_bytes + height_bytes])
+    auxpowHex = computeAuxpow (newHash, target, True, auxpow_scriptPubKey.hex())
     block.auxpow = CAuxPow ()
     block.auxpow.deserialize (BytesIO (bytes.fromhex(auxpowHex)))
 

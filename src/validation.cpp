@@ -4546,6 +4546,57 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, strprintf("bad-version(0x%08x)", baseVer),
                                     strprintf("rejected nVersion=0x%08x block", block.nVersion));
     }
+    if (block.IsAuxpow() && pindexPrev->nHeight >= 20)
+    {
+        if (!block.auxpow)
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow", "Missing AuxPoW data");
+        const CTransactionRef &coinbaseTx = block.auxpow->getCoinbaseTx();
+        if (!coinbaseTx)
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow-cb", "Missing AuxPoW coinbase data");
+        int nActiveHeight = pindexPrev->nHeight - 5;
+        nActiveHeight -= nActiveHeight % 10;
+        const CBlockIndex* refIndex = pindexPrev->GetAncestor(nActiveHeight);
+        if (!refIndex)
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-auxpow-ref", "Referenced mod-10 block missing");
+
+        uint256 expectedTagHash = refIndex->GetBlockHash();
+        uint32_t expectedTagHeight = refIndex->nHeight;
+        
+        bool foundSysTag = false;
+        
+        const unsigned char* const sysHeaderBegin = pchSyscoinHeader;
+        const unsigned char* const sysHeaderEnd = sysHeaderBegin + sizeof(pchSyscoinHeader);
+        size_t tagLen = sysHeaderEnd - sysHeaderBegin;
+        
+        for (const auto &txout : coinbaseTx->vout)
+        {
+            if (txout.scriptPubKey.IsUnspendable())
+            {
+                auto pcHead = std::search(txout.scriptPubKey.begin(), txout.scriptPubKey.end(), sysHeaderBegin, sysHeaderEnd);
+                if (pcHead != txout.scriptPubKey.end())
+                {
+                    // Combine hash + height into one data chunk for validation
+                    // Append height explicitly
+                    CDataStream ssData(SER_NETWORK, PROTOCOL_VERSION);
+                    ssData << expectedTagHash;
+                    ssData << expectedTagHeight;
+                    const auto bytesVec = MakeUCharSpan(ssData);
+                    auto pc = std::search(pcHead + tagLen, txout.scriptPubKey.end(), bytesVec.begin(), bytesVec.end());
+        
+                    if (pc == txout.scriptPubKey.end())
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-auxpow-tag", "SYSCOIN AuxPoW tag mismatch (hash or height)");
+        
+                    if (foundSysTag)
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "multiple-syscoin-tags", "Multiple SYSCOIN AuxPoW tags detected");
+        
+                    foundSysTag = true;
+                }
+            }
+        }
+        
+        if (!foundSysTag)
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-syscoin-tag", "No SYSCOIN AuxPoW tag detected");           
+    }
     return true;
 }
 

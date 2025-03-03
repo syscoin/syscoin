@@ -10,14 +10,14 @@ import binascii
 import codecs
 import hashlib
 
-def constructAuxpow(block):
+def constructAuxpow(block, auxpowtag_script):
   """
   Starts to construct a minimal auxpow, ready to be mined.  Returns the
   coinbase tx (with one OP_RETURN output containing a Syscoin-like commitment)
   and the unmined parent block header as hex strings.
 
   This differs minimally from the old version: we only add a vout with a single
-  OP_RETURN to hold "SYSCOIN" + 32 zero bytes + 4 zero bytes.
+  OP_RETURN to hold "SYS" + 32 block bytes + 4 height bytes.
   """
 
   # Convert the block from ASCII to bytes for hex manipulation
@@ -36,32 +36,12 @@ def constructAuxpow(block):
   vin += codecs.encode("%02x" % (len(coinbase) // 2), "ascii") + coinbase
   vin += (b"ff" * 4)
 
-  # -------------------------------
-  # Here is the minimal difference:
-  # We add exactly 1 output, with an OP_RETURN script containing
-  # "SYSCOIN" + 32 zero bytes + 4 zero bytes.
-  # Everything else remains the same.
-  # -------------------------------
+  # Construct tx outputs (vout)
+  vout = b"01"  # one output
+  vout += b"0000000000000000"  # value=0 (coinbase)
 
-  # Vout count (1)
-  vout = b"01"
-
-  # Output 0: amount = 0 (8 bytes, little-endian)
-  vout += b"0000000000000000"
-
-  # Now build the scriptPubKey for OP_RETURN
-  #  - OP_RETURN = 0x6a
-  #  - We push <data> as a single chunk if it's <0x4c in length
-  # Data is 7 bytes "SYSCOIN", plus 32 zero bytes for the hash, plus 4 zero bytes for height
-  syscoinTag = b"737973636f696e"        # hex for "syscoin"
-  dataPayload = syscoinTag + block
-  dataPayloadLen = len(dataPayload) // 2   # each byte is 2 hex chars
-  # OP_RETURN + <push-len> + <payload>
-  scriptPubKey = b"6a" + ("%02x" % dataPayloadLen).encode("ascii") + dataPayload
-
-  # scriptPubKey length in bytes
-  scriptPubKeyLen = len(scriptPubKey) // 2
-  vout += codecs.encode("%02x" % scriptPubKeyLen, "ascii") + scriptPubKey
+  # Use provided auxpowtag directly as scriptPubKey
+  vout += codecs.encode("%02x" % (len(auxpowtag_script) // 2), "ascii") + codecs.encode(auxpowtag_script, 'ascii')
 
   # Build the full coinbase tx (version=01000000, vin, vout, locktime=00000000)
   tx = b"01000000" + vin + vout + b"00000000"

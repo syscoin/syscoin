@@ -333,7 +333,7 @@ static RPCHelpMan getauxblock()
                             {RPCResult::Type::NUM, "chainid", "chain ID for this block"},
                             {RPCResult::Type::STR_HEX, "previousblockhash", "hash of the previous block"},
                             {RPCResult::Type::NUM, "coinbasevalue", "value of the block's coinbase"},
-                            {RPCResult::Type::STR_HEX, "coinbasescript", "The full scriptPubKey of the parent coinbase output for Syscoin chain commitment"},
+                            {RPCResult::Type::STR_HEX, "coinbasescript", "The full scriptPubKey of the parent coinbase output for Syscoin AuxPoW tag commitment"},
                             {RPCResult::Type::STR, "bits", "compressed target of the block"},
                             {RPCResult::Type::NUM, "height", "height of the block"},
                             {RPCResult::Type::STR_HEX, "_target", "target in reversed byte order, deprecated"},

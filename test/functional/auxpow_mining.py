@@ -96,13 +96,13 @@ class AuxpowMiningTest (SyscoinTestFramework):
     gbt = self.nodes[0].getblocktemplate ({"rules": ["segwit"]})
     assert_equal (target, gbt['target'].encode ("ascii"))
 
-    # Compute invalid auxpow.
-    apow = computeAuxpow (auxblock['hash'], target, False)
+    # SYSCOIN Compute invalid auxpow.
+    apow = computeAuxpow (auxblock['hash'], target, False, auxblock['coinbasescript'])
     res = submit (auxblock['hash'], apow)
     assert not res
 
-    # Compute and submit valid auxpow.
-    apow = computeAuxpow (auxblock['hash'], target, True)
+    # SYSCOIN Compute and submit valid auxpow.
+    apow = computeAuxpow (auxblock['hash'], target, True, auxblock['coinbasescript'])
     res = submit (auxblock['hash'], apow)
     assert res
 

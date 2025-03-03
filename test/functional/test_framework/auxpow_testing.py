@@ -10,14 +10,14 @@
 import binascii
 
 from test_framework import auxpow
-
-def computeAuxpow (block, target, ok):
+# SYSCOIN
+def computeAuxpow (block, target, ok, auxpowtag_script):
   """
   Build an auxpow object (serialised as hex string) that solves
   (ok = True) or doesn't solve (ok = False) the block.
   """
 
-  (tx, header) = auxpow.constructAuxpow (block)
+  (tx, header) = auxpow.constructAuxpow (block, auxpowtag_script)
   (header, _) = mineBlock (header, target, ok)
   return auxpow.finishAuxpow (tx, header)
 
@@ -43,7 +43,8 @@ def mineAuxpowBlockWithMethods (create, submit):
 
   auxblock = create ()
   target = auxpow.reverseHex (auxblock['_target'])
-  apow = computeAuxpow (auxblock['hash'], target, True)
+  # SYSCOIN
+  apow = computeAuxpow (auxblock['hash'], target, True, auxblock['coinbasescript'])
   res = submit (auxblock['hash'], apow)
   assert res
 

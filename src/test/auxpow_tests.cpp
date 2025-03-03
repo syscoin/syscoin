@@ -92,10 +92,8 @@ public:
   /**
    * Set the coinbase's script.
    * @param scr Set it to this script.
-   * @param vout Set the coinbase outputs (for hash commitment in some chains)
    */
-  // SYSCOIN
-  void setCoinbase (const CScript& scr, const std::vector<CTxOut>& vout);
+  void setCoinbase (const CScript& scr);
 
   /**
    * Build the auxpow merkle branch.  The member variables will be
@@ -151,13 +149,6 @@ public:
    */
   static valtype buildCoinbaseData (bool header, const valtype& auxRoot,
                                     unsigned h, int nonce);
-  // SYSCOIN
-  /**
-   * Build a coinbase output to store the blockhash commitment
-   * @param auxRoot The aux merkle root hash.
-   * @return The constructed vout which can be attached to coinbase tx.
-   */                                  
-  static std::vector<CTxOut> buildCoinbaseOutput (const uint256& auxRoot);
 
 };
 
@@ -165,16 +156,14 @@ CAuxpowBuilder::CAuxpowBuilder (int baseVersion, int chainId)
 {
   parentBlock.SetBaseVersion(baseVersion, chainId);
 }
-// SYSCOIN
+
 void
-CAuxpowBuilder::setCoinbase (const CScript& scr, const std::vector<CTxOut>& vout)
+CAuxpowBuilder::setCoinbase (const CScript& scr)
 {
   CMutableTransaction mtx;
   mtx.vin.resize (1);
   mtx.vin[0].prevout.SetNull ();
   mtx.vin[0].scriptSig = scr;
-  // SYSCOIN
-  mtx.vout = vout;
 
   parentBlock.vtx.clear ();
   parentBlock.vtx.push_back (MakeTransactionRef (std::move (mtx)));
@@ -242,15 +231,6 @@ CAuxpowBuilder::buildCoinbaseData (bool header, const valtype& auxRoot,
 
   return res;
 }
-// SYSCOIN
-std::vector<CTxOut>
-CAuxpowBuilder::buildCoinbaseOutput (const uint256& auxRoot)
-{
-  std::vector<CTxOut> vout;
-  // Add the OP_RETURN output (value=0) to coinbase transaction
-  vout.emplace_back(0, AuxpowMiner::createScriptPubKey(auxRoot));
-  return vout;
-}
 
 /* ************************************************************************** */
 
@@ -265,17 +245,17 @@ BOOST_FIXTURE_TEST_CASE (check_auxpow, BasicTestingSetup)
   const unsigned height = 30;
   const int nonce = 7;
   int index;
-  // SYSCOIN
-  auto vout = CAuxpowBuilder::buildCoinbaseOutput(hashAux);
+
   valtype auxRoot, data;
   CScript scr;
+
   /* Build a correct auxpow.  The height is the maximally allowed one.  */
   index = CAuxPow::getExpectedIndex (nonce, ourChainId, height);
-  auxRoot = builder.buildAuxpowChain (hashAux, height, index); 
+  auxRoot = builder.buildAuxpowChain (hashAux, height, index);
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
   scr = (CScript () << 2809 << 2013);
   scr = (scr << OP_2 << data);
-  builder.setCoinbase (scr, vout);
+  builder.setCoinbase (scr);
   BOOST_CHECK (builder.get ().check (hashAux, ourChainId, params));
 
   /* An auxpow without any inputs in the parent coinbase tx should be
@@ -297,7 +277,7 @@ BOOST_FIXTURE_TEST_CASE (check_auxpow, BasicTestingSetup)
   /* Non-coinbase parent tx should fail.  Note that we can't just copy
      the coinbase literally, as we have to get a tx with different hash.  */
   const CTransactionRef oldCoinbase = builder.parentBlock.vtx[0];
-  builder.setCoinbase (scr << 5, vout);
+  builder.setCoinbase (scr << 5);
   builder.parentBlock.vtx.push_back (oldCoinbase);
   builder.parentBlock.hashMerkleRoot = BlockMerkleRoot (builder.parentBlock);
   auxpow = builder.get (builder.parentBlock.vtx[0]);
@@ -323,7 +303,7 @@ BOOST_FIXTURE_TEST_CASE (check_auxpow, BasicTestingSetup)
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height + 1, nonce);
   scr = (CScript () << 2809 << 2013);
   scr = (scr << OP_2 << data);
-  builder2.setCoinbase (scr, vout);
+  builder2.setCoinbase (scr);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   /* Verify that we compare correctly to the parent block's merkle root.  */
@@ -340,7 +320,7 @@ BOOST_FIXTURE_TEST_CASE (check_auxpow, BasicTestingSetup)
   data = CAuxpowBuilder::buildCoinbaseData (false, auxRoot, height, nonce);
   scr = (CScript () << 2809 << 2013);
   scr = (scr << OP_2 << data);
-  builder2.setCoinbase (scr, vout);
+  builder2.setCoinbase (scr);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   /* However, various attempts at smuggling two roots in should be detected.  */
@@ -349,58 +329,58 @@ BOOST_FIXTURE_TEST_CASE (check_auxpow, BasicTestingSetup)
     = builder2.buildAuxpowChain (modifiedAux, height, index);
   valtype data2
     = CAuxpowBuilder::buildCoinbaseData (false, wrongAuxRoot, height, nonce);
-  builder2.setCoinbase (CScript () << data << data2, vout);
+  builder2.setCoinbase (CScript () << data << data2);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
-  builder2.setCoinbase (CScript () << data2 << data, vout);
+  builder2.setCoinbase (CScript () << data2 << data);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   data2 = CAuxpowBuilder::buildCoinbaseData (true, wrongAuxRoot, height, nonce);
-  builder2.setCoinbase (CScript () << data << data2, vout);
+  builder2.setCoinbase (CScript () << data << data2);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
-  builder2.setCoinbase (CScript () << data2 << data, vout);
+  builder2.setCoinbase (CScript () << data2 << data);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
-  builder2.setCoinbase (CScript () << data << data2, vout);
+  builder2.setCoinbase (CScript () << data << data2);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
-  builder2.setCoinbase (CScript () << data2 << data, vout);
+  builder2.setCoinbase (CScript () << data2 << data);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   data2 = CAuxpowBuilder::buildCoinbaseData (false, wrongAuxRoot,
                                              height, nonce);
-  builder2.setCoinbase (CScript () << data << data2, vout);
+  builder2.setCoinbase (CScript () << data << data2);
   BOOST_CHECK (builder2.get ().check (hashAux, ourChainId, params));
-  builder2.setCoinbase (CScript () << data2 << data, vout);
+  builder2.setCoinbase (CScript () << data2 << data);
   BOOST_CHECK (builder2.get ().check (hashAux, ourChainId, params));
 
   /* Verify that the appended nonce/size values are checked correctly.  */
 
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
-  builder2.setCoinbase (CScript () << data, vout);
+  builder2.setCoinbase (CScript () << data);
   BOOST_CHECK (builder2.get ().check (hashAux, ourChainId, params));
 
   data.pop_back ();
-  builder2.setCoinbase (CScript () << data, vout);
+  builder2.setCoinbase (CScript () << data);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height - 1, nonce);
-  builder2.setCoinbase (CScript () << data, vout);
+  builder2.setCoinbase (CScript () << data);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce + 3);
-  builder2.setCoinbase (CScript () << data, vout);
+  builder2.setCoinbase (CScript () << data);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   /* Put the aux hash in an invalid merkle tree position.  */
 
   auxRoot = builder.buildAuxpowChain (hashAux, height, index + 1);
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
-  builder2.setCoinbase (CScript () << data, vout);
+  builder2.setCoinbase (CScript () << data);
   BOOST_CHECK (!builder2.get ().check (hashAux, ourChainId, params));
 
   auxRoot = builder.buildAuxpowChain (hashAux, height, index);
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
-  builder2.setCoinbase (CScript () << data, vout);
+  builder2.setCoinbase (CScript () << data);
   BOOST_CHECK (builder2.get ().check (hashAux, ourChainId, params));
 }
 
@@ -491,12 +471,12 @@ BOOST_FIXTURE_TEST_CASE (auxpow_pow, BasicTestingSetup)
   const int nonce = 7;
   const int index = CAuxPow::getExpectedIndex (nonce, ourChainId, height);
   valtype auxRoot, data;
+
   /* Valid auxpow, PoW check of parent block.  */
   block.SetAuxpowVersion (true);
   auxRoot = builder.buildAuxpowChain (block.GetHash (), height, index);
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
-  // SYSCOIN
-  builder.setCoinbase (CScript () << data, CAuxpowBuilder::buildCoinbaseOutput(block.GetHash ()));
+  builder.setCoinbase (CScript () << data);
   mineBlock (builder.parentBlock, false, block.nBits);
   block.SetAuxpow (builder.getUnique ());
   BOOST_CHECK (!HasValidProofOfWork({block}, params));
@@ -512,8 +492,7 @@ BOOST_FIXTURE_TEST_CASE (auxpow_pow, BasicTestingSetup)
   const uint256 hashAux = block.GetHash ();
   auxRoot = builder.buildAuxpowChain (hashAux, height, index);
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
-  // SYSCOIN
-  builder.setCoinbase (CScript () << data, CAuxpowBuilder::buildCoinbaseOutput(block.GetHash ()));
+  builder.setCoinbase (CScript () << data);
   mineBlock (builder.parentBlock, true, block.nBits);
   block.SetAuxpow (builder.getUnique ());
   BOOST_CHECK (hashAux != block.GetHash ());
@@ -525,8 +504,7 @@ BOOST_FIXTURE_TEST_CASE (auxpow_pow, BasicTestingSetup)
   block.SetAuxpowVersion (true);
   auxRoot = builder.buildAuxpowChain (block.GetHash (), height, index);
   data = CAuxpowBuilder::buildCoinbaseData (true, auxRoot, height, nonce);
-  // SYSCOIN
-  builder.setCoinbase (CScript () << data, CAuxpowBuilder::buildCoinbaseOutput(block.GetHash ()));
+  builder.setCoinbase (CScript () << data);
   mineBlock (builder.parentBlock, true, block.nBits);
   block.SetAuxpow (builder.getUnique ());
   BOOST_CHECK (HasValidProofOfWork({block}, params));
@@ -632,117 +610,6 @@ BOOST_FIXTURE_TEST_CASE (auxpow_miner_createAndLookupBlock, TestChain100Setup)
 
   BOOST_CHECK (miner.lookupSavedBlock (pblock->GetHash ().GetHex ()) == pblock);
   BOOST_CHECK_THROW (miner.lookupSavedBlock ("foobar"), UniValue);
-}
-
-BOOST_FIXTURE_TEST_CASE(check_syscoin_commitment, BasicTestingSetup)
-{
-    // We'll do various manipulations on the coinbase scriptPubKey outputs
-    // to ensure the new validation code for Syscoin commitments works as intended.
-    const Consensus::Params& params = Params().GetConsensus();
-    CAuxpowBuilder builder(5, 42);
-    // Some constants
-    const uint256 hashAux = ArithToUint256(arith_uint256(12345));
-    const int32_t ourChainId = params.nAuxpowChainId;
-    const unsigned height = 30;
-    const int nonce = 7;
-    const int index = CAuxPow::getExpectedIndex(nonce, ourChainId, height);
-
-    // Build the standard coinbase input + syscoin commitment vout
-    // The 'vout' is valid to start with
-    valtype auxRoot = builder.buildAuxpowChain(hashAux, height, index);
-    auto goodVout = CAuxpowBuilder::buildCoinbaseOutput(hashAux);
-    // We'll reuse 'scr' for coinbase input scriptSig
-    valtype data = CAuxpowBuilder::buildCoinbaseData(true, auxRoot, height, nonce);
-    CScript scr = (CScript() << OP_2 << data);
-
-    // 1) Verify a properly formed Syscoin commitment is accepted
-    builder.setCoinbase(scr, goodVout);
-    BOOST_CHECK_MESSAGE(
-        builder.get().check(hashAux, ourChainId, params),
-        "A valid coinbase with exactly one well-formed Syscoin commitment must pass"
-    );
-
-    // 2) Missing Syscoin commitment -> remove OP_RETURN output entirely
-    //    i.e. pass an empty vout
-    builder.setCoinbase(scr, {});
-    BOOST_CHECK_MESSAGE(
-        !builder.get().check(hashAux, ourChainId, params),
-        "Missing Syscoin commitment should fail"
-    );
-
-    // 3) Multiple Syscoin commitments -> e.g. replicate goodVout in coinbase
-    {
-        std::vector<CTxOut> multiVout = goodVout;
-        // Append a second OP_RETURN output with the same commitment
-        multiVout.insert(multiVout.end(), goodVout.begin(), goodVout.end());
-        builder.setCoinbase(scr, multiVout);
-        BOOST_CHECK_MESSAGE(
-            !builder.get().check(hashAux, ourChainId, params),
-            "Multiple Syscoin commitments must fail"
-        );
-    }
-
-    // 4) Malformed commitment data -> e.g. only 'SYSCOIN' tag, no hash or height
-    {
-        std::vector<CTxOut> malformedVout;
-        {
-            std::vector<unsigned char> commitData;
-            // Insert just 'SYSCOIN' but skip the 32-byte hash & 4-byte height
-            commitData.insert(commitData.end(), pchSyscoinHeader, pchSyscoinHeader + 7);
-
-            CScript commitScript;
-            commitScript << OP_RETURN << commitData;
-            malformedVout.emplace_back(0, commitScript);
-        }
-
-        builder.setCoinbase(scr, malformedVout);
-        BOOST_CHECK_MESSAGE(
-            !builder.get().check(hashAux, ourChainId, params),
-            "Malformed Syscoin commitment data must fail (missing hash/height)"
-        );
-    }
-
-    // 5) Tag in a non-OP_RETURN output -> must fail
-    {
-        // Create a spendable output with 'SYSCOIN' in the scriptPubKey
-        // For instance, OP_DUP OP_HASH160 <SYSCOIN bytes> OP_EQUALVERIFY OP_CHECKSIG
-        // We'll just insert the raw bytes into a typical script to simulate it
-        std::vector<CTxOut> wrongOutputVout;
-        CScript scriptPubKey;
-        scriptPubKey << OP_DUP << OP_HASH160
-                     << std::vector<unsigned char>(pchSyscoinHeader, pchSyscoinHeader + 7) // 'SYSCOIN'
-                     << OP_EQUALVERIFY << OP_CHECKSIG;
-        wrongOutputVout.emplace_back(50 * COIN, scriptPubKey);
-
-        builder.setCoinbase(scr, wrongOutputVout);
-        BOOST_CHECK_MESSAGE(
-            !builder.get().check(hashAux, ourChainId, params),
-            "Tag in spendable output is not recognized as a valid Syscoin commitment"
-        );
-    }
-
-    // 6) Mismatched block-hash or height in the Syscoin commitment
-    //    We'll create a valid OP_RETURN structure but with a random 32-byte hash
-    {
-        // Build a normal OP_RETURN but corrupt the hash
-        std::vector<unsigned char> commitData;
-        // Insert 'SYSCOIN'
-        commitData.insert(commitData.end(), pchSyscoinHeader, pchSyscoinHeader + 7);
-        
-        // Insert a random / tampered 32-byte hash
-        uint256 randomHash = uint256S("0x123456");
-        commitData.insert(commitData.end(), randomHash.begin(), randomHash.end());
-        
-        CScript commitScript;
-        commitScript << OP_RETURN << commitData;
-        std::vector<CTxOut> mismatchedVout{CTxOut(0, commitScript)};
-
-        builder.setCoinbase(scr, mismatchedVout);
-        BOOST_CHECK_MESSAGE(
-            !builder.get().check(hashAux, ourChainId, params),
-            "Wrong block-hash/height in Syscoin commitment must fail"
-        );
-    }
 }
 
 /* ************************************************************************** */

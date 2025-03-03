@@ -109,36 +109,6 @@ bool CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
     if (nChainIndex != getExpectedIndex(nNonce, nChainId, merkleHeight))
         return error("Aux POW wrong index");
 
-        // Existing syscoin header and auxpow hash
-    const unsigned char* const sysHeaderBegin = pchSyscoinHeader;
-    const unsigned char* const sysHeaderEnd = sysHeaderBegin + sizeof(pchSyscoinHeader);
-    
-
-    // Scan the coinbase transaction outputs for a single SYSCOIN commitment.
-    bool foundSysTag = false;
-    size_t tagLen = sysHeaderEnd - sysHeaderBegin;
-    // [7 bytes "SYSCOIN"] [32 bytes block hash]
-    for (const auto &txout : coinbaseTx->vout)
-    {
-        // Check if the output is an OP_RETURN.
-        if (txout.scriptPubKey.IsUnspendable()) {
-          CScript::const_iterator pcHead = std::search(txout.scriptPubKey.begin(), txout.scriptPubKey.end(), sysHeaderBegin, sysHeaderEnd);
-          if (pcHead != txout.scriptPubKey.end())
-          {
-            valtype vchAuxHash(hashAuxBlock.begin(), hashAuxBlock.end());
-            std::reverse(vchAuxHash.begin(), vchAuxHash.end()); // correct endian
-            CScript::const_iterator pc = std::search(pcHead + tagLen, txout.scriptPubKey.end(), vchAuxHash.begin(), vchAuxHash.end());
-              if (foundSysTag) 
-                return error("Multiple Syscoin commitments found in Aux POW parent coinbase");
-              if (pc == txout.scriptPubKey.end())
-                return error("Aux POW missing blockhash in parent coinbase");
-              foundSysTag = true;
-          }
-        }
-    }
-    if (!foundSysTag)
-        return error("Aux POW missing SYSCOIN tag in coinbase outputs");
-
     return true;
 }
 

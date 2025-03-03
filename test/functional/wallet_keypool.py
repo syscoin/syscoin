@@ -247,7 +247,8 @@ def test_auxpow(self, nodes):
         assert_equal (nodes[0].getwalletinfo()['keypoolsize'], 0)
 
     target = reverseHex(auxblock['_target'])
-    solved = computeAuxpow(auxblock['hash'], target, True)
+    # SYSCOIN
+    solved = computeAuxpow(auxblock['hash'], target, True, auxblock['coinbasescript'])
     res = nodes[0].getauxblock(auxblock['hash'], solved)
     assert res
     if self.options.descriptors:

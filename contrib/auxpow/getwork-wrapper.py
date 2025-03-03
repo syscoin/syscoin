@@ -63,7 +63,8 @@ class GetworkWrapper:
 
   def createWork (self):
     auxblock = self.backend.getauxblock ()
-    (tx, hdr) = auxpow.constructAuxpow (auxblock['hash'])
+    # SYSCOIN
+    (tx, hdr) = auxpow.constructAuxpow (auxblock['hash'], auxblock['coinbasescript'])
 
     en = self.extraNonce
     self.extraNonce = (self.extraNonce + 1) % (1 << 32)

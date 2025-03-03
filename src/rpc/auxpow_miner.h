@@ -89,7 +89,7 @@ public:
   /**
    * Create the coinbase script pubkey that should go into the parent coinbase script as an output
    */                         
-  static const CScript createScriptPubKey(const uint256& auxRoot);                        
+  static const CScript createScriptPubKey(const uint256& auxRoot, int nHeight);                        
   /**
    * Performs the main work for the "submitauxblock" RPC:  Look up the block
    * previously created for the given hash, attach the given auxpow to it
