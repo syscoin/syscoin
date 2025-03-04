@@ -1681,7 +1681,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         ChainstateManager& chainman = *Assert(node.chainman);
         // SYSCOIN
         const fs::path &evodbPath = args.GetDataDirNet() / "evodb_dmn";
-        if (!fs::exists(evodbPath)) {
+        if (!fRegTest && !fs::exists(evodbPath)) {
             LogPrintf("Folder %s not found, forcing reindex.\n", fs::PathToString(evodbPath));
             fReindex = true;
         }
