@@ -62,10 +62,15 @@ MasternodeList::MasternodeList(QWidget* parent) :
     ui->tableWidgetMasternodesDIP3->setColumnWidth(9, columnOwnerWidth);
     ui->tableWidgetMasternodesDIP3->setColumnWidth(10, columnVotingWidth);
 
-    // dummy column for proTxHash
-    // TODO use a proper table model for the MN list
+    int columnNEVMAddressWidth = 130;
+
     ui->tableWidgetMasternodesDIP3->insertColumn(11);
-    ui->tableWidgetMasternodesDIP3->setColumnHidden(11, true);
+    ui->tableWidgetMasternodesDIP3->setHorizontalHeaderItem(11, new QTableWidgetItem(tr("NEVM Address")));
+    ui->tableWidgetMasternodesDIP3->setColumnWidth(11, columnNEVMAddressWidth);
+    
+    ui->tableWidgetMasternodesDIP3->insertColumn(12);
+    ui->tableWidgetMasternodesDIP3->setColumnHidden(12, true);
+    
 
     ui->tableWidgetMasternodesDIP3->setContextMenuPolicy(Qt::CustomContextMenu);
 
@@ -97,7 +102,10 @@ MasternodeList::MasternodeList(QWidget* parent) :
     connect(copyCollateralAction, &QAction::triggered, this, &MasternodeList::copyCollateral_clicked);
     connect(copyOwnerAction, &QAction::triggered, this, &MasternodeList::copyOwner_clicked);
     connect(copyVotingAction, &QAction::triggered, this, &MasternodeList::copyVoting_clicked);
-
+    QAction* copyNEVMAddressAction = new QAction(tr("Copy NEVM Address"), this);
+    contextMenuDIP3->addAction(copyNEVMAddressAction);
+    connect(copyNEVMAddressAction, &QAction::triggered, this, &MasternodeList::copyNEVMAddress_clicked);
+    
     timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &MasternodeList::updateDIP3ListScheduled);
     timer->start(1000);
@@ -230,6 +238,9 @@ void MasternodeList::updateDIP3List()
         QTableWidgetItem* lastPaidItem = new QTableWidgetItem(QString::number(dmn.pdmnState->nLastPaidHeight));
         
         QTableWidgetItem* nextPaymentItem = new QTableWidgetItem(nextPayments.count(dmn.proTxHash) ? QString::number(nextPayments[dmn.proTxHash]) : tr("UNKNOWN"));
+        // Add NEVM Address
+        QString nevmAddressStr = QString::fromStdString(HexStr(dmn.pdmnState->vchNEVMAddress));
+        QTableWidgetItem* nevmAddressItem = new QTableWidgetItem(nevmAddressStr);
 
         CTxDestination payeeDest;
         QString payeeStr = tr("UNKNOWN");
@@ -272,17 +283,18 @@ void MasternodeList::updateDIP3List()
 
         if (strCurrentFilterDIP3 != "") {
             strToFilter = addressItem->text() + " " +
-                          statusItem->text() + " " +
-                          PoSeScoreItem->text() + " " +
-                          registeredItem->text() + " " +
-                          lastPaidItem->text() + " " +
-                          nextPaymentItem->text() + " " +
-                          payeeItem->text() + " " +
-                          operatorRewardItem->text() + " " +
-                          collateralItem->text() + " " +
-                          ownerItem->text() + " " +
-                          votingItem->text() + " " +
-                          proTxHashItem->text();
+                        statusItem->text() + " " +
+                        PoSeScoreItem->text() + " " +
+                        registeredItem->text() + " " +
+                        lastPaidItem->text() + " " +
+                        nextPaymentItem->text() + " " +
+                        payeeItem->text() + " " +
+                        operatorRewardItem->text() + " " +
+                        collateralItem->text() + " " +
+                        ownerItem->text() + " " +
+                        votingItem->text() + " " +
+                        nevmAddressItem->text() + " " +
+                        proTxHashItem->text();
             if (!strToFilter.contains(strCurrentFilterDIP3)) return;
         }
 
@@ -298,7 +310,9 @@ void MasternodeList::updateDIP3List()
         ui->tableWidgetMasternodesDIP3->setItem(0, 8, collateralItem);
         ui->tableWidgetMasternodesDIP3->setItem(0, 9, ownerItem);
         ui->tableWidgetMasternodesDIP3->setItem(0, 10, votingItem);
-        ui->tableWidgetMasternodesDIP3->setItem(0, 11, proTxHashItem);
+        ui->tableWidgetMasternodesDIP3->setItem(0, 11, nevmAddressItem);
+        ui->tableWidgetMasternodesDIP3->setItem(0, 12, proTxHashItem);
+        
     });
 
     ui->countLabelDIP3->setText(QString::number(ui->tableWidgetMasternodesDIP3->rowCount()));
@@ -337,7 +351,7 @@ CDeterministicMNCPtr MasternodeList::GetSelectedDIP3MN()
 
         QModelIndex index = selected.at(0);
         int nSelectedRow = index.row();
-        strProTxHash = ui->tableWidgetMasternodesDIP3->item(nSelectedRow, 11)->text().toStdString();
+        strProTxHash = ui->tableWidgetMasternodesDIP3->item(nSelectedRow, 12)->text().toStdString();
     }
 
     uint256 proTxHash;
@@ -442,4 +456,13 @@ void MasternodeList::copyVoting_clicked()
     }
     QString votingStr = QString::fromStdString(EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDVoting)));
     QApplication::clipboard()->setText(votingStr);
+}
+
+void MasternodeList::copyNEVMAddress_clicked()
+{
+    auto dmn = GetSelectedDIP3MN();
+    if (!dmn) return;
+
+    QString nevmAddressStr = QString::fromStdString(HexStr(dmn->pdmnState->vchNEVMAddress));
+    QApplication::clipboard()->setText(nevmAddressStr);
 }

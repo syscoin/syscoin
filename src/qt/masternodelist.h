@@ -77,6 +77,7 @@ private Q_SLOTS:
     void copyCollateral_clicked();
     void copyOwner_clicked();
     void copyVoting_clicked();
+    void copyNEVMAddress_clicked();
 
     void handleMasternodeListChanged();
     void updateDIP3ListScheduled();
