@@ -623,6 +623,22 @@ SigningResult LegacyScriptPubKeyMan::SignMessage(const std::string& message, con
     }
     return SigningResult::SIGNING_FAILED;
 }
+// SYSCOIN
+SigningResult LegacyScriptPubKeyMan::SignMessage(const std::string& message, const CTxDestination& dest, std::string& str_sig) const
+{
+    CKeyID keyID = GetKeyForDestination(*this, dest);
+    if (keyID.IsNull()) {
+        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+    }
+    CKey key;
+    if (!GetKey(keyID, key)) {
+        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+    }
+    if (MessageSign(key, message, str_sig)) {
+        return SigningResult::OK;
+    }
+    return SigningResult::SIGNING_FAILED;
+}
 
 TransactionError LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
 {
@@ -2474,6 +2490,26 @@ SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message,
         return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
     }
 
+    if (!MessageSign(key, message, str_sig)) {
+        return SigningResult::SIGNING_FAILED;
+    }
+    return SigningResult::OK;
+}
+// SYSCOIN
+SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message, const CTxDestination& dest, std::string& str_sig) const
+{
+    std::unique_ptr<FlatSigningProvider> keys = GetSigningProvider(GetScriptForDestination(dest), true);
+    if (!keys) {
+        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+    }
+    CKeyID keyID = GetKeyForDestination(*keys, dest);
+    if (keyID.IsNull()) {
+        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+    }
+    CKey key;
+    if (!keys->GetKey(keyID, key)) {
+        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+    }
     if (!MessageSign(key, message, str_sig)) {
         return SigningResult::SIGNING_FAILED;
     }

@@ -40,9 +40,19 @@ class SignMessagesWithPrivTest(SyscoinTestFramework):
         assert_equal(addresses[0], 'mpLQjfK79b7CCV4VMJWEWAj5Mpx8Up5zxB')
         assert self.nodes[0].verifymessage(addresses[0], signature, message)
 
-        self.log.info('test that verifying with non-P2PKH addresses throws error')
-        for non_p2pkh_address in addresses[1:]:
-            assert_raises_rpc_error(-3, "Address does not refer to key", self.nodes[0].verifymessage, non_p2pkh_address, signature, message)
+        self.log.info('test that verifying with non-P2PKH addresses succeeds')
+        # SYSCOIN Legacy address test (should succeed)
+        legacy_address = addresses[0]
+        assert self.nodes[0].verifymessage(legacy_address, signature, message)
+
+        # Native Segwit (P2WPKH) test (should succeed)
+        segwit_address = addresses[2]
+        assert self.nodes[0].verifymessage(segwit_address, signature, message)
+
+        # Nested Segwit (P2SH-P2WPKH) test (should fail)
+        p2sh_segwit_address = addresses[1]
+        assert_raises_rpc_error(-3, 'Address does not refer to key',
+                                self.nodes[0].verifymessage, p2sh_segwit_address, signature, message)
 
         self.log.info('test parameter validity and error codes')
         # signmessagewithprivkey has two required parameters

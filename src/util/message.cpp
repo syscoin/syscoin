@@ -22,7 +22,7 @@
  * inadvertently signing a transaction.
  */
 const std::string MESSAGE_MAGIC = "Syscoin Signed Message:\n";
-
+// SYSCOIN
 MessageVerificationResult MessageVerify(
     const std::string& address,
     const std::string& signature,
@@ -33,7 +33,13 @@ MessageVerificationResult MessageVerify(
         return MessageVerificationResult::ERR_INVALID_ADDRESS;
     }
 
-    if (std::get_if<PKHash>(&destination) == nullptr) {
+    std::vector<unsigned char> hash_bytes;
+
+    if (const auto* pkhash = std::get_if<PKHash>(&destination)) {
+        hash_bytes.assign(pkhash->begin(), pkhash->end());
+    } else if (const auto* wpkhash = std::get_if<WitnessV0KeyHash>(&destination)) {
+        hash_bytes.assign(wpkhash->begin(), wpkhash->end());
+    } else {
         return MessageVerificationResult::ERR_ADDRESS_NO_KEY;
     }
 
@@ -47,12 +53,13 @@ MessageVerificationResult MessageVerify(
         return MessageVerificationResult::ERR_PUBKEY_NOT_RECOVERED;
     }
 
-    if (!(PKHash(pubkey) == *std::get_if<PKHash>(&destination))) {
+    if (Hash160(pubkey) != uint160(hash_bytes)) {
         return MessageVerificationResult::ERR_NOT_SIGNED;
     }
 
     return MessageVerificationResult::OK;
 }
+
 
 bool MessageSign(
     const CKey& privkey,

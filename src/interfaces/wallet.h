@@ -98,7 +98,8 @@ public:
 
     //! Sign message
     virtual SigningResult signMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) = 0;
-
+    // SYSCOIN
+    virtual SigningResult signMessage(const std::string& message, const CTxDestination& dest, std::string& str_sig) = 0;
     //! Return whether wallet has private key.
     virtual bool isSpendable(const CTxDestination& dest) = 0;
     // SYSCOIN

@@ -170,6 +170,11 @@ public:
         return m_wallet->SignMessage(message, pkhash, str_sig);
     }
     // SYSCOIN
+    SigningResult signMessage(const std::string& message, const CTxDestination& dest, std::string& str_sig) override
+    {
+        return m_wallet->SignMessage(message, dest, str_sig);
+    }
+    // SYSCOIN
     bool isSpendable(const CScript& script) override
     {
         LOCK(m_wallet->cs_wallet);

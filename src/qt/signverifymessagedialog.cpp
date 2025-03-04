@@ -119,13 +119,15 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
         ui->statusLabel_SM->setText(tr("The entered address is invalid.") + QString(" ") + tr("Please check the address and try again."));
         return;
     }
+    // SYSCOIN
+    /*
     const PKHash* pkhash = std::get_if<PKHash>(&destination);
     if (!pkhash) {
         ui->addressIn_SM->setValid(false);
         ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
         ui->statusLabel_SM->setText(tr("The entered address does not refer to a key.") + QString(" ") + tr("Please check the address and try again."));
         return;
-    }
+    }*/
 
     WalletModel::UnlockContext ctx(model->requestUnlock());
     if (!ctx.isValid())
@@ -137,7 +139,8 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
 
     const std::string& message = ui->messageIn_SM->document()->toPlainText().toStdString();
     std::string signature;
-    SigningResult res = model->wallet().signMessage(message, *pkhash, signature);
+    // SYSCOIN
+    SigningResult res = model->wallet().signMessage(message, destination, signature);
 
     QString error;
     switch (res) {
