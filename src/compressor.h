@@ -109,10 +109,10 @@ struct AmountCompression
     }
 };
 
-/** wrapper for CTxOut that provides a more compact serialization */
+/** SYSCOIN wrapper for CTxOutCoin that provides a more compact serialization */
 struct TxOutCompression
 {
-    FORMATTER_METHODS(CTxOut, obj) { READWRITE(Using<AmountCompression>(obj.nValue), Using<ScriptCompression>(obj.scriptPubKey)); }
+    FORMATTER_METHODS(CTxOutCoin, obj) { READWRITE(Using<AmountCompression>(obj.nValue), Using<ScriptCompression>(obj.scriptPubKey)); }
 };
 
 #endif // SYSCOIN_COMPRESSOR_H
