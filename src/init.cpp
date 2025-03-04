@@ -1680,6 +1680,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         node.chainman = std::make_unique<ChainstateManager>(node.kernel->interrupt, chainman_opts, blockman_opts);
         ChainstateManager& chainman = *Assert(node.chainman);
         // SYSCOIN
+        const fs::path &evodbPath = args.GetDataDirNet() / "evodb_dmn";
+        if (!fs::exists(evodbPath)) {
+            LogPrintf("Folder %s not found, forcing reindex.\n", fs::PathToString(evodbPath));
+            fReindex = true;
+        }
         node.peerman = PeerManager::make(*node.connman, *node.addrman, node.banman.get(),
                                      chainman, *node.mempool, peerman_opts);
         RegisterValidationInterface(node.peerman.get());
