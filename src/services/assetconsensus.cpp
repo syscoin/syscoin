@@ -257,7 +257,7 @@ bool DisconnectMintAsset(const CTransaction &tx, const uint256& txHash, NEVMMint
 
 bool CheckSyscoinInputs(const CTransaction& tx, const Consensus::Params& params, const uint256& txHash, TxValidationState& state, const uint32_t &nHeight, const int64_t& nTime, NEVMMintTxMap &mapMintKeys, const bool &bSanityCheck, CAssetsMap& mapAssetIn, CAssetsMap& mapAssetOut) {
     if(!fRegTest && nHeight < (uint32_t)params.nNexusStartBlock)
-        return true;
+        return false;
     if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY)
         return false;
     return CheckSyscoinInputs(false, params, tx, txHash, state, true, nHeight, nTime, uint256(), bSanityCheck, mapMintKeys, mapAssetIn, mapAssetOut);
@@ -265,6 +265,8 @@ bool CheckSyscoinInputs(const CTransaction& tx, const Consensus::Params& params,
 
 bool CheckSyscoinInputs(const bool &ibd, const Consensus::Params& params, const CTransaction& tx, const uint256& txHash, TxValidationState& state, const bool &fJustCheck, const uint32_t &nHeight, const int64_t& nTime, const uint256 & blockHash, const bool &bSanityCheck, NEVMMintTxMap &mapMintKeys, CAssetsMap& mapAssetIn, CAssetsMap& mapAssetOut) {
     bool good = true;
+    if(nHeight < (uint32_t)params.nNexusStartBlock)
+        return true;
     try{
         if(IsSyscoinMintTx(tx.nVersion)) {
             good = CheckSyscoinMint(ibd, tx, txHash, state, fJustCheck, bSanityCheck, nHeight, nTime, blockHash, mapMintKeys, mapAssetIn, mapAssetOut);

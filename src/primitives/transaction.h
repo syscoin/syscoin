@@ -562,14 +562,11 @@ public:
     std::vector<CAssetOutValue> values;
     
     SERIALIZE_METHODS(CAssetOut, obj) {
-        std::vector<unsigned char> vchNotarySig;
-        READWRITE(VARINT(obj.key), obj.values, vchNotarySig);
-        if(vchNotarySig.size() > 100) {
-            throw std::ios_base::failure("Asset out too large");
-        }
+        READWRITE(VARINT(obj.key), obj.values);
     }
 
     CAssetOut(const uint64_t &keyIn, const std::vector<CAssetOutValue>& valuesIn): key(keyIn), values(valuesIn) {}
+    CAssetOut(const uint64_t &keyIn, const std::vector<CAssetOutValue>& valuesIn, const std::vector<unsigned char> &vchNotarySigIn): key(keyIn), values(valuesIn) {}
     CAssetOut() {
 		SetNull();
 	}
