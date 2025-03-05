@@ -170,8 +170,6 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, const std::vecto
 BasicTestingSetup::~BasicTestingSetup()
 {
     // SYSCOIN
-    passetdb.reset();
-    passetnftdb.reset();
     pnevmtxrootsdb.reset();
     pnevmtxmintdb.reset();
     pblockindexdb.reset();

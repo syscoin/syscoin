@@ -5,7 +5,6 @@
 #include <node/blockstorage.h>
 #include <rpc/util.h>
 #include <services/nevmconsensus.h>
-#include <services/rpc/nevmrpc.h>
 #include <chainparams.h>
 #include <rpc/server.h>
 #include <thread>

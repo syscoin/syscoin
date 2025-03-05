@@ -13,8 +13,7 @@
 #include <script/interpreter.h>
 #include <util/check.h>
 #include <util/moneystr.h>
-// SYSCOIN
-#include <services/asset.h>
+#include <logging.h>
 bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
 {
     if (tx.nLockTime == 0)
@@ -184,18 +183,10 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
                 strprintf("tried to spend coinbase at depth %d", nSpendHeight - coin.nHeight));
         }
         if (!coin.out.assetInfo.IsNull()) {
-            const bool &zeroVal = coin.out.assetInfo.nValue == 0;
-            auto inRes = mapAssetIn.try_emplace(coin.out.assetInfo.nAsset, zeroVal, coin.out.assetInfo.nValue);
+            auto inRes = mapAssetIn.try_emplace(coin.out.assetInfo.nAsset, coin.out.assetInfo.nValue);
             if (!inRes.second) {
-                inRes.first->second.nAmount += coin.out.assetInfo.nValue;
-                if (!inRes.first->second.bZeroVal) {
-                    inRes.first->second.bZeroVal = zeroVal;
-                }
-                // sanity, should never have multiple zero val inputs for an asset
-                else if (zeroVal) {
-                    return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-multiple-zero-val-input");
-                }
-                if(!MoneyRangeAsset(inRes.first->second.nAmount) || !MoneyRangeAsset(coin.out.assetInfo.nValue)) {
+                inRes.first->second += coin.out.assetInfo.nValue;
+                if(!MoneyRangeAsset(inRes.first->second) || !MoneyRangeAsset(coin.out.assetInfo.nValue)) {
                     return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-inputvalues-outofrange");
                 }
             }
@@ -217,10 +208,6 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
         std::string err;
         if(!tx.GetAssetValueOut(mapAssetOut, err)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, err);
-        }
-        // if input was used, validate it against output (note, no fees for assets in == out)
-        if(!CheckTxInputsAssets(tx, state, GetBaseAssetID(tx.voutAssets.begin()->key), mapAssetIn, mapAssetOut)) {
-            return false; // state filled by CheckTxInputsAssets
         }
     }
     

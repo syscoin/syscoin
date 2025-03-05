@@ -83,20 +83,6 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         .wipe_data = options.fReindexGeth,
         .options = chainman.m_options.block_tree_db};
     llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, options.fReindexGeth);
-    passetdb.reset();
-    passetdb = std::make_unique<CAssetDB>(DBParams{
-        .path = chainman.m_options.datadir / "asset",
-        .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = options.fReindexGeth,
-        .options = chainman.m_options.block_tree_db});
-    passetnftdb.reset();
-    passetnftdb = std::make_unique<CAssetNFTDB>(DBParams{
-        .path = chainman.m_options.datadir / "assetnft",
-        .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = options.fReindexGeth,
-        .options = chainman.m_options.block_tree_db});
     pnevmtxrootsdb.reset();
     pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
         .path = chainman.m_options.datadir / "nevmtxroots",
@@ -118,8 +104,6 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         .memory_only = options.block_tree_db_in_memory,
         .wipe_data = options.fReindexGeth,
         .options = chainman.m_options.block_tree_db});
-    if(!pblockindexdb->ReadLastKnownHeight(nLastKnownHeightOnStart))
-        nLastKnownHeightOnStart = 0;
     // PoDA data cannot be deleted from disk on reindex because chain on disk does not have PoDA information to recreate it
     pnevmdatadb.reset();
     pnevmdatadb = std::make_unique<CNEVMDataDB>(DBParams{
@@ -285,20 +269,6 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             .wipe_data = coinsViewEmpty,
             .options = chainman.m_options.block_tree_db};
         llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, coinsViewEmpty);
-        passetdb.reset();
-        passetdb = std::make_unique<CAssetDB>(DBParams{
-            .path = chainman.m_options.datadir / "asset",
-            .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
-            .memory_only = options.block_tree_db_in_memory,
-            .wipe_data = coinsViewEmpty,
-            .options = chainman.m_options.block_tree_db});
-        passetnftdb.reset();
-        passetnftdb = std::make_unique<CAssetNFTDB>(DBParams{
-            .path = chainman.m_options.datadir / "assetnft",
-            .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
-            .memory_only = options.block_tree_db_in_memory,
-            .wipe_data = coinsViewEmpty,
-            .options = chainman.m_options.block_tree_db});
         pnevmtxrootsdb.reset();
         pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
             .path = chainman.m_options.datadir / "nevmtxroots",

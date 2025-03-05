@@ -370,8 +370,6 @@ void Shutdown(NodeContext& node)
         }
         UninterruptibleSleep(std::chrono::milliseconds{200});
 
-        passetdb.reset();
-        passetnftdb.reset();
         pnevmtxrootsdb.reset();
         pnevmtxmintdb.reset();
         pblockindexdb.reset();
@@ -1846,10 +1844,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
                     }
                 } else if((int64_t)nHeightFromGeth > nHeightLocalGeth) {
-                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d vs nLastKnownHeightOnStart %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth, nHeightFromGeth + Params().GetConsensus().nNEVMStartBlock);
-                    nHeightFromGeth += Params().GetConsensus().nNEVMStartBlock;
-                    // otherwise local height is below so catch up to geth without strict enforcement on geth
-                    nLastKnownHeightOnStart = nHeightFromGeth;
+                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth, nHeightFromGeth + Params().GetConsensus().nNEVMStartBlock);
                 }
             } else if(nHeightLocalGeth > 0){
                 fNEVMConnection = false;

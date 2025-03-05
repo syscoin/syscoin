@@ -10,7 +10,6 @@
 #include <script/interpreter.h>
 #include <script/script.h>
 #include <policy/policy.h>
-#include <services/asset.h>
 #include <univalue.h>
 #include <key_io.h>
 #include <test/util/setup_common.h>

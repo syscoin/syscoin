@@ -32,5 +32,5 @@ public:
     const PoDAMAP& GetMapCache() const { return mapCache;}
 };
 extern std::unique_ptr<CNEVMDataDB> pnevmdatadb;
-bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, AssetMap &mapAssets, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut);
+bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut);
 #endif // SYSCOIN_SERVICES_NEVMCONSENSUS_H

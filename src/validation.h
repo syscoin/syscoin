@@ -105,7 +105,6 @@ extern bool fRegTest;
 extern bool fSigNet;
 extern bool fNEVMConnection;
 extern std::atomic_bool fReindexGeth;
-extern uint32_t nLastKnownHeightOnStart;
 static constexpr uint8_t NEVM_MAGIC_BYTES[4] = {'n', 'e', 'v', 'm'};
 
 /** Documentation for argument 'checklevel'. */
@@ -676,12 +675,12 @@ public:
 
     // Block (dis)connection on a given view:
     // SYSCOIN
-    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, AssetMap &mapAssets, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                     CCoinsViewCache& view, bool fJustCheck = false, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                    CCoinsViewCache& view, bool fJustCheck, AssetMap &mapAssets, NEVMMintTxMap &mapMintKeys, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                    CCoinsViewCache& view, bool fJustCheck, NEVMMintTxMap &mapMintKeys, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     // SYSCOIN Apply the effects of a block disconnection on the UTXO set.
     bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
@@ -759,7 +758,7 @@ private:
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, AssetMap &mapAssets, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxMap &mapMintKeys, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxMap &mapMintKeys, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void CheckForkWarningConditions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void InvalidChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ConflictingChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -1287,14 +1286,10 @@ public:
 static const uint32_t MAX_BLOCK_INDEX = 43800*12; // 2.5 year of blocks
 // SYSCOIN
 class CBlockIndexDB : public CDBWrapper {
-    const uint8_t LAST_KNOWN_HEIGHT_TAG = 'L';
     std::unordered_map<uint256, uint32_t, StaticSaltedHasher> mapCache;
 public:
     using CDBWrapper::CDBWrapper;
     bool ReadBlockHeight(const uint256& txid, uint32_t& nHeight);
-    bool ReadLastKnownHeight(uint32_t& nHeight) {
-        return Read(LAST_KNOWN_HEIGHT_TAG, nHeight);
-    }
     bool Prune(const uint32_t &nHeight, CDBBatch &batch);
     bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs);
     bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs, CDBBatch &batch);

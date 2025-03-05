@@ -47,17 +47,6 @@ static const int SERIALIZE_TRANSACTION_NO_WITNESS = 0x40000000;
 // SYSCOIN
 static const int SERIALIZE_TRANSACTION_PODA = 0x04000000;
 static const float NEVM_DATA_SCALE_FACTOR = 0.01;
-enum {
-    ASSET_UPDATE_DATA=1, // can you update public data field?
-    ASSET_UPDATE_CONTRACT=2, // can you update smart contract?
-    ASSET_UPDATE_SUPPLY=4, // can you update supply?
-    ASSET_UPDATE_NOTARY_KEY=8, // can you update notary?
-    ASSET_UPDATE_NOTARY_DETAILS=16, // can you update notary details?
-    ASSET_UPDATE_AUXFEE=32, // can you update aux fees?
-    ASSET_UPDATE_CAPABILITYFLAGS=64, // can you update capability flags?
-    ASSET_CAPABILITY_ALL=127,
-    ASSET_INIT=128, // set when creating an asset
-};
 
 
 const int SYSCOIN_TX_VERSION_MN_REGISTER = 80;
@@ -571,20 +560,22 @@ class CAssetOut {
 public:
     uint64_t key;
     std::vector<CAssetOutValue> values;
-    std::vector<unsigned char> vchNotarySig;
+    
     SERIALIZE_METHODS(CAssetOut, obj) {
-        READWRITE(VARINT(obj.key), obj.values, obj.vchNotarySig);
+        std::vector<unsigned char> vchNotarySig;
+        READWRITE(VARINT(obj.key), obj.values, vchNotarySig);
+        if(vchNotarySig.size() > 100) {
+            throw std::ios_base::failure("Asset out too large");
+        }
     }
 
     CAssetOut(const uint64_t &keyIn, const std::vector<CAssetOutValue>& valuesIn): key(keyIn), values(valuesIn) {}
-    CAssetOut(const uint64_t &keyIn, const std::vector<CAssetOutValue>& valuesIn, const std::vector<unsigned char> &vchNotarySigIn): key(keyIn), values(valuesIn), vchNotarySig(vchNotarySigIn) {}
     CAssetOut() {
 		SetNull();
 	}
     inline void SetNull() {
         key = 0;
         values.clear();
-        vchNotarySig.clear();
     }
     inline friend bool operator==(const CAssetOut &a, const CAssetOut &b) {
 		return (a.key == b.key && a.values == b.values);
@@ -619,8 +610,6 @@ public:
     const std::vector<CTxOut> vout;
     const int32_t nVersion;
     const uint32_t nLockTime;
-    // SYSCOIN
-    const std::vector<CAssetOut> voutAssets;
 
 private:
     /** Memory only. */
@@ -702,8 +691,6 @@ struct CMutableTransaction
     std::vector<CTxOut> vout;
     int32_t nVersion;
     uint32_t nLockTime;
-    // SYSCOIN
-    std::vector<CAssetOut> voutAssets;
 
     explicit CMutableTransaction();
     explicit CMutableTransaction(const CTransaction& tx);
@@ -743,84 +730,11 @@ struct CMutableTransaction
     bool IsNEVMData() const;
     bool IsMnTx() const;
     void LoadAssets();
-    CAmount GetAssetValueOut(const std::vector<CAssetOutValue> &vecVout) const;
 };
 
 typedef std::shared_ptr<const CTransaction> CTransactionRef;
 template <typename Tx> static inline CTransactionRef MakeTransactionRef(Tx&& txIn) { return std::make_shared<const CTransaction>(std::forward<Tx>(txIn)); }
 
-class CAuxFee {
-public:
-    CAmount nBound;
-    uint16_t nPercent;
-    CAuxFee() {
-        SetNull();
-    }
-    CAuxFee(const CAmount &nBoundIn, const uint16_t &nPercentIn):nBound(nBoundIn),nPercent(nPercentIn) {}
-    SERIALIZE_METHODS(CAuxFee, obj) {
-        READWRITE(Using<AmountCompression>(obj.nBound), obj.nPercent);
-    }
-    inline friend bool operator==(const CAuxFee &a, const CAuxFee &b) {
-        return (
-        a.nBound == b.nBound && a.nPercent == b.nPercent
-        );
-    }
-
-    inline friend bool operator!=(const CAuxFee &a, const CAuxFee &b) {
-        return !(a == b);
-    }
-    inline void SetNull() { nPercent = 0; nBound = 0;}
-    inline bool IsNull() const { return (nPercent == 0 && nBound == 0); }
-};
-class CAuxFeeDetails {
-public:
-    std::vector<unsigned char> vchAuxFeeKeyID;
-    std::vector<CAuxFee> vecAuxFees;
-    CAuxFeeDetails() {
-        SetNull();
-    }
-    CAuxFeeDetails(const UniValue& value, const uint8_t &nPrecision);
-    SERIALIZE_METHODS(CAuxFeeDetails, obj) {
-        READWRITE(obj.vchAuxFeeKeyID, obj.vecAuxFees);
-    }
-    inline friend bool operator==(const CAuxFeeDetails &a, const CAuxFeeDetails &b) {
-        return (
-        a.vecAuxFees == b.vecAuxFees && a.vchAuxFeeKeyID == b.vchAuxFeeKeyID
-        );
-    }
-
-    inline friend bool operator!=(const CAuxFeeDetails &a, const CAuxFeeDetails &b) {
-        return !(a == b);
-    }
-    inline void SetNull() { vecAuxFees.clear(); vchAuxFeeKeyID.clear();}
-    inline bool IsNull() const { return (vecAuxFees.empty() && vchAuxFeeKeyID.empty()); }
-    void ToJson(UniValue& json, const uint32_t& nBaseAsset) const;
-};
-class CNotaryDetails {
-public:
-    std::string strEndPoint;
-    uint8_t bEnableInstantTransfers;
-    uint8_t bRequireHD;
-    CNotaryDetails() {
-        SetNull();
-    }
-    CNotaryDetails(const UniValue& value);
-    SERIALIZE_METHODS(CNotaryDetails, obj) {
-        READWRITE(obj.strEndPoint, obj.bEnableInstantTransfers, obj.bRequireHD);
-    }
-    inline friend bool operator==(const CNotaryDetails &a, const CNotaryDetails &b) {
-        return (
-        a.strEndPoint == b.strEndPoint && a.bEnableInstantTransfers == b.bEnableInstantTransfers && a.bRequireHD == b.bRequireHD
-        );
-    }
-
-    inline friend bool operator!=(const CNotaryDetails &a, const CNotaryDetails &b) {
-        return !(a == b);
-    }
-    inline void SetNull() { strEndPoint.clear();  bEnableInstantTransfers = bRequireHD = 0;}
-    inline bool IsNull() const { return strEndPoint.empty(); }
-    void ToJson(UniValue &json) const;
-};
 class CAssetAllocation {
 public:
     std::vector<CAssetOut> voutAssets;
@@ -854,174 +768,6 @@ public:
 	void SerializeData(std::vector<unsigned char>& vchData);
 };
 
-class CAsset: public CAssetAllocation {
-public:
-    std::vector<unsigned char> vchContract;
-    std::vector<unsigned char> vchPrevContract;
-    std::string strSymbol;
-    std::string strPubData;
-    std::string strPrevPubData;
-    CAmount nTotalSupply;
-    CAmount nMaxSupply;
-    uint8_t nPrecision;
-    uint8_t nUpdateCapabilityFlags;
-    uint8_t nPrevUpdateCapabilityFlags;
-    std::vector<unsigned char> vchNotaryKeyID;
-    std::vector<unsigned char> vchPrevNotaryKeyID;
-    CNotaryDetails notaryDetails;
-    CNotaryDetails prevNotaryDetails;
-    CAuxFeeDetails auxFeeDetails;
-    CAuxFeeDetails prevAuxFeeDetails;
-    uint8_t nUpdateMask;
-    CAsset() {
-        SetNull();
-    }
-    explicit CAsset(const CTransaction &tx);
-    explicit CAsset(const CMutableTransaction &mtx);
-    
-    inline void ClearAsset() {
-        strPubData.clear();
-        vchContract.clear();
-        voutAssets.clear();
-        strPrevPubData.clear();
-        vchPrevContract.clear();
-        strSymbol.clear();
-        nPrevUpdateCapabilityFlags = nUpdateCapabilityFlags = 0;
-        nTotalSupply = 0;
-        nMaxSupply = 0;
-        vchNotaryKeyID.clear();
-        vchPrevNotaryKeyID.clear();
-        notaryDetails.SetNull();
-        prevNotaryDetails.SetNull();
-        auxFeeDetails.SetNull();
-        prevAuxFeeDetails.SetNull();
-        nUpdateMask = 0;
-    }
-    // these two functions will work with transactions which require previous fields for disconnect logic
-    template<typename Stream>
-    void SerializeTx(Stream& s) const
-    {
-        s << *(CAssetAllocation*)this;
-        s << nPrecision;
-        s << nUpdateMask;
-        if(nUpdateMask & ASSET_INIT) {
-            s << strSymbol;
-            s << Using<AmountCompression>(nMaxSupply);
-        }
-        if(nUpdateMask & ASSET_UPDATE_CONTRACT) {
-            s << vchContract;
-            s << vchPrevContract;
-        }
-        if(nUpdateMask & ASSET_UPDATE_DATA) {
-            s << strPubData;
-            s << strPrevPubData;
-        }
-        if(nUpdateMask & ASSET_UPDATE_SUPPLY) {
-            s << Using<AmountCompression>(nTotalSupply);
-        }
-        if(nUpdateMask & ASSET_UPDATE_NOTARY_KEY) {
-            s << vchNotaryKeyID;
-            s << vchPrevNotaryKeyID;
-        }
-        if(nUpdateMask & ASSET_UPDATE_NOTARY_DETAILS) {
-            s << notaryDetails;
-            s << prevNotaryDetails;
-        }
-        if(nUpdateMask & ASSET_UPDATE_AUXFEE) {
-            s << auxFeeDetails;
-            s << prevAuxFeeDetails;
-        }
-        if(nUpdateMask & ASSET_UPDATE_CAPABILITYFLAGS) {
-            s << nUpdateCapabilityFlags;
-            s << nPrevUpdateCapabilityFlags;
-        }
-    }
-
-    template<typename Stream>
-    void UnserializeTx(Stream& s) {
-        s >> *(CAssetAllocation*)this;
-        s >> nPrecision;
-        s >> nUpdateMask;
-        if(nUpdateMask & ASSET_INIT) {
-            s >> strSymbol;
-            s >> Using<AmountCompression>(nMaxSupply);
-        }
-        if(nUpdateMask & ASSET_UPDATE_CONTRACT) {
-            s >> vchContract;
-            s >> vchPrevContract;
-        }
-        if(nUpdateMask & ASSET_UPDATE_DATA) {
-            s >> strPubData;
-            s >> strPrevPubData;
-        }
-        if(nUpdateMask & ASSET_UPDATE_SUPPLY) {
-            s >> Using<AmountCompression>(nTotalSupply);
-        }
-        if(nUpdateMask & ASSET_UPDATE_NOTARY_KEY) {
-            s >> vchNotaryKeyID;
-            s >> vchPrevNotaryKeyID;
-        }
-        if(nUpdateMask & ASSET_UPDATE_NOTARY_DETAILS) {
-            s >> notaryDetails;
-            s >> prevNotaryDetails;
-        }
-        if(nUpdateMask & ASSET_UPDATE_AUXFEE) {
-            s >> auxFeeDetails;
-            s >> prevAuxFeeDetails;
-        }
-        if(nUpdateMask & ASSET_UPDATE_CAPABILITYFLAGS) {
-            s >> nUpdateCapabilityFlags;
-            s >> nPrevUpdateCapabilityFlags;
-        }
-    }
-    // this version is for everything else including database storage which does not require previous fields
-    SERIALIZE_METHODS(CAsset, obj) {
-        READWRITE(AsBase<CAssetAllocation>(obj));
-        READWRITE(obj.nPrecision, obj.nUpdateMask);
-        if(obj.nUpdateMask & ASSET_INIT) {
-            READWRITE(obj.strSymbol, Using<AmountCompression>(obj.nMaxSupply));
-        }
-        if(obj.nUpdateMask & ASSET_UPDATE_CONTRACT) {
-            READWRITE(obj.vchContract);
-        }
-        if(obj.nUpdateMask & ASSET_UPDATE_DATA) {
-            READWRITE(obj.strPubData);
-        }
-        if(obj.nUpdateMask & ASSET_UPDATE_SUPPLY) {
-            READWRITE(Using<AmountCompression>(obj.nTotalSupply));
-        }
-        if(obj.nUpdateMask & ASSET_UPDATE_NOTARY_KEY) {
-            READWRITE(obj.vchNotaryKeyID);
-        }
-        if(obj.nUpdateMask & ASSET_UPDATE_NOTARY_DETAILS) {
-            READWRITE(obj.notaryDetails);
-        }
-        if(obj.nUpdateMask & ASSET_UPDATE_AUXFEE) {
-            READWRITE(obj.auxFeeDetails);
-        }
-        if(obj.nUpdateMask & ASSET_UPDATE_CAPABILITYFLAGS) {
-            READWRITE(obj.nUpdateCapabilityFlags);
-        }
-    }
-
-    inline friend bool operator==(const CAsset &a, const CAsset &b) {
-        return (
-        a.voutAssets == b.voutAssets
-        );
-    }
-
-
-    inline friend bool operator!=(const CAsset &a, const CAsset &b) {
-        return !(a == b);
-    }
-    // set precision to an invalid amount so isnull will identify this asset as invalid state
-    inline void SetNull() { ClearAsset(); nPrecision = 9; }
-    inline bool IsNull() const { return nPrecision == 9; }
-    bool UnserializeFromTx(const CTransaction &tx);
-    bool UnserializeFromTx(const CMutableTransaction &mtx);
-    int UnserializeFromData(const std::vector<unsigned char> &vchData);
-    void SerializeData(std::vector<unsigned char>& vchData);
-};
 class CMintSyscoin: public CAssetAllocation {
 public:
     // where in vchTxParentNodes the vchTxValue can be found as an offset
@@ -1121,8 +867,6 @@ bool IsSyscoinTx(const int &nVersion);
 bool IsMasternodeTx(const int &nVersion);
 bool IsAssetAllocationTx(const int &nVersion);
 bool IsZdagTx(const int &nVersion);
-bool IsSyscoinWithNoInputTx(const int &nVersion);
-bool IsAssetTx(const int &nVersion);
 bool IsSyscoinMintTx(const int &nVersion);
 int GetSyscoinDataOutput(const CTransaction& tx);
 int GetSyscoinDataOutput(const CMutableTransaction& mtx);
@@ -1132,7 +876,6 @@ bool GetSyscoinData(const CScript &scriptPubKey, std::vector<unsigned char> &vch
 typedef std::unordered_map<uint256, uint256> NEVMMintTxMap;
 typedef std::vector<std::vector<uint8_t> > NEVMDataVec;
 typedef std::unordered_map<uint256, NEVMTxRoot> NEVMTxRootMap;
-typedef std::unordered_map<uint32_t, std::pair<std::vector<uint64_t>, CAsset > > AssetMap;
 typedef std::map<std::vector<uint8_t>, std::pair<std::vector<uint8_t>, int64_t> > PoDAMAP;
 typedef std::map<std::vector<uint8_t>, const std::vector<uint8_t>* > PoDAMAPMemory;
 /** A generic txid reference (txid or wtxid). */

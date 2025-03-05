@@ -82,8 +82,7 @@ std::string CTxOut::ToString() const
         return strprintf("CTxOut(nValue=%d.%08d, scriptPubKey=%s, nAsset=%llu, nAssetValue=%d.%08d)", nValue / COIN, nValue % COIN, HexStr(scriptPubKey).substr(0, 30), assetInfo.nAsset, assetInfo.nValue / COIN, assetInfo.nValue % COIN);
 }
 CMutableTransaction::CMutableTransaction() : nVersion(CTransaction::CURRENT_VERSION), nLockTime(0) {}
-// SYSCOIN
-CMutableTransaction::CMutableTransaction(const CTransaction& tx) : vin(tx.vin), vout(tx.vout), nVersion(tx.nVersion), nLockTime(tx.nLockTime), voutAssets(tx.voutAssets) {}
+CMutableTransaction::CMutableTransaction(const CTransaction& tx) : vin(tx.vin), vout(tx.vout), nVersion(tx.nVersion), nLockTime(tx.nLockTime) {}
 
 uint256 CMutableTransaction::GetHash() const
 {
@@ -102,9 +101,8 @@ uint256 CTransaction::ComputeWitnessHash() const
     }
     return (CHashWriter{0} << *this).GetHash();
 }
-// SYSCOIN
-CTransaction::CTransaction(const CMutableTransaction& tx) : vin(tx.vin), vout(tx.vout), nVersion(tx.nVersion), nLockTime(tx.nLockTime), voutAssets(tx.voutAssets), hash{ComputeHash()}, m_witness_hash{ComputeWitnessHash()} {}
-CTransaction::CTransaction(CMutableTransaction&& tx) : vin(std::move(tx.vin)), vout(std::move(tx.vout)), nVersion(tx.nVersion), nLockTime(tx.nLockTime), voutAssets(std::move(tx.voutAssets)), hash{ComputeHash()}, m_witness_hash{ComputeWitnessHash()} {}
+CTransaction::CTransaction(const CMutableTransaction& tx) : vin(tx.vin), vout(tx.vout), nVersion(tx.nVersion), nLockTime(tx.nLockTime), hash{ComputeHash()}, m_witness_hash{ComputeWitnessHash()} {}
+CTransaction::CTransaction(CMutableTransaction&& tx) : vin(std::move(tx.vin)), vout(std::move(tx.vout)), nVersion(tx.nVersion), nLockTime(tx.nLockTime), hash{ComputeHash()}, m_witness_hash{ComputeWitnessHash()} {}
 
 CAmount CTransaction::GetValueOut() const
 {
@@ -362,12 +360,11 @@ void CMutableTransaction::LoadAssets()
         if(allocation.IsNull()) {
             throw std::ios_base::failure("Unknown asset data");
         }
-        voutAssets = std::move(allocation.voutAssets);
-        if(voutAssets.empty()) {
+        if(allocation.voutAssets.empty()) {
             throw std::ios_base::failure("asset empty map");
         }
         const size_t &nVoutSize = vout.size();
-        for(const auto &it: voutAssets) {
+        for(const auto &it: allocation.voutAssets) {
             const uint64_t &nAsset = it.key;
             if(it.values.empty()) {
                 throw std::ios_base::failure("asset empty outputs");
@@ -377,7 +374,7 @@ void CMutableTransaction::LoadAssets()
                 if(nOut >= nVoutSize) {
                     throw std::ios_base::failure("asset vout out of range");
                 }
-                if(voutAsset.nValue > MAX_ASSET || voutAsset.nValue < 0) {
+                if(!MoneyRangeAsset(voutAsset.nValue)) {
                     throw std::ios_base::failure("asset vout value out of range");
                 }
                 // store in vout
@@ -388,69 +385,22 @@ void CMutableTransaction::LoadAssets()
         }       
     }
 }
-CAmount CTransaction::GetAssetValueOut(const std::vector<CAssetOutValue> &vecVout) const
-{
-    CAmount nTotal = 0;
-    for(const auto& voutAsset: vecVout) {
-        nTotal += voutAsset.nValue;
-    }
-    return nTotal;
-}
-CAmount CMutableTransaction::GetAssetValueOut(const std::vector<CAssetOutValue> &vecVout) const
-{
-    CAmount nTotal = 0;
-    for(const auto& voutAsset: vecVout) {
-        nTotal += voutAsset.nValue;
-    }
-    return nTotal;
-}
+
 bool CTransaction::GetAssetValueOut(CAssetsMap &mapAssetOut, std::string &err) const
 {
-    std::unordered_set<uint32_t> setUsedIndex;
-    for(const auto &it: voutAssets) {
-        CAmount nTotal = 0;
-        if(it.values.empty()) {
-            err = "bad-txns-asset-empty";
-            return false;
+    for(const auto &out: vout) {
+        if(out.assetInfo.IsNull()) {
+            continue;
         }
-        const uint64_t &nAsset = it.key;
-        const size_t &nVoutSize = vout.size();
-        bool zeroVal = false;
-        for(const auto& voutAsset: it.values) {
-            const uint32_t& nOut = voutAsset.n;
-            if(nOut >= nVoutSize) {
-                err = "bad-txns-asset-outofrange";
-                return false;
-            }
-            const CAmount& nAmount = voutAsset.nValue;
-            // make sure the vout assetinfo matches the asset commitment in OP_RETURN
-            if(vout[nOut].assetInfo.nAsset != nAsset || vout[nOut].assetInfo.nValue != nAmount) {
-                err = "bad-txns-asset-out-assetinfo-mismatch";
-                return false;
-            }
-            nTotal += nAmount;
-            if(nAmount == 0) {
-                // only one zero val per asset is allowed
-                if(zeroVal) {
-                    err = "bad-txns-asset-multiple-zero-out";
-                    return false;
-                }
-                zeroVal = true;
-            }
-            if(!MoneyRangeAsset(nTotal) || !MoneyRangeAsset(nAmount)) {
+        const uint64_t &nAsset = out.assetInfo.nAsset;
+        const CAmount& nAmount = out.assetInfo.nValue;
+        auto itRes = mapAssetOut.try_emplace(nAsset, nAmount);
+        if(!itRes.second) {
+            itRes.first->second += nAmount;
+            if (!MoneyRange(nAmount) || !MoneyRange(itRes.first->second)) {
                 err = "bad-txns-asset-out-outofrange";
                 return false;
             }
-            auto itSet = setUsedIndex.emplace(nOut);
-            if(!itSet.second) {
-                err = "bad-txns-asset-out-not-unique";
-                return false;
-            }
-        }
-        auto itRes = mapAssetOut.try_emplace(nAsset, zeroVal, nTotal);
-        if(!itRes.second) {
-            err = "bad-txns-asset-not-unique";
-            return false;
         }
     }
     return true;
@@ -459,10 +409,6 @@ bool CTransaction::GetAssetValueOut(CAssetsMap &mapAssetOut, std::string &err) c
 
 bool IsSyscoinMintTx(const int &nVersion) {
     return nVersion == SYSCOIN_TX_VERSION_ALLOCATION_MINT;
-}
-
-bool IsAssetTx(const int &nVersion) {
-    return nVersion == SYSCOIN_TX_VERSION_ASSET_ACTIVATE || nVersion == SYSCOIN_TX_VERSION_ASSET_UPDATE || nVersion == SYSCOIN_TX_VERSION_ASSET_SEND;
 }
 
 bool IsAssetAllocationTx(const int &nVersion) {
@@ -479,7 +425,7 @@ bool IsZdagTx(const int &nVersion) {
 }
 
 bool IsSyscoinTx(const int &nVersion) {
-    return IsAssetTx(nVersion) || IsAssetAllocationTx(nVersion) || IsSyscoinMintTx(nVersion);
+    return IsAssetAllocationTx(nVersion) || IsSyscoinMintTx(nVersion);
 }
 bool IsMasternodeTx(const int &nVersion) {
     return 
@@ -487,9 +433,6 @@ bool IsMasternodeTx(const int &nVersion) {
      nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
      nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
      nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
-}
-bool IsSyscoinWithNoInputTx(const int &nVersion) {
-    return nVersion == SYSCOIN_TX_VERSION_ASSET_SEND || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_MINT || nVersion == SYSCOIN_TX_VERSION_ASSET_ACTIVATE || nVersion == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION;
 }
 
 int GetSyscoinDataOutput(const CTransaction& tx) {
@@ -575,55 +518,6 @@ CBurnSyscoin::CBurnSyscoin(const CMutableTransaction &mtx) {
     SetNull();
     UnserializeFromTx(mtx);
 }
-CAsset::CAsset(const CTransaction &tx) {
-    SetNull();
-    UnserializeFromTx(tx);
-}
-CAsset::CAsset(const CMutableTransaction &mtx) {
-    SetNull();
-    UnserializeFromTx(mtx);
-}
-int CAsset::UnserializeFromData(const std::vector<unsigned char> &vchData) {
-    try {
-		CDataStream dsAsset(vchData, SER_NETWORK, PROTOCOL_VERSION);
-		UnserializeTx(dsAsset);
-        return dsAsset.size();
-    } catch (std::exception &e) {
-		SetNull();
-    }
-	return -1;
-}
-
-bool CAsset::UnserializeFromTx(const CTransaction &tx) {
-	std::vector<unsigned char> vchData;
-	int nOut;
-	if (!GetSyscoinData(tx, vchData, nOut))
-	{
-		SetNull();
-		return false;
-	}
-	if(UnserializeFromData(vchData) != 0)
-	{	
-		SetNull();
-		return false;
-	}
-    return true;
-}
-bool CAsset::UnserializeFromTx(const CMutableTransaction &mtx) {
-	std::vector<unsigned char> vchData;
-	int nOut;
-	if (!GetSyscoinData(mtx, vchData, nOut))
-	{
-		SetNull();
-		return false;
-	}
-	if(UnserializeFromData(vchData) != 0)
-	{	
-		SetNull();
-		return false;
-	}
-    return true;
-}
 int CAssetAllocation::UnserializeFromData(const std::vector<unsigned char> &vchData) {
     try {
         CDataStream dsAsset(vchData, SER_NETWORK, PROTOCOL_VERSION);
@@ -644,8 +538,7 @@ bool CAssetAllocation::UnserializeFromTx(const CTransaction &tx) {
     }
     const int &bytesLeft = UnserializeFromData(vchData);
     const bool &allocationMemoThreshold = IsAssetAllocationTx(tx.nVersion) && tx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM && tx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN;
-    const bool &assetIssuanceMemoThreshold = tx.nVersion == SYSCOIN_TX_VERSION_ASSET_SEND;
-	if(bytesLeft == -1 || (bytesLeft > MAX_MEMO && (allocationMemoThreshold || assetIssuanceMemoThreshold)))
+	if(bytesLeft == -1 || (bytesLeft > MAX_MEMO && allocationMemoThreshold))
 	{	
 		SetNull();
 		return false;
@@ -663,8 +556,7 @@ bool CAssetAllocation::UnserializeFromTx(const CMutableTransaction &mtx) {
     }
     const int &bytesLeft = UnserializeFromData(vchData);
     const bool &allocationMemoThreshold =  IsAssetAllocationTx(mtx.nVersion) && mtx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM && mtx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN;
-    const bool &assetIssuanceMemoThreshold = mtx.nVersion == SYSCOIN_TX_VERSION_ASSET_SEND;
-	if(bytesLeft == -1 || (bytesLeft > MAX_MEMO && (allocationMemoThreshold || assetIssuanceMemoThreshold)))
+	if(bytesLeft == -1 || (bytesLeft > MAX_MEMO && allocationMemoThreshold))
 	{	
 		SetNull();
 		return false;
@@ -774,12 +666,6 @@ void CBurnSyscoin::SerializeData( std::vector<unsigned char> &vchData) {
     Serialize(dsBurn);
     const auto &bytesVec = MakeUCharSpan(dsBurn);
     vchData = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
-}
-void CAsset::SerializeData( std::vector<unsigned char> &vchData) {
-    CDataStream dsAsset(SER_NETWORK, PROTOCOL_VERSION);
-    SerializeTx(dsAsset);
-    const auto &bytesVec = MakeUCharSpan(dsAsset);
-	vchData = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
 }
 CNEVMData::CNEVMData(const CTransaction &tx, const int nVersion) {
     SetNull();

@@ -23,26 +23,14 @@ bool fNEVMConnection = false;
 bool fRegTest = false;
 bool fSigNet = false;
 
-bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, AssetMap &mapAssets, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut) {
+bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut) {
  
     if(IsSyscoinMintTx(tx.nVersion)) {
         if(!DisconnectMintAsset(tx, txHash, mapMintKeys))
             return false;       
     }
     else {
-        if (IsAssetTx(tx.nVersion)) {
-            if (tx.nVersion == SYSCOIN_TX_VERSION_ASSET_SEND) {
-                if(!DisconnectAssetSend(tx, txHash, txundo, mapAssets))
-                    return false;
-            } else if (tx.nVersion == SYSCOIN_TX_VERSION_ASSET_UPDATE) {  
-                if(!DisconnectAssetUpdate(tx, txHash, mapAssets))
-                    return false;
-            }
-            else if (tx.nVersion == SYSCOIN_TX_VERSION_ASSET_ACTIVATE) {
-                if(!DisconnectAssetActivate(tx, txHash, mapAssets))
-                    return false;
-            }   
-        } else if (tx.IsNEVMData()) {
+        if (tx.IsNEVMData()) {
             CNEVMData nevmData(tx);
             if(nevmData.IsNull()) {
                 LogPrint(BCLog::SYS,"DisconnectSyscoinTransaction: nevm-data-invalid\n");
