@@ -14,26 +14,7 @@ class CBlock;
 class BlockValidationState;
 class CBlockIndexDB;
 class CNEVMData;
-class CNEVMTxRootsDB : public CDBWrapper {
-    NEVMTxRootMap mapCache;
-public:
-    using CDBWrapper::CDBWrapper;
-    bool FlushErase(const std::vector<uint256> &vecBlockHashes);
-    bool ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot);
-    bool FlushCacheToDisk();
-    void FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots);
-};
 
-class CNEVMMintedTxDB : public CDBWrapper {
-    NEVMMintTxMap mapCache;
-public:
-    using CDBWrapper::CDBWrapper;
-    bool FlushErase(const NEVMMintTxMap &mapMintKeys);
-    bool FlushWrite(const NEVMMintTxMap &mapMintKeys);
-    bool FlushCacheToDisk();
-    void FlushDataToCache(const NEVMMintTxMap &mapNEVMTxRoots);
-    bool ExistsTx(const uint256& nTxHash);
-};
 class CNEVMDataDB : public CDBWrapper {
 private:
     PoDAMAP mapCache;
@@ -50,10 +31,6 @@ public:
     bool BlobExists(const std::vector<uint8_t>& vchVersionhash);
     const PoDAMAP& GetMapCache() const { return mapCache;}
 };
-extern std::unique_ptr<CNEVMTxRootsDB> pnevmtxrootsdb;
-extern std::unique_ptr<CNEVMMintedTxDB> pnevmtxmintdb;
 extern std::unique_ptr<CNEVMDataDB> pnevmdatadb;
-bool DisconnectMint(const CTransaction &tx, const uint256& txHash, NEVMMintTxMap &mapMintKeys);
-bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut);
-bool CheckSyscoinMint(const CTransaction& tx, TxValidationState &tstate, const bool &fJustCheck, const uint32_t& nHeight, NEVMMintTxMap &mapMintKeys, CAmount &nValue);
+bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, AssetMap &mapAssets, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut);
 #endif // SYSCOIN_SERVICES_NEVMCONSENSUS_H

@@ -195,6 +195,7 @@ public:
         consensus.defaultAssumeValid = uint256S("0xe1b6214ca67cf3e98d8d08d4bad95bcd620fc72c6ea98af3e4b10b28d2a462e5"); // 1989728
         consensus.fStrictChainId = true;
         consensus.nLegacyBlocksBefore = 1;
+        consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 57;
         consensus.vchSYSXBurnMethodSignature = ParseHex("54c988ff");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
@@ -204,6 +205,8 @@ public:
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
         consensus.nNexusStartBlock = 2000000;
+        consensus.nUTXOAssetsBlock = 1004200;
+        consensus.nUTXOAssetsBlockProvisioning = consensus.nNEVMStartBlock + 10000;
         consensus.DIP0003Height = 1004200;
         consensus.DIP0003EnforcementHeight = 1004200;
         /**
@@ -356,6 +359,7 @@ public:
         consensus.nAuxpowOldChainId = 4096;
         consensus.fStrictChainId = false;
         consensus.nLegacyBlocksBefore = 1;
+        consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
         consensus.vchSYSXBurnMethodSignature = ParseHex("54c988ff");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
@@ -367,6 +371,8 @@ public:
         consensus.nV19StartBlock = 1100000;
         consensus.DIP0003Height = 545000;
         consensus.DIP0003EnforcementHeight = 545000;
+        consensus.nUTXOAssetsBlock = 545000;
+        consensus.nUTXOAssetsBlockProvisioning = consensus.nNEVMStartBlock + 10000;
         pchMessageStart[0] = 0xce;
         pchMessageStart[1] = 0xe2;
         pchMessageStart[2] = 0xca;
@@ -593,6 +599,7 @@ public:
         consensus.nAuxpowOldChainId = 4096;
         consensus.fStrictChainId = true;
         consensus.nLegacyBlocksBefore = 0;
+        consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
         consensus.vchSYSXBurnMethodSignature = ParseHex("54c988ff");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
@@ -604,7 +611,8 @@ public:
         consensus.nV19StartBlock = opts.v19startblock;
         consensus.DIP0003Height = opts.dip3startblock;
         consensus.DIP0003EnforcementHeight = opts.dip3enforcement;
-
+        consensus.nUTXOAssetsBlock = 0;
+        consensus.nUTXOAssetsBlockProvisioning = 1000;
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;
         pchMessageStart[2] = 0xb5;

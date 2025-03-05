@@ -69,6 +69,7 @@
 #include <llmq/quorums_commitment.h>
 #include <governance/governance.h>
 #include <services/nevmconsensus.h>
+#include <services/assetconsensus.h>
 #include <stdexcept>
 #include <llmq/quorums_blockprocessor.h>
 #include <spork.h>
@@ -169,6 +170,8 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, const std::vecto
 BasicTestingSetup::~BasicTestingSetup()
 {
     // SYSCOIN
+    passetdb.reset();
+    passetnftdb.reset();
     pnevmtxrootsdb.reset();
     pnevmtxmintdb.reset();
     pblockindexdb.reset();

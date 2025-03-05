@@ -242,8 +242,9 @@ FUZZ_TARGET(coins_view, .init = initialize_coins_view)
                     return;
                 }
                 // SYSCOIN
-                NEVMMintTxMap mapMintKeys;
-                if (Consensus::CheckTxInputs(transaction, state, coins_view_cache, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, std::numeric_limits<int>::max()), tx_fee_out, true, mapMintKeys)) {
+                CAssetsMap mapAssetIn;
+                CAssetsMap mapAssetOut;
+                if (Consensus::CheckTxInputs(transaction, state, coins_view_cache, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, std::numeric_limits<int>::max()), tx_fee_out, mapAssetIn, mapAssetOut)) {
                     assert(MoneyRange(tx_fee_out));
                 }
             },

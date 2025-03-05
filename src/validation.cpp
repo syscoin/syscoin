@@ -79,6 +79,7 @@
 #include <services/nevmconsensus.h>
 #include <llmq/quorums.h>
 #include <llmq/quorums_blockprocessor.h>
+#include <services/assetconsensus.h>
 #include <fstream>
 #include <cachemultimap.h>
 #include <nevm/sha3.h>
@@ -104,6 +105,7 @@ HANDLE hProcessGeth = NULL;
 #endif
 RecursiveMutex cs_geth;
 NEVMMintTxMap mapMintKeysMempool;
+std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
 std::map<uint256, int64_t> mapRejectedBlocks GUARDED_BY(cs_main);
 
 using kernel::CCoinsStats;
@@ -621,8 +623,12 @@ private:
         explicit Workspace(const CTransactionRef& ptx) : m_ptx(ptx), m_hash(ptx->GetHash()) {}
         /** Txids of mempool transactions that this transaction directly conflicts with. */
         std::set<uint256> m_conflicts;
+        /** Txids of mempool asset transactions that this transaction directly conflicts with. */
+        std::set<uint256> m_conflictsAsset;
         /** Iterators to mempool entries that this transaction directly conflicts with. */
         CTxMemPool::setEntries m_iters_conflicting;
+        /** Iterators to mempool asset entries that this transaction directly conflicts with. */
+        CTxMemPool::setEntries m_iters_conflictingAsset;
         /** Iterators to all mempool entries that would be replaced by this transaction, including
          * those it directly conflicts with and their descendants. */
         CTxMemPool::setEntries m_all_conflicting;
@@ -780,8 +786,10 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         // wtxid) already exists in the mempool.
         return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-same-nonwitness-data-in-mempool");
     }
-
+    
+    // SYSCOIN
     // Check for conflicts with in-memory transactions
+    const bool& IsZTx = IsZdagTx(tx.nVersion);
     for (const CTxIn &txin : tx.vin)
     {
         const CTransaction* ptxConflicting = m_pool.GetConflictTx(txin.prevout);
@@ -790,7 +798,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // Transaction conflicts with a mempool tx, but we're not allowing replacements.
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
             }
-            if (!ws.m_conflicts.count(ptxConflicting->GetHash()))
+            // SYSCOIN
+            if (!ws.m_conflicts.count(ptxConflicting->GetHash()) && !ws.m_conflictsAsset.count(ptxConflicting->GetHash()))
             {
                 // Transactions that don't explicitly signal replaceability are
                 // *not* replaceable with the current logic, even if one of their
@@ -803,9 +812,28 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // If replaceability signaling is ignored due to node setting,
                 // replacement is always allowed.
                 if (!m_pool.m_full_rbf && !SignalsOptInRBF(*ptxConflicting)) {
-                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
+                    // if not RBF then allow first double spend to be relayed, ZDAG by default isn't RBF enabled because it shouldn't be replaceable and because of checks below
+                    // neither are its ancestors, they will be locked in as soon as you have a ZDAG tx because ZDAG isn't compliant with RBF.
+                    if(IsZTx){
+                        // allow the first time this outpoint was found in conflict
+                        auto it = mapAssetAllocationConflicts.try_emplace(txin.prevout, ptx, MakeTransactionRef(*ptxConflicting));
+                        // if was inserted (not found)
+                        if(it.second) {
+                            // if just testing, and this is the first conflict for this prevout then let it go through but just don't add it to the global mapAssetAllocationConflicts
+                            if(args.m_test_accept) {
+                                mapAssetAllocationConflicts.erase(txin.prevout);
+                            }
+                            ws.m_conflictsAsset.insert(ptxConflicting->GetHash());
+                            break;
+                        }
+                        else
+                            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict-zdag");
+                    }
+                    else
+                        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
                 }
-
+                // regardless of RBF flag this tx as per BTC policy but JFYI we don't want to limit asset allocation txs to use NON-RBF,
+                // its still valid to send asset allocations with RBF for normal use-case, just that verifyzdag will flag it as a warning and shouldn't be accepted at point-of-sale
                 ws.m_conflicts.insert(ptxConflicting->GetHash());
             }
         }
@@ -855,11 +883,23 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     if (!lock_points.has_value() || !CheckSequenceLocksAtTip(m_active_chainstate.m_chain.Tip(), *lock_points)) {
         return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "non-BIP68-final");
     }
+
     // SYSCOIN
-    if (!Consensus::CheckTxInputs(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, ws.m_base_fees, args.m_test_accept, mapMintKeysMempool)) {
+    CAssetsMap mapAssetIn;
+    CAssetsMap mapAssetOut;
+    if (!Consensus::CheckTxInputs(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, ws.m_base_fees, mapAssetIn, mapAssetOut)) {
         return false; // state filled in by CheckTxInputs
     }
 
+    // SYSCOIN
+    bool isAssetTx = false;
+    const auto& params = args.m_chainparams.GetConsensus();
+    if(tx.HasAssets()) {
+        isAssetTx = IsAssetTx(tx.nVersion);
+        if (!CheckSyscoinInputs(tx, params, hash, state, (uint32_t)m_active_chainstate.m_chain.Tip()->nHeight + 1, m_active_chainstate.m_chain.Tip()->GetMedianTimePast(), mapMintKeysMempool, args.m_test_accept, mapAssetIn, mapAssetOut)) {
+            return false; // state filled in by CheckSyscoinInputs
+        } 
+    }  
     // SYSCOIN
     if(!ProcessNEVMData(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip()->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_active_chainstate.m_chainman.m_options.adjusted_time_callback()), ws.mapPoDA)) {
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-poda-invalid");
@@ -892,11 +932,20 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     // Set entry_sequence to 0 when bypass_limits is used; this allows txs from a block
-    // reorg to be marked earlier than any child txs that were already in the mempool.
+    // reorg to be marked earlier than any child txs that were already in the mempool.    
     const uint64_t entry_sequence = bypass_limits ? 0 : m_pool.GetSequence();
     entry.reset(new CTxMemPoolEntry(ptx, ws.m_base_fees, nAcceptTime, m_active_chainstate.m_chain.Height(), entry_sequence,
                                     fSpendsCoinbase, nSigOpsCost, lock_points.value()));
-    ws.m_vsize = entry->GetTxSize();
+    // SYSCOIN only double fee-rate requirement for allocation spends if not RBF
+    const bool& isZDAGNoRBF = IsZTx && !SignalsOptInRBF(tx);
+    if (isZDAGNoRBF) {
+        const size_t& txTotalSize = tx.GetTotalSize();
+        if(txTotalSize > MAX_STANDARD_ZDAG_TX_SIZE) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool-zdag-too-large", strprintf("%d > %d", txTotalSize, MAX_STANDARD_ZDAG_TX_SIZE));
+        }
+    }
+    // ensure we apply double the bandwidth costs for zdag to account for 1 double-spend allowance per zdag tx
+    ws.m_vsize = isZDAGNoRBF? entry->GetTxSize()*2: entry->GetTxSize();
 
     if (nSigOpsCost > MAX_STANDARD_TX_SIGOPS_COST)
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-too-many-sigops",
@@ -957,7 +1006,16 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         maybe_rbf_limits.descendant_count += 1;
         maybe_rbf_limits.descendant_size_vbytes += conflict->GetSizeWithDescendants();
     }
+    // SYSCOIN
+    ws.m_iters_conflictingAsset = m_pool.GetIterSet(ws.m_conflictsAsset);
+    // Calculate in-mempool ancestors, up to a limit.
+    if (ws.m_conflictsAsset.size() == 1) {
+        assert(ws.m_iters_conflictingAsset.size() == 1);
+        CTxMemPool::txiter conflict = *ws.m_iters_conflictingAsset.begin();
 
+        maybe_rbf_limits.descendant_count += 1;
+        maybe_rbf_limits.descendant_size_vbytes += conflict->GetSizeWithDescendants();
+    }
     auto ancestors{m_pool.CalculateMemPoolAncestors(*entry, maybe_rbf_limits)};
     if (!ancestors) {
         // If CalculateMemPoolAncestors fails second time, we want the original error string.
@@ -985,6 +1043,11 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         ancestors = m_pool.CalculateMemPoolAncestors(*entry, cpfp_carve_out_limits);
         if (!ancestors) return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-long-mempool-chain", error_message);
     }
+    // SYSCOIN asset tx must use confirmed inputs because non utxo information changes
+    // which may invalidate transactions even though they are entered into mempool
+    if(isAssetTx && !ws.m_ancestors.empty()) {
+        return state.Invalid(TxValidationResult::TX_CONFLICT, "bad-txns-asset-inputs-missingorspent");
+    }
 
     // check special TXs after all the other checks. If we'd do this before the other checks, we might end up
     // DoS scoring a node for non-critical errors, e.g. duplicate keys because a TX is received that was already
@@ -999,9 +1062,10 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     // A transaction that spends outputs that would be replaced by it is invalid. Now
     // that we have the set of all ancestors we can detect this
-    // pathological case by making sure setConflicts and setAncestors don't
+    // pathological case by making sure setConflicts/setConflictsAsset and setAncestors don't
     // intersect.
-    if (const auto err_string{EntriesAndTxidsDisjoint(ws.m_ancestors, ws.m_conflicts, hash)}) {
+    // SYSCOIN
+    if (const auto err_string{EntriesAndTxidsDisjoint(ws.m_ancestors, ws.m_conflicts, ws.m_conflictsAsset, hash)}) {
         // We classify this as a consensus error because a transaction depending on something it
         // conflicts with would be inconsistent.
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-spends-conflicting-tx", *err_string);
@@ -1637,6 +1701,8 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
 
         for (const COutPoint& hashTx : coins_to_uncache) {
             active_chainstate.CoinsTip().Uncache(hashTx);
+            // SYSCOIN
+            mapAssetAllocationConflicts.erase(hashTx);
         }
         // if we had duplicate mint's we don't want to remove the mint tx hash, but only if we had some other error not related to TX_MINT_DUPLICATE
         if(result.m_state.GetResult() != TxValidationResult::TX_MINT_DUPLICATE) {
@@ -2366,7 +2432,7 @@ bool ProcessNEVMData(const BlockManager& blockman, const CTransaction& tx, const
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 // SYSCOIN
-DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, AssetMap &mapAssets, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
 {
     AssertLockHeld(::cs_main);
     // SYSCOIN
@@ -2426,7 +2492,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 return DISCONNECT_FAILED;
             }
             // SYSCOIN
-            if(!DisconnectSyscoinTransaction(tx, hash, txundo, view, mapMintKeys, NEVMDataVecOut))
+            if(passetdb != nullptr && !DisconnectSyscoinTransaction(tx, hash, txundo, view, mapAssets, mapMintKeys, NEVMDataVecOut))
                 fClean = false;
 
             for (unsigned int j = tx.vin.size(); j > 0;) {
@@ -2555,18 +2621,19 @@ static int64_t num_blocks_total = 0;
 // SYSCOIN
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, bool fJustCheck, bool bReverify) {
+    AssetMap mapAssets;
     NEVMMintTxMap mapMintKeys;
     NEVMTxRootMap mapNEVMTxRoots;
     PoDAMAPMemory mapPoDA;
     std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
-    return ConnectBlock(block, state, pindex, view, fJustCheck, mapMintKeys, mapNEVMTxRoots, mapPoDA, vecTXIDPairs, bReverify);
+    return ConnectBlock(block, state, pindex, view, fJustCheck, mapAssets, mapMintKeys, mapNEVMTxRoots, mapPoDA, vecTXIDPairs, bReverify);       
 }
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
  *  can fail if those validity checks fail (among other reasons). */
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                  CCoinsViewCache& view, bool fJustCheck,
-                  NEVMMintTxMap &mapMintKeys, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+                  CCoinsViewCache& view, bool fJustCheck, 
+                  AssetMap &mapAssets, NEVMMintTxMap &mapMintKeys, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
 {
     AssertLockHeld(cs_main);
     assert(pindex);
@@ -2776,6 +2843,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     int64_t nSigOpsCost = 0;
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     // SYSCOIN
+    const bool ibd = m_chainman.IsInitialBlockDownload();
     const uint256& blockHash = block.GetHash();
     bool fNexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock || fRegTest;
     fScriptChecks = fScriptChecks && fNexusContext;
@@ -2800,16 +2868,31 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // SYSCOIN
         const uint256& txHash = tx.GetHash();
         const bool &isCoinBase = tx.IsCoinBase();
+        const bool &hasAssets = tx.HasAssets();
         vecTXIDPairs.emplace_back(txHash, pindex->nHeight);
         if (!isCoinBase)
         {
             TxValidationState tx_state;
             CAmount txfee = 0;
-            if (fNexusContext && !Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, fJustCheck, mapMintKeys)) {
+            // SYSCOIN
+            CAssetsMap mapAssetIn;
+            CAssetsMap mapAssetOut;
+            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, mapAssetIn, mapAssetOut)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                             tx_state.GetRejectReason(), tx_state.GetDebugMessage());
                 return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
+            }
+            // SYSCOIN
+            if(hasAssets){
+                TxValidationState tx_statesys;
+                // just temp var not used in !fJustCheck mode
+                if (!CheckSyscoinInputs(ibd, params.GetConsensus(), tx, txHash, tx_statesys, false, (uint32_t)pindex->nHeight, m_chain.Tip()->GetMedianTimePast(), blockHash, fJustCheck, mapAssets, mapMintKeys, mapAssetIn, mapAssetOut)){
+                    // Any transaction validation failure in ConnectBlock is a block consensus failure
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
+                    return error("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
+                }
             }
             nFees += txfee;
             if (!MoneyRange(nFees)) {
@@ -3286,6 +3369,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
     // Apply the block atomically to the chain state.
     // SYSCOIN
+    AssetMap mapAssets;
     NEVMMintTxMap mapMintKeys;
     NEVMDataVec NEVMDataVecOut;
     std::vector<uint256> vecNEVMBlocks;
@@ -3294,14 +3378,14 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     {
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
-        if (DisconnectBlock(block, pindexDelete, view, mapMintKeys, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, bReverify) != DISCONNECT_OK)
+        if (DisconnectBlock(block, pindexDelete, view, mapAssets, mapMintKeys, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, bReverify) != DISCONNECT_OK)
             return error("DisconnectTip(): DisconnectBlock %s failed", pindexDelete->GetBlockHash().ToString());
         bool flushed = view.Flush();
         assert(flushed);
     }
     // SYSCOIN
-    if(pnevmtxmintdb != nullptr){
-        if(!pnevmtxmintdb->FlushErase(mapMintKeys) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(NEVMDataVecOut)){
+    if(passetdb != nullptr){
+        if(!passetdb->Flush(mapAssets) || !passetnftdb->Flush(mapAssets) || !pnevmtxmintdb->FlushErase(mapMintKeys) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(NEVMDataVecOut)){
             return error("DisconnectTip(): Error flushing to asset dbs on disconnect %s", pindexDelete->GetBlockHash().ToString());
         }
     }
@@ -3422,13 +3506,14 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     LogPrint(BCLog::BENCHMARK, "  - Load block from disk: %.2fms\n",
              Ticks<MillisecondsDouble>(time_2 - time_1));
     // SYSCOIN
+    AssetMap mapAssets;
     NEVMMintTxMap mapMintKeys;
     NEVMTxRootMap mapNEVMTxRoots;
     PoDAMAPMemory mapPoDA;
     std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
     {
         CCoinsViewCache view(&CoinsTip());
-        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false, mapMintKeys, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
+        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false, mapAssets, mapMintKeys, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
         GetMainSignals().BlockChecked(blockConnecting, state);
         if (!rv) {
             if (state.IsInvalid())
@@ -3444,6 +3529,12 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  Ticks<MillisecondsDouble>(time_connect_total) / num_blocks_total);
         bool flushed = view.Flush();
         assert(flushed);
+    }
+    // SYSCOIN
+    if(passetdb){
+        if(!passetdb->Flush(mapAssets) || !passetnftdb->Flush(mapAssets)) {
+            return error("Error flushing to Syscoin DBs: %s", pindexNew->GetBlockHash().ToString());
+        }
     }
     if(pnevmdatadb)
         pnevmdatadb->FlushDataToCache(mapPoDA, pindexNew->GetMedianTimePast());
@@ -4546,7 +4637,8 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, strprintf("bad-version(0x%08x)", baseVer),
                                     strprintf("rejected nVersion=0x%08x block", block.nVersion));
     }
-    if (block.IsAuxpow() && pindexPrev->nHeight >= 20)
+    bool fNexusActive_context = nHeight >= consensusParams.nNexusStartBlock;
+    if (fNexusActive_context && block.IsAuxpow() && pindexPrev->nHeight >= 20)
     {
         if (!block.auxpow)
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow", "Missing AuxPoW data");
@@ -5174,6 +5266,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
 
     const bool is_snapshot_cs{chainstate.m_from_snapshot_blockhash};
     // SYSCOIN
+    AssetMap mapAssets;
     NEVMMintTxMap mapMintKeys;
     std::vector<uint256> vecNEVMBlocks;
     NEVMDataVec NEVMDataVecOut;
@@ -5225,7 +5318,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
         if (nCheckLevel >= 3) {
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
                 // SYSCOIN
-                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, mapMintKeys, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, false);
+                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, mapAssets, mapMintKeys, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, false);
                 if (res == DISCONNECT_FAILED) {
                     LogPrintf("Verification error: irrecoverable inconsistency in block data at %d, hash=%s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
                     return VerifyDBResult::CORRUPTED_BLOCK_DB;
@@ -5290,7 +5383,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
 }
 
 /** Apply the effects of a block on the utxo cache, ignoring that it may already have been applied. */
-bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxMap &mapMintKeys, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
+bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, AssetMap &mapAssets, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxMap &mapMintKeys, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
 {
     // TODO: merge with ConnectBlock
     CBlock block;
@@ -5300,10 +5393,12 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         return error("ReplayBlock(): ReadBlockFromDisk failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
     }
     // SYSCOIN
+    const uint256& blockHash = pindex->GetBlockHash();
+    const bool ibd = m_chainman.IsInitialBlockDownload();
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     BlockValidationState state;
     CDeterministicMNListNEVMAddressDiff diff;
-    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, m_chainman.IsInitialBlockDownload())) {
+    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, ibd)) {
         return error("%s: ProcessSpecialTxsInBlock for block %s failed with %s", __func__,
             pindex->GetBlockHash().ToString(), state.ToString());
     }
@@ -5312,17 +5407,23 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
     }
     for (const CTransactionRef& tx : block.vtx) {
         if (!tx->IsCoinBase()) {
-            // SYSCOIN
-            const uint256& txHash = tx->GetHash();
-            if(tx->IsMintTx()){
-                TxValidationState tx_state;
-                CAmount txfee = 0;
-                if (!Consensus::CheckTxInputs(*tx, tx_state, inputs, pindex->nHeight, txfee, false, mapMintKeys)) {
-                    return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
-                }
-            }
             for (const CTxIn &txin : tx->vin) {
                 inputs.SpendCoin(txin.prevout);
+            }
+            // SYSCOIN
+            const uint256& txHash = tx->GetHash();
+            if(tx->HasAssets()){
+                TxValidationState tx_state;
+                CAmount txfee = 0;
+                CAssetsMap mapAssetIn;
+                CAssetsMap mapAssetOut;
+                if (!Consensus::CheckTxInputs(*tx, tx_state, inputs, pindex->nHeight, txfee, mapAssetIn, mapAssetOut)) {
+                    return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
+                }
+                // just temp var not used in !fJustCheck mode
+                if (!CheckSyscoinInputs(ibd, chainParams, *tx, txHash, tx_state, false, (uint32_t)pindex->nHeight, m_chain.Tip()->GetMedianTimePast(), blockHash, false, mapAssets, mapMintKeys, mapAssetIn, mapAssetOut)) {
+                    return error("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
+                }
             }
             vecTXIDPairs.emplace_back(txHash, pindex->nHeight);
 
@@ -5344,6 +5445,7 @@ bool Chainstate::ReplayBlocks()
     CCoinsViewCache cache(&db);
     std::vector<uint256> hashHeads = db.GetHeadBlocks();
     // SYSCOIN
+    AssetMap mapAssetsDisconnect, mapAssetsConnect;
     PoDAMAPMemory mapPoDAConnect;
     NEVMDataVec vecNEVMDataDisconnect;
     NEVMMintTxMap mapMintKeysDisconnect, mapMintKeysConnect;
@@ -5382,7 +5484,7 @@ bool Chainstate::ReplayBlocks()
             }
             LogPrintf("Rolling back %s (%i)\n", pindexOld->GetBlockHash().ToString(), pindexOld->nHeight);
             // SYSCOIN
-            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, mapMintKeysDisconnect, vecNEVMDataDisconnect, vecNEVMBlocks, vecTXIDPairs);
+            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, mapAssetsDisconnect, mapMintKeysDisconnect, vecNEVMDataDisconnect, vecNEVMBlocks, vecTXIDPairs);
             if (res == DISCONNECT_FAILED) {
                 return error("RollbackBlock(): DisconnectBlock failed at %d, hash=%s", pindexOld->nHeight, pindexOld->GetBlockHash().ToString());
             }
@@ -5393,9 +5495,9 @@ bool Chainstate::ReplayBlocks()
         }
         pindexOld = pindexOld->pprev;
     }
-    // SYSCOIN must flush for now because disconnect may remove data and rolling forward expects it to be clean from db
-    if(pnevmtxmintdb != nullptr){
-        if(!pnevmtxmintdb->FlushErase(mapMintKeysDisconnect) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(vecNEVMDataDisconnect)){
+    // SYSCOIN must flush for now because disconnect may remove asset data and rolling forward expects it to be clean from db
+    if(passetdb != nullptr){
+        if(!passetdb->Flush(mapAssetsDisconnect) || !passetnftdb->Flush(mapAssetsDisconnect) || !pnevmtxmintdb->FlushErase(mapMintKeysDisconnect) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(vecNEVMDataDisconnect)){
             return error("RollbackBlock(): Error flushing to asset dbs on disconnect %s", pindexOld->GetBlockHash().ToString());
         }
     }
@@ -5408,11 +5510,16 @@ bool Chainstate::ReplayBlocks()
         LogPrintf("Rolling forward %s (%i)\n", pindex.GetBlockHash().ToString(), nHeight);
         m_chainman.GetNotifications().progress(_("Replaying blocks…"), (int)((nHeight - nForkHeight) * 100.0 / (pindexNew->nHeight - nForkHeight)), false);
         // SYSCOIN
-        if (!RollforwardBlock(&pindex, cache, mapNEVMTxRoots, mapMintKeysConnect, mapPoDAConnect, vecTXIDPairs)) return false;
+        if (!RollforwardBlock(&pindex, cache, mapAssetsConnect, mapNEVMTxRoots, mapMintKeysConnect, mapPoDAConnect, vecTXIDPairs)) return false;
     }
 
     cache.SetBestBlock(pindexNew->GetBlockHash());
     cache.Flush();
+    if(passetdb != nullptr){
+        if(!passetdb->Flush(mapAssetsConnect) || !passetnftdb->Flush(mapAssetsConnect)){
+            return error("RollbackBlock(): Error flushing to Syscoin dbs on roll forward %s", pindexOld->GetBlockHash().ToString());
+        }
+    }
     if(pnevmdatadb) {
         pnevmdatadb->FlushDataToCache(mapPoDAConnect, pindexNew->GetMedianTimePast());
     }
