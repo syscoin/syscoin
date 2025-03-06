@@ -11,7 +11,6 @@
 #include <consensus/amount.h>
 bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP& parentNodes, const dev::RLP& root); 
 bool parseNEVMMethodInputData(const std::vector<unsigned char>& vchInputExpectedMethodHash,
-    uint8_t nERC20Precision,  
     const std::vector<unsigned char>& vchInputData,
     CAmount &outputAmount,
     std::string &witnessAddress);

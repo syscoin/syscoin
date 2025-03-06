@@ -119,7 +119,6 @@ BOOST_AUTO_TEST_CASE(nevm_parseabidata)
     // Positive test => should succeed
     BOOST_CHECK(parseNEVMMethodInputData(
         expectedMethodHash, 
-        8 /* nERC20Precision */,
         rlpBytes, 
         outputAmount, 
         address
@@ -132,7 +131,6 @@ BOOST_AUTO_TEST_CASE(nevm_parseabidata)
     const std::vector<unsigned char> &invalidMethodHash = ParseHex("deadbeef");
     BOOST_CHECK(!parseNEVMMethodInputData(
         invalidMethodHash, 
-        8, 
         rlpBytes, 
         outputAmount, 
         address
@@ -159,7 +157,6 @@ BOOST_AUTO_TEST_CASE(nevm_parseabidata)
     );
     BOOST_CHECK(!parseNEVMMethodInputData(
         expectedMethodHash, 
-        8, 
         invalidAddressRlpBytes, 
         outputAmount, 
         address
@@ -185,7 +182,6 @@ BOOST_AUTO_TEST_CASE(nevm_parseabidata)
     );
     BOOST_CHECK(!parseNEVMMethodInputData(
         expectedMethodHash, 
-        8, 
         invalidTokenIdRlpBytes, 
         outputAmount, 
         address
@@ -207,7 +203,6 @@ BOOST_AUTO_TEST_CASE(nevm_parseabidata)
     );
     BOOST_CHECK(!parseNEVMMethodInputData(
         expectedMethodHash, 
-        8, 
         shortStringRlpBytes, 
         outputAmount, 
         address
@@ -228,8 +223,7 @@ BOOST_AUTO_TEST_CASE(nevm_parseabidata)
         // omit the rest => parse fails
     );
     BOOST_CHECK(!parseNEVMMethodInputData(
-        expectedMethodHash, 
-        8, 
+        expectedMethodHash,  
         badPaddingRlpBytes, 
         outputAmount, 
         address

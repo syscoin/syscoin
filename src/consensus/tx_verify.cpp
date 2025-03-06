@@ -186,7 +186,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             auto inRes = mapAssetIn.try_emplace(coin.out.assetInfo.nAsset, coin.out.assetInfo.nValue);
             if (!inRes.second) {
                 inRes.first->second += coin.out.assetInfo.nValue;
-                if(!MoneyRangeAsset(inRes.first->second) || !MoneyRangeAsset(coin.out.assetInfo.nValue)) {
+                if(!MoneyRange(inRes.first->second) || !MoneyRange(coin.out.assetInfo.nValue)) {
                     return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-inputvalues-outofrange");
                 }
             }

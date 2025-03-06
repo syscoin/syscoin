@@ -26,9 +26,6 @@ static constexpr CAmount COIN = 100000000;
  * for the creation of coins out of thin air modification could lead to a fork.
  * */
 static const CAmount MAX_MONEY = 1000000000000000000LL - 1LL;
-// SYSCOIN
-static const CAmount MAX_ASSET = 1000000000000000000LL - 1LL; // 10^18 - 1 max decimal value that will fit in CAmount
 inline bool MoneyRange(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_MONEY); }
-inline bool MoneyRangeAsset(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_ASSET); }
 typedef std::unordered_map<uint64_t, CAmount> CAssetsMap;
 #endif // SYSCOIN_CONSENSUS_AMOUNT_H

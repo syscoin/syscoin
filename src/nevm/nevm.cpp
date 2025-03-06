@@ -9,6 +9,7 @@
 #include <util/strencodings.h>
 #include <key_io.h>
 #include <math.h>
+const arith_uint256 nMax = arith_uint256(MAX_MONEY);
 int nibblesToTraverse(const std::string &encodedPartialPath, const std::string &path, int pathPtr) {
   std::string partialPath;
   // typecast as the character
@@ -116,7 +117,6 @@ bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP&
  * @brief Parse call data for freezeBurn(uint value, address assetAddr, uint256 tokenId, string memory syscoinAddr)
  *
  * @param vchInputExpectedMethodHash The 4-byte Keccak selector for freezeBurn(...)
- * @param nERC20Precision The token's ERC20 decimals
  * @param vchInputData     The raw call data (including the 4-byte method ID)
  * @param outputAmount     [out] The bridging amount, scaled to local precision
  * @param witnessAddress   [out] The user’s Syscoin address extracted from the string param
@@ -125,7 +125,6 @@ bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP&
  */
 bool parseNEVMMethodInputData(
     const std::vector<unsigned char>& vchInputExpectedMethodHash,
-    uint8_t nERC20Precision,  
     const std::vector<unsigned char>& vchInputData,
     CAmount &outputAmount,
     std::string &witnessAddress
@@ -156,7 +155,10 @@ bool parseNEVMMethodInputData(
     // Ethereum is big-endian, we reverse to interpret as little-endian 64
     std::reverse(vchValue.begin(), vchValue.end());
     arith_uint256 bigValue = UintToArith256(uint256(vchValue));
-
+    if(bigValue > nMax) {
+      return false;
+    }
+    outputAmount = static_cast<CAmount>(bigValue.GetLow64());
     // 3) Parse param2: `assetAddr` (offset [36..68])
     //    The actual address is the **last 20 bytes** of that 32-byte word. Skip this one.
 
@@ -204,21 +206,6 @@ bool parseNEVMMethodInputData(
 
     // Convert to ASCII
     witnessAddress = std::string(vchString.begin(), vchString.end());
-
-    // 6) Convert bigValue => local precision
-    //    The bridging “value” is at `bigValue`. We scale it to (CAmount) with
-    //    local decimals. If local decimals < ERC20 decimals, we *downscale*.
-    //    If local decimals > ERC20 decimals, we *upscale*.
-    const uint8_t LOCAL_SYS_PREC = 8;
-    arith_uint256 scaled = bigValue;
-    if (LOCAL_SYS_PREC > nERC20Precision) {
-        // multiply
-        scaled *= arith_uint256(std::pow(10, (int)(LOCAL_SYS_PREC - nERC20Precision)));
-    } else if (LOCAL_SYS_PREC < nERC20Precision) {
-        // divide
-        scaled /= arith_uint256(std::pow(10, (int)(nERC20Precision - LOCAL_SYS_PREC)));
-    }
-    outputAmount = static_cast<CAmount>(scaled.GetLow64());
 
     return true;
 }

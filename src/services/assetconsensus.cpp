@@ -79,7 +79,6 @@ bool CheckSyscoinMint(
     if (itemCount < 1 || itemCount > 10) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-logs-count", bSanityCheck);
     }
-    uint8_t nERC20Precision = 0;
     uint64_t nAssetFromLog  = 0;
 
     // The bridging contract we expect
@@ -118,22 +117,16 @@ bool CheckSyscoinMint(
         // param0: assetGuid (uint64 zero-extended to 32 bytes)
         // param1: freezer   (address -> 20 bytes, but 32 in event)
         // param2: value     (uint256 32 bytes)
-        // param3: precisions (32 bytes => we store multiple bytes in one slot, e.g. [27], [31])
         {
             // parse assetGuid from offset [0..31]
             std::vector<unsigned char> vchAssetGuid(dataValue.begin(), dataValue.begin()+32);
             nAssetFromLog = ReadBE64(&vchAssetGuid[24]);  // last 8 bytes
-
-            // parse precisions from offset [96..127]
-            // e.g. last 32 bytes => [0..31]
-            std::vector<unsigned char> vchPrecisions(dataValue.begin()+96, dataValue.begin()+128);
-            nERC20Precision = static_cast<uint8_t>(vchPrecisions[31]);
         }
         // we found our freeze log, break out
         break;
     }
 
-    if (nAssetFromLog == 0 || nERC20Precision == 0) {
+    if (nAssetFromLog == 0) {
         return FormatSyscoinErrorMessage(state, "mint-missing-freeze-log", bSanityCheck);
     }
 
@@ -210,7 +203,6 @@ bool CheckSyscoinMint(
     std::vector<unsigned char> vchFreezeBurnSelector = Params().GetConsensus().vchSYSXBurnMethodSignature;
     if (!parseNEVMMethodInputData(
              vchFreezeBurnSelector,
-             nERC20Precision,
              inputData,
              outputAmount,
              witnessAddress
@@ -260,7 +252,7 @@ bool CheckSyscoinMint(
     if (outputAmount != nTotalMinted) {
         return FormatSyscoinErrorMessage(state, "mint-output-mismatch", bSanityCheck);
     }
-    if (!MoneyRangeAsset(outputAmount)) {
+    if (!MoneyRange(outputAmount)) {
         return FormatSyscoinErrorMessage(state, "mint-value-out-of-range", bSanityCheck);
     }
 

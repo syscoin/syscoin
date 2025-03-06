@@ -374,7 +374,7 @@ void CMutableTransaction::LoadAssets()
                 if(nOut >= nVoutSize) {
                     throw std::ios_base::failure("asset vout out of range");
                 }
-                if(!MoneyRangeAsset(voutAsset.nValue)) {
+                if(!MoneyRange(voutAsset.nValue)) {
                     throw std::ios_base::failure("asset vout value out of range");
                 }
                 // store in vout

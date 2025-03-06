@@ -199,7 +199,7 @@ public:
         consensus.nNEVMChainID = 57;
         consensus.vchSYSXBurnMethodSignature = ParseHex("ab972f5a");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
-        consensus.vchTokenFreezeMethod = ParseHex("7ca654cf9212e4c3cf0164a529dd6159fc71113f867d0b09fdeb10aa65780732");
+        consensus.vchTokenFreezeMethod = ParseHex("8f3b257b2cea086a69bcfbefab36555c9e6275fc56ada0f1d8796222f6874fec");
         consensus.nBridgeStartBlock = 348000;
         consensus.nNEVMStartBlock = 1317500;
         consensus.nPODAStartBlock = 1586000;
@@ -363,7 +363,7 @@ public:
         consensus.nNEVMChainID = 5700;
         consensus.vchSYSXBurnMethodSignature = ParseHex("ab972f5a");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
-        consensus.vchTokenFreezeMethod = ParseHex("7ca654cf9212e4c3cf0164a529dd6159fc71113f867d0b09fdeb10aa65780732");
+        consensus.vchTokenFreezeMethod = ParseHex("8f3b257b2cea086a69bcfbefab36555c9e6275fc56ada0f1d8796222f6874fec");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
         consensus.nPODAStartBlock = 1004000;
@@ -603,7 +603,7 @@ public:
         consensus.nNEVMChainID = 5700;
         consensus.vchSYSXBurnMethodSignature = ParseHex("ab972f5a");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
-        consensus.vchTokenFreezeMethod = ParseHex("7ca654cf9212e4c3cf0164a529dd6159fc71113f867d0b09fdeb10aa65780732");
+        consensus.vchTokenFreezeMethod = ParseHex("8f3b257b2cea086a69bcfbefab36555c9e6275fc56ada0f1d8796222f6874fec");
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nPODAStartBlock = 0;
