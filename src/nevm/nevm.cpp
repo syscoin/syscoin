@@ -112,60 +112,114 @@ bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP&
   
   return false;
 }
-
 /**
- * Parse nevm input string expected to contain smart contract method call data. If the method call is not what we
- * expected, or the length of the expected string is not what we expect then return false.
+ * @brief Parse call data for freezeBurn(uint value, address assetAddr, uint256 tokenId, string memory syscoinAddr)
  *
- * @param vchInputExpectedMethodHash The expected method hash
- * @param nERC20Precision The erc20 precision to know how to convert NEVM's uint256 to a uint64 with truncation of insignifficant bits
- * @param nLocalPrecision The local precision to know how to convert NEVM's uint256 to a uint64 with truncation of insignifficant bits
- * @param vchInputData The input to parse
- * @param outputAmount The amount burned
- * @param nAsset The asset burned
- * @param witnessAddress The witness address for the minting
- * @return true if everything is valid
+ * @param vchInputExpectedMethodHash The 4-byte Keccak selector for freezeBurn(...)
+ * @param nERC20Precision The token's ERC20 decimals
+ * @param vchInputData     The raw call data (including the 4-byte method ID)
+ * @param outputAmount     [out] The bridging amount, scaled to local precision
+ * @param witnessAddress   [out] The user’s Syscoin address extracted from the string param
+ *
+ * @return true if parsing succeeds, false otherwise
  */
-bool parseNEVMMethodInputData(const std::vector<unsigned char>& vchInputExpectedMethodHash, const uint8_t &nERC20Precision, const uint8_t& nLocalPrecision, const std::vector<unsigned char>& vchInputData, CAmount& outputAmount, uint64_t& nAsset, std::string& witnessAddress) {
-    // total 5 to 7 fields are expected @ 32 bytes each field, > 5 fields if address is bigger, bech32 can be up to 91 characters so it will span up to 3 fields and as little as 1 field
-    if(vchInputData.size() < 164 || vchInputData.size() > 228) {
-      return false;  
-    }
-    // method hash is 4 bytes
-    std::vector<unsigned char>::const_iterator firstMethod = vchInputData.begin();
-    std::vector<unsigned char>::const_iterator lastMethod = firstMethod + 4;
-    const std::vector<unsigned char> vchMethodHash(firstMethod,lastMethod);
-    // if the method hash doesn't match the expected method hash then return false
-    if(vchMethodHash != vchInputExpectedMethodHash) {
-      return false;
-    }
-
-    std::vector<unsigned char> vchAmount(lastMethod,lastMethod + 32);
-    // reverse endian
-    std::reverse(vchAmount.begin(), vchAmount.end());
-    arith_uint256 outputAmountArith = UintToArith256(uint256(vchAmount));
-    // local precision can range between 0 and 8 decimal places, so it should fit within a CAmount
-    // we pad zero's if erc20's precision is less than ours so we can accurately get the whole value of the amount transferred
-    if(nLocalPrecision > nERC20Precision){
-      outputAmountArith *= pow(10.0, nLocalPrecision-nERC20Precision);
-    // ensure we truncate decimals to fit within int64 if erc20's precision is more than our asset precision
-    } else if(nLocalPrecision < nERC20Precision){
-      outputAmountArith /= pow(10.0, nERC20Precision-nLocalPrecision);
-    }
-    outputAmount = (CAmount)outputAmountArith.GetLow64();
-    
-    // convert the vch into a uint64_t (nAsset)
-    // should be in position 60 as big endian
-    nAsset = ReadBE64(&(vchInputData[60]));
-
-    // skip data field marker (32 bytes) + 31 bytes offset to the varint _byte
-    const unsigned char &dataLength = vchInputData[131];
-    // bech32 addresses to 91 chars (sys1 vs bc1), min length is 9 for min witness address https://en.bitcoin.it/wiki/BIP_0173
-    if(dataLength > 91 || dataLength < 9) {
-      return false;
+bool parseNEVMMethodInputData(
+    const std::vector<unsigned char>& vchInputExpectedMethodHash,
+    uint8_t nERC20Precision,  
+    const std::vector<unsigned char>& vchInputData,
+    CAmount &outputAmount,
+    std::string &witnessAddress
+) {
+    // Minimal length check:
+    //   4 bytes for selector + 4 * 32 = 132 bytes of "static" data,
+    //   plus 32 bytes for string length, plus at least 9 for a minimal bech32...
+    //   So let's pick 4+128+32+9 = 173 as a minimal example check
+    if (vchInputData.size() < 173) {
+        return false;
     }
 
-    // witness address information starting at position 132 till the end
-    witnessAddress = hexToASCII(HexStr(std::vector<unsigned char>(vchInputData.begin()+132, vchInputData.begin()+132 + dataLength)));
+    // 1) Extract method hash
+    std::vector<unsigned char> vchMethodHash(
+        vchInputData.begin(),
+        vchInputData.begin() + 4
+    );
+    if (vchMethodHash != vchInputExpectedMethodHash) {
+        // Not the freezeBurn function
+        return false;
+    }
+
+    // 2) Parse param1: `value` (offset [4..36])
+    std::vector<unsigned char> vchValue(
+        vchInputData.begin() + 4,
+        vchInputData.begin() + 36
+    );
+    // Ethereum is big-endian, we reverse to interpret as little-endian 64
+    std::reverse(vchValue.begin(), vchValue.end());
+    arith_uint256 bigValue = UintToArith256(uint256(vchValue));
+
+    // 3) Parse param2: `assetAddr` (offset [36..68])
+    //    The actual address is the **last 20 bytes** of that 32-byte word. Skip this one.
+
+    // 4) Parse param3: `tokenId` (offset [68..100]). Skip this one.
+ 
+    // 5) Parse param4: `syscoinAddr` => We get a 32-byte offset pointer at [100..132].
+    //    We'll read that offset, then read the string length, then the string data.
+    std::vector<unsigned char> vchOffsetVal(
+        vchInputData.begin() + 100,
+        vchInputData.begin() + 132
+    );
+    std::reverse(vchOffsetVal.begin(), vchOffsetVal.end());
+    arith_uint256 offsetArith = UintToArith256(uint256(vchOffsetVal));
+    uint64_t offsetToString = offsetArith.GetLow64();
+    // offset is relative to the *start of the method params* (excluding the 4-byte selector),
+    // i.e. 0 means param1 starts at offset 0, param2 at offset 32, etc.
+
+    // Safety checks
+    // The dynamic area starts at offsetToString, which must be >= 128 bytes (since the first 4 params are 128).
+    if (offsetToString < 128 || offsetToString >= vchInputData.size()) {
+        return false;
+    }
+    // Then first 32 bytes there is the length of the string
+    size_t strLenOffset = 4 + offsetToString; // 4 bytes for method selector
+    if (strLenOffset + 32 > vchInputData.size()) {
+        return false;
+    }
+    std::vector<unsigned char> vchStrLen(
+        vchInputData.begin() + strLenOffset,
+        vchInputData.begin() + strLenOffset + 32
+    );
+    std::reverse(vchStrLen.begin(), vchStrLen.end());
+    arith_uint256 strLenArith = UintToArith256(uint256(vchStrLen));
+    uint64_t lenString = strLenArith.GetLow64();
+
+    // Now read the actual string
+    size_t strDataPos = strLenOffset + 32;
+    if (strDataPos + lenString > vchInputData.size()) {
+        return false;
+    }
+    std::vector<unsigned char> vchString(
+        vchInputData.begin() + strDataPos,
+        vchInputData.begin() + strDataPos + lenString
+    );
+
+    // Convert to ASCII
+    witnessAddress = std::string(vchString.begin(), vchString.end());
+
+    // 6) Convert bigValue => local precision
+    //    The bridging “value” is at `bigValue`. We scale it to (CAmount) with
+    //    local decimals. If local decimals < ERC20 decimals, we *downscale*.
+    //    If local decimals > ERC20 decimals, we *upscale*.
+    const uint8_t LOCAL_SYS_PREC = 8;
+    arith_uint256 scaled = bigValue;
+    if (LOCAL_SYS_PREC > nERC20Precision) {
+        // multiply
+        scaled *= arith_uint256(std::pow(10, (int)(LOCAL_SYS_PREC - nERC20Precision)));
+    } else if (LOCAL_SYS_PREC < nERC20Precision) {
+        // divide
+        scaled /= arith_uint256(std::pow(10, (int)(nERC20Precision - LOCAL_SYS_PREC)));
+    }
+    outputAmount = static_cast<CAmount>(scaled.GetLow64());
+
     return true;
 }
+

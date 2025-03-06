@@ -18,233 +18,269 @@
 std::unique_ptr<CNEVMTxRootsDB> pnevmtxrootsdb;
 std::unique_ptr<CNEVMMintedTxDB> pnevmtxmintdb;
 RecursiveMutex cs_setethstatus;
-bool CheckSyscoinMint(const bool &ibd, const CTransaction& tx, const uint256& txHash, TxValidationState& state, const bool &fJustCheck, const bool& bSanityCheck, const uint32_t& nHeight, const int64_t& nTime, const uint256& blockhash, NEVMMintTxMap &mapMintKeys, CAssetsMap &mapAssetIn, CAssetsMap &mapAssetOut) {
-    if (!bSanityCheck)
-        LogPrint(BCLog::SYS,"*** ASSET MINT %d %s %s bSanityCheck=%d\n", nHeight,
-            txHash.ToString().c_str(),
-            fJustCheck ? "JUSTCHECK" : "BLOCK", bSanityCheck? 1: 0);
-    // unserialize mint object from txn, check for valid
-    CMintSyscoin mintSyscoin(tx);
-    if(mintSyscoin.IsNull()) {
-        return FormatSyscoinErrorMessage(state, "mint-unserialize", bSanityCheck);
+bool CheckSyscoinMint(
+    const bool &ibd,
+    const CTransaction &tx,
+    const uint256 &txHash,
+    TxValidationState &state,
+    const bool &fJustCheck,
+    const bool &bSanityCheck,
+    const uint32_t &nHeight,
+    const int64_t &nTime,
+    const uint256 &blockhash,
+    NEVMMintTxMap &mapMintKeys,
+    CAssetsMap &mapAssetIn,
+    CAssetsMap &mapAssetOut
+) {
+    if (!bSanityCheck) {
+        LogPrint(BCLog::SYS,"*** ASSET MINT blockHeight=%d tx=%s %s bSanityCheck=%d\n",
+            nHeight, txHash.ToString(), fJustCheck ? "JUSTCHECK" : "BLOCK",
+            bSanityCheck? 1: 0);
     }
 
+    // 1) Unserialize the mint object from the syscoin TX
+    CMintSyscoin mintSyscoin(tx);
+    if (mintSyscoin.IsNull()) {
+        return FormatSyscoinErrorMessage(state, "mint-unserialize-failed", bSanityCheck);
+    }
+
+    // 2) Load the NEVM block’s TxRoot / ReceiptRoot
     NEVMTxRoot txRootDB;
     {
         LOCK(cs_setethstatus);
-        if(!pnevmtxrootsdb || !pnevmtxrootsdb->ReadTxRoots(mintSyscoin.nBlockHash, txRootDB)) {
+        if (!pnevmtxrootsdb || !pnevmtxrootsdb->ReadTxRoots(mintSyscoin.nBlockHash, txRootDB)) {
             return FormatSyscoinErrorMessage(state, "mint-txroot-missing", bSanityCheck);
         }
     }
-     // check transaction receipt validity
+
+    // 3) RLP decode the receipt
     dev::RLP rlpReceiptParentNodes(&mintSyscoin.vchReceiptParentNodes);
-    std::vector<unsigned char> vchReceiptValue(mintSyscoin.vchReceiptParentNodes.begin()+mintSyscoin.posReceipt, mintSyscoin.vchReceiptParentNodes.end());
+    std::vector<unsigned char> vchReceiptValue(
+        mintSyscoin.vchReceiptParentNodes.begin() + mintSyscoin.posReceipt,
+        mintSyscoin.vchReceiptParentNodes.end()
+    );
     dev::RLP rlpReceiptValue(&vchReceiptValue);
-    
-    if (!rlpReceiptValue.isList()) {
-        return FormatSyscoinErrorMessage(state, "mint-invalid-tx-receipt", bSanityCheck);
+    if (!rlpReceiptValue.isList() || rlpReceiptValue.itemCount() != 4) {
+        return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-structure", bSanityCheck);
     }
-    if (rlpReceiptValue.itemCount() != 4) {
-        return FormatSyscoinErrorMessage(state, "mint-invalid-tx-receipt-count", bSanityCheck);
-    }
-    const uint64_t &nStatus = rlpReceiptValue[0].toInt<uint64_t>(dev::RLP::VeryStrict);
+
+    // 4) Check status field (EIP2718)
+    uint64_t nStatus = rlpReceiptValue[0].toInt<uint64_t>(dev::RLP::VeryStrict);
     if (nStatus != 1) {
-        return FormatSyscoinErrorMessage(state, "mint-invalid-tx-receipt-status", bSanityCheck);
-    } 
-    dev::RLP rlpReceiptLogsValue(rlpReceiptValue[3]);
-    if (!rlpReceiptLogsValue.isList()) {
-        return FormatSyscoinErrorMessage(state, "mint-receipt-rlp-logs-list", bSanityCheck);
+        return FormatSyscoinErrorMessage(state, "mint-receipt-status-failed", bSanityCheck);
     }
-    const size_t &itemCount = rlpReceiptLogsValue.itemCount();
-    // just sanity checks for bounds
+
+    // 5) Parse logs from the 4th field (index=3)
+    dev::RLP rlpLogs(rlpReceiptValue[3]);
+    if (!rlpLogs.isList() || rlpLogs.itemCount() < 1) {
+        return FormatSyscoinErrorMessage(state, "mint-no-logs", bSanityCheck);
+    }
+    size_t itemCount = rlpLogs.itemCount();
     if (itemCount < 1 || itemCount > 10) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-logs-count", bSanityCheck);
     }
-    // look for TokenFreeze event and get the last parameter which should be the precisions
     uint8_t nERC20Precision = 0;
-    uint8_t nSPTPrecision = 0;
-    for(uint32_t i = 0;i<itemCount;i++) {
-        dev::RLP rlpReceiptLogValue(rlpReceiptLogsValue[i]);
-        if (!rlpReceiptLogValue.isList()) {
-            return FormatSyscoinErrorMessage(state, "mint-receipt-log-rlp-list", bSanityCheck);
+    uint64_t nAssetFromLog  = 0;
+
+    // The bridging contract we expect
+    const std::vector<unsigned char> &vchManagerAddress = Params().GetConsensus().vchSYSXERC20Manager;
+
+    // The known topic for event TokenFreeze(...)
+    const std::vector<unsigned char> &vchFreezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
+
+    // Iterate each log
+    for (size_t i = 0; i < rlpLogs.itemCount(); i++) {
+        dev::RLP rlpLog(rlpLogs[i]);
+        if (!rlpLog.isList() || rlpLog.itemCount() < 3) {
+            continue;
         }
-        // ensure this log has at least the address to check against
-        if (rlpReceiptLogValue.itemCount() < 1) {
-            return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-log-count", bSanityCheck);
+        // index=0 => contract address
+        dev::Address addressLog = rlpLog[0].toHash<dev::Address>(dev::RLP::VeryStrict);
+        if (addressLog.asBytes() != vchManagerAddress) {
+            continue; // not our bridging manager
         }
-        const dev::Address &address160Log = rlpReceiptLogValue[0].toHash<dev::Address>(dev::RLP::VeryStrict);
-        if(Params().GetConsensus().vchSYSXERC20Manager == address160Log.asBytes()) {
-            // for mint log we should have exactly 3 entries in it, this event we control through our erc20manager contract
-            if (rlpReceiptLogValue.itemCount() != 3) {
-                return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-log-count-bridgeid", bSanityCheck);
-            }
-            // check topic
-            dev::RLP rlpReceiptLogTopicsValue(rlpReceiptLogValue[1]);
-            if (!rlpReceiptLogTopicsValue.isList()) {
-                return FormatSyscoinErrorMessage(state, "mint-receipt-log-topics-rlp-list", bSanityCheck);
-            }
-            if (rlpReceiptLogTopicsValue.itemCount() != 1) {
-                return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-log-topics-count", bSanityCheck);
-            }
-            // topic hash matches with TokenFreeze signature
-            if(Params().GetConsensus().vchTokenFreezeMethod == rlpReceiptLogTopicsValue[0].toBytes(dev::RLP::VeryStrict)) {
-                const std::vector<unsigned char> &dataValue = rlpReceiptLogValue[2].toBytes(dev::RLP::VeryStrict);
-                if(dataValue.size() < 128) {
-                     return FormatSyscoinErrorMessage(state, "mint-receipt-log-data-invalid-size", fJustCheck);
-                }
-                // get last data field which should be our precisions
-                const std::vector<unsigned char> precisions(dataValue.begin()+96, dataValue.end());
-                // get precision
-                nERC20Precision = static_cast<uint8_t>(precisions[31]);
-                nSPTPrecision = static_cast<uint8_t>(precisions[27]);
-            }
+        // index=1 => array of topics
+        dev::RLP rlpLogTopics(rlpLog[1]);
+        if (!rlpLogTopics.isList() || rlpLogTopics.itemCount() == 0) {
+            continue;
         }
+        // check first topic == TokenFreeze
+        if (rlpLogTopics[0].toBytes(dev::RLP::VeryStrict) != vchFreezeTopic) {
+            continue;
+        }
+        // index=2 => data (ABI-encoded: (uint64 assetGuid, address freezer, uint256 value, uint precisions) )
+        std::vector<unsigned char> dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
+        if (dataValue.size() < 128) {
+            return FormatSyscoinErrorMessage(state, "mint-log-data-too-small", bSanityCheck);
+        }
+
+        // Each param is 32 bytes. So:
+        // param0: assetGuid (uint64 zero-extended to 32 bytes)
+        // param1: freezer   (address -> 20 bytes, but 32 in event)
+        // param2: value     (uint256 32 bytes)
+        // param3: precisions (32 bytes => we store multiple bytes in one slot, e.g. [27], [31])
+        {
+            // parse assetGuid from offset [0..31]
+            std::vector<unsigned char> vchAssetGuid(dataValue.begin(), dataValue.begin()+32);
+            nAssetFromLog = ReadBE64(&vchAssetGuid[24]);  // last 8 bytes
+
+            // parse precisions from offset [96..127]
+            // e.g. last 32 bytes => [0..31]
+            std::vector<unsigned char> vchPrecisions(dataValue.begin()+96, dataValue.begin()+128);
+            nERC20Precision = static_cast<uint8_t>(vchPrecisions[31]);
+        }
+        // we found our freeze log, break out
+        break;
     }
-    if(nERC20Precision == 0 || nSPTPrecision == 0) {
-        return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-missing-precision", bSanityCheck);
+
+    if (nAssetFromLog == 0 || nERC20Precision == 0) {
+        return FormatSyscoinErrorMessage(state, "mint-missing-freeze-log", bSanityCheck);
     }
-    // check transaction spv proofs
-    std::vector<unsigned char> rlpTxRootVec(txRootDB.nTxRoot.begin(), txRootDB.nTxRoot.end());
-    dev::RLPStream sTxRoot, sReceiptRoot;
-    sTxRoot.append(rlpTxRootVec);
-    std::vector<unsigned char> rlpReceiptRootVec(txRootDB.nReceiptRoot.begin(),  txRootDB.nReceiptRoot.end());
-    sReceiptRoot.append(rlpReceiptRootVec);
-    dev::RLP rlpTxRoot(sTxRoot.out());
-    dev::RLP rlpReceiptRoot(sReceiptRoot.out());
-    if(mintSyscoin.nTxRoot != txRootDB.nTxRoot){
+
+    // 6) Check TxProof & ReceiptProof
+    if (mintSyscoin.nTxRoot != txRootDB.nTxRoot) {
         return FormatSyscoinErrorMessage(state, "mint-mismatching-txroot", bSanityCheck);
     }
-    if(mintSyscoin.nReceiptRoot != txRootDB.nReceiptRoot){
+    if (mintSyscoin.nReceiptRoot != txRootDB.nReceiptRoot) {
         return FormatSyscoinErrorMessage(state, "mint-mismatching-receiptroot", bSanityCheck);
     }
-    
-    
+
+    // verify receipt proof
+    dev::RLP rlpReceiptRoot(dev::bytesConstRef(txRootDB.nReceiptRoot.begin(), txRootDB.nReceiptRoot.size()));
+    if(!VerifyProof(&mintSyscoin.vchTxPath, rlpReceiptValue, rlpReceiptParentNodes, rlpReceiptRoot)) {
+        return FormatSyscoinErrorMessage(state, "mint-verify-receipt-proof-failed", bSanityCheck);
+    }
+
+    // verify transaction proof
     dev::RLP rlpTxParentNodes(&mintSyscoin.vchTxParentNodes);
-    std::vector<unsigned char> vchTxValue(mintSyscoin.vchTxParentNodes.begin()+mintSyscoin.posTx, mintSyscoin.vchTxParentNodes.end());
+    std::vector<unsigned char> vchTxValue(
+        mintSyscoin.vchTxParentNodes.begin()+mintSyscoin.posTx,
+        mintSyscoin.vchTxParentNodes.end()
+    );
     std::vector<unsigned char> vchTxHash(dev::sha3(vchTxValue).asBytes());
-    // we must reverse the endian-ness because we store uint256 in BE but Eth uses LE.
     std::reverse(vchTxHash.begin(), vchTxHash.end());
-    // validate mintSyscoin.nTxHash is the hash of vchTxValue, this is not the TXID which would require deserializataion of the transaction object, for our purpose we only need
-    // uniqueness per transaction that is immutable and we do not care specifically for the txid but only that the hash cannot be reproduced for double-spend
-    if(uint256S(HexStr(vchTxHash)) != mintSyscoin.nTxHash) {
+    if (uint256S(HexStr(vchTxHash)) != mintSyscoin.nTxHash) {
         return FormatSyscoinErrorMessage(state, "mint-verify-tx-hash", bSanityCheck);
     }
     dev::RLP rlpTxValue(&vchTxValue);
-    const std::vector<unsigned char> &vchTxPath = mintSyscoin.vchTxPath;
-    // ensure eth tx not already spent in a previous block
-    if(pnevmtxmintdb->ExistsTx(mintSyscoin.nTxHash)) {
-        return FormatSyscoinErrorMessage(state, "mint-exists", bSanityCheck);
-    } 
-    // sanity check is set in mempool during m_test_accept and when miner validates block
-    // we care to ensure unique bridge id's in the mempool, not to emplace on test_accept
-    if(bSanityCheck) {
-        if(mapMintKeys.find(mintSyscoin.nTxHash) != mapMintKeys.end()) {
-            return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-transfer");
-        }
+    dev::RLP rlpTxRoot(dev::bytesConstRef(txRootDB.nTxRoot.begin(), txRootDB.nTxRoot.size()));
+    if(!VerifyProof(&mintSyscoin.vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot)) {
+        return FormatSyscoinErrorMessage(state, "mint-verify-tx-proof-failed", bSanityCheck);
     }
-    else {
-        // ensure eth tx not already spent in current processing block or mempool(mapMintKeysMempool passed in)
+
+    // check we haven't used nTxHash before
+    if (pnevmtxmintdb->ExistsTx(mintSyscoin.nTxHash)) {
+        return FormatSyscoinErrorMessage(state, "mint-tx-already-processed", bSanityCheck);
+    }
+    // also check in mapMintKeys for duplicates
+    if(bSanityCheck) {
+        if (mapMintKeys.find(mintSyscoin.nTxHash) != mapMintKeys.end()) {
+            return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-tx");
+        }
+    } else {
         auto itMap = mapMintKeys.try_emplace(mintSyscoin.nTxHash, txHash);
         if(!itMap.second) {
-            return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-transfer");
+            return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-tx");
         }
     }
-    // verify receipt proof
-    if(!VerifyProof(&vchTxPath, rlpReceiptValue, rlpReceiptParentNodes, rlpReceiptRoot)) {
-        return FormatSyscoinErrorMessage(state, "mint-verify-receipt-proof", bSanityCheck);
-    }
-    // verify transaction proof
-    if(!VerifyProof(&vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot)) {
-        return FormatSyscoinErrorMessage(state, "mint-verify-tx-proof", bSanityCheck);
-    }
-    if (!rlpTxValue.isList()) {
-        return FormatSyscoinErrorMessage(state, "mint-tx-rlp-list", bSanityCheck);
-    }
-    if (rlpTxValue.itemCount() < 8) {
-        return FormatSyscoinErrorMessage(state, "mint-tx-itemcount", bSanityCheck);
-    }
-    const dev::u256& nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
-    if(nChainID != (dev::u256(Params().GetConsensus().nNEVMChainID))) {
-        return FormatSyscoinErrorMessage(state, "mint-invalid-chainid", bSanityCheck);
-    }
-    if (!rlpTxValue[7].isData()) {
-        return FormatSyscoinErrorMessage(state, "mint-tx-array", bSanityCheck);
-    }    
-    if (rlpTxValue[5].isEmpty()) {
-        return FormatSyscoinErrorMessage(state, "mint-tx-invalid-receiver", bSanityCheck);
-    }             
-    const dev::Address &address160 = rlpTxValue[5].toHash<dev::Address>(dev::RLP::VeryStrict);
 
-    // ensure ERC20Manager is in the "to" field for the contract, meaning the function was called on this contract for freezing supply
-    if(Params().GetConsensus().vchSYSXERC20Manager != address160.asBytes()) {
-        return FormatSyscoinErrorMessage(state, "mint-invalid-contract-manager", bSanityCheck);
+    // 7) Check chainID, "to" field, parse method input
+    if (!rlpTxValue.isList() || rlpTxValue.itemCount() < 8) {
+        return FormatSyscoinErrorMessage(state, "mint-tx-rlp-structure-fail", bSanityCheck);
     }
+    dev::u256 nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
+    if (nChainID != dev::u256(Params().GetConsensus().nNEVMChainID)) {
+        return FormatSyscoinErrorMessage(state, "mint-wrong-chainid", bSanityCheck);
+    }
+    if (!rlpTxValue[5].isData()) {
+        return FormatSyscoinErrorMessage(state, "mint-invalid-receiver-field", bSanityCheck);
+    }
+    dev::Address toField = rlpTxValue[5].toHash<dev::Address>(dev::RLP::VeryStrict);
+    if (toField.asBytes() != Params().GetConsensus().vchSYSXERC20Manager) {
+        return FormatSyscoinErrorMessage(state, "mint-incorrect-bridge-manager", bSanityCheck);
+    }
+    // The input data (call data) is in rlpTxValue[7]
+    const std::vector<unsigned char> &inputData = rlpTxValue[7].toBytes(dev::RLP::VeryStrict);
+
+    // parse freezeBurn(...) call data
     CAmount outputAmount;
-    uint64_t nAssetNEVM = 0;
-    const std::vector<unsigned char> &rlpBytes = rlpTxValue[7].toBytes(dev::RLP::VeryStrict);
-    std::vector<unsigned char> vchERC20ContractAddress;
-    CTxDestination dest;
     std::string witnessAddress;
-    if(!parseNEVMMethodInputData(Params().GetConsensus().vchSYSXBurnMethodSignature, nERC20Precision, nSPTPrecision, rlpBytes, outputAmount, nAssetNEVM, witnessAddress)) {
-        return FormatSyscoinErrorMessage(state, "mint-invalid-tx-data", bSanityCheck);
+
+    // Some 4-byte selector for freezeBurn
+    std::vector<unsigned char> vchFreezeBurnSelector = Params().GetConsensus().vchSYSXBurnMethodSignature;
+    if (!parseNEVMMethodInputData(
+             vchFreezeBurnSelector,
+             nERC20Precision,
+             inputData,
+             outputAmount,
+             witnessAddress
+        ))
+    {
+        return FormatSyscoinErrorMessage(state, "mint-parse-freezeBurn-failed", bSanityCheck);
     }
-    auto itOut = mapAssetOut.find(nAssetNEVM);
-    if(itOut == mapAssetOut.end()) {
-        return FormatSyscoinErrorMessage(state, "mint-asset-output-notfound", bSanityCheck);             
-    }
-    if(!fRegTest) {
-        bool bFoundDest = false;
-        // look through outputs to find one that matches the destination with the right asset and asset amount
-        for(const auto &vout: tx.vout) {
-            if(vout.scriptPubKey.IsUnspendable()) {
-                continue;
-            }
-            if(!ExtractDestination(vout.scriptPubKey, dest)) {
-                return FormatSyscoinErrorMessage(state, "mint-extract-destination", bSanityCheck);  
-            }
-            if(EncodeDestination(dest) == witnessAddress && vout.assetInfo.nAsset == nAssetNEVM && vout.assetInfo.nValue == outputAmount) {
-                bFoundDest = true;
-                break;
-            }
+    bool bFoundDest = false;
+    for (const auto &vout : tx.vout) {
+        if (vout.scriptPubKey.IsUnspendable()) {
+            continue;
         }
-        if(!bFoundDest) {
-            return FormatSyscoinErrorMessage(state, "mint-mismatch-destination", bSanityCheck);
+        CTxDestination dest;
+        if (!ExtractDestination(vout.scriptPubKey, dest)) {
+            return FormatSyscoinErrorMessage(state, "mint-extract-destination", bSanityCheck);  
+        }
+        if (EncodeDestination(dest) == witnessAddress && vout.assetInfo.nAsset == nAssetFromLog && vout.assetInfo.nValue == outputAmount) {
+            bFoundDest = true;
+            break;
         }
     }
-    if(outputAmount <= 0) {
-        return FormatSyscoinErrorMessage(state, "mint-value-negative", bSanityCheck);
+    if (!bFoundDest) {
+        return FormatSyscoinErrorMessage(state, "mint-mismatch-destination", bSanityCheck);
     }
-    
-    // if input for this asset exists, must also include it as change in output, so output-input should be the new amount created
-    auto itIn = mapAssetIn.find(nAssetNEVM);
-    CAmount nTotal;
-    if(itIn != mapAssetIn.end()) {
-        nTotal = itOut->second - itIn->second;
+    // 8) Now you have final "outputAmount" and "nAssetFromLog" => see if the UTXO outputs match
+    //    That part depends on your bridging logic: checking mapAssetOut, ensuring there's an output
+    //    to witnessAddress with the correct asset, etc.
+
+    // For example:
+    auto itOut = mapAssetOut.find(nAssetFromLog);
+    if (itOut == mapAssetOut.end()) {
+        return FormatSyscoinErrorMessage(state, "mint-asset-output-notfound", bSanityCheck);
+    }
+
+    // If there's also an input for this asset, remove it and see how much was net minted
+    CAmount nTotalMinted;
+    auto itIn = mapAssetIn.find(nAssetFromLog);
+    if (itIn != mapAssetIn.end()) {
+        nTotalMinted = itOut->second - itIn->second;
         mapAssetIn.erase(itIn);
     } else {
-        nTotal = itOut->second;
+        nTotalMinted = itOut->second;
     }
-    // erase in / out of this asset as equality is checked for the rest after CheckSyscoinInputs()
     mapAssetOut.erase(itOut);
-    // the event logged amount must be only the amount we mint
-    if(outputAmount != nTotal) {
-        return FormatSyscoinErrorMessage(state, "mint-mismatch-value", bSanityCheck);  
+
+    // Must match the bridging "outputAmount"
+    if (outputAmount != nTotalMinted) {
+        return FormatSyscoinErrorMessage(state, "mint-output-mismatch", bSanityCheck);
     }
-    if (!MoneyRangeAsset(nTotal)) {
-        return FormatSyscoinErrorMessage(state, "mint-value-outofrange", bSanityCheck);
+    if (!MoneyRangeAsset(outputAmount)) {
+        return FormatSyscoinErrorMessage(state, "mint-value-out-of-range", bSanityCheck);
     }
-    if(!fJustCheck) {
-        if(!bSanityCheck && nHeight > 0) {   
-            LogPrint(BCLog::SYS,"CONNECTED ASSET MINT: op=%s asset=%llu hash=%s height=%d fJustCheck=%s\n",
-                stringFromSyscoinTx(tx.nVersion).c_str(),
-                nAssetNEVM,
-                txHash.ToString().c_str(),
+
+    // Optionally check that there's a matching vout to witnessAddress
+    // e.g. loop over tx.vout, compare the address and asset.
+
+    if (!fJustCheck) {
+        if (!bSanityCheck && nHeight > 0) {
+            LogPrint(BCLog::SYS,"CONNECTED ASSET MINT: asset=%llu tx=%s height=%d fJustCheck=%s\n",
+                nAssetFromLog,
+                txHash.ToString(),
                 nHeight,
-                fJustCheck ? "JUSTCHECK" : "BLOCK");      
-        }           
-    }               
+                fJustCheck ? "JUSTCHECK" : "BLOCK"
+            );
+        }
+    }
+
     return true;
 }
+
 bool DisconnectMintAsset(const CTransaction &tx, const uint256& txHash, NEVMMintTxMap &mapMintKeys){
     CMintSyscoin mintSyscoin(tx);
     if(mintSyscoin.IsNull()) {

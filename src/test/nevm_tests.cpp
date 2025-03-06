@@ -79,17 +79,164 @@ BOOST_AUTO_TEST_CASE(nevm_parseabidata)
 {
     tfm::format(std::cout,"Running nevm_parseabidata...\n");
     CAmount outputAmount;
-    uint64_t nAsset = 0;
-    const std::vector<unsigned char> &expectedMethodHash = ParseHex("54c988ff");
-    const std::vector<unsigned char> &rlpBytes = ParseHex("54c988ff00000000000000000000000000000000000000000000000000000002540be400000000000000000000000000000000000000000000000000000000009be8894b0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000002c62637274317130667265323430737939326d716b386b6b377073616561366b74366d3537323570377964636a0000000000000000000000000000000000000000");
-    std::string expectedAddress = "bcrt1q0fre240sy92mqk8kk7psaea6kt6m5725p7ydcj";
     std::string address;
-    BOOST_CHECK(parseNEVMMethodInputData(expectedMethodHash, 8, 8, rlpBytes, outputAmount, nAsset, address));
-    BOOST_CHECK_EQUAL(outputAmount, 100*COIN);
-    BOOST_CHECK_EQUAL(nAsset, (uint64_t)2615707979);
-    BOOST_CHECK(address == expectedAddress);
 
+    // 4-byte function selector for freezeBurn(...)
+    const std::vector<unsigned char> &expectedMethodHash = ParseHex("ab972f5a");
+
+    // A valid RLP that encodes:
+    //  (1) methodHash = ab972f5a
+    //  (2) value = 100*COIN in big-endian
+    //  (3) assetAddr => dummy 0x1111111111111111111111111111111111111111
+    //  (4) tokenId => 0
+    //  (5) offset pointer => 0x80
+    //  (6) string length => 44
+    //  (7) the 44-byte string
+    //  (8) zero padding
+    const std::vector<unsigned char> &rlpBytes = ParseHex(
+        // method hash
+        "ab972f5a"
+        // value: 0x02540be400 => 10,000,000,000 (100 * COIN)
+        "00000000000000000000000000000000000000000000000000000002540be400"
+        // assetAddr => 0x111111... in last 20 bytes
+        "0000000000000000000000001111111111111111111111111111111111111111"
+        // tokenId => 0
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        // offset pointer => 0x80
+        "0000000000000000000000000000000000000000000000000000000000000080"
+        // string length => 0x2c (44 decimal)
+        "000000000000000000000000000000000000000000000000000000000000002c"
+        // 44-byte string => "bcrt1q0fre240sy92mqk8kk7psaea6kt6m5725p7ydcj"
+        "62637274317130667265323430737939326d716b386b6b377073616561366b74"
+        "366d3537323570377964636a"
+        // pad 20 bytes => total 64 after the string length
+        "0000000000000000000000000000000000000000"
+    );
+
+    // The expected witness address
+    std::string expectedAddress = "bcrt1q0fre240sy92mqk8kk7psaea6kt6m5725p7ydcj";
+
+    // Positive test => should succeed
+    BOOST_CHECK(parseNEVMMethodInputData(
+        expectedMethodHash, 
+        8 /* nERC20Precision */,
+        rlpBytes, 
+        outputAmount, 
+        address
+    ));
+    // Check the parse results
+    BOOST_CHECK_EQUAL(outputAmount, 100 * COIN);
+    BOOST_CHECK_EQUAL(address, expectedAddress);
+
+    // Negative test #1: Wrong method hash => should fail
+    const std::vector<unsigned char> &invalidMethodHash = ParseHex("deadbeef");
+    BOOST_CHECK(!parseNEVMMethodInputData(
+        invalidMethodHash, 
+        8, 
+        rlpBytes, 
+        outputAmount, 
+        address
+    ));
+
+    // Negative test #2: "invalidAddressRlpBytes"
+    // We'll cause out-of-bounds by removing the last 8 hex bytes from the final padding.
+    // So the string claims length=44, but there's only 36 leftover => parse should fail.
+    const std::vector<unsigned char> &invalidAddressRlpBytes = ParseHex(
+        "ab972f5a"
+        // param1 => 100 * COIN
+        "00000000000000000000000000000000000000000000000000000002540be400"
+        // param2 => some "invalid" address? Actually doesn't matter; we want out-of-bounds
+        "0000000000000000000000009999999999999999999999999999999999999999"
+        // param3 => tokenId => 0
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        // param4 => offset pointer => 0x80
+        "0000000000000000000000000000000000000000000000000000000000000080"
+        // string length => 44
+        "000000000000000000000000000000000000000000000000000000000000002c"
+        // string data => let's only provide 32 bytes (should be 44)
+        "62637274317130667265323430737939326d716b386b6b3770"
+        // no final padding => out-of-bounds read
+    );
+    BOOST_CHECK(!parseNEVMMethodInputData(
+        expectedMethodHash, 
+        8, 
+        invalidAddressRlpBytes, 
+        outputAmount, 
+        address
+    ));
+
+    // Negative test #3: "invalidTokenIdRlpBytes"
+    // Similarly remove final 8 hex => string is truncated => out-of-bounds => false
+    const std::vector<unsigned char> &invalidTokenIdRlpBytes = ParseHex(
+        "ab972f5a"
+        // param1 => 100 * COIN
+        "00000000000000000000000000000000000000000000000000000002540be400"
+        // param2 => normal address
+        "0000000000000000000000001111111111111111111111111111111111111111"
+        // param3 => tokenId => let's pretend it's zero, but it doesn't matter
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        // param4 => offset pointer => 0x80
+        "0000000000000000000000000000000000000000000000000000000000000080"
+        // length => 44
+        "000000000000000000000000000000000000000000000000000000000000002c"
+        // give only 16 bytes of actual string
+        "62637274317130667265323430"
+        // no leftover => out-of-bounds
+    );
+    BOOST_CHECK(!parseNEVMMethodInputData(
+        expectedMethodHash, 
+        8, 
+        invalidTokenIdRlpBytes, 
+        outputAmount, 
+        address
+    ));
+
+    // Negative test #4: "shortStringRlpBytes"
+    // We'll make the string length 16 but only provide 8 => out-of-bounds
+    const std::vector<unsigned char> &shortStringRlpBytes = ParseHex(
+        "ab972f5a"
+        "00000000000000000000000000000000000000000000000000000002540be400"
+        "0000000000000000000000001111111111111111111111111111111111111111"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000080"
+        // length=16 => 0x10
+        "0000000000000000000000000000000000000000000000000000000000000010"
+        // provide only 8 bytes => out-of-bounds
+        "6263727431713066"
+        // remove leftover so parse fails
+    );
+    BOOST_CHECK(!parseNEVMMethodInputData(
+        expectedMethodHash, 
+        8, 
+        shortStringRlpBytes, 
+        outputAmount, 
+        address
+    ));
+
+    // Negative test #5: "badPaddingRlpBytes"
+    // We'll set length=44 but remove more than 44 from the end. Out-of-bounds read => false
+    const std::vector<unsigned char> &badPaddingRlpBytes = ParseHex(
+        "ab972f5a"
+        "00000000000000000000000000000000000000000000000000000002540be400"
+        "0000000000000000000000001111111111111111111111111111111111111111"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000080"
+        // length=44
+        "000000000000000000000000000000000000000000000000000000000000002c"
+        // Provide exactly 30 bytes of the string => out-of-bounds
+        "62637274317130667265323430737939326d716b386b6b"
+        // omit the rest => parse fails
+    );
+    BOOST_CHECK(!parseNEVMMethodInputData(
+        expectedMethodHash, 
+        8, 
+        badPaddingRlpBytes, 
+        outputAmount, 
+        address
+    ));
 }
+
+
 BOOST_AUTO_TEST_CASE(nevmspv_valid)
 {
     tfm::format(std::cout,"Running nevmspv_valid...\n");
