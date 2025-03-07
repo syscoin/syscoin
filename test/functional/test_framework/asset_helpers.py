@@ -1,25 +1,27 @@
 from decimal import ROUND_UP, Decimal
 import struct
-SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN = 128
-SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION = 129
-SYSCOIN_TX_VERSION_ALLOCATION_MINT = 133
-SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM = 134
-SYSCOIN_TX_VERSION_ALLOCATION_SEND = 135
-
 from test_framework.messages import (
     ser_compact_size,
     ser_string,
+)
+from test_framework.blocktools import (
+    SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN,
+    SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION,
+    SYSCOIN_TX_VERSION_ALLOCATION_MINT,
+    SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM,
+    SYSCOIN_TX_VERSION_ALLOCATION_SEND,
 )
 ################################################################################
 # Minimal stubs mirroring Syscoin classes:
 ################################################################################
 
+DUST_THRESHOLD = Decimal('0.00000546')
+
 def ser_varint(n):
-    """Serialize integer using Syscoin VarInt encoding."""
     result = bytearray()
     while True:
         byte = n & 0x7F
-        if len(result):
+        if result:
             byte |= 0x80
         result.insert(0, byte)
         if n <= 0x7F:
@@ -27,165 +29,95 @@ def ser_varint(n):
         n = (n >> 7) - 1
     return bytes(result)
 
-class AssetOutValue:
-    """
-    Python equivalent to:
-       (compactSize) -> n
-       (compressed amount) -> nValue
-    """
-    def __init__(self, n=0, nValue=0):
-        self.n = n           # 32-bit index
-        self.nValue = nValue # 64-bit amount
-
-    def serialize(self, compress_amount_callback) -> bytes:
-        """Write `n` as a compactSize, then `nValue` via compress_amount_callback()."""
-        out = b""
-        out += ser_compact_size(self.n)
-        out += compress_amount_callback(self.nValue)
-        return out
-
-
-class AssetOut:
-    """
-    Python equivalent to:
-       (varint) key
-       (vector of AssetOutValue)
-    """
-    def __init__(self, key=0, values=None):
-        if values is None:
-            values = []
-        self.key = key
-        self.values = values
-
-    def serialize(self, compress_amount_callback) -> bytes:
-        out = b""
-        # key is varint
-        out += ser_varint(self.key)
-        # 'values' is a vector of AssetOutValue
-        out += ser_compact_size(len(self.values))
-        for av in self.values:
-            out += av.serialize(compress_amount_callback)
-        return out
-
-
-class CAssetAllocation:
-    """
-    Python version of:
-      CAssetAllocation { std::vector<CAssetOut> voutAssets; }
-    """
-    def __init__(self, voutAssets=None):
-        if voutAssets is None:
-            voutAssets = []
-        self.voutAssets = voutAssets
-
-    def serialize(self, compress_amount_callback) -> bytes:
-        out = b""
-        out += ser_compact_size(len(self.voutAssets))
-        for ao in self.voutAssets:
-            out += ao.serialize(compress_amount_callback)
-        return out
-
-    def serialize_data(self, compress_amount_callback):
-        # mirrors "SerializeData(std::vector<unsigned char>)" from C++ code
-        return self.serialize(compress_amount_callback)
-
-
-################################################################################
-# Example for CMintSyscoin and CBurnSyscoin
-################################################################################
-
-class CMintSyscoin(CAssetAllocation):
-    """
-    Represents the mint transaction for Syscoin assets.
-    Contains SPV proof data for validation.
-    """
-    def __init__(self):
-        super().__init__()
-        self.txHash = b""                # Transaction hash on NEVM
-        self.txValue = b""               # Transaction value 
-        self.txPos = 0                   # Transaction position in block
-        self.txBlockHash = b""           # Block hash containing the transaction
-        self.txParentNodes = b""         # Merkle proof parent nodes
-        self.txPath = b""                # Path in the Merkle tree
-        self.posReceipt = 0              # Receipt position
-        self.receiptParentNodes = b""    # Receipt parent nodes
-        self.txRoot = b""                # Transaction Merkle root  
-        self.receiptRoot = b""           # Receipt Merkle root
-
-    def serialize(self, compress_amount_callback):
-        # 1) Serialize base CAssetAllocation
-        out = super().serialize(compress_amount_callback)
-        
-        # 2) Serialize SPV-proof-related fields
-        out += self.txHash                       # 32 bytes
-        out += self.txValue                      # Variable length
-        out += struct.pack("<I", self.txPos)     # 4 bytes
-        out += self.txBlockHash                  # 32 bytes 
-        out += ser_string(self.txParentNodes)    # Variable length
-        out += ser_string(self.txPath)           # Variable length
-        out += struct.pack("<I", self.posReceipt)     # 4 bytes
-        out += ser_string(self.receiptParentNodes)    # Variable length
-        out += self.txRoot                       # 32 bytes
-        out += self.receiptRoot                  # 32 bytes
-        
-        return out
-
-    def serialize_data(self, compress_amount_callback):
-        return self.serialize(compress_amount_callback)
-
-
-class CBurnSyscoin(CAssetAllocation):
-    """
-    C++ side does:
-      READWRITE(AsBase<CAssetAllocation>(obj));
-      READWRITE(obj.vchNEVMAddress);
-    """
-    def __init__(self):
-        super().__init__()
-        self.vchNEVMAddress = b''
-
-    def serialize(self, compress_amount_callback):
-        out = super().serialize(compress_amount_callback)
-        out += ser_string(self.vchNEVMAddress)
-        return out
-
-    def serialize_data(self, compress_amount_callback):
-        return self.serialize(compress_amount_callback)
-
-
-################################################################################
-# 2) Compress / Decompress amount
-################################################################################
-
 def compress_amount_64bit(amount) -> bytes:
-    """
-    Compress a 64-bit amount according to Syscoin's implementation.
-    Handles both integer and Decimal values.
-    """
-    # If we got a Decimal, convert to integer first (satoshis)
     if isinstance(amount, Decimal):
         amount = int(amount * 100000000)
     elif not isinstance(amount, int):
         amount = int(float(amount) * 100000000)
-        
+
     if amount == 0:
         return ser_varint(0)
 
-    # Follow Syscoin's compression algorithm
-    e = 0
-    n = amount
+    e, n = 0, amount
     while (n % 10) == 0 and e < 9:
         n //= 10
         e += 1
-        
+
     if e < 9:
         d = n % 10
         n //= 10
         code = 1 + (n * 9 + d - 1) * 10 + e
-        return ser_varint(code)
     else:
         code = 1 + (n - 1) * 10 + 9
-        return ser_varint(code)
+
+    return ser_varint(code)
+
+class AssetOutValue:
+    def __init__(self, n=0, nValue=0):
+        self.n = n
+        self.nValue = nValue
+
+    def serialize(self):
+        return ser_compact_size(self.n) + compress_amount_64bit(self.nValue)
+
+class AssetOut:
+    def __init__(self, key=0, values=None):
+        self.key = key
+        self.values = values or []
+
+    def serialize(self):
+        out = ser_varint(self.key)
+        out += ser_compact_size(len(self.values))
+        for av in self.values:
+            out += av.serialize()
+        return out
+
+class CAssetAllocation:
+    def __init__(self, voutAssets=None):
+        self.voutAssets = voutAssets or []
+
+    def serialize(self):
+        out = ser_compact_size(len(self.voutAssets))
+        for ao in self.voutAssets:
+            out += ao.serialize()
+        return out
+
+class CMintSyscoin(CAssetAllocation):
+    def __init__(self, spv_proof=None):
+        super().__init__()
+        spv_proof = spv_proof or {}
+        self.txHash = spv_proof.get("txHash", b"")
+        self.txValue = spv_proof.get("txValue", b"")
+        self.txPos = spv_proof.get("txPos", 0)
+        self.txBlockHash = spv_proof.get("txBlockHash", b"")
+        self.txParentNodes = spv_proof.get("txParentNodes", b"")
+        self.txPath = spv_proof.get("txPath", b"")
+        self.posReceipt = spv_proof.get("posReceipt", 0)
+        self.receiptParentNodes = spv_proof.get("receiptParentNodes", b"")
+        self.txRoot = spv_proof.get("txRoot", b"")
+        self.receiptRoot = spv_proof.get("receiptRoot", b"")
+
+    def serialize(self):
+        out = super().serialize()
+        out += self.txHash
+        out += self.txValue
+        out += struct.pack("<I", self.txPos)
+        out += self.txBlockHash
+        out += ser_string(self.txParentNodes)
+        out += ser_string(self.txPath)
+        out += struct.pack("<I", self.posReceipt)
+        out += ser_string(self.receiptParentNodes)
+        out += self.txRoot
+        out += self.receiptRoot
+        return out
+
+class CBurnSyscoin(CAssetAllocation):
+    def __init__(self, nevm_address=b''):
+        super().__init__()
+        self.vchNEVMAddress = nevm_address
+
+    def serialize(self):
+        return super().serialize() + ser_string(self.vchNEVMAddress)
 
 
 ################################################################################
@@ -243,7 +175,7 @@ def create_allocation_data(allocation_type: str,
         raise ValueError(f"Unknown allocation type: {allocation_type}")
     
     # Serialize the data
-    raw_data = obj.serialize_data(compress_amount_64bit)
+    raw_data = obj.serialize()
     return raw_data.hex()
 
 def attach_allocation_data_to_tx(node, syscoinversion, data_hex, inputs, outputs):
