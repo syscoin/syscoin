@@ -727,6 +727,11 @@ RPCHelpMan listunspent()
         PushParentDescriptors(*pwallet, scriptPubKey, entry);
         if (avoid_reuse) entry.pushKV("reused", reused);
         entry.pushKV("safe", out.safe);
+        // SYSCOIN
+        if(out.txout.assetInfo.IsNull()) {
+            entry.pushKV("asset_guid", out.txout.assetInfo.nAsset);
+            entry.pushKV("asset_amount", ValueFromAmount(out.txout.assetInfo.nValue));
+        }
         results.push_back(entry);
     }
 
