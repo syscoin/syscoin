@@ -257,237 +257,25 @@ class CoinSelector:
             if self.total_assets.get(guid, Decimal('0')) < amount:
                 raise ValueError(f"Not enough asset {guid}: need {amount}, have {self.total_assets.get(guid, Decimal('0'))}")
 
-    def estimate_current_fee(self, tx_type, num_outputs):
-        return calculate_tx_fee(
-            self.node,
-            len(self.selected_utxos),
-            num_outputs,
-            has_op_return=True,
-            has_asset_data=tx_type != SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION
-        )
-
     def select_coins_for_transaction(self, tx_type, sys_amount, asset_amounts=None, fees=None):
-        if asset_amounts is None:
-            asset_amounts = {}
-
+        asset_amounts = asset_amounts or {}
         asset_amounts = {int(k): v for k, v in asset_amounts.items()}
 
-        DUST_THRESHOLD = Decimal('0.00000546')
-        initial_fee = fees if fees is not None else Decimal('0.0001')
-
-        total_sys_needed = sys_amount + initial_fee
+        initial_fee = fees if fees else Decimal('0.0001')
+        num_asset_change_outputs = len([guid for guid in asset_amounts if asset_amounts[guid] > 0])
+        total_sys_needed = sys_amount + initial_fee + (DUST_THRESHOLD * num_asset_change_outputs)
 
         self.select_optimal_inputs(total_sys_needed, asset_amounts)
-
-        num_outputs = 1
-        if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND:
-            num_outputs += len(asset_amounts)
-        elif tx_type in [
-            SYSCOIN_TX_VERSION_ALLOCATION_MINT,
-            SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION,
-            SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN
-        ]:
-            num_outputs += 1
-
-        asset_changes = {
-            guid: total - asset_amounts.get(guid, Decimal('0'))
-            for guid, total in self.total_assets.items()
-            if total > asset_amounts.get(guid, Decimal('0'))
-        }
-
-        num_asset_change_outputs = len(asset_changes)
-        total_sys_needed += DUST_THRESHOLD * num_asset_change_outputs
-
-        actual_fee = self.estimate_current_fee(tx_type, num_outputs + num_asset_change_outputs)
-        total_sys_needed = sys_amount + actual_fee + (DUST_THRESHOLD * num_asset_change_outputs)
 
         if self.total_sys < total_sys_needed:
             raise ValueError(f"Not enough SYS: need {total_sys_needed}, have {self.total_sys}")
 
-        raw_sys_change = self.total_sys - total_sys_needed
-        sys_change = raw_sys_change if raw_sys_change >= DUST_THRESHOLD else Decimal('0')
+        sys_change = self.total_sys - total_sys_needed
+        sys_change = sys_change if sys_change >= DUST_THRESHOLD else Decimal('0')
+
+        asset_changes = {guid: self.total_assets[guid] - asset_amounts[guid] for guid in asset_amounts if self.total_assets.get(guid, 0) > asset_amounts[guid]}
 
         return True, self.selected_utxos, sys_change, asset_changes
-
-def estimate_asset_commitment_size(asset_amounts=None, tx_type=None, nevm_address=None):
-    """
-    Estimate the size of the asset commitment in bytes
-    
-    Args:
-        asset_amounts: Dict of {guid: amount} for assets
-        tx_type: Transaction type (SYSCOIN_TX_VERSION_*)
-        nevm_address: NEVM address for BURN_TO_NEVM
-        
-    Returns:
-        Size of asset commitment in bytes
-    """
-    if asset_amounts is None:
-        asset_amounts = {}
-    
-    # Convert asset keys to integers if they're strings
-    asset_amounts = {int(k) if isinstance(k, str) else k: v for k, v in asset_amounts.items()}
-    
-    # Base size for CAssetAllocation
-    base_size = 1  # 1 byte for asset count
-    
-    # Special handling for different transaction types
-    if tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
-        # Creating SYSX from SYS - just one SYSX output
-        asset_count = 1
-    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
-        # Burning SYSX to SYS - just one SYSX input
-        asset_count = 1
-    else:
-        # For other types, count the number of assets
-        asset_count = len(asset_amounts)
-    
-    # Size per asset (key + values)
-    # Each AssetOut: GUID (4 bytes) + vector size (1 byte) + values
-    # Each AssetOutValue: output index (1 byte) + compressed amount (~3-8 bytes)
-    per_asset_size = 12  # Average size accounting for variations
-    
-    # Asset outputs total size
-    total_asset_size = asset_count * per_asset_size
-    
-    # Additional size for specific transaction types
-    additional_size = 0
-    
-    # CMintSyscoin has additional fields for SPV proof
-    if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
-        # txHash (32) + blockHash (32) + txIndex (4) + receiptIndex (4) +
-        # txRoot (32) + receiptRoot (32) + parent nodes + paths
-        additional_size = 136 + 100  # Fixed fields + estimated size for variable fields
-    
-    # CBurnSyscoin has NEVM address field
-    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
-        # NEVM address (typically 20 bytes) + length byte
-        additional_size = 21
-    
-    # Total size
-    total_size = base_size + total_asset_size + additional_size
-    
-    # Add padding for safety (5%)
-    return int(total_size * 1.05)
-
-def estimate_tx_size(num_inputs, num_outputs, tx_type=None, asset_amounts=None, nevm_address=None):
-    """
-    Estimate transaction size in bytes for fee calculation
-    
-    Args:
-        num_inputs: Number of transaction inputs
-        num_outputs: Number of transaction outputs
-        tx_type: Transaction type (SYSCOIN_TX_VERSION_*)
-        asset_amounts: Dict of {guid: amount} for assets
-        nevm_address: NEVM address for BURN_TO_NEVM
-        
-    Returns:
-        Estimated transaction size in bytes
-    """
-    # Base transaction size
-    base_size = 10  # version (4) + locktime (4) + input count varint (1) + output count varint (1)
-    
-    # Input size 
-    # prevout (36) + script len (1) + signature script (~107) + sequence (4)
-    input_size = num_inputs * 148  
-    
-    # Regular output size
-    # value (8) + script length (1) + pubkey script (~25)
-    output_size = num_outputs * 34  
-    
-    # OP_RETURN output size
-    op_return_size = 0
-    if tx_type:
-        # OP_RETURN itself is very small, but the asset data can be substantial
-        # value (8) + script len (1) + OP_RETURN (1) + pushdata + asset data
-        asset_data_size = estimate_asset_commitment_size(asset_amounts, tx_type, nevm_address)
-        op_return_size = 10 + asset_data_size
-    
-    # Total estimated size
-    total_size = base_size + input_size + output_size + op_return_size
-    
-    # Add padding for safety (10%)
-    return int(total_size * 1.1)
-
-def get_current_fee_rate(node):
-    """
-    Get the current fee rate from the node
-    
-    Args:
-        node: The node to query
-        
-    Returns:
-        Fee rate in satoshis per kilobyte
-    """
-    try:
-        # Try newer API first
-        info = node.getnetworkinfo()
-        if 'relayfee' in info:
-            # relayfee is in SYS/kB, convert to satoshis/kB
-            return Decimal(str(info['relayfee'])) * Decimal('100000000')
-    except:
-        pass
-    
-    # Fallback to estimatefee if available
-    try:
-        # estimatefee returns SYS/kB
-        fee_per_kb = node.estimatefee(2)  # Estimate for 2 blocks confirmation
-        if fee_per_kb > 0:
-            # Convert to satoshis/kB
-            return Decimal(str(fee_per_kb)) * Decimal('100000000')
-    except:
-        pass
-    
-    # Default fallback
-    return Decimal('1000')  # 1000 satoshis/kB (0.00001 SYS/kB)
-
-def calculate_tx_fee(node, num_inputs, num_outputs, has_op_return=True, has_asset_data=True):
-    """
-    Calculate transaction fee based on input/output counts and current fee rate
-    
-    Args:
-        node: Node to use for getting fee rate
-        num_inputs: Number of transaction inputs
-        num_outputs: Number of transaction outputs
-        has_op_return: Whether transaction has OP_RETURN output
-        has_asset_data: Whether OP_RETURN contains asset data
-        
-    Returns:
-        Fee in SYS
-    """
-    # Validate inputs
-    if num_inputs <= 0:
-        raise ValueError("Number of inputs must be positive")
-    if num_outputs <= 0:
-        raise ValueError("Number of outputs must be positive")
-    
-    # Get current fee rate (satoshis/kB)
-    fee_rate = get_current_fee_rate(node)
-    
-    # Determine transaction type for size estimation
-    tx_type = None
-    if has_asset_data:
-        # Use ALLOCATION_SEND as a default for size estimation
-        tx_type = SYSCOIN_TX_VERSION_ALLOCATION_SEND
-    
-    # Estimate transaction size
-    tx_size = estimate_tx_size(
-        num_inputs=num_inputs,
-        num_outputs=num_outputs,
-        tx_type=tx_type,
-        asset_amounts={"123456": Decimal('1.0')} if has_asset_data else None
-    )
-    
-    # Calculate fee based on size and rate
-    fee_satoshis = Decimal(tx_size) * fee_rate / Decimal(1000)  # fee_rate is in sat/KB
-    
-    # Convert to SYS with proper rounding
-    fee_sys = fee_satoshis / Decimal('100000000')
-    
-    # Round up to nearest satoshi and ensure minimum fee
-    min_fee = Decimal('0.00000010')  # 10 satoshis minimum
-    fee = fee_sys.quantize(Decimal('0.00000001'), rounding=ROUND_UP)
-    
-    return max(fee, min_fee)
 
 def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), 
                               asset_amounts=None, fees=None,
@@ -601,7 +389,7 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'),
             values=[AssetOutValue(n=output_indexes[destination_address], nValue=sys_amount)]
         )
         asset_outputs.append(sysx_out)
-        
+        print(f'asset_outputs {output_indexes[destination_address]}')
         # Create OP_RETURN with burn value
         data_hex = create_allocation_data("burn", vout_assets=asset_outputs)
         # Replace placeholder with actual data
@@ -814,3 +602,55 @@ def example_multi_asset_transaction():
 
 
 
+def verify_tx_outputs(node, txid, tx_type, asset_details=None):
+    """Efficiently verify transaction outputs based on Syscoin transaction type."""
+    asset_details = asset_details or {}
+    utxos = node.listunspent()
+    print(f'utxos {utxos}')
+    def utxo_exists(asset_guid=None, asset_amount=None, sys_amt=None):
+        for utxo in utxos:
+            if utxo['txid'] != txid:
+                continue
+            if sys_amt and Decimal(str(utxo['amount'])) != Decimal(str(sys_amt)):
+                continue
+            if asset_guid and asset_amount:
+                for asset in utxo.get('assets', []):
+                    if int(asset['guid']) == asset_guid and Decimal(str(asset['value'])) == Decimal(str(asset_amount)):
+                        return True
+                continue
+            elif not asset_guid and not asset_amount:
+                return True
+        return False
+
+    if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND:
+        for guid, amount in asset_details.items():
+            if not utxo_exists(asset_guid=guid, asset_amount=amount, sys_amt=DUST_THRESHOLD):
+                raise AssertionError(f"Asset output not found: txid={txid}, guid={guid}, amount={amount}")
+
+    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
+        for guid, amount in asset_details.items():
+            if not utxo_exists(asset_guid=guid, asset_amount=amount, sys_amt=DUST_THRESHOLD):
+                raise AssertionError(f"Minted asset not found: txid={txid}, guid={guid}, amount={amount}")
+
+    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
+        for guid, amount in asset_details.items():
+            if utxo_exists(asset_guid=guid, asset_amount=amount):
+                raise AssertionError(f"Burned asset still found in UTXO: txid={txid}, guid={guid}, amount={amount}")
+
+    elif tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
+        for guid, amount in asset_details.items():
+            if not utxo_exists(asset_guid=guid, asset_amount=amount):
+                raise AssertionError(f"SYSX output not found in UTXO: txid={txid}, guid={guid}, amount={amount}")
+
+    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
+        for guid, amount in asset_details.items():
+            if utxo_exists(asset_guid=guid, asset_amount=amount):
+                raise AssertionError(f"SYS output still found in UTXO: txid={txid}, guid={guid}, amount={amount}")
+        sys_amt = list(asset_details.values())[0]
+        if not utxo_exists(sys_amt=sys_amt):
+            raise AssertionError(f"SYS output not found: txid={txid}, amount={sys_amt}")
+
+    else:
+        raise ValueError("Unknown transaction type")
+
+    print(f"Verified UTXOs successfully for txid={txid}, tx_type={tx_type}")
