@@ -281,210 +281,57 @@ def attach_allocation_data_to_tx(node, syscoinversion, data_hex, inputs, outputs
     return sign_res["hex"]
 
 class CoinSelector:
-    """
-    Generic coin selector for Syscoin transactions that handles mixed UTXOs intelligently.
-    Supports all transaction types and handles UTXOs that contain both SYS and assets.
-    """
     def __init__(self, node, max_inputs=10):
-        """Initialize with a node and maximum number of inputs to use"""
         self.node = node
         self.max_inputs = max_inputs
         self.selected_utxos = []
         self.total_sys = Decimal('0')
         self.total_assets = {}
-        
+
     def analyze_utxo(self, utxo):
-        """Analyze a UTXO to extract SYS value and any assets it contains"""
         sys_value = Decimal(str(utxo['amount']))
-        assets = {}
-        
-        # If UTXO has assets, extract them
-        if 'assets' in utxo:
-            for asset in utxo['assets']:
-                guid = int(asset['guid'])
-                value = Decimal(str(asset['value']))
-                assets[guid] = value
-                
+        assets = {int(asset['guid']): Decimal(str(asset['value'])) for asset in utxo.get('assets', [])}
         return sys_value, assets
-            
+
     def select_optimal_inputs(self, sys_target, asset_targets=None):
-        """
-        Select UTXOs optimally to cover both SYS and asset targets
+        asset_targets = asset_targets or {}
+        asset_targets = {int(k): v for k, v in asset_targets.items()}
         
-        Args:
-            sys_target: Target amount of SYS to select
-            asset_targets: Dict of {guid: amount} for assets to select
-            
-        Returns:
-            List of selected UTXOs
-        """
-        if asset_targets is None:
-            asset_targets = {}
-        
-        # Convert all keys in asset_targets to integers if they're strings
-        asset_targets = {int(k) if isinstance(k, str) else k: v for k, v in asset_targets.items()}
-        
-        # Reset selection state
         self.selected_utxos = []
         self.total_sys = Decimal('0')
         self.total_assets = {}
-        
-        # Convert sys_target to Decimal if it's not already
-        if not isinstance(sys_target, Decimal):
-            sys_target = Decimal(str(sys_target))
-        
-        # Get all UTXOs
-        all_utxos = self.node.listunspent()
-        
-        # Early return if no UTXOs are available
-        if not all_utxos:
-            raise ValueError("No UTXOs available for selection")
-        
-        # Special handling for asset targets (including SYSX - GUID 123456)
-        if asset_targets:
-            # Get set of needed asset GUIDs
-            needed_guids = set(asset_targets.keys())
-            
-            # Categorize UTXOs into different buckets for prioritization
-            exact_match_utxos = []      # UTXOs with exactly the assets we need (no extra)
-            efficient_match_utxos = []  # UTXOs with needed assets and minimal extra
-            other_match_utxos = []      # UTXOs with needed assets but many extra assets
-            sys_only_utxos = []         # UTXOs with only SYS (clean UTXOs)
-            other_utxos = []            # All other UTXOs
-            
-            for utxo in all_utxos:
-                sys_value, assets = self.analyze_utxo(utxo)
-                utxo_guids = set(assets.keys())
-                
-                # Check which needed assets this UTXO contains
-                matching_guids = utxo_guids.intersection(needed_guids)
-                
-                if matching_guids:
-                    # Has at least one needed asset
-                    if utxo_guids == needed_guids:
-                        # Exact match - only the assets we need
-                        exact_match_utxos.append(utxo)
-                    elif len(utxo_guids) <= len(needed_guids) + 2:
-                        # Has needed assets with few extras (efficient)
-                        efficient_match_utxos.append(utxo)
-                    else:
-                        # Has needed assets but many extras (less efficient)
-                        other_match_utxos.append(utxo)
-                elif not assets and sys_value > 0:
-                    # Pure SYS UTXO
-                    sys_only_utxos.append(utxo)
-                else:
-                    # Other UTXO (no needed assets)
-                    other_utxos.append(utxo)
-            
-            # Sort within each category
-            # For exact and efficient matches, sort by descending asset values to minimize inputs
-            exact_match_utxos.sort(key=lambda x: sum(self.analyze_utxo(x)[1].get(guid, 0) for guid in needed_guids), reverse=True)
-            efficient_match_utxos.sort(key=lambda x: sum(self.analyze_utxo(x)[1].get(guid, 0) for guid in needed_guids), reverse=True)
-            
-            # For SYS-only UTXOs, sort strategy depends on goal:
-            # - If SYS target is large, prefer fewer larger UTXOs (avoid fragmentation)
-            # - If SYS target is small, prefer smaller UTXOs (avoid breaking large UTXOs unnecessarily)
-            if sys_target > Decimal('1.0'):  # Arbitrary threshold, adjust as needed
-                # For larger SYS targets, use larger UTXOs first (descending)
-                sys_only_utxos.sort(key=lambda x: x['amount'], reverse=True)
-            else:
-                # For smaller SYS targets, use smaller UTXOs first (ascending)
-                sys_only_utxos.sort(key=lambda x: x['amount'])
-            
-            # Other categories sort by asset count (ascending) to minimize unnecessary asset change
-            other_match_utxos.sort(key=lambda x: len(self.analyze_utxo(x)[1]))
-            other_utxos.sort(key=lambda x: len(self.analyze_utxo(x)[1]))
-            
-            # Combine sorted categories with priority
-            sorted_utxos = exact_match_utxos + efficient_match_utxos + other_match_utxos + sys_only_utxos + other_utxos
-        else:
-            # If we only need SYS, sort strategy depends on target amount
-            if sys_target > Decimal('1.0'):  # Arbitrary threshold
-                # For larger SYS targets, use larger UTXOs first (descending)
-                sorted_utxos = sorted(all_utxos, key=lambda x: x['amount'], reverse=True)
-            else:
-                # For smaller SYS targets, use smaller UTXOs first (ascending)
-                sorted_utxos = sorted(all_utxos, key=lambda x: x['amount'])
-        
-        # Select UTXOs until we meet all targets or run out
-        for utxo in sorted_utxos:
+
+        utxos = sorted(self.node.listunspent(), key=lambda x: -x['amount'])
+
+        for utxo in utxos:
             if len(self.selected_utxos) >= self.max_inputs:
                 break
-                
+
             sys_value, assets = self.analyze_utxo(utxo)
-            
-            # Determine if this UTXO helps us meet our targets
-            helps_sys_target = self.total_sys < sys_target
-            helps_asset_targets = False
-            
-            for guid, amount in assets.items():
-                if guid in asset_targets and self.total_assets.get(guid, Decimal('0')) < asset_targets[guid]:
-                    helps_asset_targets = True
-                    break
-            
-            # Only add this UTXO if it helps meet at least one target or if we have no UTXOs yet
-            if helps_sys_target or helps_asset_targets or not self.selected_utxos:
-                # Add this UTXO to our selection
-                self.selected_utxos.append(utxo)
-                
-                # Update SYS total
-                self.total_sys += sys_value
-                
-                # Update asset totals
-                for guid, value in assets.items():
-                    if guid in self.total_assets:
-                        self.total_assets[guid] += value
-                    else:
-                        self.total_assets[guid] = value
-                
-                # Check if we've met all targets
-                if self.total_sys >= sys_target:
-                    met_all_asset_targets = True
-                    for guid, target in asset_targets.items():
-                        if guid not in self.total_assets or self.total_assets[guid] < target:
-                            met_all_asset_targets = False
-                            break
-                    
-                    if met_all_asset_targets:
-                        break
-        
-        # Check if we have enough funds
+            if self.total_sys >= sys_target and all(
+                self.total_assets.get(guid, 0) >= amount for guid, amount in asset_targets.items()
+            ):
+                break
+
+            self.selected_utxos.append({"txid": utxo["txid"], "vout": utxo["vout"]})
+            self.total_sys += sys_value
+            for guid, value in assets.items():
+                self.total_assets[guid] = self.total_assets.get(guid, 0) + value
+
         if self.total_sys < sys_target:
             raise ValueError(f"Not enough SYS: need {sys_target}, have {self.total_sys}")
-        
-        for guid, target in asset_targets.items():
-            if guid not in self.total_assets or self.total_assets[guid] < target:
-                raise ValueError(f"Not enough asset {guid}: need {target}, have {self.total_assets.get(guid, Decimal('0'))}")
-        
-        return self.selected_utxos
 
-    def add_input(self, utxo):
-        """Add a UTXO to our selection and update totals."""
-        self.selected_utxos.append({"txid": utxo["txid"], "vout": utxo["vout"]})
-        
-        # Update SYS total
-        self.total_sys += Decimal(utxo['amount'])
-        
-        # Update asset totals if present
-        if 'assets' in utxo:
-            for asset in utxo['assets']:
-                guid = int(asset['guid'])
-                amount = Decimal(str(asset['value']))
-                if guid in self.total_assets:
-                    self.total_assets[guid] += amount
-                else:
-                    self.total_assets[guid] = amount
+        for guid, amount in asset_targets.items():
+            if self.total_assets.get(guid, Decimal('0')) < amount:
+                raise ValueError(f"Not enough asset {guid}: need {amount}, have {self.total_assets.get(guid, Decimal('0'))}")
 
     def estimate_current_fee(self, tx_type, num_outputs):
-        """Estimate fee for current transaction state."""
-        has_asset_data = tx_type != SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION
         return calculate_tx_fee(
             self.node,
             len(self.selected_utxos),
             num_outputs,
             has_op_return=True,
-            has_asset_data=has_asset_data
+            has_asset_data=tx_type != SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION
         )
 
     def select_coins_for_transaction(self, tx_type, sys_amount, asset_amounts=None, fees=None):
@@ -493,7 +340,9 @@ class CoinSelector:
 
         asset_amounts = {int(k): v for k, v in asset_amounts.items()}
 
+        DUST_THRESHOLD = Decimal('0.00000546')
         initial_fee = fees if fees is not None else Decimal('0.0001')
+
         total_sys_needed = sys_amount + initial_fee
 
         self.select_optimal_inputs(total_sys_needed, asset_amounts)
@@ -501,19 +350,21 @@ class CoinSelector:
         num_outputs = 1
         if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND:
             num_outputs += len(asset_amounts)
-        elif tx_type in [SYSCOIN_TX_VERSION_ALLOCATION_MINT, SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION, SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN]:
+        elif tx_type in [
+            SYSCOIN_TX_VERSION_ALLOCATION_MINT,
+            SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION,
+            SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN
+        ]:
             num_outputs += 1
 
-        # Count asset change outputs
-        num_asset_change_outputs = sum(
-            1 for guid, total in self.total_assets.items()
+        asset_changes = {
+            guid: total - asset_amounts.get(guid, Decimal('0'))
+            for guid, total in self.total_assets.items()
             if total > asset_amounts.get(guid, Decimal('0'))
-        )
+        }
 
-        # Account for SYS required for asset change outputs
-        DUST_THRESHOLD = Decimal('0.00000546')
-        extra_sys_for_asset_changes = DUST_THRESHOLD * num_asset_change_outputs
-        total_sys_needed += extra_sys_for_asset_changes
+        num_asset_change_outputs = len(asset_changes)
+        total_sys_needed += DUST_THRESHOLD * num_asset_change_outputs
 
         actual_fee = self.estimate_current_fee(tx_type, num_outputs + num_asset_change_outputs)
         total_sys_needed = sys_amount + actual_fee + (DUST_THRESHOLD * num_asset_change_outputs)
@@ -523,13 +374,6 @@ class CoinSelector:
 
         raw_sys_change = self.total_sys - total_sys_needed
         sys_change = raw_sys_change if raw_sys_change >= DUST_THRESHOLD else Decimal('0')
-
-        asset_changes = {}
-        for guid, total in self.total_assets.items():
-            target = asset_amounts.get(guid, Decimal('0'))
-            change = total - target
-            if change > 0:
-                asset_changes[guid] = change
 
         return True, self.selected_utxos, sys_change, asset_changes
 
