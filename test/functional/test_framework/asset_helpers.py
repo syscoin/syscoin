@@ -84,8 +84,8 @@ class CAssetAllocation:
         return out
 
 class CMintSyscoin(CAssetAllocation):
-    def __init__(self, spv_proof=None):
-        super().__init__()
+    def __init__(self, voutAssets=None, spv_proof=None):
+        super().__init__(voutAssets=voutAssets)
         spv_proof = spv_proof or {}
         self.txHash = spv_proof.get("txHash", b"")
         self.txValue = spv_proof.get("txValue", b"")
@@ -113,8 +113,8 @@ class CMintSyscoin(CAssetAllocation):
         return out
 
 class CBurnSyscoin(CAssetAllocation):
-    def __init__(self, nevm_address=b''):
-        super().__init__()
+    def __init__(self, voutAssets=None, nevm_address=b''):
+        super().__init__(voutAssets=voutAssets)
         self.vchNEVMAddress = nevm_address
 
     def serialize(self):
@@ -145,12 +145,11 @@ def create_allocation_data(tx_type,
     """
     if vout_assets is None:
         vout_assets = []
-    
-    if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND or tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
+    if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND or tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN or tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
         obj = CAssetAllocation(voutAssets=vout_assets)
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
         obj = CMintSyscoin(voutAssets=vout_assets, spv_proof=spv_proof)
-    elif tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION or tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
+    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
         obj = CBurnSyscoin(voutAssets=vout_assets, nevm_address=vchNEVMAddress)
     else:
         raise ValueError(f"Unknown allocation type: {tx_type}")
@@ -346,28 +345,23 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), sys
     # Handle each transaction type
     if tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
         guid, amount, destination = next(iter(asset_amounts))
-        # Add SYSX destination output
         outputs.append({destination: float(DUST_THRESHOLD)})
-        # Create SYSX output for asset data
         sysx_out = AssetOut(
-            key=guid,  # GUID 123456 for SYSX
+            key=guid,
             values=[AssetOutValue(n=len(outputs)-1, nValue=amount)]
         )
         asset_outputs.append(sysx_out)
-        # Create OP_RETURN with burn value
         data_hex = create_allocation_data(tx_type, vout_assets=asset_outputs)
-        # Replace placeholder with actual data
         outputs.append({"data": data_hex})
         outputs.append({"data_version": tx_type})
         outputs.append({"data_amount": float(amount)})
     
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
-        # Add SYS destination output
         guid, amount, destination = next(iter(asset_amounts))
-        outputs.append({destination: float(amount)})
-        # Create SYSX output for asset data (burn)
+        # SYS has to exist at vout[0]
+        outputs.insert(0, {destination: float(amount)})
         sysx_out = AssetOut(
-            key=guid,  # GUID 123456 for SYSX
+            key=guid,
             values=[AssetOutValue(n=len(outputs), nValue=amount)]
         )
         asset_outputs.append(sysx_out)
@@ -380,7 +374,15 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), sys
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
         # For NEVM burn, we don't create regular outputs for the assets
         guid, amount, destination = next(iter(asset_amounts))
-        
+        # Validate and format NEVM address
+        if not nevm_address or not isinstance(nevm_address, str):
+            raise ValueError("nevm_address must be provided as a string for BURN_TO_NEVM")
+        if nevm_address.startswith('0x'):
+            nevm_address = nevm_address[2:]
+        try:
+            nevm_address_bin = bytes.fromhex(nevm_address)
+        except ValueError:
+            raise ValueError(f"Invalid NEVM address provided: {nevm_address}")
         burn_out = AssetOut(
             key=int(guid),
             values=[AssetOutValue(n=len(outputs), nValue=amount)]
@@ -389,7 +391,7 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), sys
         
         # Create OP_RETURN with NEVM address
         data_hex = create_allocation_data(tx_type, vout_assets=asset_outputs,
-                                       vchNEVMAddress=nevm_address)
+                                       vchNEVMAddress=nevm_address_bin)
         outputs.append({"data": data_hex})
         outputs.append({"data_version": tx_type})
     

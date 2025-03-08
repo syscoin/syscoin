@@ -49,13 +49,14 @@ class AssetTransactionTest(SyscoinTestFramework):
         self.num_nodes = 1
         self.extra_args = [['-dip3params=0:0']]
 
-    def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
+    def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None, nevm_address=None):
         tx_hex = create_transaction_with_selector(
             node=self.nodes[0],
             tx_type=tx_type,
             sys_amount=sys_amount,
             sys_destination=sys_destination,
-            asset_amounts=asset_amounts
+            asset_amounts=asset_amounts,
+            nevm_address=nevm_address
         )
         txid = self.nodes[0].sendrawtransaction(tx_hex)
         self.generate(self.nodes[0],1)
@@ -67,41 +68,29 @@ class AssetTransactionTest(SyscoinTestFramework):
             asset_details=asset_amounts
         )
 
-    def syscoin_burn_to_allocation(self, asset_amounts, sys_amount):
+    def syscoin_burn_to_allocation(self, asset_amounts, sys_amount=Decimal('0')):
         self.syscoin_tx(SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION, asset_amounts, sys_amount)
 
     def asset_allocation_send(self, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
         self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_SEND, asset_amounts, sys_amount, sys_destination)
 
+    def allocation_burn_to_nevm(self, asset_amounts, sys_amount=Decimal('0'), nevm_address=''):
+        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM, asset_amounts, sys_amount, nevm_address=nevm_address)
+        
+    def allocation_burn_to_syscoin(self, asset_amounts, sys_amount=Decimal('0')):
+        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN, asset_amounts, sys_amount)
 
     def setup_test_assets(self):
         """Create test assets for transactions"""
         print("Setting up test assets...")
         self.generate(self.nodes[0],110)
         self.sysx_addr = self.nodes[0].getnewaddress()
-        self.sysx_addr1 = self.nodes[0].getnewaddress()
-        self.sysx_addr2 = self.nodes[0].getnewaddress()
         self.nodes[0].sendtoaddress(self.sysx_addr, 50)
         self.generate(self.nodes[0],1)
         asset_amounts = [
             (SYSX_GUID, Decimal('20'), self.sysx_addr)
         ]
         self.syscoin_burn_to_allocation(asset_amounts, sys_amount=Decimal('20'))
-        asset_amounts = [
-            (SYSX_GUID, Decimal('5'), self.sysx_addr)
-        ]
-        self.asset_allocation_send(asset_amounts)
-        asset_amounts = [
-            (SYSX_GUID, Decimal('5'), self.sysx_addr),
-            (SYSX_GUID, Decimal('15'), self.sysx_addr1)
-        ]
-        self.asset_allocation_send(asset_amounts)
-        asset_amounts = [
-            (SYSX_GUID, Decimal('3'), self.sysx_addr1),
-            (SYSX_GUID, Decimal('1'), self.sysx_addr2),
-            (SYSX_GUID, Decimal('15'), self.sysx_addr)
-        ]
-        self.asset_allocation_send(asset_amounts, sys_amount=Decimal('25'), sys_destination=self.nodes[0].getnewaddress())
         return
         # Now create custom assets via mint - this requires a properly structured SPV proof
         # In regtest, certain validations are relaxed, but we need the basic structure correct
@@ -190,13 +179,15 @@ class AssetTransactionTest(SyscoinTestFramework):
         """Main test logic"""
         # Setup initial test assets
         self.setup_test_assets()
-        return
-        # Run tests for each transaction type
         self.test_allocation_send()
-        self.test_allocation_mint()
         self.test_allocation_burn_to_nevm()
         self.test_sys_burn_to_allocation()
         self.test_allocation_burn_to_sys()
+        return
+        # Run tests for each transaction type
+        self.test_allocation_mint()
+        
+        
         
         # Run coin selection edge case tests
         self.test_coin_selection_priority()
@@ -207,81 +198,25 @@ class AssetTransactionTest(SyscoinTestFramework):
     def test_allocation_send(self):
         """Test SYSCOIN_TX_VERSION_ALLOCATION_SEND transactions"""
         print("\nTesting ALLOCATION_SEND transactions...")
-        
-        # Test case 1: Send single asset
-        dest_addr = self.nodes[1].getnewaddress()
         asset_amounts = [
-            (self.asset1_guid, Decimal('100'), dest_addr)
+            (SYSX_GUID, Decimal('5'), self.sysx_addr)
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_SEND,
-            asset_amounts=asset_amounts
-        )
-        
-        # Sign and send the transaction
-        tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-        self.generate(self.nodes[0],1)
-        
-        # Verify transaction succeeded
-        tx_details = self.nodes[0].gettransaction(tx_id)
-        assert_equal(tx_details["confirmations"], 1)
-        
-        # Test case 2: Send multiple assets
-        dest_addr1 = self.nodes[1].getnewaddress()
-        dest_addr2 = self.nodes[1].getnewaddress()
-        asset_transfers = [
-            (self.asset1_guid, Decimal('50'), dest_addr1),
-            (self.asset2_guid, Decimal('30'), dest_addr2)
-        ]
-
-        
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_SEND,
-            asset_amounts=asset_transfers
-        )
-        
-        # Sign and send the transaction
-        tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-        self.generate(self.nodes[0],1)
-        
-        # Verify multiple asset send succeeded
-        tx_details = self.nodes[0].gettransaction(tx_id)
-        assert_equal(tx_details["confirmations"], 1)
-        
-        # Test case 3: Send with asset change
-        # First create a small amount of assets to force change
-        small_asset_guid = int(self.nodes[0].assetallocationcreate(
-            self.nodes[0].getnewaddress(), "SMALL", 1000, {"precision": 8}
-        )['guid'])
-        self.generate(self.nodes[0],1)
-        
-        # Create multiple UTXOs with this asset
-        addr = self.nodes[0].getnewaddress()
-        for _ in range(3):
-            self.nodes[0].assetallocationsend(small_asset_guid, addr, 100)
-        self.generate(self.nodes[0],1)
-        
-        # Now send an amount that will require multiple inputs and create change
-        dest_addr = self.nodes[1].getnewaddress()
+        self.sysx_addr = self.nodes[0].getnewaddress()
+        self.sysx_addr1 = self.nodes[0].getnewaddress()
+        self.sysx_addr2 = self.nodes[0].getnewaddress()
+        self.asset_allocation_send(asset_amounts)
         asset_amounts = [
-            (self.small_asset_guid, Decimal('250'), dest_addr)
+            (SYSX_GUID, Decimal('5'), self.sysx_addr),
+            (SYSX_GUID, Decimal('15'), self.sysx_addr1)
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_SEND,
-            asset_amounts=asset_amounts
-        )
-        
-        # Sign and send the transaction
-        tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-        self.generate(self.nodes[0],1)
-        
-        # Verify transaction succeeded
-        tx_details = self.nodes[0].gettransaction(tx_id)
-        assert_equal(tx_details["confirmations"], 1)
-        
+        self.asset_allocation_send(asset_amounts)
+        asset_amounts = [
+            (SYSX_GUID, Decimal('3'), self.sysx_addr1),
+            (SYSX_GUID, Decimal('1'), self.sysx_addr2),
+            (SYSX_GUID, Decimal('15'), self.sysx_addr)
+        ]
+        self.asset_allocation_send(asset_amounts, sys_amount=Decimal('25'), sys_destination=self.nodes[0].getnewaddress())
+                
         print("ALLOCATION_SEND tests passed")
 
     def test_allocation_mint(self):
@@ -338,22 +273,9 @@ class AssetTransactionTest(SyscoinTestFramework):
         # Test case: Burn asset to NEVM
         nevm_address = "0x" + "1" * 40  # Dummy NEVM address
         asset_amounts = [
-            (self.asset1_guid, Decimal('100'), '')
+            (SYSX_GUID, Decimal('20'), '')
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM,
-            asset_amounts=asset_amounts,
-            nevm_address=nevm_address
-        )
-        
-        # Sign and send the transaction
-        tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-        self.generate(self.nodes[0],1)
-        
-        # Verify transaction succeeded
-        tx_details = self.nodes[0].gettransaction(tx_id)
-        assert_equal(tx_details["confirmations"], 1)
+        self.allocation_burn_to_nevm(asset_amounts, Decimal('0'), nevm_address)
         
         print("ALLOCATION_BURN_TO_NEVM tests passed")
 
@@ -367,20 +289,7 @@ class AssetTransactionTest(SyscoinTestFramework):
         asset_amounts = [
             (SYSX_GUID, sys_amount, dest_addr)
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION,
-            sys_amount=sys_amount,
-            asset_amounts=asset_amounts
-        )
-        
-        # Sign and send the transaction
-        tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-        self.generate(self.nodes[0],1)
-        
-        # Verify transaction succeeded
-        tx_details = self.nodes[0].gettransaction(tx_id)
-        assert_equal(tx_details["confirmations"], 1)
+        self.syscoin_burn_to_allocation(asset_amounts, sys_amount)
         
         # Test edge case: SYS amount near dust threshold
         dest_addr = self.nodes[0].getnewaddress()
@@ -388,81 +297,26 @@ class AssetTransactionTest(SyscoinTestFramework):
         asset_amounts = [
             (SYSX_GUID, sys_amount, dest_addr)
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION,
-            sys_amount=sys_amount,
-            asset_amounts=asset_amounts
-        )
-        
-        # Sign and send the transaction
-        tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-        self.generate(self.nodes[0],1)
-        
-        # Verify transaction succeeded
-        tx_details = self.nodes[0].gettransaction(tx_id)
-        assert_equal(tx_details["confirmations"], 1)
+        self.syscoin_burn_to_allocation(asset_amounts, sys_amount)
         
         print("SYSCOIN_BURN_TO_ALLOCATION tests passed")
 
     def test_allocation_burn_to_sys(self):
         """Test SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN transactions"""
         print("\nTesting ALLOCATION_BURN_TO_SYSCOIN transactions...")
-        
-        # SYSX has GUID 123456 in Syscoin
-        # First, we need to make sure we have SYSX from our setup
-        # Get the balance of SYSX for our test address
-        asset_list = self.nodes[0].syscoinlistassetbalancesbyaddress(self.sysx_addr)
-        sysx_balance = Decimal('0')
-        for asset in asset_list:
-            if int(asset['asset_guid']) == SYSX_GUID:
-                sysx_balance = Decimal(str(asset['balance']))
-                break
-            
-        print(f"SYSX balance: {sysx_balance}")
-        assert sysx_balance > Decimal('0'), "Should have SYSX balance from setup"
-        
-        # Test case: Convert SYSX to SYS
         dest_addr = self.nodes[0].getnewaddress()
-        burn_amount = min(Decimal('3.0'), sysx_balance)  # Use smaller of 3.0 or actual balance
         asset_amounts = [
-            (SYSX_GUID, burn_amount, dest_addr)
+            (SYSX_GUID, Decimal('3'), dest_addr)
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN,
-            asset_amounts=asset_amounts,
-        )
-        
-        # Sign and send the transaction
-        tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-        self.generate(self.nodes[0],1)
-        
-        # Verify transaction succeeded
-        tx_details = self.nodes[0].gettransaction(tx_id)
-        assert_equal(tx_details["confirmations"], 1)
-        
-        # Test edge case: Small SYSX amount if we have enough balance
-        if sysx_balance > Decimal('5.0'):  # Ensure we still have enough balance
-            dest_addr = self.nodes[0].getnewaddress()
-            small_amount = Decimal('0.0001')
-            asset_amounts = [
-                (SYSX_GUID, small_amount, dest_addr)
-            ]
-            tx_hex = create_transaction_with_selector(
-                node=self.nodes[0],
-                tx_type=SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN,
-                asset_amounts=asset_amounts
-            )
-            
-            # Sign and send the transaction
-            tx_id = self.nodes[0].sendrawtransaction(tx_hex)
-            self.generate(self.nodes[0],1)
-            
-            # Verify transaction succeeded
-            tx_details = self.nodes[0].gettransaction(tx_id)
-            assert_equal(tx_details["confirmations"], 1)
-        
+        self.allocation_burn_to_syscoin(asset_amounts)
+   
+        dest_addr = self.nodes[0].getnewaddress()
+        small_amount = Decimal('0.0001')
+        asset_amounts = [
+            (SYSX_GUID, small_amount, dest_addr)
+        ]
+        self.allocation_burn_to_syscoin(asset_amounts)
+       
         print("ALLOCATION_BURN_TO_SYSCOIN tests passed")
 
     def test_coin_selection_priority(self):
