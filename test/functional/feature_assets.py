@@ -77,8 +77,8 @@ class AssetTransactionTest(SyscoinTestFramework):
     def allocation_burn_to_nevm(self, asset_amounts, sys_amount=Decimal('0'), nevm_address=''):
         self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM, asset_amounts, sys_amount, nevm_address=nevm_address)
         
-    def allocation_burn_to_syscoin(self, asset_amounts, sys_amount=Decimal('0')):
-        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN, asset_amounts, sys_amount)
+    def allocation_burn_to_syscoin(self, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
+        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN, asset_amounts, sys_amount, sys_destination)
 
     def setup_test_assets(self):
         """Create test assets for transactions"""
@@ -305,17 +305,18 @@ class AssetTransactionTest(SyscoinTestFramework):
         """Test SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN transactions"""
         print("\nTesting ALLOCATION_BURN_TO_SYSCOIN transactions...")
         dest_addr = self.nodes[0].getnewaddress()
+        dest_addr1 = self.nodes[0].getnewaddress()
         asset_amounts = [
-            (SYSX_GUID, Decimal('3'), dest_addr)
+            (SYSX_GUID, Decimal('3'), '')
         ]
-        self.allocation_burn_to_syscoin(asset_amounts)
+        self.allocation_burn_to_syscoin(asset_amounts, Decimal('0'), dest_addr1)
    
         dest_addr = self.nodes[0].getnewaddress()
         small_amount = Decimal('0.0001')
         asset_amounts = [
-            (SYSX_GUID, small_amount, dest_addr)
+            (SYSX_GUID, small_amount, '')
         ]
-        self.allocation_burn_to_syscoin(asset_amounts)
+        self.allocation_burn_to_syscoin(asset_amounts, small_amount, dest_addr1)
        
         print("ALLOCATION_BURN_TO_SYSCOIN tests passed")
 
