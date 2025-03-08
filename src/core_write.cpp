@@ -48,7 +48,7 @@ bool AssetAllocationTxToJSON(const CTransaction &tx, const uint256& hashBlock, U
             continue;
         }
         UniValue oAssetAllocationReceiversObj(UniValue::VOBJ);
-        oAssetAllocationReceiversObj.pushKV("asset_guid", UniValue(out.assetInfo.nAsset).write());
+        oAssetAllocationReceiversObj.pushKV("asset_guid", out.assetInfo.nAsset);
         oAssetAllocationReceiversObj.pushKV("amount", ValueFromAmount(out.assetInfo.nValue));
         oAssetAllocationReceiversArray.push_back(oAssetAllocationReceiversObj);
     }

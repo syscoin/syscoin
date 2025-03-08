@@ -251,6 +251,9 @@ static std::vector<RPCArg> CreateTxDoc()
                 {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
                     {
                         {"data", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A key-value pair. The key must be \"data\", the value is hex-encoded data"},
+                        // SYSCOIN
+                        {"data_amount", RPCArg::Type::AMOUNT, RPCArg::Default{0}, "Amount to burn in OP_RETURN output for Syscoin transactions"},
+                        {"data_version", RPCArg::Type::NUM, RPCArg::Default{0}, "Transaction version to use for Syscoin transactions"},
                     },
                 },
             },
