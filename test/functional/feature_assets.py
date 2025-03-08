@@ -49,11 +49,12 @@ class AssetTransactionTest(SyscoinTestFramework):
         self.num_nodes = 1
         self.extra_args = [['-dip3params=0:0']]
 
-    def syscoin_tx(self, tx_type, sys_amount, asset_amounts):
+    def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
         tx_hex = create_transaction_with_selector(
             node=self.nodes[0],
             tx_type=tx_type,
             sys_amount=sys_amount,
+            sys_destination=sys_destination,
             asset_amounts=asset_amounts
         )
         txid = self.nodes[0].sendrawtransaction(tx_hex)
@@ -66,29 +67,41 @@ class AssetTransactionTest(SyscoinTestFramework):
             asset_details=asset_amounts
         )
 
-    def syscoin_burn_to_allocation(self, sys_amount, asset_amounts):
-        self.syscoin_tx(SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION, sys_amount, asset_amounts)
+    def syscoin_burn_to_allocation(self, asset_amounts, sys_amount):
+        self.syscoin_tx(SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION, asset_amounts, sys_amount)
 
-    def asset_allocation_send(self, sys_amount, asset_amounts):
-        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_SEND, sys_amount, asset_amounts)
+    def asset_allocation_send(self, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
+        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_SEND, asset_amounts, sys_amount, sys_destination)
 
 
     def setup_test_assets(self):
         """Create test assets for transactions"""
         print("Setting up test assets...")
-        
-        # Mine some blocks to get SYS
         self.generate(self.nodes[0],110)
-        # First, create SYSX by burning SYS
-        # Fund the address first
         self.sysx_addr = self.nodes[0].getnewaddress()
+        self.sysx_addr1 = self.nodes[0].getnewaddress()
+        self.sysx_addr2 = self.nodes[0].getnewaddress()
         self.nodes[0].sendtoaddress(self.sysx_addr, 50)
         self.generate(self.nodes[0],1)
         asset_amounts = [
             (SYSX_GUID, Decimal('20'), self.sysx_addr)
         ]
-        # Now burn SYS to create SYSX
-        self.syscoin_burn_to_allocation('20', asset_amounts)
+        self.syscoin_burn_to_allocation(asset_amounts, sys_amount=Decimal('20'))
+        asset_amounts = [
+            (SYSX_GUID, Decimal('5'), self.sysx_addr)
+        ]
+        self.asset_allocation_send(asset_amounts)
+        asset_amounts = [
+            (SYSX_GUID, Decimal('5'), self.sysx_addr),
+            (SYSX_GUID, Decimal('15'), self.sysx_addr1)
+        ]
+        self.asset_allocation_send(asset_amounts)
+        asset_amounts = [
+            (SYSX_GUID, Decimal('3'), self.sysx_addr1),
+            (SYSX_GUID, Decimal('1'), self.sysx_addr2),
+            (SYSX_GUID, Decimal('15'), self.sysx_addr)
+        ]
+        self.asset_allocation_send(asset_amounts, sys_amount=Decimal('25'), sys_destination=self.nodes[0].getnewaddress())
         return
         # Now create custom assets via mint - this requires a properly structured SPV proof
         # In regtest, certain validations are relaxed, but we need the basic structure correct
