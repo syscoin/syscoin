@@ -366,12 +366,15 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), sys
         outputs.append({"data_amount": float(amount)})
     
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
-        guid, amount, _ = next(iter(asset_amounts))
+        guid, amount, destination = next(iter(asset_amounts))
         # Replace normal SYS output with burn SYS output
         if sys_destination and sys_amount > 0:
             outputs.pop(0)
         # SYS has to exist at vout[0]
-        outputs.insert(0, {sys_destination: float(amount)})
+        outputs.insert(0, {destination: float(amount)})
+        # if regular SYS spend add it to the end
+        if sys_destination and sys_amount > 0:
+            outputs.append({sys_destination: float(sys_amount)})
         sysx_out = AssetOut(
             key=guid,
             values=[AssetOutValue(n=len(outputs), nValue=amount)]

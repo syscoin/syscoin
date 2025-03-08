@@ -35,7 +35,7 @@ from test_framework.asset_helpers import (
 # Constants for testing
 SYSX_GUID = 123456
 DUST_THRESHOLD = Decimal('0.00000546')
-
+BLOCK_REWARD = Decimal('50')
 class AssetTransactionTest(SyscoinTestFramework):
     def add_options(self, parser):
         self.add_wallet_options(parser)
@@ -69,16 +69,30 @@ class AssetTransactionTest(SyscoinTestFramework):
         )
 
     def syscoin_burn_to_allocation(self, asset_amounts, sys_amount=Decimal('0')):
+        sys_balance_before = self.nodes[0].getbalance()
         self.syscoin_tx(SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION, asset_amounts, sys_amount)
+        sys_balance_after = self.nodes[0].getbalance()
+        expected_balance = sys_balance_before - sys_amount - Decimal('0.0001') + BLOCK_REWARD + DUST_THRESHOLD
+        assert_equal(expected_balance, sys_balance_after)
 
     def asset_allocation_send(self, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
         self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_SEND, asset_amounts, sys_amount, sys_destination)
 
     def allocation_burn_to_nevm(self, asset_amounts, sys_amount=Decimal('0'), nevm_address=''):
+        sys_balance_before = self.nodes[0].getbalance()
         self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM, asset_amounts, sys_amount, nevm_address=nevm_address)
+        sys_balance_after = self.nodes[0].getbalance()
+        expected_balance = sys_balance_before - Decimal('0.0001') + BLOCK_REWARD - DUST_THRESHOLD
+        assert_equal(expected_balance, sys_balance_after)
         
     def allocation_burn_to_syscoin(self, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
+        sys_balance_before = self.nodes[0].getbalance()
         self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN, asset_amounts, sys_amount, sys_destination)
+        sys_balance_after = self.nodes[0].getbalance()
+        # You get back SYS equal to the asset amount burned
+        total_asset_amount = sum(amount for _, amount, _ in asset_amounts)
+        expected_balance = sys_balance_before + total_asset_amount + BLOCK_REWARD - Decimal('0.0001') # minus fees
+        assert_equal(expected_balance, sys_balance_after)
 
     def setup_test_assets(self):
         """Create test assets for transactions"""
@@ -307,16 +321,15 @@ class AssetTransactionTest(SyscoinTestFramework):
         dest_addr = self.nodes[0].getnewaddress()
         dest_addr1 = self.nodes[0].getnewaddress()
         asset_amounts = [
-            (SYSX_GUID, Decimal('3'), '')
+            (SYSX_GUID, Decimal('3'), dest_addr)
         ]
-        self.allocation_burn_to_syscoin(asset_amounts, Decimal('0'), dest_addr1)
+        self.allocation_burn_to_syscoin(asset_amounts)
    
-        dest_addr = self.nodes[0].getnewaddress()
         small_amount = Decimal('0.0001')
         asset_amounts = [
-            (SYSX_GUID, small_amount, '')
+            (SYSX_GUID, small_amount, dest_addr)
         ]
-        self.allocation_burn_to_syscoin(asset_amounts, small_amount, dest_addr1)
+        self.allocation_burn_to_syscoin(asset_amounts, Decimal('300'), dest_addr1)
        
         print("ALLOCATION_BURN_TO_SYSCOIN tests passed")
 
