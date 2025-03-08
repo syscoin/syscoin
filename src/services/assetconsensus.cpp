@@ -92,38 +92,34 @@ bool CheckSyscoinMint(
 
     // Iterate each log
     for (size_t i = 0; i < rlpLogs.itemCount(); i++) {
-        dev::RLP rlpLog(rlpLogs[i]);
+        const dev::RLP& rlpLog = rlpLogs[i];
         if (!rlpLog.isList() || rlpLog.itemCount() < 3) {
             continue;
         }
-        // index=0 => contract address
-        dev::Address addressLog = rlpLog[0].toHash<dev::Address>(dev::RLP::VeryStrict);
+    
+        const dev::Address& addressLog = rlpLog[0].toHash<dev::Address>(dev::RLP::VeryStrict);
         if (addressLog.asBytes() != vchManagerAddress) {
-            continue; // not our bridging manager
+            continue;
         }
-        // index=1 => array of topics
-        dev::RLP rlpLogTopics(rlpLog[1]);
+    
+        const dev::RLP& rlpLogTopics = rlpLog[1];
         if (!rlpLogTopics.isList() || rlpLogTopics.itemCount() == 0) {
             continue;
         }
-        // check first topic == TokenFreeze
-        if (rlpLogTopics[0].toBytes(dev::RLP::VeryStrict) != vchTokenFreezeMethod) {
+    
+        if (rlpLogTopics[0].toBytes(dev::RLP::VeryStrict) != vchFreezeTopic) {
             continue;
         }
-        // index=2 => data (ABI-encoded: (uint64 assetGuid, address freezer, uint256 value, string syscoinAddr))
-        std::vector<unsigned char> dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
-
-        // Sanity check: assetGuid[32], freezer[32], value[32], offset[32], strlen[32] => at least 160 bytes
+    
+        const std::vector<unsigned char>& dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
         if (dataValue.size() < 160) {
             return FormatSyscoinErrorMessage(state, "mint-log-data-too-small", bSanityCheck);
         }
-
-        // --- Parse assetGuid (first 32 bytes, use last 8 bytes as uint64 big-endian) ---
+    
         nAssetFromLog = ReadBE64(&dataValue[24]);
-
-        // --- Parse value (3rd parameter, bytes [64..95]) ---
-        std::vector<unsigned char> vchValue(dataValue.begin() + 64, dataValue.begin() + 96);
-        arith_uint256 valueArith = UintToArith256(uint256(vchValue));
+    
+        const std::vector<unsigned char> vchValue(dataValue.begin() + 64, dataValue.begin() + 96);
+        const arith_uint256 valueArith = UintToArith256(uint256(vchValue));
         if (valueArith > nMax) {
             return FormatSyscoinErrorMessage(state, "mint-value-overflow", bSanityCheck);
         }
@@ -131,30 +127,25 @@ bool CheckSyscoinMint(
         if (!MoneyRange(outputAmount)) {
             return FormatSyscoinErrorMessage(state, "mint-value-out-of-range", bSanityCheck);
         }
-
-        // --- Parse offset pointer for syscoinAddr string (4th parameter at [96..127]) ---
-        std::vector<unsigned char> vchOffset(dataValue.begin() + 96, dataValue.begin() + 128);
-        arith_uint256 offsetArith = UintToArith256(uint256(vchOffset));
-        uint64_t offsetToString = offsetArith.GetLow64();
-
-        // Validate offset sanity (must be at least 128 bytes to skip first 4 parameters)
+    
+        const std::vector<unsigned char> vchOffset(dataValue.begin() + 96, dataValue.begin() + 128);
+        const arith_uint256 offsetArith = UintToArith256(uint256(vchOffset));
+        const uint64_t offsetToString = offsetArith.GetLow64();
+    
         if (offsetToString < 128 || offsetToString + 32 > dataValue.size()) {
             return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-offset", bSanityCheck);
         }
-
-        // --- Parse length of syscoinAddr string (at offsetToString) ---
-        std::vector<unsigned char> vchStrLen(dataValue.begin() + offsetToString, dataValue.begin() + offsetToString + 32);
-        arith_uint256 strLenArith = UintToArith256(uint256(vchStrLen));
-        uint64_t lenString = strLenArith.GetLow64();
-
-        // Validate length sanity
+    
+        const std::vector<unsigned char> vchStrLen(dataValue.begin() + offsetToString, dataValue.begin() + offsetToString + 32);
+        const arith_uint256 strLenArith = UintToArith256(uint256(vchStrLen));
+        const uint64_t lenString = strLenArith.GetLow64();
+    
         if (offsetToString + 32 + lenString > dataValue.size()) {
             return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-length", bSanityCheck);
         }
-
-        // --- Extract syscoinAddr string ---
+    
         witnessAddress = std::string(reinterpret_cast<const char*>(&dataValue[offsetToString + 32]), lenString);
-        // we found our freeze log, break out
+    
         break;
     }
 
