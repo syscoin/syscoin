@@ -124,7 +124,7 @@ class CBurnSyscoin(CAssetAllocation):
 # 3) Putting it all together in a param-based "SDK" function
 ################################################################################
 
-def create_allocation_data(allocation_type: str,
+def create_allocation_data(tx_type,
                          vout_assets=None,
                          # For CMintSyscoin:
                          spv_proof=None,  # Pass the entire SPV proof as one object
@@ -145,51 +145,23 @@ def create_allocation_data(allocation_type: str,
     if vout_assets is None:
         vout_assets = []
     
-    if allocation_type == "allocation":
+    if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND or tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
         obj = CAssetAllocation(voutAssets=vout_assets)
-    
-    elif allocation_type == "mint":
-        obj = CMintSyscoin()
-        if spv_proof:
-            # Map SPV proof fields to our CMintSyscoin object
-            obj.txHash = spv_proof.get("txHash", b"")
-            obj.txValue = spv_proof.get("txValue", b"") 
-            obj.txPos = spv_proof.get("txPos", 0)
-            obj.txBlockHash = spv_proof.get("txBlockHash", b"")
-            obj.txParentNodes = spv_proof.get("txParentNodes", b"")
-            obj.txPath = spv_proof.get("txPath", b"")
-
-            obj.posReceipt = spv_proof.get("posReceipt", 0)
-            obj.receiptParentNodes = spv_proof.get("receiptParentNodes", b"")
-            obj.txRoot = spv_proof.get("txRoot", b"")
-            obj.receiptRoot = spv_proof.get("receiptRoot", b"")
-        obj.voutAssets = vout_assets
-    
-    elif allocation_type == "burn":
-        obj = CBurnSyscoin()
-        if vchNEVMAddress:
-            obj.vchNEVMAddress = vchNEVMAddress
-        obj.voutAssets = vout_assets
-    
+    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
+        obj = CMintSyscoin(voutAssets=vout_assets, spv_proof=spv_proof)
+    elif tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION or tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
+        obj = CBurnSyscoin(voutAssets=vout_assets, nevm_address=vchNEVMAddress)
     else:
-        raise ValueError(f"Unknown allocation type: {allocation_type}")
+        raise ValueError(f"Unknown allocation type: {tx_type}")
     
     # Serialize the data
     raw_data = obj.serialize()
     return raw_data.hex()
 
-def attach_allocation_data_to_tx(node, syscoinversion, data_hex, inputs, outputs):
+def attach_allocation_data_to_tx(node, inputs, outputs):
     """
     Create raw tx with allocation data, then modify it with Syscoin RPC if needed
     """
-    # Check if we need to handle a burn value
-    burn_value = None
-    if "data" in outputs and isinstance(outputs["data"], dict):
-        burn_value = outputs["data"].get("value", 0)
-        outputs["data"] = data_hex
-        outputs["data_version"] = syscoinversion
-        outputs["data_amount"] = burn_value
-    
     # Clean up inputs to only include required fields
     cleaned_inputs = []
     for inp in inputs:
@@ -197,10 +169,6 @@ def attach_allocation_data_to_tx(node, syscoinversion, data_hex, inputs, outputs
             "txid": inp["txid"],
             "vout": inp["vout"]
         })
-    
-    # Add logging to see cleaned inputs and outputs
-    print("CreateRawTransaction cleaned inputs:", cleaned_inputs)
-    print("CreateRawTransaction outputs:", outputs)
     
     # Create the raw transaction
     rawtx = node.createrawtransaction(
@@ -257,13 +225,12 @@ class CoinSelector:
             if self.total_assets.get(guid, Decimal('0')) < amount:
                 raise ValueError(f"Not enough asset {guid}: need {amount}, have {self.total_assets.get(guid, Decimal('0'))}")
 
-    def select_coins_for_transaction(self, tx_type, sys_amount, asset_amounts=None, fees=None):
-        asset_amounts = asset_amounts or {}
-        asset_amounts = {int(k): v for k, v in asset_amounts.items()}
-
+    def select_coins_for_transaction(self, sys_amount, asset_amounts=None, fees=None):
+        asset_amounts = asset_amounts or []
+        asset_amounts = {int(guid): amount for guid, amount, _ in asset_amounts}
         initial_fee = fees if fees else Decimal('0.0001')
         num_asset_change_outputs = len([guid for guid in asset_amounts if asset_amounts[guid] > 0])
-        total_sys_needed = sys_amount + initial_fee + (DUST_THRESHOLD * num_asset_change_outputs)
+        total_sys_needed = Decimal(sys_amount) + initial_fee + (DUST_THRESHOLD * num_asset_change_outputs)
 
         self.select_optimal_inputs(total_sys_needed, asset_amounts)
 
@@ -278,9 +245,8 @@ class CoinSelector:
         return True, self.selected_utxos, sys_change, asset_changes
 
 def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), 
-                              asset_amounts=None, fees=None,
-                              destinations=None, nevm_address=None,
-                              spv_proof=None, destination_address=None):
+                              asset_amounts=None, fees=None, nevm_address=None,
+                              spv_proof=None):
     """
     Create a transaction with the specified type using CoinSelector for input selection
     
@@ -288,363 +254,191 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'),
         node: The node to use for coin selection and transaction creation
         tx_type: One of the SYSCOIN_TX_VERSION_* constants
         sys_amount: Amount of SYS to send/burn (for SYS->SYSX conversion)
-        asset_amounts: Dict of {guid: amount} for asset operations
+        asset_amounts: Triple of {guid, amount, destination} for asset operations
         fees: Optional override for fee calculation
         destinations: Dict of {guid: address} for asset send operations
         nevm_address: NEVM address for BURN_TO_NEVM operations
         spv_proof: SPV proof for mint operations
-        destination_address: Destination address for burn/mint operations
         
     Returns:
         Hex string of the signed transaction
     """
-    DUST_THRESHOLD = Decimal('0.00000546')  # Standard Bitcoin dust threshold (546 satoshis)
-    
     # Initialize asset tracker for changes
     asset_outputs = []
-    
-    # Validate inputs based on transaction type
-    if asset_amounts is None:
-        asset_amounts = {}
-    
-    # Convert all asset keys to integers if they're strings
-    asset_amounts = {int(k) if isinstance(k, str) else k: v for k, v in asset_amounts.items()}
-    
-    # Validate transaction type specific requirements
-    if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND:
-        if not destinations:
-            raise ValueError("destinations must be provided for ALLOCATION_SEND")
-    
-    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
-        if not nevm_address:
-            raise ValueError("nevm_address must be provided for ALLOCATION_BURN_TO_NEVM")
-        # For NEVM burns, we should only have one asset
-        if len(asset_amounts) > 1:
-            raise ValueError("Only one asset can be burned to NEVM in a single transaction")
-    
-    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
-        if not spv_proof:
-            raise ValueError("spv_proof must be provided for ALLOCATION_MINT")
-        # For mints, we should only have one asset
-        if len(asset_amounts) > 1:
-            raise ValueError("Only one asset can be minted in a single transaction")
-    
-    elif tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
-        if not destination_address:
-            raise ValueError("destination_address must be provided for SYSCOIN_BURN_TO_ALLOCATION")
-        if sys_amount <= 0:
-            raise ValueError("sys_amount must be positive for SYSCOIN_BURN_TO_ALLOCATION")
-    
-    elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
-        if not destination_address:
-            raise ValueError("destination_address must be provided for ALLOCATION_BURN_TO_SYSCOIN")
-        # For SYSX->SYS, we should only have GUID 123456 (SYSX)
-        if len(asset_amounts) != 1 or 123456 not in asset_amounts:
-            raise ValueError("Only SYSX (GUID 123456) can be burned to SYS")
     
     # Create coin selector and select inputs
     selector = CoinSelector(node)
     if tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
         success, inputs, change, asset_changes = selector.select_coins_for_transaction(
-            tx_type, sys_amount, fees=fees
+            sys_amount, fees=fees
         )
     else:
         success, inputs, change, asset_changes = selector.select_coins_for_transaction(
-            tx_type, DUST_THRESHOLD, asset_amounts, fees
+            DUST_THRESHOLD, asset_amounts, fees
         )
     
     if not success:
         raise ValueError(f"Failed to select coins for transaction type {tx_type}")
     
-    # Initialize outputs as OrderedDict to maintain insertion order
-    # And track output indices explicitly
-    from collections import OrderedDict
-    outputs = OrderedDict()
-    output_indexes = {}  # Maps address -> output index
-    current_output_index = 0
-    
-    # Start with OP_RETURN output (always first)
-    # We'll fill in the actual data later
-    outputs["data_placeholder"] = "placeholder"
-    current_output_index += 1
+    outputs = []
     
     # Handle SYS change if any (always comes next)
     if change > 0:
         change_address = node.getnewaddress()
-        outputs[change_address] = float(change)
-        output_indexes[change_address] = current_output_index
-        current_output_index += 1
+        outputs.append({change_address: float(change)})
     
     # Now add all other outputs and track their indices
     # Handle each transaction type
     if tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
+        guid, amount, destination = next(iter(asset_amounts))
         # Add SYSX destination output
-        outputs[destination_address] = float(DUST_THRESHOLD)
-        output_indexes[destination_address] = current_output_index
-        current_output_index += 1
-        
+        outputs.append({destination: float(DUST_THRESHOLD)})
         # Create SYSX output for asset data
         sysx_out = AssetOut(
-            key=123456,  # GUID 123456 for SYSX
-            values=[AssetOutValue(n=output_indexes[destination_address], nValue=sys_amount)]
+            key=guid,  # GUID 123456 for SYSX
+            values=[AssetOutValue(n=len(outputs)-1, nValue=amount)]
         )
         asset_outputs.append(sysx_out)
-        print(f'asset_outputs {output_indexes[destination_address]}')
         # Create OP_RETURN with burn value
-        data_hex = create_allocation_data("burn", vout_assets=asset_outputs)
+        data_hex = create_allocation_data(tx_type, vout_assets=asset_outputs)
         # Replace placeholder with actual data
-        del outputs["data_placeholder"]
-        outputs["data"] = {"value": float(sys_amount), "hex": data_hex}
+        outputs.append({"data": data_hex})
+        outputs.append({"data_version": tx_type})
+        outputs.append({"data_amount": float(amount)})
     
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
         # Add SYS destination output
-        sysx_amount = asset_amounts[123456]  # We've already validated this exists
-        outputs[destination_address] = float(sysx_amount)
-        output_indexes[destination_address] = current_output_index
-        current_output_index += 1
-        
+        guid, amount, destination = next(iter(asset_amounts))
+        outputs.append({destination: float(amount)})
         # Create SYSX output for asset data (burn)
-        # For burn to SYS, we don't need to reference a specific output in the n value
         sysx_out = AssetOut(
-            key=123456,  # GUID 123456 for SYSX
-            values=[AssetOutValue(n=0, nValue=sysx_amount)]
+            key=guid,  # GUID 123456 for SYSX
+            values=[AssetOutValue(n=len(outputs), nValue=amount)]
         )
         asset_outputs.append(sysx_out)
         
         # Create OP_RETURN
-        data_hex = create_allocation_data("burn", vout_assets=asset_outputs)
-        # Replace placeholder with actual data
-        del outputs["data_placeholder"]
-        outputs["data"] = data_hex
+        data_hex = create_allocation_data(tx_type, vout_assets=asset_outputs)
+        outputs.append({"data": data_hex})
+        outputs.append({"data_version": tx_type})
     
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
         # For NEVM burn, we don't create regular outputs for the assets
+        guid, amount, destination = next(iter(asset_amounts))
         
-        # Since we've validated only one asset can be burned, extract it directly
-        if len(asset_amounts) != 1:
-            raise ValueError("Exactly one asset must be provided for BURN_TO_NEVM")
-        
-        guid, amount = next(iter(asset_amounts.items()))
-        
-        # Create asset output for burning - use n=0 since it's being burned
         burn_out = AssetOut(
             key=int(guid),
-            # For burn to NEVM, we don't need to reference a specific output
-            values=[AssetOutValue(n=0, nValue=amount)]
+            values=[AssetOutValue(n=len(outputs), nValue=amount)]
         )
         asset_outputs.append(burn_out)
         
         # Create OP_RETURN with NEVM address
-        data_hex = create_allocation_data("burn", vout_assets=asset_outputs,
+        data_hex = create_allocation_data(tx_type, vout_assets=asset_outputs,
                                        vchNEVMAddress=nevm_address)
-        # Replace placeholder with actual data
-        del outputs["data_placeholder"]
-        outputs["data"] = data_hex
+        outputs.append({"data": data_hex})
+        outputs.append({"data_version": tx_type})
     
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND:
         # Add all destination outputs first
-        for guid, amount in asset_amounts.items():
-            guid_int = int(guid)
-            dest_address = destinations.get(str(guid), destinations.get(guid_int))
-            if not dest_address:
+        for guid, amount, destination in asset_amounts:
+            if not destination:
                 raise ValueError(f"Destination address not found for asset {guid}")
             
             # Add destination output
-            outputs[dest_address] = float(DUST_THRESHOLD)
-            output_indexes[dest_address] = current_output_index
-            current_output_index += 1
+            outputs.append({destination: float(DUST_THRESHOLD)})
             
             # Create asset output referencing the correct output index
             send_out = AssetOut(
-                key=guid_int,
-                values=[AssetOutValue(n=output_indexes[dest_address], nValue=amount)]
+                key=guid,
+                values=[AssetOutValue(n=len(outputs)-1, nValue=amount)]
             )
             asset_outputs.append(send_out)
     
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
         # Add destination output for minted assets
-        outputs[destination_address] = float(DUST_THRESHOLD)
-        output_indexes[destination_address] = current_output_index
-        current_output_index += 1
-        
-        # Since we've validated only one asset can be minted, extract it directly
-        if len(asset_amounts) != 1:
-            raise ValueError("Exactly one asset must be provided for ALLOCATION_MINT")
-        
-        guid, amount = next(iter(asset_amounts.items()))
+        guid, amount, destination = next(iter(asset_amounts))
+        outputs.append({destination: float(DUST_THRESHOLD)})
         
         # Create mint output - the asset goes to the destination output
         mint_out = AssetOut(
             key=int(guid),
-            values=[AssetOutValue(n=output_indexes[destination_address], nValue=amount)]
+            values=[AssetOutValue(n=len(outputs)-1, nValue=amount)]
         )
         asset_outputs.append(mint_out)
     
     # Add asset change outputs for all transaction types
     for guid, amount in asset_changes.items():
         change_address = node.getnewaddress()
-        outputs[change_address] = float(DUST_THRESHOLD)
-        output_indexes[change_address] = current_output_index
-        current_output_index += 1
+        outputs.append({change_address: float(DUST_THRESHOLD)})
         
         change_out = AssetOut(
             key=int(guid),
-            values=[AssetOutValue(n=output_indexes[change_address], nValue=amount)]
+            values=[AssetOutValue(n=len(outputs)-1, nValue=amount)]
         )
         asset_outputs.append(change_out)
     
     # Create allocation data based on transaction type
     if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND:
-        data_hex = create_allocation_data("allocation", vout_assets=asset_outputs)
+        data_hex = create_allocation_data(tx_type, vout_assets=asset_outputs)
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
-        data_hex = create_allocation_data("mint", vout_assets=asset_outputs, spv_proof=spv_proof)
+        data_hex = create_allocation_data(tx_type, vout_assets=asset_outputs, spv_proof=spv_proof)
     else:
         # Already created data_hex for burn transactions above
         pass
     
     # Replace OP_RETURN placeholder with actual data for mint and send transactions
     if tx_type in [SYSCOIN_TX_VERSION_ALLOCATION_SEND, SYSCOIN_TX_VERSION_ALLOCATION_MINT]:
-        del outputs["data_placeholder"]
-        outputs["data"] = data_hex
+        outputs.append({"data": data_hex})
+        outputs.append({"data_version": tx_type})
     
     # Create and sign the transaction
-    tx_hex = attach_allocation_data_to_tx(node, tx_type, data_hex, inputs, outputs)
+    tx_hex = attach_allocation_data_to_tx(node, inputs, outputs)
     return tx_hex
-
-def example_multi_asset_transaction():
-    """Examples of all five main Syscoin transaction types using CoinSelector"""
-    node = setup_node()  # Function to set up your test node
-    
-    # 1. ALLOCATION_SEND: Send multiple assets to specific addresses
-    asset_amounts = {
-        "123456": Decimal('500'),
-        "654321": Decimal('300')
-    }
-    destinations = {
-        "123456": "sys1qxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "654321": "sys1qyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
-    }
-    send_tx_hex = create_transaction_with_selector(
-        node=node,
-        tx_type=SYSCOIN_TX_VERSION_ALLOCATION_SEND,
-        asset_amounts=asset_amounts,
-        destinations=destinations
-    )
-    sign_and_send(send_tx_hex, "Sending multiple assets")
-    
-    # 2. ALLOCATION_MINT: Mint new assets with SPV proof
-    mint_asset_amounts = {
-        "789012": Decimal('1000')
-    }
-    spv_proof = {
-        "txHash": bytes.fromhex("1234..."),  # NEVM transaction hash
-        "blockHash": bytes.fromhex("5678..."),  # NEVM block hash
-        "txPos": 123,  # Transaction position
-        "txParentNodes": b"...",  # Merkle proof nodes
-        "txPath": b"..."  # Path in Merkle tree
-    }
-    mint_tx_hex = create_transaction_with_selector(
-        node=node,
-        tx_type=SYSCOIN_TX_VERSION_ALLOCATION_MINT,
-        asset_amounts=mint_asset_amounts,
-        spv_proof=spv_proof,
-        destination_address="sys1qzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"  # Where minted assets go
-    )
-    sign_and_send(mint_tx_hex, "Minting new assets")
-    
-    # 3. ALLOCATION_BURN_TO_NEVM: Burn assets to NEVM
-    nevm_burn_amounts = {
-        "123456": Decimal('200')  # Amount of asset to burn
-    }
-    nevm_address = "0x1234567890123456789012345678901234567890"  # NEVM destination
-    nevm_burn_tx_hex = create_transaction_with_selector(
-        node=node,
-        tx_type=SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM,
-        asset_amounts=nevm_burn_amounts,
-        nevm_address=nevm_address
-    )
-    sign_and_send(nevm_burn_tx_hex, "Burning assets to NEVM")
-    
-    # 4. SYSCOIN_BURN_TO_ALLOCATION: Convert SYS to SYSX
-    sys_amount = Decimal('10.0')  # Amount of SYS to convert to SYSX
-    sysx_destination = "sys1qwwwwwwwwwwwwwwwwwwwwwwwwwwwww"  # Where to send the SYSX
-    sys_to_sysx_tx_hex = create_transaction_with_selector(
-        node=node,
-        tx_type=SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION,
-        sys_amount=sys_amount,
-        destination_address=sysx_destination
-    )
-    sign_and_send(sys_to_sysx_tx_hex, "Converting SYS to SYSX")
-    
-    # 5. ALLOCATION_BURN_TO_SYSCOIN: Convert SYSX back to SYS
-    sysx_to_sys_amounts = {
-        "123456": Decimal('5.0')  # Amount of SYSX to burn
-    }
-    sys_destination = "sys1qvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"  # Where to send the SYS
-    sysx_to_sys_tx_hex = create_transaction_with_selector(
-        node=node,
-        tx_type=SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN,
-        asset_amounts=sysx_to_sys_amounts,
-        destination_address=sys_destination
-    )
-    sign_and_send(sysx_to_sys_tx_hex, "Converting SYSX to SYS")
-    
-    def sign_and_send(tx_hex, description):
-        """Helper to sign and send transaction"""
-        try:
-            # Sign transaction (should already be signed from create_transaction_with_selector)
-            tx_id = node.sendrawtransaction(tx_hex)
-            print(f"Success: {description} - TxID: {tx_id}")
-            return tx_id
-        except Exception as e:
-            print(f"Error with {description}: {str(e)}")
-            return None
-
-
 
 def verify_tx_outputs(node, txid, tx_type, asset_details=None):
     """Efficiently verify transaction outputs based on Syscoin transaction type."""
     asset_details = asset_details or {}
     utxos = node.listunspent()
-    print(f'utxos {utxos}')
-    def utxo_exists(asset_guid=None, asset_amount=None, sys_amt=None):
+    def utxo_exists(asset_guid=None, asset_amount=None, sys_amt=None, destination=None):
         for utxo in utxos:
             if utxo['txid'] != txid:
                 continue
             if sys_amt and Decimal(str(utxo['amount'])) != Decimal(str(sys_amt)):
                 continue
+            if destination and utxo['address'] != destination:
+                continue
             if asset_guid and asset_amount:
-                for asset in utxo.get('assets', []):
-                    if int(asset['guid']) == asset_guid and Decimal(str(asset['value'])) == Decimal(str(asset_amount)):
-                        return True
+                if (int(utxo.get('asset_guid', -1)) == asset_guid and
+                    Decimal(str(utxo.get('asset_amount', '0'))) == Decimal(str(asset_amount))):
+                    return True
                 continue
             elif not asset_guid and not asset_amount:
                 return True
         return False
 
     if tx_type == SYSCOIN_TX_VERSION_ALLOCATION_SEND:
-        for guid, amount in asset_details.items():
-            if not utxo_exists(asset_guid=guid, asset_amount=amount, sys_amt=DUST_THRESHOLD):
+        for guid, amount, destination in asset_details:
+            if not utxo_exists(asset_guid=guid, asset_amount=amount, sys_amt=DUST_THRESHOLD, destination=destination):
                 raise AssertionError(f"Asset output not found: txid={txid}, guid={guid}, amount={amount}")
 
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
-        for guid, amount in asset_details.items():
-            if not utxo_exists(asset_guid=guid, asset_amount=amount, sys_amt=DUST_THRESHOLD):
+        for guid, amount, destination  in asset_details:
+            if not utxo_exists(asset_guid=guid, asset_amount=amount, sys_amt=DUST_THRESHOLD, destination=destination):
                 raise AssertionError(f"Minted asset not found: txid={txid}, guid={guid}, amount={amount}")
 
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM:
-        for guid, amount in asset_details.items():
-            if utxo_exists(asset_guid=guid, asset_amount=amount):
+        for guid, amount, destination  in asset_details:
+            if utxo_exists(asset_guid=guid, asset_amount=amount, destination=destination):
                 raise AssertionError(f"Burned asset still found in UTXO: txid={txid}, guid={guid}, amount={amount}")
 
     elif tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
-        for guid, amount in asset_details.items():
-            if not utxo_exists(asset_guid=guid, asset_amount=amount):
+        for guid, amount, destination  in asset_details:
+            if not utxo_exists(asset_guid=guid, asset_amount=amount, destination=destination):
                 raise AssertionError(f"SYSX output not found in UTXO: txid={txid}, guid={guid}, amount={amount}")
 
     elif tx_type == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN:
-        for guid, amount in asset_details.items():
-            if utxo_exists(asset_guid=guid, asset_amount=amount):
+        for guid, amount, destination  in asset_details:
+            if utxo_exists(asset_guid=guid, asset_amount=amount, destination=destination):
                 raise AssertionError(f"SYS output still found in UTXO: txid={txid}, guid={guid}, amount={amount}")
         sys_amt = list(asset_details.values())[0]
         if not utxo_exists(sys_amt=sys_amt):
@@ -652,5 +446,3 @@ def verify_tx_outputs(node, txid, tx_type, asset_details=None):
 
     else:
         raise ValueError("Unknown transaction type")
-
-    print(f"Verified UTXOs successfully for txid={txid}, tx_type={tx_type}")
