@@ -87,30 +87,37 @@ class CMintSyscoin(CAssetAllocation):
     def __init__(self, voutAssets=None, spv_proof=None):
         super().__init__(voutAssets=voutAssets)
         spv_proof = spv_proof or {}
-        self.txHash = spv_proof.get("txHash", b"")
-        self.txValue = spv_proof.get("txValue", b"")
+        self.txHash = spv_proof.get("txHash", b"\x00"*32)
+        self.txValue = spv_proof.get("txValue", b"\x00"*20)
         self.txPos = spv_proof.get("txPos", 0)
-        self.txBlockHash = spv_proof.get("txBlockHash", b"")
+        self.txBlockHash = spv_proof.get("txBlockHash", b"\x00"*32)
         self.txParentNodes = spv_proof.get("txParentNodes", b"")
         self.txPath = spv_proof.get("txPath", b"")
         self.posReceipt = spv_proof.get("posReceipt", 0)
         self.receiptParentNodes = spv_proof.get("receiptParentNodes", b"")
-        self.txRoot = spv_proof.get("txRoot", b"")
-        self.receiptRoot = spv_proof.get("receiptRoot", b"")
+        self.txRoot = spv_proof.get("txRoot", b"\x00"*32)
+        self.receiptRoot = spv_proof.get("receiptRoot", b"\x00"*32)
 
     def serialize(self):
         out = super().serialize()
+
+        assert len(self.txHash) == 32, "txHash must be 32 bytes"
+        assert len(self.txBlockHash) == 32, "txBlockHash must be 32 bytes"
+        assert len(self.txRoot) == 32, "txRoot must be 32 bytes"
+        assert len(self.receiptRoot) == 32, "receiptRoot must be 32 bytes"
+
         out += self.txHash
-        out += self.txValue
-        out += struct.pack("<I", self.txPos)
         out += self.txBlockHash
+        out += struct.pack("<H", self.txPos)
         out += ser_string(self.txParentNodes)
         out += ser_string(self.txPath)
-        out += struct.pack("<I", self.posReceipt)
+        out += struct.pack("<H", self.posReceipt)
         out += ser_string(self.receiptParentNodes)
         out += self.txRoot
         out += self.receiptRoot
         return out
+
+
 
 class CBurnSyscoin(CAssetAllocation):
     def __init__(self, voutAssets=None, nevm_address=b''):
@@ -321,7 +328,7 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), sys
     nevm_address_bin = None
     # Create coin selector and select inputs
     selector = CoinSelector(node)
-    if tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION:
+    if tx_type == SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION or tx_type == SYSCOIN_TX_VERSION_ALLOCATION_MINT:
         success, inputs, change, asset_changes = selector.select_coins_for_transaction(
             sys_amount, fees=fees
         )
@@ -423,7 +430,7 @@ def create_transaction_with_selector(node, tx_type, sys_amount=Decimal('0'), sys
         
         # Create mint output - the asset goes to the destination output
         mint_out = AssetOut(
-            key=int(guid),
+            key=guid,
             values=[AssetOutValue(n=len(outputs)-1, nValue=amount)]
         )
         asset_outputs.append(mint_out)

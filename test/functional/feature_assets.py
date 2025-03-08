@@ -49,14 +49,15 @@ class AssetTransactionTest(SyscoinTestFramework):
         self.num_nodes = 1
         self.extra_args = [['-dip3params=0:0']]
 
-    def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None, nevm_address=None):
+    def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None, nevm_address=None, spv_proof=None):
         tx_hex = create_transaction_with_selector(
             node=self.nodes[0],
             tx_type=tx_type,
             sys_amount=sys_amount,
             sys_destination=sys_destination,
             asset_amounts=asset_amounts,
-            nevm_address=nevm_address
+            nevm_address=nevm_address,
+            spv_proof=spv_proof
         )
         txid = self.nodes[0].sendrawtransaction(tx_hex)
         self.generate(self.nodes[0],1)
@@ -91,8 +92,18 @@ class AssetTransactionTest(SyscoinTestFramework):
         sys_balance_after = self.nodes[0].getbalance()
         # You get back SYS equal to the asset amount burned
         total_asset_amount = sum(amount for _, amount, _ in asset_amounts)
+        expected_balance = sys_balance_before + total_asset_amount + BLOCK_REWARD - Decimal('0.0001')
+        assert_equal(expected_balance, sys_balance_after)
+
+    def allocation_mint(self, asset_amounts, spv_proof, sys_amount=Decimal('0'), sys_destination=None):
+        sys_balance_before = self.nodes[0].getbalance()
+        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_MINT, asset_amounts, sys_amount, sys_destination, spv_proof=spv_proof)
+        sys_balance_after = self.nodes[0].getbalance()
+        # You get back SYS equal to the asset amount burned
+        total_asset_amount = sum(amount for _, amount, _ in asset_amounts)
         expected_balance = sys_balance_before + total_asset_amount + BLOCK_REWARD - Decimal('0.0001') # minus fees
         assert_equal(expected_balance, sys_balance_after)
+
 
     def setup_test_assets(self):
         """Create test assets for transactions"""
@@ -105,7 +116,6 @@ class AssetTransactionTest(SyscoinTestFramework):
             (SYSX_GUID, Decimal('20'), self.sysx_addr)
         ]
         self.syscoin_burn_to_allocation(asset_amounts, sys_amount=Decimal('20'))
-        return
         # Now create custom assets via mint - this requires a properly structured SPV proof
         # In regtest, certain validations are relaxed, but we need the basic structure correct
         
@@ -115,77 +125,30 @@ class AssetTransactionTest(SyscoinTestFramework):
         # Create dummy SPV proof with enough structure to pass validation
         # Format based on CheckSyscoinMint validation requirements
         spv_proof = {
-            "txHash": bytes.fromhex("a" * 64),        # Transaction hash on NEVM
-            "txValue": bytes.fromhex("b" * 20),       # Transaction value (dummy)
-            "txPos": 0,                               # Transaction position in block 
-            "txBlockHash": bytes.fromhex(burn_block["hash"]), # Use an actual block hash
-            "txParentNodes": b"\x00" * 32,            # Merkle proof parent nodes (dummy)
-            "txPath": b"\x01\x00",                    # Simplified tx path (dummy)
-            "posReceipt": 1,                          # Receipt position
-            "receiptParentNodes": b"\x00" * 32,       # Receipt parent nodes (dummy)
-            "txRoot": bytes.fromhex("c" * 64),        # Transaction Merkle root (dummy)
-            "receiptRoot": bytes.fromhex("d" * 64)    # Receipt Merkle root (dummy)
+            "txHash": bytes.fromhex("aa" * 32),              # exactly 32 bytes
+            "txValue": bytes.fromhex("bb" * 20),             # typically 20 bytes (address-size)
+            "txPos": 0,                                      # uint16_t position
+            "txBlockHash": bytes.fromhex(burn_block["hash"]), # exactly 32 bytes (real block hash)
+            "txParentNodes": b"\x00" * 32,                   # example dummy parent node (32 bytes)
+            "txPath": b"\x01\x00",                           # small example path (2 bytes)
+            "posReceipt": 1,                                 # uint16_t receipt position
+            "receiptParentNodes": b"\x00" * 32,              # example dummy receipt parent node (32 bytes)
+            "txRoot": bytes.fromhex("cc" * 32),              # exactly 32 bytes
+            "receiptRoot": bytes.fromhex("dd" * 32)          # exactly 32 bytes
         }
-        # Create asset 1 via mint
-        self.asset1_guid = 12345678  # For testing we'll use predefined GUIDs
+
         asset1_dest = self.nodes[0].getnewaddress()
         asset_amounts = [
-            (self.asset1_guid, Decimal('10000'), asset1_dest)
+            (SYSX_GUID, Decimal('10000'), asset1_dest)
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_MINT,
-            asset_amounts=asset_amounts,
-            spv_proof=spv_proof
-        )
-        # Send and confirm transaction
-        self.nodes[0].sendrawtransaction(tx_hex)
-        
-        # Create asset 2 via mint
-        self.asset2_guid = 87654321  # Second test asset GUID
+        self.allocation_mint(asset_amounts, spv_proof)
+
         asset2_dest = self.nodes[0].getnewaddress()
         asset_amounts = [
-            (self.asset2_guid, Decimal('10000'), asset2_dest)
+            (SYSX_GUID, Decimal('10000'), asset2_dest)
         ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_MINT,
-            asset_amounts=asset_amounts,
-            spv_proof=spv_proof,
-        )
-        # Send and confirm transaction
-        self.nodes[0].sendrawtransaction(tx_hex)
+        #self.allocation_mint(asset_amounts, spv_proof)
         
-        # Mine block to confirm mint transactions
-        self.generate(self.nodes[0],1)
-        
-        # Transfer some assets to the second node for testing
-        addr2 = self.nodes[1].getnewaddress()
-        asset_amounts = [
-            (self.asset1_guid, Decimal('5000'), addr2)
-        ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_SEND,
-            asset_amounts=asset_amounts,
-        )
-        self.nodes[0].sendrawtransaction(tx_hex)
-        
-        addr2_2 = self.nodes[1].getnewaddress()
-        asset_amounts = [
-            (self.asset2_guid, Decimal('3000'), addr2_2)
-        ]
-        tx_hex = create_transaction_with_selector(
-            node=self.nodes[0],
-            tx_type=SYSCOIN_TX_VERSION_ALLOCATION_SEND,
-            asset_amounts=asset_amounts,
-        )
-        self.nodes[0].sendrawtransaction(tx_hex)
-        
-        
-        # Mine blocks to confirm transactions
-        self.generate(self.nodes[0],10)
-        self.sync_all()
         
         print("Test assets created successfully")
 
@@ -258,7 +221,7 @@ class AssetTransactionTest(SyscoinTestFramework):
         dest_addr = self.nodes[0].getnewaddress()
         
         # Use a fresh GUID for this test
-        new_asset_guid = 9876543  # Different GUID for test mint
+        new_asset_guid = SYSX_GUID
         
         asset_amounts = [
             (new_asset_guid, Decimal('500'), dest_addr)
