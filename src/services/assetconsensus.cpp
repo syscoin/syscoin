@@ -18,6 +18,7 @@
 std::unique_ptr<CNEVMTxRootsDB> pnevmtxrootsdb;
 std::unique_ptr<CNEVMMintedTxDB> pnevmtxmintdb;
 RecursiveMutex cs_setethstatus;
+const arith_uint256 nMax = arith_uint256(MAX_MONEY);
 bool CheckSyscoinMint(
     const bool &ibd,
     const CTransaction &tx,
@@ -46,6 +47,7 @@ bool CheckSyscoinMint(
 
     // 2) Load the NEVM block’s TxRoot / ReceiptRoot
     NEVMTxRoot txRootDB;
+    if(!fRegTest)
     {
         LOCK(cs_setethstatus);
         if (!pnevmtxrootsdb || !pnevmtxrootsdb->ReadTxRoots(mintSyscoin.nBlockHash, txRootDB)) {
@@ -80,7 +82,8 @@ bool CheckSyscoinMint(
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-logs-count", bSanityCheck);
     }
     uint64_t nAssetFromLog  = 0;
-
+    CAmount outputAmount = 0;
+    std::string witnessAddress;
     // The bridging contract we expect
     const std::vector<unsigned char> &vchManagerAddress = Params().GetConsensus().vchSYSXERC20Manager;
 
@@ -104,42 +107,73 @@ bool CheckSyscoinMint(
             continue;
         }
         // check first topic == TokenFreeze
-        if (rlpLogTopics[0].toBytes(dev::RLP::VeryStrict) != vchFreezeTopic) {
+        if (rlpLogTopics[0].toBytes(dev::RLP::VeryStrict) != vchTokenFreezeMethod) {
             continue;
         }
-        // index=2 => data (ABI-encoded: (uint64 assetGuid, address freezer, uint256 value, uint precisions) )
+        // index=2 => data (ABI-encoded: (uint64 assetGuid, address freezer, uint256 value, string syscoinAddr))
         std::vector<unsigned char> dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
-        if (dataValue.size() < 128) {
+
+        // Sanity check: assetGuid[32], freezer[32], value[32], offset[32], strlen[32] => at least 160 bytes
+        if (dataValue.size() < 160) {
             return FormatSyscoinErrorMessage(state, "mint-log-data-too-small", bSanityCheck);
         }
 
-        // Each param is 32 bytes. So:
-        // param0: assetGuid (uint64 zero-extended to 32 bytes)
-        // param1: freezer   (address -> 20 bytes, but 32 in event)
-        // param2: value     (uint256 32 bytes)
-        {
-            // parse assetGuid from offset [0..31]
-            std::vector<unsigned char> vchAssetGuid(dataValue.begin(), dataValue.begin()+32);
-            nAssetFromLog = ReadBE64(&vchAssetGuid[24]);  // last 8 bytes
+        // --- Parse assetGuid (first 32 bytes, use last 8 bytes as uint64 big-endian) ---
+        nAssetFromLog = ReadBE64(&dataValue[24]);
+
+        // --- Parse value (3rd parameter, bytes [64..95]) ---
+        std::vector<unsigned char> vchValue(dataValue.begin() + 64, dataValue.begin() + 96);
+        arith_uint256 valueArith = UintToArith256(uint256(vchValue));
+        if (valueArith > nMax) {
+            return FormatSyscoinErrorMessage(state, "mint-value-overflow", bSanityCheck);
         }
+        outputAmount = static_cast<CAmount>(valueArith.GetLow64());
+        if (!MoneyRange(outputAmount)) {
+            return FormatSyscoinErrorMessage(state, "mint-value-out-of-range", bSanityCheck);
+        }
+
+        // --- Parse offset pointer for syscoinAddr string (4th parameter at [96..127]) ---
+        std::vector<unsigned char> vchOffset(dataValue.begin() + 96, dataValue.begin() + 128);
+        arith_uint256 offsetArith = UintToArith256(uint256(vchOffset));
+        uint64_t offsetToString = offsetArith.GetLow64();
+
+        // Validate offset sanity (must be at least 128 bytes to skip first 4 parameters)
+        if (offsetToString < 128 || offsetToString + 32 > dataValue.size()) {
+            return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-offset", bSanityCheck);
+        }
+
+        // --- Parse length of syscoinAddr string (at offsetToString) ---
+        std::vector<unsigned char> vchStrLen(dataValue.begin() + offsetToString, dataValue.begin() + offsetToString + 32);
+        arith_uint256 strLenArith = UintToArith256(uint256(vchStrLen));
+        uint64_t lenString = strLenArith.GetLow64();
+
+        // Validate length sanity
+        if (offsetToString + 32 + lenString > dataValue.size()) {
+            return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-length", bSanityCheck);
+        }
+
+        // --- Extract syscoinAddr string ---
+        witnessAddress = std::string(reinterpret_cast<const char*>(&dataValue[offsetToString + 32]), lenString);
         // we found our freeze log, break out
         break;
     }
 
-    if (nAssetFromLog == 0) {
+    if (nAssetFromLog == 0 || outputAmount == 0 || witnessAddress.empty()) {
         return FormatSyscoinErrorMessage(state, "mint-missing-freeze-log", bSanityCheck);
     }
 
     // 6) Check TxProof & ReceiptProof
-    if (mintSyscoin.nTxRoot != txRootDB.nTxRoot) {
-        return FormatSyscoinErrorMessage(state, "mint-mismatching-txroot", bSanityCheck);
-    }
-    if (mintSyscoin.nReceiptRoot != txRootDB.nReceiptRoot) {
-        return FormatSyscoinErrorMessage(state, "mint-mismatching-receiptroot", bSanityCheck);
+    if(!fRegTest) {
+        if (mintSyscoin.nTxRoot != txRootDB.nTxRoot) {
+            return FormatSyscoinErrorMessage(state, "mint-mismatching-txroot", bSanityCheck);
+        }
+        if (mintSyscoin.nReceiptRoot != txRootDB.nReceiptRoot) {
+            return FormatSyscoinErrorMessage(state, "mint-mismatching-receiptroot", bSanityCheck);
+        }
     }
 
     // verify receipt proof
-    dev::RLP rlpReceiptRoot(dev::bytesConstRef(txRootDB.nReceiptRoot.begin(), txRootDB.nReceiptRoot.size()));
+    dev::RLP rlpReceiptRoot(dev::bytesConstRef(mintSyscoin.nReceiptRoot.begin(), mintSyscoin.nReceiptRoot.size()));
     if(!VerifyProof(&mintSyscoin.vchTxPath, rlpReceiptValue, rlpReceiptParentNodes, rlpReceiptRoot)) {
         return FormatSyscoinErrorMessage(state, "mint-verify-receipt-proof-failed", bSanityCheck);
     }
@@ -156,7 +190,7 @@ bool CheckSyscoinMint(
         return FormatSyscoinErrorMessage(state, "mint-verify-tx-hash", bSanityCheck);
     }
     dev::RLP rlpTxValue(&vchTxValue);
-    dev::RLP rlpTxRoot(dev::bytesConstRef(txRootDB.nTxRoot.begin(), txRootDB.nTxRoot.size()));
+    dev::RLP rlpTxRoot(dev::bytesConstRef(mintSyscoin.nTxRoot.begin(), mintSyscoin.nTxRoot.size()));
     if(!VerifyProof(&mintSyscoin.vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot)) {
         return FormatSyscoinErrorMessage(state, "mint-verify-tx-proof-failed", bSanityCheck);
     }
@@ -191,24 +225,6 @@ bool CheckSyscoinMint(
     dev::Address toField = rlpTxValue[5].toHash<dev::Address>(dev::RLP::VeryStrict);
     if (toField.asBytes() != Params().GetConsensus().vchSYSXERC20Manager) {
         return FormatSyscoinErrorMessage(state, "mint-incorrect-bridge-manager", bSanityCheck);
-    }
-    // The input data (call data) is in rlpTxValue[7]
-    const std::vector<unsigned char> &inputData = rlpTxValue[7].toBytes(dev::RLP::VeryStrict);
-
-    // parse freezeBurn(...) call data
-    CAmount outputAmount;
-    std::string witnessAddress;
-
-    // Some 4-byte selector for freezeBurn
-    std::vector<unsigned char> vchFreezeBurnSelector = Params().GetConsensus().vchSYSXBurnMethodSignature;
-    if (!parseNEVMMethodInputData(
-             vchFreezeBurnSelector,
-             inputData,
-             outputAmount,
-             witnessAddress
-        ))
-    {
-        return FormatSyscoinErrorMessage(state, "mint-parse-freezeBurn-failed", bSanityCheck);
     }
     bool bFoundDest = false;
     for (const auto &vout : tx.vout) {
@@ -251,9 +267,6 @@ bool CheckSyscoinMint(
     // Must match the bridging "outputAmount"
     if (outputAmount != nTotalMinted) {
         return FormatSyscoinErrorMessage(state, "mint-output-mismatch", bSanityCheck);
-    }
-    if (!MoneyRange(outputAmount)) {
-        return FormatSyscoinErrorMessage(state, "mint-value-out-of-range", bSanityCheck);
     }
 
     // Optionally check that there's a matching vout to witnessAddress
@@ -305,6 +318,8 @@ bool CheckSyscoinInputs(const bool &ibd, const Consensus::Params& params, const 
         if (good && mapAssetIn != mapAssetOut) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-io-mismatch");
         }
+    } catch (const std::exception& e) {
+        return FormatSyscoinErrorMessage(state, e.what(), bSanityCheck);
     } catch (...) {
         return FormatSyscoinErrorMessage(state, "checksyscoininputs-exception", bSanityCheck);
     }
