@@ -84,111 +84,123 @@ BOOST_AUTO_TEST_CASE(checksyscoinmint_event_log_parsing)
     const uint64_t assetGuid = Params().GetConsensus().nSYSXAsset;
     const CAmount outputAmount = 100 * COIN;
     const std::string witnessAddress = "sys1q09vm5lfy0j5reeulh4x5752q25uqqvz34hufdl";
-
     NEVMMintTxSet setMintTxs;
-    CAssetsMap mapAssetIn, mapAssetOut;
-    mapAssetOut[assetGuid] = outputAmount;
 
-    // Helper lambda to create a correctly formed CMintSyscoin object
+    // Helper function to create a valid mint
     auto createValidMintSyscoin = [&](const uint64_t assetGuid, const CAmount value, const std::string& syscoinAddr) -> CMintSyscoin {
         CMintSyscoin mint;
+    
+        // Set a valid block hash placeholder
         mint.nBlockHash = uint256S("0xbbbb");
-        mint.nTxHash = uint256S("0xeeee");
-        mint.nTxRoot = uint256S("0xcccc");
-        mint.nReceiptRoot = uint256S("0xdddd");
-        
-        const auto& erc20Manager = Params().GetConsensus().vchSYSXERC20Manager;
-        const auto& freezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
-
-        // ABI encode the log data exactly as the validation expects
-        std::vector<unsigned char> data;
-
-        // assetGuid
-        data.insert(data.end(), 24, 0);
-        uint64_t assetGuidBE = htobe64(assetGuid);
-        data.insert(data.end(), (unsigned char*)&assetGuidBE, ((unsigned char*)&assetGuidBE) + 8);
-
-        // freezer address (dummy)
-        data.insert(data.end(), 12, 0);
-        auto freezer = ParseHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        data.insert(data.end(), freezer.begin(), freezer.end());
-
-        // value (uint256)
-        data.insert(data.end(), 24, 0);
-        uint64_t valueBE = htobe64(value);
-        data.insert(data.end(), (unsigned char*)&valueBE, ((unsigned char*)&valueBE) + 8);
-
-        // offset (0x80)
-        data.insert(data.end(), 31, 0);
-        data.push_back(0x80);
-
-        // string length
-        data.insert(data.end(), 31, 0);
-        data.push_back(syscoinAddr.size());
-
-        // string data
-        data.insert(data.end(), syscoinAddr.begin(), syscoinAddr.end());
-        data.insert(data.end(), (32 - (syscoinAddr.size() % 32)), 0);
-
-        // Create RLP log
-        dev::RLPStream logs;
-        logs.appendList(1);
-        logs.appendList(3);
-        logs << dev::Address(erc20Manager);
-        logs.appendList(1);
-        logs << freezeTopic;
-        logs << data;
-
-        // Complete receipt RLP
-        dev::RLPStream receipt;
-        receipt.appendList(4);
-        receipt << 1;    // status = success
-        receipt << "";   // cumulativeGasUsed
-        receipt << "";   // logsBloom
-        receipt.appendRaw(logs.out());
-
-        mint.posReceipt = 0;
-        auto receiptBytes = receipt.out();
-        mint.vchReceiptParentNodes.assign(receiptBytes.begin(), receiptBytes.end());
-
-        // Create dummy valid Tx RLP (for VerifyProof)
-        dev::RLPStream txStream;
-        txStream.appendList(8);
-        txStream << Params().GetConsensus().nNEVMChainID; // chainId
-        txStream << ""; // nonce
-        txStream << ""; // gasPrice
-        txStream << ""; // gasLimit
-        txStream << ""; // to address placeholder
-        txStream << dev::Address(erc20Manager); // to address (vchSYSXERC20Manager)
-        txStream << ""; // value placeholder
-        txStream << ""; // data placeholder
-
-        auto txBytes = txStream.out();
+    
+        // ERC20Manager contract and freeze event topic from params
+        const std::vector<unsigned char>& erc20Manager = Params().GetConsensus().vchSYSXERC20Manager;
+        const std::vector<unsigned char>& freezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
+    
+        // ---------------------------
+        // 1. Build Transaction RLP
+        // ---------------------------
+        dev::RLPStream txRLP;
+        txRLP.appendList(8);
+        txRLP << dev::u256(Params().GetConsensus().nNEVMChainID);   // chainId
+        txRLP << dev::u256(0);                                      // nonce
+        txRLP << dev::u256(0);                                      // gasPrice
+        txRLP << dev::u256(0);                                      // gasLimit
+        txRLP << dev::bytes();                                      // from (empty for simplicity)
+        txRLP << dev::Address(erc20Manager);                        // to (erc20 manager contract)
+        txRLP << dev::u256(0);                                      // value
+        txRLP << dev::bytes();                                      // data (empty, simplified)
+    
+        const auto txBytes = txRLP.out();
         mint.posTx = 0;
-        mint.vchTxParentNodes = txBytes; // actual valid minimal RLP to pass VerifyProof
-
-        // Compute the correct tx hash
-        std::vector<unsigned char> txHashComputed(dev::sha3(txBytes).asBytes());
-        std::reverse(txHashComputed.begin(), txHashComputed.end());
-        mint.nTxHash = uint256S(HexStr(txHashComputed));
-
-        // Dummy txpath (trivial path)
-        mint.vchTxPath = ParseHex("00");
-
+        mint.vchTxParentNodes = txBytes;
+    
+        // Set correct nTxHash (hash of txBytes)
+        auto txHashVec = dev::sha3(txBytes).asBytes();
+        std::reverse(txHashVec.begin(), txHashVec.end());
+        mint.nTxHash = uint256(std::vector<unsigned char>(txHashVec.begin(), txHashVec.end()));
+    
+        // ---------------------------
+        // 2. Build Receipt RLP with Logs
+        // ---------------------------
+        dev::RLPStream receiptRLP;
+        receiptRLP.appendList(4);
+        receiptRLP << 1;                   // status = success
+        receiptRLP << dev::bytes();        // cumulativeGasUsed
+        receiptRLP << dev::bytes();        // logsBloom
+    
+        // Logs array (outer array for logs)
+        dev::RLPStream logsRLP;
+        logsRLP.appendList(1);             // single log entry
+    
+        // Single log entry: [address, [topics], data]
+        logsRLP.appendList(3);
+        logsRLP << dev::Address(erc20Manager);   // log address
+    
+        // topics array
+        logsRLP.appendList(1);
+        logsRLP << freezeTopic;
+    
+        // Data field (ABI-encoded TokenFreeze parameters)
+        std::vector<unsigned char> logData(160, 0);
+    
+        // AssetGuid at byte offset 24 (big-endian)
+        uint64_t assetGuidBE = htobe64(assetGuid);
+        memcpy(&logData[24], &assetGuidBE, 8);
+    
+        // Freezer (dummy address at byte offset 44, 20 bytes)
+        const auto freezer = ParseHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        memcpy(&logData[44], freezer.data(), 20);
+    
+        // value at byte offset 64 (uint256 big-endian)
+        arith_uint256 valueArith(value);
+        auto vchValue = ArithToUint256(valueArith).GetHex();
+        const auto valueBytes = ParseHex(vchValue);
+        memcpy(&logData[96 - valueBytes.size()], valueBytes.data(), valueBytes.size());
+    
+        // offset to string at byte offset 96 = 0x80
+        logData[127] = 0x80;
+    
+        // String length at offset 128
+        logData[159] = static_cast<unsigned char>(syscoinAddr.size());
+    
+        // Actual address string at offset 160
+        logData.insert(logData.end(), syscoinAddr.begin(), syscoinAddr.end());
+    
+        // Padding to 32-byte boundary
+        size_t padding = 32 - (syscoinAddr.size() % 32);
+        logData.insert(logData.end(), padding, 0);
+    
+        logsRLP << logData;  // append data to log entry
+    
+        receiptRLP.appendRaw(logsRLP.out());  // append logs array
+    
+        const auto receiptBytes = receiptRLP.out();
+        mint.posReceipt = 0;
+        mint.vchReceiptParentNodes = receiptBytes;
+    
+        // ---------------------------
+        // 3. Set Roots (hash of RLP)
+        // ---------------------------
+        mint.nTxRoot = uint256(dev::sha3(txBytes).ref().cropped(0, 32).toBytes());
+        mint.nReceiptRoot = uint256(dev::sha3(receiptBytes).ref().cropped(0, 32).toBytes());
+    
+        // ---------------------------
+        // 4. Set vchTxPath (simple zero-index for testing)
+        // ---------------------------
+        mint.vchTxPath = dev::rlp(0);
+    
         return mint;
     };
+    
 
     CMintSyscoin mintSyscoin = createValidMintSyscoin(assetGuid, outputAmount, witnessAddress);
 
     TxValidationState state;
+    uint64_t assetGuidInternal;
     CAmount outputAmountInternal;
     std::string witnessAddressInternal;
-    uint64_t assetGuidInternal;
-
-    // Set regtest flag to true to skip txroot/receiptroot DB checks only
     fRegTest = true;
-
-    // Actual test function call
     bool result = CheckSyscoinMintInternal(
         mintSyscoin,
         state,
@@ -198,13 +210,15 @@ BOOST_AUTO_TEST_CASE(checksyscoinmint_event_log_parsing)
         outputAmountInternal,
         witnessAddressInternal
     );
+    printf("state %s\n", state.ToString().c_str());
 
-    // Check validation results
     BOOST_CHECK(result);
     BOOST_CHECK_EQUAL(assetGuidInternal, assetGuid);
     BOOST_CHECK_EQUAL(outputAmountInternal, outputAmount);
     BOOST_CHECK_EQUAL(witnessAddressInternal, witnessAddress);
 }
+
+
 
 
 /*BOOST_AUTO_TEST_CASE(nevm_parseabidata)
