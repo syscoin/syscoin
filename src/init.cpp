@@ -1846,7 +1846,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 } else if((int64_t)nHeightFromGeth > nHeightLocalGeth) {
                     LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth, nHeightFromGeth + Params().GetConsensus().nNEVMStartBlock);
                 }
-            } else if(nHeightLocalGeth > 0){
+            } else if(nHeightLocalGeth > 1){
                 fNEVMConnection = false;
                 LogPrintf("nHeightFromGeth == 0 and nHeightLocalGeth > 0, setting fNEVMConnection to false...\n");
             }
