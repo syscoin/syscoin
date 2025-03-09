@@ -90,109 +90,81 @@ BOOST_AUTO_TEST_CASE(checksyscoinmint_event_log_parsing)
     auto createValidMintSyscoin = [&](const uint64_t assetGuid, const CAmount value, const std::string& syscoinAddr) -> CMintSyscoin {
         CMintSyscoin mint;
     
-        // Set a valid block hash placeholder
         mint.nBlockHash = uint256S("0xbbbb");
     
-        // ERC20Manager contract and freeze event topic from params
-        const std::vector<unsigned char>& erc20Manager = Params().GetConsensus().vchSYSXERC20Manager;
-        const std::vector<unsigned char>& freezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
+        const auto& erc20Manager = Params().GetConsensus().vchSYSXERC20Manager;
+        const auto& freezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
     
-        // ---------------------------
-        // 1. Build Transaction RLP
-        // ---------------------------
+        // Transaction RLP
         dev::RLPStream txRLP;
         txRLP.appendList(8);
-        txRLP << dev::u256(Params().GetConsensus().nNEVMChainID);   // chainId
-        txRLP << dev::u256(0);                                      // nonce
-        txRLP << dev::u256(0);                                      // gasPrice
-        txRLP << dev::u256(0);                                      // gasLimit
-        txRLP << dev::bytes();                                      // from (empty for simplicity)
-        txRLP << dev::Address(erc20Manager);                        // to (erc20 manager contract)
-        txRLP << dev::u256(0);                                      // value
-        txRLP << dev::bytes();                                      // data (empty, simplified)
-    
+        txRLP << dev::u256(Params().GetConsensus().nNEVMChainID);
+        txRLP << dev::u256(0); // nonce
+        txRLP << dev::u256(0); // gasPrice
+        txRLP << dev::u256(0); // gasLimit
+        txRLP << dev::bytes(); // from
+        txRLP << dev::Address(erc20Manager);
+        txRLP << dev::u256(0); // value
+        txRLP << dev::bytes(); // data
         const auto txBytes = txRLP.out();
         mint.posTx = 0;
         mint.vchTxParentNodes = txBytes;
     
-        // Set correct nTxHash (hash of txBytes)
         auto txHashVec = dev::sha3(txBytes).asBytes();
         std::reverse(txHashVec.begin(), txHashVec.end());
-        mint.nTxHash = uint256(std::vector<unsigned char>(txHashVec.begin(), txHashVec.end()));
+        mint.nTxHash = uint256(txHashVec);
     
-        // ---------------------------
-        // 2. Build Receipt RLP with Logs
-        // ---------------------------
-        dev::RLPStream receiptRLP;
-        receiptRLP.appendList(4);
-        receiptRLP << 1;                   // status = success
-        receiptRLP << dev::bytes();        // cumulativeGasUsed
-        receiptRLP << dev::bytes();        // logsBloom
+        // Log Data ABI-encoding (160 bytes)
+        std::vector<unsigned char> logData(160, 0);
+        WriteBE64(&logData[24], assetGuid); // assetGuid
+        auto freezer = ParseHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        memcpy(&logData[44], freezer.data(), 20);
+        memset(&logData[64], 0, 24); // value padding
+        WriteBE64(&logData[88], value); // correct big-endian
+        logData[127] = 0x80; // offset
+        logData[159] = static_cast<unsigned char>(syscoinAddr.size()); // addr length
+        auto addrBytes = std::vector<unsigned char>(syscoinAddr.begin(), syscoinAddr.end());
+        addrBytes.resize(((addrBytes.size() + 31) / 32) * 32, 0); // align to 32 bytes
+        logData.insert(logData.end(), addrBytes.begin(), addrBytes.end());
     
-        // Logs array (outer array for logs)
+        // Logs RLP
         dev::RLPStream logsRLP;
-        logsRLP.appendList(1);             // single log entry
-    
-        // Single log entry: [address, [topics], data]
+        logsRLP.appendList(1);
         logsRLP.appendList(3);
-        logsRLP << dev::Address(erc20Manager);   // log address
-    
-        // topics array
+        logsRLP << dev::Address(erc20Manager);
         logsRLP.appendList(1);
         logsRLP << freezeTopic;
+        logsRLP << logData;
     
-        // Data field (ABI-encoded TokenFreeze parameters)
-        std::vector<unsigned char> logData(160, 0);
-    
-        // AssetGuid at byte offset 24 (big-endian)
-        uint64_t assetGuidBE = htobe64(assetGuid);
-        memcpy(&logData[24], &assetGuidBE, 8);
-    
-        // Freezer (dummy address at byte offset 44, 20 bytes)
-        const auto freezer = ParseHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        memcpy(&logData[44], freezer.data(), 20);
-    
-        // value at byte offset 64 (uint256 big-endian)
-        arith_uint256 valueArith(value);
-        auto vchValue = ArithToUint256(valueArith).GetHex();
-        const auto valueBytes = ParseHex(vchValue);
-        memcpy(&logData[96 - valueBytes.size()], valueBytes.data(), valueBytes.size());
-    
-        // offset to string at byte offset 96 = 0x80
-        logData[127] = 0x80;
-    
-        // String length at offset 128
-        logData[159] = static_cast<unsigned char>(syscoinAddr.size());
-    
-        // Actual address string at offset 160
-        logData.insert(logData.end(), syscoinAddr.begin(), syscoinAddr.end());
-    
-        // Padding to 32-byte boundary
-        size_t padding = 32 - (syscoinAddr.size() % 32);
-        logData.insert(logData.end(), padding, 0);
-    
-        logsRLP << logData;  // append data to log entry
-    
-        receiptRLP.appendRaw(logsRLP.out());  // append logs array
-    
+        // Receipt RLP (actual receipt node)
+        dev::RLPStream receiptRLP;
+        receiptRLP.appendList(4);
+        receiptRLP << 1; // status
+        receiptRLP << dev::bytes(); // cumulativeGasUsed
+        receiptRLP << dev::bytes(); // logsBloom
+        receiptRLP.appendRaw(logsRLP.out());
         const auto receiptBytes = receiptRLP.out();
         mint.posReceipt = 0;
-        mint.vchReceiptParentNodes = receiptBytes;
     
-        // ---------------------------
-        // 3. Set Roots (hash of RLP)
-        // ---------------------------
-        mint.nTxRoot = uint256(dev::sha3(txBytes).ref().cropped(0, 32).toBytes());
-        mint.nReceiptRoot = uint256(dev::sha3(receiptBytes).ref().cropped(0, 32).toBytes());
+        // Correct minimal trie-proof: single-level parent nodes (receipt is child)
+        dev::RLPStream receiptProofNodes;
+        receiptProofNodes.appendList(1);
+        receiptProofNodes.appendRaw(receiptBytes);
+        mint.vchReceiptParentNodes = receiptProofNodes.out();
     
-        // ---------------------------
-        // 4. Set vchTxPath (simple zero-index for testing)
-        // ---------------------------
-        mint.vchTxPath = dev::rlp(0);
+        // Roots
+        auto txRootHash = dev::sha3(txBytes).asBytes();
+        auto receiptRootHash = dev::sha3(receiptBytes).asBytes();
+        mint.nTxRoot = uint256(std::vector<unsigned char>(txRootHash.begin(), txRootHash.begin() + 32));
+        mint.nReceiptRoot = uint256(std::vector<unsigned char>(receiptRootHash.begin(), receiptRootHash.begin() + 32));
+    
+        mint.vchTxPath = {0x00};
     
         return mint;
     };
     
+       
+     
 
     CMintSyscoin mintSyscoin = createValidMintSyscoin(assetGuid, outputAmount, witnessAddress);
 
