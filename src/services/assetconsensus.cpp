@@ -37,7 +37,6 @@ bool CheckSyscoinMintInternal(
             return FormatSyscoinErrorMessage(state, "mint-txroot-missing", fJustCheck);
         }
     }
-
     const dev::RLP rlpReceiptParentNodes(&mintSyscoin.vchReceiptParentNodes);
     const std::vector<unsigned char> vchReceiptValue(
         mintSyscoin.vchReceiptParentNodes.begin() + mintSyscoin.posReceipt,
@@ -52,13 +51,11 @@ bool CheckSyscoinMintInternal(
     if (nStatus != 1) {
         return FormatSyscoinErrorMessage(state, "mint-receipt-status-failed", fJustCheck);
     }
-
     const dev::RLP rlpLogs(rlpReceiptValue[3]);
     const size_t itemCount = rlpLogs.itemCount();
     if (!rlpLogs.isList() || itemCount < 1 || itemCount > 10) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-logs-count", fJustCheck);
     }
-
     const std::vector<unsigned char>& vchManagerAddress = Params().GetConsensus().vchSYSXERC20Manager;
     const std::vector<unsigned char>& vchFreezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
 
@@ -88,27 +85,33 @@ bool CheckSyscoinMintInternal(
         }
 
         nAssetFromLog = ReadBE64(&dataValue[24]);
-
-        const std::vector<unsigned char> vchValue(dataValue.begin() + 64, dataValue.begin() + 96);
+       
+        std::vector<unsigned char> vchValue(dataValue.begin() + 64, dataValue.begin() + 96);
+        std::reverse(vchValue.begin(), vchValue.end());
         const arith_uint256 valueArith = UintToArith256(uint256(vchValue));
         if (valueArith > nMax) {
             return FormatSyscoinErrorMessage(state, "mint-value-overflow", fJustCheck);
         }
         outputAmount = static_cast<CAmount>(valueArith.GetLow64());
+       
         if (!MoneyRange(outputAmount)) {
             return FormatSyscoinErrorMessage(state, "mint-value-out-of-range", fJustCheck);
         }
 
-        const std::vector<unsigned char> vchOffset(dataValue.begin() + 96, dataValue.begin() + 128);
+        std::vector<unsigned char> vchOffset(dataValue.begin() + 96, dataValue.begin() + 128);
+        std::reverse(vchOffset.begin(), vchOffset.end());
         const uint64_t offsetToString = UintToArith256(uint256(vchOffset)).GetLow64();
-
         if (offsetToString < 128 || offsetToString + 32 > dataValue.size()) {
             return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-offset", fJustCheck);
         }
 
-        const uint64_t lenString = UintToArith256(uint256(std::vector<unsigned char>(
+        // Parse string length correctly:
+        std::vector<unsigned char> vchLenString(
             dataValue.begin() + offsetToString,
-            dataValue.begin() + offsetToString + 32))).GetLow64();
+            dataValue.begin() + offsetToString + 32
+        );
+        std::reverse(vchLenString.begin(), vchLenString.end());
+        const uint64_t lenString = UintToArith256(uint256(vchLenString)).GetLow64();
 
         if (offsetToString + 32 + lenString > dataValue.size()) {
             return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-length", fJustCheck);
@@ -125,12 +128,20 @@ bool CheckSyscoinMintInternal(
     if (!fRegTest && (mintSyscoin.nTxRoot != txRootDB.nTxRoot || mintSyscoin.nReceiptRoot != txRootDB.nReceiptRoot)) {
         return FormatSyscoinErrorMessage(state, "mint-mismatching-txroot-or-receiptroot", fJustCheck);
     }
-
-    const dev::RLP rlpReceiptRoot(dev::bytesConstRef(mintSyscoin.nReceiptRoot.data(), mintSyscoin.nReceiptRoot.size()));
-    if (!VerifyProof(&mintSyscoin.vchTxPath, rlpReceiptValue, rlpReceiptParentNodes, rlpReceiptRoot)) {
+    std::vector<unsigned char> rlpTxRootVec(txRootDB.nTxRoot.begin(), txRootDB.nTxRoot.end());
+    dev::RLPStream sTxRoot, sReceiptRoot;
+    sTxRoot.append(rlpTxRootVec);
+    std::vector<unsigned char> rlpReceiptRootVec(txRootDB.nReceiptRoot.begin(),  txRootDB.nReceiptRoot.end());
+    sReceiptRoot.append(rlpReceiptRootVec);
+    dev::RLP rlpTxRoot(sTxRoot.out());
+    dev::RLP rlpReceiptRoot(sReceiptRoot.out());
+    dev::bytes receiptRootBytes = ParseHex(rlpReceiptRoot.toString());
+    dev::RLP rlpReceiptRootNode(receiptRootBytes);
+    // Verify the Merkle Patricia Proof
+    if (!VerifyProof(&mintSyscoin.vchTxPath, rlpReceiptValue, rlpReceiptParentNodes, rlpReceiptRootNode)) {
         return FormatSyscoinErrorMessage(state, "mint-verify-receipt-proof-failed", fJustCheck);
     }
-
+    
     const dev::RLP rlpTxParentNodes(&mintSyscoin.vchTxParentNodes);
     const std::vector<unsigned char> vchTxValue(mintSyscoin.vchTxParentNodes.begin() + mintSyscoin.posTx, mintSyscoin.vchTxParentNodes.end());
     std::vector<unsigned char> vchTxHash(dev::sha3(vchTxValue).asBytes());
@@ -138,9 +149,7 @@ bool CheckSyscoinMintInternal(
     if (uint256S(HexStr(vchTxHash)) != mintSyscoin.nTxHash) {
         return FormatSyscoinErrorMessage(state, "mint-verify-tx-hash", fJustCheck);
     }
-
     const dev::RLP rlpTxValue(&vchTxValue);
-    const dev::RLP rlpTxRoot(dev::bytesConstRef(mintSyscoin.nTxRoot.begin(), mintSyscoin.nTxRoot.size()));
     if (!VerifyProof(&mintSyscoin.vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot)) {
         return FormatSyscoinErrorMessage(state, "mint-verify-tx-proof-failed", fJustCheck);
     }
