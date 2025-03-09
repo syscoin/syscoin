@@ -104,7 +104,7 @@ pid_t gethpid = -1;
 HANDLE hProcessGeth = NULL;
 #endif
 RecursiveMutex cs_geth;
-NEVMMintTxMap mapMintKeysMempool;
+NEVMMintTxSet setMintTxsMempool;
 std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
 std::map<uint256, int64_t> mapRejectedBlocks GUARDED_BY(cs_main);
 
@@ -894,7 +894,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // SYSCOIN
     const auto& params = args.m_chainparams.GetConsensus();
     if(tx.HasAssets()) {
-        if (!CheckSyscoinInputs(tx, params, hash, state, (uint32_t)m_active_chainstate.m_chain.Tip()->nHeight + 1, m_active_chainstate.m_chain.Tip()->GetMedianTimePast(), mapMintKeysMempool, args.m_test_accept, mapAssetIn, mapAssetOut)) {
+        if (!CheckSyscoinInputs(params, tx, hash, state, (uint32_t)m_active_chainstate.m_chain.Tip()->nHeight + 1, args.m_test_accept, setMintTxsMempool, mapAssetIn, mapAssetOut)) {
             return false; // state filled in by CheckSyscoinInputs
         }      
     }  
@@ -1703,7 +1703,7 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
             if(IsSyscoinMintTx(tx->nVersion)) {
                 CMintSyscoin mintSyscoin(*tx);
                 if(!mintSyscoin.IsNull()) {
-                    mapMintKeysMempool.erase(mintSyscoin.nTxHash);
+                    setMintTxsMempool.erase(mintSyscoin.nTxHash);
                 }
             }
         }
@@ -2425,7 +2425,7 @@ bool ProcessNEVMData(const BlockManager& blockman, const CTransaction& tx, const
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 // SYSCOIN
-DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
 {
     AssertLockHeld(::cs_main);
     // SYSCOIN
@@ -2485,7 +2485,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 return DISCONNECT_FAILED;
             }
             // SYSCOIN
-            if(!DisconnectSyscoinTransaction(tx, hash, txundo, view, mapMintKeys, NEVMDataVecOut))
+            if(!DisconnectSyscoinTransaction(tx,  setMintTxs, NEVMDataVecOut))
                 fClean = false;
 
             for (unsigned int j = tx.vin.size(); j > 0;) {
@@ -2614,18 +2614,18 @@ static int64_t num_blocks_total = 0;
 // SYSCOIN
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, bool fJustCheck, bool bReverify) {
-    NEVMMintTxMap mapMintKeys;
+    NEVMMintTxSet setMintTxs;
     NEVMTxRootMap mapNEVMTxRoots;
     PoDAMAPMemory mapPoDA;
     std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
-    return ConnectBlock(block, state, pindex, view, fJustCheck, mapMintKeys, mapNEVMTxRoots, mapPoDA, vecTXIDPairs, bReverify);       
+    return ConnectBlock(block, state, pindex, view, fJustCheck, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs, bReverify);       
 }
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
  *  can fail if those validity checks fail (among other reasons). */
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, bool fJustCheck, 
-                  NEVMMintTxMap &mapMintKeys, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+                  NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
 {
     AssertLockHeld(cs_main);
     assert(pindex);
@@ -2835,7 +2835,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     int64_t nSigOpsCost = 0;
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     // SYSCOIN
-    const bool ibd = m_chainman.IsInitialBlockDownload();
     const uint256& blockHash = block.GetHash();
     bool fNexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock || fRegTest;
     fScriptChecks = fScriptChecks && fNexusContext;
@@ -2879,7 +2878,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if(hasAssets){
                 TxValidationState tx_statesys;
                 // just temp var not used in !fJustCheck mode
-                if (!CheckSyscoinInputs(ibd, params.GetConsensus(), tx, txHash, tx_statesys, false, (uint32_t)pindex->nHeight, m_chain.Tip()->GetMedianTimePast(), blockHash, fJustCheck, mapMintKeys, mapAssetIn, mapAssetOut)){
+                if (!CheckSyscoinInputs(params.GetConsensus(), tx, txHash, tx_statesys, (uint32_t)pindex->nHeight, fJustCheck, setMintTxs, mapAssetIn, mapAssetOut)){
                     // Any transaction validation failure in ConnectBlock is a block consensus failure
                     state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                 tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
@@ -3362,7 +3361,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
     // Apply the block atomically to the chain state.
     // SYSCOIN
-    NEVMMintTxMap mapMintKeys;
+    NEVMMintTxSet setMintTxs;
     NEVMDataVec NEVMDataVecOut;
     std::vector<uint256> vecNEVMBlocks;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
@@ -3370,14 +3369,14 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     {
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
-        if (DisconnectBlock(block, pindexDelete, view, mapMintKeys, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, bReverify) != DISCONNECT_OK)
+        if (DisconnectBlock(block, pindexDelete, view, setMintTxs, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, bReverify) != DISCONNECT_OK)
             return error("DisconnectTip(): DisconnectBlock %s failed", pindexDelete->GetBlockHash().ToString());
         bool flushed = view.Flush();
         assert(flushed);
     }
     // SYSCOIN
     if(pnevmtxmintdb != nullptr){
-        if(!pnevmtxmintdb->FlushErase(mapMintKeys) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(NEVMDataVecOut)){
+        if(!pnevmtxmintdb->FlushErase(setMintTxs) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(NEVMDataVecOut)){
             return error("DisconnectTip(): Error flushing to asset dbs on disconnect %s", pindexDelete->GetBlockHash().ToString());
         }
     }
@@ -3498,13 +3497,13 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     LogPrint(BCLog::BENCHMARK, "  - Load block from disk: %.2fms\n",
              Ticks<MillisecondsDouble>(time_2 - time_1));
     // SYSCOIN
-    NEVMMintTxMap mapMintKeys;
+    NEVMMintTxSet setMintTxs;
     NEVMTxRootMap mapNEVMTxRoots;
     PoDAMAPMemory mapPoDA;
     std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
     {
         CCoinsViewCache view(&CoinsTip());
-        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false, mapMintKeys, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
+        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
         GetMainSignals().BlockChecked(blockConnecting, state);
         if (!rv) {
             if (state.IsInvalid())
@@ -3525,7 +3524,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     if(pnevmdatadb)
         pnevmdatadb->FlushDataToCache(mapPoDA, pindexNew->GetMedianTimePast());
     if(pnevmtxmintdb)
-        pnevmtxmintdb->FlushDataToCache(mapMintKeys);
+        pnevmtxmintdb->FlushDataToCache(setMintTxs);
     if(pblockindexdb)
         pblockindexdb->FlushDataToCache(vecTXIDPairs);
     if(pnevmtxrootsdb)
@@ -5252,7 +5251,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
 
     const bool is_snapshot_cs{chainstate.m_from_snapshot_blockhash};
     // SYSCOIN
-    NEVMMintTxMap mapMintKeys;
+    NEVMMintTxSet setMintTxs;
     std::vector<uint256> vecNEVMBlocks;
     NEVMDataVec NEVMDataVecOut;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
@@ -5303,7 +5302,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
         if (nCheckLevel >= 3) {
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
                 // SYSCOIN
-                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, mapMintKeys, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, false);
+                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, setMintTxs, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, false);
                 if (res == DISCONNECT_FAILED) {
                     LogPrintf("Verification error: irrecoverable inconsistency in block data at %d, hash=%s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
                     return VerifyDBResult::CORRUPTED_BLOCK_DB;
@@ -5368,7 +5367,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
 }
 
 /** Apply the effects of a block on the utxo cache, ignoring that it may already have been applied. */
-bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxMap &mapMintKeys, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
+bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
 {
     // TODO: merge with ConnectBlock
     CBlock block;
@@ -5378,17 +5377,16 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         return error("ReplayBlock(): ReadBlockFromDisk failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
     }
     // SYSCOIN
-    const uint256& blockHash = pindex->GetBlockHash();
-    const bool ibd = m_chainman.IsInitialBlockDownload();
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
-    BlockValidationState state;
+    const bool ibd = m_chainman.IsInitialBlockDownload();
     CDeterministicMNListNEVMAddressDiff diff;
+    BlockValidationState state;
     if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, ibd)) {
         return error("%s: ProcessSpecialTxsInBlock for block %s failed with %s", __func__,
             pindex->GetBlockHash().ToString(), state.ToString());
     }
     if(!ProcessNEVMData(m_chainman.m_blockman, block, m_chain.Tip()->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_chainman.m_options.adjusted_time_callback()), mapPoDA)) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "poda-validation-failed");
+        return error("ReplayBlock(): poda-validation-failed");
     }
     for (const CTransactionRef& tx : block.vtx) {
         if (!tx->IsCoinBase()) {
@@ -5406,7 +5404,7 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
                     return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
                 }
                 // just temp var not used in !fJustCheck mode
-                if (!CheckSyscoinInputs(ibd, chainParams, *tx, txHash, tx_state, false, (uint32_t)pindex->nHeight, m_chain.Tip()->GetMedianTimePast(), blockHash, false, mapMintKeys, mapAssetIn, mapAssetOut)) {
+                if (!CheckSyscoinInputs(chainParams, *tx, txHash, tx_state, (uint32_t)pindex->nHeight, false, setMintTxs, mapAssetIn, mapAssetOut)) {
                     return error("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
                 }
             }
@@ -5432,7 +5430,7 @@ bool Chainstate::ReplayBlocks()
     // SYSCOIN
     PoDAMAPMemory mapPoDAConnect;
     NEVMDataVec vecNEVMDataDisconnect;
-    NEVMMintTxMap mapMintKeysDisconnect, mapMintKeysConnect;
+    NEVMMintTxSet setMintTxsDisconnect, setMintTxsConnect;
     std::vector<uint256> vecNEVMBlocks;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
     BlockValidationState state;
@@ -5468,7 +5466,7 @@ bool Chainstate::ReplayBlocks()
             }
             LogPrintf("Rolling back %s (%i)\n", pindexOld->GetBlockHash().ToString(), pindexOld->nHeight);
             // SYSCOIN
-            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, mapMintKeysDisconnect, vecNEVMDataDisconnect, vecNEVMBlocks, vecTXIDPairs);
+            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, setMintTxsDisconnect, vecNEVMDataDisconnect, vecNEVMBlocks, vecTXIDPairs);
             if (res == DISCONNECT_FAILED) {
                 return error("RollbackBlock(): DisconnectBlock failed at %d, hash=%s", pindexOld->nHeight, pindexOld->GetBlockHash().ToString());
             }
@@ -5481,7 +5479,7 @@ bool Chainstate::ReplayBlocks()
     }
     // SYSCOIN must flush for now because disconnect may remove asset data and rolling forward expects it to be clean from db
     if(pnevmtxmintdb != nullptr){
-        if(!pnevmtxmintdb->FlushErase(mapMintKeysDisconnect) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(vecNEVMDataDisconnect)){
+        if(!pnevmtxmintdb->FlushErase(setMintTxsDisconnect) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(vecNEVMDataDisconnect)){
             return error("RollbackBlock(): Error flushing to asset dbs on disconnect %s", pindexOld->GetBlockHash().ToString());
         }
     }
@@ -5494,7 +5492,7 @@ bool Chainstate::ReplayBlocks()
         LogPrintf("Rolling forward %s (%i)\n", pindex.GetBlockHash().ToString(), nHeight);
         m_chainman.GetNotifications().progress(_("Replaying blocks…"), (int)((nHeight - nForkHeight) * 100.0 / (pindexNew->nHeight - nForkHeight)), false);
         // SYSCOIN
-        if (!RollforwardBlock(&pindex, cache, mapNEVMTxRoots, mapMintKeysConnect, mapPoDAConnect, vecTXIDPairs)) return false;
+        if (!RollforwardBlock(&pindex, cache, mapNEVMTxRoots, setMintTxsConnect, mapPoDAConnect, vecTXIDPairs)) return false;
     }
 
     cache.SetBestBlock(pindexNew->GetBlockHash());
@@ -5504,7 +5502,7 @@ bool Chainstate::ReplayBlocks()
         pnevmdatadb->FlushDataToCache(mapPoDAConnect, pindexNew->GetMedianTimePast());
     }
     if(pnevmtxmintdb) {
-        pnevmtxmintdb->FlushDataToCache(mapMintKeysConnect);
+        pnevmtxmintdb->FlushDataToCache(setMintTxsConnect);
     }
     if(pblockindexdb) {
         pblockindexdb->FlushDataToCache(vecTXIDPairs);

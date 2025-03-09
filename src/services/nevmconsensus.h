@@ -7,6 +7,7 @@
 #include <primitives/transaction.h>
 #include <dbwrapper.h>
 #include <consensus/params.h>
+#include <util/hasher.h>
 class TxValidationState;
 class CCoinsViewCache;
 class CTxUndo;
@@ -32,5 +33,5 @@ public:
     const PoDAMAP& GetMapCache() const { return mapCache;}
 };
 extern std::unique_ptr<CNEVMDataDB> pnevmdatadb;
-bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut);
+bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut);
 #endif // SYSCOIN_SERVICES_NEVMCONSENSUS_H

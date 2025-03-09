@@ -30,7 +30,7 @@
 #include <evo/providertx.h>
 #include <evo/deterministicmns.h>   
 extern bool EraseNEVMData(const NEVMDataVec&);
-extern NEVMMintTxMap mapMintKeysMempool;
+extern NEVMMintTxSet setMintTxsMempool;
 extern std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
 
 #include <cmath>
@@ -641,7 +641,7 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     if(IsSyscoinMintTx(it->GetTx().nVersion)) {
         CMintSyscoin mintSyscoin(it->GetTx());
         if(!mintSyscoin.IsNull())
-            mapMintKeysMempool.erase(mintSyscoin.nTxHash);
+            setMintTxsMempool.erase(mintSyscoin.nTxHash);
     }
     // completely remove data if we are expiring due to timeout or trimming mempool, any other and it may be block related where we keep around until chainlock eventually prune them
     else if(it->GetTx().IsNEVMData() && (reason == MemPoolRemovalReason::EXPIRY || reason == MemPoolRemovalReason::SIZELIMIT)) {

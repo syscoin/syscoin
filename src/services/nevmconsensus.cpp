@@ -23,10 +23,10 @@ bool fNEVMConnection = false;
 bool fRegTest = false;
 bool fSigNet = false;
 
-bool DisconnectSyscoinTransaction(const CTransaction& tx, const uint256& txHash, const CTxUndo& txundo, CCoinsViewCache& view, NEVMMintTxMap &mapMintKeys, NEVMDataVec &NEVMDataVecOut) {
+bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut) {
  
     if(IsSyscoinMintTx(tx.nVersion)) {
-        if(!DisconnectMintAsset(tx, txHash, mapMintKeys))
+        if(!DisconnectMintAsset(tx, setMintTxs))
             return false;       
     }
     else {
