@@ -173,14 +173,14 @@ bool CheckSyscoinMintInternal(
     if (!rlpTxValue.isList() || rlpTxValue.itemCount() < 8) {
         return FormatSyscoinErrorMessage(state, "mint-tx-rlp-structure-fail", fJustCheck);
     }
-    dev::u256 nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
+    const dev::u256 &nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
     if (nChainID != dev::u256(Params().GetConsensus().nNEVMChainID)) {
         return FormatSyscoinErrorMessage(state, "mint-wrong-chainid", fJustCheck);
     }
     if (!rlpTxValue[5].isData()) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receiver-field", fJustCheck);
     }
-    dev::Address toField = rlpTxValue[5].toHash<dev::Address>(dev::RLP::VeryStrict);
+    const dev::Address &toField = rlpTxValue[5].toHash<dev::Address>(dev::RLP::VeryStrict);
     if (toField.asBytes() != Params().GetConsensus().vchSYSXERC20Manager) {
         return FormatSyscoinErrorMessage(state, "mint-incorrect-bridge-manager", fJustCheck);
     }
