@@ -1844,7 +1844,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
                     }
                 } else if((int64_t)nHeightFromGeth > nHeightLocalGeth) {
-                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth, nHeightFromGeth + Params().GetConsensus().nNEVMStartBlock);
+                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth);
                 }
             } else if(nHeightLocalGeth > 1){
                 fNEVMConnection = false;
