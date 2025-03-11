@@ -53,12 +53,12 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
 
     CAmount nGovernanceBudgetUp = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
     CAmount nGovernanceBudgetDown = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 100.0));
-    if (nGovernanceBudgetDown < CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MIN) {
-        nGovernanceBudgetDown = CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MIN;
+    if (nGovernanceBudgetDown < CSuperblock::SUPERBLOCK_BUDGET_MIN) {
+        nGovernanceBudgetDown = CSuperblock::SUPERBLOCK_BUDGET_MIN;
     }
     
-    if (nGovernanceBudgetUp > CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MAX) {
-        nGovernanceBudgetUp = CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MAX;
+    if (nGovernanceBudgetUp > CSuperblock::SUPERBLOCK_BUDGET_MAX) {
+        nGovernanceBudgetUp = CSuperblock::SUPERBLOCK_BUDGET_MAX;
     }
     
     const CAmount &nSuperblockMaxValue =  blockReward + nGovernanceBudgetUp;
