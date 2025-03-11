@@ -328,7 +328,7 @@ void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterminis
                 NEVMDiffEntry entry;
                 entry.type = NEVMDiffType::Added;
                 entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
-                entry.collateralHeight = toPtr->pdmnState->nCollateralHeight;
+                entry.collateralHeight = uint32_t(toPtr->pdmnState->nCollateralHeight);
                 nevmDiffMap[toPtr->proTxHash] = entry;
             }
             diffRet.addedMNs.emplace_back(toPtr);
@@ -346,12 +346,13 @@ void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterminis
                         // Address was added.
                         entry.type = NEVMDiffType::Added;
                         entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
-                        entry.collateralHeight = toPtr->pdmnState->nCollateralHeight;
+                        entry.collateralHeight = uint32_t(toPtr->pdmnState->nCollateralHeight);
                     } else {
                         // Address was updated.
                         entry.type = NEVMDiffType::Updated;
                         entry.oldAddress = fromPtr->pdmnState->vchNEVMAddress;
                         entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
+                        entry.collateralHeight = uint32_t(toPtr->pdmnState->nCollateralHeight);
                     }
                     nevmDiffMap[toPtr->proTxHash] = entry;
                 }
@@ -389,7 +390,7 @@ void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterminis
                 diffRetNEVMAddress.addedMNNEVM.emplace_back(entry.newAddress, entry.collateralHeight);
                 break;
             case NEVMDiffType::Updated:
-                diffRetNEVMAddress.updatedMNNEVM.emplace_back(entry.oldAddress, entry.newAddress);
+                diffRetNEVMAddress.updatedMNNEVM.emplace_back(entry.oldAddress, std::make_pair(entry.newAddress, entry.collateralHeight));
                 break;
             case NEVMDiffType::Removed:
                 diffRetNEVMAddress.removedMNNEVM.emplace_back(entry.oldAddress);
@@ -576,7 +577,7 @@ std::string CDeterministicMNListNEVMAddressDiff::ToString() const {
     }
 
     for (const auto& entry : updatedMNNEVM) {
-        updatedStr += strprintf("(OldAddress=%s, NewAddress=%s) ", HexStr(entry.first), HexStr(entry.second));
+        updatedStr += strprintf("(OldAddress=%s, NewAddress=%s, CollateralHeight=%d) ", HexStr(entry.first), HexStr(entry.second.first), entry.second.second);
     }
 
     for (const auto& entry : removedMNNEVM) {
