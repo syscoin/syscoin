@@ -99,6 +99,7 @@ public:
     static constexpr int SUPERBLOCK_PAYMENT_LIMIT_SAME = 0;
     static constexpr CAmount SUPERBLOCK_INITIAL_BUDGET = 2000000.00*COIN;
     static constexpr CAmount SUPERBLOCK_INITIAL_BUDGET_MAX = 5000000.00*COIN;
+    static constexpr CAmount SUPERBLOCK_INITIAL_BUDGET_MIN = 20000*COIN;
     CSuperblock();
     CSuperblock(int nBlockHeight, std::vector<CGovernancePayment> vecPayments);
     explicit CSuperblock(uint256& nHash);
