@@ -28,9 +28,6 @@ bool CheckSyscoinMintInternal(
     uint64_t &nAssetFromLog,
     CAmount &outputAmount,
     std::string &witnessAddress) {
-    nAssetFromLog = 0;
-    outputAmount = 0;
-    witnessAddress.clear();
     NEVMTxRoot txRootDB;
     if (!fRegTest) {
         LOCK(cs_setethstatus);
@@ -61,6 +58,9 @@ bool CheckSyscoinMintInternal(
     const std::vector<unsigned char>& vchFreezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
 
     for (size_t i = 0; i < itemCount; ++i) {
+        nAssetFromLog = 0;
+        outputAmount = 0;
+        witnessAddress.clear();
         const dev::RLP& rlpLog = rlpLogs[i];
         if (!rlpLog.isList() || rlpLog.itemCount() < 3) {
             continue;
@@ -135,10 +135,10 @@ bool CheckSyscoinMintInternal(
         return FormatSyscoinErrorMessage(state, "mint-missing-freeze-log", fJustCheck);
     }
     // check transaction spv proofs
-    const std::vector<unsigned char> rlpTxRootVec(txRootDB.nTxRoot.begin(), txRootDB.nTxRoot.end());
+    const std::vector<unsigned char> rlpTxRootVec(mintSyscoin.nTxRoot.begin(), mintSyscoin.nTxRoot.end());
     dev::RLPStream sTxRoot, sReceiptRoot;
     sTxRoot.append(rlpTxRootVec);
-    const std::vector<unsigned char> rlpReceiptRootVec(txRootDB.nReceiptRoot.begin(),  txRootDB.nReceiptRoot.end());
+    const std::vector<unsigned char> rlpReceiptRootVec(mintSyscoin.nReceiptRoot.begin(),  mintSyscoin.nReceiptRoot.end());
     sReceiptRoot.append(rlpReceiptRootVec);
     const dev::RLP rlpTxRoot(sTxRoot.out());
     const dev::RLP rlpReceiptRoot(sReceiptRoot.out());
