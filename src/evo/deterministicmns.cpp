@@ -1056,7 +1056,7 @@ void CDeterministicMNManager::DoMaintenance() {
         m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList>>(db_params, LIST_CACHE_SIZE);
         // Restore the caches from the copies
         m_evoDb->RestoreCaches(mapCacheCopy, eraseCacheCopy);
-        LogPrintf("CDeterministicMNManager::DoMaintenance Database successfully wiped and recreated.\n");
+        LogPrint(BCLog::SYS, "CDeterministicMNManager::DoMaintenance Database successfully wiped and recreated.\n");
     }
 }
 bool CDeterministicMNManager::FlushCacheToDisk() {
