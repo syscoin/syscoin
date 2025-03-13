@@ -197,16 +197,13 @@ public:
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 57;
-        consensus.vchSYSXBurnMethodSignature = ParseHex("ab972f5a");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
-        consensus.vchTokenFreezeMethod = ParseHex("8f3b257b2cea086a69bcfbefab36555c9e6275fc56ada0f1d8796222f6874fec");
+        consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 348000;
         consensus.nNEVMStartBlock = 1317500;
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
         consensus.nNexusStartBlock = 2000000;
-        consensus.nUTXOAssetsBlock = 1004200;
-        consensus.nUTXOAssetsBlockProvisioning = consensus.nNEVMStartBlock + 10000;
         consensus.DIP0003Height = 1004200;
         consensus.DIP0003EnforcementHeight = 1004200;
         /**
@@ -361,9 +358,8 @@ public:
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
-        consensus.vchSYSXBurnMethodSignature = ParseHex("ab972f5a");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
-        consensus.vchTokenFreezeMethod = ParseHex("8f3b257b2cea086a69bcfbefab36555c9e6275fc56ada0f1d8796222f6874fec");
+        consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
         consensus.nPODAStartBlock = 1004000;
@@ -371,8 +367,6 @@ public:
         consensus.nV19StartBlock = 1100000;
         consensus.DIP0003Height = 545000;
         consensus.DIP0003EnforcementHeight = 545000;
-        consensus.nUTXOAssetsBlock = 545000;
-        consensus.nUTXOAssetsBlockProvisioning = consensus.nNEVMStartBlock + 10000;
         pchMessageStart[0] = 0xce;
         pchMessageStart[1] = 0xe2;
         pchMessageStart[2] = 0xca;
@@ -601,9 +595,8 @@ public:
         consensus.nLegacyBlocksBefore = 0;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
-        consensus.vchSYSXBurnMethodSignature = ParseHex("ab972f5a");
         consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
-        consensus.vchTokenFreezeMethod = ParseHex("8f3b257b2cea086a69bcfbefab36555c9e6275fc56ada0f1d8796222f6874fec");
+        consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nPODAStartBlock = 0;
@@ -611,8 +604,7 @@ public:
         consensus.nV19StartBlock = opts.v19startblock;
         consensus.DIP0003Height = opts.dip3startblock;
         consensus.DIP0003EnforcementHeight = opts.dip3enforcement;
-        consensus.nUTXOAssetsBlock = 0;
-        consensus.nUTXOAssetsBlockProvisioning = 1000;
+
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;
         pchMessageStart[2] = 0xb5;

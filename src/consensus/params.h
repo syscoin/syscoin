@@ -158,7 +158,6 @@ struct Params {
     // SYSCOIN
     uint64_t nSYSXAsset;
     uint32_t nNEVMChainID;
-    std::vector<unsigned char> vchSYSXBurnMethodSignature;
     std::vector<unsigned char> vchSYSXERC20Manager;
     std::vector<unsigned char> vchTokenFreezeMethod;
     unsigned int nSeniorityHeight1;
@@ -170,8 +169,6 @@ struct Params {
     int nNEVMStartBlock;
     int nPODAStartBlock;
     int nNexusStartBlock;
-    int nUTXOAssetsBlock;
-    int nUTXOAssetsBlockProvisioning;
     int nV19StartBlock;
     uint64_t nMinMNSubsidySats;
         
