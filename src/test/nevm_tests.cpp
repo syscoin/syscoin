@@ -7,6 +7,8 @@
 #include <nevm/nevm.h>
 #include <nevm/common.h>
 #include <nevm/rlp.h>
+#include <nevm/address.h>
+#include <nevm/sha3.h>
 #include <script/interpreter.h>
 #include <script/script.h>
 #include <policy/policy.h>
@@ -14,7 +16,9 @@
 #include <key_io.h>
 #include <test/util/setup_common.h>
 #include <test/util/json.h>
-
+#include <validation.h>
+#include <consensus/validation.h>
+#include <services/assetconsensus.h>
 BOOST_FIXTURE_TEST_SUITE(nevm_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(seniority_test)
 {
@@ -75,19 +79,7 @@ BOOST_AUTO_TEST_CASE(halving_test)
     BOOST_CHECK_EQUAL(consensusParams.SubsidyHalvingIntervals(nextIntervalAfterFork + (consensusParams.nSubsidyHalvingInterval*2) - 1), 4);
     BOOST_CHECK_EQUAL(consensusParams.SubsidyHalvingIntervals(nextIntervalAfterFork + (consensusParams.nSubsidyHalvingInterval*2)), 5);
 }
-BOOST_AUTO_TEST_CASE(nevm_parseabidata)
-{
-    tfm::format(std::cout,"Running nevm_parseabidata...\n");
-    CAmount outputAmount;
-    const std::vector<unsigned char> &expectedMethodHash = ParseHex("54c988ff");
-    const std::vector<unsigned char> &rlpBytes = ParseHex("54c988ff00000000000000000000000000000000000000000000000000000002540be400000000000000000000000000000000000000000000000000000000009be8894b0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000002c62637274317130667265323430737939326d716b386b6b377073616561366b74366d3537323570377964636a0000000000000000000000000000000000000000");
-    std::string expectedAddress = "bcrt1q0fre240sy92mqk8kk7psaea6kt6m5725p7ydcj";
-    std::string address;
-    BOOST_CHECK(parseNEVMMethodInputData(expectedMethodHash, 8, 8, rlpBytes, outputAmount, address));
-    BOOST_CHECK_EQUAL(outputAmount, 100*COIN);
-    BOOST_CHECK(address == expectedAddress);
 
-}
 BOOST_AUTO_TEST_CASE(nevmspv_valid)
 {
     tfm::format(std::cout,"Running nevmspv_valid...\n");

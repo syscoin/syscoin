@@ -551,6 +551,8 @@ RPCHelpMan listunspent()
                             {RPCResult::Type::BOOL, "safe", "Whether this output is considered safe to spend. Unconfirmed transactions\n"
                                                             "from outside keys and unconfirmed replacement transactions are considered unsafe\n"
                                                             "and are not eligible for spending by fundrawtransaction and sendtoaddress."},
+                            {RPCResult::Type::NUM, "asset_guid",  /*optional=*/true, "Asset GUID if exists"},
+                            {RPCResult::Type::STR_AMOUNT, "asset_amount",  /*optional=*/true, "Asset amount if exists"},
                         }},
                     }
                 },
@@ -727,6 +729,11 @@ RPCHelpMan listunspent()
         PushParentDescriptors(*pwallet, scriptPubKey, entry);
         if (avoid_reuse) entry.pushKV("reused", reused);
         entry.pushKV("safe", out.safe);
+        // SYSCOIN
+        if(!out.txout.assetInfo.IsNull()) {
+            entry.pushKV("asset_guid", out.txout.assetInfo.nAsset);
+            entry.pushKV("asset_amount", ValueFromAmount(out.txout.assetInfo.nValue));
+        }
         results.push_back(entry);
     }
 

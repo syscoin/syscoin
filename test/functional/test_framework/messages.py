@@ -297,13 +297,15 @@ class CNEVMAddressUpdateEntry:
     def __init__(self):
         self.oldAddress = None
         self.newAddress = None
+        self.collateralHeight = None
 
     def deserialize(self, f):
         self.oldAddress = deser_string(f)
         self.newAddress = deser_string(f)
+        self.collateralHeight = struct.unpack("<I", f.read(4))[0]
         
     def __repr__(self):
-        return "CNEVMAddressUpdateEntry(oldAddress=%s, newAddress=%s)" % (self.oldAddress.hex(), self.newAddress.hex())
+        return "CNEVMAddressUpdateEntry(oldAddress=%s, newAddress=%s, collateralHeight=%d)" % (self.oldAddress.hex(), self.newAddress.hex(), self.collateralHeight)
 
 class CNEVMRemoveEntry:
     def __init__(self):

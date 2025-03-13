@@ -328,7 +328,7 @@ void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterminis
                 NEVMDiffEntry entry;
                 entry.type = NEVMDiffType::Added;
                 entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
-                entry.collateralHeight = toPtr->pdmnState->nCollateralHeight;
+                entry.collateralHeight = uint32_t(toPtr->pdmnState->nCollateralHeight);
                 nevmDiffMap[toPtr->proTxHash] = entry;
             }
             diffRet.addedMNs.emplace_back(toPtr);
@@ -346,12 +346,13 @@ void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterminis
                         // Address was added.
                         entry.type = NEVMDiffType::Added;
                         entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
-                        entry.collateralHeight = toPtr->pdmnState->nCollateralHeight;
+                        entry.collateralHeight = uint32_t(toPtr->pdmnState->nCollateralHeight);
                     } else {
                         // Address was updated.
                         entry.type = NEVMDiffType::Updated;
                         entry.oldAddress = fromPtr->pdmnState->vchNEVMAddress;
                         entry.newAddress = toPtr->pdmnState->vchNEVMAddress;
+                        entry.collateralHeight = uint32_t(toPtr->pdmnState->nCollateralHeight);
                     }
                     nevmDiffMap[toPtr->proTxHash] = entry;
                 }
@@ -389,7 +390,7 @@ void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterminis
                 diffRetNEVMAddress.addedMNNEVM.emplace_back(entry.newAddress, entry.collateralHeight);
                 break;
             case NEVMDiffType::Updated:
-                diffRetNEVMAddress.updatedMNNEVM.emplace_back(entry.oldAddress, entry.newAddress);
+                diffRetNEVMAddress.updatedMNNEVM.emplace_back(entry.oldAddress, std::make_pair(entry.newAddress, entry.collateralHeight));
                 break;
             case NEVMDiffType::Removed:
                 diffRetNEVMAddress.removedMNNEVM.emplace_back(entry.oldAddress);
@@ -465,7 +466,11 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
         throw(std::runtime_error(strprintf("%s: Can't add a masternode %s with a duplicate pubKeyOperator=%s", __func__,
                 dmn->proTxHash.ToString(), dmn->pdmnState->pubKeyOperator.Get().ToString())));
     }
-
+    if (!dmn->pdmnState->vchNEVMAddress.empty() && !AddUniqueProperty(*dmn, dmn->pdmnState->vchNEVMAddress)) {
+        mnUniquePropertyMap = mnUniquePropertyMapSaved;
+        throw(std::runtime_error(strprintf("%s: Can't add a masternode %s with a duplicate vchNEVMAddress=%s", __func__,
+                dmn->proTxHash.ToString(), dmn->pdmnState->pubKeyOperator.Get().ToString())));
+    }
     mnMap = mnMap.set(dmn->proTxHash, dmn);
     mnInternalIdMap = mnInternalIdMap.set(dmn->GetInternalId(), dmn->proTxHash);
     if (fBumpTotalCount) {
@@ -501,8 +506,8 @@ void CDeterministicMNList::UpdateMN(const CDeterministicMN& oldDmn, const std::s
     }
     if (!UpdateUniqueProperty(*dmn, oldState->vchNEVMAddress, pdmnState->vchNEVMAddress)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
-        throw(std::runtime_error(strprintf("%s: Can't update a masternode %s with a duplicate vchNEVMAddress=%s", __func__,
-                oldDmn.proTxHash.ToString(), HexStr(pdmnState->vchNEVMAddress))));
+        throw(std::runtime_error(strprintf("%s: Can't update a masternode %s with a duplicate old vchNEVMAddress=%s vs new vchNEVMAddress=%s", __func__,
+                oldDmn.proTxHash.ToString(), HexStr(oldState->vchNEVMAddress), HexStr(pdmnState->vchNEVMAddress))));
     }
     mnMap = mnMap.set(oldDmn.proTxHash, dmn);
 }
@@ -555,7 +560,11 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
         throw(std::runtime_error(strprintf("%s: Can't delete a masternode %s with a pubKeyOperator=%s", __func__,
                 proTxHash.ToString(), dmn->pdmnState->pubKeyOperator.Get().ToString())));
     }
-
+    if (!dmn->pdmnState->vchNEVMAddress.empty() && !DeleteUniqueProperty(*dmn, dmn->pdmnState->vchNEVMAddress)) {
+        mnUniquePropertyMap = mnUniquePropertyMapSaved;
+        throw(std::runtime_error(strprintf("%s: Can't delete a masternode %s with a vchNEVMAddress=%s", __func__,
+                proTxHash.ToString(), HexStr(dmn->pdmnState->vchNEVMAddress))));
+    }
     mnMap = mnMap.erase(proTxHash);
     mnInternalIdMap = mnInternalIdMap.erase(dmn->GetInternalId());
 }
@@ -568,7 +577,7 @@ std::string CDeterministicMNListNEVMAddressDiff::ToString() const {
     }
 
     for (const auto& entry : updatedMNNEVM) {
-        updatedStr += strprintf("(OldAddress=%s, NewAddress=%s) ", HexStr(entry.first), HexStr(entry.second));
+        updatedStr += strprintf("(OldAddress=%s, NewAddress=%s, CollateralHeight=%d) ", HexStr(entry.first), HexStr(entry.second.first), entry.second.second);
     }
 
     for (const auto& entry : removedMNNEVM) {
@@ -636,6 +645,7 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         // always update interface for payment detail changes
         uiInterface.NotifyMasternodeListChanged(newList);
     }
+
     return true;
 }
 
@@ -867,10 +877,10 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
             
                 // Handle pubKeyOperator changes
                 if (newState->pubKeyOperator != proTx.pubKeyOperator) {
-                    newState->ResetOperatorFields();
                     if(!newState->vchNEVMAddress.empty()) {
                         newList.m_changed_nevm_address = true;
                     }
+                    newState->ResetOperatorFields();
                     newState->BanIfNotBanned(nHeight);
                     newState->nVersion = proTx.nVersion;
                     newState->pubKeyOperator = proTx.pubKeyOperator;
@@ -895,10 +905,10 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-hash");
                 }
                 auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
-                newState->ResetOperatorFields();
                 if(!newState->vchNEVMAddress.empty()) {
                     newList.m_changed_nevm_address = true;
                 }
+                newState->ResetOperatorFields();
                 newState->BanIfNotBanned(nHeight);
                 newState->nRevocationReason = proTx.nReason;
                 newList.UpdateMN(proTx.proTxHash, newState);
@@ -1046,7 +1056,7 @@ void CDeterministicMNManager::DoMaintenance() {
         m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList>>(db_params, LIST_CACHE_SIZE);
         // Restore the caches from the copies
         m_evoDb->RestoreCaches(mapCacheCopy, eraseCacheCopy);
-        LogPrintf("CDeterministicMNManager::DoMaintenance Database successfully wiped and recreated.\n");
+        LogPrint(BCLog::SYS, "CDeterministicMNManager::DoMaintenance Database successfully wiped and recreated.\n");
     }
 }
 bool CDeterministicMNManager::FlushCacheToDisk() {

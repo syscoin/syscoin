@@ -390,8 +390,9 @@ private:
 class CDeterministicMNListNEVMAddressDiff
 {
 public:
-    std::vector<std::pair<std::vector<unsigned char>, int>> addedMNNEVM;
-    std::vector<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>> updatedMNNEVM;
+
+    std::vector<std::pair<std::vector<unsigned char>, uint32_t>> addedMNNEVM;
+    std::vector<std::pair<std::vector<unsigned char>, std::pair<std::vector<unsigned char>, uint32_t>>> updatedMNNEVM;
     std::vector<std::vector<unsigned char>> removedMNNEVM;
 
     SERIALIZE_METHODS(CDeterministicMNListNEVMAddressDiff, obj) {
@@ -415,7 +416,7 @@ struct NEVMDiffEntry {
     // For a removal, only oldAddress is needed.
     std::vector<unsigned char> oldAddress;
     std::vector<unsigned char> newAddress;
-    int collateralHeight = 0;
+    uint32_t collateralHeight = 0;
 };
 class CDeterministicMNListDiff
 {

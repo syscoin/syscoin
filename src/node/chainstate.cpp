@@ -22,6 +22,8 @@
 #include <validation.h>
 // SYSCOIN
 #include <services/nevmconsensus.h>
+#include <services/assetconsensus.h>
+#include <evo/evodb.h>
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_init.h>
 #include <governance/governance.h>
@@ -102,8 +104,6 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         .memory_only = options.block_tree_db_in_memory,
         .wipe_data = options.fReindexGeth,
         .options = chainman.m_options.block_tree_db});
-    if(!pblockindexdb->ReadLastKnownHeight(nLastKnownHeightOnStart))
-        nLastKnownHeightOnStart = 0;
     // PoDA data cannot be deleted from disk on reindex because chain on disk does not have PoDA information to recreate it
     pnevmdatadb.reset();
     pnevmdatadb = std::make_unique<CNEVMDataDB>(DBParams{

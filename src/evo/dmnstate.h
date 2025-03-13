@@ -101,6 +101,7 @@ public:
         addr = CService();
         scriptOperatorPayout = CScript();
         nRevocationReason = CProUpRevTx::REASON_NOT_SPECIFIED;
+        vchNEVMAddress.clear();
     }
     void BanIfNotBanned(int height)
     {

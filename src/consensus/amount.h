@@ -5,6 +5,9 @@
 
 #ifndef SYSCOIN_CONSENSUS_AMOUNT_H
 #define SYSCOIN_CONSENSUS_AMOUNT_H
+// SYSCOIN
+#include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 
 /** Amount in satoshis (Can be negative) */
@@ -24,4 +27,5 @@ static constexpr CAmount COIN = 100000000;
  * */
 static const CAmount MAX_MONEY = 1000000000000000000LL - 1LL;
 inline bool MoneyRange(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_MONEY); }
+typedef std::unordered_map<uint64_t, CAmount> CAssetsMap;
 #endif // SYSCOIN_CONSENSUS_AMOUNT_H

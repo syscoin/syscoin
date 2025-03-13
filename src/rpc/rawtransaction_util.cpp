@@ -104,15 +104,24 @@ void AddOutputs(CMutableTransaction& rawTx, const UniValue& outputs_in)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, duplicate key: data");
             }
             has_data = true;
+            // SYSCOIN
+            CAmount nAmount = 0;
+            if (outputs.exists("data_amount")) {
+                nAmount = AmountFromValue(outputs["data_amount"]);
+            }
             std::vector<unsigned char> data = ParseHexV(outputs[name_].getValStr(), "Data");
-            CTxOut out(0, CScript() << OP_RETURN << data);
+            CTxOut out(nAmount, CScript() << OP_RETURN << data);
             // SYSCOIN
             if(outputs.exists("datanevm")) {
                 out.vchNEVMData = ParseHexV(outputs["datanevm"].getValStr(), "DataNEVM");
             }
+            // SYSCOIN: Set transaction version if data_version is specified
+            if(outputs.exists("data_version")) {
+                rawTx.nVersion = outputs["data_version"].getInt<int>();
+            }
             rawTx.vout.push_back(out);
-        } else if (name_ == "datanevm") {
-            // no-op handled in "data"
+        } else if (name_ == "datanevm" || name_ == "data_amount" || name_ == "data_version") {
+            // SYSCOIN: no-op handled in "data"
         } else {
             CTxDestination destination = DecodeDestination(name_);
             if (!IsValidDestination(destination)) {

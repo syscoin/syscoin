@@ -104,7 +104,6 @@ std::vector<unsigned char> ParseHexO(const UniValue& o, std::string strKey);
  * @returns a CAmount if the various checks pass.
  */
 CAmount AmountFromValue(const UniValue& value, int decimals = 8);
-
 using RPCArgList = std::vector<std::pair<std::string, UniValue>>;
 std::string HelpExampleCli(const std::string& methodname, const std::string& args);
 std::string HelpExampleCliNamed(const std::string& methodname, const RPCArgList& args);

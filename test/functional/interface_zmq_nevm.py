@@ -401,14 +401,22 @@ class ZMQTest(SyscoinTestFramework):
         del expected_mapping[mn2_nevm_address.lower()]
         nevmsub.assertMNList(expected_mapping)
 
-        # Test case 6: Remove MN (should remove NEVM address)
-        self.log.info("Removing MN")
+        # Test case 6: Remove MN (should remove NEVM address) via spending collateral
+        self.log.info("Removing MN by spending collateral")
         self.remove_mn(self.mns[0])
         self.sync_blocks()
         self.mns[1].removal_height = self.nodes[0].getblockcount()
         del expected_mapping[new_mn1_nevm_address.lower()]
         nevmsub.assertMNList(expected_mapping)
 
+        # The MN should release the address from global storage so another MN can take it
+        self.log.info("Updating MN to NEVM address to that of previous removed MN")
+        self.update_mn_set_nevm(self.mns[1], new_mn1_nevm_address)
+        self.sync_blocks()
+        self.mns[1].last_update_height = self.nodes[0].getblockcount()
+        expected_mapping[new_mn1_nevm_address.lower()] = self.mns[1].collateral_height
+        nevmsub.assertMNList(expected_mapping)
+        
         # Test case 7: Reorg that undoes an MN creation (should remove NEVM address)
         self.log.info("Reorg to undo MN creation")
         invalidblock = self.reorg(self.mns[0].collateral_height)

@@ -5,7 +5,6 @@
 #include <node/blockstorage.h>
 #include <rpc/util.h>
 #include <services/nevmconsensus.h>
-#include <services/rpc/nevmrpc.h>
 #include <chainparams.h>
 #include <rpc/server.h>
 #include <thread>
@@ -23,57 +22,6 @@
 #include <common/args.h>
 #include <logging.h>
 using node::GetTransaction;
-extern RecursiveMutex cs_setethstatus;
-
-static RPCHelpMan syscoindecoderawtransaction()
-{
-    return RPCHelpMan{"syscoindecoderawtransaction",
-    "\nDecode raw syscoin transaction (serialized, hex-encoded) and display information pertaining to the service that is included in the transactiion data output(OP_RETURN)\n",
-    {
-        {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction hex string."}
-    },
-    RPCResult{
-        RPCResult::Type::OBJ, "", "",
-        {
-            {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
-            {RPCResult::Type::STR_HEX, "blockhash", "Block confirming the transaction, if any"},
-            {RPCResult::Type::NUM, "value", "The total amount in this transaction"},
-        }},
-    RPCExamples{
-        HelpExampleCli("syscoindecoderawtransaction", "\"hexstring\"")
-        + HelpExampleRpc("syscoindecoderawtransaction", "\"hexstring\"")
-    },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    const UniValue &params = request.params;
-    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
-
-    std::string hexstring = params[0].get_str();
-    CMutableTransaction tx;
-    if(!DecodeHexTx(tx, hexstring, false, true)) {
-        if(!DecodeHexTx(tx, hexstring, true, true)) {
-             throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Could not decode transaction");
-        }
-    }
-    CTransactionRef rawTx(MakeTransactionRef(std::move(tx)));
-    if (rawTx->IsNull())
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Could not decode transaction");
-
-    CBlockIndex* blockindex = nullptr;
-    uint256 hashBlock;
-    if (g_txindex) {
-        g_txindex->BlockUntilSyncedToCurrentChain();
-    }
-    // block may not be found
-    rawTx = GetTransaction(blockindex, node.mempool.get(), rawTx->GetHash(), hashBlock, node.chainman->m_blockman);
-
-    UniValue output(UniValue::VOBJ);
-    if(rawTx && !DecodeSyscoinRawtransaction(*rawTx, hashBlock, output))
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Not a Syscoin transaction");
-    return output;
-},
-    };
-}
 
 static RPCHelpMan getnevmblockchaininfo()
 {
@@ -524,89 +472,14 @@ static RPCHelpMan syscoinstartgeth()
     };
 }
 
-static RPCHelpMan syscoingettxroots()
-{
-    return RPCHelpMan{"syscoingettxroots",
-    "\nGet NEVM transaction and receipt roots based on block hash.\n",
-    {
-        {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash to lookup."}
-    },
-    RPCResult{
-        RPCResult::Type::OBJ, "", "",
-        {
-            {RPCResult::Type::STR_HEX, "txroot", "The transaction merkle root"},
-            {RPCResult::Type::STR_HEX, "receiptroot", "The receipt merkle root"},
-        }},
-    RPCExamples{
-        HelpExampleCli("syscoingettxroots", "0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
-        + HelpExampleRpc("syscoingettxroots", "0xd8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
-    },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    LOCK(cs_setethstatus);
-    std::string blockHashStr = request.params[0].get_str();
-    blockHashStr = RemovePrefix(blockHashStr, "0x");  // strip 0x
-    uint256 nBlockHash;
-    if(!ParseHashStr(blockHashStr, nBlockHash)) {
-         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read block hash");
-    }
-    NEVMTxRoot txRootDB;
-    if(!pnevmtxrootsdb || !pnevmtxrootsdb->ReadTxRoots(nBlockHash, txRootDB)){
-       throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read transaction roots");
-    }
-
-    UniValue ret(UniValue::VOBJ);
-    ret.pushKV("blockhash", nBlockHash.GetHex());
-    ret.pushKV("txroot", txRootDB.nTxRoot.GetHex());
-    ret.pushKV("receiptroot", txRootDB.nReceiptRoot.GetHex());
-
-    return ret;
-},
-    };
-}
-
-static RPCHelpMan syscoincheckmint()
-{
-    return RPCHelpMan{"syscoincheckmint",
-    "\nGet the Syscoin mint transaction by looking up using NEVM tx hash (This is no the txid, it is the sha3 of the transaction bytes value).\n",
-    {
-        {"nevm_txhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "NEVM Tx Hash used to burn funds to move to Syscoin."}
-    },
-    RPCResult{
-        RPCResult::Type::OBJ, "", "",
-        {
-            {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
-        }},
-    RPCExamples{
-        HelpExampleCli("syscoincheckmint", "d8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
-        + HelpExampleRpc("syscoincheckmint", "d8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
-    },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    std::string strTxHash = request.params[0].get_str();
-    strTxHash = RemovePrefix(strTxHash, "0x");  // strip 0x
-    uint256 sysTxid;
-    if(!pnevmtxmintdb || !pnevmtxmintdb->Read(uint256S(strTxHash), sysTxid)){
-       throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read Syscoin txid using mint transaction hash");
-    }
-    UniValue output(UniValue::VOBJ);
-    output.pushKV("txid", sysTxid.GetHex());
-    return output;
-},
-    };
-}
-
 // clang-format on
 void RegisterNEVMRPCCommands(CRPCTable &t)
 {
     static const CRPCCommand commands[]{
-        {"syscoin", &syscoingettxroots},
         {"syscoin", &syscoingetspvproof},
-        {"syscoin", &syscoindecoderawtransaction},
         {"syscoin", &listnevmblobdata},
         {"syscoin", &syscoinstopgeth},
         {"syscoin", &syscoinstartgeth},
-        {"syscoin", &syscoincheckmint},
         {"syscoin", &getnevmblockchaininfo},
         {"syscoin", &getnevmblobdata},
     };

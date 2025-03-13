@@ -49,6 +49,7 @@ bool ParseHashStr(const std::string& strHex, uint256& result);
 [[nodiscard]] util::Result<int> SighashFromStr(const std::string& sighash);
 
 // core_write.cpp
+// SYSCOIN
 UniValue ValueFromAmount(const CAmount amount);
 std::string FormatScript(const CScript& script);
 std::string EncodeHexTx(const CTransaction& tx, const int serializeFlags = 0);

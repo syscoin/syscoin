@@ -50,15 +50,21 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
     // Initial thresholds
     const CAmount &nPaymentsLimitUp = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 2) / 100.0));
     const CAmount &nPaymentsLimitDown = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 2) / 100.0));
-    const CAmount &nGovernanceBudgetDown = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 100.0));
-    CAmount nGovernanceBudget = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
-    if (nGovernanceBudget > CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MAX) {
-        nGovernanceBudget = CSuperblock::SUPERBLOCK_INITIAL_BUDGET_MAX;
+
+    CAmount nGovernanceBudgetUp = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
+    CAmount nGovernanceBudgetDown = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 100.0));
+    if (nGovernanceBudgetDown < CSuperblock::SUPERBLOCK_BUDGET_MIN) {
+        nGovernanceBudgetDown = CSuperblock::SUPERBLOCK_BUDGET_MIN;
     }
-    const CAmount &nSuperblockMaxValue =  blockReward + nGovernanceBudget;
+    
+    if (nGovernanceBudgetUp > CSuperblock::SUPERBLOCK_BUDGET_MAX) {
+        nGovernanceBudgetUp = CSuperblock::SUPERBLOCK_BUDGET_MAX;
+    }
+    
+    const CAmount &nSuperblockMaxValue =  blockReward + nGovernanceBudgetUp;
 
     bool isSuperblockMaxValueMet = block.vtx[0]->GetValueOut() <= nSuperblockMaxValue;
-    LogPrint(BCLog::GOBJECT, "block.vtx[0]->GetValueOut() %lld <= nSuperblockMaxValue %lld (nGovernanceBudget %lld) nSuperblockPayment %lld\n", block.vtx[0]->GetValueOut(), nSuperblockMaxValue, nGovernanceBudget, nSuperblockPayment);
+    LogPrint(BCLog::GOBJECT, "block.vtx[0]->GetValueOut() %lld <= nSuperblockMaxValue %lld (nGovernanceBudgetUp %lld) nSuperblockPayment %lld\n", block.vtx[0]->GetValueOut(), nSuperblockMaxValue, nGovernanceBudgetUp, nSuperblockPayment);
 
     // bail out in case superblock limits were exceeded
     if (!isSuperblockMaxValueMet) {
@@ -77,7 +83,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
             if(nSuperblockPayment <= nPaymentsLimitDown) {
                 nAdjustment = nGovernanceBudgetDown;
             } else if(nSuperblockPayment >= nPaymentsLimitUp) {
-                nAdjustment = nGovernanceBudget;
+                nAdjustment = nGovernanceBudgetUp;
             }
             governance->m_sb->WriteCache(uint256(), nAdjustment);
         }
@@ -102,7 +108,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
             if(nSuperblockPayment <= nPaymentsLimitDown) {
                 nAdjustment = nGovernanceBudgetDown;
             } else if(nSuperblockPayment >= nPaymentsLimitUp) {
-                nAdjustment = nGovernanceBudget;
+                nAdjustment = nGovernanceBudgetUp;
             }
             governance->m_sb->WriteCache(uint256(), nAdjustment);
         }
@@ -131,7 +137,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         if(nSuperblockPayment <= nPaymentsLimitDown) {
             nAdjustment = nGovernanceBudgetDown;
         } else if(nSuperblockPayment >= nPaymentsLimitUp) {
-            nAdjustment = nGovernanceBudget;
+            nAdjustment = nGovernanceBudgetUp;
         }
         governance->m_sb->WriteCache(uint256(), nAdjustment);
     }

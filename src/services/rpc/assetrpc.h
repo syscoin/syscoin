@@ -2,11 +2,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#ifndef SYSCOIN_SERVICES_RPC_NEVMRPC_H
-#define SYSCOIN_SERVICES_RPC_NEVMRPC_H
+#ifndef SYSCOIN_SERVICES_RPC_ASSETRPC_H
+#define SYSCOIN_SERVICES_RPC_ASSETRPC_H
 #include <string>
-class CTransaction;
-class uint256;
-class UniValue;
+bool SysTxToJSON(const CTransaction &tx, const uint256& hashBlock, UniValue &entry);
 bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, const uint256 &hashBlock, UniValue& output);
-#endif // SYSCOIN_SERVICES_RPC_NEVMRPC_H
+#endif // SYSCOIN_SERVICES_RPC_ASSETRPC_H

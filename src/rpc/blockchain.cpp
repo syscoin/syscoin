@@ -2397,6 +2397,12 @@ static RPCHelpMan scantxoutset()
             unspent.pushKV("amount", ValueFromAmount(txo.nValue));
             unspent.pushKV("coinbase", coin.IsCoinBase());
             unspent.pushKV("height", (int32_t)coin.nHeight);
+            // SYSCOIN
+            if(!coin.out.assetInfo.IsNull()) {
+                unspent.pushKV("asset_guid", coin.out.assetInfo.nAsset);
+                unspent.pushKV("amount", ValueFromAmount(coin.out.assetInfo.nValue));
+            }
+
             unspents.push_back(unspent);
         }
         result.pushKV("unspents", unspents);

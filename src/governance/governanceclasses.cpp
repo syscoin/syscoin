@@ -479,7 +479,7 @@ CAmount CSuperblock::GetPaymentsLimit(int nBlockHeight)
     }
     CAmount nPaymentsLimit = 0;
     if(!governance->m_sb->ReadCache(uint256(), nPaymentsLimit)) {
-        nPaymentsLimit = CSuperblock::SUPERBLOCK_INITIAL_BUDGET;
+        nPaymentsLimit = CSuperblock::SUPERBLOCK_BUDGET;
     }
     return nPaymentsLimit;
 }

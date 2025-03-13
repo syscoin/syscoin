@@ -143,8 +143,6 @@ int main(int argc, char* argv[])
     cache_sizes.block_tree_db = 2 << 20;
     cache_sizes.coins_db = 2 << 22;
     cache_sizes.coins = (450 << 20) - (2 << 20) - (2 << 22);
-    // SYSCOIN
-    cache_sizes.evo_db = 2 << 20;
     node::ChainstateLoadOptions options;
     options.connman = Assert(connman.get());
     options.banman =  Assert(banman.get());

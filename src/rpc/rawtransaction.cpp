@@ -131,8 +131,17 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
         }},
         {RPCResult::Type::OBJ, "systx", /*optional=*/true, "",
         {
+            {RPCResult::Type::STR, "txtype", "Transaction type"},
             {RPCResult::Type::STR_HEX, "txid", "Transaction id"},
             {RPCResult::Type::STR_HEX, "blockhash", "Block hash"},
+            {RPCResult::Type::ARR, "allocations", /*optional=*/true, "",
+            {
+                {RPCResult::Type::OBJ, "receiverObj", /*optional=*/true, "",
+                {
+                    {RPCResult::Type::NUM, "asset_guid", "Asset guid"},
+                    {RPCResult::Type::STR_AMOUNT, "amount", "Value"}
+                }}
+            }},
             {RPCResult::Type::STR, "nevm_destination", /*optional=*/true, "NEVM destination address"},
             {RPCResult::Type::OBJ, "spv_proof", /*optional=*/true, "",
             {
@@ -144,8 +153,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
                 {RPCResult::Type::STR, "txpath", "txpath"},
                 {RPCResult::Type::STR, "posReceipt", "pos receipt"},
                 {RPCResult::Type::STR, "receiptroot", "receipt root"},
-                {RPCResult::Type::STR, "receiptparentnodes", "Receipt parent nodes"},
-                {RPCResult::Type::STR_AMOUNT, "value", "The value in " + CURRENCY_UNIT}
+                {RPCResult::Type::STR, "receiptparentnodes", "Receipt parent nodes"}
             }},
         }},
         {RPCResult::Type::OBJ, "proRegTx", /*optional=*/true, "",
@@ -243,6 +251,9 @@ static std::vector<RPCArg> CreateTxDoc()
                 {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
                     {
                         {"data", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A key-value pair. The key must be \"data\", the value is hex-encoded data"},
+                        // SYSCOIN
+                        {"data_amount", RPCArg::Type::AMOUNT, RPCArg::Default{0}, "Amount to burn in OP_RETURN output for Syscoin transactions"},
+                        {"data_version", RPCArg::Type::NUM, RPCArg::Default{0}, "Transaction version to use for Syscoin transactions"},
                     },
                 },
             },

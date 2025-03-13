@@ -76,6 +76,7 @@ CAmount AmountFromValue(const UniValue& value, int decimals)
         throw JSONRPCError(RPC_TYPE_ERROR, "Amount out of range");
     return amount;
 }
+
 uint256 ParseHashV(const UniValue& v, std::string strName)
 {
     const std::string& strHex(v.get_str());

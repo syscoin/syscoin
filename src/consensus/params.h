@@ -156,8 +156,8 @@ struct LLMQParams {
 struct Params {
     uint256 hashGenesisBlock;
     // SYSCOIN
+    uint64_t nSYSXAsset;
     uint32_t nNEVMChainID;
-    std::vector<unsigned char> vchSYSXBurnMethodSignature;
     std::vector<unsigned char> vchSYSXERC20Manager;
     std::vector<unsigned char> vchTokenFreezeMethod;
     unsigned int nSeniorityHeight1;

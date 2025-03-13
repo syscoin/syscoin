@@ -42,7 +42,7 @@ public:
         LOCK(cs);
         if(!skipFlushOnNextRead && bFlushOnNextRead) {
             bFlushOnNextRead = false;
-            LogPrintf("Evodb::ReadCache flushing cache before read\n");
+            LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
             FlushCacheToDisk();
         }
         auto it = mapCache.find(key);
@@ -128,9 +128,13 @@ public:
 
     bool FlushCacheToDisk() {
         LOCK(cs);
+
+        // If there is nothing to flush, we can return true early.
         if (mapCache.empty() && setEraseCache.empty()) {
             return true;
         }
+
+        // Prepare the batch with our pending writes + erases.
         CDBBatch batch(*this);
         for (const auto& [key, it] : mapCache) {
             batch.Write(key, it->second);
@@ -138,13 +142,21 @@ public:
         for (const auto& key : setEraseCache) {
             batch.Erase(key);
         }
-        LogPrintf("Flushing cache (%s) to disk, storing %d items, erasing %d items\n", GetName(), mapCache.size(), setEraseCache.size());
+
+        // Attempt to write the batch. If it fails, do NOT clear the caches.
         bool res = WriteBatch(batch, true);
-        mapCache.clear();
-        fifoList.clear();
-        setEraseCache.clear();
+        if (res) {
+            LogPrint(BCLog::SYS, "Flushing cache (%s) to disk, storing %d items, erasing %d items\n",
+                    GetName(), mapCache.size(), setEraseCache.size());
+            // Only clear our in-memory structures on success
+            mapCache.clear();
+            fifoList.clear();
+            setEraseCache.clear();
+        }
+
         return res;
     }
+
 
     // Getter for testing purposes
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> GetMapCache() const {

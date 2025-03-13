@@ -128,7 +128,8 @@ endif
 SYSCOIN_CORE_H = \
   addresstype.h \
   services/nevmconsensus.h \
-  services/rpc/nevmrpc.h \
+  services/assetconsensus.h \
+  services/rpc/assetrpc.h \
   spork.h \
   dsnotificationinterface.h \
   governance/governance.h \
@@ -185,7 +186,6 @@ SYSCOIN_CORE_H = \
   compat/compat.h \
   compat/cpuid.h \
   compat/endian.h \
-  compressor.h \
   common/settings.h \
   common/system.h \
   node/connection_types.h \
@@ -468,6 +468,8 @@ libsyscoin_node_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_node_a_SOURCES = \
   services/nevmconsensus.cpp \
   services/rpc/nevmrpc.cpp \
+  services/assetconsensus.cpp \
+  services/rpc/assetrpc.cpp \
   core_write.cpp \
   dsnotificationinterface.cpp \
   governance/governance.cpp \
@@ -810,6 +812,7 @@ libsyscoin_common_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_common_a_SOURCES = \
   addresstype.cpp \
   services/nevmconsensus.cpp \
+  services/assetconsensus.cpp \
   auxpow.cpp \
   base58.cpp \
   bech32.cpp \
@@ -821,7 +824,6 @@ libsyscoin_common_a_SOURCES = \
   common/init.cpp \
   common/interfaces.cpp \
   common/run_command.cpp \
-  compressor.cpp \
   common/settings.cpp \
   common/system.cpp \
   core_read.cpp \
@@ -1084,7 +1086,6 @@ libsyscoinkernel_la_SOURCES = \
   coins.cpp \
   common/args.cpp \
   common/config.cpp \
-  compressor.cpp \
   consensus/merkle.cpp \
   consensus/tx_check.cpp \
   consensus/tx_verify.cpp \

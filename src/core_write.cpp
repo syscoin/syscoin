@@ -22,38 +22,8 @@
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <llmq/quorums_commitment.h>
+#include <services/assetconsensus.h>
 #include <math.h>
-
-
-bool SyscoinMintTxToJson(const CTransaction& tx, const uint256& txHash, const uint256& hashBlock, UniValue &entry) {
-    CMintSyscoin mintSyscoin(tx);
-    if (!mintSyscoin.IsNull()) {
-        entry.pushKV("txid", txHash.GetHex());
-        entry.pushKV("blockhash", hashBlock.GetHex());  
-        UniValue oSPVProofObj(UniValue::VOBJ);
-        oSPVProofObj.pushKV("txhash", mintSyscoin.nTxHash.GetHex());  
-        oSPVProofObj.pushKV("blockhash", mintSyscoin.nBlockHash.GetHex());  
-        oSPVProofObj.pushKV("postx", mintSyscoin.posTx);
-        oSPVProofObj.pushKV("txroot", mintSyscoin.nTxRoot.GetHex()); 
-        oSPVProofObj.pushKV("txparentnodes", HexStr(mintSyscoin.vchTxParentNodes)); 
-        oSPVProofObj.pushKV("txpath", HexStr(mintSyscoin.vchTxPath)); 
-        oSPVProofObj.pushKV("posReceipt", mintSyscoin.posReceipt);  
-        oSPVProofObj.pushKV("receiptroot", mintSyscoin.nReceiptRoot.GetHex());  
-        oSPVProofObj.pushKV("receiptparentnodes", HexStr(mintSyscoin.vchReceiptParentNodes));  
-        oSPVProofObj.pushKV("amount", ValueFromAmount(mintSyscoin.nValue));  
-        entry.pushKV("spv_proof", oSPVProofObj);
-        return true;
-    } 
-    return false;
-}
-
-bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, const uint256 &hashBlock, UniValue& output) {
-    bool found = false;
-    if(IsSyscoinMintTx(rawTx.nVersion)) {
-        found = SyscoinMintTxToJson(rawTx, rawTx.GetHash(), hashBlock, output);
-    }
-    return found;
-}
 UniValue ValueFromAmount(const CAmount amount)
 {
     static_assert(COIN > 1);
@@ -66,6 +36,70 @@ UniValue ValueFromAmount(const CAmount amount)
     return UniValue(UniValue::VNUM,
             strprintf("%s%d.%08d", amount < 0 ? "-" : "", quotient, remainder));
 }
+bool AssetAllocationTxToJSON(const CTransaction &tx, const uint256& hashBlock, UniValue &entry) {
+    const uint256& txHash = tx.GetHash();
+    entry.pushKV("txtype", stringFromSyscoinTx(tx.nVersion));
+    entry.pushKV("txid", txHash.GetHex());
+    entry.pushKV("blockhash", hashBlock.GetHex());  
+    UniValue oAssetAllocationReceiversArray(UniValue::VARR);
+   
+    for(const auto &out: tx.vout) {
+        if(out.assetInfo.IsNull()) {
+            continue;
+        }
+        UniValue oAssetAllocationReceiversObj(UniValue::VOBJ);
+        oAssetAllocationReceiversObj.pushKV("asset_guid", out.assetInfo.nAsset);
+        oAssetAllocationReceiversObj.pushKV("amount", ValueFromAmount(out.assetInfo.nValue));
+        oAssetAllocationReceiversArray.push_back(oAssetAllocationReceiversObj);
+    }
+    entry.pushKV("allocations", oAssetAllocationReceiversArray);
+    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM){
+         CBurnSyscoin burnSyscoin(tx);
+         entry.pushKV("nevm_destination", "0x" + HexStr(burnSyscoin.vchNEVMAddress));
+    }
+    return true;
+}
+
+
+bool AssetMintTxToJson(const CTransaction& tx, const uint256& txHash, const uint256& hashBlock, UniValue &entry) {
+    CMintSyscoin mintSyscoin(tx);
+    if (!mintSyscoin.IsNull()) {
+        AssetAllocationTxToJSON(tx, hashBlock, entry);
+        UniValue oSPVProofObj(UniValue::VOBJ);
+        oSPVProofObj.pushKV("txhash", mintSyscoin.nTxHash.GetHex());  
+        oSPVProofObj.pushKV("blockhash", mintSyscoin.nBlockHash.GetHex());  
+        oSPVProofObj.pushKV("postx", mintSyscoin.posTx);
+        oSPVProofObj.pushKV("txroot", mintSyscoin.nTxRoot.GetHex()); 
+        oSPVProofObj.pushKV("txparentnodes", HexStr(mintSyscoin.vchTxParentNodes)); 
+        oSPVProofObj.pushKV("txpath", HexStr(mintSyscoin.vchTxPath)); 
+        oSPVProofObj.pushKV("posReceipt", mintSyscoin.posReceipt);  
+        oSPVProofObj.pushKV("receiptroot", mintSyscoin.nReceiptRoot.GetHex());  
+        oSPVProofObj.pushKV("receiptparentnodes", HexStr(mintSyscoin.vchReceiptParentNodes));  
+        entry.pushKV("spv_proof", oSPVProofObj);
+        return true;
+    } 
+    return false;
+}
+
+bool SysTxToJSON(const CTransaction& tx, const uint256 &hashBlock, UniValue& output) {
+    bool found = false;
+    if (IsAssetAllocationTx(tx.nVersion))
+        found = AssetAllocationTxToJSON(tx, hashBlock, output);
+    return found;
+}
+
+bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, const uint256 &hashBlock, UniValue& output) {
+    bool found = false;
+    if(IsSyscoinMintTx(rawTx.nVersion)) {
+        found = AssetMintTxToJson(rawTx, rawTx.GetHash(), hashBlock, output);
+    }
+    else if (IsAssetAllocationTx(rawTx.nVersion)) {
+        found = SysTxToJSON(rawTx, hashBlock, output);
+    }
+    
+    return found;
+}
+
 std::string FormatScript(const CScript& script)
 {
     std::string ret;

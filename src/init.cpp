@@ -126,6 +126,7 @@
 #include <spork.h>
 #include <netfulfilledman.h>
 #include <services/nevmconsensus.h>
+#include <services/assetconsensus.h>
 #include <key_io.h>
 #include <llmq/quorums.h>
 #include <llmq/quorums_init.h>
@@ -546,6 +547,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-maxrecsigsage=<n>", strprintf("Number of seconds to keep LLMQ recovery sigs (default: %u)", DEFAULT_MAX_RECOVERED_SIGS_AGE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-masternodeblsprivkey=<n>", "Set the masternode private key", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
     argsman.AddArg("-minsporkkeys=<n>", "Overrides minimum spork signers to change spork value. Only useful for regtest. Using this on mainnet or testnet will ban you.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-assetindex=<n>", strprintf("Wallet is Asset aware, won't spend assets when sending only Syscoin (0-1, default: 0)"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dip3params=<n:m>", "DIP3 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-hrp=<prefix>", "Bech32 HRP override used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dip19params=<n:m>", "DIP19 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1680,9 +1682,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         node.chainman = std::make_unique<ChainstateManager>(node.kernel->interrupt, chainman_opts, blockman_opts);
         ChainstateManager& chainman = *Assert(node.chainman);
         // SYSCOIN
-        const fs::path &evodbPath = args.GetDataDirNet() / "evodb_dmn";
-        if (!fRegTest && !fs::exists(evodbPath)) {
-            LogPrintf("Folder %s not found, forcing reindex.\n", fs::PathToString(evodbPath));
+        const fs::path &assetbPath = args.GetDataDirNet() / "asset";
+        if (!fRegTest && fs::exists(assetbPath)) {
+            const fs::path &assetNftbPath = args.GetDataDirNet() / "assetnft";
+            if(fs::exists(assetNftbPath)) {
+                fs::remove_all(assetNftbPath);
+            }
+            fs::remove_all(assetbPath);
+            LogPrintf("Folder %s found, forcing reindex.\n", fs::PathToString(assetbPath));
             fReindex = true;
         }
         node.peerman = PeerManager::make(*node.connman, *node.addrman, node.banman.get(),
@@ -1842,12 +1849,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
                     }
                 } else if((int64_t)nHeightFromGeth > nHeightLocalGeth) {
-                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d vs nLastKnownHeightOnStart %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth, nHeightFromGeth + Params().GetConsensus().nNEVMStartBlock);
-                    nHeightFromGeth += Params().GetConsensus().nNEVMStartBlock;
-                    // otherwise local height is below so catch up to geth without strict enforcement on geth
-                    nLastKnownHeightOnStart = nHeightFromGeth;
+                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth);
                 }
-            } else if(nHeightLocalGeth > 0){
+            } else if(nHeightLocalGeth > 1){
                 fNEVMConnection = false;
                 LogPrintf("nHeightFromGeth == 0 and nHeightLocalGeth > 0, setting fNEVMConnection to false...\n");
             }
@@ -2056,7 +2060,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     node.scheduler->scheduleEvery([&] { masternodeSync.DoMaintenance(*node.connman, *node.peerman); }, std::chrono::seconds{1});
     node.scheduler->scheduleEvery(std::bind(CMasternodeUtils::DoMaintenance, std::ref(*node.connman)), std::chrono::minutes{1});
     node.scheduler->scheduleEvery([&] { governance->DoMaintenance(*node.connman); }, std::chrono::minutes{5});
-    node.scheduler->scheduleEvery([&] { deterministicMNManager->DoMaintenance(); }, std::chrono::hours{1});
     if (activeMasternodeManager) {
         node.scheduler->scheduleEvery([&] { llmq::quorumDKGSessionManager->CleanupOldContributions(*node.chainman); }, std::chrono::hours{1});
     }

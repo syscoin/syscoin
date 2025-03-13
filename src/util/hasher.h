@@ -97,5 +97,6 @@ public:
 
     size_t operator()(const Span<const unsigned char>& script) const;
 };
-
+// SYSCOIN
+typedef std::unordered_set<uint256, SaltedTxidHasher> NEVMMintTxSet;
 #endif // SYSCOIN_UTIL_HASHER_H
