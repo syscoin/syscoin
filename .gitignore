@@ -160,3 +160,5 @@ dist/
 /guix-build-*
 
 /ci/scratch/
+
+.vscode
