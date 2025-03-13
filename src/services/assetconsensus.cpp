@@ -29,7 +29,7 @@ bool CheckSyscoinMintInternal(
     CAmount &outputAmount,
     std::string &witnessAddress) {
     NEVMTxRoot txRootDB;
-    if (!fRegTest) {
+    {
         LOCK(cs_setethstatus);
         if (!pnevmtxrootsdb || !pnevmtxrootsdb->ReadTxRoots(mintSyscoin.nBlockHash, txRootDB)) {
             return FormatSyscoinErrorMessage(state, "mint-txroot-missing", fJustCheck);
