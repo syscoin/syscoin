@@ -12,6 +12,7 @@ Nexus sets the stage for the proceeding [roadmap](https://syscoin.org/news/roadm
 
 A more technical blog can be found on [medium](https://medium.com/@sidhujag/tying-it-all-together-scaling-bitcoin-with-syscoins-modular-ecosystem-d68e0fbe28fa)
 
+Note: Syscoin Platform Tokens (SPTs) will be reindexed and existing SPTs (including SYSX) will lose state until the Nexus block is reached. If you have any assets in SPTs, please move them (for example SYSX burn to SYS or to NEVM) prior to the Nexus activation height. You will lose your SPT if you do not.
 
 Please report any issues using the issue tracker on GitHub:
 
@@ -54,6 +55,8 @@ the new release:
 If you are upgrading from a version older than 4.2.x, **please read**:  
 [Syscoin 4.2 Upgrade Guide](https://syscoin.readme.io/v4.2.0/docs/syscoin-42-upgrade-guide)
 
+We have an automated upgrade mechanism to force a reindex to the node upon detection of your first time running Syscoin 5. This is needed so the node remains consistent with the new network. The node should only reindex the first time you start Syscoin 5.
+
 ---
 
 ## Compatibility
@@ -61,7 +64,7 @@ If you are upgrading from a version older than 4.2.x, **please read**:
 - Supported & tested on **Linux** (kernel 3+), **macOS 10.15+**, and **Windows 7+**.
 - Older OS versions are no longer supported.
 - Should also run on most Unix-like systems, though less tested there.
-
+- Legacy SPTs are removed, a new form of SPT will exist that is more efficient. Thus the old and new are not compatible, we skip indexing SPTs until Nexus is activated.
 ---
 
 ## Major Changes from 4.4.2 to 5.0.0
@@ -94,7 +97,7 @@ If you are upgrading from a version older than 4.2.x, **please read**:
 ### 7. BLS/LLMQ & Masternode Protocol Improvements
 - Finalizes the transition to the **Basic BLS IETF** standard scheme (v19 BLS upgrade):
   - **Masternode P2P messages** (e.g., `mnauth`, `qsigshare`, `qfcommit`) and `protx` transactions now use the new scheme after activation height.
-- **MNLISTDIFF** improvements for more reliable masternode list sync.
+- **MNLISTDIFF** improvements for more reliable masternode list sync. Because the MN lists are now stored in cache/db as a FIFO queue (up to the last 1728) instead the diff's which cleans up the implementation, we need to reindex the node upon upgrade to ensure the Sentry node list/state remains consistent with the network. We detect asset/assetnft directories which exist prior to Syscoin 5 as a form to upgrade detectabilty and thus force a reindex if those directories are found, subsequently deleting them as they are not needed in Syscoin 5 and further restarts do not reindex.
 
 ### 8. Wallet & Descriptor Improvements
 - Descriptor wallets are default; legacy wallets remain possible by passing `"descriptor": false` in `createwallet`.
@@ -113,7 +116,8 @@ If you are upgrading from a version older than 4.2.x, **please read**:
 - **Performance**: Faster chain sync thanks to updated indexing and UTXO/NEVM improvements.
 - **Security**: Enhanced bridging proof validation, spork logic, and PoDA referencing.
 - **Logging**: More detailed logs for bridging events, NEVM calls, and masternode states.
-- Numerous code refactors and bug fixes.
+- **SPT changes**: We simplified the SPT design and thus removed SPT management (updates, creation) and delegate that to the NEVM layer. Assets are expected to move from the NEVM bridge to exist in the SPT layer of Syscoin UTXO chain. The SPT design is more efficient and changes from the older one so therefor we re-start indexing SPTs starting from Syscoin 5 activation.
+- Numerous other code refactors and bug fixes.
 
 ---
 
