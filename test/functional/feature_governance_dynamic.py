@@ -398,7 +398,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.generate(self.nodes[0], n - 1)
         self.sync_blocks()
         self.stop_node(1)
-        self.start_node(1, extra_args=['-reindex', *self.extra_args[1]])
+        self.start_node(1, extra_args=["-mocktime=" + str(self.mocktime), '-reindex', *self.extra_args[1]])
         self.nodes[1].setnetworkactive(True)
         for idx, node_outer in enumerate(self.nodes):
             for idx, node_inner in enumerate(self.nodes):
@@ -446,7 +446,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.stop_node(1)
         shutil.rmtree(self.nodes[1].datadir_path)
         initialize_datadir(self.options.tmpdir, 1, self.chain)
-        self.start_node(1, extra_args=['-networkactive=0', *self.extra_args[1]])
+        self.start_node(1, extra_args=["-mocktime=" + str(self.mocktime), '-networkactive=0', *self.extra_args[1]])
         # always starts at initial budget before sync
         assert_equal(self.nodes[1].getsuperblockbudget(), satoshi_round(self.initial_budget))
         self.nodes[1].setnetworkactive(True)
