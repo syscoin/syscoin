@@ -356,6 +356,9 @@ bool CMutableTransaction::IsMnTx() const
 void CMutableTransaction::LoadAssets()
 {
     if(HasAssets()) {
+        if (!g_fNexusActive.load(std::memory_order_acquire)) {
+            return;
+        }
         CAssetAllocation allocation(*this);
         if(allocation.IsNull()) {
             throw std::ios_base::failure("Unknown asset data");

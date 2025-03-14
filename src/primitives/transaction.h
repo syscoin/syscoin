@@ -78,6 +78,7 @@ enum {
     ZDAG_WARNING_SIZE_OVER_POLICY,
 	ZDAG_MAJOR_CONFLICT
 };
+static std::atomic<bool> g_fNexusActive = false;
 /** An outpoint - a combination of a transaction hash and an index n into its vout */
 class COutPoint
 {
