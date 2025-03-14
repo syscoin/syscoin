@@ -2444,6 +2444,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     }
     // SYSCOIN
     if (bReverify && !UndoSpecialTxsInBlock(block, pindex, diffNEVM)) {
+        error("DisconnectBlock(): UndoSpecialTxsInBlock failed!\n");
         return DISCONNECT_FAILED;
     }
 
@@ -2485,8 +2486,10 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 return DISCONNECT_FAILED;
             }
             // SYSCOIN
-            if(!DisconnectSyscoinTransaction(tx,  setMintTxs, NEVMDataVecOut))
+            if(!DisconnectSyscoinTransaction(tx, setMintTxs, NEVMDataVecOut)) {
+                error("DisconnectBlock(): DisconnectSyscoinTransaction failed!\n");
                 fClean = false;
+            }
 
             for (unsigned int j = tx.vin.size(); j > 0;) {
                 --j;

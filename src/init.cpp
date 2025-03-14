@@ -1847,6 +1847,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     if (state.IsValid()) {
                         LOCK(cs_main);
                         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
+                    } else {
+                        LogPrintf("InvalidateBlock failed %s...\n",state.ToString());
                     }
                 } else if((int64_t)nHeightFromGeth > nHeightLocalGeth) {
                     LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth);

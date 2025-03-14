@@ -25,7 +25,7 @@ bool fSigNet = false;
 
 bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut) {
  
-    if(IsSyscoinMintTx(tx.nVersion)) {
+    if(g_fNexusActive.load(std::memory_order_acquire) && IsSyscoinMintTx(tx.nVersion)) {
         if(!DisconnectMintAsset(tx, setMintTxs))
             return false;       
     }

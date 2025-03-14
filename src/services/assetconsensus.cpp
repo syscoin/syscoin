@@ -307,7 +307,7 @@ bool CheckSyscoinInputs(const Consensus::Params& params, const CTransaction& tx,
     bool good = true;
     if(nHeight < (uint32_t)params.nNexusStartBlock)
         return !fJustCheck;
-    // to gaurd load assets
+    // to guard load assets
     if (!g_fNexusActive.load(std::memory_order_acquire)) {
         g_fNexusActive.store(true, std::memory_order_release);
     }
