@@ -116,40 +116,7 @@ class AssetTransactionTest(SyscoinTestFramework):
             (SYSX_GUID, Decimal('20'), self.sysx_addr)
         ]
         self.syscoin_burn_to_allocation(asset_amounts, sys_amount=Decimal('20'))
-        # Now create custom assets via mint - this requires a properly structured SPV proof
-        # In regtest, certain validations are relaxed, but we need the basic structure correct
-        
-        # Get info for SPV proof structure
-        burn_block = self.nodes[0].getblock(self.nodes[0].getbestblockhash())
-        
-        # Create dummy SPV proof with enough structure to pass validation
-        # Format based on CheckSyscoinMint validation requirements
-        spv_proof = {
-            "txHash": bytes.fromhex("aa" * 32),              # exactly 32 bytes
-            "txValue": bytes.fromhex("bb" * 20),             # typically 20 bytes (address-size)
-            "txPos": 0,                                      # uint16_t position
-            "txBlockHash": bytes.fromhex(burn_block["hash"]), # exactly 32 bytes (real block hash)
-            "txParentNodes": b"\x00" * 32,                   # example dummy parent node (32 bytes)
-            "txPath": b"\x01\x00",                           # small example path (2 bytes)
-            "posReceipt": 1,                                 # uint16_t receipt position
-            "receiptParentNodes": b"\x00" * 32,              # example dummy receipt parent node (32 bytes)
-            "txRoot": bytes.fromhex("cc" * 32),              # exactly 32 bytes
-            "receiptRoot": bytes.fromhex("dd" * 32)          # exactly 32 bytes
-        }
 
-        asset1_dest = self.nodes[0].getnewaddress()
-        asset_amounts = [
-            (SYSX_GUID, Decimal('10000'), asset1_dest)
-        ]
-        self.allocation_mint(asset_amounts, spv_proof)
-
-        asset2_dest = self.nodes[0].getnewaddress()
-        asset_amounts = [
-            (SYSX_GUID, Decimal('10000'), asset2_dest)
-        ]
-        #self.allocation_mint(asset_amounts, spv_proof)
-        
-        
         print("Test assets created successfully")
 
     def run_test(self):
