@@ -187,6 +187,7 @@ BASE_SCRIPTS = [
     'wallet_fast_rescan.py --descriptors',
     'interface_zmq.py',
     'interface_zmq_nevm.py',
+    'feature_assets.py',
     'rpc_invalid_address_message.py',
     'rpc_validateaddress.py',
     'rpc_verifychainlock.py',
