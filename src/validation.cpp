@@ -4446,8 +4446,8 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
 
     // Size limits
     if (block.vtx.empty() || block.vtx.size() * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT || ::GetSerializeSize(block, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS) * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT) {
-        // SYSCOIN
-        if(block.IsNEVM() || fRegTest) {
+        // SYSCOIN, pre NEVM we had larger blocks for SPTs mainly
+        if(block.GetBlockTime() >= Params().GetConsensus().nNEVMStartTime) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-length", "size limits failed");
         }
     }

@@ -167,6 +167,7 @@ struct Params {
     bool bTestnet{false};
     int nBridgeStartBlock;
     int nNEVMStartBlock;
+    uint64_t nNEVMStartTime;
     int nPODAStartBlock;
     int nNexusStartBlock;
     int nV19StartBlock;
