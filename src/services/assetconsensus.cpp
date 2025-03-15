@@ -251,10 +251,7 @@ bool CheckSyscoinMint(
     if (!bFoundDest) {
         return FormatSyscoinErrorMessage(state, "mint-mismatch-destination", fJustCheck);
     }
-    // 8) Now you have final "outputAmount" and "nAssetFromLog" => see if the UTXO outputs match
-    //    That part depends on your bridging logic: checking mapAssetOut, ensuring there's an output
-    //    to witnessAddress with the correct asset, etc.
-
+    // check that there is an output from the asset in the log
     auto itOut = mapAssetOut.find(nAssetFromLog);
     if (itOut == mapAssetOut.end()) {
         return FormatSyscoinErrorMessage(state, "mint-asset-output-notfound", fJustCheck);
@@ -262,13 +259,21 @@ bool CheckSyscoinMint(
 
     // If there's also an input for this asset, remove it and see how much was net minted
     CAmount nTotalMinted;
+    // if there is an input from this asset then there must be change so calculate the minted amount by subtracting outputs of the asset from input
     auto itIn = mapAssetIn.find(nAssetFromLog);
     if (itIn != mapAssetIn.end()) {
         nTotalMinted = itOut->second - itIn->second;
+        // if there is input from this asset we find total minted and remove input
         mapAssetIn.erase(itIn);
     } else {
+        // otherwise assume its a new output (no asset input) so the minted amount is the new output
         nTotalMinted = itOut->second;
     }
+    // we only need to find nTotalMinted then we can remove asset from output (we enforce that input of the asset is also removed).
+    // This is important because we now will have assets in and out (minus this asset). 
+    // Since we may create a new asset output without an input via this function, 
+    // we cannot gaurantee in==out unless we remove the asset from in and out. 
+    // The same pattern is used with SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION where sysx(asset) is minted by burning sys (non-asset).
     mapAssetOut.erase(itOut);
 
     // Must match the bridging "outputAmount"
