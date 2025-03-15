@@ -158,7 +158,7 @@ struct Params {
     // SYSCOIN
     uint64_t nSYSXAsset;
     uint32_t nNEVMChainID;
-    std::vector<unsigned char> vchSYSXERC20Manager;
+    std::vector<unsigned char> vchSyscoinVaultManager;
     std::vector<unsigned char> vchTokenFreezeMethod;
     unsigned int nSeniorityHeight1;
     double nSeniorityLevel1;

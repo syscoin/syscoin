@@ -54,7 +54,7 @@ bool CheckSyscoinMintInternal(
     if (!rlpLogs.isList() || itemCount < 1 || itemCount > 10) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-logs-count", fJustCheck);
     }
-    const std::vector<unsigned char>& vchManagerAddress = Params().GetConsensus().vchSYSXERC20Manager;
+    const std::vector<unsigned char>& vchManagerAddress = Params().GetConsensus().vchSyscoinVaultManager;
     const std::vector<unsigned char>& vchFreezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
 
     for (size_t i = 0; i < itemCount; ++i) {
@@ -207,7 +207,7 @@ bool CheckSyscoinMintInternal(
     const dev::Address &address160 = rlpTxValue[5].toHash<dev::Address>(dev::RLP::VeryStrict);
 
     // ensure ERC20Manager is in the "to" field for the contract, meaning the function was called on this contract for freezing supply
-    if(Params().GetConsensus().vchSYSXERC20Manager != address160.asBytes()) {
+    if(Params().GetConsensus().vchSyscoinVaultManager != address160.asBytes()) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-contract-manager", fJustCheck);
     }
     return true;

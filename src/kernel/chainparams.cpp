@@ -197,7 +197,7 @@ public:
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 57;
-        consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
+        consensus.vchSyscoinVaultManager = ParseHex("d819731dfEb4C9c8E8327bc27CD162BA89D3fD95");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 348000;
         consensus.nNEVMStartBlock = 1317500;
@@ -359,7 +359,7 @@ public:
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
-        consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
+        consensus.vchSyscoinVaultManager = ParseHex("d819731dfEb4C9c8E8327bc27CD162BA89D3fD95");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
@@ -597,7 +597,7 @@ public:
         consensus.nLegacyBlocksBefore = 0;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
-        consensus.vchSYSXERC20Manager = ParseHex("A738a563F9ecb55e0b2245D1e9E380f0fE455ea1");
+        consensus.vchSyscoinVaultManager = ParseHex("d819731dfEb4C9c8E8327bc27CD162BA89D3fD95");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
