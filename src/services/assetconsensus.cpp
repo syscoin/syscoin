@@ -276,9 +276,6 @@ bool CheckSyscoinMint(
         return FormatSyscoinErrorMessage(state, "mint-output-mismatch", fJustCheck);
     }
 
-    // Optionally check that there's a matching vout to witnessAddress
-    // e.g. loop over tx.vout, compare the address and asset.
-
     if (!fJustCheck) {
         if (nHeight > 0) {
             LogPrint(BCLog::SYS,"CONNECTED ASSET MINT: asset=%llu tx=%s height=%d fJustCheck=%s\n",

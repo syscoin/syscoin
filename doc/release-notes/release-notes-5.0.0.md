@@ -86,7 +86,7 @@ We have an automated upgrade mechanism to force a reindex to the node upon detec
 
 ### 5. Enhanced NFT/Token Bridge (ERC721/1155/ERC20)
 - **Extended bridging support** for ERC721 (NFT), ERC1155 (multi-token), and standard ERC20 tokens between NEVM and Syscoin’s UTXO-based chain.
-- Updated [NEVM bridge contracts](https://github.com/syscoin/sysethereum-contracts/) and logic in Syscoin Core for robust freeze/mint flows and event-based validations. A new SyscoinVaultManager contract deployed and SYS balances are moved over from the old ERC20Manager contract to the new one at the Nexus block in NEVM.
+- Updated [NEVM bridge contracts](https://github.com/syscoin/sysethereum-contracts/) and logic in Syscoin Core for robust freeze/mint flows and event-based validations. A new SyscoinVaultManager contract deployed and SYS balances are moved over from the old ERC20Manager contract to the new one at the Nexus block in NEVM. The new vault manager is here https://explorer.syscoin.org/address/0xd819731dfEb4C9c8E8327bc27CD162BA89D3fD95#code.
 
 ### 6. NEVM Registry & PoDA Enhancements
 - **NEVM Registry**: A decentralized reference for registered Syscoin NEVM tokens/contracts. Supports easy lookup of token metadata, owners, etc. Precompile address (0x62) enables the registry on the NEVM. Every Sentry node must register their address via protx_update_service to add to registry. If you are using a hosting provider (allnodes, nodehub) they may also help manage your nodes using the registry. Future usage of the registry will include decentralized sequencing, social airdropping, AI node registration to AVS services and other services which want to economically align with Syscoin L1.
