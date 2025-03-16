@@ -202,8 +202,6 @@ bool CheckSyscoinMintInternal(
         dev::u256 v = rlpTxValue[6].toInt<dev::u256>(dev::RLP::VeryStrict);
         if (v >= 35) {
             nChainID = (v - 35) / 2;  // EIP-155 rule for legacy
-        } else {
-            nChainID = (dev::u256(Params().GetConsensus().nNEVMChainID));
         }
     } else if (txItemCount >= 12) {
         nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
@@ -215,7 +213,7 @@ bool CheckSyscoinMintInternal(
     if(nChainID != (dev::u256(Params().GetConsensus().nNEVMChainID))) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-chainid", fJustCheck);
     }
-    size_t toFieldIndex = (txItemCount == 9) ? 3 : 5;
+    const size_t toFieldIndex = (txItemCount == 9) ? 3 : 5;
     const std::vector<unsigned char> vchAddress = rlpTxValue[toFieldIndex].toBytes(dev::RLP::VeryStrict);
     if (vchAddress.size() != 20) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-address-length", fJustCheck);
