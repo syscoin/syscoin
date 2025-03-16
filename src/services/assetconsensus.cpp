@@ -201,7 +201,8 @@ bool CheckSyscoinMintInternal(
     if (txItemCount == 9) {  // Legacy transaction
         dev::u256 v = rlpTxValue[6].toInt<dev::u256>(dev::RLP::VeryStrict);
         if (v >= 35) {
-            nChainID = (v - 35) / 2;  // EIP-155 rule for legacy
+            // EIP-155: chainId included in the signature
+            nChainID = (v - 35) / 2;
         }
     } else if (txItemCount >= 12) {
         nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
