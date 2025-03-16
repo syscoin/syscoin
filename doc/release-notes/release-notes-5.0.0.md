@@ -4,7 +4,7 @@ Syscoin Core version 5.0.0 (codename Nexus) is now available from:
 
 - [Syscoin GitHub Releases](https://github.com/syscoin/syscoin/releases/tag/v5.0.0)
 
-This major release includes new features, enhancements to both Syscoin Core and the NEVM (Geth) implementation, and numerous security/stability fixes since **Syscoin Core 4.4.2**. **All users, especially Masternode operators and NEVM node operators, must upgrade.**
+This major release includes new features, enhancements to both Syscoin Core and the NEVM (Geth) implementation, and numerous security/stability fixes since **Syscoin Core 4.4.2**. **All users, especially Sentry node operators and NEVM node operators, must upgrade.**
 
 You can review the community proposal for this release here https://syscoin.org/news/codename-nexus. Which passed yes - no by 888 votes. You can review the proposal here: 
 
@@ -30,7 +30,7 @@ Please report any issues using the issue tracker on GitHub:
     4. [AuxPoW Tags](#4-auxpow-tags)  
     5. [Enhanced NFT/Token Bridge (ERC721/1155/ERC20)](#5-enhanced-nfttoken-bridge-erc7211155erc20)  
     6. [NEVM Registry & PoDA Enhancements](#6-nevm-registry--poda-enhancements)  
-    7. [BLS/LLMQ & Masternode Protocol Improvements](#7-blsllmq--masternode-protocol-improvements)  
+    7. [BLS/LLMQ & Sentry node Protocol Improvements](#7-blsllmq--sentrynode-protocol-improvements)  
     8. [Wallet & Descriptor Improvements](#8-wallet--descriptor-improvements)  
     9. [Removal of Deprecated Syscoin 4.x Asset RPCs](#9-removal-of-deprecated-syscoin-4x-asset-rpcs)  
     10. [Additional Miscellaneous Changes](#10-additional-miscellaneous-changes)  
@@ -78,7 +78,9 @@ We have an automated upgrade mechanism to force a reindex to the node upon detec
 - **NEVM chain rule updates** include EIP-3651, EIP-3855, and EIP-3860 (carried over from 4.4.0). NEVM registry is enabled on the NEVM in this release.
 
 ### 3. Dynamic Governance
-- **Dynamic Governance**: On-chain mechanism that allows key chain parameters to be updated via masternode/community voting without a full hard fork.
+- **Dynamic Governance**: On-chain mechanism that allows key chain parameters to be updated via Sentr node/community voting without a full hard fork.
+
+As part of the governance upgrade, we have sunset `sentinel` and Sentry nodes do not need to run it anymore the trigger mechanism is built-in to the node.
 
 ### 4. AuxPoW Tags
 - **AuxPoW Tags**: New block header metadata to improve coordination with merged-mining pools and external chain monitoring tools as well as new interesting BTC bridging designs using BitVM2. The blockhash + height is put into the Bitcoin coinbase. This is essential for a fork-aware bridge using BitVM2 for a fully trust-minimized sidechain two-way bridge between Bitcoin and Syscoin.
@@ -94,10 +96,10 @@ We have an automated upgrade mechanism to force a reindex to the node upon detec
   - Refined data blob creation and retrieval, with improved consensus checks.  
   - New RPCs to manage PoDA blobs for bridging or other on-chain references.
 
-### 7. BLS/LLMQ & Masternode Protocol Improvements
+### 7. BLS/LLMQ & Sentry node Protocol Improvements
 - Finalizes the transition to the **Basic BLS IETF** standard scheme (v19 BLS upgrade):
-  - **Masternode P2P messages** (e.g., `mnauth`, `qsigshare`, `qfcommit`) and `protx` transactions now use the new scheme after activation height.
-- **MNLISTDIFF** improvements for more reliable masternode list sync. Because the MN lists are now stored in cache/db as a FIFO queue (up to the last 1728) instead the diff's which cleans up the implementation, we need to reindex the node upon upgrade to ensure the Sentry node list/state remains consistent with the network. We detect asset/assetnft directories which exist prior to Syscoin 5 as a form to upgrade detectabilty and thus force a reindex if those directories are found, subsequently deleting them as they are not needed in Syscoin 5 and further restarts do not reindex.
+  - **Sentry node P2P messages** (e.g., `mnauth`, `qsigshare`, `qfcommit`) and `protx` transactions now use the new scheme after activation height.
+- **MNLISTDIFF** improvements for more reliable Sentry node list sync. Because the MN lists are now stored in cache/db as a FIFO queue (up to the last 1728) instead the diff's which cleans up the implementation, we need to reindex the node upon upgrade to ensure the Sentry node list/state remains consistent with the network. We detect asset/assetnft directories which exist prior to Syscoin 5 as a form to upgrade detectabilty and thus force a reindex if those directories are found, subsequently deleting them as they are not needed in Syscoin 5 and further restarts do not reindex.
 
 ### 8. Wallet & Descriptor Improvements
 - Descriptor wallets are default; legacy wallets remain possible by passing `"descriptor": false` in `createwallet`.
@@ -115,7 +117,7 @@ We have an automated upgrade mechanism to force a reindex to the node upon detec
 ### 10. Additional Miscellaneous Changes
 - **Performance**: Faster chain sync thanks to updated indexing and UTXO/NEVM improvements.
 - **Security**: Enhanced bridging proof validation, spork logic, and PoDA referencing.
-- **Logging**: More detailed logs for bridging events, NEVM calls, and masternode states.
+- **Logging**: More detailed logs for bridging events, NEVM calls, and Sentry node states.
 - **SPT changes**: We simplified the SPT design and thus removed SPT management (updates, creation) and delegate that to the NEVM layer. Assets are expected to move from the NEVM bridge to exist in the SPT layer of Syscoin UTXO chain. The SPT design is more efficient and changes from the older one so therefor we re-start indexing SPTs starting from Syscoin 5 activation.
 - Numerous other code refactors and bug fixes.
 
