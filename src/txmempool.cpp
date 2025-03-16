@@ -860,8 +860,8 @@ bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
             // if transaction in question was signalling RBF but conflicting transaction was not
             // prefer the conflict version over this one as prescedence over time based ordering
             // if both signal RBF, just choose the first one in mempool based on time below (they wouldn't have been used for point-of-sale anyway due to RBF)
-            const bool &thisRBF = SignalsOptInRBF(thisit->GetTx());
-            const bool &otherRBF = SignalsOptInRBF(conflictit->GetTx());
+            const bool thisRBF = SignalsOptInRBF(thisit->GetTx());
+            const bool otherRBF = SignalsOptInRBF(conflictit->GetTx());
             if(thisRBF && !otherRBF) {
                 return false;
             // if this transaction is non-RBF but conflict signals it, prefer this one regardless of time order
@@ -871,8 +871,8 @@ bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
             // if conflicting transaction was received before the transaction in question
             // idea is to mine the oldest transaction in event of conflict
             // upon block, the conflict is removed
-            const auto& time1 = conflictit->GetTime();
-            const auto& time2 = thisit->GetTime();
+            const auto time1 = conflictit->GetTime();
+            const auto time2 = thisit->GetTime();
             if(time1 < time2){
                 return false;
             } else if(time1 == time2) {

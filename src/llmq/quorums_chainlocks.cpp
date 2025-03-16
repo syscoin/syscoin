@@ -196,7 +196,7 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
         return false;
     }
     const auto& llmqParams = Params().GetConsensus().llmqTypeChainLocks;
-    const size_t& threshold = llmqParams.signingActiveQuorumCount / 2 + 1;
+    const size_t threshold = llmqParams.signingActiveQuorumCount / 2 + 1;
 
     std::vector<CBLSSignature> sigs;
     CChainLockSig clsigAgg;

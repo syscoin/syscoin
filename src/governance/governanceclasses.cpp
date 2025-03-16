@@ -615,7 +615,7 @@ bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAm
     }
 
     // payments should not exceed limit
-    const CAmount &nPaymentsTotalAmount = GetPaymentsTotalAmount();
+    const CAmount nPaymentsTotalAmount = GetPaymentsTotalAmount();
     if(nSuperblockPaymentFromBlock != nPaymentsTotalAmount) {
         LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, superblock payment and block payment mismatch: payment limit from block %lld, payment limit from superblock %lld\n", nSuperblockPaymentFromBlock, nPaymentsTotalAmount);
         return false;    

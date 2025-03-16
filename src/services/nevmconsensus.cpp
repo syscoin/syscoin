@@ -25,7 +25,7 @@ bool fSigNet = false;
 
 bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut) {
  
-    if(g_fNexusActive.load(std::memory_order_acquire) && IsSyscoinMintTx(tx.nVersion)) {
+    if(IsSyscoinMintTx(tx.nVersion)) {
         if(!DisconnectMintAsset(tx, setMintTxs))
             return false;       
     }
@@ -71,8 +71,8 @@ bool CNEVMDataDB::FlushCacheToDisk() {
     }
     CDBBatch batch(*this);    
     for (auto const& [key, val] : mapCache) {
-        const auto &pairData = std::make_pair(key, true);
-        const auto &pairMTP = std::make_pair(key, false);
+        const auto pairData = std::make_pair(key, true);
+        const auto pairMTP = std::make_pair(key, false);
         // write the size of the data
         batch.Write(key, (uint32_t)val.first.size());
         // write the data
@@ -92,7 +92,7 @@ bool CNEVMDataDB::ReadData(const std::vector<uint8_t>& nVersionHash, std::vector
         vchData = it->second.first;
         return true;
     } else {
-        const auto& pair = std::make_pair(nVersionHash, true);
+        const auto pair = std::make_pair(nVersionHash, true);
         return Read(pair, vchData);
     }
     return false;
@@ -103,7 +103,7 @@ bool CNEVMDataDB::ReadMTP(const std::vector<uint8_t>& nVersionHash, int64_t &nMe
         nMedianTime = it->second.second;
         return true;
     } else {
-        const auto& pair = std::make_pair(nVersionHash, false);
+        const auto pair = std::make_pair(nVersionHash, false);
         return Read(pair, nMedianTime);
     }
     return false;
@@ -123,7 +123,7 @@ bool CNEVMDataDB::FlushEraseMTPs(const NEVMDataVec &vecDataKeys) {
         return true;
     CDBBatch batch(*this);    
     for (const auto &key : vecDataKeys) {
-        const auto &pairMTP = std::make_pair(key, false);
+        const auto pairMTP = std::make_pair(key, false);
         // only set if it already exists (override) rather than create a new insertion
         if(Exists(pairMTP))   
             batch.Write(pairMTP, 0);
@@ -141,8 +141,8 @@ bool CNEVMDataDB::FlushErase(const NEVMDataVec &vecDataKeys) {
         return true;
     CDBBatch batch(*this);    
     for (const auto &key : vecDataKeys) {
-        const auto &pairData = std::make_pair(key, true);
-        const auto &pairMTP = std::make_pair(key, false);
+        const auto pairData = std::make_pair(key, true);
+        const auto pairMTP = std::make_pair(key, false);
         // erase size
         batch.Erase(key);
         // erase data and MTP keys

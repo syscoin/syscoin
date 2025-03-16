@@ -40,7 +40,7 @@ void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strC
         CFinalCommitment qc;
         vRecv >> qc;
 
-        const uint256& hash = ::SerializeHash(qc);
+        const uint256 hash = ::SerializeHash(qc);
         PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
         if (peer)
             peerman.AddKnownTx(*peer, hash);

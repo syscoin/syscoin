@@ -45,11 +45,11 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
     if(nBlockHeight < Params().GetConsensus().DIP0003Height) {
         return true;
     }
-    const CAmount &nSuperblockPayment = block.vtx[0]->GetValueOut() - blockReward;
-    const CAmount &nPaymentLimit = CSuperblock::GetPaymentsLimit(nBlockHeight);
+    const CAmount nSuperblockPayment = block.vtx[0]->GetValueOut() - blockReward;
+    const CAmount nPaymentLimit = CSuperblock::GetPaymentsLimit(nBlockHeight);
     // Initial thresholds
-    const CAmount &nPaymentsLimitUp = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 2) / 100.0));
-    const CAmount &nPaymentsLimitDown = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 2) / 100.0));
+    const CAmount nPaymentsLimitUp = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 2) / 100.0));
+    const CAmount nPaymentsLimitDown = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 2) / 100.0));
 
     CAmount nGovernanceBudgetUp = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
     CAmount nGovernanceBudgetDown = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 100.0));
@@ -61,7 +61,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         nGovernanceBudgetUp = CSuperblock::SUPERBLOCK_BUDGET_MAX;
     }
     
-    const CAmount &nSuperblockMaxValue =  blockReward + nGovernanceBudgetUp;
+    const CAmount nSuperblockMaxValue =  blockReward + nGovernanceBudgetUp;
 
     bool isSuperblockMaxValueMet = block.vtx[0]->GetValueOut() <= nSuperblockMaxValue;
     LogPrint(BCLog::GOBJECT, "block.vtx[0]->GetValueOut() %lld <= nSuperblockMaxValue %lld (nGovernanceBudgetUp %lld) nSuperblockPayment %lld\n", block.vtx[0]->GetValueOut(), nSuperblockMaxValue, nGovernanceBudgetUp, nSuperblockPayment);
@@ -160,7 +160,7 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
         LogPrint(BCLog::GOBJECT, "%s -- WARNING: Client synced but old budget system is disabled, accepting any payee\n", __func__);
         return true;
     }
-    const CAmount &nHalfFee = fees / 2;
+    const CAmount nHalfFee = fees / 2;
 
     // Check for correct masternode payment
     if(CMasternodePayments::IsTransactionValid(activeChain, txNew, nBlockHeight, blockReward, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet)) {
@@ -181,7 +181,7 @@ void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
             CSuperblockManager::GetSuperblockPayments(nBlockHeight, voutSuperblockPaymentsRet);
     }
 
-    const CAmount &nHalfFee = fees / 2;
+    const CAmount nHalfFee = fees / 2;
     if (!CMasternodePayments::GetMasternodeTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee)) {
         LogPrint(BCLog::MNPAYMENTS, "%s -- no masternode to pay (MN list probably empty)\n", __func__);
         return;
@@ -244,7 +244,7 @@ CAmount GetBlockMNSubsidy(const CAmount &nBlockReward, unsigned int nHeight, con
         nSubsidy = nMinMN;
     }
     if (nHeight > 0 && nStartHeight > 0) {
-        const double &fSubsidyAdjustmentPercentage = consensusParams.Seniority(nHeight, nStartHeight);
+        const double fSubsidyAdjustmentPercentage = consensusParams.Seniority(nHeight, nStartHeight);
         if(fSubsidyAdjustmentPercentage > 0){
             nMNSeniorityRet = nSubsidy*fSubsidyAdjustmentPercentage;
             nSubsidy += nMNSeniorityRet;

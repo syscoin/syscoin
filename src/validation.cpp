@@ -84,6 +84,7 @@
 #include <cachemultimap.h>
 #include <nevm/sha3.h>
 #include <common/system.h> // runCommand
+#include <core_io.h>
 #ifndef WIN32
 #include <sys/wait.h>
 #include <sys/types.h>
@@ -789,7 +790,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     
     // SYSCOIN
     // Check for conflicts with in-memory transactions
-    const bool& IsZTx = IsZdagTx(tx.nVersion);
+    const bool IsZTx = IsZdagTx(tx.nVersion);
     for (const CTxIn &txin : tx.vin)
     {
         const CTransaction* ptxConflicting = m_pool.GetConflictTx(txin.prevout);
@@ -893,11 +894,10 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     // SYSCOIN
     const auto& params = args.m_chainparams.GetConsensus();
-    if(tx.HasAssets()) {
-        if (!CheckSyscoinInputs(params, tx, hash, state, (uint32_t)m_active_chainstate.m_chain.Tip()->nHeight + 1, args.m_test_accept, setMintTxsMempool, mapAssetIn, mapAssetOut)) {
-            return false; // state filled in by CheckSyscoinInputs
-        }      
-    }  
+    if (!CheckSyscoinInputs(params, tx, hash, state, (uint32_t)m_active_chainstate.m_chain.Tip()->nHeight + 1, args.m_test_accept, setMintTxsMempool, mapAssetIn, mapAssetOut)) {
+        return false; // state filled in by CheckSyscoinInputs
+    }      
+    
     // SYSCOIN
     if(!ProcessNEVMData(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip()->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_active_chainstate.m_chainman.m_options.adjusted_time_callback()), ws.mapPoDA)) {
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-poda-invalid");
@@ -935,9 +935,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     entry.reset(new CTxMemPoolEntry(ptx, ws.m_base_fees, nAcceptTime, m_active_chainstate.m_chain.Height(), entry_sequence,
                                     fSpendsCoinbase, nSigOpsCost, lock_points.value()));
     // SYSCOIN only double fee-rate requirement for allocation spends if not RBF
-    const bool& isZDAGNoRBF = IsZTx && !SignalsOptInRBF(tx);
+    const bool isZDAGNoRBF = IsZTx && !SignalsOptInRBF(tx);
     if (isZDAGNoRBF) {
-        const size_t& txTotalSize = tx.GetTotalSize();
+        const size_t txTotalSize = tx.GetTotalSize();
         if(txTotalSize > MAX_STANDARD_ZDAG_TX_SIZE) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool-zdag-too-large", strprintf("%d > %d", txTotalSize, MAX_STANDARD_ZDAG_TX_SIZE));
         }
@@ -1760,7 +1760,7 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
        the chain ID is correct.  Legacy blocks are not allowed since
        the merge-mining start, which is checked in AcceptBlockHeader
        where the height is known.  */
-    const int32_t &nChainID = block.GetChainId();
+    const int32_t nChainID = block.GetChainId();
     if (!block.IsLegacy() && params.fStrictChainId) {
         if(nChainID > 0) {
             if(nChainID != params.nAuxpowChainId)
@@ -1769,7 +1769,7 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
                         __func__, nChainID,
                         params.nAuxpowChainId, block.nVersion);
         } else if(block.auxpow) {
-            const int32_t &nOldChainID = block.GetOldChainId();
+            const int32_t nOldChainID = block.GetOldChainId();
             if(nOldChainID != params.nAuxpowOldChainId)
                 return error("%s : block does not have our old chain ID"
                         " (got %d, expected %d, full nVersion %d)",
@@ -1834,7 +1834,7 @@ CAmount GetBlockSubsidy(unsigned int nHeight, const Consensus::Params& consensus
     // account for NEVM adjustment to 2.5 blocks
     if(nHeight >= (unsigned int)consensusParams.nNEVMStartBlock)
         nSubsidy *= 2.5;
-    const int &reductions = consensusParams.SubsidyHalvingIntervals(nHeight);
+    const int reductions = consensusParams.SubsidyHalvingIntervals(nHeight);
     if (reductions >= 50) {
         return 0;
     }
@@ -1843,7 +1843,7 @@ CAmount GetBlockSubsidy(unsigned int nHeight, const Consensus::Params& consensus
         nSubsidy -= nSubsidy / 20;
     }
     // Reduce the block reward of miners (allowing budget/superblocks)
-    const CAmount &nSuperblockPart = (nSubsidy*0.1);
+    const CAmount nSuperblockPart = (nSubsidy*0.1);
 
     if (fSuperblockPartOnly)
         return nSuperblockPart;
@@ -2303,7 +2303,7 @@ bool FillNEVMData(const CTransactionRef &tx) {
     if(!tx->IsNEVMData()) {
         return true;
     }
-    const auto &nOut = GetSyscoinDataOutput(*tx);
+    const auto nOut = GetSyscoinDataOutput(*tx);
     if (nOut == -1) {
         return false;
     }
@@ -2462,7 +2462,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         const CTransaction &tx = *(block.vtx[i]);
         // SYSCOIN
         const uint256 &hash = tx.GetHash();
-        const bool &is_coinbase = tx.IsCoinBase();
+        const bool is_coinbase = tx.IsCoinBase();
 
         // Check that all outputs are available and match the outputs in the block itself
         // exactly.
@@ -2504,7 +2504,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     BlockValidationState state;
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
     if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(state, vecNEVMBlocks, block, block.GetHash(), diffNEVM)) {
-        const std::string &errStr = strprintf("DisconnectBlock(): NEVM block failed to disconnect: %s\n", state.ToString().c_str());
+        const std::string errStr = strprintf("DisconnectBlock(): NEVM block failed to disconnect: %s\n", state.ToString().c_str());
         error(errStr.c_str());
         return DISCONNECT_FAILED;
     }
@@ -2838,7 +2838,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     int64_t nSigOpsCost = 0;
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     // SYSCOIN
-    const uint256& blockHash = block.GetHash();
+    const uint256 blockHash = block.GetHash();
     bool fNexusContext = pindex->nHeight >= params.GetConsensus().nNexusStartBlock || fRegTest;
     fScriptChecks = fScriptChecks && fNexusContext;
     CDeterministicMNListNEVMAddressDiff diff;
@@ -2861,10 +2861,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         nInputs += tx.vin.size();
         // SYSCOIN
         const uint256& txHash = tx.GetHash();
-        const bool &isCoinBase = tx.IsCoinBase();
-        const bool &hasAssets = tx.HasAssets();
         vecTXIDPairs.emplace_back(txHash, pindex->nHeight);
-        if (!isCoinBase)
+        if (!tx.IsCoinBase())
         {
             TxValidationState tx_state;
             CAmount txfee = 0;
@@ -2877,17 +2875,19 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                             tx_state.GetRejectReason(), tx_state.GetDebugMessage());
                 return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
             }
+            bool bLegacy = tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY;
+            if(bLegacy)
+                LogPrintf("SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY height %d amount %s\n", pindex->nHeight, ValueFromAmount(tx.vout[0].nValue).write());
             // SYSCOIN
-            if(hasAssets){
-                TxValidationState tx_statesys;
-                // just temp var not used in !fJustCheck mode
-                if (!CheckSyscoinInputs(params.GetConsensus(), tx, txHash, tx_statesys, (uint32_t)pindex->nHeight, fJustCheck, setMintTxs, mapAssetIn, mapAssetOut)){
-                    // Any transaction validation failure in ConnectBlock is a block consensus failure
-                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
-                                tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
-                    return error("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
-                }
+            TxValidationState tx_statesys;
+            // just temp var not used in !fJustCheck mode
+            if (!CheckSyscoinInputs(params.GetConsensus(), tx, txHash, tx_statesys, (uint32_t)pindex->nHeight, fJustCheck, setMintTxs, mapAssetIn, mapAssetOut)){
+                // Any transaction validation failure in ConnectBlock is a block consensus failure
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                            tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
+                return error("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
             }
+            
             nFees += txfee;
             if (!MoneyRange(nFees)) {
                 LogPrintf("ERROR: %s: accumulated fee in the block out of range.\n", __func__);
@@ -2962,7 +2962,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
     // SYSCOIN : MODIFIED TO CHECK MASTERNODE PAYMENTS AND SUPERBLOCKS
     if(fScriptChecks) {
-        const CAmount &blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
+        const CAmount blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
         CAmount nMNSeniorityRet = 0;
         CAmount nMNFloorDiffRet = 0;
         const bool check_superblock = llmq::chainLocksHandler->GetBestChainLock().nHeight < pindex->nHeight;
@@ -4608,8 +4608,8 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     // SYSCOIN
     if(nHeight >= consensusParams.DIP0003Height) {
         // if valid Chain ID (> 0) then it should always be nAuxpowChainId after DIP0003Height block
-        const int32_t& nChainID = block.GetChainId();
-        const auto& baseVer = block.GetBaseVersion();
+        const int32_t nChainID = block.GetChainId();
+        const auto baseVer = block.GetBaseVersion();
         if(!fTestNet && ((baseVer < 2 && nHeight >= consensusParams.BIP34Height) ||
         (baseVer < 3 && nHeight >= consensusParams.BIP66Height) ||
         (baseVer < 4 && nHeight >= consensusParams.BIP65Height) ||
@@ -4618,7 +4618,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, strprintf("bad-version(0x%08x)", baseVer),
                                     strprintf("rejected nVersion=0x%08x block", block.nVersion));
     } else {
-        const auto& baseVer = block.GetOldBaseVersion();
+        const auto baseVer = block.GetOldBaseVersion();
         if((baseVer < 2 && nHeight >= consensusParams.BIP34Height) ||
         (baseVer < 3 && nHeight >= consensusParams.BIP66Height) ||
         (baseVer < 4 && nHeight >= consensusParams.BIP65Height))
@@ -4630,7 +4630,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     {
         if (!block.auxpow)
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow", "Missing AuxPoW data");
-        const CTransactionRef &coinbaseTx = block.auxpow->getCoinbaseTx();
+        const CTransactionRef coinbaseTx = block.auxpow->getCoinbaseTx();
         if (!coinbaseTx)
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow-cb", "Missing AuxPoW coinbase data");
         int nActiveHeight = pindexPrev->nHeight - 5;
@@ -4659,7 +4659,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                     CDataStream ssData(SER_NETWORK, PROTOCOL_VERSION);
                     ssData << expectedTagHash;
                     ssData << expectedTagHeight;
-                    const auto bytesVec = MakeUCharSpan(ssData);
+                    const auto &bytesVec = MakeUCharSpan(ssData);
                     auto pc = std::search(pcHead + tagLen, txout.scriptPubKey.end(), bytesVec.begin(), bytesVec.end());
         
                     if (pc == txout.scriptPubKey.end())
@@ -5392,24 +5392,22 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         return error("ReplayBlock(): poda-validation-failed");
     }
     for (const CTransactionRef& tx : block.vtx) {
+        TxValidationState tx_state;
+        CAmount txfee = 0;
+        CAssetsMap mapAssetIn;
+        CAssetsMap mapAssetOut;
         if (!tx->IsCoinBase()) {
             for (const CTxIn &txin : tx->vin) {
                 inputs.SpendCoin(txin.prevout);
             }
             // SYSCOIN
             const uint256& txHash = tx->GetHash();
-            if(tx->HasAssets()){
-                TxValidationState tx_state;
-                CAmount txfee = 0;
-                CAssetsMap mapAssetIn;
-                CAssetsMap mapAssetOut;
-                if (!Consensus::CheckTxInputs(*tx, tx_state, inputs, pindex->nHeight, txfee, mapAssetIn, mapAssetOut)) {
-                    return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
-                }
-                // just temp var not used in !fJustCheck mode
-                if (!CheckSyscoinInputs(chainParams, *tx, txHash, tx_state, (uint32_t)pindex->nHeight, false, setMintTxs, mapAssetIn, mapAssetOut)) {
-                    return error("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
-                }
+            if (!Consensus::CheckTxInputs(*tx, tx_state, inputs, pindex->nHeight, txfee, mapAssetIn, mapAssetOut)) {
+                return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
+            }
+            // just temp var not used in !fJustCheck mode
+            if (!CheckSyscoinInputs(chainParams, *tx, txHash, tx_state, (uint32_t)pindex->nHeight, false, setMintTxs, mapAssetIn, mapAssetOut)) {
+                return error("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, txHash.ToString(), tx_state.ToString());
             }
             vecTXIDPairs.emplace_back(txHash, pindex->nHeight);
 

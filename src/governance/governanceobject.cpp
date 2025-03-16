@@ -486,8 +486,8 @@ bool CGovernanceObject::IsCollateralValid(ChainstateManager &chainman, std::stri
     AssertLockHeld(cs_main);
     strError = "";
     fMissingConfirmations = false;
-    const uint256 &nExpectedHash = GetHash();
-    const uint256 &nCollateralHash = GetCollateralHash();
+    const uint256 nExpectedHash = GetHash();
+    const uint256 nCollateralHash = GetCollateralHash();
     // RETRIEVE TRANSACTION IN QUESTION
     CTransactionRef txCollateral;
     uint32_t nBlockHeight;

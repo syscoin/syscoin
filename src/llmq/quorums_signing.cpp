@@ -418,7 +418,7 @@ void CSigningManager::ProcessMessageRecoveredSig(CNode* pfrom, const std::shared
         }
         return;
     }
-    const std::string& signHash = CLLMQUtils::BuildSignHash(*recoveredSig).ToString();
+    const std::string signHash = CLLMQUtils::BuildSignHash(*recoveredSig).ToString();
     LogPrint(BCLog::LLMQ, "CSigningManager::%s -- signHash=%s, id=%s, msgHash=%s, node=%d\n", __func__,
     signHash, recoveredSig->id.ToString(), recoveredSig->msgHash.ToString(), pfrom->GetId());
     {

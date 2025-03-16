@@ -29,7 +29,7 @@ void CDKGPendingMessages::PushPendingMessage(CNode* pfrom, CDataStream& vRecv)
     auto pm = std::make_shared<CDataStream>(std::move(vRecv));
     CHashWriter hw(SER_GETHASH, 0);
     hw << Span{*pm};
-    const uint256 &hash = hw.GetHash();
+    const uint256 hash = hw.GetHash();
     LOCK2(cs_main, cs);
     if(pfrom) {
         PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
@@ -408,7 +408,7 @@ std::set<NodeId> BatchVerifyMessageSigs(CDKGSession& session, const std::vector<
 template<typename Message>
 bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendingMessages, size_t maxCount, PeerManager& peerman)
 {
-    const auto &msgs = pendingMessages.PopAndDeserializeMessages<Message>(maxCount);
+    const auto msgs = pendingMessages.PopAndDeserializeMessages<Message>(maxCount);
     if (msgs.empty()) {
         return false;
     }
@@ -428,7 +428,7 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
         }
         const auto& msg = *p.second;
 
-        const uint256& hash = ::SerializeHash(msg);
+        const uint256 hash = ::SerializeHash(msg);
         if (peer)
             peerman.AddKnownTx(*peer, hash);
         {

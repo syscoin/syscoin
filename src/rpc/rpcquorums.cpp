@@ -92,7 +92,7 @@ UniValue BuildQuorumInfo(const llmq::CQuorumCPtr& quorum, bool includeMembers, b
         ret.pushKV("members", membersArr);
     }
     ret.pushKV("quorumPublicKey", quorum->qc->quorumPublicKey.ToString());
-    const CBLSSecretKey& skShare = quorum->GetSkShare();
+    const CBLSSecretKey skShare = quorum->GetSkShare();
     if (includeSkShare && skShare.IsValid()) {
         ret.pushKV("secretKeyShare", skShare.ToString());
     }

@@ -142,7 +142,7 @@ void CSporkManager::ProcessSpork(CNode* pfrom, CDataStream& vRecv, PeerManager& 
     CSporkMessage spork;
     vRecv >> spork;
 
-    const uint256 &hash = spork.GetHash();
+    const uint256 hash = spork.GetHash();
 
     std::string strLogMsg;
     PeerRef peer = peerman.GetPeerRef(pfrom->GetId());

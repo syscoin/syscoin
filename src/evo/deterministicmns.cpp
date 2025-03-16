@@ -699,7 +699,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
     }
     auto payee = oldList.GetMNPayee();
     // at least 2 rounds of payments before registered MN's gets put in list
-    const size_t &mnCountThreshold = oldList.GetValidMNsCount()*2;
+    const size_t mnCountThreshold = oldList.GetValidMNsCount()*2;
     // we iterate the oldList here and update the newList
     // this is only valid as long these have not diverged at this point, which is the case as long as we don't add
     // code above this loop that modifies newList

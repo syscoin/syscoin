@@ -40,6 +40,7 @@ bool CheckSyscoinMintInternal(
         mintSyscoin.vchReceiptParentNodes.begin() + mintSyscoin.posReceipt,
         mintSyscoin.vchReceiptParentNodes.end()
     );
+    
     const dev::RLP rlpReceiptValue(&vchReceiptValue);
     if (!rlpReceiptValue.isList() || rlpReceiptValue.itemCount() != 4) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-structure", fJustCheck);
@@ -65,7 +66,7 @@ bool CheckSyscoinMintInternal(
         if (!rlpLog.isList() || rlpLog.itemCount() < 3) {
             continue;
         }
-        const dev::Address& addressLog = rlpLog[0].toHash<dev::Address>(dev::RLP::VeryStrict);
+        const dev::Address addressLog = rlpLog[0].toHash<dev::Address>(dev::RLP::VeryStrict);
         if (addressLog.asBytes() != vchManagerAddress) {
             continue;
         }
@@ -81,13 +82,13 @@ bool CheckSyscoinMintInternal(
         }
 
         // Parse indexed asset guid from topics:
-        const std::vector<unsigned char> &vchAssetGuid = rlpLogTopics[1].toBytes(dev::RLP::VeryStrict);
+        const std::vector<unsigned char> vchAssetGuid = rlpLogTopics[1].toBytes(dev::RLP::VeryStrict);
 
         // Take the last 8 bytes (assuming assetGuid fits in 64 bits), 24 because all topics are 32 bytes
         nAssetFromLog = ReadBE64(vchAssetGuid.data() + 24);
 
         // Now parse non-indexed parameters from data:
-        const std::vector<unsigned char>& dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
+        const std::vector<unsigned char> dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
         if (dataValue.size() < 96) {
             return FormatSyscoinErrorMessage(state, "mint-log-data-too-small", fJustCheck);
         }
@@ -191,25 +192,40 @@ bool CheckSyscoinMintInternal(
     if (!rlpTxValue.isList()) {
         return FormatSyscoinErrorMessage(state, "mint-tx-rlp-list", fJustCheck);
     }
-    if (rlpTxValue.itemCount() < 8) {
+    const size_t txItemCount = rlpTxValue.itemCount();
+    if (txItemCount < 8) {
         return FormatSyscoinErrorMessage(state, "mint-tx-itemcount", fJustCheck);
     }
-    const dev::u256& nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
+
+    dev::u256 nChainID = 0;
+    if (txItemCount == 9) {  // Legacy transaction
+        dev::u256 v = rlpTxValue[6].toInt<dev::u256>(dev::RLP::VeryStrict);
+        if (v >= 35) {
+            nChainID = (v - 35) / 2;  // EIP-155 rule for legacy
+        } else {
+            nChainID = (dev::u256(Params().GetConsensus().nNEVMChainID));
+        }
+    } else if (txItemCount >= 12) {
+        nChainID = rlpTxValue[0].toInt<dev::u256>(dev::RLP::VeryStrict);
+    } else {
+        return FormatSyscoinErrorMessage(state, "mint-unsupported-tx-format", fJustCheck);
+    }
+    
+    // Compare extracted chain ID with Syscoin's expected Chain ID
     if(nChainID != (dev::u256(Params().GetConsensus().nNEVMChainID))) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-chainid", fJustCheck);
     }
-    if (!rlpTxValue[7].isData()) {
-        return FormatSyscoinErrorMessage(state, "mint-tx-array", fJustCheck);
-    }    
-    if (rlpTxValue[5].isEmpty()) {
-        return FormatSyscoinErrorMessage(state, "mint-tx-invalid-receiver", fJustCheck);
-    }             
-    const dev::Address &address160 = rlpTxValue[5].toHash<dev::Address>(dev::RLP::VeryStrict);
-
-    // ensure ERC20Manager is in the "to" field for the contract, meaning the function was called on this contract for freezing supply
-    if(Params().GetConsensus().vchSyscoinVaultManager != address160.asBytes()) {
+    size_t toFieldIndex = (txItemCount == 9) ? 3 : 5;
+    const std::vector<unsigned char> vchAddress = rlpTxValue[toFieldIndex].toBytes(dev::RLP::VeryStrict);
+    if (vchAddress.size() != 20) {
+        return FormatSyscoinErrorMessage(state, "mint-invalid-address-length", fJustCheck);
+    }
+    const dev::Address address160(vchAddress);
+    // Verify "to" address is vault
+    if (Params().GetConsensus().vchSyscoinVaultManager != address160.asBytes()) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-contract-manager", fJustCheck);
     }
+    
     return true;
 }
 bool CheckSyscoinMint(
@@ -280,7 +296,6 @@ bool CheckSyscoinMint(
     if (outputAmount != nTotalMinted) {
         return FormatSyscoinErrorMessage(state, "mint-output-mismatch", fJustCheck);
     }
-
     if (!fJustCheck) {
         if (nHeight > 0) {
             LogPrint(BCLog::SYS,"CONNECTED ASSET MINT: asset=%llu tx=%s height=%d fJustCheck=%s\n",
@@ -308,13 +323,9 @@ bool DisconnectMintAsset(const CTransaction &tx, NEVMMintTxSet &setMintTxs){
 bool CheckSyscoinInputs(const Consensus::Params& params, const CTransaction& tx, const uint256& txHash, TxValidationState& state, const uint32_t &nHeight, const bool &fJustCheck, NEVMMintTxSet &setMintTxs, CAssetsMap& mapAssetIn, CAssetsMap& mapAssetOut) {
     bool good = true;
     if(nHeight < (uint32_t)params.nNexusStartBlock)
-        return !fJustCheck;
-    // to guard load assets
-    if (!g_fNexusActive.load(std::memory_order_acquire)) {
-        g_fNexusActive.store(true, std::memory_order_release);
-    }
-    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY)
-        return !fJustCheck;
+        return !tx.HasAssets();
+    if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY || tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY1)
+        return false;
     try{
         if(IsSyscoinMintTx(tx.nVersion)) {
             good = CheckSyscoinMint(tx, txHash, state, nHeight, fJustCheck, setMintTxs, mapAssetIn, mapAssetOut);
@@ -322,7 +333,7 @@ bool CheckSyscoinInputs(const Consensus::Params& params, const CTransaction& tx,
         else if (IsAssetAllocationTx(tx.nVersion)) {
             good = CheckAssetAllocationInputs(tx, txHash, state, nHeight, fJustCheck, mapAssetIn, mapAssetOut);
         }
-        if (good && mapAssetIn != mapAssetOut) {
+        if (good && tx.HasAssets() && mapAssetIn != mapAssetOut) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-io-mismatch");
         }
     } catch (const std::exception& e) {
@@ -339,7 +350,7 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, const uint256& txHash, T
             txHash.ToString().c_str(),
             fJustCheck ? "JUSTCHECK" : "BLOCK");
         
-    const int &nOut = GetSyscoinDataOutput(tx);
+    const int nOut = GetSyscoinDataOutput(tx);
     if(nOut < 0) {
         return FormatSyscoinErrorMessage(state, "assetallocation-missing-burn-output", fJustCheck);
     }

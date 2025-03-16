@@ -40,12 +40,12 @@ bool CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
                 const Consensus::Params& params) const
 {
     if (params.fStrictChainId) {
-        const int32_t &nChainIDParent = parentBlock.GetChainId();
+        const int32_t nChainIDParent = parentBlock.GetChainId();
         if(nChainIDParent > 0) {
             if(nChainIDParent == params.nAuxpowChainId)
                 return error("Aux POW parent has our chain ID");
         } else {
-            const int32_t &nOldChainIDParent = parentBlock.GetOldChainId();
+            const int32_t nOldChainIDParent = parentBlock.GetOldChainId();
             if(nOldChainIDParent == params.nAuxpowOldChainId)
                 return error("Aux POW parent has our old chain ID");
         }
@@ -55,7 +55,7 @@ bool CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
         return error("Aux POW chain merkle branch too long");
 
     // Check that the chain merkle root is in the coinbase
-    const uint256 &nRootHash = CheckMerkleBranch (hashAuxBlock, vChainMerkleBranch, nChainIndex);
+    const uint256 nRootHash = CheckMerkleBranch (hashAuxBlock, vChainMerkleBranch, nChainIndex);
     valtype vchRootHash(nRootHash.begin(), nRootHash.end());
     std::reverse(vchRootHash.begin(), vchRootHash.end()); // correct endian
 
@@ -100,12 +100,12 @@ bool CAuxPow::check (const uint256& hashAuxBlock, int nChainId,
     if (script.end() - pc < 8)
         return error("Aux POW missing chain merkle tree size and nonce in parent coinbase");
 
-    const uint32_t &nSize = DecodeLE32(&pc[0]);
-    const unsigned &merkleHeight = vChainMerkleBranch.size();
+    const uint32_t nSize = DecodeLE32(&pc[0]);
+    const unsigned merkleHeight = vChainMerkleBranch.size();
     if (nSize != (1u << merkleHeight))
         return error("Aux POW merkle branch size does not match parent coinbase");
 
-    const uint32_t &nNonce = DecodeLE32(&pc[4]);
+    const uint32_t nNonce = DecodeLE32(&pc[4]);
     if (nChainIndex != getExpectedIndex(nNonce, nChainId, merkleHeight))
         return error("Aux POW wrong index");
 

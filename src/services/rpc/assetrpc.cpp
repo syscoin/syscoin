@@ -30,7 +30,7 @@ int CheckActorsInTransactionGraph(const CTxMemPool& mempool, const uint256& look
     LOCK(mempool.cs);
     {
         CTxMemPool::setEntries setAncestors;
-        const CTransactionRef &txRef = mempool.get(lookForTxHash);
+        const CTransactionRef txRef = mempool.get(lookForTxHash);
         if (!txRef)
             return ZDAG_NOT_FOUND;
         if(!IsZdagTx(txRef->nVersion))

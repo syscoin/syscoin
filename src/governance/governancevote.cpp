@@ -159,7 +159,7 @@ uint256 CGovernanceVote::GetSignatureHash() const
 
 bool CGovernanceVote::Sign(const CKey& key, const CKeyID& keyID)
 {
-    const uint256 &signatureHash = GetSignatureHash();
+    const uint256 signatureHash = GetSignatureHash();
 
     if (!CHashSigner::SignHash(signatureHash, key, vchSig)) {
         LogPrintf("CGovernanceVote::Sign -- SignHash() failed\n");

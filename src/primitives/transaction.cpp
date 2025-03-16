@@ -112,7 +112,7 @@ CAmount CTransaction::GetValueOut() const
         if (!MoneyRange(tx_out.nValue) || !MoneyRange(nValueOut + tx_out.nValue))
             throw std::runtime_error(std::string(__func__) + ": value out of range");
         // SYSCOIN
-        if(bFirstOutput && (nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY)){
+        if(bFirstOutput && (nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY || nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY1)){
             bFirstOutput = false;
             continue;
         }
@@ -356,9 +356,6 @@ bool CMutableTransaction::IsMnTx() const
 void CMutableTransaction::LoadAssets()
 {
     if(HasAssets()) {
-        if (!g_fNexusActive.load(std::memory_order_acquire)) {
-            return;
-        }
         CAssetAllocation allocation(*this);
         if(allocation.IsNull()) {
             throw std::ios_base::failure("Unknown asset data");
@@ -366,7 +363,7 @@ void CMutableTransaction::LoadAssets()
         if(allocation.voutAssets.empty()) {
             throw std::ios_base::failure("asset empty map");
         }
-        const size_t &nVoutSize = vout.size();
+        const size_t nVoutSize = vout.size();
         for(const auto &it: allocation.voutAssets) {
             const uint64_t &nAsset = it.key;
             if(it.values.empty()) {
@@ -539,8 +536,8 @@ bool CAssetAllocation::UnserializeFromTx(const CTransaction &tx) {
         SetNull();
         return false;
     }
-    const int &bytesLeft = UnserializeFromData(vchData);
-    const bool &allocationMemoThreshold = IsAssetAllocationTx(tx.nVersion) && tx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM && tx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN;
+    const int bytesLeft = UnserializeFromData(vchData);
+    const bool allocationMemoThreshold = IsAssetAllocationTx(tx.nVersion) && tx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM && tx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN;
 	if(bytesLeft == -1 || (bytesLeft > MAX_MEMO && allocationMemoThreshold))
 	{	
 		SetNull();
@@ -557,8 +554,8 @@ bool CAssetAllocation::UnserializeFromTx(const CMutableTransaction &mtx) {
         SetNull();
         return false;
     }
-    const int &bytesLeft = UnserializeFromData(vchData);
-    const bool &allocationMemoThreshold =  IsAssetAllocationTx(mtx.nVersion) && mtx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM && mtx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN;
+    const int bytesLeft = UnserializeFromData(vchData);
+    const bool allocationMemoThreshold =  IsAssetAllocationTx(mtx.nVersion) && mtx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM && mtx.nVersion != SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN;
 	if(bytesLeft == -1 || (bytesLeft > MAX_MEMO && allocationMemoThreshold))
 	{	
 		SetNull();

@@ -161,7 +161,7 @@ bool CoinStatsIndex::CustomAppend(const interfaces::BlockInfo& block)
                 Coin coin{out, block.height, tx->IsCoinBase()};
                 COutPoint outpoint{tx->GetHash(), j};
                 // SYSCOIN
-                const bool &isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
+                const bool isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
                 // Skip unspendable coins
                 if (coin.out.scriptPubKey.IsUnspendable()) {
                     m_total_unspendable_amount += coin.out.nValue;
@@ -202,7 +202,7 @@ bool CoinStatsIndex::CustomAppend(const interfaces::BlockInfo& block)
                 for (size_t j = 0; j < tx_undo.vprevout.size(); ++j) {
                     Coin coin{tx_undo.vprevout[j]};
                     // SYSCOIN
-                    const bool &isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
+                    const bool isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
                     COutPoint outpoint{tx->vin[j].prevout.hash, tx->vin[j].prevout.n};
 
                     RemoveCoinHash(m_muhash, outpoint, coin);
@@ -460,7 +460,7 @@ bool CoinStatsIndex::ReverseBlock(const CBlock& block, const CBlockIndex* pindex
             COutPoint outpoint{tx->GetHash(), j};
             Coin coin{out, pindex->nHeight, tx->IsCoinBase()};
             // SYSCOIN
-            const bool &isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
+            const bool isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
             // Skip unspendable coins
             if (coin.out.scriptPubKey.IsUnspendable()) {
                 m_total_unspendable_amount -= coin.out.nValue;
@@ -501,7 +501,7 @@ bool CoinStatsIndex::ReverseBlock(const CBlock& block, const CBlockIndex* pindex
             for (size_t j = 0; j < tx_undo.vprevout.size(); ++j) {
                 Coin coin{tx_undo.vprevout[j]};
                 // SYSCOIN
-                const bool &isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
+                const bool isSYSX = coin.out.assetInfo.nAsset == nSYSXAsset;
                 COutPoint outpoint{tx->vin[j].prevout.hash, tx->vin[j].prevout.n};
 
                 ApplyCoinHash(m_muhash, outpoint, coin);

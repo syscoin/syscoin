@@ -228,7 +228,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         CGovernanceVote vote;
         vRecv >> vote;
 
-        const uint256 &nHash = vote.GetHash();
+        const uint256 nHash = vote.GetHash();
         PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
         if (peer)
             peerman.AddKnownTx(*peer, nHash);
@@ -738,7 +738,7 @@ void CGovernanceManager::VoteGovernanceTriggers(const std::optional<const CGover
     const auto activeTriggers = GetActiveTriggers();
     for (const auto& trigger : activeTriggers) {
         
-        const uint256 &trigger_hash = WITH_LOCK(governance->cs, return trigger->GetGovernanceObject()->GetHash());
+        const uint256 trigger_hash = WITH_LOCK(governance->cs, return trigger->GetGovernanceObject()->GetHash());
         if (trigger->GetBlockHeight() <= nCachedBlockHeight) {
             // ignore triggers from the past
             LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s Not voting NO-FUNDING for outdated trigger:%s\n", __func__, trigger_hash.ToString());
@@ -884,8 +884,9 @@ void CGovernanceManager::SyncSingleObjVotes(CNode* pnode, const uint256& nProp, 
         const auto& fileVotes = govobj.GetVoteFile();
         const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
 
-        for (const auto& vote : fileVotes.GetVotes()) {
-            const uint256 &nVoteHash = vote.GetHash();
+        auto votes = fileVotes.GetVotes();
+        for (const auto &vote : votes) {
+            const uint256 nVoteHash = vote.GetHash();
 
             bool onlyVotingKeyAllowed = govobj.GetObjectType() == GOVERNANCE_OBJECT_PROPOSAL && vote.GetSignal() == VOTE_SIGNAL_FUNDING;
 
@@ -1059,8 +1060,8 @@ bool CGovernanceManager::ProcessVoteAndRelay(const CGovernanceVote& vote, const 
 bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, CGovernanceException& exception, CConnman& connman)
 {
     ENTER_CRITICAL_SECTION(cs);
-    const uint256 &nHashVote = vote.GetHash();
-    const uint256 &nHashGovobj = vote.GetParentHash();
+    const uint256 nHashVote = vote.GetHash();
+    const uint256 nHashGovobj = vote.GetParentHash();
 
     if (cmapVoteToObject.HasKey(nHashVote)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceObject::ProcessVote -- skipping known valid vote %s for object %s\n", nHashVote.ToString(), nHashGovobj.ToString());

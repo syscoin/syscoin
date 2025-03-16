@@ -172,6 +172,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
                          strprintf("%s: inputs missing/spent", __func__));
     }
     CAmount nValueIn = 0;
+    bool hasAssets = tx.HasAssets();
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
         const Coin& coin = inputs.AccessCoin(prevout);
@@ -182,7 +183,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "bad-txns-premature-spend-of-coinbase",
                 strprintf("tried to spend coinbase at depth %d", nSpendHeight - coin.nHeight));
         }
-        if (!coin.out.assetInfo.IsNull()) {
+        if (hasAssets && !coin.out.assetInfo.IsNull()) {
             auto inRes = mapAssetIn.try_emplace(coin.out.assetInfo.nAsset, coin.out.assetInfo.nValue);
             if (!inRes.second) {
                 inRes.first->second += coin.out.assetInfo.nValue;
@@ -204,7 +205,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             strprintf("value in (%s) < value out (%s)", FormatMoney(nValueIn), FormatMoney(value_out)));
     }
     // SYSCOIN
-    if(tx.HasAssets()) {
+    if(hasAssets) {
         std::string err;
         if(!tx.GetAssetValueOut(mapAssetOut, err)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, err);

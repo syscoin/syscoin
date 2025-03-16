@@ -21,7 +21,7 @@ CGovernanceObjectVoteFile::CGovernanceObjectVoteFile(const CGovernanceObjectVote
 
 void CGovernanceObjectVoteFile::AddVote(const CGovernanceVote& vote)
 {
-    const uint256 &nHash = vote.GetHash();
+    const uint256 nHash = vote.GetHash();
     // make sure to never add/update already known votes
     if (HasVote(nHash))
         return;
@@ -115,7 +115,7 @@ void CGovernanceObjectVoteFile::RebuildIndex()
     auto it = listVotes.begin();
     while (it != listVotes.end()) {
         const CGovernanceVote& vote = *it;
-        const uint256 &nHash = vote.GetHash();
+        const uint256 nHash = vote.GetHash();
         if (mapVoteIndex.find(nHash) == mapVoteIndex.end()) {
             mapVoteIndex[nHash] = it;
             ++nMemoryVotes;
