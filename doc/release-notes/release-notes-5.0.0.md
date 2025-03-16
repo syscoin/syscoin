@@ -30,7 +30,7 @@ Please report any issues using the issue tracker on GitHub:
     4. [AuxPoW Tags](#4-auxpow-tags)  
     5. [Enhanced NFT/Token Bridge (ERC721/1155/ERC20)](#5-enhanced-nfttoken-bridge-erc7211155erc20)  
     6. [NEVM Registry & PoDA Enhancements](#6-nevm-registry--poda-enhancements)  
-    7. [BLS/LLMQ & Sentry node Protocol Improvements](#7-blsllmq--sentrynode-protocol-improvements)  
+    7. [BLS/LLMQ & Sentry node Protocol Improvements](#7-blsllmq--sentry-node-protocol-improvements)  
     8. [Wallet & Descriptor Improvements](#8-wallet--descriptor-improvements)  
     9. [Removal of Deprecated Syscoin 4.x Asset RPCs](#9-removal-of-deprecated-syscoin-4x-asset-rpcs)  
     10. [Additional Miscellaneous Changes](#10-additional-miscellaneous-changes)  
