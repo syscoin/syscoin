@@ -29,7 +29,7 @@ bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMint
         if(!DisconnectMintAsset(tx, setMintTxs))
             return false;       
     }
-    else if tx.IsNEVMData() {
+    else if (tx.IsNEVMData()) {
         CNEVMData nevmData(tx);
         if(nevmData.IsNull()) {
             LogPrint(BCLog::SYS,"DisconnectSyscoinTransaction: nevm-data-invalid\n");
