@@ -12,7 +12,6 @@
 #include <serialize.h>
 #include <uint256.h>
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <ios>
@@ -408,7 +407,7 @@ public:
         nValue = 0;
 	}
     CAssetCoinInfo(const uint64_t &nAssetIn, const CAmount& nValueIn): nAsset(nAssetIn), nValue(nValueIn) {}
-
+ 
     friend bool operator==(const CAssetCoinInfo& a, const CAssetCoinInfo& b)
     {
         return (a.nAsset == b.nAsset &&
@@ -560,7 +559,7 @@ class CAssetOut {
 public:
     uint64_t key;
     std::vector<CAssetOutValue> values;
-
+    
     SERIALIZE_METHODS(CAssetOut, obj) {
         READWRITE(VARINT(obj.key), obj.values);
     }
@@ -753,7 +752,7 @@ public:
     CAssetAllocation(CAssetAllocation && other) = default;
     CAssetAllocation& operator=( CAssetAllocation& a ) = delete;
 	CAssetAllocation& operator=( CAssetAllocation&& a ) = default;
-
+ 
 	inline friend bool operator!=(const CAssetAllocation &a, const CAssetAllocation &b) {
 		return !(a == b);
 	}
@@ -810,7 +809,7 @@ public:
     explicit CBurnSyscoin(const CMutableTransaction &mtx);
 
     SERIALIZE_METHODS(CBurnSyscoin, obj) {
-
+        
         READWRITE(AsBase<CAssetAllocation>(obj));
         READWRITE(obj.vchNEVMAddress);
     }
