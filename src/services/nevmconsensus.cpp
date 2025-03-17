@@ -184,7 +184,7 @@ bool CNEVMDataDB::Prune(const int64_t nMedianTime) {
                 // erase both pairs
                 batch.Erase(pair);
                 pair.second = true;
-                if(Exists(pair)) {  
+                if(Exists(pair)) {
                     batch.Erase(pair);
                 }
                 // erase size

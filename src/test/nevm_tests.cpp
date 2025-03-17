@@ -92,7 +92,7 @@ BOOST_AUTO_TEST_CASE(nevmspv_valid)
 
     for (unsigned int idx = 0; idx < tests.size(); idx++) {
         const UniValue &test = tests[idx];
-        const std::string &strTest = test.write();
+        const std::string strTest = test.write();
         if (test.size() != 4) {
             // ignore comments
             continue;
@@ -103,17 +103,17 @@ BOOST_AUTO_TEST_CASE(nevmspv_valid)
             }
 
             std::string spv_tx_root = test[0].get_str();
-                std::string spv_parent_nodes = test[1].get_str();
-                std::string spv_value = test[2].get_str();
-                std::string spv_path = test[3].get_str();
+            std::string spv_parent_nodes = test[1].get_str();
+            std::string spv_value = test[2].get_str();
+            std::string spv_path = test[3].get_str();
 
-            const std::vector<unsigned char> &vchTxRoot = ParseHex(spv_tx_root);
+            const std::vector<unsigned char> vchTxRoot = ParseHex(spv_tx_root);
             dev::RLP rlpTxRoot(&vchTxRoot);
-            const std::vector<unsigned char> &vchTxParentNodes = ParseHex(spv_parent_nodes);
+            const std::vector<unsigned char> vchTxParentNodes = ParseHex(spv_parent_nodes);
             dev::RLP rlpTxParentNodes(&vchTxParentNodes);
-            const std::vector<unsigned char> &vchTxValue = ParseHex(spv_value);
+            const std::vector<unsigned char> vchTxValue = ParseHex(spv_value);
             dev::RLP rlpTxValue(&vchTxValue);
-            const std::vector<unsigned char> &vchTxPath = ParseHex(spv_path);
+            const std::vector<unsigned char> vchTxPath = ParseHex(spv_path);
             BOOST_CHECK(VerifyProof(&vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot));
         }
     }
@@ -131,7 +131,7 @@ BOOST_AUTO_TEST_CASE(nevmspv_invalid)
 
     for (unsigned int idx = 0; idx < tests.size(); idx++) {
         const UniValue &test = tests[idx];
-        const std::string &strTest = test.write();
+        const std::string strTest = test.write();
         if (test.size() != 4) {
             // ignore comments
             continue;
@@ -140,18 +140,18 @@ BOOST_AUTO_TEST_CASE(nevmspv_invalid)
                 BOOST_ERROR("Bad test: " << strTest);
                 continue;
             }
-                    std::string spv_tx_root = test[0].get_str();
-                    std::string spv_parent_nodes = test[1].get_str();
-                    std::string spv_value = test[2].get_str();
-                    std::string spv_path = test[3].get_str();
+            std::string spv_tx_root = test[0].get_str();
+            std::string spv_parent_nodes = test[1].get_str();
+            std::string spv_value = test[2].get_str();
+            std::string spv_path = test[3].get_str();
 
-            const std::vector<unsigned char> &vchTxRoot = ParseHex(spv_tx_root);
+            const std::vector<unsigned char> vchTxRoot = ParseHex(spv_tx_root);
             dev::RLP rlpTxRoot(&vchTxRoot);
-            const std::vector<unsigned char> &vchTxParentNodes = ParseHex(spv_parent_nodes);
+            const std::vector<unsigned char> vchTxParentNodes = ParseHex(spv_parent_nodes);
             dev::RLP rlpTxParentNodes(&vchTxParentNodes);
-            const std::vector<unsigned char> &vchTxValue = ParseHex(spv_value);
+            const std::vector<unsigned char> vchTxValue = ParseHex(spv_value);
             dev::RLP rlpTxValue(&vchTxValue);
-            const std::vector<unsigned char> &vchTxPath = ParseHex(spv_path);
+            const std::vector<unsigned char> vchTxPath = ParseHex(spv_path);
             BOOST_CHECK(!VerifyProof(&vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot));
         }
     }

@@ -6997,7 +6997,7 @@ bool Chainstate::StartGethNode()
     LogPrintf("%s: Starting SysGeth\n", __func__);
     fs::path gethFilename = fs::u8path(GetGethFilename());
     std::string binArchitectureTag;
-    const fs::path &fpathDefault = FindExecPath(binArchitectureTag);
+    const fs::path fpathDefault = FindExecPath(binArchitectureTag);
 
     fs::path binaryURL = fpathDefault / "../Resources" / gethFilename;
     binaryURL = binaryURL.make_preferred();
@@ -7053,9 +7053,9 @@ bool Chainstate::StartGethNode()
         LogPrintf("Could not find sysgeth\n");
         return false;
     }
-    const fs::path &dataDir = m_chainman.m_options.datadir / "geth";
+    const fs::path dataDir = m_chainman.m_options.datadir / "geth";
     std::vector<std::string> vecCmdLineStr = SanitizeGethCmdLine(m_chainman.GethCommandLine(), binaryURL, dataDir);
-    const fs::path &log = m_chainman.m_options.datadir / "sysgeth.log";
+    const fs::path log = m_chainman.m_options.datadir / "sysgeth.log";
 
     #ifndef WIN32
     // Prevent killed child-processes remaining as "defunct"
@@ -7182,12 +7182,12 @@ bool Chainstate::DoGethStartupProcedure() {
         LogPrintf("%s: Stopping Geth\n", __func__);
         StopGethNode(true);
         // copy wallet dir if exists
-        const fs::path &dataDir = m_chainman.m_options.datadir;
-        const fs::path &gethDir = dataDir / "geth";
-        const fs::path &gethKeyStoreDir = gethDir / "keystore";
-        const fs::path &gethNodeKeyPath = gethDir / "geth" / "nodekey";
-        const fs::path &keyStoreTmpDir = dataDir / "keystoretmp";
-        const fs::path &nodeKeyTmpDir = dataDir / "nodekeytmp";
+        const fs::path dataDir = m_chainman.m_options.datadir;
+        const fs::path gethDir = dataDir / "geth";
+        const fs::path gethKeyStoreDir = gethDir / "keystore";
+        const fs::path gethNodeKeyPath = gethDir / "geth" / "nodekey";
+        const fs::path keyStoreTmpDir = dataDir / "keystoretmp";
+        const fs::path nodeKeyTmpDir = dataDir / "nodekeytmp";
         bool existedKeystore = fs::exists(gethKeyStoreDir);
         bool existedKeystoreTmp = fs::exists(keyStoreTmpDir);
         if(existedKeystore && !existedKeystoreTmp){

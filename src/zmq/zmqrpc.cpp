@@ -48,7 +48,7 @@ static RPCHelpMan getzmqnotifications()
             obj.pushKV("type", n->GetType());
             obj.pushKV("address", n->GetAddress());
             // SYSCOIN
-            const std::string &addresssub = n->GetAddressSub();
+            const std::string addresssub = n->GetAddressSub();
             if(!addresssub.empty())
                 obj.pushKV("addresssub", addresssub);
             obj.pushKV("hwm", n->GetOutboundMessageHighWaterMark());

@@ -71,7 +71,7 @@ static RPCHelpMan getnevmblockchaininfo()
             throw JSONRPCError(RPC_DESERIALIZATION_ERROR, state.ToString());
         }
     }
-    const std::vector<std::string> &cmdLine = chainman.GethCommandLine();
+    const std::vector<std::string> cmdLine = chainman.GethCommandLine();
     std::vector<UniValue> vec;
     for(auto& cmd: cmdLine) {
         UniValue v;
@@ -380,7 +380,7 @@ static RPCHelpMan syscoingetspvproof()
     }
     CDataStream ssBlock(SER_NETWORK, PROTOCOL_VERSION);
     ssBlock << pblockindex->GetBlockHeader(*node.chainman);
-    const std::string &rawTx = EncodeHexTx(*tx, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+    const std::string rawTx = EncodeHexTx(*tx, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
     res.pushKVEnd("transaction",rawTx);
     res.pushKVEnd("blockhash", hashBlock.GetHex());
     const auto bytesVec = MakeUCharSpan(ssBlock);

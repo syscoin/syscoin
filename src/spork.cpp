@@ -403,7 +403,7 @@ bool CSporkMessage::Sign(const CKey& key)
     }
 
     CKeyID pubKeyId = key.GetPubKey().GetID();
-    const uint256 &hash = GetSignatureHash();
+    const uint256 hash = GetSignatureHash();
 
     if (!CHashSigner::SignHash(hash, key, vchSig)) {
         LogPrintf("CSporkMessage::Sign -- SignHash() failed\n");
@@ -421,7 +421,7 @@ bool CSporkMessage::Sign(const CKey& key)
 bool CSporkMessage::CheckSignature(const CKeyID& pubKeyId) const
 {
 
-    const uint256 &hash = GetSignatureHash();
+    const uint256 hash = GetSignatureHash();
 
     if (!CHashSigner::VerifyHash(hash, pubKeyId, vchSig)) {
         LogPrint(BCLog::SPORK, "CSporkMessage::CheckSignature -- VerifyHash() failed\n");
