@@ -137,7 +137,7 @@ inline uint256 uint256S(const std::string& str)
 
 uint256& UINT256_ONE();
 // SYSCOIN
-
+// mostly used for evodb ephemeral cache
 namespace std {
     template <>
     struct hash<uint256>
