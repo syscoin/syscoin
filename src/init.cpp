@@ -1691,6 +1691,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             fs::remove_all(assetbPath);
             LogPrintf("Folder %s found, forcing reindex.\n", fs::PathToString(assetbPath));
             fReindex = true;
+            fReindexGeth = true;
         }
         node.peerman = PeerManager::make(*node.connman, *node.addrman, node.banman.get(),
                                      chainman, *node.mempool, peerman_opts);
@@ -1773,6 +1774,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     "", CClientUIInterface::MSG_ERROR | CClientUIInterface::BTN_ABORT);
                 if (fRet) {
                     fReindex = true;
+                    fReindexGeth = true;
                     AbortShutdown();
                 } else {
                     LogPrintf("Aborted block database rebuild. Exiting.\n");

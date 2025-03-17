@@ -2875,9 +2875,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                             tx_state.GetRejectReason(), tx_state.GetDebugMessage());
                 return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
             }
-            bool bLegacy = tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY;
-            if(bLegacy)
-                LogPrintf("SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN_LEGACY height %d amount %s\n", pindex->nHeight, ValueFromAmount(tx.vout[0].nValue).write());
             // SYSCOIN
             TxValidationState tx_statesys;
             // just temp var not used in !fJustCheck mode
@@ -7172,7 +7169,7 @@ bool Chainstate::DoGethStartupProcedure() {
         return false;
     }
     // hasn't started yet so start
-    if(!fReindexGeth ) {
+    if(!fReindexGeth) {
         LogPrintf("%s: Stopping Geth\n", __func__);
         StopGethNode(true);
         LogPrintf("%s: Starting Geth because PID's were uninitialized\n", __func__);
