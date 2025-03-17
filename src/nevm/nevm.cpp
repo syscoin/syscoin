@@ -29,7 +29,7 @@ bool VerifyProof(dev::bytesConstRef path, const dev::RLP& value, const dev::RLP&
   dev::RLP nodeKey = root;       
   int pathPtr = 0;
 
-  const std::string &pathString = dev::toHex(path);
+  const std::string pathString = dev::toHex(path);
   int nibbles;
   char pathPtrInt[2];
   uint8_t pathInt;
