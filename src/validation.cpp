@@ -7062,39 +7062,47 @@ bool Chainstate::StartGethNode()
     struct sigaction sa;
     sa.sa_handler = SIG_DFL;
     sa.sa_flags = SA_NOCLDWAIT;
+    sigaction(SIGCHLD, &sa, nullptr);
 
-    sigaction( SIGCHLD, &sa, nullptr ) ;
-
-    // Duplicate ("fork") the process. Will return zero in the child
-    // process, and the child's PID in the parent (or negative on error).
-    gethpid = fork() ;
-    if( gethpid < 0 ) {
+    // Fork the process
+    gethpid = fork();
+    if (gethpid < 0) {
         LogPrintf("Could not start Geth, pid < 0 %d\n", gethpid);
         return false;
     }
-    // TODO: sanitize environment variables as per
-    // https://wiki.sei.cmu.edu/confluence/display/c/ENV03-C.+Sanitize+the+environment+when+invoking+external+programs
-    if( gethpid == 0 ) {
-        std::vector<char*> commandVector;
-        commandVector.reserve(vecCmdLineStr.size());
-        for(const std::string &cmdStr: vecCmdLineStr) {
-            commandVector.push_back(const_cast<char*>(cmdStr.c_str()));
+
+    // Child process logic
+    if (gethpid == 0) {
+        if (setsid() < 0) {  // <--- explicitly create new session here
+            LogPrintf("setsid failed\n");
+            exit(EXIT_FAILURE);
         }
 
-        // push NULL to the end of the vector (execvp expects NULL as last element)
+        std::vector<char*> commandVector;
+        commandVector.reserve(vecCmdLineStr.size());
+        for (const std::string &cmdStr: vecCmdLineStr) {
+            commandVector.push_back(const_cast<char*>(cmdStr.c_str()));
+        }
         commandVector.push_back(nullptr);
+
         char **command = commandVector.data();
         LogPrintf("%s: Starting geth with command line: %s...\n", __func__, command[0]);
+
         int err = open(fs::PathToString(log).c_str(), O_RDWR|O_CREAT|O_APPEND, 0600);
         if (err == -1) {
             LogPrintf("Could not open sysgeth.log\n");
+            exit(EXIT_FAILURE);
         }
-        if (-1 == dup2(err, fileno(stderr))) { LogPrintf("Cannot redirect stderr for syssgeth\n"); return false; }
-        fflush(stderr); close(err);
+        if (-1 == dup2(err, fileno(stderr))) { 
+            LogPrintf("Cannot redirect stderr for sysgeth\n");
+            exit(EXIT_FAILURE); 
+        }
+        fflush(stderr);
+        close(err);
+
         execvp(command[0], &command[0]);
-        if (errno != 0) {
-            LogPrintf("Geth not found at %s\n", fs::PathToString(binaryURL));
-        }
+        LogPrintf("Geth not found at %s\n", fs::PathToString(binaryURL));
+        exit(EXIT_FAILURE);
     }
     #else
         std::string commandStr;
@@ -7115,43 +7123,58 @@ bool Chainstate::StartGethNode()
 }
 bool Chainstate::StopGethNode(bool bOnStart)
 {
-    if(!fNEVMConnection || fRegTest) {
+    if (!fNEVMConnection || fRegTest) {
         return false;
     }
     if(!bOnStart) {
         bool bResponse = false;
-        // returns without waiting, signals sysgeth to shutdown
         GetMainSignals().NotifyNEVMComms("disconnect", bResponse);
-        if(bResponse) {
-            LogPrintf("Waiting for sysgeth to shutdown...\n");
+        
+        if (bResponse) {
+            LogPrintf("Waiting for sysgeth to shutdown gracefully...\n");
+            UninterruptibleSleep(std::chrono::milliseconds{2000});
             #ifdef WIN32
-            if(hProcessGeth) {
-                for (int i = 0; i < 50; ++i) {
-                    LogPrintf("Geth shutdown check (%d)\n", i);
-                    if(WaitForSingleObject(hProcessGeth, 0) == WAIT_OBJECT_0) {
+            if (hProcessGeth) {
+                for (int i = 0; i < 20; ++i) { // wait up to 40 seconds
+                    if (WaitForSingleObject(hProcessGeth, 2000) == WAIT_OBJECT_0) {
                         CloseHandle(hProcessGeth);
                         return true;
                     }
-                    UninterruptibleSleep(std::chrono::milliseconds{2000});
+                    LogPrintf("Geth shutdown check (%d)\n", i);
                 }
                 CloseHandle(hProcessGeth);
             }
             #else
-            for (int i = 0; i < 50; ++i) {
-                LogPrintf("Geth shutdown check (%d)\n", i);
-                int status;
-                if(waitpid(gethpid, &status, WNOHANG) != 0 && !WIFEXITED(status)){
+            for (int i = 0; i < 20; ++i) { // wait up to 40 seconds
+                int status = 0;
+                pid_t result = waitpid(gethpid, &status, WNOHANG);
+            
+                if (result == gethpid) {
+                    if (WIFEXITED(status)) {
+                        LogPrintf("Geth shutdown gracefully with exit code %d.\n", WEXITSTATUS(status));
+                        return true;
+                    } else if (WIFSIGNALED(status)) {
+                        LogPrintf("Geth terminated by signal %d.\n", WTERMSIG(status));
+                        return true;  // explicitly treat signal exits as valid shutdowns
+                    }
+                } else if (result == -1 && errno == ECHILD) {
+                    LogPrintf("Geth process no longer exists (ECHILD).\n");
                     return true;
                 }
+            
+                LogPrintf("Geth shutdown check (%d)\n", i);
                 UninterruptibleSleep(std::chrono::milliseconds{2000});
             }
             #endif
+        } else {
+            LogPrintf("No response from sysgeth on disconnect.\n");
         }
     }
 
+    // Only now explicitly kill sysgeth as last resort
+    LogPrintf("Graceful shutdown failed; explicitly killing sysgeth...\n");
     #ifndef USE_SYSCALL_SANDBOX
     #if HAVE_SYSTEM
-    LogPrintf("Killing any sysgeth processes that may be already running...\n");
     std::string cmd = "pkill -9 -f sysgeth";
     #ifdef WIN32
         cmd = "taskkill /F /T /IM sysgeth.exe >nul 2>&1";
@@ -7164,6 +7187,7 @@ bool Chainstate::StopGethNode(bool bOnStart)
 
     return true;
 }
+
 bool Chainstate::DoGethStartupProcedure() {
     if(m_chainman.m_interrupt) {
         return false;
