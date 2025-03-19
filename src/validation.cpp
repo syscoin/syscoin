@@ -6767,8 +6767,12 @@ bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight) {
         batch.Write(key, val);
     }
     LogPrint(BCLog::SYS, "Flush writing %d block indexes\n", mapCache.size());
-    mapCache.clear();
-    return WriteBatch(batch, true);
+   
+    bool res = WriteBatch(batch, true);
+    if(res) {
+        mapCache.clear();
+    }
+    return res;
 }
 bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
     if(MAX_BLOCK_INDEX > nHeight) {

@@ -79,8 +79,10 @@ bool CNEVMDataDB::FlushCacheToDisk() {
         batch.Write(pairMTP, val.second);
     }
     LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm blobs\n", mapCache.size());
-    auto res = WriteBatch(batch, true);
-    mapCache.clear();
+    bool res = WriteBatch(batch, true);
+    if(res) {
+        mapCache.clear();
+    }
     return res;
 }
 bool CNEVMDataDB::ReadData(const std::vector<uint8_t>& nVersionHash, std::vector<uint8_t>& vchData) {

@@ -440,8 +440,10 @@ bool CNEVMTxRootsDB::FlushCacheToDisk() {
         batch.Write(key, val);
     }
     LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx roots\n", mapCache.size());
-    auto res = WriteBatch(batch, true);
-    mapCache.clear();
+    bool res = WriteBatch(batch, true);
+    if(res) {
+        mapCache.clear();
+    }
     return res;
 }
 bool CNEVMTxRootsDB::ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) {
@@ -486,8 +488,10 @@ bool CNEVMMintedTxDB::FlushCacheToDisk() {
         batch.Write(key, true);
     }
     LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx mints\n", mapCache.size());
-    auto res = WriteBatch(batch, true);
-    mapCache.clear();
+    bool res = WriteBatch(batch, true);
+    if(res) {
+        mapCache.clear();
+    }
     return res;
 }
 bool CNEVMMintedTxDB::FlushErase(const NEVMMintTxSet &mapNEVMTxRoots) {
