@@ -187,7 +187,7 @@ void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
         return;
     }
 	// miner takes 25% of the reward and half fees
-	txNew.vout[0].nValue = voutMasternodePaymentsRet.empty()? blockReward: (blockReward*0.25);
+	txNew.vout[0].nValue = voutMasternodePaymentsRet.empty()? blockReward: ceil(blockReward*0.25);
     if(nHalfFee > 0)
 	    txNew.vout[0].nValue += nHalfFee;
     // mn is paid 75% of block reward plus any seniority
