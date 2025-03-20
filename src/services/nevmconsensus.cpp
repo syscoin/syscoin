@@ -23,28 +23,19 @@ bool fNEVMConnection = false;
 bool fRegTest = false;
 bool fSigNet = false;
 
-bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut) {
+bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs) {
  
     if(IsSyscoinMintTx(tx.nVersion)) {
         if(!DisconnectMintAsset(tx, setMintTxs))
             return false;       
     }
-    else if (tx.IsNEVMData()) {
-        CNEVMData nevmData(tx);
-        if(nevmData.IsNull()) {
-            LogPrint(BCLog::SYS,"DisconnectSyscoinTransaction: nevm-data-invalid\n");
-            return false; 
-        }
-        NEVMDataVecOut.emplace_back(nevmData.vchVersionHash); 
-    } 
     return true;       
 }
 
-void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, const int64_t& nMedianTime) {
+void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, const int64_t nMedianTime) {
     if(mapPoDA.empty()) {
         return;
     }
-    int nCount = 0;
     for (auto const& [key, val] : mapPoDA) {
         // Could be null if we are reindexing blocks from disk and we get the VH without data (because data wasn't provided in payload).
         // This is OK because we still want to provide the VH's to NEVM for indexing into DB (lookup via precompile).
@@ -58,12 +49,29 @@ void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, const int64_t& 
         if(!inserted.second) {
             inserted.first->second.second = nMedianTime;
         }
-        nCount++;
     }
-    if(nCount > 0)
-        LogPrint(BCLog::SYS, "Flushing to cache, storing %d nevm blobs\n", nCount);
 }
-bool CNEVMDataDB::FlushCacheToDisk() {
+size_t CNEVMDataDB::GetCacheMemoryUsage() const
+{
+    size_t total = 0;
+    for (const auto &it : mapCache) {
+        total += it.second.first.size();
+    }
+    return total;
+}
+PoDACacheSizeState CNEVMDataDB::GetPoDACacheSizeState(size_t &cacheSize) {
+    cacheSize = GetCacheMemoryUsage();
+    // 1GB limit for cache for PoDA
+    static const size_t PODA_CACHE_LIMIT = 1024 * 1024 * 1024; 
+    // You can define thresholds for LARGE/CRITICAL
+    if (cacheSize > PODA_CACHE_LIMIT * 0.95) {
+        return PoDACacheSizeState::CRITICAL;
+    } else if (cacheSize > PODA_CACHE_LIMIT * 0.90) {
+        return PoDACacheSizeState::LARGE;
+    }
+    return PoDACacheSizeState::OK;
+}
+bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime) {
     if(mapCache.empty()) {
         return true;
     }
@@ -77,6 +85,13 @@ bool CNEVMDataDB::FlushCacheToDisk() {
         batch.Write(pairData, val.first);
         // write the MTP
         batch.Write(pairMTP, val.second);
+    }
+    // only prune on testnet flush, mainnet relies only on CL
+    if(fTestNet) {
+        if (!PruneToBatch(batch, nMedianTime)) {
+            LogPrint(BCLog::SYS, "Error: Could not prune nevm blobs\n");
+            return false;
+        }
     }
     LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm blobs\n", mapCache.size());
     bool res = WriteBatch(batch, true);
@@ -118,24 +133,6 @@ bool CNEVMDataDB::ReadDataSize(const std::vector<uint8_t>& nVersionHash, uint32_
     }
     return false;
 }
-bool CNEVMDataDB::FlushEraseMTPs(const NEVMDataVec &vecDataKeys) {
-    if(vecDataKeys.empty())
-        return true;
-    CDBBatch batch(*this);    
-    for (const auto &key : vecDataKeys) {
-        const auto pairMTP = std::make_pair(key, false);
-        // only set if it already exists (override) rather than create a new insertion
-        if(Exists(pairMTP))   
-            batch.Write(pairMTP, 0);
-        // set in cache as well
-        auto it = mapCache.find(key);
-        if(it != mapCache.end()) {
-            it->second.second = 0;
-        }
-    }
-    LogPrint(BCLog::SYS, "Flushing, resetting %d nevm MTPs\n", vecDataKeys.size());
-    return WriteBatch(batch, true);
-}
 bool CNEVMDataDB::FlushErase(const NEVMDataVec &vecDataKeys) {
     if(vecDataKeys.empty())
         return true;
@@ -156,47 +153,74 @@ bool CNEVMDataDB::FlushErase(const NEVMDataVec &vecDataKeys) {
         if(it != mapCache.end())
             mapCache.erase(it);
     }
-    LogPrint(BCLog::SYS, "Flushing, erasing %d nevm entries\n", vecDataKeys.size());
+    LogPrint(BCLog::SYS, "Flushing, erasing %d nevm blob keys\n", vecDataKeys.size());
     return WriteBatch(batch, true);
 }
 bool CNEVMDataDB::BlobExists(const std::vector<uint8_t>& vchVersionHash) {
     return (mapCache.find(vchVersionHash) != mapCache.end()) || Exists(std::make_pair(vchVersionHash, true));
 }
-bool CNEVMDataDB::Prune(const int64_t nMedianTime) {
-    auto it = mapCache.begin();
-    while (it != mapCache.end()) {
-        const bool isExpired = (nMedianTime > (it->second.second+NEVM_DATA_EXPIRE_TIME));
-        if (it->second.second > 0 && isExpired) {
-            mapCache.erase(it++);
-        }
-        else {
-            ++it;
-        }
-    }
-    CDBBatch batch(*this);
+bool CNEVMDataDB::PruneToBatch(
+    CDBBatch& batch,
+    const int64_t nMedianTime)
+{
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
     pcursor->SeekToFirst();
     std::pair<std::vector<unsigned char>, bool> pair;
-    int64_t nTime;
+    int64_t nTime   = 0;
+    int count       = 0;
     while (pcursor->Valid()) {
         try {
             nTime = 0;
-            // check if expired if so delete data
-            if(pcursor->GetKey(pair) && pair.second == false && pcursor->GetValue(nTime) && nTime > 0 && nMedianTime > (nTime+NEVM_DATA_EXPIRE_TIME)) {
-                // erase both pairs
-                batch.Erase(pair);
-                pair.second = true;
-                if(Exists(pair)) {
+            if (!pcursor->GetKey(pair) || pair.second) {
+                pcursor->Next();
+                continue; // Not an MTP key or is the (versionHash, true) data key
+            }
+            // So this is (versionHash, false) => MTP entry
+            if (pcursor->GetValue(nTime)) {
+                bool isExpired = nMedianTime > (nTime + NEVM_DATA_EXPIRE_TIME);
+                if (isExpired) {
+                    // Erase MTP
                     batch.Erase(pair);
+
+                    // Erase data key if it exists
+                    pair.second = true;
+                    if (Exists(pair)) {
+                        batch.Erase(pair);
+                    }
+                    // Erase size
+                    batch.Erase(pair.first);
+                    count++;
                 }
-                // erase size
-                batch.Erase(pair.first);
             }
             pcursor->Next();
-        }
-        catch (std::exception &e) {
-            return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+        } catch (const std::exception& e) {
+            return error("%s() : deserialize error: %s", __func__, e.what());
         }
     }
+    LogPrint(BCLog::SYS, "PruneToBatch pruned %d nevm blobs\n", count);
+
+    return true;
+}
+
+bool CNEVMDataDB::PruneStandalone(const int64_t nMedianTime)
+{
+    int nCount = 0;
+    auto it = mapCache.begin();
+    while (it != mapCache.end()) {
+        const int64_t entryTime = it->second.second;
+        bool isExpired = nMedianTime > (entryTime + NEVM_DATA_EXPIRE_TIME);
+        if (isExpired) {
+            it = mapCache.erase(it);
+        } else {
+            ++it;
+        }
+        ++nCount;
+    }
+    CDBBatch batch(*this);
+    if (!PruneToBatch(batch, nMedianTime)) {
+        return false;
+    }
+    if(nCount > 0)
+        LogPrint(BCLog::SYS, "PruneStandalone, pruning %d nevm blobs\n", nCount);
     return WriteBatch(batch, true);
 }

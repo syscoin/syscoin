@@ -15,23 +15,30 @@ class CBlock;
 class BlockValidationState;
 class CBlockIndexDB;
 class CNEVMData;
-
+class CDBBatch;
+enum class PoDACacheSizeState {
+    OK,
+    LARGE,
+    CRITICAL,
+};
 class CNEVMDataDB : public CDBWrapper {
 private:
     PoDAMAP mapCache;
 public:
     using CDBWrapper::CDBWrapper;
     bool FlushErase(const NEVMDataVec &vecDataKeys);
-    bool FlushEraseMTPs(const NEVMDataVec &vecDataKeys);
-    bool FlushCacheToDisk();
-    void FlushDataToCache(const PoDAMAPMemory &mapPoDA, const int64_t &nMedianTime);
+    bool FlushCacheToDisk(const int64_t nMedianTime);
+    void FlushDataToCache(const PoDAMAPMemory &mapPoDA, const int64_t nMedianTime);
     bool ReadData(const std::vector<uint8_t>& nVersionHash, std::vector<uint8_t>& vchData);
     bool ReadDataSize(const std::vector<uint8_t>& nVersionHash, uint32_t &nSize);
     bool ReadMTP(const std::vector<uint8_t>& nVersionHash, int64_t &nMedianTime);
-    bool Prune(int64_t nMedianTime);
+    bool PruneStandalone(const int64_t nMedianTime);
+    bool PruneToBatch(CDBBatch& batch, const int64_t nMedianTime);
     bool BlobExists(const std::vector<uint8_t>& vchVersionhash);
     const PoDAMAP& GetMapCache() const { return mapCache;}
+    size_t GetCacheMemoryUsage() const;
+    PoDACacheSizeState GetPoDACacheSizeState(size_t &cacheSize);
 };
 extern std::unique_ptr<CNEVMDataDB> pnevmdatadb;
-bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut);
+bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs);
 #endif // SYSCOIN_SERVICES_NEVMCONSENSUS_H

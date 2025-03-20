@@ -429,7 +429,6 @@ void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
     for (auto const& [key, val] : mapNEVMTxRoots) {
         mapCache.try_emplace(key, val);
     }
-    LogPrint(BCLog::SYS, "Flushing to cache, storing %d nevm tx roots\n", mapNEVMTxRoots.size());
 }
 bool CNEVMTxRootsDB::FlushCacheToDisk() {
     if(mapCache.empty()) {
@@ -477,7 +476,6 @@ void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) {
     for (auto const& key : mapNEVMTxRoots) {
         mapCache.insert(key);
     }
-    LogPrint(BCLog::SYS, "Flushing to cache, storing %d nevm tx mints\n", mapNEVMTxRoots.size());
 }
 bool CNEVMMintedTxDB::FlushCacheToDisk() {
     if(mapCache.empty()) {

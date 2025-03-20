@@ -92,7 +92,8 @@ void ReleaseDirectoryLocks()
 
 bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes)
 {
-    constexpr uint64_t min_disk_space = 52428800; // 50 MiB
+    // SYSCOIN
+    constexpr uint64_t min_disk_space = 5242880000; // 5000 MiB
 
     uint64_t free_bytes_available = fs::space(dir).available;
     return free_bytes_available >= min_disk_space + additional_bytes;

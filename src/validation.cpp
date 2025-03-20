@@ -2425,7 +2425,7 @@ bool ProcessNEVMData(const BlockManager& blockman, const CTransaction& tx, const
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 // SYSCOIN
-DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
 {
     AssertLockHeld(::cs_main);
     // SYSCOIN
@@ -2486,7 +2486,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 return DISCONNECT_FAILED;
             }
             // SYSCOIN
-            if(!DisconnectSyscoinTransaction(tx, setMintTxs, NEVMDataVecOut)) {
+            if(!DisconnectSyscoinTransaction(tx, setMintTxs)) {
                 error("DisconnectBlock(): DisconnectSyscoinTransaction failed!\n");
                 fClean = false;
             }
@@ -2936,7 +2936,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
     }
     bool PODAContext = pindex->nHeight >= params.GetConsensus().nPODAStartBlock;
-    if(PODAContext && !ProcessNEVMData(m_chainman.m_blockman, block, m_chain.Tip()->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_chainman.m_options.adjusted_time_callback()), mapPoDA)) {
+    if(PODAContext && !ProcessNEVMData(m_chainman.m_blockman, block, pindex->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_chainman.m_options.adjusted_time_callback()), mapPoDA)) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "poda-validation-failed");
     }
 
@@ -3137,6 +3137,23 @@ bool Chainstate::FlushStateToDisk(
         bool fPeriodicFlush = mode == FlushStateMode::PERIODIC && nNow > m_last_flush + DATABASE_FLUSH_INTERVAL;
         // Combine all conditions that result in a full cache flush.
         fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
+        // Check PoDA cache usage
+        if (pnevmdatadb) {
+            size_t PoDACacheSize;
+            PoDACacheSizeState poda_cache_state = pnevmdatadb->GetPoDACacheSizeState(PoDACacheSize);
+            // Similar to coin cache logic:
+            bool podaCacheLarge    = mode == FlushStateMode::PERIODIC && poda_cache_state >= PoDACacheSizeState::LARGE;
+            bool podaCacheCritical = mode == FlushStateMode::IF_NEEDED && poda_cache_state >= PoDACacheSizeState::CRITICAL;
+            if(fPeriodicWrite || podaCacheLarge ||podaCacheCritical || fDoFullFlush) {
+                // Ensure we can write block index
+                if (!CheckDiskSpace(m_chainman.m_options.datadir, PoDACacheSize)) {
+                    return FatalError(m_chainman.GetNotifications(), state, "Disk space is too low!", _("Disk space is too low!"));
+                }
+                if (pnevmdatadb && !pnevmdatadb->FlushCacheToDisk(m_chain.Tip()->GetMedianTimePast())) {
+                    return FatalError(m_chainman.GetNotifications(), state, "Failed to commit PoDA");
+                }
+            }
+        }
         // Write blocks and block index to disk.
         if (fDoFullFlush || fPeriodicWrite) {
             // Ensure we can write block index
@@ -3169,14 +3186,14 @@ bool Chainstate::FlushStateToDisk(
                 m_blockman.UnlinkPrunedFiles(setFilesToPrune);
             }
             // SYSCOIN
-            if (pnevmdatadb && !pnevmdatadb->FlushCacheToDisk()) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit PoDA");
-            }
-            if (pblockindexdb && !pblockindexdb->FlushCacheToDisk((uint32_t)m_chainman.ActiveHeight())) {
+            if (pblockindexdb && !pblockindexdb->FlushCacheToDisk((uint32_t)m_chain.Height())) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to block index db");
             }
             if (pnevmtxrootsdb && !pnevmtxrootsdb->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx roots db");
+            }
+            if (pnevmtxmintdb && !pnevmtxmintdb->FlushCacheToDisk()) {
+                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx mint db");
             }
             if (deterministicMNManager && !deterministicMNManager->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit DMN DB");
@@ -3186,9 +3203,6 @@ bool Chainstate::FlushStateToDisk(
             }
             if (llmq::quorumManager && !llmq::quorumManager->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QM DB");
-            }
-            if (pnevmtxmintdb && !pnevmtxmintdb->FlushCacheToDisk()) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx mint db");
             }
             m_last_write = nNow;
         }
@@ -3362,21 +3376,20 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     // Apply the block atomically to the chain state.
     // SYSCOIN
     NEVMMintTxSet setMintTxs;
-    NEVMDataVec NEVMDataVecOut;
     std::vector<uint256> vecNEVMBlocks;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
     const auto time_start{SteadyClock::now()};
     {
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
-        if (DisconnectBlock(block, pindexDelete, view, setMintTxs, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, bReverify) != DISCONNECT_OK)
+        if (DisconnectBlock(block, pindexDelete, view, setMintTxs, vecNEVMBlocks, vecTXIDPairs, bReverify) != DISCONNECT_OK)
             return error("DisconnectTip(): DisconnectBlock %s failed", pindexDelete->GetBlockHash().ToString());
         bool flushed = view.Flush();
         assert(flushed);
     }
     // SYSCOIN
     if(pnevmtxmintdb != nullptr){
-        if(!pnevmtxmintdb->FlushErase(setMintTxs) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(NEVMDataVecOut)){
+        if(!pnevmtxmintdb->FlushErase(setMintTxs) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs)){
             return error("DisconnectTip(): Error flushing to asset dbs on disconnect %s", pindexDelete->GetBlockHash().ToString());
         }
     }
@@ -5036,7 +5049,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // SYSCOIN ProcessNEVMData/FlushDataToCache so we have the data from processing out-of-order blocks and it reads from disk (recreating PoDA data in block) prior to validation in ConnectTip()
     bool PODAContext = pindex->nHeight >= params.GetConsensus().nPODAStartBlock;
     PoDAMAPMemory mapPoDA;
-    if(PODAContext && !ProcessNEVMData(m_blockman, block, ActiveTip()? ActiveTip()->GetMedianTimePast(): 0, TicksSinceEpoch<std::chrono::seconds>(this->m_options.adjusted_time_callback()), mapPoDA)) {
+    if(PODAContext && !ProcessNEVMData(m_blockman, block, pindex->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(this->m_options.adjusted_time_callback()), mapPoDA)) {
         state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "poda-validation-failed");
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_blockman.m_dirty_blockindex.insert(pindex);
@@ -5253,7 +5266,6 @@ VerifyDBResult CVerifyDB::VerifyDB(
     // SYSCOIN
     NEVMMintTxSet setMintTxs;
     std::vector<uint256> vecNEVMBlocks;
-    NEVMDataVec NEVMDataVecOut;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
 
     for (pindex = chainstate.m_chain.Tip(); pindex && pindex->pprev; pindex = pindex->pprev) {
@@ -5302,7 +5314,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
         if (nCheckLevel >= 3) {
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
                 // SYSCOIN
-                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, setMintTxs, NEVMDataVecOut, vecNEVMBlocks, vecTXIDPairs, false);
+                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, setMintTxs, vecNEVMBlocks, vecTXIDPairs, false);
                 if (res == DISCONNECT_FAILED) {
                     LogPrintf("Verification error: irrecoverable inconsistency in block data at %d, hash=%s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
                     return VerifyDBResult::CORRUPTED_BLOCK_DB;
@@ -5385,7 +5397,7 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         return error("%s: ProcessSpecialTxsInBlock for block %s failed with %s", __func__,
             pindex->GetBlockHash().ToString(), state.ToString());
     }
-    if(!ProcessNEVMData(m_chainman.m_blockman, block, m_chain.Tip()->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_chainman.m_options.adjusted_time_callback()), mapPoDA)) {
+    if(!ProcessNEVMData(m_chainman.m_blockman, block, pindex->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_chainman.m_options.adjusted_time_callback()), mapPoDA)) {
         return error("ReplayBlock(): poda-validation-failed");
     }
     for (const CTransactionRef& tx : block.vtx) {
@@ -5427,7 +5439,6 @@ bool Chainstate::ReplayBlocks()
     std::vector<uint256> hashHeads = db.GetHeadBlocks();
     // SYSCOIN
     PoDAMAPMemory mapPoDAConnect;
-    NEVMDataVec vecNEVMDataDisconnect;
     NEVMMintTxSet setMintTxsDisconnect, setMintTxsConnect;
     std::vector<uint256> vecNEVMBlocks;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
@@ -5464,7 +5475,7 @@ bool Chainstate::ReplayBlocks()
             }
             LogPrintf("Rolling back %s (%i)\n", pindexOld->GetBlockHash().ToString(), pindexOld->nHeight);
             // SYSCOIN
-            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, setMintTxsDisconnect, vecNEVMDataDisconnect, vecNEVMBlocks, vecTXIDPairs);
+            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, setMintTxsDisconnect, vecNEVMBlocks, vecTXIDPairs);
             if (res == DISCONNECT_FAILED) {
                 return error("RollbackBlock(): DisconnectBlock failed at %d, hash=%s", pindexOld->nHeight, pindexOld->GetBlockHash().ToString());
             }
@@ -5477,7 +5488,7 @@ bool Chainstate::ReplayBlocks()
     }
     // SYSCOIN must flush for now because disconnect may remove asset data and rolling forward expects it to be clean from db
     if(pnevmtxmintdb != nullptr){
-        if(!pnevmtxmintdb->FlushErase(setMintTxsDisconnect) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs) || !pnevmdatadb->FlushEraseMTPs(vecNEVMDataDisconnect)){
+        if(!pnevmtxmintdb->FlushErase(setMintTxsDisconnect) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs)){
             return error("RollbackBlock(): Error flushing to asset dbs on disconnect %s", pindexOld->GetBlockHash().ToString());
         }
     }
@@ -5696,7 +5707,14 @@ void ChainstateManager::LoadExternalBlockFile(
                         pblock = std::make_shared<CBlock>();
                         blkdat >> *pblock;
                         nRewind = blkdat.GetPos();
-
+                        // SYSCOIN
+                        for (auto &tx : pblock->vtx) {
+                            if(tx && tx->IsNEVMData()) {
+                                if(!FillNEVMData(tx)) {
+                                    LogPrint(BCLog::REINDEX, "FillNEVMData() failed for %s", hash.GetHex());
+                                }
+                            }
+                        }
                         BlockValidationState state;
                         if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
                             nLoaded++;
@@ -6755,7 +6773,6 @@ void CBlockIndexDB::FlushDataToCache(const std::vector<std::pair<uint256,uint32_
     for (auto const& [key, val] : vecTXIDPairs) {
         mapCache.try_emplace(key, val);
     }
-    LogPrint(BCLog::SYS, "Flushing to cache, storing %d block indexes\n", vecTXIDPairs.size());
 }
 bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight) {
     if(mapCache.empty()) {

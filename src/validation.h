@@ -675,7 +675,7 @@ public:
 
     // Block (dis)connection on a given view:
     // SYSCOIN
-    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, NEVMDataVec &NEVMDataVecOut, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                     CCoinsViewCache& view, bool fJustCheck = false, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

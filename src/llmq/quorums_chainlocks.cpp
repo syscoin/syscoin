@@ -182,7 +182,7 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
     if (it1 != bestChainLockCandidates.end()) {
         // only prune blob data upon chainlock so we cannot rollback on pruned blob transactions. If we rolled back on pruned blob data then upon new inclusion there could be situation
         // where new block would fall within 2-hour time window of enforcement and include the pruned blob tx
-        if(bestChainLockBlockIndex && !pnevmdatadb->Prune(bestChainLockBlockIndex->GetMedianTimePast())) {
+        if(bestChainLockBlockIndex && !pnevmdatadb->PruneStandalone(bestChainLockBlockIndex->GetMedianTimePast())) {
             LogPrintf("CChainLocksHandler::%s -- CNEVMDataDB::Prune failed\n", __func__);
         }
         bestChainLockWithKnownBlock = *it1->second;
@@ -214,7 +214,7 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
             if (sigs.size() >= threshold) {
                 // only prune blob data upon chainlock so we cannot rollback on pruned blob transactions. If we rolled back on pruned blob data then upon new inclusion there could be situation
                 // where new block would fall within 2-hour time window of enforcement and include the pruned blob tx
-                if(bestChainLockBlockIndex && !pnevmdatadb->Prune(bestChainLockBlockIndex->GetMedianTimePast())) {
+                if(bestChainLockBlockIndex && !pnevmdatadb->PruneStandalone(bestChainLockBlockIndex->GetMedianTimePast())) {
                     LogPrintf("CChainLocksHandler::%s -- CNEVMDataDB::Prune failed\n", __func__);
                 }
                 // all sigs should be validated already
