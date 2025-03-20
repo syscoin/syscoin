@@ -6763,7 +6763,8 @@ bool CBlockIndexDB::FlushErase(const std::vector<std::pair<uint256,uint32_t> > &
             mapCache.erase(it);
         }
     }
-    LogPrint(BCLog::SYS, "Flushing %d block index removals\n", vecTXIDPairs.size());
+    if(vecTXIDPairs.size() > 0)
+        LogPrint(BCLog::SYS, "Flushing %d block index removals\n", vecTXIDPairs.size());
     return true;
 }
 void CBlockIndexDB::FlushDataToCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
@@ -6783,7 +6784,8 @@ bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight) {
     for (auto const& [key, val] : mapCache) {
         batch.Write(key, val);
     }
-    LogPrint(BCLog::SYS, "Flush writing %d block indexes\n", mapCache.size());
+    if(mapCache.size() > 0)
+        LogPrint(BCLog::SYS, "Flush writing %d block indexes\n", mapCache.size());
    
     bool res = WriteBatch(batch, true);
     if(res) {

@@ -438,7 +438,8 @@ bool CNEVMTxRootsDB::FlushCacheToDisk() {
     for (auto const& [key, val] : mapCache) {
         batch.Write(key, val);
     }
-    LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx roots\n", mapCache.size());
+    if(mapCache.size() > 0)
+        LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx roots\n", mapCache.size());
     bool res = WriteBatch(batch, true);
     if(res) {
         mapCache.clear();
@@ -466,7 +467,8 @@ bool CNEVMTxRootsDB::FlushErase(const std::vector<uint256> &vecBlockHashes) {
             mapCache.erase(it);
         }
     }
-    LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx roots\n", vecBlockHashes.size());
+    if(vecBlockHashes.size() > 0)
+        LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx roots\n", vecBlockHashes.size());
     return WriteBatch(batch, true);
 }
 void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) {
@@ -485,7 +487,8 @@ bool CNEVMMintedTxDB::FlushCacheToDisk() {
     for (auto const& key : mapCache) {
         batch.Write(key, true);
     }
-    LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx mints\n", mapCache.size());
+    if(mapCache.size() > 0)
+        LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx mints\n", mapCache.size());
     bool res = WriteBatch(batch, true);
     if(res) {
         mapCache.clear();
@@ -503,7 +506,8 @@ bool CNEVMMintedTxDB::FlushErase(const NEVMMintTxSet &mapNEVMTxRoots) {
             mapCache.erase(it);
         }
     }
-    LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx mints\n", mapNEVMTxRoots.size());
+    if(mapNEVMTxRoots.size() > 0)
+        LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx mints\n", mapNEVMTxRoots.size());
     return WriteBatch(batch, true);
 }
 bool CNEVMMintedTxDB::ExistsTx(const uint256& nTxHash) {

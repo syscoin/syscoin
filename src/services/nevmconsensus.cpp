@@ -93,7 +93,8 @@ bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime) {
             return false;
         }
     }
-    LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm blobs\n", mapCache.size());
+    if(mapCache.size() > 0)
+        LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm blobs\n", mapCache.size());
     bool res = WriteBatch(batch, true);
     if(res) {
         mapCache.clear();
@@ -153,7 +154,8 @@ bool CNEVMDataDB::FlushErase(const NEVMDataVec &vecDataKeys) {
         if(it != mapCache.end())
             mapCache.erase(it);
     }
-    LogPrint(BCLog::SYS, "Flushing, erasing %d nevm blob keys\n", vecDataKeys.size());
+    if(vecDataKeys.size() > 0)
+        LogPrint(BCLog::SYS, "Flushing, erasing %d nevm blob keys\n", vecDataKeys.size());
     return WriteBatch(batch, true);
 }
 bool CNEVMDataDB::BlobExists(const std::vector<uint8_t>& vchVersionHash) {
@@ -197,7 +199,8 @@ bool CNEVMDataDB::PruneToBatch(
             return error("%s() : deserialize error: %s", __func__, e.what());
         }
     }
-    LogPrint(BCLog::SYS, "PruneToBatch pruned %d nevm blobs\n", count);
+    if(count > 0)
+        LogPrint(BCLog::SYS, "PruneToBatch pruned %d nevm blobs\n", count);
 
     return true;
 }
