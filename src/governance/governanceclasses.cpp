@@ -353,14 +353,14 @@ bool CSuperblockManager::GetSuperblockPayments(int nBlockHeight, std::vector<CTx
     return true;
 }
 
-bool CSuperblockManager::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nSuperblockPaymentFromBlock)
+bool CSuperblockManager::IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nGovernanceBudget)
 {
     // GET BEST SUPERBLOCK, SHOULD MATCH
     LOCK(governance->cs);
 
     CSuperblock_sptr pSuperblock;
     if (CSuperblockManager::GetBestSuperblock(pSuperblock, nBlockHeight)) {
-        return pSuperblock->IsValid(txNew, nBlockHeight, blockReward, nSuperblockPaymentFromBlock);
+        return pSuperblock->IsValid(txNew, nBlockHeight, blockReward, nGovernanceBudget);
     }
 
     return false;
@@ -580,7 +580,7 @@ CAmount CSuperblock::GetPaymentsTotalAmount()
 *   - Does this transaction match the superblock?
 */
 
-bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nSuperblockPaymentFromBlock)
+bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nGovernanceBudget)
 {
     // TODO : LOCK(cs);
     // No reason for a lock here now since this method only accesses data
@@ -616,9 +616,16 @@ bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAm
 
     // payments should not exceed limit
     const CAmount nPaymentsTotalAmount = GetPaymentsTotalAmount();
-    if(nSuperblockPaymentFromBlock != nPaymentsTotalAmount) {
-        LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, superblock payment and block payment mismatch: payment limit from block %lld, payment limit from superblock %lld\n", nSuperblockPaymentFromBlock, nPaymentsTotalAmount);
-        return false;    
+    if (nPaymentsTotalAmount > nGovernanceBudget) {
+        LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, payments limit exceeded: payments %lld, limit %lld\n", nPaymentsTotalAmount, nGovernanceBudget);
+        return false;
+    }
+
+    // miner and masternodes should not get more than they would usually get
+    CAmount nBlockValue = txNew.GetValueOut();
+    if (nBlockValue > blockReward + nPaymentsTotalAmount) {
+        LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, block value limit exceeded: block %lld, limit %lld\n", nBlockValue, blockReward + nPaymentsTotalAmount);
+        return false;
     }
 
     int nVoutIndex = 0;

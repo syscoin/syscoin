@@ -51,11 +51,11 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
     const CBlockIndex* nLastSBIndex = pindex->GetAncestor(nLastSuperblock);
     const CAmount nPaymentLimit = CSuperblock::GetPaymentsLimit(nLastSBIndex);
     // Initial thresholds
-    const CAmount nPaymentsLimitUp = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 2) / 100.0));
-    const CAmount nPaymentsLimitDown = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 2) / 100.0));
+    CAmount nPaymentsLimitUp   = (nPaymentLimit * CSuperblock::SHIFT_HALF_UP)   / CSuperblock::SHIFT;
+    CAmount nPaymentsLimitDown = (nPaymentLimit * CSuperblock::SHIFT_HALF_DOWN) / CSuperblock::SHIFT;
 
-    CAmount nGovernanceBudgetUp = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
-    CAmount nGovernanceBudgetDown = nPaymentLimit * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 100.0));
+    CAmount nGovernanceBudgetUp   = (nPaymentLimit * CSuperblock::SHIFT_UP)   / CSuperblock::SHIFT;
+    CAmount nGovernanceBudgetDown = (nPaymentLimit * CSuperblock::SHIFT_DOWN) / CSuperblock::SHIFT;
     if (nGovernanceBudgetDown < CSuperblock::SUPERBLOCK_BUDGET_MIN) {
         nGovernanceBudgetDown = CSuperblock::SUPERBLOCK_BUDGET_MIN;
     }
@@ -128,7 +128,7 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         return isBlockRewardValueMet;
     }
     // this actually also checks for correct payees and not only amount
-    if (!CSuperblockManager::IsValid(*block.vtx[0], nBlockHeight, blockReward, nSuperblockPayment)) {
+    if (!CSuperblockManager::IsValidSuperblock(*block.vtx[0], nBlockHeight, blockReward, nGovernanceBudgetUp)) {
         // triggered but invalid? that's weird
         LogPrintf("%s -- ERROR: Invalid superblock detected at height %d: %s", __func__, nBlockHeight, block.vtx[0]->ToString()); /* Continued */
         // should NOT allow invalid superblocks, when superblocks are enabled

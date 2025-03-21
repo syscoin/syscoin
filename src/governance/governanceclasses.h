@@ -35,7 +35,7 @@ public:
 
     static bool GetSuperblockPayments(int nBlockHeight, std::vector<CTxOut>& voutSuperblockRet);
     static void ExecuteBestSuperblock(int nBlockHeight);
-    static bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nSuperblockPaymentFromBlock);
+    static bool IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nGovernanceBudget);
 };
 
 /**
@@ -96,7 +96,16 @@ private:
 public:
     static constexpr int SUPERBLOCK_PAYMENT_LIMIT_UP = 10;
     static constexpr int SUPERBLOCK_PAYMENT_LIMIT_DOWN = -10;
+    static constexpr int SUPERBLOCK_PAYMENT_LIMIT_UP_HALF = 5;
+    static constexpr int SUPERBLOCK_PAYMENT_LIMIT_DOWN_HALF = -5;
     static constexpr int SUPERBLOCK_PAYMENT_LIMIT_SAME = 0;
+    static constexpr int SHIFT = 100;
+    static constexpr int SHIFT_UP = SHIFT + SUPERBLOCK_PAYMENT_LIMIT_UP;   // 100 + 10 = 110
+    static constexpr int SHIFT_DOWN = SHIFT + SUPERBLOCK_PAYMENT_LIMIT_DOWN; // 100 - 10 = 90
+    static constexpr int SHIFT_HALF_UP   = SHIFT + SUPERBLOCK_PAYMENT_LIMIT_UP_HALF; // 100 + 5 = 105
+    static constexpr int SHIFT_HALF_DOWN = SHIFT + SUPERBLOCK_PAYMENT_LIMIT_DOWN_HALF; // 100 - 5 = 95
+
+
     static constexpr CAmount SUPERBLOCK_BUDGET = 2000000.00*COIN;
     static constexpr CAmount SUPERBLOCK_BUDGET_MAX = 5000000.00*COIN;
     static constexpr CAmount SUPERBLOCK_BUDGET_MIN = 20000*COIN;
@@ -126,7 +135,7 @@ public:
     bool GetPayment(int nPaymentIndex, CGovernancePayment& paymentRet);
     CAmount GetPaymentsTotalAmount();
 
-    bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nSuperblockPaymentFromBlock);
+    bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nGovernanceBudget);
     bool IsExpired() const;
 
     std::vector<uint256> GetProposalHashes() const;

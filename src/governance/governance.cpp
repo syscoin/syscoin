@@ -608,11 +608,10 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(c
     const CBlockIndex* nLastSBIndex = pindex->GetAncestor(nLastSuperblock);
     auto SBEpochTime = static_cast<int64_t>(GetTime<std::chrono::seconds>().count() + (nNextSuperblock - nHeight) * 2.5 * 60);
     // fund up to the next limit which is governed by IsBlockValueValid block validation
-    CAmount nGovernanceBudgetUp = CSuperblock::GetPaymentsLimit(nLastSBIndex) * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
+    CAmount nGovernanceBudgetUp   = (CSuperblock::GetPaymentsLimit(nLastSBIndex) * CSuperblock::SHIFT_UP)   / CSuperblock::SHIFT;
     if (nGovernanceBudgetUp > CSuperblock::SUPERBLOCK_BUDGET_MAX) {
         nGovernanceBudgetUp = CSuperblock::SUPERBLOCK_BUDGET_MAX;
     }
-    LogPrintf("CreateSuperblockCandidate nGovernanceBudgetUp %lld nLastSuperblock %d nNextSuperblock %d nLastSBIndex %d CSuperblock::GetPaymentsLimit(nLastSBIndex) %lld\n", nGovernanceBudgetUp, nLastSuperblock, nNextSuperblock, nLastSBIndex->nHeight, CSuperblock::GetPaymentsLimit(nLastSBIndex));
     CAmount budgetAllocated{};
     for (const auto& proposal : approvedProposals) {
         // Extract payment address and amount from proposal
