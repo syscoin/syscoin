@@ -1198,6 +1198,9 @@ static RPCHelpMan gettxout()
                     {RPCResult::Type::STR, "type", "The type, eg pubkeyhash"},
                     {RPCResult::Type::STR, "address", /*optional=*/true, "The Syscoin address (only if a well-defined address exists)"},
                 }},
+                // SYSCOIN
+                {RPCResult::Type::NUM, "asset_guid", /*optional=*/true, "asset"},
+                {RPCResult::Type::STR_AMOUNT, "asset_value", /*optional=*/true, "The asset value in " + CURRENCY_UNIT},
                 {RPCResult::Type::BOOL, "coinbase", "Coinbase or not"},
             }},
         },
@@ -1248,6 +1251,11 @@ static RPCHelpMan gettxout()
         ret.pushKV("confirmations", (int64_t)(pindex->nHeight - coin.nHeight + 1));
     }
     ret.pushKV("value", ValueFromAmount(coin.out.nValue));
+    // SYSCOIN
+    if(!coin.out.assetInfo.IsNull()) {
+        ret.pushKV("asset_guid", coin.out.assetInfo.nAsset);
+        ret.pushKV("asset_value", ValueFromAmount(coin.out.assetInfo.nValue));
+    }
     UniValue o(UniValue::VOBJ);
     ScriptToUniv(coin.out.scriptPubKey, /*out=*/o, /*include_hex=*/true, /*include_address=*/true);
     ret.pushKV("scriptPubKey", o);
@@ -2400,7 +2408,7 @@ static RPCHelpMan scantxoutset()
             // SYSCOIN
             if(!coin.out.assetInfo.IsNull()) {
                 unspent.pushKV("asset_guid", coin.out.assetInfo.nAsset);
-                unspent.pushKV("amount", ValueFromAmount(coin.out.assetInfo.nValue));
+                unspent.pushKV("asset_amount", ValueFromAmount(coin.out.assetInfo.nValue));
             }
 
             unspents.push_back(unspent);

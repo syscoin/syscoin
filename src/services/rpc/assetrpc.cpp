@@ -157,7 +157,7 @@ static RPCHelpMan syscoindecoderawtransaction()
     rawTx = GetTransaction(blockindex, node.mempool.get(), rawTx->GetHash(), hashBlock, node.chainman->m_blockman);
 
     UniValue output(UniValue::VOBJ);
-    if(rawTx && !DecodeSyscoinRawtransaction(*rawTx, hashBlock, output))
+    if(rawTx && !DecodeSyscoinRawtransaction(*rawTx, output))
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Not a Syscoin transaction");
     return output;
 },

@@ -36,23 +36,8 @@ UniValue ValueFromAmount(const CAmount amount)
     return UniValue(UniValue::VNUM,
             strprintf("%s%d.%08d", amount < 0 ? "-" : "", quotient, remainder));
 }
-bool AssetAllocationTxToJSON(const CTransaction &tx, const uint256& hashBlock, UniValue &entry) {
-    const uint256& txHash = tx.GetHash();
+bool AssetAllocationTxToJSON(const CTransaction &tx, UniValue &entry) {
     entry.pushKV("txtype", stringFromSyscoinTx(tx.nVersion));
-    entry.pushKV("txid", txHash.GetHex());
-    entry.pushKV("blockhash", hashBlock.GetHex());  
-    UniValue oAssetAllocationReceiversArray(UniValue::VARR);
-   
-    for(const auto &out: tx.vout) {
-        if(out.assetInfo.IsNull()) {
-            continue;
-        }
-        UniValue oAssetAllocationReceiversObj(UniValue::VOBJ);
-        oAssetAllocationReceiversObj.pushKV("asset_guid", out.assetInfo.nAsset);
-        oAssetAllocationReceiversObj.pushKV("amount", ValueFromAmount(out.assetInfo.nValue));
-        oAssetAllocationReceiversArray.push_back(oAssetAllocationReceiversObj);
-    }
-    entry.pushKV("allocations", oAssetAllocationReceiversArray);
     if(tx.nVersion == SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_NEVM){
          CBurnSyscoin burnSyscoin(tx);
          entry.pushKV("nevm_destination", "0x" + HexStr(burnSyscoin.vchNEVMAddress));
@@ -60,11 +45,10 @@ bool AssetAllocationTxToJSON(const CTransaction &tx, const uint256& hashBlock, U
     return true;
 }
 
-
-bool AssetMintTxToJson(const CTransaction& tx, const uint256& txHash, const uint256& hashBlock, UniValue &entry) {
+bool AssetMintTxToJson(const CTransaction& tx, const uint256& txHash, UniValue &entry) {
     CMintSyscoin mintSyscoin(tx);
     if (!mintSyscoin.IsNull()) {
-        AssetAllocationTxToJSON(tx, hashBlock, entry);
+        AssetAllocationTxToJSON(tx, entry);
         UniValue oSPVProofObj(UniValue::VOBJ);
         oSPVProofObj.pushKV("txhash", mintSyscoin.nTxHash.GetHex());  
         oSPVProofObj.pushKV("blockhash", mintSyscoin.nBlockHash.GetHex());  
@@ -81,20 +65,20 @@ bool AssetMintTxToJson(const CTransaction& tx, const uint256& txHash, const uint
     return false;
 }
 
-bool SysTxToJSON(const CTransaction& tx, const uint256 &hashBlock, UniValue& output) {
+bool SysTxToJSON(const CTransaction& tx, UniValue& output) {
     bool found = false;
     if (IsAssetAllocationTx(tx.nVersion))
-        found = AssetAllocationTxToJSON(tx, hashBlock, output);
+        found = AssetAllocationTxToJSON(tx, output);
     return found;
 }
 
-bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, const uint256 &hashBlock, UniValue& output) {
+bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, UniValue& output) {
     bool found = false;
     if(IsSyscoinMintTx(rawTx.nVersion)) {
-        found = AssetMintTxToJson(rawTx, rawTx.GetHash(), hashBlock, output);
+        found = AssetMintTxToJson(rawTx, rawTx.GetHash(), output);
     }
     else if (IsAssetAllocationTx(rawTx.nVersion)) {
-        found = SysTxToJSON(rawTx, hashBlock, output);
+        found = SysTxToJSON(rawTx, output);
     }
     
     return found;
@@ -313,6 +297,11 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
         UniValue o(UniValue::VOBJ);
         ScriptToUniv(txout.scriptPubKey, /*out=*/o, /*include_hex=*/true, /*include_address=*/true);
         out.pushKV("scriptPubKey", o);
+        // SYSCOIN
+        if(!txout.assetInfo.IsNull()) {
+            out.pushKV("asset_guid", txout.assetInfo.nAsset);
+            out.pushKV("asset_value", ValueFromAmount(txout.assetInfo.nValue));
+        }
         vout.push_back(out);
         // SYSCOIN
         /*if (have_undo) {
@@ -358,7 +347,7 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
         }
     }
     UniValue output(UniValue::VOBJ);
-    if(DecodeSyscoinRawtransaction(tx, block_hash, output))
+    if(DecodeSyscoinRawtransaction(tx, output))
         entry.pushKV("systx", output);
 
     if (have_undo) {

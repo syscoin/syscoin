@@ -127,21 +127,14 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
                 {RPCResult::Type::STR_AMOUNT, "value", "The value in " + CURRENCY_UNIT},
                 {RPCResult::Type::NUM, "n", "index"},
                 {RPCResult::Type::OBJ, "scriptPubKey", "", ScriptPubKeyDoc()},
+                // SYSCOIN
+                {RPCResult::Type::NUM, "asset_guid", /*optional=*/true, "asset"},
+                {RPCResult::Type::STR_AMOUNT, "asset_value", /*optional=*/true, "The asset value in " + CURRENCY_UNIT},
             }},
         }},
         {RPCResult::Type::OBJ, "systx", /*optional=*/true, "",
         {
             {RPCResult::Type::STR, "txtype", "Transaction type"},
-            {RPCResult::Type::STR_HEX, "txid", "Transaction id"},
-            {RPCResult::Type::STR_HEX, "blockhash", "Block hash"},
-            {RPCResult::Type::ARR, "allocations", /*optional=*/true, "",
-            {
-                {RPCResult::Type::OBJ, "receiverObj", /*optional=*/true, "",
-                {
-                    {RPCResult::Type::NUM, "asset_guid", "Asset guid"},
-                    {RPCResult::Type::STR_AMOUNT, "amount", "Value"}
-                }}
-            }},
             {RPCResult::Type::STR, "nevm_destination", /*optional=*/true, "NEVM destination address"},
             {RPCResult::Type::OBJ, "spv_proof", /*optional=*/true, "",
             {

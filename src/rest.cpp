@@ -947,6 +947,11 @@ static bool rest_getutxos(const std::any& context, HTTPRequest* req, const std::
             UniValue o(UniValue::VOBJ);
             ScriptToUniv(coin.out.scriptPubKey, /*out=*/o, /*include_hex=*/true, /*include_address=*/true);
             utxo.pushKV("scriptPubKey", o);
+            // SYSCOIN
+            if(!coin.out.assetInfo.IsNull()) {
+                utxo.pushKV("asset_guid", coin.out.assetInfo.nAsset);
+                utxo.pushKV("asset_value", ValueFromAmount(coin.out.assetInfo.nValue));
+            }
             utxos.push_back(utxo);
         }
         objGetUTXOResponse.pushKV("utxos", utxos);

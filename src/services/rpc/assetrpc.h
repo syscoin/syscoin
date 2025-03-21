@@ -5,6 +5,6 @@
 #ifndef SYSCOIN_SERVICES_RPC_ASSETRPC_H
 #define SYSCOIN_SERVICES_RPC_ASSETRPC_H
 #include <string>
-bool SysTxToJSON(const CTransaction &tx, const uint256& hashBlock, UniValue &entry);
-bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, const uint256 &hashBlock, UniValue& output);
+bool SysTxToJSON(const CTransaction &tx, UniValue &entry);
+bool DecodeSyscoinRawtransaction(const CTransaction& rawTx, UniValue& output);
 #endif // SYSCOIN_SERVICES_RPC_ASSETRPC_H
