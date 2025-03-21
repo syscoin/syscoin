@@ -472,13 +472,13 @@ void CSuperblock::GetNearestSuperblocksHeights(int nBlockHeight, int& nLastSuper
     }
 }
 
-CAmount CSuperblock::GetPaymentsLimit(int nBlockHeight)
+CAmount CSuperblock::GetPaymentsLimit(const CBlockIndex* pindex)
 {
-    if (!IsValidBlockHeight(nBlockHeight)) {
+    if (!IsValidBlockHeight(pindex->nHeight)) {
         return 0;
     }
     CAmount nPaymentsLimit = 0;
-    if(!governance->m_sb->ReadCache(uint256(), nPaymentsLimit)) {
+    if(!governance->m_sb->ReadCache(pindex->GetBlockHash(), nPaymentsLimit)) {
         nPaymentsLimit = CSuperblock::SUPERBLOCK_BUDGET;
     }
     return nPaymentsLimit;

@@ -273,6 +273,7 @@ public:
     const std::unique_ptr<CEvoDB<uint256, CAmount>> m_sb;
     explicit CGovernanceManager(ChainstateManager& _chainman);
     ~CGovernanceManager();
+    bool FlushCacheToDisk();
 
     bool LoadCache(bool load_cache);
 
@@ -363,7 +364,7 @@ public:
     void CleanAndRemoveTriggers();
 
 private:
-    std::optional<const CSuperblock> CreateSuperblockCandidate(int nHeight) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    std::optional<const CSuperblock> CreateSuperblockCandidate(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
     std::optional<const CGovernanceObject> CreateGovernanceTrigger(const std::optional<const CSuperblock>& sb_opt, PeerManager& peerman) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void VoteGovernanceTriggers(const std::optional<const CGovernanceObject>& trigger_opt, CConnman& connman, PeerManager& peerman) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool VoteFundingTrigger(const uint256& nHash, const vote_outcome_enum_t outcome, CConnman& connman, PeerManager& peerman);

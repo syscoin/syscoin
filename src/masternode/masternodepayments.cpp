@@ -27,10 +27,10 @@ CMasternodePayments mnpayments;
 *   - When non-superblocks are detected, the normal schedule should be maintained
 */
 
-bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock)
+bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock)
 {
     bool isBlockRewardValueMet = (block.vtx[0]->GetValueOut() <= blockReward);
-
+    const int nBlockHeight = pindex->nHeight;
     strErrorRet = "";
     
     LogPrint(BCLog::MNPAYMENTS, "block.vtx[0]->GetValueOut() %lld <= blockReward %lld\n", block.vtx[0]->GetValueOut(), blockReward);
@@ -38,7 +38,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         // can't possibly be a superblock, so lets just check for block reward limits
         if (!isBlockRewardValueMet) {
             strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded block reward, only regular blocks are allowed at this height",
-                                    nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
+                            nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
         }
         return isBlockRewardValueMet;
     }
@@ -46,7 +46,10 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         return true;
     }
     const CAmount nSuperblockPayment = block.vtx[0]->GetValueOut() - blockReward;
-    const CAmount nPaymentLimit = CSuperblock::GetPaymentsLimit(nBlockHeight);
+    int sbCycle = Params().GetConsensus().SuperBlockCycle(nBlockHeight);
+    int nLastSuperblock = nBlockHeight - sbCycle;
+    const CBlockIndex* nLastSBIndex = pindex->GetAncestor(nLastSuperblock);
+    const CAmount nPaymentLimit = CSuperblock::GetPaymentsLimit(nLastSBIndex);
     // Initial thresholds
     const CAmount nPaymentsLimitUp = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 2) / 100.0));
     const CAmount nPaymentsLimitDown = nPaymentLimit * (1 + ((CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_DOWN / 2) / 100.0));
@@ -69,7 +72,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
     // bail out in case superblock limits were exceeded
     if (!isSuperblockMaxValueMet) {
         strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded superblock max value",
-                                nBlockHeight, block.vtx[0]->GetValueOut(), nSuperblockMaxValue);
+                        nBlockHeight, block.vtx[0]->GetValueOut(), nSuperblockMaxValue);
         return false;
     }
 
@@ -79,13 +82,14 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         // We rely on the network to have followed the correct chain in this case
         // follow longest chain as IsValid() doesn't get to validate nSuperblockPayment via the superblock
         if(!fJustCheck && nSuperblockPayment > 0) {
+
             CAmount nAdjustment = nPaymentLimit;
             if(nSuperblockPayment <= nPaymentsLimitDown) {
                 nAdjustment = nGovernanceBudgetDown;
             } else if(nSuperblockPayment >= nPaymentsLimitUp) {
                 nAdjustment = nGovernanceBudgetUp;
             }
-            governance->m_sb->WriteCache(uint256(), nAdjustment);
+            governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
         }
         return true;
     }
@@ -98,7 +102,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         LogPrint(BCLog::GOBJECT, "%s -- Superblocks are disabled, no superblocks allowed\n", __func__);
         if(!isBlockRewardValueMet) {
             strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded block reward, superblocks are disabled",
-                                    nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
+                            nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
         }
         return isBlockRewardValueMet;
     }
@@ -110,7 +114,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
             } else if(nSuperblockPayment >= nPaymentsLimitUp) {
                 nAdjustment = nGovernanceBudgetUp;
             }
-            governance->m_sb->WriteCache(uint256(), nAdjustment);
+            governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
         }
         return true;
     }
@@ -119,7 +123,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         // revert to block reward limits in this case
         if(!isBlockRewardValueMet) {
             strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded block reward, no triggered superblock detected",
-                                    nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
+                             nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
         }
         return isBlockRewardValueMet;
     }
@@ -139,7 +143,7 @@ bool IsBlockValueValid(const CBlock& block, int nBlockHeight, const CAmount &blo
         } else if(nSuperblockPayment >= nPaymentsLimitUp) {
             nAdjustment = nGovernanceBudgetUp;
         }
-        governance->m_sb->WriteCache(uint256(), nAdjustment);
+        governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
     }
     // we got a valid superblock
     return true;

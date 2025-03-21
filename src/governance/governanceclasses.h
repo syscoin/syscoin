@@ -106,7 +106,7 @@ public:
 
     static bool IsValidBlockHeight(int nBlockHeight);
     static void GetNearestSuperblocksHeights(int nBlockHeight, int& nLastSuperblockRet, int& nNextSuperblockRet);
-    static CAmount GetPaymentsLimit(int nBlockHeight);
+    static CAmount GetPaymentsLimit(const CBlockIndex* pindex);
     SeenObjectStatus GetStatus() const { return nStatus; }
     void SetStatus(SeenObjectStatus nStatusIn) { nStatus = nStatusIn; }
 

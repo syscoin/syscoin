@@ -79,6 +79,7 @@
 #include <services/nevmconsensus.h>
 #include <llmq/quorums.h>
 #include <llmq/quorums_blockprocessor.h>
+#include <governance/governance.h>
 #include <services/assetconsensus.h>
 #include <fstream>
 #include <cachemultimap.h>
@@ -2971,7 +2972,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
         std::string strError;
         // add seniority to reward when checking for limit
-        if (!IsBlockValueValid(block, pindex->nHeight, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError, fJustCheck, check_superblock) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
+        if (!IsBlockValueValid(block, pindex, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError, fJustCheck, check_superblock) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
             LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             // hack for feature_signet.py to pass which uses bitcoin blocks signed by the signet witness
             if(!fSigNet || pindex->nHeight > 100) {
@@ -3197,6 +3198,9 @@ bool Chainstate::FlushStateToDisk(
             }
             if (deterministicMNManager && !deterministicMNManager->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit DMN DB");
+            }
+            if (governance && !governance->FlushCacheToDisk()) {
+                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit governance DB");
             }
             if (llmq::quorumBlockProcessor && !llmq::quorumBlockProcessor->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QC DB");

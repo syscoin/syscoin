@@ -606,7 +606,8 @@ static RPCHelpMan getgovernanceinfo()
     int nBlockHeight = WITH_LOCK(cs_main, return node.chainman->ActiveHeight());
 
     CSuperblock::GetNearestSuperblocksHeights(nBlockHeight, nLastSuperblock, nNextSuperblock);
-
+    const CBlockIndex* nLastSBIndex = WITH_LOCK(cs_main, return node.chainman->ActiveChain()[nLastSuperblock]);
+    
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("governanceminquorum", Params().GetConsensus().nGovernanceMinQuorum);
     obj.pushKV("proposalfee", ValueFromAmount(GOVERNANCE_PROPOSAL_FEE_TX));
@@ -615,30 +616,43 @@ static RPCHelpMan getgovernanceinfo()
     obj.pushKV("lastsuperblock", nLastSuperblock);
     obj.pushKV("nextsuperblock", nNextSuperblock);
     obj.pushKV("fundingthreshold", int(deterministicMNManager->GetListAtChainTip().GetValidMNsCount() / 10));
-    obj.pushKV("governancebudget", ValueFromAmount(CSuperblock::GetPaymentsLimit(nNextSuperblock)));
+    obj.pushKV("governancebudget", ValueFromAmount(CSuperblock::GetPaymentsLimit(nLastSBIndex)));
 
     return obj;
 },
     };
 } 
 
-
 static RPCHelpMan getsuperblockbudget()
 {
     return RPCHelpMan{"getsuperblockbudget",
         "\nReturns the absolute maximum sum of superblock payments allowed.\n",
-        {      
-                    
+        {
+            {"index", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The block index"},
         },
-        RPCResult{RPCResult::Type::NUM, "n", "The absolute maximum sum of superblock payments allowed, in " + CURRENCY_UNIT},
+        RPCResult{
+            RPCResult::Type::NUM, "n", "The absolute maximum sum of superblock payments allowed, in " + CURRENCY_UNIT
+        },
         RPCExamples{
-                HelpExampleCli("getsuperblockbudget", "")
-            + HelpExampleRpc("getsuperblockbudget", "")
+            HelpExampleCli("getsuperblockbudget", "1000")
+    + HelpExampleRpc("getsuperblockbudget", "1000")
         },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
+    node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    int nLastSuperblock = 0, nNextSuperblock = 0;
+    int nBlockHeight = WITH_LOCK(cs_main, return node.chainman->ActiveHeight());
 
-    return ValueFromAmount(CSuperblock::GetPaymentsLimit(Params().GetConsensus().SuperBlockCycle(0)));
+    CSuperblock::GetNearestSuperblocksHeights(nBlockHeight, nLastSuperblock, nNextSuperblock);
+
+    if(request.params.size() > 0) {
+        nNextSuperblock = request.params[0].getInt<int>();
+        if (nNextSuperblock < 0 || nNextSuperblock > nBlockHeight) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
+        }
+    }
+    const CBlockIndex* nLastSBIndex = WITH_LOCK(cs_main, return node.chainman->ActiveChain()[nLastSuperblock]);
+    return ValueFromAmount(CSuperblock::GetPaymentsLimit(nLastSBIndex));
 },
     };
 }

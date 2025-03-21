@@ -560,9 +560,10 @@ void CGovernanceManager::GetAllNewerThan(std::vector<CGovernanceObject>& objs, i
 }
 
 
-std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(int nHeight) const
+std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(const CBlockIndex* pindex) const
 {
     AssertLockNotHeld(cs);
+    const int nHeight = pindex->nHeight;
     if (!IsValid()) return std::nullopt;
     if (!masternodeSync.IsSynced()) return std::nullopt;
     if (nHeight % Params().GetConsensus().SuperBlockCycle(nHeight) < Params().GetConsensus().SuperBlockCycle(nHeight) - Params().GetConsensus().nSuperblockMaturityWindow) return std::nullopt;
@@ -604,12 +605,14 @@ std::optional<const CSuperblock> CGovernanceManager::CreateSuperblockCandidate(i
     int nLastSuperblock;
     int nNextSuperblock;
     CSuperblock::GetNearestSuperblocksHeights(nHeight, nLastSuperblock, nNextSuperblock);
+    const CBlockIndex* nLastSBIndex = pindex->GetAncestor(nLastSuperblock);
     auto SBEpochTime = static_cast<int64_t>(GetTime<std::chrono::seconds>().count() + (nNextSuperblock - nHeight) * 2.5 * 60);
     // fund up to the next limit which is governed by IsBlockValueValid block validation
-    CAmount nGovernanceBudgetUp = CSuperblock::GetPaymentsLimit(nNextSuperblock) * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
+    CAmount nGovernanceBudgetUp = CSuperblock::GetPaymentsLimit(nLastSBIndex) * (1 + (CSuperblock::SUPERBLOCK_PAYMENT_LIMIT_UP / 100.0));
     if (nGovernanceBudgetUp > CSuperblock::SUPERBLOCK_BUDGET_MAX) {
         nGovernanceBudgetUp = CSuperblock::SUPERBLOCK_BUDGET_MAX;
     }
+    LogPrintf("CreateSuperblockCandidate nGovernanceBudgetUp %lld nLastSuperblock %d nNextSuperblock %d nLastSBIndex %d CSuperblock::GetPaymentsLimit(nLastSBIndex) %lld\n", nGovernanceBudgetUp, nLastSuperblock, nNextSuperblock, nLastSBIndex->nHeight, CSuperblock::GetPaymentsLimit(nLastSBIndex));
     CAmount budgetAllocated{};
     for (const auto& proposal : approvedProposals) {
         // Extract payment address and amount from proposal
@@ -1469,7 +1472,7 @@ void CGovernanceManager::UpdatedBlockTip(const CBlockIndex* pindex, CConnman& co
     }
 
     if (!activeMasternodeInfo.proTxHash.IsNull()) {
-        const auto sb_opt = CreateSuperblockCandidate(pindex->nHeight);
+        const auto sb_opt = CreateSuperblockCandidate(pindex);
         const auto trigger_opt = CreateGovernanceTrigger(sb_opt, peerman);
         VoteGovernanceTriggers(trigger_opt, connman, peerman);
     }
@@ -1575,6 +1578,10 @@ void CGovernanceManager::RemoveInvalidVotes()
 
     // store current MN list for the next run so that we can determine which keys changed
     lastMNListForVotingKeys = std::make_shared<CDeterministicMNList>(tip_mn_list);
+}
+bool CGovernanceManager::FlushCacheToDisk()
+{
+    return m_sb->FlushCacheToDisk();
 }
 
 bool AreSuperblocksEnabled()

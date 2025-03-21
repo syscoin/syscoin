@@ -308,6 +308,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "spork", 1, "value" },
     { "voteraw", 1, "collateralTxIndex" },
     { "voteraw", 5, "time" },
+    { "getsuperblockbudget", 0, "index" },
     { "listnevmblobdata", 0, "count" },
     { "listnevmblobdata", 1, "from" },
     { "listnevmblobdata", 2, "options" },
