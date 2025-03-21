@@ -8,6 +8,7 @@ import json
 import time
 import shutil
 from decimal import Decimal
+from collections import defaultdict
 from test_framework.test_framework import DashTestFramework, initialize_datadir
 from test_framework.util import assert_equal, satoshi_round, force_finish_mnsync, wait_until_helper_internal
 GOVERNANCE_DELETION_DELAY = 10 * 60
@@ -30,14 +31,14 @@ class SyscoinGovernanceTest(DashTestFramework):
     def add_options(self, parser):
         self.add_wallet_options(parser)
 
-    def prepare_object(self, object_type, parent_hash, creation_time, revision, name, amount, payment_address):
+    def prepare_object(self, object_type, parent_hash, creation_time, expiry_time, revision, name, amount, payment_address):
         proposal_rev = revision
         proposal_time = int(creation_time)
         proposal_template = {
             "type": object_type,
             "name": name,
             "start_epoch": proposal_time,
-            "end_epoch": proposal_time + PROPOSAL_END_EPOCH,
+            "end_epoch": expiry_time,
             "payment_amount": float(amount),
             "payment_address": payment_address,
             "url": "https://syscoin.org"
@@ -153,14 +154,15 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.generate(self.nodes[0], 5)
         self.bump_mocktime(int(GOVERNANCE_DELETION_DELAY + MASTERNODE_SYNC_TICK_SECONDS))  # delete prev proposals and advance ProcessTick
         for i in range(len(self.nodes)):
-            force_finish_mnsync(self.nodes[i])
+            force_finish_mnsync(self.nodes[i])   
         proposals_data = [
-            {"amount": self.expected_budget * Decimal('0.52'), "address": self.p0_payout_address},
-            {"amount": self.expected_budget * Decimal('0.29'), "address": self.p1_payout_address},
-            {"amount": self.expected_budget * Decimal('0.23'), "address": self.p2_payout_address}  # Total: 1.04 times the budget
+            {"amount": self.expected_budget * Decimal('0.5'), "address": self.p0_payout_address},
+            {"amount": self.expected_budget * Decimal('0.2'), "address": self.p1_payout_address},
+            {"amount": self.expected_budget * Decimal('0.24'), "address": self.p2_payout_address}  # Total: 0.94 times the budget
         ]   
         proposals_data = self.prepare_and_submit_proposals(proposals_data)
         self.vote_on_proposals([p["hash"] for p in proposals_data], map_vote_signals, map_vote_outcomes)
+        
         self.mine_superblock_and_check_budget(proposals_data)
 
         # Step 5: SB5 - Proposals to change proposals budget down by 4% and not see a change in the limit
@@ -279,12 +281,14 @@ class SyscoinGovernanceTest(DashTestFramework):
         for i, proposal in enumerate(proposals):
             amount = satoshi_round(proposal["amount"])
             address = proposal["address"]
-            proposal_data = self.prepare_object(1, "%064x" % 0, proposal_time, 1, f"Proposal_{i}", amount, address)
+            expiry_time = proposal_time + PROPOSAL_END_EPOCH
+            proposal_data = self.prepare_object(1, "%064x" % 0, proposal_time, expiry_time, 1, f"Proposal_{i}", amount, address)
             proposals_data.append({
                 "amount": amount,
                 "address": address,
                 "hex": proposal_data["hex"],
-                "collateralHash": proposal_data["collateralHash"]
+                "collateralHash": proposal_data["collateralHash"],
+                "expiry_time": proposal.get("expiry_time")
             })
 
         self.generate(self.nodes[0], GOVERNANCE_FEE_CONFIRMATIONS, sync_fun=self.no_op)
@@ -350,8 +354,7 @@ class SyscoinGovernanceTest(DashTestFramework):
 
         self.log.info(f"Mined superblock at height {sb_height}")
 
-        total_funded_amount = self.verify_proposals_in_superblock()
-
+        total_funded_amount = self.verify_proposals_in_superblock(proposals_data)
         funded_percentage = (total_funded_amount / actual_budget) * Decimal('100.0')
 
         if funded_percentage >= Decimal('100') + SUPERBLOCK_PAYMENT_LIMIT_UP / Decimal('2'):
@@ -369,21 +372,24 @@ class SyscoinGovernanceTest(DashTestFramework):
         )
         self.check_superblockbudget()
 
-    def verify_proposals_in_superblock(self):
+    def verify_proposals_in_superblock(self, proposals_data):
         coinbase_outputs = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 2)["tx"][0]["vout"]
 
-        # Explicitly skip first 3 outputs (block rewards + miner payouts)
-        proposal_outputs = coinbase_outputs[3:]
+        # Create a set of addresses used in expected proposals
+        proposal_addresses = {p["address"] for p in proposals_data}
 
-        included_payments = {
-            output["scriptPubKey"]["address"]: output["value"]
-            for output in proposal_outputs
-            if "address" in output["scriptPubKey"]
-        }
+        # Only count outputs that go to proposal addresses
+        included_payments = defaultdict(Decimal)
+        for output in coinbase_outputs:
+            address = output["scriptPubKey"].get("address")
+            if address in proposal_addresses:
+                included_payments[address] += Decimal(output["value"])
 
-        total_payment = Decimal(sum(included_payments.values()))
+
+        total_payment = sum(included_payments.values())
         assert total_payment <= MAX_GOVERNANCE_BUDGET, "Total proposal payments exceed MAX superblock budget"
         return total_payment
+
 
     def reindex_node_and_check_budget(self, proposals_data):
         # Check expected budget before mining
@@ -413,7 +419,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         if n > 0:
             self.generate(self.nodes[0], n)
         self.log.info(f"Mined superblock at height {sb_height}")
-        total_funded_amount = self.verify_proposals_in_superblock()
+        total_funded_amount = self.verify_proposals_in_superblock(proposals_data)
 
         funded_percentage = (total_funded_amount / actual_budget) * Decimal('100.0')
 
@@ -461,7 +467,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         if n > 0:
             self.generate(self.nodes[0], n)
         self.log.info(f"Mined superblock at height {sb_height}")
-        total_funded_amount = self.verify_proposals_in_superblock()
+        total_funded_amount = self.verify_proposals_in_superblock(proposals_data)
 
         funded_percentage = (total_funded_amount / actual_budget) * Decimal('100.0')
 
