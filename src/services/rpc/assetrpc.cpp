@@ -23,7 +23,6 @@
 #include <common/args.h>
 #include <logging.h>
 using node::GetTransaction;
-extern RecursiveMutex cs_setethstatus;
 
 int CheckActorsInTransactionGraph(const CTxMemPool& mempool, const uint256& lookForTxHash) {
     LOCK(cs_main);
@@ -183,7 +182,6 @@ static RPCHelpMan syscoingettxroots()
     },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    LOCK(cs_setethstatus);
     std::string blockHashStr = request.params[0].get_str();
     blockHashStr = RemovePrefix(blockHashStr, "0x");  // strip 0x
     uint256 nBlockHash;

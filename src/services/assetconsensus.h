@@ -8,28 +8,30 @@
 #include <dbwrapper.h>
 #include <consensus/params.h>
 #include <util/hasher.h>
+#include <sync.h>
 class TxValidationState;
 class CTxUndo;
 class CBlock;
 class CNEVMTxRootsDB : public CDBWrapper {
     NEVMTxRootMap mapCache;
+    mutable Mutex cs_cache; // Mutex to protect cache operations (non-recursive for better performance)
 public:
     using CDBWrapper::CDBWrapper;
-    bool FlushErase(const std::vector<uint256> &vecBlockHashes);
-    bool ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot);
-    bool FlushCacheToDisk();
-    void FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots);
+    bool FlushErase(const std::vector<uint256> &vecBlockHashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    bool ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    bool FlushCacheToDisk() EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    void FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
 };
 
 class CNEVMMintedTxDB : public CDBWrapper {
     NEVMMintTxSet mapCache;
+    mutable Mutex cs_cache; // Mutex to protect cache operations (non-recursive for better performance)
 public:
     using CDBWrapper::CDBWrapper;
-    bool FlushErase(const NEVMMintTxSet &setMintTxs);
-    bool FlushWrite(const NEVMMintTxSet &setMintTxs);
-    bool FlushCacheToDisk();
-    void FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots);
-    bool ExistsTx(const uint256& nTxHash);
+    bool FlushErase(const NEVMMintTxSet &setMintTxs) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    bool FlushCacheToDisk() EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    void FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    bool ExistsTx(const uint256& nTxHash) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
 };
 
 extern std::unique_ptr<CNEVMTxRootsDB> pnevmtxrootsdb;

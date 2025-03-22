@@ -18,7 +18,6 @@
 #include <core_io.h>
 std::unique_ptr<CNEVMTxRootsDB> pnevmtxrootsdb;
 std::unique_ptr<CNEVMMintedTxDB> pnevmtxmintdb;
-RecursiveMutex cs_setethstatus;
 const arith_uint256 nMax = arith_uint256(MAX_MONEY);
 bool CheckSyscoinMintInternal(
     const CMintSyscoin &mintSyscoin,
@@ -29,19 +28,17 @@ bool CheckSyscoinMintInternal(
     CAmount &outputAmount,
     std::string &witnessAddress) {
     NEVMTxRoot txRootDB;
-    {
-        LOCK(cs_setethstatus);
-        if (!pnevmtxrootsdb || !pnevmtxrootsdb->ReadTxRoots(mintSyscoin.nBlockHash, txRootDB)) {
-            return FormatSyscoinErrorMessage(state, "mint-txroot-missing", fJustCheck);
-        }
+    if (!pnevmtxrootsdb || !pnevmtxrootsdb->ReadTxRoots(mintSyscoin.nBlockHash, txRootDB)) {
+        return FormatSyscoinErrorMessage(state, "mint-txroot-missing", fJustCheck);
     }
     const dev::RLP rlpReceiptParentNodes(&mintSyscoin.vchReceiptParentNodes);
-    const std::vector<unsigned char> vchReceiptValue(
-        mintSyscoin.vchReceiptParentNodes.begin() + mintSyscoin.posReceipt,
-        mintSyscoin.vchReceiptParentNodes.end()
+    const dev::RLP rlpReceiptValue(
+        dev::bytesConstRef(
+            mintSyscoin.vchReceiptParentNodes.data() + mintSyscoin.posReceipt,
+            mintSyscoin.vchReceiptParentNodes.size() - mintSyscoin.posReceipt
+        )
     );
     
-    const dev::RLP rlpReceiptValue(&vchReceiptValue);
     if (!rlpReceiptValue.isList() || rlpReceiptValue.itemCount() != 4) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-structure", fJustCheck);
     }
@@ -82,19 +79,18 @@ bool CheckSyscoinMintInternal(
         }
 
         // Parse indexed asset guid from topics:
-        const std::vector<unsigned char> vchAssetGuid = rlpLogTopics[1].toBytes(dev::RLP::VeryStrict);
-
+        dev::bytes vchAssetGuid = rlpLogTopics[1].toBytes(dev::RLP::VeryStrict);
         // Take the last 8 bytes (assuming assetGuid fits in 64 bits), 24 because all topics are 32 bytes
         nAssetFromLog = ReadBE64(vchAssetGuid.data() + 24);
 
         // Now parse non-indexed parameters from data:
-        const std::vector<unsigned char> dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
+        dev::bytes dataValue = rlpLog[2].toBytes(dev::RLP::VeryStrict);
         if (dataValue.size() < 96) {
             return FormatSyscoinErrorMessage(state, "mint-log-data-too-small", fJustCheck);
         }
 
         // satoshiValue (big-endian)
-        std::vector<unsigned char> vchValue(dataValue.begin(), dataValue.begin() + 32);
+        std::vector<unsigned char> vchValue(dataValue.data(), dataValue.data() + 32);
         std::reverse(vchValue.begin(), vchValue.end());
         const arith_uint256 valueArith = UintToArith256(uint256(vchValue));
         if (valueArith > nMax) {
@@ -106,7 +102,7 @@ bool CheckSyscoinMintInternal(
         }
 
         // offset to string (big-endian)
-        std::vector<unsigned char> vchOffset(dataValue.begin() + 32, dataValue.begin() + 64);
+        std::vector<unsigned char> vchOffset(dataValue.data() + 32, dataValue.data() + 64);
         std::reverse(vchOffset.begin(), vchOffset.end());
         const uint64_t offsetToString = UintToArith256(uint256(vchOffset)).GetLow64();
 
@@ -115,8 +111,8 @@ bool CheckSyscoinMintInternal(
             return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-offset", fJustCheck);
         }
         std::vector<unsigned char> vchLenString(
-            dataValue.begin() + offsetToString,
-            dataValue.begin() + offsetToString + 32
+            dataValue.data() + offsetToString,
+            dataValue.data() + offsetToString + 32
         );
         std::reverse(vchLenString.begin(), vchLenString.end());
         const uint64_t lenString = UintToArith256(uint256(vchLenString)).GetLow64();
@@ -125,8 +121,15 @@ bool CheckSyscoinMintInternal(
         if (offsetToString + 32 + lenString > dataValue.size()) {
             return FormatSyscoinErrorMessage(state, "mint-log-invalid-string-length", fJustCheck);
         }
+
+        // Add maximum length check to prevent excessive memory allocation
+        const uint64_t MAX_WITNESS_ADDRESS_LENGTH = 1024; // Reasonable maximum
+        if (lenString > MAX_WITNESS_ADDRESS_LENGTH) {
+            return FormatSyscoinErrorMessage(state, "mint-witness-address-too-long", fJustCheck);
+        }
+
         witnessAddress = std::string(
-            reinterpret_cast<const char*>(&dataValue[offsetToString + 32]), 
+            reinterpret_cast<const char*>(dataValue.data() + offsetToString + 32), 
             lenString
         );
         break;
@@ -136,11 +139,9 @@ bool CheckSyscoinMintInternal(
         return FormatSyscoinErrorMessage(state, "mint-missing-freeze-log", fJustCheck);
     }
     // check transaction spv proofs
-    const std::vector<unsigned char> rlpTxRootVec(mintSyscoin.nTxRoot.begin(), mintSyscoin.nTxRoot.end());
     dev::RLPStream sTxRoot, sReceiptRoot;
-    sTxRoot.append(rlpTxRootVec);
-    const std::vector<unsigned char> rlpReceiptRootVec(mintSyscoin.nReceiptRoot.begin(),  mintSyscoin.nReceiptRoot.end());
-    sReceiptRoot.append(rlpReceiptRootVec);
+    sTxRoot.append(dev::bytesConstRef(mintSyscoin.nTxRoot.data(), mintSyscoin.nTxRoot.size()));
+    sReceiptRoot.append(dev::bytesConstRef(mintSyscoin.nReceiptRoot.data(), mintSyscoin.nReceiptRoot.size()));
     const dev::RLP rlpTxRoot(sTxRoot.out());
     const dev::RLP rlpReceiptRoot(sReceiptRoot.out());
     if(mintSyscoin.nTxRoot != txRootDB.nTxRoot){
@@ -152,8 +153,12 @@ bool CheckSyscoinMintInternal(
     
     
     const dev::RLP rlpTxParentNodes(&mintSyscoin.vchTxParentNodes);
-    std::vector<unsigned char> vchTxValue(mintSyscoin.vchTxParentNodes.begin()+mintSyscoin.posTx, mintSyscoin.vchTxParentNodes.end());
-    std::vector<unsigned char> vchTxHash(dev::sha3(vchTxValue).asBytes());
+    const dev::bytesConstRef vchTxValueRef(
+        mintSyscoin.vchTxParentNodes.data() + mintSyscoin.posTx,
+        mintSyscoin.vchTxParentNodes.size() - mintSyscoin.posTx
+    );
+    const dev::h256 txHash = dev::sha3(vchTxValueRef);
+    std::vector<unsigned char> vchTxHash(txHash.asBytes());
     // we must reverse the endian-ness because we store uint256 in BE but Eth uses LE.
     std::reverse(vchTxHash.begin(), vchTxHash.end());
     // validate mintSyscoin.nTxHash is the hash of vchTxValue, this is not the TXID which would require deserializataion of the transaction object, for our purpose we only need
@@ -161,8 +166,11 @@ bool CheckSyscoinMintInternal(
     if(uint256S(HexStr(vchTxHash)) != mintSyscoin.nTxHash) {
         return FormatSyscoinErrorMessage(state, "mint-verify-tx-hash", fJustCheck);
     }
-    dev::RLP rlpTxValue(&vchTxValue);
-    const std::vector<unsigned char> &vchTxPath = mintSyscoin.vchTxPath;
+    dev::RLP rlpTxValue(vchTxValueRef);
+    
+    // Create a bytesConstRef for the path to avoid passing a pointer
+    dev::bytesConstRef vchTxPathRef(mintSyscoin.vchTxPath.data(), mintSyscoin.vchTxPath.size());
+    
     // ensure eth tx not already spent in a previous block
     if(pnevmtxmintdb->ExistsTx(mintSyscoin.nTxHash)) {
         return FormatSyscoinErrorMessage(state, "mint-exists", fJustCheck);
@@ -181,12 +189,13 @@ bool CheckSyscoinMintInternal(
             return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-transfer");
         }
     }
+    
     // verify receipt proof
-    if(!VerifyProof(&vchTxPath, rlpReceiptValue, rlpReceiptParentNodes, rlpReceiptRoot)) {
+    if(!VerifyProof(vchTxPathRef, rlpReceiptValue, rlpReceiptParentNodes, rlpReceiptRoot)) {
         return FormatSyscoinErrorMessage(state, "mint-verify-receipt-proof", fJustCheck);
     }
     // verify transaction proof
-    if(!VerifyProof(&vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot)) {
+    if(!VerifyProof(vchTxPathRef, rlpTxValue, rlpTxParentNodes, rlpTxRoot)) {
         return FormatSyscoinErrorMessage(state, "mint-verify-tx-proof", fJustCheck);
     }
     if (!rlpTxValue.isList()) {
@@ -215,7 +224,7 @@ bool CheckSyscoinMintInternal(
         return FormatSyscoinErrorMessage(state, "mint-invalid-chainid", fJustCheck);
     }
     const size_t toFieldIndex = (txItemCount == 9) ? 3 : 5;
-    const std::vector<unsigned char> vchAddress = rlpTxValue[toFieldIndex].toBytes(dev::RLP::VeryStrict);
+    dev::bytes vchAddress = rlpTxValue[toFieldIndex].toBytes(dev::RLP::VeryStrict);
     if (vchAddress.size() != 20) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-address-length", fJustCheck);
     }
@@ -423,20 +432,22 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, const uint256& txHash, T
 // called on connect
 
 void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
-    if(mapNEVMTxRoots.empty()) {
-        return;
-    }
-    for (auto const& [key, val] : mapNEVMTxRoots) {
-        mapCache.try_emplace(key, val);
+    LOCK(cs_cache);
+    for (const auto& entry : mapNEVMTxRoots) {
+        auto result = mapCache.emplace(entry.first, entry.second);
+        if (!result.second) {
+            result.first->second = entry.second;
+        }
     }
 }
 bool CNEVMTxRootsDB::FlushCacheToDisk() {
+    LOCK(cs_cache);
     if(mapCache.empty()) {
         return true;
     }
     CDBBatch batch(*this);    
-    for (auto const& [key, val] : mapCache) {
-        batch.Write(key, val);
+    for (auto const& entry : mapCache) {
+        batch.Write(entry.first, entry.second);
     }
     if(mapCache.size() > 0)
         LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx roots\n", mapCache.size());
@@ -447,24 +458,24 @@ bool CNEVMTxRootsDB::FlushCacheToDisk() {
     return res;
 }
 bool CNEVMTxRootsDB::ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) {
+    LOCK(cs_cache);
     auto it = mapCache.find(nBlockHash);
-    if(it != mapCache.end()){
+    if (it != mapCache.end()) {
         txRoot = it->second;
         return true;
-    } else {
-        return Read(nBlockHash, txRoot);
     }
-    return false;
+    return Read(nBlockHash, txRoot);
 } 
 bool CNEVMTxRootsDB::FlushErase(const std::vector<uint256> &vecBlockHashes) {
+    LOCK(cs_cache);
     if(vecBlockHashes.empty())
         return true;
     CDBBatch batch(*this);
-    for (const auto &key : vecBlockHashes) {
-        batch.Erase(key);
-        auto it = mapCache.find(key);
-        if(it != mapCache.end()){
-            mapCache.erase(it);
+    for (const auto& hash: vecBlockHashes) {
+        batch.Erase(hash);
+        auto it = mapCache.find(hash);
+        if (it != mapCache.end()) {
+            mapCache.erase(hash);
         }
     }
     if(vecBlockHashes.size() > 0)
@@ -472,14 +483,13 @@ bool CNEVMTxRootsDB::FlushErase(const std::vector<uint256> &vecBlockHashes) {
     return WriteBatch(batch, true);
 }
 void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) {
-    if(mapNEVMTxRoots.empty()) {
-        return;
-    }
+    LOCK(cs_cache);
     for (auto const& key : mapNEVMTxRoots) {
         mapCache.insert(key);
     }
 }
 bool CNEVMMintedTxDB::FlushCacheToDisk() {
+    LOCK(cs_cache);
     if(mapCache.empty()) {
         return true;
     }
@@ -496,6 +506,7 @@ bool CNEVMMintedTxDB::FlushCacheToDisk() {
     return res;
 }
 bool CNEVMMintedTxDB::FlushErase(const NEVMMintTxSet &mapNEVMTxRoots) {
+    LOCK(cs_cache);
     if(mapNEVMTxRoots.empty())
         return true;
     CDBBatch batch(*this);
@@ -511,6 +522,7 @@ bool CNEVMMintedTxDB::FlushErase(const NEVMMintTxSet &mapNEVMTxRoots) {
     return WriteBatch(batch, true);
 }
 bool CNEVMMintedTxDB::ExistsTx(const uint256& nTxHash) {
+    LOCK(cs_cache);
     return (mapCache.find(nTxHash) != mapCache.end()) || Exists(nTxHash);
 }
 std::string stringFromSyscoinTx(const int &nVersion) {

@@ -188,8 +188,12 @@ bool ScanBlobs(CNEVMDataDB& pnevmdatadb, const uint32_t count, const uint32_t fr
 		}
 	}
     uint32_t index = 0;
-    const auto & mapCache = pnevmdatadb.GetMapCache();
-    for (auto const& [key, val] :mapCache) {
+    
+    // Get a thread-safe copy of the cache
+    PoDAMAP cacheCopy = pnevmdatadb.GetCacheCopy();
+    
+    // Now iterate over the copy which is thread-safe
+    for (auto const& [key, val] : cacheCopy) {
         UniValue oBlob(UniValue::VOBJ);
         oBlob.pushKV("versionhash",  HexStr(key));
         oBlob.pushKV("mpt", val.second);
@@ -213,7 +217,8 @@ bool ScanBlobs(CNEVMDataDB& pnevmdatadb, const uint32_t count, const uint32_t fr
             key.first.clear();
 			if (pcursor->GetKey(key)) {
                 // MTP
-                if(key.second == false && mapCache.find(key.first) == mapCache.end()) {
+                // Check against our thread-safe copy of the cache
+                if(key.second == false && cacheCopy.find(key.first) == cacheCopy.end()) {
                     UniValue oBlob(UniValue::VOBJ);
                     uint64_t nMedianTime;
                     if(pcursor->GetValue(nMedianTime)) {

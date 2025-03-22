@@ -33,6 +33,7 @@ bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMint
 }
 
 void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, const int64_t nMedianTime) {
+    LOCK(cs_cache);
     if(mapPoDA.empty()) {
         return;
     }
@@ -53,6 +54,7 @@ void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, const int64_t n
 }
 size_t CNEVMDataDB::GetCacheMemoryUsage() const
 {
+    LOCK(cs_cache);
     size_t total = 0;
     for (const auto &it : mapCache) {
         total += it.second.first.size();
@@ -72,6 +74,7 @@ PoDACacheSizeState CNEVMDataDB::GetPoDACacheSizeState(size_t &cacheSize) {
     return PoDACacheSizeState::OK;
 }
 bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime) {
+    LOCK(cs_cache);
     if(mapCache.empty()) {
         return true;
     }
@@ -102,7 +105,7 @@ bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime) {
     return res;
 }
 bool CNEVMDataDB::ReadData(const std::vector<uint8_t>& nVersionHash, std::vector<uint8_t>& vchData) {
-    
+    LOCK(cs_cache);
     auto it = mapCache.find(nVersionHash);
     if(it != mapCache.end()){
         vchData = it->second.first;
@@ -114,6 +117,7 @@ bool CNEVMDataDB::ReadData(const std::vector<uint8_t>& nVersionHash, std::vector
     return false;
 } 
 bool CNEVMDataDB::ReadMTP(const std::vector<uint8_t>& nVersionHash, int64_t &nMedianTime) {
+    LOCK(cs_cache);
     auto it = mapCache.find(nVersionHash);
     if(it != mapCache.end()){
         nMedianTime = it->second.second;
@@ -125,6 +129,7 @@ bool CNEVMDataDB::ReadMTP(const std::vector<uint8_t>& nVersionHash, int64_t &nMe
     return false;
 }
 bool CNEVMDataDB::ReadDataSize(const std::vector<uint8_t>& nVersionHash, uint32_t &nSize) {
+    LOCK(cs_cache);
     auto it = mapCache.find(nVersionHash);
     if(it != mapCache.end()){
         nSize = it->second.first.size();
@@ -135,6 +140,7 @@ bool CNEVMDataDB::ReadDataSize(const std::vector<uint8_t>& nVersionHash, uint32_
     return false;
 }
 bool CNEVMDataDB::FlushErase(const NEVMDataVec &vecDataKeys) {
+    LOCK(cs_cache);
     if(vecDataKeys.empty())
         return true;
     CDBBatch batch(*this);    
@@ -159,8 +165,15 @@ bool CNEVMDataDB::FlushErase(const NEVMDataVec &vecDataKeys) {
     return WriteBatch(batch, true);
 }
 bool CNEVMDataDB::BlobExists(const std::vector<uint8_t>& vchVersionHash) {
+    LOCK(cs_cache);
     return (mapCache.find(vchVersionHash) != mapCache.end()) || Exists(std::make_pair(vchVersionHash, true));
 }
+
+PoDAMAP CNEVMDataDB::GetCacheCopy() const {
+    LOCK(cs_cache);
+    return mapCache;  // Returns a copy of the cache map
+}
+
 bool CNEVMDataDB::PruneToBatch(
     CDBBatch& batch,
     const int64_t nMedianTime)
@@ -207,6 +220,7 @@ bool CNEVMDataDB::PruneToBatch(
 
 bool CNEVMDataDB::PruneStandalone(const int64_t nMedianTime)
 {
+    LOCK(cs_cache);
     int nCount = 0;
     auto it = mapCache.begin();
     while (it != mapCache.end()) {

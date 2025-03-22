@@ -114,7 +114,8 @@ BOOST_AUTO_TEST_CASE(nevmspv_valid)
             const std::vector<unsigned char> vchTxValue = ParseHex(spv_value);
             dev::RLP rlpTxValue(&vchTxValue);
             const std::vector<unsigned char> vchTxPath = ParseHex(spv_path);
-            BOOST_CHECK(VerifyProof(&vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot));
+            dev::bytesConstRef vchTxPathRef(vchTxPath.data(), vchTxPath.size());
+            BOOST_CHECK(VerifyProof(vchTxPathRef, rlpTxValue, rlpTxParentNodes, rlpTxRoot));
         }
     }
 }
@@ -152,7 +153,8 @@ BOOST_AUTO_TEST_CASE(nevmspv_invalid)
             const std::vector<unsigned char> vchTxValue = ParseHex(spv_value);
             dev::RLP rlpTxValue(&vchTxValue);
             const std::vector<unsigned char> vchTxPath = ParseHex(spv_path);
-            BOOST_CHECK(!VerifyProof(&vchTxPath, rlpTxValue, rlpTxParentNodes, rlpTxRoot));
+            dev::bytesConstRef vchTxPathRef(vchTxPath.data(), vchTxPath.size());
+            BOOST_CHECK(!VerifyProof(vchTxPathRef, rlpTxValue, rlpTxParentNodes, rlpTxRoot));
         }
     }
 }
