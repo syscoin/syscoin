@@ -362,6 +362,7 @@ public:
     std::vector<std::shared_ptr<CSuperblock>> GetActiveTriggers() EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool AddNewTrigger(uint256 nHash) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void CleanAndRemoveTriggers();
+    bool UndoBlock(const CBlockIndex* pindex);
 
 private:
     std::optional<const CSuperblock> CreateSuperblockCandidate(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(!cs);

@@ -15,6 +15,7 @@
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <logging.h>
+#include <governance/governance.h>
 class CCoinsViewCache;
 bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs)
 {
@@ -78,16 +79,21 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
     return true;
 }
 
-bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM)
+bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM, bool bReverify)
 {
     try {
-        if (!deterministicMNManager || !deterministicMNManager->UndoBlock(pindex, diffNEVM)) {
+        if(bReverify) {
+            if (!deterministicMNManager || !deterministicMNManager->UndoBlock(pindex, diffNEVM)) {
+                return false;
+            }
+            if (!llmq::quorumBlockProcessor->UndoBlock(block, pindex)) {
+                return false;
+            }
+        }
+        if (!governance->UndoBlock(pindex)) {
             return false;
         }
 
-        if (!llmq::quorumBlockProcessor->UndoBlock(block, pindex)) {
-            return false;
-        }
     } catch (const std::exception& e) {
         return error(strprintf("%s -- failed: %s\n", __func__, e.what()).c_str());
     }

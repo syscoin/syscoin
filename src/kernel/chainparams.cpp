@@ -204,7 +204,7 @@ public:
         consensus.nNEVMStartTime = 1638791667;
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
-        consensus.nNexusStartBlock = 2000000;
+        consensus.nNexusStartBlock = 2006500;
         consensus.DIP0003Height = 1004200;
         consensus.DIP0003EnforcementHeight = 1004200;
         /**

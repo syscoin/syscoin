@@ -2444,7 +2444,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         return DISCONNECT_FAILED;
     }
     // SYSCOIN
-    if (bReverify && !UndoSpecialTxsInBlock(block, pindex, diffNEVM)) {
+    if (!UndoSpecialTxsInBlock(block, pindex, diffNEVM, bReverify)) {
         error("DisconnectBlock(): UndoSpecialTxsInBlock failed!\n");
         return DISCONNECT_FAILED;
     }

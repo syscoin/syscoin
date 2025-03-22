@@ -1582,7 +1582,14 @@ bool CGovernanceManager::FlushCacheToDisk()
 {
     return m_sb->FlushCacheToDisk();
 }
-
+bool CGovernanceManager::UndoBlock(const CBlockIndex* pindex)
+{
+    if (CSuperblock::IsValidBlockHeight(pindex->nHeight) && m_sb->ExistsCache(pindex->GetBlockHash())) {
+        LogPrint(BCLog::GOBJECT, "CGovernanceManager::UndoBlock -- Removing superblock at height from SB cache: %d\n", pindex->nHeight);
+        m_sb->EraseCache(pindex->GetBlockHash());
+    }
+    return true;
+}
 bool AreSuperblocksEnabled()
 {
     return sporkManager->IsSporkActive(SPORK_9_SUPERBLOCKS_ENABLED);

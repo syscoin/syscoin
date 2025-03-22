@@ -90,6 +90,8 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
                 nAdjustment = nGovernanceBudgetUp;
             }
             governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
+            if(nAdjustment != nPaymentLimit)
+                LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
         }
         return true;
     }
@@ -115,6 +117,8 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
                 nAdjustment = nGovernanceBudgetUp;
             }
             governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
+            if(nAdjustment != nPaymentLimit)
+                LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
         }
         return true;
     }
@@ -144,6 +148,8 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
             nAdjustment = nGovernanceBudgetUp;
         }
         governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
+        if(nAdjustment != nPaymentLimit)
+            LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
     }
     // we got a valid superblock
     return true;
