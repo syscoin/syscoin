@@ -129,7 +129,7 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
             strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded block reward, no triggered superblock detected",
                              nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
         }
-        else if(!fJustCheck && nSuperblockPayment > 0) {
+        else if(!fJustCheck) {
             CAmount nAdjustment = nPaymentLimit;
             if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
                 nAdjustment = nGovernanceBudgetDown;
