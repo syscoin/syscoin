@@ -54,7 +54,7 @@ CGovernanceManager::CGovernanceManager(ChainstateManager& _chainman) :
     fRateChecksEnabled(true),
     votedFundingYesTriggerHash(std::nullopt),
     mapTrigger{},
-    m_sb(std::make_unique<CEvoDB<uint256, CAmount>>(DBParams{.path = chainman.m_options.datadir / "evodb_sb", .wipe_data = chainman.m_options.reindex}, 1))
+    m_sb(std::make_unique<CEvoDB<uint256, CAmount>>(DBParams{.path = chainman.m_options.datadir / "evodb_sb", .wipe_data = chainman.m_options.reindex}, 0))
 {
 }
 
@@ -1584,7 +1584,7 @@ bool CGovernanceManager::FlushCacheToDisk()
 }
 bool CGovernanceManager::UndoBlock(const CBlockIndex* pindex)
 {
-    if (CSuperblock::IsValidBlockHeight(pindex->nHeight) && m_sb->ExistsCache(pindex->GetBlockHash())) {
+    if (CSuperblock::IsValidBlockHeight(pindex->nHeight)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::UndoBlock -- Removing superblock at height from SB cache: %d\n", pindex->nHeight);
         m_sb->EraseCache(pindex->GetBlockHash());
     }

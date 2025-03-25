@@ -84,6 +84,8 @@ BOOST_AUTO_TEST_CASE(TestEraseCache) {
     evoDB.WriteCache(3, three);
 
     evoDB.EraseCache(2);
+    // try erasing again
+    evoDB.EraseCache(2);
 
     int value;
     BOOST_CHECK(!evoDB.ReadCache(2, value));
@@ -98,10 +100,10 @@ BOOST_AUTO_TEST_CASE(TestEraseCache) {
     auto fifoList = evoDB.GetFifoList();
     auto eraseCache = evoDB.GetEraseCacheCopy();
 
-    BOOST_CHECK_EQUAL(mapCache.size(), 2);
-    BOOST_CHECK_EQUAL(fifoList.size(), 2);
-    BOOST_CHECK_EQUAL(eraseCache.size(), 1);
-    BOOST_CHECK(eraseCache.find(2) != eraseCache.end());
+    BOOST_CHECK_EQUAL(mapCache.size(), 0);
+    BOOST_CHECK_EQUAL(fifoList.size(), 0);
+    BOOST_CHECK_EQUAL(eraseCache.size(), 0);
+    BOOST_CHECK(eraseCache.find(2) == eraseCache.end());
 }
 
 BOOST_AUTO_TEST_CASE(TestFlushCacheToDisk) {
@@ -412,6 +414,43 @@ BOOST_AUTO_TEST_CASE(TestStressTest) {
         BOOST_CHECK_EQUAL(value, i);
     }
 }
+BOOST_AUTO_TEST_CASE(TestUint256KeyUniqueness)
+{
+    auto dbParams = DBParams{
+        .path = "testdb",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true
+    };
 
+    CEvoDB<uint256, int> evoDB(dbParams, 10);
+
+    uint256 key1 = uint256S("0x01");
+    uint256 key2 = uint256S("0x02");
+    uint256 key3 = uint256S("0x03");
+
+    evoDB.WriteCache(key1, 100);
+    evoDB.WriteCache(key2, 200);
+    evoDB.WriteCache(key3, 300);
+
+    int value;
+
+    BOOST_CHECK(evoDB.ReadCache(key1, value));
+    BOOST_CHECK_EQUAL(value, 100);
+
+    BOOST_CHECK(evoDB.ReadCache(key2, value));
+    BOOST_CHECK_EQUAL(value, 200);
+
+    BOOST_CHECK(evoDB.ReadCache(key3, value));
+    BOOST_CHECK_EQUAL(value, 300);
+
+    // Check internal structures explicitly
+    auto mapCache = evoDB.GetMapCache();
+    BOOST_CHECK_EQUAL(mapCache.size(), 3);
+
+    // Confirm that keys are treated as unique and not overwritten
+    BOOST_CHECK(mapCache.find(key1) != mapCache.end());
+    BOOST_CHECK(mapCache.find(key2) != mapCache.end());
+    BOOST_CHECK(mapCache.find(key3) != mapCache.end());
+}
 BOOST_AUTO_TEST_SUITE_END()
 

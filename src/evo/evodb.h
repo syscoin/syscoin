@@ -26,21 +26,20 @@ class CEvoDB : public CDBWrapper {
 public:
     using CDBWrapper::CDBWrapper;
     explicit CEvoDB(const DBParams &db_params, size_t maxCacheSizeIn) : CDBWrapper(db_params), maxCacheSize(maxCacheSizeIn), m_db_params(db_params) {
-        assert(maxCacheSize > 0);
     }
     ~CEvoDB() {
         FlushCacheToDisk();
     }
     bool IsCacheFull() const {
         LOCK(cs);
-        return (mapCache.size()+setEraseCache.size()) >= maxCacheSize;
+        return maxCacheSize > 0 && (mapCache.size()+setEraseCache.size()) >= maxCacheSize;
     }
     DBParams GetDBParams() const {
         return m_db_params;
     }
-    bool ReadCache(const K& key, V& value, bool skipFlushOnNextRead = false) {
+    bool ReadCache(const K& key, V& value) {
         LOCK(cs);
-        if(!skipFlushOnNextRead && bFlushOnNextRead) {
+        if(bFlushOnNextRead) {
             bFlushOnNextRead = false;
             LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
             FlushCacheToDisk();
@@ -52,8 +51,13 @@ public:
         }
         return Read(key, value);
     }
-    std::unordered_map<K, V> GetMapCacheCopy() const {
+    std::unordered_map<K, V> GetMapCacheCopy() {
         LOCK(cs);
+        if(bFlushOnNextRead) {
+            bFlushOnNextRead = false;
+            LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
+            FlushCacheToDisk();
+        }
         std::unordered_map<K, V> cacheCopy;
         for (const auto& [key, it] : mapCache) {
             cacheCopy[key] = it->second;
@@ -85,7 +89,7 @@ public:
         mapCache[key] = --fifoList.end();
         setEraseCache.erase(key);
 
-        if (mapCache.size() > maxCacheSize) {
+        if (maxCacheSize > 0 && mapCache.size() > maxCacheSize) {
             auto oldest = fifoList.front();
             fifoList.pop_front();
             mapCache.erase(oldest.first);
@@ -103,21 +107,26 @@ public:
         mapCache[key] = --fifoList.end();
         setEraseCache.erase(key);
 
-        if (mapCache.size() > maxCacheSize) {
+        if (maxCacheSize > 0 && mapCache.size() > maxCacheSize) {
             auto oldest = fifoList.front();
             fifoList.pop_front();
             mapCache.erase(oldest.first);
         }
     }
 
-    bool ExistsCache(const K& key) const {
+    bool ExistsCache(const K& key) {
         LOCK(cs);
+        if(bFlushOnNextRead) {
+            bFlushOnNextRead = false;
+            LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
+            FlushCacheToDisk();
+        }
         return (mapCache.find(key) != mapCache.end() || Exists(key));
     }
 
-    void EraseCache(const K& key, bool flushOnNextRead = false) {
+    void EraseCache(const K& key) {
         LOCK(cs);
-        bFlushOnNextRead = flushOnNextRead;
+        bFlushOnNextRead = true;
         auto it = mapCache.find(key);
         if (it != mapCache.end()) {
             fifoList.erase(it->second);

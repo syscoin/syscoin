@@ -43,14 +43,14 @@ public:
     bool GetMineableCommitmentByHash(const uint256& commitmentHash, CFinalCommitment& ret);
     bool GetMinableCommitment(int nHeight, CFinalCommitment& ret) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    bool HasMinedCommitment(const uint256& quorumHash) const;
+    bool HasMinedCommitment(const uint256& quorumHash);
     CFinalCommitmentPtr GetMinedCommitment(const uint256& quorumHash, uint256& retMinedBlockHash);
     bool FlushCacheToDisk();
     static bool IsMiningPhase(int nHeight);
 private:
     static bool GetCommitmentsFromBlock(const CBlock& block, const uint32_t& nHeight, llmq::CFinalCommitmentTxPayload &qcRet, BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ProcessCommitment(int nHeight, const uint256& blockHash, const CFinalCommitment& qc, BlockValidationState& state, bool fJustCheck, bool fBLSChecks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    bool IsCommitmentRequired(int nHeight) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsCommitmentRequired(int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     static uint256 GetQuorumBlockHash(ChainstateManager& chainman, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 

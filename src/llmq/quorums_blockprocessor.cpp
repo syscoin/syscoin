@@ -274,7 +274,7 @@ bool CQuorumBlockProcessor::UndoBlock(const CBlock& block, const CBlockIndex* pi
         return true;
     }
 
-    m_commitment_evoDb.EraseCache(qcTx.commitment.quorumHash, true);
+    m_commitment_evoDb.EraseCache(qcTx.commitment.quorumHash);
 
     // if a reorg happened, we should allow to mine this commitment later
     AddMineableCommitment(qcTx.commitment);
@@ -315,7 +315,7 @@ bool CQuorumBlockProcessor::IsMiningPhase(int nHeight)
     return false;
 }
 
-bool CQuorumBlockProcessor::IsCommitmentRequired(int nHeight) const
+bool CQuorumBlockProcessor::IsCommitmentRequired(int nHeight)
 {
     AssertLockHeld(cs_main);
     uint256 quorumHash = GetQuorumBlockHash(chainman, nHeight);
@@ -341,7 +341,7 @@ uint256 CQuorumBlockProcessor::GetQuorumBlockHash(ChainstateManager& chainman, i
     return quorumBlockHash;
 }
 
-bool CQuorumBlockProcessor::HasMinedCommitment(const uint256& quorumHash) const
+bool CQuorumBlockProcessor::HasMinedCommitment(const uint256& quorumHash)
 {
     return m_commitment_evoDb.ExistsCache(quorumHash);
 }
