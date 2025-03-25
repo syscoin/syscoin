@@ -81,10 +81,10 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         // not enough data for full checks but at least we know that the superblock limits were honored.
         // We rely on the network to have followed the correct chain in this case
         // follow longest chain as IsValid() doesn't get to validate nSuperblockPayment via the superblock
-        if(!fJustCheck && nSuperblockPayment > 0) {
+        if(!fJustCheck) {
 
             CAmount nAdjustment = nPaymentLimit;
-            if(nSuperblockPayment <= nPaymentsLimitDown) {
+            if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
                 nAdjustment = nGovernanceBudgetDown;
             } else if(nSuperblockPayment >= nPaymentsLimitUp) {
                 nAdjustment = nGovernanceBudgetUp;
@@ -109,9 +109,9 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         return isBlockRewardValueMet;
     }
     if (!check_superblock) {
-        if(!fJustCheck && nSuperblockPayment > 0) {
+        if(!fJustCheck) {
             CAmount nAdjustment = nPaymentLimit;
-            if(nSuperblockPayment <= nPaymentsLimitDown) {
+            if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
                 nAdjustment = nGovernanceBudgetDown;
             } else if(nSuperblockPayment >= nPaymentsLimitUp) {
                 nAdjustment = nGovernanceBudgetUp;
@@ -129,6 +129,17 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
             strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded block reward, no triggered superblock detected",
                              nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
         }
+        else if(!fJustCheck && nSuperblockPayment > 0) {
+            CAmount nAdjustment = nPaymentLimit;
+            if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
+                nAdjustment = nGovernanceBudgetDown;
+            } else if(nSuperblockPayment >= nPaymentsLimitUp) {
+                nAdjustment = nGovernanceBudgetUp;
+            }
+            governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
+            if(nAdjustment != nPaymentLimit)
+                LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
+        }
         return isBlockRewardValueMet;
     }
     // this actually also checks for correct payees and not only amount
@@ -140,9 +151,9 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         return false;
     }
     // only store new limit if there was some governance
-    if(!fJustCheck && nSuperblockPayment > 0) {
+    if(!fJustCheck) {
         CAmount nAdjustment = nPaymentLimit;
-        if(nSuperblockPayment <= nPaymentsLimitDown) {
+        if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
             nAdjustment = nGovernanceBudgetDown;
         } else if(nSuperblockPayment >= nPaymentsLimitUp) {
             nAdjustment = nGovernanceBudgetUp;

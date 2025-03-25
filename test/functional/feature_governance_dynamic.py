@@ -189,6 +189,16 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.bump_mocktime(int(GOVERNANCE_DELETION_DELAY + MASTERNODE_SYNC_TICK_SECONDS))  # delete prev proposals and advance ProcessTick
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
+        # empty SB shouldn't reset the budget
+        # Expire previous proposals
+        self.bump_mocktime(int(PROPOSAL_END_EPOCH))
+        self.generate(self.nodes[0], 5)
+        self.bump_mocktime(int(GOVERNANCE_DELETION_DELAY + MASTERNODE_SYNC_TICK_SECONDS))
+        for node in self.nodes:
+            force_finish_mnsync(node)
+        self.mine_superblock_and_check_budget([])
+        # Step 7: SB7 - Reindex and verify budget after reindex
+        self.log.info(f"SB7 - Reindex and check budget {satoshi_round(self.expected_budget)}")
         proposals_data = [
             {"amount": self.expected_budget * Decimal('0.1'), "address": self.p0_payout_address},
             {"amount": self.expected_budget * Decimal('0.7'), "address": self.p1_payout_address},
@@ -197,9 +207,6 @@ class SyscoinGovernanceTest(DashTestFramework):
         proposals_data = self.prepare_and_submit_proposals(proposals_data)
         self.vote_on_proposals([p["hash"] for p in proposals_data], map_vote_signals, map_vote_outcomes)
         self.mine_superblock_and_check_budget(proposals_data)
-
-        # Step 7: SB7 - Reindex and verify budget after reindex
-        self.log.info("SB7 - Reindex and check budget")
         # previous proposals were against the higher budget so the limit should increase again with the same proposals
         self.reindex_node_and_check_budget(proposals_data)
 
@@ -261,9 +268,8 @@ class SyscoinGovernanceTest(DashTestFramework):
         proposals_data = self.prepare_and_submit_proposals(proposals_data)
         self.vote_on_proposals([p["hash"] for p in proposals_data], map_vote_signals, map_vote_outcomes)
         self.mine_superblock_and_check_budget(proposals_data)
-
         # Step 12: Final verification, resync and check budget
-        self.log.info("Resync and ensure budget consistency")
+        self.log.info(f"Resync and ensure budget consistency {satoshi_round(self.expected_budget)}")
         self.resync_node_and_check_budget(proposals_data)
 
     def prepare_and_submit_proposals(self, proposals):
@@ -345,7 +351,8 @@ class SyscoinGovernanceTest(DashTestFramework):
         n = self.sb_immaturity_window - block_count % sb_cycle
         self.generate(self.nodes[0], n - 1)
         self.log.info(f"Waiting for trigger")
-        self.wait_for_trigger(sb_height)
+        if len(proposals_data) > 0:
+            self.wait_for_trigger(sb_height)
 
         block_count = self.nodes[0].getblockcount()
         n = sb_height - block_count
@@ -361,7 +368,7 @@ class SyscoinGovernanceTest(DashTestFramework):
             self.expected_budget = min(
                 actual_budget * (Decimal('1') + SUPERBLOCK_PAYMENT_LIMIT_UP / Decimal('100')), MAX_GOVERNANCE_BUDGET
             )
-        elif funded_percentage <= Decimal('100') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('2'):
+        elif funded_percentage > Decimal('0') and funded_percentage <= Decimal('100') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('2'):
             self.expected_budget = actual_budget * (Decimal('1') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('100'))
         else:
             self.expected_budget = actual_budget
@@ -373,6 +380,8 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.check_superblockbudget()
 
     def verify_proposals_in_superblock(self, proposals_data):
+        if len(proposals_data) == 0:
+            return Decimal('0')
         coinbase_outputs = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 2)["tx"][0]["vout"]
 
         # Create a set of addresses used in expected proposals
@@ -427,7 +436,7 @@ class SyscoinGovernanceTest(DashTestFramework):
             self.expected_budget = min(
                 actual_budget * (Decimal('1') + SUPERBLOCK_PAYMENT_LIMIT_UP / Decimal('100')), MAX_GOVERNANCE_BUDGET
             )
-        elif funded_percentage <= Decimal('100') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('2'):
+        elif funded_percentage > Decimal('0') and funded_percentage <= Decimal('100') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('2'):
             self.expected_budget = actual_budget * (Decimal('1') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('100'))
         else:
             self.expected_budget = actual_budget
@@ -475,7 +484,7 @@ class SyscoinGovernanceTest(DashTestFramework):
             self.expected_budget = min(
                 actual_budget * (Decimal('1') + SUPERBLOCK_PAYMENT_LIMIT_UP / Decimal('100')), MAX_GOVERNANCE_BUDGET
             )
-        elif funded_percentage <= Decimal('100') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('2'):
+        elif funded_percentage > Decimal('0') and funded_percentage <= Decimal('100') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('2'):
             self.expected_budget = actual_budget * (Decimal('1') + SUPERBLOCK_PAYMENT_LIMIT_DOWN / Decimal('100'))
         else:
             self.expected_budget = actual_budget
