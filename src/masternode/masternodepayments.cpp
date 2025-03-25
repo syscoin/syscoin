@@ -16,6 +16,24 @@
 #include <string>
 
 CMasternodePayments mnpayments;
+void CheckAndWriteBudget(const CAmount& nSuperblockPayment, const CAmount& nPaymentLimit, const CAmount& nGovernanceBudgetUp, const CBlockIndex* pindex) {
+    CAmount nGovernanceBudgetDown = (nPaymentLimit * CSuperblock::SHIFT_DOWN) / CSuperblock::SHIFT;
+    if (nGovernanceBudgetDown < CSuperblock::SUPERBLOCK_BUDGET_MIN) {
+        nGovernanceBudgetDown = CSuperblock::SUPERBLOCK_BUDGET_MIN;
+    }
+    CAmount nPaymentsLimitUp   = (nPaymentLimit * CSuperblock::SHIFT_HALF_UP)   / CSuperblock::SHIFT;
+    CAmount nPaymentsLimitDown = (nPaymentLimit * CSuperblock::SHIFT_HALF_DOWN) / CSuperblock::SHIFT;
+
+    CAmount nAdjustment = nPaymentLimit;
+    if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
+        nAdjustment = nGovernanceBudgetDown;
+    } else if(nSuperblockPayment >= nPaymentsLimitUp) {
+        nAdjustment = nGovernanceBudgetUp;
+    }
+    governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
+    if(nAdjustment != nPaymentLimit)
+        LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
+}
 /**
 * IsBlockValueValid
 *
@@ -51,15 +69,7 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
     const CBlockIndex* nLastSBIndex = pindex->GetAncestor(nLastSuperblock);
     const CAmount nPaymentLimit = CSuperblock::GetPaymentsLimit(nLastSBIndex);
     // Initial thresholds
-    CAmount nPaymentsLimitUp   = (nPaymentLimit * CSuperblock::SHIFT_HALF_UP)   / CSuperblock::SHIFT;
-    CAmount nPaymentsLimitDown = (nPaymentLimit * CSuperblock::SHIFT_HALF_DOWN) / CSuperblock::SHIFT;
-
     CAmount nGovernanceBudgetUp   = (nPaymentLimit * CSuperblock::SHIFT_UP)   / CSuperblock::SHIFT;
-    CAmount nGovernanceBudgetDown = (nPaymentLimit * CSuperblock::SHIFT_DOWN) / CSuperblock::SHIFT;
-    if (nGovernanceBudgetDown < CSuperblock::SUPERBLOCK_BUDGET_MIN) {
-        nGovernanceBudgetDown = CSuperblock::SUPERBLOCK_BUDGET_MIN;
-    }
-    
     if (nGovernanceBudgetUp > CSuperblock::SUPERBLOCK_BUDGET_MAX) {
         nGovernanceBudgetUp = CSuperblock::SUPERBLOCK_BUDGET_MAX;
     }
@@ -81,18 +91,8 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         // not enough data for full checks but at least we know that the superblock limits were honored.
         // We rely on the network to have followed the correct chain in this case
         // follow longest chain as IsValid() doesn't get to validate nSuperblockPayment via the superblock
-        if(!fJustCheck) {
-
-            CAmount nAdjustment = nPaymentLimit;
-            if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
-                nAdjustment = nGovernanceBudgetDown;
-            } else if(nSuperblockPayment >= nPaymentsLimitUp) {
-                nAdjustment = nGovernanceBudgetUp;
-            }
-            governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
-            if(nAdjustment != nPaymentLimit)
-                LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
-        }
+        if(!fJustCheck)
+            CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
         return true;
     }
 
@@ -109,17 +109,8 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         return isBlockRewardValueMet;
     }
     if (!check_superblock) {
-        if(!fJustCheck) {
-            CAmount nAdjustment = nPaymentLimit;
-            if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
-                nAdjustment = nGovernanceBudgetDown;
-            } else if(nSuperblockPayment >= nPaymentsLimitUp) {
-                nAdjustment = nGovernanceBudgetUp;
-            }
-            governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
-            if(nAdjustment != nPaymentLimit)
-                LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
-        }
+        if(!fJustCheck)
+            CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
         return true;
     }
     if (!CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
@@ -130,15 +121,7 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
                              nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
         }
         else if(!fJustCheck) {
-            CAmount nAdjustment = nPaymentLimit;
-            if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
-                nAdjustment = nGovernanceBudgetDown;
-            } else if(nSuperblockPayment >= nPaymentsLimitUp) {
-                nAdjustment = nGovernanceBudgetUp;
-            }
-            governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
-            if(nAdjustment != nPaymentLimit)
-                LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
+            CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
         }
         return isBlockRewardValueMet;
     }
@@ -151,17 +134,8 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         return false;
     }
     // only store new limit if there was some governance
-    if(!fJustCheck) {
-        CAmount nAdjustment = nPaymentLimit;
-        if(nSuperblockPayment > 0 && nSuperblockPayment <= nPaymentsLimitDown) {
-            nAdjustment = nGovernanceBudgetDown;
-        } else if(nSuperblockPayment >= nPaymentsLimitUp) {
-            nAdjustment = nGovernanceBudgetUp;
-        }
-        governance->m_sb->WriteCache(pindex->GetBlockHash(), nAdjustment);
-        if(nAdjustment != nPaymentLimit)
-            LogPrint(BCLog::GOBJECT, "%s -- Adjusting SB limit to %lld (from %lld) for block %s\n", __func__, nAdjustment, nPaymentLimit, pindex->GetBlockHash().GetHex());
-    }
+    if(!fJustCheck)
+        CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
     // we got a valid superblock
     return true;
 }
