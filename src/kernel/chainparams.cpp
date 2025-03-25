@@ -204,7 +204,7 @@ public:
         consensus.nNEVMStartTime = 1638791667;
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
-        consensus.nNexusStartBlock = 2006500;
+        consensus.nNexusStartBlock = 2010345;
         consensus.DIP0003Height = 1004200;
         consensus.DIP0003EnforcementHeight = 1004200;
         /**
@@ -364,9 +364,9 @@ public:
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
         consensus.nNEVMStartTime = 1632775675;
-        consensus.nPODAStartBlock = 1004000;
+        consensus.nPODAStartBlock = 1022500;
+        consensus.nV19StartBlock = 1063000;
         consensus.nNexusStartBlock = 1505000;
-        consensus.nV19StartBlock = 1100000;
         consensus.DIP0003Height = 545000;
         consensus.DIP0003EnforcementHeight = 545000;
         pchMessageStart[0] = 0xce;
