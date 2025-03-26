@@ -82,12 +82,26 @@ BOOST_AUTO_TEST_CASE(TestEraseCache) {
     evoDB.WriteCache(1, one);
     evoDB.WriteCache(2, two);
     evoDB.WriteCache(3, three);
+    auto mapCache = evoDB.GetMapCache();
+    auto fifoList = evoDB.GetFifoList();
+    auto eraseCache = evoDB.GetEraseCacheCopy();
+    BOOST_CHECK_EQUAL(mapCache.size(), 3);
+    BOOST_CHECK_EQUAL(fifoList.size(), 3);
+    BOOST_CHECK_EQUAL(eraseCache.size(), 0);
 
     evoDB.EraseCache(2);
     // try erasing again
     evoDB.EraseCache(2);
+    mapCache = evoDB.GetMapCache();
+    fifoList = evoDB.GetFifoList();
+    eraseCache = evoDB.GetEraseCacheCopy();
+    BOOST_CHECK_EQUAL(mapCache.size(), 2);
+    BOOST_CHECK_EQUAL(fifoList.size(), 2);
+    BOOST_CHECK_EQUAL(eraseCache.size(), 1);
+    BOOST_CHECK(eraseCache.find(2) != eraseCache.end());
 
     int value;
+    // should flush to disk
     BOOST_CHECK(!evoDB.ReadCache(2, value));
     BOOST_CHECK(evoDB.ReadCache(1, value));
     BOOST_CHECK_EQUAL(value, one);
@@ -95,10 +109,10 @@ BOOST_AUTO_TEST_CASE(TestEraseCache) {
     BOOST_CHECK(evoDB.ReadCache(3, value));
     BOOST_CHECK_EQUAL(value, three);
 
-    // Check internal structures
-    auto mapCache = evoDB.GetMapCache();
-    auto fifoList = evoDB.GetFifoList();
-    auto eraseCache = evoDB.GetEraseCacheCopy();
+    // Check internal structures that are empty after read flush (after erase)
+    mapCache = evoDB.GetMapCache();
+    fifoList = evoDB.GetFifoList();
+    eraseCache = evoDB.GetEraseCacheCopy();
 
     BOOST_CHECK_EQUAL(mapCache.size(), 0);
     BOOST_CHECK_EQUAL(fifoList.size(), 0);
