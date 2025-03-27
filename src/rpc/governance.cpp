@@ -576,7 +576,7 @@ static RPCHelpMan voteraw()
 } 
 bool ScanGovLimits(UniValue& oRes, const CBlockIndex* pindexStart)
 {
-    static constexpr size_t MAX_COUNT = 10;
+    static constexpr size_t MAX_COUNT = 1000;
     size_t found = 0;
     std::vector<std::tuple<int, uint256, CAmount>> results;
 
@@ -592,9 +592,11 @@ bool ScanGovLimits(UniValue& oRes, const CBlockIndex* pindexStart)
                 results.emplace_back(pindex->nHeight, h, cVal);
                 found++;
             } else {
+                LogPrintf("ScanGovLimits: Could not find block %s (%d) in the cache...\n", h.GetHex(), pindex->nHeight);
                 break;
             }
         } else {
+            LogPrintf("ScanGovLimits: Block %s (%d) not a valid SB height...\n", pindex->GetBlockHash().GetHex(), pindex->nHeight);
             break;
         }
         // Jump to the previous superblock height
@@ -602,6 +604,7 @@ bool ScanGovLimits(UniValue& oRes, const CBlockIndex* pindexStart)
         // If we can't go back any further, break
         if (pindex->nHeight < sbCycle) {
             // no more possible superblocks
+            LogPrintf("ScanGovLimits: No more SB\n");
             break;
         }
         int nLastSuperblock = pindex->nHeight - sbCycle;
