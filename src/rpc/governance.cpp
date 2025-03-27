@@ -576,7 +576,7 @@ static RPCHelpMan voteraw()
 } 
 bool ScanGovLimits(UniValue& oRes, const CBlockIndex* pindexStart)
 {
-    static constexpr size_t MAX_COUNT = 1000;
+    static constexpr size_t MAX_COUNT = 10;
     size_t found = 0;
     std::vector<std::tuple<int, uint256, CAmount>> results;
 
