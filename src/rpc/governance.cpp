@@ -574,69 +574,55 @@ static RPCHelpMan voteraw()
 },
     };
 } 
+bool ScanGovLimits(UniValue& oRes, const CBlockIndex* pindexStart)
+{
+    static constexpr size_t MAX_COUNT = 10;
+    size_t found = 0;
+    std::vector<std::tuple<int, uint256, CAmount>> results;
 
-bool ScanGovLimits(UniValue& oRes, const node::JSONRPCRequest& request) {
-    ChainstateManager& chainman = EnsureAnyChainman(request.context);
-    static constexpr uint32_t MAX_COUNT = 10;
-    uint32_t index = 0;
-    // Get a thread-safe copy of the cache
-    auto cacheCopy = governance->m_sb->GetMapCacheCopy();
-    std::map<int, std::pair<uint256, CAmount> > mapLimits;
-    // Now iterate over the copy which is thread-safe
-    for (auto const& [key, value] : cacheCopy) {
-        const CBlockIndex *pblockindex;
-        {
-            LOCK(cs_main);
-            pblockindex = chainman.m_blockman.LookupBlockIndex(key);
-            if (!pblockindex) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+    const CBlockIndex* pindex = pindexStart;
+    if (!pindex) return false;
+
+    while (pindex && found < MAX_COUNT) {
+        // If the current block is a superblock, try to read its limit
+        if (CSuperblock::IsValidBlockHeight(pindex->nHeight)) {
+            uint256 h = pindex->GetBlockHash();
+            CAmount cVal = 0;
+            if (governance->m_sb->ReadCache(h, cVal)) {
+                results.emplace_back(pindex->nHeight, h, cVal);
+                found++;
+            } else {
+                break;
             }
-        }
-        mapLimits.emplace(pblockindex->nHeight, std::make_pair(key, static_cast<CAmount>(value)));
-        index += 1;
-        if (index >= MAX_COUNT)
+        } else {
             break;
-    }
-    if(index < MAX_COUNT) {
-        std::unique_ptr<CDBIterator> pcursor(governance->m_sb->NewIterator());
-        pcursor->SeekToFirst();
-        uint256 key;
-        int64_t value;
-        while (pcursor->Valid()) {
-            try {
-                key = uint256();
-                if (pcursor->GetKey(key) && pcursor->GetValue(value)) {
-                    const CBlockIndex *pblockindex;
-                    {
-                        LOCK(cs_main);
-                        pblockindex = chainman.m_blockman.LookupBlockIndex(key);
-                        if (!pblockindex) {
-                            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
-                        }
-                    }
-                    if(mapLimits.find(pblockindex->nHeight) == mapLimits.end()) {
-                        mapLimits.emplace(pblockindex->nHeight, std::make_pair(key, static_cast<CAmount>(value)));
-                        index += 1;
-                        if (index >= MAX_COUNT)
-                            break;
-                    }
-                }
-                pcursor->Next();
-            }
-            catch (std::exception &e) {
-                return error("%s() : deserialize error", __PRETTY_FUNCTION__);
-            }
         }
+        // Jump to the previous superblock height
+        int sbCycle = Params().GetConsensus().SuperBlockCycle(pindex->nHeight);
+        // If we can't go back any further, break
+        if (pindex->nHeight < sbCycle) {
+            // no more possible superblocks
+            break;
+        }
+        int nLastSuperblock = pindex->nHeight - sbCycle;
+        // Now move pindex to that older superblock
+        pindex = pindex->GetAncestor(nLastSuperblock);
     }
-    for (auto const& [key, value] : mapLimits) {
-        UniValue oBlob(UniValue::VOBJ);
-        oBlob.pushKV("height", key);
-        oBlob.pushKV("blockhash", value.first.GetHex());
-        oBlob.pushKV("governancebudget", ValueFromAmount(value.second));
-        oRes.push_back(oBlob);
+
+    std::reverse(results.begin(), results.end());
+
+    for (const auto& [height, bh, val] : results) {
+        UniValue obj(UniValue::VOBJ);
+        obj.pushKV("height", (int)height);
+        obj.pushKV("blockhash", bh.GetHex());
+        obj.pushKV("limit", ValueFromAmount(val));
+        oRes.push_back(obj);
     }
-	return true;
+
+    return true;
 }
+
+
 static RPCHelpMan getgovernanceinfo()
 {
     return RPCHelpMan{"getgovernanceinfo",
@@ -689,7 +675,9 @@ static RPCHelpMan getgovernanceinfo()
     obj.pushKV("fundingthreshold", int(deterministicMNManager->GetListAtChainTip().GetValidMNsCount() / 10));
     obj.pushKV("governancebudget", ValueFromAmount(CSuperblock::GetPaymentsLimit(nLastSBIndex)));
     UniValue oLimits(UniValue::VARR);
-    ScanGovLimits(oLimits, request);
+    if(!ScanGovLimits(oLimits, nLastSBIndex)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not retrieve last 10 governance budgets!");
+    }
     obj.pushKV("last10governancebudgets", oLimits);
     return obj;
 },
