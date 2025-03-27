@@ -618,7 +618,7 @@ bool ScanGovLimits(UniValue& oRes, const CBlockIndex* pindexStart)
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("height", (int)height);
         obj.pushKV("blockhash", bh.GetHex());
-        obj.pushKV("limit", ValueFromAmount(val));
+        obj.pushKV("governancebudget", ValueFromAmount(val));
         oRes.push_back(obj);
     }
 
