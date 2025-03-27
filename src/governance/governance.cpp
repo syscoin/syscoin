@@ -54,7 +54,7 @@ CGovernanceManager::CGovernanceManager(ChainstateManager& _chainman) :
     fRateChecksEnabled(true),
     votedFundingYesTriggerHash(std::nullopt),
     mapTrigger{},
-    m_sb(std::make_unique<CEvoDB<uint256, CAmount>>(DBParams{.path = chainman.m_options.datadir / "evodb_sb", .wipe_data = chainman.m_options.reindex, .cache_bytes = static_cast<size_t>(1 << 20)}, 0))
+    m_sb(std::make_unique<CEvoDB<uint256, CAmount>>(DBParams{.path = chainman.m_options.datadir / "evodb_sb", .cache_bytes = static_cast<size_t>(1 << 20), .wipe_data = chainman.m_options.reindex}, 0))
 {
 }
 
