@@ -79,7 +79,7 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
     return true;
 }
 
-bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM, bool bReverify)
+bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM, bool bReverify, bool bReplay)
 {
     try {
         if(bReverify) {
@@ -90,8 +90,11 @@ bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDete
                 return false;
             }
         }
-        if (!governance->UndoBlock(pindex)) {
-            return false;
+        // replay doesn't connect block which writes governance SB to cache again
+        if(!bReplay) {
+            if (!governance->UndoBlock(pindex)) {
+                return false;
+            }
         }
 
     } catch (const std::exception& e) {

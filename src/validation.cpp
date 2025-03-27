@@ -2426,7 +2426,7 @@ bool ProcessNEVMData(const BlockManager& blockman, const CTransaction& tx, const
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 // SYSCOIN
-DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, bool bReplay)
 {
     AssertLockHeld(::cs_main);
     // SYSCOIN
@@ -2444,7 +2444,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         return DISCONNECT_FAILED;
     }
     // SYSCOIN
-    if (!UndoSpecialTxsInBlock(block, pindex, diffNEVM, bReverify)) {
+    if (!UndoSpecialTxsInBlock(block, pindex, diffNEVM, bReverify, bReplay)) {
         error("DisconnectBlock(): UndoSpecialTxsInBlock failed!\n");
         return DISCONNECT_FAILED;
     }
@@ -3520,7 +3520,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
     {
         CCoinsViewCache view(&CoinsTip());
-        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
+        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false /*bJustCheck*/, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
         GetMainSignals().BlockChecked(blockConnecting, state);
         if (!rv) {
             if (state.IsInvalid())
@@ -5318,7 +5318,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
         if (nCheckLevel >= 3) {
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
                 // SYSCOIN
-                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, setMintTxs, vecNEVMBlocks, vecTXIDPairs, false);
+                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, setMintTxs, vecNEVMBlocks, vecTXIDPairs, false /*bReverify*/);
                 if (res == DISCONNECT_FAILED) {
                     LogPrintf("Verification error: irrecoverable inconsistency in block data at %d, hash=%s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
                     return VerifyDBResult::CORRUPTED_BLOCK_DB;
@@ -5363,7 +5363,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }
             // SYSCOIN
-            if (!chainstate.ConnectBlock(block, state, pindex, coins, false, false)) {
+            if (!chainstate.ConnectBlock(block, state, pindex, coins, false /*bJustCheck*/, false /*bReverify*/)) {
                 LogPrintf("Verification error: found unconnectable block at %d, hash=%s (%s)\n", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }
@@ -5479,7 +5479,7 @@ bool Chainstate::ReplayBlocks()
             }
             LogPrintf("Rolling back %s (%i)\n", pindexOld->GetBlockHash().ToString(), pindexOld->nHeight);
             // SYSCOIN
-            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, setMintTxsDisconnect, vecNEVMBlocks, vecTXIDPairs);
+            DisconnectResult res = DisconnectBlock(block, pindexOld, cache, setMintTxsDisconnect, vecNEVMBlocks, vecTXIDPairs, true /*bReverify*/, true /*bReplay*/);
             if (res == DISCONNECT_FAILED) {
                 return error("RollbackBlock(): DisconnectBlock failed at %d, hash=%s", pindexOld->nHeight, pindexOld->GetBlockHash().ToString());
             }
