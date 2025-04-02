@@ -3145,7 +3145,7 @@ bool Chainstate::FlushStateToDisk(
             // Similar to coin cache logic:
             bool podaCacheLarge    = mode == FlushStateMode::PERIODIC && poda_cache_state >= PoDACacheSizeState::LARGE;
             bool podaCacheCritical = mode == FlushStateMode::IF_NEEDED && poda_cache_state >= PoDACacheSizeState::CRITICAL;
-            if(fPeriodicWrite || podaCacheLarge ||podaCacheCritical || fDoFullFlush) {
+            if(fPeriodicWrite || podaCacheLarge || podaCacheCritical || fDoFullFlush) {
                 // Ensure we can write block index
                 if (!CheckDiskSpace(m_chainman.m_options.datadir, PoDACacheSize)) {
                     return FatalError(m_chainman.GetNotifications(), state, "Disk space is too low!", _("Disk space is too low!"));

@@ -92,6 +92,9 @@ As part of the governance upgrade, we have sunset `sentinel` and Sentry nodes do
 
 ### 6. NEVM Registry & PoDA Enhancements
 - **NEVM Registry**: A decentralized reference for registered Syscoin NEVM tokens/contracts. Supports easy lookup of token metadata, owners, etc. Precompile address (0x62) enables the registry on the NEVM. Every Sentry node must register their address via protx_update_service to add to registry. If you are using a hosting provider (allnodes, nodehub) they may also help manage your nodes using the registry. Future usage of the registry will include decentralized sequencing, social airdropping, AI node registration to AVS services and other services which want to economically align with Syscoin L1.
+
+To add your Sentry node to the registry you must call protx_update_service and pass in the nevmAddress with a valid NEVM account address. You will then be registered in NEVM and will show up when queried through the precompile. Setting the nevmAddress to empty in protx_update_service will clear it from the registry.
+
 - **PoDA (Proof-of-Data Availability)**:  
   - Refined data blob creation and retrieval, with improved consensus checks.  
   - New RPCs to manage PoDA blobs for bridging or other on-chain references.
@@ -99,7 +102,7 @@ As part of the governance upgrade, we have sunset `sentinel` and Sentry nodes do
 ### 7. BLS/LLMQ & Sentry node Protocol Improvements
 - Finalizes the transition to the **Basic BLS IETF** standard scheme (v19 BLS upgrade):
   - **Sentry node P2P messages** (e.g., `mnauth`, `qsigshare`, `qfcommit`) and `protx` transactions now use the new scheme after activation height.
-- **MNLISTDIFF** improvements for more reliable Sentry node list sync. Because the MN lists are now stored in cache/db as a FIFO queue (up to the last 1728) instead the diff's which cleans up the implementation, we need to reindex the node upon upgrade to ensure the Sentry node list/state remains consistent with the network. We detect asset/assetnft directories which exist prior to Syscoin 5 as a form to upgrade detectabilty and thus force a reindex if those directories are found, subsequently deleting them as they are not needed in Syscoin 5 and further restarts do not reindex.
+- **MNLISTDIFF** improvements for more reliable Sentry node list sync. Because the MN lists are now stored in cache/db as a FIFO queue (up to the last 1728 lists) instead the diff's which cleans up the implementation, we need to reindex the node upon upgrade to ensure the Sentry node list/state remains consistent with the network. We detect asset/assetnft directories which exist prior to Syscoin 5 as a form to upgrade detectabilty and thus force a reindex if those directories are found, subsequently deleting them as they are not needed in Syscoin 5 and further restarts do not reindex.
 
 ### 8. Wallet & Descriptor Improvements
 - Descriptor wallets are default; legacy wallets remain possible by passing `"descriptor": false` in `createwallet`.
