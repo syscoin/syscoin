@@ -74,11 +74,21 @@ PoDACacheSizeState CNEVMDataDB::GetPoDACacheSizeState(size_t &cacheSize) {
     return PoDACacheSizeState::OK;
 }
 bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime) {
-    LOCK(cs_cache);
     if(mapCache.empty()) {
+        if(fTestNet) {
+            return PruneStandalone(nMedianTime);
+        }
         return true;
     }
+    LOCK(cs_cache);
     CDBBatch batch(*this);    
+    // only prune on testnet flush, mainnet relies only on CL
+    if(fTestNet) {
+        if (!PruneToBatch(batch, nMedianTime)) {
+            LogPrint(BCLog::SYS, "Error: Could not prune nevm blobs\n");
+            return false;
+        }
+    }
     for (auto const& [key, val] : mapCache) {
         const auto pairData = std::make_pair(key, true);
         const auto pairMTP = std::make_pair(key, false);
@@ -88,13 +98,6 @@ bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime) {
         batch.Write(pairData, val.first);
         // write the MTP
         batch.Write(pairMTP, val.second);
-    }
-    // only prune on testnet flush, mainnet relies only on CL
-    if(fTestNet) {
-        if (!PruneToBatch(batch, nMedianTime)) {
-            LogPrint(BCLog::SYS, "Error: Could not prune nevm blobs\n");
-            return false;
-        }
     }
     if(mapCache.size() > 0)
         LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm blobs\n", mapCache.size());
@@ -178,11 +181,24 @@ bool CNEVMDataDB::PruneToBatch(
     CDBBatch& batch,
     const int64_t nMedianTime)
 {
+
+    int nCount = 0;
+    auto it = mapCache.begin();
+    while (it != mapCache.end()) {
+        const int64_t entryTime = it->second.second;
+        bool isExpired = nMedianTime > (entryTime + NEVM_DATA_EXPIRE_TIME);
+        if (isExpired) {
+            it = mapCache.erase(it);
+        } else {
+            ++it;
+        }
+        ++nCount;
+    }
+    
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
     pcursor->SeekToFirst();
     std::pair<std::vector<unsigned char>, bool> pair;
     int64_t nTime   = 0;
-    int count       = 0;
     while (pcursor->Valid()) {
         try {
             nTime = 0;
@@ -204,7 +220,7 @@ bool CNEVMDataDB::PruneToBatch(
                     }
                     // Erase size
                     batch.Erase(pair.first);
-                    count++;
+                    nCount++;
                 }
             }
             pcursor->Next();
@@ -212,8 +228,8 @@ bool CNEVMDataDB::PruneToBatch(
             return error("%s() : deserialize error: %s", __func__, e.what());
         }
     }
-    if(count > 0)
-        LogPrint(BCLog::SYS, "PruneToBatch pruned %d nevm blobs\n", count);
+    if(nCount > 0)
+        LogPrint(BCLog::SYS, "PruneToBatch pruned %d nevm blobs\n", nCount);
 
     return true;
 }
@@ -221,23 +237,9 @@ bool CNEVMDataDB::PruneToBatch(
 bool CNEVMDataDB::PruneStandalone(const int64_t nMedianTime)
 {
     LOCK(cs_cache);
-    int nCount = 0;
-    auto it = mapCache.begin();
-    while (it != mapCache.end()) {
-        const int64_t entryTime = it->second.second;
-        bool isExpired = nMedianTime > (entryTime + NEVM_DATA_EXPIRE_TIME);
-        if (isExpired) {
-            it = mapCache.erase(it);
-        } else {
-            ++it;
-        }
-        ++nCount;
-    }
     CDBBatch batch(*this);
     if (!PruneToBatch(batch, nMedianTime)) {
         return false;
     }
-    if(nCount > 0)
-        LogPrint(BCLog::SYS, "PruneStandalone, pruning %d nevm blobs\n", nCount);
     return WriteBatch(batch, true);
 }
