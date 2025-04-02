@@ -359,11 +359,24 @@ static RPCHelpMan listnevmblobdata()
     UniValue oRes(UniValue::VARR);
     if (!ScanBlobs(*pnevmdatadb, count, from, options, oRes))
         throw JSONRPCError(RPC_MISC_ERROR, "Scan failed");
-    std::sort(oRes.begin(), oRes.end(), [](const UniValue &a, const UniValue &b) {
-        return a["mpt"].get_int64() < b["mpt"].get_int64();
+    // Extract into a sortable vector
+    std::vector<UniValue> blobVec;
+    for (size_t i = 0; i < oRes.size(); i++) {
+        blobVec.push_back(oRes[i]);
+    }
+
+    // Sort by mpt
+    std::sort(blobVec.begin(), blobVec.end(), [](const UniValue &a, const UniValue &b) {
+        return a["mpt"].getInt<int64_t>() < b["mpt"].getInt<int64_t>();
     });
-        
-    return oRes;
+
+    // Reconstruct the sorted UniValue result
+    UniValue sortedRes(UniValue::VARR);
+    for (const auto& blob : blobVec) {
+        sortedRes.push_back(blob);
+    }
+
+    return sortedRes;
 },
     };
 }
