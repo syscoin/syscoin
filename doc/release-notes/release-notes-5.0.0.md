@@ -6,7 +6,7 @@ Syscoin Core version 5.0.0 (codename Nexus) is now available from:
 
 This major release includes new features, enhancements to both Syscoin Core and the NEVM (Geth) implementation, and numerous security/stability fixes since **Syscoin Core 4.4.2**. **All users, especially Sentry node operators and NEVM node operators, must upgrade.**
 
-You can review the community proposal for this release here https://syscoin.org/news/codename-nexus. Which passed yes - no by 888 votes. You can review the proposal here: 
+You can review the community proposal for this release here https://syscoin.org/news/codename-nexus. Which passed yes - no by 888 votes (read here https://syscoin.org/news/syscoin-5-approved).
 
 Nexus sets the stage for the proceeding [roadmap](https://syscoin.org/news/roadmap-preview)
 
@@ -145,6 +145,8 @@ As part of the governance upgrade, we have sunset `sentinel` and Sentry nodes do
     ```
     The tag is enforced in consensus by [ContextualCheckBlockHeader](https://github.com/syscoin/syscoin/blob/master/src/validation.cpp#L4626).
 
+3. **signmessage**
+   - Allowed signing within QT and within RPC via signmessage to work with segwit address types. Previously only legacy addresses were supported (as in Bitcoin Core), however we added the ability for newer address types and descriptor wallets to be able to sign messages. This will give us ability to run Sentry nodes with descriptor wallets but we will follow up with future Sentry node RPC changes that can be called from a descriptor wallet context in the next release.
 ---
 
 ## Known Issues
