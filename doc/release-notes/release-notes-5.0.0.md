@@ -74,7 +74,7 @@ We have an automated upgrade mechanism to force a reindex to the node upon detec
 - **Descriptor wallets** remain the default wallet creation model introduced in Bitcoin 23.0.
 
 ### 2. NEVM (Syscoin Geth) Upgrades
-- Incorporates upstream **go-ethereum** (Geth) changes from ~v1.10.x to v1.11.x, including performance fixes, EVM improvements.
+- Incorporates upstream **go-ethereum** (Geth) changes from ~v1.10.x to v1.15.7, including performance fixes, EVM improvements.
 - **NEVM chain rule updates** include EIP-3651, EIP-3855, and EIP-3860 (carried over from 4.4.0). NEVM registry is enabled on the NEVM in this release.
 
 ### 3. Dynamic Governance
