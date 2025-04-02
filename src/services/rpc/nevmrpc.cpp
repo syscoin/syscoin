@@ -180,115 +180,165 @@ static RPCHelpMan getnevmblobdata()
 
 
 bool ScanBlobs(CNEVMDataDB& pnevmdatadb, const uint32_t count, const uint32_t from, const UniValue& oOptions, UniValue& oRes) {
-	bool getdata = false;
-	if (!oOptions.isNull()) {
-		const UniValue &getdataObj = oOptions.find_value("getdata");
-		if (getdataObj.isBool()) {
-			getdata = getdataObj.get_bool();
-		}
-	}
+    bool getdata = false;
+    bool stats = false;
+
+    if (!oOptions.isNull()) {
+        const UniValue &getdataObj = oOptions.find_value("getdata");
+        if (getdataObj.isBool()) {
+            getdata = getdataObj.get_bool();
+        }
+        const UniValue &statsObj = oOptions.find_value("stats");
+        if (statsObj.isBool()) {
+            stats = statsObj.get_bool();
+        }
+    }
+
+    uint64_t totalSize = 0;
+    uint64_t totalBlobs = 0;
+    uint64_t oldest = UINT64_MAX;
+    uint64_t newest = 0;
+
+    if (stats) {
+        PoDAMAP cacheCopy = pnevmdatadb.GetCacheCopy();
+
+        for (const auto& [key, val] : cacheCopy) {
+            totalSize += val.first.size();
+            totalBlobs++;
+            oldest = std::min(oldest, static_cast<uint64_t>(val.second));
+            newest = std::max(newest, static_cast<uint64_t>(val.second));            
+        }
+
+        std::unique_ptr<CDBIterator> pcursor(pnevmdatadb.NewIterator());
+        pcursor->SeekToFirst();
+        std::pair<std::vector<uint8_t>, bool> key;
+        while (pcursor->Valid()) {
+            key.first.clear();
+            if (pcursor->GetKey(key)) {
+                if(key.second == false && cacheCopy.find(key.first) == cacheCopy.end()) {
+                    uint64_t nMedianTime;
+                    if(pcursor->GetValue(nMedianTime)) {
+                        uint32_t nSize = 0;
+                        if(!pnevmdatadb.ReadDataSize(key.first, nSize)) {
+                            std::vector<uint8_t> vchData;
+                            pnevmdatadb.ReadData(key.first, vchData);
+                            nSize = vchData.size();
+                        }
+                        totalSize += nSize;
+                        totalBlobs++;
+                        oldest = std::min(oldest, nMedianTime);
+                        newest = std::max(newest, nMedianTime);
+                    }
+                }
+            }
+            pcursor->Next();
+        }
+
+        UniValue oStats(UniValue::VOBJ);
+        oStats.pushKV("total_blobs", totalBlobs);
+        oStats.pushKV("total_size", totalSize);
+        oStats.pushKV("oldest_mpt", oldest == UINT64_MAX ? 0 : oldest);
+        oStats.pushKV("newest_mpt", newest);
+        oRes.push_back(oStats);
+        return true;
+    }
+
+    // existing logic (unchanged)
     uint32_t index = 0;
-    
-    // Get a thread-safe copy of the cache
     PoDAMAP cacheCopy = pnevmdatadb.GetCacheCopy();
-    
-    // Now iterate over the copy which is thread-safe
     for (auto const& [key, val] : cacheCopy) {
+        if (++index <= from) continue;
+
         UniValue oBlob(UniValue::VOBJ);
-        oBlob.pushKV("versionhash",  HexStr(key));
+        oBlob.pushKV("versionhash", HexStr(key));
         oBlob.pushKV("mpt", val.second);
         oBlob.pushKV("datasize", (uint32_t)val.first.size());
         if(getdata) {
             oBlob.pushKV("data", HexStr(val.first));
         }
-        index += 1;
-        if (index <= from) {
-            continue;
-        }
         oRes.push_back(oBlob);
-        if (index >= count + from)
-            return true;
+
+        if (index >= count + from) return true;
     }
-	std::unique_ptr<CDBIterator> pcursor(pnevmdatadb.NewIterator());
-	pcursor->SeekToFirst();
-	std::pair<std::vector<uint8_t>, bool> key;
-	while (pcursor->Valid()) {
-		try {
-            key.first.clear();
-			if (pcursor->GetKey(key)) {
-                // MTP
-                // Check against our thread-safe copy of the cache
-                if(key.second == false && cacheCopy.find(key.first) == cacheCopy.end()) {
-                    UniValue oBlob(UniValue::VOBJ);
-                    uint64_t nMedianTime;
-                    if(pcursor->GetValue(nMedianTime)) {
-                        oBlob.pushKV("versionhash",  HexStr(key.first));
-                        oBlob.pushKV("mpt", nMedianTime);
-                        uint32_t nSize = 0;
-                        std::vector<uint8_t> vchData;
-                        if(!pnevmdatadb.ReadDataSize(key.first, nSize)) {
-                           pnevmdatadb.ReadData(key.first, vchData);
-                        }
-                        oBlob.pushKV("datasize", nSize);
-                        if(getdata) {
-                            if(vchData.empty()) {
-                                pnevmdatadb.ReadData(key.first, vchData);
-                            }
-                            oBlob.pushKV("data", HexStr(vchData));
-                        }
-                        oRes.push_back(oBlob);
+
+    std::unique_ptr<CDBIterator> pcursor(pnevmdatadb.NewIterator());
+    pcursor->SeekToFirst();
+    std::pair<std::vector<uint8_t>, bool> key;
+
+    while (pcursor->Valid()) {
+        key.first.clear();
+        if (pcursor->GetKey(key)) {
+            if(key.second == false && cacheCopy.find(key.first) == cacheCopy.end()) {
+                if (++index <= from) { pcursor->Next(); continue; }
+                UniValue oBlob(UniValue::VOBJ);
+                uint64_t nMedianTime;
+                if(pcursor->GetValue(nMedianTime)) {
+                    oBlob.pushKV("versionhash", HexStr(key.first));
+                    oBlob.pushKV("mpt", nMedianTime);
+                    uint32_t nSize = 0;
+                    std::vector<uint8_t> vchData;
+                    if(!pnevmdatadb.ReadDataSize(key.first, nSize)) {
+                        pnevmdatadb.ReadData(key.first, vchData);
                     }
-                } else {
-           			pcursor->Next();
-					continue;
+                    oBlob.pushKV("datasize", nSize);
+                    if(getdata) {
+                        if(vchData.empty()) {
+                            pnevmdatadb.ReadData(key.first, vchData);
+                        }
+                        oBlob.pushKV("data", HexStr(vchData));
+                    }
+                    oRes.push_back(oBlob);
                 }
-				index += 1;
-				if (index <= from) {
-					pcursor->Next();
-					continue;
-				}
-				if (index >= count + from)
-					break;
-			}
-			pcursor->Next();
-		}
-		catch (std::exception &e) {
-			return error("%s() : deserialize error", __PRETTY_FUNCTION__);
-		}
-	}
-	return true;
+                if (index >= count + from) break;
+            }
+        }
+        pcursor->Next();
+    }
+
+    return true;
 }
+
 static RPCHelpMan listnevmblobdata()
 {
     return RPCHelpMan{"listnevmblobdata",
-        "\nScan through all blobs.\n",
+        "\nScan through all blobs or get blob statistics.\n",
         {
             {"count", RPCArg::Type::NUM, RPCArg::Default{10}, "The number of results to return."},
             {"from", RPCArg::Type::NUM, RPCArg::Default{0}, "The number of results to skip."},
             {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "A json object with options to filter results.",
                 {
                     {"getdata", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Return data from blob"},
+                    {"stats", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Return statistics for all blobs (ignores count/from)"},
                 }
-                }
-            },
-            RPCResult{
-                RPCResult::Type::ARR, "", "",
+            }
+        },
+        RPCResult{
+            RPCResult::Type::ARR, "", "",
+            {
+                {RPCResult::Type::OBJ, "", "",
                 {
-                    {RPCResult::Type::OBJ, "", "",
-                    {
-                        {RPCResult::Type::STR_HEX, "versionhash", "The version hash of the NEVM blob"},
-                        {RPCResult::Type::NUM, "datasize", "Size of data blob in bytes"},
-                        {RPCResult::Type::STR_HEX, "data", "Blob data if getdata is true"},
-                    }},
-                },
+                    {RPCResult::Type::STR_HEX, "versionhash", "The version hash of the NEVM blob"},
+                    {RPCResult::Type::NUM, "datasize", "Size of data blob in bytes"},
+                    {RPCResult::Type::STR_HEX, "data", "Blob data if getdata is true"},
+                    {RPCResult::Type::NUM, "mpt", "Median timestamp of the blob"},
+                }},
+                {RPCResult::Type::OBJ, "(if stats=true)", "",
+                {
+                    {RPCResult::Type::NUM, "total_blobs", "Total number of blobs"},
+                    {RPCResult::Type::NUM, "total_size", "Total size of all blobs in bytes"},
+                    {RPCResult::Type::NUM, "oldest_mpt", "Median timestamp of the oldest blob"},
+                    {RPCResult::Type::NUM, "newest_mpt", "Median timestamp of the newest blob"},
+                }},
             },
-            RPCExamples{
+        },
+        RPCExamples{
             HelpExampleCli("listnevmblobdata", "0")
             + HelpExampleCli("listnevmblobdata", "10 10")
             + HelpExampleCli("listnevmblobdata", "0 0 '{\"getdata\":true}'")
-            + HelpExampleRpc("listnevmblobdata", "0, 0, '{\"getdata\":false}'")
-            },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+            + HelpExampleCli("listnevmblobdata", "0 0 '{\"stats\":true}'")
+            + HelpExampleRpc("listnevmblobdata", "0, 0, '{\"getdata\":false, \"stats\":true}'")
+        },
+        [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
     const UniValue &params = request.params;
     UniValue options;
@@ -309,10 +359,15 @@ static RPCHelpMan listnevmblobdata()
     UniValue oRes(UniValue::VARR);
     if (!ScanBlobs(*pnevmdatadb, count, from, options, oRes))
         throw JSONRPCError(RPC_MISC_ERROR, "Scan failed");
+    std::sort(oRes.begin(), oRes.end(), [](const UniValue &a, const UniValue &b) {
+        return a["mpt"].get_int64() < b["mpt"].get_int64();
+    });
+        
     return oRes;
 },
     };
 }
+
 
 static RPCHelpMan syscoingetspvproof()
 {
