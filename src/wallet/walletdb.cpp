@@ -601,8 +601,8 @@ static DBErrors LoadLegacyWalletRecords(CWallet* pwallet, DatabaseBatch& batch, 
 
     // Check whether rewrite is needed
     if (ckey_res.m_records > 0) {
-        // Rewrite encrypted wallets of versions 0.4.0 and 0.5.0rc:
-        if (last_client == 40000 || last_client == 50000) result = std::max(result, DBErrors::NEED_REWRITE);
+        // SYSCOIN Rewrite encrypted wallets of versions 0.4.0 and 0.5.0rc:
+        // if (last_client == 40000 || last_client == 50000) result = std::max(result, DBErrors::NEED_REWRITE);
     }
 
     // Load keymeta
