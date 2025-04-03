@@ -42,8 +42,6 @@ Please report any issues using the issue tracker on GitHub:
 
 ## Upgrade Instructions
 
-Upgrade Instructions: <https://syscoin.readme.io/v5.0.0/docs/syscoin-50-upgrade-guide>
-
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then install
 the new release:
