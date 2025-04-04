@@ -2300,26 +2300,37 @@ bool DisconnectNEVMCommitment(BlockValidationState& state, std::vector<uint256> 
     return res;
 }
 // before propagating blocks/txs out to peers we need to fill the OPRETURN with the NEVM DA payload from separate store
-bool FillNEVMData(const CTransactionRef &tx) {
-    if(!tx->IsNEVMData()) {
-        return true;
+bool FillNEVMData(CBlock &block) {
+    for (size_t i = 0; i < block.vtx.size(); ++i) {
+        const CTransactionRef tx = block.vtx[i];
+        if (tx->IsNEVMData()) {
+            const auto nOut = GetSyscoinDataOutput(*tx);
+            if (nOut != -1) {
+                // already has payload skip it
+                if(!tx->vout[nOut].vchNEVMData.empty()) {
+                    continue;
+                }
+                CNEVMData nevmData(tx->vout[nOut].scriptPubKey);
+                if (!nevmData.IsNull()) {
+                    if(pnevmdatadb->BlobExists(nevmData.vchVersionHash)) {
+                        CMutableTransaction mutable_tx(*tx);
+                        // Directly modify the mutable vector
+                        if(pnevmdatadb->ReadData(nevmData.vchVersionHash, mutable_tx.vout[nOut].vchNEVMData)) {
+                            // Now create the immutable CTransaction and store its Ref
+                            block.vtx[i] = MakeTransactionRef(std::move(mutable_tx));
+                        } else {
+                            return false;
+                        }
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    
     }
-    const auto nOut = GetSyscoinDataOutput(*tx);
-    if (nOut == -1) {
-        return false;
-    }
-    // uncast nevmdata, its safe because its not used anywhere else
-    std::vector<uint8_t> &vchNEVMData = const_cast<std::vector<uint8_t>&>(tx->vout[nOut].vchNEVMData);
-    CNEVMData nevmData(tx->vout[nOut].scriptPubKey);
-    if(nevmData.IsNull()) {
-        return false;
-    }
-    // vout already has payload
-    if(!tx->vout[nOut].vchNEVMData.empty()) {
-        return true;
-    }
-    // data doesn't have to exist but if it does fill it
-    pnevmdatadb->ReadData(nevmData.vchVersionHash, vchNEVMData);
     return true;
 }
 bool EraseNEVMData(const NEVMDataVec &NEVMDataVecOut) {
@@ -4797,7 +4808,6 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, bool bForBlock)
 {
     AssertLockHeld(cs_main);
-
     // Check for duplicate
     uint256 hash = block.GetHash();
     BlockMap::iterator miSelf{m_blockman.m_block_index.find(hash)};
@@ -5712,13 +5722,10 @@ void ChainstateManager::LoadExternalBlockFile(
                         blkdat >> *pblock;
                         nRewind = blkdat.GetPos();
                         // SYSCOIN
-                        for (auto &tx : pblock->vtx) {
-                            if(tx && tx->IsNEVMData()) {
-                                if(!FillNEVMData(tx)) {
-                                    LogPrint(BCLog::REINDEX, "FillNEVMData() failed for %s", hash.GetHex());
-                                }
-                            }
+                        if(!FillNEVMData(*pblock)) {
+                            LogPrint(BCLog::REINDEX, "Block Import: FillNEVMData failed for block %s at height %d\n", hash.ToString(), pindex->nHeight);
                         }
+                      
                         BlockValidationState state;
                         if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
                             nLoaded++;

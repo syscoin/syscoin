@@ -1095,13 +1095,9 @@ bool BlockManager::ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) cons
 {
     auto res = ReadBlockOrHeader(block, pos);
     // SYSCOIN
-    for (auto &tx : block.vtx) {
-        if(tx && tx->IsNEVMData()) {
-            if(!FillNEVMData(tx)) {
-                return error("ReadBlockFromDisk(): FillNEVMData() failed for %s",
-                block.GetHash().GetHex());
-            }
-        }
+    if(!FillNEVMData(block)) {
+        return error("ReadBlockFromDisk(): FillNEVMData() failed for %s",
+        block.GetHash().GetHex());
     }
     return res;
 }
@@ -1110,13 +1106,9 @@ bool BlockManager::ReadBlockFromDisk(CBlock& block, const CBlockIndex& index) co
 {
     auto res = ReadBlockOrHeader(block, index);
     // SYSCOIN
-    for (auto &tx : block.vtx) {
-        if(tx && tx->IsNEVMData()) {
-            if(!FillNEVMData(tx)) {
-                return error("ReadBlockFromDisk(): FillNEVMData() failed for %s",
-                index.GetBlockHash().GetHex());
-            }
-        }
+    if(!FillNEVMData(block)) {
+        return error("ReadBlockFromDisk(): FillNEVMData() failed for %s",
+        index.GetBlockHash().GetHex());
     }
     return res;
 }
