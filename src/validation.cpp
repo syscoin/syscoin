@@ -5720,7 +5720,7 @@ void ChainstateManager::LoadExternalBlockFile(
                         // SYSCOIN Instead of using blkdat, call ReadBlockFromDisk
                         pblock = std::make_shared<CBlock>();
                         if (!m_blockman.ReadBlockFromDisk(*pblock, *dbp)) {
-                            LogPrint("Failed to read block %s using ReadBlockFromDisk\n", hash.ToString());
+                            LogPrint(BCLog::REINDEX, "Failed to read block %s using ReadBlockFromDisk\n", hash.ToString());
                             break;
                         }
                         BlockValidationState state;
