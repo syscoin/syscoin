@@ -5717,16 +5717,12 @@ void ChainstateManager::LoadExternalBlockFile(
                     // process in case the block isn't known yet
                     const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
                     if (!pindex || (pindex->nStatus & BLOCK_HAVE_DATA) == 0) {
-                        // This block can be processed immediately; rewind to its start, read and deserialize it.
-                        blkdat.SetPos(nBlockPos);
+                        // SYSCOIN Instead of using blkdat, call ReadBlockFromDisk
                         pblock = std::make_shared<CBlock>();
-                        blkdat >> *pblock;
-                        nRewind = blkdat.GetPos();
-                        // SYSCOIN
-                        if(!FillNEVMData(*pblock)) {
-                            LogPrint(BCLog::REINDEX, "Block Import: FillNEVMData failed for block %s at height %d\n", hash.ToString(), pindex->nHeight);
+                        if (!m_blockman.ReadBlockFromDisk(*pblock, *dbp)) {
+                            LogPrint("Failed to read block %s using ReadBlockFromDisk\n", hash.ToString());
+                            break;
                         }
-                      
                         BlockValidationState state;
                         if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
                             nLoaded++;

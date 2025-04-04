@@ -566,7 +566,6 @@ public:
     }
 
     CAssetOut(const uint64_t &keyIn, const std::vector<CAssetOutValue>& valuesIn): key(keyIn), values(valuesIn) {}
-    CAssetOut(const uint64_t &keyIn, const std::vector<CAssetOutValue>& valuesIn, const std::vector<unsigned char> &vchNotarySigIn): key(keyIn), values(valuesIn) {}
     CAssetOut() {
 		SetNull();
 	}
