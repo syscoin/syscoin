@@ -5713,16 +5713,39 @@ void ChainstateManager::LoadExternalBlockFile(
                         }
                         continue;
                     }
-
                     // process in case the block isn't known yet
                     const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
                     if (!pindex || (pindex->nStatus & BLOCK_HAVE_DATA) == 0) {
-                        // SYSCOIN Instead of using blkdat, call ReadBlockFromDisk
                         pblock = std::make_shared<CBlock>();
-                        if (!m_blockman.ReadBlockFromDisk(*pblock, *dbp)) {
-                            LogPrint(BCLog::REINDEX, "Failed to read block %s using ReadBlockFromDisk\n", hash.ToString());
+                        // SYSCOIN
+                        bool fReadBlockOk = false;
+                        if (dbp) {
+                            // Use ReadBlockFromDisk when dbp is provided (e.g., for specific block lookups)
+                            if (m_blockman.ReadBlockFromDisk(*pblock, *dbp)) {
+                                fReadBlockOk = true;
+                            } else {
+                                LogPrint(BCLog::REINDEX, "Failed to read block %s using ReadBlockFromDisk\n", hash.ToString());
+                            }
+                        } else {
+                            // Use direct stream reading when dbp is null (e.g., -loadblock)
+                            // This avoids repeated file opens from ReadBlockFromDisk in sequential scan mode.
+                            try {
+                                // This block can be processed immediately; rewind to its start, read and deserialize it.
+                                blkdat.SetPos(nBlockPos);
+                                blkdat >> *pblock;
+                                nRewind = blkdat.GetPos();
+                                fReadBlockOk = true;
+                            } catch (const std::exception& e) {
+                                LogPrint(BCLog::REINDEX, "%s: Deserialize or I/O error - %s at %s\n", __func__, e.what(), hash.ToString());
+                            }
+                        }
+
+                        if (!fReadBlockOk) {
+                            // Break the loop if we failed to read the block by either method
                             break;
                         }
+
+                        // Now proceed with AcceptBlock using the populated pblock
                         BlockValidationState state;
                         if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
                             nLoaded++;
