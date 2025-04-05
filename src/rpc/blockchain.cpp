@@ -2902,13 +2902,13 @@ static RPCHelpMan loadtxoutset()
         "Meanwhile, the original chainstate will complete the initial block download process in "
         "the background, eventually validating up to the block that the snapshot is based upon.\n\n"
 
-        "The result is a usable bitcoind instance that is current with the network tip in a "
+        "The result is a usable syscoind instance that is current with the network tip in a "
         "matter of minutes rather than hours. UTXO snapshot are typically obtained from "
         "third-party sources (HTTP, torrent, etc.) which is reasonable since their "
         "contents are always checked by hash.\n\n"
 
         "You can find more information on this process in the `assumeutxo` design "
-        "document (<https://github.com/bitcoin/bitcoin/blob/master/doc/design/assumeutxo.md>).",
+        "document (<https://github.com/syscoin/syscoin/blob/master/doc/design/assumeutxo.md>).",
         {
             {"path",
                 RPCArg::Type::STR,
