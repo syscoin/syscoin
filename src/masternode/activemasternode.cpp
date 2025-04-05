@@ -74,7 +74,7 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
         // listen option is probably overwritten by something else, no good
         state = MASTERNODE_ERROR;
         strError = "Masternode must accept connections from outside. Make sure listen configuration option is not overwritten by some another parameter.";
-        LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
+        LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
 
@@ -100,22 +100,22 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
         return;
     }
 
-    LogPrintf("CActiveMasternodeManager::Init -- proTxHash=%s, proTx=%s\n", dmn->proTxHash.ToString(), dmn->ToString());
+    LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- proTxHash=%s, proTx=%s\n", dmn->proTxHash.ToString(), dmn->ToString());
 
     if (activeMasternodeInfo.service != dmn->pdmnState->addr) {
         state = MASTERNODE_ERROR;
         strError = "Local address does not match the address from ProTx";
-        LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
+        LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
 
     // Check socket connectivity
-    LogPrintf("CActiveMasternodeManager::Init -- Checking inbound connection to '%s'\n", activeMasternodeInfo.service.ToStringAddrPort());
+    LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- Checking inbound connection to '%s'\n", activeMasternodeInfo.service.ToStringAddrPort());
     {
         CNode* pnode = connman.FindNode(activeMasternodeInfo.service);
         if (pnode)
         {
-            LogPrintf("Failed to open new connection, already connected\n");
+            LogPrint(BCLog::MNSYNC, "Failed to open new connection, already connected\n");
             activeMasternodeInfo.proTxHash = dmn->proTxHash;
             activeMasternodeInfo.outpoint = dmn->collateralOutpoint;
             state = MASTERNODE_READY;
@@ -126,14 +126,14 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
     if(!sockPtr) {
         state = MASTERNODE_ERROR;
         strError = "Could not create socket to connect to " + activeMasternodeInfo.service.ToStringAddrPort();
-        LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
+        LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
 
     if (sockPtr->Get() == INVALID_SOCKET) {
         state = MASTERNODE_ERROR;
         strError = "Could not create socket to connect to " + activeMasternodeInfo.service.ToStringAddrPort();
-        LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
+        LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
     bool fConnected = ConnectSocketDirectly(activeMasternodeInfo.service, *sockPtr, nConnectTimeout, true) && sockPtr->IsSelectable();
@@ -142,7 +142,7 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
     if (!fConnected && Params().RequireRoutableExternalIP()) {
         state = MASTERNODE_ERROR;
         strError = "Could not connect to " + activeMasternodeInfo.service.ToStringAddrPort();
-        LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
+        LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- ERROR: %s\n", strError);
         return;
     }
 
@@ -231,7 +231,7 @@ bool CActiveMasternodeManager::GetLocalAddress(CService& addrRet)
         // nothing and no live connections, can't do anything for now
         if (empty) {
             strError = "Can't detect valid external address. Please consider using the externalip configuration option if problem persists. Make sure to use IPv4 address only.";
-            LogPrintf("CActiveMasternodeManager::GetLocalAddress -- ERROR: %s\n", strError);
+            LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::GetLocalAddress -- ERROR: %s\n", strError);
             return false;
         }
     }
