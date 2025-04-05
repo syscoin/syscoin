@@ -136,7 +136,7 @@ static RPCHelpMan bls_generate()
      return RPCHelpMan{"bls_generate",
         "\nReturns a BLS secret/public key pair.\n",
         {   
-            {"legacy", RPCArg::Type::BOOL, RPCArg::Default{true}, "Use legacy BLS scheme"},           
+            {"legacy", RPCArg::Type::BOOL, RPCArg::Default{false}, "Use legacy BLS scheme"},           
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
@@ -147,13 +147,9 @@ static RPCHelpMan bls_generate()
 {
     CBLSSecretKey sk;
     sk.MakeNewKey();
-    bool bls_legacy_scheme;
-    {
-        LOCK(cs_main);
-        bls_legacy_scheme = false;
-        if (!request.params[0].isNull()) {
-            bls_legacy_scheme = request.params[0].get_bool();
-        }
+    bool bls_legacy_scheme{false};
+    if (!request.params[0].isNull()) {
+        bls_legacy_scheme = request.params[0].get_bool();
     }
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("secret", sk.ToString());
@@ -178,7 +174,7 @@ static RPCHelpMan bls_fromsecret()
         "\nParses a BLS secret key and returns the secret/public key pair.\n",
         {              
              {"secret", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The BLS secret key."},  
-             {"legacy", RPCArg::Type::BOOL, RPCArg::Default{true}, "Use legacy BLS scheme"},
+             {"legacy", RPCArg::Type::BOOL, RPCArg::Default{false}, "Use legacy BLS scheme"},
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
@@ -187,16 +183,11 @@ static RPCHelpMan bls_fromsecret()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    node::NodeContext& node = request.nodeContext? *request.nodeContext: EnsureAnyNodeContext (request.context);
-    CBLSSecretKey sk = ParseBLSSecretKey(request.params[0].get_str(), "secretKey");
-    bool bls_legacy_scheme;
-    {
-        LOCK(cs_main);
-        bls_legacy_scheme = !llmq::CLLMQUtils::IsV19Active(node.chainman->ActiveHeight());
-        if (!request.params[1].isNull()) {
-            bls_legacy_scheme = request.params[1].get_bool();
-        }
+    bool bls_legacy_scheme{false};
+    if (!request.params[1].isNull()) {
+        bls_legacy_scheme = request.params[1].get_bool();
     }
+    CBLSSecretKey sk = ParseBLSSecretKey(request.params[0].get_str(), "secretKey");
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("secret", sk.ToString());
     ret.pushKV("public", sk.GetPublicKey().ToString(bls_legacy_scheme));
