@@ -1343,8 +1343,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             return true; // i.e. can't decode payload == conflict
         }
         if(proTx.addr != CService()) {
-            auto it = mapProTxAddresses.find(proTx.addr);
-            if(it != mapProTxAddresses.end() && it->second != proTx.proTxHash) {
+            if(mapProTxAddresses.count(proTx.addr)) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx.GetHash().ToString());
                 return true;
             }
@@ -1372,8 +1371,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
                 return true;
             }
             // Check NEVM address uniqueness
-            auto it = mapProTxNEVMAddresses.find(proTx.vchNEVMAddress);
-            if(it != mapProTxNEVMAddresses.end() && it->second != proTx.proTxHash) {
+            if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
                 return true;
             }
@@ -1398,8 +1396,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             }
         }
         if(proTx.pubKeyOperator.Get().IsValid()) {
-            auto it = mapProTxBlsPubKeyHashes.find(proTx.pubKeyOperator.GetHash());
-            if(it != mapProTxBlsPubKeyHashes.end() && it->second != proTx.proTxHash) {
+            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
                 return true;
             }
