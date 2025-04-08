@@ -1302,8 +1302,9 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
 
-    auto hasKeyChangeInMempool = [&](const uint256& proTxHash) {
-        LOCK2(cs_main, cs);
+    auto hasKeyChangeInMempool = [&](const uint256& proTxHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main) {
+        AssertLockHeld(cs_main);
+        AssertLockHeld(cs);
         for (auto its = mapProTxRefs.equal_range(proTxHash); its.first != its.second; ++its.first) {
             auto txit = mapTx.find(its.first->second);
             if (txit == mapTx.end()) {
@@ -1342,7 +1343,8 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             return true; // i.e. can't decode payload == conflict
         }
         if(proTx.addr != CService()) {
-            if(mapProTxAddresses.count(proTx.addr)) {
+            auto it = mapProTxAddresses.find(proTx.addr);
+            if(it != mapProTxAddresses.end() && it->second != proTx.proTxHash) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx.GetHash().ToString());
                 return true;
             }
@@ -1369,9 +1371,9 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid NEVM address size, tx: %s\n", __func__, tx.GetHash().ToString());
                 return true;
             }
-        
             // Check NEVM address uniqueness
-            if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
+            auto it = mapProTxNEVMAddresses.find(proTx.vchNEVMAddress);
+            if(it != mapProTxNEVMAddresses.end() && it->second != proTx.proTxHash) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
                 return true;
             }
@@ -1391,24 +1393,16 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
         // only allow one operator key change in the mempool
         if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
             if (hasKeyChangeInMempool(proTx.proTxHash)) {
+                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Key change already in mempool (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
                 return true;
             }
         }
         if(proTx.pubKeyOperator.Get().IsValid()) {
-            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
+            auto it = mapProTxBlsPubKeyHashes.find(proTx.pubKeyOperator.GetHash());
+            if(it != mapProTxBlsPubKeyHashes.end() && it->second != proTx.proTxHash) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
                 return true;
-            }   
-        }
-    
-        // Existing operator key conflict checks
-        if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator && hasKeyChangeInMempool(proTx.proTxHash)) {
-            return true;
-        }
-    
-        if (proTx.pubKeyOperator.Get().IsValid() && mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
-            return true;
+            }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
