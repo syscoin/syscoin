@@ -77,7 +77,7 @@ UniValue BuildQuorumInfo(const llmq::CQuorumCPtr& quorum, bool includeMembers, b
             auto& dmn = quorum->members[i];
             UniValue mo(UniValue::VOBJ);
             mo.pushKV("proTxHash", dmn->proTxHash.ToString());
-            mo.pushKV("pubKeyOperator", dmn->pdmnState->pubKeyOperator.Get().ToString());
+            mo.pushKV("pubKeyOperator", dmn->pdmnState->pubKeyOperator.ToString());
             bool member = quorum->qc->validMembers[i];
             mo.pushKV("valid", member);
             if (quorum->qc->validMembers[i]) {
