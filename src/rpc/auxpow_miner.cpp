@@ -96,6 +96,10 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
         const int32_t nVersion = chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainman.GetConsensus ());
         newBlock->block.SetBaseVersion(nVersion, nChainId);
         newBlock->block.SetAuxpowVersion (true);
+        if(!fRegTest) {
+          newBlock->block.SetNEVMVersion();
+        }
+
         /* Save in our map of constructed blocks.  */
         pblockCur = &newBlock->block;
         curBlocks.try_emplace(scriptID, pblockCur);
