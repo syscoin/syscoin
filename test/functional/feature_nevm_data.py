@@ -234,11 +234,6 @@ class NEVMDataTest(DashTestFramework):
             force_finish_mnsync(self.nodes[i])
         cl = self.generate(self.nodes[0], 10)[-6]
         self.wait_for_chainlocked_block_all_nodes(cl)
-        self.bump_mocktime(2) # push median time over expiry
-        for i in range(len(self.nodes)):
-            force_finish_mnsync(self.nodes[i])
-        cl = self.generate(self.nodes[0], 10)[-6]
-        self.wait_for_chainlocked_block_all_nodes(cl)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, txid)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, vh)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, txid1)

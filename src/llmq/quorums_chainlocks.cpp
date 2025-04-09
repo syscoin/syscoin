@@ -180,13 +180,13 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
 
     auto it1 = bestChainLockCandidates.find(pindex->nHeight);
     if (it1 != bestChainLockCandidates.end()) {
-        // only prune blob data upon chainlock so we cannot rollback on pruned blob transactions. If we rolled back on pruned blob data then upon new inclusion there could be situation
-        // where new block would fall within 2-hour time window of enforcement and include the pruned blob tx
-        if(bestChainLockBlockIndex && !pnevmdatadb->PruneStandalone(bestChainLockBlockIndex->GetMedianTimePast())) {
-            LogPrintf("CChainLocksHandler::%s -- CNEVMDataDB::Prune failed\n", __func__);
-        }
         bestChainLockWithKnownBlock = *it1->second;
         bestChainLockBlockIndex = pindex;
+        // only prune blob data upon chainlock so we cannot rollback on pruned blob transactions. If we rolled back on pruned blob data then upon new inclusion there could be situation
+        // where new block would fall within 2-hour time window of enforcement and include the pruned blob tx
+        if(!pnevmdatadb->PruneStandalone(bestChainLockBlockIndex->GetMedianTimePast())) {
+            LogPrintf("CChainLocksHandler::%s -- CNEVMDataDB::Prune failed\n", __func__);
+        }
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG from candidates (%s)\n", __func__, bestChainLockWithKnownBlock.ToString());
         return true;
     }
@@ -212,16 +212,16 @@ bool CChainLocksHandler::TryUpdateBestChainLock(const CBlockIndex* pindex)
                 std::transform(clsigAgg.signers.begin(), clsigAgg.signers.end(), pair.second->signers.begin(), clsigAgg.signers.begin(), std::logical_or<bool>());
             }
             if (sigs.size() >= threshold) {
-                // only prune blob data upon chainlock so we cannot rollback on pruned blob transactions. If we rolled back on pruned blob data then upon new inclusion there could be situation
-                // where new block would fall within 2-hour time window of enforcement and include the pruned blob tx
-                if(bestChainLockBlockIndex && !pnevmdatadb->PruneStandalone(bestChainLockBlockIndex->GetMedianTimePast())) {
-                    LogPrintf("CChainLocksHandler::%s -- CNEVMDataDB::Prune failed\n", __func__);
-                }
                 // all sigs should be validated already
                 clsigAgg.sig = CBLSSignature::AggregateInsecure(sigs);
                 bestChainLockWithKnownBlock = clsigAgg;
                 bestChainLockBlockIndex = pindex;
                 bestChainLockCandidates[clsigAgg.nHeight] = std::make_shared<const CChainLockSig>(clsigAgg);
+                // only prune blob data upon chainlock so we cannot rollback on pruned blob transactions. If we rolled back on pruned blob data then upon new inclusion there could be situation
+                // where new block would fall within 2-hour time window of enforcement and include the pruned blob tx
+                if(!pnevmdatadb->PruneStandalone(bestChainLockBlockIndex->GetMedianTimePast())) {
+                    LogPrintf("CChainLocksHandler::%s -- CNEVMDataDB::Prune failed\n", __func__);
+                }
                 LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG aggregated (%s)\n", __func__, bestChainLockWithKnownBlock.ToString());
                 return true;
             }
