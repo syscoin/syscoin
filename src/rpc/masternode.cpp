@@ -371,6 +371,10 @@ RPCHelpMan masternode_payments()
             for (const auto &txin : tx->vin) {
                 uint256 blockHashTmp;
                 CTransactionRef txPrev = GetTransaction( pindex, node.mempool.get(), txin.prevout.hash, blockHashTmp, node.chainman->m_blockman);
+                if(!txPrev) {
+                    LogPrintf("Tx vin not found %s for tx %s\n", txin.prevout.hash.GetHex(), tx->GetHash().GetHex());
+                    continue;
+                }
                 nValueIn += txPrev->vout[txin.prevout.n].nValue;
             }
             nBlockFees += nValueIn - tx->GetValueOut();
