@@ -128,6 +128,33 @@ class NEVMDataTest(DashTestFramework):
         self.generate_helper(self.nodes[0], 3)
         self.wait_for_chainlocked_block_all_nodes(cl)
 
+    def bump_until_mtp_exceeds(self, cl, expiry_timestamp):
+        max_bumps = 20  # avoid infinite loops in case something goes wrong
+        bumps = 0
+        mtp = self.nodes[0].getblockheader(cl)["mediantime"]
+        while True:
+            self.bump_mocktime(150)
+            print(f"Current MTP: {mtp}, Target expiry: {expiry_timestamp}, Mocktime: {self.mocktime}")
+            for i in range(len(self.nodes)):
+                force_finish_mnsync(self.nodes[i])
+            for i in range(len(self.nodes)):
+                if i != 1:
+                    self.connect_nodes(i, 1, wait_for_connect=False)
+                    self.connect_nodes(1, i, wait_for_connect=False)
+                if i != 0:
+                    self.connect_nodes(i, 0, wait_for_connect=False)
+                    self.connect_nodes(1, 0, wait_for_connect=False)
+            cl = self.nodes[0].getbestblockhash()
+            self.generate(self.nodes[0], 5)
+            mtp = self.nodes[0].getblockheader(cl)['mediantime']
+            self.wait_for_chainlocked_block_all_nodes(cl)
+            if mtp > expiry_timestamp:
+                print(f"Current MTP: {mtp}, Target expiry: {expiry_timestamp}, Mocktime: {self.mocktime}, MTP expiry achieved")
+                break
+            bumps += 1
+            if bumps >= max_bumps:
+                raise RuntimeError("Exceeded max mocktime bumps without reaching expiry MTP.")
+
     def basic_nevm_data(self):
         print('Testing relay in mempool and compact blocks around blobs')
         # test relay with block
@@ -180,10 +207,9 @@ class NEVMDataTest(DashTestFramework):
         print('Generating blocks after waiting for mempools to sync...')
         self.wait_until(lambda: self.sync_mempools_helper(self.nodes[0:4]))
         self.generate_helper(self.nodes[2], 5, sync_fun=self.no_op, nodes=self.nodes[0:4])
-        self.starttime = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())['time']
         self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:4]))
         print('Test reindex...')
-        self.restart_node(1, extra_args=self.extra_args[1] + ["-reindex"])
+        self.restart_node(1, extra_args=["-mocktime=" + str(self.mocktime), '-reindex', *self.extra_args[1]])
         force_finish_mnsync(self.nodes[1])
         for i in range(len(self.nodes[0:4])):
             if i != 1:
@@ -197,8 +223,9 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[1].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid1, True)['data'], txid1Data)
+        mtp = self.nodes[1].getnevmblobdata(vhTxid)['mpt']
         print('Start node 4...')
-        self.start_node(4, extra_args=self.extra_args[4])
+        self.start_node(4, extra_args=["-mocktime=" + str(self.mocktime), *self.extra_args[4]])
         force_finish_mnsync(self.nodes[4])
         for i in range(len(self.nodes)):
             if i != 1:
@@ -212,8 +239,11 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[4].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[4].getnevmblobdata(txid1, True)['data'], txid1Data)
         print('Test blob expiry...')
-        self.mocktime = self.starttime
-        self.bump_mocktime(NEVM_DATA_EXPIRE_TIME-1) # right before expiry
+        expiry_timestamp = (mtp + NEVM_DATA_EXPIRE_TIME)
+        bump_to_expiry = expiry_timestamp - self.mocktime
+        self.bump_mocktime(bump_to_expiry-1) # right before expiry
+        for i in range(len(self.nodes)):
+            force_finish_mnsync(self.nodes[i])
         for i in range(len(self.nodes)):
             if i != 1:
                 self.connect_nodes(i, 1, wait_for_connect=False)
@@ -221,8 +251,6 @@ class NEVMDataTest(DashTestFramework):
             if i != 0:
                 self.connect_nodes(i, 0, wait_for_connect=False)
                 self.connect_nodes(1, 0, wait_for_connect=False)
-        for i in range(len(self.nodes)):
-            force_finish_mnsync(self.nodes[i])
         cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
@@ -234,6 +262,7 @@ class NEVMDataTest(DashTestFramework):
             force_finish_mnsync(self.nodes[i])
         cl = self.generate(self.nodes[0], 10)[-6]
         self.wait_for_chainlocked_block_all_nodes(cl)
+        self.bump_until_mtp_exceeds(cl, expiry_timestamp)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, txid)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, vh)
         assert_raises_rpc_error(-32602, 'Could not find MTP for versionhash', self.nodes[0].getnevmblobdata, txid1)
