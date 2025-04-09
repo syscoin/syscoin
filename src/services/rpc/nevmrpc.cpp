@@ -155,7 +155,7 @@ static RPCHelpMan getnevmblobdata()
     std::vector<uint8_t> vchData;
     int64_t mpt = -1;
     if(!pnevmdatadb->ReadMTP(vchVH, mpt)) {
-        throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find MTP for versionhash %s", HexStr(vchVH)));
+        throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find blob information for versionhash %s", HexStr(vchVH)));
     }
     if(!pnevmdatadb->ReadDataSize(vchVH, nSize)) {
         throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find data size for versionhash %s", HexStr(vchVH)));
