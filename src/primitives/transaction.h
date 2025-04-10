@@ -427,18 +427,22 @@ bool IsSyscoinNEVMDataTx(const int &nVersion);
 class CNEVMData {
 public:
     std::vector<uint8_t> vchVersionHash;
-    std::shared_ptr<const std::vector<uint8_t>> vchNEVMData;
+    const std::vector<uint8_t> *vchNEVMData{nullptr};
     CNEVMData() {
         SetNull();
     }
     explicit CNEVMData(const CScript &script);
     explicit CNEVMData(const CTransaction &tx, const int nVersion);
     explicit CNEVMData(const CTransaction &tx);
+    explicit CNEVMData(const std::vector<uint8_t> &vchVersionHashIn, const std::vector<uint8_t> &vchNEVMDataIn): vchVersionHash(vchVersionHashIn) {
+        vchNEVMData = new std::vector<uint8_t>{vchNEVMDataIn};
+    }
     inline void ClearData() {
         vchVersionHash.clear();
         if(vchNEVMData) {
-            vchNEVMData.reset(); 
+            delete vchNEVMData;
         }
+        vchNEVMData = nullptr;
     }
     template<typename Stream>
     void Ser(Stream &s) {
@@ -452,7 +456,7 @@ public:
         if(fAllowPoDA) {
             std::vector<uint8_t> vchNEVMDataIn;
             s >> vchNEVMDataIn;
-            vchNEVMData = std::make_shared<const std::vector<uint8_t>>(vchNEVMDataIn);
+            vchNEVMData = new std::vector<uint8_t>{vchNEVMDataIn};
         }
     }
     inline void SetNull() { ClearData(); }
@@ -485,13 +489,12 @@ public:
     {
         READWRITE(obj.nValue, obj.scriptPubKey);
         if(obj.scriptPubKey.IsUnspendable() && IsSyscoinNEVMDataTx(s.GetTxVersion())) {
-            if (s.GetType() & SER_NO_PODA) {
-                std::vector<uint8_t> emptyVec;
-                READWRITE(emptyVec);
-            } else if (s.GetType() & (SER_NETWORK | SER_DISK)) {
+            if(s.GetType() == SER_NETWORK) {
                 READWRITE(obj.vchNEVMData);
-            } else if(s.GetType() == SER_SIZE) {
-                s.seek(obj.vchNEVMData.size() * NEVM_DATA_SCALE_FACTOR);
+            } else {
+                if(s.GetType() == SER_SIZE) {
+                    s.seek(obj.vchNEVMData.size() * NEVM_DATA_SCALE_FACTOR);
+                }
             }
         }
     }
@@ -869,7 +872,7 @@ bool GetSyscoinData(const CScript &scriptPubKey, std::vector<unsigned char> &vch
 typedef std::vector<std::vector<uint8_t> > NEVMDataVec;
 typedef std::unordered_map<uint256, NEVMTxRoot, StaticSaltedHasher> NEVMTxRootMap;
 typedef std::map<std::vector<uint8_t>, std::pair<std::vector<uint8_t>, int64_t> > PoDAMAP;
-typedef std::map<std::vector<uint8_t>, std::shared_ptr<const std::vector<uint8_t> > > PoDAMAPMemory;
+typedef std::map<std::vector<uint8_t>, const std::vector<uint8_t>* > PoDAMAPMemory;
 /** A generic txid reference (txid or wtxid). */
 // SYSCOIN
 class GenTxid
