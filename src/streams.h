@@ -605,7 +605,7 @@ private:
     int nTxVersion{0};
 public:
     // SYSCOIN
-    explicit CAutoFile(std::FILE* file, int version, std::vector<std::byte> data_xor = {}) : AutoFile{file, std::move(data_xor)}, nType{SER_DISK}, nVersion{version} {}
+    explicit CAutoFile(std::FILE* file, int version, int typeIn=SER_DISK, std::vector<std::byte> data_xor = {}) : AutoFile{file, std::move(data_xor)}, nType{typeIn}, nVersion{version} {}
     int GetType() const          { return nType; }
     int GetVersion() const       { return nVersion; }
 

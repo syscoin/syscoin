@@ -1233,7 +1233,7 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
 
     // SYSCOIN
     if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(ws.mapPoDA);
+        pnevmdatadb->FlushDataToCache(ws.mapPoDA, 0);
     // trim mempool and check if tx was trimmed
     // If we are validating a package, don't trim here because we could evict a previous transaction
     // in the package. LimitMempoolSize() should be called at the very end to make sure the mempool
@@ -2394,7 +2394,7 @@ bool ProcessNEVMDataHelper(const BlockManager& blockman, const std::vector<CNEVM
         LogPrint(BCLog::BENCHMARK, "ProcessNEVMDataHelper: verified %d blobs in %.2fms (%.2fms/blob)\n", nSizeChecks, Ticks<MillisecondsDouble>(time_2 - time_1), Ticks<MillisecondsDouble>(time_2 - time_1) / nSizeChecks);
     }
     for (const auto &nevmDataPayload : vecNevmDataPayload) {
-        mapPoDA.try_emplace(nevmDataPayload.vchVersionHash, MapPoDAPayloadMeta(nevmDataPayload, nMedianTime));
+        mapPoDA.try_emplace(nevmDataPayload.vchVersionHash, nevmDataPayload.vchNEVMData);
     }
     return true;
 }
@@ -3162,7 +3162,7 @@ bool Chainstate::FlushStateToDisk(
                 if (!CheckDiskSpace(m_chainman.m_options.datadir, PoDACacheSize)) {
                     return FatalError(m_chainman.GetNotifications(), state, "Disk space is too low!", _("Disk space is too low!"));
                 }
-                if (pnevmdatadb && !pnevmdatadb->FlushCacheToDisk(m_chainman, m_chain.Tip()->GetMedianTimePast())) {
+                if (pnevmdatadb && !pnevmdatadb->FlushCacheToDisk(m_chain.Tip()->GetMedianTimePast())) {
                     return FatalError(m_chainman.GetNotifications(), state, "Failed to commit PoDA");
                 }
             }
@@ -3551,7 +3551,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     }
     // SYSCOIN
     if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(mapPoDA);
+        pnevmdatadb->FlushDataToCache(mapPoDA, pindexNew->GetMedianTimePast());
     if(pnevmtxmintdb)
         pnevmtxmintdb->FlushDataToCache(setMintTxs);
     if(pblockindexdb)
@@ -5071,7 +5071,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         return error("%s: %s", __func__, state.ToString());
     }
     if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(mapPoDA);
+        pnevmdatadb->FlushDataToCache(mapPoDA, pindex->GetMedianTimePast());
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
@@ -5523,7 +5523,7 @@ bool Chainstate::ReplayBlocks()
     cache.Flush();
     // SYSCOIN
     if(pnevmdatadb) {
-        pnevmdatadb->FlushDataToCache(mapPoDAConnect);
+        pnevmdatadb->FlushDataToCache(mapPoDAConnect, pindexNew->GetMedianTimePast());
     }
     if(pnevmtxmintdb) {
         pnevmtxmintdb->FlushDataToCache(setMintTxsConnect);
