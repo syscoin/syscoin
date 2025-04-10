@@ -691,10 +691,7 @@ int CNEVMData::UnserializeFromData(const std::vector<unsigned char> &vchPayload,
     }
 	return -1;
 }
-CNEVMData::CNEVMData(const CScript &script) {
-    SetNull();
-    UnserializeFromScript(script);
-}
+
 bool CNEVMData::UnserializeFromTx(const CTransaction &tx, const int nVersion) {
 	std::vector<unsigned char> vchData;
 	int nOut;
@@ -716,20 +713,7 @@ bool CNEVMData::UnserializeFromTx(const CTransaction &tx, const int nVersion) {
             return false;
         }
     }
-    return true;
-}
-bool CNEVMData::UnserializeFromScript(const CScript &scriptPubKey) {
-	std::vector<unsigned char> vchData;
-	if (!GetSyscoinData(scriptPubKey, vchData))
-	{
-		SetNull();
-		return false;
-	}
-	if(UnserializeFromData(vchData, PROTOCOL_VERSION) != 0)
-	{
-		SetNull();
-		return false;
-	}
+    txid = tx.GetHash();
     return true;
 }
 void CNEVMData::SerializeData(std::vector<unsigned char> &vchData) {

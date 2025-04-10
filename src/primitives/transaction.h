@@ -427,11 +427,11 @@ bool IsSyscoinNEVMDataTx(const int &nVersion);
 class CNEVMData {
 public:
     std::vector<uint8_t> vchVersionHash;
+    uint256 txid;
     std::shared_ptr<const std::vector<uint8_t>> vchNEVMData;
     CNEVMData() {
         SetNull();
     }
-    explicit CNEVMData(const CScript &script);
     explicit CNEVMData(const CTransaction &tx, const int nVersion);
     explicit CNEVMData(const CTransaction &tx);
     inline void ClearData() {
@@ -458,9 +458,23 @@ public:
     inline void SetNull() { ClearData(); }
     inline bool IsNull() const { return (vchVersionHash.empty()); }
     bool UnserializeFromTx(const CTransaction &tx, const int nVersion);
-    bool UnserializeFromScript(const CScript& script);
     int UnserializeFromData(const std::vector<unsigned char> &vchData, const int nVersion);
     void SerializeData(std::vector<unsigned char>& vchData);
+};
+class MapPoDAPayloadMeta {
+public:
+    uint256 txid;
+    uint32_t nSize{0};
+    int64_t nMedianTime{0};
+    MapPoDAPayloadMeta() {}
+    explicit MapPoDAPayloadMeta(const CNEVMData &data, const int64_t &nMedianTimeIn): txid(data.txid), nMedianTime(nMedianTimeIn) {
+        if(data.vchNEVMData) {
+            nSize = data.vchNEVMData->size();
+        }
+    }
+    SERIALIZE_METHODS(MapPoDAPayloadMeta, obj) {
+        READWRITE(obj.txid, obj.nSize, obj.nMedianTime);
+    }
 };
 /** An output of a transaction.  It contains the public key that the next input
  * must be able to sign with to claim it.
@@ -484,7 +498,8 @@ public:
     SERIALIZE_METHODS(CTxOut, obj)
     {
         READWRITE(obj.nValue, obj.scriptPubKey);
-        if(obj.scriptPubKey.IsUnspendable() && IsSyscoinNEVMDataTx(s.GetTxVersion())) {
+    
+        if (obj.scriptPubKey.IsUnspendable() && IsSyscoinNEVMDataTx(s.GetTxVersion())) {
             if (s.GetType() & SER_NO_PODA) {
                 std::vector<uint8_t> emptyVec;
                 READWRITE(emptyVec);
@@ -495,6 +510,8 @@ public:
             }
         }
     }
+    
+    
 
     void SetNull()
     {
@@ -868,8 +885,7 @@ bool GetSyscoinData(const CMutableTransaction &mtx, std::vector<unsigned char> &
 bool GetSyscoinData(const CScript &scriptPubKey, std::vector<unsigned char> &vchData);
 typedef std::vector<std::vector<uint8_t> > NEVMDataVec;
 typedef std::unordered_map<uint256, NEVMTxRoot, StaticSaltedHasher> NEVMTxRootMap;
-typedef std::map<std::vector<uint8_t>, std::pair<std::vector<uint8_t>, int64_t> > PoDAMAP;
-typedef std::map<std::vector<uint8_t>, std::shared_ptr<const std::vector<uint8_t> > > PoDAMAPMemory;
+typedef std::map<std::vector<uint8_t>, MapPoDAPayloadMeta > PoDAMAPMemory;
 /** A generic txid reference (txid or wtxid). */
 // SYSCOIN
 class GenTxid
