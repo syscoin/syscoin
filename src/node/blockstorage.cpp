@@ -846,7 +846,8 @@ FlatFileSeq BlockManager::UndoFileSeq() const
 
 CAutoFile BlockManager::OpenBlockFile(const FlatFilePos& pos, bool fReadOnly) const
 {
-    return CAutoFile{BlockFileSeq().Open(pos, fReadOnly), CLIENT_VERSION};
+    // SYSCOIN
+    return CAutoFile{BlockFileSeq().Open(pos, fReadOnly), SER_DISK | SER_NO_PODA, CLIENT_VERSION};
 }
 
 /** Open an undo file (rev?????.dat) */
@@ -990,7 +991,7 @@ bool BlockManager::WriteBlockToDisk(const CBlock& block, FlatFilePos& pos) const
     }
 
     // SYSCOIN Write index header
-    unsigned int nSize = GetSerializeSize(block, fileout.GetVersion(), SER_DISK);
+    unsigned int nSize = GetSerializeSize(block, fileout.GetVersion(), SER_DISK | SER_NO_PODA);
     fileout << GetParams().MessageStart() << nSize;
 
     // Write block
@@ -1155,7 +1156,8 @@ bool BlockManager::ReadRawBlockFromDisk(std::vector<uint8_t>& block, const FlatF
 
 FlatFilePos BlockManager::SaveBlockToDisk(const CBlock& block, int nHeight, const FlatFilePos* dbp)
 {
-    unsigned int nBlockSize = ::GetSerializeSize(block, CLIENT_VERSION, SER_DISK);
+    // SYSCOIN
+    unsigned int nBlockSize = ::GetSerializeSize(block, CLIENT_VERSION, SER_DISK | SER_NO_PODA);
     FlatFilePos blockPos;
     const auto position_known {dbp != nullptr};
     if (position_known) {

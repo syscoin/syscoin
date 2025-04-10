@@ -709,10 +709,9 @@ bool CNEVMData::UnserializeFromTx(const CTransaction &tx, const int nVersion) {
 		return false;
 	}
     if(!tx.vout[nOut].vchNEVMData.empty()) {
-        vchNEVMData = &tx.vout[nOut].vchNEVMData;
+        vchNEVMData = std::make_shared<const std::vector<uint8_t>>(tx.vout[nOut].vchNEVMData);
         if(vchNEVMData->size() > MAX_NEVM_DATA_BLOB) {
-            // avoid from deleting in SetNull because vchNEVMData memory isn't owned by CNEVMData
-            vchNEVMData = nullptr;
+            vchNEVMData.reset();
             SetNull();
             return false;
         }
