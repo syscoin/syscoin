@@ -1513,7 +1513,7 @@ private:
      * avoid initiating duplicate connections.
      */
     // SYSCOIN
-    bool AlreadyConnectedToAddress(const CAddress& addr, bool masternode_probe_connection = false);
+    bool AlreadyConnectedToAddress(const CAddress& addr);
 
     bool AttemptToEvictConnection();
     CNode* ConnectNode(CAddress addrConnect, const char *pszDest, bool fCountFailure, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);

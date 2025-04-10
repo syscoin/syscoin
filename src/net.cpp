@@ -407,17 +407,9 @@ CNode* CConnman::FindNode(const CService& addr, bool fExcludeDisconnecting)
     return nullptr;
 }
 
-bool CConnman::AlreadyConnectedToAddress(const CAddress& addr, bool masternode_probe_connection)
+bool CConnman::AlreadyConnectedToAddress(const CAddress& addr)
 {
-    // Search for IP:PORT match:
-    //  - if multiple ports for the same IP are allowed,
-    //  - for probe connections
-    // Search for IP-only match otherwise
-    bool searchIPPort = fRegTest || masternode_probe_connection;
-    bool skip = searchIPPort ?
-            FindNode(addr.ToStringAddrPort()) :
-            FindNode(static_cast<CNetAddr>(addr));
-    return skip;
+    return FindNode(addr.ToStringAddrPort());
 }
 
 bool CConnman::CheckIncomingNonce(uint64_t nonce)
@@ -2350,7 +2342,7 @@ void CConnman::ThreadDNSAddressSeed()
                         LOCK(m_nodes_mutex);
                         for (const CNode* pnode : m_nodes) {
                             // SYSCOIN
-                            if (pnode->fSuccessfullyConnected && !pnode->m_masternode_probe_connection && pnode->IsFullOutboundConn()) ++nRelevant;
+                            if (pnode->fSuccessfullyConnected && !pnode->IsFullOutboundConn() && !pnode->m_masternode_probe_connection) ++nRelevant;
                         }
                     }
                     if (nRelevant >= 2) {
@@ -2640,8 +2632,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
             LOCK(m_nodes_mutex);
             for (const CNode* pnode : m_nodes) {
                 // SYSCOIN
-                if (pnode->IsMasternodeConnection()) continue;
-                if (pnode->IsFullOutboundConn()) nOutboundFullRelay++;
+                if (pnode->IsFullOutboundConn() && !pnode->IsMasternodeConnection()) nOutboundFullRelay++;
                 if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
 
                 // Make sure our persistent outbound slots to ipv4/ipv6 peers belong to different netgroups.
@@ -3197,22 +3188,10 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     };
     if (!pszDest) {
         // SYSCOIN banned, discouraged or exact match?
-        if ((m_banman && (m_banman->IsDiscouraged(addrConnect) || m_banman->IsBanned(addrConnect))) || FindNode(addrConnect.ToStringAddrPort()))
+        if ((m_banman && (m_banman->IsDiscouraged(addrConnect) || m_banman->IsBanned(addrConnect))) || AlreadyConnectedToAddress(addrConnect))
             return;
-        // local and not a connection to itself?
-        bool fAllowLocal = fRegTest && addrConnect.GetPort() != GetListenPort();
-        if (!fAllowLocal && IsLocal(addrConnect))
-            return;
-        // Search for IP:PORT match:
-        //  - if multiple ports for the same IP are allowed,
-        //  - for probe connections
-        // Search for IP-only match otherwise
-        bool searchIPPort = fRegTest || masternode_probe_connection == MasternodeProbeConn::Is_Connection;
-        bool skip = searchIPPort ?
-                FindNode(static_cast<CService>(addrConnect)) :
-                FindNode(static_cast<CNetAddr>(addrConnect));
-        if (skip) {
-            LogPrintf("CConnman::%s -- Failed to open new connection to %s, already connected\n", __func__, getIpStr());
+        // connecting to ourselves?
+        if (addrConnect.GetPort() == GetListenPort() && IsLocal(addrConnect)) {
             return;
         }
     } else if (FindNode(std::string(pszDest))) {
