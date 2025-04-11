@@ -5,7 +5,7 @@
 import time
 
 from test_framework.test_framework import DashTestFramework
-from test_framework.util import force_finish_mnsync, p2p_port, assert_raises_rpc_error
+from test_framework.util import assert_equal, force_finish_mnsync, p2p_port, assert_raises_rpc_error
 
 
 '''
@@ -30,6 +30,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
         self.skip_if_no_bdb()
 
     def run_test(self):
+        self.deaf_mns = []
         self.sync_blocks(self.nodes, timeout=60*5)
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
@@ -40,9 +41,9 @@ class LLMQSimplePoSeTest(DashTestFramework):
         self.test_no_banning()
 
         # Now lets isolate MNs one by one and verify that punishment/banning happens
-        self.test_banning(self.isolate_mn, 1)
+        self.test_banning(self.isolate_mn, 2)
 
-        self.repair_masternodes(True)
+        self.repair_masternodes(False)
 
         self.nodes[0].spork("SPORK_21_QUORUM_ALL_CONNECTED", 0)
         self.nodes[0].spork("SPORK_23_QUORUM_POSE", 0)
@@ -56,7 +57,8 @@ class LLMQSimplePoSeTest(DashTestFramework):
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
         # Lets restart masternodes with closed ports and verify that they get banned even though they are connected to other MNs (via outbound connections)
-        self.test_banning(self.close_mn_port, 3)
+        self.test_banning(self.close_mn_port)
+        self.deaf_mns.clear()
 
         self.repair_masternodes(True)
         self.reset_probe_timeouts()
@@ -74,6 +76,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
 
         self.repair_masternodes(True)
         self.close_mn_port(self.mninfo[0])
+        self.deaf_mns.clear()
         self.test_no_banning(3)
 
     def isolate_mn(self, mn):
@@ -82,13 +85,14 @@ class LLMQSimplePoSeTest(DashTestFramework):
         return True, True
 
     def close_mn_port(self, mn):
+        self.deaf_mns.append(mn)
         self.stop_node(mn.node.index)
         self.start_masternode(mn, extra_args=["-mocktime=" + str(self.mocktime), "-listen=0"])
         self.connect_nodes(mn.node.index, 0)
         # Make sure the to-be-banned node is still connected well via outbound connections
         for mn2 in self.mninfo:
-            if mn2 is not mn:
-                self.connect_nodes(mn.node.index, mn2.node.index, wait_for_connect=False)
+            if self.deaf_mns.count(mn2) == 0:
+                self.connect_nodes(mn.node.index, mn2.node.index)
         self.reset_probe_timeouts()
         return False, False
 
@@ -102,42 +106,48 @@ class LLMQSimplePoSeTest(DashTestFramework):
     def test_no_banning(self, expected_connections=None):
         for i in range(3):
             self.mine_quorum(expected_connections=expected_connections)
-        for mn in self.mninfo:
-            assert not self.check_punished(mn) and not self.check_banned(mn)
+            for mn in self.mninfo:
+                assert not self.check_punished(mn) and not self.check_banned(mn)
 
-    def test_banning(self, invalidate_proc, expected_connections):
+    def test_banning(self, invalidate_proc, expected_connections=None):
         mninfos_online = self.mninfo.copy()
         mninfos_valid = self.mninfo.copy()
         expected_contributors = len(mninfos_online)
         for i in range(2):
+            self.log.info(f"Testing PoSe banning due to {invalidate_proc.__name__} {i + 1}/2")
             mn = mninfos_valid.pop()
             went_offline, instant_ban = invalidate_proc(mn)
+            expected_complaints = expected_contributors - 1
             if went_offline:
                 mninfos_online.remove(mn)
                 expected_contributors -= 1
 
             # NOTE: Min PoSe penalty is 100 (see CDeterministicMNList::CalcMaxPoSePenalty()),
             # so nodes are PoSe-banned in the same DKG they misbehave without being PoSe-punished first.
-            if not instant_ban:
-                # it's ok to miss probes/quorum connections up to 5 times
-                for i in range(5):
+            if instant_ban:
+                assert expected_connections is not None
+                self.log.info("Expecting instant PoSe banning")
+                self.reset_probe_timeouts()
+                self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
+
+                if not self.check_banned(mn):
+                    self.log.info("Instant ban still requires 2 missing DKG round. If it is not banned yet, mine 2nd one")
                     self.reset_probe_timeouts()
-                    self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=0, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
-                    assert not self.check_banned(mn)
-            self.reset_probe_timeouts()
-            self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_contributors-1, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
-            self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_contributors-1, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
+                    self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
+            else:
+                # It's ok to miss probes/quorum connections up to 5 times.
+                # 6th time is when it should be banned for sure.
+                assert expected_connections is None
+                for j in range(6):
+                    self.log.info(f"Accumulating PoSe penalty {j + 1}/6")
+                    self.reset_probe_timeouts()
+                    self.mine_quorum(expected_connections=0, expected_members=expected_contributors, expected_contributions=0, expected_complaints=0, expected_commitments=0, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
+
             assert self.check_banned(mn)
 
             if not went_offline:
                 # we do not include PoSe banned mns in quorums, so the next one should have 1 contributor less
                 expected_contributors -= 1
-            assert_raises_rpc_error(-4, 'bad-protx-banned-nevm-address', 
-                self.nodes[0].protx_update_service,  
-                mn.proTxHash, 
-                '127.0.0.2:%d' % p2p_port(mn.node.index),
-                mn.keyOperator,
-                "0x1111111111111111111111111111111111111111")
 
     def repair_masternodes(self, restart):
         # Repair all nodes
@@ -160,8 +170,12 @@ class LLMQSimplePoSeTest(DashTestFramework):
                 self.connect_nodes(mn.node.index, 0, wait_for_connect=False)
         self.sync_all()
 
+        self.bump_mocktime(60 * 10 + 1)
+        self.generate(self.nodes[0], 1)
+        
         # Isolate and re-connect all MNs (otherwise there might be open connections with no MNAUTH for MNs which were banned before)
         for mn in self.mninfo:
+            assert not self.check_banned(mn)
             mn.node.setnetworkactive(False)
             self.wait_until(lambda: mn.node.getconnectioncount() == 0)
             mn.node.setnetworkactive(True)

@@ -14,6 +14,7 @@ class CNode;
 class PeerManager;
 class BlockValidationState;
 class ChainstateManager;
+class CInv;
 namespace llmq
 {
 class CFinalCommitment;
@@ -33,12 +34,12 @@ public:
     CEvoDB<uint256, std::pair<CFinalCommitment, uint256>> m_commitment_evoDb;
     explicit CQuorumBlockProcessor(const DBParams& db_commitment_params, PeerManager &_peerman, ChainstateManager& _chainman);
 
-    void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, PeerManager& peerman);
+    void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv);
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, llmq::CFinalCommitmentTxPayload& qcTx, bool fJustCheck, bool fBLSChecks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool UndoBlock(const CBlock& block, const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    void AddMineableCommitment(const CFinalCommitment& fqc);
+    std::optional<CInv> AddMineableCommitment(const CFinalCommitment& fqc);
     bool HasMineableCommitment(const uint256& hash) const;
     bool GetMineableCommitmentByHash(const uint256& commitmentHash, CFinalCommitment& ret);
     bool GetMinableCommitment(int nHeight, CFinalCommitment& ret) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

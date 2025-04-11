@@ -699,16 +699,7 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
         }
     }
     if (fMasternodeMode) {
-        LOCK(cs_main);
-        connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-            AssertLockHeld(::cs_main);
-            if (pnode->fSendRecSigs) {
-                PeerRef peer = peerman.GetPeerRef(pnode->GetId());
-                if(peer) {
-                    peerman.PushTxInventoryOther(*peer, inv);
-                }
-            }
-        });
+        peerman.RelayRecoveredSig(recoveredSig->GetHash());
     }
 
     for (auto& l : listeners) {

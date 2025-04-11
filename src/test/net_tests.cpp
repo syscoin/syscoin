@@ -800,13 +800,12 @@ BOOST_AUTO_TEST_CASE(LocalAddress_BasicLifecycle)
 
     g_reachable_nets.Add(NET_IPV4);
 
-    BOOST_CHECK(!IsLocal(addr, true));
+    BOOST_CHECK(!IsLocal(addr));
     BOOST_CHECK(AddLocal(addr, 1000));
-    // SYSCOIN
-    BOOST_CHECK(IsLocal(addr, true));
+    BOOST_CHECK(IsLocal(addr));
 
     RemoveLocal(addr);
-    BOOST_CHECK(!IsLocal(addr, true));
+    BOOST_CHECK(!IsLocal(addr));
 }
 
 BOOST_AUTO_TEST_CASE(initial_advertise_from_version_message)

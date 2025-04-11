@@ -59,6 +59,9 @@ static const bool DEFAULT_WHITELISTFORCERELAY = false;
 
 /** Time after which to disconnect, after waiting for a ping response (or inactivity). */
 static constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
+// SYSCOIN
+/** Time to wait since m_connected before disconnecting a probe node. */
+static const auto PROBE_WAIT_INTERVAL{5s};
 /** Run the feeler connection loop once every 2 minutes. **/
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
@@ -189,7 +192,7 @@ bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE);
 void RemoveLocal(const CService& addr);
 bool SeenLocal(const CService& addr);
 // SYSCOIN
-bool IsLocal(const CService& addr, bool bOverrideNetwork = false);
+bool IsLocal(const CService& addr);
 bool GetLocal(CService &addr, const CNetAddr *paddrPeer);
 CService GetLocalAddress(const CNode& peer);
 
@@ -936,8 +939,6 @@ public:
     uint256 verifiedProRegTxHash GUARDED_BY(cs_mnauth);
     uint256 verifiedPubKeyHash GUARDED_BY(cs_mnauth);
 
-    // If true, we will announce/send him plain recovered sigs (usually true for full nodes)
-    std::atomic<bool> fSendRecSigs{false};
     // If true, we will send him all quorum related messages, even if he is not a member of our quorums
     std::atomic<bool> qwatch{false};
     std::atomic<std::chrono::microseconds> m_min_ping_time{std::chrono::microseconds::max()};
@@ -1236,12 +1237,13 @@ public:
     // alias for thread safety annotations only, not defined
     RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex);
 
-    bool ForNode(NodeId id, std::function<bool(const CNode* pnode)> cond, std::function<bool(CNode* pnode)> func);
-
     void PushMessage(CNode* pnode, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
     // SYSCOIN
-    bool ForNode(NodeId id, std::function<bool(CNode* pnode)> func);
-    CNode* FindNode(const CService& addr, bool fExcludeDisconnecting = true);
+    template<typename Callable>
+    bool ForNode(NodeId id, Callable&& func)
+    {
+        return ForNode(id, FullyConnectedOnly, func);
+    }
     template<typename Condition, typename Callable>
     bool ForEachNodeContinueIf(const Condition& cond, Callable&& func)
     {
@@ -1285,11 +1287,10 @@ public:
                 func(node);
         }
     };
-
     using NodeFn = std::function<void(CNode*)>;
-    void ForEachNode(const NodeFn& func)
+    void ForEachNode(const NodeFn& fn)
     {
-        ForEachNode(FullyConnectedOnly, func);
+        ForEachNode(FullyConnectedOnly, fn);
     }
 
     template<typename Condition, typename Callable>
@@ -1302,9 +1303,43 @@ public:
         }
     };
 
-    void ForEachNode(const NodeFn& func) const
+    void ForEachNode(const NodeFn& fn) const
     {
-        ForEachNode(FullyConnectedOnly, func);
+        ForEachNode(FullyConnectedOnly, fn);
+    }
+
+    template<typename Condition, typename Callable, typename CallableAfter>
+    void ForEachNodeThen(const Condition& cond, Callable&& pre, CallableAfter&& post)
+    {
+        LOCK(m_nodes_mutex);
+        for (auto&& node : m_nodes) {
+            if (cond(node))
+                pre(node);
+        }
+        post();
+    };
+
+    template<typename Callable, typename CallableAfter>
+    void ForEachNodeThen(Callable&& pre, CallableAfter&& post)
+    {
+        ForEachNodeThen(FullyConnectedOnly, pre, post);
+    }
+
+    template<typename Condition, typename Callable, typename CallableAfter>
+    void ForEachNodeThen(const Condition& cond, Callable&& pre, CallableAfter&& post) const
+    {
+        LOCK(m_nodes_mutex);
+        for (auto&& node : m_nodes) {
+            if (cond(node))
+                pre(node);
+        }
+        post();
+    };
+
+    template<typename Callable, typename CallableAfter>
+    void ForEachNodeThen(Callable&& pre, CallableAfter&& post) const
+    {
+        ForEachNodeThen(FullyConnectedOnly, pre, post);
     }
 
     // Addrman functions
@@ -1416,13 +1451,48 @@ public:
         Variable intervals will result in privacy decrease.
     */
     // SYSCOIN
+    bool ForNode(NodeId id, std::function<bool(const CNode* pnode)> cond, std::function<bool(CNode* pnode)> func);
+    bool ForNode(const CService& addr, std::function<bool(const CNode* pnode)> cond, std::function<bool(CNode* pnode)> func);
+
+    template<typename Callable>
+    bool ForNode(const CService& addr, Callable&& func)
+    {
+        return ForNode(addr, FullyConnectedOnly, func);
+    }
+
+
+    bool IsConnected(const CService& addr, std::function<bool(const CNode* pnode)> cond)
+    {
+        return ForNode(addr, cond, [](CNode* pnode){
+            return true;
+        });
+    }
     bool IsMasternodeOrDisconnectRequested(const CService& addr);
 
     /** Return true if we should disconnect the peer for failing an inactivity check. */
     bool ShouldRunInactivityChecks(const CNode& node, std::chrono::seconds now) const;
 
     bool MultipleManualOrFullOutboundConns(Network net) const EXCLUSIVE_LOCKS_REQUIRED(m_nodes_mutex);
+    // SYSCOIN
+    /**
+     * RAII helper to atomically create a copy of `m_nodes` and add a reference
+     * to each of the nodes. The nodes are released when this object is destroyed.
+     */
+    class NodesSnapshot
+    {
+    public:
+        explicit NodesSnapshot(const CConnman& connman, std::function<bool(const CNode* pnode)> cond = AllNodes,
+                               bool shuffle = false);
+        ~NodesSnapshot();
 
+        const std::vector<CNode*>& Nodes() const
+        {
+            return m_nodes_copy;
+        }
+
+    private:
+        std::vector<CNode*> m_nodes_copy;
+    };
 private:
     struct ListenSocket {
     public:
@@ -1506,7 +1576,9 @@ private:
     uint64_t CalculateKeyedNetGroup(const CAddress& ad) const;
 
     CNode* FindNode(const CNetAddr& ip, bool fExcludeDisconnecting = true);
+    CNode* FindNode(const CSubNet& subNet, bool fExcludeDisconnecting = true);
     CNode* FindNode(const std::string& addrName, bool fExcludeDisconnecting = true);
+    CNode* FindNode(const CService& addr, bool fExcludeDisconnecting = true);
 
     /**
      * Determine whether we're already connected to a given address, in order to
@@ -1751,6 +1823,9 @@ private:
         std::string destination;
         ConnectionType conn_type;
         bool use_v2transport;
+        // SYSCOIN
+        bool masternode_connection;
+        bool masternode_probe_connection;
     };
 
     /**
@@ -1767,47 +1842,6 @@ private:
      */
     static constexpr size_t MAX_UNUSED_I2P_SESSIONS_SIZE{10};
     public:
-    /**
-     * RAII helper to atomically create a copy of `m_nodes` and add a reference
-     * to each of the nodes. The nodes are released when this object is destroyed.
-     */
-    class NodesSnapshot
-    {
-    public:
-        explicit NodesSnapshot(const CConnman& connman, std::function<bool(const CNode* pnode)> filter, bool shuffle = false)
-        {
-            {
-                LOCK(connman.m_nodes_mutex);
-                m_nodes_copy.reserve(connman.m_nodes.size());
-
-                for (auto& node : connman.m_nodes) {
-                    if (!filter(node))
-                        continue;
-                    node->AddRef();
-                    m_nodes_copy.push_back(node);
-                }
-
-                if (shuffle) {
-                    Shuffle(m_nodes_copy.begin(), m_nodes_copy.end(), FastRandomContext{});
-                }
-            }
-        }
-
-        ~NodesSnapshot()
-        {
-            for (auto& node : m_nodes_copy) {
-                node->Release();
-            }
-        }
-
-        const std::vector<CNode*>& Nodes() const
-        {
-            return m_nodes_copy;
-        }
-
-    private:
-        std::vector<CNode*> m_nodes_copy;
-    };
 
     const CChainParams& m_params;
 

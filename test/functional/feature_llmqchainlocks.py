@@ -55,9 +55,9 @@ class LLMQChainLocksTest(DashTestFramework):
         # Connect all nodes to node1 so that we always have the whole network connected
         # Otherwise only masternode connections will be established between nodes, which won't propagate TXs/blocks
         # Usually node0 is the one that does this, but in this test we isolate it multiple times
-        for i in range(len(self.nodes)):
-            if i != 1:
-                self.connect_nodes(i, 1)
+        for i in range(2, len(self.nodes)):
+            self.connect_nodes(i, 1)
+            
         self.generate(self.nodes[0], 10)
         self.sync_blocks(self.nodes, timeout=60*5)
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 0)
@@ -239,9 +239,6 @@ class LLMQChainLocksTest(DashTestFramework):
         self.wait_for_chainlocked_block(self.nodes[0], node0_cl)
 
         self.log.info("Send fake future clsigs and see if this breaks ChainLocks")
-        for i in range(len(self.nodes)):
-            if i != 0:
-                self.connect_nodes(i, 0)
         p2p_node = self.nodes[0].add_p2p_connection(TestP2PConn())
         p2p_node.wait_for_verack()
         self.wait_for_chainlocked_block_all_nodes(node0_cl, timeout=30)

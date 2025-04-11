@@ -508,7 +508,7 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
         }
         if (clsigAggInv.type == MSG_CLSIG) {
             // We just created an aggregated CLSIG, relay it
-            peerman.RelayTransactionOther(clsigAggInv);
+            peerman.RelayInv(clsigAggInv);
         } else {
             {
                 LOCK(cs_main);
@@ -547,7 +547,7 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 mostRecentChainLockShare = clsig;
                 TryUpdateBestChainLock(pindexScan);
             }
-            peerman.RelayTransactionOther(clsigInv);
+            peerman.RelayInv(clsigInv);
     }
     bool bChainLockMatchSigIndex = WITH_LOCK(cs, return bestChainLockBlockIndex == pindexScan);
     if (bChainLockMatchSigIndex) {

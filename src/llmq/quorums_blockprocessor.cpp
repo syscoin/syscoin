@@ -34,7 +34,7 @@ CQuorumBlockProcessor::CQuorumBlockProcessor(const DBParams& db_commitment_param
 {
 }
 
-void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, PeerManager& peerman)
+void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv)
 {
     if (strCommand == NetMsgType::QFCOMMITMENT) {
         CFinalCommitment qc;
@@ -142,7 +142,9 @@ void CQuorumBlockProcessor::ProcessMessage(CNode* pfrom, const std::string& strC
             LOCK(cs_main);
             peerman.ForgetTxHash(pfrom->GetId(), hash);
         }
-        AddMineableCommitment(qc);
+        if (auto inv_opt = AddMineableCommitment(qc); inv_opt.has_value()) {
+            peerman.RelayInv(inv_opt.value());
+        }
     }
 }
 
@@ -362,7 +364,7 @@ bool CQuorumBlockProcessor::HasMineableCommitment(const uint256& hash) const
     return minableCommitments.count(hash) != 0;
 }
 
-void CQuorumBlockProcessor::AddMineableCommitment(const CFinalCommitment& fqc)
+std::optional<CInv> CQuorumBlockProcessor::AddMineableCommitment(const CFinalCommitment& fqc)
 {
     const uint256 commitmentHash = ::SerializeHash(fqc);
 
@@ -388,12 +390,9 @@ void CQuorumBlockProcessor::AddMineableCommitment(const CFinalCommitment& fqc)
         return false;
     }();
 
-    // We only relay the new commitment if it's new or better then the old one
-    if (relay) {
-        CInv inv(MSG_QUORUM_FINAL_COMMITMENT, commitmentHash);
-        peerman.RelayTransactionOther(inv);
-    }
+    return relay ? std::make_optional(CInv{MSG_QUORUM_FINAL_COMMITMENT, commitmentHash}) : std::nullopt;
 }
+
 
 bool CQuorumBlockProcessor::GetMineableCommitmentByHash(const uint256& commitmentHash, llmq::CFinalCommitment& ret)
 {

@@ -86,10 +86,9 @@ static RPCHelpMan masternode_connect()
       throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
     // TODO: Pass CConnman instance somehow and don't use global variable.
     node.connman->OpenMasternodeConnection(CAddress(addr.value(), NODE_NETWORK));
-    CNode* pnode = node.connman->FindNode(CAddress(addr.value(), NODE_NETWORK));
-    if (!pnode || pnode->fDisconnect)
+    if (!node.connman->IsConnected(CAddress(addr.value(), NODE_NETWORK), AllNodes)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Couldn't connect to masternode %s", strAddress));
-
+    }
     return "successfully connected";
 },
     };

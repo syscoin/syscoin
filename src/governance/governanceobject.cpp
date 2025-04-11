@@ -628,7 +628,7 @@ void CGovernanceObject::Relay(PeerManager& peerman) const
     }
 
     CInv inv(MSG_GOVERNANCE_OBJECT, GetHash());
-    peerman.RelayTransactionOther(inv);
+    peerman.RelayInv(inv);
 }
 
 void CGovernanceObject::UpdateSentinelVariables(const CDeterministicMNList& tip_mn_list)

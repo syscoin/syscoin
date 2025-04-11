@@ -131,7 +131,7 @@ void CGovernanceVote::Relay(PeerManager& peerman, const CDeterministicMNList& ti
     }
 
     CInv inv(MSG_GOVERNANCE_OBJECT_VOTE, GetHash());
-    peerman.RelayTransactionOther(inv);
+    peerman.RelayInv(inv);
 }
 
 void CGovernanceVote::UpdateHash() const

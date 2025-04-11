@@ -161,17 +161,18 @@ static constexpr auto ROTATE_ADDR_RELAY_DEST_INTERVAL{24h};
 static constexpr auto INBOUND_INVENTORY_BROADCAST_INTERVAL{5s};
 /** Average delay between trickled inventory transmissions for outbound peers.
  *  Use a smaller delay as there is less privacy concern for them.
- *  Blocks and peers with NetPermissionFlags::NoBan permission bypass this. */
-// SYSCOIN
-static const unsigned int OUTBOUND_INVENTORY_BROADCAST_INTERVAL = 2;
+ *  Blocks and peers with NetPermissionFlags::NoBan permission bypass this.
+ *  Masternode outbound peers get half this delay. */
+static constexpr auto OUTBOUND_INVENTORY_BROADCAST_INTERVAL{2s};
 /** Maximum rate of inventory items to send per second.
- *  Limits the impact of low-fee transaction floods. */
-// SYSCOIN We have 10 times smaller block times in Syscoin, so we need to push 10 times more invs per 1MB. */
-static constexpr unsigned int INVENTORY_BROADCAST_PER_SECOND = 7 * 10;
+ *  Limits the impact of low-fee transaction floods.
+ *  We have 4 times smaller block times in Syscoin, so we need to push 4 times more invs per 1MB. */
+static constexpr unsigned int INVENTORY_BROADCAST_PER_SECOND = 7;
 /** Target number of tx inventory items to send per transmission. */
-static constexpr unsigned int INVENTORY_BROADCAST_TARGET = INVENTORY_BROADCAST_PER_SECOND * count_seconds(INBOUND_INVENTORY_BROADCAST_INTERVAL);
+static constexpr unsigned int INVENTORY_BROADCAST_TARGET = 4 * INVENTORY_BROADCAST_PER_SECOND * count_seconds(INBOUND_INVENTORY_BROADCAST_INTERVAL);
+// SYSCOIN
 /** Maximum number of inventory items to send per transmission. */
-static constexpr unsigned int INVENTORY_BROADCAST_MAX = 1000;
+static constexpr unsigned int INVENTORY_BROADCAST_MAX = 3500;
 static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_BROADCAST_MAX too low");
 static_assert(INVENTORY_BROADCAST_MAX <= MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Average delay between feefilter broadcasts in seconds. */
@@ -329,10 +330,9 @@ public:
     void SendPings() override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void RelayTransaction(const uint256& txid, const uint256& wtxid) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     // SYSCOIN
-    void _RelayTransaction(const uint256& txid, const uint256& wtxid) override  EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    void RelayRecoveredSig(const uint256& sigHash) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void PushTxInventory(Peer& peer, const uint256& txid, const uint256& wtxid) override;
-    void RelayTransactionOther(const CInv& inv) override;
-    void _RelayTransactionOther(const CInv& inv) override;
+    void RelayInv(const CInv &inv) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void PushTxInventoryOther(Peer& peer, const CInv& inv) override;
     void SetBestHeight(int height) override { m_best_height = height; };
     void UnitTestMisbehaving(NodeId peer_id, int howmuch) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), howmuch, ""); };
@@ -1381,12 +1381,15 @@ void PeerManagerImpl::AddTxAnnouncement(const CNode& node, const GenTxid& gtxid,
     //   - OVERLOADED_PEER_TX_DELAY for announcements from peers which have at least
     //     MAX_PEER_TX_REQUEST_IN_FLIGHT requests in flight (and don't have NetPermissionFlags::Relay).
     auto delay{0us};
+    // SYSCOIN
     const bool preferred = state->fPreferredDownload;
-    if (!preferred) delay += NONPREF_PEER_TX_DELAY;
-    if (!gtxid.IsWtxid() && m_wtxid_relay_peers > 0) delay += TXID_RELAY_DELAY;
-    const bool overloaded = !node.HasPermission(NetPermissionFlags::Relay) &&
-        m_txrequest.CountInFlight(nodeid) >= MAX_PEER_TX_REQUEST_IN_FLIGHT;
-    if (overloaded) delay += OVERLOADED_PEER_TX_DELAY;
+    if(!fMasternodeMode) {
+        if (!preferred) delay += NONPREF_PEER_TX_DELAY;
+        if (!gtxid.IsWtxid() && m_wtxid_relay_peers > 0) delay += TXID_RELAY_DELAY;
+        const bool overloaded = !node.HasPermission(NetPermissionFlags::Relay) &&
+            m_txrequest.CountInFlight(nodeid) >= MAX_PEER_TX_REQUEST_IN_FLIGHT;
+        if (overloaded) delay += OVERLOADED_PEER_TX_DELAY;
+    }
     m_txrequest.ReceivedInv(nodeid, gtxid, preferred, current_time + delay);
 }
 
@@ -1944,19 +1947,20 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
         }
     }
 
-    {
-        LOCK(m_peer_mutex);
-        for (auto& it : m_peer_map) {
-            Peer& peer = *it.second;
-            // SYSCOIN
-            if (peer.m_masternode_connection) return;
-            LOCK(peer.m_block_inv_mutex);
-            for (const uint256& hash : reverse_iterate(vHashes)) {
-                peer.m_blocks_for_headers_relay.push_back(hash);
-            }
-        }
-    }
+ 
+    // SYSCOIN Relay to all peers
+    // TODO: Move CanRelay() to Peer and migrate to iteration through m_peer_map
+    m_connman.ForEachNode([this, &vHashes](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        if (!pnode->CanRelay()) return;
 
+        PeerRef peer = GetPeerRef(pnode->GetId());
+        if (peer == nullptr) return;
+
+        LOCK(peer->m_block_inv_mutex);
+        for (const uint256& hash : reverse_iterate(vHashes)) {
+            peer->m_blocks_for_headers_relay.push_back(hash);
+        }
+    });
     m_connman.WakeMessageHandler();
 }
 
@@ -2060,22 +2064,27 @@ void PeerManagerImpl::SendPings()
 
 void PeerManagerImpl::RelayTransaction(const uint256& txid, const uint256& wtxid)
 {
-    WITH_LOCK(cs_main, _RelayTransaction(txid, wtxid););
+    LOCK(m_peer_mutex);
+    for(auto& it : m_peer_map) {
+        Peer& peer = *it.second;
+        auto tx_relay = peer.GetTxRelay();
+        if (!tx_relay) continue;
+
+        LOCK(tx_relay->m_tx_inventory_mutex);
+        // Only queue transactions for announcement once the version handshake
+        // is completed. The time of arrival for these transactions is
+        // otherwise at risk of leaking to a spy, if the spy is able to
+        // distinguish transactions received during the handshake from the rest
+        // in the announcement.
+        if (tx_relay->m_next_inv_send_time == 0s) continue;
+
+        const uint256& hash{peer.m_wtxid_relay ? wtxid : txid};
+        if (!tx_relay->m_tx_inventory_known_filter.contains(hash)) {
+            tx_relay->m_tx_inventory_to_send.insert(hash);
+        }
+    };
 }
 
-void PeerManagerImpl::_RelayTransaction(const uint256& txid, const uint256& wtxid)
-{
-    m_connman.ForEachNode([&txid, &wtxid, this](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        AssertLockHeld(::cs_main);
-        // SYSCOIN only relay to outbound masternodes for efficiency
-        if (pnode->CanRelay())
-        {
-            PeerRef peer = GetPeerRef(pnode->GetId());
-            if (peer)
-                PushTxInventory(*peer, txid, wtxid);
-        }
-    });
-}
 void PeerManagerImpl::PushTxInventory(Peer& peer, const uint256& txid, const uint256& wtxid)
 {
     auto tx_relay = peer.GetTxRelay();
@@ -2095,24 +2104,15 @@ void PeerManagerImpl::PushTxInventory(Peer& peer, const uint256& txid, const uin
     }
 
 }
-void PeerManagerImpl::RelayTransactionOther(const CInv& inv)
+void PeerManagerImpl::RelayInv(const CInv& inv)
 {
-    WITH_LOCK(cs_main, _RelayTransactionOther(inv););
+    LOCK(m_peer_mutex);
+    for (const auto& [_, peer] : m_peer_map) {
+        if (!peer->GetTxRelay()) continue;
+        PushTxInventoryOther(*peer, inv);
+    }
 }
 
-void PeerManagerImpl::_RelayTransactionOther(const CInv& inv)
-{
-    m_connman.ForEachNode([&inv, this](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        AssertLockHeld(::cs_main);
-        // SYSCOIN only relay to outbound masternodes for efficiency
-        if (pnode->CanRelay())
-        {
-            PeerRef peer = GetPeerRef(pnode->GetId());
-            if (peer)
-                PushTxInventoryOther(*peer, inv);
-        }
-    });
-}
 void PeerManagerImpl::PushTxInventoryOther(Peer& peer, const CInv& inv)
 {
     auto tx_relay = peer.GetTxRelay();
@@ -2124,6 +2124,18 @@ void PeerManagerImpl::PushTxInventoryOther(Peer& peer, const CInv& inv)
     }
 
 }
+
+void PeerManagerImpl::RelayRecoveredSig(const uint256& sigHash)
+{
+    const CInv inv{MSG_QUORUM_RECOVERED_SIG, sigHash};
+    LOCK(m_peer_mutex);
+    for (const auto& [_, peer] : m_peer_map) {
+        if (peer->m_wants_recsigs) {
+            PushTxInventoryOther(*peer, inv);
+        }
+    }
+}
+
 void PeerManagerImpl::RelayAddress(NodeId originator,
                                    const CAddress& addr,
                                    bool fReachable)
@@ -3736,12 +3748,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                       (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
         }
         // SYSCOIN
-        if (pfrom.m_masternode_probe_connection) {
-            pfrom.fSuccessfullyConnected = true;
-            return;
-        }
         int nHeight = WITH_LOCK(m_chainman.GetMutex(), return m_chainman.ActiveHeight());
-        CMNAuth::PushMNAUTH(&pfrom, m_connman, nHeight);
+        if (fMasternodeMode && !pfrom.m_masternode_probe_connection) {
+            CMNAuth::PushMNAUTH(&pfrom, m_connman, nHeight);
+        }
 
         if (pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
             // Tell our peer we are willing to provide version 2 cmpctblocks.
@@ -3752,7 +3762,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::SENDCMPCT, /*high_bandwidth=*/false, /*version=*/CMPCTBLOCKS_VERSION));
         }
         // SYSCOIN
-        if(!pfrom.IsBlockOnlyConn()) {
+        if(!RejectIncomingTxs(pfrom)) {
             if (llmq::CLLMQUtils::IsWatchQuorumsEnabled() && m_connman.IsMasternodeQuorumNode(&pfrom)) {
                 m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QWATCH));
             }
@@ -4015,7 +4025,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     }
     // SYSCOIN
     if (msg_type == NetMsgType::QSENDRECSIGS) {
-        pfrom.fSendRecSigs = true;
+        peer->m_wants_recsigs = true;
         return;
     }
     if (msg_type == NetMsgType::INV) {
@@ -5186,7 +5196,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         CMNAuth::ProcessMessage(&pfrom, msg_type, vRecv, m_chainman, m_connman, *this);
         return;
     } else if(msg_type == NetMsgType::QFCOMMITMENT) {
-        llmq::quorumBlockProcessor->ProcessMessage(&pfrom, msg_type, vRecv, *this);
+        llmq::quorumBlockProcessor->ProcessMessage(&pfrom, msg_type, vRecv);
         return;
     } else if(msg_type == NetMsgType::QSIGREC) {
         llmq::quorumSigningManager->ProcessMessage(&pfrom, msg_type, vRecv);
@@ -6010,13 +6020,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     if (pto->IsInboundConn()) {
                         tx_relay->m_next_inv_send_time = NextInvToInbounds(current_time, INBOUND_INVENTORY_BROADCAST_INTERVAL);
                     } else {
-                        // Use half the delay for regular outbound peers, as there is less privacy concern for them.
-                        // and quarter the delay for Masternode outbound peers, as there is even less privacy concern in this case.
-                        unsigned char verifiedMN = 0;
-                        if(!verifiedProRegTxHash.IsNull()) {
-                            verifiedMN = 1;
-                        }
-                        tx_relay->m_next_inv_send_time = GetExponentialRand(current_time, std::chrono::seconds{OUTBOUND_INVENTORY_BROADCAST_INTERVAL >> 1 >> verifiedMN} );
+                        // Use half the delay for Masternode outbound peers, as there is less privacy concern for them.
+                        tx_relay->m_next_inv_send_time = verifiedProRegTxHash.IsNull() ?
+                                        GetExponentialRand(current_time, OUTBOUND_INVENTORY_BROADCAST_INTERVAL) :
+                                        GetExponentialRand(current_time, OUTBOUND_INVENTORY_BROADCAST_INTERVAL / 2);
                     }
                 }
 
