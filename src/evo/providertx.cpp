@@ -289,9 +289,6 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
             // pass the state returned by the function above
             return false;
         }
-        if (mn->pdmnState->pubKeyOperator.IsLegacy() != (ptx.nVersion == LEGACY_BLS_VERSION)) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-operator-pubkey");
-        }
         if (check_sigs && !CheckHashSig(ptx, mn->pdmnState->pubKeyOperator.Get(), state, fJustCheck)) {
             // pass the state returned by the function above
             return false;
@@ -394,9 +391,6 @@ bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
         if (!CheckInputsHash(tx, ptx, state, fJustCheck)) {
             // pass the state returned by the function above
             return false;
-        }
-        if (dmn->pdmnState->pubKeyOperator.IsLegacy() != (ptx.nVersion == LEGACY_BLS_VERSION)) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-operator-pubkey");
         }
         if (check_sigs && !CheckHashSig(ptx, dmn->pdmnState->pubKeyOperator.Get(), state, fJustCheck)) {
             // pass the state returned by the function above
