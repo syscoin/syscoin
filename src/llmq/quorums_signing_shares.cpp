@@ -1527,7 +1527,7 @@ CSigShare CSigSharesManager::CreateSigShare(const CQuorumCPtr& quorum, const uin
     sigShare.quorumMember = (uint16_t)memberIdx;
     uint256 signHash = CLLMQUtils::BuildSignHash(sigShare);
 
-    sigShare.sigShare.Set(skShare.Sign(signHash), bls::bls_legacy_scheme.load());
+    sigShare.sigShare.Set(skShare.Sign(signHash, bls::bls_legacy_scheme.load()), bls::bls_legacy_scheme.load());
     if (!sigShare.sigShare.Get().IsValid()) {
         LogPrintf("CSigSharesManager::%s -- failed to sign sigShare. signHash=%s, id=%s, msgHash=%s, time=%s\n", __func__,
                   signHash.ToString(), sigShare.id.ToString(), sigShare.msgHash.ToString(), t.count());

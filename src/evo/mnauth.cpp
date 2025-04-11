@@ -39,8 +39,7 @@ void CMNAuth::PushMNAUTH(CNode* pnode, CConnman& connman, const int nHeight)
     if (fRegTest && gArgs.IsArgSet("-pushversion")) {
         nOurNodeVersion = gArgs.GetIntArg("-pushversion", PROTOCOL_VERSION);
     }
-    bool isV19active = llmq::CLLMQUtils::IsV19Active(nHeight);
-    const CBLSPublicKeyVersionWrapper pubKey(*activeMasternodeInfo.blsPubKeyOperator, !isV19active);
+    const CBLSPublicKey pubKey(*activeMasternodeInfo.blsPubKeyOperator);
     if (pnode->nVersion < MNAUTH_NODE_VER_VERSION || nOurNodeVersion < MNAUTH_NODE_VER_VERSION) {
         signHash = ::SerializeHash(std::make_tuple(pubKey, receivedMNAuthChallenge, pnode->IsInboundConn()));
     } else {
@@ -49,7 +48,8 @@ void CMNAuth::PushMNAUTH(CNode* pnode, CConnman& connman, const int nHeight)
 
     CMNAuth mnauth;
     mnauth.proRegTxHash = activeMasternodeInfo.proTxHash;
-    mnauth.sig = activeMasternodeInfo.blsKeyOperator->Sign(signHash);
+    // all clients uses basic BLS
+    mnauth.sig = activeMasternodeInfo.blsKeyOperator->Sign(signHash, false);
 
     LogPrint(BCLog::NET, "CMNAuth::%s -- Sending MNAUTH, peer=%d\n", __func__, pnode->GetId());
 

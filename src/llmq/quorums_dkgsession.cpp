@@ -64,6 +64,7 @@ CDKGMember::CDKGMember(const CDeterministicMNCPtr& _dmn, size_t _idx) :
 bool CDKGSession::Init(const CBlockIndex* _pQuorumBaseBlockIndex, const std::vector<CDeterministicMNCPtr>& mns, const uint256& _myProTxHash)
 {
     m_quorum_base_block_index = _pQuorumBaseBlockIndex;
+    m_use_legacy_bls = !llmq::CLLMQUtils::IsV19Active(m_quorum_base_block_index->nHeight);
     members.resize(mns.size());
     memberIds.resize(members.size());
     receivedVvecs.resize(members.size());
@@ -170,7 +171,7 @@ void CDKGSession::SendContributions(CDKGPendingMessages& pendingMessages)
 
     logger.Batch("encrypted contributions. time=%d", t1.count());
 
-    qc.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(qc.GetSignHash()));
+    qc.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(qc.GetSignHash(), m_use_legacy_bls));
 
     logger.Flush();
 
@@ -472,7 +473,7 @@ void CDKGSession::SendComplaint(CDKGPendingMessages& pendingMessages)
 
     logger.Batch("sending complaint. badCount=%d, complaintCount=%d", badCount, complaintCount);
 
-    qc.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(qc.GetSignHash()));
+    qc.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(qc.GetSignHash(), m_use_legacy_bls));
 
     logger.Flush();
 
@@ -665,7 +666,7 @@ void CDKGSession::SendJustification(CDKGPendingMessages& pendingMessages, const 
         return;
     }
 
-    qj.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(qj.GetSignHash()));
+    qj.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(qj.GetSignHash(), m_use_legacy_bls));
 
     logger.Flush();
 
@@ -955,19 +956,17 @@ void CDKGSession::SendCommitment(CDKGPendingMessages& pendingMessages)
         (*commitmentHash.begin())++;
     }
 
-    qc.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(commitmentHash));
-    qc.quorumSig = skShare.Sign(commitmentHash);
+    qc.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(commitmentHash, m_use_legacy_bls));
+    qc.quorumSig = skShare.Sign(commitmentHash, m_use_legacy_bls);
 
     if (lieType == 3) {
-        const bool is_bls_legacy = bls::bls_legacy_scheme.load();
-        std::vector<uint8_t> buf = qc.sig.ToByteVector(is_bls_legacy);
+        auto buf = qc.sig.ToBytes(m_use_legacy_bls);
         buf[5]++;
-        qc.sig.SetByteVector(buf, is_bls_legacy);
+        qc.sig.SetBytes(buf, m_use_legacy_bls);
     } else if (lieType == 4) {
-        const bool is_bls_legacy = bls::bls_legacy_scheme.load();
-        std::vector<uint8_t> buf = qc.quorumSig.ToByteVector(is_bls_legacy);
+        auto buf = qc.quorumSig.ToBytes(m_use_legacy_bls);
         buf[5]++;
-        qc.quorumSig.SetByteVector(buf, is_bls_legacy);
+        qc.quorumSig.SetBytes(buf, m_use_legacy_bls);
     }
 
     t3.stop();

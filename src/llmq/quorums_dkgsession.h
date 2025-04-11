@@ -262,6 +262,7 @@ private:
     CDKGSessionManager& dkgManager;
 
     const CBlockIndex* m_quorum_base_block_index{nullptr};
+    bool m_use_legacy_bls;
 
 private:
     std::vector<std::unique_ptr<CDKGMember>> members;

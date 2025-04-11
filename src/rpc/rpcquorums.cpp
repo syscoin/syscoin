@@ -389,8 +389,10 @@ static RPCHelpMan quorum_verify()
 
     uint256 id = ParseHashV(request.params[0], "id");
     uint256 msgHash = ParseHashV(request.params[1], "msgHash");
+
+    const bool use_bls_legacy = bls::bls_legacy_scheme.load();
     CBLSSignature sig;
-    if (!sig.SetHexStr(request.params[2].get_str())) {
+    if (!sig.SetHexStr(request.params[2].get_str(), use_bls_legacy)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
     }
     if (request.params[3].isNull() || (request.params[3].get_str().empty() && !request.params[4].isNull())) {
@@ -581,9 +583,9 @@ static RPCHelpMan verifychainlock()
     }
     nBlockHeight = pIndex->nHeight;
 
-
+    const bool use_bls_legacy = bls::bls_legacy_scheme.load();
     CBLSSignature sig;
-    if (!sig.SetHexStr(request.params[1].get_str())) {
+    if (!sig.SetHexStr(request.params[1].get_str(), use_bls_legacy)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
     }
     
@@ -744,8 +746,9 @@ static RPCHelpMan submitchainlock()
     const int32_t bestCLHeight = llmq::chainLocksHandler->GetBestChainLock().nHeight;
     if (nBlockHeight <= bestCLHeight) return bestCLHeight;
 
+    const bool use_bls_legacy = bls::bls_legacy_scheme.load();
     CBLSSignature sig;
-    if (!sig.SetHexStr(request.params[1].get_str())) {
+    if (!sig.SetHexStr(request.params[1].get_str(), use_bls_legacy)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid signature format");
     }
     auto clsig = llmq::CChainLockSig(nBlockHeight, nBlockHash, sig, *signers);

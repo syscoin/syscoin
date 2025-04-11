@@ -124,7 +124,7 @@ static CMutableTransaction CreateProUpServTx(const node::NodeContext& node, Simp
     tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
     FundTransaction(node, tx, utxos, GetScriptForDestination(WitnessV0KeyHash(coinbaseKey.GetPubKey())), 1 * COIN);
     proTx.inputsHash = CalcTxInputsHash(CTransaction(tx));
-    proTx.sig = operatorKey.Sign(::SerializeHash(proTx));
+    proTx.sig = operatorKey.Sign(::SerializeHash(proTx), bls::bls_legacy_scheme);
     SetTxPayload(tx, proTx);
     SignTransaction(node, tx, coinbaseKey);
 
@@ -162,7 +162,7 @@ static CMutableTransaction CreateProUpRevTx(const node::NodeContext& node, Simpl
     tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
     FundTransaction(node, tx, utxos, GetScriptForDestination(WitnessV0KeyHash(coinbaseKey.GetPubKey())), 1 * COIN);
     proTx.inputsHash = CalcTxInputsHash(CTransaction(tx));
-    proTx.sig = operatorKey.Sign(::SerializeHash(proTx));
+    proTx.sig = operatorKey.Sign(::SerializeHash(proTx), bls::bls_legacy_scheme);
     SetTxPayload(tx, proTx);
     SignTransaction(node, tx, coinbaseKey);
 
