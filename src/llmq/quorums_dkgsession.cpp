@@ -156,16 +156,21 @@ void CDKGSession::SendContributions(CDKGPendingMessages& pendingMessages)
     qc.vvec = vvecContribution;
 
     cxxtimer::Timer t1(true);
-    qc.contributions = std::make_shared<std::vector<CBLSSecretKey>>(skContributions);
-
+    qc.contributions = std::make_shared<CBLSIESMultiRecipientObjects<CBLSSecretKey>>();
+    qc.contributions->InitEncrypt(members.size());
 
     for (size_t i = 0; i < members.size(); i++) {
         const auto& m = members[i];
-        CBLSSecretKey &skContrib = (*qc.contributions)[i];
+        CBLSSecretKey skContrib = skContributions[i];
 
         if (i != myIdx && ShouldSimulateError(DKGError::type::CONTRIBUTION_LIE)) {
             logger.Batch("lying for %s", m->dmn->proTxHash.ToString());
             skContrib.MakeNewKey();
+        }
+
+        if (!qc.contributions->Encrypt(i, m->dmn->pdmnState->pubKeyOperator.Get(), skContrib, PROTOCOL_VERSION)) {
+            logger.Batch("failed to encrypt contribution for %s", m->dmn->proTxHash.ToString());
+            return;
         }
     }
 
@@ -202,7 +207,7 @@ bool CDKGSession::PreVerifyMessage(const CDKGContribution& qc, bool& retBan) con
         return false;
     }
 
-    if (qc.contributions->size() != members.size()) {
+    if (qc.contributions->blobs.size() != members.size()) {
         logger.Batch("invalid contributions count");
         retBan = true;
         return false;
@@ -285,7 +290,11 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGContribution& qc
     dkgManager.WriteVerifiedVvecContribution(m_quorum_base_block_index->GetBlockHash(), qc.proTxHash, qc.vvec);
 
     bool complain = false;
-    if (member->idx != myIdx && ShouldSimulateError(DKGError::type::COMPLAIN_LIE)) {
+    CBLSSecretKey skContribution;
+    if (!qc.contributions->Decrypt(*myIdx, WITH_LOCK(activeMasternodeInfoCs, return *activeMasternodeInfo.blsKeyOperator), skContribution, PROTOCOL_VERSION)) {
+        logger.Batch("contribution from %s could not be decrypted", member->dmn->proTxHash.ToString());
+        complain = true;
+    } else if (member->idx != myIdx && ShouldSimulateError(DKGError::type::COMPLAIN_LIE)) {
         logger.Batch("lying/complaining for %s", member->dmn->proTxHash.ToString());
         complain = true;
     }
@@ -300,7 +309,8 @@ void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGContribution& qc
     }
 
     logger.Batch("decrypted our contribution share. time=%d", t2.count());
-    receivedSkContributions[member->idx] = (*qc.contributions)[*myIdx];
+
+    receivedSkContributions[member->idx] = skContribution;
     LOCK(cs_pending);
     pendingContributionVerifications.emplace_back(member->idx);
     if (pendingContributionVerifications.size() >= 32) {

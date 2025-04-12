@@ -34,7 +34,7 @@ public:
     uint256 quorumHash;
     uint256 proTxHash;
     BLSVerificationVectorPtr vvec;
-    std::shared_ptr<std::vector<CBLSSecretKey>> contributions;
+    std::shared_ptr<CBLSIESMultiRecipientObjects<CBLSSecretKey>> contributions;
     CBLSSignature sig;
 
 public:
@@ -56,7 +56,7 @@ public:
     inline void Unserialize(Stream& s)
     {
         std::vector<CBLSPublicKey> tmp1;
-        std::vector<CBLSSecretKey> tmp2;
+        CBLSIESMultiRecipientObjects<CBLSSecretKey> tmp2;
 
         s >> quorumHash;
         s >> proTxHash;
@@ -65,7 +65,7 @@ public:
         s >> sig;
 
         vvec = std::make_shared<std::vector<CBLSPublicKey>>(std::move(tmp1));
-        contributions = std::make_shared<std::vector<CBLSSecretKey>>(std::move(tmp2));
+        contributions = std::make_shared<CBLSIESMultiRecipientObjects<CBLSSecretKey>>(std::move(tmp2));
     }
 
     [[nodiscard]] uint256 GetSignHash() const
