@@ -19,11 +19,11 @@ class CEvoDB : public CDBWrapper {
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> mapCache;
     std::list<std::pair<K, V>> fifoList;
     std::unordered_set<K> setEraseCache;
-    mutable RecursiveMutex cs;
     size_t maxCacheSize{0};
     DBParams m_db_params;
     bool bFlushOnNextRead{false};
 public:
+    mutable RecursiveMutex cs;
     using CDBWrapper::CDBWrapper;
     explicit CEvoDB(const DBParams &db_params, size_t maxCacheSizeIn) : CDBWrapper(db_params), maxCacheSize(maxCacheSizeIn), m_db_params(db_params) {
     }

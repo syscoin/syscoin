@@ -98,23 +98,23 @@ int CQuorum::GetMemberIndex(const uint256& proTxHash) const
     return -1;
 }
 
-void CQuorum::WriteContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk)
+void CQuorum::WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk)
 {
     uint256 dbKey = MakeQuorumKey(*this);
     LOCK(cs);
     if (HasVerificationVector()) {
-        evoDb_vvec.WriteCache(dbKey, *quorumVvec);
+        evoDb_vvec->WriteCache(dbKey, *quorumVvec);
     }
     if (skShare.IsValid()) {
-        evoDb_sk.WriteCache(dbKey, skShare);
+        evoDb_sk->WriteCache(dbKey, skShare);
     }
 }
 
-bool CQuorum::ReadContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk)
+bool CQuorum::ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk)
 {
     uint256 dbKey = MakeQuorumKey(*this);
     std::vector<CBLSPublicKey> qv;
-    if (evoDb_vvec.ReadCache(dbKey, qv)) {
+    if (evoDb_vvec->ReadCache(dbKey, qv)) {
         WITH_LOCK(cs, quorumVvec = std::make_shared<std::vector<CBLSPublicKey>>(std::move(qv)));
     } else {
         return false;
@@ -122,7 +122,7 @@ bool CQuorum::ReadContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evo
 
     // We ignore the return value here as it is ok if this fails. If it fails, it usually means that we are not a
     // member of the quorum but observed the whole DKG process to have the quorum verification vector.
-    WITH_LOCK(cs, evoDb_sk.ReadCache(dbKey, skShare));
+    WITH_LOCK(cs, evoDb_sk->ReadCache(dbKey, skShare));
     return true;
 }
 
@@ -130,11 +130,11 @@ CQuorumManager::CQuorumManager(const DBParams& db_params_vvecs, const DBParams& 
     blsWorker(_blsWorker),
     dkgManager(_dkgManager),
     chainman(_chainman),
-    evoDb_vvec(db_params_vvecs, 10),
-    evoDb_sk(db_params_sk, 10)
+    evoDb_vvec(std::make_unique<CEvoDB<uint256, std::vector<CBLSPublicKey>>>(db_params_vvecs, QUORUM_CACHE_SIZE)),
+    evoDb_sk(std::make_unique<CEvoDB<uint256, CBLSSecretKey>>(db_params_sk, QUORUM_CACHE_SIZE))
 {
     quorumThreadInterrupt.reset();
-    vecQuorumsCache.reserve(10);
+    vecQuorumsCache.reserve(QUORUM_CACHE_SIZE);
 }
 
 void CQuorumManager::Start()
@@ -157,7 +157,6 @@ void CQuorumManager::UpdatedBlockTip(const CBlockIndex* pindexNew, bool fInitial
         return;
     }
     EnsureQuorumConnections(pindexNew);
-    //CleanupOldQuorumData(pindexNew);
 }
 
 void CQuorumManager::EnsureQuorumConnections(const CBlockIndex* pindexNew)
@@ -222,7 +221,7 @@ CQuorumPtr CQuorumManager::BuildQuorumFromCommitment(const CBlockIndex* pQuorumB
     }
     {
         LOCK(cs_quorums);
-        if(vecQuorumsCache.size() >= 10) {
+        if(vecQuorumsCache.size() >= QUORUM_CACHE_SIZE) {
             vecQuorumsCache.erase(vecQuorumsCache.begin());
         }
         vecQuorumsCache.emplace_back(quorum);
@@ -365,41 +364,47 @@ void CQuorumManager::StartCachePopulatorThread(const CQuorumCPtr pQuorum) const
     });
 }
 
+void CQuorumManager::DoMaintenance() {
+    {
+        LOCK(evoDb_vvec->cs);
+        if (evoDb_vvec->IsCacheFull()) {
+            DBParams db_params = evoDb_vvec->GetDBParams();
+            // Create copies of the current caches
+            auto mapCacheCopy = evoDb_vvec->GetMapCacheCopy();
+            auto eraseCacheCopy = evoDb_vvec->GetEraseCacheCopy();
 
-static void DataCleanupHelper(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk, std::set<uint256> skip_list)
-{
-    for (const auto& prefix : skip_list) {
-        evoDb_vvec.EraseCache(prefix);
-        evoDb_sk.EraseCache(prefix);
-        LogPrint(BCLog::LLMQ, "CQuorumManager::%s removed %d\n", __func__, skip_list.size());
+            db_params.wipe_data = true; // Set the wipe_data flag to true
+            evoDb_vvec.reset(); // Destroy the current instance
+            
+            evoDb_vvec = std::make_unique<CEvoDB<uint256, std::vector<CBLSPublicKey>>>(db_params, QUORUM_CACHE_SIZE);
+            // Restore the caches from the copies
+            evoDb_vvec->RestoreCaches(mapCacheCopy, eraseCacheCopy);
+            LogPrint(BCLog::SYS, "CQuorumManager::DoMaintenance evoDb_vvec Database successfully wiped and recreated.\n");
+        }
     }
-}
+    {
+        LOCK(evoDb_sk->cs);
+        if (evoDb_sk->IsCacheFull()) {
+            DBParams db_params = evoDb_sk->GetDBParams();
+            // Create copies of the current caches
+            auto mapCacheCopy = evoDb_sk->GetMapCacheCopy();
+            auto eraseCacheCopy = evoDb_sk->GetEraseCacheCopy();
 
-
-
-void CQuorumManager::CleanupOldQuorumData(const CBlockIndex* pIndex)
-{
-    if (!fMasternodeMode || pIndex == nullptr || (pIndex->nHeight % 576 != 0)) {
-        return;
+            db_params.wipe_data = true; // Set the wipe_data flag to true
+            evoDb_sk.reset(); // Destroy the current instance
+            evoDb_sk = std::make_unique<CEvoDB<uint256, CBLSSecretKey>>(db_params, QUORUM_CACHE_SIZE);
+            // Restore the caches from the copies
+            evoDb_sk->RestoreCaches(mapCacheCopy, eraseCacheCopy);
+            LogPrint(BCLog::SYS, "CQuorumManager::DoMaintenance evoDb_sk Database successfully wiped and recreated.\n");
+        }
     }
-
-    std::set<uint256> dbKeys;
-
-    LogPrint(BCLog::LLMQ, "CQuorumManager::%s -- start\n", __func__);
-
-
-    const auto vecQuorums = ScanQuorums(pIndex, Params().GetConsensus().llmqTypeChainLocks.keepOldConnections);
-    for (const auto& pQuorum : vecQuorums) {
-        dbKeys.insert(MakeQuorumKey(*pQuorum));
-    }
-    
-
-    DataCleanupHelper(evoDb_vvec, evoDb_sk, dbKeys);
-
-    LogPrint(BCLog::LLMQ, "CQuorumManager::%d -- done\n", __func__);
 }
 bool CQuorumManager::FlushCacheToDisk() {
-    return evoDb_vvec.FlushCacheToDisk() && evoDb_sk.FlushCacheToDisk();
+    DoMaintenance();
+    {
+        LOCK2(evoDb_vvec->cs, evoDb_sk->cs);
+        return evoDb_vvec->FlushCacheToDisk() && evoDb_sk->FlushCacheToDisk();
+    }
 }
 
 

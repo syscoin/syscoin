@@ -80,8 +80,8 @@ public:
     CBLSSecretKey GetSkShare() const;
 
 private:
-    void WriteContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk);
-    bool ReadContributions(CEvoDB<uint256, std::vector<CBLSPublicKey>>& evoDb_vvec, CEvoDB<uint256, CBLSSecretKey>& evoDb_sk);
+    void WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk);
+    bool ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk);
 };
 
 /**
@@ -100,10 +100,11 @@ private:
     mutable std::vector<CQuorumCPtr> vecQuorumsCache GUARDED_BY(cs_quorums);
     mutable ctpl::thread_pool workerPool;
     mutable CThreadInterrupt quorumThreadInterrupt;
+    static constexpr int QUORUM_CACHE_SIZE = 10;
 
 public:
-    CEvoDB<uint256, std::vector<CBLSPublicKey>> evoDb_vvec;
-    CEvoDB<uint256, CBLSSecretKey> evoDb_sk;
+    std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>> evoDb_vvec;
+    std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>> evoDb_sk;
     explicit CQuorumManager(const DBParams& db_params_vvecs, const DBParams& db_params_sk, CBLSWorker& _blsWorker, CDKGSessionManager& _dkgManager, ChainstateManager& _chainman);
     ~CQuorumManager() { Stop(); };
 
@@ -123,6 +124,7 @@ public:
     std::vector<CQuorumCPtr> ScanQuorums(const CBlockIndex* pindexStart, size_t nCountRequested);
     bool FlushCacheToDisk();
 private:
+    void DoMaintenance();
     std::vector<CQuorumCPtr>::iterator FindQuorumByHash(const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(cs_quorums);
     // all private methods here are cs_main-free
     void EnsureQuorumConnections(const CBlockIndex *pindexNew);
@@ -132,7 +134,6 @@ private:
 
     CQuorumCPtr GetQuorum(const CBlockIndex* pindex);
     void StartCachePopulatorThread(const CQuorumCPtr pQuorum) const;
-    void CleanupOldQuorumData(const CBlockIndex* pIndex);
 };
 
 extern CQuorumManager* quorumManager;
