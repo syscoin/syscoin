@@ -52,11 +52,6 @@ public:
         return strMessage.c_str();
     }
 
-    const std::string& GetMessage() const
-    {
-        return strMessage;
-    }
-
     governance_exception_type_enum_t GetType() const
     {
         return eType;
