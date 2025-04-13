@@ -61,17 +61,22 @@ private:
     // the public key shares are ready when needed later
     mutable CBLSWorkerCache blsCache;
 
-    mutable RecursiveMutex cs;
+    mutable RecursiveMutex cs_vvec_shShare;
     // These are only valid when we either participated in the DKG or fully watched it
-    BLSVerificationVectorPtr quorumVvec GUARDED_BY(cs);
-    CBLSSecretKey skShare GUARDED_BY(cs);
+    BLSVerificationVectorPtr quorumVvec GUARDED_BY(cs_vvec_shShare);
+    CBLSSecretKey skShare GUARDED_BY(cs_vvec_shShare);
 
 public:
     CQuorum(CBLSWorker& _blsWorker);
     ~CQuorum() = default;
     void Init(CFinalCommitmentPtr _qc, const CBlockIndex* _pQuorumBaseBlockIndex, const uint256& _minedBlockHash, const std::vector<CDeterministicMNCPtr>& _members);
 
-    bool HasVerificationVector() const;
+    void SetVerificationVector(BLSVerificationVectorPtr vvec_in) {
+        LOCK(cs_vvec_shShare);
+        quorumVvec = std::move(vvec_in);
+    }
+    bool SetSecretKeyShare(const CBLSSecretKey& secretKeyShare);
+    bool HasVerificationVector() const LOCKS_EXCLUDED(cs_vvec_shShare);
     bool IsMember(const uint256& proTxHash) const;
     bool IsValidMember(const uint256& proTxHash) const;
     int GetMemberIndex(const uint256& proTxHash) const;
@@ -80,6 +85,7 @@ public:
     CBLSSecretKey GetSkShare() const;
 
 private:
+    bool HasVerificationVectorInternal() const EXCLUSIVE_LOCKS_REQUIRED(cs_vvec_shShare);
     void WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk);
     bool ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk);
 };
