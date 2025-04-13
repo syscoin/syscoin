@@ -1753,8 +1753,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                   MIN_BLOCKS_TO_KEEP);
             }
             int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight());
-            if (llmq::CLLMQUtils::IsV19Active(nHeight))
+            if (llmq::CLLMQUtils::IsV19Active(nHeight)) {
                 bls::bls_legacy_scheme.store(false);
+                LogPrintf("BLS scheme - Basic\n");
+            } else {
+                LogPrintf("BLS scheme - Legacy\n");
+            }
             std::tie(status, error) = catch_exceptions([&]{ return VerifyLoadedChainstate(chainman, options);});
             if (status == node::ChainstateLoadStatus::SUCCESS) {
                 fLoaded = true;

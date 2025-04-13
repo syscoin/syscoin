@@ -152,8 +152,9 @@ bool CQuorumBlockProcessor::ProcessBlock(const CBlock& block, const CBlockIndex*
 {
     AssertLockHeld(cs_main);
     
-    if (CLLMQUtils::IsV19Active(pindex->pprev->nHeight))
+    if (CLLMQUtils::IsV19Active(pindex->pprev->nHeight) && bls::bls_legacy_scheme.load()) {
         bls::bls_legacy_scheme.store(false);
+    }
     bool fDIP0003Active = pindex->nHeight >= Params().GetConsensus().DIP0003Height;
     bool fNexusActive = pindex->nHeight >= Params().GetConsensus().nNexusStartBlock;
     if (!fNexusActive || !fDIP0003Active) {
