@@ -1772,7 +1772,8 @@ bool CConnman::AttemptToEvictConnection()
     LOCK(m_nodes_mutex);
     for (CNode* pnode : m_nodes) {
         if (pnode->GetId() == *node_id_to_evict) {
-            LogPrint(BCLog::NET, "selected %s connection for eviction peer=%d; disconnecting\n", pnode->ConnectionTypeAsString(), pnode->GetId());
+            // SYSCOIN
+            LogPrint(BCLog::NET_NETCONN, "selected %s connection for eviction peer=%d; disconnecting\n", pnode->ConnectionTypeAsString(), pnode->GetId());
             pnode->fDisconnect = true;
             return true;
         }
@@ -1842,7 +1843,8 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     }
 
     if (!fNetworkActive) {
-        LogPrint(BCLog::NET, "connection from %s dropped: not accepting new connections\n", addr.ToStringAddrPort());
+        // SYSCOIN
+        LogPrint(BCLog::NET_NETCONN, "connection from %s dropped: not accepting new connections\n", addr.ToStringAddrPort());
         return;
     }
 
@@ -1926,8 +1928,8 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                              });
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, nodeServices);
-
-    LogPrint(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
+    // SYSCOIN
+    LogPrint(BCLog::NET_NETCONN, "connection from %s accepted\n", addr.ToStringAddrPort());
 
     {
         LOCK(m_nodes_mutex);
@@ -2960,7 +2962,7 @@ void CConnman::ThreadOpenMasternodeConnections()
                                 if (pnode->nTimeFirstMessageReceived != 0 && nTimeSeconds - pnode->nTimeFirstMessageReceived > 5) {
                                     // clearly not expecting mnauth to take that long even if it wasn't the first message
                                     // we received (as it should normally), disconnect
-                                    LogPrint(BCLog::NET, "CConnman::%s -- dropping non-mnauth connection to %s, service=%s\n", _func_, proRegTxHash.ToString(), addr2.ToStringAddrPort());
+                                    LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- dropping non-mnauth connection to %s, service=%s\n", _func_, proRegTxHash.ToString(), addr2.ToStringAddrPort());
                                     pnode->fDisconnect = true;
                                 }
                             }
@@ -3017,7 +3019,7 @@ void CConnman::ThreadOpenMasternodeConnections()
                 auto dmn = mnList.GetValidMN(vPendingMasternodes.front());
                 vPendingMasternodes.erase(vPendingMasternodes.begin());
                 if (dmn && !connectedNodes.count(dmn->pdmnState->addr) && !IsMasternodeOrDisconnectRequested(dmn->pdmnState->addr)) {
-                    LogPrint(BCLog::NET, "CConnman::%s -- opening pending masternode connection to %s, service=%s\n", _func_, dmn->proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
+                    LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- opening pending masternode connection to %s, service=%s\n", _func_, dmn->proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                     return dmn;
                 }
             }
@@ -3025,7 +3027,7 @@ void CConnman::ThreadOpenMasternodeConnections()
             if (const auto pending = getPendingQuorumNodes(); !pending.empty()) {
                 // not-null
                 auto dmn = pending[GetRand(pending.size())];
-                LogPrint(BCLog::NET, "CConnman::%s -- opening quorum connection to %s, service=%s\n",
+                LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- opening quorum connection to %s, service=%s\n",
                          _func_, dmn->proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 return dmn;
             }
@@ -3036,7 +3038,7 @@ void CConnman::ThreadOpenMasternodeConnections()
                 masternodePendingProbes.erase(dmn->proTxHash);
                 isProbe = MasternodeProbeConn::Is_Connection;
 
-                LogPrint(BCLog::NET, "CConnman::%s -- probing masternode %s, service=%s\n", _func_, dmn->proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
+                LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- probing masternode %s, service=%s\n", _func_, dmn->proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 return dmn;
             }
             return nullptr;
@@ -3058,10 +3060,10 @@ void CConnman::ThreadOpenMasternodeConnections()
         // should be in the list now if connection was opened
         CNode* pnode = FindNode(connectToDmn->pdmnState->addr);
         if(!pnode) {
-            LogPrint(BCLog::NET, "CConnman::%s -- connection failed for masternode  %s, service=%s\n", __func__, connectToDmn->proTxHash.ToString(), connectToDmn->pdmnState->addr.ToStringAddrPort());
+            LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- connection failed for masternode  %s, service=%s\n", __func__, connectToDmn->proTxHash.ToString(), connectToDmn->pdmnState->addr.ToStringAddrPort());
             // Will take a few consequent failed attempts to PoSe-punish a MN.
             if (mmetaman->GetMetaInfo(connectToDmn->proTxHash)->OutboundFailedTooManyTimes()) {
-                LogPrint(BCLog::NET, "CConnman::%s -- failed to connect to masternode %s too many times\n", __func__, connectToDmn->proTxHash.ToString());
+                LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- failed to connect to masternode %s too many times\n", __func__, connectToDmn->proTxHash.ToString());
             }
         }
     }
@@ -3199,17 +3201,18 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     } else if (FindNode(std::string(pszDest))) {
         return;
     }
-    LogPrint(BCLog::NET, "CConnman::%s -- connecting to %s\n", __func__, getIpStr());
+    // SYSCOIN
+    LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- connecting to %s\n", __func__, getIpStr());
     CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport);
     // SYSCOIN
     if (!pnode) {
-        LogPrint(BCLog::NET, "CConnman::%s -- ConnectNode failed for %s\n", __func__, getIpStr());
+        LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- ConnectNode failed for %s\n", __func__, getIpStr());
         return;
     }
 
     {
         LOCK(pnode->m_sock_mutex);
-        LogPrint(BCLog::NET, "CConnman::%s -- successfully connected to %s, sock=%d, peer=%d\n", __func__, getIpStr(), pnode->m_sock->Get(), pnode->GetId());
+        LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- successfully connected to %s, sock=%d, peer=%d\n", __func__, getIpStr(), pnode->m_sock->Get(), pnode->GetId());
     }
 
     pnode->grantOutbound = std::move(grant_outbound);
@@ -4043,7 +4046,8 @@ bool CConnman::DisconnectNode(const std::string& strNode)
 {
     LOCK(m_nodes_mutex);
     if (CNode* pnode = FindNode(strNode)) {
-        LogPrint(BCLog::NET, "disconnect by address%s matched peer=%d; disconnecting\n", (fLogIPs ? strprintf("=%s", strNode) : ""), pnode->GetId());
+        // SYSCOIN
+        LogPrint(BCLog::NET_NETCONN, "disconnect by address%s matched peer=%d; disconnecting\n", (fLogIPs ? strprintf("=%s", strNode) : ""), pnode->GetId());
         pnode->fDisconnect = true;
         return true;
     }
@@ -4056,7 +4060,8 @@ bool CConnman::DisconnectNode(const CSubNet& subnet)
     LOCK(m_nodes_mutex);
     for (CNode* pnode : m_nodes) {
         if (subnet.Match(pnode->addr)) {
-            LogPrint(BCLog::NET, "disconnect by subnet%s matched peer=%d; disconnecting\n", (fLogIPs ? strprintf("=%s", subnet.ToString()) : ""), pnode->GetId());
+            // SYSCOIN
+            LogPrint(BCLog::NET_NETCONN, "disconnect by subnet%s matched peer=%d; disconnecting\n", (fLogIPs ? strprintf("=%s", subnet.ToString()) : ""), pnode->GetId());
             pnode->fDisconnect = true;
             disconnected = true;
         }

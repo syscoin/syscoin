@@ -80,6 +80,10 @@ namespace BCLog {
         TXRECONCILIATION = (uint64_t)(1ULL << 37),
         SCAN        = (uint64_t)(1ULL << 38),
         TXPACKAGES  = (uint64_t)(1ULL << 39),
+        NETCONN     = ((uint64_t)1ULL << 40),
+        DASH        = CHAINLOCKS | GOBJECT | LLMQ | LLMQ_DKG
+        | LLMQ_SIGS | MNPAYMENTS | MNSYNC | SPORK | NETCONN,
+        NET_NETCONN = NET | NETCONN,
         ALL         = ~(uint64_t)0,
     };
     enum class Level {

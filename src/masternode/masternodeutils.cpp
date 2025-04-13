@@ -68,9 +68,9 @@ void CMasternodeUtils::ProcessMasternodeConnections(CConnman& connman)
             }
         }
         if (fLogIPs) {
-            LogPrint(BCLog::NET, "Closing Masternode connection: peer=%d, addr=%s\n", pnode->GetId(), pnode->addr.ToStringAddr());
+            LogPrint(BCLog::NET_NETCONN, "Closing Masternode connection: peer=%d, addr=%s\n", pnode->GetId(), pnode->addr.ToStringAddr());
         } else {
-            LogPrint(BCLog::NET, "Closing Masternode connection: peer=%d\n", pnode->GetId());
+            LogPrint(BCLog::NET_NETCONN, "Closing Masternode connection: peer=%d\n", pnode->GetId());
         }
         pnode->fDisconnect = true;
     });

@@ -215,9 +215,13 @@ bool CLLMQUtils::EnsureQuorumConnections(const CBlockIndex *pQuorumBaseBlockInde
         return false;
     }
 
+    LogPrint(BCLog::NET_NETCONN, "%s -- isMember=%d for quorum %s:\n",
+        __func__, isMember, pQuorumBaseBlockIndex->GetBlockHash().ToString());
+
     std::set<uint256> connections;
     std::set<uint256> relayMembers;
     if (isMember) {
+
         connections = CLLMQUtils::GetQuorumConnections(pQuorumBaseBlockIndex, myProTxHash, true);
         relayMembers = CLLMQUtils::GetQuorumRelayMembers(pQuorumBaseBlockIndex, myProTxHash, true);
     } else {
@@ -239,7 +243,7 @@ bool CLLMQUtils::EnsureQuorumConnections(const CBlockIndex *pQuorumBaseBlockInde
                     debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 }
             }
-            LogPrint(BCLog::NET, "%s\n", debugMsg.c_str());
+            LogPrint(BCLog::NET_NETCONN, "%s\n", debugMsg.c_str());
         }
         connman.SetMasternodeQuorumNodes(pQuorumBaseBlockIndex->GetBlockHash(), connections);
     }
@@ -289,7 +293,7 @@ void CLLMQUtils::AddQuorumProbeConnections(const CBlockIndex *pQuorumBaseBlockIn
                     debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 }
             }
-            LogPrint(BCLog::NET, "%s\n", debugMsg.c_str());
+            LogPrint(BCLog::NET_NETCONN, "%s\n", debugMsg.c_str());
         }
         connman.AddPendingProbeConnections(probeConnections);
     }
