@@ -79,12 +79,23 @@ void CDKGSessionManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         && strCommand != NetMsgType::QWATCH) {
         return;
     }
-
+    PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
     if (strCommand == NetMsgType::QWATCH) {
+        if (!fMasternodeMode) {
+            // non-masternodes should never receive this
+            if(peer)
+                peerman.Misbehaving(*peer, 10, "Non-MN cannot recv qwatch");
+            return;
+        }
         pfrom->qwatch = true;
         return;
     }
-    PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
+    if ((!fMasternodeMode && !llmq::CLLMQUtils::IsWatchQuorumsEnabled())) {
+        // regular non-watching nodes should never receive any of these
+        if(peer)
+            peerman.Misbehaving(*peer, 10, "Non-watcher cannot recv qwatch");
+        return;
+    }
     if (vRecv.empty()) {
         if(peer)
             peerman.Misbehaving(*peer, 100, "invalid recv size for DKG session");
