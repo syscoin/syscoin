@@ -19,19 +19,17 @@
 #include <cxxtimer.hpp>
 #include <memory>
 #include <net_processing.h>
-#include <batchedlogger.h>
 
 namespace llmq
 {
-class CDKGLogger : public CBatchedLogger
-{
-public:
-    CDKGLogger(const CDKGSession& _quorumDkg, std::string_view _func, int source_line) :
-        CDKGLogger(_quorumDkg.m_quorum_base_block_index->GetBlockHash(), _quorumDkg.m_quorum_base_block_index->nHeight, _quorumDkg.AreWeMember(), _func, source_line){};
-    CDKGLogger(const uint256& _quorumHash, int _height, bool _areWeMember, std::string_view _func, int source_line) :
-        CBatchedLogger(BCLog::LLMQ_DKG, strprintf("QuorumDKG(h=%d, member=%d)", _height, _areWeMember), __FILE__, source_line){};
-};
 
+CDKGLogger::CDKGLogger(const CDKGSession& _quorumDkg, std::string_view _func, int source_line) :
+    CBatchedLogger(BCLog::LLMQ_DKG, BCLog::Level::Debug,
+                   strprintf("QuorumDKG(h=%d, member=%d)",
+                             _quorumDkg.m_quorum_base_block_index->nHeight, _quorumDkg.AreWeMember()),
+                   __FILE__, source_line)
+{
+}
 static std::array<std::atomic<double>, DKGError::type::_COUNT> simDkgErrorMap{};
 
 void SetSimulatedDKGErrorRate(DKGError::type type, double rate)

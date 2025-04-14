@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_DKGSESSION_H
 #define SYSCOIN_LLMQ_QUORUMS_DKGSESSION_H
 
+#include <batchedlogger.h>
 #include <bls/bls.h>
 #include <bls/bls_ies.h>
 #include <bls/bls_worker.h>
@@ -232,6 +233,12 @@ public:
         if (in == "justify-omit") return JUSTIFY_OMIT;
         return _COUNT;
     }
+};
+
+class CDKGLogger : public CBatchedLogger
+{
+public:
+    CDKGLogger(const CDKGSession& _quorumDkg, std::string_view _func, int source_line);
 };
 
 /**
