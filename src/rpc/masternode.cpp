@@ -563,7 +563,8 @@ RPCHelpMan masternodelist()
             objMN.pushKV("address", dmn.pdmnState->addr.ToStringAddrPort());
             objMN.pushKV("payee", payeeStr);
             objMN.pushKV("status", dmnToStatus(dmn));
-            objMN.pushKV("collateralblock", dmn.pdmnState->nCollateralHeight);
+            objMN.pushKV("collateralheight", dmn.pdmnState->nCollateralHeight);
+            objMN.pushKV("registeredheight", dmn.pdmnState->nRegisteredHeight);
             objMN.pushKV("lastpaidtime", dmnToLastPaidTime(dmn));
             objMN.pushKV("lastpaidblock", dmn.pdmnState->nLastPaidHeight);
             objMN.pushKV("owneraddress", EncodeDestination(WitnessV0KeyHash(dmn.pdmnState->keyIDOwner)));
@@ -599,7 +600,7 @@ RPCHelpMan masternodelist()
         } else if (strMode == "nevmaddress") {
             if (strFilter !="" && strOutpoint.find(strFilter) == std::string::npos) return;
             obj.pushKV(strOutpoint, dmn.pdmnState->vchNEVMAddress.empty()? "": "0x" + HexStr(dmn.pdmnState->vchNEVMAddress));
-        }  
+        }
     });
 
     return obj;
