@@ -241,6 +241,8 @@ std::vector<CDeterministicMNCPtr> CDeterministicMNList::CalculateQuorum(size_t m
 std::vector<std::pair<arith_uint256, CDeterministicMNCPtr>> CDeterministicMNList::CalculateScores(const uint256& modifier) const
 {
     static const int TESTNET_MIN_REGISTRATION_HEIGHT = 1000000;
+    int nAllowedLegacyNodes = 25;
+    int nLegacyNodeCount = 0;
     std::vector<std::pair<arith_uint256, CDeterministicMNCPtr>> scores;
     scores.reserve(GetAllMNsCount());
     ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
@@ -251,12 +253,14 @@ std::vector<std::pair<arith_uint256, CDeterministicMNCPtr>> CDeterministicMNList
         }
         // remove old defunct nodes on testnet
          if(fTestNet && dmn->pdmnState->nRegisteredHeight < TESTNET_MIN_REGISTRATION_HEIGHT) {
-            // Assign the highest possible score to effectively exclude this node from selection
-            // if enough newer nodes exist.
-            LogPrint(BCLog::MNLIST, "CDeterministicMNList::%s -- Assigning max score to testnet MN %s (registered height %d < %d)\n",
-                     __func__, dmn->proTxHash.ToString(), dmn->pdmnState->nRegisteredHeight, TESTNET_MIN_REGISTRATION_HEIGHT);
-            scores.emplace_back(UintToArith256(std::numeric_limits<uint256>::max()), dmn);
-            return;
+            nLegacyNodeCount++;
+            if(nLegacyNodeCount > nAllowedLegacyNodes) {
+                // Assign the lowest possible score (0) to deprioritize with descending sort
+                LogPrint(BCLog::MNLIST, "CDeterministicMNList::%s -- Assigning score 0 to testnet MN %s (registered height %d < %d) due to limit %d\n",
+                        __func__, dmn->proTxHash.ToString(), dmn->pdmnState->nRegisteredHeight, TESTNET_MIN_REGISTRATION_HEIGHT, nAllowedLegacyNodes);
+                scores.emplace_back(arith_uint256(0), dmn);
+                return; // Skip normal calculation
+            }
          }
         // calculate sha256(sha256(proTxHash, confirmedHash), modifier) per MN
         // Please note that this is not a double-sha256 but a single-sha256
