@@ -29,16 +29,19 @@ CMasternodeSync::CMasternodeSync() :
 void CMasternodeSync::Reset(bool fForce, bool fNotifyReset)
 {
     // Avoid resetting the sync process if we just "recently" received a new block
-    if (fForce || (GetTime() - GetLastUpdateBlockTip() > MASTERNODE_SYNC_RESET_SECONDS)) {
-        SetSyncMode(MASTERNODE_SYNC_BLOCKCHAIN);
-        nTriedPeerCount = 0;
-        nTimeAssetSyncStarted = GetTime();
-        nTimeLastBumped = GetTime();
-        nTimeLastUpdateBlockTip = 0;
-        fReachedBestHeader = false;
-        if (fNotifyReset) {
-            uiInterface.NotifyAdditionalDataSyncProgressChanged(-1);
+    if (!fForce) {
+        if (GetTime() - nTimeLastUpdateBlockTip < MASTERNODE_SYNC_RESET_SECONDS) {
+            return;
         }
+    }
+    nCurrentAsset = MASTERNODE_SYNC_BLOCKCHAIN;
+    nTriedPeerCount = 0;
+    nTimeAssetSyncStarted = GetTime();
+    nTimeLastBumped = GetTime();
+    nTimeLastUpdateBlockTip = 0;
+    fReachedBestHeader = false;
+    if (fNotifyReset) {
+        uiInterface.NotifyAdditionalDataSyncProgressChanged(-1);
     }
 }
 
@@ -362,7 +365,7 @@ void CMasternodeSync::UpdatedBlockTip(const CBlockIndex *pindexNew, ChainstateMa
     LogPrint(BCLog::MNSYNC, "CMasternodeSync::UpdatedBlockTip -- pindexNew->nHeight: %d fInitialDownload=%d\n", pindexNew->nHeight, fInitialDownload);
 
 
-    nTimeLastUpdateBlockTip = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+    nTimeLastUpdateBlockTip = GetTime<std::chrono::seconds>().count();
     CBlockIndex* pindexTip = WITH_LOCK(cs_main, return chainman.m_best_header);
 
     if (IsSynced() || !pindexTip || !pindexNew)

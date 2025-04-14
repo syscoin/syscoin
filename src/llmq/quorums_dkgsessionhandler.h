@@ -103,24 +103,24 @@ private:
     friend class CDKGSessionManager;
 
 private:
-    mutable RecursiveMutex cs;
+    mutable RecursiveMutex cs_phase_qhash;
     std::atomic<bool> stopRequested{false};
 
     CBLSWorker& blsWorker;
     CDKGSessionManager& dkgManager;
     ChainstateManager& chainman;
 
-    QuorumPhase phase GUARDED_BY(cs) {QuorumPhase_Idle};
-    int currentHeight GUARDED_BY(cs) {-1};
-    uint256 quorumHash GUARDED_BY(cs);
+    QuorumPhase phase GUARDED_BY(cs_phase_qhash) {QuorumPhase_Idle};
+    std::atomic<int> currentHeight {-1};
+    uint256 quorumHash GUARDED_BY(cs_phase_qhash);
 
     std::unique_ptr<CDKGSession> curSession;
     std::thread phaseHandlerThread;
 
-    CDKGPendingMessages pendingContributions GUARDED_BY(cs);
-    CDKGPendingMessages pendingComplaints GUARDED_BY(cs);
-    CDKGPendingMessages pendingJustifications GUARDED_BY(cs);
-    CDKGPendingMessages pendingPrematureCommitments GUARDED_BY(cs);
+    CDKGPendingMessages pendingContributions;
+    CDKGPendingMessages pendingComplaints;
+    CDKGPendingMessages pendingJustifications;
+    CDKGPendingMessages pendingPrematureCommitments;
     std::string m_threadName;
     PeerManager& peerman;
 public:
@@ -141,7 +141,7 @@ private:
 
     using StartPhaseFunc = std::function<void()>;
     using WhileWaitFunc = std::function<bool()>;
-    void WaitForNextPhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const;
+    void WaitForNextPhase(std::optional<QuorumPhase> curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const;
     void WaitForNewQuorum(const uint256& oldQuorumHash) const;
     void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const WhileWaitFunc& runWhileWaiting) const;
     void HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const StartPhaseFunc& startPhaseFunc, const WhileWaitFunc& runWhileWaiting);

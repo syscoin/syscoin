@@ -20,7 +20,6 @@
 
 class CScheduler;
 class CConnman;
-class BanMan;
 class PeerMan;
 namespace llmq
 {
@@ -379,10 +378,9 @@ private:
     int64_t lastCleanupTime{0};
     std::atomic<uint32_t> recoveredSigsCounter{0};
     CConnman& connman;
-    BanMan& banman;
     PeerManager& peerman;
 public:
-    CSigSharesManager(CConnman& connman, BanMan& banman, PeerManager& peerman);
+    CSigSharesManager(CConnman& connman, PeerManager& peerman);
     ~CSigSharesManager() override = default;
 
     void StartWorkerThread();

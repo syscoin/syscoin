@@ -266,7 +266,7 @@ void CLLMQUtils::AddQuorumProbeConnections(const CBlockIndex *pQuorumBaseBlockIn
     }
 
     auto members = GetAllQuorumMembers(pQuorumBaseBlockIndex);
-    auto curTime = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+    auto curTime = GetTime<std::chrono::seconds>().count();
 
     std::set<uint256> probeConnections;
     for (const auto& dmn : members) {
@@ -306,7 +306,7 @@ bool CLLMQUtils::IsQuorumActive(const uint256& quorumHash)
     // sig shares and recovered sigs are only accepted from recent/active quorums
     // we allow one more active quorum as specified in consensus, as otherwise there is a small window where things could
     // fail while we are on the brink of a new quorum
-    auto quorums = quorumManager->ScanQuorums((int)params.signingActiveQuorumCount + 1);
+    auto quorums = quorumManager->ScanQuorums(params.keepOldConnections);
     return ranges::any_of(quorums, [&quorumHash](const auto& q){ return q->qc->quorumHash == quorumHash; });
 }
 } // namespace llmq

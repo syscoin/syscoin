@@ -346,7 +346,7 @@ public:
     void ReceivedResponse(NodeId nodeId, const uint256& hash) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, ::cs_main);
     void ForgetTxHash(NodeId nodeId, const uint256& hash) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, ::cs_main);
     // SYSCOIN
-    bool IsBanned(NodeId nodeid, BanMan& banman) override;
+    bool IsBanned(NodeId nodeid) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     /** Get a shared pointer to the Peer object.
      *  May return an empty shared_ptr if the Peer object can't be found. */
     PeerRef GetPeerRef(NodeId id) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -1581,13 +1581,16 @@ bool PeerManagerImpl::GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) c
     return true;
 }
 // SYSCOIN
-bool PeerManagerImpl::IsBanned(NodeId nodeid, BanMan& banman) {
-    LOCK(cs_main);
-    CNodeState *state = State(nodeid);
-    if (state == nullptr)
+bool PeerManagerImpl::IsBanned(NodeId pnode)
+{
+    PeerRef peer = GetPeerRef(pnode);
+    if (peer == nullptr)
         return false;
-
-    return banman.IsBanned(state->address);
+    LOCK(peer->m_misbehavior_mutex);
+    if (peer->m_should_discourage) {
+        return true;
+    }
+    return false;
 }
 void PeerManagerImpl::AddToCompactExtraTransactions(const CTransactionRef& tx)
 {
@@ -3914,9 +3917,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
     // SYSCOIN
-    if (pfrom.nTimeFirstMessageReceived == 0 && msg_type != NetMsgType::WTXIDRELAY && msg_type != NetMsgType::SENDADDRV2) {
+    if (pfrom.nTimeFirstMessageReceived.load() == 0s && msg_type != NetMsgType::WTXIDRELAY && msg_type != NetMsgType::SENDADDRV2) {
         // First message after VERSION/VERACK it can be sendaddrv2 or wtxidrelay as well which happen in parallel
-        pfrom.nTimeFirstMessageReceived = GetTime<std::chrono::seconds>().count();
+        pfrom.nTimeFirstMessageReceived = GetTime<std::chrono::seconds>();
         pfrom.fFirstMessageIsMNAUTH = msg_type == NetMsgType::MNAUTH;
         // Note: do not break the flow here
 

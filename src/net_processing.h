@@ -331,7 +331,7 @@ public:
     virtual void PushTxInventoryOther(Peer& peer, const CInv& inv) = 0;
     virtual PeerRef GetPeerRef(NodeId id) const = 0;
     virtual void AddKnownTx(Peer& peer, const uint256& hash) = 0;
-    virtual bool IsBanned(NodeId nodeid, BanMan& banman) = 0;
+    virtual bool IsBanned(NodeId nodeid) = 0;
     /* Public for unit testing. */
     virtual void UnitTestMisbehaving(NodeId peer_id, int howmuch) = 0;
     // SYSCOIN

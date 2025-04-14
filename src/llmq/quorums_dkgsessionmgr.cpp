@@ -111,7 +111,6 @@ bool CDKGSessionManager::AlreadyHave(const uint256& hash) const
         return false;
     
     
-    LOCK(dkgSessionHandler->cs);   
     if (dkgSessionHandler->pendingContributions.HasSeen(hash)
         || dkgSessionHandler->pendingComplaints.HasSeen(hash)
         || dkgSessionHandler->pendingJustifications.HasSeen(hash)
@@ -128,7 +127,7 @@ bool CDKGSessionManager::GetContribution(const uint256& hash, CDKGContribution& 
         return false;
 
     
-    LOCK(dkgSessionHandler->cs);
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Initialized || dkgSessionHandler->phase > QuorumPhase_Contribute) {
         return false;
     }
@@ -147,7 +146,7 @@ bool CDKGSessionManager::GetComplaint(const uint256& hash, CDKGComplaint& ret) c
         return false;
 
     
-    LOCK(dkgSessionHandler->cs);
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Contribute || dkgSessionHandler->phase > QuorumPhase_Complain) {
         return false;
     }
@@ -166,7 +165,7 @@ bool CDKGSessionManager::GetJustification(const uint256& hash, CDKGJustification
         return false;
 
     
-    LOCK(dkgSessionHandler->cs);
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Complain || dkgSessionHandler->phase > QuorumPhase_Justify) {
         return false;
     }
@@ -186,7 +185,7 @@ bool CDKGSessionManager::GetPrematureCommitment(const uint256& hash, CDKGPrematu
 
 
     
-    LOCK(dkgSessionHandler->cs);
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Justify || dkgSessionHandler->phase > QuorumPhase_Commit) {
         return false;
     }

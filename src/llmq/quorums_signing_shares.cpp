@@ -16,7 +16,6 @@
 #include <spork.h>
 #include <timedata.h>
 #include <cxxtimer.hpp>
-#include <banman.h>
 #include <util/thread.h>
 #include <logging.h>
 namespace llmq
@@ -180,7 +179,7 @@ void CSigSharesNodeState::RemoveSession(const uint256& signHash)
 
 //////////////////////
 
-CSigSharesManager::CSigSharesManager(CConnman& _connman, BanMan& _banman, PeerManager& _peerman): connman(_connman), banman(_banman), peerman(_peerman)
+CSigSharesManager::CSigSharesManager(CConnman& _connman, PeerManager& _peerman): connman(_connman), peerman(_peerman)
 {
     workInterrupt.reset();
 }
@@ -605,7 +604,14 @@ void CSigSharesManager::CollectPendingSigSharesToVerify(
             }
 
             CQuorumCPtr quorum = quorumManager->GetQuorum(sigShare.quorumHash);
-            assert(quorum != nullptr);
+           // Despite constructing a convenience map, we assume that the quorum *must* be present.
+            // The absence of it might indicate an inconsistent internal state, so we should report
+            // nothing instead of reporting flawed data.
+            if (!quorum) {
+                LogPrintf("%s: ERROR! Unexpected missing quorum with quorumHash=%s\n", __func__,
+                          sigShare.quorumHash.ToString());
+                return;
+            }
             retQuorums.try_emplace(sigShare.quorumHash, quorum);
         }
     }
@@ -721,7 +727,7 @@ void CSigSharesManager::ProcessSigShare(const CSigShare& sigShare, const CQuorum
         }
 
         // Update the time we've seen the last sigShare
-        timeSeenForSessions[sigShare.GetSignHash()] = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+        timeSeenForSessions[sigShare.GetSignHash()] = GetTime<std::chrono::seconds>().count();
 
         if (!quorumNodes.empty()) {
             // don't announce and wait for other nodes to request this share and directly send it to them
@@ -827,7 +833,7 @@ void CSigSharesManager::CollectSigSharesToRequest(std::unordered_map<NodeId, std
 {
     AssertLockHeld(cs);
 
-    int64_t now = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+    int64_t now = GetTime<std::chrono::seconds>().count();
     const size_t maxRequestsForNode = 32;
 
     // avoid requesting from same nodes all the time
@@ -1247,7 +1253,7 @@ CSigShare CSigSharesManager::RebuildSigShare(const CSigSharesNodeState::SessionI
 
 void CSigSharesManager::Cleanup()
 {
-    const int64_t now = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+    const int64_t now = GetTime<std::chrono::seconds>().count();
     if (now - lastCleanupTime < 5) {
         return;
     }
@@ -1371,7 +1377,7 @@ void CSigSharesManager::Cleanup()
         nodeStates.erase(nodeId);
     }
 
-    lastCleanupTime = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+    lastCleanupTime = GetTime<std::chrono::seconds>().count();
 }
 
 void CSigSharesManager::RemoveSigSharesForSession(const uint256& signHash)
@@ -1390,10 +1396,9 @@ void CSigSharesManager::RemoveSigSharesForSession(const uint256& signHash)
 void CSigSharesManager::RemoveBannedNodeStates()
 {
     // Called regularly to cleanup local node states for banned nodes
-
-    LOCK2(cs_main, cs);
+    LOCK(cs);
     for (auto it = nodeStates.begin(); it != nodeStates.end();) {
-        if (peerman.IsBanned(it->first, banman)) {
+        if (peerman.IsBanned(it->first)) {
             // re-request sigshares from other nodes
             it->second.requestedSigShares.ForEach([this](const SigShareKey& k, int64_t) {
                 LOCK(cs);

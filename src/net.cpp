@@ -1734,7 +1734,7 @@ bool CConnman::AttemptToEvictConnection()
                 // follow when the incoming connection is from another masternode. When a message other than MNAUTH
                 // is received after VERSION/VERACK, the protection is lifted immediately.
                 bool isProtected = (GetTime<std::chrono::seconds>() - node->m_connected) < INBOUND_EVICTION_PROTECTION_TIME;
-                if (node->nTimeFirstMessageReceived != 0 && !node->fFirstMessageIsMNAUTH) {
+                if (node->nTimeFirstMessageReceived.load() != 0s && !node->fFirstMessageIsMNAUTH) {
                     isProtected = false;
                 }
                 // if MNAUTH was valid, the node is always protected (and at the same time not accounted when
@@ -2897,13 +2897,13 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
         }
     }
 }
-
 void CConnman::ThreadOpenMasternodeConnections()
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     // Connecting to specific addresses, no masternode connections available
     if (gArgs.IsArgSet("-connect") && gArgs.GetArgs("-connect").size() > 0)
         return;
+
 
     auto& chainParams = Params();
 
@@ -2919,15 +2919,13 @@ void CConnman::ThreadOpenMasternodeConnections()
 
         didConnect = false;
 
-        if (!fNetworkActive || !masternodeSync.IsBlockchainSynced())
-            continue;
+        if (!fNetworkActive || !masternodeSync.IsBlockchainSynced()) continue;
 
-        std::set<CService> connectedNodes;
-        std::map<uint256 /*proTxHash*/, bool /*fInbound*/> connectedProRegTxHashes;
+        std::unordered_set<CService, CServiceHash> connectedNodes;
+        std::unordered_map<uint256 /*proTxHash*/, bool /*fInbound*/, StaticSaltedHasher> connectedProRegTxHashes;
         ForEachNode([&](const CNode* pnode) {
-            auto verifiedProRegTxHash = pnode->GetVerifiedProRegTxHash();
             connectedNodes.emplace(pnode->addr);
-            if (!verifiedProRegTxHash.IsNull()) {
+            if (auto verifiedProRegTxHash = pnode->GetVerifiedProRegTxHash(); !verifiedProRegTxHash.IsNull()) {
                 connectedProRegTxHashes.emplace(verifiedProRegTxHash, pnode->IsInboundConn());
             }
         });
@@ -2937,15 +2935,15 @@ void CConnman::ThreadOpenMasternodeConnections()
         if (interruptNet)
             return;
 
-        int64_t nANow = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
+        int64_t nANow = GetTime<std::chrono::seconds>().count();
         constexpr const auto &_func_ = __func__;
 
         // NOTE: Process only one pending masternode at a time
 
         MasternodeProbeConn isProbe = MasternodeProbeConn::Is_Not_Connection;
-        const auto &nTimeSeconds = GetTime<std::chrono::seconds>().count();
-        const auto &getPendingQuorumNodes = [&]() {
-            LOCK2(m_nodes_mutex, cs_vPendingMasternodes);
+
+        const auto getPendingQuorumNodes = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_vPendingMasternodes) {
+            AssertLockHeld(cs_vPendingMasternodes);
             std::vector<CDeterministicMNCPtr> ret;
             for (const auto& group : masternodeQuorumNodes) {
                 for (const auto& proRegTxHash : group.second) {
@@ -2955,35 +2953,36 @@ void CConnman::ThreadOpenMasternodeConnections()
                     }
                     const auto& addr2 = dmn->pdmnState->addr;
                     if (connectedNodes.count(addr2) && !connectedProRegTxHashes.count(proRegTxHash)) {
-                            // we probably connected to it before it became a masternode
-                            // or maybe we are still waiting for mnauth
-                            CNode* pnode = FindNode(addr2);
-                            if(pnode != nullptr) {
-                                if (pnode->nTimeFirstMessageReceived != 0 && nTimeSeconds - pnode->nTimeFirstMessageReceived > 5) {
-                                    // clearly not expecting mnauth to take that long even if it wasn't the first message
-                                    // we received (as it should normally), disconnect
-                                    LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- dropping non-mnauth connection to %s, service=%s\n", _func_, proRegTxHash.ToString(), addr2.ToStringAddrPort());
-                                    pnode->fDisconnect = true;
-                                }
+                        // we probably connected to it before it became a masternode
+                        // or maybe we are still waiting for mnauth
+                        (void)ForNode(addr2, [&](CNode* pnode) {
+                            if (pnode->nTimeFirstMessageReceived.load() != 0s && GetTime<std::chrono::seconds>() - pnode->nTimeFirstMessageReceived.load() > 5s) {
+                                // clearly not expecting mnauth to take that long even if it wasn't the first message
+                                // we received (as it should normally), disconnect
+                                LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- dropping non-mnauth connection to %s, service=%s\n", _func_, proRegTxHash.ToString(), addr2.ToStringAddrPort());
+                                pnode->fDisconnect = true;
+                                return true;
                             }
-                            // either way - it's not ready, skip it for now
+                            return false;
+                        });
+                        // either way - it's not ready, skip it for now
+                        continue;
+                    }
+                    if (!connectedNodes.count(addr2) && !IsMasternodeOrDisconnectRequested(addr2) && !connectedProRegTxHashes.count(proRegTxHash)) {
+                        int64_t lastAttempt = mmetaman->GetMetaInfo(dmn->proTxHash)->GetLastOutboundAttempt();
+                        // back off trying connecting to an address if we already tried recently
+                        if (nANow - lastAttempt < chainParams.LLMQConnectionRetryTimeout()) {
                             continue;
                         }
-                        if (!connectedNodes.count(addr2) && !IsMasternodeOrDisconnectRequested(addr2) && !connectedProRegTxHashes.count(proRegTxHash)) {
-                            int64_t lastAttempt = mmetaman->GetMetaInfo(dmn->proTxHash)->GetLastOutboundAttempt();
-                            // back off trying connecting to an address if we already tried recently
-                            if (nANow - lastAttempt < chainParams.LLMQConnectionRetryTimeout()) {
-                                continue;
-                            }
-                            ret.emplace_back(dmn);
-                        }
+                        ret.emplace_back(dmn);
                     }
                 }
+            }
             return ret;
         };
 
-        const auto &getPendingProbes = [&]() {
-            LOCK(cs_vPendingMasternodes);
+        const auto getPendingProbes = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_vPendingMasternodes) {
+            AssertLockHeld(cs_vPendingMasternodes);
             std::vector<CDeterministicMNCPtr> ret;
             for (auto it = masternodePendingProbes.begin(); it != masternodePendingProbes.end(); ) {
                 auto dmn = mnList.GetMN(*it);
@@ -3056,10 +3055,13 @@ void CConnman::ThreadOpenMasternodeConnections()
 
         OpenMasternodeConnection(CAddress(connectToDmn->pdmnState->addr, NODE_NETWORK), isProbe);
         // should be in the list now if connection was opened
-        LOCK(m_nodes_mutex);
-        // should be in the list now if connection was opened
-        CNode* pnode = FindNode(connectToDmn->pdmnState->addr);
-        if(!pnode) {
+        bool connected = ForNode(connectToDmn->pdmnState->addr, AllNodes, [&](CNode* pnode) {
+            if (pnode->fDisconnect) {
+                return false;
+            }
+            return true;
+        });
+        if (!connected) {
             LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- connection failed for masternode  %s, service=%s\n", __func__, connectToDmn->proTxHash.ToString(), connectToDmn->pdmnState->addr.ToStringAddrPort());
             // Will take a few consequent failed attempts to PoSe-punish a MN.
             if (mmetaman->GetMetaInfo(connectToDmn->proTxHash)->OutboundFailedTooManyTimes()) {
@@ -3898,6 +3900,7 @@ std::set<uint256> CConnman::GetMasternodeQuorums()
     for (const auto& p : masternodeQuorumNodes) {
         result.emplace(p.first);
     }
+    
     return result;
 }
 
@@ -4217,7 +4220,6 @@ CNode::CNode(NodeId idIn,
       m_sock{sock},
       m_connected{GetTime<std::chrono::seconds>()},
       // SYSCOIN
-      nTimeFirstMessageReceived{0},
       fFirstMessageIsMNAUTH{false},
       addr{addrIn},
       addrBind{addrBindIn},

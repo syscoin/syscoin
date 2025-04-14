@@ -5,7 +5,7 @@
 import time
 
 from test_framework.test_framework import DashTestFramework
-from test_framework.util import assert_equal, force_finish_mnsync, p2p_port, assert_raises_rpc_error
+from test_framework.util import force_finish_mnsync, p2p_port
 
 
 '''

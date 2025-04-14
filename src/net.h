@@ -751,7 +751,7 @@ public:
     const std::chrono::seconds m_connected;
     std::atomic<int64_t> nTimeOffset{0};
     // SYSCOIN
-    std::atomic<int64_t> nTimeFirstMessageReceived;
+    std::atomic<std::chrono::seconds> nTimeFirstMessageReceived;
     std::atomic<bool> fFirstMessageIsMNAUTH;
     // If 'true' this node will be disconnected on CMasternodeMan::ProcessMasternodeConnections()
     std::atomic<bool> m_masternode_connection;

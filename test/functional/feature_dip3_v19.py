@@ -86,7 +86,7 @@ class DIP3V19Test(DashTestFramework):
         self.log.info("Creating pre-v19 quorums")
         self.log.info("Mining 4 quorums")
         for i in range(4):
-            self.mine_quorum(mod5=True)
+            self.mine_quorum()
         self.wait_for_sporks_same()
         
         # Verify chainlocks are working pre-v19
@@ -147,7 +147,7 @@ class DIP3V19Test(DashTestFramework):
         self.log.info("Creating post-v19 quorums")
         self.log.info("Mining 4 quorums")
         for i in range(4):
-            self.mine_quorum(mod5=True)
+            self.mine_quorum()
         self.bump_mocktime(30)  # Give time for quorum processing
         
         # Mine blocks to ensure chainlocks
