@@ -4220,6 +4220,7 @@ CNode::CNode(NodeId idIn,
       m_sock{sock},
       m_connected{GetTime<std::chrono::seconds>()},
       // SYSCOIN
+      nTimeFirstMessageReceived{0s},
       fFirstMessageIsMNAUTH{false},
       addr{addrIn},
       addrBind{addrBindIn},
