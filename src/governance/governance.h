@@ -270,7 +270,7 @@ private:
     std::map<uint256, std::shared_ptr<CSuperblock>> mapTrigger;
 
 public:
-    const std::unique_ptr<CEvoDB<uint256, CAmount>> m_sb;
+    const std::unique_ptr<CEvoDB<uint256, CAmount, StaticSaltedHasher>> m_sb;
     explicit CGovernanceManager(ChainstateManager& _chainman);
     ~CGovernanceManager();
     bool FlushCacheToDisk();

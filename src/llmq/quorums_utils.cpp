@@ -117,11 +117,11 @@ uint256 CLLMQUtils::DeterministicOutboundConnection(const uint256& proTxHash1, c
     return proTxHash2;
 }
 
-std::set<uint256> CLLMQUtils::GetQuorumConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& forMember, bool onlyOutbound)
+std::unordered_set<uint256, StaticSaltedHasher> CLLMQUtils::GetQuorumConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& forMember, bool onlyOutbound)
 {
     if (IsAllMembersConnectedEnabled()) {
         auto mns = GetAllQuorumMembers(pQuorumBaseBlockIndex);
-        std::set<uint256> result;
+        std::unordered_set<uint256, StaticSaltedHasher> result;
 
         for (const auto& dmn : mns) {
             if (dmn->proTxHash == forMember) {
@@ -141,16 +141,16 @@ std::set<uint256> CLLMQUtils::GetQuorumConnections(const CBlockIndex* pQuorumBas
     }
 }
 
-std::set<uint256> CLLMQUtils::GetQuorumRelayMembers(const CBlockIndex* pQuorumBaseBlockIndex, const uint256 &forMember, bool onlyOutbound)
+std::unordered_set<uint256, StaticSaltedHasher> CLLMQUtils::GetQuorumRelayMembers(const CBlockIndex* pQuorumBaseBlockIndex, const uint256 &forMember, bool onlyOutbound)
 {
     auto mns = GetAllQuorumMembers(pQuorumBaseBlockIndex);
-    std::set<uint256> result;
+    std::unordered_set<uint256, StaticSaltedHasher> result;
 
     auto calcOutbound = [&](size_t i, const uint256 &proTxHash) {
         // Relay to nodes at indexes (i+2^k)%n, where
         //   k: 0..max(1, floor(log2(n-1))-1)
         //   n: size of the quorum/ring
-        std::set<uint256> r;
+        std::unordered_set<uint256, StaticSaltedHasher> r;
         int gap = 1;
         int gap_max = (int)mns.size() - 1;
         int k = 0;
@@ -218,8 +218,8 @@ bool CLLMQUtils::EnsureQuorumConnections(const CBlockIndex *pQuorumBaseBlockInde
     LogPrint(BCLog::NET_NETCONN, "%s -- isMember=%d for quorum %s:\n",
         __func__, isMember, pQuorumBaseBlockIndex->GetBlockHash().ToString());
 
-    std::set<uint256> connections;
-    std::set<uint256> relayMembers;
+    std::unordered_set<uint256, StaticSaltedHasher> connections;
+    std::unordered_set<uint256, StaticSaltedHasher>  relayMembers;
     if (isMember) {
 
         connections = CLLMQUtils::GetQuorumConnections(pQuorumBaseBlockIndex, myProTxHash, true);

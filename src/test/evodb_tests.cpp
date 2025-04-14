@@ -5,6 +5,7 @@
 #include <iostream>
 #include <evo/evodb.h>
 #include <dbwrapper.h>
+#include <saltedhasher.h>
 
 BOOST_AUTO_TEST_SUITE(evodb_tests)
 int one = 100;
@@ -436,7 +437,7 @@ BOOST_AUTO_TEST_CASE(TestUint256KeyUniqueness)
         .memory_only = true
     };
 
-    CEvoDB<uint256, int> evoDB(dbParams, 10);
+    CEvoDB<uint256, int, StaticSaltedHasher> evoDB(dbParams, 10);
 
     uint256 key1 = uint256S("0x01");
     uint256 key2 = uint256S("0x02");

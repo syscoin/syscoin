@@ -86,8 +86,8 @@ public:
 
 private:
     bool HasVerificationVectorInternal() const EXCLUSIVE_LOCKS_REQUIRED(cs_vvec_shShare);
-    void WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk);
-    bool ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk);
+    void WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk);
+    bool ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk);
 };
 
 /**
@@ -109,8 +109,8 @@ private:
     static constexpr int QUORUM_CACHE_SIZE = 10;
 
 public:
-    std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>> evoDb_vvec;
-    std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>> evoDb_sk;
+    std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>> evoDb_vvec;
+    std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>> evoDb_sk;
     explicit CQuorumManager(const DBParams& db_params_vvecs, const DBParams& db_params_sk, CBLSWorker& _blsWorker, CDKGSessionManager& _dkgManager, ChainstateManager& _chainman);
     ~CQuorumManager() { Stop(); };
 

@@ -1382,10 +1382,10 @@ public:
     std::vector<AddedNodeInfo> GetAddedNodeInfo() const EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
     // SYSCOIN
     bool AddPendingMasternode(const uint256& proTxHash);
-    void SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::set<uint256>& proTxHashes);
-    void SetMasternodeQuorumNodes(const uint256& quorumHash, const std::set<uint256>& proTxHashes);
+    void SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
+    void SetMasternodeQuorumNodes(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
     bool HasMasternodeQuorumNodes(const uint256& quorumHash);
-    std::set<uint256> GetMasternodeQuorums();
+    std::unordered_set<uint256, StaticSaltedHasher> GetMasternodeQuorums();
     // also returns QWATCH nodes
     void GetMasternodeQuorumNodes(const uint256& quorumHash, std::set<NodeId> &result) const;
     void RemoveMasternodeQuorumNodes(const uint256& quorumHash);
@@ -1667,8 +1667,8 @@ private:
     mutable Mutex m_added_nodes_mutex;
     // SYSCOIN
     std::vector<uint256> vPendingMasternodes GUARDED_BY(cs_vPendingMasternodes);
-    std::map<uint256, std::set<uint256>> masternodeQuorumNodes GUARDED_BY(cs_vPendingMasternodes);
-    std::map<uint256, std::set<uint256>> masternodeQuorumRelayMembers GUARDED_BY(cs_vPendingMasternodes);
+    std::map<uint256, std::unordered_set<uint256, StaticSaltedHasher>> masternodeQuorumNodes GUARDED_BY(cs_vPendingMasternodes);
+    std::map<uint256, std::unordered_set<uint256, StaticSaltedHasher>> masternodeQuorumRelayMembers GUARDED_BY(cs_vPendingMasternodes);
     std::set<uint256> masternodePendingProbes;
     mutable RecursiveMutex cs_vPendingMasternodes;
     std::vector<CNode*> m_nodes GUARDED_BY(m_nodes_mutex);

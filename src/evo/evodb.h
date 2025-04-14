@@ -14,11 +14,11 @@
 #include <utility>
 #include <logging.h>
 
-template <typename K, typename V>
+template <typename K, typename V, typename Hasher = std::hash<K>>
 class CEvoDB : public CDBWrapper {
-    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> mapCache;
+    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> mapCache;
     std::list<std::pair<K, V>> fifoList;
-    std::unordered_set<K> setEraseCache;
+    std::unordered_set<K, Hasher> setEraseCache;
     size_t maxCacheSize{0};
     DBParams m_db_params;
     bool bFlushOnNextRead{false};
@@ -51,26 +51,26 @@ public:
         }
         return Read(key, value);
     }
-    std::unordered_map<K, V> GetMapCacheCopy() {
+    std::unordered_map<K, V, Hasher> GetMapCacheCopy() {
         LOCK(cs);
         if(bFlushOnNextRead) {
             bFlushOnNextRead = false;
             LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
             FlushCacheToDisk();
         }
-        std::unordered_map<K, V> cacheCopy;
+        std::unordered_map<K, V, Hasher> cacheCopy;
         for (const auto& [key, it] : mapCache) {
             cacheCopy[key] = it->second;
         }
         return cacheCopy;
     }
 
-    std::unordered_set<K> GetEraseCacheCopy() const {
+    std::unordered_set<K, Hasher> GetEraseCacheCopy() const {
         LOCK(cs);
         return setEraseCache;
     }
 
-    void RestoreCaches(const std::unordered_map<K, V>& mapCacheCopy, const std::unordered_set<K>& eraseCacheCopy) {
+    void RestoreCaches(const std::unordered_map<K, V, Hasher>& mapCacheCopy, const std::unordered_set<K, Hasher>& eraseCacheCopy) {
         LOCK(cs);
         for (const auto& [key, value] : mapCacheCopy) {
             WriteCache(key, value);
@@ -168,7 +168,7 @@ public:
 
 
     // Getter for testing purposes
-    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> GetMapCache() const {
+    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> GetMapCache() const {
         return mapCache;
     }
 

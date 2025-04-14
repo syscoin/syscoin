@@ -1051,12 +1051,12 @@ void CDeterministicMNManager::DoMaintenance() {
     if (m_evoDb->IsCacheFull()) {
         DBParams db_params = m_evoDb->GetDBParams();
         // Create copies of the current caches
-        std::unordered_map<uint256, CDeterministicMNList> mapCacheCopy = m_evoDb->GetMapCacheCopy();
-        std::unordered_set<uint256> eraseCacheCopy = m_evoDb->GetEraseCacheCopy();
+        auto mapCacheCopy = m_evoDb->GetMapCacheCopy();
+        auto eraseCacheCopy = m_evoDb->GetEraseCacheCopy();
 
         db_params.wipe_data = true; // Set the wipe_data flag to true
         m_evoDb.reset(); // Destroy the current instance
-        m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList>>(db_params, LIST_CACHE_SIZE);
+        m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>>(db_params, LIST_CACHE_SIZE);
         // Restore the caches from the copies
         m_evoDb->RestoreCaches(mapCacheCopy, eraseCacheCopy);
         LogPrint(BCLog::SYS, "CDeterministicMNManager::DoMaintenance Database successfully wiped and recreated.\n");

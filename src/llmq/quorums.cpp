@@ -111,7 +111,7 @@ int CQuorum::GetMemberIndex(const uint256& proTxHash) const
     return -1;
 }
 
-void CQuorum::WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk)
+void CQuorum::WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk)
 {
     uint256 dbKey = MakeQuorumKey(*this);
     LOCK(cs_vvec_shShare);
@@ -123,7 +123,7 @@ void CQuorum::WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBL
     }
 }
 
-bool CQuorum::ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey>>& evoDb_sk)
+bool CQuorum::ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk)
 {
     uint256 dbKey = MakeQuorumKey(*this);
     std::vector<CBLSPublicKey> qv;
@@ -143,8 +143,8 @@ CQuorumManager::CQuorumManager(const DBParams& db_params_vvecs, const DBParams& 
     blsWorker(_blsWorker),
     dkgManager(_dkgManager),
     chainman(_chainman),
-    evoDb_vvec(std::make_unique<CEvoDB<uint256, std::vector<CBLSPublicKey>>>(db_params_vvecs, QUORUM_CACHE_SIZE)),
-    evoDb_sk(std::make_unique<CEvoDB<uint256, CBLSSecretKey>>(db_params_sk, QUORUM_CACHE_SIZE))
+    evoDb_vvec(std::make_unique<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>(db_params_vvecs, QUORUM_CACHE_SIZE)),
+    evoDb_sk(std::make_unique<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>(db_params_sk, QUORUM_CACHE_SIZE))
 {
     quorumThreadInterrupt.reset();
     vecQuorumsCache.reserve(QUORUM_CACHE_SIZE);
@@ -390,7 +390,7 @@ void CQuorumManager::DoMaintenance() {
             db_params.wipe_data = true; // Set the wipe_data flag to true
             evoDb_vvec.reset(); // Destroy the current instance
             
-            evoDb_vvec = std::make_unique<CEvoDB<uint256, std::vector<CBLSPublicKey>>>(db_params, QUORUM_CACHE_SIZE);
+            evoDb_vvec = std::make_unique<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>(db_params, QUORUM_CACHE_SIZE);
             // Restore the caches from the copies
             evoDb_vvec->RestoreCaches(mapCacheCopy, eraseCacheCopy);
             LogPrint(BCLog::SYS, "CQuorumManager::DoMaintenance evoDb_vvec Database successfully wiped and recreated.\n");
@@ -406,7 +406,7 @@ void CQuorumManager::DoMaintenance() {
 
             db_params.wipe_data = true; // Set the wipe_data flag to true
             evoDb_sk.reset(); // Destroy the current instance
-            evoDb_sk = std::make_unique<CEvoDB<uint256, CBLSSecretKey>>(db_params, QUORUM_CACHE_SIZE);
+            evoDb_sk = std::make_unique<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>(db_params, QUORUM_CACHE_SIZE);
             // Restore the caches from the copies
             evoDb_sk->RestoreCaches(mapCacheCopy, eraseCacheCopy);
             LogPrint(BCLog::SYS, "CQuorumManager::DoMaintenance evoDb_sk Database successfully wiped and recreated.\n");

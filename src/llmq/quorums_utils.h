@@ -45,8 +45,8 @@ public:
     static bool IsAllMembersConnectedEnabled();
     static bool IsQuorumPoseEnabled();
     static uint256 DeterministicOutboundConnection(const uint256& proTxHash1, const uint256& proTxHash2);
-    static std::set<uint256> GetQuorumConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& forMember, bool onlyOutbound);
-    static std::set<uint256> GetQuorumRelayMembers(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& forMember, bool onlyOutbound);
+    static std::unordered_set<uint256, StaticSaltedHasher> GetQuorumConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& forMember, bool onlyOutbound);
+    static std::unordered_set<uint256, StaticSaltedHasher> GetQuorumRelayMembers(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& forMember, bool onlyOutbound);
     static std::set<size_t> CalcDeterministicWatchConnections(const CBlockIndex *pQuorumBaseBlockIndex, size_t memberCount, size_t connectionCount);
 
     static bool EnsureQuorumConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& myProTxHash, CConnman& connman);

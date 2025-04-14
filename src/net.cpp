@@ -3843,7 +3843,7 @@ bool CConnman::AddPendingMasternode(const uint256& proTxHash)
     return true;
 }
 
-void CConnman::SetMasternodeQuorumNodes(const uint256& quorumHash, const std::set<uint256>& proTxHashes)
+void CConnman::SetMasternodeQuorumNodes(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes)
 {
     LOCK(cs_vPendingMasternodes);
     auto it = masternodeQuorumNodes.emplace(quorumHash, proTxHashes);
@@ -3852,7 +3852,7 @@ void CConnman::SetMasternodeQuorumNodes(const uint256& quorumHash, const std::se
     }
 }
 
-void CConnman::SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::set<uint256>& proTxHashes)
+void CConnman::SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes)
 {
     {
         LOCK(cs_vPendingMasternodes);
@@ -3893,10 +3893,10 @@ bool CConnman::HasMasternodeQuorumNodes(const uint256& quorumHash)
 }
 
 
-std::set<uint256> CConnman::GetMasternodeQuorums()
+std::unordered_set<uint256, StaticSaltedHasher> CConnman::GetMasternodeQuorums()
 {
     LOCK(cs_vPendingMasternodes);
-    std::set<uint256> result;
+    std::unordered_set<uint256, StaticSaltedHasher> result;
     for (const auto& p : masternodeQuorumNodes) {
         result.emplace(p.first);
     }

@@ -31,7 +31,7 @@ private:
     std::map<uint256, CFinalCommitment> minableCommitments GUARDED_BY(minableCommitmentsCs);
 
 public:
-    CEvoDB<uint256, std::pair<CFinalCommitment, uint256>> m_commitment_evoDb;
+    CEvoDB<uint256, std::pair<CFinalCommitment, uint256>, StaticSaltedHasher> m_commitment_evoDb;
     explicit CQuorumBlockProcessor(const DBParams& db_commitment_params, PeerManager &_peerman, ChainstateManager& _chainman);
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv);
