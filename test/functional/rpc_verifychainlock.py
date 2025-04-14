@@ -55,7 +55,7 @@ class RPCVerifyChainLockTest(DashTestFramework):
         self.wait_for_sporks_same()
         
         for i in range(4):
-            self.mine_quorum(mod5=True)
+            self.mine_quorum()
        
         cl0 = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 5)

@@ -314,7 +314,7 @@ class NEVMDataTest(DashTestFramework):
 
         self.log.info("Mining 4 quorums")
         for i in range(4):
-            self.mine_quorum(mod5=True)
+            self.mine_quorum()
 
         self.wait_for_sporks_same()
         self.log.info("Mine single block, wait for chainlock")

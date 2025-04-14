@@ -73,7 +73,7 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         self.log.info("Mining 4 quorums")
         for i in range(4):
-            self.mine_quorum(mod5=True)
+            self.mine_quorum()
 
         cl = self.nodes[0].getbestblockhash()
         self.log.info(f'cl {cl} count {self.nodes[0].getblockcount()}')
