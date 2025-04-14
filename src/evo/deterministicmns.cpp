@@ -240,6 +240,7 @@ std::vector<CDeterministicMNCPtr> CDeterministicMNList::CalculateQuorum(size_t m
 
 std::vector<std::pair<arith_uint256, CDeterministicMNCPtr>> CDeterministicMNList::CalculateScores(const uint256& modifier) const
 {
+    static const int TESTNET_MIN_REGISTRATION_HEIGHT = 1000000;
     std::vector<std::pair<arith_uint256, CDeterministicMNCPtr>> scores;
     scores.reserve(GetAllMNsCount());
     ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
@@ -248,6 +249,15 @@ std::vector<std::pair<arith_uint256, CDeterministicMNCPtr>> CDeterministicMNList
             // future quorums
             return;
         }
+        // remove old defunct nodes on testnet
+         if(fTestNet && dmn->pdmnState->nRegisteredHeight < TESTNET_MIN_REGISTRATION_HEIGHT) {
+            // Assign the highest possible score to effectively exclude this node from selection
+            // if enough newer nodes exist.
+            LogPrint(BCLog::MNLIST, "CDeterministicMNList::%s -- Assigning max score to testnet MN %s (registered height %d < %d)\n",
+                     __func__, dmn->proTxHash.ToString(), dmn->pdmnState->nRegisteredHeight, TESTNET_MIN_REGISTRATION_HEIGHT);
+            scores.emplace_back(UintToArith256(std::numeric_limits<uint256>::max()), dmn);
+            return;
+         }
         // calculate sha256(sha256(proTxHash, confirmedHash), modifier) per MN
         // Please note that this is not a double-sha256 but a single-sha256
         // The first part is already precalculated (confirmedHashWithProRegTxHash)
