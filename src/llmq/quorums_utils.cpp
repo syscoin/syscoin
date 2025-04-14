@@ -240,7 +240,7 @@ bool CLLMQUtils::EnsureQuorumConnections(const CBlockIndex *pQuorumBaseBlockInde
                 if (!dmn) {
                     debugMsg += strprintf("  %s (not in valid MN set anymore)", c.ToString());
                 } else {
-                    debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
+                    debugMsg += strprintf("  %s (%s) h=%d", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort(), dmn->pdmnState->nRegisteredHeight);
                 }
             }
             LogPrint(BCLog::NET_NETCONN, "%s\n", debugMsg.c_str());
