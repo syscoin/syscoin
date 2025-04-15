@@ -16,6 +16,10 @@ class PeerManager;
 class ChainstateManager;
 namespace llmq
 {
+class CDKGContribution;
+class CDKGComplaint;
+class CDKGJustification;
+class CDKGPrematureCommitment;
 class CDKGSession;
 class CDKGSessionManager;
 enum QuorumPhase {
