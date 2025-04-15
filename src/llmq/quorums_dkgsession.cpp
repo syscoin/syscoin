@@ -234,11 +234,9 @@ bool CDKGSession::PreVerifyMessage(const CDKGContribution& qc, bool& retBan) con
     return true;
 }
 
-void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGContribution& qc, bool& retBan)
+void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGContribution& qc)
 {
     CDKGLogger logger(*this, __func__, __LINE__);
-
-    retBan = false;
 
     auto* member = GetMember(qc.proTxHash);
 
@@ -536,11 +534,9 @@ bool CDKGSession::PreVerifyMessage(const CDKGComplaint& qc, bool& retBan) const
     return true;
 }
 
-void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGComplaint& qc, bool& retBan)
+void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGComplaint& qc)
 {
     CDKGLogger logger(*this, __func__, __LINE__);
-
-    retBan = false;
 
     logger.Batch("received complaint from %s", qc.proTxHash.ToString());
 
@@ -745,11 +741,9 @@ bool CDKGSession::PreVerifyMessage(const CDKGJustification& qj, bool& retBan) co
     return true;
 }
 
-void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGJustification& qj, bool& retBan)
+void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGJustification& qj)
 {
     CDKGLogger logger(*this, __func__, __LINE__);
-
-    retBan = false;
 
     logger.Batch("received justification from %s", qj.proTxHash.ToString());
 
@@ -1056,11 +1050,9 @@ bool CDKGSession::PreVerifyMessage(const CDKGPrematureCommitment& qc, bool& retB
     return true;
 }
 
-void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGPrematureCommitment& qc, bool& retBan)
+void CDKGSession::ReceiveMessage(const uint256& hash, const CDKGPrematureCommitment& qc)
 {
     CDKGLogger logger(*this, __func__, __LINE__);
-
-    retBan = false;
 
     cxxtimer::Timer t1(true);
 

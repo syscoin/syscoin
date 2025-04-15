@@ -328,7 +328,7 @@ public:
     void Contribute(CDKGPendingMessages& pendingMessages);
     void SendContributions(CDKGPendingMessages& pendingMessages);
     bool PreVerifyMessage(const CDKGContribution& qc, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGContribution& qc, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
+    void ReceiveMessage(const uint256& hash, const CDKGContribution& qc) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
     void VerifyPendingContributions() EXCLUSIVE_LOCKS_REQUIRED(cs_pending);
 
     // Phase 2: complaint
@@ -336,19 +336,19 @@ public:
     void VerifyConnectionAndMinProtoVersions() const;
     void SendComplaint(CDKGPendingMessages& pendingMessages);
     bool PreVerifyMessage(const CDKGComplaint& qc, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGComplaint& qc, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
+    void ReceiveMessage(const uint256& hash, const CDKGComplaint& qc) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
 
     // Phase 3: justification
     void VerifyAndJustify(CDKGPendingMessages& pendingMessages) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
     void SendJustification(CDKGPendingMessages& pendingMessages, const std::set<uint256>& forMembers);
     bool PreVerifyMessage(const CDKGJustification& qj, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGJustification& qj, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
+    void ReceiveMessage(const uint256& hash, const CDKGJustification& qj) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
 
     // Phase 4: commit
     void VerifyAndCommit(CDKGPendingMessages& pendingMessages);
     void SendCommitment(CDKGPendingMessages& pendingMessages);
     bool PreVerifyMessage(const CDKGPrematureCommitment& qc, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGPrematureCommitment& qc, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
+    void ReceiveMessage(const uint256& hash, const CDKGPrematureCommitment& qc) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
 
     // Phase 5: aggregate/finalize
     std::vector<CFinalCommitment> FinalizeCommitments() EXCLUSIVE_LOCKS_REQUIRED(!invCs);

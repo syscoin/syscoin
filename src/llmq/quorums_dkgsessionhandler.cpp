@@ -469,15 +469,7 @@ bool ProcessPendingMessageBatch(CDKGSession& session, CDKGPendingMessages& pendi
             continue;
         }
         const auto& msg = *preverifiedMessages[i].second;
-        bool ban = false;
-        session.ReceiveMessage(hashes[i], msg, ban);
-        if (ban) {
-            PeerRef peer = peerman.GetPeerRef(nodeId);
-            LogPrint(BCLog::LLMQ_DKG, "%s -- banning node after ReceiveMessage failed, peer=%d\n", __func__, nodeId);
-            if(peer)
-                peerman.Misbehaving(*peer, 100, "banning node after ReceiveMessage failed");
-            badNodes.emplace(nodeId);
-        }
+        session.ReceiveMessage(hashes[i], msg);
     }
 
     return true;
