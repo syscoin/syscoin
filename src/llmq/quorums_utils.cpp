@@ -123,30 +123,40 @@ std::unordered_set<uint256, StaticSaltedHasher> CLLMQUtils::GetQuorumConnections
     }
 }
 
-std::unordered_set<uint256, StaticSaltedHasher> CLLMQUtils::GetQuorumRelayMembers(const CBlockIndex* pQuorumBaseBlockIndex, const uint256 &forMember, bool onlyOutbound)
+std::unordered_set<uint256, StaticSaltedHasher> CLLMQUtils::GetQuorumRelayMembers(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& forMember, bool onlyOutbound)
 {
     auto mns = GetAllQuorumMembers(pQuorumBaseBlockIndex);
     std::unordered_set<uint256, StaticSaltedHasher> result;
 
-    auto calcOutbound = [&](size_t i, const uint256 &proTxHash) {
+    auto calcOutbound = [&](size_t i, const uint256& proTxHash) {
         // Relay to nodes at indexes (i+2^k)%n, where
         //   k: 0..max(1, floor(log2(n-1))-1)
         //   n: size of the quorum/ring
-        std::unordered_set<uint256, StaticSaltedHasher> r;
+        std::unordered_set<uint256, StaticSaltedHasher> r{};
+        if (mns.size() == 1) {
+            // No outbound connections are needed when there is one MN only.
+            // Also note that trying to calculate results via the algorithm below
+            // would result in an endless loop.
+            return r;
+        }
         int gap = 1;
         int gap_max = (int)mns.size() - 1;
         int k = 0;
         while ((gap_max >>= 1) || k <= 1) {
             size_t idx = (i + gap) % mns.size();
+            // It doesn't matter if this node is going to be added to the resulting set or not,
+            // we should always bump the gap and the k (step count) regardless.
+            // Refusing to bump the gap results in an incomplete set in the best case scenario
+            // (idx won't ever change again once we hit `==`). Not bumping k guarantees an endless
+            // loop when the first or the second node we check is the one that should be skipped
+            // (k <= 1 forever).
+            gap <<= 1;
+            k++;
             const auto& otherDmn = mns[idx];
             if (otherDmn->proTxHash == proTxHash) {
-                gap <<= 1;
-                k++;
                 continue;
             }
             r.emplace(otherDmn->proTxHash);
-            gap <<= 1;
-            k++;
         }
         return r;
     };
@@ -166,6 +176,7 @@ std::unordered_set<uint256, StaticSaltedHasher> CLLMQUtils::GetQuorumRelayMember
 
     return result;
 }
+
 
 std::set<size_t> CLLMQUtils::CalcDeterministicWatchConnections(const CBlockIndex* pQuorumBaseBlockIndex, size_t memberCount, size_t connectionCount)
 {
@@ -241,7 +252,7 @@ bool CLLMQUtils::IsWatchQuorumsEnabled()
     return fIsWatchQuroumsEnabled;
 }
 
-void CLLMQUtils::AddQuorumProbeConnections(const CBlockIndex *pQuorumBaseBlockIndex, const uint256 &myProTxHash, CConnman& connman)
+void CLLMQUtils::AddQuorumProbeConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& myProTxHash, CConnman& connman)
 {
     if (!CLLMQUtils::IsQuorumPoseEnabled()) {
         return;
@@ -256,29 +267,28 @@ void CLLMQUtils::AddQuorumProbeConnections(const CBlockIndex *pQuorumBaseBlockIn
             continue;
         }
         auto lastOutbound = mmetaman->GetMetaInfo(dmn->proTxHash)->GetLastOutboundSuccess();
-        // re-probe after 10 minutes so that the "good connection" check in the DKG doesn't fail just because we're on
-        // the brink of timeout
-        if (curTime - lastOutbound > 10 * 60) {
-            probeConnections.emplace(dmn->proTxHash);
+        if (curTime - lastOutbound < 10 * 60) {
+            // avoid re-probing nodes too often
+            continue;
         }
+        probeConnections.emplace(dmn->proTxHash);
     }
 
     if (!probeConnections.empty()) {
         if (LogAcceptCategory(BCLog::LLMQ, BCLog::Level::Debug)) {
             auto mnList = deterministicMNManager->GetListAtChainTip();
-            std::string debugMsg = strprintf("CLLMQUtils::%s -- adding masternodes probes for quorum %s:", __func__, pQuorumBaseBlockIndex->GetBlockHash().ToString());
-            for (auto& c : probeConnections) {
+            std::string debugMsg = strprintf("%s -- adding masternodes probes for quorum %s:\n", __func__, pQuorumBaseBlockIndex->GetBlockHash().ToString());
+            for (const auto& c : probeConnections) {
                 auto dmn = mnList.GetValidMN(c);
                 if (!dmn) {
-                    debugMsg += strprintf("  %s (not in valid MN set anymore)", c.ToString());
+                    debugMsg += strprintf("  %s (not in valid MN set anymore)\n", c.ToString());
                 } else {
-                    debugMsg += strprintf("  %s (%s)", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
+                    debugMsg += strprintf("  %s (%s)\n", c.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 }
             }
-            LogPrint(BCLog::NET_NETCONN, "%s\n", debugMsg.c_str());
+            LogPrint(BCLog::NET_NETCONN, debugMsg.c_str()); /* Continued */
         }
         connman.AddPendingProbeConnections(probeConnections);
     }
 }
-
 } // namespace llmq

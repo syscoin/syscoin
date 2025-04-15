@@ -722,18 +722,17 @@ void CSigSharesManager::ProcessSigShare(const CSigShare& sigShare, const CQuorum
         // Update the time we've seen the last sigShare
         timeSeenForSessions[sigShare.GetSignHash()] = GetTime<std::chrono::seconds>().count();
 
-        if (!quorumNodes.empty()) {
-            // don't announce and wait for other nodes to request this share and directly send it to them
-            // there is no way the other nodes know about this share as this is the one created on this node
-            for (auto otherNodeId : quorumNodes) {
-                auto& nodeState = nodeStates[otherNodeId];
-                auto& session = nodeState.GetOrCreateSessionFromShare(sigShare);
-                session.quorum = quorum;
-                session.requested.Set(sigShare.getQuorumMember(), true);
-                session.knows.Set(sigShare.getQuorumMember(), true);
-            }
-        }
 
+        // don't announce and wait for other nodes to request this share and directly send it to them
+        // there is no way the other nodes know about this share as this is the one created on this node
+        for (auto otherNodeId : quorumNodes) {
+            auto& nodeState = nodeStates[otherNodeId];
+            auto& session = nodeState.GetOrCreateSessionFromShare(sigShare);
+            session.quorum = quorum;
+            session.requested.Set(sigShare.getQuorumMember(), true);
+            session.knows.Set(sigShare.getQuorumMember(), true);
+        }
+        
         size_t sigShareCount = sigShares.CountForSignHash(sigShare.GetSignHash());
         if (sigShareCount >= (size_t)params.threshold) {
             canTryRecovery = true;
@@ -1378,6 +1377,8 @@ void CSigSharesManager::Cleanup()
 
 void CSigSharesManager::RemoveSigSharesForSession(const uint256& signHash)
 {
+    AssertLockHeld(cs);
+
     for (auto& [_, nodeState] : nodeStates) {
         nodeState.RemoveSession(signHash);
     }

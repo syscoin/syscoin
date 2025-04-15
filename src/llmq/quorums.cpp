@@ -44,11 +44,11 @@ CQuorum::CQuorum(CBLSWorker& _blsWorker) : blsCache(_blsWorker)
 {
 }
 
-void CQuorum::Init(CFinalCommitmentPtr _qc, const CBlockIndex* _pQuorumBaseBlockIndex, const uint256& _minedBlockHash, const std::vector<CDeterministicMNCPtr>& _members)
+void CQuorum::Init(CFinalCommitmentPtr _qc, const CBlockIndex* _pQuorumBaseBlockIndex, const uint256& _minedBlockHash, Span<CDeterministicMNCPtr> _members)
 {
     qc = std::move(_qc);
     m_quorum_base_block_index = _pQuorumBaseBlockIndex;
-    members = _members;
+    members = std::vector(_members.begin(), _members.end());
     minedBlockHash = _minedBlockHash;
 }
 
@@ -84,7 +84,7 @@ CBLSPublicKey CQuorum::GetPubKeyShare(size_t memberIdx) const
     if (!HasVerificationVectorInternal() || memberIdx >= members.size() || !qc->validMembers[memberIdx]) {
         return CBLSPublicKey();
     }
-    auto& m = members[memberIdx];
+    const auto& m = members[memberIdx];
     return blsCache.BuildPubKeyShare(m->proTxHash, quorumVvec, CBLSId(m->proTxHash));
 }
 
