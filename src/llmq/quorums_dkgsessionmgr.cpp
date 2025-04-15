@@ -207,6 +207,7 @@ bool CDKGSessionManager::GetVerifiedContributions(const CBlockIndex* pQuorumBase
     vvecsRet.reserve(members.size());
     skContributionsRet.reserve(members.size());
     // NOTE: the `cs_main` should not be locked under scope of `contributionsCacheCs`
+    LOCK(contributionsCacheCs);
     for (size_t i = 0; i < members.size(); i++) {
         if (validMembers[i]) {
             const uint256& proTxHash = members[i]->proTxHash;
