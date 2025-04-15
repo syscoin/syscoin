@@ -95,14 +95,14 @@ std::string CBatchedSigShares::ToInvString() const
     return inv.ToString();
 }
 
-template<typename T>
-static void InitSession(CSigSharesNodeState::Session& s, const uint256& signHash, T& from)
+static void InitSession(CSigSharesNodeState::Session& s, const uint256& signHash, CSigBase from)
 {
     const auto& params = Params().GetConsensus().llmqTypeChainLocks;
 
     s.quorumHash = from.getQuorumHash();
     s.id = from.getId();
     s.msgHash = from.getMsgHash();
+    s.signHash = signHash;
     s.announced.Init((size_t)params.size);
     s.requested.Init((size_t)params.size);
     s.knows.Init((size_t)params.size);
@@ -595,8 +595,8 @@ bool CSigSharesManager::CollectPendingSigSharesToVerify(
                 continue;
             }
 
-            CQuorumCPtr quorum = quorumManager->GetQuorum(sigShare.getQuorumHash());
-           // Despite constructing a convenience map, we assume that the quorum *must* be present.
+            auto quorum = quorumManager->GetQuorum(sigShare.getQuorumHash());
+            // Despite constructing a convenience map, we assume that the quorum *must* be present.
             // The absence of it might indicate an inconsistent internal state, so we should report
             // nothing instead of reporting flawed data.
             if (!quorum) {
@@ -617,8 +617,8 @@ bool CSigSharesManager::ProcessPendingSigShares()
     std::unordered_map<uint256, CQuorumCPtr, StaticSaltedHasher> quorums;
 
     const size_t nMaxBatchSize{32};
-    CollectPendingSigSharesToVerify(nMaxBatchSize, sigSharesByNodes, quorums);
-    if (sigSharesByNodes.empty()) {
+    bool collect_status = CollectPendingSigSharesToVerify(nMaxBatchSize, sigSharesByNodes, quorums);
+    if (!collect_status || sigSharesByNodes.empty()) {
         return false;
     }
 
@@ -962,7 +962,7 @@ void CSigSharesManager::CollectSigSharesToSend(std::unordered_map<NodeId, std::u
                     // only create the map if we actually add a batched sig
                     sigSharesToSend2 = &sigSharesToSend[nodeId];
                 }
-                (*sigSharesToSend2).try_emplace(signHash, std::move(batchedSigShares));
+                sigSharesToSend2->try_emplace(signHash, std::move(batchedSigShares));
             }
         }
     }
@@ -1276,7 +1276,7 @@ void CSigSharesManager::Cleanup()
         LOCK(cs);
         std::unordered_set<uint256, StaticSaltedHasher> inactiveQuorumSessions;
         sigShares.ForEach([&quorums, &inactiveQuorumSessions](const SigShareKey&, const CSigShare& sigShare) {
-            if (!quorums.count(sigShare.getQuorumHash())) {
+            if (quorums.count(sigShare.getQuorumHash()) == 0) {
                 inactiveQuorumSessions.emplace(sigShare.GetSignHash());
             }
         });
@@ -1539,7 +1539,7 @@ void CSigSharesManager::ForceReAnnouncement(const CQuorumCPtr& quorum, const uin
 
     LOCK(cs);
     auto signHash = BuildSignHash(quorum->qc->quorumHash, id, msgHash);
-    if (const auto sigs = sigShares.GetAllForSignHash(signHash)) {
+    if (const auto *const sigs = sigShares.GetAllForSignHash(signHash)) {
         for (const auto& [quorumMemberIndex, _] : *sigs) {
             // re-announce every sigshare to every node
             sigSharesQueuedToAnnounce.Add(std::make_pair(signHash, quorumMemberIndex), true);
