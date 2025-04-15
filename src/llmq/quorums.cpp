@@ -25,6 +25,8 @@
 namespace llmq
 {
 
+// forward declaration to avoid circular dependency
+uint256 BuildSignHash(const uint256& quorumHash, const uint256& id, const uint256& msgHash);
 
 CQuorumManager* quorumManager;
 
@@ -422,4 +424,55 @@ bool CQuorumManager::FlushCacheToDisk() {
 }
 
 
+CQuorumCPtr SelectQuorumForSigning(ChainstateManager& chainman,
+                                   const uint256& selectionHash, int signHeight, int signOffset)
+{
+    const auto& llmqParams = Params().GetConsensus().llmqTypeChainLocks;
+    size_t poolSize = llmqParams.signingActiveQuorumCount;
+
+    CBlockIndex* pindexStart;
+    {
+        LOCK(cs_main);
+        if (signHeight == -1) {
+            signHeight = chainman.ActiveHeight();
+        }
+        int startBlockHeight = signHeight - signOffset;
+        if (startBlockHeight > chainman.ActiveHeight() || startBlockHeight < 0) {
+            return {};
+        }
+        pindexStart = chainman.ActiveChain()[startBlockHeight];
+    }
+
+   
+    auto quorums = quorumManager->ScanQuorums(pindexStart, poolSize);
+    if (quorums.empty()) {
+        return nullptr;
+    }
+
+    std::vector<std::pair<uint256, size_t>> scores;
+    scores.reserve(quorums.size());
+    for (size_t i = 0; i < quorums.size(); i++) {
+        CHashWriter h(SER_NETWORK, 0);
+        h << quorums[i]->qc->quorumHash;
+        h << selectionHash;
+        scores.emplace_back(h.GetHash(), i);
+    }
+    std::sort(scores.begin(), scores.end());
+    return quorums[scores.front().second];
+    
+}
+
+VerifyRecSigStatus VerifyRecoveredSig(ChainstateManager& chainman,
+                        int signedAtHeight, const uint256& id, const uint256& msgHash, const CBLSSignature& sig,
+                        const int signOffset)
+{
+    auto quorum = SelectQuorumForSigning(chainman, id, signedAtHeight, signOffset);
+    if (!quorum) {
+        return VerifyRecSigStatus::NoQuorum;
+    }
+
+    uint256 signHash = BuildSignHash(quorum->qc->quorumHash, id, msgHash);
+    const bool ret = sig.VerifyInsecure(quorum->qc->quorumPublicKey, signHash);
+    return ret ? VerifyRecSigStatus::Valid : VerifyRecSigStatus::Invalid;
+}
 } // namespace llmq

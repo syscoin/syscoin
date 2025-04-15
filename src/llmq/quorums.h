@@ -25,7 +25,12 @@ using CDeterministicMNCPtr = std::shared_ptr<const CDeterministicMN>;
 
 namespace llmq
 {
-
+enum class VerifyRecSigStatus
+{
+    NoQuorum,
+    Invalid,
+    Valid,
+};
 class CDKGSessionManager;
 
 
@@ -141,6 +146,19 @@ private:
     CQuorumCPtr GetQuorum(const CBlockIndex* pindex);
     void StartCachePopulatorThread(const CQuorumCPtr pQuorum) const;
 };
+
+// when selecting a quorum for signing and verification, we use CQuorumManager::SelectQuorum with this offset as
+// starting height for scanning. This is because otherwise the resulting signatures would not be verifiable by nodes
+// which are not 100% at the chain tip.
+static constexpr int SIGN_HEIGHT_OFFSET{5};
+
+CQuorumCPtr SelectQuorumForSigning(ChainstateManager& chainman,
+                                   const uint256& selectionHash, int signHeight = -1 /*chain tip*/, int signOffset = SIGN_HEIGHT_OFFSET);
+
+// Verifies a recovered sig that was signed while the chain tip was at signedAtTip
+VerifyRecSigStatus VerifyRecoveredSig(ChainstateManager& chainman,
+                                      int signedAtHeight, const uint256& id, const uint256& msgHash, const CBLSSignature& sig,
+                                      int signOffset = SIGN_HEIGHT_OFFSET);
 
 extern CQuorumManager* quorumManager;
 

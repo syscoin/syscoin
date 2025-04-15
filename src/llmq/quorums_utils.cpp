@@ -65,15 +65,6 @@ uint256 CLLMQUtils::BuildCommitmentHash(const uint256& blockHash, const std::vec
     return hw.GetHash();
 }
 
-uint256 CLLMQUtils::BuildSignHash(const uint256& quorumHash, const uint256& id, const uint256& msgHash)
-{
-    CHashWriter h(SER_GETHASH, 0);
-    h << quorumHash;
-    h << id;
-    h << msgHash;
-    return h.GetHash();
-}
-
 static bool EvalSpork(int64_t spork_value)
 {
     if (spork_value == 0) {
@@ -299,14 +290,4 @@ void CLLMQUtils::AddQuorumProbeConnections(const CBlockIndex *pQuorumBaseBlockIn
     }
 }
 
-bool CLLMQUtils::IsQuorumActive(const uint256& quorumHash)
-{
-    auto& params = Params().GetConsensus().llmqTypeChainLocks;
-
-    // sig shares and recovered sigs are only accepted from recent/active quorums
-    // we allow one more active quorum as specified in consensus, as otherwise there is a small window where things could
-    // fail while we are on the brink of a new quorum
-    auto quorums = quorumManager->ScanQuorums(params.keepOldConnections);
-    return ranges::any_of(quorums, [&quorumHash](const auto& q){ return q->qc->quorumHash == quorumHash; });
-}
 } // namespace llmq

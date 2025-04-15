@@ -312,31 +312,32 @@ static RPCHelpMan quorum_sign()
     if (fSubmit) {
         return llmq::quorumSigningManager->AsyncSignIfMember( id, msgHash, quorumHash);
     } else {
-        llmq::CQuorumCPtr pQuorum;
-
-        if (quorumHash.IsNull()) {
-            pQuorum = llmq::quorumSigningManager->SelectQuorumForSigning(*node.chainman, id);
-        } else {
-            pQuorum = llmq::quorumManager->GetQuorum( quorumHash);
-        }
+        const auto pQuorum = [&]() {
+            if (quorumHash.IsNull()) {
+                return llmq::SelectQuorumForSigning(*node.chainman, id);
+            } else {
+                return llmq::quorumManager->GetQuorum(quorumHash);
+            }
+        }();
 
         if (pQuorum == nullptr) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "quorum not found");
         }
 
-        llmq::CSigShare sigShare = llmq::quorumSigSharesManager->CreateSigShare(pQuorum, id, msgHash);
+        auto sigShare = llmq::quorumSigSharesManager->CreateSigShare(pQuorum, id, msgHash);
 
-        if (!sigShare.sigShare.Get().IsValid()) {
+        if (!sigShare.has_value() || !sigShare->sigShare.Get().IsValid()) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "failed to create sigShare");
         }
 
+
         UniValue obj(UniValue::VOBJ);
-        obj.pushKV("quorumHash", sigShare.quorumHash.ToString());
-        obj.pushKV("quorumMember", sigShare.quorumMember);
+        obj.pushKV("quorumHash", sigShare->getQuorumHash().ToString());
+        obj.pushKV("quorumMember", sigShare->getQuorumMember());
         obj.pushKV("id", id.ToString());
         obj.pushKV("msgHash", msgHash.ToString());
-        obj.pushKV("signHash", sigShare.GetSignHash().ToString());
-        obj.pushKV("signature", sigShare.sigShare.Get().ToString());
+        obj.pushKV("signHash", sigShare->GetSignHash().ToString());
+        obj.pushKV("signature", sigShare->sigShare.Get().ToString());
 
         return obj;
     }
@@ -366,6 +367,17 @@ static RPCHelpMan quorum_hasrecsig()
 },
     };
 } 
+static bool VerifyRecoveredSigLatestQuorums(const Consensus::LLMQParams& llmq_params, ChainstateManager& chainman,
+    int signHeight, const uint256& id, const uint256& msgHash, const CBLSSignature& sig)
+{
+    // First check against the current active set, if it fails check against the last active set
+    for (int signOffset : {0, llmq_params.dkgInterval}) {
+        if (llmq::VerifyRecoveredSig(chainman, signHeight, id, msgHash, sig, signOffset) == llmq::VerifyRecSigStatus::Valid) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static RPCHelpMan quorum_verify()
 {
@@ -400,17 +412,14 @@ static RPCHelpMan quorum_verify()
         if (!request.params[4].isNull()) {
             signHeight = request.params[4].getInt<int>();
         }
-        // First check against the current active set, if it fails check against the last active set
-        int signOffset{Params().GetConsensus().llmqTypeChainLocks.dkgInterval};
-        return llmq::quorumSigningManager->VerifyRecoveredSig(*node.chainman, signHeight, id, msgHash, sig, 0) ||
-                llmq::quorumSigningManager->VerifyRecoveredSig(*node.chainman, signHeight, id, msgHash, sig, signOffset);
+        return VerifyRecoveredSigLatestQuorums(Params().GetConsensus().llmqTypeChainLocks, *node.chainman, signHeight, id, msgHash, sig);
     } else {
         uint256 quorumHash = ParseHashV(request.params[3], "quorumHash");
         llmq::CQuorumCPtr quorum = llmq::quorumManager->GetQuorum( quorumHash);
         if (!quorum) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "quorum not found");
         }
-        uint256 signHash = llmq::CLLMQUtils::BuildSignHash( quorum->qc->quorumHash, id, msgHash);
+        uint256 signHash = llmq::BuildSignHash( quorum->qc->quorumHash, id, msgHash);
         return sig.VerifyInsecure(quorum->qc->quorumPublicKey, signHash);
     }
 },
@@ -440,7 +449,7 @@ static RPCHelpMan quorum_getrecsig()
     if (!llmq::quorumSigningManager->GetRecoveredSigForId( id, recSig)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "recovered signature not found");
     }
-    if (recSig.msgHash != msgHash) {
+    if (recSig.getMsgHash() != msgHash) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "recovered signature not found");
     }
     return recSig.ToJson();
@@ -493,7 +502,7 @@ static RPCHelpMan quorum_selectquorum()
 
     UniValue ret(UniValue::VOBJ);
 
-    auto quorum = llmq::quorumSigningManager->SelectQuorumForSigning(*node.chainman, id);
+    const auto quorum = llmq::SelectQuorumForSigning(*node.chainman, id);
     if (!quorum) {
         throw JSONRPCError(RPC_MISC_ERROR, "no quorums active");
     }

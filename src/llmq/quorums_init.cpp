@@ -30,7 +30,7 @@ void InitLLMQSystem(const DBParams& quorumCommitmentDB, const DBParams& quorumVe
     quorumDKGSessionManager = new CDKGSessionManager(*blsWorker, connman, peerman, chainman, unitTests, fWipe);
     quorumManager = new CQuorumManager(quorumVectorDB, quorumSkDB, *blsWorker, *quorumDKGSessionManager, chainman);
     quorumSigSharesManager = new CSigSharesManager(connman, peerman);
-    quorumSigningManager = new CSigningManager(unitTests, connman, peerman, chainman, fWipe);
+    quorumSigningManager = new CSigningManager(unitTests, peerman, chainman, fWipe);
     chainLocksHandler = new CChainLocksHandler(connman, peerman, chainman);
 }
 

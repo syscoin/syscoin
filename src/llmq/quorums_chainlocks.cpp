@@ -266,7 +266,7 @@ bool CChainLocksHandler::VerifyChainLockShare(const CChainLockSig& clsig, const 
         if (fHaveSigner && !clsig.signers[i]) {
             continue;
         }
-        uint256 signHash = CLLMQUtils::BuildSignHash(quorum->qc->quorumHash, requestId, clsig.blockHash);
+        uint256 signHash = llmq::BuildSignHash(quorum->qc->quorumHash, requestId, clsig.blockHash);
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- CLSIG (%s) requestId=%s, signHash=%s\n",
                 __func__, clsig.ToString(), requestId.ToString(), signHash.ToString());
 
@@ -330,7 +330,7 @@ bool CChainLocksHandler::VerifyAggregatedChainLock(const CChainLockSig& clsig, c
         }
         quorumPublicKeys.emplace_back(quorum->qc->quorumPublicKey);
         uint256 requestId = ::SerializeHash(std::make_tuple(CLSIG_REQUESTID_PREFIX, clsig.nHeight, quorum->qc->quorumHash));
-        uint256 signHash = CLLMQUtils::BuildSignHash(quorum->qc->quorumHash, requestId, clsig.blockHash);
+        uint256 signHash = llmq::BuildSignHash(quorum->qc->quorumHash, requestId, clsig.blockHash);
         hashes.emplace_back(signHash);
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- index %d CLSIG (%s) pindexScan=%s requestId=%s (clsig.nHeight %d, quorum->qc->quorumHash %s), signHash=%s (quorum->qc->quorumHash, requestId, clsig.blockHash)\n",
                 __func__, i, clsig.ToString(), pindexScan->GetBlockHash().ToString(), requestId.ToString(), clsig.nHeight, quorum->qc->quorumHash.ToString(), signHash.ToString());
@@ -383,8 +383,8 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "existing-clsig-height");
         }
     
-        int nActiveHeight = chainman.ActiveHeight()-CSigningManager::SIGN_HEIGHT_LOOKBACK;
-        nActiveHeight -= nActiveHeight%CSigningManager::SIGN_HEIGHT_LOOKBACK;
+        int nActiveHeight = chainman.ActiveHeight()-SIGN_HEIGHT_OFFSET;
+        nActiveHeight -= nActiveHeight%SIGN_HEIGHT_OFFSET;
         if(nActiveHeight != clsig.nHeight) {
             if (from != -1) {
                 peerman.ForgetTxHash(from, hash);
@@ -419,7 +419,7 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             }
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-height");
         }
-        if ((clsig.nHeight%CSigningManager::SIGN_HEIGHT_LOOKBACK) != 0) {
+        if ((clsig.nHeight%SIGN_HEIGHT_OFFSET) != 0) {
             // Should not happen
             LogPrintf("CChainLocksHandler::%s -- height of CLSIG (%s) is not a factor of 5\n",
                     __func__, clsig.ToString());
@@ -691,8 +691,8 @@ void CChainLocksHandler::TrySignChainTip()
     const CBlockIndex* pindex;
     {
         LOCK(cs_main);
-        int nActiveHeight = chainman.ActiveHeight()-CSigningManager::SIGN_HEIGHT_LOOKBACK;
-        nActiveHeight -= nActiveHeight%CSigningManager::SIGN_HEIGHT_LOOKBACK;
+        int nActiveHeight = chainman.ActiveHeight()-SIGN_HEIGHT_OFFSET;
+        nActiveHeight -= nActiveHeight%SIGN_HEIGHT_OFFSET;
         pindex = chainman.ActiveChain()[nActiveHeight];
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- PRE trying to sign nActiveHeight=%d\n", __func__, nActiveHeight);
         if (!pindex || !pindex->pprev || !pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
@@ -853,8 +853,8 @@ void CChainLocksHandler::HandleNewRecoveredSig(const llmq::CRecoveredSig& recove
             return;
         }
 
-        auto it = mapSignedRequestIds.find(recoveredSig.id);
-        if (it == mapSignedRequestIds.end() || recoveredSig.msgHash != it->second.second) {
+        auto it = mapSignedRequestIds.find(recoveredSig.getId());
+        if (it == mapSignedRequestIds.end() || recoveredSig.getMsgHash() != it->second.second) {
             // this is not what we signed, so lets not create a CLSIG for it
             return;
         }
@@ -866,10 +866,10 @@ void CChainLocksHandler::HandleNewRecoveredSig(const llmq::CRecoveredSig& recove
         clsig.nHeight = it->second.first;
         clsig.blockHash = it->second.second;
         clsig.sig = recoveredSig.sig.Get();
-        mapSignedRequestIds.erase(recoveredSig.id);
+        mapSignedRequestIds.erase(recoveredSig.getId());
     }
     BlockValidationState state;
-    ProcessNewChainLock(-1, clsig, state, ::SerializeHash(clsig), recoveredSig.id);
+    ProcessNewChainLock(-1, clsig, state, ::SerializeHash(clsig), recoveredSig.getId());
 }
 
 bool CChainLocksHandler::HasChainLock(int nHeight, const uint256& blockHash)

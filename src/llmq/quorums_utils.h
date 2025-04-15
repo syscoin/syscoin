@@ -33,14 +33,6 @@ public:
     // includes members which failed DKG
     static std::vector<CDeterministicMNCPtr> GetAllQuorumMembers(const CBlockIndex* pindexQuorum);
     static uint256 BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash);
-    static uint256 BuildSignHash(const uint256& quorumHash, const uint256& id, const uint256& msgHash);
-
-    // works for sig shares and recovered sigs
-    template<typename T>
-    static uint256 BuildSignHash(const T& s)
-    {
-        return BuildSignHash(s.quorumHash, s.id, s.msgHash);
-    }
 
     static bool IsAllMembersConnectedEnabled();
     static bool IsQuorumPoseEnabled();
@@ -52,38 +44,8 @@ public:
     static bool EnsureQuorumConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& myProTxHash, CConnman& connman);
     static void AddQuorumProbeConnections(const CBlockIndex* pQuorumBaseBlockIndex, const uint256& myProTxHash, CConnman& connman);
 
-    static bool IsQuorumActive(const uint256& quorumHash);
     /// Returns the state of `-watchquorums`
     static bool IsWatchQuorumsEnabled();
-    template<typename NodesContainer, typename Continue, typename Callback>
-    static void IterateNodesRandom(NodesContainer& nodeStates, Continue&& cont, Callback&& callback, FastRandomContext& rnd)
-    {
-        std::vector<typename NodesContainer::iterator> rndNodes;
-        rndNodes.reserve(nodeStates.size());
-        for (auto it = nodeStates.begin(); it != nodeStates.end(); ++it) {
-            rndNodes.emplace_back(it);
-        }
-        if (rndNodes.empty()) {
-            return;
-        }
-        Shuffle(rndNodes.begin(), rndNodes.end(), rnd);
-
-        size_t idx = 0;
-        while (!rndNodes.empty() && cont()) {
-            auto nodeId = rndNodes[idx]->first;
-            auto& ns = rndNodes[idx]->second;
-
-            if (callback(nodeId, ns)) {
-                idx = (idx + 1) % rndNodes.size();
-            } else {
-                rndNodes.erase(rndNodes.begin() + idx);
-                if (rndNodes.empty()) {
-                    break;
-                }
-                idx %= rndNodes.size();
-            }
-        }
-    }
     static std::string ToHexStr(const std::vector<bool>& vBits)
     {
         std::vector<uint8_t> vBytes((vBits.size() + 7) / 8);

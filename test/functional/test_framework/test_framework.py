@@ -1600,7 +1600,7 @@ class DashTestFramework(SyscoinTestFramework):
         assert_equal(q, new_quorum)
         quorum_info = self.nodes[0].quorum_info(new_quorum)
 
-        # Mine 5 (SIGN_HEIGHT_LOOKBACK) more blocks to make sure that the new quorum gets eligible for signing sessions
+        # Mine 5 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
         skip_count = 5 - (self.nodes[0].getblockcount() % 5)
         if skip_count:
             self.generate_helper(self.nodes[0], skip_count, sync_fun=self.no_op)
