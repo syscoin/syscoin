@@ -131,10 +131,7 @@ bool CDKGSessionManager::GetContribution(const uint256& hash, CDKGContribution& 
     if (dkgSessionHandler->phase < QuorumPhase_Initialized || dkgSessionHandler->phase > QuorumPhase_Contribute) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->contributions.find(hash);
-    if (it != dkgSessionHandler->curSession->contributions.end()) {
-        ret = it->second;
+    if(dkgSessionHandler->GetContribution(hash, ret)) {
         return true;
     }
     return false;
@@ -150,10 +147,7 @@ bool CDKGSessionManager::GetComplaint(const uint256& hash, CDKGComplaint& ret) c
     if (dkgSessionHandler->phase < QuorumPhase_Contribute || dkgSessionHandler->phase > QuorumPhase_Complain) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->complaints.find(hash);
-    if (it != dkgSessionHandler->curSession->complaints.end()) {
-        ret = it->second;
+    if(dkgSessionHandler->GetComplaint(hash, ret)) {
         return true;
     }
     return false;
@@ -169,10 +163,7 @@ bool CDKGSessionManager::GetJustification(const uint256& hash, CDKGJustification
     if (dkgSessionHandler->phase < QuorumPhase_Complain || dkgSessionHandler->phase > QuorumPhase_Justify) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->justifications.find(hash);
-    if (it != dkgSessionHandler->curSession->justifications.end()) {
-        ret = it->second;
+    if(dkgSessionHandler->GetJustification(hash, ret)) {
         return true;
     }
     return false;
@@ -184,18 +175,14 @@ bool CDKGSessionManager::GetPrematureCommitment(const uint256& hash, CDKGPrematu
         return false;
 
 
-    
+
     LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Justify || dkgSessionHandler->phase > QuorumPhase_Commit) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->prematureCommitments.find(hash);
-    if (it != dkgSessionHandler->curSession->prematureCommitments.end() && dkgSessionHandler->curSession->validCommitments.count(hash)) {
-        ret = it->second;
+    if(dkgSessionHandler->GetPrematureCommitment(hash, ret)) {
         return true;
     }
-
     return false;
 }
 

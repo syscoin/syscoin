@@ -132,6 +132,12 @@ public:
 
     void StartThread();
     void StopThread();
+
+    bool GetContribution(const uint256& hash, CDKGContribution& ret) const;
+    bool GetComplaint(const uint256& hash, CDKGComplaint& ret) const;
+    bool GetJustification(const uint256& hash, CDKGJustification& ret) const;
+    bool GetPrematureCommitment(const uint256& hash, CDKGPrematureCommitment& ret) const;
+    
     const char* GetName() {return m_threadName.c_str();}
 
 private:
