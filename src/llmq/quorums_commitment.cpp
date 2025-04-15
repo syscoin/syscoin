@@ -81,7 +81,7 @@ bool CFinalCommitment::Verify(const CBlockIndex* pQuorumBaseBlockIndex, bool che
 
     // sigs are only checked when the block is processed
     if (checkSigs) {
-        uint256 commitmentHash = CLLMQUtils::BuildCommitmentHash(quorumHash, validMembers, quorumPublicKey, quorumVvecHash);
+        uint256 commitmentHash = BuildCommitmentHash(quorumHash, validMembers, quorumPublicKey, quorumVvecHash);
 
         std::vector<CBLSPublicKey> memberPubKeys;
         for (size_t i = 0; i < members.size(); i++) {
@@ -128,5 +128,14 @@ bool CFinalCommitment::VerifySizes() const
     return true;
 }
 
+uint256 BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash)
+{
+    CHashWriter hw(SER_GETHASH, 0);
+    hw << blockHash;
+    hw << DYNBITSET(validMembers);
+    hw << pubKey;
+    hw << vvecHash;
+    return hw.GetHash();
+}
 
 } // namespace llmq

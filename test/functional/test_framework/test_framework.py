@@ -39,7 +39,6 @@ from .util import (
     set_node_times,
     copy_datadir,
     force_finish_mnsync,
-    bump_node_times,
     satoshi_round,
 )
 
@@ -1080,9 +1079,6 @@ class DashTestFramework(SyscoinTestFramework):
         self.llmq_size = 3
         self.llmq_threshold = 2
         self.disable_autoconnect = False
-
-    def bump_scheduler(self, t, nodes=None):
-        bump_node_times(nodes or self.nodes, t)
 
     def set_dash_llmq_test_params(self, llmq_size, llmq_threshold):
         self.llmq_size = llmq_size

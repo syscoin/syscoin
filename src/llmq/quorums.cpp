@@ -152,6 +152,8 @@ CQuorumManager::CQuorumManager(const DBParams& db_params_vvecs, const DBParams& 
     vecQuorumsCache.reserve(QUORUM_CACHE_SIZE);
 }
 
+CQuorumManager::~CQuorumManager() { Stop(); }
+
 void CQuorumManager::Start()
 {
     int workerCount = std::thread::hardware_concurrency() / 2;
@@ -218,11 +220,11 @@ CQuorumPtr CQuorumManager::BuildQuorumFromCommitment(const CBlockIndex* pQuorumB
     quorum->Init(std::move(qc), pQuorumBaseBlockIndex, minedBlockHash, members);
 
     bool hasValidVvec = false;
-    if (quorum->ReadContributions(evoDb_vvec, evoDb_sk)) {
+    if (WITH_LOCK(cs_db, return quorum->ReadContributions(evoDb_vvec, evoDb_sk))) {
         hasValidVvec = true;
     } else {
         if (BuildQuorumContributions(quorum->qc, quorum)) {
-            quorum->WriteContributions(evoDb_vvec, evoDb_sk);
+            WITH_LOCK(cs_db, quorum->WriteContributions(evoDb_vvec, evoDb_sk));
             hasValidVvec = true;
         } else {
             LogPrint(BCLog::LLMQ, "CQuorumManager::%s -- quorum.ReadContributions and BuildQuorumContributions for quorumHash[%s] failed\n", __func__, quorum->qc->quorumHash.ToString());
@@ -302,18 +304,17 @@ std::vector<CQuorumCPtr> CQuorumManager::ScanQuorums(const CBlockIndex* pindexSt
     if (offset != 0) {
         pIndex = pIndex->GetAncestor(pIndex->nHeight - offset);
     }
-    {
-        LOCK(cs_quorums);
-        // Iterate through blocks using dkgInterval to gather the required number of quorums
-        while (vecResultQuorums.size() < nCountRequested && pIndex != nullptr) {
-            CQuorumCPtr quorum = GetQuorum(pIndex);
-            if (quorum != nullptr) {
-                vecResultQuorums.emplace_back(quorum);
-            }
-            // Move to the previous block at the interval of nDKGInterval
-            pIndex = pIndex->GetAncestor(pIndex->nHeight - nDKGInterval);
+
+    // Iterate through blocks using dkgInterval to gather the required number of quorums
+    while (vecResultQuorums.size() < nCountRequested && pIndex != nullptr) {
+        CQuorumCPtr quorum = GetQuorum(pIndex);
+        if (quorum != nullptr) {
+            vecResultQuorums.emplace_back(quorum);
         }
+        // Move to the previous block at the interval of nDKGInterval
+        pIndex = pIndex->GetAncestor(pIndex->nHeight - nDKGInterval);
     }
+    
     return vecResultQuorums;
 }
 

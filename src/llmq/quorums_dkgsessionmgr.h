@@ -11,6 +11,7 @@
 #include <bls/bls_worker.h>
 class CConnman;
 class UniValue;
+class CDBWrapper;
 class PeerManager;
 class CBlockIndex;
 class ChainstateManager;
@@ -25,7 +26,7 @@ private:
     std::unique_ptr<CDBWrapper> db{nullptr};
     std::unique_ptr<CDKGSessionHandler> dkgSessionHandler{nullptr};
 
-    mutable RecursiveMutex contributionsCacheCs;
+    mutable Mutex contributionsCacheCs;
     struct ContributionsCacheKey {
         uint256 quorumHash;
         uint256 proTxHash;
@@ -51,7 +52,7 @@ public:
     void StartThreads();
     void StopThreads();
 
-    void UpdatedBlockTip(const CBlockIndex *pindexNew, bool fInitialDownload);
+    void UpdatedBlockTip(const CBlockIndex *pindexNew, bool fInitialDownload) EXCLUSIVE_LOCKS_REQUIRED(!contributionsCacheCs);
 
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv);
     bool AlreadyHave(const uint256& hash) const;
@@ -63,10 +64,10 @@ public:
     // Verified contributions are written while in the DKG
     void WriteVerifiedVvecContribution(const uint256& hashQuorum, const uint256& proTxHash, const BLSVerificationVectorPtr& vvec);
     void WriteVerifiedSkContribution(const uint256& hashQuorum, const uint256& proTxHash, const CBLSSecretKey& skContribution);
-    bool GetVerifiedContributions(const CBlockIndex* pQuorumBaseBlockIndex, const std::vector<bool>& validMembers, std::vector<uint16_t>& memberIndexesRet, std::vector<BLSVerificationVectorPtr>& vvecsRet, std::vector<CBLSSecretKey>& skContributionsRet) const;
+    bool GetVerifiedContributions(const CBlockIndex* pQuorumBaseBlockIndex, const std::vector<bool>& validMembers, std::vector<uint16_t>& memberIndexesRet, std::vector<BLSVerificationVectorPtr>& vvecsRet, std::vector<CBLSSecretKey>& skContributionsRet) const EXCLUSIVE_LOCKS_REQUIRED(!contributionsCacheCs);
     void CleanupOldContributions(ChainstateManager& chainstate) const;
 private:
-    void CleanupCache() const;
+    void CleanupCache() const EXCLUSIVE_LOCKS_REQUIRED(!contributionsCacheCs);
 };
 
 bool IsQuorumDKGEnabled();

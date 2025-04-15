@@ -49,6 +49,10 @@ void CDKGSessionManager::StartThreads()
 
 void CDKGSessionManager::StopThreads()
 {
+    if (!fMasternodeMode && !CLLMQUtils::IsWatchQuorumsEnabled()) {
+        // Regular nodes do not care about any DKG internals, bail out
+        return;
+    }
     dkgSessionHandler->StopThread();
 }
 

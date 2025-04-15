@@ -499,11 +499,6 @@ def set_node_times(nodes, t):
     for node in nodes:
         node.setmocktime(t)
 
-# SYSCOIN
-def bump_node_times(nodes, t):
-    for node in nodes:
-        node.mockscheduler(t)
-
 def force_finish_mnsync(node):
     """
     Masternodes won't accept incoming connections while IsSynced is false.

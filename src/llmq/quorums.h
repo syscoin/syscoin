@@ -66,7 +66,7 @@ private:
     // the public key shares are ready when needed later
     mutable CBLSWorkerCache blsCache;
 
-    mutable RecursiveMutex cs_vvec_shShare;
+    mutable Mutex cs_vvec_shShare;
     // These are only valid when we either participated in the DKG or fully watched it
     BLSVerificationVectorPtr quorumVvec GUARDED_BY(cs_vvec_shShare);
     CBLSSecretKey skShare GUARDED_BY(cs_vvec_shShare);
@@ -76,23 +76,23 @@ public:
     ~CQuorum() = default;
     void Init(CFinalCommitmentPtr _qc, const CBlockIndex* _pQuorumBaseBlockIndex, const uint256& _minedBlockHash, const std::vector<CDeterministicMNCPtr>& _members);
 
-    void SetVerificationVector(BLSVerificationVectorPtr vvec_in) {
+    void SetVerificationVector(BLSVerificationVectorPtr vvec_in) EXCLUSIVE_LOCKS_REQUIRED(!cs_vvec_shShare) {
         LOCK(cs_vvec_shShare);
         quorumVvec = std::move(vvec_in);
     }
-    bool SetSecretKeyShare(const CBLSSecretKey& secretKeyShare);
-    bool HasVerificationVector() const LOCKS_EXCLUDED(cs_vvec_shShare);
+    bool SetSecretKeyShare(const CBLSSecretKey& secretKeyShare) EXCLUSIVE_LOCKS_REQUIRED(!cs_vvec_shShare);
+    bool HasVerificationVector() const EXCLUSIVE_LOCKS_REQUIRED(!cs_vvec_shShare);
     bool IsMember(const uint256& proTxHash) const;
     bool IsValidMember(const uint256& proTxHash) const;
     int GetMemberIndex(const uint256& proTxHash) const;
 
-    CBLSPublicKey GetPubKeyShare(size_t memberIdx) const;
-    CBLSSecretKey GetSkShare() const;
+    CBLSPublicKey GetPubKeyShare(size_t memberIdx) const EXCLUSIVE_LOCKS_REQUIRED(!cs_vvec_shShare);
+    CBLSSecretKey GetSkShare() const EXCLUSIVE_LOCKS_REQUIRED(!cs_vvec_shShare);
 
 private:
     bool HasVerificationVectorInternal() const EXCLUSIVE_LOCKS_REQUIRED(cs_vvec_shShare);
-    void WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk);
-    bool ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk);
+    void WriteContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk) EXCLUSIVE_LOCKS_REQUIRED(!cs_vvec_shShare);
+    bool ReadContributions(std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>& evoDb_vvec, std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>& evoDb_sk) EXCLUSIVE_LOCKS_REQUIRED(!cs_vvec_shShare);
 };
 
 /**
@@ -104,10 +104,11 @@ private:
 class CQuorumManager
 {
 private:
+    mutable Mutex cs_db;
     CBLSWorker& blsWorker;
     CDKGSessionManager& dkgManager;
     ChainstateManager& chainman;
-    mutable RecursiveMutex cs_quorums;
+    mutable Mutex cs_quorums;
     mutable std::vector<CQuorumCPtr> vecQuorumsCache GUARDED_BY(cs_quorums);
     mutable ctpl::thread_pool workerPool;
     mutable CThreadInterrupt quorumThreadInterrupt;
@@ -117,33 +118,33 @@ public:
     std::unique_ptr<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>> evoDb_vvec;
     std::unique_ptr<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>> evoDb_sk;
     explicit CQuorumManager(const DBParams& db_params_vvecs, const DBParams& db_params_sk, CBLSWorker& _blsWorker, CDKGSessionManager& _dkgManager, ChainstateManager& _chainman);
-    ~CQuorumManager() { Stop(); };
+    ~CQuorumManager();
 
     void Start();
     void Stop();
 
-    void UpdatedBlockTip(const CBlockIndex *pindexNew, bool fInitialDownload);
+    void UpdatedBlockTip(const CBlockIndex *pindexNew, bool fInitialDownload) EXCLUSIVE_LOCKS_REQUIRED(!cs_quorums, !cs_db);
 
 
     static bool HasQuorum(const uint256& quorumHash);
 
     // all these methods will lock cs_main for a short period of time
-    CQuorumCPtr GetQuorum(const uint256& quorumHash);
-    std::vector<CQuorumCPtr> ScanQuorums(size_t nCountRequested);
+    CQuorumCPtr GetQuorum(const uint256& quorumHash) EXCLUSIVE_LOCKS_REQUIRED(!cs_quorums, !cs_db);
+    std::vector<CQuorumCPtr> ScanQuorums(size_t nCountRequested) EXCLUSIVE_LOCKS_REQUIRED(!cs_quorums, !cs_db);
 
     // this one is cs_main-free
-    std::vector<CQuorumCPtr> ScanQuorums(const CBlockIndex* pindexStart, size_t nCountRequested);
+    std::vector<CQuorumCPtr> ScanQuorums(const CBlockIndex* pindexStart, size_t nCountRequested) EXCLUSIVE_LOCKS_REQUIRED(!cs_quorums, !cs_db);
     bool FlushCacheToDisk();
 private:
     void DoMaintenance();
     std::vector<CQuorumCPtr>::iterator FindQuorumByHash(const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(cs_quorums);
     // all private methods here are cs_main-free
-    void EnsureQuorumConnections(const CBlockIndex *pindexNew);
+    void EnsureQuorumConnections(const CBlockIndex *pindexNew) EXCLUSIVE_LOCKS_REQUIRED(!cs_quorums, !cs_db);
 
-    CQuorumPtr BuildQuorumFromCommitment(const CBlockIndex* pQuorumBaseBlockIndex);
-    bool BuildQuorumContributions(const CFinalCommitmentPtr& fqc, const std::shared_ptr<CQuorum>& quorum) const;
+    CQuorumPtr BuildQuorumFromCommitment(const CBlockIndex* pQuorumBaseBlockIndex) EXCLUSIVE_LOCKS_REQUIRED(!cs_quorums, !cs_db);
+    bool BuildQuorumContributions(const CFinalCommitmentPtr& fqc, const std::shared_ptr<CQuorum>& quorum) const EXCLUSIVE_LOCKS_REQUIRED(!cs_db, !cs_quorums);
 
-    CQuorumCPtr GetQuorum(const CBlockIndex* pindex);
+    CQuorumCPtr GetQuorum(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs_quorums, !cs_db);
     void StartCachePopulatorThread(const CQuorumCPtr pQuorum) const;
 };
 

@@ -4,22 +4,15 @@
 
 #ifndef SYSCOIN_LLMQ_QUORUMS_UTILS_H
 #define SYSCOIN_LLMQ_QUORUMS_UTILS_H
-
-#include <consensus/params.h>
-
 #include <set>
-
+#include <unordered_set>
 #include <vector>
-#include <random.h>
-#include <sync.h>
-#include <dbwrapper.h>
-#include <chainparams.h>
 #include <util/strencodings.h>
-
+#include <uint256.h>
+#include <saltedhasher.h>
 class CBlockIndex;
 class CDeterministicMN;
 using CDeterministicMNCPtr = std::shared_ptr<const CDeterministicMN>;
-class CBLSPublicKey;
 class CConnman;
 namespace llmq
 {
@@ -32,7 +25,6 @@ public:
     static const CBlockIndex* V19ActivationIndex(const CBlockIndex* pindex);
     // includes members which failed DKG
     static std::vector<CDeterministicMNCPtr> GetAllQuorumMembers(const CBlockIndex* pindexQuorum);
-    static uint256 BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash);
 
     static bool IsAllMembersConnectedEnabled();
     static bool IsQuorumPoseEnabled();

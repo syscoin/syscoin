@@ -5,12 +5,13 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_DKGSESSION_H
 #define SYSCOIN_LLMQ_QUORUMS_DKGSESSION_H
 
+#include <llmq/quorums_commitment.h>
+
 #include <batchedlogger.h>
 #include <bls/bls.h>
 #include <bls/bls_ies.h>
 #include <bls/bls_worker.h>
 
-#include <llmq/quorums_utils.h>
 #include <sync.h>
 
 #include <optional>
@@ -184,7 +185,7 @@ public:
 
     [[nodiscard]] uint256 GetSignHash() const
     {
-        return CLLMQUtils::BuildCommitmentHash( quorumHash, validMembers, quorumPublicKey, quorumVvecHash);
+        return BuildCommitmentHash( quorumHash, validMembers, quorumPublicKey, quorumVvecHash);
     }
 };
 

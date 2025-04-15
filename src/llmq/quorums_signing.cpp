@@ -432,15 +432,15 @@ void CSigningManager::ProcessMessageRecoveredSig(CNode* pfrom, const std::shared
     }
     LogPrint(BCLog::LLMQ, "CSigningManager::%s -- signHash=%s, id=%s, msgHash=%s, node=%d\n", __func__,
              recoveredSig->buildSignHash().ToString(), recoveredSig->getId().ToString(), recoveredSig->getMsgHash().ToString(), pfrom->GetId());
-    {
-        LOCK(cs_pending);
-        if (pendingReconstructedRecoveredSigs.count(hash)) {
-            // no need to perform full verification
-            LogPrint(BCLog::LLMQ, "CSigningManager::%s -- already pending reconstructed sig, signHash=%s, id=%s, msgHash=%s, node=%d\n", __func__,
-                    recoveredSig->buildSignHash().ToString(), recoveredSig->getId().ToString(), recoveredSig->getMsgHash().ToString(), pfrom->GetId());
-        }
+    
+    LOCK(cs_pending);
+    if (pendingReconstructedRecoveredSigs.count(hash)) {
+        // no need to perform full verification
+        LogPrint(BCLog::LLMQ, "CSigningManager::%s -- already pending reconstructed sig, signHash=%s, id=%s, msgHash=%s, node=%d\n", __func__,
+                recoveredSig->buildSignHash().ToString(), recoveredSig->getId().ToString(), recoveredSig->getMsgHash().ToString(), pfrom->GetId());
         return;
     }
+    
     pendingRecoveredSigs[pfrom->GetId()].emplace_back(recoveredSig);
 }
 
@@ -638,10 +638,6 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
 
     LogPrint(BCLog::LLMQ, "CSigningManager::%s -- valid recSig. signHash=%s, id=%s, msgHash=%s\n", __func__,
             signHash.ToString(), recoveredSig->getId().ToString(), recoveredSig->getMsgHash().ToString());
-    {
-        LOCK(cs_main);
-        peerman.ForgetTxHash(nodeId, hash);
-    }
     if (db.HasRecoveredSigForId(recoveredSig->getId())) {
         CRecoveredSig otherRecoveredSig;
         if (db.GetRecoveredSigById(recoveredSig->getId(), otherRecoveredSig)) {
@@ -666,7 +662,6 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
 
     db.WriteRecoveredSig(*recoveredSig);
     WITH_LOCK(cs_pending, pendingReconstructedRecoveredSigs.erase(recoveredSig->GetHash()));
-
     if (fMasternodeMode) {
         peerman.RelayRecoveredSig(recoveredSig->GetHash());
     }
@@ -674,6 +669,10 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
     auto listeners = WITH_LOCK(cs_listeners, return recoveredSigsListeners);
     for (auto& l : listeners) {
         l->HandleNewRecoveredSig(*recoveredSig);
+    }
+    {
+        LOCK(cs_main);
+        peerman.ForgetTxHash(nodeId, hash);
     }
 }
 
@@ -831,7 +830,7 @@ void CSigningManager::StartWorkerThread()
         assert(false);
     }
 
-    workThread = std::thread(&util::TraceThread, "sigshares", [this] { WorkThreadMain(); });
+    workThread = std::thread(&util::TraceThread, "signingman", [this] { WorkThreadMain(); });
 }
 
 void CSigningManager::StopWorkerThread()

@@ -55,15 +55,6 @@ std::vector<CDeterministicMNCPtr> CLLMQUtils::GetAllQuorumMembers(const CBlockIn
     return quorumMembers;
 }
 
-uint256 CLLMQUtils::BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash)
-{
-    CHashWriter hw(SER_GETHASH, 0);
-    hw << blockHash;
-    hw << DYNBITSET(validMembers);
-    hw << pubKey;
-    hw << vvecHash;
-    return hw.GetHash();
-}
 
 static bool EvalSpork(int64_t spork_value)
 {

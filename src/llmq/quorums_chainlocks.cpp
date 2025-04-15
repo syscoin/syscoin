@@ -653,24 +653,24 @@ private:
     int lastSignedHeight GUARDED_BY(cs) {-1};
 
 public:
-    mutable RecursiveMutex cs;
-    void SetLastSignedHeight(int _lastSignedHeight)
+    mutable Mutex cs;
+    void SetLastSignedHeight(int _lastSignedHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs)
     {
         LOCK(cs);
         lastSignedHeight = _lastSignedHeight;
         attempt = ATTEMPT_START;
     }
-    int GetLastSignedHeight() const
+    int GetLastSignedHeight() const EXCLUSIVE_LOCKS_REQUIRED(!cs)
     {
         LOCK(cs);
         return lastSignedHeight;
     }
-    void BumpAttempt()
+    void BumpAttempt() EXCLUSIVE_LOCKS_REQUIRED(!cs)
     {
         LOCK(cs);
         ++attempt;
     }
-    int GetAttempt() const
+    int GetAttempt() const EXCLUSIVE_LOCKS_REQUIRED(!cs)
     {
         LOCK(cs);
         return attempt;
