@@ -197,10 +197,6 @@ AC_DEFUN([GMP_CHECK],[
   fi
 
 
-  if test x"$want_backend" = x"gmp" && test x"$has_gmp" = x"no"; then
-    AC_MSG_ERROR([$gmp_fail_reason])
-  fi
-
   CPPFLAGS="$CPPFLAGS_TEMP"
   LIBS="$LIBS_TEMP"
 ])
