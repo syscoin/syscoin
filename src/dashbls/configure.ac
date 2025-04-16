@@ -187,7 +187,7 @@ AC_DEFUN([GMP_CHECK],[
         #error GMP version too old
         #endif
       ]], [[]])],
-      [AC_MSG_RESULT([yes]); has_gmp=yes],
+      [AC_MSG_RESULT([yes]); GMP_LIBS="-lgmp"; has_gmp=yes;],
       [AC_MSG_RESULT([no]); gmp_fail_reason="GMP version too old"; has_gmp=no]
     )
   fi

@@ -23,10 +23,8 @@ endif
 
 SYSCOIND_BIN=$(top_builddir)/src/$(SYSCOIN_DAEMON_NAME)$(EXEEXT)
 SYSCOIN_QT_BIN=$(top_builddir)/src/qt/$(SYSCOIN_GUI_NAME)$(EXEEXT)
-SYSCOIN_TEST_BIN=$(top_builddir)/src/test/$(SYSCOIN_TEST_NAME)$(EXEEXT)
 SYSCOIN_CLI_BIN=$(top_builddir)/src/$(SYSCOIN_CLI_NAME)$(EXEEXT)
 SYSCOIN_TX_BIN=$(top_builddir)/src/$(SYSCOIN_TX_NAME)$(EXEEXT)
-SYSCOIN_UTIL_BIN=$(top_builddir)/src/$(SYSCOIN_UTIL_NAME)$(EXEEXT)
 SYSCOIN_WALLET_BIN=$(top_builddir)/src/$(SYSCOIN_WALLET_TOOL_NAME)$(EXEEXT)
 SYSCOIN_NODE_BIN=$(top_builddir)/src/$(SYSCOIN_MP_NODE_NAME)$(EXEEXT)
 SYSCOIN_GUI_BIN=$(top_builddir)/src/$(SYSCOIN_MP_GUI_NAME)$(EXEEXT)
@@ -97,11 +95,9 @@ $(SYSCOIN_WIN_INSTALLER): all-recursive
 	$(MKDIR_P) $(top_builddir)/release
 	STRIPPROG="$(STRIP)" $(INSTALL_STRIP_PROGRAM) $(SYSCOIND_BIN) $(top_builddir)/release
 	STRIPPROG="$(STRIP)" $(INSTALL_STRIP_PROGRAM) $(SYSCOIN_QT_BIN) $(top_builddir)/release
-	STRIPPROG="$(STRIP)" $(INSTALL_STRIP_PROGRAM) $(SYSCOIN_TEST_BIN) $(top_builddir)/release
 	STRIPPROG="$(STRIP)" $(INSTALL_STRIP_PROGRAM) $(SYSCOIN_CLI_BIN) $(top_builddir)/release
 	STRIPPROG="$(STRIP)" $(INSTALL_STRIP_PROGRAM) $(SYSCOIN_TX_BIN) $(top_builddir)/release
 	STRIPPROG="$(STRIP)" $(INSTALL_STRIP_PROGRAM) $(SYSCOIN_WALLET_BIN) $(top_builddir)/release
-	STRIPPROG="$(STRIP)" $(INSTALL_STRIP_PROGRAM) $(SYSCOIN_UTIL_BIN) $(top_builddir)/release
 	@test -f $(MAKENSIS) && echo 'OutFile "$@"' | cat $(top_builddir)/share/setup.nsi - | $(MAKENSIS) -V2 - || \
 	  echo error: could not build $@
 	@echo built $@
@@ -138,8 +134,6 @@ OSX_APP_BUILT=$(OSX_APP)/Contents/PkgInfo $(OSX_APP)/Contents/Resources/empty.lp
   $(OSX_APP)/Contents/Resources/syscoin.icns $(OSX_APP)/Contents/Info.plist \
   $(OSX_APP)/Contents/MacOS/Syscoin-Qt $(OSX_APP)/Contents/Resources/Base.lproj/InfoPlist.strings
 
-osx_volname:
-	echo $(OSX_VOLNAME) >$@
 
 if BUILD_DARWIN
 $(OSX_ZIP): $(OSX_APP_BUILT) $(OSX_PACKAGING)
@@ -153,8 +147,8 @@ $(OSX_ZIP): deploydir
 	if [ -n "$(SOURCE_DATE_EPOCH)" ]; then find $(APP_DIST_DIR) -exec touch -d @$(SOURCE_DATE_EPOCH) {} +; fi
 	cd $(APP_DIST_DIR) && find . | sort | $(ZIP) -X@ $@
 
-$(APP_DIST_DIR)/$(OSX_APP)/Contents/MacOS/Syscoin-Qt: $(OSX_APP_BUILT) $(OSX_PACKAGING)
-	INSTALL_NAME_TOOL=$(INSTALL_NAME_TOOL) OTOOL=$(OTOOL) STRIP=$(STRIP) $(PYTHON) $(OSX_DEPLOY_SCRIPT) $(OSX_APP) $(OSX_VOLNAME) -translations-dir=$(QT_TRANSLATION_DIR)
+$(APP_DIST_DIR)/$(OSX_APP)/Contents/MacOS/Dash-Qt: $(OSX_APP_BUILT) $(OSX_PACKAGING)
+	OBJDUMP=$(OBJDUMP) $(PYTHON) $(OSX_DEPLOY_SCRIPT) $(OSX_APP) $(OSX_VOLNAME) -translations-dir=$(QT_TRANSLATION_DIR)
 
 deploydir: $(APP_DIST_DIR)/$(OSX_APP)/Contents/MacOS/Syscoin-Qt
 endif !BUILD_DARWIN
@@ -172,9 +166,6 @@ $(SYSCOIN_CLI_BIN): FORCE
 	$(MAKE) -C src $(@F)
 
 $(SYSCOIN_TX_BIN): FORCE
-	$(MAKE) -C src $(@F)
-
-$(SYSCOIN_UTIL_BIN): FORCE
 	$(MAKE) -C src $(@F)
 
 $(SYSCOIN_WALLET_BIN): FORCE
@@ -197,6 +188,7 @@ LCOV_FILTER_PATTERN = \
 	-p "src/leveldb/" \
 	-p "src/crc32c/" \
 	-p "src/bench/" \
+	-p "src/univalue" \
 	-p "src/crypto/ctaes" \
 	-p "src/minisketch" \
 	-p "src/secp256k1" \
@@ -356,7 +348,7 @@ clean-docs:
 clean-local: clean-docs
 	rm -rf coverage_percent.txt test_syscoin.coverage/ total.coverage/ fuzz.coverage/ test/tmp/ cache/ $(OSX_APP)
 	rm -rf test/functional/__pycache__ test/functional/test_framework/__pycache__ test/cache share/rpcauth/__pycache__
-	rm -rf osx_volname dist/
+	rm -rf dist/
 
 test-security-check:
 if TARGET_DARWIN

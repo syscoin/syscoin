@@ -45,9 +45,7 @@ endif
 if BUILD_SYSCOIN_LIBS
 LIBSYSCOINCONSENSUS=libsyscoinconsensus.la
 endif
-if BUILD_SYSCOIN_KERNEL_LIB
-LIBSYSCOINKERNEL=libsyscoinkernel.la
-endif
+
 if ENABLE_WALLET
 LIBSYSCOIN_WALLET=libsyscoin_wallet.a
 LIBSYSCOIN_WALLET_TOOL=libsyscoin_wallet_tool.a
@@ -113,14 +111,6 @@ if ENABLE_WALLET
 if BUILD_SYSCOIN_WALLET
   bin_PROGRAMS += syscoin-wallet
 endif
-endif
-
-if BUILD_SYSCOIN_UTIL
-  bin_PROGRAMS += syscoin-util
-endif
-
-if BUILD_SYSCOIN_CHAINSTATE
-  bin_PROGRAMS += syscoin-chainstate
 endif
 
 .PHONY: FORCE check-symbols check-security
@@ -1026,144 +1016,6 @@ syscoin_wallet_SOURCES += syscoin-wallet-res.rc
 endif
 #
 
-# syscoin-util binary #
-syscoin_util_SOURCES = syscoin-util.cpp
-syscoin_util_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
-syscoin_util_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-syscoin_util_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
-
-if TARGET_WINDOWS
-syscoin_util_SOURCES += syscoin-util-res.rc
-endif
-
-syscoin_util_LDADD = \
-  $(LIBSYSCOIN_COMMON) \
-  $(LIBSYSCOIN_UTIL) \
-  $(LIBUNIVALUE) \
-  $(LIBSYSCOIN_CONSENSUS) \
-  $(LIBSYSCOIN_CRYPTO) \
-  $(LIBSECP256K1)
-#
-
-# syscoin-chainstate binary #
-syscoin_chainstate_SOURCES = syscoin-chainstate.cpp
-syscoin_chainstate_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(BOOST_CPPFLAGS)
-syscoin_chainstate_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-
-syscoin_chainstate_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(PTHREAD_FLAGS) $(LIBTOOL_APP_LDFLAGS) -static
-syscoin_chainstate_LDADD = $(LIBSYSCOINKERNEL)
-
-# libtool is unable to calculate this indirect dependency, presumably because it's a subproject.
-# libsecp256k1 only needs to be linked in when libsyscoinkernel is static.
-syscoin_chainstate_LDADD += $(LIBSECP256K1)
-#
-
-# syscoinkernel library #
-if BUILD_SYSCOIN_KERNEL_LIB
-lib_LTLIBRARIES += $(LIBSYSCOINKERNEL)
-
-libsyscoinkernel_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS) $(PTHREAD_FLAGS)
-libsyscoinkernel_la_LIBADD = $(LIBSYSCOIN_CRYPTO) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS) $(LIBUNIVALUE) $(LIBLEVELDB) $(LIBMEMENV) $(LIBSECP256K1) $(MINISKETCH_LIBS) $(LIBSYSCOIN_ZMQ) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_CONSENSUS) $(LIBSYSCOIN_NODE) $(LIBSYSCOIN_WALLET)
-libsyscoinkernel_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include $(BOOST_CPPFLAGS) $(LEVELDB_CPPFLAGS) -I$(srcdir)/$(UNIVALUE_INCLUDE_DIR_INT) $(SYSCOIN_INCLUDES)
-
-# libsyscoinkernel requires default symbol visibility, explicitly specify that
-# here so that things still work even when user configures with
-#   --enable-reduce-exports
-#
-# Note this is a quick hack that will be removed as we incrementally define what
-# to export from the library.
-libsyscoinkernel_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -fvisibility=default
-
-# TODO: libsyscoinkernel is a work in progress consensus engine library, as more
-#       and more modules are decoupled from the consensus engine, this list will
-#       shrink to only those which are absolutely necessary.
-libsyscoinkernel_la_SOURCES = \
-  $(nevm_libnevm_a_SOURCES) \
-  kernel/syscoinkernel.cpp \
-  arith_uint256.cpp \
-  chain.cpp \
-  clientversion.cpp \
-  coins.cpp \
-  common/args.cpp \
-  common/config.cpp \
-  consensus/merkle.cpp \
-  consensus/tx_check.cpp \
-  consensus/tx_verify.cpp \
-  core_read.cpp \
-  dbwrapper.cpp \
-  deploymentinfo.cpp \
-  deploymentstatus.cpp \
-  flatfile.cpp \
-  hash.cpp \
-  kernel/chain.cpp \
-  kernel/checks.cpp \
-  kernel/chainparams.cpp \
-  kernel/coinstats.cpp \
-  kernel/context.cpp \
-  kernel/cs_main.cpp \
-  kernel/mempool_persist.cpp \
-  kernel/mempool_removal_reason.cpp \
-  key.cpp \
-  logging.cpp \
-  node/blockstorage.cpp \
-  node/chainstate.cpp \
-  node/utxo_snapshot.cpp \
-  policy/feerate.cpp \
-  policy/fees.cpp \
-  policy/packages.cpp \
-  policy/policy.cpp \
-  policy/rbf.cpp \
-  policy/settings.cpp \
-  pow.cpp \
-  primitives/block.cpp \
-  primitives/transaction.cpp \
-  pubkey.cpp \
-  random.cpp \
-  randomenv.cpp \
-  scheduler.cpp \
-  script/interpreter.cpp \
-  script/script.cpp \
-  script/script_error.cpp \
-  script/sigcache.cpp \
-  script/solver.cpp \
-  signet.cpp \
-  streams.cpp \
-  support/cleanse.cpp \
-  support/lockedpool.cpp \
-  sync.cpp \
-  txdb.cpp \
-  txmempool.cpp \
-  uint256.cpp \
-  util/batchpriority.cpp \
-  util/chaintype.cpp \
-  util/check.cpp \
-  util/exception.cpp \
-  util/fs.cpp \
-  util/fs_helpers.cpp \
-  util/hasher.cpp \
-  util/moneystr.cpp \
-  util/rbf.cpp \
-  util/serfloat.cpp \
-  util/signalinterrupt.cpp \
-  util/strencodings.cpp \
-  util/string.cpp \
-  util/syserror.cpp \
-  util/thread.cpp \
-  util/threadnames.cpp \
-  util/time.cpp \
-  util/tokenpipe.cpp \
-  validation.cpp \
-  validationinterface.cpp \
-  versionbits.cpp \
-  warnings.cpp
-
-
-# Required for obj/build.h to be generated first.
-# More details: https://www.gnu.org/software/automake/manual/html_node/Built-Sources-Example.html
-libsyscoinkernel_la-clientversion.l$(OBJEXT): obj/build.h
-endif # BUILD_SYSCOIN_KERNEL_LIB
-#
-
 # syscoinconsensus library #
 if BUILD_SYSCOIN_LIBS
 lib_LTLIBRARIES += $(LIBSYSCOINCONSENSUS)
@@ -1308,14 +1160,6 @@ libsyscoin_ipc_mpgen_output = \
 nodist_libsyscoin_ipc_a_SOURCES = $(libsyscoin_ipc_mpgen_output)
 CLEANFILES += $(libsyscoin_ipc_mpgen_output)
 endif
-
-%.raw.h: %.raw
-	@$(MKDIR_P) $(@D)
-	$(AM_V_GEN) { \
-	 echo "static unsigned const char $(*F)_raw[] = {" && \
-	 $(HEXDUMP) -v -e '8/1 "0x%02x, "' -e '"\n"' $< | $(SED) -e 's/0x  ,//g' && \
-	 echo "};"; \
-	} > "$@.new" && mv -f "$@.new" "$@"
 
 include Makefile.minisketch.include
 
