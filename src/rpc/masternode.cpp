@@ -63,78 +63,6 @@ static RPCHelpMan masternode_list()
     };
 } 
 
-static UniValue mnlistjson(ChainstateManager &chainman, uint256 quorumHash)
-{
-    UniValue ret(UniValue::VOBJ);
-
-    if (quorumHash.IsNull()) {
-        return ret;
-    }
-
-    const CBlockIndex* pindex;
-    std::vector<CDeterministicMNCPtr> dmnMembers;
-
-    pindex = WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(quorumHash));
-    if (pindex != nullptr) {
-        dmnMembers = llmq::CLLMQUtils::GetAllQuorumMembers(pindex);
-    }
-
-    ret.pushKV("quorumHash", quorumHash.ToString());
-    if (pindex) {
-        ret.pushKV("quorumHeight", pindex->nHeight);
-    } else {
-        ret.pushKV("quorumHeight", -1);
-    }
-
-    // Sort members by nRegisteredHeight (ascending)
-    std::sort(dmnMembers.begin(), dmnMembers.end(), 
-        [](const CDeterministicMNCPtr& a, const CDeterministicMNCPtr& b) {
-            return a->pdmnState->nRegisteredHeight < b->pdmnState->nRegisteredHeight;
-        }
-    );
-    int newCount= 0;
-    UniValue arr(UniValue::VARR);
-    int index=0;
-    for (const auto& dmn : dmnMembers) {
-        UniValue obj(UniValue::VOBJ);
-        obj.pushKV("idx", index++);
-        obj.pushKV("proTxHash", dmn->proTxHash.ToString());
-        if(dmn->pdmnState->nRegisteredHeight >= 1339231) {
-            newCount++;
-        }
-        obj.pushKV("registered_height", static_cast<int>(dmn->pdmnState->nRegisteredHeight));
-        arr.push_back(obj);
-    }
-
-    ret.pushKV("members", arr);
-    ret.pushKV("size", static_cast<int>(dmnMembers.size()));
-    ret.pushKV("newCount", newCount);
-
-    return ret;
-}
-
-
-static RPCHelpMan masternode_selection()
-{
-    return RPCHelpMan{"masternode_selection",
-        "\nGet quorum selection based on a quorum DKG hash\n",
-        {
-            {"blockhash", RPCArg::Type::STR, RPCArg::Optional::NO, "The DKG blockhash to get quorum selection for."},                
-        },
-        RPCResult{RPCResult::Type::ANY, "", ""},
-        RPCExamples{
-                HelpExampleCli("masternode_selection", "")
-            + HelpExampleRpc("masternode_selection", "")
-        },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    const node::NodeContext& node = EnsureAnyNodeContext(request.context);
-    uint256 blockhash = ParseHashV(request.params[0], "blockhash");
-    return mnlistjson(*node.chainman, blockhash);
-},
-    };
-} 
-
 static RPCHelpMan masternode_connect()
 {
     return RPCHelpMan{"masternode_connect",
@@ -685,7 +613,6 @@ void RegisterMasternodeRPCCommands(CRPCTable &t)
     static const CRPCCommand commands[]{
         {"masternode", &masternode_connect},
         {"masternode", &masternode_list},
-        {"masternode", &masternode_selection},
         {"masternode", &masternode_winners},
         {"masternode", &masternode_payments},
         {"masternode", &masternode_count},
