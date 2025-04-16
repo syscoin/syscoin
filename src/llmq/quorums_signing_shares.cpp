@@ -808,7 +808,8 @@ void CSigSharesManager::TryRecoverSig(const CQuorumCPtr& quorum, const uint256& 
 
 CDeterministicMNCPtr CSigSharesManager::SelectMemberForRecovery(const CQuorumCPtr& quorum, const uint256 &id, int attempt)
 {
-    assert((size_t)attempt < quorum->members.size());
+    const auto& params = Params().GetConsensus().llmqTypeChainLocks;
+    assert(attempt < params.recoveryMembers);
 
     std::vector<std::pair<uint256, CDeterministicMNCPtr>> v;
     v.reserve(quorum->members.size());
@@ -987,7 +988,7 @@ void CSigSharesManager::CollectSigSharesToSendConcentrated(std::unordered_map<No
             continue;
         }
 
-        if (signedSession.attempt > params.recoveryMembers) {
+        if (signedSession.attempt >= params.recoveryMembers) {
             continue;
         }
 
@@ -996,6 +997,11 @@ void CSigSharesManager::CollectSigSharesToSendConcentrated(std::unordered_map<No
             waitTime = std::min(MAX_SEND_FOR_RECOVERY_TIMEOUT, waitTime);
             signedSession.nextAttemptTime = curTime + waitTime;
             auto dmn = SelectMemberForRecovery(signedSession.quorum, signedSession.sigShare.getId(), signedSession.attempt);
+            if(!dmn) {
+                LogPrint(BCLog::LLMQ_SIGS, "CSigSharesManager::%s -- signHash=%s, failed to find DMN for %s, attempt=%d, skipping...\n", __func__,
+                    signedSession.sigShare.GetSignHash().ToString(), dmn->proTxHash.ToString(), signedSession.attempt);
+                continue;
+            }
             signedSession.attempt++;
 
             LogPrint(BCLog::LLMQ_SIGS, "CSigSharesManager::%s -- signHash=%s, sending to %s, attempt=%d\n", __func__,
