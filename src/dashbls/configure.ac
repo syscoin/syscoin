@@ -162,35 +162,40 @@ AC_DEFUN([GMP_CHECK],[
   )
 
   if test x"$has_gmp" != x"no"; then
-    # Proper support for macOS aarch64 was introduced in 6.3.0, but LTS distros
-    # like Ubuntu 20.04 (focal) use 6.2.0, so, the minimum supported version is
-    # determined by platform and architecture.
+    # Determine minimum required version based on platform
     case $host in
       *darwin*)
         case $host_cpu in
           aarch*)
-            gmp_major_version=6
-            gmp_minor_version=3
+            gmp_version=630
+            ;;
+          *)
+            gmp_version=620
             ;;
         esac
         ;;
       *)
-        gmp_major_version=6
-        gmp_minor_version=2
+        gmp_version=620
         ;;
     esac
-    AC_MSG_CHECKING([gmp version >= $gmp_major_version.$gmp_minor_version])
+
+    AC_MSG_CHECKING([for GMP version >= ${gmp_version}])
     AC_COMPILE_IFELSE(
-      [AC_LANG_PROGRAM(
-        [[@%:@include <gmp.h>]],
-        [[
-          @%:@if __GNU_MP_VERSION < $gmp_major_version || __GNU_MP_VERSION_MINOR < $gmp_minor_version
-            @%:@error Unsupported GMP version
-          @%:@endif]])],
-      [AC_MSG_RESULT([yes]); GMP_LIBS="-lgmp"; has_gmp=yes;],
-      [AC_MSG_RESULT([no]); gmp_fail_reason="unsupported gmp version"; has_gmp=no;]
+      [AC_LANG_PROGRAM([[
+        #include <gmp.h>
+        #if (__GNU_MP_VERSION * 100 + __GNU_MP_VERSION_MINOR * 10 + __GNU_MP_VERSION_PATCHLEVEL < $gmp_version)
+        #error GMP version too old
+        #endif
+      ]], [[]])],
+      [AC_MSG_RESULT([yes]); has_gmp=yes],
+      [AC_MSG_RESULT([no]); gmp_fail_reason="GMP version too old"; has_gmp=no]
     )
   fi
+
+  if test x"$want_backend" = x"gmp" && test x"$has_gmp" = x"no"; then
+    AC_MSG_ERROR([$gmp_fail_reason])
+  fi
+
 
   if test x"$want_backend" = x"gmp" && test x"$has_gmp" = x"no"; then
     AC_MSG_ERROR([$gmp_fail_reason])
