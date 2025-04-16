@@ -699,7 +699,7 @@ void CSigSharesManager::ProcessSigShare(const CSigShare& sigShare, const CQuorum
     bool canTryRecovery = false;
 
     // prepare node set for direct-push in case this is our sig share
-    std::set<NodeId> quorumNodes;
+    std::unordered_set<NodeId> quorumNodes;
     if (!CLLMQUtils::IsAllMembersConnectedEnabled() && sigShare.getQuorumMember() == quorum->GetMemberIndex(WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.proTxHash))) {
         connman.GetMasternodeQuorumNodes(sigShare.getQuorumHash(), quorumNodes);
     }
@@ -1033,7 +1033,7 @@ void CSigSharesManager::CollectSigSharesToAnnounce(std::unordered_map<NodeId, st
         // announce to the nodes which we know through the intra-quorum-communication system
         auto it = quorumNodesMap.find(sigShare->getQuorumHash());
         if (it == quorumNodesMap.end()) {
-            std::set<NodeId> nodeIds;
+            std::unordered_set<NodeId> nodeIds;
             connman.GetMasternodeQuorumNodes(sigShare->getQuorumHash(), nodeIds);
             it = quorumNodesMap.emplace(std::piecewise_construct, std::forward_as_tuple(sigShare->getQuorumHash()), std::forward_as_tuple(nodeIds.begin(), nodeIds.end())).first;
         }
@@ -1077,6 +1077,7 @@ bool CSigSharesManager::SendMessages()
     std::unordered_map<NodeId, std::vector<CSigSesAnn>> sigSessionAnnouncements;
 
     auto addSigSesAnnIfNeeded = [&](NodeId nodeId, const uint256& signHash) EXCLUSIVE_LOCKS_REQUIRED(cs){
+        AssertLockHeld(cs);
         auto& nodeState = nodeStates[nodeId];
         auto *session = nodeState.GetSessionBySignHash(signHash);
         assert(session);
