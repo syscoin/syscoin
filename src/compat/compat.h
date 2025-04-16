@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2022 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -52,6 +52,7 @@ typedef unsigned int SOCKET;
 #define WSAEADDRINUSE       EADDRINUSE
 #define INVALID_SOCKET      (SOCKET)(~0)
 #define SOCKET_ERROR        -1
+#define SD_SEND             SHUT_WR
 #else
 // WSAEAGAIN doesn't exist on Windows
 #ifdef EAGAIN
@@ -94,9 +95,17 @@ typedef char* sockopt_arg_type;
 
 // Note these both should work with the current usage of poll, but best to be safe
 // WIN32 poll is broken https://daniel.haxx.se/blog/2012/10/10/wsapoll-is-broken/
-// __APPLE__ poll is broke https://github.com/syscoin/syscoin/pull/14336#issuecomment-437384408
-#if defined(__linux__)
+// __APPLE__ poll is broke https://github.com/bitcoin/bitcoin/pull/14336#issuecomment-437384408
+#if defined(__linux__) || defined(__FreeBSD__)
 #define USE_POLL
+#endif
+
+#if defined(__linux__)
+#define USE_EPOLL
+#endif
+
+#if defined(__FreeBSD__) || defined(__APPLE__)
+#define USE_KQUEUE
 #endif
 
 // MSG_NOSIGNAL is not available on some platforms, if it doesn't exist define it as 0

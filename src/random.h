@@ -205,7 +205,7 @@ public:
     {
         assert(range);
         --range;
-        int bits = CountBits(range);
+        int bits = std::bit_width(range);
         while (true) {
             uint64_t ret = randbits(bits);
             if (ret <= range) return ret;

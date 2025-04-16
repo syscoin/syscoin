@@ -160,7 +160,7 @@ void CRecoveredSigsDb::WriteRecoveredSig(const llmq::CRecoveredSig& recSig)
     batch.Write(k4, (uint8_t)1);
 
     // store by current time. Allows fast cleanup of old recSigs
-    auto k5 = std::make_tuple(std::string("rs_t"), (uint32_t)htobe32(curTime), recSig.getId());
+    auto k5 = std::make_tuple(std::string("rs_t"), (uint32_t)htobe32_internal(curTime), recSig.getId());
     batch.Write(k5, (uint8_t)1);
 
     db->WriteBatch(batch);
@@ -196,7 +196,7 @@ void CRecoveredSigsDb::RemoveRecoveredSig(CDBBatch& batch, const uint256& id, bo
     if (deleteTimeKey) {
         uint32_t writeTime;
         if (db->Read(k2, writeTime)) {
-            auto k5 = std::make_tuple(std::string("rs_t"), (uint32_t) htobe32(writeTime), recSig.getId());
+            auto k5 = std::make_tuple(std::string("rs_t"), (uint32_t) htobe32_internal(writeTime), recSig.getId());
             batch.Erase(k5);
         }
     }
@@ -235,7 +235,7 @@ void CRecoveredSigsDb::CleanupOldRecoveredSigs(int64_t maxAge)
         if (!pcursor->GetKey(k) || std::get<0>(k) != "rs_t") {
             break;
         }
-        if (be32toh(std::get<1>(k)) >= endTime) {
+        if (be32toh_internal(std::get<1>(k)) >= endTime) {
             break;
         }
 
@@ -284,7 +284,7 @@ bool CRecoveredSigsDb::GetVoteForId(const uint256& id, uint256& msgHashRet) cons
 void CRecoveredSigsDb::WriteVoteForId(const uint256& id, const uint256& msgHash)
 {
     auto k1 = std::make_tuple(std::string("rs_v"), id);
-    auto k2 = std::make_tuple(std::string("rs_vt"), (uint32_t)htobe32(GetTime<std::chrono::seconds>().count()), id);
+    auto k2 = std::make_tuple(std::string("rs_vt"), (uint32_t)htobe32_internal(GetTime<std::chrono::seconds>().count()), id);
 
     CDBBatch batch(*db);
     batch.Write(k1, msgHash);
@@ -309,7 +309,7 @@ void CRecoveredSigsDb::CleanupOldVotes(int64_t maxAge)
         if (!pcursor->GetKey(k) || std::get<0>(k) != "rs_vt") {
             break;
         }
-        if (be32toh(std::get<1>(k)) >= endTime) {
+        if (be32toh_internal(std::get<1>(k)) >= endTime) {
             break;
         }
 
