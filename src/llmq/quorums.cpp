@@ -192,12 +192,18 @@ void CQuorumManager::EnsureQuorumConnections(const CBlockIndex* pindexNew)
 
     for (const auto& quorum : lastQuorums) {
         if (CLLMQUtils::EnsureQuorumConnections(quorum->m_quorum_base_block_index, WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.proTxHash), dkgManager.connman)) {
-            continue;
+            if (connmanQuorumsToDelete.erase(quorum->qc->quorumHash) > 0) {
+                LogPrint(BCLog::LLMQ, "CQuorumManager::%s -- h[%d] keeping mn quorum connections for quorum: [%d:%s]\n", __func__, pindexNew->nHeight, quorum->m_quorum_base_block_index->nHeight, quorum->m_quorum_base_block_index->GetBlockHash().ToString());
+            }
         }
         if (connmanQuorumsToDelete.count(quorum->qc->quorumHash) > 0) {
             LogPrint(BCLog::LLMQ, "CQuorumManager::%s -- removing masternodes quorum connections for quorum %s:\n", __func__, quorum->qc->quorumHash.ToString());
             dkgManager.connman.RemoveMasternodeQuorumNodes(quorum->qc->quorumHash);
         }
+    }
+    for (const auto& quorumHash : connmanQuorumsToDelete) {
+        LogPrint(BCLog::LLMQ, "CQuorumManager::%s -- removing masternodes quorum connections for quorum %s:\n", __func__, quorumHash.ToString());
+        dkgManager.connman.RemoveMasternodeQuorumNodes(quorumHash);
     }
 }
 

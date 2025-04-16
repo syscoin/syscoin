@@ -135,11 +135,11 @@ class LLMQSimplePoSeTest(DashTestFramework):
                     self.reset_probe_timeouts()
                     self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
             else:
-                # It's ok to miss probes/quorum connections up to 5 times.
-                # 6th time is when it should be banned for sure.
+                # It's ok to miss probes/quorum connections up to 6 times.
+                # 7th time is when it should be banned for sure.
                 assert expected_connections is None
-                for j in range(6):
-                    self.log.info(f"Accumulating PoSe penalty {j + 1}/6")
+                for j in range(7):
+                    self.log.info(f"Accumulating PoSe penalty {j + 1}/7")
                     self.reset_probe_timeouts()
                     self.mine_quorum(expected_connections=0, expected_members=expected_contributors, expected_contributions=0, expected_complaints=0, expected_commitments=0, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
 
