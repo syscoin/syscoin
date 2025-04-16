@@ -363,11 +363,6 @@ std::string FormatParagraph(std::string_view in, size_t width, size_t indent)
     }
     return out.str();
 }
-// SYSCOIN
-std::string itostr(int n)
-{
-    return strprintf("%d", n);
-}
 /** Upper bound for mantissa.
  * 10^18-1 is the largest arbitrary decimal that will fit in a signed 64-bit integer.
  * Larger integers cannot consist of arbitrary combinations of 0-9:

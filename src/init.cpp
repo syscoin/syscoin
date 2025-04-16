@@ -812,7 +812,7 @@ void InitParameterInteraction(ArgsManager& args)
         #endif // ENABLE_WALLET
         if (args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS) < DEFAULT_MAX_PEER_CONNECTIONS) {
             // masternodes MUST be able to handle at least DEFAULT_MAX_PEER_CONNECTIONS connections
-            args.SoftSetArg("-maxconnections", itostr(DEFAULT_MAX_PEER_CONNECTIONS));
+            args.SoftSetArg("-maxconnections", ToString(DEFAULT_MAX_PEER_CONNECTIONS));
             LogPrintf("%s: parameter interaction: -masternodeblsprivkey=... -> setting -maxconnections=%d\n", __func__, DEFAULT_MAX_PEER_CONNECTIONS);
         }
     }
