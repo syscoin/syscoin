@@ -108,3 +108,13 @@ bench: $(BENCH_BINARY) FORCE
 
 syscoin_bench_clean : FORCE
 	rm -f $(CLEAN_SYSCOIN_BENCH) $(bench_bench_syscoin_OBJECTS) $(BENCH_BINARY)
+
+bench/data/%.raw.h: bench/data/%.raw
+	@$(MKDIR_P) $(@D)
+	@{ \
+	 echo "namespace raw_bench{" && \
+	 echo "static unsigned const char $(*F)_raw[] = {" && \
+	 $(HEXDUMP) -v -e '8/1 "0x%02x, "' -e '"\n"' $< | $(SED) -e 's/0x  ,//g' && \
+	 echo "};};"; \
+	} > "$@.new" && mv -f "$@.new" "$@"
+	@echo "Generated $@"
