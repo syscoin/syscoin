@@ -3,56 +3,55 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 '''
-A script to check that release executables only contain certain symbols
-and are only linked against allowed libraries.
+A script to check that the (Linux) release executables only contain
+certain symbols and are only linked against allowed libraries.
 
 Example usage:
 
     find ../path/to/binaries -type f -executable | xargs python3 contrib/devtools/symbol-check.py
 '''
 import sys
-from typing import List, Dict
+from typing import Dict, List
 
-import lief
+import lief #type:ignore
 
-# Debian 10 (Buster) EOL: 2024. https://wiki.debian.org/LTS
+# Debian 11 (Bullseye) EOL: 2026. https://wiki.debian.org/LTS
 #
-# - libgcc version 8.3.0 (https://packages.debian.org/search?suite=buster&arch=any&searchon=names&keywords=libgcc1)
-# - libc version 2.28 (https://packages.debian.org/search?suite=buster&arch=any&searchon=names&keywords=libc6)
+# - libgcc version 10.2.1 (https://packages.debian.org/bullseye/libgcc-s1)
+# - libc version 2.31 (https://packages.debian.org/source/bullseye/glibc)
 #
-# Ubuntu 18.04 (Bionic) EOL: 2028. https://wiki.ubuntu.com/ReleaseTeam
+# Ubuntu 20.04 (Focal) EOL: 2030. https://wiki.ubuntu.com/ReleaseTeam
 #
-# - libgcc version 8.4.0 (https://packages.ubuntu.com/bionic/libgcc1)
-# - libc version 2.27 (https://packages.ubuntu.com/bionic/libc6)
+# - libgcc version 10.5.0 (https://packages.ubuntu.com/focal/libgcc1)
+# - libc version 2.31 (https://packages.ubuntu.com/focal/libc6)
 #
-# CentOS Stream 8 EOL: 2024. https://wiki.centos.org/About/Product
+# CentOS Stream 9 EOL: 2027. https://www.centos.org/cl-vs-cs/#end-of-life
 #
-# - libgcc version 8.5.0 (http://mirror.centos.org/centos/8-stream/AppStream/x86_64/os/Packages/)
-# - libc version 2.28 (http://mirror.centos.org/centos/8-stream/AppStream/x86_64/os/Packages/)
+# - libgcc version 12.2.1 (https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/Packages/)
+# - libc version 2.34 (https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/Packages/)
 #
 # See https://gcc.gnu.org/onlinedocs/libstdc++/manual/abi.html for more info.
 
 MAX_VERSIONS = {
-'GCC':       (4,8,0),
+'GCC':       (4,3,0),
 'GLIBC': {
-    lief.ELF.ARCH.x86_64: (2,27),
-    lief.ELF.ARCH.ARM:    (2,27),
-    lief.ELF.ARCH.AARCH64:(2,27),
-    lief.ELF.ARCH.PPC64:  (2,27),
-    lief.ELF.ARCH.RISCV:  (2,27),
+    lief.ELF.ARCH.x86_64: (2,31),
+    lief.ELF.ARCH.ARM:    (2,31),
+    lief.ELF.ARCH.AARCH64:(2,31),
+    lief.ELF.ARCH.PPC64:  (2,31),
+    lief.ELF.ARCH.RISCV:  (2,31),
 },
 'LIBATOMIC': (1,0),
 'V':         (0,5,0),  # xkb (syscoin-qt only)
 }
 
 # Ignore symbols that are exported as part of every executable
-# // SYSCOIN
 IGNORE_EXPORTS = {
-'environ', '_environ', '__environ', '_fini', '_init', 'stdin',
-'stdout', 'stderr',
-}
-IGNORE_IMPORTS = {
-'fmemopen',
+'_edata', '_end', '__end__', '_init', '__bss_start', '__bss_start__', '_bss_end__',
+'__bss_end__', '_fini', '_IO_stdin_used', 'stdin', 'stdout', 'stderr',
+'environ', '_environ', '__environ',
+# Used in stacktraces.cpp
+'__cxa_demangle'
 }
 
 # Expected linker-loader names can be found here:
@@ -110,8 +109,10 @@ ELF_ALLOWED_LIBRARIES = {
 'ld64.so.1', # POWER64 ABIv1 dynamic linker
 'ld64.so.2', # POWER64 ABIv2 dynamic linker
 'ld-linux-riscv64-lp64d.so.1', # 64-bit RISC-V dynamic linker
+'libz.so.1', # zlib
 # syscoin-qt only
 'libxcb.so.1', # part of X11
+'libxcb-shm.so.0', # X11 shared memory extension
 'libxkbcommon.so.0', # keyboard keymapping
 'libxkbcommon-x11.so.0', # keyboard keymapping
 'libfontconfig.so.1', # font support
@@ -162,6 +163,7 @@ PE_ALLOWED_LIBRARIES = {
 'msvcrt.dll', # C standard library for MSVC
 'SHELL32.dll', # shell API
 'WS2_32.dll', # sockets
+'bcrypt.dll',
 # syscoin-qt only
 'dwmapi.dll', # desktop window manager
 'GDI32.dll', # graphics device interface
@@ -175,7 +177,6 @@ PE_ALLOWED_LIBRARIES = {
 'UxTheme.dll', # visual style
 'VERSION.dll', # version checking
 'WINMM.dll', # WinMM audio API
-'bcrypt.dll',
 'WTSAPI32.dll', # Remote Desktop
 }
 
@@ -194,9 +195,6 @@ def check_imported_symbols(binary) -> bool:
 
     for symbol in binary.imported_symbols:
         if not symbol.imported:
-            continue
-
-        if symbol.name in IGNORE_IMPORTS:
             continue
 
         version = symbol.symbol_version if symbol.has_version else None
@@ -221,6 +219,11 @@ def check_exported_symbols(binary) -> bool:
         ok = False
     return ok
 
+def check_RUNPATH(binary) -> bool:
+    assert binary.get(lief.ELF.DYNAMIC_TAGS.RUNPATH) is None
+    assert binary.get(lief.ELF.DYNAMIC_TAGS.RPATH) is None
+    return True
+
 def check_ELF_libraries(binary) -> bool:
     ok: bool = True
     for library in binary.libraries:
@@ -244,12 +247,12 @@ def check_MACHO_min_os(binary) -> bool:
     return False
 
 def check_MACHO_sdk(binary) -> bool:
-    if binary.build_version.sdk == [11, 0, 0]:
+    if binary.build_version.sdk == [14, 0, 0]:
         return True
     return False
 
-def check_MACHO_ld64(binary) -> bool:
-    if binary.build_version.tools[0].version == [711, 0, 0]:
+def check_MACHO_lld(binary) -> bool:
+    if binary.build_version.tools[0].version == [18, 1, 6]:
         return True
     return False
 
@@ -286,12 +289,13 @@ lief.EXE_FORMATS.ELF: [
     ('LIBRARY_DEPENDENCIES', check_ELF_libraries),
     ('INTERPRETER_NAME', check_ELF_interpreter),
     ('ABI', check_ELF_ABI),
+    ('RUNPATH', check_RUNPATH),
 ],
 lief.EXE_FORMATS.MACHO: [
     ('DYNAMIC_LIBRARIES', check_MACHO_libraries),
     ('MIN_OS', check_MACHO_min_os),
     ('SDK', check_MACHO_sdk),
-    ('LD64', check_MACHO_ld64),
+    ('LLD', check_MACHO_lld),
 ],
 lief.EXE_FORMATS.PE: [
     ('DYNAMIC_LIBRARIES', check_PE_libraries),

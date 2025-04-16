@@ -3,16 +3,35 @@
 Utility to generate the seeds.txt list that is compiled into the client
 (see [src/chainparamsseeds.h](/src/chainparamsseeds.h) and other utilities in [contrib/seeds](/contrib/seeds)).
 
-Be sure to update `PATTERN_AGENT` in `makeseeds.py` to include the current version,
-and remove old versions as necessary (at a minimum when GetDesirableServiceFlags
-changes its default return value, as those are the services which seeds are added
-to addrman with).
+The seeds compiled into the release are created from the current protx list, like this:
 
-The seeds compiled into the release are created from sipa's DNS seed and AS map
-data. Run the following commands from the `/contrib/seeds` directory:
+```bash
+syscoin-cli protx list valid 1 2018966 > protx_list.json
 
-    curl https://bitcoin.sipa.be/seeds.txt.gz | gzip -dc > seeds_main.txt
-    curl https://bitcoin.sipa.be/asmap-filled.dat > asmap-filled.dat
-    python3 makeseeds.py -a asmap-filled.dat -s seeds_main.txt > nodes_main.txt
-    cat nodes_main_manual.txt >> nodes_main.txt
-    python3 generate-seeds.py . > ../../src/chainparamsseeds.h
+# Make sure the onion seeds still work!
+while IFS= read -r line
+do
+  address=$(echo $line | cut -d':' -f1)
+  port=$(echo $line | cut -d':' -f2)
+  nc -v -x 127.0.0.1:9050 -z $address $port
+done < "onion_seeds.txt"
+
+python3 makeseeds.py protx_list.json onion_seeds.txt > nodes_main.txt
+python3 generate-seeds.py . > ../../src/chainparamsseeds.h
+```
+
+Make sure to use a recent block height in the "protx list" call. After updating, create a PR and
+specify which block height you used so that reviewers can re-run the same commands and verify
+that the list is as expected.
+
+## Dependencies
+
+Ubuntu, Debian:
+
+    sudo apt-get install python3-dnspython
+
+and/or for other operating systems:
+
+    pip3 install dnspython3
+
+See https://dnspython.readthedocs.io/en/latest/installation.html for more information.

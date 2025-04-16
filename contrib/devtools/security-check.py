@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2022 The Bitcoin Core developers
+# Copyright (c) 2015-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 '''
@@ -10,7 +10,7 @@ Otherwise the exit status will be 1 and it will log which executables failed whi
 import sys
 from typing import List
 
-import lief
+import lief #type:ignore
 
 def check_ELF_RELRO(binary) -> bool:
     '''
@@ -34,7 +34,7 @@ def check_ELF_RELRO(binary) -> bool:
         flags = binary.get(lief.ELF.DYNAMIC_TAGS.FLAGS)
         if flags.value & lief.ELF.DYNAMIC_FLAGS.BIND_NOW:
             have_bindnow = True
-    except Exception:
+    except:
         have_bindnow = False
 
     return have_gnu_relro and have_bindnow
@@ -193,6 +193,16 @@ def check_MACHO_control_flow(binary) -> bool:
         return True
     return False
 
+def check_MACHO_branch_protection(binary) -> bool:
+    '''
+    Check for branch protection instrumentation
+    '''
+    content = binary.get_content_from_virtual_address(binary.entrypoint, 4, lief.Binary.VA_TYPES.AUTO)
+
+    if content.tolist() == [95, 36, 3, 213]: # bti
+        return True
+    return False
+
 BASE_ELF = [
     ('PIE', check_PIE),
     ('NX', check_NX),
@@ -232,7 +242,7 @@ CHECKS = {
         lief.ARCHITECTURES.X86: BASE_MACHO + [('PIE', check_PIE),
                                               ('NX', check_NX),
                                               ('CONTROL_FLOW', check_MACHO_control_flow)],
-        lief.ARCHITECTURES.ARM64: BASE_MACHO,
+        lief.ARCHITECTURES.ARM64: BASE_MACHO + [('BRANCH_PROTECTION', check_MACHO_branch_protection)],
     }
 }
 

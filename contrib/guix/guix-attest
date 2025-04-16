@@ -171,11 +171,11 @@ echo "Attesting to build outputs for version: '${VERSION}'"
 echo ""
 
 # Given a SHA256SUMS file as stdin that has lines like:
-#     0ba536819b221a91d3d42e978be016aac918f40984754d74058aa0c921cd3ea6  a/b/d/c/d/s/bitcoin-22.0rc2-riscv64-linux-gnu.tar.gz
+#     0ba536819b221a91d3d42e978be016aac918f40984754d74058aa0c921cd3ea6  a/b/d/c/d/s/syscoin-22.0rc2-riscv64-linux-gnu.tar.gz
 #     ...
 #
 # Replace each line's file name with its basename:
-#     0ba536819b221a91d3d42e978be016aac918f40984754d74058aa0c921cd3ea6  bitcoin-22.0rc2-riscv64-linux-gnu.tar.gz
+#     0ba536819b221a91d3d42e978be016aac918f40984754d74058aa0c921cd3ea6  syscoin-22.0rc2-riscv64-linux-gnu.tar.gz
 #     ...
 #
 basenameify_SHA256SUMS() {
@@ -192,6 +192,7 @@ mkdir -p "$outsigdir"
 
     if (( ${#noncodesigned_fragments[@]} )); then
         cat "${noncodesigned_fragments[@]}" \
+            | grep -v apple-darwin-debug.tar \
             | sort -u \
             | sort -k2 \
             | basenameify_SHA256SUMS \
@@ -220,6 +221,7 @@ mkdir -p "$outsigdir"
         # Note: all.SHA256SUMS attests to all of $sha256sum_fragments, but is
         #       not needed if there are no $codesigned_fragments
         cat "${sha256sum_fragments[@]}" \
+            | grep -v apple-darwin-debug.tar \
             | sort -u \
             | sort -k2 \
             | basenameify_SHA256SUMS \

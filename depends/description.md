@@ -1,4 +1,4 @@
-This is a system of building and caching dependencies necessary for building Syscoin.
+This is a system of building and caching dependencies necessary for building Syscoin Core.
 There are several features that make it different from most similar systems:
 
 ### It is designed to be builder and host agnostic
@@ -6,8 +6,7 @@ There are several features that make it different from most similar systems:
 In theory, binaries for any target OS/architecture can be created, from a
 builder running any OS/architecture. In practice, build-side tools must be
 specified when the defaults don't fit, and packages must be amended to work
-on new hosts. For now, a build architecture of x86_64 is assumed, either on
-Linux or macOS.
+on new hosts.
 
 ### No reliance on timestamps
 
