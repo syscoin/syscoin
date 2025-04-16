@@ -357,8 +357,8 @@ bool CSigSharesManager::ProcessMessageSigSharesInv(const CNode* pfrom, const CSi
 
     LOCK(cs);
     auto& nodeState = nodeStates[pfrom->GetId()];
-    auto session = nodeState.GetSessionByRecvId(inv.sessionId);
-    if (!session) {
+    auto *session = nodeState.GetSessionByRecvId(inv.sessionId);
+    if (session == nullptr) {
         return true;
     }
     session->announced.Merge(inv);
@@ -387,8 +387,8 @@ bool CSigSharesManager::ProcessMessageGetSigShares(const CNode* pfrom, const CSi
 
     LOCK(cs);
     auto& nodeState = nodeStates[pfrom->GetId()];
-    auto session = nodeState.GetSessionByRecvId(inv.sessionId);
-    if (!session) {
+    auto *session = nodeState.GetSessionByRecvId(inv.sessionId);
+    if (session == nullptr) {
         return true;
     }
     session->requested.Merge(inv);
@@ -665,7 +665,7 @@ bool CSigSharesManager::ProcessPendingSigShares()
     LogPrint(BCLog::LLMQ_SIGS, "CSigSharesManager::%s -- verified sig shares. count=%d, pt=%d, vt=%d, nodes=%d\n", __func__, verifyCount, prepareTimer.count(), verifyTimer.count(), sigSharesByNodes.size());
 
     for (const auto& [nodeId, v] : sigSharesByNodes) {
-        if (batchVerifier.badSources.count(nodeId)) {
+        if (batchVerifier.badSources.count(nodeId) != 0) {
             LogPrint(BCLog::LLMQ_SIGS, "CSigSharesManager::%s -- invalid sig shares from other node, banning peer=%d\n",
                      __func__, nodeId);
             // this will also cause re-requesting of the shares that were sent by this node
@@ -901,7 +901,7 @@ void CSigSharesManager::CollectSigSharesToRequest(std::unordered_map<NodeId, std
                 r.first = nodeId;
                 r.second = now;
 
-                if (!invMap) {
+                if (invMap == nullptr) {
                     invMap = &sigSharesToRequest[nodeId];
                 }
                 auto& inv = (*invMap)[signHash];
@@ -948,7 +948,7 @@ void CSigSharesManager::CollectSigSharesToSend(std::unordered_map<NodeId, std::u
 
                 auto k = std::make_pair(signHash, (uint16_t)i);
                 const CSigShare* sigShare = sigShares.Get(k);
-                if (!sigShare) {
+                if (sigShare == nullptr) {
                     // he requested something we don'have
                     session.requested.inv[i] = false;
                     continue;
@@ -1032,7 +1032,7 @@ void CSigSharesManager::CollectSigSharesToAnnounce(std::unordered_map<NodeId, st
         const auto& signHash = sigShareKey.first;
         auto quorumMember = sigShareKey.second;
         const CSigShare* sigShare = sigShares.Get(sigShareKey);
-        if (!sigShare) {
+        if (sigShare == nullptr) {
             return;
         }
 
