@@ -1341,10 +1341,7 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
     // SYSCOIN push version and mn auth
     uint256 mnauthChallenge;
     GetRandBytes(mnauthChallenge);
-    {
-        LOCK(pnode.cs_mnauth);
-        pnode.sentMNAuthChallenge = mnauthChallenge;
-    }
+    pnode.SetSentMNAuthChallenge(mnauthChallenge);
     int nProtocolVersion = PROTOCOL_VERSION;
     if (fRegTest && gArgs.IsArgSet("-pushversion")) {
         nProtocolVersion = gArgs.GetIntArg("-pushversion", PROTOCOL_VERSION);
@@ -1354,7 +1351,7 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
     m_connman.PushMessage(&pnode, CNetMsgMaker(INIT_PROTO_VERSION).Make(NetMsgType::VERSION, nProtocolVersion, my_services, nTime,
             your_services, CNetAddr::V1(addr_you), // Together the pre-version-31402 serialization of CAddress "addrYou" (without nTime)
             my_services, CNetAddr::V1(CService{}), // Together the pre-version-31402 serialization of CAddress "addrMe" (without nTime)
-            nonce, strSubVersion, nNodeStartingHeight, tx_relay, mnauthChallenge, pnode.IsMasternodeConnection()));
+            nonce, strSubVersion, nNodeStartingHeight, tx_relay, mnauthChallenge, pnode.m_masternode_connection.load()));
 
     if (fLogIPs) {
         LogPrint(BCLog::NET, "send version message: version %d, blocks=%d, them=%s, txrelay=%d, peer=%d\n", PROTOCOL_VERSION, nNodeStartingHeight, addr_you.ToStringAddrPort(), tx_relay, nodeid);
@@ -1953,7 +1950,7 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
  
     // SYSCOIN Relay to all peers
     // TODO: Move CanRelay() to Peer and migrate to iteration through m_peer_map
-    m_connman.ForEachNode([this, &vHashes](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+    m_connman.ForEachNode([this, &vHashes](CNode* pnode) {
         if (!pnode->CanRelay()) return;
 
         PeerRef peer = GetPeerRef(pnode->GetId());
@@ -3547,11 +3544,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             bool fOtherMasternode = false;
             vRecv >> fOtherMasternode;
             if (pfrom.IsInboundConn()) {
-                {
-                    LOCK(pfrom.cs_mnauth);
-                    pfrom.m_masternode_connection = fOtherMasternode;
-                }
-                peer->m_masternode_connection = fOtherMasternode;
+                pfrom.m_masternode_connection = fOtherMasternode;
                 if (fOtherMasternode) {
                     LogPrint(BCLog::NET_NETCONN, "peer=%d is an inbound masternode connection, not relaying anything to it\n", pfrom.GetId());
                     if (!fMasternodeMode) {
@@ -5465,7 +5458,7 @@ void PeerManagerImpl::EvictExtraOutboundPeers(std::chrono::seconds now)
             AssertLockHeld(::cs_main);
 
             // SYSCOIN Don't disconnect masternodes just because they were slow in block announcement
-            if (pnode->IsMasternodeConnection()) return;
+            if (pnode->m_masternode_connection) return;
             // Only consider outbound-full-relay peers that are not already
             // marked for disconnection
             if (!pnode->IsFullOutboundConn() || pnode->fDisconnect) return;

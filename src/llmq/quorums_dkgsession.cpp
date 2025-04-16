@@ -420,8 +420,7 @@ void CDKGSession::VerifyConnectionAndMinProtoVersions() const
     CDKGLogger logger(*this, __func__, __LINE__);
 
     std::unordered_map<uint256, int, StaticSaltedHasher> protoMap;
-    dkgManager.connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        AssertLockHeld(::cs_main);
+    dkgManager.connman.ForEachNode([&](CNode* pnode) {
         auto verifiedProRegTxHash = pnode->GetVerifiedProRegTxHash();
         if (verifiedProRegTxHash.IsNull()) {
             return;
@@ -1273,9 +1272,7 @@ void CDKGSession::RelayOtherInvToParticipants(const CInv& inv, PeerManager& peer
                  myProTxHash.ToString().substr(0, 4), ss.str());
 
     std::stringstream ss2;
-    LOCK(cs_main);
-    dkgManager.connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        AssertLockHeld(::cs_main);
+    dkgManager.connman.ForEachNode([&](CNode* pnode) {
         if (pnode->qwatch ||
                 (!pnode->GetVerifiedProRegTxHash().IsNull() && (relayMembers.count(pnode->GetVerifiedProRegTxHash()) != 0))) {
             PeerRef peer = peerman.GetPeerRef(pnode->GetId());

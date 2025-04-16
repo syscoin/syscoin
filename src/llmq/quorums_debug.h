@@ -88,18 +88,16 @@ public:
 class CDKGDebugManager
 {
 private:
-    mutable RecursiveMutex cs;
-    CDKGDebugStatus localStatus GUARDED_BY(cs);
+    mutable Mutex cs_lockStatus;
+    CDKGDebugStatus localStatus GUARDED_BY(cs_lockStatus);
 public:
     CDKGDebugManager();
 
-    void GetLocalDebugStatus(CDKGDebugStatus& ret) const;
-
-    void ResetLocalSessionStatus();
-    void InitLocalSessionStatus(const uint256& quorumHash, uint32_t quorumHeight);
-
-    void UpdateLocalSessionStatus(std::function<bool(CDKGDebugSessionStatus& status)>&& func);
-    void UpdateLocalMemberStatus(size_t memberIdx, std::function<bool(CDKGDebugMemberStatus& status)>&& func);
+    void GetLocalDebugStatus(CDKGDebugStatus& ret) const EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
+    void ResetLocalSessionStatus() EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
+    void InitLocalSessionStatus(const uint256& quorumHash, uint32_t quorumHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
+    void UpdateLocalSessionStatus(std::function<bool(CDKGDebugSessionStatus& status)>&& func) EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
+    void UpdateLocalMemberStatus(size_t memberIdx, std::function<bool(CDKGDebugMemberStatus& status)>&& func) EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
 };
 
 extern CDKGDebugManager* quorumDKGDebugManager;

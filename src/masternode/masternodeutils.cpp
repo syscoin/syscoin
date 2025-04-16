@@ -20,7 +20,7 @@ struct CompareScoreMN
     }
 };
 
-void CMasternodeUtils::ProcessMasternodeConnections(CConnman& connman)
+void CMasternodeUtils::DoMaintenance(CConnman& connman)
 {
     // Don't disconnect masternode connections when we have less then the desired amount of outbound nodes
     size_t nonMasternodeCount = 0;
@@ -28,7 +28,7 @@ void CMasternodeUtils::ProcessMasternodeConnections(CConnman& connman)
         if ((!pnode->IsInboundConn() &&
             !pnode->IsFeelerConn() &&
             !pnode->IsManualConn() &&
-            !pnode->IsMasternodeConnection() &&
+            !pnode->m_masternode_connection &&
             !pnode->m_masternode_probe_connection) ||
             // treat unverified MNs as non-MNs here
             pnode->GetVerifiedProRegTxHash().IsNull()) {
@@ -45,7 +45,7 @@ void CMasternodeUtils::ProcessMasternodeConnections(CConnman& connman)
             if (GetTime<std::chrono::seconds>() - pnode->m_connected < PROBE_WAIT_INTERVAL) return;
         } else {
             // we're only disconnecting m_masternode_connection connections
-            if (!pnode->IsMasternodeConnection()) return;
+            if (!pnode->m_masternode_connection) return;
             if (!pnode->GetVerifiedProRegTxHash().IsNull()) {
                 // keep _verified_ LLMQ connections
                 if (connman.IsMasternodeQuorumNode(pnode)) {
@@ -76,18 +76,3 @@ void CMasternodeUtils::ProcessMasternodeConnections(CConnman& connman)
     });
 
 }
-
-void CMasternodeUtils::DoMaintenance(CConnman& connman)
-{
-    if(!masternodeSync.IsBlockchainSynced() || ShutdownRequested())
-        return;
-
-    static unsigned int nTick = 0;
-
-    nTick++;
-
-    if(nTick % 60 == 0) {
-        ProcessMasternodeConnections(connman);
-    }
-}
-

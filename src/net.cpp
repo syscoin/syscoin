@@ -692,9 +692,8 @@ void CNode::CopyStats(CNodeStats& stats)
         LOCK(cs_mnauth);
         X(verifiedProRegTxHash);
         X(verifiedPubKeyHash);
-        X(m_masternode_connection);
     }
-
+    X(m_masternode_connection);
     X(m_conn_type);
 }
 #undef X
@@ -1728,7 +1727,6 @@ bool CConnman::AttemptToEvictConnection()
                 continue;
             // SYSCOIN
             if (fMasternodeMode) {
-                LOCK(node->cs_mnauth);
                 // This handles eviction protected nodes. Nodes are always protected for a short time after the connection
                 // was accepted. This short time is meant for the VERSION/VERACK exchange and the possible MNAUTH that might
                 // follow when the incoming connection is from another masternode. When a message other than MNAUTH
@@ -1739,7 +1737,7 @@ bool CConnman::AttemptToEvictConnection()
                 }
                 // if MNAUTH was valid, the node is always protected (and at the same time not accounted when
                 // checking incoming connection limits)
-                if (!node->verifiedProRegTxHash.IsNull()) {
+                if (!node->GetVerifiedProRegTxHash().IsNull()) {
                     isProtected = true;
                 }
                 if (isProtected) {
@@ -1833,7 +1831,6 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
              // SYSCOIN
             if (pnode->IsInboundConn())
             {
-                LOCK(pnode->cs_mnauth);
                 nInbound++;
                 if (!pnode->GetVerifiedProRegTxHash().IsNull()) {
                     nVerifiedInboundMasternodes++;
@@ -2478,7 +2475,7 @@ int CConnman::GetExtraFullOutboundCount() const
         for (const CNode* pnode : m_nodes) {
 
             // SYSCOIN don't count outbound masternodes
-            if (pnode->IsMasternodeConnection()) {
+            if (pnode->m_masternode_connection) {
                 continue;
             }
             if (pnode->fSuccessfullyConnected && !pnode->fDisconnect && !pnode->m_masternode_probe_connection && pnode->IsFullOutboundConn()) {
@@ -2649,7 +2646,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
             LOCK(m_nodes_mutex);
             for (const CNode* pnode : m_nodes) {
                 // SYSCOIN
-                if (pnode->IsFullOutboundConn() && !pnode->IsMasternodeConnection()) nOutboundFullRelay++;
+                if (pnode->IsFullOutboundConn() && !pnode->m_masternode_connection) nOutboundFullRelay++;
                 if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
 
                 // Make sure our persistent outbound slots to ipv4/ipv6 peers belong to different netgroups.
@@ -3221,7 +3218,6 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
 
     // SYSCOIN
     if (masternode_connection == MasternodeConn::Is_Connection) {
-        LOCK(pnode->cs_mnauth);
         pnode->m_masternode_connection = true;
     }
     if (masternode_probe_connection == MasternodeProbeConn::Is_Connection)
@@ -3276,7 +3272,7 @@ void CConnman::ThreadMessageHandler()
                 if (flagInterruptMsgProc)
                     return;
                 // SYSCOIN Send messages
-                if (!fSkipSendMessagesForMasternodes || !pnode->IsMasternodeConnection()) {
+                if (!fSkipSendMessagesForMasternodes || !pnode->m_masternode_connection) {
                     m_msgproc->SendMessages(pnode);
                 }
 
@@ -3864,24 +3860,15 @@ void CConnman::SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const 
 
     // Update existing connections
     ForEachNode([&](CNode* pnode) {
-        uint256 verifiedProRegTxHash;
-        bool iqr;
-        {
-            LOCK(pnode->cs_mnauth);
-            verifiedProRegTxHash = pnode->verifiedProRegTxHash;
-            iqr = pnode->m_masternode_iqr_connection;
-        }
-        if (!verifiedProRegTxHash.IsNull() && !iqr && IsMasternodeQuorumRelayMember(verifiedProRegTxHash)) {
+        auto verifiedProRegTxHash = pnode->GetVerifiedProRegTxHash();
+        if (!verifiedProRegTxHash.IsNull() && !pnode->m_masternode_iqr_connection && IsMasternodeQuorumRelayMember(verifiedProRegTxHash)) {
             // Tell our peer that we're interested in plain LLMQ recovered signatures.
             // Otherwise the peer would only announce/send messages resulting from QRECSIG,
             // e.g. InstantSend locks or ChainLocks. SPV and regular full nodes should not send
             // this message as they are usually only interested in the higher level messages.
             const CNetMsgMaker msgMaker(pnode->GetCommonVersion());
             PushMessage(pnode, msgMaker.Make(NetMsgType::QSENDRECSIGS));
-            {
-                LOCK(pnode->cs_mnauth);
-                pnode->m_masternode_iqr_connection = true;
-            }
+            pnode->m_masternode_iqr_connection = true;
         }
     });
 }
@@ -3904,7 +3891,7 @@ std::unordered_set<uint256, StaticSaltedHasher> CConnman::GetMasternodeQuorums()
     return result;
 }
 
-void CConnman::GetMasternodeQuorumNodes(const uint256& quorumHash, std::set<NodeId>& nodes) const
+void CConnman::GetMasternodeQuorumNodes(const uint256& quorumHash,std::unordered_set<NodeId>& nodes) const
 {
     LOCK2(m_nodes_mutex, cs_vPendingMasternodes);
     nodes.clear();
@@ -3915,7 +3902,6 @@ void CConnman::GetMasternodeQuorumNodes(const uint256& quorumHash, std::set<Node
     const auto& proRegTxHashes = it->second;
 
     for (const auto pnode : m_nodes) {
-        LOCK(pnode->cs_mnauth);
         if (pnode->fDisconnect) {
             continue;
         }
@@ -3936,15 +3922,10 @@ void CConnman::RemoveMasternodeQuorumNodes(const uint256& quorumHash)
 
 bool CConnman::IsMasternodeQuorumNode(const CNode* pnode)
 {
-    uint256 verifiedProRegTxHash;
-    {
-        LOCK(pnode->cs_mnauth);
-        verifiedProRegTxHash = pnode->verifiedProRegTxHash;
-    }
     // Let's see if this is an outgoing connection to an address that is known to be a masternode
     // We however only need to know this if the node did not authenticate itself as a MN yet
     uint256 assumedProTxHash;
-    if (verifiedProRegTxHash.IsNull() && !pnode->IsInboundConn()) {
+    if (pnode->GetVerifiedProRegTxHash().IsNull() && !pnode->IsInboundConn()) {
         auto mnList = deterministicMNManager->GetListAtChainTip();
         auto dmn = mnList.GetMNByService(pnode->addr);
         if (dmn == nullptr) {
@@ -3956,8 +3937,8 @@ bool CConnman::IsMasternodeQuorumNode(const CNode* pnode)
 
     LOCK(cs_vPendingMasternodes);
     for (const auto& p : masternodeQuorumNodes) {
-        if (!verifiedProRegTxHash.IsNull()) {
-            if (p.second.count(verifiedProRegTxHash)) {
+        if (!pnode->GetVerifiedProRegTxHash().IsNull()) {
+            if (p.second.count(pnode->GetVerifiedProRegTxHash())) {
                 return true;
             }
         } else if (!assumedProTxHash.IsNull()) {
@@ -4025,7 +4006,7 @@ size_t CConnman::GetNodeCount(ConnectionDirection flags) const
 // SYSCOIN
 size_t CConnman::GetMaxOutboundNodeCount()
 {
-    return m_max_outbound_full_relay;
+    return m_max_outbound;
 }
 
 uint32_t CConnman::GetMappedAS(const CNetAddr& addr) const
@@ -4246,10 +4227,6 @@ CNode::CNode(NodeId idIn,
     } else {
         LogPrint(BCLog::NET, "Added connection peer=%d\n", id);
     }
-    // SYSCOIN
-    m_masternode_connection = false;
-    m_masternode_probe_connection = false;
-    m_masternode_iqr_connection = false;
 }
 
 void CNode::MarkReceivedMsgsForProcessing()
