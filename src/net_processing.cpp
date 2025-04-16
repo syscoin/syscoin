@@ -172,7 +172,7 @@ static constexpr unsigned int INVENTORY_BROADCAST_PER_SECOND = 7;
 static constexpr unsigned int INVENTORY_BROADCAST_TARGET = 4 * INVENTORY_BROADCAST_PER_SECOND * count_seconds(INBOUND_INVENTORY_BROADCAST_INTERVAL);
 // SYSCOIN
 /** Maximum number of inventory items to send per transmission. */
-static constexpr unsigned int INVENTORY_BROADCAST_MAX = 3500;
+static constexpr unsigned int INVENTORY_BROADCAST_MAX = 1000;
 static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_BROADCAST_MAX too low");
 static_assert(INVENTORY_BROADCAST_MAX <= MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Average delay between feefilter broadcasts in seconds. */
@@ -6132,7 +6132,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         tx_relay->m_tx_inventory_known_filter.insert(hash);
                     }
                     // SYSCOIN Send non-tx/non-block inventory items
-                    while (!tx_relay->m_tx_inventory_to_send_other.empty() && nRelayedTransactions < INVENTORY_BROADCAST_MAX) {
+                    while (!tx_relay->m_tx_inventory_to_send_other.empty()) {
                         // get inv's from other set to send
                         std::set<CInv>::const_iterator it = std::next(tx_relay->m_tx_inventory_to_send_other.end(), -1);
                         CInv inv = *it;
@@ -6143,7 +6143,6 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                             continue;
                         }
                         // use existing limits with tx to limit other inv sends as well
-                        nRelayedTransactions++;
                         vInv.emplace_back(inv);
                         tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
                         if (vInv.size() == MAX_INV_SZ) {
