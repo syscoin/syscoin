@@ -20,7 +20,8 @@ namespace llmq
 
 class CDKGSessionManager
 {
-    static constexpr int64_t MAX_CONTRIBUTION_CACHE_TIME = 60 * 1000;
+    // SYSCOIN keep cache around for 15 minutes
+    static constexpr int64_t MAX_CONTRIBUTION_CACHE_TIME = 900 * 1000;
 
 private:
     std::unique_ptr<CDBWrapper> db{nullptr};

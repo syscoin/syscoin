@@ -27,7 +27,8 @@ CDKGSessionManager::CDKGSessionManager(CBLSWorker& blsWorker, CConnman &_connman
 {
     db = std::make_unique<CDBWrapper>(DBParams{
         .path = gArgs.GetDataDirNet() / "llmq/dkgdb",
-        .cache_bytes = static_cast<size_t>(1 << 20),
+        // SYSCOIN use 64MB cache for vvecs
+        .cache_bytes = static_cast<size_t>(1 << 26),
         .memory_only = unitTests,
         .wipe_data = fWipe});
     dkgSessionHandler = std::make_unique<CDKGSessionHandler>(
