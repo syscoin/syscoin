@@ -409,8 +409,9 @@ if test "$enable_crashhooks" = "yes"; then
     AC_DEFINE(ENABLE_CRASH_HOOKS, 1, [Define this symbol if crash hooks should be enabled])
 fi
 
+LINK_WRAP_SUPPORTED=no
 AX_CHECK_LINK_FLAG([-Wl,-wrap=__cxa_allocate_exception], [LINK_WRAP_SUPPORTED=yes],,,)
-AM_CONDITIONAL([CRASH_HOOKS_WRAPPED_CXX_ABI],[test $LINK_WRAP_SUPPORTED = "yes"])
+AM_CONDITIONAL([CRASH_HOOKS_WRAPPED_CXX_ABI],[test "$LINK_WRAP_SUPPORTED" = "yes"])
 
 if test "$LINK_WRAP_SUPPORTED" = "yes"; then
   AC_DEFINE(CRASH_HOOKS_WRAPPED_CXX_ABI, 1, [Define this symbol to use wrapped CXX ABIs for exception stacktraces])
