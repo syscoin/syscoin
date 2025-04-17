@@ -79,6 +79,7 @@ $(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(w
 # Make is not made aware of per-object dependencies to avoid limiting building parallelization
 # But to build the less dependent modules first, we manually select their order here:
 EXTRA_LIBRARIES += \
+  $(LIBSYSCOIN_CRYPTO) \
   $(LIBSYSCOIN_UTIL) \
   $(LIBSYSCOIN_COMMON) \
   $(LIBSYSCOIN_CONSENSUS) \
@@ -848,7 +849,6 @@ libsyscoin_common_a_SOURCES = \
   script/sign.cpp \
   script/signingprovider.cpp \
   script/solver.cpp \
-  sync.cpp \
   warnings.cpp \
   $(SYSCOIN_CORE_H)
 
