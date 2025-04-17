@@ -80,7 +80,7 @@ class LLMQSigningTest(DashTestFramework):
         # and conflict for msgHashConflict
         if self.options.spork21:
             # 1. Providing an invalid quorum hash and set submit=false, should throw an error
-            assert_raises_rpc_error(-8, 'quorum not found', self.mninfo[2].node.quorum_sign(id, msgHash, id, False))
+            assert_raises_rpc_error(-8, 'quorum not found', self.mninfo[2].node.quorum_sign, id, msgHash, id, False)
             # 2. Providing a valid quorum hash and set submit=false, should return a valid sigShare object
             sig_share_rpc_1 = self.mninfo[2].node.quorum_sign( id, msgHash, quorumHash, False)
             sig_share_rpc_2 = self.mninfo[2].node.quorum_sign( id, msgHash, "", False)
