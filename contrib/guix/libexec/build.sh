@@ -263,14 +263,15 @@ mkdir -p "$DISTSRC"
 
 
     # Build Syscoin Core
-    make --jobs="$JOBS" ${V:+V=1}
+    # Syscoin: add '-O --no-print-directory' (see Depends Building)
+    make -O --no-print-directory --jobs="$JOBS" ${V:+V=1}
 
-    # Make macos-specific debug symbols
-    case "$HOST" in
-        *darwin*)
-            make -C src/ osx_debug
-            ;;
-    esac
+    # SYSCOIN Make macos-specific debug symbols
+    # case "$HOST" in
+    #     *darwin*)
+    #         make -C src/ osx_debug
+    #         ;;
+    # esac
 
     # Check that symbol/security checks tools are sane.
     make test-security-check ${V:+V=1}
@@ -331,11 +332,8 @@ mkdir -p "$DISTSRC"
         rm -rf "${DISTNAME}/lib/pkgconfig"
 
         case "$HOST" in
-            *darwin*)
-                # Copy dSYM-s
-                find ../src -name "*.dSYM" -exec cp -ra {} "${DISTNAME}/bin" \;
-                ;;
-            *)
+            # SYSCOIN
+            *darwin*) ;;
                 # SYSCOIN Split binaries and libraries from their debug symbols
                 {
                     find "${DISTNAME}/bin" -type f -executable ! -name "sysgeth" ! -name "sysgeth.exe" -print0
@@ -388,17 +386,18 @@ mkdir -p "$DISTSRC"
                 #     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
                 ;;
             *darwin*)
-                find "${DISTNAME}" -not -path "*.dSYM*" -print0 \
+                find "${DISTNAME}" -print0 \
                     | sort --zero-terminated \
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
                     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" \
                     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" && exit 1 )
-                find "${DISTNAME}" -path "*.dSYM*" -print0 \
-                    | sort --zero-terminated \
-                    | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
-                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
-                ;;
+                # SYSCOIN
+                # find "${DISTNAME}" -path "*.dSYM*" -print0 \
+                #     | sort --zero-terminated \
+                #     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
+                #     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
+                #     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
+                # ;;
         esac
     )  # $DISTSRC/installed
 
