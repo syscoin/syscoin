@@ -443,10 +443,11 @@ endif
 test/data/%.json.h: test/data/%.json
 	@$(MKDIR_P) $(@D)
 	@{ \
+	 echo "#include <string>" && \
 	 echo "namespace json_tests{" && \
-	 echo "static const std::string $(*F) = std::string{" && \
-	 $(HEXDUMP) -v -e '"\\" "x%02x"' $< && \
-	 echo "};};"; \
+	 echo "static const std::string $(*F) = R\"json(\"" && \
+	 cat $< && \
+	 echo "\")json\";};"; \
 	} > "$@.new" && mv -f "$@.new" "$@"
 	@echo "Generated $@"
 
