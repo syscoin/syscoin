@@ -445,9 +445,9 @@ test/data/%.json.h: test/data/%.json
 	@{ \
 	 echo "#include <string>" && \
 	 echo "namespace json_tests{" && \
-	 echo "static const std::string $(*F) = R\"json(\"" && \
+	 echo "static const std::string $(*F) = R\"json(" && \
 	 cat $< && \
-	 echo "\")json\";};"; \
+	 echo ")json\";};"; \
 	} > "$@.new" && mv -f "$@.new" "$@"
 	@echo "Generated $@"
 
