@@ -410,7 +410,7 @@ if test "$enable_crashhooks" = "yes"; then
 fi
 
 LINK_WRAP_SUPPORTED=no
-AX_CHECK_LINK_FLAG([-Wl,-wrap=__cxa_allocate_exception], [LINK_WRAP_SUPPORTED=yes],,,)
+AX_CHECK_LINK_FLAG([-Wl,-wrap=__cxa_allocate_exception], [LINK_WRAP_SUPPORTED=yes], [], [])
 AM_CONDITIONAL([CRASH_HOOKS_WRAPPED_CXX_ABI],[test "$LINK_WRAP_SUPPORTED" = "yes"])
 
 if test "$LINK_WRAP_SUPPORTED" = "yes"; then
