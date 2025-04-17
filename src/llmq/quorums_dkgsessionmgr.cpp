@@ -273,7 +273,7 @@ void CDKGSessionManager::CleanupOldContributions(ChainstateManager& chainstate) 
                 break;
             }
             cnt_all++;
-            const CBlockIndex* pindexQuorum = chainstate.m_blockman.LookupBlockIndex(std::get<2>(k));
+            const CBlockIndex* pindexQuorum = chainstate.m_blockman.LookupBlockIndex(std::get<1>(k));
             if (pindexQuorum == nullptr || chainstate.ActiveHeight() - pindexQuorum->nHeight > params.max_store_depth()) {
                 // not found or too old
                 batch.Erase(k);
