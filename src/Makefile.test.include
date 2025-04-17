@@ -444,8 +444,8 @@ test/data/%.json.h: test/data/%.json
 	@$(MKDIR_P) $(@D)
 	@{ \
 	 echo "namespace json_tests{" && \
-	 echo "static unsigned const char $(*F)[] = {" && \
-	 $(HEXDUMP) -v -e '8/1 "0x%02x, "' -e '"\n"' $< | $(SED) -e 's/0x  ,//g' && \
+	 echo "static const std::string $(*F) = std::string{" && \
+	 $(HEXDUMP) -v -e '"\\" "x%02x"' $< && \
 	 echo "};};"; \
 	} > "$@.new" && mv -f "$@.new" "$@"
 	@echo "Generated $@"
