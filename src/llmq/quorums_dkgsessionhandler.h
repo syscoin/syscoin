@@ -47,23 +47,23 @@ public:
     using BinaryMessage = std::pair<NodeId, std::shared_ptr<CDataStream>>;
 
 private:
-    mutable Mutex cs;
-    size_t maxMessagesPerNode GUARDED_BY(cs);
-    std::list<BinaryMessage> pendingMessages GUARDED_BY(cs);
-    std::map<NodeId, size_t> messagesPerNode GUARDED_BY(cs);
-    std::set<uint256> seenMessages GUARDED_BY(cs);
+    mutable Mutex cs_messages;
+    size_t maxMessagesPerNode GUARDED_BY(cs_messages);
+    std::list<BinaryMessage> pendingMessages GUARDED_BY(cs_messages);
+    std::map<NodeId, size_t> messagesPerNode GUARDED_BY(cs_messages);
+    std::set<uint256> seenMessages GUARDED_BY(cs_messages);
 
 public:
     PeerManager& peerman;
     explicit CDKGPendingMessages(size_t _maxMessagesPerNode, PeerManager& _peerman): maxMessagesPerNode(_maxMessagesPerNode), peerman(_peerman) {};
 
-    void PushPendingMessage(CNode* from, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    std::list<BinaryMessage> PopPendingMessages(size_t maxCount) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool HasSeen(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    void Clear() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    void PushPendingMessage(CNode* from, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
+    std::list<BinaryMessage> PopPendingMessages(size_t maxCount) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
+    bool HasSeen(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
+    void Clear() EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
 
     template<typename Message>
-    void PushPendingMessage(CNode* from, Message& msg) EXCLUSIVE_LOCKS_REQUIRED(!cs)
+    void PushPendingMessage(CNode* from, Message& msg) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages)
     {
         CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
         ds << msg;
@@ -72,7 +72,7 @@ public:
 
     // Might return nullptr messages, which indicates that deserialization failed for some reason
     template<typename Message>
-    std::vector<std::pair<NodeId, std::shared_ptr<Message>>> PopAndDeserializeMessages(size_t maxCount) EXCLUSIVE_LOCKS_REQUIRED(!cs)
+    std::vector<std::pair<NodeId, std::shared_ptr<Message>>> PopAndDeserializeMessages(size_t maxCount) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages)
     {
         auto binaryMessages = PopPendingMessages(maxCount);
         if (binaryMessages.empty()) {
