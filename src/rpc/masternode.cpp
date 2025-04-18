@@ -257,6 +257,48 @@ std::string GetRequiredPaymentsString(int nBlockHeight, const CDeterministicMNCP
 }
 
 
+static RPCHelpMan getevodbstats()
+{
+    return RPCHelpMan{"getevodbstats",
+        "\nReturns statistics about the deterministic masternode list database (DMN EvoDB).\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "approx_persisted_entries", "Approximate number of list entries stored persistently on disk."},
+                {RPCResult::Type::NUM, "estimated_disk_size_bytes", "Estimated total disk size occupied by the database files."},
+                {RPCResult::Type::NUM, "cache_entries", "Number of list entries currently held in the in-memory write cache."},
+                {RPCResult::Type::NUM, "erase_cache_entries", "Number of list entries currently marked for deletion in the in-memory erase cache."},
+                {RPCResult::Type::STR, "db_path", "Filesystem path to the database directory."},
+            }
+        },
+        RPCExamples{
+                HelpExampleCli("getevodbstats", "")
+            + HelpExampleRpc("getevodbstats", "")
+        },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    if (!deterministicMNManager) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Deterministic MN manager not initialized");
+    }
+
+    CDeterministicMNManager::EvoDBStats stats;
+    if (!deterministicMNManager->GetEvoDBStats(stats)) {
+         throw JSONRPCError(RPC_INTERNAL_ERROR, "Failed to retrieve EvoDB statistics");
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("approx_persisted_entries", stats.approxPersistedEntries);
+    result.pushKV("estimated_disk_size_bytes", stats.estimatedDiskSizeBytes);
+    result.pushKV("cache_entries", (uint64_t)stats.cacheEntries);
+    result.pushKV("erase_cache_entries", (uint64_t)stats.eraseCacheEntries);
+    result.pushKV("db_path", stats.dbPath);
+
+    return result;
+},
+    };
+} 
+
 static RPCHelpMan masternode_winners()
 {
     return RPCHelpMan{"masternode_winners",
@@ -614,6 +656,7 @@ void RegisterMasternodeRPCCommands(CRPCTable &t)
         {"masternode", &masternode_connect},
         {"masternode", &masternode_list},
         {"masternode", &masternode_winners},
+        {"masternode", &getevodbstats},
         {"masternode", &masternode_payments},
         {"masternode", &masternode_count},
         {"masternode", &masternode_winner},
