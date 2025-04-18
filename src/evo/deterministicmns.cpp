@@ -20,7 +20,7 @@
 #include <common/args.h>
 #include <logging.h>
 #include <interfaces/chain.h>
-#include <boost/range/irange.hpp>
+#include <util/fs.h> 
 bool fMasternodeMode = false;
 int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE = 60 * 60 * 24 * 7; // keep them for a week
 
@@ -641,8 +641,7 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
             LOCK(cs);
             tipIndex = pindex;
         }
-        // this call runs through every MN so its expensive only do it when needed
-        // for NEVM we need to build and make a consistent list thats accessible via a precompile (m_changed_nevm_address will also tell us when NEVM address changed)
+
         if(!ibd || (fNEVMConnection && fNexusActive && newList.m_changed_nevm_address)) {
             oldList.BuildDiff(newList, diff, diffNEVM);
         }
@@ -722,7 +721,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
     // code above this loop that modifies newList
     std::vector<CDeterministicMNCPtr> toDecrease;
     toDecrease.reserve(oldList.GetAllMNsCount() / 10);
-    oldList.ForEachMNShared(false, [&decreasePoSE, &oldList,  &toDecrease, &mnCountThreshold, &pindexPrev, &newList](const CDeterministicMNCPtr& dmn) {
+    oldList.ForEachMNShared(false, [&decreasePoSE, &oldList, &toDecrease, &mnCountThreshold, &pindexPrev, &newList](const CDeterministicMNCPtr& dmn) {
         if (dmn->pdmnState->confirmedHash.IsNull()) {
             // this works on the previous block, so confirmation will happen one block after mnCountThreshold
             // has been reached, but the block hash will then point to the block at mnCountThreshold
@@ -1081,5 +1080,64 @@ bool CDeterministicMNManager::FlushCacheToDisk() {
     {
         LOCK(cs);
         return m_evoDb->FlushCacheToDisk();
+    }
+}
+bool CDeterministicMNManager::GetEvoDBStats(EvoDBStats& stats)
+{
+    LOCK(cs); // Lock the manager's mutex
+
+    if (!m_evoDb) {
+        LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- EvoDB not initialized.\n", __func__);
+        stats = {}; // Clear stats
+        return false;
+    }
+
+    try {
+        // Get DB path from parameters used to initialize CEvoDB
+        stats.dbPath = m_evoDb->GetDBParams().path; // Assumes GetDBParams() exists and returns DBParams struct
+
+
+        stats.cacheEntries = m_evoDb->GetReadWriteCacheSize();
+        stats.eraseCacheEntries = m_evoDb->GetEraseCacheSize();
+        stats.approxPersistedEntries = m_evoDb->CountPersistedEntries(); 
+
+        // Calculate disk size by iterating directory
+        stats.estimatedDiskSizeBytes = 0; // Initialize size
+        if (!stats.dbPath.empty() && fs::is_directory(stats.dbPath)) {
+            try { // Add inner try-catch for filesystem iteration errors
+                for (const auto& dir_entry : fs::recursive_directory_iterator(stats.dbPath)) {
+                    if (fs::is_regular_file(dir_entry.path())) {
+                        std::error_code ec;
+                        uint64_t fileSize = fs::file_size(dir_entry.path(), ec);
+                        if (ec) {
+                            LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- Error getting file size for %s: %s\n", __func__, fs::PathToString(dir_entry.path()), ec.message());
+                            // Optionally continue or return false depending on desired strictness
+                        } else {
+                            stats.estimatedDiskSizeBytes += fileSize;
+                        }
+                    }
+                }
+            } catch (const fs::filesystem_error& e) {
+                 LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- Filesystem error while iterating %s: %s\n", __func__, stats.dbPath, e.what());
+                 // Can't reliably estimate size, maybe return false or keep size 0
+                 return false; // Indicate failure if iteration fails
+            }
+        } else if (!stats.dbPath.empty()) {
+            LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- DB path '%s' is not a valid directory.\n", __func__, stats.dbPath);
+             // Path specified but not a directory, size is effectively 0, but maybe log warning.
+        } else {
+            LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- DB path is empty.\n", __func__);
+        }
+
+        return true;
+
+    } catch (const std::exception& e) {
+        LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- Exception: %s\n", __func__, e.what());
+        stats = {}; // Clear stats on error
+        return false;
+    } catch (...) {
+        LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- Unknown exception.\n", __func__);
+        stats = {}; // Clear stats on error
+        return false;
     }
 }

@@ -16,7 +16,6 @@
 #include <unordered_map>
 
 
-class CChainState;
 class CDataStream;
 class CDBBatch;
 class CDBWrapper;

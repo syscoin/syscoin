@@ -166,7 +166,35 @@ public:
         return res;
     }
 
-
+    int64_t CountPersistedEntries() {
+        try {
+            std::unique_ptr<CDBIterator> pcursor(NewIterator());
+            if (!pcursor) {
+                 LogPrint(BCLog::SYS, "CEvoDB::%s -- Failed to create DB iterator\n", __func__);
+                 return -1; // Indicate error
+            }
+            int64_t count = 0;
+            // We only need to iterate keys, values are not needed for count
+            pcursor->SeekToFirst();
+            while (pcursor->Valid()) {
+                count++;
+                pcursor->Next();
+            }
+            return count;
+        } catch (const std::exception& e) {
+             LogPrint(BCLog::SYS, "CEvoDB::%s -- Exception during iteration: %s\n", __func__, e.what());
+            return -1; // Indicate error
+        } catch (...) {
+             LogPrint(BCLog::SYS, "CEvoDB::%s -- Unknown exception during iteration\n", __func__);
+            return -1; // Indicate error
+        }
+    }
+    size_t GetReadWriteCacheSize() {
+        return mapCache.size();
+    }
+    size_t GetEraseCacheSize() {
+        return setEraseCache.size();
+    }
     // Getter for testing purposes
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> GetMapCache() const {
         return mapCache;
