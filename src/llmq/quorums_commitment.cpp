@@ -72,7 +72,7 @@ bool CFinalCommitment::Verify(const CBlockIndex* pQuorumBaseBlockIndex, bool che
     if (LogAcceptCategory(BCLog::LLMQ, BCLog::Level::Debug)) {
         std::stringstream ss;
         std::stringstream ss2;
-        for (size_t i = members.size(); i < (size_t)llmq_params.size; i++) {
+        for (size_t i = 0; i < (size_t)llmq_params.size; i++) {
             ss << "v[" << i << "]=" << validMembers[i];
             ss2 << "s[" << i << "]=" << signers[i];
         }
