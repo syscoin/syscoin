@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+set -eo pipefail
+
+WORKSPACE_PATH="${1:-$(pwd)}"
+
+if [[ ! -d "${WORKSPACE_PATH}" || ! "${WORKSPACE_PATH}" = /* || ! -f "${WORKSPACE_PATH}/contrib/guix/libexec/prelude.bash" ]]; then
+    echo "${0##*/}: ${WORKSPACE_PATH} is not the top directory of the Syscoin Core repository, exiting!"
+    exit 1
+fi
+
+cd "$WORKSPACE_PATH"
+
+source "contrib/guix/libexec/prelude.bash"
+
+printf "\nBinaries:\n\n"
+( \
+SRC_PATH_PREFIX="${VERSION_BASE}/distsrc-" && \
+sha256sum ${SRC_PATH_PREFIX}*/src/syscoin{d,-cli,-tx,-wallet}{,.exe} && \
+sha256sum ${SRC_PATH_PREFIX}*/src/qt/syscoin-qt{,.exe} && \
+sha256sum ${SRC_PATH_PREFIX}*/src/test/test_syscoin{,.exe} \
+) | sort -k 2
+
+printf "\nArchives:\n\n"
+find "${OUTDIR_BASE}" -type f | grep -v SHA256 | xargs sha256sum | sort -k 2
