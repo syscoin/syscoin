@@ -212,6 +212,7 @@ mkdir -p "$OUTDIR"
 
 # SYSCOIN CONFIGFLAGS
 CONFIGFLAGS+=" --enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary --disable-debug"
+CONFIGFLAGS+=" --disable-tests"
 
 # CFLAGS SYSCOIN (Release, nodebug)
 HOST_CFLAGS="-O2"
