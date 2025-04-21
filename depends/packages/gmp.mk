@@ -6,11 +6,19 @@ $(package)_sha256_hash=ac28211a7cfb609bae2e2c8d6058d66c8fe96434f740cf6fe2e47b000
 $(package)_patches = include_ldflags_in_configure.patch
 
 define $(package)_set_vars
-$(package)_config_opts += --disable-shared --enable-cxx --enable-fat
-# Disable GMP assembly only for x86_64-apple-darwin due to lld incompatibility
+# Base options for all targets
+$(package)_config_opts += --disable-shared --enable-cxx
+
+# Handle target-specific options
 ifeq ($(host),x86_64-apple-darwin)
-$(package)_config_opts += --disable-assembly
+  # Disable GMP assembly only for x86_64-apple-darwin due to lld incompatibility
+  # Cannot use --enable-fat with --disable-assembly
+  $(package)_config_opts += --disable-assembly
+else
+  # Enable fat builds for other targets where assembly is used
+  $(package)_config_opts += --enable-fat
 endif
+
 $(package)_cflags_aarch64 += -march=armv8-a
 $(package)_cflags_armv7l += -march=armv7-a
 $(package)_cflags_x86_64 += -march=x86-64
