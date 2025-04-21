@@ -210,12 +210,14 @@ mkdir -p "$OUTDIR"
 # Binary Tarball Building #
 ###########################
 
-# SYSCOIN CONFIGFLAGS
-CONFIGFLAGS+=" --enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary --disable-debug"
-CONFIGFLAGS+=" --disable-tests"
+# CONFIGFLAGS
+CONFIGFLAGS+=" --enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary"
+case "$HOST" in
+    *mingw*) CONFIGFLAGS+=" --disable-miner" ;;
+esac
 
-# CFLAGS SYSCOIN (Release, nodebug)
-HOST_CFLAGS="-O2"
+# CFLAGS
+HOST_CFLAGS="-O2 -g"
 HOST_CFLAGS+=$(find /gnu/store -maxdepth 1 -mindepth 1 -type d -exec echo -n " -ffile-prefix-map={}=/usr" \;)
 case "$HOST" in
     *linux*)  HOST_CFLAGS+=" -ffile-prefix-map=${PWD}=." ;;
@@ -230,11 +232,10 @@ case "$HOST" in
     arm-linux-gnueabihf) HOST_CXXFLAGS="${HOST_CXXFLAGS} -Wno-psabi" ;;
 esac
 
-# LDFLAGS Syscoin
-# since gcc-10: only for mingw 'strip-debug' still passes security checks
+# LDFLAGS
 case "$HOST" in
     *linux*)  HOST_LDFLAGS="-Wl,--as-needed -Wl,--dynamic-linker=$glibc_dynamic_linker -static-libstdc++ -Wl,-O2" ;;
-    *mingw*)  HOST_LDFLAGS="-Wl,--no-insert-timestamp,-S" ;;
+    *mingw*)  HOST_LDFLAGS="-Wl,--no-insert-timestamp" ;;
 esac
 
 # Make $HOST-specific native binaries from depends available in $PATH
@@ -264,15 +265,14 @@ mkdir -p "$DISTSRC"
 
 
     # Build Syscoin Core
-    # Syscoin: add '-O --no-print-directory' (see Depends Building)
-    make -O --no-print-directory --jobs="$JOBS" ${V:+V=1}
+    make --jobs="$JOBS" ${V:+V=1}
 
-    # SYSCOIN Make macos-specific debug symbols
-    # case "$HOST" in
-    #     *darwin*)
-    #         make -C src/ osx_debug
-    #         ;;
-    # esac
+    # Make macos-specific debug symbols
+    case "$HOST" in
+        *darwin*)
+            make -C src/ osx_debug
+            ;;
+    esac
 
     # Check that symbol/security checks tools are sane.
     make test-security-check ${V:+V=1}
@@ -332,14 +332,19 @@ mkdir -p "$DISTSRC"
         # Prune pkg-config files
         rm -rf "${DISTNAME}/lib/pkgconfig"
 
-        # SYSCOIN Split binaries and libraries from their debug symbols
-        {
-            find "${DISTNAME}/bin" -type f -executable ! -name "sysgeth" ! -name "sysgeth.exe" -print0
-            find "${DISTNAME}/lib" -type f -print0
-        } | xargs -0 -P"$JOBS" -I{} "${DISTSRC}/contrib/devtools/split-debug.sh" {} {} {}.dbg
-        # SYSCOIN: Release, delete symbol files from split-debug
-        find "${DISTNAME}/bin" -name "*.dbg" -delete
-        find "${DISTNAME}/lib" -name "*.dbg" -delete
+        case "$HOST" in
+            *darwin*)
+                # Copy dSYM-s
+                find ../src -name "*.dSYM" -exec cp -ra {} "${DISTNAME}/bin" \;
+                ;;
+            *)
+                # SYSCOIN Split binaries and libraries from their debug symbols
+                {
+                    find "${DISTNAME}/bin" -type f -executable ! -name "sysgeth" ! -name "sysgeth.exe" -print0
+                    find "${DISTNAME}/lib" -type f -print0
+                } | xargs -0 -P"$JOBS" -I{} "${DISTSRC}/contrib/devtools/split-debug.sh" {} {} {}.dbg
+                ;;
+        esac
 
         case "$HOST" in
             *mingw*)
@@ -360,13 +365,12 @@ mkdir -p "$DISTSRC"
                     | sort \
                     | zip -X@ "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}.zip" \
                     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}.zip" && exit 1 )
-                # Syscoin (Release, nodebug)
-                # find "${DISTNAME}" -name "*.dbg" -print0 \
-                #     | xargs -0r touch --no-dereference --date="@${SOURCE_DATE_EPOCH}"
-                # find "${DISTNAME}" -name "*.dbg" \
-                #     | sort \
-                #     | zip -X@ "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" \
-                #     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" && exit 1 )
+                find "${DISTNAME}" -name "*.dbg" -print0 \
+                    | xargs -0r touch --no-dereference --date="@${SOURCE_DATE_EPOCH}"
+                find "${DISTNAME}" -name "*.dbg" \
+                    | sort \
+                    | zip -X@ "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" && exit 1 )
                 ;;
             *linux*)
                 find "${DISTNAME}" -not -name "*.dbg" -print0 \
@@ -374,26 +378,24 @@ mkdir -p "$DISTSRC"
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
                     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" \
                     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" && exit 1 )
-                # SYSCOIN (Release, nodebug)
-                # find "${DISTNAME}" -name "*.dbg" -print0 \
-                #     | sort --zero-terminated \
-                #     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                #     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
-                #     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
+                find "${DISTNAME}" -name "*.dbg" -print0 \
+                    | sort --zero-terminated \
+                    | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
                 ;;
             *darwin*)
-                find "${DISTNAME}" -print0 \
+                find "${DISTNAME}" -not -path "*.dSYM*" -print0 \
                     | sort --zero-terminated \
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
                     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" \
                     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" && exit 1 )
-                # SYSCOIN
-                # find "${DISTNAME}" -path "*.dSYM*" -print0 \
-                #     | sort --zero-terminated \
-                #     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                #     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
-                #     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
-                # ;;
+                find "${DISTNAME}" -path "*.dSYM*" -print0 \
+                    | sort --zero-terminated \
+                    | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
+                ;;
         esac
     )  # $DISTSRC/installed
 
