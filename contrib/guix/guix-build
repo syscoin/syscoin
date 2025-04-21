@@ -237,8 +237,8 @@ host_to_commonname() {
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -c log.showSignature=false log --format=%at -1)}"
 
 # Precious directories are those which should not be cleaned between successive
-# SYSCOIN guix builds
-depends_precious_dir_names='SOURCES_PATH BASE_CACHE SDK_PATH SDKs'
+# guix builds
+depends_precious_dir_names='SOURCES_PATH BASE_CACHE SDK_PATH'
 precious_dir_names="${depends_precious_dir_names} OUTDIR_BASE PROFILES_BASE"
 
 # Usage: contains IFS-SEPARATED-LIST ITEM
