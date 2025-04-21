@@ -8,6 +8,10 @@ $(package)_patches += remove_bind_at_load_flag.patch
 
 define $(package)_set_vars
 $(package)_config_opts += --disable-shared --enable-cxx --enable-fat
+# Disable GMP assembly only for x86_64-apple-darwin due to lld incompatibility
+ifeq ($(host),x86_64-apple-darwin)
+$(package)_config_opts += --disable-assembly
+endif
 $(package)_cflags_aarch64 += -march=armv8-a
 $(package)_cflags_armv7l += -march=armv7-a
 $(package)_cflags_x86_64 += -march=x86-64
