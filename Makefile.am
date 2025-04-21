@@ -147,7 +147,7 @@ $(OSX_ZIP): deploydir
 	if [ -n "$(SOURCE_DATE_EPOCH)" ]; then find $(APP_DIST_DIR) -exec touch -d @$(SOURCE_DATE_EPOCH) {} +; fi
 	cd $(APP_DIST_DIR) && find . | sort | $(ZIP) -X@ $@
 
-$(APP_DIST_DIR)/$(OSX_APP)/Contents/MacOS/Dash-Qt: $(OSX_APP_BUILT) $(OSX_PACKAGING)
+$(APP_DIST_DIR)/$(OSX_APP)/Contents/MacOS/Syscoin-Qt: $(OSX_APP_BUILT) $(OSX_PACKAGING)
 	OBJDUMP=$(OBJDUMP) $(PYTHON) $(OSX_DEPLOY_SCRIPT) $(OSX_APP) $(OSX_VOLNAME) -translations-dir=$(QT_TRANSLATION_DIR)
 
 deploydir: $(APP_DIST_DIR)/$(OSX_APP)/Contents/MacOS/Syscoin-Qt
