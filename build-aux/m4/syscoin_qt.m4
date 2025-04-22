@@ -137,9 +137,9 @@ AC_DEFUN([SYSCOIN_QT_CONFIGURE],[
       fi
     fi
 
-    if test "x$TARGET_OS" != xandroid; then
+    if test "$TARGET_OS" != "android"; then
       _SYSCOIN_QT_CHECK_STATIC_PLUGIN([QMinimalIntegrationPlugin], [-lqminimal])
-      AC_DEFINE(QT_QPA_PLATFORM_MINIMAL, 1, [Define this symbol if the minimal qt platform exists])
+      AC_DEFINE([QT_QPA_PLATFORM_MINIMAL], [1], [Define this symbol if the minimal qt platform exists])
     fi
     if test "$TARGET_OS" = "windows"; then
       dnl Linking against wtsapi32 is required. See #17749 and

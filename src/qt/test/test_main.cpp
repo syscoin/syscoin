@@ -28,7 +28,7 @@
 
 #include <functional>
 
-#if defined(QT_STATIC)
+#if defined(QT_STATICPLUGIN)
 #include <QtPlugin>
 #if defined(QT_QPA_PLATFORM_MINIMAL)
 Q_IMPORT_PLUGIN(QMinimalIntegrationPlugin);

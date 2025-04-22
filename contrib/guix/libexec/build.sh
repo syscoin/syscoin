@@ -300,8 +300,6 @@ mkdir -p "$DISTSRC"
 
     case "$HOST" in
         *darwin*)
-            # Set QTDIR for macdeployqtplus to find Qt frameworks/plugins within depends
-            export QTDIR="${BASEPREFIX}/${HOST}"
             make deploydir ${V:+V=1}
             mkdir -p "unsigned-app-${HOST}"
             cp  --target-directory="unsigned-app-${HOST}" \
@@ -323,21 +321,7 @@ mkdir -p "$DISTSRC"
 
         case "$HOST" in
             *mingw*)
-                # Copy Qt DLLs and platform plugin needed for unpackaged execution
-                cp "${BASEPREFIX}/${HOST}/bin"/*.dll "${DISTNAME}/bin/"
-                mkdir -p "${DISTNAME}/bin/platforms"
-                cp "${BASEPREFIX}/${HOST}/plugins/platforms/qwindows.dll" "${DISTNAME}/bin/platforms/"
                 mv --target-directory="$DISTNAME"/lib/ "$DISTNAME"/bin/*.dll
-                ;;
-            *linux*)
-                # Copy Qt .so libs and platform plugin needed for unpackaged execution
-                mkdir -p "${DISTNAME}/lib"
-                cp -L "${BASEPREFIX}/${HOST}/lib"/libQt5*.so.* "${DISTNAME}/lib/"
-                # It's often better to link only needed libs, but this is simpler for now
-                cp -L "${BASEPREFIX}/${HOST}/lib"/*.so* "${DISTNAME}/lib/" # Copy other potential libs too
-                mkdir -p "${DISTNAME}/bin/platforms"
-                cp "${BASEPREFIX}/${HOST}/plugins/platforms/libqxcb.so" "${DISTNAME}/bin/platforms/"
-                cp "${DISTSRC}/README.md" "${DISTNAME}/"
                 ;;
         esac
 
