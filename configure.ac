@@ -24,7 +24,6 @@ SYSCOIN_GUI_NAME=syscoin-qt
 SYSCOIN_CLI_NAME=syscoin-cli
 SYSCOIN_TX_NAME=syscoin-tx
 SYSCOIN_WALLET_TOOL_NAME=syscoin-wallet
-SYSCOIN_GETH=sysgeth
 dnl Multi Process
 SYSCOIN_MP_NODE_NAME=syscoin-node
 SYSCOIN_MP_GUI_NAME=syscoin-gui
@@ -850,27 +849,6 @@ case $host in
      ;;
 esac
 
-case $host in
-  *x86_64*)
-     TARGET_ARCH=x86_64
-     ;;
-   *aarch64*)
-     TARGET_ARCH=aarch64
-     ;;
-   *arm64*)
-     TARGET_ARCH=arm64
-     ;;
-   *arm*)
-     TARGET_ARCH=arm
-     ;;
-   *i686*)
-     TARGET_ARCH=x86_32
-     ;;
-   *x86_32*)
-     TARGET_ARCH=x86_32
-     ;;
-   *) AC_MSG_ERROR([Could not determine target arch, or it is unsupported]) ;;
-esac
 
 if test "$use_extended_functional_tests" != "no"; then
   AC_SUBST(EXTENDED_FUNCTIONAL_TESTS, --extended)
@@ -1468,16 +1446,6 @@ if test "$use_natpmp" != "no"; then
                    [have_natpmp=no])
 fi
 
-AM_CONDITIONAL([TARGET_X86_64], [test "$TARGET_ARCH" = "x86_64"])
-AM_CONDITIONAL([TARGET_AARCH64], [test "$TARGET_ARCH" = "aarch64"])
-AM_CONDITIONAL([TARGET_ARM64], [test "$TARGET_ARCH" = "arm64"])
-AM_CONDITIONAL([TARGET_ARM], [test "$TARGET_ARCH" = "arm"])
-
-AM_CONDITIONAL([TARGET_X86_64_LINUX], [test "$TARGET_ARCH-$TARGET_OS" = "x86_64-linux"])
-AM_CONDITIONAL([TARGET_ARM_LINUX], [test "$TARGET_ARCH-$TARGET_OS" = "arm-linux"])
-AM_CONDITIONAL([TARGET_AARCH64_LINUX], [test "$TARGET_ARCH-$TARGET_OS" = "aarch64-linux"])
-AM_CONDITIONAL([TARGET_X86_64_DARWIN], [test "$TARGET_ARCH-$TARGET_OS" = "x86_64-darwin"])
-AM_CONDITIONAL([TARGET_ARM64_DARWIN], [test "$TARGET_ARCH-$TARGET_OS" = "arm64-darwin"])
 
 if test "$build_syscoin_wallet$build_syscoin_cli$build_syscoin_tx$build_syscoind$syscoin_enable_qt$use_tests$use_bench" = "nonononononono"; then
     use_boost=no

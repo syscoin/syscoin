@@ -29,24 +29,6 @@ SYSCOIN_WALLET_BIN=$(top_builddir)/src/$(SYSCOIN_WALLET_TOOL_NAME)$(EXEEXT)
 SYSCOIN_NODE_BIN=$(top_builddir)/src/$(SYSCOIN_MP_NODE_NAME)$(EXEEXT)
 SYSCOIN_GUI_BIN=$(top_builddir)/src/$(SYSCOIN_MP_GUI_NAME)$(EXEEXT)
 SYSCOIN_WIN_INSTALLER=$(PACKAGE)-$(PACKAGE_VERSION)-win64-setup$(EXEEXT)
-if TARGET_WINDOWS
-SYSCOIN_GETH_BIN=
-endif
-if TARGET_X86_64_DARWIN
-SYSCOIN_GETH_BIN=
-endif
-if TARGET_ARM64_DARWIN
-SYSCOIN_GETH_BIN=
-endif
-if TARGET_X86_64_LINUX
-SYSCOIN_GETH_BIN=$(top_builddir)/src/bin/linux/x86_64/$(SYSCOIN_GETH)$(EXEEXT)
-endif
-# if TARGET_ARM_LINUX
-# SYSCOIN_GETH_BIN=$(top_builddir)/src/bin/linux/arm/$(SYSCOIN_GETH)$(EXEEXT)
-# endif
-# if TARGET_AARCH64_LINUX
-# SYSCOIN_GETH_BIN=$(top_builddir)/src/bin/linux/aarch64/$(SYSCOIN_GETH)$(EXEEXT)
-# endif
 
 empty :=
 space := $(empty) $(empty)
