@@ -727,7 +727,7 @@ case $host in
      if test "$WINDRES" = "none"; then
        AC_MSG_ERROR([windres not found])
      fi
-
+     CORE_CPPFLAGS="$CORE_CPPFLAGS -DSECP256K1_STATIC"
      CORE_CPPFLAGS="$CORE_CPPFLAGS -D_MT -DWIN32 -D_WINDOWS -D_WIN32_WINNT=0x0601 -D_WIN32_IE=0x0501 -DWIN32_LEAN_AND_MEAN"
      dnl Prevent the definition of min/max macros.
      dnl We always want to use the standard library.
@@ -743,6 +743,10 @@ case $host in
 
      dnl We require Windows 7 (NT 6.1) or later
      AX_CHECK_LINK_FLAG([-Wl,--major-subsystem-version -Wl,6 -Wl,--minor-subsystem-version -Wl,1], [CORE_LDFLAGS="$CORE_LDFLAGS -Wl,--major-subsystem-version -Wl,6 -Wl,--minor-subsystem-version -Wl,1"], [], [$LDFLAG_WERROR])
+
+     dnl Avoid the use of aligned vector instructions when building for Windows.
+     dnl See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=54412.
+     AX_CHECK_COMPILE_FLAG([-Wa,-muse-unaligned-vector-move], [CORE_CXXFLAGS="$CORE_CXXFLAGS -Wa,-muse-unaligned-vector-move"], [], [$CXXFLAG_WERROR])
      ;;
   *darwin*)
      TARGET_OS=darwin
