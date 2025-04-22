@@ -859,7 +859,6 @@ case $host in
    *x86_32*)
      TARGET_ARCH=x86_32
      ;;
-   *) AC_MSG_ERROR([Could not determine target arch, or it is unsupported]) ;;
 esac
 
 if test "$use_extended_functional_tests" != "no"; then
