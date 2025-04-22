@@ -16,8 +16,6 @@ export XCODE_VERSION=12.2
 export XCODE_BUILD_ID=12B45b
 export RUN_UNIT_TESTS=false
 export RUN_FUNCTIONAL_TESTS=false
-export GOAL="deploy"
-
-# False-positive warning is fixed with clang 17, remove this when that version
-# can be used.
-export SYSCOIN_CONFIG="--with-gui --enable-reduce-exports LDFLAGS=-Wno-error=unused-command-line-argument"
+export GOAL="all deploy"
+export SYSCOIN_CONFIG="--with-gui --enable-reduce-exports --disable-miner --with-boost-process"
+export NO_WERROR=1
