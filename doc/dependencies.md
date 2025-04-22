@@ -11,7 +11,7 @@ These are the dependencies currently used by Syscoin Core. You can find instruct
 | GCC |  | [8.1](https://gcc.gnu.org/) (C++17 & std::filesystem support) |  |  |  |
 | glibc | | [2.18](https://www.gnu.org/software/libc/) |  |  |  |  |
 | HarfBuzz-NG |  |  |  |  | [Yes](https://github.com/bitcoin/bitcoin/blob/master/depends/packages/qt.mk) |
-| libevent | [2.1.12-stable](https://github.com/libevent/libevent/releases) | [2.0.21](https://github.com/bitcoin/bitcoin/pull/18676) | No |  |  |
+| libevent | [2.1.12-stable](https://github.com/libevent/libevent/releases) | [2.1.8](https://github.com/bitcoin/bitcoin/pull/24681) | No |  |  |
 | libnatpmp | git commit [4536032...](https://github.com/miniupnp/libnatpmp/tree/4536032ae32268a45c073a4d5e91bbab4534773a) |  | No |  |  |
 | libpng |  |  |  |  | [Yes](https://github.com/bitcoin/bitcoin/blob/master/depends/packages/qt.mk) |
 | MiniUPnPc | [2.2.2](https://miniupnp.tuxfamily.org/files) |  | No |  |  |
