@@ -1094,9 +1094,7 @@ bool CDeterministicMNManager::GetEvoDBStats(EvoDBStats& stats)
 
     try {
         // Get DB path from parameters used to initialize CEvoDB
-        stats.dbPath = m_evoDb->GetDBParams().path; // Assumes GetDBParams() exists and returns DBParams struct
-
-
+        stats.dbPath = fs::PathToString(m_evoDb->GetDBParams().path);
         stats.cacheEntries = m_evoDb->GetReadWriteCacheSize();
         stats.eraseCacheEntries = m_evoDb->GetEraseCacheSize();
         stats.approxPersistedEntries = m_evoDb->CountPersistedEntries(); 
