@@ -143,10 +143,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: guix-artifacts-${{ matrix.build_target }}
+          # Upload main release archives/installers and checksum file (excluding debug)
           path: |
-            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}.tar.gz
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64-setup-unsigned.exe
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}-unsigned.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/SHA256SUMS.part
+          if-no-files-found: error # Optional: error if the expected files aren't found
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/*
+          # Update subject-path to match the uploaded files
+          subject-path: |
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}.tar.gz
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64-setup-unsigned.exe
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}-unsigned.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/SHA256SUMS.part
