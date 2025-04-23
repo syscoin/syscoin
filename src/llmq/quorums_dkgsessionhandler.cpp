@@ -39,28 +39,24 @@ void CDKGPendingMessages::PushPendingMessage(CNode* pfrom, CDataStream& vRecv)
         LOCK(cs_main);
         peerman.ReceivedResponse(from, hash);
     }
-    {
-        LOCK(cs_messages);
-
-        if (messagesPerNode[from] >= maxMessagesPerNode) {
-            // TODO ban?
-            LogPrint(BCLog::LLMQ_DKG, "CDKGPendingMessages::%s -- too many messages, peer=%d\n", __func__, from);
-            return;
-        }
-        messagesPerNode[from]++;
-        
-        if (!seenMessages.emplace(hash).second) {
-            if(pfrom)
-                peerman.ForgetTxHash(from, hash);
-            LogPrint(BCLog::LLMQ_DKG, "CDKGPendingMessages::%s -- already seen %s, peer=%d\n", __func__, hash.ToString(), from);
-            return;
-        }
-        pendingMessages.emplace_back(std::make_pair(from, std::move(pm)));
+    LOCK2(cs_main, cs_messages);
+    if (messagesPerNode[from] >= maxMessagesPerNode) {
+        // TODO ban?
+        LogPrint(BCLog::LLMQ_DKG, "CDKGPendingMessages::%s -- too many messages, peer=%d\n", __func__, from);
+        return;
+    }
+    messagesPerNode[from]++;
+    
+    if (!seenMessages.emplace(hash).second) {
+        if(pfrom)
+            peerman.ForgetTxHash(from, hash);
+        LogPrint(BCLog::LLMQ_DKG, "CDKGPendingMessages::%s -- already seen %s, peer=%d\n", __func__, hash.ToString(), from);
+        return;
     }
     if(pfrom) {
-        LOCK(cs_main);
         peerman.ForgetTxHash(from, hash);
     }
+    pendingMessages.emplace_back(std::make_pair(from, std::move(pm)));
 }
 
 std::list<CDKGPendingMessages::BinaryMessage> CDKGPendingMessages::PopPendingMessages(size_t maxCount)
