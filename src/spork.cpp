@@ -20,7 +20,6 @@
 #include <util/ranges.h>
 #include <util/string.h>
 #include <validation.h>
-#include <key_io.h>
 #include <string>
 
 std::unique_ptr<CSporkManager> sporkManager;
