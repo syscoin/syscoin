@@ -2355,7 +2355,7 @@ void CConnman::ThreadDNSAddressSeed()
                         LOCK(m_nodes_mutex);
                         for (const CNode* pnode : m_nodes) {
                             // SYSCOIN
-                            if (pnode->fSuccessfullyConnected && !pnode->IsFullOutboundConn() && !pnode->m_masternode_probe_connection) ++nRelevant;
+                            if (pnode->fSuccessfullyConnected && pnode->IsFullOutboundConn() && !pnode->m_masternode_probe_connection) ++nRelevant;
                         }
                     }
                     if (nRelevant >= 2) {
