@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2021-2022 The Bitcoin Core developers
+# Copyright (c) 2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 export LC_ALL=C
@@ -8,7 +8,7 @@ export TZ=UTC
 
 # Although Guix _does_ set umask when building its own packages (in our case,
 # this is all packages in manifest.scm), it does not set it for `guix
-# environment`. It does make sense for at least `guix environment --container`
+# shell`. It does make sense for at least `guix shell --container`
 # to set umask, so if that change gets merged upstream and we bump the
 # time-machine to a commit which includes the aforementioned change, we can
 # remove this line.
@@ -41,12 +41,8 @@ ACTUAL_OUTDIR="${OUTDIR}"
 OUTDIR="${DISTSRC}/output"
 
 git_head_version() {
-    local recent_tag
-    if recent_tag="$(git -C "$1" describe --exact-match HEAD 2> /dev/null)"; then
-        echo "${recent_tag#v}"
-    else
-        git -C "$1" rev-parse --short=12 HEAD
-    fi
+    recent_tag="$(git -C "$1" describe --abbrev=12 --dirty --always 2> /dev/null)"
+    echo "${recent_tag#v}"
 }
 
 CODESIGNATURE_GIT_ARCHIVE="${DIST_ARCHIVE_BASE}/${DISTNAME}-codesignatures-$(git_head_version "$DETACHED_SIGS_REPO").tar.gz"

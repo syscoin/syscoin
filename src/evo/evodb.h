@@ -14,16 +14,16 @@
 #include <utility>
 #include <logging.h>
 
-template <typename K, typename V>
+template <typename K, typename V, typename Hasher = std::hash<K>>
 class CEvoDB : public CDBWrapper {
-    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> mapCache;
+    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> mapCache;
     std::list<std::pair<K, V>> fifoList;
-    std::unordered_set<K> setEraseCache;
-    mutable RecursiveMutex cs;
+    std::unordered_set<K, Hasher> setEraseCache;
     size_t maxCacheSize{0};
     DBParams m_db_params;
     bool bFlushOnNextRead{false};
 public:
+    mutable RecursiveMutex cs;
     using CDBWrapper::CDBWrapper;
     explicit CEvoDB(const DBParams &db_params, size_t maxCacheSizeIn) : CDBWrapper(db_params), maxCacheSize(maxCacheSizeIn), m_db_params(db_params) {
     }
@@ -51,26 +51,26 @@ public:
         }
         return Read(key, value);
     }
-    std::unordered_map<K, V> GetMapCacheCopy() {
+    std::unordered_map<K, V, Hasher> GetMapCacheCopy() {
         LOCK(cs);
         if(bFlushOnNextRead) {
             bFlushOnNextRead = false;
             LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
             FlushCacheToDisk();
         }
-        std::unordered_map<K, V> cacheCopy;
+        std::unordered_map<K, V, Hasher> cacheCopy;
         for (const auto& [key, it] : mapCache) {
             cacheCopy[key] = it->second;
         }
         return cacheCopy;
     }
 
-    std::unordered_set<K> GetEraseCacheCopy() const {
+    std::unordered_set<K, Hasher> GetEraseCacheCopy() const {
         LOCK(cs);
         return setEraseCache;
     }
 
-    void RestoreCaches(const std::unordered_map<K, V>& mapCacheCopy, const std::unordered_set<K>& eraseCacheCopy) {
+    void RestoreCaches(const std::unordered_map<K, V, Hasher>& mapCacheCopy, const std::unordered_set<K, Hasher>& eraseCacheCopy) {
         LOCK(cs);
         for (const auto& [key, value] : mapCacheCopy) {
             WriteCache(key, value);
@@ -166,9 +166,37 @@ public:
         return res;
     }
 
-
+    int64_t CountPersistedEntries() {
+        try {
+            std::unique_ptr<CDBIterator> pcursor(NewIterator());
+            if (!pcursor) {
+                 LogPrint(BCLog::SYS, "CEvoDB::%s -- Failed to create DB iterator\n", __func__);
+                 return -1; // Indicate error
+            }
+            int64_t count = 0;
+            // We only need to iterate keys, values are not needed for count
+            pcursor->SeekToFirst();
+            while (pcursor->Valid()) {
+                count++;
+                pcursor->Next();
+            }
+            return count;
+        } catch (const std::exception& e) {
+             LogPrint(BCLog::SYS, "CEvoDB::%s -- Exception during iteration: %s\n", __func__, e.what());
+            return -1; // Indicate error
+        } catch (...) {
+             LogPrint(BCLog::SYS, "CEvoDB::%s -- Unknown exception during iteration\n", __func__);
+            return -1; // Indicate error
+        }
+    }
+    size_t GetReadWriteCacheSize() {
+        return mapCache.size();
+    }
+    size_t GetEraseCacheSize() {
+        return setEraseCache.size();
+    }
     // Getter for testing purposes
-    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> GetMapCache() const {
+    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> GetMapCache() const {
         return mapCache;
     }
 

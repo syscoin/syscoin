@@ -94,8 +94,6 @@ std::string EncodeBase32(Span<const unsigned char> input, bool pad = true);
  */
 std::string EncodeBase32(std::string_view str, bool pad = true);
 
-// SYSCOIN
-std::string itostr(int n);
 /**
  * Splits socket address string into host string and port value.
  * Validates port value.

@@ -64,8 +64,11 @@ public:
     UniValue ToJson() const;
 
 public:
-    const uint256& GetProTxHash() const { LOCK(cs); return proTxHash; }
-
+    const uint256 GetProTxHash() const
+    {
+        LOCK(cs);
+        return proTxHash;
+    }
     // KEEP TRACK OF EACH GOVERNANCE ITEM IN CASE THIS NODE GOES OFFLINE, SO WE CAN RECALCULATE THEIR STATUS
     void AddGovernanceVote(const uint256& nGovernanceObjectHash);
 

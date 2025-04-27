@@ -632,6 +632,10 @@ static RPCHelpMan getnetworkinfo()
                         {RPCResult::Type::NUM, "connections", "the total number of connections"},
                         {RPCResult::Type::NUM, "connections_in", "the number of inbound connections"},
                         {RPCResult::Type::NUM, "connections_out", "the number of outbound connections"},
+                        // SYSCOIN
+                        {RPCResult::Type::NUM, "connections_mn", "the number of verified mn connections"},
+                        {RPCResult::Type::NUM, "connections_mn_in", "the number of inbound verified mn connections"},
+                        {RPCResult::Type::NUM, "connections_mn_out", "the number of outbound verified mn connections"},
                         {RPCResult::Type::BOOL, "networkactive", "whether p2p networking is enabled"},
                         {RPCResult::Type::ARR, "networks", "information per network",
                         {
@@ -684,6 +688,10 @@ static RPCHelpMan getnetworkinfo()
         obj.pushKV("connections", node.connman->GetNodeCount(ConnectionDirection::Both));
         obj.pushKV("connections_in", node.connman->GetNodeCount(ConnectionDirection::In));
         obj.pushKV("connections_out", node.connman->GetNodeCount(ConnectionDirection::Out));
+        // SYSCOIN
+        obj.pushKV("connections_mn",   node.connman->GetNodeCount(ConnectionDirection::Verified));
+        obj.pushKV("connections_mn_in",   node.connman->GetNodeCount(ConnectionDirection::VerifiedIn));
+        obj.pushKV("connections_mn_out",   node.connman->GetNodeCount(ConnectionDirection::VerifiedOut));
     }
     obj.pushKV("networks",      GetNetworksInfo());
     if (node.mempool) {

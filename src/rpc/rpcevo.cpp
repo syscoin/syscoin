@@ -163,7 +163,8 @@ static RPCHelpMan bls_generate()
 static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::string& paramName)
 {
     CBLSSecretKey secKey;
-    if (!secKey.SetHexStr(hexKey)) {
+    // Actually, bool flag for bls::PrivateKey has other meaning (modOrder)
+    if (!secKey.SetHexStr(hexKey, false)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
     }
     return secKey;

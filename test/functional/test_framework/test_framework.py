@@ -39,7 +39,6 @@ from .util import (
     set_node_times,
     copy_datadir,
     force_finish_mnsync,
-    bump_node_times,
     satoshi_round,
 )
 
@@ -1058,7 +1057,7 @@ class DashTestFramework(SyscoinTestFramework):
     def set_test_params(self):
         """Tests must this method to change default values for number of nodes, topology, etc"""
         raise NotImplementedError
-    def set_dash_test_params(self, num_nodes, masterodes_count, extra_args=None, fast_dip3_enforcement=False):
+    def set_dash_test_params(self, num_nodes, masterodes_count, extra_args=None, fast_dip3_enforcement=False, default_legacy_bls=False):
         self.mn_count = masterodes_count
         self.num_nodes = num_nodes
         self.mninfo = []
@@ -1070,6 +1069,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.extra_args = [copy.deepcopy(a) for a in extra_args]
         self.extra_args[0] += ["-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"]
         self.fast_dip3_enforcement = fast_dip3_enforcement
+        self.default_legacy_bls = default_legacy_bls
         if fast_dip3_enforcement:
             for i in range(0, num_nodes):
                 self.extra_args[i].append("-dip3params=30:50")
@@ -1079,9 +1079,6 @@ class DashTestFramework(SyscoinTestFramework):
         self.llmq_size = 3
         self.llmq_threshold = 2
         self.disable_autoconnect = False
-
-    def bump_scheduler(self, t, nodes=None):
-        bump_node_times(nodes or self.nodes, t)
 
     def set_dash_llmq_test_params(self, llmq_size, llmq_threshold):
         self.llmq_size = llmq_size
@@ -1105,7 +1102,7 @@ class DashTestFramework(SyscoinTestFramework):
     def prepare_masternode(self, idx):
         register_fund = (idx % 2) == 0
 
-        bls = self.nodes[0].bls_generate()
+        bls = self.nodes[0].bls_generate(self.default_legacy_bls)
         address = self.nodes[0].getnewaddress()
         txid = self.nodes[0].sendtoaddress(address, MASTERNODE_COLLATERAL)
 
@@ -1131,10 +1128,10 @@ class DashTestFramework(SyscoinTestFramework):
         submit = (idx % 4) < 2
         if register_fund:
             # self.nodes[0].lockunspent(True, [{'txid': txid, 'vout': collateral_vout}])
-            protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit)
+            protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit, self.default_legacy_bls)
         else:
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            protx_result = self.nodes[0].protx_register(txid, collateral_vout, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit)
+            protx_result = self.nodes[0].protx_register(txid, collateral_vout, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit, self.default_legacy_bls)
 
         if submit:
             proTxHash = protx_result
@@ -1145,7 +1142,7 @@ class DashTestFramework(SyscoinTestFramework):
             self.generate(self.nodes[0], 1)
             operatorPayoutAddress = self.nodes[0].getnewaddress()
             nevmAddress = ""
-            self.nodes[0].protx_update_service(proTxHash, ipAndPort, bls['secret'], nevmAddress, operatorPayoutAddress, address)
+            self.nodes[0].protx_update_service(proTxHash, ipAndPort, bls['secret'], nevmAddress, operatorPayoutAddress, address, self.default_legacy_bls)
 
         self.mninfo.append(MasternodeInfo(proTxHash, ownerAddr, votingAddr, bls['public'], bls['secret'], address, txid, collateral_vout))
 
@@ -1517,7 +1514,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.generate_helper(self.nodes[0], num_blocks, sync_fun=self.no_op)
         self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
 
-    def mine_quorum(self, expected_connections=None, expected_members=None, expected_contributions=None, expected_complaints=0, expected_justifications=0, expected_commitments=None, mninfos_online=None, mninfos_valid=None, mod5=False):
+    def mine_quorum(self, expected_connections=None, expected_members=None, expected_contributions=None, expected_complaints=0, expected_justifications=0, expected_commitments=None, mninfos_online=None, mninfos_valid=None):
         spork21_active = self.nodes[0].spork('show')['SPORK_21_QUORUM_ALL_CONNECTED'] <= 1
         spork23_active = self.nodes[0].spork('show')['SPORK_23_QUORUM_POSE'] <= 1
 
@@ -1599,7 +1596,7 @@ class DashTestFramework(SyscoinTestFramework):
         assert_equal(q, new_quorum)
         quorum_info = self.nodes[0].quorum_info(new_quorum)
 
-        # Mine 5 (SIGN_HEIGHT_LOOKBACK) more blocks to make sure that the new quorum gets eligible for signing sessions
+        # Mine 5 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
         skip_count = 5 - (self.nodes[0].getblockcount() % 5)
         if skip_count:
             self.generate_helper(self.nodes[0], skip_count, sync_fun=self.no_op)

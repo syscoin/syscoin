@@ -27,6 +27,8 @@ struct champ_iterator
     using tree_t = champ<T, Hash, Eq, MP, B>;
     using node_t = typename tree_t::node_t;
 
+    champ_iterator() = default;
+
     struct end_t
     {};
 
@@ -66,7 +68,7 @@ private:
     T* end_;
     count_t depth_;
     node_t* const* path_[max_depth<B> + 1] = {
-        nullptr,
+        0,
     };
 
     void increment()

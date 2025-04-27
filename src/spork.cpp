@@ -20,7 +20,6 @@
 #include <util/ranges.h>
 #include <util/string.h>
 #include <validation.h>
-#include <key_io.h>
 #include <string>
 
 std::unique_ptr<CSporkManager> sporkManager;
@@ -444,5 +443,5 @@ std::optional<CKeyID> CSporkMessage::GetSignerKeyID() const
 void CSporkMessage::Relay(PeerManager& peerman) const
 {
     CInv inv(MSG_SPORK, GetHash());
-    peerman.RelayTransactionOther(inv);
+    peerman.RelayInv(inv);
 }

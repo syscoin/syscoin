@@ -29,7 +29,7 @@ private:
 
     friend class CDeterministicMNStateDiff;
 public:
-    int nVersion{CProUpServTx::UPDATE_NEVM_VERSION};
+    int nVersion{CProUpServTx::LEGACY_BLS_VERSION};
 
     int nRegisteredHeight{-1};
     int nCollateralHeight{-1};
@@ -96,7 +96,7 @@ public:
 
     void ResetOperatorFields()
     {
-        nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+        nVersion = CProUpServTx::LEGACY_BLS_VERSION;
         pubKeyOperator = CBLSLazyPublicKey();
         addr = CService();
         scriptOperatorPayout = CScript();

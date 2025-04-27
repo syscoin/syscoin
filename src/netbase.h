@@ -35,6 +35,10 @@ enum class ConnectionDirection {
     In = (1U << 0),
     Out = (1U << 1),
     Both = (In | Out),
+    // SYSCOIN
+    Verified = (1U << 2),
+    VerifiedIn = (Verified | In),
+    VerifiedOut = (Verified | Out),
 };
 static inline ConnectionDirection& operator|=(ConnectionDirection& a, ConnectionDirection b) {
     using underlying = typename std::underlying_type<ConnectionDirection>::type;

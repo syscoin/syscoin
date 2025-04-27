@@ -131,7 +131,7 @@ void CGovernanceVote::Relay(PeerManager& peerman, const CDeterministicMNList& ti
     }
 
     CInv inv(MSG_GOVERNANCE_OBJECT_VOTE, GetHash());
-    peerman.RelayTransactionOther(inv);
+    peerman.RelayInv(inv);
 }
 
 void CGovernanceVote::UpdateHash() const
@@ -199,7 +199,7 @@ bool CGovernanceVote::Sign()
 bool CGovernanceVote::CheckSignature(const CBLSPublicKey& pubKey) const
 {
     CBLSSignature sig;
-    sig.SetByteVector(vchSig, false);
+    sig.SetBytes(vchSig, false);
     if (!sig.VerifyInsecure(pubKey, GetSignatureHash(), false)) {
         LogPrintf("CGovernanceVote::CheckSignature -- VerifyInsecure() failed\n");
         return false;

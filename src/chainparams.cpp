@@ -79,7 +79,7 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
             throw std::runtime_error(strprintf("Invalid nDIP3EnforcementHeight (%s)", vDIP3Params[1]));
         }
     }
-    else if (args.IsArgSet("-dip19params")) {
+    if (args.IsArgSet("-dip19params")) {
         std::string strDIP19Params = args.GetArg("-dip19params", "");
         if (!ParseInt32(strDIP19Params, &options.v19startblock)) {
             throw std::runtime_error(strprintf("Invalid nDIP19ActivationHeight (%s)", strDIP19Params));

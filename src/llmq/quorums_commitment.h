@@ -6,7 +6,7 @@
 #define SYSCOIN_LLMQ_QUORUMS_COMMITMENT_H
 
 #include <llmq/quorums_utils.h>
-
+#include <primitives/transaction.h>
 #include <bls/bls.h>
 
 #include <univalue.h>
@@ -134,6 +134,7 @@ public:
     inline bool IsNull() const {return nHeight == 0;}
 };
 
+uint256 BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash);
 } // namespace llmq
 
 #endif // SYSCOIN_LLMQ_QUORUMS_COMMITMENT_H

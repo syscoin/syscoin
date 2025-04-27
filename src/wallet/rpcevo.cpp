@@ -44,11 +44,10 @@ static CKeyID ParsePubKeyIDFromAddress(const std::string& strAddress, const std:
     return ToKeyID(*keyID);
 }
 
-static CBLSPublicKey ParseBLSPubKey(const std::string& hexKey, const std::string& paramName, bool is_bls_legacy_scheme = true, bool specific_legacy_bls_scheme = false)
+static CBLSPublicKey ParseBLSPubKey(const std::string& hexKey, const std::string& paramName, bool specific_legacy_bls_scheme)
 {
     CBLSPublicKey pubKey;
-    bool use_legacy_bls_scheme = specific_legacy_bls_scheme || is_bls_legacy_scheme;
-    if (!pubKey.SetHexStr(hexKey, use_legacy_bls_scheme)) {
+    if (!pubKey.SetHexStr(hexKey, specific_legacy_bls_scheme)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS public key, not %s", paramName, hexKey));
     }
     return pubKey;
@@ -57,7 +56,8 @@ static CBLSPublicKey ParseBLSPubKey(const std::string& hexKey, const std::string
 static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::string& paramName)
 {
     CBLSSecretKey secKey;
-    if (!secKey.SetHexStr(hexKey)) {
+    // Actually, bool flag for bls::PrivateKey has other meaning (modOrder)
+    if (!secKey.SetHexStr(hexKey, false)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
     }
     return secKey;
@@ -147,13 +147,14 @@ static void SignSpecialTxPayloadByString(const CMutableTransaction& tx, SpecialT
     }
 }
 
-template<typename SpecialTxPayload>
-static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxPayload& payload, const CBLSSecretKey& key)
+template <typename SpecialTxPayload>
+static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxPayload& payload,
+                                       const CBLSSecretKey& key, bool use_legacy)
 {
     UpdateSpecialTxInputsHash(tx, payload);
 
     uint256 hash = ::SerializeHash(payload);
-    payload.sig = key.Sign(hash);
+    payload.sig = key.Sign(hash, use_legacy);
 }
 static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true)
 {
@@ -274,7 +275,7 @@ static RPCHelpMan protx_register()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme);
+        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", specific_legacy_bls_scheme);
         CKeyID keyIDVoting = ptx.keyIDOwner;
         if (request.params[paramIdx + 3].get_str() != "") {
             keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -294,7 +295,7 @@ static RPCHelpMan protx_register()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
         }
 
-        ptx.pubKeyOperator.Set(pubKeyOperator, ptx.nVersion == CProRegTx::LEGACY_BLS_VERSION);
+        ptx.pubKeyOperator.Set(pubKeyOperator, specific_legacy_bls_scheme);
         ptx.keyIDVoting = keyIDVoting;
         ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
@@ -439,7 +440,7 @@ static RPCHelpMan protx_register_fund()
     }
 
     ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-    CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme);
+    CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", specific_legacy_bls_scheme);
     CKeyID keyIDVoting = ptx.keyIDOwner;
     if (request.params[paramIdx + 3].get_str() != "") {
         keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -459,7 +460,7 @@ static RPCHelpMan protx_register_fund()
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
     }
 
-    ptx.pubKeyOperator.Set(pubKeyOperator, ptx.nVersion == CProUpServTx::LEGACY_BLS_VERSION);
+    ptx.pubKeyOperator.Set(pubKeyOperator, specific_legacy_bls_scheme);
     ptx.keyIDVoting = keyIDVoting;
     ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
@@ -584,7 +585,7 @@ static RPCHelpMan protx_register_prepare()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme);
+        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", specific_legacy_bls_scheme);
         CKeyID keyIDVoting = ptx.keyIDOwner;
         if (request.params[paramIdx + 3].get_str() != "") {
             keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -604,7 +605,7 @@ static RPCHelpMan protx_register_prepare()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
         }
 
-        ptx.pubKeyOperator.Set(pubKeyOperator, ptx.nVersion == CProUpServTx::LEGACY_BLS_VERSION);
+        ptx.pubKeyOperator.Set(pubKeyOperator, specific_legacy_bls_scheme);
         ptx.keyIDVoting = keyIDVoting;
         ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
@@ -829,7 +830,7 @@ static RPCHelpMan protx_update_service()
 
     FundSpecialTx(*pwallet, tx, ptx, feeSource);
 
-    SignSpecialTxPayloadByHash(tx, ptx, keyOperator);
+    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, specific_legacy_bls_scheme);
     SetTxPayload(tx, ptx);
 
     return SignAndSendSpecialTx(request, *pwallet, tx);
@@ -898,7 +899,7 @@ static RPCHelpMan protx_update_service()
         ptx.scriptPayout = dmn->pdmnState->scriptPayout;
 
         if (request.params[1].get_str() != "") {
-            ptx.pubKeyOperator.Set(ParseBLSPubKey(request.params[1].get_str(), "operator BLS address", !v19active, specific_legacy_bls_scheme), ptx.nVersion == CProUpServTx::LEGACY_BLS_VERSION);
+            ptx.pubKeyOperator.Set(ParseBLSPubKey(request.params[1].get_str(), "operator BLS address", specific_legacy_bls_scheme), specific_legacy_bls_scheme);
         }
         if (request.params[2].get_str() != "") {
             ptx.keyIDVoting = ParsePubKeyIDFromAddress(request.params[2].get_str(), "voting address");
@@ -1037,7 +1038,7 @@ static RPCHelpMan protx_revoke()
         throw JSONRPCError(RPC_INTERNAL_ERROR, "No payout or fee source addresses found, can't revoke");
     }
 
-    SignSpecialTxPayloadByHash(tx, ptx, keyOperator);
+    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, specific_legacy_bls_scheme);
     SetTxPayload(tx, ptx);
 
     return SignAndSendSpecialTx(request, *pwallet, tx);

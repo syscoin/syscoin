@@ -27,7 +27,8 @@ CDKGSessionManager::CDKGSessionManager(CBLSWorker& blsWorker, CConnman &_connman
 {
     db = std::make_unique<CDBWrapper>(DBParams{
         .path = gArgs.GetDataDirNet() / "llmq/dkgdb",
-        .cache_bytes = static_cast<size_t>(1 << 20),
+        // SYSCOIN use 64MB cache for vvecs
+        .cache_bytes = static_cast<size_t>(1 << 26),
         .memory_only = unitTests,
         .wipe_data = fWipe});
     dkgSessionHandler = std::make_unique<CDKGSessionHandler>(
@@ -49,6 +50,10 @@ void CDKGSessionManager::StartThreads()
 
 void CDKGSessionManager::StopThreads()
 {
+    if (!fMasternodeMode && !CLLMQUtils::IsWatchQuorumsEnabled()) {
+        // Regular nodes do not care about any DKG internals, bail out
+        return;
+    }
     dkgSessionHandler->StopThread();
 }
 
@@ -79,12 +84,23 @@ void CDKGSessionManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         && strCommand != NetMsgType::QWATCH) {
         return;
     }
-
+    PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
     if (strCommand == NetMsgType::QWATCH) {
+        if (!fMasternodeMode) {
+            // non-masternodes should never receive this
+            if(peer)
+                peerman.Misbehaving(*peer, 10, "Non-MN cannot recv qwatch");
+            return;
+        }
         pfrom->qwatch = true;
         return;
     }
-    PeerRef peer = peerman.GetPeerRef(pfrom->GetId());
+    if ((!fMasternodeMode && !llmq::CLLMQUtils::IsWatchQuorumsEnabled())) {
+        // regular non-watching nodes should never receive any of these
+        if(peer)
+            peerman.Misbehaving(*peer, 10, "Non-watcher cannot recv qwatch");
+        return;
+    }
     if (vRecv.empty()) {
         if(peer)
             peerman.Misbehaving(*peer, 100, "invalid recv size for DKG session");
@@ -100,7 +116,6 @@ bool CDKGSessionManager::AlreadyHave(const uint256& hash) const
         return false;
     
     
-    LOCK(dkgSessionHandler->cs);   
     if (dkgSessionHandler->pendingContributions.HasSeen(hash)
         || dkgSessionHandler->pendingComplaints.HasSeen(hash)
         || dkgSessionHandler->pendingJustifications.HasSeen(hash)
@@ -117,14 +132,11 @@ bool CDKGSessionManager::GetContribution(const uint256& hash, CDKGContribution& 
         return false;
 
     
-    LOCK(dkgSessionHandler->cs);
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Initialized || dkgSessionHandler->phase > QuorumPhase_Contribute) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->contributions.find(hash);
-    if (it != dkgSessionHandler->curSession->contributions.end()) {
-        ret = it->second;
+    if(dkgSessionHandler->GetContribution(hash, ret)) {
         return true;
     }
     return false;
@@ -136,14 +148,11 @@ bool CDKGSessionManager::GetComplaint(const uint256& hash, CDKGComplaint& ret) c
         return false;
 
     
-    LOCK(dkgSessionHandler->cs);
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Contribute || dkgSessionHandler->phase > QuorumPhase_Complain) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->complaints.find(hash);
-    if (it != dkgSessionHandler->curSession->complaints.end()) {
-        ret = it->second;
+    if(dkgSessionHandler->GetComplaint(hash, ret)) {
         return true;
     }
     return false;
@@ -155,14 +164,11 @@ bool CDKGSessionManager::GetJustification(const uint256& hash, CDKGJustification
         return false;
 
     
-    LOCK(dkgSessionHandler->cs);
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Complain || dkgSessionHandler->phase > QuorumPhase_Justify) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->justifications.find(hash);
-    if (it != dkgSessionHandler->curSession->justifications.end()) {
-        ret = it->second;
+    if(dkgSessionHandler->GetJustification(hash, ret)) {
         return true;
     }
     return false;
@@ -174,18 +180,14 @@ bool CDKGSessionManager::GetPrematureCommitment(const uint256& hash, CDKGPrematu
         return false;
 
 
-    
-    LOCK(dkgSessionHandler->cs);
+
+    LOCK(dkgSessionHandler->cs_phase_qhash);
     if (dkgSessionHandler->phase < QuorumPhase_Justify || dkgSessionHandler->phase > QuorumPhase_Commit) {
         return false;
     }
-    LOCK(dkgSessionHandler->curSession->invCs);
-    auto it = dkgSessionHandler->curSession->prematureCommitments.find(hash);
-    if (it != dkgSessionHandler->curSession->prematureCommitments.end() && dkgSessionHandler->curSession->validCommitments.count(hash)) {
-        ret = it->second;
+    if(dkgSessionHandler->GetPrematureCommitment(hash, ret)) {
         return true;
     }
-
     return false;
 }
 
@@ -201,7 +203,6 @@ void CDKGSessionManager::WriteVerifiedSkContribution(const uint256& hashQuorum, 
 
 bool CDKGSessionManager::GetVerifiedContributions(const CBlockIndex* pQuorumBaseBlockIndex, const std::vector<bool>& validMembers, std::vector<uint16_t>& memberIndexesRet, std::vector<BLSVerificationVectorPtr>& vvecsRet, std::vector<CBLSSecretKey>& skContributionsRet) const
 {
-    LOCK(contributionsCacheCs);
     auto members = CLLMQUtils::GetAllQuorumMembers(pQuorumBaseBlockIndex);
 
     memberIndexesRet.clear();
@@ -210,6 +211,8 @@ bool CDKGSessionManager::GetVerifiedContributions(const CBlockIndex* pQuorumBase
     memberIndexesRet.reserve(members.size());
     vvecsRet.reserve(members.size());
     skContributionsRet.reserve(members.size());
+    // NOTE: the `cs_main` should not be locked under scope of `contributionsCacheCs`
+    LOCK(contributionsCacheCs);
     for (size_t i = 0; i < members.size(); i++) {
         if (validMembers[i]) {
             const uint256& proTxHash = members[i]->proTxHash;
@@ -271,7 +274,7 @@ void CDKGSessionManager::CleanupOldContributions(ChainstateManager& chainstate) 
                 break;
             }
             cnt_all++;
-            const CBlockIndex* pindexQuorum = chainstate.m_blockman.LookupBlockIndex(std::get<2>(k));
+            const CBlockIndex* pindexQuorum = chainstate.m_blockman.LookupBlockIndex(std::get<1>(k));
             if (pindexQuorum == nullptr || chainstate.ActiveHeight() - pindexQuorum->nHeight > params.max_store_depth()) {
                 // not found or too old
                 batch.Erase(k);

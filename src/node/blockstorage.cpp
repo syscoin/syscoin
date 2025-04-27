@@ -1155,7 +1155,6 @@ bool BlockManager::ReadRawBlockFromDisk(std::vector<uint8_t>& block, const FlatF
 
 FlatFilePos BlockManager::SaveBlockToDisk(const CBlock& block, int nHeight, const FlatFilePos* dbp)
 {
-    // SYSCOIN
     unsigned int nBlockSize = ::GetSerializeSize(block, CLIENT_VERSION, SER_DISK);
     FlatFilePos blockPos;
     const auto position_known {dbp != nullptr};

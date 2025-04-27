@@ -184,7 +184,9 @@ const CLogCategoryDesc LogCategories[] =
     {BCLog::MNLIST, "mnlist"},
     {BCLog::MNSYNC, "mnsync"},
     {BCLog::SPORK, "spork"},
+    {BCLog::NETCONN, "netconn"},
     {BCLog::SYS, "syscoin"},
+    {BCLog::DASH, "dash"},
     {BCLog::I2P, "i2p"},
     {BCLog::IPC, "ipc"},
 #ifdef DEBUG_LOCKCONTENTION
@@ -303,6 +305,12 @@ std::string LogCategoryToStr(BCLog::LogFlags category)
         return "syscoin";
     case BCLog::LogFlags::SPORK:
         return "spork";
+    case BCLog::LogFlags::NETCONN:
+        return "netconn";
+    case BCLog::LogFlags::DASH:
+        return "dash";
+    case BCLog::LogFlags::NET_NETCONN:
+        return "net|netconn";
     case BCLog::LogFlags::I2P:
         return "i2p";
     case BCLog::LogFlags::IPC:
@@ -355,7 +363,8 @@ std::vector<LogCategory> BCLog::Logger::LogCategoriesList() const
 
     std::vector<LogCategory> ret;
     for (const CLogCategoryDesc& category_desc : categories) {
-        if (category_desc.flag == BCLog::NONE || category_desc.flag == BCLog::ALL) continue;
+        // SYSCOIN
+        if (category_desc.flag == BCLog::NONE || category_desc.flag == BCLog::ALL || category_desc.flag == BCLog::DASH) continue;
         LogCategory catActive;
         catActive.category = category_desc.category;
         catActive.active = WillLogCategory(category_desc.flag);

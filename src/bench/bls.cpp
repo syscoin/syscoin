@@ -1,10 +1,10 @@
-// Copyright (c) 2018-2022 The Dash Core developers
+// Copyright (c) 2018-2024 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <bench/bench.h>
-#include <random.h>
 #include <bls/bls_worker.h>
+#include <random.h>
 #include <util/time.h>
 
 #include <iostream>
@@ -29,12 +29,12 @@ static void BuildTestVectors(size_t count, size_t invalidCount,
         secKeys[i].MakeNewKey();
         pubKeys[i] = secKeys[i].GetPublicKey();
         msgHashes[i] = GetRandHash();
-        sigs[i] = secKeys[i].Sign(msgHashes[i]);
+        sigs[i] = secKeys[i].Sign(msgHashes[i], false);
 
         if (invalid[i]) {
             CBLSSecretKey s;
             s.MakeNewKey();
-            sigs[i] = s.Sign(msgHashes[i]);
+            sigs[i] = s.Sign(msgHashes[i], false);
         }
     }
 }
@@ -71,8 +71,8 @@ static void BLS_SignatureAggregate_Normal(benchmark::Bench& bench)
     CBLSSecretKey secKey1, secKey2;
     secKey1.MakeNewKey();
     secKey2.MakeNewKey();
-    CBLSSignature sig1 = secKey1.Sign(hash);
-    CBLSSignature sig2 = secKey2.Sign(hash);
+    CBLSSignature sig1 = secKey1.Sign(hash, false);
+    CBLSSignature sig2 = secKey2.Sign(hash, false);
 
     // Benchmark.
     bench.run([&] {
@@ -89,7 +89,7 @@ static void BLS_Sign_Normal(benchmark::Bench& bench)
     // Benchmark.
     bench.minEpochIterations(100).run([&] {
         uint256 hash = GetRandHash();
-        sig = secKey.Sign(hash);
+        sig = secKey.Sign(hash, false);
     });
 }
 
@@ -215,7 +215,7 @@ static void BLS_Verify_LargeAggregatedBlock1000PreVerified(benchmark::Bench& ben
     std::set<size_t> prevalidated;
 
     while (prevalidated.size() < 900) {
-        int idx = GetRandInternal((int)pubKeys.size());
+        int idx = GetRand((int)pubKeys.size());
         if (prevalidated.count((size_t)idx)) {
             continue;
         }

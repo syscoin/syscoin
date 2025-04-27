@@ -122,7 +122,8 @@ struct Peer {
     /** Timestamp after which we will send the next BIP133 `feefilter` message
       * to the peer. */
     std::chrono::microseconds m_next_send_feefilter GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
-
+    /** Whether the peer has requested to receive llmq recovered signatures */
+    std::atomic<bool> m_wants_recsigs{false};
     struct TxRelay {
         mutable RecursiveMutex m_bloom_filter_mutex;
         /** Whether we relay transactions to this peer. */
@@ -312,6 +313,9 @@ public:
     /** Relay transaction to all peers. */
     virtual void RelayTransaction(const uint256& txid, const uint256& wtxid) = 0;
 
+    /** SYSCOIN Relay recovered sigs to all interested peers */
+    virtual void RelayRecoveredSig(const uint256& sigHash) = 0;
+
     /** Send ping message to all peers */
     virtual void SendPings() = 0;
 
@@ -322,14 +326,12 @@ public:
     virtual size_t GetRequestedCount(NodeId nodeId) const = 0;
     virtual void ReceivedResponse(NodeId nodeId, const uint256& hash) = 0;
     virtual void ForgetTxHash(NodeId nodeId, const uint256& hash) = 0;
-    virtual void _RelayTransaction(const uint256& txid, const uint256& wtxid) = 0;
     virtual void PushTxInventory(Peer& peer, const uint256& txid, const uint256& wtxid) = 0;
-    virtual void RelayTransactionOther(const CInv& inv) = 0;
-    virtual void _RelayTransactionOther(const CInv& inv) = 0;
+    virtual void RelayInv(const CInv& inv) = 0;
     virtual void PushTxInventoryOther(Peer& peer, const CInv& inv) = 0;
     virtual PeerRef GetPeerRef(NodeId id) const = 0;
     virtual void AddKnownTx(Peer& peer, const uint256& hash) = 0;
-    virtual bool IsBanned(NodeId nodeid, BanMan& banman) = 0;
+    virtual bool IsBanned(NodeId nodeid) = 0;
     /* Public for unit testing. */
     virtual void UnitTestMisbehaving(NodeId peer_id, int howmuch) = 0;
     // SYSCOIN

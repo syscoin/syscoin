@@ -16,6 +16,7 @@
 #include <rpc/server_util.h>
 #include <llmq/quorums_chainlocks.h>
 #include <index/txindex.h>
+#include <llmq/quorums_utils.h>
 using node::GetTransaction;
 RPCHelpMan masternodelist();
 
@@ -62,7 +63,6 @@ static RPCHelpMan masternode_list()
     };
 } 
 
-
 static RPCHelpMan masternode_connect()
 {
     return RPCHelpMan{"masternode_connect",
@@ -86,10 +86,9 @@ static RPCHelpMan masternode_connect()
       throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
     // TODO: Pass CConnman instance somehow and don't use global variable.
     node.connman->OpenMasternodeConnection(CAddress(addr.value(), NODE_NETWORK));
-    CNode* pnode = node.connman->FindNode(CAddress(addr.value(), NODE_NETWORK));
-    if (!pnode || pnode->fDisconnect)
+    if (!node.connman->IsConnected(CAddress(addr.value(), NODE_NETWORK), AllNodes)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Couldn't connect to masternode %s", strAddress));
-
+    }
     return "successfully connected";
 },
     };
@@ -257,6 +256,48 @@ std::string GetRequiredPaymentsString(int nBlockHeight, const CDeterministicMNCP
     return strPayments;
 }
 
+
+static RPCHelpMan getevodbstats()
+{
+    return RPCHelpMan{"getevodbstats",
+        "\nReturns statistics about the deterministic masternode list database (DMN EvoDB).\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "approx_persisted_entries", "Approximate number of list entries stored persistently on disk."},
+                {RPCResult::Type::NUM, "estimated_disk_size_bytes", "Estimated total disk size occupied by the database files."},
+                {RPCResult::Type::NUM, "cache_entries", "Number of list entries currently held in the in-memory write cache."},
+                {RPCResult::Type::NUM, "erase_cache_entries", "Number of list entries currently marked for deletion in the in-memory erase cache."},
+                {RPCResult::Type::STR, "db_path", "Filesystem path to the database directory."},
+            }
+        },
+        RPCExamples{
+                HelpExampleCli("getevodbstats", "")
+            + HelpExampleRpc("getevodbstats", "")
+        },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    if (!deterministicMNManager) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Deterministic MN manager not initialized");
+    }
+
+    CDeterministicMNManager::EvoDBStats stats;
+    if (!deterministicMNManager->GetEvoDBStats(stats)) {
+         throw JSONRPCError(RPC_INTERNAL_ERROR, "Failed to retrieve EvoDB statistics");
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("approx_persisted_entries", stats.approxPersistedEntries);
+    result.pushKV("estimated_disk_size_bytes", stats.estimatedDiskSizeBytes);
+    result.pushKV("cache_entries", (uint64_t)stats.cacheEntries);
+    result.pushKV("erase_cache_entries", (uint64_t)stats.eraseCacheEntries);
+    result.pushKV("db_path", stats.dbPath);
+
+    return result;
+},
+    };
+} 
 
 static RPCHelpMan masternode_winners()
 {
@@ -564,7 +605,8 @@ RPCHelpMan masternodelist()
             objMN.pushKV("address", dmn.pdmnState->addr.ToStringAddrPort());
             objMN.pushKV("payee", payeeStr);
             objMN.pushKV("status", dmnToStatus(dmn));
-            objMN.pushKV("collateralblock", dmn.pdmnState->nCollateralHeight);
+            objMN.pushKV("collateralheight", dmn.pdmnState->nCollateralHeight);
+            objMN.pushKV("registeredheight", dmn.pdmnState->nRegisteredHeight);
             objMN.pushKV("lastpaidtime", dmnToLastPaidTime(dmn));
             objMN.pushKV("lastpaidblock", dmn.pdmnState->nLastPaidHeight);
             objMN.pushKV("owneraddress", EncodeDestination(WitnessV0KeyHash(dmn.pdmnState->keyIDOwner)));
@@ -600,7 +642,7 @@ RPCHelpMan masternodelist()
         } else if (strMode == "nevmaddress") {
             if (strFilter !="" && strOutpoint.find(strFilter) == std::string::npos) return;
             obj.pushKV(strOutpoint, dmn.pdmnState->vchNEVMAddress.empty()? "": "0x" + HexStr(dmn.pdmnState->vchNEVMAddress));
-        }  
+        }
     });
 
     return obj;
@@ -614,6 +656,7 @@ void RegisterMasternodeRPCCommands(CRPCTable &t)
         {"masternode", &masternode_connect},
         {"masternode", &masternode_list},
         {"masternode", &masternode_winners},
+        {"masternode", &getevodbstats},
         {"masternode", &masternode_payments},
         {"masternode", &masternode_count},
         {"masternode", &masternode_winner},

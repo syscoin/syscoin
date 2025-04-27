@@ -1348,28 +1348,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
                 return true;
             }
         }
-        auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
-        if (!dmn) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
-            return true;
-        }
-         // Check confirmed hash (if required)
-         if(proTx.vchNEVMAddress != dmn->pdmnState->vchNEVMAddress) {
-            if (dmn->pdmnState->confirmedHash.IsNull()) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: unconfirmed state for NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
-                return true;
-            }
-            if (dmn->pdmnState->IsBanned()) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: banned state for NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
-                return true;
-            }
-        }
-         if(!proTx.vchNEVMAddress.empty()) {
-            // Check NEVM address size
-            if (proTx.vchNEVMAddress.size() != 20) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid NEVM address size, tx: %s\n", __func__, tx.GetHash().ToString());
-                return true;
-            }
+        if(!proTx.vchNEVMAddress.empty()) {
             // Check NEVM address uniqueness
             if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());

@@ -569,7 +569,7 @@ static RPCHelpMan voteraw()
     if (governance->ProcessVoteAndRelay(vote, mnList, exception, *node.connman, *node.peerman)) {
         return "Voted successfully";
     } else {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Error voting : " + exception.GetMessage());
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Error voting : " + std::string(exception.what()));
     }
 },
     };

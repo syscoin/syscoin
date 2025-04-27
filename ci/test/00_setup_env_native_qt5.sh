@@ -15,7 +15,6 @@ export TEST_RUNNER_EXTRA="--previous-releases --coverage --extended --exclude fe
 export RUN_UNIT_TESTS_SEQUENTIAL="true"
 export RUN_UNIT_TESTS="false"
 export GOAL="install"
-export NO_WERROR=1  # -Werror=maybe-uninitialized
-export DOWNLOAD_PREVIOUS_RELEASES="true"
-export SYSCOIN_CONFIG="--enable-zmq --with-libs=no --with-gui=qt5 --enable-reduce-exports --enable-debug \
-CFLAGS=\"-g0 -O2 -funsigned-char\" CPPFLAGS='-DBOOST_MULTI_INDEX_ENABLE_SAFE_MODE' CXXFLAGS=\"-g0 -O2 -funsigned-char\""
+export PREVIOUS_RELEASES_TO_DOWNLOAD="v0.15.0.0 v0.16.1.1 v0.17.0.3 v18.2.2 v19.3.0 v20.0.1"
+export SYSCOIN_CONFIG="--enable-zmq --with-libs=no --enable-reduce-exports --disable-fuzz-binary LDFLAGS=-static-libstdc++ --with-boost-process"
+export NO_WERROR=1

@@ -79,11 +79,15 @@ class CDeterministicMNListNEVMAddressDiff;
 class CDeterministicMNList
 {
 private:
+    struct ImmerHasher
+    {
+        size_t operator()(const uint256& hash) const { return ReadLE64(hash.begin()); }
+    };
 
 public:
-    using MnMap = immer::map<uint256, CDeterministicMNCPtr>;
+    using MnMap = immer::map<uint256, CDeterministicMNCPtr, ImmerHasher>;
     using MnInternalIdMap = immer::map<uint64_t, uint256>;
-    using MnUniquePropertyMap = immer::map<uint256, std::pair<uint256, uint32_t>>;
+    using MnUniquePropertyMap = immer::map<uint256, std::pair<uint256, uint32_t>, ImmerHasher>;
     bool m_changed_nevm_address{false};
 private:
     uint256 blockHash;
@@ -486,11 +490,17 @@ private:
     std::atomic<int> to_cleanup {0};
 
     const CBlockIndex* tipIndex GUARDED_BY(cs) {nullptr};
-
 public:
-    std::unique_ptr<CEvoDB<uint256, CDeterministicMNList>> m_evoDb;
+    struct EvoDBStats {
+        int64_t approxPersistedEntries{0};
+        uint64_t estimatedDiskSizeBytes{0};
+        size_t cacheEntries{0};
+        size_t eraseCacheEntries{0};
+        std::string dbPath;
+    };
+    std::unique_ptr<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>> m_evoDb;
     explicit CDeterministicMNManager(const DBParams& db_params)
-        : m_evoDb(std::make_unique<CEvoDB<uint256, CDeterministicMNList>>(db_params, LIST_CACHE_SIZE)) {}
+        : m_evoDb(std::make_unique<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>>(db_params, LIST_CACHE_SIZE)) {}
        
     ~CDeterministicMNManager() = default;
 
@@ -500,7 +510,7 @@ public:
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,
-                               CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet, const llmq::CFinalCommitmentTxPayload &qcTx) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+                                CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet, const llmq::CFinalCommitmentTxPayload &qcTx) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease);
 
@@ -514,6 +524,7 @@ public:
     bool FlushCacheToDisk() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void DoMaintenance() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool GetEvoDBStats(EvoDBStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };

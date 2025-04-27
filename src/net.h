@@ -59,6 +59,9 @@ static const bool DEFAULT_WHITELISTFORCERELAY = false;
 
 /** Time after which to disconnect, after waiting for a ping response (or inactivity). */
 static constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
+// SYSCOIN
+/** Time to wait since m_connected before disconnecting a probe node. */
+static const auto PROBE_WAIT_INTERVAL{5s};
 /** Run the feeler connection loop once every 2 minutes. **/
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
@@ -189,7 +192,7 @@ bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE);
 void RemoveLocal(const CService& addr);
 bool SeenLocal(const CService& addr);
 // SYSCOIN
-bool IsLocal(const CService& addr, bool bOverrideNetwork = false);
+bool IsLocal(const CService& addr);
 bool GetLocal(CService &addr, const CNetAddr *paddrPeer);
 CService GetLocalAddress(const CNode& peer);
 
@@ -748,12 +751,15 @@ public:
     const std::chrono::seconds m_connected;
     std::atomic<int64_t> nTimeOffset{0};
     // SYSCOIN
-    std::atomic<int64_t> nTimeFirstMessageReceived;
+    std::atomic<std::chrono::seconds> nTimeFirstMessageReceived;
     std::atomic<bool> fFirstMessageIsMNAUTH;
     // If 'true' this node will be disconnected on CMasternodeMan::ProcessMasternodeConnections()
-    std::atomic<bool> m_masternode_connection;
-    // If 'true' this node will be disconnected after MNAUTH
-    std::atomic<bool> m_masternode_probe_connection;
+    std::atomic<bool> m_masternode_connection{false};
+    /**
+     * If 'true' this node will be disconnected after MNAUTH (outbound only) or
+     * after PROBE_WAIT_INTERVAL seconds since m_connected
+     */
+    std::atomic<bool> m_masternode_probe_connection{false};
     // If 'true', we identified it as an intra-quorum relay connection
     std::atomic<bool> m_masternode_iqr_connection{false};
     // Address of this peer
@@ -930,14 +936,12 @@ public:
      * criterium in CConnman::AttemptToEvictConnection. */
     // SYSCOIN
     // Challenge sent in VERSION to be answered with MNAUTH (only happens between MNs)
-    mutable RecursiveMutex cs_mnauth;
+    mutable Mutex cs_mnauth;
     uint256 sentMNAuthChallenge GUARDED_BY(cs_mnauth);
     uint256 receivedMNAuthChallenge GUARDED_BY(cs_mnauth);
     uint256 verifiedProRegTxHash GUARDED_BY(cs_mnauth);
     uint256 verifiedPubKeyHash GUARDED_BY(cs_mnauth);
 
-    // If true, we will announce/send him plain recovered sigs (usually true for full nodes)
-    std::atomic<bool> fSendRecSigs{false};
     // If true, we will send him all quorum related messages, even if he is not a member of our quorums
     std::atomic<bool> qwatch{false};
     std::atomic<std::chrono::microseconds> m_min_ping_time{std::chrono::microseconds::max()};
@@ -1006,52 +1010,51 @@ public:
     }
 
     void CloseSocketDisconnect() EXCLUSIVE_LOCKS_REQUIRED(!m_sock_mutex);
-
-    void CopyStats(CNodeStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!m_subver_mutex, !m_addr_local_mutex, !cs_vSend, !cs_vRecv);
+    // SYSCOIN
+    void CopyStats(CNodeStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!m_subver_mutex, !m_addr_local_mutex, !cs_vSend, !cs_vRecv, !cs_mnauth);
 
 
     // SYSCOIN
-    bool CanRelay() const { LOCK(cs_mnauth); return !m_masternode_connection || m_masternode_iqr_connection; }
-    uint256 GetSentMNAuthChallenge() const {
+    bool CanRelay() const { return !m_masternode_connection || m_masternode_iqr_connection; }
+    uint256 GetSentMNAuthChallenge() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         return sentMNAuthChallenge;
     }
 
-    uint256 GetReceivedMNAuthChallenge() const {
+    uint256 GetReceivedMNAuthChallenge() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         return receivedMNAuthChallenge;
     }
 
-    uint256 GetVerifiedProRegTxHash() const {
+    uint256 GetVerifiedProRegTxHash() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         return verifiedProRegTxHash;
     }
 
-    uint256 GetVerifiedPubKeyHash() const {
+    uint256 GetVerifiedPubKeyHash() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         return verifiedPubKeyHash;
     }
 
-    void SetSentMNAuthChallenge(const uint256& newSentMNAuthChallenge) {
+    void SetSentMNAuthChallenge(const uint256& newSentMNAuthChallenge)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         sentMNAuthChallenge = newSentMNAuthChallenge;
     }
 
-    void SetReceivedMNAuthChallenge(const uint256& newReceivedMNAuthChallenge) {
+    void SetReceivedMNAuthChallenge(const uint256& newReceivedMNAuthChallenge)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         receivedMNAuthChallenge = newReceivedMNAuthChallenge;
     }
 
-    void SetVerifiedProRegTxHash(const uint256& newVerifiedProRegTxHash) {
+    void SetVerifiedProRegTxHash(const uint256& newVerifiedProRegTxHash)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         verifiedProRegTxHash = newVerifiedProRegTxHash;
     }
 
-    void SetVerifiedPubKeyHash(const uint256& newVerifiedPubKeyHash) {
+    void SetVerifiedPubKeyHash(const uint256& newVerifiedPubKeyHash)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
         verifiedPubKeyHash = newVerifiedPubKeyHash;
     }
-    bool IsMasternodeConnection() const { LOCK(cs_mnauth); return m_masternode_connection; }
     std::string ConnectionTypeAsString() const { return ::ConnectionTypeAsString(m_conn_type); }
 
     /** A ping-pong round trip has completed successfully. Update latest and minimum ping times. */
@@ -1236,12 +1239,13 @@ public:
     // alias for thread safety annotations only, not defined
     RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex);
 
-    bool ForNode(NodeId id, std::function<bool(const CNode* pnode)> cond, std::function<bool(CNode* pnode)> func);
-
     void PushMessage(CNode* pnode, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
     // SYSCOIN
-    bool ForNode(NodeId id, std::function<bool(CNode* pnode)> func);
-    CNode* FindNode(const CService& addr, bool fExcludeDisconnecting = true);
+    template<typename Callable>
+    bool ForNode(NodeId id, Callable&& func)
+    {
+        return ForNode(id, FullyConnectedOnly, func);
+    }
     template<typename Condition, typename Callable>
     bool ForEachNodeContinueIf(const Condition& cond, Callable&& func)
     {
@@ -1285,11 +1289,10 @@ public:
                 func(node);
         }
     };
-
     using NodeFn = std::function<void(CNode*)>;
-    void ForEachNode(const NodeFn& func)
+    void ForEachNode(const NodeFn& fn)
     {
-        ForEachNode(FullyConnectedOnly, func);
+        ForEachNode(FullyConnectedOnly, fn);
     }
 
     template<typename Condition, typename Callable>
@@ -1302,9 +1305,43 @@ public:
         }
     };
 
-    void ForEachNode(const NodeFn& func) const
+    void ForEachNode(const NodeFn& fn) const
     {
-        ForEachNode(FullyConnectedOnly, func);
+        ForEachNode(FullyConnectedOnly, fn);
+    }
+
+    template<typename Condition, typename Callable, typename CallableAfter>
+    void ForEachNodeThen(const Condition& cond, Callable&& pre, CallableAfter&& post)
+    {
+        LOCK(m_nodes_mutex);
+        for (auto&& node : m_nodes) {
+            if (cond(node))
+                pre(node);
+        }
+        post();
+    };
+
+    template<typename Callable, typename CallableAfter>
+    void ForEachNodeThen(Callable&& pre, CallableAfter&& post)
+    {
+        ForEachNodeThen(FullyConnectedOnly, pre, post);
+    }
+
+    template<typename Condition, typename Callable, typename CallableAfter>
+    void ForEachNodeThen(const Condition& cond, Callable&& pre, CallableAfter&& post) const
+    {
+        LOCK(m_nodes_mutex);
+        for (auto&& node : m_nodes) {
+            if (cond(node))
+                pre(node);
+        }
+        post();
+    };
+
+    template<typename Callable, typename CallableAfter>
+    void ForEachNodeThen(Callable&& pre, CallableAfter&& post) const
+    {
+        ForEachNodeThen(FullyConnectedOnly, pre, post);
     }
 
     // Addrman functions
@@ -1347,12 +1384,12 @@ public:
     std::vector<AddedNodeInfo> GetAddedNodeInfo() const EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
     // SYSCOIN
     bool AddPendingMasternode(const uint256& proTxHash);
-    void SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::set<uint256>& proTxHashes);
-    void SetMasternodeQuorumNodes(const uint256& quorumHash, const std::set<uint256>& proTxHashes);
+    void SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
+    void SetMasternodeQuorumNodes(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
     bool HasMasternodeQuorumNodes(const uint256& quorumHash);
-    std::set<uint256> GetMasternodeQuorums();
+    std::unordered_set<uint256, StaticSaltedHasher> GetMasternodeQuorums();
     // also returns QWATCH nodes
-    void GetMasternodeQuorumNodes(const uint256& quorumHash, std::set<NodeId> &result) const;
+    void GetMasternodeQuorumNodes(const uint256& quorumHash, std::unordered_set<NodeId> &result) const;
     void RemoveMasternodeQuorumNodes(const uint256& quorumHash);
     bool IsMasternodeQuorumNode(const CNode* pnode);
     bool IsMasternodeQuorumRelayMember(const uint256& protxHash);
@@ -1416,13 +1453,48 @@ public:
         Variable intervals will result in privacy decrease.
     */
     // SYSCOIN
+    bool ForNode(NodeId id, std::function<bool(const CNode* pnode)> cond, std::function<bool(CNode* pnode)> func);
+    bool ForNode(const CService& addr, std::function<bool(const CNode* pnode)> cond, std::function<bool(CNode* pnode)> func);
+
+    template<typename Callable>
+    bool ForNode(const CService& addr, Callable&& func)
+    {
+        return ForNode(addr, FullyConnectedOnly, func);
+    }
+
+
+    bool IsConnected(const CService& addr, std::function<bool(const CNode* pnode)> cond)
+    {
+        return ForNode(addr, cond, [](CNode* pnode){
+            return true;
+        });
+    }
     bool IsMasternodeOrDisconnectRequested(const CService& addr);
 
     /** Return true if we should disconnect the peer for failing an inactivity check. */
     bool ShouldRunInactivityChecks(const CNode& node, std::chrono::seconds now) const;
 
     bool MultipleManualOrFullOutboundConns(Network net) const EXCLUSIVE_LOCKS_REQUIRED(m_nodes_mutex);
+    // SYSCOIN
+    /**
+     * RAII helper to atomically create a copy of `m_nodes` and add a reference
+     * to each of the nodes. The nodes are released when this object is destroyed.
+     */
+    class NodesSnapshot
+    {
+    public:
+        explicit NodesSnapshot(const CConnman& connman, std::function<bool(const CNode* pnode)> cond = AllNodes,
+                               bool shuffle = false);
+        ~NodesSnapshot();
 
+        const std::vector<CNode*>& Nodes() const
+        {
+            return m_nodes_copy;
+        }
+
+    private:
+        std::vector<CNode*> m_nodes_copy;
+    };
 private:
     struct ListenSocket {
     public:
@@ -1506,7 +1578,9 @@ private:
     uint64_t CalculateKeyedNetGroup(const CAddress& ad) const;
 
     CNode* FindNode(const CNetAddr& ip, bool fExcludeDisconnecting = true);
+    CNode* FindNode(const CSubNet& subNet, bool fExcludeDisconnecting = true);
     CNode* FindNode(const std::string& addrName, bool fExcludeDisconnecting = true);
+    CNode* FindNode(const CService& addr, bool fExcludeDisconnecting = true);
 
     /**
      * Determine whether we're already connected to a given address, in order to
@@ -1595,9 +1669,9 @@ private:
     mutable Mutex m_added_nodes_mutex;
     // SYSCOIN
     std::vector<uint256> vPendingMasternodes GUARDED_BY(cs_vPendingMasternodes);
-    std::map<uint256, std::set<uint256>> masternodeQuorumNodes GUARDED_BY(cs_vPendingMasternodes);
-    std::map<uint256, std::set<uint256>> masternodeQuorumRelayMembers GUARDED_BY(cs_vPendingMasternodes);
-    std::set<uint256> masternodePendingProbes;
+    std::map<uint256, std::unordered_set<uint256, StaticSaltedHasher>> masternodeQuorumNodes GUARDED_BY(cs_vPendingMasternodes);
+    std::map<uint256, std::unordered_set<uint256, StaticSaltedHasher>> masternodeQuorumRelayMembers GUARDED_BY(cs_vPendingMasternodes);
+    std::set<uint256> masternodePendingProbes GUARDED_BY(cs_vPendingMasternodes);
     mutable RecursiveMutex cs_vPendingMasternodes;
     std::vector<CNode*> m_nodes GUARDED_BY(m_nodes_mutex);
     std::list<CNode*> m_nodes_disconnected;
@@ -1751,6 +1825,9 @@ private:
         std::string destination;
         ConnectionType conn_type;
         bool use_v2transport;
+        // SYSCOIN
+        bool masternode_connection;
+        bool masternode_probe_connection;
     };
 
     /**
@@ -1767,47 +1844,6 @@ private:
      */
     static constexpr size_t MAX_UNUSED_I2P_SESSIONS_SIZE{10};
     public:
-    /**
-     * RAII helper to atomically create a copy of `m_nodes` and add a reference
-     * to each of the nodes. The nodes are released when this object is destroyed.
-     */
-    class NodesSnapshot
-    {
-    public:
-        explicit NodesSnapshot(const CConnman& connman, std::function<bool(const CNode* pnode)> filter, bool shuffle = false)
-        {
-            {
-                LOCK(connman.m_nodes_mutex);
-                m_nodes_copy.reserve(connman.m_nodes.size());
-
-                for (auto& node : connman.m_nodes) {
-                    if (!filter(node))
-                        continue;
-                    node->AddRef();
-                    m_nodes_copy.push_back(node);
-                }
-
-                if (shuffle) {
-                    Shuffle(m_nodes_copy.begin(), m_nodes_copy.end(), FastRandomContext{});
-                }
-            }
-        }
-
-        ~NodesSnapshot()
-        {
-            for (auto& node : m_nodes_copy) {
-                node->Release();
-            }
-        }
-
-        const std::vector<CNode*>& Nodes() const
-        {
-            return m_nodes_copy;
-        }
-
-    private:
-        std::vector<CNode*> m_nodes_copy;
-    };
 
     const CChainParams& m_params;
 

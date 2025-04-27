@@ -111,17 +111,6 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
 
     // Check socket connectivity
     LogPrint(BCLog::MNSYNC, "CActiveMasternodeManager::Init -- Checking inbound connection to '%s'\n", activeMasternodeInfo.service.ToStringAddrPort());
-    {
-        CNode* pnode = connman.FindNode(activeMasternodeInfo.service);
-        if (pnode)
-        {
-            LogPrint(BCLog::MNSYNC, "Failed to open new connection, already connected\n");
-            activeMasternodeInfo.proTxHash = dmn->proTxHash;
-            activeMasternodeInfo.outpoint = dmn->collateralOutpoint;
-            state = MASTERNODE_READY;
-            return;
-        }
-    }
     std::unique_ptr<Sock> sockPtr = CreateSockTCP(activeMasternodeInfo.service);
     if(!sockPtr) {
         state = MASTERNODE_ERROR;

@@ -5,11 +5,13 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_DKGSESSION_H
 #define SYSCOIN_LLMQ_QUORUMS_DKGSESSION_H
 
+#include <llmq/quorums_commitment.h>
+
+#include <batchedlogger.h>
 #include <bls/bls.h>
 #include <bls/bls_ies.h>
 #include <bls/bls_worker.h>
 
-#include <llmq/quorums_utils.h>
 #include <sync.h>
 
 #include <optional>
@@ -34,7 +36,7 @@ public:
     uint256 quorumHash;
     uint256 proTxHash;
     BLSVerificationVectorPtr vvec;
-    std::shared_ptr<std::vector<CBLSSecretKey>> contributions;
+    std::shared_ptr<CBLSIESMultiRecipientObjects<CBLSSecretKey>> contributions;
     CBLSSignature sig;
 
 public:
@@ -56,7 +58,7 @@ public:
     inline void Unserialize(Stream& s)
     {
         std::vector<CBLSPublicKey> tmp1;
-        std::vector<CBLSSecretKey> tmp2;
+        CBLSIESMultiRecipientObjects<CBLSSecretKey> tmp2;
 
         s >> quorumHash;
         s >> proTxHash;
@@ -65,7 +67,7 @@ public:
         s >> sig;
 
         vvec = std::make_shared<std::vector<CBLSPublicKey>>(std::move(tmp1));
-        contributions = std::make_shared<std::vector<CBLSSecretKey>>(std::move(tmp2));
+        contributions = std::make_shared<CBLSIESMultiRecipientObjects<CBLSSecretKey>>(std::move(tmp2));
     }
 
     [[nodiscard]] uint256 GetSignHash() const
@@ -183,7 +185,7 @@ public:
 
     [[nodiscard]] uint256 GetSignHash() const
     {
-        return CLLMQUtils::BuildCommitmentHash( quorumHash, validMembers, quorumPublicKey, quorumVvecHash);
+        return BuildCommitmentHash( quorumHash, validMembers, quorumPublicKey, quorumVvecHash);
     }
 };
 
@@ -234,6 +236,12 @@ public:
     }
 };
 
+class CDKGLogger : public CBatchedLogger
+{
+public:
+    CDKGLogger(const CDKGSession& _quorumDkg, std::string_view _func, int source_line);
+};
+
 /**
  * The DKG session is a single instance of the DKG process. It is owned and called by CDKGSessionHandler, which passes
  * received DKG messages to the session. The session is not persistent and will loose it's state (the whole object is
@@ -262,11 +270,12 @@ private:
     CDKGSessionManager& dkgManager;
 
     const CBlockIndex* m_quorum_base_block_index{nullptr};
+    bool m_use_legacy_bls;
 
 private:
     std::vector<std::unique_ptr<CDKGMember>> members;
     std::map<uint256, size_t> membersMap;
-    std::set<uint256> relayMembers;
+    std::unordered_set<uint256, StaticSaltedHasher> relayMembers;
     BLSVerificationVectorPtr vvecContribution;
     std::vector<CBLSSecretKey> skContributions;
 
@@ -320,7 +329,7 @@ public:
     void Contribute(CDKGPendingMessages& pendingMessages);
     void SendContributions(CDKGPendingMessages& pendingMessages);
     bool PreVerifyMessage(const CDKGContribution& qc, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGContribution& qc, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
+    void ReceiveMessage(const uint256& hash, const CDKGContribution& qc) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
     void VerifyPendingContributions() EXCLUSIVE_LOCKS_REQUIRED(cs_pending);
 
     // Phase 2: complaint
@@ -328,19 +337,19 @@ public:
     void VerifyConnectionAndMinProtoVersions() const;
     void SendComplaint(CDKGPendingMessages& pendingMessages);
     bool PreVerifyMessage(const CDKGComplaint& qc, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGComplaint& qc, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
+    void ReceiveMessage(const uint256& hash, const CDKGComplaint& qc) EXCLUSIVE_LOCKS_REQUIRED(!invCs, !cs_pending);
 
     // Phase 3: justification
     void VerifyAndJustify(CDKGPendingMessages& pendingMessages) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
     void SendJustification(CDKGPendingMessages& pendingMessages, const std::set<uint256>& forMembers);
     bool PreVerifyMessage(const CDKGJustification& qj, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGJustification& qj, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
+    void ReceiveMessage(const uint256& hash, const CDKGJustification& qj) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
 
     // Phase 4: commit
     void VerifyAndCommit(CDKGPendingMessages& pendingMessages);
     void SendCommitment(CDKGPendingMessages& pendingMessages);
     bool PreVerifyMessage(const CDKGPrematureCommitment& qc, bool& retBan) const;
-    void ReceiveMessage(const uint256& hash, const CDKGPrematureCommitment& qc, bool& retBan) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
+    void ReceiveMessage(const uint256& hash, const CDKGPrematureCommitment& qc) EXCLUSIVE_LOCKS_REQUIRED(!invCs);
 
     // Phase 5: aggregate/finalize
     std::vector<CFinalCommitment> FinalizeCommitments() EXCLUSIVE_LOCKS_REQUIRED(!invCs);

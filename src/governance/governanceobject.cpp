@@ -290,7 +290,7 @@ bool CGovernanceObject::Sign()
 bool CGovernanceObject::CheckSignature(const CBLSPublicKey& pubKey) const
 {
     CBLSSignature sig;
-    sig.SetByteVector(m_obj.vchSig, false);
+    sig.SetBytes(m_obj.vchSig, false);
     if (!sig.VerifyInsecure(pubKey, GetSignatureHash(), false)) {
         LogPrintf("CGovernanceObject::CheckSignature -- VerifyInsecure() failed\n");
         return false;
@@ -628,7 +628,7 @@ void CGovernanceObject::Relay(PeerManager& peerman) const
     }
 
     CInv inv(MSG_GOVERNANCE_OBJECT, GetHash());
-    peerman.RelayTransactionOther(inv);
+    peerman.RelayInv(inv);
 }
 
 void CGovernanceObject::UpdateSentinelVariables(const CDeterministicMNList& tip_mn_list)

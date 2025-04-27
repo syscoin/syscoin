@@ -146,7 +146,7 @@ def main():
                          stdout=subprocess.PIPE,
                          stderr=None,
                          stdin=subprocess.PIPE,
-                         text=True)
+                         universal_newlines=True)
     stdout, stderr = p.communicate()
     if p.returncode != 0:
       sys.exit(p.returncode)

@@ -1422,6 +1422,9 @@ class CMerkleBlock:
 
 
 class CFinalCommitment:
+    __slots__ = ("nVersion", "quorumHash", "signers", "validMembers", "quorumPublicKey",
+                 "quorumVvecHash", "quorumSig", "membersSig")
+
     def __init__(self):
         self.set_null()
 
@@ -1430,10 +1433,10 @@ class CFinalCommitment:
         self.quorumHash = 0
         self.signers = []
         self.validMembers = []
-        self.quorumPublicKey = b'\\x0' * 48
+        self.quorumPublicKey = b'\x00' * 48
         self.quorumVvecHash = 0
-        self.quorumSig = b'\\x0' * 96
-        self.membersSig = b'\\x0' * 96
+        self.quorumSig = b'\x00' * 96
+        self.membersSig = b'\x00' * 96
 
     def deserialize(self, f):
         self.nVersion = struct.unpack("<H", f.read(2))[0]
@@ -1457,13 +1460,121 @@ class CFinalCommitment:
         r += self.membersSig
         return r
 
+    def __repr__(self):
+        return "CFinalCommitment(nVersion={} quorumHash={:x} signers={}" \
+               " validMembers={} quorumPublicKey={} quorumVvecHash={:x}) quorumSig={} membersSig={})" \
+            .format(self.nVersion, self.quorumHash, repr(self.signers),
+                    repr(self.validMembers), self.quorumPublicKey.hex(), self.quorumVvecHash, self.quorumSig.hex(), self.membersSig.hex())
+
+class CGovernanceObject:
+    __slots__ = ("nHashParent", "nRevision", "nTime", "nCollateralHash", "vchData", "nObjectType",
+                 "masternodeOutpoint", "vchSig")
+
+    def __init__(self):
+        self.nHashParent = 0
+        self.nRevision = 0
+        self.nTime = 0
+        self.nCollateralHash = 0
+        self.vchData = []
+        self.nObjectType = 0
+        self.masternodeOutpoint = COutPoint()
+        self.vchSig = []
+
+    def deserialize(self, f):
+        self.nHashParent = deser_uint256(f)
+        self.nRevision = struct.unpack("<i", f.read(4))[0]
+        self.nTime = struct.unpack("<q", f.read(8))[0]
+        self.nCollateralHash = deser_uint256(f)
+        size = deser_compact_size(f)
+        if size > 0:
+            self.vchData = f.read(size)
+        self.nObjectType = struct.unpack("<i", f.read(4))[0]
+        self.masternodeOutpoint.deserialize(f)
+        size = deser_compact_size(f)
+        if size > 0:
+            self.vchSig = f.read(size)
+
+    def serialize(self):
+        r = b""
+        r += ser_uint256(self.nParentHash)
+        r += struct.pack("<i", self.nRevision)
+        r += struct.pack("<q", self.nTime)
+        r += deser_uint256(self.nCollateralHash)
+        r += deser_compact_size(len(self.vchData))
+        r += self.vchData
+        r += struct.pack("<i", self.nObjectType)
+        r += self.masternodeOutpoint.serialize()
+        r += deser_compact_size(len(self.vchSig))
+        r += self.vchSig
+        return r
+
+
+class CGovernanceVote:
+    __slots__ = ("masternodeOutpoint", "nParentHash", "nVoteOutcome", "nVoteSignal", "nTime", "vchSig")
+
+    def __init__(self):
+        self.masternodeOutpoint = COutPoint()
+        self.nParentHash = 0
+        self.nVoteOutcome = 0
+        self.nVoteSignal = 0
+        self.nTime = 0
+        self.vchSig = []
+
+    def deserialize(self, f):
+        self.masternodeOutpoint.deserialize(f)
+        self.nParentHash = deser_uint256(f)
+        self.nVoteOutcome = struct.unpack("<i", f.read(4))[0]
+        self.nVoteSignal = struct.unpack("<i", f.read(4))[0]
+        self.nTime = struct.unpack("<q", f.read(8))[0]
+        size = deser_compact_size(f)
+        if size > 0:
+            self.vchSig = f.read(size)
+
+    def serialize(self):
+        r = b""
+        r += self.masternodeOutpoint.serialize()
+        r += ser_uint256(self.nParentHash)
+        r += struct.pack("<i", self.nVoteOutcome)
+        r += struct.pack("<i", self.nVoteSignal)
+        r += struct.pack("<q", self.nTime)
+        r += ser_compact_size(len(self.vchSig))
+        r += self.vchSig
+        return r
+
+
+class CRecoveredSig:
+    __slots__ = ("quorumHash", "id", "msgHash", "sig")
+
+    def __init__(self):
+        self.quorumHash = 0
+        self.id = 0
+        self.msgHash = 0
+        self.sig = b'\x00' * 96
+
+    def deserialize(self, f):
+        self.quorumHash = deser_uint256(f)
+        self.id = deser_uint256(f)
+        self.msgHash = deser_uint256(f)
+        self.sig = f.read(96)
+
+    def serialize(self):
+        r = b""
+        r += ser_uint256(self.quorumHash)
+        r += ser_uint256(self.id)
+        r += ser_uint256(self.msgHash)
+        r += self.sig
+        return r
+
+
 class CSigShare:
+    __slots__ = ("quorumHash", "quorumMember", "id", "msgHash", "sigShare")
+
     def __init__(self):
         self.quorumHash = 0
         self.quorumMember = 0
         self.id = 0
         self.msgHash = 0
-        self.sigShare = b'\\x0' * 96
+        self.sigShare = b'\x00' * 96
 
     def deserialize(self, f):
         self.quorumHash = deser_uint256(f)

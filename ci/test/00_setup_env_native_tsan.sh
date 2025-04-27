@@ -11,5 +11,7 @@ export CI_IMAGE_NAME_TAG="docker.io/ubuntu:23.10"  # This version will reach EOL
 export PACKAGES="clang-17 llvm-17 libclang-rt-17-dev libc++abi-17-dev libc++-17-dev python3-zmq"
 export DEP_OPTS="CC=clang-17 CXX='clang++-17 -stdlib=libc++'"
 export GOAL="install"
-export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm"
-export SYSCOIN_CONFIG="--enable-zmq CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER -DDEBUG_LOCKCONTENTION' CXXFLAGS='-g' --with-sanitizers=thread"
+export SYSCOIN_CONFIG="--enable-zmq --with-sanitizers=thread CC=clang-18 CXX=clang++-18 CXXFLAGS='-g' --with-boost-process"
+export CPPFLAGS="-DARENA_DEBUG -DDEBUG_LOCKORDER -DDEBUG_LOCKCONTENTION"
+export PYZMQ=true
+export NO_WERROR=1

@@ -127,20 +127,20 @@ UniValue CDKGDebugStatus::ToJson(ChainstateManager &chainman, int detailLevel) c
 
 void CDKGDebugManager::GetLocalDebugStatus(llmq::CDKGDebugStatus& ret) const
 {
-    LOCK(cs);
+    LOCK(cs_lockStatus);
     ret = localStatus;
 }
 
 void CDKGDebugManager::ResetLocalSessionStatus()
 {
-    LOCK(cs);
+    LOCK(cs_lockStatus);
     localStatus.session = CDKGDebugSessionStatus();
     localStatus.nTime = GetTime();
 }
 
 void CDKGDebugManager::InitLocalSessionStatus(const uint256& quorumHash, uint32_t quorumHeight)
 {
-    LOCK(cs);
+    LOCK(cs_lockStatus);
     if(localStatus.session.quorumHash.IsNull()) {
         localStatus.session = CDKGDebugSessionStatus();
     }
@@ -154,7 +154,7 @@ void CDKGDebugManager::InitLocalSessionStatus(const uint256& quorumHash, uint32_
 
 void CDKGDebugManager::UpdateLocalSessionStatus(std::function<bool(CDKGDebugSessionStatus& status)>&& func)
 {
-    LOCK(cs);
+    LOCK(cs_lockStatus);
     if(localStatus.session.quorumHash.IsNull()) {
         return;
     }
@@ -165,7 +165,7 @@ void CDKGDebugManager::UpdateLocalSessionStatus(std::function<bool(CDKGDebugSess
 
 void CDKGDebugManager::UpdateLocalMemberStatus(size_t memberIdx, std::function<bool(CDKGDebugMemberStatus& status)>&& func)
 {
-    LOCK(cs);
+    LOCK(cs_lockStatus);
     if(localStatus.session.quorumHash.IsNull()) {
         return;
     }

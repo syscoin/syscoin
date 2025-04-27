@@ -812,7 +812,7 @@ void InitParameterInteraction(ArgsManager& args)
         #endif // ENABLE_WALLET
         if (args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS) < DEFAULT_MAX_PEER_CONNECTIONS) {
             // masternodes MUST be able to handle at least DEFAULT_MAX_PEER_CONNECTIONS connections
-            args.SoftSetArg("-maxconnections", itostr(DEFAULT_MAX_PEER_CONNECTIONS));
+            args.SoftSetArg("-maxconnections", ToString(DEFAULT_MAX_PEER_CONNECTIONS));
             LogPrintf("%s: parameter interaction: -masternodeblsprivkey=... -> setting -maxconnections=%d\n", __func__, DEFAULT_MAX_PEER_CONNECTIONS);
         }
     }
@@ -1753,8 +1753,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                   MIN_BLOCKS_TO_KEEP);
             }
             int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight());
-            if (llmq::CLLMQUtils::IsV19Active(nHeight))
+            if (llmq::CLLMQUtils::IsV19Active(nHeight)) {
                 bls::bls_legacy_scheme.store(false);
+                LogPrintf("BLS scheme - Basic\n");
+            } else {
+                LogPrintf("BLS scheme - Legacy\n");
+            }
             std::tie(status, error) = catch_exceptions([&]{ return VerifyLoadedChainstate(chainman, options);});
             if (status == node::ChainstateLoadStatus::SUCCESS) {
                 fLoaded = true;

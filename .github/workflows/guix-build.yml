@@ -1,0 +1,166 @@
+name: Guix Build
+
+permissions:
+  packages: write
+  id-token: write
+  attestations: write
+
+on:
+  pull_request_target:
+  push:
+
+jobs:
+  build-image:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      image-tag: ${{ steps.prepare.outputs.image-tag }}
+      repo-name: ${{ steps.prepare.outputs.repo-name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: syscoin
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Commit variables
+        id: prepare
+        run: |
+          echo "hash=$(sha256sum ./syscoin/contrib/containers/guix/Dockerfile | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          echo "host_user_id=$(id -u)" >> $GITHUB_OUTPUT
+          echo "host_group_id=$(id -g)" >> $GITHUB_OUTPUT
+          BRANCH_NAME=$(echo "${GITHUB_REF##*/}" | tr '[:upper:]' '[:lower:]')
+          REPO_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image-tag=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+          echo "repo-name=${REPO_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ github.workspace }}/syscoin
+          build-args: |
+            USER_ID=${{ steps.prepare.outputs.host_user_id }}
+            GROUP_ID=${{ steps.prepare.outputs.host_group_id }}
+          build-contexts: |
+            docker_root=${{ github.workspace }}/syscoin/contrib/containers/guix
+          file: ./syscoin/contrib/containers/guix/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.prepare.outputs.repo-name }}/syscoin-guix-builder:${{ steps.prepare.outputs.image-tag }}
+            ghcr.io/${{ steps.prepare.outputs.repo-name }}/syscoin-guix-builder:latest
+          cache-from: type=registry,ref=ghcr.io/${{ steps.prepare.outputs.repo-name }}/syscoin-guix-builder:latest
+          cache-to: type=inline,mode=max
+
+  build:
+    needs: build-image
+    # runs-on: [ "self-hosted", "linux", "x64", "ubuntu-core" ]
+    runs-on: ubuntu-24.04-arm
+#    if: ${{ contains(github.event.pull_request.labels.*.name, 'guix-build') }}
+    strategy:
+      matrix:
+        build_target: [x86_64-linux-gnu, arm-linux-gnueabihf, aarch64-linux-gnu, riscv64-linux-gnu, powerpc64-linux-gnu, x86_64-w64-mingw32, x86_64-apple-darwin, arm64-apple-darwin]
+
+    timeout-minutes: 480
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Disable apparmor user namespace restrictions
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: syscoin
+          fetch-depth: 0
+
+      - name: Cache depends sources
+        uses: actions/cache@v4
+        with:
+          path: syscoin/depends/sources
+          key: depends-sources-${{ hashFiles('syscoin/depends/packages/*') }}
+          restore-keys: |
+            depends-sources-
+
+      - name: Cache Guix and depends
+        id: guix-cache-restore
+        uses: actions/cache@v3
+        with:
+          path: |
+            ${{ github.workspace }}/.cache
+            ${{ github.workspace }}/syscoin/depends/built
+            ${{ github.workspace }}/syscoin/depends/work
+            /gnu/store
+          key: ${{ runner.os }}-guix-${{ matrix.build_target }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-guix-${{ matrix.build_target }}
+            ${{ runner.os }}-guix-
+
+      - name: Create .cache folder if missing
+        if: steps.guix-cache-restore.outputs.cache-hit != 'true'
+        run: mkdir -p .cache
+
+      - name: Run Guix build
+        timeout-minutes: 480
+        run: |
+          docker run --privileged -d --rm -t \
+            --name guix-daemon \
+            -v ${{ github.workspace }}/syscoin:/src/syscoin \
+            -v ${{ github.workspace }}/.cache:/home/ubuntu/.cache \
+            -w /src/syscoin \
+            ghcr.io/${{ needs.build-image.outputs.repo-name }}/syscoin-guix-builder:${{ needs.build-image.outputs.image-tag }} && \
+          docker exec guix-daemon bash -c 'HOSTS=${{ matrix.build_target }} /usr/local/bin/guix-start /src/syscoin'
+
+      - name: Ensure build passes
+        run: |
+          if [[ $? != 0 ]]; then
+            echo "Guix build failed!"
+            exit 1
+          fi
+
+      - name: Compute SHA256 checksums
+        continue-on-error: true # It will complain on depending on only some hosts
+        run: |
+          HOSTS=${{ matrix.build_target }} ./syscoin/contrib/containers/guix/scripts/guix-check ${{ github.workspace }}/syscoin
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: guix-artifacts-${{ matrix.build_target }}
+          # Upload main release archives/installers, source tarball, and checksum file
+          path: |
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}.tar.gz
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64-setup-unsigned.exe
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}-unsigned.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/dist-archive/syscoin-*.tar.gz
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/SHA256SUMS.part
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          # Update subject-path to match the uploaded files
+          subject-path: |
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}.tar.gz
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*-win64-setup-unsigned.exe
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/syscoin-*${{ matrix.build_target }}-unsigned.zip
+            ${{ github.workspace }}/syscoin/guix-build*/output/dist-archive/syscoin-*.tar.gz
+            ${{ github.workspace }}/syscoin/guix-build*/output/${{ matrix.build_target }}/SHA256SUMS.part

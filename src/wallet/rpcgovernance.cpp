@@ -66,7 +66,7 @@ UniValue VoteWithMasternodes(const std::map<uint256, CKey>& keys,
         } else {
             nFailed++;
             statusObj.pushKV("result", "failed");
-            statusObj.pushKV("errorMessage", exception.GetMessage());
+            statusObj.pushKV("errorMessage", exception.what());
         }
 
         resultsObj.pushKV(proTxHash.ToString(), statusObj);

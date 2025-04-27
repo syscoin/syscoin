@@ -16,6 +16,10 @@ class PeerManager;
 class ChainstateManager;
 namespace llmq
 {
+class CDKGContribution;
+class CDKGComplaint;
+class CDKGJustification;
+class CDKGPrematureCommitment;
 class CDKGSession;
 class CDKGSessionManager;
 enum QuorumPhase {
@@ -43,23 +47,23 @@ public:
     using BinaryMessage = std::pair<NodeId, std::shared_ptr<CDataStream>>;
 
 private:
-    mutable RecursiveMutex cs;
-    size_t maxMessagesPerNode GUARDED_BY(cs);
-    std::list<BinaryMessage> pendingMessages GUARDED_BY(cs);
-    std::map<NodeId, size_t> messagesPerNode GUARDED_BY(cs);
-    std::set<uint256> seenMessages GUARDED_BY(cs);
+    mutable Mutex cs_messages;
+    size_t maxMessagesPerNode GUARDED_BY(cs_messages);
+    std::list<BinaryMessage> pendingMessages GUARDED_BY(cs_messages);
+    std::map<NodeId, size_t> messagesPerNode GUARDED_BY(cs_messages);
+    std::set<uint256> seenMessages GUARDED_BY(cs_messages);
 
 public:
     PeerManager& peerman;
     explicit CDKGPendingMessages(size_t _maxMessagesPerNode, PeerManager& _peerman): maxMessagesPerNode(_maxMessagesPerNode), peerman(_peerman) {};
 
-    void PushPendingMessage(CNode* from, CDataStream& vRecv);
-    std::list<BinaryMessage> PopPendingMessages(size_t maxCount);
-    bool HasSeen(const uint256& hash) const;
-    void Clear();
+    void PushPendingMessage(CNode* from, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
+    std::list<BinaryMessage> PopPendingMessages(size_t maxCount) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
+    bool HasSeen(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
+    void Clear() EXCLUSIVE_LOCKS_REQUIRED(!cs_messages);
 
     template<typename Message>
-    void PushPendingMessage(CNode* from, Message& msg)
+    void PushPendingMessage(CNode* from, Message& msg) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages)
     {
         CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
         ds << msg;
@@ -68,9 +72,9 @@ public:
 
     // Might return nullptr messages, which indicates that deserialization failed for some reason
     template<typename Message>
-    std::vector<std::pair<NodeId, std::shared_ptr<Message>>> PopAndDeserializeMessages(size_t maxCount)
+    std::vector<std::pair<NodeId, std::shared_ptr<Message>>> PopAndDeserializeMessages(size_t maxCount) EXCLUSIVE_LOCKS_REQUIRED(!cs_messages)
     {
-        const auto &binaryMessages = PopPendingMessages(maxCount);
+        auto binaryMessages = PopPendingMessages(maxCount);
         if (binaryMessages.empty()) {
             return {};
         }
@@ -103,50 +107,56 @@ private:
     friend class CDKGSessionManager;
 
 private:
-    mutable RecursiveMutex cs;
+    mutable Mutex cs_phase_qhash;
     std::atomic<bool> stopRequested{false};
 
     CBLSWorker& blsWorker;
     CDKGSessionManager& dkgManager;
     ChainstateManager& chainman;
 
-    QuorumPhase phase GUARDED_BY(cs) {QuorumPhase_Idle};
-    int currentHeight GUARDED_BY(cs) {-1};
-    uint256 quorumHash GUARDED_BY(cs);
+    QuorumPhase phase GUARDED_BY(cs_phase_qhash) {QuorumPhase_Idle};
+    std::atomic<int> currentHeight {-1};
+    uint256 quorumHash GUARDED_BY(cs_phase_qhash);
 
     std::unique_ptr<CDKGSession> curSession;
     std::thread phaseHandlerThread;
 
-    CDKGPendingMessages pendingContributions GUARDED_BY(cs);
-    CDKGPendingMessages pendingComplaints GUARDED_BY(cs);
-    CDKGPendingMessages pendingJustifications GUARDED_BY(cs);
-    CDKGPendingMessages pendingPrematureCommitments GUARDED_BY(cs);
+    CDKGPendingMessages pendingContributions;
+    CDKGPendingMessages pendingComplaints;
+    CDKGPendingMessages pendingJustifications;
+    CDKGPendingMessages pendingPrematureCommitments;
     std::string m_threadName;
     PeerManager& peerman;
 public:
     CDKGSessionHandler(CBLSWorker& blsWorker, CDKGSessionManager& _dkgManager, PeerManager& peerman, ChainstateManager& _chainman);
     ~CDKGSessionHandler() = default;
 
-    void UpdatedBlockTip(const CBlockIndex *pindexNew);
+    void UpdatedBlockTip(const CBlockIndex *pindexNew) EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv);
 
     void StartThread();
     void StopThread();
+
+    bool GetContribution(const uint256& hash, CDKGContribution& ret) const;
+    bool GetComplaint(const uint256& hash, CDKGComplaint& ret) const;
+    bool GetJustification(const uint256& hash, CDKGJustification& ret) const;
+    bool GetPrematureCommitment(const uint256& hash, CDKGPrematureCommitment& ret) const;
+    
     const char* GetName() {return m_threadName.c_str();}
 
 private:
     bool InitNewQuorum(const CBlockIndex* pQuorumBaseBlockIndex);
 
-    std::pair<QuorumPhase, uint256> GetPhaseAndQuorumHash() const;
+    std::pair<QuorumPhase, uint256> GetPhaseAndQuorumHash() const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
 
     using StartPhaseFunc = std::function<void()>;
     using WhileWaitFunc = std::function<bool()>;
-    void WaitForNextPhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const;
-    void WaitForNewQuorum(const uint256& oldQuorumHash) const;
-    void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const WhileWaitFunc& runWhileWaiting) const;
-    void HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const StartPhaseFunc& startPhaseFunc, const WhileWaitFunc& runWhileWaiting);
-    void HandleDKGRound();
-    void PhaseHandlerThread();
+    void WaitForNextPhase(std::optional<QuorumPhase> curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    void WaitForNewQuorum(const uint256& oldQuorumHash) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    void HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash, double randomSleepFactor, const StartPhaseFunc& startPhaseFunc, const WhileWaitFunc& runWhileWaiting) EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    void HandleDKGRound() EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    void PhaseHandlerThread() EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
 };
 
 } // namespace llmq

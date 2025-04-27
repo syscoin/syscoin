@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2019-2022 The Bitcoin Core developers
+# Copyright (c) 2019-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 export LC_ALL=C
@@ -8,7 +8,7 @@ export TZ=UTC
 
 # Although Guix _does_ set umask when building its own packages (in our case,
 # this is all packages in manifest.scm), it does not set it for `guix
-# environment`. It does make sense for at least `guix environment --container`
+# shell`. It does make sense for at least `guix shell --container`
 # to set umask, so if that change gets merged upstream and we bump the
 # time-machine to a commit which includes the aforementioned change, we can
 # remove this line.
@@ -36,6 +36,11 @@ Required environment variables as seen inside the container:
     OUTDIR: ${OUTDIR:?not set}
 EOF
 
+cat << EOF
+Optional environment variables as seen inside the container:
+    CONFIGFLAGS: ${CONFIGFLAGS}
+EOF
+
 ACTUAL_OUTDIR="${OUTDIR}"
 OUTDIR="${DISTSRC}/output"
 
@@ -61,7 +66,6 @@ store_path() {
 # Set environment variables to point the NATIVE toolchain to the right
 # includes/libs
 NATIVE_GCC="$(store_path gcc-toolchain)"
-NATIVE_GCC_STATIC="$(store_path gcc-toolchain static)"
 
 unset LIBRARY_PATH
 unset CPATH
@@ -70,11 +74,17 @@ unset CPLUS_INCLUDE_PATH
 unset OBJC_INCLUDE_PATH
 unset OBJCPLUS_INCLUDE_PATH
 
-export LIBRARY_PATH="${NATIVE_GCC}/lib:${NATIVE_GCC_STATIC}/lib"
 export C_INCLUDE_PATH="${NATIVE_GCC}/include"
 export CPLUS_INCLUDE_PATH="${NATIVE_GCC}/include/c++:${NATIVE_GCC}/include"
-export OBJC_INCLUDE_PATH="${NATIVE_GCC}/include"
-export OBJCPLUS_INCLUDE_PATH="${NATIVE_GCC}/include/c++:${NATIVE_GCC}/include"
+
+case "$HOST" in
+    *darwin*) export LIBRARY_PATH="${NATIVE_GCC}/lib" ;; # Required for qt/qmake
+    *mingw*) export LIBRARY_PATH="${NATIVE_GCC}/lib" ;;
+    *)
+        NATIVE_GCC_STATIC="$(store_path gcc-toolchain static)"
+        export LIBRARY_PATH="${NATIVE_GCC}/lib:${NATIVE_GCC_STATIC}/lib"
+        ;;
+esac
 
 # Set environment variables to point the CROSS toolchain to the right
 # includes/libs for $HOST
@@ -126,18 +136,7 @@ for p in "${PATHS[@]}"; do
 done
 
 # Disable Guix ld auto-rpath behavior
-case "$HOST" in
-    *darwin*)
-        # The auto-rpath behavior is necessary for darwin builds as some native
-        # tools built by depends refer to and depend on Guix-built native
-        # libraries
-        #
-        # After the native packages in depends are built, the ld wrapper should
-        # no longer affect our build, as clang would instead reach for
-        # x86_64-apple-darwin-ld from cctools
-        ;;
-    *) export GUIX_LD_WRAPPER_DISABLE_RPATH=yes ;;
-esac
+export GUIX_LD_WRAPPER_DISABLE_RPATH=yes
 
 # Make /usr/bin if it doesn't exist
 [ -e /usr/bin ] || mkdir -p /usr/bin
@@ -166,26 +165,13 @@ esac
 # Environment variables for determinism
 export TAR_OPTIONS="--owner=0 --group=0 --numeric-owner --mtime='@${SOURCE_DATE_EPOCH}' --sort=name"
 export TZ="UTC"
-case "$HOST" in
-    *darwin*)
-        # cctools AR, unlike GNU binutils AR, does not have a deterministic mode
-        # or a configure flag to enable determinism by default, it only
-        # understands if this env-var is set or not. See:
-        #
-        # https://github.com/tpoechtrager/cctools-port/blob/55562e4073dea0fbfd0b20e0bf69ffe6390c7f97/cctools/ar/archive.c#L334
-        export ZERO_AR_DATE=yes
-        ;;
-esac
 
 ####################
 # Depends Building #
 ####################
 
 # Build the depends tree, overriding variables that assume multilib gcc
-# Syscoin: -O to group output by target when using --jobs
-#          --no-print-directory needed because of '-O' side effect
 make -C depends --jobs="$JOBS" HOST="$HOST" \
-                                   -O --no-print-directory \
                                    ${V:+V=1} \
                                    ${SOURCES_PATH+SOURCES_PATH="$SOURCES_PATH"} \
                                    ${BASE_CACHE+BASE_CACHE="$BASE_CACHE"} \
@@ -195,9 +181,16 @@ make -C depends --jobs="$JOBS" HOST="$HOST" \
                                    x86_64_linux_AR=x86_64-linux-gnu-gcc-ar \
                                    x86_64_linux_RANLIB=x86_64-linux-gnu-gcc-ranlib \
                                    x86_64_linux_NM=x86_64-linux-gnu-gcc-nm \
-                                   x86_64_linux_STRIP=x86_64-linux-gnu-strip \
-                                   FORCE_USE_SYSTEM_CLANG=1
+                                   x86_64_linux_STRIP=x86_64-linux-gnu-strip
 
+case "$HOST" in
+    *darwin*)
+        # Unset now that Qt is built
+        unset C_INCLUDE_PATH
+        unset CPLUS_INCLUDE_PATH
+        unset LIBRARY_PATH
+        ;;
+esac
 
 ###########################
 # Source Tarball Building #
@@ -217,14 +210,14 @@ mkdir -p "$OUTDIR"
 # Binary Tarball Building #
 ###########################
 
-# SYSCOIN CONFIGFLAGS
-CONFIGFLAGS="--enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary --disable-debug"
+# CONFIGFLAGS
+CONFIGFLAGS+=" --enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary"
+case "$HOST" in
+    *mingw*) CONFIGFLAGS+=" --disable-miner" ;;
+esac
 
 # CFLAGS
 HOST_CFLAGS="-O2 -g"
-# CFLAGS Syscoin (Release, nodebug)
-HOST_CFLAGS="-O2"
-
 HOST_CFLAGS+=$(find /gnu/store -maxdepth 1 -mindepth 1 -type d -exec echo -n " -ffile-prefix-map={}=/usr" \;)
 case "$HOST" in
     *linux*)  HOST_CFLAGS+=" -ffile-prefix-map=${PWD}=." ;;
@@ -243,12 +236,6 @@ esac
 case "$HOST" in
     *linux*)  HOST_LDFLAGS="-Wl,--as-needed -Wl,--dynamic-linker=$glibc_dynamic_linker -static-libstdc++ -Wl,-O2" ;;
     *mingw*)  HOST_LDFLAGS="-Wl,--no-insert-timestamp" ;;
-esac
-
-# LDFLAGS Syscoin
-# since gcc-10: only for mingw 'strip-debug' still passes security checks
-case "$HOST" in
-    *mingw*)  HOST_LDFLAGS="${HOST_LDFLAGS} -Wl,-S" ;;
 esac
 
 # Make $HOST-specific native binaries from depends available in $PATH
@@ -274,13 +261,18 @@ mkdir -p "$DISTSRC"
                     ${HOST_CXXFLAGS:+CXXFLAGS="${HOST_CXXFLAGS}"} \
                     ${HOST_LDFLAGS:+LDFLAGS="${HOST_LDFLAGS}"}
 
-    sed -i.old 's/-lstdc++ //g' config.status libtool
-    # SYSCOIN ensure we don't include non-static stdc++ in dashbls which seems to get included always
-    sed -i.old 's/-lstdc++ //g' src/dashbls/config.status libtool
+    sed -i.old 's/-lstdc++ //g' {./,src/dashbls/,src/secp256k1/}{config.status,libtool}
+
 
     # Build Syscoin Core
-    # Syscoin: add '-O --no-print-directory' (see Depends Building)
-    make -O --no-print-directory --jobs="$JOBS" ${V:+V=1}
+    make --jobs="$JOBS" ${V:+V=1}
+
+    # Make macos-specific debug symbols
+    case "$HOST" in
+        *darwin*)
+            make -C src/ osx_debug
+            ;;
+    esac
 
     # Check that symbol/security checks tools are sane.
     make test-security-check ${V:+V=1}
@@ -304,22 +296,13 @@ mkdir -p "$DISTSRC"
     INSTALLPATH="${PWD}/installed/${DISTNAME}"
     mkdir -p "${INSTALLPATH}"
     # Install built Syscoin Core to $INSTALLPATH
-    case "$HOST" in
-        *darwin*)
-            make install-strip DESTDIR="${INSTALLPATH}" ${V:+V=1}
-            ;;
-        *)
-            make install DESTDIR="${INSTALLPATH}" ${V:+V=1}
-            ;;
-    esac
+    make install DESTDIR="${INSTALLPATH}" ${V:+V=1}
 
     case "$HOST" in
         *darwin*)
-            make osx_volname ${V:+V=1}
             make deploydir ${V:+V=1}
             mkdir -p "unsigned-app-${HOST}"
             cp  --target-directory="unsigned-app-${HOST}" \
-                osx_volname \
                 contrib/macdeploy/detached-sig-create.sh
             mv --target-directory="unsigned-app-${HOST}" dist
             (
@@ -350,16 +333,16 @@ mkdir -p "$DISTSRC"
         rm -rf "${DISTNAME}/lib/pkgconfig"
 
         case "$HOST" in
-            *darwin*) ;;
+            *darwin*)
+                # Copy dSYM-s
+                find ../src -name "*.dSYM" -exec cp -ra {} "${DISTNAME}/bin" \;
+                ;;
             *)
-                # Split binaries and libraries from their debug symbols
+                # SYSCOIN Split binaries and libraries from their debug symbols
                 {
                     find "${DISTNAME}/bin" -type f -executable ! -name "sysgeth" ! -name "sysgeth.exe" -print0
                     find "${DISTNAME}/lib" -type f -print0
                 } | xargs -0 -P"$JOBS" -I{} "${DISTSRC}/contrib/devtools/split-debug.sh" {} {} {}.dbg
-                # Syscoin: Release, delete symbol files from split-debug
-                find "${DISTNAME}/bin" -name "*.dbg" -delete
-                find "${DISTNAME}/lib" -name "*.dbg" -delete
                 ;;
         esac
 
@@ -372,12 +355,6 @@ mkdir -p "$DISTSRC"
                 ;;
         esac
 
-        # copy over the example syscoin.conf file. if contrib/devtools/gen-syscoin-conf.sh
-        # has not been run before buildling, this file will be a stub
-        cp "${DISTSRC}/share/examples/syscoin.conf" "${DISTNAME}/"
-
-        cp -r "${DISTSRC}/share/rpcauth" "${DISTNAME}/share/"
-
         # Finally, deterministically produce {non-,}debug binary tarballs ready
         # for release
         case "$HOST" in
@@ -388,13 +365,12 @@ mkdir -p "$DISTSRC"
                     | sort \
                     | zip -X@ "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}.zip" \
                     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}.zip" && exit 1 )
-                # Syscoin (Release, nodebug)
-                # find "${DISTNAME}" -name "*.dbg" -print0 \
-                #     | xargs -0r touch --no-dereference --date="@${SOURCE_DATE_EPOCH}"
-                # find "${DISTNAME}" -name "*.dbg" \
-                #     | sort \
-                #     | zip -X@ "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" \
-                #     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" && exit 1 )
+                find "${DISTNAME}" -name "*.dbg" -print0 \
+                    | xargs -0r touch --no-dereference --date="@${SOURCE_DATE_EPOCH}"
+                find "${DISTNAME}" -name "*.dbg" \
+                    | sort \
+                    | zip -X@ "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-w64-mingw32/win64}-debug.zip" && exit 1 )
                 ;;
             *linux*)
                 find "${DISTNAME}" -not -name "*.dbg" -print0 \
@@ -402,19 +378,23 @@ mkdir -p "$DISTSRC"
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
                     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" \
                     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" && exit 1 )
-                # Syscoin (Release, nodebug)
-                # find "${DISTNAME}" -name "*.dbg" -print0 \
-                #     | sort --zero-terminated \
-                #     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                #     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
-                #     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
+                find "${DISTNAME}" -name "*.dbg" -print0 \
+                    | sort --zero-terminated \
+                    | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
                 ;;
             *darwin*)
-                find "${DISTNAME}" -print0 \
+                find "${DISTNAME}" -not -path "*.dSYM*" -print0 \
                     | sort --zero-terminated \
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
                     | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" \
                     || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" && exit 1 )
+                find "${DISTNAME}" -path "*.dSYM*" -print0 \
+                    | sort --zero-terminated \
+                    | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
                 ;;
         esac
     )  # $DISTSRC/installed

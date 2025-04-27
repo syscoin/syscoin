@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2020-2022 The Bitcoin Core developers
+# Copyright (c) 2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Parse message capture binary files.  To be used in conjunction with -capturemessages."""
@@ -122,8 +122,8 @@ def process_file(path: str, messages: List[Any], recv: bool, progress_bar: Optio
             msg_ser = BytesIO(f_in.read(length))
 
             # Determine message type
-            if msgtype not in MESSAGEMAP:
-                # Unrecognized message type
+            if msgtype not in MESSAGEMAP or MESSAGEMAP[msgtype] is None:
+                # Unrecognized or unhandled message type
                 try:
                     msgtype_tmp = msgtype.decode()
                     if not msgtype_tmp.isprintable():
@@ -131,10 +131,11 @@ def process_file(path: str, messages: List[Any], recv: bool, progress_bar: Optio
                     msg_dict["msgtype"] = msgtype_tmp
                 except UnicodeDecodeError:
                     msg_dict["msgtype"] = "UNREADABLE"
+                err_str = "Unrecognized" if msgtype not in MESSAGEMAP else "Unhandled"
                 msg_dict["body"] = msg_ser.read().hex()
-                msg_dict["error"] = "Unrecognized message type."
+                msg_dict["error"] = f"{err_str} message type"
                 messages.append(msg_dict)
-                print(f"WARNING - Unrecognized message type {msgtype} in {path}", file=sys.stderr)
+                print(f"WARNING - {msg_dict['error']} {msgtype} in {path}", file=sys.stderr)
                 continue
 
             # Deserialize the message

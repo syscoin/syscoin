@@ -317,7 +317,7 @@ static bool rest_block(const std::any& context,
     switch (rf) {
     case RESTResponseFormat::BINARY: {
         // SYSCOIN
-        CDataStream ssBlock(SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | RPCSerializationFlags());
+        CDataStream ssBlock(SER_DISK, PROTOCOL_VERSION | RPCSerializationFlags());
         ssBlock << block;
         std::string binaryBlock = ssBlock.str();
         req->WriteHeader("Content-Type", "application/octet-stream");
@@ -327,7 +327,7 @@ static bool rest_block(const std::any& context,
 
     case RESTResponseFormat::HEX: {
         // SYSCOIN
-        CDataStream ssBlock(SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | RPCSerializationFlags());
+        CDataStream ssBlock(SER_DISK, PROTOCOL_VERSION | RPCSerializationFlags());
         ssBlock << block;
         std::string strHex = HexStr(ssBlock) + "\n";
         req->WriteHeader("Content-Type", "text/plain");
@@ -734,7 +734,7 @@ static bool rest_tx(const std::any& context, HTTPRequest* req, const std::string
     switch (rf) {
     case RESTResponseFormat::BINARY: {
         // SYSCOIN
-        CDataStream ssTx(SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | RPCSerializationFlags());
+        CDataStream ssTx(SER_DISK, PROTOCOL_VERSION | RPCSerializationFlags());
         ssTx << tx;
 
         std::string binaryTx = ssTx.str();
@@ -745,7 +745,7 @@ static bool rest_tx(const std::any& context, HTTPRequest* req, const std::string
 
     case RESTResponseFormat::HEX: {
         // SYSCOIN
-        CDataStream ssTx(SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | RPCSerializationFlags());
+        CDataStream ssTx(SER_DISK, PROTOCOL_VERSION | RPCSerializationFlags());
         ssTx << tx;
 
         std::string strHex = HexStr(ssTx) + "\n";

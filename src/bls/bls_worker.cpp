@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2023 The Dash Core developers
+// Copyright (c) 2018-2024 The Dash Core developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,6 +7,7 @@
 #include <serialize.h>
 
 #include <util/ranges.h>
+#include <util/system.h>
 
 #include <memory>
 #include <utility>
@@ -123,7 +124,7 @@ bool CBLSWorker::GenerateContributions(int quorumThreshold, Span<CBLSId> ids, BL
 // input vector is stored. This means that the input vector must stay alive for the whole lifetime of the Aggregator
 template <typename T>
 struct Aggregator : public std::enable_shared_from_this<Aggregator<T>> {
-    size_t batchSize{16};
+    const size_t BATCH_SIZE{16};
     std::shared_ptr<std::vector<const T*> > inputVec;
 
     bool parallel;
@@ -163,7 +164,7 @@ struct Aggregator : public std::enable_shared_from_this<Aggregator<T>> {
     // If parallel=true, then this will return fast, otherwise this will block until aggregation is done
     void Start()
     {
-        size_t batchCount = (inputVec->size() + batchSize - 1) / batchSize;
+        size_t batchCount = (inputVec->size() + BATCH_SIZE - 1) / BATCH_SIZE;
 
         if (!parallel) {
             if (inputVec->size() == 1) {
@@ -190,8 +191,8 @@ struct Aggregator : public std::enable_shared_from_this<Aggregator<T>> {
         // increment wait counter as otherwise the first finished async aggregation might signal that we're done
         IncWait();
         for (size_t i = 0; i < batchCount; i++) {
-            size_t start = i * batchSize;
-            size_t count = std::min(batchSize, inputVec->size() - start);
+            size_t start = i * BATCH_SIZE;
+            size_t count = std::min(BATCH_SIZE, inputVec->size() - start);
             AsyncAggregateAndPushAggQueue(inputVec, start, count, false);
         }
         // this will decrement the wait counter and in most cases NOT finish, as async work is still in progress
@@ -271,24 +272,24 @@ struct Aggregator : public std::enable_shared_from_this<Aggregator<T>> {
             throw;
         }
 
-        if (++aggQueueSize >= batchSize) {
+        if (++aggQueueSize >= BATCH_SIZE) {
             // we've collected enough intermediate results to form a new batch.
             std::shared_ptr<std::vector<const T*> > newBatch;
             {
                 std::unique_lock<std::mutex> l(m);
-                if (aggQueueSize < batchSize) {
+                if (aggQueueSize < BATCH_SIZE) {
                     // some other worker thread grabbed this batch
                     return;
                 }
-                newBatch = std::make_shared<std::vector<const T*> >(batchSize);
+                newBatch = std::make_shared<std::vector<const T*>>(BATCH_SIZE);
                 // collect items for new batch
-                for (size_t i = 0; i < batchSize; i++) {
+                for (size_t i = 0; i < BATCH_SIZE; i++) {
                     T* p = nullptr;
                     bool s = aggQueue.pop(p);
                     assert(s);
                     (*newBatch)[i] = p;
                 }
-                aggQueueSize -= batchSize;
+                aggQueueSize -= BATCH_SIZE;
             }
 
             // push new batch to work queue. del=true this time as these items are intermediate results and need to be deleted
@@ -761,7 +762,7 @@ bool CBLSWorker::VerifyVerificationVectors(Span<BLSVerificationVectorPtr> vvecs)
 void CBLSWorker::AsyncSign(const CBLSSecretKey& secKey, const uint256& msgHash, const CBLSWorker::SignDoneCallback& doneCallback)
 {
     workerPool.push([secKey, msgHash, doneCallback](int threadId) {
-        doneCallback(secKey.Sign(msgHash));
+        doneCallback(secKey.Sign(msgHash, bls::bls_legacy_scheme.load()));
     });
 }
 
