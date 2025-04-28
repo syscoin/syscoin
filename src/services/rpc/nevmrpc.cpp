@@ -214,6 +214,7 @@ bool ScanBlobs(CNEVMDataDB& pnevmdatadb, const uint32_t count, const uint32_t fr
                     MapPoDAPayloadMeta meta;
                     if(pcursor->GetValue(meta)) {
                         totalSize += meta.nSize;
+                        totalBlobs++;
                         oldest = std::min(oldest, static_cast<uint64_t>(meta.nMedianTime));
                         newest = std::max(newest, static_cast<uint64_t>(meta.nMedianTime));    
                     }
@@ -247,17 +248,15 @@ bool ScanBlobs(CNEVMDataDB& pnevmdatadb, const uint32_t count, const uint32_t fr
 
     std::unique_ptr<CDBIterator> pcursor(pnevmdatadb.NewIterator());
     pcursor->SeekToFirst();
-    std::pair<std::vector<uint8_t>, bool> key;
-
+    std::vector<uint8_t> vchVersionHash;
     while (pcursor->Valid()) {
-        key.first.clear();
-        if (pcursor->GetKey(key)) {
-            if(key.second == false && cache.find(key.first) == cache.end()) {
+        if (pcursor->GetKey(vchVersionHash)) {
+            if(cache.find(vchVersionHash) == cache.end()) {
                 if (++index <= from) { pcursor->Next(); continue; }
                 UniValue oBlob(UniValue::VOBJ);
                 MapPoDAPayloadMeta meta;
                 if(pcursor->GetValue(meta)) {
-                    oBlob.pushKV("versionhash", HexStr(key.first));
+                    oBlob.pushKV("versionhash", HexStr(vchVersionHash));
                     oBlob.pushKV("mtp", meta.nMedianTime);
                     oBlob.pushKV("datasize", meta.nSize);
                     oBlob.pushKV("txid", meta.txid.ToString());
