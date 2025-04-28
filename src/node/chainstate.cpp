@@ -104,15 +104,21 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         .memory_only = options.block_tree_db_in_memory,
         .wipe_data = options.fReindexGeth,
         .options = chainman.m_options.block_tree_db});
-    // PoDA data cannot be deleted from disk on reindex because chain on disk does not have PoDA information to recreate it
     pnevmdatadb.reset();
     pnevmdatadb = std::make_unique<CNEVMDataDB>(DBParams{
         .path = chainman.m_options.datadir / "nevmdata",
+        .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
+        .memory_only = options.block_tree_db_in_memory,
+        .wipe_data = options.fReindexGeth,
+        .options = chainman.m_options.coins_db});
+    pnevmdatablobdb.reset();  
+    // PoDA blob data cannot be deleted from disk on reindex because chain on disk does not have PoDA information to recreate it
+    pnevmdatablobdb = std::make_unique<CNEVMDataBlobDB>(DBParams{
+        .path = chainman.m_options.datadir / "nevmblobdata",
         .cache_bytes = static_cast<size_t>(cache_sizes.evo_poda_db),
         .memory_only = options.block_tree_db_in_memory,
         .wipe_data = false,
-        .options = chainman.m_options.coins_db});
-
+        .options = chainman.m_options.coins_db});  
     // new BlockTreeDB tries to delete the existing file, which
     // fails if it's still open from the previous loop. Close it first:
     pblocktree.reset();
@@ -295,8 +301,16 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             .path = chainman.m_options.datadir / "nevmdata",
             .cache_bytes = static_cast<size_t>(cache_sizes.evo_poda_db),
             .memory_only = options.block_tree_db_in_memory,
-            .wipe_data = false,
+            .wipe_data = coinsViewEmpty,
             .options = chainman.m_options.coins_db});
+        pnevmdatablobdb.reset();  
+        // PoDA blob data cannot be deleted from disk on reindex because chain on disk does not have PoDA information to recreate it
+        pnevmdatablobdb = std::make_unique<CNEVMDataBlobDB>(DBParams{
+            .path = chainman.m_options.datadir / "nevmblobdata",
+            .cache_bytes = static_cast<size_t>(cache_sizes.evo_poda_db),
+            .memory_only = options.block_tree_db_in_memory,
+            .wipe_data = false,
+            .options = chainman.m_options.coins_db});  
     }
 
     // Now that chainstates are loaded and we're able to flush to

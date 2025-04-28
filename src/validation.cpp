@@ -1233,7 +1233,7 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
 
     // SYSCOIN
     if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(ws.mapPoDA, 0);
+        pnevmdatadb->FlushDataToCache(ws.mapPoDA);
     // trim mempool and check if tx was trimmed
     // If we are validating a package, don't trim here because we could evict a previous transaction
     // in the package. LimitMempoolSize() should be called at the very end to make sure the mempool
@@ -2312,10 +2312,10 @@ bool FillNEVMData(CBlock &block) {
                 }
                 CNEVMData nevmData(tx->vout[nOut].scriptPubKey);
                 if (!nevmData.IsNull()) {
-                    if(pnevmdatadb->BlobExists(nevmData.vchVersionHash)) {
+                    if(pnevmdatablobdb->Exists(nevmData.vchVersionHash)) {
                         CMutableTransaction mutable_tx(*tx);
                         // Directly modify the mutable vector
-                        if(pnevmdatadb->ReadData(nevmData.vchVersionHash, mutable_tx.vout[nOut].vchNEVMData)) {
+                        if(pnevmdatablobdb->Read(nevmData.vchVersionHash, mutable_tx.vout[nOut].vchNEVMData)) {
                             if(!mutable_tx.vout[nOut].vchNEVMData.empty()) {
                                 // Now create the immutable CTransaction and store its Ref
                                 block.vtx[i] = MakeTransactionRef(std::move(mutable_tx));
@@ -2394,7 +2394,7 @@ bool ProcessNEVMDataHelper(const BlockManager& blockman, const std::vector<CNEVM
         LogPrint(BCLog::BENCHMARK, "ProcessNEVMDataHelper: verified %d blobs in %.2fms (%.2fms/blob)\n", nSizeChecks, Ticks<MillisecondsDouble>(time_2 - time_1), Ticks<MillisecondsDouble>(time_2 - time_1) / nSizeChecks);
     }
     for (const auto &nevmDataPayload : vecNevmDataPayload) {
-        mapPoDA.try_emplace(nevmDataPayload.vchVersionHash, nevmDataPayload.vchNEVMData);
+        mapPoDA.try_emplace(nevmDataPayload.vchVersionHash, MapPoDAPayloadMeta(nevmDataPayload, nMedianTime));
     }
     return true;
 }
@@ -3150,23 +3150,6 @@ bool Chainstate::FlushStateToDisk(
         bool fPeriodicFlush = mode == FlushStateMode::PERIODIC && nNow > m_last_flush + DATABASE_FLUSH_INTERVAL;
         // Combine all conditions that result in a full cache flush.
         fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
-        // Check PoDA cache usage
-        if (pnevmdatadb) {
-            size_t PoDACacheSize;
-            PoDACacheSizeState poda_cache_state = pnevmdatadb->GetPoDACacheSizeState(PoDACacheSize);
-            // Similar to coin cache logic:
-            bool podaCacheLarge    = mode == FlushStateMode::PERIODIC && poda_cache_state >= PoDACacheSizeState::LARGE;
-            bool podaCacheCritical = mode == FlushStateMode::IF_NEEDED && poda_cache_state >= PoDACacheSizeState::CRITICAL;
-            if(fPeriodicWrite || podaCacheLarge || podaCacheCritical || fDoFullFlush) {
-                // Ensure we can write block index
-                if (!CheckDiskSpace(m_chainman.m_options.datadir, PoDACacheSize)) {
-                    return FatalError(m_chainman.GetNotifications(), state, "Disk space is too low!", _("Disk space is too low!"));
-                }
-                if (pnevmdatadb && !pnevmdatadb->FlushCacheToDisk(m_chain.Tip()->GetMedianTimePast())) {
-                    return FatalError(m_chainman.GetNotifications(), state, "Failed to commit PoDA");
-                }
-            }
-        }
         // Write blocks and block index to disk.
         if (fDoFullFlush || fPeriodicWrite) {
             // Ensure we can write block index
@@ -3199,6 +3182,9 @@ bool Chainstate::FlushStateToDisk(
                 m_blockman.UnlinkPrunedFiles(setFilesToPrune);
             }
             // SYSCOIN
+            if (pnevmdatadb && !pnevmdatadb->FlushCacheToDisk(m_chain.Tip()->GetMedianTimePast())) {
+                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit PoDA");
+            }
             if (pblockindexdb && !pblockindexdb->FlushCacheToDisk((uint32_t)m_chain.Height())) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to block index db");
             }
@@ -3220,6 +3206,7 @@ bool Chainstate::FlushStateToDisk(
             if (llmq::quorumManager && !llmq::quorumManager->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QM DB");
             }
+            
             m_last_write = nNow;
         }
         // Flush best chain related state. This can only be done if the blocks / block index write was also done.
@@ -3551,7 +3538,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     }
     // SYSCOIN
     if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(mapPoDA, pindexNew->GetMedianTimePast());
+        pnevmdatadb->FlushDataToCache(mapPoDA);
     if(pnevmtxmintdb)
         pnevmtxmintdb->FlushDataToCache(setMintTxs);
     if(pblockindexdb)
@@ -5071,7 +5058,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         return error("%s: %s", __func__, state.ToString());
     }
     if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(mapPoDA, pindex->GetMedianTimePast());
+        pnevmdatadb->FlushDataToCache(mapPoDA);
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
@@ -5523,7 +5510,7 @@ bool Chainstate::ReplayBlocks()
     cache.Flush();
     // SYSCOIN
     if(pnevmdatadb) {
-        pnevmdatadb->FlushDataToCache(mapPoDAConnect, pindexNew->GetMedianTimePast());
+        pnevmdatadb->FlushDataToCache(mapPoDAConnect);
     }
     if(pnevmtxmintdb) {
         pnevmtxmintdb->FlushDataToCache(setMintTxsConnect);

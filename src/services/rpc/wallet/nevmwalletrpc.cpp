@@ -168,8 +168,7 @@ static RPCHelpMan syscoincreatenevmblob()
     // process new vector in batch checking the blobs
     BlockValidationState state;
     const std::vector<uint8_t> vchVersionHash = dev::sha3(vchData).asBytes();
-    int64_t mpt = -1;
-    if(pnevmdatadb->ReadMTP(vchVersionHash, mpt) && !bOverwrite) {
+    if(pnevmdatadb->BlobExists(vchVersionHash) && !bOverwrite) {
         UniValue resObj(UniValue::VOBJ);
         resObj.pushKVEnd("versionhash", HexStr(vchVersionHash));
         return resObj;
