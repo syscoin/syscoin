@@ -174,6 +174,7 @@ BasicTestingSetup::~BasicTestingSetup()
     pnevmtxmintdb.reset();
     pblockindexdb.reset();
     pnevmdatadb.reset();
+    pnevmdatablobdb.reset();
     governance.reset();
     deterministicMNManager.reset();
     netfulfilledman.reset();

@@ -148,6 +148,7 @@ enum
     // SYSCOIN
     SER_GETHASH         = (1 << 2),
     SER_SIZE            = (1 << 3),
+    SER_NO_PODA         = (1 << 4),
 };
 
 /**

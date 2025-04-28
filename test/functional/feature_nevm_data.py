@@ -39,7 +39,7 @@ class NEVMDataTest(DashTestFramework):
         blobDataMaxPlus = secrets.token_hex(MAX_NEVM_DATA_BLOB + 1)
         txBad = self.nodes[0].syscoincreatenevmblob(blobDataMaxPlus)['txid']
         assert_raises_rpc_error(-5, "No such mempool transaction", self.nodes[1].getrawtransaction, txid=txBad)
-        print('Trying 2MB * MAX_DATA_BLOBS per block...')
+        print('Making 2MB * MAX_DATA_BLOBS+1...')
         self.blobVHs = []
         for i in range(0, 33):
             blobDataMax = secrets.token_hex(MAX_NEVM_DATA_BLOB)
@@ -54,13 +54,14 @@ class NEVMDataTest(DashTestFramework):
         assert rpc_details["size"] > 670000 and rpc_details["size"]  < 680000
         foundCount = 0
         self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
-        print('Testing nodes to see if MAX_DATA_BLOBS blobs exist at 2MB each...')
+        # get the tip block's MTP
+        mtp = self.nodes[0].getblockheader(tip)["mediantime"]
+        foundCount = 0
+        print('Testing nodes to see if MAX_DATA_BLOBS blobs exist at 2MB each in the tip...')
         for i, blobVH in enumerate(self.blobVHs):
-            mpt = 0
             try:
-                mpt = self.nodes[1].getnevmblobdata(blobVH)['mpt']
-                # mpt > 0 means it got confirmed
-                if (mpt > 0):
+                blob = self.nodes[1].getnevmblobdata(blobVH)
+                if blob['mtp'] == mtp:
                     foundCount += 1
             except Exception:
                 pass
@@ -69,14 +70,12 @@ class NEVMDataTest(DashTestFramework):
         print('Generating next block...')
         tip = self.generate(self.nodes[0], 1)[-1]
         rpc_details = self.nodes[0].getblock(tip, True)
-        foundCount = 0
-        print('Testing nodes to see if MAX_DATA_BLOBS+1 blobs exist...')
+        mtp = self.nodes[0].getblockheader(tip)["mediantime"]
+        print('Testing nodes to see if MAX_DATA_BLOBS+1 blobs exist after the next block...')
         for i, blobVH in enumerate(self.blobVHs):
-            mpt = 0
             try:
-                mpt = self.nodes[1].getnevmblobdata(blobVH)['mpt']
-                # mpt > 0 means it got confirmed
-                if (mpt > 0):
+                blob = self.nodes[1].getnevmblobdata(blobVH)
+                if blob['mtp'] == mtp:
                     foundCount += 1
             except Exception:
                 pass
@@ -96,30 +95,28 @@ class NEVMDataTest(DashTestFramework):
         print('Generating block...')
         cl = self.nodes[0].getbestblockhash()
         self.generate_helper(self.nodes[0], 1)
+        mtp = self.nodes[0].getblockheader(cl)["mediantime"]
         foundCount = 0
         print('Testing nodes to see if only MAX_DATA_BLOBS blobs exist...')
         for i, blobVH in enumerate(self.blobVHs):
-            mpt = 0
             try:
-                mpt = self.nodes[1].getnevmblobdata(blobVH)['mpt']
-                # mpt > 0 means it got confirmed
-                if (mpt > 0):
+                blob = self.nodes[1].getnevmblobdata(blobVH)
+                if blob['mtp'] == mtp:
                     foundCount += 1
             except Exception:
                 pass
 
         assert_equal(foundCount, MAX_DATA_BLOBS)
-        # clear the rest of the blobs
+        # mine the rest of the blobs
         print('Generating next block...')
         self.generate_helper(self.nodes[0], 1)
-        foundCount = 0
+        tip = self.nodes[0].getbestblockhash()
         print('Testing nodes to see if MAX_DATA_BLOBS*2 blobs exist...')
+        mtp = self.nodes[0].getblockheader(tip)["mediantime"]
         for i, blobVH in enumerate(self.blobVHs):
-            mpt = 0
             try:
-                mpt = self.nodes[1].getnevmblobdata(blobVH)['mpt']
-                # mpt > 0 means it got confirmed
-                if (mpt > 0):
+                blob = self.nodes[1].getnevmblobdata(blobVH)
+                if blob['mtp'] == mtp:
                     foundCount += 1
             except Exception:
                 pass
@@ -133,7 +130,10 @@ class NEVMDataTest(DashTestFramework):
         bumps = 0
         mtp = self.nodes[0].getblockheader(cl)["mediantime"]
         while True:
-            self.bump_mocktime(150)
+            bump_time = (expiry_timestamp - mtp) * 10
+            if (bump_time > 150):
+                bump_time = 150
+            self.bump_mocktime(bump_time)
             print(f"Current MTP: {mtp}, Target expiry: {expiry_timestamp}, Mocktime: {self.mocktime}")
             for i in range(len(self.nodes)):
                 force_finish_mnsync(self.nodes[i])
@@ -223,7 +223,7 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[1].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid1, True)['data'], txid1Data)
-        mtp = self.nodes[1].getnevmblobdata(vhTxid)['mpt']
+        mtp = self.nodes[1].getnevmblobdata(txid1)['mtp']
         print('Start node 4...')
         self.start_node(4, extra_args=["-mocktime=" + str(self.mocktime), *self.extra_args[4]])
         force_finish_mnsync(self.nodes[4])
@@ -264,12 +264,14 @@ class NEVMDataTest(DashTestFramework):
         self.wait_for_chainlocked_block_all_nodes(cl)
         self.bump_until_mtp_exceeds(cl, expiry_timestamp)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid)
-        assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, vh)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid1)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[4].getnevmblobdata, txid)
-        assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[3].getnevmblobdata, vh)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[2].getnevmblobdata, txid1)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[1].getnevmblobdata, txid1)
+        # vh got recreated so its MTP was updated to a later time
+        mtpbest = self.nodes[2].getblockheader(self.nodes[2].getbestblockhash())['mediantime']
+        assert_equal(self.nodes[2].getnevmblobdata(vh, True)['data'], vhData)
+        assert_equal(self.nodes[3].getnevmblobdata(vh, True)['data'], vhData)
         nowblockhash = self.nodes[0].getbestblockhash()
         print('Checking for reorg with chainlocks')
         print('Invalidating back to the original blockhash {}'.format(startblockhash))
@@ -277,19 +279,40 @@ class NEVMDataTest(DashTestFramework):
         print('Reconsidering block')
         self.nodes[0].reconsiderblock(startblockhash)
         assert_equal(self.nodes[0].getbestblockhash(), nowblockhash)
+        assert_equal(self.nodes[2].getnevmblobdata(vh, True)['data'], vhData)
+        assert_equal(self.nodes[3].getnevmblobdata(vh, True)['data'], vhData)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid)
-        assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, vh)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid1)
         cl = self.nodes[0].getbestblockhash()
         self.generate_helper(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid)
-        assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, vh)
+        mtpbest = self.nodes[2].getblockheader(cl)['mediantime']
+        assert_equal(self.nodes[0].getnevmblobdata(vh, True)['data'], vhData)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid1)
         print('Checking for invalid versionhash...')
         txidBad = self.nodes[3].syscoincreaterawnevmblob(secrets.token_hex(55), secrets.token_hex(55))['txid']
         # should fail and not propagate due to 'bad-txns-poda-invalid'
         assert_raises_rpc_error(-5, "No such mempool transaction", self.nodes[0].getrawtransaction, txid=txidBad)
+        print('Expire updated blob...')
+        mtp = self.nodes[0].getnevmblobdata(vh)['mtp']
+        expiry_timestamp = (mtp + NEVM_DATA_EXPIRE_TIME)
+        self.bump_until_mtp_exceeds(cl, expiry_timestamp)
+        for i in range(len(self.nodes)):
+            force_finish_mnsync(self.nodes[i])
+        for i in range(len(self.nodes)):
+            if i != 1:
+                self.connect_nodes(i, 1, wait_for_connect=False)
+                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 0:
+                self.connect_nodes(i, 0, wait_for_connect=False)
+                self.connect_nodes(1, 0, wait_for_connect=False)
+        cl = self.nodes[0].getbestblockhash()
+        self.generate(self.nodes[0], 5)
+        self.wait_for_chainlocked_block_all_nodes(cl)
+        assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, vh)
+        assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid)
+        assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid1)
 
     def run_test(self):
         self.nodes[1].createwallet("")

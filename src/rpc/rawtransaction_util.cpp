@@ -114,6 +114,9 @@ void AddOutputs(CMutableTransaction& rawTx, const UniValue& outputs_in)
             // SYSCOIN
             if(outputs.exists("datanevm")) {
                 out.vchNEVMData = ParseHexV(outputs["datanevm"].getValStr(), "DataNEVM");
+                if (out.vchNEVMData.size() > MAX_NEVM_DATA_BLOB) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "datanevm exceeds max size (2MB)");
+                }
             }
             // SYSCOIN: Set transaction version if data_version is specified
             if(outputs.exists("data_version")) {

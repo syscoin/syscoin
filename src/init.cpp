@@ -374,6 +374,7 @@ void Shutdown(NodeContext& node)
         pnevmtxmintdb.reset();
         pblockindexdb.reset();
         pnevmdatadb.reset();
+        pnevmdatablobdb.reset();
         llmq::DestroyLLMQSystem();
         deterministicMNManager.reset();
         netfulfilledman.reset();

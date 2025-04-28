@@ -474,7 +474,7 @@ def copy_datadir(from_node, to_node, dirname):
     from_datadir = os.path.join(dirname, "node"+str(from_node), "regtest")
     to_datadir = os.path.join(dirname, "node"+str(to_node), "regtest")
 
-    dirs = ["blocks", "chainstate", "evodb_dmn", "evodb_qc", "evodb_qvvecs", "evodb_qsk", "evodb_sb", "llmq", "nevmminttx", "nevmtxroots", "dbblockindex", "nevmdata"]
+    dirs = ["blocks", "chainstate", "evodb_dmn", "evodb_qc", "evodb_qvvecs", "evodb_qsk", "evodb_sb", "llmq", "nevmminttx", "nevmtxroots", "dbblockindex", "nevmdata", "nevmblobdata"]
     for d in dirs:
         try:
             src = os.path.join(from_datadir, d)
