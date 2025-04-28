@@ -711,7 +711,6 @@ bool CNEVMData::UnserializeFromTx(const CTransaction &tx, const int nVersion) {
     if(!tx.vout[nOut].vchNEVMData.empty()) {
         vchNEVMData = std::make_shared<const std::vector<uint8_t>>(tx.vout[nOut].vchNEVMData);
         if(vchNEVMData->size() > MAX_NEVM_DATA_BLOB) {
-            vchNEVMData.reset();
             SetNull();
             return false;
         }
