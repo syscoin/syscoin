@@ -139,6 +139,9 @@ static RPCHelpMan getnevmblobdata()
         }
         if(!tx || hashBlock.IsNull()) {
             vchVH = ParseHex(request.params[0].get_str());
+            if(vchVH.size() != 32) {
+                throw JSONRPCError(RPC_INVALID_PARAMS, "Invalid version hash length");
+            }
         }
         else {
             nevmData = CNEVMData(*tx);
