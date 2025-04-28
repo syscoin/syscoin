@@ -294,6 +294,7 @@ public:
     }
     // SYSCOIN
     std::string GetName() const { return m_name; }
+    void ResetDB();
 };
 
 #endif // SYSCOIN_DBWRAPPER_H

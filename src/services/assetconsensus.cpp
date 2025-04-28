@@ -440,23 +440,39 @@ void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
         }
     }
 }
-bool CNEVMTxRootsDB::FlushCacheToDisk() {
+bool CNEVMTxRootsDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS)
+{
     LOCK(cs_cache);
-    if(mapCache.empty()) {
+    if (mapCache.empty()) return true;
+
+    CDBBatch batch(*this);
+    std::size_t items = 0;
+    std::size_t count = 0;
+    auto flush = [&]() {
+        if (batch.SizeEstimate() == 0) return true;
+        if (!WriteBatch(batch, /*sync=*/true)) return false;
+        batch.Clear();
+        items = 0;
         return true;
+    };
+
+    for (auto it = mapCache.begin(); it != mapCache.end(); ) {
+        batch.Write(it->first, it->second);
+        count++;
+        if (++items == CHUNK_ITEMS) {
+            if (!flush()) return false;
+        }
+        // entry is now durable → erase from cache
+        it = mapCache.erase(it);
     }
-    CDBBatch batch(*this);    
-    for (auto const& entry : mapCache) {
-        batch.Write(entry.first, entry.second);
-    }
-    if(mapCache.size() > 0)
-        LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx roots\n", mapCache.size());
-    bool res = WriteBatch(batch, true);
-    if(res) {
-        mapCache.clear();
-    }
-    return res;
+    if (!flush()) return false;       // last partial chunk
+
+    LogPrint(BCLog::SYS,
+             "Flushed NEVM-tx-roots cache, %zu items written in %zu-entry chunks\n",
+             count, CHUNK_ITEMS);
+    return true;
 }
+
 bool CNEVMTxRootsDB::ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) {
     LOCK(cs_cache);
     auto it = mapCache.find(nBlockHash);
@@ -488,23 +504,39 @@ void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) {
         mapCache.insert(key);
     }
 }
-bool CNEVMMintedTxDB::FlushCacheToDisk() {
+bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS)
+{
     LOCK(cs_cache);
-    if(mapCache.empty()) {
+    if (mapCache.empty()) return true;
+
+    CDBBatch batch(*this);
+    std::size_t items = 0;
+    std::size_t count = 0;
+
+    auto flush = [&]() {
+        if (batch.SizeEstimate() == 0) return true;
+        if (!WriteBatch(batch, /*sync=*/true)) return false;
+        batch.Clear();
+        items = 0;
         return true;
+    };
+
+    for (auto it = mapCache.begin(); it != mapCache.end(); ) {
+        batch.Write(*it, true);       // value is a dummy bool
+        count++;
+        if (++items == CHUNK_ITEMS) {
+            if (!flush()) return false;
+        }
+        it = mapCache.erase(it);      // safe to purge now
     }
-    CDBBatch batch(*this);    
-    for (auto const& key : mapCache) {
-        batch.Write(key, true);
-    }
-    if(mapCache.size() > 0)
-        LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm tx mints\n", mapCache.size());
-    bool res = WriteBatch(batch, true);
-    if(res) {
-        mapCache.clear();
-    }
-    return res;
+    if (!flush()) return false;
+
+    LogPrint(BCLog::SYS,
+             "Flushed NEVM-minted-tx cache, %zu items written in %zu-entry chunks\n",
+             count, CHUNK_ITEMS);
+    return true;
 }
+
 bool CNEVMMintedTxDB::FlushErase(const NEVMMintTxSet &mapNEVMTxRoots) {
     LOCK(cs_cache);
     if(mapNEVMTxRoots.empty())

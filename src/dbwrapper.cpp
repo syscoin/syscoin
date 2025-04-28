@@ -381,6 +381,33 @@ bool CDBWrapper::IsEmpty()
     return !(it->Valid());
 }
 
+void CDBWrapper::ResetDB()
+{
+    const std::string path = fs::PathToString(m_path);
+
+    /* 1. Close the old handle – releases LOCK */
+    delete DBContext().pdb;
+    DBContext().pdb = nullptr;
+
+    /* 2. Destroy the directory */
+    HandleError(leveldb::DestroyDB(path, DBContext().options));
+
+    /* 3. Re-open */
+    HandleError(leveldb::DB::Open(DBContext().options, path, &DBContext().pdb));
+
+    /* 4. Restore obfuscation *if* this DB uses it               */
+    const bool has_nonzero_key =
+        std::any_of(obfuscate_key.begin(), obfuscate_key.end(),
+                    [](unsigned char b){ return b != 0; });
+
+    if (has_nonzero_key) {
+        // always write; the DB is brand-new so the key doesn’t exist yet
+        Write(OBFUSCATE_KEY_KEY, obfuscate_key);
+    }
+}
+
+
+
 struct CDBIterator::IteratorImpl {
     const std::unique_ptr<leveldb::Iterator> iter;
 

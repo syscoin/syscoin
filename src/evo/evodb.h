@@ -135,35 +135,53 @@ public:
         setEraseCache.insert(key);
     }
 
-    bool FlushCacheToDisk() {
+    bool FlushCacheToDisk(std::size_t CHUNK_ITEMS = 256)
+    {
         LOCK(cs);
+        if (mapCache.empty() && setEraseCache.empty()) return true;
 
-        // If there is nothing to flush, we can return true early.
-        if (mapCache.empty() && setEraseCache.empty()) {
-            return true;
-        }
-
-        // Prepare the batch with our pending writes + erases.
         CDBBatch batch(*this);
-        for (const auto& [key, it] : mapCache) {
-            batch.Write(key, it->second);
-        }
-        for (const auto& key : setEraseCache) {
-            batch.Erase(key);
+        std::size_t items = 0;
+        std::size_t count = 0;
+        auto flush = [&]() {
+            if (batch.SizeEstimate() == 0) return true;
+            if (!WriteBatch(batch, /*sync=*/true)) return false;
+            batch.Clear();
+            items = 0;
+            return true;
+        };
+
+        while (!fifoList.empty()) {
+            batch.Write(fifoList.front().first, fifoList.front().second);
+            ++items;
+            count++;
+            if (items == CHUNK_ITEMS || fifoList.size() == 1) {
+                if (!flush()) return false;
+            }
+            mapCache.erase(fifoList.front().first);
+            fifoList.pop_front();
         }
 
-        // Attempt to write the batch. If it fails, do NOT clear the caches.
-        bool res = WriteBatch(batch, true);
-        if (res) {
-            LogPrint(BCLog::SYS, "Flushing cache (%s) to disk, storing %d items, erasing %d items\n",
-                    GetName(), mapCache.size(), setEraseCache.size());
-            // Only clear our in-memory structures on success
-            mapCache.clear();
-            fifoList.clear();
-            setEraseCache.clear();
+        items = 0;
+        for (auto it = setEraseCache.begin(); it != setEraseCache.end(); ) {
+            batch.Erase(*it);
+            ++items;
+            count++;
+            if (items == CHUNK_ITEMS) {
+                if (!flush()) return false;
+                it = setEraseCache.erase(setEraseCache.begin(), ++it);
+                items = 0;
+            } else {
+                ++it;
+            }
         }
+        if (!flush()) return false;
+        setEraseCache.clear();
 
-        return res;
+        LogPrint(BCLog::SYS,
+                "Flushed %zu items to cache (%s) in %zu-item chunks (sync_each=1)\n",
+                count, GetName().c_str(), CHUNK_ITEMS);
+        return true;
     }
 
     int64_t CountPersistedEntries() {

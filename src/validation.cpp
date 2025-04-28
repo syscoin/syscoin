@@ -3194,7 +3194,7 @@ bool Chainstate::FlushStateToDisk(
             if (pnevmtxmintdb && !pnevmtxmintdb->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx mint db");
             }
-            if (deterministicMNManager && !deterministicMNManager->FlushCacheToDisk()) {
+            if (deterministicMNManager && !deterministicMNManager->FlushCacheToDisk(mode == FlushStateMode::ALWAYS)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit DMN DB");
             }
             if (governance && !governance->FlushCacheToDisk()) {
@@ -3203,7 +3203,7 @@ bool Chainstate::FlushStateToDisk(
             if (llmq::quorumBlockProcessor && !llmq::quorumBlockProcessor->FlushCacheToDisk()) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QC DB");
             }
-            if (llmq::quorumManager && !llmq::quorumManager->FlushCacheToDisk()) {
+            if (llmq::quorumManager && !llmq::quorumManager->FlushCacheToDisk(mode == FlushStateMode::ALWAYS)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QM DB");
             }
             
@@ -6793,24 +6793,42 @@ void CBlockIndexDB::FlushDataToCache(const std::vector<std::pair<uint256,uint32_
         mapCache.try_emplace(key, val);
     }
 }
-bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight) {
-    if(mapCache.empty()) {
-        return true;
-    }
+bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight,
+                                     std::size_t CHUNK_ITEMS)
+{
+    if (mapCache.empty()) return true;
+
     CDBBatch batch(*this);
+    std::size_t items = 0;
+    std::size_t count = 0;
+    /* prune first so we don’t write obsolete entries */
     Prune(nHeight, batch);
-    for (auto const& [key, val] : mapCache) {
-        batch.Write(key, val);
+
+    auto flush = [&]() {
+        if (batch.SizeEstimate() == 0) return true;
+        if (!WriteBatch(batch, /*sync=*/true)) return false;
+        batch.Clear();
+        items = 0;
+        return true;
+    };
+
+    for (auto it = mapCache.begin(); it != mapCache.end(); ) {
+        batch.Write(it->first, it->second);
+        count++;
+        if (++items == CHUNK_ITEMS) {
+            if (!flush()) return false;
+        }
+        // safe to erase now – record is durable
+        it = mapCache.erase(it);
     }
-    if(mapCache.size() > 0)
-        LogPrint(BCLog::SYS, "Flush writing %d block indexes\n", mapCache.size());
-   
-    bool res = WriteBatch(batch, true);
-    if(res) {
-        mapCache.clear();
-    }
-    return res;
+    if (!flush()) return false;
+
+    LogPrint(BCLog::SYS,
+             "Flushed %zu block-index entries (chunk=%zu)\n",
+             count, CHUNK_ITEMS);
+    return true;
 }
+
 bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
     if(MAX_BLOCK_INDEX > nHeight) {
         LogPrintf("PruneIndex not enough blocks, not pruning\n");

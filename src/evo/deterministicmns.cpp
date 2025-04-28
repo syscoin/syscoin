@@ -645,21 +645,21 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         if(!ibd || (fNEVMConnection && fNexusActive && newList.m_changed_nevm_address)) {
             oldList.BuildDiff(newList, diff, diffNEVM);
         }
+        if(!ibd) {
+            if (diff.HasChanges()) {
+                GetMainSignals().NotifyMasternodeListChanged(false, oldList, diff);
+            }
+            // always update interface for payment detail changes
+            uiInterface.NotifyMasternodeListChanged(newList);
+        }
         {
             LOCK(cs);
-            m_evoDb->WriteCache(newList.GetBlockHash(), ibd? std::move(newList): newList);
+            m_evoDb->WriteCache(pindex->GetBlockHash(), std::move(newList));
         }
        
     } catch (const std::exception& e) {
         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- internal error: %s\n", __func__, e.what());
         return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "failed-dmn-block");
-    }
-    if(!ibd) {
-        if (diff.HasChanges()) {
-            GetMainSignals().NotifyMasternodeListChanged(false, oldList, diff);
-        }
-        // always update interface for payment detail changes
-        uiInterface.NotifyMasternodeListChanged(newList);
     }
 
     return true;
@@ -1059,28 +1059,22 @@ bool CDeterministicMNManager::IsDIP3Enforced(int nHeight)
     return nHeight >= Params().GetConsensus().DIP0003EnforcementHeight;
 }
 
-void CDeterministicMNManager::DoMaintenance() {
+bool CDeterministicMNManager::DoMaintenance(bool bForceFlush) {
     LOCK(cs);
     if (m_evoDb->IsCacheFull()) {
-        DBParams db_params = m_evoDb->GetDBParams();
-        // Create copies of the current caches
-        auto mapCacheCopy = m_evoDb->GetMapCacheCopy();
-        auto eraseCacheCopy = m_evoDb->GetEraseCacheCopy();
-
-        db_params.wipe_data = true; // Set the wipe_data flag to true
-        m_evoDb.reset(); // Destroy the current instance
-        m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>>(db_params, LIST_CACHE_SIZE);
-        // Restore the caches from the copies
-        m_evoDb->RestoreCaches(mapCacheCopy, eraseCacheCopy);
+        m_evoDb->ResetDB();
+        bForceFlush = true;
         LogPrint(BCLog::SYS, "CDeterministicMNManager::DoMaintenance Database successfully wiped and recreated.\n");
     }
-}
-bool CDeterministicMNManager::FlushCacheToDisk() {
-    DoMaintenance();
-    {
-        LOCK(cs);
-        return m_evoDb->FlushCacheToDisk();
+    if(bForceFlush) {
+        if(!m_evoDb->FlushCacheToDisk()) {
+            return false;
+        }
     }
+    return true;
+}
+bool CDeterministicMNManager::FlushCacheToDisk(bool bForceFlush) {
+    return DoMaintenance(bForceFlush);
 }
 bool CDeterministicMNManager::GetEvoDBStats(EvoDBStats& stats)
 {

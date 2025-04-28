@@ -387,49 +387,38 @@ void CQuorumManager::StartCachePopulatorThread(const CQuorumCPtr pQuorum) const
     });
 }
 
-void CQuorumManager::DoMaintenance() {
+bool CQuorumManager::DoMaintenance(bool bForceFlush) {
     {
         LOCK(evoDb_vvec->cs);
         if (evoDb_vvec->IsCacheFull()) {
-            DBParams db_params = evoDb_vvec->GetDBParams();
-            // Create copies of the current caches
-            auto mapCacheCopy = evoDb_vvec->GetMapCacheCopy();
-            auto eraseCacheCopy = evoDb_vvec->GetEraseCacheCopy();
-
-            db_params.wipe_data = true; // Set the wipe_data flag to true
-            evoDb_vvec.reset(); // Destroy the current instance
-            
-            evoDb_vvec = std::make_unique<CEvoDB<uint256, std::vector<CBLSPublicKey>, StaticSaltedHasher>>(db_params, QUORUM_CACHE_SIZE);
-            // Restore the caches from the copies
-            evoDb_vvec->RestoreCaches(mapCacheCopy, eraseCacheCopy);
+            evoDb_vvec->ResetDB();
+            bForceFlush = true;
             LogPrint(BCLog::SYS, "CQuorumManager::DoMaintenance evoDb_vvec Database successfully wiped and recreated.\n");
+        }
+        if(bForceFlush) {
+            if(!evoDb_vvec->FlushCacheToDisk()) {
+                return false;
+            }
         }
     }
     {
         LOCK(evoDb_sk->cs);
         if (evoDb_sk->IsCacheFull()) {
-            DBParams db_params = evoDb_sk->GetDBParams();
-            // Create copies of the current caches
-            auto mapCacheCopy = evoDb_sk->GetMapCacheCopy();
-            auto eraseCacheCopy = evoDb_sk->GetEraseCacheCopy();
-
-            db_params.wipe_data = true; // Set the wipe_data flag to true
-            evoDb_sk.reset(); // Destroy the current instance
-            evoDb_sk = std::make_unique<CEvoDB<uint256, CBLSSecretKey, StaticSaltedHasher>>(db_params, QUORUM_CACHE_SIZE);
-            // Restore the caches from the copies
-            evoDb_sk->RestoreCaches(mapCacheCopy, eraseCacheCopy);
+            evoDb_sk->ResetDB();
+            bForceFlush = true;
             LogPrint(BCLog::SYS, "CQuorumManager::DoMaintenance evoDb_sk Database successfully wiped and recreated.\n");
         }
+        if(bForceFlush) {
+            if(!evoDb_sk->FlushCacheToDisk()) {
+                return false;
+            }
+        }
     }
+    return true;
 }
-bool CQuorumManager::FlushCacheToDisk() {
-    DoMaintenance();
-    {
-        LOCK2(evoDb_vvec->cs, evoDb_sk->cs);
-        return evoDb_vvec->FlushCacheToDisk() && evoDb_sk->FlushCacheToDisk();
-    }
+bool CQuorumManager::FlushCacheToDisk(bool bForceFlush) {
+    return DoMaintenance(bForceFlush);
 }
-
 
 CQuorumCPtr SelectQuorumForSigning(ChainstateManager& chainman,
                                    const uint256& selectionHash, int signHeight, int signOffset)
