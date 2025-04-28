@@ -34,6 +34,8 @@ class LLMQDKGErrors(DashTestFramework):
         qh = self.mine_quorum()
         self.assert_member_valid(qh, self.mninfo[0].proTxHash, True)
 
+        mninfos_valid = self.mninfo.copy()[1:]
+
         self.log.info("Lets omit the contribution")
         self.mninfo[0].node.quorum_dkgsimerror('contribution-omit', 1)
         qh = self.mine_quorum(expected_contributions=2)

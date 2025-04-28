@@ -6,7 +6,7 @@ import time
 
 from test_framework.test_framework import DashTestFramework
 from test_framework.util import force_finish_mnsync, p2p_port
-
+from test_framework.masternodes import check_banned, check_punished
 
 '''
 feature_llmqsimplepose.py
@@ -29,7 +29,15 @@ class LLMQSimplePoSeTest(DashTestFramework):
         self.skip_if_no_wallet()
         self.skip_if_no_bdb()
 
+    def add_options(self, parser):
+        parser.add_argument("--disable-spork23", dest="disable_spork23", default=False, action="store_true",
+                            help="Test with spork23 disabled")
+
     def run_test(self):
+        if self.options.disable_spork23:
+            self.nodes[0].sporkupdate("SPORK_23_QUORUM_POSE", 4070908800)
+        else:
+            self.nodes[0].sporkupdate("SPORK_23_QUORUM_POSE", 0)
         self.deaf_mns = []
         self.sync_blocks(self.nodes, timeout=60*5)
         for i in range(len(self.nodes)):
@@ -37,47 +45,32 @@ class LLMQSimplePoSeTest(DashTestFramework):
         self.nodes[0].spork("SPORK_17_QUORUM_DKG_ENABLED", 0)
         self.wait_for_sporks_same()
 
-        # check if mining quorums with all nodes being online succeeds without punishment/banning
-        self.test_no_banning()
-
-        # Now lets isolate MNs one by one and verify that punishment/banning happens
+        # Lets isolate MNs one by one and verify that punishment/banning happens
         self.test_banning(self.isolate_mn, 2)
 
         self.repair_masternodes(False)
 
-        self.nodes[0].spork("SPORK_21_QUORUM_ALL_CONNECTED", 0)
-        self.nodes[0].spork("SPORK_23_QUORUM_POSE", 0)
-        self.generate_helper(self.nodes[0], 5)
+        self.nodes[0].sporkupdate("SPORK_21_QUORUM_ALL_CONNECTED", 0)
         self.wait_for_sporks_same()
 
         self.reset_probe_timeouts()
 
-        # Make sure no banning happens with spork21 enabled
-        self.test_no_banning()
-        for i in range(len(self.nodes)):
-            force_finish_mnsync(self.nodes[i])
-        # Lets restart masternodes with closed ports and verify that they get banned even though they are connected to other MNs (via outbound connections)
-        self.test_banning(self.close_mn_port)
+        if not self.options.disable_spork23:
+            # Lets restart masternodes with closed ports and verify that they get banned even though they are connected to other MNs (via outbound connections)
+            self.test_banning(self.close_mn_port)
+        else:
+            # With PoSe off there should be no punishing for non-reachable nodes
+            self.test_no_banning(self.close_mn_port, 3)
+
+
         self.deaf_mns.clear()
-
         self.repair_masternodes(True)
-        self.reset_probe_timeouts()
-        for i in range(len(self.nodes)):
-            force_finish_mnsync(self.nodes[i])
-        self.test_banning(self.force_old_mn_proto, 3)
 
-        # With PoSe off there should be no punishing for non-reachable and outdated nodes
-        self.nodes[0].spork("SPORK_23_QUORUM_POSE", 4070908800)
-        self.wait_for_sporks_same()
-
-        self.repair_masternodes(True)
-        self.force_old_mn_proto(self.mninfo[0])
-        self.test_no_banning(3)
-
-        self.repair_masternodes(True)
-        self.close_mn_port(self.mninfo[0])
-        self.deaf_mns.clear()
-        self.test_no_banning(3)
+        if not self.options.disable_spork23:
+            self.test_banning(self.force_old_mn_proto, 3)
+        else:
+            # With PoSe off there should be no punishing for outdated nodes
+            self.test_no_banning(self.force_old_mn_proto, 3)
 
     def isolate_mn(self, mn):
         mn.node.setnetworkactive(False)
@@ -103,15 +96,19 @@ class LLMQSimplePoSeTest(DashTestFramework):
         self.reset_probe_timeouts()
         return False, True
 
-    def test_no_banning(self, expected_connections=None):
+    def test_no_banning(self, invalidate_proc, expected_connections=None):
+        invalidate_proc(self.mninfo[0])
         for i in range(3):
             self.mine_quorum(expected_connections=expected_connections)
-            for mn in self.mninfo:
-                assert not self.check_punished(mn) and not self.check_banned(mn)
 
     def test_banning(self, invalidate_proc, expected_connections=None):
         mninfos_online = self.mninfo.copy()
         mninfos_valid = self.mninfo.copy()
+
+        for mn in mninfos_valid:
+            assert not check_punished(self.nodes[0], mn)
+            assert not check_banned(self.nodes[0], mn)
+
         expected_contributors = len(mninfos_online)
         for i in range(2):
             self.log.info(f"Testing PoSe banning due to {invalidate_proc.__name__} {i + 1}/2")
@@ -130,7 +127,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
                 self.reset_probe_timeouts()
                 self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
 
-                if not self.check_banned(mn):
+                if not check_banned(self.nodes[0], mn):
                     self.log.info("Instant ban still requires 2 missing DKG round. If it is not banned yet, mine 2nd one")
                     self.reset_probe_timeouts()
                     self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
@@ -143,7 +140,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
                     self.reset_probe_timeouts()
                     self.mine_quorum(expected_connections=0, expected_members=expected_contributors, expected_contributions=0, expected_complaints=0, expected_commitments=0, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
 
-            assert self.check_banned(mn)
+            assert check_banned(self.nodes[0], mn)
 
             if not went_offline:
                 # we do not include PoSe banned mns in quorums, so the next one should have 1 contributor less
@@ -152,7 +149,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
     def repair_masternodes(self, restart):
         # Repair all nodes
         for mn in self.mninfo:
-            if self.check_banned(mn) or self.check_punished(mn):
+            if check_banned(self.nodes[0], mn) or check_punished(self.nodes[0], mn):
                 addr = self.nodes[0].getnewaddress()
                 self.nodes[0].sendtoaddress(addr, 0.1)
                 self.nodes[0].protx_update_service(mn.proTxHash, '127.0.0.1:%d' % p2p_port(mn.node.index), mn.keyOperator, "", addr)
@@ -175,7 +172,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
         
         # Isolate and re-connect all MNs (otherwise there might be open connections with no MNAUTH for MNs which were banned before)
         for mn in self.mninfo:
-            assert not self.check_banned(mn)
+            assert not check_banned(self.nodes[0], mn)
             mn.node.setnetworkactive(False)
             self.wait_until(lambda: mn.node.getconnectioncount() == 0)
             mn.node.setnetworkactive(True)
@@ -188,17 +185,6 @@ class LLMQSimplePoSeTest(DashTestFramework):
         # Sleep a couple of seconds to let mn sync tick to happen
         time.sleep(2)
 
-    def check_punished(self, mn):
-        info = self.nodes[0].protx_info(mn.proTxHash)
-        if info['state']['PoSePenalty'] > 0:
-            return True
-        return False
-
-    def check_banned(self, mn):
-        info = self.nodes[0].protx_info(mn.proTxHash)
-        if info['state']['PoSeBanHeight'] != -1:
-            return True
-        return False
 
 if __name__ == '__main__':
     LLMQSimplePoSeTest().main()

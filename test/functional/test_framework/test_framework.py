@@ -23,6 +23,7 @@ import copy
 from typing import List
 from .address import create_deterministic_address_bcrt1_p2tr_op_true
 from .authproxy import JSONRPCException
+from test_framework.masternodes import check_banned, check_punished
 from . import coverage
 from .p2p import NetworkThread
 from .test_node import TestNode
@@ -1604,6 +1605,10 @@ class DashTestFramework(SyscoinTestFramework):
 
 
         self.log.info("New quorum: height=%d, quorumHash=%s, minedBlock=%s" % (quorum_info["height"], new_quorum, quorum_info["minedBlock"]))
+
+        for mn in mninfos_valid:
+            assert not check_punished(self.nodes[0], mn)
+            assert not check_banned(self.nodes[0], mn)
 
         return new_quorum
 
