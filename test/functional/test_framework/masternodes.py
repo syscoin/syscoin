@@ -5,9 +5,9 @@
 """Helpful routines for masternode regression testing."""
 
 def check_punished(node, mn):
-    info = node.protx('info', mn.proTxHash)
+    info = node.protx_info(mn.proTxHash)
     return info['state']['PoSePenalty'] > 0
 
 def check_banned(node, mn):
-    info = node.protx('info', mn.proTxHash)
+    info = node.protx_info(mn.proTxHash)
     return info['state']['PoSeBanHeight'] != -1
