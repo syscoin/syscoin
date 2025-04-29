@@ -59,8 +59,7 @@ void CDeterministicMNState::ToJson(UniValue& obj) const
 
 UniValue CDeterministicMNStateDiff::ToJson() const
 {
-    UniValue obj;
-    obj.setObject();
+    UniValue obj(UniValue::VOBJ);
     if (fields & Field_nVersion) {
         obj.pushKV("version", state.nVersion);
     }
