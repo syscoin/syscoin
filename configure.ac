@@ -454,16 +454,8 @@ if test "$enable_werror" = "yes"; then
   fi
   ERROR_CXXFLAGS=$CXXFLAG_WERROR
 
-  dnl -Warray-bounds and -Wdangling-reference cause problems with GCC. Do not treat these warnings as errors.
   dnl Suppress -Warray-bounds entirely because of noisy output, currently unhappy with immer implementation.
   AX_CHECK_COMPILE_FLAG([-Warray-bounds], [NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-array-bounds"], [], [$CXXFLAG_WERROR], [AC_LANG_SOURCE([
-    #if defined(__clang__) || defined(__INTEL_COMPILER) || !defined(__GNUC__)
-      #error Non-GCC compiler detected, not setting flag
-    #endif
-    int main(void) { return 0; }
-  ])])
-  dnl TODO: Remove suppression after backporting bitcoin#27605
-  AX_CHECK_COMPILE_FLAG([-Wdangling-reference], [NOWARN_CXXFLAGS="$NOWARN_CXXFLAGS -Wno-error=dangling-reference"], [], [$CXXFLAG_WERROR], [AC_LANG_SOURCE([
     #if defined(__clang__) || defined(__INTEL_COMPILER) || !defined(__GNUC__)
       #error Non-GCC compiler detected, not setting flag
     #endif
@@ -496,7 +488,6 @@ AX_CHECK_COMPILE_FLAG([-Woverloaded-virtual], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wo
 AX_CHECK_COMPILE_FLAG([-Wsuggest-override], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wsuggest-override"], [], [$CXXFLAG_WERROR])
 AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wimplicit-fallthrough"], [], [$CXXFLAG_WERROR])
 AX_CHECK_COMPILE_FLAG([-Wunreachable-code], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wunreachable-code"], [], [$CXXFLAG_WERROR])
-AX_CHECK_COMPILE_FLAG([-Wdocumentation], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wdocumentation"], [], [$CXXFLAG_WERROR])
 
 dnl Some compilers (gcc) ignore unknown -Wno-* options, but warn about all
 dnl unknown options if any other warning is produced. Test the -Wfoo case, and
