@@ -212,9 +212,9 @@ class NEVMDataTest(DashTestFramework):
         self.restart_node(1, extra_args=["-mocktime=" + str(self.mocktime), '-reindex', *self.extra_args[1]])
         force_finish_mnsync(self.nodes[1])
         for i in range(len(self.nodes[0:4])):
-            if i != 1:
-                self.connect_nodes(i, 1, wait_for_connect=False)
-                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 2:
+                self.connect_nodes(i, 2, wait_for_connect=False)
+                self.connect_nodes(2, i, wait_for_connect=False)
             if i != 0:
                 self.connect_nodes(i, 0, wait_for_connect=False)
                 self.connect_nodes(1, 0, wait_for_connect=False)
@@ -228,9 +228,9 @@ class NEVMDataTest(DashTestFramework):
         self.start_node(4, extra_args=["-mocktime=" + str(self.mocktime), *self.extra_args[4]])
         force_finish_mnsync(self.nodes[4])
         for i in range(len(self.nodes)):
-            if i != 1:
-                self.connect_nodes(i, 1, wait_for_connect=False)
-                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 2:
+                self.connect_nodes(i, 2, wait_for_connect=False)
+                self.connect_nodes(2, i, wait_for_connect=False)
             if i != 0:
                 self.connect_nodes(i, 0, wait_for_connect=False)
                 self.connect_nodes(1, 0, wait_for_connect=False)
@@ -245,9 +245,9 @@ class NEVMDataTest(DashTestFramework):
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
         for i in range(len(self.nodes)):
-            if i != 1:
-                self.connect_nodes(i, 1, wait_for_connect=False)
-                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 2:
+                self.connect_nodes(i, 2, wait_for_connect=False)
+                self.connect_nodes(2, i, wait_for_connect=False)
             if i != 0:
                 self.connect_nodes(i, 0, wait_for_connect=False)
                 self.connect_nodes(1, 0, wait_for_connect=False)
@@ -287,7 +287,6 @@ class NEVMDataTest(DashTestFramework):
         self.generate_helper(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid)
-        mtpbest = self.nodes[2].getblockheader(cl)['mediantime']
         assert_equal(self.nodes[0].getnevmblobdata(vh, True)['data'], vhData)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid1)
         print('Checking for invalid versionhash...')
@@ -301,9 +300,9 @@ class NEVMDataTest(DashTestFramework):
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
         for i in range(len(self.nodes)):
-            if i != 1:
-                self.connect_nodes(i, 1, wait_for_connect=False)
-                self.connect_nodes(1, i, wait_for_connect=False)
+            if i != 2:
+                self.connect_nodes(i, 2, wait_for_connect=False)
+                self.connect_nodes(2, i, wait_for_connect=False)
             if i != 0:
                 self.connect_nodes(i, 0, wait_for_connect=False)
                 self.connect_nodes(1, 0, wait_for_connect=False)
