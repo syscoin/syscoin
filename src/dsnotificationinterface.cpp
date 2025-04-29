@@ -21,10 +21,8 @@ void CDSNotificationInterface::InitializeCurrentBlockTip(ChainstateManager& chai
     
     {
         LOCK(cs_main);
-        const CBlockIndex *pindex = chainman.ActiveChain().Tip();
+        SynchronousUpdatedBlockTip(chainman.ActiveChain().Tip(), nullptr, chainman.IsInitialBlockDownload());
         UpdatedBlockTip(chainman.ActiveChain().Tip(), nullptr, chainman, chainman.IsInitialBlockDownload());
-        if(deterministicMNManager)
-            deterministicMNManager->UpdatedBlockTip(pindex);
     }
 }
 
@@ -36,6 +34,16 @@ void CDSNotificationInterface::NotifyHeaderTip(const CBlockIndex *pindexNew)
     masternodeSync.NotifyHeaderTip(pindexNew);
 }
 
+void CDSNotificationInterface::SynchronousUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
+{
+    assert(deterministicMNManager);
+
+    if (pindexNew == pindexFork || ShutdownRequested()) // blocks were disconnected without any new ones
+        return;
+
+    deterministicMNManager->UpdatedBlockTip(pindexNew);
+}
+
 void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload)
 {
     if (pindexNew == pindexFork || ShutdownRequested()) // blocks were disconnected without any new ones
@@ -45,8 +53,6 @@ void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, con
 
     if (fInitialDownload)
         return;
-    if(deterministicMNManager)
-        deterministicMNManager->UpdatedBlockTip(pindexNew);
     if(llmq::quorumManager)
         llmq::quorumManager->UpdatedBlockTip(pindexNew, fInitialDownload);
     if(llmq::quorumDKGSessionManager)
