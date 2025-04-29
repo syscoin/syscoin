@@ -493,35 +493,36 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     // Invalid ProTxes should never get this far because transactions should be
     // fully checked by AcceptToMemoryPool() at this point, so we just assume that
     // everything is fine here.
+    const uint256 tx_hash{tx.GetHash()};
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if(GetTxPayload(tx, proTx)) {
             if (!proTx.collateralOutpoint.hash.IsNull()) {
-                mapProTxRefs.emplace(tx.GetHash(), proTx.collateralOutpoint.hash);
+                mapProTxRefs.emplace(tx_hash, proTx.collateralOutpoint.hash);
             }
-            mapProTxAddresses.emplace(proTx.addr, tx.GetHash());
-            mapProTxPubKeyIDs.emplace(proTx.keyIDOwner, tx.GetHash());
-            mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx.GetHash());
+            mapProTxAddresses.emplace(proTx.addr, tx_hash);
+            mapProTxPubKeyIDs.emplace(proTx.keyIDOwner, tx_hash);
+            mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx_hash);
             if (!proTx.collateralOutpoint.hash.IsNull()) {
-                mapProTxCollaterals.emplace(proTx.collateralOutpoint, tx.GetHash());
+                mapProTxCollaterals.emplace(proTx.collateralOutpoint, tx_hash);
             } else {
-                mapProTxCollaterals.emplace(COutPoint(tx.GetHash(), proTx.collateralOutpoint.n), tx.GetHash());
+                mapProTxCollaterals.emplace(COutPoint(tx_hash, proTx.collateralOutpoint.n), tx_hash);
             }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
         CProUpServTx proTx;
         if(GetTxPayload(tx, proTx)) {
-            mapProTxRefs.emplace(proTx.proTxHash, tx.GetHash());
-            mapProTxAddresses.emplace(proTx.addr, tx.GetHash());
+            mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
+            mapProTxAddresses.emplace(proTx.addr, tx_hash);
             if(!proTx.vchNEVMAddress.empty()) {
-                mapProTxNEVMAddresses.emplace(proTx.vchNEVMAddress, tx.GetHash());
+                mapProTxNEVMAddresses.emplace(proTx.vchNEVMAddress, tx_hash);
             }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if(GetTxPayload(tx, proTx)) {
-            mapProTxRefs.emplace(proTx.proTxHash, tx.GetHash());
-            mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx.GetHash());
+            mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
+            mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx_hash);
             auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
             if(dmn) {
                 newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
@@ -533,7 +534,7 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if(GetTxPayload(tx, proTx)) {
-            mapProTxRefs.emplace(proTx.proTxHash, tx.GetHash());
+            mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
             auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
             if(dmn) {
                 newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
@@ -603,23 +604,23 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
             }
         }
     };
-
+    const uint256 tx_hash{it->GetTx().GetHash()};
     if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) {
             if (!proTx.collateralOutpoint.IsNull()) {
-                eraseProTxRef(it->GetTx().GetHash(), proTx.collateralOutpoint.hash);
+                eraseProTxRef(tx_hash, proTx.collateralOutpoint.hash);
             }
             mapProTxAddresses.erase(proTx.addr);
             mapProTxPubKeyIDs.erase(proTx.keyIDOwner);
             mapProTxBlsPubKeyHashes.erase(proTx.pubKeyOperator.GetHash());
             mapProTxCollaterals.erase(proTx.collateralOutpoint);
-            mapProTxCollaterals.erase(COutPoint(it->GetTx().GetHash(), proTx.collateralOutpoint.n));
+            mapProTxCollaterals.erase(COutPoint(tx_hash, proTx.collateralOutpoint.n));
         }
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
         CProUpServTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) {
-            eraseProTxRef(proTx.proTxHash, it->GetTx().GetHash());
+            eraseProTxRef(proTx.proTxHash, tx_hash);
             mapProTxAddresses.erase(proTx.addr);
             if(!proTx.vchNEVMAddress.empty()) {
                 mapProTxNEVMAddresses.erase(proTx.vchNEVMAddress);
@@ -628,13 +629,13 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) { 
-            eraseProTxRef(proTx.proTxHash, it->GetTx().GetHash());
+            eraseProTxRef(proTx.proTxHash, tx_hash);
             mapProTxBlsPubKeyHashes.erase(proTx.pubKeyOperator.GetHash());
         }
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) {
-            eraseProTxRef(proTx.proTxHash, it->GetTx().GetHash());
+            eraseProTxRef(proTx.proTxHash, tx_hash);
         }
     }
     // remove nevm tx from mempool structure
@@ -975,17 +976,17 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
     removeProTxSpentCollateralConflicts(tx);
-
+    const uint256 tx_hash{tx.GetHash()};
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return;
         }
 
         if (mapProTxAddresses.count(proTx.addr)) {
             uint256 conflictHash = mapProTxAddresses[proTx.addr];
-            if (conflictHash != tx.GetHash() && mapTx.count(conflictHash)) {
+            if (conflictHash != tx_hash && mapTx.count(conflictHash)) {
                 removeRecursive(mapTx.find(conflictHash)->GetTx(), MemPoolRemovalReason::CONFLICT);
             }
         }
@@ -994,18 +995,18 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
         if (!proTx.collateralOutpoint.hash.IsNull()) {
             removeProTxCollateralConflicts(tx, proTx.collateralOutpoint);
         } else {
-            removeProTxCollateralConflicts(tx, COutPoint(tx.GetHash(), proTx.collateralOutpoint.n));
+            removeProTxCollateralConflicts(tx, COutPoint(tx_hash, proTx.collateralOutpoint.n));
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
         CProUpServTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return;
         }
 
         if (mapProTxAddresses.count(proTx.addr)) {
             uint256 conflictHash = mapProTxAddresses[proTx.addr];
-            if (conflictHash != tx.GetHash() && mapTx.count(conflictHash)) {
+            if (conflictHash != tx_hash && mapTx.count(conflictHash)) {
                 removeRecursive(mapTx.find(conflictHash)->GetTx(), MemPoolRemovalReason::CONFLICT);
             }
         }
@@ -1013,7 +1014,7 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return;
         }
 
@@ -1022,7 +1023,7 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return;
         }
 
@@ -1316,11 +1317,11 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
         }
         return false;
     };
-
+    const uint256 tx_hash{tx.GetHash()};
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return true; // i.e. can't decode payload == conflict
         }
         if (mapProTxAddresses.count(proTx.addr) || mapProTxPubKeyIDs.count(proTx.keyIDOwner) || mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()))
@@ -1339,26 +1340,26 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
         CProUpServTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return true; // i.e. can't decode payload == conflict
         }
         if(proTx.addr != CService()) {
             if(mapProTxAddresses.count(proTx.addr)) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx.GetHash().ToString());
+                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx_hash.ToString());
                 return true;
             }
         }
         if(!proTx.vchNEVMAddress.empty()) {
             // Check NEVM address uniqueness
             if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx.GetHash().ToString());
+                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx_hash.ToString());
                 return true;
             }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return true;
         }
     
@@ -1370,20 +1371,20 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
         // only allow one operator key change in the mempool
         if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
             if (hasKeyChangeInMempool(proTx.proTxHash)) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Key change already in mempool (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
+                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Key change already in mempool (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx_hash.ToString());
                 return true;
             }
         }
         if(proTx.pubKeyOperator.Get().IsValid()) {
             if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx.GetHash().ToString());
+                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx_hash.ToString());
                 return true;
             }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx.GetHash().ToString());
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return true; // i.e. can't decode payload == conflict
         }
 
