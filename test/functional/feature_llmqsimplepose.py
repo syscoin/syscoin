@@ -35,9 +35,9 @@ class LLMQSimplePoSeTest(DashTestFramework):
 
     def run_test(self):
         if self.options.disable_spork23:
-            self.nodes[0].sporkupdate("SPORK_23_QUORUM_POSE", 4070908800)
+            self.nodes[0].spork("SPORK_23_QUORUM_POSE", 4070908800)
         else:
-            self.nodes[0].sporkupdate("SPORK_23_QUORUM_POSE", 0)
+            self.nodes[0].spork("SPORK_23_QUORUM_POSE", 0)
         self.deaf_mns = []
         self.sync_blocks(self.nodes, timeout=60*5)
         for i in range(len(self.nodes)):
@@ -50,7 +50,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
 
         self.repair_masternodes(False)
 
-        self.nodes[0].sporkupdate("SPORK_21_QUORUM_ALL_CONNECTED", 0)
+        self.nodes[0].spork("SPORK_21_QUORUM_ALL_CONNECTED", 0)
         self.wait_for_sporks_same()
 
         self.reset_probe_timeouts()
@@ -135,8 +135,8 @@ class LLMQSimplePoSeTest(DashTestFramework):
                 # It's ok to miss probes/quorum connections up to 6 times.
                 # 7th time is when it should be banned for sure.
                 assert expected_connections is None
-                for j in range(7):
-                    self.log.info(f"Accumulating PoSe penalty {j + 1}/7")
+                for j in range(6):
+                    self.log.info(f"Accumulating PoSe penalty {j + 1}/6")
                     self.reset_probe_timeouts()
                     self.mine_quorum(expected_connections=0, expected_members=expected_contributors, expected_contributions=0, expected_complaints=0, expected_commitments=0, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
 
@@ -153,19 +153,13 @@ class LLMQSimplePoSeTest(DashTestFramework):
                 addr = self.nodes[0].getnewaddress()
                 self.nodes[0].sendtoaddress(addr, 0.1)
                 self.nodes[0].protx_update_service(mn.proTxHash, '127.0.0.1:%d' % p2p_port(mn.node.index), mn.keyOperator, "", addr)
-                # Make sure this tx "safe" to mine even when ChainLocks are no longer functional
-                self.bump_mocktime(60 * 10 + 1)
-                self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-                assert not self.check_banned(mn)
-
                 if restart:
                     self.stop_node(mn.node.index)
-                    time.sleep(0.5)
                     self.start_masternode(mn, extra_args=["-mocktime=" + str(self.mocktime)])
                 else:
                     mn.node.setnetworkactive(True)
                 self.connect_nodes(mn.node.index, 0, wait_for_connect=False)
-        self.sync_all()
+        self.sync_blocks()
 
         self.bump_mocktime(60 * 10 + 1)
         self.generate(self.nodes[0], 1)

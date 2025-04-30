@@ -178,6 +178,7 @@ BASE_SCRIPTS = [
     'p2p_compactblocks.py',
     'p2p_compactblocks_blocksonly.py',
     'feature_llmqsimplepose.py',
+    'feature_llmq_simplepose.py --disable-spork23',
     'wallet_hd.py --legacy-wallet',
     'wallet_hd.py --descriptors',
     'wallet_blank.py --legacy-wallet',
