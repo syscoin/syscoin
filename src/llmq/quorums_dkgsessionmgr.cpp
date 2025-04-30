@@ -30,7 +30,7 @@ CDKGSessionManager::CDKGSessionManager(CBLSWorker& blsWorker, CConnman &_connman
         // SYSCOIN use 64MB cache for vvecs
         .cache_bytes = static_cast<size_t>(1 << 26),
         .memory_only = unitTests,
-        .wipe_data = fWipe});
+        .wipe_data = false});
     dkgSessionHandler = std::make_unique<CDKGSessionHandler>(
         blsWorker, 
         *this, 
