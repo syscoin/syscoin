@@ -136,7 +136,7 @@ def contains_bitcoin_addr(text, errors):
     return False
 
 def contains_syscoin_addr(text, errors):
-    if text is not None and ADDRESS_REGEXP_SYSCOIN.search(text) is not None:
+    if text is not None and ADDRESS_REGEXP_SYS.search(text) is not None:
         errors.append('Translation "%s" contains a Syscoin address. This will be removed.' % (text))
         return True
     return False
