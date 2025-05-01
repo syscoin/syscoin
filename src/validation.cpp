@@ -3903,7 +3903,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             // Enqueue while holding cs_main to ensure that UpdatedBlockTip is called in the order in which blocks are connected
             if (this == &m_chainman.ActiveChainstate() && pindexFork != pindexNewTip) {
                 // SYSCOIN Notify ValidationInterface subscribers
-                GetMainSignals().SynchronousUpdatedBlockTip(pindexNewTip, pindexFork, still_in_ibd);
+                if(deterministicMNManager)
+                    deterministicMNManager->UpdatedBlockTip(pindexNewTip);
                 GetMainSignals().UpdatedBlockTip(pindexNewTip, pindexFork, m_chainman, still_in_ibd);
                 // Always notify the UI if a new block tip was connected
                 if (kernel::IsInterrupted(m_chainman.GetNotifications().blockTip(GetSynchronizationState(still_in_ibd), *pindexNewTip))) {
@@ -4176,7 +4177,8 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
 
         InvalidChainFound(to_mark_failed);
         // SYSCOIN
-        GetMainSignals().SynchronousUpdatedBlockTip(m_chain.Tip(), nullptr, m_chainman.IsInitialBlockDownload());
+        if(deterministicMNManager)
+            deterministicMNManager->UpdatedBlockTip(m_chain.Tip());
     }
     // Only notify about a new block tip if the active chain was modified.
     if (pindex_was_in_chain) {
@@ -4263,7 +4265,8 @@ bool Chainstate::MarkConflictingBlock(BlockValidationState& state, CBlockIndex *
     }
 
     ConflictingChainFound(pindex);
-    GetMainSignals().SynchronousUpdatedBlockTip(m_chain.Tip(), nullptr, false);
+    if(deterministicMNManager)
+        deterministicMNManager->UpdatedBlockTip(m_chain.Tip());
     GetMainSignals().UpdatedBlockTip(m_chain.Tip(), nullptr, m_chainman, false);
 
     // Only notify about a new block tip if the active chain was modified.

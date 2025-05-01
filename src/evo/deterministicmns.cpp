@@ -648,10 +648,7 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
             // always update interface for payment detail changes
             uiInterface.NotifyMasternodeListChanged(newList);
         }
-        {
-            LOCK(cs);
-            m_evoDb->WriteCache(pindex->GetBlockHash(), std::move(newList));
-        }
+        m_evoDb->WriteCache(pindex->GetBlockHash(), std::move(newList));
        
     } catch (const std::exception& e) {
         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- internal error: %s\n", __func__, e.what());
@@ -668,11 +665,7 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
 
     CDeterministicMNList curList;
     CDeterministicMNList prevList;
-    bool readCache = false;
-    {
-        LOCK(cs);
-        readCache = m_evoDb->ReadCache(blockHash, curList);
-    }
+    bool readCache = m_evoDb->ReadCache(blockHash, curList);
     if(readCache) {
         prevList = GetListForBlockInternal(pindex->pprev);
         CDeterministicMNListDiff inversedDiff;
@@ -991,15 +984,12 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(cons
     if (!fDIP0003Active) {
         return snapshot;
     }
-    {
-        LOCK(cs);
-        if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot)) {
-            snapshot = CDeterministicMNList(pindex->GetBlockHash(), pindex->nHeight, 0);
-            m_evoDb->WriteCache(pindex->GetBlockHash(), snapshot);
-            LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- initial snapshot. blockHash=%s nHeight=%d\n", __func__,
-                        snapshot.GetBlockHash().ToString(), snapshot.GetHeight());
-            return snapshot;
-        }
+    if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot)) {
+        snapshot = CDeterministicMNList(pindex->GetBlockHash(), pindex->nHeight, 0);
+        m_evoDb->WriteCache(pindex->GetBlockHash(), snapshot);
+        LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- initial snapshot. blockHash=%s nHeight=%d\n", __func__,
+                    snapshot.GetBlockHash().ToString(), snapshot.GetHeight());
+        return snapshot;
     }
     assert(snapshot.GetHeight() != -1);
     return snapshot;
@@ -1052,7 +1042,7 @@ bool CDeterministicMNManager::IsDIP3Enforced(int nHeight)
 }
 
 bool CDeterministicMNManager::DoMaintenance(bool bForceFlush) {
-    LOCK(cs);
+    LOCK(m_evoDb->cs);
     if (m_evoDb->IsCacheFull()) {
         m_evoDb->ResetDB();
         bForceFlush = true;
@@ -1070,8 +1060,6 @@ bool CDeterministicMNManager::FlushCacheToDisk(bool bForceFlush) {
 }
 bool CDeterministicMNManager::GetEvoDBStats(EvoDBStats& stats)
 {
-    LOCK(cs); // Lock the manager's mutex
-
     if (!m_evoDb) {
         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- EvoDB not initialized.\n", __func__);
         stats = {}; // Clear stats

@@ -208,9 +208,11 @@ public:
         }
     }
     size_t GetReadWriteCacheSize() {
+        LOCK(cs);
         return mapCache.size();
     }
     size_t GetEraseCacheSize() {
+        LOCK(cs);
         return setEraseCache.size();
     }
     // Getter for testing purposes

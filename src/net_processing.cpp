@@ -222,8 +222,6 @@ struct QueuedBlock {
  */
 struct CNodeState {
     // SYSCOIN
-    //! The peer's address
-    const CService address;
     //! The best known block we know this peer has announced.
     const CBlockIndex* pindexBestKnownBlock{nullptr};
     //! The hash of the last unknown block this peer has announced.
@@ -290,7 +288,7 @@ struct CNodeState {
     const bool m_is_inbound;
 
     // SYSCOIN
-    CNodeState(CAddress addrIn, bool is_inbound) : address(addrIn), m_is_inbound(is_inbound) {}
+    CNodeState(bool is_inbound) : m_is_inbound(is_inbound) {}
 };
 
 class PeerManagerImpl final : public PeerManager
@@ -1403,7 +1401,7 @@ void PeerManagerImpl::InitializeNode(CNode& node, ServiceFlags our_services)
     {
         LOCK(cs_main);
         // SYSCOIN
-        m_node_states.emplace_hint(m_node_states.end(), std::piecewise_construct, std::forward_as_tuple(nodeid), std::forward_as_tuple(node.addr, node.IsInboundConn()));
+        m_node_states.emplace_hint(m_node_states.end(), std::piecewise_construct, std::forward_as_tuple(nodeid), std::forward_as_tuple(node.IsInboundConn()));
         assert(m_txrequest.Count(nodeid) == 0);
     }
     PeerRef peer = std::make_shared<Peer>(nodeid, our_services);
