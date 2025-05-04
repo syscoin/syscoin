@@ -74,6 +74,29 @@ class LLMQChainLocksTest(DashTestFramework):
         self.generate(self.nodes[0], 5)
 
         self.wait_for_chainlocked_block_all_nodes(cl)
+        self.log.info("Stop half the nodes to ensure chainlocks don't form")
+        self.stop_node(2)
+        self.stop_node(3)
+        self.log.info("Check recent_chainlock forms but not an active chainlock")
+        self.nodes[0].getbestblockhash()
+        self.generate(self.nodes[0], 5, sync_fun=self.no_op)
+        time.sleep(5)
+        # bump cleanup for seen shares
+        self.bump_mocktime(30, self.nodes[0:2])
+        assert self.nodes[0].getbestchainlock()['blockhash'] == cl
+        assert self.nodes[1].getbestchainlock()['blockhash'] == cl
+        self.log.info("Start nodes again and check for chainlock")
+        self.start_node(2, extra_args=["-mocktime=" + str(self.mocktime), '-reindex', *self.extra_args[2]])
+        self.start_node(3, extra_args=["-mocktime=" + str(self.mocktime), '-reindex', *self.extra_args[3]])
+        for i in range(len(self.nodes)):
+            force_finish_mnsync(self.nodes[i])
+        for i in range(2, len(self.nodes)):
+            self.connect_nodes(i, 1)
+        self.sync_all()
+        cl = self.nodes[0].getbestblockhash()
+        self.generate(self.nodes[0], 5)
+
+        self.wait_for_chainlocked_block_all_nodes(cl)
         self.log.info("Restart miner and ensure chainlock is sent via P2P")
         self.stop_node(0)
         self.start_node(0)
