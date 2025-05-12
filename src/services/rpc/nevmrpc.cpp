@@ -165,6 +165,8 @@ static RPCHelpMan getnevmblobdata()
     if(pblockindex != nullptr) {
         oNEVM.pushKVEnd("blockhash", pblockindex->GetBlockHash().GetHex());
         oNEVM.pushKVEnd("height", pblockindex->nHeight);
+        if(llmq::chainLocksHandler)
+            oNEVM.pushKV("chainlock", llmq::chainLocksHandler->HasChainLock(pblockindex->nHeight, pblockindex->GetBlockHash()));
     }
     if(bGetData) {
         std::vector<uint8_t> vchData;
