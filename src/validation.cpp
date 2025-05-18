@@ -2971,7 +2971,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "block-validation-failed");
     }
     // SYSCOIN : MODIFIED TO CHECK MASTERNODE PAYMENTS AND SUPERBLOCKS
-    if(fScriptChecks) {
+    if(fNexusContext) {
         const CAmount blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
         CAmount nMNSeniorityRet = 0;
         CAmount nMNFloorDiffRet = 0;
