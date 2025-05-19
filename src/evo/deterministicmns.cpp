@@ -336,8 +336,9 @@ void CDeterministicMNList::PoSeDecrease(const CDeterministicMN& dmn)
 void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const
 {
     std::unordered_map<uint256, NEVMDiffEntry, StaticSaltedHasher> nevmDiffMap;
-  // Process MNs from the new list (adds and updates)
-    to.ForEachMNShared(false, [&](const CDeterministicMNCPtr& toPtr) {
+   // Process MNs from the new list (adds and updates)
+    for (const auto& p : to.mnMap) {
+        const auto& toPtr = p.second;
         auto fromPtr = GetMN(toPtr->proTxHash);
         if (fromPtr == nullptr) {
             // Masternode is newly added.
@@ -376,28 +377,30 @@ void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterminis
                 diffRet.updatedMNs.emplace(toPtr->GetInternalId(), std::move(stateDiff));
             }
         }
-    });
-
-    // Process removals from the old list.
-    ForEachMN(false, [&](auto& fromPtr) {
-        auto toPtr = to.GetMN(fromPtr.proTxHash);
-        if (toPtr == nullptr) {
-            // Masternode removed entirely.
-            if (!fromPtr.pdmnState->vchNEVMAddress.empty()) {
+    };
+    if (mnMap.size() + diffRet.addedMNs.size() != to.mnMap.size()) {
+        // Process removals from the old list.
+        for (auto& fromPtr : mnMap) {
+            const auto toPtr = to.GetMN(fromPtr.second->proTxHash);
+            if (toPtr == nullptr) {
+                // Masternode removed entirely.
+                if (!fromPtr.second->pdmnState->vchNEVMAddress.empty()) {
+                    NEVMDiffEntry entry;
+                    entry.type = NEVMDiffType::Removed;
+                    entry.oldAddress = fromPtr.second->pdmnState->vchNEVMAddress;
+                    nevmDiffMap[fromPtr.second->proTxHash] = entry;
+                }
+                diffRet.removedMns.emplace(fromPtr.second->GetInternalId());
+                if (mnMap.size() + diffRet.addedMNs.size() - diffRet.removedMns.size() == to.mnMap.size()) break;
+            } else if (toPtr->pdmnState->vchNEVMAddress.empty() && !fromPtr.second->pdmnState->vchNEVMAddress.empty()) {
+                // Masternode still exists but its NEVM address was cleared.
                 NEVMDiffEntry entry;
                 entry.type = NEVMDiffType::Removed;
-                entry.oldAddress = fromPtr.pdmnState->vchNEVMAddress;
-                nevmDiffMap[fromPtr.proTxHash] = entry;
+                entry.oldAddress = fromPtr.second->pdmnState->vchNEVMAddress;
+                nevmDiffMap[fromPtr.second->proTxHash] = entry;
             }
-            diffRet.removedMns.emplace(fromPtr.GetInternalId());
-        } else if (toPtr->pdmnState->vchNEVMAddress.empty() && !fromPtr.pdmnState->vchNEVMAddress.empty()) {
-            // Masternode still exists but its NEVM address was cleared.
-            NEVMDiffEntry entry;
-            entry.type = NEVMDiffType::Removed;
-            entry.oldAddress = fromPtr.pdmnState->vchNEVMAddress;
-            nevmDiffMap[fromPtr.proTxHash] = entry;
-        }
-    });
+        };
+    }
 
     // Now convert the deduplicated map into the diff vectors.
     for (const auto& pair : nevmDiffMap) {
