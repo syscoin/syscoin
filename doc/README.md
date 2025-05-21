@@ -28,7 +28,7 @@ Drag Syscoin Core to your applications folder, and then run Syscoin Core.
 
 ### Need Help?
 
-* See the documentation at the [Syscoin Wiki](https://en.syscoin.it/wiki/Main_Page)
+* See the documentation at the [Syscoin Wiki](https://support.syscoin.org)
 for help and more information.
 * Ask for help on [#syscoin](http://webchat.freenode.net?channels=syscoin) on Freenode. If you don't have an IRC client, use [webchat here](http://webchat.freenode.net?channels=syscoin).
 * Ask for help on the [BitcoinTalk](https://syscointalk.org/) forums, in the [Technical Support board](https://bitcointalk.org/index.php?board=4.0).

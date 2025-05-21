@@ -18,6 +18,6 @@ However, it downloads and stores the entire history of Syscoin transactions;
 depending on the speed of your computer and network connection, the synchronization
 process can take anywhere from a few hours to a day or more.
 
-See the syscoin wiki at:
-  https://en.syscoin.it/wiki/Main_Page
+See syscoin support at:
+  https://support.syscoin.org/
 for more help and information.
