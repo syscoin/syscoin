@@ -142,7 +142,8 @@ static bool DecodeTx(CMutableTransaction& tx, const std::vector<unsigned char>& 
     // Try decoding with extended serialization support, and remember if the result successfully
     // consumes the entire input.
     if (try_witness) {
-        CDataStream ssData(tx_data, SER_NETWORK, PROTOCOL_VERSION);
+        // SYSCOIN
+        CDataStream ssData(tx_data, SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION);
         try {
             ssData >> tx_extended;
             if (ssData.empty()) ok_extended = true;
@@ -160,7 +161,8 @@ static bool DecodeTx(CMutableTransaction& tx, const std::vector<unsigned char>& 
 
     // Try decoding with legacy serialization, and remember if the result successfully consumes the entire input.
     if (try_no_witness) {
-        CDataStream ssData(tx_data, SER_NETWORK, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+        // SYSCOIN
+        CDataStream ssData(tx_data, SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
         try {
             ssData >> tx_legacy;
             if (ssData.empty()) ok_legacy = true;
@@ -222,7 +224,8 @@ bool DecodeHexBlk(CBlock& block, const std::string& strHexBlk)
         return false;
 
     std::vector<unsigned char> blockData(ParseHex(strHexBlk));
-    CDataStream ssBlock(blockData, SER_NETWORK, PROTOCOL_VERSION);
+    // SYSCOIN
+    CDataStream ssBlock(blockData, SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION);
     try {
         ssBlock >> block;
     }

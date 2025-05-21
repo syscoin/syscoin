@@ -504,10 +504,7 @@ public:
     {
         READWRITE(obj.nValue, obj.scriptPubKey);
         if (obj.scriptPubKey.IsUnspendable() && IsSyscoinNEVMDataTx(s.GetTxVersion())) {
-            if (s.GetType() & SER_NO_PODA) {
-                std::vector<uint8_t> emptyVec;
-                READWRITE(emptyVec);
-            } else if (s.GetType() & SER_NETWORK) {
+            if (!(s.GetType() & SER_NO_PODA) && s.GetType() & SER_NETWORK) {
                 READWRITE(obj.vchNEVMData);
             } else if(s.GetType() == SER_SIZE) {
                 s.seek(obj.vchNEVMData.size() * NEVM_DATA_SCALE_FACTOR);

@@ -578,8 +578,8 @@ bool CZMQPublishHashTransactionNotifier::NotifyTransaction(const CTransaction &t
 bool CZMQPublishRawBlockNotifier::NotifyBlock(const CBlockIndex *pindex)
 {
     LogPrint(BCLog::ZMQ, "Publish rawblock %s to %s\n", pindex->GetBlockHash().GetHex(), this->address);
-
-    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+    // SYSCOIN
+    CDataStream ss(SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | RPCSerializationFlags());
     CBlock block;
     if (!m_get_block_by_index(block, *pindex)) {
         zmqError("Can't read block from disk");
@@ -594,7 +594,8 @@ bool CZMQPublishRawTransactionNotifier::NotifyTransaction(const CTransaction &tr
 {
     uint256 hash = transaction.GetHash();
     LogPrint(BCLog::ZMQ, "Publish rawtx %s to %s\n", hash.GetHex(), this->address);
-    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+    // SYSCOIN
+    CDataStream ss(SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | RPCSerializationFlags());
     ss << transaction;
     return SendZmqMessage(MSG_RAWTX, &(*ss.begin()), ss.size());
 }
@@ -621,7 +622,8 @@ bool CZMQPublishRawMempoolTransactionNotifier::NotifyTransactionMempool(const CT
 {
     uint256 hash = transaction.GetHash();
     LogPrint(BCLog::ZMQ, "zmq: Publish rawmempooltx %s\n", hash.GetHex());
-    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+    // SYSCOIN
+    CDataStream ss(SER_NETWORK | SER_NO_PODA, PROTOCOL_VERSION | RPCSerializationFlags());
     ss << transaction;
     return SendZmqMessage(MSG_RAWMEMPOOLTX, &(*ss.begin()), ss.size());
 }
