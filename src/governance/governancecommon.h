@@ -91,4 +91,4 @@ public:
 };
 
 } // namespace Governance
-#endif
+#endif // SYSCOIN_GOVERNANCE_GOVERNANCECOMMON_H

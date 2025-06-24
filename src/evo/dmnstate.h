@@ -108,7 +108,7 @@ public:
         if (!IsBanned()) {
             nPoSeBanHeight = height;
             vchNEVMAddress.clear();
-            
+
         }
     }
     int GetBannedHeight() const
@@ -226,4 +226,4 @@ public:
 };
 
 
-#endif //SYSCOIN_EVO_DMNSTATE_H
+#endif // SYSCOIN_EVO_DMNSTATE_H
