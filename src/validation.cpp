@@ -3133,9 +3133,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
 
     const bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock &&
-        !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff)) {
-        return error("%s: ConnectNEVMCommitment failed with %s", __func__, state.ToString());
+    if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff)) {
+            return error("%s: ConnectNEVMCommitment failed with %s", __func__, state.ToString());
+        }
+        // Helper may return true while leaving state invalid (managed geth shutdown path).
+        if (!state.IsValid()) {
+            return false;
+        }
     }
     // END SYSCOIN
     const auto time_4{SteadyClock::now()};
@@ -5668,8 +5673,13 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         AddCoins(inputs, *tx, pindex->nHeight, true);
     }
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock && !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff)) {
-        return error("RollforwardBlock(): ConnectNEVMCommitment() failed at %d, hash=%s state=%s", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
+    if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff)) {
+            return error("RollforwardBlock(): ConnectNEVMCommitment() failed at %d, hash=%s state=%s", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
+        }
+        if (!state.IsValid()) {
+            return false;
+        }
     }
     return true;
 }
