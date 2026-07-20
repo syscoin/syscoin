@@ -2968,7 +2968,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     int nInputs = 0;
     int64_t nSigOpsCost = 0;
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
-    bool connect_failed = false;
     std::string connect_error;
     // SYSCOIN
     const uint256 blockHash = block.GetHash();
@@ -3086,11 +3085,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
     }
 
-    bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if (state.IsValid() && bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock && !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff)) {
-        connect_failed = true;
-        connect_error = strprintf("%s: ConnectNEVMCommitment failed with %s", __func__, state.ToString()); // state filled by ConnectNEVMCommitment
-    }
     const auto time_3{SteadyClock::now()};
     time_connect += time_3 - time_2;
     LogPrint(BCLog::BENCHMARK, "      - Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin) [%.2fs (%.2fms/blk)]\n", (unsigned)block.vtx.size(),
@@ -3106,7 +3100,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "block-validation-failed");
         }
     }
-    if (connect_failed || !state.IsValid()) {
+    if (!state.IsValid()) {
         if (!connect_error.empty()) {
             return error("%s", connect_error);
         }
@@ -3135,6 +3129,17 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
         if (pindex->pprev && pindex->phashBlock && llmq::chainLocksHandler->HasConflictingChainLock(pindex->nHeight, pindex->GetBlockHash())) {
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-chainlock");
+        }
+    }
+
+    const bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
+    if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff)) {
+            return error("%s: ConnectNEVMCommitment failed with %s", __func__, state.ToString());
+        }
+        // Helper may return true while leaving state invalid (managed geth shutdown path).
+        if (!state.IsValid()) {
+            return false;
         }
     }
     // END SYSCOIN
@@ -5668,8 +5673,13 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         AddCoins(inputs, *tx, pindex->nHeight, true);
     }
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock && !ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff)) {
-        return error("RollforwardBlock(): ConnectNEVMCommitment() failed at %d, hash=%s state=%s", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
+    if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff)) {
+            return error("RollforwardBlock(): ConnectNEVMCommitment() failed at %d, hash=%s state=%s", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
+        }
+        if (!state.IsValid()) {
+            return false;
+        }
     }
     return true;
 }
