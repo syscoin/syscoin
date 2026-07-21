@@ -93,21 +93,48 @@ bool VerifyProof(dev::bytesConstRef path,
         break;
       case 2:
         {
-        const std::string encodedPartialPath = toHex(currentNode[0].payload());
-        if(encodedPartialPath.empty()) {
+        if(!currentNode[0].isData()) {
           return false;
         }
+        const dev::bytes compact = currentNode[0].toBytes();
+        if(compact.empty()) {
+          return false;
+        }
+        // HP compact encoding (Yellow Paper / Geth):
+        // high nibble 0/1 = extension, 2/3 = leaf; low bit = odd path length.
+        // Do not infer leaf vs extension from path exhaustion alone.
+        const uint8_t hp_flag = compact[0] >> 4;
+        if(hp_flag > 3) {
+          return false;
+        }
+        const bool is_odd = (hp_flag & 1) != 0;
+        const bool is_leaf = (hp_flag & 2) != 0;
+        // Even HP encoding requires a zero padding nibble.
+        if(!is_odd && (compact[0] & 0x0f) != 0) {
+          return false;
+        }
+        // Geth does not emit empty extension paths (shared prefix length 0
+        // becomes a branch). Reject that noncanonical shape.
+        if(!is_leaf && !is_odd && compact.size() == 1) {
+          return false;
+        }
+        const std::string encodedPartialPath = toHex(
+            dev::bytesConstRef(compact.data(), compact.size()));
         nibbles = nibblesToTraverse(encodedPartialPath, pathString, pathPtr);
         if(nibbles <= -1) {
           return false;
         }
         pathPtr += nibbles;
-        if(pathPtr == (int)pathString.size()) { //leaf node
+        if(is_leaf) {
+          if(pathPtr != (int)pathString.size()) {
+            return false;
+          }
           dev::bytes nodeVec(currentNode[1].toBytes());
           return MatchProofValue(std::move(nodeVec), value, envelope_type);
-        } else {//extension node
-          nodeKey = currentNode[1];
         }
+        // Extension: follow the child. After a nonempty extension the remaining
+        // path may be empty when the child is a branch value slot.
+        nodeKey = currentNode[1];
         }
         break;
       default:
