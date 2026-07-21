@@ -248,6 +248,194 @@ BOOST_AUTO_TEST_CASE(nevmspv_authenticates_envelope_type)
     verify(uint8_t{0x7f});
 }
 
+BOOST_AUTO_TEST_CASE(nevmspv_requires_hp_leaf_extension_flags)
+{
+    // Hex-prefix flag nibble: 0/1 = extension (child ref), 2/3 = leaf (value).
+    // VerifyProof must use that bit — not merely whether the remaining path is empty.
+    const dev::bytes payload{0xc0};
+    const dev::RLP value(payload);
+    const dev::bytes empty_path;
+
+    auto make_root_bytes = [](const dev::bytes& node_data) {
+        const dev::bytes root_hash = dev::sha3(
+            dev::bytesConstRef(node_data.data(), node_data.size())).asBytes();
+        dev::RLPStream root_stream;
+        root_stream.append(dev::bytesConstRef(root_hash.data(), root_hash.size()));
+        return root_stream.out();
+    };
+
+    // 1) Empty even extension (noncanonical) must not authenticate as a value.
+    {
+        dev::RLPStream extension(2);
+        extension.append(dev::bytes{0x00}); // extension, even, empty path
+        extension.append(payload);
+        const dev::bytes node_data = extension.out();
+
+        dev::RLPStream parents(1);
+        parents.appendRaw(node_data);
+        const dev::bytes parent_data = parents.out();
+        const dev::RLP parent_nodes(parent_data);
+        const dev::bytes root_data = make_root_bytes(node_data);
+        const dev::RLP root(root_data);
+
+        BOOST_CHECK_MESSAGE(
+            !VerifyProof(dev::bytesConstRef(empty_path.data(), empty_path.size()),
+                         value, parent_nodes, root),
+            "empty extension must not authenticate");
+    }
+
+    // 2) Empty-path leaf (flag 2) must still authenticate.
+    {
+        dev::RLPStream leaf(2);
+        leaf.append(dev::bytes{0x20}); // leaf, even, empty path
+        leaf.append(payload);
+        const dev::bytes node_data = leaf.out();
+
+        dev::RLPStream parents(1);
+        parents.appendRaw(node_data);
+        const dev::bytes parent_data = parents.out();
+        const dev::RLP parent_nodes(parent_data);
+        const dev::bytes root_data = make_root_bytes(node_data);
+        const dev::RLP root(root_data);
+
+        BOOST_CHECK(VerifyProof(
+            dev::bytesConstRef(empty_path.data(), empty_path.size()),
+            value, parent_nodes, root));
+    }
+
+    // 3) Nonempty extension that consumes the full key, then a branch value.
+    //    Old path-exhaustion logic compared the branch hash to the value.
+    {
+        const dev::bytes path{0xab}; // hex path nibbles "ab"
+
+        dev::RLPStream branch(17);
+        branch.append(dev::bytes(32, 0x42)); // unrelated hashed child
+        for (int i = 1; i < 16; ++i) {
+            branch.append(dev::bytes{});
+        }
+        branch.append(payload); // branch value slot
+        const dev::bytes branch_data = branch.out();
+        const dev::bytes branch_hash = dev::sha3(
+            dev::bytesConstRef(branch_data.data(), branch_data.size())).asBytes();
+
+        dev::RLPStream extension(2);
+        extension.append(dev::bytes{0x00, 0xab}); // even extension path "ab"
+        extension.append(branch_hash);
+        const dev::bytes ext_data = extension.out();
+
+        dev::RLPStream parents(2);
+        parents.appendRaw(ext_data);
+        parents.appendRaw(branch_data);
+        const dev::bytes parent_data = parents.out();
+        const dev::RLP parent_nodes(parent_data);
+        const dev::bytes root_data = make_root_bytes(ext_data);
+        const dev::RLP root(root_data);
+
+        BOOST_CHECK_MESSAGE(
+            VerifyProof(dev::bytesConstRef(path.data(), path.size()),
+                        value, parent_nodes, root),
+            "nonempty extension must descend into branch value");
+    }
+
+    // 4) Leaf flag with path still remaining must reject, even if the leaf
+    //    "value" is the keccak of a following node that would complete the path.
+    {
+        const dev::bytes path{0xab}; // hex path nibbles "ab"
+
+        dev::RLPStream real_leaf(2);
+        real_leaf.append(dev::bytes{0x20, 0xab}); // leaf consuming "ab"
+        real_leaf.append(payload);
+        const dev::bytes real_leaf_data = real_leaf.out();
+        const dev::bytes real_leaf_hash = dev::sha3(
+            dev::bytesConstRef(real_leaf_data.data(), real_leaf_data.size())).asBytes();
+
+        // Mis-labeled leaf used as if it were an extension.
+        dev::RLPStream fake_leaf(2);
+        fake_leaf.append(dev::bytes{0x20}); // leaf flag, empty path
+        fake_leaf.append(real_leaf_hash);
+        const dev::bytes fake_leaf_data = fake_leaf.out();
+
+        dev::RLPStream parents(2);
+        parents.appendRaw(fake_leaf_data);
+        parents.appendRaw(real_leaf_data);
+        const dev::bytes parent_data = parents.out();
+        const dev::RLP parent_nodes(parent_data);
+        const dev::bytes root_data = make_root_bytes(fake_leaf_data);
+        const dev::RLP root(root_data);
+
+        BOOST_CHECK_MESSAGE(
+            !VerifyProof(dev::bytesConstRef(path.data(), path.size()),
+                         value, parent_nodes, root),
+            "leaf flag must not be followed as an extension");
+    }
+
+    // 5) Odd flags: extension 1a → leaf 3b.
+    {
+        const dev::bytes path{0xab};
+
+        dev::RLPStream leaf(2);
+        leaf.append(dev::bytes{0x3b}); // odd leaf, remaining nibble "b"
+        leaf.append(payload);
+        const dev::bytes leaf_data = leaf.out();
+        const dev::bytes leaf_hash = dev::sha3(
+            dev::bytesConstRef(leaf_data.data(), leaf_data.size())).asBytes();
+
+        dev::RLPStream extension(2);
+        extension.append(dev::bytes{0x1a}); // odd extension, nibble "a"
+        extension.append(leaf_hash);
+        const dev::bytes ext_data = extension.out();
+
+        dev::RLPStream parents(2);
+        parents.appendRaw(ext_data);
+        parents.appendRaw(leaf_data);
+        const dev::bytes parent_data = parents.out();
+        const dev::RLP parent_nodes(parent_data);
+        const dev::bytes root_data = make_root_bytes(ext_data);
+        const dev::RLP root(root_data);
+
+        BOOST_CHECK(VerifyProof(
+            dev::bytesConstRef(path.data(), path.size()), value, parent_nodes, root));
+    }
+
+    // 6) Invalid HP flag nibble (> 3) must reject.
+    {
+        dev::RLPStream node(2);
+        node.append(dev::bytes{0x40}); // flag 4
+        node.append(payload);
+        const dev::bytes node_data = node.out();
+
+        dev::RLPStream parents(1);
+        parents.appendRaw(node_data);
+        const dev::bytes parent_data = parents.out();
+        const dev::RLP parent_nodes(parent_data);
+        const dev::bytes root_data = make_root_bytes(node_data);
+        const dev::RLP root(root_data);
+
+        BOOST_CHECK(!VerifyProof(
+            dev::bytesConstRef(empty_path.data(), empty_path.size()),
+            value, parent_nodes, root));
+    }
+
+    // 7) Even encoding with nonzero padding nibble must reject.
+    {
+        dev::RLPStream node(2);
+        node.append(dev::bytes{0x2f}); // leaf flag with nonzero pad
+        node.append(payload);
+        const dev::bytes node_data = node.out();
+
+        dev::RLPStream parents(1);
+        parents.appendRaw(node_data);
+        const dev::bytes parent_data = parents.out();
+        const dev::RLP parent_nodes(parent_data);
+        const dev::bytes root_data = make_root_bytes(node_data);
+        const dev::RLP root(root_data);
+
+        BOOST_CHECK(!VerifyProof(
+            dev::bytesConstRef(empty_path.data(), empty_path.size()),
+            value, parent_nodes, root));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(nevm_blob_versionhash_formats_and_hashes)
 {
     const std::vector<uint8_t> data{'a', 'b', 'c'};
