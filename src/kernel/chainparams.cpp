@@ -198,13 +198,15 @@ public:
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 57;
         consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
-        // Liberty cutover stub — replace with deployed V2 vault before setting nCLReceiptStartBlock.
+        // Bridge V2 stub — replace with deployed vault proxy before setting nBridgeV2StartBlock.
         consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 348000;
         consensus.nNEVMStartBlock = 1317500;
         // ChainLock receipt activation height (set on deployment to avoid invalidating historical blocks)
         consensus.nCLReceiptStartBlock = std::numeric_limits<int>::max();
+        // Independent of nCLReceiptStartBlock; set to Core cutover H when V2 proxy is live.
+        consensus.nBridgeV2StartBlock = std::numeric_limits<int>::max();
         consensus.nNEVMStartTime = 1638791667;
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
@@ -360,13 +362,15 @@ public:
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
-        // Shared Liberty cutover addresses with mainnet (tanenbaum resyncs at LibertyBlock).
         consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
         consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
+        // Keep canonical receipt hardening active; do not couple manager switch to this.
         consensus.nCLReceiptStartBlock = 1746000;
+        // Future H2 when V2 vault proxy is deployed (NEVM F2 = H2 - nNEVMStartBlock + 1).
+        consensus.nBridgeV2StartBlock = std::numeric_limits<int>::max();
         consensus.nNEVMStartTime = 1632775675;
         consensus.nPODAStartBlock = 1022500;
         consensus.nV19StartBlock = 1063000;
@@ -606,11 +610,14 @@ public:
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
         consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
-        consensus.vchSyscoinVaultManager = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
+        // Distinct V2 address so unit tests can exercise the manager boundary.
+        consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nCLReceiptStartBlock = opts.clreceiptstartblock;
+        // Inclusive cutover for manager selection in unit tests.
+        consensus.nBridgeV2StartBlock = 1000;
         consensus.nNEVMStartTime = 0;
         consensus.nPODAStartBlock = 0;
         consensus.nNexusStartBlock = opts.dip3startblock;

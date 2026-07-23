@@ -223,8 +223,10 @@ bool CheckSyscoinMintInternal(
     }
     const Consensus::Params& consensus = Params().GetConsensus();
     // Inclusive cutover: below H prove legacy vault; at/above H prove V2 vault.
+    // Uses nBridgeV2StartBlock (not nCLReceiptStartBlock) so canonical receipt
+    // hardening can remain active while V2 is still undeployed.
     const std::vector<unsigned char>& vchManagerAddress =
-        nHeight < (uint32_t)consensus.nCLReceiptStartBlock
+        nHeight < (uint32_t)consensus.nBridgeV2StartBlock
             ? consensus.vchSyscoinVaultManagerLegacy
             : consensus.vchSyscoinVaultManager;
     const std::vector<unsigned char>& vchFreezeTopic = consensus.vchTokenFreezeMethod;
