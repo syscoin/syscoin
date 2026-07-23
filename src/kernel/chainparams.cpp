@@ -610,14 +610,14 @@ public:
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
         consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
-        // Distinct V2 address so unit tests can exercise the manager boundary.
+        // Distinct V2 address for opt-in boundary tests (-bridgev2startheight).
         consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nCLReceiptStartBlock = opts.clreceiptstartblock;
-        // Inclusive cutover for manager selection in unit tests.
-        consensus.nBridgeV2StartBlock = 1000;
+        // Deferred by default; set via -bridgev2startheight for tests/private nets.
+        consensus.nBridgeV2StartBlock = opts.bridgev2startblock;
         consensus.nNEVMStartTime = 0;
         consensus.nPODAStartBlock = 0;
         consensus.nNexusStartBlock = opts.dip3startblock;

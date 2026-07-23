@@ -986,12 +986,23 @@ BOOST_AUTO_TEST_CASE(syscoin_bridge_uses_clreceipt_activation)
     args.ForceSetArg("-clreceiptstartheight", "123");
     const auto regtest = CreateChainParams(args, ChainType::REGTEST);
     BOOST_CHECK_EQUAL(regtest->GetConsensus().nCLReceiptStartBlock, 123);
-    BOOST_CHECK_EQUAL(regtest->GetConsensus().nBridgeV2StartBlock, 1000);
-    BOOST_CHECK(regtest->GetConsensus().vchSyscoinVaultManagerLegacy !=
-                regtest->GetConsensus().vchSyscoinVaultManager);
+    // Cutover deferred by default so private regtest chains keep the legacy vault.
+    BOOST_CHECK_EQUAL(regtest->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
+
+    ArgsManager args_v2;
+    args_v2.ForceSetArg("-bridgev2startheight", "1000");
+    const auto regtest_v2 = CreateChainParams(args_v2, ChainType::REGTEST);
+    BOOST_CHECK_EQUAL(regtest_v2->GetConsensus().nBridgeV2StartBlock, 1000);
+    BOOST_CHECK(regtest_v2->GetConsensus().vchSyscoinVaultManagerLegacy !=
+                regtest_v2->GetConsensus().vchSyscoinVaultManager);
 }
 
-BOOST_AUTO_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height)
+struct BridgeV2CutoverTestingSetup : BasicTestingSetup {
+    BridgeV2CutoverTestingSetup()
+        : BasicTestingSetup(ChainType::REGTEST, {"-bridgev2startheight=1000"}) {}
+};
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height, BridgeV2CutoverTestingSetup)
 {
     auto previous_roots_db = std::move(pnevmtxrootsdb);
     auto previous_mint_db = std::move(pnevmtxmintdb);
