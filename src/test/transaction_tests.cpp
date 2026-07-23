@@ -561,7 +561,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_compares_roots_before_proof_parsing)
     CAmount amount{0};
     std::string address;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, state, true, false, mint_txs, asset_guid, amount, address));
+        mint, state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "mint-mismatching-txroot");
 
     mint.nTxRoot = stored_roots.nTxRoot;
@@ -577,19 +577,19 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_compares_roots_before_proof_parsing)
     mint.nTxHash = uint256S(HexStr(invalid_tx_hash_bytes));
     TxValidationState proof_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, proof_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, proof_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(proof_state.GetRejectReason(), "mint-verify-receipt-proof");
 
     pnevmtxmintdb->FlushDataToCache({mint.nTxHash});
     TxValidationState replay_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, replay_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, replay_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(replay_state.GetRejectReason(), "mint-exists");
 
     mint.nTxHash = uint256S("01");
     TxValidationState forged_hash_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, forged_hash_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, forged_hash_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(forged_hash_state.GetRejectReason(), "mint-verify-tx-hash");
 
     pnevmtxrootsdb = std::move(previous_roots_db);
@@ -611,7 +611,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_canonical_receipt_activation)
         .memory_only = true,
         .wipe_data = true});
 
-    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManager;
+    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManagerLegacy;
     const dev::bytes freeze_topic = Params().GetConsensus().vchTokenFreezeMethod;
     dev::bytes guid_topic(32, 0);
     guid_topic[0] = 1; // Legacy ignores these high bits.
@@ -692,14 +692,14 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_canonical_receipt_activation)
     std::string address;
     TxValidationState legacy_state;
     BOOST_CHECK(CheckSyscoinMintInternal(
-        mint, legacy_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, legacy_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(asset_guid, 1U);
     BOOST_CHECK_EQUAL(amount, 1);
     BOOST_CHECK_EQUAL(address, witness);
 
     TxValidationState canonical_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, canonical_state, true, true, mint_txs, asset_guid, amount, address));
+        mint, canonical_state, true, true, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(canonical_state.GetRejectReason(), "mint-log-invalid-field-count");
 
     pnevmtxrootsdb = std::move(previous_roots_db);
@@ -721,7 +721,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_typed_transaction_schemas)
         .memory_only = true,
         .wipe_data = true});
 
-    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManager;
+    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManagerLegacy;
     const dev::bytes freeze_topic = Params().GetConsensus().vchTokenFreezeMethod;
     dev::bytes guid_topic(32, 0);
     guid_topic[31] = 1;
@@ -836,7 +836,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_typed_transaction_schemas)
         std::string address;
         TxValidationState state;
         BOOST_CHECK_EQUAL(CheckSyscoinMintInternal(
-            mint, state, true, true, mint_txs, asset_guid, amount, address), expected);
+            mint, state, true, true, /*nHeight=*/0, mint_txs, asset_guid, amount, address), expected);
         if (expected) {
             BOOST_CHECK_EQUAL(asset_guid, 1U);
             BOOST_CHECK_EQUAL(amount, 1);

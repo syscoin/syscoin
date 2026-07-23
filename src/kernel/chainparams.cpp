@@ -197,7 +197,9 @@ public:
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 57;
-        consensus.vchSyscoinVaultManager = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
+        consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
+        // Liberty cutover stub — replace with deployed V2 vault before setting nCLReceiptStartBlock.
+        consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 348000;
         consensus.nNEVMStartBlock = 1317500;
@@ -358,7 +360,9 @@ public:
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
-        consensus.vchSyscoinVaultManager = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
+        // Shared Liberty cutover addresses with mainnet (tanenbaum resyncs at LibertyBlock).
+        consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
+        consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
@@ -601,6 +605,7 @@ public:
         consensus.nLegacyBlocksBefore = 0;
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
+        consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
         consensus.vchSyscoinVaultManager = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 0;
