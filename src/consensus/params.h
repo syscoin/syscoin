@@ -158,6 +158,9 @@ struct Params {
     // SYSCOIN
     uint64_t nSYSXAsset;
     uint32_t nNEVMChainID;
+    // Pre-H vault (NEVM→UTXO mints below nBridgeV2StartBlock).
+    std::vector<unsigned char> vchSyscoinVaultManagerLegacy;
+    // Post-H vault (at/above nBridgeV2StartBlock). Stub until cutover deploy.
     std::vector<unsigned char> vchSyscoinVaultManager;
     std::vector<unsigned char> vchTokenFreezeMethod;
     unsigned int nSeniorityHeight1;
@@ -168,6 +171,8 @@ struct Params {
     int nBridgeStartBlock;
     int nNEVMStartBlock;
     int nCLReceiptStartBlock;
+    // Bridge V2 vault-manager cutover (independent of nCLReceiptStartBlock).
+    int nBridgeV2StartBlock;
     int64_t nNEVMStartTime;
     int nPODAStartBlock;
     int nNexusStartBlock;

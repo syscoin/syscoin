@@ -561,7 +561,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_compares_roots_before_proof_parsing)
     CAmount amount{0};
     std::string address;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, state, true, false, mint_txs, asset_guid, amount, address));
+        mint, state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "mint-mismatching-txroot");
 
     mint.nTxRoot = stored_roots.nTxRoot;
@@ -577,19 +577,19 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_compares_roots_before_proof_parsing)
     mint.nTxHash = uint256S(HexStr(invalid_tx_hash_bytes));
     TxValidationState proof_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, proof_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, proof_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(proof_state.GetRejectReason(), "mint-verify-receipt-proof");
 
     pnevmtxmintdb->FlushDataToCache({mint.nTxHash});
     TxValidationState replay_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, replay_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, replay_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(replay_state.GetRejectReason(), "mint-exists");
 
     mint.nTxHash = uint256S("01");
     TxValidationState forged_hash_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, forged_hash_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, forged_hash_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(forged_hash_state.GetRejectReason(), "mint-verify-tx-hash");
 
     pnevmtxrootsdb = std::move(previous_roots_db);
@@ -611,7 +611,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_canonical_receipt_activation)
         .memory_only = true,
         .wipe_data = true});
 
-    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManager;
+    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManagerLegacy;
     const dev::bytes freeze_topic = Params().GetConsensus().vchTokenFreezeMethod;
     dev::bytes guid_topic(32, 0);
     guid_topic[0] = 1; // Legacy ignores these high bits.
@@ -692,14 +692,14 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_canonical_receipt_activation)
     std::string address;
     TxValidationState legacy_state;
     BOOST_CHECK(CheckSyscoinMintInternal(
-        mint, legacy_state, true, false, mint_txs, asset_guid, amount, address));
+        mint, legacy_state, true, false, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(asset_guid, 1U);
     BOOST_CHECK_EQUAL(amount, 1);
     BOOST_CHECK_EQUAL(address, witness);
 
     TxValidationState canonical_state;
     BOOST_CHECK(!CheckSyscoinMintInternal(
-        mint, canonical_state, true, true, mint_txs, asset_guid, amount, address));
+        mint, canonical_state, true, true, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(canonical_state.GetRejectReason(), "mint-log-invalid-field-count");
 
     pnevmtxrootsdb = std::move(previous_roots_db);
@@ -721,7 +721,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_typed_transaction_schemas)
         .memory_only = true,
         .wipe_data = true});
 
-    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManager;
+    const dev::bytes manager = Params().GetConsensus().vchSyscoinVaultManagerLegacy;
     const dev::bytes freeze_topic = Params().GetConsensus().vchTokenFreezeMethod;
     dev::bytes guid_topic(32, 0);
     guid_topic[31] = 1;
@@ -836,7 +836,7 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_typed_transaction_schemas)
         std::string address;
         TxValidationState state;
         BOOST_CHECK_EQUAL(CheckSyscoinMintInternal(
-            mint, state, true, true, mint_txs, asset_guid, amount, address), expected);
+            mint, state, true, true, /*nHeight=*/0, mint_txs, asset_guid, amount, address), expected);
         if (expected) {
             BOOST_CHECK_EQUAL(asset_guid, 1U);
             BOOST_CHECK_EQUAL(amount, 1);
@@ -978,11 +978,174 @@ BOOST_AUTO_TEST_CASE(syscoin_bridge_uses_clreceipt_activation)
     const auto testnet = CreateChainParams(*m_node.args, ChainType::TESTNET);
     BOOST_CHECK_EQUAL(main->GetConsensus().nCLReceiptStartBlock, std::numeric_limits<int>::max());
     BOOST_CHECK_EQUAL(testnet->GetConsensus().nCLReceiptStartBlock, 1746000);
+    // Manager cutover is independent and stays deferred until V2 deploy.
+    BOOST_CHECK_EQUAL(main->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK_EQUAL(testnet->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
 
     ArgsManager args;
     args.ForceSetArg("-clreceiptstartheight", "123");
     const auto regtest = CreateChainParams(args, ChainType::REGTEST);
     BOOST_CHECK_EQUAL(regtest->GetConsensus().nCLReceiptStartBlock, 123);
+    // Cutover deferred by default so private regtest chains keep the legacy vault.
+    BOOST_CHECK_EQUAL(regtest->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
+
+    ArgsManager args_v2;
+    args_v2.ForceSetArg("-bridgev2startheight", "1000");
+    const auto regtest_v2 = CreateChainParams(args_v2, ChainType::REGTEST);
+    BOOST_CHECK_EQUAL(regtest_v2->GetConsensus().nBridgeV2StartBlock, 1000);
+    BOOST_CHECK(regtest_v2->GetConsensus().vchSyscoinVaultManagerLegacy !=
+                regtest_v2->GetConsensus().vchSyscoinVaultManager);
+}
+
+struct BridgeV2CutoverTestingSetup : BasicTestingSetup {
+    BridgeV2CutoverTestingSetup()
+        : BasicTestingSetup(ChainType::REGTEST, {"-bridgev2startheight=1000"}) {}
+};
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height, BridgeV2CutoverTestingSetup)
+{
+    auto previous_roots_db = std::move(pnevmtxrootsdb);
+    auto previous_mint_db = std::move(pnevmtxmintdb);
+    pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
+        .path = "mint_bridge_v2_roots",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true});
+    pnevmtxmintdb = std::make_unique<CNEVMMintedTxDB>(DBParams{
+        .path = "mint_bridge_v2_txs",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true});
+
+    const Consensus::Params& consensus = Params().GetConsensus();
+    const uint32_t h = (uint32_t)consensus.nBridgeV2StartBlock;
+    BOOST_REQUIRE_GT(h, 0U);
+    const dev::bytes legacy = consensus.vchSyscoinVaultManagerLegacy;
+    const dev::bytes v2 = consensus.vchSyscoinVaultManager;
+    BOOST_REQUIRE(legacy != v2);
+
+    const dev::bytes freeze_topic = consensus.vchTokenFreezeMethod;
+    dev::bytes guid_topic(32, 0);
+    guid_topic[31] = 1;
+    dev::bytes freezer_topic(32, 0);
+    freezer_topic[31] = 1;
+    const std::string witness{"abc"};
+
+    auto build_mint = [&](const dev::bytes& manager, const uint256& block_hash) {
+        dev::RLPStream topics(3);
+        topics.append(freeze_topic);
+        topics.append(guid_topic);
+        topics.append(freezer_topic);
+
+        dev::bytes event_data(128, 0);
+        event_data[31] = 1;
+        event_data[63] = 64;
+        event_data[95] = witness.size();
+        std::copy(witness.begin(), witness.end(), event_data.begin() + 96);
+
+        dev::RLPStream log(3);
+        log.append(manager);
+        log.appendRaw(topics.out());
+        log.append(event_data);
+        dev::RLPStream logs(1);
+        logs.appendRaw(log.out());
+        dev::RLPStream receipt(4);
+        receipt.append(1U);
+        receipt.append(0U);
+        receipt.append(dev::bytes(256, 0));
+        receipt.appendRaw(logs.out());
+        const dev::bytes receipt_value = receipt.out();
+
+        const uint64_t chain_id = consensus.nNEVMChainID;
+        const dev::RLPStream empty_list(0);
+        dev::RLPStream type1_tx(11);
+        type1_tx.append(chain_id);
+        type1_tx.append(0U);
+        type1_tx.append(0U);
+        type1_tx.append(0U);
+        type1_tx.append(manager);
+        type1_tx.append(0U);
+        type1_tx.append(dev::bytes{});
+        type1_tx.appendRaw(empty_list.out());
+        type1_tx.append(0U);
+        type1_tx.append(0U);
+        type1_tx.append(0U);
+        const dev::bytes tx_value = type1_tx.out();
+
+        auto make_proof = [](const dev::bytes& value,
+                             uint8_t envelope_type,
+                             uint16_t& value_pos,
+                             uint256& root) {
+            dev::bytes trie_value;
+            trie_value.push_back(envelope_type);
+            trie_value.insert(trie_value.end(), value.begin(), value.end());
+            dev::RLPStream leaf(2);
+            leaf.append(dev::bytes{0x20});
+            leaf.append(trie_value);
+            const dev::bytes leaf_data = leaf.out();
+            dev::RLPStream parents(1);
+            parents.appendRaw(leaf_data);
+            const dev::bytes parent_data = parents.out();
+            const auto value_it = std::search(
+                parent_data.begin(), parent_data.end(), value.begin(), value.end());
+            BOOST_REQUIRE(value_it != parent_data.end());
+            value_pos = static_cast<uint16_t>(
+                std::distance(parent_data.begin(), value_it));
+            const dev::bytes root_bytes = dev::sha3(
+                dev::bytesConstRef(leaf_data.data(), leaf_data.size())).asBytes();
+            std::copy(root_bytes.begin(), root_bytes.end(), root.begin());
+            return std::vector<unsigned char>(parent_data.begin(), parent_data.end());
+        };
+
+        CMintSyscoin mint;
+        // Distinct source hashes: FlushDataToCache replaces by key.
+        mint.nBlockHash = block_hash;
+        mint.vchReceiptParentNodes =
+            make_proof(receipt_value, 1, mint.posReceipt, mint.nReceiptRoot);
+        mint.vchTxParentNodes = make_proof(tx_value, 1, mint.posTx, mint.nTxRoot);
+        const dev::h256 tx_hash =
+            dev::sha3(dev::bytesConstRef(tx_value.data(), tx_value.size()));
+        std::vector<unsigned char> tx_hash_bytes = tx_hash.asBytes();
+        std::reverse(tx_hash_bytes.begin(), tx_hash_bytes.end());
+        mint.nTxHash = uint256S(HexStr(tx_hash_bytes));
+        pnevmtxrootsdb->FlushDataToCache(
+            {{mint.nBlockHash, {mint.nTxRoot, mint.nReceiptRoot}}});
+        return mint;
+    };
+
+    auto check = [&](const CMintSyscoin& mint, uint32_t height, bool expected,
+                     const std::string& reason = "") {
+        NEVMMintTxSet mint_txs;
+        uint64_t asset_guid{0};
+        CAmount amount{0};
+        std::string address;
+        TxValidationState state;
+        BOOST_CHECK_EQUAL(CheckSyscoinMintInternal(
+                              mint, state, true, true, height, mint_txs, asset_guid,
+                              amount, address),
+                          expected);
+        if (expected) {
+            BOOST_CHECK_EQUAL(asset_guid, 1U);
+            BOOST_CHECK_EQUAL(amount, 1);
+            BOOST_CHECK_EQUAL(address, witness);
+        } else if (!reason.empty()) {
+            BOOST_CHECK_EQUAL(state.GetRejectReason(), reason);
+        }
+    };
+
+    const CMintSyscoin legacy_mint = build_mint(legacy, uint256S("33"));
+    const CMintSyscoin v2_mint = build_mint(v2, uint256S("44"));
+
+    // H-1: legacy succeeds; V2 emitter is skipped → missing freeze log.
+    check(legacy_mint, h - 1, true);
+    check(v2_mint, h - 1, false, "mint-missing-freeze-log");
+
+    // H: V2 succeeds; legacy emitter is skipped → missing freeze log.
+    check(v2_mint, h, true);
+    check(legacy_mint, h, false, "mint-missing-freeze-log");
+
+    pnevmtxrootsdb = std::move(previous_roots_db);
+    pnevmtxmintdb = std::move(previous_mint_db);
 }
 
 BOOST_AUTO_TEST_CASE(asset_amount_aggregate_range_checks)

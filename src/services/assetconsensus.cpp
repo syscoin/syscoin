@@ -132,6 +132,7 @@ bool CheckSyscoinMintInternal(
     TxValidationState &state,
     const bool &fJustCheck,
     const bool fBridgeCanonicalActive,
+    const uint32_t &nHeight,
     NEVMMintTxSet &setMintTxs,
     uint64_t &nAssetFromLog,
     CAmount &outputAmount,
@@ -220,8 +221,15 @@ bool CheckSyscoinMintInternal(
     if (!rlpLogs.isList() || itemCount < 1 || itemCount > 10) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-receipt-logs-count", fJustCheck);
     }
-    const std::vector<unsigned char>& vchManagerAddress = Params().GetConsensus().vchSyscoinVaultManager;
-    const std::vector<unsigned char>& vchFreezeTopic = Params().GetConsensus().vchTokenFreezeMethod;
+    const Consensus::Params& consensus = Params().GetConsensus();
+    // Inclusive cutover: below H prove legacy vault; at/above H prove V2 vault.
+    // Uses nBridgeV2StartBlock (not nCLReceiptStartBlock) so canonical receipt
+    // hardening can remain active while V2 is still undeployed.
+    const std::vector<unsigned char>& vchManagerAddress =
+        nHeight < (uint32_t)consensus.nBridgeV2StartBlock
+            ? consensus.vchSyscoinVaultManagerLegacy
+            : consensus.vchSyscoinVaultManager;
+    const std::vector<unsigned char>& vchFreezeTopic = consensus.vchTokenFreezeMethod;
 
     for (size_t i = 0; i < itemCount; ++i) {
         nAssetFromLog = 0;
@@ -396,8 +404,8 @@ bool CheckSyscoinMintInternal(
         return FormatSyscoinErrorMessage(state, "mint-invalid-address-length", fJustCheck);
     }
     const dev::Address address160(vchAddress);
-    // Verify "to" address is vault
-    if (Params().GetConsensus().vchSyscoinVaultManager != address160.asBytes()) {
+    // Verify "to" address matches the height-selected vault manager.
+    if (vchManagerAddress != address160.asBytes()) {
         return FormatSyscoinErrorMessage(state, "mint-invalid-contract-manager", fJustCheck);
     }
     
@@ -425,7 +433,7 @@ bool CheckSyscoinMint(
     const bool fBridgeCanonicalActive =
         nHeight >= (uint32_t)Params().GetConsensus().nCLReceiptStartBlock;
     if(!CheckSyscoinMintInternal(mintSyscoin, state, fJustCheck, fBridgeCanonicalActive,
-                                setMintTxs, nAssetFromLog, outputAmount, witnessAddress)) {
+                                nHeight, setMintTxs, nAssetFromLog, outputAmount, witnessAddress)) {
         return false; // state filled in by CheckSyscoinMintInternal
     }
     bool bFoundDest = false;

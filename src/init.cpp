@@ -618,6 +618,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-dip19params=<n:m>", "DIP19 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-nevmstartheight=<n>", "NEVM Start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-clreceiptstartheight=<n>", "CL receipt start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-bridgev2startheight=<n>", "Bridge V2 vault-manager cutover height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheadermanaged", strprintf("Automatically start/stop a local Bitcoin headers-only node for BTCC signer policy checks (default: %u)", DEFAULT_BTC_HEADER_MANAGED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheaderbinary=<path>", "Path to bitcoind binary used when -btcheadermanaged=1. If unset, syscoin searches common install/build locations.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheaderclibinary=<path>", "Path to bitcoin-cli binary used for managed BTC header RPC checks. If unset, syscoin tries the bitcoind directory first.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
