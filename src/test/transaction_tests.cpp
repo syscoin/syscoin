@@ -1031,7 +1031,7 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height, Bridg
     freezer_topic[31] = 1;
     const std::string witness{"abc"};
 
-    auto build_mint = [&](const dev::bytes& manager) {
+    auto build_mint = [&](const dev::bytes& manager, const uint256& block_hash) {
         dev::RLPStream topics(3);
         topics.append(freeze_topic);
         topics.append(guid_topic);
@@ -1098,7 +1098,8 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height, Bridg
         };
 
         CMintSyscoin mint;
-        mint.nBlockHash = uint256S("33");
+        // Distinct source hashes: FlushDataToCache replaces by key.
+        mint.nBlockHash = block_hash;
         mint.vchReceiptParentNodes =
             make_proof(receipt_value, 1, mint.posReceipt, mint.nReceiptRoot);
         mint.vchTxParentNodes = make_proof(tx_value, 1, mint.posTx, mint.nTxRoot);
@@ -1132,8 +1133,8 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height, Bridg
         }
     };
 
-    const CMintSyscoin legacy_mint = build_mint(legacy);
-    const CMintSyscoin v2_mint = build_mint(v2);
+    const CMintSyscoin legacy_mint = build_mint(legacy, uint256S("33"));
+    const CMintSyscoin v2_mint = build_mint(v2, uint256S("44"));
 
     // H-1: legacy succeeds; V2 emitter is skipped → missing freeze log.
     check(legacy_mint, h - 1, true);
