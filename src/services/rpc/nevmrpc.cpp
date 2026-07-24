@@ -383,7 +383,7 @@ static RPCHelpMan syscoingetspvproof()
         {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "If specified, looks for txid in the block with this hash"}
     },
     RPCResult{
-        RPCResult::Type::ANY, "proof", "JSON representation of merkle proof (transaction index, siblings and block header and some other information useful for moving coins to another chain)"},
+        RPCResult::Type::ANY, "proof", "JSON representation of merkle proof (transaction, coinbase, index, siblings, header, nevm_blockhash, ...)"},
     RPCExamples{""},
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -447,6 +447,11 @@ static RPCHelpMan syscoingetspvproof()
     ssBlock << pblockindex->GetBlockHeader(*node.chainman);
     const std::string rawTx = EncodeHexTx(*tx, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
     res.pushKVEnd("transaction",rawTx);
+    // Witness-stripped coinbase for NEVM relay same-depth Merkle checks (GHSA-wg2x class).
+    if (block.vtx.empty()) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Block has no transactions");
+    }
+    res.pushKVEnd("coinbase", EncodeHexTx(*block.vtx[0], PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS));
     res.pushKVEnd("blockhash", hashBlock.GetHex());
     const auto bytesVec = MakeUCharSpan(ssBlock);
     // get first 80 bytes of header (non auxpow part)
