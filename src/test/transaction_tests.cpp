@@ -1837,4 +1837,91 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     }
 }
 
+static CBlock MakeNEVMCoinbaseBlock(const std::vector<unsigned char>& syscoin_payload)
+{
+    CMutableTransaction coinbase;
+    coinbase.nVersion = 1;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig = CScript() << 0;
+    coinbase.vout.resize(1);
+    coinbase.vout[0].nValue = 0;
+    coinbase.vout[0].scriptPubKey = CScript() << OP_RETURN << syscoin_payload;
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+    return block;
+}
+
+static std::vector<unsigned char> SerializeNEVMHeaderPayload(const CNEVMHeader& header, bool with_trailing)
+{
+    std::vector<unsigned char> payload(std::begin(NEVM_MAGIC_BYTES), std::end(NEVM_MAGIC_BYTES));
+    CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
+    ds << header;
+    payload.insert(payload.end(), ds.begin(), ds.end());
+    if (with_trailing) {
+        // Trailing BTCC-style bytes after the header must be ignored by GetNEVMData.
+        payload.insert(payload.end(), {0x62, 0x74, 0x63, 0x63, 0x01, 0x02, 0x03});
+    }
+    return payload;
+}
+
+BOOST_AUTO_TEST_CASE(getnevmdata_rejects_short_suffix_after_magic)
+{
+    const std::vector<unsigned char> short_payload(std::begin(NEVM_MAGIC_BYTES), std::end(NEVM_MAGIC_BYTES));
+    const CBlock block = MakeNEVMCoinbaseBlock(short_payload);
+
+    BlockValidationState state;
+    CNEVMHeader header;
+    BOOST_CHECK(!GetNEVMData(state, block, header));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-block-data-short");
+}
+
+BOOST_AUTO_TEST_CASE(getnevmdata_accepts_header_with_trailing_payload)
+{
+    CNEVMHeader expected;
+    expected.nBlockHash = uint256S("0x1111111111111111111111111111111111111111111111111111111111111111");
+    expected.nTxRoot = uint256S("0x2222222222222222222222222222222222222222222222222222222222222222");
+    expected.nReceiptRoot = uint256S("0x3333333333333333333333333333333333333333333333333333333333333333");
+
+    const CBlock block = MakeNEVMCoinbaseBlock(SerializeNEVMHeaderPayload(expected, /*with_trailing=*/true));
+    BlockValidationState state;
+    CNEVMHeader parsed;
+    std::vector<unsigned char> coinbase_payload;
+    BOOST_CHECK(GetNEVMData(state, block, parsed, &coinbase_payload));
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK(parsed.nBlockHash == expected.nBlockHash);
+    BOOST_CHECK(parsed.nTxRoot == expected.nTxRoot);
+    BOOST_CHECK(parsed.nReceiptRoot == expected.nReceiptRoot);
+    // Full coinbase syscoin payload retained for BTCC parsing.
+    BOOST_CHECK(coinbase_payload.size() > 4 + 96);
+}
+
+BOOST_AUTO_TEST_CASE(getnevmdata_rejects_short_suffix_after_witness_commitment_push)
+{
+    std::vector<unsigned char> commitment(36, 0);
+    commitment[0] = 0xaa;
+    commitment[1] = 0x21;
+    commitment[2] = 0xa9;
+    commitment[3] = 0xed;
+    const std::vector<unsigned char> short_payload(std::begin(NEVM_MAGIC_BYTES), std::end(NEVM_MAGIC_BYTES));
+
+    CMutableTransaction coinbase;
+    coinbase.nVersion = 1;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig = CScript() << 0;
+    coinbase.vout.resize(1);
+    coinbase.vout[0].nValue = 0;
+    coinbase.vout[0].scriptPubKey = CScript() << OP_RETURN << commitment << short_payload;
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+
+    BlockValidationState state;
+    CNEVMHeader header;
+    BOOST_CHECK(!GetNEVMData(state, block, header));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-block-data-short");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
