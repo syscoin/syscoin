@@ -2248,8 +2248,14 @@ bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &
     if(pos == vchData.end() )
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "nevm-block-tag");
     pos = std::next(pos, sizeof(NEVM_MAGIC_BYTES));
-    vchData = std::vector<unsigned char>(pos, pos+sizeof(CNEVMHeader));
-    CDataStream ds(vchData, SER_NETWORK, PROTOCOL_VERSION);
+ 
+    static constexpr size_t NEVM_HEADER_SERIALIZED_SIZE = 32 + 32 + 32;
+    assert(GetSerializeSize(CNEVMHeader{}, PROTOCOL_VERSION) == NEVM_HEADER_SERIALIZED_SIZE);
+    if (static_cast<size_t>(std::distance(pos, vchData.end())) < NEVM_HEADER_SERIALIZED_SIZE) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "nevm-block-data-short");
+    }
+    const std::vector<unsigned char> headerBytes(pos, pos + NEVM_HEADER_SERIALIZED_SIZE);
+    CDataStream ds(headerBytes, SER_NETWORK, PROTOCOL_VERSION);
     try {
         ds >> evmBlockHeader;
     } catch (std::exception& e) {
