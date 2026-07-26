@@ -138,6 +138,13 @@ enum BlockStatus : uint32_t {
     BLOCK_ASSUMED_VALID      =   256,
     // SYSCOIN
     BLOCK_CONFLICT_CHAINLOCK =   512, //!< conflicts with chainlock system
+    /**
+     * Exact governance validation was performed for this superblock while the
+     * required governance data was available. This is persisted so ChainLock
+     * signing never relies only on BLOCK_VALID_SCRIPTS, which can be reached
+     * through the bounded historical-sync fallback.
+     */
+    BLOCK_GOVERNANCE_VALIDATED = 1024,
 };
 
 /** The block chain is a tree shaped structure starting with the

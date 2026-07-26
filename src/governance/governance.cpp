@@ -343,7 +343,8 @@ void CGovernanceManager::AddGovernanceObject(CGovernanceObject& govobj, PeerMana
     LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- Before trigger block, GetDataAsPlainString = %s, nObjectType = %d\n",
                 govObjRef.GetDataAsPlainString(), govObjRef.GetObjectType());
 
-    if (govObjRef.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER && !AddNewTrigger(nHash)) {
+    if (govObjRef.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER &&
+        !AddNewTrigger(nHash, chainman.ActiveHeight())) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- undo adding invalid trigger object: hash = %s\n", nHash.ToString());
         govObjRef.PrepareDeletion(GetTime<std::chrono::seconds>().count());
         return;
@@ -1061,13 +1062,16 @@ bool CGovernanceManager::ProcessVoteAndRelay(const CGovernanceVote& vote, const 
 
 bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, CGovernanceException& exception, CConnman& connman)
 {
+    ENTER_CRITICAL_SECTION(chainman.GetMutex());
     ENTER_CRITICAL_SECTION(cs);
     const uint256 nHashVote = vote.GetHash();
     const uint256 nHashGovobj = vote.GetParentHash();
+    const int active_height = chainman.ActiveHeight();
 
     if (cmapVoteToObject.HasKey(nHashVote)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceObject::ProcessVote -- skipping known valid vote %s for object %s\n", nHashVote.ToString(), nHashGovobj.ToString());
         LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(chainman.GetMutex());
         return false;
     }
 
@@ -1079,6 +1083,7 @@ bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, 
         LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
         exception = CGovernanceException(ostr.str(), GOVERNANCE_EXCEPTION_PERMANENT_ERROR, 20);
         LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(chainman.GetMutex());
         return false;
     }
 
@@ -1090,6 +1095,7 @@ bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, 
         exception = CGovernanceException(ostr.str(), GOVERNANCE_EXCEPTION_WARNING);
         if (cmmapOrphanVotes.Insert(nHashGovobj, vote_time_pair_t(vote, GetTime<std::chrono::seconds>().count() + GOVERNANCE_ORPHAN_EXPIRATION_TIME))) {
             LEAVE_CRITICAL_SECTION(cs);
+            LEAVE_CRITICAL_SECTION(chainman.GetMutex());
             RequestGovernanceObject(pfrom, nHashGovobj, connman);
             LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
             return false;
@@ -1097,6 +1103,7 @@ bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, 
 
         LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
         LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(chainman.GetMutex());
         return false;
     }
 
@@ -1105,11 +1112,32 @@ bool CGovernanceManager::ProcessVote(CNode* pfrom, const CGovernanceVote& vote, 
     if (govobj.IsSetCachedDelete() || govobj.IsSetExpired()) {
         LogPrint(BCLog::GOBJECT, "CGovernanceObject::ProcessVote -- ignoring vote for expired or deleted object, hash = %s\n", nHashGovobj.ToString());
         LEAVE_CRITICAL_SECTION(cs);
+        LEAVE_CRITICAL_SECTION(chainman.GetMutex());
         return false;
+    }
+
+    if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER) {
+        const auto trigger_it = mapTrigger.find(nHashGovobj);
+        if (trigger_it == mapTrigger.end() ||
+            trigger_it->second->GetBlockHeight() <= active_height) {
+            std::ostringstream ostr;
+            ostr << "CGovernanceManager::ProcessVote -- Trigger event height has passed"
+                 << ", governance object hash = "
+                 << nHashGovobj.ToString()
+                 << ", current block height = "
+                 << active_height;
+            LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
+            exception = CGovernanceException(
+                ostr.str(), GOVERNANCE_EXCEPTION_WARNING);
+            LEAVE_CRITICAL_SECTION(cs);
+            LEAVE_CRITICAL_SECTION(chainman.GetMutex());
+            return false;
+        }
     }
 
     bool fOk = govobj.ProcessVote(deterministicMNManager->GetListAtChainTip(), vote, exception) && cmapVoteToObject.Insert(nHashVote, &govobj);
     LEAVE_CRITICAL_SECTION(cs);
+    LEAVE_CRITICAL_SECTION(chainman.GetMutex());
     return fOk;
 }
 
@@ -1356,7 +1384,7 @@ void CGovernanceManager::RebuildIndexes()
     }
 }
 
-void CGovernanceManager::AddCachedTriggers()
+void CGovernanceManager::AddCachedTriggers(int active_height)
 {
     LOCK(cs);
 
@@ -1369,7 +1397,7 @@ void CGovernanceManager::AddCachedTriggers()
             continue;
         }
 
-        if (!AddNewTrigger(govobj.GetHash())) {
+        if (!AddNewTrigger(govobj.GetHash(), active_height)) {
             govobj.PrepareDeletion(nNow);
         }
     }
@@ -1377,11 +1405,12 @@ void CGovernanceManager::AddCachedTriggers()
 
 void CGovernanceManager::InitOnLoad()
 {
-    LOCK(cs);
+    LOCK2(chainman.GetMutex(), cs);
+    const int active_height = chainman.ActiveHeight();
     int64_t nStart = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
     LogPrintf("Preparing masternode indexes and governance triggers...\n");
     RebuildIndexes();
-    AddCachedTriggers();
+    AddCachedTriggers(active_height);
     LogPrintf("Masternode indexes and governance triggers prepared  %dms\n", TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()) - nStart);
     LogPrintf("     %s\n", ToString());
 }

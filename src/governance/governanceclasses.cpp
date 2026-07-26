@@ -94,7 +94,7 @@ CAmount ParsePaymentAmount(const std::string& strAmount)
 *   Add Governance Object
 */
 
-bool CGovernanceManager::AddNewTrigger(uint256 nHash)
+bool CGovernanceManager::AddNewTrigger(uint256 nHash, int active_height)
 {
     AssertLockHeld(cs);
     // IF WE ALREADY HAVE THIS HASH, RETURN
@@ -112,6 +112,17 @@ bool CGovernanceManager::AddNewTrigger(uint256 nHash)
         return false;
     } catch (...) {
         LogPrintf("CGovernanceManager::%s -- Unknown Error creating superblock\n", __func__);
+        return false;
+    }
+
+    if (pSuperblock->GetBlockHeight() <= active_height) {
+        LogPrint(
+            BCLog::GOBJECT,
+            "CGovernanceManager::%s -- Rejecting trigger %s for past event height %d (tip %d)\n",
+            __func__,
+            nHash.ToString(),
+            pSuperblock->GetBlockHeight(),
+            active_height);
         return false;
     }
 
@@ -749,4 +760,3 @@ CGovernancePayment::CGovernancePayment(const CTxDestination& destIn, CAmount nAm
                   EncodeDestination(destIn), nAmountIn);
     }
 }
-

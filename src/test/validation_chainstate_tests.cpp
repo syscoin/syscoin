@@ -3,20 +3,88 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
 #include <chainparams.h>
+#include <addresstype.h>
 #include <consensus/validation.h>
+#include <governance/governanceclasses.h>
+#include <governance/governanceexceptions.h>
+#include <governance/governancevote.h>
+#include <masternode/masternodepayments.h>
+#include <masternode/masternodesync.h>
+#include <primitives/block.h>
+#include <primitives/transaction.h>
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <script/script.h>
 #include <sync.h>
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <util/time.h>
 #include <validation.h>
 
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
+
+namespace governance_tests {
+
+class CGovernanceManagerTestAccess
+{
+public:
+    static bool AddTriggerAtHeight(
+        CGovernanceManager& manager,
+        int observed_height,
+        CGovernanceObject&& trigger,
+        uint256& trigger_hash)
+    {
+        const int active_height = WITH_LOCK(
+            manager.chainman.GetMutex(),
+            return manager.chainman.ActiveHeight());
+        trigger_hash = trigger.GetHash();
+        LOCK(manager.cs);
+        manager.nCachedBlockHeight = observed_height;
+        const auto [it, inserted] =
+            manager.mapObjects.emplace(trigger_hash, std::move(trigger));
+        return inserted &&
+            manager.AddNewTrigger(trigger_hash, active_height);
+    }
+
+    static bool ProcessVoteAtHeight(
+        CGovernanceManager& manager,
+        int observed_height,
+        const CGovernanceVote& vote,
+        CGovernanceException& exception,
+        CConnman& connman)
+    {
+        {
+            LOCK(manager.cs);
+            manager.nCachedBlockHeight = observed_height;
+        }
+        return manager.ProcessVote(
+            /*pfrom=*/nullptr, vote, exception, connman);
+    }
+
+    static bool InsertPreviouslyAdmittedTrigger(
+        CGovernanceManager& manager,
+        CGovernanceObject&& trigger,
+        uint256& trigger_hash)
+    {
+        trigger_hash = trigger.GetHash();
+        LOCK(manager.cs);
+        const auto [it, inserted] =
+            manager.mapObjects.emplace(trigger_hash, std::move(trigger));
+        if (!inserted) return false;
+
+        auto superblock = std::make_shared<CSuperblock>(trigger_hash);
+        superblock->SetStatus(SeenObjectStatus::Valid);
+        return manager.mapTrigger.emplace(
+            trigger_hash, std::move(superblock)).second;
+    }
+};
+
+} // namespace governance_tests
 
 BOOST_FIXTURE_TEST_SUITE(validation_chainstate_tests, ChainTestingSetup)
 
@@ -138,6 +206,172 @@ BOOST_FIXTURE_TEST_CASE(chainstate_update_tip, TestChain100Setup)
     // validation chain.
     BOOST_CHECK(block_added);
     BOOST_CHECK_EQUAL(curr_tip, ::g_best_block);
+}
+
+BOOST_FIXTURE_TEST_CASE(superblock_chainlock_requires_exact_governance_provenance,
+                        TestChainDIP3V19Setup)
+{
+    struct SyncModeGuard {
+        const int old_mode;
+        ~SyncModeGuard() { masternodeSync.SetSyncMode(old_mode); }
+    } sync_mode_guard{masternodeSync.GetAssetID()};
+
+    const CBlockIndex* pindex;
+    {
+        LOCK(::cs_main);
+        pindex = m_node.chainman->ActiveChain().Tip();
+    }
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nHeight >= Params().GetConsensus().DIP0003Height);
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(pindex->nHeight));
+
+    const CAmount regular_reward =
+        GetBlockSubsidy(pindex->nHeight, Params().GetConsensus());
+    const CAmount unbacked_issuance = COIN;
+
+    BOOST_REQUIRE(!m_coinbase_txns.empty());
+    CMutableTransaction coinbase{*m_coinbase_txns.back()};
+    coinbase.vout.emplace_back(unbacked_issuance, CScript() << OP_TRUE);
+
+    CBlock block;
+    block.vtx.emplace_back(MakeTransactionRef(coinbase));
+
+    CAmount mn_seniority = 0;
+    CAmount mn_floor_diff = 0;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(IsBlockPayeeValid(m_node.chainman->ActiveChain(),
+                                        *block.vtx[0], pindex->nHeight,
+                                        regular_reward, /*fees=*/0, mn_seniority,
+                                        mn_floor_diff));
+    }
+    const CAmount value_limit =
+        regular_reward + mn_seniority + mn_floor_diff;
+    BOOST_REQUIRE_EQUAL(m_coinbase_txns.back()->GetValueOut(), value_limit);
+    BOOST_REQUIRE_EQUAL(block.vtx[0]->GetValueOut(),
+                        value_limit + unbacked_issuance);
+
+    std::string error;
+    bool exact_superblock_validation{true};
+
+    // The historical sync fallback remains bounded by the adaptive cap, but
+    // must not produce exact-governance provenance for ChainLock signing.
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+    BOOST_REQUIRE(masternodeSync.IsBlockchainSynced());
+    BOOST_REQUIRE(!masternodeSync.IsSynced());
+    BOOST_CHECK(IsBlockValueValid(block, pindex, value_limit, error,
+                                  /*fJustCheck=*/true,
+                                  /*check_superblock=*/true,
+                                  &exact_superblock_validation));
+    BOOST_CHECK(!exact_superblock_validation);
+
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
+    error.clear();
+    exact_superblock_validation = false;
+    BOOST_CHECK(!IsBlockValueValid(block, pindex, value_limit, error,
+                                   /*fJustCheck=*/true,
+                                   /*check_superblock=*/true,
+                                   &exact_superblock_validation));
+    BOOST_CHECK(exact_superblock_validation);
+
+    // Equal height is not historical: the ChainLocked block itself must take
+    // the exact path. Only a strict ancestor may set this predicate false.
+    const int best_chainlock_height = pindex->nHeight;
+    const bool check_superblock =
+        best_chainlock_height <= pindex->nHeight;
+    BOOST_REQUIRE(check_superblock);
+
+    error.clear();
+    exact_superblock_validation = false;
+    BOOST_CHECK(!IsBlockValueValid(block, pindex, value_limit, error,
+                                   /*fJustCheck=*/true, check_superblock,
+                                   &exact_superblock_validation));
+    BOOST_CHECK(exact_superblock_validation);
+
+    error.clear();
+    exact_superblock_validation = true;
+    BOOST_CHECK(IsBlockValueValid(block, pindex, value_limit, error,
+                                  /*fJustCheck=*/true,
+                                  /*check_superblock=*/false,
+                                  &exact_superblock_validation));
+    BOOST_CHECK(!exact_superblock_validation);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    past_superblock_trigger_and_funding_vote_are_rejected,
+    TestChainDIP3V19Setup)
+{
+    const CBlockIndex* tip =
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip());
+    BOOST_REQUIRE(tip != nullptr);
+    const int event_height = tip->nHeight;
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(event_height));
+
+    const CTxDestination destination =
+        PKHash(coinbaseKey.GetPubKey());
+    const auto make_trigger = [&](const int trigger_height,
+                                  const uint256& proposal_hash) {
+        std::vector<CGovernancePayment> payments;
+        payments.emplace_back(destination, COIN, proposal_hash);
+        CSuperblock schedule{trigger_height, std::move(payments)};
+        return CGovernanceObject{
+            uint256{},
+            /*revision=*/1,
+            GetTime<std::chrono::seconds>().count(),
+            uint256{},
+            schedule.GetHexStrData()};
+    };
+
+    uint256 late_trigger_hash;
+    BOOST_CHECK(
+        !governance_tests::CGovernanceManagerTestAccess::
+            AddTriggerAtHeight(
+                *governance,
+                event_height - 1,
+                make_trigger(event_height, InsecureRand256()),
+                late_trigger_hash));
+
+    const int future_event_height =
+        event_height +
+        Params().GetConsensus().SuperBlockCycle(event_height);
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(future_event_height));
+    uint256 future_trigger_hash;
+    BOOST_REQUIRE(
+        governance_tests::CGovernanceManagerTestAccess::
+            AddTriggerAtHeight(
+                *governance,
+                event_height - 1,
+                make_trigger(future_event_height, InsecureRand256()),
+                future_trigger_hash));
+
+    uint256 on_time_trigger_hash;
+    BOOST_REQUIRE(
+        governance_tests::CGovernanceManagerTestAccess::
+            InsertPreviouslyAdmittedTrigger(
+                *governance,
+                make_trigger(event_height, InsecureRand256()),
+                on_time_trigger_hash));
+
+    CGovernanceVote late_funding_vote{
+        COutPoint{InsecureRand256(), 0},
+        on_time_trigger_hash,
+        VOTE_SIGNAL_FUNDING,
+        VOTE_OUTCOME_YES};
+    CGovernanceException exception;
+    BOOST_CHECK(
+        !governance_tests::CGovernanceManagerTestAccess::
+            ProcessVoteAtHeight(
+                *governance,
+                event_height - 1,
+                late_funding_vote,
+                exception,
+                *m_node.connman));
+    BOOST_CHECK_EQUAL(
+        exception.GetType(), GOVERNANCE_EXCEPTION_WARNING);
+    BOOST_CHECK_EQUAL(exception.GetNodePenalty(), 0);
+    BOOST_CHECK(
+        std::string{exception.what()}.find("event height has passed") !=
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
