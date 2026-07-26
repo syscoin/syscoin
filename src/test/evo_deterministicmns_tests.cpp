@@ -10,6 +10,7 @@
 #include <base58.h>
 #include <netbase.h>
 #include <messagesigner.h>
+#include <masternode/masternodepayments.h>
 #include <policy/policy.h>
 #include <script/signingprovider.h>
 #include <spork.h>
@@ -707,6 +708,92 @@ BOOST_AUTO_TEST_CASE(dip3_protx_basic)
 {
     TestChainDIP3V19Setup setup;
     FuncDIP3Protx(setup);
+}
+
+BOOST_AUTO_TEST_CASE(masternode_required_outputs_are_matched_once)
+{
+    TestChainDIP3V19Setup setup;
+    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
+    const CScript payout =
+        GetScriptForDestination(WitnessV0KeyHash(setup.coinbaseKey.GetPubKey()));
+
+    CKey owner_key;
+    CBLSSecretKey operator_key;
+    const CMutableTransaction pro_reg =
+        CreateProRegTx(
+            setup.m_node,
+            utxos,
+            /*port=*/1,
+            payout,
+            setup.coinbaseKey,
+            owner_key,
+            operator_key);
+    setup.CreateAndProcessBlock(
+        {pro_reg}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
+
+    const CMutableTransaction pro_up_serv =
+        CreateProUpServTx(
+            setup.m_node,
+            utxos,
+            pro_reg.GetHash(),
+            operator_key,
+            /*port=*/2,
+            setup.coinbaseKey);
+    setup.CreateAndProcessBlock(
+        {pro_up_serv}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
+
+    CChain* active_chain = WITH_LOCK(
+        ::cs_main, return &setup.m_node.chainman->ActiveChain());
+    const int next_height = *setup.m_node.chain->getHeight() + 1;
+    constexpr CAmount block_reward{100 * COIN};
+    CAmount mn_seniority{0};
+    CAmount mn_floor_diff{0};
+    int collateral_height{0};
+    std::vector<CTxOut> required_outputs;
+    BOOST_REQUIRE(
+        CMasternodePayments::GetBlockTxOuts(
+            *active_chain,
+            next_height,
+            block_reward,
+            required_outputs,
+            /*nHalfFee=*/0,
+            mn_seniority,
+            mn_floor_diff,
+            collateral_height));
+    BOOST_REQUIRE_EQUAL(required_outputs.size(), 2);
+    BOOST_REQUIRE(required_outputs[0] == required_outputs[1]);
+
+    CMutableTransaction tx;
+    tx.vout = {required_outputs[0]};
+    mn_seniority = 0;
+    mn_floor_diff = 0;
+    BOOST_CHECK(
+        !CMasternodePayments::IsTransactionValid(
+            *active_chain,
+            CTransaction{tx},
+            next_height,
+            block_reward,
+            /*nHalfFee=*/0,
+            mn_seniority,
+            mn_floor_diff));
+
+    tx.vout.push_back(required_outputs[1]);
+    mn_seniority = 0;
+    mn_floor_diff = 0;
+    std::vector<bool> matched_outputs;
+    BOOST_CHECK(
+        CMasternodePayments::IsTransactionValid(
+            *active_chain,
+            CTransaction{tx},
+            next_height,
+            block_reward,
+            /*nHalfFee=*/0,
+            mn_seniority,
+            mn_floor_diff,
+            &matched_outputs));
+    BOOST_REQUIRE_EQUAL(matched_outputs.size(), tx.vout.size());
+    BOOST_CHECK(matched_outputs[0]);
+    BOOST_CHECK(matched_outputs[1]);
 }
 
 BOOST_AUTO_TEST_CASE(test_mempool_reorg_legacy)

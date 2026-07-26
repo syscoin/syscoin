@@ -35,7 +35,7 @@ public:
 
     static bool GetSuperblockPayments(int nBlockHeight, std::vector<CTxOut>& voutSuperblockRet);
     static void ExecuteBestSuperblock(int nBlockHeight);
-    static bool IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nGovernanceBudget);
+    static bool IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nGovernanceBudget, const std::vector<bool>* matched_outputs = nullptr);
 };
 
 /**
@@ -135,7 +135,7 @@ public:
     bool GetPayment(int nPaymentIndex, CGovernancePayment& paymentRet);
     CAmount GetPaymentsTotalAmount();
 
-    bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nGovernanceBudget);
+    bool IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nGovernanceBudget, const std::vector<bool>* matched_outputs = nullptr);
     bool IsExpired() const;
 
     std::vector<uint256> GetProposalHashes() const;

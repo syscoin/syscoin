@@ -82,6 +82,15 @@ public:
         return manager.mapTrigger.emplace(
             trigger_hash, std::move(superblock)).second;
     }
+
+    static CSuperblock_sptr GetTrigger(
+        CGovernanceManager& manager,
+        const uint256& trigger_hash)
+    {
+        LOCK(manager.cs);
+        const auto it = manager.mapTrigger.find(trigger_hash);
+        return it == manager.mapTrigger.end() ? nullptr : it->second;
+    }
 };
 
 } // namespace governance_tests
@@ -372,6 +381,80 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(
         std::string{exception.what()}.find("event height has passed") !=
         std::string::npos);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_required_outputs_are_matched_once,
+    TestChainDIP3V19Setup)
+{
+    const CBlockIndex* tip =
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip());
+    BOOST_REQUIRE(tip != nullptr);
+    const int event_height = tip->nHeight;
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(event_height));
+
+    const CTxDestination destination = PKHash(coinbaseKey.GetPubKey());
+    std::vector<CGovernancePayment> payments;
+    payments.emplace_back(destination, COIN, InsecureRand256());
+    payments.emplace_back(destination, COIN, InsecureRand256());
+    CSuperblock schedule{event_height, std::move(payments)};
+    CGovernanceObject trigger{
+        uint256{},
+        /*revision=*/1,
+        GetTime<std::chrono::seconds>().count(),
+        uint256{},
+        schedule.GetHexStrData()};
+
+    uint256 trigger_hash;
+    BOOST_REQUIRE(
+        governance_tests::CGovernanceManagerTestAccess::
+            InsertPreviouslyAdmittedTrigger(
+                *governance, std::move(trigger), trigger_hash));
+    const auto superblock =
+        governance_tests::CGovernanceManagerTestAccess::
+            GetTrigger(*governance, trigger_hash);
+    BOOST_REQUIRE(superblock != nullptr);
+
+    const CTxOut miner_output{10 * COIN, CScript{}};
+    const CTxOut required_output{
+        COIN, GetScriptForDestination(destination)};
+    CMutableTransaction tx;
+    tx.vout = {miner_output, required_output};
+
+    BOOST_CHECK(
+        !superblock->IsValid(
+            CTransaction{tx},
+            event_height,
+            /*blockReward=*/10 * COIN,
+            /*nGovernanceBudget=*/2 * COIN));
+
+    tx.vout.push_back(required_output);
+    BOOST_CHECK(
+        superblock->IsValid(
+            CTransaction{tx},
+            event_height,
+            /*blockReward=*/10 * COIN,
+            /*nGovernanceBudget=*/2 * COIN));
+
+    std::vector<bool> previously_matched(tx.vout.size());
+    previously_matched[1] = true;
+    BOOST_CHECK(
+        !superblock->IsValid(
+            CTransaction{tx},
+            event_height,
+            /*blockReward=*/11 * COIN,
+            /*nGovernanceBudget=*/2 * COIN,
+            &previously_matched));
+
+    tx.vout.push_back(required_output);
+    previously_matched.resize(tx.vout.size());
+    BOOST_CHECK(
+        superblock->IsValid(
+            CTransaction{tx},
+            event_height,
+            /*blockReward=*/11 * COIN,
+            /*nGovernanceBudget=*/2 * COIN,
+            &previously_matched));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

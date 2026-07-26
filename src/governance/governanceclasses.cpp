@@ -364,14 +364,14 @@ bool CSuperblockManager::GetSuperblockPayments(int nBlockHeight, std::vector<CTx
     return true;
 }
 
-bool CSuperblockManager::IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nGovernanceBudget)
+bool CSuperblockManager::IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nGovernanceBudget, const std::vector<bool>* matched_outputs)
 {
     // GET BEST SUPERBLOCK, SHOULD MATCH
     LOCK(governance->cs);
 
     CSuperblock_sptr pSuperblock;
     if (CSuperblockManager::GetBestSuperblock(pSuperblock, nBlockHeight)) {
-        return pSuperblock->IsValid(txNew, nBlockHeight, blockReward, nGovernanceBudget);
+        return pSuperblock->IsValid(txNew, nBlockHeight, blockReward, nGovernanceBudget, matched_outputs);
     }
 
     return false;
@@ -591,7 +591,7 @@ CAmount CSuperblock::GetPaymentsTotalAmount()
 *   - Does this transaction match the superblock?
 */
 
-bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nGovernanceBudget)
+bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nGovernanceBudget, const std::vector<bool>* matched_outputs)
 {
     // TODO : LOCK(cs);
     // No reason for a lock here now since this method only accesses data
@@ -608,6 +608,12 @@ bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAm
     int nOutputs = txNew.vout.size();
     int nPayments = CountPayments();
     int nMinerAndMasternodePayments = nOutputs - nPayments;
+    if (matched_outputs && matched_outputs->size() != txNew.vout.size()) {
+        LogPrintf("CSuperblock::IsValid -- ERROR: Block invalid, inconsistent matched output state\n");
+        return false;
+    }
+    std::vector<bool> outputs_used =
+        matched_outputs ? *matched_outputs : std::vector<bool>(nOutputs);
 
     {
         LOCK(governance->cs);
@@ -652,11 +658,13 @@ bool CSuperblock::IsValid(const CTransaction& txNew, int nBlockHeight, const CAm
 
         for (int j = nVoutIndex; j < nOutputs; j++) {
             // Find superblock payment
-            fPaymentMatch = ((payment.script == txNew.vout[j].scriptPubKey) &&
+            fPaymentMatch = (!outputs_used[j] &&
+                             (payment.script == txNew.vout[j].scriptPubKey) &&
                              (payment.nAmount == txNew.vout[j].nValue));
 
             if (fPaymentMatch) {
-                nVoutIndex = j;
+                outputs_used[j] = true;
+                nVoutIndex = j + 1;
                 break;
             }
         }
