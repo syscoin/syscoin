@@ -45,7 +45,7 @@ void CheckAndWriteBudget(const CAmount& nSuperblockPayment, const CAmount& nPaym
 *   - When non-superblocks are detected, the normal schedule should be maintained
 */
 
-bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock, bool* exact_superblock_validation)
+bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock, bool* exact_superblock_validation, const std::vector<bool>* matched_outputs)
 {
     if (exact_superblock_validation != nullptr) {
         *exact_superblock_validation = false;
@@ -135,7 +135,7 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         return isBlockRewardValueMet;
     }
     // this actually also checks for correct payees and not only amount
-    if (!CSuperblockManager::IsValidSuperblock(*block.vtx[0], nBlockHeight, blockReward, nGovernanceBudgetUp)) {
+    if (!CSuperblockManager::IsValidSuperblock(*block.vtx[0], nBlockHeight, blockReward, nGovernanceBudgetUp, matched_outputs)) {
         // triggered but invalid? that's weird
         LogPrintf("%s -- ERROR: Invalid superblock detected at height %d: %s", __func__, nBlockHeight, block.vtx[0]->ToString()); /* Continued */
         // should NOT allow invalid superblocks, when superblocks are enabled
@@ -149,7 +149,7 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
     return true;
 }
 
-bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, CAmount& nMNSeniorityRet, CAmount& nMNFloorDiffRet)
+bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, CAmount& nMNSeniorityRet, CAmount& nMNFloorDiffRet, std::vector<bool>* matched_outputs)
 {
 
     // we are still using budgets, but we have no data about them anymore,
@@ -167,7 +167,7 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
     const CAmount nHalfFee = fees / 2;
 
     // Check for correct masternode payment
-    if(CMasternodePayments::IsTransactionValid(activeChain, txNew, nBlockHeight, blockReward, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet)) {
+    if(CMasternodePayments::IsTransactionValid(activeChain, txNew, nBlockHeight, blockReward, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, matched_outputs)) {
         LogPrint(BCLog::MNPAYMENTS, "%s -- Valid masternode payment at height %d\n", __func__, nBlockHeight);
         return true;
     }
@@ -292,8 +292,11 @@ bool CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, 
     return true;
 }
 
-bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet)
+bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet, std::vector<bool>* matched_outputs)
 {
+    if (matched_outputs) {
+        matched_outputs->assign(txNew.vout.size(), false);
+    }
     if (!deterministicMNManager || !deterministicMNManager->IsDIP3Enforced(nBlockHeight)) {
         // can't verify historical blocks here
         return true;
@@ -306,8 +309,16 @@ bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransac
         return true;
     }
 
+    std::vector<bool> outputs_used(txNew.vout.size());
     for (const auto& txout : voutMasternodePayments) {
-        bool found = ranges::any_of(txNew.vout, [&txout](const auto& txout2) {return txout == txout2;});
+        bool found = false;
+        for (size_t i = 0; i < txNew.vout.size(); ++i) {
+            if (!outputs_used[i] && txout == txNew.vout[i]) {
+                outputs_used[i] = true;
+                found = true;
+                break;
+            }
+        }
         if (!found) {
             CTxDestination dest;
             if (!ExtractDestination(txout.scriptPubKey, dest))
@@ -315,6 +326,9 @@ bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransac
             LogPrintf("CMasternodePayments::%s -- ERROR failed to find expected payee %s in block at height %s\n", __func__, EncodeDestination(dest), nBlockHeight);
             return false;
         }
+    }
+    if (matched_outputs) {
+        *matched_outputs = std::move(outputs_used);
     }
     return true;
 }
