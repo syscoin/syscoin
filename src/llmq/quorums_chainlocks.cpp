@@ -828,14 +828,6 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
             }
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-height");
         }
-        if (!HasChainLockTargetDataAndValidity(pindexScan)) {
-            LogPrintf("CChainLocksHandler::%s -- block data or full validation missing for CLSIG (%s)\n",
-                      __func__, clsig.ToString());
-            if (from != -1) {
-                peerman.ForgetTxHash(from, hash);
-            }
-            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-block-state");
-        }
         if ((clsig.nHeight%SIGN_HEIGHT_OFFSET) != 0) {
             // Should not happen
             LogPrintf("CChainLocksHandler::%s -- height of CLSIG (%s) is not a factor of 5\n",
@@ -877,6 +869,14 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 }
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "clsig-window-ancestor-mismatch");
             }
+        }
+        if (!HasChainLockTargetDataAndValidity(pindexScan)) {
+            LogPrintf("CChainLocksHandler::%s -- block data or full validation missing for CLSIG (%s)\n",
+                      __func__, clsig.ToString());
+            if (from != -1) {
+                peerman.ForgetTxHash(from, hash);
+            }
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-block-state");
         }
         // current chainlock should be confirmed before trying to make new one (don't let headers-only be locked by more than 1 CL)
         if (bestIndex && (!chainman.ActiveChain().Contains(bestIndex) || !bestIndex->IsValid(BLOCK_VALID_SCRIPTS))) {
