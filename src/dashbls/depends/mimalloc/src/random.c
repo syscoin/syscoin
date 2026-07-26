@@ -13,6 +13,13 @@ terms of the MIT license. A copy of the license can be found in the file
 
 #include <string.h> // memset
 
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#define MI_MEMORY_SANITIZER 1
+#endif
+#endif
+
 /* ----------------------------------------------------------------------------
 We use our own PRNG to keep predictable performance of random number generation
 and to avoid implementations that use a lock. We only use the OS provided
@@ -241,7 +248,13 @@ static bool os_random_buf(void* buf, size_t buf_len) {
   static _Atomic(uintptr_t) no_getrandom; // = 0
   if (mi_atomic_load_acquire(&no_getrandom)==0) {
     ssize_t ret = syscall(SYS_getrandom, buf, buf_len, GRND_NONBLOCK);
-    if (ret >= 0) return (buf_len == (size_t)ret);
+    if (ret >= 0) {
+      // MemorySanitizer cannot observe writes performed by a raw syscall.
+      #if defined(MI_MEMORY_SANITIZER)
+      __msan_unpoison(buf, (size_t)ret);
+      #endif
+      return (buf_len == (size_t)ret);
+    }
     if (errno != ENOSYS) return false;
     mi_atomic_store_release(&no_getrandom, 1UL); // don't call again, and fall back to /dev/urandom
   }

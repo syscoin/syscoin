@@ -568,7 +568,7 @@ bool CZMQPublishNEVMBlockNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std:
         CDataStream ss(evmData, SER_NETWORK, PROTOCOL_VERSION);
         try {
             ss >> evmBlock;
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             state = "nevm-response-unserialize";
             return false;
         }

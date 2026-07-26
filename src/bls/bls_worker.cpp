@@ -7,10 +7,16 @@
 #include <serialize.h>
 
 #include <util/ranges.h>
-#include <util/system.h>
 
+#include <algorithm>
+#include <atomic>
+#include <functional>
+#include <future>
 #include <memory>
+#include <set>
+#include <thread>
 #include <utility>
+#include <vector>
 
 template <typename T>
 bool VerifyVectorHelper(Span<T> vec)

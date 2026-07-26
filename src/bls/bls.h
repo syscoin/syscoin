@@ -24,7 +24,6 @@
 
 #include <array>
 #include <mutex>
-#include <unistd.h>
 
 #include <atomic>
 
@@ -52,22 +51,44 @@ protected:
     ImplType impl;
     bool fValid{false};
     mutable uint256 cachedHash;
+    mutable std::mutex cachedHashMutex;
 
 public:
     static constexpr size_t SerSize = _SerSize;
 
     explicit CBLSWrapper() = default;
 
-    CBLSWrapper(const CBLSWrapper& ref) = default;
-    CBLSWrapper& operator=(const CBLSWrapper& ref) = default;
+    CBLSWrapper(const CBLSWrapper& ref)
+    {
+        std::lock_guard<std::mutex> l(ref.cachedHashMutex);
+        impl = ref.impl;
+        fValid = ref.fValid;
+        cachedHash = ref.cachedHash;
+    }
+    CBLSWrapper& operator=(const CBLSWrapper& ref)
+    {
+        if (this == &ref) {
+            return *this;
+        }
+        std::scoped_lock l(cachedHashMutex, ref.cachedHashMutex);
+        impl = ref.impl;
+        fValid = ref.fValid;
+        cachedHash = ref.cachedHash;
+        return *this;
+    }
     CBLSWrapper(CBLSWrapper&& ref) noexcept
     {
+        std::lock_guard<std::mutex> l(ref.cachedHashMutex);
         std::swap(impl, ref.impl);
         std::swap(fValid, ref.fValid);
         std::swap(cachedHash, ref.cachedHash);
     }
     CBLSWrapper& operator=(CBLSWrapper&& ref) noexcept
     {
+        if (this == &ref) {
+            return *this;
+        }
+        std::scoped_lock l(cachedHashMutex, ref.cachedHashMutex);
         std::swap(impl, ref.impl);
         std::swap(fValid, ref.fValid);
         std::swap(cachedHash, ref.cachedHash);
@@ -137,6 +158,7 @@ public:
 
     const uint256& GetHash() const
     {
+        std::lock_guard<std::mutex> l(cachedHashMutex);
         if (cachedHash.IsNull()) {
             cachedHash = ::SerializeHash(*this);
         }

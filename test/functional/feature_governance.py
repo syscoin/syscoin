@@ -172,7 +172,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.p2_hash = self.nodes[0].gobject_submit("0", 1, proposal_time, p2_collateral_prepare["hex"], p2_collateral_prepare["collateralHash"])
         
         def sync_gobject_list(node):
-            self.bump_mocktime(1)
+            self._throttled_bump_mocktime("feature_governance_object_sync", step=1)
             return len(node.gobject_list()) == 3
 
         for i in range(len(self.nodes)):
@@ -203,6 +203,14 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.nodes[0].gobject_vote_many(self.p2_hash, map_vote_signals[1], map_vote_outcomes[1])
         assert_equal(self.nodes[0].gobject_get(self.p2_hash)["FundingResult"]["YesCount"], self.mn_count - 2)
         assert_equal(self.nodes[0].gobject_get(self.p2_hash)["FundingResult"]["NoCount"], 2)
+
+        expected_vote_count = self.mn_count * 3
+        def votes_synced(node):
+            self._throttled_bump_mocktime("feature_governance_proposal_vote_sync", step=5)
+            return node.gobject_count()["votes"] == expected_vote_count
+
+        for node in self.nodes:
+            self.wait_until(lambda node=node: votes_synced(node), timeout=5)
 
         assert_equal(len(self.nodes[0].gobject_list("valid", "triggers")), 0)
 
@@ -241,12 +249,13 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.isolate_node(isolated)
         for idx, node in enumerate(non_isolated_nodes):
             if node.index != 0:
-                self.connect_nodes(0, node.index, wait_for_connect=False)
-                self.connect_nodes(node.index, 0, wait_for_connect=False)
+                self.connect_nodes(0, node.index)
+                self.connect_nodes(node.index, 0)
         # Move 1 block inside the Superblock maturity window on the isolated node
+        self.bump_mocktime(1)
         self.generate(isolated, 1, sync_fun=self.no_op)
         def sync_gobject_list_trigger(node, count):
-            self.bump_mocktime(1)
+            self._throttled_bump_mocktime("feature_governance_trigger_sync", step=5)
             return len(node.gobject_list("valid", "triggers")) == count
             
         # The isolated "winner" should submit new trigger and vote for it
@@ -260,10 +269,10 @@ class SyscoinGovernanceTest (DashTestFramework):
         # make sure no triggers exist before block
         for idx, node in enumerate(non_isolated_nodes):
             self.wait_until(lambda: sync_gobject_list_trigger(node, 0), timeout=5)
-            
+
+        self.bump_mocktime(1)
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.sync_all(nodes=non_isolated_nodes)
-        self.bump_mocktime(1)
         assert_equal(self.nodes[0].getblockcount(), 145)
 
         # The "winner" should submit new trigger and vote for it, but payee which is same as last is isolated so non-isolated nodes will not be in payee list
@@ -271,6 +280,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         assert_equal(has_trigger, False)
         
         # Move 1 block inside the Superblock maturity window on non-isolated nodes
+        self.bump_mocktime(1)
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.sync_all(nodes=non_isolated_nodes)
 
@@ -290,10 +300,11 @@ class SyscoinGovernanceTest (DashTestFramework):
             assert(amount_str in payment_amounts_expected)
 
         # Move another block inside the Superblock maturity window on non-isolated nodes
+        self.bump_mocktime(1)
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.sync_all(nodes=non_isolated_nodes)
         def sync_gobject_list2(node):
-            self.bump_mocktime(1)
+            self._throttled_bump_mocktime("feature_governance_vote_sync", step=5)
             count = list(node.gobject_list("valid", "triggers").values())[0]['YesCount']
             return count == self.mn_count - 1
     
@@ -305,13 +316,13 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.reconnect_isolated_node(self.nodes[payee_idx], 0)
         for idx, node in enumerate(self.nodes):
             if node.index != 0:
-                self.connect_nodes(0, node.index, wait_for_connect=False)
-                self.connect_nodes(node.index, 0, wait_for_connect=False)
+                self.connect_nodes(0, node.index)
+                self.connect_nodes(node.index, 0)
         self.sync_blocks()
 
         # re-sync helper
         def sync_gov(node):
-            self.bump_mocktime(1)
+            self._throttled_bump_mocktime("feature_governance_mnsync", step=1)
             return node.mnsync("status")["IsSynced"]
 
         # make sure isolated node is fully synced at this point
@@ -337,7 +348,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.sync_blocks()
 
         def sync_gobject_list3(node, trigger_hash, count):
-            self.bump_mocktime(1)
+            self._throttled_bump_mocktime("feature_governance_no_vote_sync", step=5)
             return node.gobject_list("valid", "triggers")[trigger_hash]['NoCount'] == count
         
         # Should see NO votes on both triggers now

@@ -11,6 +11,11 @@
 #include <test/util/setup_common.h>
 #include <boost/test/unit_test.hpp>
 
+#include <array>
+#include <atomic>
+#include <thread>
+#include <vector>
+
 BOOST_AUTO_TEST_SUITE(bls_tests)
 
 void FuncSign(const bool legacy_scheme)
@@ -590,6 +595,37 @@ BOOST_AUTO_TEST_CASE(test_get_hash_consistency)
     uint256 hash1 = lazy1.GetHash();
     uint256 hash2 = lazy2.GetHash();
     BOOST_CHECK(hash1 == hash2);
+}
+
+BOOST_AUTO_TEST_CASE(test_get_hash_thread_safe)
+{
+    CBLSSecretKey secret_key;
+    secret_key.MakeNewKey();
+    const CBLSPublicKey public_key{secret_key.GetPublicKey()};
+
+    constexpr size_t thread_count{8};
+    std::array<uint256, thread_count> hashes;
+    std::atomic<bool> start{false};
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    for (size_t i = 0; i < thread_count; ++i) {
+        threads.emplace_back([&, i] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (size_t iteration = 0; iteration < 1000; ++iteration) {
+                hashes[i] = public_key.GetHash();
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (size_t i = 1; i < thread_count; ++i) {
+        BOOST_CHECK_EQUAL(hashes[i], hashes[0]);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

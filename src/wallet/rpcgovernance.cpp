@@ -129,8 +129,11 @@ static RPCHelpMan gobject_list_prepared()
         return a->GetDataAsHexString() < b->GetDataAsHexString();
     });
 
+    const size_t start_index = vecObjects.size() > static_cast<size_t>(nCount)
+        ? vecObjects.size() - static_cast<size_t>(nCount)
+        : 0;
     UniValue jsonArray(UniValue::VARR);
-    for (auto it = vecObjects.begin() + std::max<int>(0, vecObjects.size() - nCount); it != vecObjects.end(); ++it) {
+    for (auto it = vecObjects.begin() + start_index; it != vecObjects.end(); ++it) {
         jsonArray.push_back((*it)->ToJson());
     }
 

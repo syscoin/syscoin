@@ -7,6 +7,7 @@
 #define SYSCOIN_INIT_H
 
 #include <any>
+#include <atomic>
 #include <memory>
 #include <string>
 

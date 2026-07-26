@@ -98,6 +98,7 @@ void CChainParams::UpdateLLMQTestParams(int size, int threshold) {
 }
 // this one is for testing only
 static Consensus::LLMQParams llmq_test = {
+        .type = Consensus::LLMQ_TEST,
         .name = "llmq_test",
         .size = 3,
         .minSize = 2,
@@ -116,6 +117,7 @@ static Consensus::LLMQParams llmq_test = {
 };
 
 static Consensus::LLMQParams llmq400_60 = {
+        .type = Consensus::LLMQ_400_60,
         .name = "llmq_400_60",
         .size = 400,
         .minSize = 300,

@@ -115,6 +115,9 @@
 /* Define if the dllexport attribute is supported. */
 #define HAVE_DLLEXPORT_ATTRIBUTE 1
 
+/* Define this symbol if evhttp_connection_get_peer expects const char** */
+#define HAVE_EVHTTP_CONNECTION_GET_PEER_CONST_CHAR 1
+
 /* Define to the address where bug reports for this package should be sent. */
 #define PACKAGE_BUGREPORT "https://github.com/syscoin/syscoin/issues"
 

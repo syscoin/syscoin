@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <limits>
 #include <locale>
 #include <thread>
 #include <sstream>
@@ -96,30 +97,72 @@ std::chrono::seconds GetMockTime()
 
 int64_t GetTime() { return GetTime<std::chrono::seconds>().count(); }
 
+namespace {
+struct CivilTime {
+    int year;
+    unsigned int month;
+    unsigned int day;
+    unsigned int hour;
+    unsigned int minute;
+    unsigned int second;
+};
+
+bool ToCivilTime(int64_t timestamp, CivilTime& result)
+{
+    static constexpr int64_t SECONDS_PER_DAY{24 * 60 * 60};
+
+    int64_t days{timestamp / SECONDS_PER_DAY};
+    int64_t seconds{timestamp % SECONDS_PER_DAY};
+    if (seconds < 0) {
+        seconds += SECONDS_PER_DAY;
+        --days;
+    }
+
+    // Convert days since 1970-01-01 to a proleptic Gregorian date without
+    // relying on the platform CRT. In particular, Windows gmtime_s rejects
+    // otherwise representable dates after 3000-12-31.
+    const int64_t shifted_days{days + 719468};
+    const int64_t era{(shifted_days >= 0 ? shifted_days : shifted_days - 146096) / 146097};
+    const unsigned int day_of_era{static_cast<unsigned int>(shifted_days - era * 146097)};
+    const unsigned int year_of_era{
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365};
+    const int64_t year_base{static_cast<int64_t>(year_of_era) + era * 400};
+    const unsigned int day_of_year{
+        day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100)};
+    const unsigned int month_prime{(5 * day_of_year + 2) / 153};
+    const unsigned int day{day_of_year - (153 * month_prime + 2) / 5 + 1};
+    const unsigned int month{month_prime < 10 ? month_prime + 3 : month_prime - 9};
+    const int64_t year{year_base + (month <= 2)};
+    if (year < std::numeric_limits<int>::min() || year > std::numeric_limits<int>::max()) {
+        return false;
+    }
+
+    result = {
+        static_cast<int>(year),
+        month,
+        day,
+        static_cast<unsigned int>(seconds / 3600),
+        static_cast<unsigned int>((seconds % 3600) / 60),
+        static_cast<unsigned int>(seconds % 60),
+    };
+    return true;
+}
+} // namespace
+
 std::string FormatISO8601DateTime(int64_t nTime) {
-    struct tm ts;
-    time_t time_val = nTime;
-#ifdef HAVE_GMTIME_R
-    if (gmtime_r(&time_val, &ts) == nullptr) {
-#else
-    if (gmtime_s(&ts, &time_val) != 0) {
-#endif
+    CivilTime time;
+    if (!ToCivilTime(nTime, time)) {
         return {};
     }
-    return strprintf("%04i-%02i-%02iT%02i:%02i:%02iZ", ts.tm_year + 1900, ts.tm_mon + 1, ts.tm_mday, ts.tm_hour, ts.tm_min, ts.tm_sec);
+    return strprintf("%04i-%02u-%02uT%02u:%02u:%02uZ", time.year, time.month, time.day, time.hour, time.minute, time.second);
 }
 
 std::string FormatISO8601Date(int64_t nTime) {
-    struct tm ts;
-    time_t time_val = nTime;
-#ifdef HAVE_GMTIME_R
-    if (gmtime_r(&time_val, &ts) == nullptr) {
-#else
-    if (gmtime_s(&ts, &time_val) != 0) {
-#endif
+    CivilTime time;
+    if (!ToCivilTime(nTime, time)) {
         return {};
     }
-    return strprintf("%04i-%02i-%02i", ts.tm_year + 1900, ts.tm_mon + 1, ts.tm_mday);
+    return strprintf("%04i-%02u-%02u", time.year, time.month, time.day);
 }
 // SYSCOIN
 std::string DurationToDHMS(int64_t nDurationTime)

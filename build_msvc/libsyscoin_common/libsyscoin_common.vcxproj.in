@@ -9,6 +9,27 @@
   </PropertyGroup>
   <ItemGroup>
     <ClCompile Include="..\..\src\common\url.cpp" />
+    <ClCompile Include="..\..\src\nevm\address.cpp">
+      <ObjectFileName>$(IntDir)nevm_address.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\nevm\common.cpp">
+      <ObjectFileName>$(IntDir)nevm_common.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\nevm\commondata.cpp">
+      <ObjectFileName>$(IntDir)nevm_commondata.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\nevm\fixedhash.cpp">
+      <ObjectFileName>$(IntDir)nevm_fixedhash.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\nevm\nevm.cpp">
+      <ObjectFileName>$(IntDir)nevm_nevm.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\nevm\rlp.cpp">
+      <ObjectFileName>$(IntDir)nevm_rlp.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\nevm\sha3.cpp">
+      <ObjectFileName>$(IntDir)nevm_sha3.obj</ObjectFileName>
+    </ClCompile>
 @SOURCE_FILES@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />

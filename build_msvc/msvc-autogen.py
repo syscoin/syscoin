@@ -99,7 +99,10 @@ def main():
     set_properties(os.path.join(SOURCE_DIR, '../build_msvc/common.init.vcxproj'), '@TOOLSET@', args.toolset)
 
     for makefile_name in os.listdir(SOURCE_DIR):
-        if 'Makefile' in makefile_name:
+        # Generated Makefile.in/Makefile files contain automake condition
+        # prefixes that this lightweight parser does not understand and can
+        # overwrite correctly parsed source lists with empty ones.
+        if makefile_name == 'Makefile.am' or makefile_name.endswith('.include'):
             parse_makefile(os.path.join(SOURCE_DIR, makefile_name))
     for key, value in lib_sources.items():
         vcxproj_filename = os.path.abspath(os.path.join(os.path.dirname(__file__), key, key + '.vcxproj'))

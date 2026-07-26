@@ -12,6 +12,7 @@
 #include <net_types.h>
 #include <util/check.h>
 #include <evo/evodb.h>
+#include <atomic>
 #include <optional>
 
 class CBloomFilter;
@@ -266,7 +267,7 @@ private:
 
     int64_t nTimeLastDiff;
     // keep track of current block height
-    int nCachedBlockHeight;
+    std::atomic<int> nCachedBlockHeight;
     std::map<uint256, CGovernanceObject> mapPostponedObjects;
     hash_s_t setAdditionalRelayObjects;
     hash_s_t setRequestedObjects;
@@ -320,7 +321,7 @@ public:
     int64_t GetLastDiffTime() const { return nTimeLastDiff; }
     void UpdateLastDiffTime(int64_t nTimeIn) { nTimeLastDiff = nTimeIn; }
 
-    int GetCachedBlockHeight() const { return nCachedBlockHeight; }
+    int GetCachedBlockHeight() const { return nCachedBlockHeight.load(std::memory_order_relaxed); }
 
     // Accessors for thread-safe access to maps
     bool HaveObjectForHash(const uint256& nHash) const;

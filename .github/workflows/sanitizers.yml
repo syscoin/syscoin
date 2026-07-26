@@ -1,0 +1,66 @@
+# Copyright (c) 2026 The Syscoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+name: Sanitizers
+
+on:
+  pull_request:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name != 'pull_request' && github.run_id || github.ref }}-sanitizers
+  cancel-in-progress: true
+
+env:
+  CI_FAILFAST_TEST_LEAVE_DANGLING: 1
+  MAKEJOBS: '-j4'
+  TEST_RUNNER_PORT_MIN: 14000
+  CCACHE_MAXSIZE: 300M
+  CCACHE_DIR: /tmp/ccache_dir
+  CCACHE_NOHASHDIR: 1
+
+jobs:
+  sanitizer:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + LSan + UBSan
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 180
+          - name: TSan
+            file_env: ./ci/test/00_setup_env_native_tsan.sh
+            timeout: 180
+          - name: MSan
+            file_env: ./ci/test/00_setup_env_native_msan.sh
+            timeout: 300
+            free_disk_space: true
+          - name: Fuzz smoke tests
+            file_env: ./ci/test/00_setup_env_native_fuzz.sh
+            timeout: 180
+    env:
+      FILE_ENV: ${{ matrix.file_env }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Free disk space for the instrumented LLVM build
+        if: ${{ matrix.free_disk_space == true }}
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          docker system prune --all --force
+          df -h /
+
+      - name: Run CI configuration
+        run: ./ci/test_run_all.sh

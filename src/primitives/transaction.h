@@ -47,7 +47,7 @@ using CompressedScript = prevector<33, unsigned char>;
 static const int SERIALIZE_TRANSACTION_NO_WITNESS = 0x40000000;
 // SYSCOIN
 static const int SERIALIZE_TRANSACTION_PODA = 0x04000000;
-static const float NEVM_DATA_SCALE_FACTOR = 0.01;
+static const float NEVM_DATA_SCALE_FACTOR = 0.01F;
 
 
 const int SYSCOIN_TX_VERSION_MN_REGISTER = 80;

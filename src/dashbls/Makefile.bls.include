@@ -13,19 +13,19 @@ DASHBLS_INCLUDES = \
 	-I$(top_srcdir)/include/dashbls
 
 DASHBLS_H = \
-	src/bls.hpp \
-	src/chaincode.hpp \
-	src/elements.hpp \
-	src/extendedprivatekey.hpp \
-	src/extendedpublickey.hpp \
-	src/hdkeys.hpp \
-	src/hkdf.hpp \
-	src/legacy.hpp \
-	src/privatekey.hpp \
-	src/schemes.hpp \
-	src/test-utils.hpp \
-	src/threshold.hpp \
-	src/util.hpp
+	include/dashbls/bls.hpp \
+	include/dashbls/chaincode.hpp \
+	include/dashbls/elements.hpp \
+	include/dashbls/extendedprivatekey.hpp \
+	include/dashbls/extendedpublickey.hpp \
+	include/dashbls/hdkeys.hpp \
+	include/dashbls/hkdf.hpp \
+	include/dashbls/legacy.hpp \
+	include/dashbls/privatekey.hpp \
+	include/dashbls/schemes.hpp \
+	include/dashbls/test-utils.hpp \
+	include/dashbls/threshold.hpp \
+	include/dashbls/util.hpp
 
 libdashbls_la_SOURCES = \
 	src/bls.cpp \

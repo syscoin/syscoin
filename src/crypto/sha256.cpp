@@ -5,6 +5,7 @@
 #include <crypto/sha256.h>
 #include <crypto/common.h>
 
+#include <algorithm>
 #include <assert.h>
 #include <string.h>
 

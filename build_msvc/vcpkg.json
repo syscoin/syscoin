@@ -3,10 +3,20 @@
   "version-string": "1",
   "dependencies": [
     "berkeleydb",
+    "boost-container-hash",
+    "boost-date-time",
+    "boost-exception",
+    "boost-filesystem",
     "boost-multi-index",
+    "boost-multiprecision",
+    "boost-pool",
     "boost-process",
+    "boost-range",
     "boost-signals2",
     "boost-test",
+    "boost-thread",
+    "boost-throw-exception",
+    "boost-tuple",
     "sqlite3",
     {
       "name": "libevent",
@@ -14,11 +24,5 @@
     },
     "zeromq"
   ],
-  "builtin-baseline": "f14984af3738e69f197bf0e647a8dca12de92996",
-  "overrides": [
-    {
-      "name": "libevent",
-      "version": "2.1.12#7"
-    }
-  ]
+  "builtin-baseline": "a51bb4d1434e6d0927ff79db8033bed8522b85df"
 }

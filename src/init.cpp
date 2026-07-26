@@ -78,6 +78,7 @@
 #include <util/fs.h>
 #include <util/fs_helpers.h>
 #include <util/moneystr.h>
+#include <util/overflow.h>
 #include <util/result.h>
 #include <util/strencodings.h>
 #include <util/string.h>
@@ -2009,11 +2010,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 const auto& consensus = Params().GetConsensus();
                 const auto& cmdLine = chainman.GethCommandLine();
                 const bool bootstrap_disabled = std::find(cmdLine.begin(), cmdLine.end(), "--syscoin.statebootstrap.disable") != cmdLine.end();
+                const uint64_t geth_base_height = nHeightFromGeth > 0 && consensus.nNEVMStartBlock > 0
+                                                      ? SaturatingAdd(nHeightFromGeth - 1, static_cast<uint64_t>(consensus.nNEVMStartBlock))
+                                                      : 0;
                 const uint32_t bypass_height = !bootstrap_disabled &&
                                                consensus.nNEVMBootstrapBypassHeight > 0 &&
                                                nHeightFromGeth > 0 &&
-                                               (nHeightFromGeth + consensus.nNEVMStartBlock - 1) >= consensus.nNEVMBootstrapBypassHeight
-                                                   ? consensus.nNEVMBootstrapBypassHeight
+                                               geth_base_height >= static_cast<uint64_t>(consensus.nNEVMBootstrapBypassHeight)
+                                                   ? static_cast<uint32_t>(consensus.nNEVMBootstrapBypassHeight)
                                                    : 0;
                 chainman.SetSkipExternalNEVMNotifiesUntilHeight(bypass_height);
                 if (bypass_height > 0) {

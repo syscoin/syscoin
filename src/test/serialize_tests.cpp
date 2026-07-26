@@ -269,6 +269,7 @@ BOOST_AUTO_TEST_CASE(class_methods)
 BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
 {
     const auto make_disk_index = [](const uint256& btcp_prev) {
+        LOCK(cs_main);
         CBlockIndex index{};
         index.nHeight = 42;
         index.nStatus = BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO;

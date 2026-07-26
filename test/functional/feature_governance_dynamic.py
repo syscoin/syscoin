@@ -10,7 +10,7 @@ import shutil
 from decimal import Decimal
 from collections import defaultdict
 from test_framework.test_framework import DashTestFramework, initialize_datadir
-from test_framework.util import assert_equal, satoshi_round, force_finish_mnsync, wait_until_helper_internal
+from test_framework.util import assert_equal, satoshi_round, force_finish_mnsync
 GOVERNANCE_DELETION_DELAY = 10 * 60
 SUPERBLOCK_PAYMENT_LIMIT_UP = Decimal('10')
 SUPERBLOCK_PAYMENT_LIMIT_DOWN = Decimal('-10')
@@ -336,7 +336,7 @@ class SyscoinGovernanceTest(DashTestFramework):
             time.sleep(2)
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
             return self.have_trigger_for_height(sb_block_height)
-        wait_until_helper_internal(check_for_trigger, timeout=timeout)
+        self.wait_until(check_for_trigger, timeout=timeout)
         
     def mine_superblock_and_check_budget(self, proposals_data):
         # Check expected budget before mining

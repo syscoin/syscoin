@@ -6,6 +6,7 @@
 
 #include <clientversion.h>
 #include <common/args.h>
+#include <common/system.h>
 #include <crypto/sha256.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
@@ -58,6 +59,12 @@ static uint8_t parsePriorityLevel(const std::string& str) {
 
 int main(int argc, char** argv)
 {
+    SetupEnvironment();
+    if (!SetupNetworking()) {
+        tfm::format(std::cerr, "Error: Initializing networking failed\n");
+        return EXIT_FAILURE;
+    }
+
     ArgsManager argsman;
     SetupBenchArgs(argsman);
     SHA256AutoDetect();

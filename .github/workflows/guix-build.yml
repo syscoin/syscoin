@@ -18,14 +18,14 @@ jobs:
       repo-name: ${{ steps.prepare.outputs.repo-name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: syscoin
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Commit variables
         id: prepare
@@ -39,14 +39,14 @@ jobs:
           echo "repo-name=${REPO_NAME}" >> $GITHUB_OUTPUT
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ github.workspace }}/syscoin
           build-args: |
@@ -82,14 +82,14 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: syscoin
           fetch-depth: 0
           persist-credentials: false
 
       - name: Cache depends sources
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: syscoin/depends/sources
           key: depends-sources-${{ hashFiles('syscoin/depends/packages/*') }}
@@ -98,7 +98,7 @@ jobs:
 
       - name: Cache Guix and depends
         id: guix-cache-restore
-        uses: actions/cache@v3
+        uses: actions/cache@v6
         with:
           path: |
             ${{ github.workspace }}/.cache
@@ -115,7 +115,7 @@ jobs:
         run: mkdir -p .cache
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -148,7 +148,7 @@ jobs:
           HOSTS=${{ matrix.build_target }} ./syscoin/contrib/containers/guix/scripts/guix-check ${{ github.workspace }}/syscoin
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: guix-artifacts-${{ matrix.build_target }}
           # Upload main release archives/installers, source tarball, and checksum file
@@ -162,7 +162,7 @@ jobs:
           if-no-files-found: error
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           # Update subject-path to match the uploaded files
           subject-path: |

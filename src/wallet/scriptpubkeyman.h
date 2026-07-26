@@ -46,7 +46,7 @@ public:
     virtual void UnsetBlankWalletFlag(WalletBatch&) = 0;
     virtual bool CanSupportFeature(enum WalletFeature) const = 0;
     virtual void SetMinVersion(enum WalletFeature, WalletBatch* = nullptr) = 0;
-    virtual const CKeyingMaterial& GetEncryptionKey() const = 0;
+    virtual CKeyingMaterial GetEncryptionKey() const = 0;
     virtual bool HasEncryptionKeys() const = 0;
     virtual bool IsLocked() const = 0;
 };

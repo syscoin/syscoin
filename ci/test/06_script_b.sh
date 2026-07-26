@@ -7,6 +7,9 @@
 export LC_ALL=C.UTF-8
 
 set -ex
+set -o errtrace
+
+trap 'cat "${BASE_SCRATCH_DIR}"/sanitizer-output/* 2>/dev/null || true' ERR
 
 export ASAN_OPTIONS="detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
 export LSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/lsan"
@@ -167,7 +170,7 @@ if [ "$RUN_UNIT_TESTS" = "true" ]; then
 fi
 
 if [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then
-  bash -c "${TEST_RUNNER_ENV} DIR_UNIT_TEST_DATA=${DIR_UNIT_TEST_DATA} LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib ${BASE_OUTDIR}/bin/test_syscoin --catch_system_errors=no -l test_suite"
+  bash -c "${TEST_RUNNER_ENV} DIR_UNIT_TEST_DATA=${DIR_UNIT_TEST_DATA} LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib ${BASE_OUTDIR}/bin/test_syscoin ${UNIT_TESTS_CONFIG} --catch_system_errors=no -l test_suite"
 fi
 
 if [ "$RUN_FUNCTIONAL_TESTS" = "true" ]; then

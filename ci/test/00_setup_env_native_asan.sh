@@ -6,22 +6,28 @@
 
 export LC_ALL=C.UTF-8
 
-# Only install BCC tracing packages in Cirrus CI.
-if [[ "${CIRRUS_CI}" == "true" ]]; then
+# BCC needs access to host kernel facilities that are not available in every
+# container runtime. Opt in on a suitably configured runner.
+if [[ "${INSTALL_BCC_TRACING_TOOLS}" == "true" ]]; then
   BPFCC_PACKAGE="bpfcc-tools linux-headers-$(uname --kernel-release)"
-  export CI_CONTAINER_CAP="--cap-add SYS_PTRACE"  # If run with (ASan + LSan), the container needs access to ptrace (https://github.com/google/sanitizers/issues/764)
+  export CI_CONTAINER_CAP="--privileged -v /sys/kernel:/sys/kernel:rw"
 else
   BPFCC_PACKAGE=""
-  export CI_CONTAINER_CAP="--cap-add SYS_PTRACE"  # If run with (ASan + LSan), the container needs access to ptrace (https://github.com/google/sanitizers/issues/764)
+  # ASan + LSan needs access to ptrace.
+  # See https://github.com/google/sanitizers/issues/764.
+  export CI_CONTAINER_CAP="--cap-add SYS_PTRACE"
 fi
 
 export CONTAINER_NAME=ci_native_asan
-export PACKAGES="systemtap-sdt-dev clang-17 llvm-17 libclang-rt-17-dev python3-zmq qtbase5-dev qttools5-dev-tools libevent-dev libboost-dev libdb5.3++-dev libminiupnpc-dev libnatpmp-dev libzmq3-dev libqrencode-dev libsqlite3-dev ${BPFCC_PACKAGE} libgmp-dev"
-export CI_IMAGE_NAME_TAG="docker.io/ubuntu:23.10"  # This version will reach EOL in Jul 2024, and can be replaced by "ubuntu:24.04" (or anything else that ships the wanted clang version).
+export PACKAGES="systemtap-sdt-dev clang-18 llvm-18 libclang-rt-18-dev python3-zmq qtbase5-dev qttools5-dev qttools5-dev-tools libevent-dev libboost-dev libdb5.3++-dev libminiupnpc-dev libnatpmp-dev libzmq3-dev libqrencode-dev libsqlite3-dev ${BPFCC_PACKAGE} libgmp-dev"
+export CI_IMAGE_NAME_TAG="mirror.gcr.io/ubuntu:24.04"
 export NO_DEPENDS=1
 export GOAL="install"
-export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,feature_llmqchainlocks"
+export CCACHE_MAXSIZE=300M
+# Docker's network can expose AF_INET6 to Python while libevent cannot resolve
+# or bind ::1. Keep the bind tests in normal CI and skip them in this lane.
+export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,feature_llmqchainlocks,feature_dip3_v19,rpc_bind,feature_bind_extra,feature_proxy"
 export SYSCOIN_CONFIG="--enable-c++20 --enable-usdt --enable-zmq --with-incompatible-bdb --with-gui=qt5 \
 CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER' \
 --with-sanitizers=address,float-divide-by-zero,integer,undefined \
-CC='clang-17 -ftrivial-auto-var-init=pattern' CXX='clang++-17 -ftrivial-auto-var-init=pattern'"
+CC='clang-18 -ftrivial-auto-var-init=pattern' CXX='clang++-18 -ftrivial-auto-var-init=pattern'"

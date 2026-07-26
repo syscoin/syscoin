@@ -414,6 +414,10 @@ BASE_SCRIPTS = [
 
 # Tests that are currently being skipped (e. g., because of BIP9).
 SKIPPED = [
+    # Manual testnet script; not a self-contained functional test.
+    'allocation_mint_testnet.py',
+    # Re-enable after regenerating the assumeutxo data for Syscoin.
+    'feature_assumeutxo.py',
     'p2p_dos_header_tree.py',
     'rpc_getblockstats.py',
 ]

@@ -559,7 +559,7 @@ void CDKGSessionHandler::PhaseHandlerThread()
         try {
             LogPrint(BCLog::LLMQ_DKG, "CDKGSessionHandler::%s -- starting HandleDKGRound\n", __func__);
             HandleDKGRound();
-        } catch (AbortPhaseException& e) {
+        } catch (AbortPhaseException&) {
             quorumDKGDebugManager->UpdateLocalSessionStatus([&](CDKGDebugSessionStatus& status) {
                 status.statusBits.aborted = true;
                 return true;

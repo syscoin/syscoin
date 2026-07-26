@@ -7,7 +7,14 @@
 #include <univalue.h>
 
 #ifdef ENABLE_EXTERNAL_SIGNER
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 108800
+#include <boost/process/v1/error.hpp>
+namespace bp = boost::process::v1;
+#else
 #include <boost/process.hpp>
+namespace bp = boost::process;
+#endif
 #endif // ENABLE_EXTERNAL_SIGNER
 
 #include <boost/test/unit_test.hpp>
@@ -54,7 +61,7 @@ BOOST_AUTO_TEST_CASE(run_command)
 #else
         const int expected_error{2};
 #endif
-        BOOST_CHECK_EXCEPTION(RunCommandParseJSON("invalid_command"), boost::process::process_error, [&](const boost::process::process_error& e) {
+        BOOST_CHECK_EXCEPTION(RunCommandParseJSON("invalid_command"), bp::process_error, [&](const bp::process_error& e) {
             BOOST_CHECK(std::string(e.what()).find("RunCommandParseJSON error:") == std::string::npos);
             BOOST_CHECK_EQUAL(e.code().value(), expected_error);
             return true;

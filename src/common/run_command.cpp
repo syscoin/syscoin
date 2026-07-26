@@ -10,7 +10,16 @@
 
 #if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
 #define RUN_COMMAND_HAS_BOOST_PROCESS 1
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 108800
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/exe.hpp>
+#include <boost/process/v1/io.hpp>
+#include <boost/process/v1/pipe.hpp>
+#else
 #include <boost/process.hpp>
+#endif
 #endif
 #include <tinyformat.h>
 #include <univalue.h>
@@ -20,7 +29,11 @@
 
 #ifdef RUN_COMMAND_HAS_BOOST_PROCESS
 namespace {
+#if BOOST_VERSION >= 108800
+namespace bp = boost::process::v1;
+#else
 namespace bp = boost::process;
+#endif
 
 void CollectStream(bp::ipstream& stream, std::string& output)
 {

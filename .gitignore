@@ -160,6 +160,8 @@ dist/
 /guix-build-*
 
 /ci/scratch/
+/build_msvc/dashbls-build/
+/build_msvc/dashbls-install/
 
 .vscode
 *.old

@@ -9,10 +9,12 @@
   </PropertyGroup>
   <ItemGroup>
     <ClCompile Include="..\..\src\arith_uint256.cpp" />
+    <ClCompile Include="..\..\src\bls\bls.cpp" />
     <ClCompile Include="..\..\src\consensus\merkle.cpp" />
     <ClCompile Include="..\..\src\consensus\tx_check.cpp" />
     <ClCompile Include="..\..\src\hash.cpp" />
     <ClCompile Include="..\..\src\primitives\block.cpp" />
+    <ClCompile Include="..\..\src\primitives\pureheader.cpp" />
     <ClCompile Include="..\..\src\primitives\transaction.cpp" />
     <ClCompile Include="..\..\src\pubkey.cpp" />
     <ClCompile Include="..\..\src\script\syscoinconsensus.cpp" />
