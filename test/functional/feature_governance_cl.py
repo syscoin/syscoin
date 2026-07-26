@@ -2,7 +2,7 @@
 # Copyright (c) 2024 The Dash Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Tests governance checks can be skipped for blocks covered by the best chainlock."""
+"""Tests historical governance checks can be skipped below the best ChainLock."""
 
 import json
 from test_framework.test_framework import DashTestFramework
@@ -133,13 +133,21 @@ class SyscoinGovernanceTest (DashTestFramework):
         # Mine superblock
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.bump_mocktime(156)
-        cl = self.nodes[0].getbestblockhash()
-        self.generate(self.nodes[0], 5, sync_fun=self.no_op)
+        superblock_height = self.nodes[0].getblockcount()
+        # Advance the ChainLock strictly past the superblock. The ChainLocked
+        # block itself must have exact governance provenance; only committed
+        # ancestors may use the historical sync fallback.
+        self.generate(self.nodes[0], 10, sync_fun=self.no_op)
         self.sync_all_helper(self.nodes[0:5])
-        self.wait_for_chainlocked_block(self.nodes[0], cl)
+        chainlock_source = self.nodes[1]
+        self.wait_until(
+            lambda: chainlock_source.getbestchainlock()["height"] > superblock_height,
+            timeout=60)
+        cl = chainlock_source.getbestchainlock()["blockhash"]
+        self.wait_for_chainlocked_block(chainlock_source, cl)
 
         self.log.info("Reconnect isolated node and confirm the next ChainLock will let it sync")
-        self.reconnect_isolated_node(self.nodes[5], 0)
+        self.reconnect_isolated_node(self.nodes[5], chainlock_source.index)
         # Force isolated node to be fully synced so that it will request gov objects when reconnected
         assert_equal(self.nodes[5].mnsync("status")["IsSynced"], False)
         self.sync_all_helper(self.nodes)
@@ -151,6 +159,10 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         # make sure isolated node is fully synced at this point
         self.wait_until(lambda: sync_gov(self.nodes[5]))
+        self.wait_until(
+            lambda: self.nodes[5].getbestchainlock()["blockhash"] == cl,
+            timeout=60)
+        self.wait_for_chainlocked_block(self.nodes[5], cl)
         # let all fulfilled requests expire for re-sync to work correctly
         self.bump_mocktime(5 * 60)
         self.generate(self.nodes[0], 1)

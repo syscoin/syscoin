@@ -1858,7 +1858,7 @@ static std::vector<unsigned char> SerializeNEVMHeaderPayload(const CNEVMHeader& 
     std::vector<unsigned char> payload(std::begin(NEVM_MAGIC_BYTES), std::end(NEVM_MAGIC_BYTES));
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     ds << header;
-    payload.insert(payload.end(), ds.begin(), ds.end());
+    payload.insert(payload.end(), UCharCast(ds.data()), UCharCast(ds.data() + ds.size()));
     if (with_trailing) {
         // Trailing BTCC-style bytes after the header must be ignored by GetNEVMData.
         payload.insert(payload.end(), {0x62, 0x74, 0x63, 0x63, 0x01, 0x02, 0x03});

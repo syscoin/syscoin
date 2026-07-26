@@ -20,10 +20,12 @@
 #include <util/thread.h>
 #include <services/nevmconsensus.h>
 #include <evo/deterministicmns.h>
+#include <governance/governanceclasses.h>
 #include <logging.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <netmessagemaker.h>
 
+#include <algorithm>
 #include <iterator>
 namespace llmq
 {
@@ -43,6 +45,42 @@ static bool HasAggregatedChainLockStructure(const CChainLockSig& clsig)
     return std::count(clsig.signers.begin(), clsig.signers.end(), true) >= (signingActiveQuorumCount / 2 + 1);
 }
 
+static bool HasChainLockTargetDataAndValidity(const CBlockIndex* candidate_index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    return candidate_index != nullptr &&
+           (candidate_index->nStatus & BLOCK_HAVE_DATA) &&
+           !(candidate_index->nStatus & BLOCK_FAILED_MASK) &&
+           candidate_index->IsValid(BLOCK_VALID_SCRIPTS);
+}
+
+static bool HasRequiredGovernanceProvenance(
+    const CChainLockSig& best_chainlock,
+    const CBlockIndex* candidate_index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (candidate_index == nullptr) {
+        return false;
+    }
+
+    // A candidate commits its previous signing-window anchor as well as every
+    // block after it. A signer with an existing winner must prove every newly
+    // committed superblock passed exact governance validation.
+    const int32_t committed_height = best_chainlock.IsNull()
+        ? std::max<int32_t>(
+              -1, candidate_index->nHeight - SIGN_HEIGHT_OFFSET - 1)
+        : best_chainlock.nHeight;
+    for (const CBlockIndex* walk = candidate_index;
+         walk != nullptr && walk->nHeight > committed_height;
+         walk = walk->pprev) {
+        if (CSuperblock::IsValidBlockHeight(walk->nHeight) &&
+            !(walk->nStatus & BLOCK_GOVERNANCE_VALIDATED)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CChainLockSig::IsNull() const
 {
     return nHeight == -1 && blockHash == uint256();
@@ -55,7 +93,7 @@ std::string CChainLockSig::ToString() const
                 std::count(signers.begin(), signers.end(), true));
 }
 
-CChainLocksHandler::CChainLocksHandler(CConnman& _connman, PeerManager& _peerman, ChainstateManager& _chainman):     
+CChainLocksHandler::CChainLocksHandler(CConnman& _connman, PeerManager& _peerman, ChainstateManager& _chainman):
     connman(_connman),
     peerman(_peerman),
     chainman(_chainman)
@@ -400,7 +438,10 @@ bool CChainLocksHandler::IsCandidateStillAdmissible(
 {
     if (candidate_index == nullptr ||
         candidate_index->nHeight != candidate.nHeight ||
-        candidate_index->GetBlockHash() != candidate.blockHash) {
+        candidate_index->GetBlockHash() != candidate.blockHash ||
+        !HasChainLockTargetDataAndValidity(candidate_index) ||
+        (CSuperblock::IsValidBlockHeight(candidate_index->nHeight) &&
+         !(candidate_index->nStatus & BLOCK_GOVERNANCE_VALIDATED))) {
         return false;
     }
     if (!best_chainlock.IsNull()) {
@@ -423,6 +464,17 @@ bool CChainLocksHandler::IsCandidateStillAdmissible(
            candidate_index->GetAncestor(anchor_height) == active_chain[anchor_height];
 }
 
+bool CChainLocksHandler::IsSigningCandidateStillAdmissible(
+    const CChain& active_chain,
+    const CChainLockSig& best_chainlock,
+    const CChainLockSig& candidate,
+    const CBlockIndex* candidate_index)
+{
+    return IsCandidateStillAdmissible(
+               active_chain, best_chainlock, candidate, candidate_index) &&
+           HasRequiredGovernanceProvenance(best_chainlock, candidate_index);
+}
+
 const CBlockIndex* CChainLocksHandler::SelectAlternativeSigningTarget(
     int32_t height,
     const CBlockIndex* current_index,
@@ -437,6 +489,7 @@ const CBlockIndex* CChainLocksHandler::SelectAlternativeSigningTarget(
         previous_share_index == nullptr ||
         previous_share_index->nHeight != height ||
         previous_share_index->GetBlockHash() != previous_share.blockHash ||
+        !HasChainLockTargetDataAndValidity(previous_share_index) ||
         dkg_interval <= 0) {
         return nullptr;
     }
@@ -774,6 +827,14 @@ bool CChainLocksHandler::ProcessNewChainLock(const NodeId from, llmq::CChainLock
                 peerman.ForgetTxHash(from, hash);                  
             }
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-height");
+        }
+        if (!HasChainLockTargetDataAndValidity(pindexScan)) {
+            LogPrintf("CChainLocksHandler::%s -- block data or full validation missing for CLSIG (%s)\n",
+                      __func__, clsig.ToString());
+            if (from != -1) {
+                peerman.ForgetTxHash(from, hash);
+            }
+            return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "bad-clsig-block-state");
         }
         if ((clsig.nHeight%SIGN_HEIGHT_OFFSET) != 0) {
             // Should not happen
@@ -1128,7 +1189,7 @@ void CChainLocksHandler::CheckActiveState()
         isEnabled = sporkActive;
         isEnforced = isEnabled;
         if (!oldIsEnforced && isEnforced) {
-            
+
             // ChainLocks got activated just recently, but it's possible that it was already running before, leaving
             // us with some stale values which we should not try to enforce anymore (there probably was a good reason
             // to disable spork19)
@@ -1182,7 +1243,7 @@ void CChainLocksHandler::TrySignChainTip()
         return;
     }
 
-    if (!masternodeSync.IsBlockchainSynced()) {
+    if (!masternodeSync.IsSynced()) {
         LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler: -- mnsync false\n");
         return;
     }
@@ -1374,7 +1435,7 @@ void CChainLocksHandler::TrySignChainTip()
                     chainman.ActiveChain(),
                     nHeight,
                     signing_context.active_height_index) ||
-                !IsCandidateStillAdmissible(
+                !IsSigningCandidateStillAdmissible(
                     chainman.ActiveChain(), bestChainLockWithKnownBlock, candidate, signingTarget)) {
                 return;
             }

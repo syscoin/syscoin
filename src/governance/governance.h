@@ -36,6 +36,10 @@ static constexpr bool DEFAULT_GOVERNANCE_ENABLE{true};
 class CDeterministicMNList;
 using CDeterministicMNListPtr = std::shared_ptr<CDeterministicMNList>;
 
+namespace governance_tests {
+class CGovernanceManagerTestAccess;
+}
+
 class CRateCheckBuffer
 {
 private:
@@ -224,6 +228,8 @@ public:
 class CGovernanceManager : public GovernanceStore
 {
     friend class CGovernanceObject;
+    friend class governance_tests::CGovernanceManagerTestAccess;
+
 private:
     using hash_s_t = std::set<uint256>;
     using db_type = CFlatDB<GovernanceStore>;
@@ -360,7 +366,7 @@ public:
      *   - After triggers are activated and executed, they can be removed
     */
     std::vector<std::shared_ptr<CSuperblock>> GetActiveTriggers() EXCLUSIVE_LOCKS_REQUIRED(cs);
-    bool AddNewTrigger(uint256 nHash) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    bool AddNewTrigger(uint256 nHash, int active_height) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void CleanAndRemoveTriggers();
     bool UndoBlock(const CBlockIndex* pindex);
 
@@ -392,7 +398,7 @@ private:
 
     void RebuildIndexes();
 
-    void AddCachedTriggers();
+    void AddCachedTriggers(int active_height);
 
     void RequestOrphanObjects(CConnman& connman);
 

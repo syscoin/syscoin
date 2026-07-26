@@ -146,13 +146,21 @@ private:
         const CChain& active_chain,
         const CChainLockSig& best_chainlock,
         const CChainLockSig& candidate,
-        const CBlockIndex* candidate_index);
+        const CBlockIndex* candidate_index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    static bool IsSigningCandidateStillAdmissible(
+        const CChain& active_chain,
+        const CChainLockSig& best_chainlock,
+        const CChainLockSig& candidate,
+        const CBlockIndex* candidate_index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     static const CBlockIndex* SelectAlternativeSigningTarget(
         int32_t height,
         const CBlockIndex* current_index,
         const CChainLockSig& previous_share,
         const CBlockIndex* previous_share_index,
-        int32_t dkg_interval);
+        int32_t dkg_interval)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool InternalHasChainLock(int nHeight, const uint256& blockHash) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool InternalHasConflictingChainLock(int nHeight, const uint256& blockHash) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 

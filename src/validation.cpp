@@ -85,6 +85,7 @@
 #include <llmq/quorums.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <governance/governance.h>
+#include <governance/governanceclasses.h>
 #include <services/assetconsensus.h>
 #include <fstream>
 #include <cachemultimap.h>
@@ -3113,11 +3114,15 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         return false;
     }
     // SYSCOIN : MODIFIED TO CHECK MASTERNODE PAYMENTS AND SUPERBLOCKS
+    bool exact_superblock_validation{false};
     if(fNexusContext) {
         const CAmount blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
         CAmount nMNSeniorityRet = 0;
         CAmount nMNFloorDiffRet = 0;
-        const bool check_superblock = llmq::chainLocksHandler->GetBestChainLock().nHeight < pindex->nHeight;
+        // A ChainLock may provide the historical fallback only for strict
+        // ancestors. The ChainLocked block itself must pass exact governance
+        // validation.
+        const bool check_superblock = llmq::chainLocksHandler->GetBestChainLock().nHeight <= pindex->nHeight;
         // detect MN was paid properly, accounting for seniority which is added to subsidy
         if (!IsBlockPayeeValid(m_chain, *block.vtx[0], pindex->nHeight, blockReward, nFees, nMNSeniorityRet, nMNFloorDiffRet)) {
             LogPrintf("ERROR: ConnectBlock(): couldn't find masternode or superblock payments\n");
@@ -3126,7 +3131,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
         std::string strError;
         // add seniority to reward when checking for limit
-        if (!IsBlockValueValid(block, pindex, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError, fJustCheck, check_superblock) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
+        if (!IsBlockValueValid(block, pindex, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError, fJustCheck, check_superblock, &exact_superblock_validation) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
             LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             // hack for feature_signet.py to pass which uses bitcoin blocks signed by the signet witness
             if(!fSigNet || pindex->nHeight > 100) {
@@ -3161,6 +3166,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     if (!m_blockman.WriteUndoDataForBlock(blockundo, state, *pindex)) {
         return false;
+    }
+
+    if (exact_superblock_validation) {
+        pindex->nStatus |= BLOCK_GOVERNANCE_VALIDATED;
+        m_blockman.m_dirty_blockindex.insert(pindex);
     }
 
     const auto time_5{SteadyClock::now()};
@@ -4195,7 +4205,9 @@ bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex
     BlockValidationState state;
     // Go backwards through the chain referenced by clsig until we find a block that is part of the main chain and invalidate the fork block (next block in main chain).
     LogPrint(BCLog::CHAINLOCKS, "Chainstate::%s -- enforcing block %s via CLSIG\n", __func__, bestChainLockBlockIndex->GetBlockHash().ToString());
-    EnforceBlock(state, bestChainLockBlockIndex);
+    if (!EnforceBlock(state, bestChainLockBlockIndex)) {
+        return false;
+    }
     // no cs_main allowed
     const bool activateNeeded = WITH_LOCK(::cs_main, return m_chain.Tip()->GetAncestor(bestChainLockBlockIndex->nHeight)) != bestChainLockBlockIndex;
     if (!activateNeeded) {
@@ -4218,7 +4230,7 @@ bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex
     }
     return true;
 }
-void Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pindex)
+bool Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pindex)
 {
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(cs_main);
@@ -4227,6 +4239,15 @@ void Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pi
     // blocks.
     LOCK(m_chainstate_mutex);
     LOCK(cs_main);
+    if (!(pindex->nStatus & BLOCK_HAVE_DATA) ||
+        (pindex->nStatus & BLOCK_FAILED_MASK) ||
+        !pindex->IsValid(BLOCK_VALID_SCRIPTS) ||
+        (CSuperblock::IsValidBlockHeight(pindex->nHeight) &&
+         !(pindex->nStatus & BLOCK_GOVERNANCE_VALIDATED))) {
+        LogPrintf("Chainstate::%s -- refusing invalid or unverified ChainLock target %s\n",
+                  __func__, pindex->GetBlockHash().ToString());
+        return false;
+    }
     const CBlockIndex* pindex_walk = pindex;
 
     while (pindex_walk && !m_chain.Contains(pindex_walk)) {
@@ -4246,11 +4267,7 @@ void Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pi
         }
         pindex_walk = pindex_walk->pprev;
     }
-    // In case blocks from the enforced chain are invalid at the moment, reconsider them.
-    if (!pindex->IsValid()) {
-        LogPrintf("Chainstate::%s -- ResetBlockFailureFlags: %s\n", __func__, pindex->GetBlockHash().ToString());
-        ResetBlockFailureFlags(m_blockman.LookupBlockIndex(pindex->GetBlockHash()));
-    }
+    return true;
 }
 // SYSCOIN
 bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pindex, bool bReverify, bool bUpdateSpecialTxState)

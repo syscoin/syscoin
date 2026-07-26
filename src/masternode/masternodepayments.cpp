@@ -45,8 +45,11 @@ void CheckAndWriteBudget(const CAmount& nSuperblockPayment, const CAmount& nPaym
 *   - When non-superblocks are detected, the normal schedule should be maintained
 */
 
-bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock)
+bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock, bool* exact_superblock_validation)
 {
+    if (exact_superblock_validation != nullptr) {
+        *exact_superblock_validation = false;
+    }
     bool isBlockRewardValueMet = (block.vtx[0]->GetValueOut() <= blockReward);
     const int nBlockHeight = pindex->nHeight;
     strErrorRet = "";
@@ -99,6 +102,9 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
     // we are synced and possibly on a superblock now
 
     if (!AreSuperblocksEnabled()) {
+        if (exact_superblock_validation != nullptr) {
+            *exact_superblock_validation = true;
+        }
         // should NOT allow superblocks at all, when superblocks are disabled
         // revert to block reward limits in this case
         LogPrint(BCLog::GOBJECT, "%s -- Superblocks are disabled, no superblocks allowed\n", __func__);
@@ -112,6 +118,9 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         if(!fJustCheck)
             CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
         return true;
+    }
+    if (exact_superblock_validation != nullptr) {
+        *exact_superblock_validation = true;
     }
     if (!CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
         // we are on a valid superblock height but a superblock was not triggered
