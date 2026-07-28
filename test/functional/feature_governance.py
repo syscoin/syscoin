@@ -98,13 +98,19 @@ class SyscoinGovernanceTest (DashTestFramework):
     def wait_for_trigger(self, sb_block_height, timeout=10):
         def check_for_trigger():
             if((self.nodes[0].getblockcount()+1) >= sb_block_height):
-                return False
+                return self.have_trigger_for_height(sb_block_height)
             self.bump_mocktime(6)
             self.sync_blocks()
             time.sleep(2)
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+            self.sync_blocks()
             return self.have_trigger_for_height(sb_block_height)
-        wait_until_helper_internal(check_for_trigger, timeout=timeout)
+        self.wait_until(check_for_trigger, timeout=timeout)
+
+    def generate_synced_blocks(self, count):
+        for _ in range(count):
+            self.bump_mocktime(1)
+            self.generate(self.nodes[0], 1)
         
     def run_test(self):
         self.budget = satoshi_round("2000000.00")
@@ -384,7 +390,7 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         # Move until 1 block before the Superblock maturity window starts
         n = sb_immaturity_window - block_count % sb_cycle
-        self.generate(self.nodes[0], n - 1)
+        self.generate_synced_blocks(n - 1)
         self.log.info(f"Waiting for trigger")
         self.wait_for_trigger(sb_height)
         
@@ -392,7 +398,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         block_count = self.nodes[0].getblockcount()
         n = sb_height - block_count
         if n > 0:
-            self.generate(self.nodes[0], n)
+            self.generate_synced_blocks(n)
         assert_equal(self.nodes[0].getblockcount(), 175)
         self.check_superblock()
         self.check_superblockbudget()
@@ -405,13 +411,13 @@ class SyscoinGovernanceTest (DashTestFramework):
 
             # Move until 1 block before the Superblock maturity window starts
             n = sb_immaturity_window - block_count % sb_cycle
-            self.generate(self.nodes[0], n - 1)
+            self.generate_synced_blocks(n - 1)
             self.log.info(f"Waiting for trigger")
             self.wait_for_trigger(sb_height)
             block_count = self.nodes[0].getblockcount()
             n = sb_height - block_count
             if n > 0:
-                self.generate(self.nodes[0], n)
+                self.generate_synced_blocks(n)
             self.log.info(f"Mined superblock at height {sb_height}")
             assert_equal(self.nodes[0].getblockcount(), sb_height)
             self.check_superblock()

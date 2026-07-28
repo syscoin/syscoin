@@ -330,13 +330,19 @@ class SyscoinGovernanceTest(DashTestFramework):
     def wait_for_trigger(self, sb_block_height, timeout=10):
         def check_for_trigger():
             if((self.nodes[0].getblockcount()+1) >= sb_block_height):
-                return False
+                return self.have_trigger_for_height(sb_block_height)
             self.bump_mocktime(6)
             self.sync_blocks()
             time.sleep(2)
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+            self.sync_blocks()
             return self.have_trigger_for_height(sb_block_height)
         self.wait_until(check_for_trigger, timeout=timeout)
+
+    def generate_synced_blocks(self, count):
+        for _ in range(count):
+            self.bump_mocktime(1)
+            self.generate(self.nodes[0], 1)
         
     def mine_superblock_and_check_budget(self, proposals_data):
         # Check expected budget before mining
@@ -348,7 +354,7 @@ class SyscoinGovernanceTest(DashTestFramework):
 
         # Move until 1 block before the Superblock maturity window starts
         n = self.sb_immaturity_window - block_count % sb_cycle
-        self.generate(self.nodes[0], n - 1)
+        self.generate_synced_blocks(n - 1)
         self.log.info(f"Waiting for trigger")
         if len(proposals_data) > 0:
             self.wait_for_trigger(sb_height)
@@ -356,7 +362,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         block_count = self.nodes[0].getblockcount()
         n = sb_height - block_count
         if n > 0:
-            self.generate(self.nodes[0], n)
+            self.generate_synced_blocks(n)
 
         self.log.info(f"Mined superblock at height {sb_height}")
 
@@ -409,7 +415,7 @@ class SyscoinGovernanceTest(DashTestFramework):
 
         # Move until 1 block before the Superblock maturity window starts
         n = self.sb_immaturity_window - block_count % sb_cycle
-        self.generate(self.nodes[0], n - 1)
+        self.generate_synced_blocks(n - 1)
         self.sync_blocks()
         self.stop_node(1)
         self.start_node(1, extra_args=["-mocktime=" + str(self.mocktime), '-reindex', *self.extra_args[1]])
@@ -425,7 +431,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         block_count = self.nodes[0].getblockcount()
         n = sb_height - block_count
         if n > 0:
-            self.generate(self.nodes[0], n)
+            self.generate_synced_blocks(n)
         self.log.info(f"Mined superblock at height {sb_height}")
         total_funded_amount = self.verify_proposals_in_superblock(proposals_data)
 
@@ -455,7 +461,7 @@ class SyscoinGovernanceTest(DashTestFramework):
 
         # Move until 1 block before the Superblock maturity window starts
         n = self.sb_immaturity_window - block_count % sb_cycle
-        self.generate(self.nodes[0], n - 1)
+        self.generate_synced_blocks(n - 1)
         self.sync_blocks()
         self.stop_node(1)
         shutil.rmtree(self.nodes[1].datadir_path)
@@ -473,7 +479,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         block_count = self.nodes[0].getblockcount()
         n = sb_height - block_count
         if n > 0:
-            self.generate(self.nodes[0], n)
+            self.generate_synced_blocks(n)
         self.log.info(f"Mined superblock at height {sb_height}")
         total_funded_amount = self.verify_proposals_in_superblock(proposals_data)
 
