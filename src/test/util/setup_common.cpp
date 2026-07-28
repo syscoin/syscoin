@@ -104,6 +104,9 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, const std::vecto
     : m_path_root{fs::temp_directory_path() / "test_common_" PACKAGE_NAME / g_insecure_rand_ctx_temp_path.rand256().ToString()},
       m_args{}
 {
+    // Tests may share a process with a previous setup that requested shutdown.
+    // Each new setup must start with an independent shutdown state.
+    AbortShutdown();
     m_node.args = &gArgs;
     std::vector<const char*> arguments = Cat(
         {

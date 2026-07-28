@@ -32,25 +32,15 @@ fi
 
 if [ -n "$PIP_PACKAGES" ]; then
   # shellcheck disable=SC2086
-  ${CI_RETRY_EXE} pip3 install --user $PIP_PACKAGES
+  ${CI_RETRY_EXE} pip3 install --user ${PIP_INSTALL_FLAGS} $PIP_PACKAGES
 fi
 
 if [[ ${USE_MEMORY_SANITIZER} == "true" ]]; then
-  ${CI_RETRY_EXE} git clone --depth=1 https://github.com/llvm/llvm-project -b llvmorg-17.0.2 /msan/llvm-project
+  ${CI_RETRY_EXE} git clone --depth=1 https://github.com/llvm/llvm-project -b llvmorg-18.1.8 /msan/llvm-project
 
-  cmake -G Ninja -B /msan/clang_build/ \
-    -DLLVM_ENABLE_PROJECTS="clang" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLVM_TARGETS_TO_BUILD=Native \
-    -DLLVM_ENABLE_RUNTIMES="compiler-rt;libcxx;libcxxabi;libunwind" \
-    -S /msan/llvm-project/llvm
-
-  ninja -C /msan/clang_build/ "-j$( nproc )"  # Use nproc, because MAKEJOBS is the default in docker image builds
-  ninja -C /msan/clang_build/ install-runtimes
-
-  update-alternatives --install /usr/bin/clang++ clang++ /msan/clang_build/bin/clang++ 100
-  update-alternatives --install /usr/bin/clang clang /msan/clang_build/bin/clang 100
-  update-alternatives --install /usr/bin/llvm-symbolizer llvm-symbolizer /msan/clang_build/bin/llvm-symbolizer 100
+  update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+  update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+  update-alternatives --install /usr/bin/llvm-symbolizer llvm-symbolizer /usr/bin/llvm-symbolizer-18 100
 
   cmake -G Ninja -B /msan/cxx_build/ \
     -DLLVM_ENABLE_RUNTIMES='libcxx;libcxxabi' \
@@ -60,10 +50,15 @@ if [[ ${USE_MEMORY_SANITIZER} == "true" ]]; then
     -DCMAKE_CXX_COMPILER=clang++ \
     -DLLVM_TARGETS_TO_BUILD=Native \
     -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=OFF \
+    -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
     -DLIBCXX_HARDENING_MODE=debug \
     -S /msan/llvm-project/runtimes
 
   ninja -C /msan/cxx_build/ "-j$( nproc )"  # Use nproc, because MAKEJOBS is the default in docker image builds
+
+  # The instrumented libraries are all that subsequent CI stages need.
+  du -sh /msan/llvm-project
+  rm -rf /msan/llvm-project
 fi
 
 if [[ "${RUN_TIDY}" == "true" ]]; then

@@ -251,7 +251,7 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
             // pass the state returned by the function above
             return false;
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "failed-procspectxsinblock");
     }
 

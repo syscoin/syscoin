@@ -965,7 +965,7 @@ public:
     //! Make a LegacyScriptPubKeyMan and set it for all types, internal, and external.
     void SetupLegacyScriptPubKeyMan();
 
-    const CKeyingMaterial& GetEncryptionKey() const override;
+    CKeyingMaterial GetEncryptionKey() const override;
     bool HasEncryptionKeys() const override;
 
     /** Get last block processed height */

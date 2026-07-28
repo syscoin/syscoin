@@ -131,7 +131,7 @@ public:
     bool GetCLSIGFromPeers();
     bool HasChainLock(int nHeight, const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool HasConflictingChainLock(int nHeight, const uint256& blockHash) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool VerifyAggregatedChainLock(const CChainLockSig& clsig, const CBlockIndex* pindexScan, const uint256& hash, bool* retSigVerifyAttempted = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool VerifyAggregatedChainLock(const CChainLockSig& clsig, const CBlockIndex* pindexScan, const uint256& hash, bool* retSigVerifyAttempted = nullptr) LOCKS_EXCLUDED(cs_main) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool GetRecentChainLockByHeight(int32_t nHeight, CChainLockSig& ret) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     struct CQuorumContext
@@ -169,7 +169,7 @@ private:
 
     bool BuildQuorumContext(
         const CBlockIndex* candidate_index,
-        CQuorumContext& context) const EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !cs);
+        CQuorumContext& context) const LOCKS_EXCLUDED(cs_main) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     static bool SameQuorumIdentity(
         const CQuorumCPtr& lhs,
         const CQuorumCPtr& rhs);

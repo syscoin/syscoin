@@ -43,13 +43,20 @@
 #include <vector>
 #include <set>
 #include <unordered_set>
+#include <algorithm>
+#include <array>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <chrono>
+#if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
 #include <boost/multiprecision/cpp_int.hpp>	
+#if defined(__GNUC__)
 #pragma GCC diagnostic pop
+#endif
 #include <nevm/vector_ref.h>
 // CryptoPP defines _byte in the global namespace, so must we.
 using _byte = uint8_t;

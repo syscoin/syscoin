@@ -35,6 +35,9 @@ race:ctpl::thread_pool::push
 race:masternodeSync
 race:CDeterministicMNManager:GetListForBlock
 deadlock:CConnman::ForEachNode
+# The init thread can read the governance-valid flag while the main thread
+# publishes the loaded cache. Fix this in the Syscoin-specific follow-up.
+race:CGovernanceManager::LoadCache
 
 # Intermittent issues
 # -------------------

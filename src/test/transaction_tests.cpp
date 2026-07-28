@@ -1174,11 +1174,14 @@ BOOST_AUTO_TEST_CASE(asset_amount_aggregate_range_checks)
         BOOST_CHECK(setOutputs.insert(static_cast<uint32_t>(i)).second);
     }
 
-    // Without an aggregate range check, uint64 modular sum of this vector is 1
-    // (mathematical total is 2^64+1). Use unsigned addition for defined wrap.
+    // Without an aggregate range check, the uint64 modular sum of this vector
+    // is 1 (mathematical total is 2^64+1). Emulate modular addition without
+    // executing an overflow so integer-overflow sanitizers can run this test.
     uint64_t unchecked_sum = 0;
     for (CAmount a : amounts) {
-        unchecked_sum += static_cast<uint64_t>(a);
+        const uint64_t value = static_cast<uint64_t>(a);
+        const uint64_t room = std::numeric_limits<uint64_t>::max() - unchecked_sum;
+        unchecked_sum = value > room ? value - room - 1 : unchecked_sum + value;
     }
     BOOST_CHECK_EQUAL(unchecked_sum, uint64_t{1});
 
@@ -1858,7 +1861,8 @@ static std::vector<unsigned char> SerializeNEVMHeaderPayload(const CNEVMHeader& 
     std::vector<unsigned char> payload(std::begin(NEVM_MAGIC_BYTES), std::end(NEVM_MAGIC_BYTES));
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     ds << header;
-    payload.insert(payload.end(), UCharCast(ds.data()), UCharCast(ds.data() + ds.size()));
+    const auto serialized_header = MakeUCharSpan(ds);
+    payload.insert(payload.end(), serialized_header.begin(), serialized_header.end());
     if (with_trailing) {
         // Trailing BTCC-style bytes after the header must be ignored by GetNEVMData.
         payload.insert(payload.end(), {0x62, 0x74, 0x63, 0x63, 0x01, 0x02, 0x03});

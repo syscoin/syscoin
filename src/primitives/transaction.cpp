@@ -566,7 +566,7 @@ int CAssetAllocation::UnserializeFromData(const std::vector<unsigned char> &vchD
         CDataStream dsAsset(vchData, SER_NETWORK, PROTOCOL_VERSION);
         Unserialize(dsAsset);
         return dsAsset.size();
-    } catch (std::exception &e) {
+    } catch (const std::exception&) {
 		SetNull();
     }
 	return -1;
@@ -615,7 +615,7 @@ int CMintSyscoin::UnserializeFromData(const std::vector<unsigned char> &vchData)
             return -1;
         }
         return dsMS.size();
-    } catch (std::exception &e) {
+    } catch (const std::exception&) {
         SetNull();
     }
 
@@ -658,7 +658,7 @@ int CBurnSyscoin::UnserializeFromData(const std::vector<unsigned char> &vchData)
         CDataStream dsMS(vchData, SER_NETWORK, PROTOCOL_VERSION);
         Unserialize(dsMS);
         return dsMS.size();
-    } catch (std::exception &e) {
+    } catch (const std::exception&) {
         SetNull();
     }
     return -1;
@@ -738,7 +738,7 @@ int CNEVMData::UnserializeFromData(const std::vector<unsigned char> &vchPayload,
             return -1;
         }
         return dsNEVMData.size();
-    } catch (std::exception &e) {
+    } catch (const std::exception&) {
 		SetNull();
     }
 	return -1;

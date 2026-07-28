@@ -289,9 +289,9 @@ void SyscoinGUI::createActions()
         masternodeAction->setToolTip(masternodeAction->statusTip());
         masternodeAction->setCheckable(true);
 #ifdef Q_OS_MACOS
-        masternodeAction->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_5));
+        masternodeAction->setShortcut(QKeySequence(static_cast<int>(Qt::CTRL) | static_cast<int>(Qt::Key_5)));
 #else
-        masternodeAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_5));
+        masternodeAction->setShortcut(QKeySequence(static_cast<int>(Qt::ALT) | static_cast<int>(Qt::Key_5)));
 #endif
         tabGroup->addAction(masternodeAction);
         connect(masternodeAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
@@ -386,7 +386,7 @@ void SyscoinGUI::createActions()
     showHelpMessageAction->setStatusTip(tr("Show the %1 help message to get a list with possible Syscoin command-line options").arg(PACKAGE_NAME));
 
     m_mask_values_action = new QAction(tr("&Mask values"), this);
-    m_mask_values_action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
+    m_mask_values_action->setShortcut(QKeySequence(static_cast<int>(Qt::CTRL) | static_cast<int>(Qt::SHIFT) | static_cast<int>(Qt::Key_M)));
     m_mask_values_action->setStatusTip(tr("Mask the values in the Overview tab"));
     m_mask_values_action->setCheckable(true);
     connect(quitAction, &QAction::triggered, this, &SyscoinGUI::quitRequested);
@@ -418,8 +418,8 @@ void SyscoinGUI::createActions()
     }
 #endif // ENABLE_WALLET
 
-    connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C), this), &QShortcut::activated, this, &SyscoinGUI::showDebugWindowActivateConsole);
-    connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D), this), &QShortcut::activated, this, &SyscoinGUI::showDebugWindow);
+    connect(new QShortcut(QKeySequence(static_cast<int>(Qt::CTRL) | static_cast<int>(Qt::SHIFT) | static_cast<int>(Qt::Key_C)), this), &QShortcut::activated, this, &SyscoinGUI::showDebugWindowActivateConsole);
+    connect(new QShortcut(QKeySequence(static_cast<int>(Qt::CTRL) | static_cast<int>(Qt::SHIFT) | static_cast<int>(Qt::Key_D)), this), &QShortcut::activated, this, &SyscoinGUI::showDebugWindow);
 }
 
 void SyscoinGUI::createMenuBar()

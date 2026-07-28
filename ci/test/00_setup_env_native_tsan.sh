@@ -7,11 +7,15 @@
 export LC_ALL=C.UTF-8
 
 export CONTAINER_NAME=ci_native_tsan
-export CI_IMAGE_NAME_TAG="docker.io/ubuntu:23.10"  # This version will reach EOL in Jul 2024, and can be replaced by "ubuntu:24.04" (or anything else that ships the wanted clang version).
-export PACKAGES="clang-17 llvm-17 libclang-rt-17-dev libc++abi-17-dev libc++-17-dev python3-zmq"
-export DEP_OPTS="CC=clang-17 CXX='clang++-17 -stdlib=libc++'"
+export CI_IMAGE_NAME_TAG="mirror.gcr.io/ubuntu:24.04"
+export PACKAGES="cmake clang-18 llvm-18 libclang-rt-18-dev libc++abi-18-dev libc++-18-dev python3-zmq"
+export DEP_OPTS="NO_QT=1 CC=clang-18 CXX='clang++-18 -stdlib=libc++'"
 export GOAL="install"
-export SYSCOIN_CONFIG="--enable-zmq --with-sanitizers=thread CC=clang-18 CXX=clang++-18 CXXFLAGS='-g' --with-boost-process"
-export CPPFLAGS="-DARENA_DEBUG -DDEBUG_LOCKORDER -DDEBUG_LOCKCONTENTION"
+export SYSCOIN_CONFIG="--enable-zmq --with-gui=no --with-sanitizers=thread --with-boost-process \
+CC=clang-18 CXX='clang++-18 -stdlib=libc++' CXXFLAGS='-g' \
+CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER -DDEBUG_LOCKCONTENTION -D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES'"
+# Docker's network can expose AF_INET6 to Python while libevent cannot resolve
+# or bind ::1. Keep the bind tests in normal CI and skip them in this lane.
+export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,feature_llmqchainlocks,feature_dip3_v19,rpc_bind,feature_bind_extra,feature_proxy"
 export PYZMQ=true
 export NO_WERROR=1

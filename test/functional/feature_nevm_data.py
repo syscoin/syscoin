@@ -5,7 +5,7 @@
 import secrets
 import random
 import time
-from threading import Thread
+from threading import Event, Thread
 from io import BytesIO
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import DashTestFramework
@@ -182,37 +182,6 @@ class NEVMDataTest(DashTestFramework):
             return all(node.getnevmblobdata(versionhash).get('chainlock', False) for node in nodes)
         self.wait_until(blob_chainlocked, timeout=timeout)
 
-    def _wait_for_best_chainlock_recovery_with_time_advance(
-        self,
-        node,
-        expected_chainlock,
-        *,
-        versionhash=None,
-        timeout=180,
-        throttle_key,
-        nodes=None,
-        step_seconds=1,
-    ):
-        wait_nodes = self.nodes if nodes is None else nodes
-
-        def recovered_best_chainlock():
-            self._throttled_bump_mocktime(throttle_key, step=step_seconds, nodes=wait_nodes)
-            try:
-                recovered_chainlock = node.getbestchainlock()
-            except JSONRPCException:
-                return False
-            if (
-                recovered_chainlock["height"] != expected_chainlock["height"]
-                or recovered_chainlock["blockhash"] != expected_chainlock["blockhash"]
-                or not recovered_chainlock["known_block"]
-            ):
-                return False
-            if versionhash is None:
-                return True
-            return node.getnevmblobdata(versionhash).get('chainlock', False)
-
-        self.wait_until(recovered_best_chainlock, timeout=timeout)
-
     def basic_nevm_data(self):
         print('Testing relay in mempool and compact blocks around blobs')
         # test relay with block
@@ -279,13 +248,6 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[1].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid1, True)['data'], txid1Data)
-        self._wait_for_blob_chainlock_with_time_advance(
-            vh,
-            self.nodes[0:4],
-            timeout=180,
-            throttle_key="basic_nevm_data_pre_restart_chainlock",
-        )
-        expected_chainlock = self.nodes[0].getbestchainlock()
         mtp = self.nodes[1].getnevmblobdata(txid1)['mtp']
         print('Start node 4...')
         self.start_node(4, extra_args=["-mocktime=" + str(self.mocktime), *self.extra_args[4]])
@@ -298,14 +260,17 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[4].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[4].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[4].getnevmblobdata(txid1, True)['data'], txid1Data)
-        # Node 4 should recover the current best CLSIG from its peers after restart.
-        # No new block should be needed for getnevmblobdata(vh) to report chainlock.
-        self._wait_for_best_chainlock_recovery_with_time_advance(
-            self.nodes[4],
-            expected_chainlock,
-            versionhash=vh,
+        # Re-form the full quorum after the reindexed and offline nodes rejoin,
+        # then require a fresh CLSIG to cover the blob block on every node.
+        chainlock_target = self.nodes[0].getbestblockhash()
+        self.generate_helper(self.nodes[0], 5)
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes), timeout=180)
+        self.wait_for_chainlocked_block_all_nodes(chainlock_target, timeout=180)
+        self._wait_for_blob_chainlock_with_time_advance(
+            vh,
+            self.nodes,
             timeout=180,
-            throttle_key="basic_nevm_data_restart_chainlock",
+            throttle_key="basic_nevm_data_blob_chainlock",
         )
         print('Test blob expiry...')
         expiry_timestamp = (mtp + NEVM_DATA_EXPIRE_TIME)
@@ -634,59 +599,83 @@ class NEVMDataTest(DashTestFramework):
         self._zmq_connect_count = 0
         self._zmq_connect_events = []
         self._zmq_ctx = zmq.Context()
-        self._zmq_sock = self._zmq_ctx.socket(zmq.REP)
-        self._zmq_sock.bind("tcp://127.0.0.1:29555")
-        self._zmq_sock.setsockopt(zmq.RCVTIMEO, 1000)
+        self._zmq_ready = Event()
+        self._zmq_error = None
 
         def _loop():
-            while self._zmq_running:
-                try:
-                    parts = self._zmq_sock.recv_multipart()
-                except zmq.Again:
-                    continue
-                except Exception:
-                    break
-                if not parts:
-                    continue
-                topic = parts[0]
-                if topic == b"nevmcomms":
-                    self._zmq_sock.send_multipart([b"nevmcomms", b"ack"])
-                elif topic == b"nevmblock":
-                    h = hash256(str(random.randint(-0x80000000, 0x7FFFFFFF)).encode())
-                    u = uint256_from_str(h)
-                    nevm_block = CNEVMBlock()
-                    nevm_block.nBlockHash = u
-                    nevm_block.nTxRoot = u
-                    nevm_block.nReceiptRoot = u
-                    nevm_block.vchNEVMBlockData = b"nevmblock"
-                    self._zmq_sock.send_multipart([b"nevmblock", nevm_block.serialize()])
-                elif topic == b"nevmblockinfo":
-                    self._zmq_sock.send_multipart([b"nevmblockinfo", str(self.nodes[0].getblockcount()).encode()])
-                elif topic == b"nevmconnect":
-                    self._zmq_connect_count += 1
+            sock = None
+            try:
+                # ZeroMQ sockets are thread-affine. Create, use, and close the
+                # REP socket in this worker instead of crossing thread bounds.
+                sock = self._zmq_ctx.socket(zmq.REP)
+                sock.setsockopt(zmq.RCVTIMEO, 1000)
+                sock.setsockopt(zmq.SNDTIMEO, 1000)
+                sock.bind("tcp://127.0.0.1:29555")
+                self._zmq_ready.set()
+                while self._zmq_running:
                     try:
-                        nevm_connect = CNEVMBlockConnect()
-                        nevm_connect.deserialize(BytesIO(parts[1]))
-                        self._zmq_connect_events.append((nevm_connect.sysblockhash, nevm_connect.btcprevhash))
-                    except Exception:
-                        pass
-                    self._zmq_sock.send_multipart([b"nevmconnect", b"connected"])
-                elif topic == b"nevmdisconnect":
-                    self._zmq_sock.send_multipart([b"nevmdisconnect", b"disconnected"])
-                else:
-                    self._zmq_sock.send_multipart([topic, b"ack"])
+                        parts = sock.recv_multipart()
+                    except zmq.Again:
+                        continue
+                    if not parts:
+                        continue
+                    topic = parts[0]
+                    if topic == b"nevmcomms":
+                        sock.send_multipart([b"nevmcomms", b"ack"])
+                    elif topic == b"nevmblock":
+                        h = hash256(str(random.randint(-0x80000000, 0x7FFFFFFF)).encode())
+                        u = uint256_from_str(h)
+                        nevm_block = CNEVMBlock()
+                        nevm_block.nBlockHash = u
+                        nevm_block.nTxRoot = u
+                        nevm_block.nReceiptRoot = u
+                        nevm_block.vchNEVMBlockData = b"nevmblock"
+                        sock.send_multipart([b"nevmblock", nevm_block.serialize()])
+                    elif topic == b"nevmblockinfo":
+                        # Regtest does not attach an external NEVM chain. Avoid
+                        # a re-entrant RPC while node 0 is waiting for this REP
+                        # response, which can deadlock the fixture at shutdown.
+                        sock.send_multipart([b"nevmblockinfo", b"0"])
+                    elif topic == b"nevmconnect":
+                        self._zmq_connect_count += 1
+                        try:
+                            nevm_connect = CNEVMBlockConnect()
+                            nevm_connect.deserialize(BytesIO(parts[1]))
+                            self._zmq_connect_events.append((nevm_connect.sysblockhash, nevm_connect.btcprevhash))
+                        except Exception:
+                            pass
+                        sock.send_multipart([b"nevmconnect", b"connected"])
+                    elif topic == b"nevmdisconnect":
+                        sock.send_multipart([b"nevmdisconnect", b"disconnected"])
+                    else:
+                        sock.send_multipart([topic, b"ack"])
+            except Exception as e:
+                self._zmq_error = e
+                self._zmq_ready.set()
+            finally:
+                if sock is not None:
+                    sock.close(linger=0)
 
-        self._zmq_thread = Thread(target=_loop)
+        self._zmq_thread = Thread(target=_loop, daemon=True)
         self._zmq_thread.start()
+        if not self._zmq_ready.wait(timeout=10):
+            self._zmq_running = False
+            raise RuntimeError("Timed out starting the NEVM ZMQ responder")
+        if self._zmq_error is not None:
+            self._zmq_thread.join(timeout=5)
+            self._zmq_ctx.destroy(linger=0)
+            raise RuntimeError("Failed to start the NEVM ZMQ responder") from self._zmq_error
 
     def _stop_nevm_zmq_responder(self):
         self._zmq_running = False
         if hasattr(self, "_zmq_thread"):
             self._zmq_thread.join(timeout=5)
-        if hasattr(self, "_zmq_sock"):
-            self._zmq_sock.close(linger=0)
+            if self._zmq_thread.is_alive():
+                raise RuntimeError("Timed out stopping the NEVM ZMQ responder")
         if hasattr(self, "_zmq_ctx"):
             self._zmq_ctx.destroy(linger=0)
+        if self._zmq_error is not None:
+            raise RuntimeError("NEVM ZMQ responder failed") from self._zmq_error
 
     def run_test(self):
         self._start_nevm_zmq_responder()

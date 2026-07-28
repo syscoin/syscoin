@@ -9,9 +9,13 @@
 
 #include <ctpl_stl.h>
 
+#include <functional>
 #include <future>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 // Low level BLS/DKG stuff. All very compute intensive and optimized for parallelization
 // The worker tries to parallelize as much as possible and utilizes a few properties of BLS aggregation to speed up things

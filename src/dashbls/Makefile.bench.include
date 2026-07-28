@@ -7,7 +7,7 @@ DASHBLS_RUNBENCH = runbench
 
 runbench_SOURCES = \
 	src/test-bench.cpp \
-	src/test-utils.hpp
+	include/dashbls/test-utils.hpp
 
 runbench_SOURCES += \
 	$(RELIC_H) \

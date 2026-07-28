@@ -8,6 +8,7 @@
         <HeaderFilePath Required="true" />
         <SourceHeader Required="true" />
         <SourceFooter Required="true" />
+        <SkipUtf8Bom ParameterType="System.Boolean" Required="false" />
     </ParameterGroup>
     <Task>
       <Using Namespace="System"/>
@@ -29,6 +30,16 @@ else {
           using (StreamWriter sw = new StreamWriter(HeaderFilePath))
           {
               sw.WriteLine(SourceHeader);
+              if (SkipUtf8Bom)
+              {
+                  int first = inStm.ReadByte();
+                  int second = inStm.ReadByte();
+                  int third = inStm.ReadByte();
+                  if (first != 0xef || second != 0xbb || third != 0xbf)
+                  {
+                      inStm.Position = 0;
+                  }
+              }
               int count = 0;
               int rawChar = inStm.ReadByte();
               while(rawChar != -1)

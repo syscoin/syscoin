@@ -16,9 +16,9 @@
              (gnu packages mingw)
              (gnu packages moreutils)
              (gnu packages pkg-config)
-             ((gnu packages python) #:select (python-minimal))
+             ((gnu packages python) #:select (python-minimal python-minimal-wrapper))
              ((gnu packages python-build) #:select (python-tomli))
-             ((gnu packages python-crypto) #:select (python-asn1crypto))
+             ((gnu packages python-crypto) #:select (python-asn1crypto python-cryptography))
              ((gnu packages tls) #:select (openssl))
              ((gnu packages version-control) #:select (git-minimal))
              (guix build-system cmake)
@@ -206,23 +206,27 @@ and abstract ELF, PE and MachO formats.")
 (define osslsigncode
   (package
     (name "osslsigncode")
-    (version "2.5")
+    (version "2.14")
     (source (origin
               (method git-fetch)
               (uri (git-reference
                     (url "https://github.com/mtrojnar/osslsigncode")
                     (commit version)))
+              (file-name (git-file-name name version))
               (sha256
                (base32
-                "1j47vwq4caxfv0xw68kw5yh00qcpbd56d7rq6c483ma3y7s96yyz"))))
+                "06ybcp9r8w0algxvvv0mz4h1cjw764b33s9b26n1dhvpl1dqc24c"))))
     (build-system cmake-build-system)
-    (inputs (list openssl))
+    (arguments
+     (list
+      #:parallel-tests? #f))
+    (inputs (list openssl zlib))
+    (native-inputs (list python-cryptography python-minimal-wrapper))
     (home-page "https://github.com/mtrojnar/osslsigncode")
-    (synopsis "Authenticode signing and timestamping tool")
+    (synopsis "Authenticode signing for PE, CAB, CAT, MSI, APPX and script files")
     (description "osslsigncode is a small tool that implements part of the
 functionality of the Microsoft tool signtool.exe - more exactly the Authenticode
-signing and timestamping. But osslsigncode is based on OpenSSL and cURL, and
-thus should be able to compile on most platforms where these exist.")
+signing and timestamping.  It is based on OpenSSL.")
     (license license:gpl3+))) ; license is with openssl exception
 
 (define-public python-elfesteem

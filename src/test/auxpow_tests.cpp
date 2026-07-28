@@ -629,7 +629,8 @@ BOOST_FIXTURE_TEST_CASE(auxpow_miner_regeneratesTemplateOnBTCPREVChange, AuxpowC
 
   // Move to height 101 so next template is for height 102 (sign-offset height).
   CreateAndProcessBlock({}, scriptPubKey);
-  BOOST_CHECK_EQUAL(m_node.chainman->ActiveChain().Height() + 1, 102);
+  const int next_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+  BOOST_CHECK_EQUAL(next_height, 102);
 
   LOCK(miner.cs);
   uint256 target;

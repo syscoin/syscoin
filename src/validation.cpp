@@ -111,8 +111,13 @@ extern char** environ;
     #include <mach-o/dyld.h>
     #include <limits.h>
 #endif
-pid_t gethpid = -1;
-pid_t btcheaderpid = -1;
+#ifdef WIN32
+using ManagedProcessId = int;
+#else
+using ManagedProcessId = pid_t;
+#endif
+ManagedProcessId gethpid = -1;
+ManagedProcessId btcheaderpid = -1;
 RecursiveMutex cs_geth;
 RecursiveMutex cs_btcheader;
 std::string g_managed_btcheader_rpc_cmd;
@@ -2259,7 +2264,7 @@ bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &
     CDataStream ds(headerBytes, SER_NETWORK, PROTOCOL_VERSION);
     try {
         ds >> evmBlockHeader;
-    } catch (std::exception& e) {
+    } catch (const std::exception&) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "nevm-block-unserialize");
     }
     return true;
@@ -7182,8 +7187,8 @@ bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
             }
             pcursor->Next();
         }
-        catch (std::exception &e) {
-            return error("%s() : deserialize error", __PRETTY_FUNCTION__);
+        catch (const std::exception&) {
+            return error("%s() : deserialize error", __func__);
         }
     }
     return FlushErase(vecTXIDPairs, batch);
@@ -7294,8 +7299,7 @@ fs::path FindExecPath(std::string &binArchitectureTag) {
         fpathDefault = fs::u8path(std::string(buf));
         fpathDefault = fpathDefault.parent_path();
         return fpathDefault;
-    #endif
-    #ifndef WIN32
+    #elif !defined(WIN32)
         binArchitectureTag = "linux";
         char pszExePath[MAX_PATH+1];
         ssize_t r = readlink("/proc/self/exe", pszExePath, sizeof(pszExePath) - 1);

@@ -603,12 +603,22 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         """
         from_connection = self.nodes[a]
         to_connection = self.nodes[b]
-        from_num_peers = 1 + len(from_connection.getpeerinfo())
-        to_num_peers = 1 + len(to_connection.getpeerinfo())
         ip_port = "127.0.0.1:" + str(p2p_port(b))
 
         if peer_advertises_v2 is None:
             peer_advertises_v2 = self.options.v2transport
+
+        if wait_for_connect:
+            # Use subversion as peer id. Test nodes have their node number
+            # appended to the user agent string.
+            from_connection_subver = from_connection.getnetworkinfo()['subversion']
+            to_connection_subver = to_connection.getnetworkinfo()['subversion']
+
+            def connection_ready(node, peer_subversion):
+                return any(
+                    peer['subver'] == peer_subversion and peer['bytesrecv_per_msg'].get('pong', 0) >= 29
+                    for peer in node.getpeerinfo()
+                )
 
         if peer_advertises_v2:
             from_connection.addnode(node=ip_port, command="onetry", v2transport=True)
@@ -620,19 +630,12 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         if not wait_for_connect:
             return
 
-        # poll until version handshake complete to avoid race conditions
-        # with transaction relaying
-        # See comments in net_processing:
-        # * Must have a version message before anything else
-        # * Must have a verack message before anything else
-        self.wait_until(lambda: sum(peer['version'] != 0 for peer in from_connection.getpeerinfo()) == from_num_peers)
-        self.wait_until(lambda: sum(peer['version'] != 0 for peer in to_connection.getpeerinfo()) == to_num_peers)
-        self.wait_until(lambda: sum(peer['bytesrecv_per_msg'].pop('verack', 0) >= 21 for peer in from_connection.getpeerinfo()) == from_num_peers)
-        self.wait_until(lambda: sum(peer['bytesrecv_per_msg'].pop('verack', 0) >= 21 for peer in to_connection.getpeerinfo()) == to_num_peers)
-        # The message bytes are counted before processing the message, so make
-        # sure it was fully processed by waiting for a ping.
-        self.wait_until(lambda: sum(peer["bytesrecv_per_msg"].pop("pong", 0) >= 29 for peer in from_connection.getpeerinfo()) == from_num_peers)
-        self.wait_until(lambda: sum(peer["bytesrecv_per_msg"].pop("pong", 0) >= 29 for peer in to_connection.getpeerinfo()) == to_num_peers)
+        # A pong can only be received after fSuccessfullyConnected is set, so
+        # it proves the version/verack handshake has been fully processed. Do
+        # not require a direction here: Syscoin masternodes can automatically
+        # establish the reverse connection before addnode is called.
+        self.wait_until(lambda: connection_ready(from_connection, to_connection_subver))
+        self.wait_until(lambda: connection_ready(to_connection, from_connection_subver))
 
     def disconnect_nodes(self, a, b):
         def disconnect_nodes_helper(node_a, node_b):
@@ -1356,7 +1359,7 @@ class DashTestFramework(SyscoinTestFramework):
             self._throttled_bump_mocktime("wait_for_sporks_same", step=1)
             sporks = self.nodes[0].spork('show')
             return all(node.spork('show') == sporks for node in self.nodes)
-        wait_until_helper_internal(check_sporks_same, timeout=timeout)
+        self.wait_until(check_sporks_same, timeout=timeout)
 
     def wait_for_quorum_connections(self, quorum_hash, expected_connections, mninfos, timeout = 60, wait_proc=None):
         def check_quorum_connections():

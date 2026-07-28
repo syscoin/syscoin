@@ -145,6 +145,29 @@ class LLMQSimplePoSeTest(DashTestFramework):
                 # we do not include PoSe banned mns in quorums, so the next one should have 1 contributor less
                 expected_contributors -= 1
 
+    def connect_controller(self, mn):
+        controller_addr = f"127.0.0.1:{p2p_port(0)}"
+        self.connect_nodes(mn.node.index, 0, wait_for_connect=False)
+
+        def get_controller_peer():
+            return next((
+                peer for peer in mn.node.getpeerinfo()
+                if peer["addr"] == controller_addr
+                and peer["version"] != 0
+                and peer["bytesrecv_per_msg"].get("verack", 0) >= 21
+            ), None)
+
+        self.wait_until(lambda: get_controller_peer() is not None)
+        controller_peer = get_controller_peer()
+        peer_id = controller_peer["id"]
+        pong_bytes = controller_peer["bytesrecv_per_msg"].get("pong", 0)
+        mn.node.ping()
+        self.wait_until(lambda: any(
+            peer["id"] == peer_id
+            and peer["bytesrecv_per_msg"].get("pong", 0) > pong_bytes
+            for peer in mn.node.getpeerinfo()
+        ))
+
     def repair_masternodes(self, restart):
         # Repair all nodes
         for mn in self.mninfo:
@@ -157,7 +180,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
                     self.start_masternode(mn, extra_args=["-mocktime=" + str(self.mocktime)])
                 else:
                     mn.node.setnetworkactive(True)
-                self.connect_nodes(mn.node.index, 0, wait_for_connect=False)
+                self.connect_controller(mn)
         self.sync_blocks()
 
         self.bump_mocktime(60 * 10 + 1)
@@ -170,7 +193,7 @@ class LLMQSimplePoSeTest(DashTestFramework):
             self.wait_until(lambda: mn.node.getconnectioncount() == 0)
             mn.node.setnetworkactive(True)
             force_finish_mnsync(mn.node)
-            self.connect_nodes(mn.node.index, 0, wait_for_connect=False)
+            self.connect_controller(mn)
 
     def reset_probe_timeouts(self):
         # Make sure all masternodes will reconnect/re-probe

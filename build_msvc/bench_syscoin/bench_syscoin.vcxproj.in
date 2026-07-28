@@ -53,7 +53,7 @@
     <ItemGroup>
       <RawBenchFile Include="..\..\src\bench\data\*.raw" />
     </ItemGroup>
-    <HeaderFromHexdump RawFilePath="%(RawBenchFile.FullPath)" HeaderFilePath="%(RawBenchFile.FullPath).h" SourceHeader="static unsigned const char %(RawBenchFile.Filename)_raw[] = {" SourceFooter="};" />
+    <HeaderFromHexdump RawFilePath="%(RawBenchFile.FullPath)" HeaderFilePath="%(RawBenchFile.FullPath).h" SourceHeader="namespace raw_bench{ static unsigned const char %(RawBenchFile.Filename)_raw[] = {" SourceFooter="};}" />
   </Target>
   <Import Label="hexdumpTarget" Project="..\msbuild\tasks\hexdump.targets" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />

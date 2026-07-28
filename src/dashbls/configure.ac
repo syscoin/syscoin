@@ -435,8 +435,6 @@ if test x$use_big_endian = xyes; then
   AC_DEFINE([BIGED],   [1], [Define this symbol if big-endian support is enabled])
 fi
 
-use_pkgconfig=yes
-
 if test x"$use_optimizations" = x"yes"; then
   case $host_cpu in
     amd64 | x86_64)
@@ -520,7 +518,6 @@ case $host in
      AC_DEFINE([OPSYS], [WINDOWS], [Detected operation system.])
      TARGET_OS=windows
 
-     use_pkgconfig=no
      LIBTOOL_APP_LDFLAGS="$LIBTOOL_APP_LDFLAGS -all-static"
 
      dnl libtool insists upon adding -nostdlib and a list of objects/libs to link against.
@@ -568,16 +565,6 @@ case $host in
     AC_DEFINE([SEED], [UDEV], [Chosen random generator seeder.])
     ;;
 esac
-
-if test x$use_pkgconfig = xyes; then
-  m4_ifndef([PKG_PROG_PKG_CONFIG], [AC_MSG_ERROR(PKG_PROG_PKG_CONFIG macro not found. Please install pkg-config and re-run autogen.sh.)])
-  m4_ifdef([PKG_PROG_PKG_CONFIG], [
-  PKG_PROG_PKG_CONFIG
-  if test x"$PKG_CONFIG" = "x"; then
-    AC_MSG_ERROR(pkg-config not found.)
-  fi
-  ])
-fi
 
 saved_CFLAGS="$CFLAGS"
 CFLAGS="$CFLAGS -pipe"

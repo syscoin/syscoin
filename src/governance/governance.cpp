@@ -190,7 +190,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
 
         bool fRateCheckBypassed = false;
         if (!MasternodeRateCheck(govobj, true, false, fRateCheckBypassed)) {
-            LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- masternode rate check failed - %s - (current block height %d) \n", strHash, nCachedBlockHeight);
+            LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- masternode rate check failed - %s - (current block height %d) \n", strHash, GetCachedBlockHeight());
             return;
         }
 
@@ -201,7 +201,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         bool fIsValid = govobj.IsValidLocally(chainman, tip_mn_list, strError, fMissingConfirmations, true);
 
         if (fRateCheckBypassed && fIsValid && !MasternodeRateCheck(govobj, true)) {
-            LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- masternode rate check failed (after signature verification) - %s - (current block height %d)\n", strHash, nCachedBlockHeight);
+            LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- masternode rate check failed (after signature verification) - %s - (current block height %d)\n", strHash, GetCachedBlockHeight());
             return;
         }
 
@@ -323,7 +323,7 @@ void CGovernanceManager::AddGovernanceObject(CGovernanceObject& govobj, PeerMana
 
     // Make sure this object is valid locally
     if (!govobj.IsValidLocally(chainman, tip_mn_list, strError, true)) {
-        LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- invalid governance object - %s - (nCachedBlockHeight %d) \n", strError, nCachedBlockHeight);
+        LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- invalid governance object - %s - (nCachedBlockHeight %d) \n", strError, GetCachedBlockHeight());
         return;
     }
     
@@ -742,7 +742,7 @@ void CGovernanceManager::VoteGovernanceTriggers(const std::optional<const CGover
     for (const auto& trigger : activeTriggers) {
         
         const uint256 trigger_hash = WITH_LOCK(governance->cs, return trigger->GetGovernanceObject()->GetHash());
-        if (trigger->GetBlockHeight() <= nCachedBlockHeight) {
+        if (trigger->GetBlockHeight() <= GetCachedBlockHeight()) {
             // ignore triggers from the past
             LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s Not voting NO-FUNDING for outdated trigger:%s\n", __func__, trigger_hash.ToString());
             continue;
@@ -1504,8 +1504,8 @@ void CGovernanceManager::UpdatedBlockTip(const CBlockIndex* pindex, CConnman& co
         const auto trigger_opt = CreateGovernanceTrigger(sb_opt, peerman);
         VoteGovernanceTriggers(trigger_opt, connman, peerman);
     }
-    nCachedBlockHeight = pindex->nHeight;
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::UpdatedBlockTip -- nCachedBlockHeight: %d\n", nCachedBlockHeight);
+    nCachedBlockHeight.store(pindex->nHeight, std::memory_order_relaxed);
+    LogPrint(BCLog::GOBJECT, "CGovernanceManager::UpdatedBlockTip -- nCachedBlockHeight: %d\n", GetCachedBlockHeight());
 
     if (deterministicMNManager && deterministicMNManager->IsDIP3Enforced(pindex->nHeight)) {
         RemoveInvalidVotes();

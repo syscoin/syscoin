@@ -1419,7 +1419,7 @@ util::Result<CreatedTransactionResult> GetBudgetSystemCollateralTX(CWallet& wall
     CTxDestination dest;
     ExtractDestination(scriptChange, dest);
     std::vector<CRecipient> vecSend;
-    vecSend.push_back((CRecipient){dest, amount, false});
+    vecSend.push_back(CRecipient{dest, amount, false});
 
     CCoinControl coinControl;
     if (!outpoint.IsNull()) {
