@@ -90,7 +90,7 @@ static int32_t GetExpectedBTCCheckpointHeight(const ChainstateManager& chainman)
     // - Emit exactly one checkpoint per BTCCHECK_PERIOD blocks
     // - Sign at heights where height % BTCCHECK_PERIOD == BTCCHECK_SIGN_OFFSET
     const int tip = chainman.ActiveHeight();
-    const int start = Params().GetConsensus().nCLReceiptStartBlock;
+    const auto& consensus = Params().GetConsensus();
     static constexpr int PERIOD{BTCCHECK_PERIOD};
     static constexpr int SIGN_OFFSET{BTCCHECK_SIGN_OFFSET}; // within [0, PERIOD)
 
@@ -98,7 +98,7 @@ static int32_t GetExpectedBTCCheckpointHeight(const ChainstateManager& chainman)
     // Enforce activation: don't return pre-activation heights.
     if (tip < SIGN_OFFSET) return -1;
     const int h = tip - ((tip - SIGN_OFFSET) % PERIOD);
-    if (h < start) return -1;
+    if (!IsBTCCSignHeight(consensus, h)) return -1;
     return h;
 }
 
@@ -163,7 +163,7 @@ static bool RunBTCHeaderRPCCommand(const std::vector<std::string>& method_and_ar
 static bool GetLatestOnChainBTCPREVCommitment(const ChainstateManager& chainman, int32_t sign_height, uint256& out_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     out_hash.SetNull();
-    const int start = Params().GetConsensus().nCLReceiptStartBlock;
+    const int start = Params().GetConsensus().nBTCCStartBlock;
     for (int32_t h = sign_height - BTCCHECK_PERIOD; h >= start; h -= BTCCHECK_PERIOD) {
         const CBlockIndex* pindex = chainman.ActiveChain()[h];
         if (!pindex) continue;
@@ -414,11 +414,13 @@ CBTCCheckpointsHandler::CBTCCheckpointsHandler(CConnman& _connman, PeerManager& 
 
 void CBTCCheckpointsHandler::Start()
 {
+    if (!IsBTCCDeploymentConfigured(Params().GetConsensus())) return;
     quorumSigningManager->RegisterRecoveredSigsListener(this);
 }
 
 void CBTCCheckpointsHandler::Stop()
 {
+    if (!IsBTCCDeploymentConfigured(Params().GetConsensus())) return;
     quorumSigningManager->UnregisterRecoveredSigsListener(this);
 }
 
@@ -799,7 +801,8 @@ bool CBTCCheckpointsHandler::VerifyAggregatedBTCCheckpointNoCache(const CBTCChec
 
 void CBTCCheckpointsHandler::ProcessMessage(CNode* pfrom, const std::string& msg_type, CDataStream& vRecv)
 {
-    if (msg_type != NetMsgType::BTCCSIG) {
+    if (msg_type != NetMsgType::BTCCSIG ||
+        !IsBTCCDeploymentConfigured(Params().GetConsensus())) {
         return;
     }
 
@@ -982,6 +985,7 @@ not_older:
 
 void CBTCCheckpointsHandler::TrySignBTCCheckpointTip()
 {
+    if (!IsBTCCDeploymentConfigured(Params().GetConsensus())) return;
     if (!fMasternodeMode) return;
     if (!masternodeSync.IsBlockchainSynced()) return;
 
@@ -993,7 +997,7 @@ void CBTCCheckpointsHandler::TrySignBTCCheckpointTip()
         if (!lockMain) {
             return;
         }
-        const int start = Params().GetConsensus().nCLReceiptStartBlock;
+        const int start = Params().GetConsensus().nBTCCStartBlock;
         if (chainman.ActiveHeight() < start) {
             return;
         }
@@ -1370,6 +1374,8 @@ void CBTCCheckpointsHandler::AcceptVerifiedBTCCSig(const CBTCCheckpointSig& btcc
 
 void CBTCCheckpointsHandler::ProcessPendingVerifiedBTCCheckpointSigs()
 {
+    if (!IsBTCCDeploymentConfigured(Params().GetConsensus())) return;
+
     Cleanup();
 
     int32_t expectedHeight{-1};
@@ -1415,6 +1421,8 @@ void CBTCCheckpointsHandler::ProcessPendingVerifiedBTCCheckpointSigs()
 
 void CBTCCheckpointsHandler::HandleNewRecoveredSig(const CRecoveredSig& recoveredSig)
 {
+    if (!IsBTCCDeploymentConfigured(Params().GetConsensus())) return;
+
     Cleanup();
 
     CBTCCheckpointSig share;
@@ -1613,4 +1621,3 @@ bool CBTCCheckpointsHandler::VerifyAggregatedBTCCheckpoint(const CBTCCheckpointS
 }
 
 } // namespace llmq
-

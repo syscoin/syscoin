@@ -614,12 +614,39 @@ BOOST_FIXTURE_TEST_CASE (auxpow_miner_createAndLookupBlock, TestChain100Setup)
 }
 // SYSCOIN
 
-struct AuxpowCLReceiptStartZeroSetup : TestChain100Setup {
-  AuxpowCLReceiptStartZeroSetup()
-      : TestChain100Setup(ChainType::REGTEST, {"-clreceiptstartheight=102"}) {}
+struct AuxpowCLReceiptOnlySetup : TestChain100Setup {
+  AuxpowCLReceiptOnlySetup()
+      : TestChain100Setup(ChainType::REGTEST, {"-clreceiptstartheight=0"}) {}
 };
 
-BOOST_FIXTURE_TEST_CASE(auxpow_miner_regeneratesTemplateOnBTCPREVChange, AuxpowCLReceiptStartZeroSetup)
+BOOST_FIXTURE_TEST_CASE(auxpow_miner_doesNotEmbedBTCPREVWhenBTCCDisabled, AuxpowCLReceiptOnlySetup)
+{
+  CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
+  AuxpowMinerForTest miner;
+  CScript scriptPubKey;
+
+  // CL receipt rules are active, but BTCC remains at its disabled default.
+  // Move to height 101 so the next template would otherwise be a BTCC
+  // sign-offset block at height 102.
+  CreateAndProcessBlock({}, scriptPubKey);
+  const int next_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+  BOOST_CHECK_EQUAL(next_height, 102);
+
+  LOCK(miner.cs);
+  uint256 target;
+  const CBlock* pblock = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target);
+  BOOST_REQUIRE(pblock != nullptr);
+
+  uint256 committed;
+  BOOST_CHECK(!ExtractBTCPREVCommitment(*pblock, committed));
+}
+
+struct AuxpowBTCCStartSetup : TestChain100Setup {
+  AuxpowBTCCStartSetup()
+      : TestChain100Setup(ChainType::REGTEST, {"-btccstartheight=102"}) {}
+};
+
+BOOST_FIXTURE_TEST_CASE(auxpow_miner_regeneratesTemplateOnBTCPREVChange, AuxpowBTCCStartSetup)
 {
   CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
   AuxpowMinerForTest miner;

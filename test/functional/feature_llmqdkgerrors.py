@@ -18,11 +18,6 @@ class LLMQDKGErrors(DashTestFramework):
 
     def set_test_params(self):
         self.set_dash_test_params(4, 3, [["-whitelist=noban@127.0.0.1"]] * 4, fast_dip3_enforcement=True)
-        # Keep this DKG error test focused on DKG behavior only.
-        # BTCC carrier enforcement can intentionally reject blocks on temporary forked views,
-        # which is orthogonal to what this test validates.
-        for i in range(self.num_nodes):
-            self.extra_args[i].append("-clreceiptstartheight=1000000")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()

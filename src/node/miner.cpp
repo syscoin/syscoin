@@ -226,11 +226,9 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // - Sign at epoch offset +2 (avoids CL's mod-5 boundary)
     // - Mine/embed at epoch offset +7 (5-block propagation buffer)
     // Carrier height H where H % 10 == 7 embeds a btcc that attests height (H-5).
-    const int start = Params().GetConsensus().nCLReceiptStartBlock;
+    const auto& consensus = Params().GetConsensus();
     const int32_t expectedHeight = nHeight - BTCCHECK_PROP_BUFFER;
-    if (nHeight >= BTCCHECK_PROP_BUFFER &&
-        expectedHeight >= start &&
-        (nHeight % BTCCHECK_PERIOD) == BTCCHECK_CARRIER_OFFSET) {
+    if (IsBTCCCarrierHeight(consensus, nHeight)) {
         const CBlockIndex* pindexReceipt = pindexPrev->GetAncestor(expectedHeight);
         llmq::CBTCCheckpointSig btcc;
         if (llmq::btcCheckpointsHandler && pindexReceipt != nullptr &&

@@ -91,6 +91,9 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-clreceiptstartheight")) {
         options.clreceiptstartblock = args.GetIntArg("-clreceiptstartheight", std::numeric_limits<int>::max());
     }
+    if (args.IsArgSet("-btccstartheight")) {
+        options.btccstartblock = args.GetIntArg("-btccstartheight", std::numeric_limits<int>::max());
+    }
     if (args.IsArgSet("-bridgev2startheight")) {
         options.bridgev2startblock = args.GetIntArg("-bridgev2startheight", std::numeric_limits<int>::max());
     }

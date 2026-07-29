@@ -36,6 +36,7 @@
 #include <versionbits.h>
 
 #include <atomic>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -135,6 +136,24 @@ static constexpr int BTCCHECK_PERIOD{10};
 static constexpr int BTCCHECK_SIGN_OFFSET{2};   // within [0, BTCCHECK_PERIOD)
 static constexpr int BTCCHECK_PROP_BUFFER{5};   // blocks between signing and carrier mining
 static constexpr int BTCCHECK_CARRIER_OFFSET{BTCCHECK_SIGN_OFFSET + BTCCHECK_PROP_BUFFER}; // 7
+
+inline bool IsBTCCDeploymentConfigured(const Consensus::Params& consensus)
+{
+    return consensus.nBTCCStartBlock != std::numeric_limits<int>::max();
+}
+
+inline bool IsBTCCSignHeight(const Consensus::Params& consensus, const int height)
+{
+    return IsBTCCDeploymentConfigured(consensus) &&
+           height >= consensus.nBTCCStartBlock &&
+           (height % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET;
+}
+
+inline bool IsBTCCCarrierHeight(const Consensus::Params& consensus, const int height)
+{
+    return height >= BTCCHECK_PROP_BUFFER &&
+           IsBTCCSignHeight(consensus, height - BTCCHECK_PROP_BUFFER);
+}
 
 /** Documentation for argument 'checklevel'. */
 extern const std::vector<std::string> CHECKLEVEL_DOC;

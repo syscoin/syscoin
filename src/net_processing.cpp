@@ -2041,7 +2041,8 @@ bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid)
     case MSG_CLSIG:
         return llmq::chainLocksHandler->AlreadyHave(hash);
     case MSG_BTCCSIG:
-        return llmq::btcCheckpointsHandler && llmq::btcCheckpointsHandler->AlreadyHave(hash);
+        return !IsBTCCDeploymentConfigured(Params().GetConsensus()) ||
+               (llmq::btcCheckpointsHandler && llmq::btcCheckpointsHandler->AlreadyHave(hash));
     }
 
     if (m_orphanage.HaveTx(gtxid)) return true;
@@ -2501,7 +2502,9 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 }
                 case(MSG_BTCCSIG): {
                     llmq::CBTCCheckpointSig o;
-                    if (llmq::btcCheckpointsHandler && llmq::btcCheckpointsHandler->GetBTCCheckpointByHash(inv.hash, o)) {
+                    if (IsBTCCDeploymentConfigured(Params().GetConsensus()) &&
+                        llmq::btcCheckpointsHandler &&
+                        llmq::btcCheckpointsHandler->GetBTCCheckpointByHash(inv.hash, o)) {
                         m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::BTCCSIG, o));
                         push = true;
                     }
@@ -4972,6 +4975,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
     if (msg_type == NetMsgType::GETBTCCSIG) {
+        if (!IsBTCCDeploymentConfigured(Params().GetConsensus())) return;
         if (auto tx_relay = peer->GetTxRelay(); tx_relay != nullptr) {
             LOCK(tx_relay->m_tx_inventory_mutex);
             tx_relay->m_send_btccsig = true;
@@ -5222,7 +5226,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         llmq::chainLocksHandler->ProcessMessage(&pfrom, msg_type, vRecv);
         return;
     } else if(msg_type == NetMsgType::BTCCSIG) {
-        if (llmq::btcCheckpointsHandler) {
+        if (IsBTCCDeploymentConfigured(Params().GetConsensus()) &&
+            llmq::btcCheckpointsHandler) {
             llmq::btcCheckpointsHandler->ProcessMessage(&pfrom, msg_type, vRecv);
         }
         return;

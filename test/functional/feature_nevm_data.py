@@ -31,6 +31,7 @@ class NEVMDataTest(DashTestFramework):
         # Activate NEVM commitment path in this test's height range.
         for i in range(self.num_nodes):
             self.extra_args[i].append("-nevmstartheight=1")
+            self.extra_args[i].append("-btccstartheight=0")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_py3_zmq()

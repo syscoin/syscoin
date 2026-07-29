@@ -2302,9 +2302,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     uint256 btcPrevHashForNEVM{};
     {
         const auto& consensus = m_chainman.GetConsensus();
-        const bool carrier_height = nHeight >= BTCCHECK_PROP_BUFFER &&
-                                    (nHeight % BTCCHECK_PERIOD) == BTCCHECK_CARRIER_OFFSET &&
-                                    (static_cast<int>(nHeight) - BTCCHECK_PROP_BUFFER) >= consensus.nCLReceiptStartBlock;
+        const bool carrier_height = IsBTCCCarrierHeight(consensus, nHeight);
         if (carrier_height) {
             // Only forward a BTC anchor if this carrier block has a non-null BTCC receipt.
             // (Null receipts are allowed for censorship resistance and must result in no NEVM checkpoint.)
@@ -2797,8 +2795,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // accept->connect flow; otherwise fall back to reparsing.
     if (!fJustCheck) {
         const auto& consensus = params.GetConsensus();
-        const bool btcp_required = pindex->nHeight >= consensus.nCLReceiptStartBlock &&
-                                   (pindex->nHeight % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET &&
+        const bool btcp_required = IsBTCCSignHeight(consensus, pindex->nHeight) &&
                                    block.auxpow;
         if (btcp_required) {
             const uint256& btcp_expected = block.auxpow->getParentPrevBlockHash();
@@ -5011,8 +5008,7 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     // Consensus verifies that it matches this block's AuxPoW parent prev-block hash.
     {
         const Consensus::Params& consensusParams = chainman.GetConsensus();
-        const bool btcpRequired = nHeight >= consensusParams.nCLReceiptStartBlock &&
-                                  (nHeight % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET;
+        const bool btcpRequired = IsBTCCSignHeight(consensusParams, nHeight);
         if (btcpRequired && block.auxpow) {
             uint256 btcPrevHashCommit;
             if (!ExtractBTCPREVCommitment(block, btcPrevHashCommit)) {
@@ -5312,8 +5308,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // SYSCOIN: cache the contextually validated BTCPREV so ConnectBlock can reuse it
     // without reparsing the coinbase payload in the common accept->connect flow.
     {
-        const bool btcp_required = pindex->nHeight >= params.GetConsensus().nCLReceiptStartBlock &&
-                                   (pindex->nHeight % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET &&
+        const bool btcp_required = IsBTCCSignHeight(params.GetConsensus(), pindex->nHeight) &&
                                    block.auxpow;
         if (btcp_required) {
             pindex->m_btcp_prev_contextually_validated = true;
@@ -6401,7 +6396,9 @@ void ChainstateManager::BackfillRecentBTCPREVCommitments()
     LOCK(cs_main);
 
     const auto& consensus = GetConsensus();
-    const int start = consensus.nCLReceiptStartBlock;
+    if (!IsBTCCDeploymentConfigured(consensus)) return;
+
+    const int start = consensus.nBTCCStartBlock;
     const int tip = ActiveHeight();
     if (tip < 0 || tip < start) return;
 
@@ -6409,7 +6406,7 @@ void ChainstateManager::BackfillRecentBTCPREVCommitments()
     const int low = std::max(start, tip - (BTCCHECK_PERIOD * 2));
 
     for (int h = tip; h >= low; --h) {
-        if ((h % BTCCHECK_PERIOD) != BTCCHECK_SIGN_OFFSET) continue;
+        if (!IsBTCCSignHeight(consensus, h)) continue;
         CBlockIndex* pindex = ActiveChain()[h];
         if (!pindex) continue;
         if (!pindex->btcpPrevCommitment.IsNull()) continue;

@@ -997,6 +997,33 @@ BOOST_AUTO_TEST_CASE(syscoin_bridge_uses_clreceipt_activation)
                 regtest_v2->GetConsensus().vchSyscoinVaultManager);
 }
 
+BOOST_AUTO_TEST_CASE(syscoin_btcc_activation_is_independent)
+{
+    const auto main = CreateChainParams(*m_node.args, ChainType::MAIN);
+    const auto testnet = CreateChainParams(*m_node.args, ChainType::TESTNET);
+    BOOST_CHECK_EQUAL(main->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK_EQUAL(testnet->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
+
+    ArgsManager args_cl;
+    args_cl.ForceSetArg("-clreceiptstartheight", "123");
+    const auto regtest_cl = CreateChainParams(args_cl, ChainType::REGTEST);
+    BOOST_CHECK_EQUAL(regtest_cl->GetConsensus().nCLReceiptStartBlock, 123);
+    BOOST_CHECK_EQUAL(regtest_cl->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK(!IsBTCCDeploymentConfigured(regtest_cl->GetConsensus()));
+    BOOST_CHECK(!IsBTCCSignHeight(regtest_cl->GetConsensus(), 1000002));
+    BOOST_CHECK(!IsBTCCCarrierHeight(regtest_cl->GetConsensus(), 1000007));
+
+    ArgsManager args_btcc;
+    args_btcc.ForceSetArg("-btccstartheight", "321");
+    const auto regtest_btcc = CreateChainParams(args_btcc, ChainType::REGTEST);
+    BOOST_CHECK_EQUAL(regtest_btcc->GetConsensus().nCLReceiptStartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK_EQUAL(regtest_btcc->GetConsensus().nBTCCStartBlock, 321);
+    BOOST_CHECK(IsBTCCDeploymentConfigured(regtest_btcc->GetConsensus()));
+    BOOST_CHECK(!IsBTCCSignHeight(regtest_btcc->GetConsensus(), 321));
+    BOOST_CHECK(IsBTCCSignHeight(regtest_btcc->GetConsensus(), 322));
+    BOOST_CHECK(IsBTCCCarrierHeight(regtest_btcc->GetConsensus(), 327));
+}
+
 struct BridgeV2CutoverTestingSetup : BasicTestingSetup {
     BridgeV2CutoverTestingSetup()
         : BasicTestingSetup(ChainType::REGTEST, {"-bridgev2startheight=1000"}) {}
