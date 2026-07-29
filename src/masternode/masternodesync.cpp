@@ -140,6 +140,7 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
 
     nTimeLastProcess = GetTime();
     const CConnman::NodesSnapshot snap{connman, /* filter = */ FullyConnectedOnly};
+    const bool fBTCCConfigured = IsBTCCDeploymentConfigured(Params().GetConsensus());
     // Gradually request the rest of the votes after sync finished and make sure
     // we recover latest CLSIG/BTCCSIG after startup if local state is still empty.
     if(IsSynced()) {
@@ -147,7 +148,8 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
         static int64_t nTimeLastSigSyncRequest = 0;
         const int64_t nNow = GetTime<std::chrono::seconds>().count();
         const bool fNeedCLSIG = llmq::chainLocksHandler && llmq::chainLocksHandler->GetBestChainLock().IsNull();
-        const bool fNeedBTCCSIG = llmq::btcCheckpointsHandler && llmq::btcCheckpointsHandler->GetBestBTCCheckpoint().IsNull();
+        const bool fNeedBTCCSIG = fBTCCConfigured && llmq::btcCheckpointsHandler &&
+                                  llmq::btcCheckpointsHandler->GetBestBTCCheckpoint().IsNull();
         if ((fNeedCLSIG || fNeedBTCCSIG) && nNow - nTimeLastSigSyncRequest >= MASTERNODE_SYNC_TIMEOUT_SECONDS) {
             size_t nRequested = 0;
             for (auto& pnode : snap.Nodes()) {
@@ -200,7 +202,9 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                     if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
                         netfulfilledman->AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
                         connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETCLSIG));
-                        connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETBTCCSIG));
+                        if (fBTCCConfigured) {
+                            connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETBTCCSIG));
+                        }
                         LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
                     }
                 }
@@ -283,8 +287,11 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                             }
                             // Keep CLSIG/BTCCSIG requests independent from mempool-sync bookkeeping.
                             connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETCLSIG));
-                            connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETBTCCSIG));
-                            LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- requested CLSIG/BTCCSIG from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
+                            if (fBTCCConfigured) {
+                                connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETBTCCSIG));
+                            }
+                            LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- requested CLSIG%s from peer=%d\n",
+                                nTick, nMode, fBTCCConfigured ? "/BTCCSIG" : "", pNodeTmp->GetId());
                         }
                     }
                 }

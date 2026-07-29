@@ -218,6 +218,8 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
 
     def set_test_params(self):
         self.set_dash_test_params(4, 3, fast_dip3_enforcement=True)
+        for args in self.extra_args:
+            args.append("-btccstartheight=0")
         self.btc_nodes = []
         self.external_btcheader_cmd = None
         self.external_btc_p2p_ports = None

@@ -631,8 +631,14 @@ void CSigningManager::ProcessRecoveredSig(NodeId nodeId, const std::shared_ptr<c
                 if(peer) peerman.Misbehaving(*peer, 10, "invalid recovered signature block height");
                 return;
             }
+        } else if (is_btccheck_request &&
+                   !IsBTCCDeploymentConfigured(chainman.GetConsensus())) {
+            // Ignore legacy BTCC recovered signatures while the deployment is
+            // disabled instead of storing them or penalizing the peer.
+            peerman.ForgetTxHash(nodeId, hash);
+            return;
         } else if (is_btccheck_request) {
-            if ((pindex->nHeight % BTCCHECK_PERIOD) != BTCCHECK_SIGN_OFFSET) {
+            if (!IsBTCCSignHeight(chainman.GetConsensus(), pindex->nHeight)) {
                 peerman.ForgetTxHash(nodeId, hash);
                 if (peer) peerman.Misbehaving(*peer, 10, "invalid btcc recovered signature height");
                 return;

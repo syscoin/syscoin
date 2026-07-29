@@ -160,6 +160,7 @@ public:
         int dip3enforcement{432};
         int nevmstartblock{2050};
         int clreceiptstartblock{std::numeric_limits<int>::max()};
+        int btccstartblock{std::numeric_limits<int>::max()};
         int bridgev2startblock{std::numeric_limits<int>::max()};
 
     };

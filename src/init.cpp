@@ -619,6 +619,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-dip19params=<n:m>", "DIP19 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-nevmstartheight=<n>", "NEVM Start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-clreceiptstartheight=<n>", "CL receipt start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btccstartheight=<n>", "BTCC start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-bridgev2startheight=<n>", "Bridge V2 vault-manager cutover height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheadermanaged", strprintf("Automatically start/stop a local Bitcoin headers-only node for BTCC signer policy checks (default: %u)", DEFAULT_BTC_HEADER_MANAGED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheaderbinary=<path>", "Path to bitcoind binary used when -btcheadermanaged=1. If unset, syscoin searches common install/build locations.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1901,9 +1902,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const bool nevm_miner_addr_configured = HasNEVMMinerFeeRecipientConfig(args);
     const bool hrp_forces_nevm_off = args.IsArgSet("-hrp");
     const bool btcheader_policy_active_chain = !Params().MineBlocksOnDemand() || enforce_btcheader_policy_ondemand;
+    const bool btcc_deployment_configured = IsBTCCDeploymentConfigured(Params().GetConsensus());
     bool btc_header_policy_ready{true};
     bool btcheader_backend_initialized{false};
-    const bool init_btcheader_backend_early = fMasternodeMode && btcheader_policy_active_chain;
+    const bool init_btcheader_backend_early =
+        btcc_deployment_configured && fMasternodeMode && btcheader_policy_active_chain;
     if (init_btcheader_backend_early) {
         btcheader_backend_initialized = true;
         if (!node.chainman->ActiveChainstate().DoBTCHeaderStartupProcedure()) {
@@ -1919,6 +1922,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
     LogPrintf("NEVM connection %d\n", fNEVMConnection? 1: 0);
     const bool require_btcheader_backend_post_nevm =
+        btcc_deployment_configured &&
         (fMasternodeMode || ((fNEVMConnection && !hrp_forces_nevm_off) && nevm_miner_addr_configured)) &&
         btcheader_policy_active_chain;
     if (require_btcheader_backend_post_nevm && !btcheader_backend_initialized) {

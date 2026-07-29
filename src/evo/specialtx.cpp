@@ -178,11 +178,8 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
         {
             const auto& consensus = Params().GetConsensus();
             const int32_t height = pindex->nHeight;
-            const int start = consensus.nCLReceiptStartBlock;
             const int32_t expected = height - BTCCHECK_PROP_BUFFER;
-            const bool receiptRequired = height >= BTCCHECK_PROP_BUFFER &&
-                                        expected >= start &&
-                                        ((height % BTCCHECK_PERIOD) == BTCCHECK_CARRIER_OFFSET);
+            const bool receiptRequired = IsBTCCCarrierHeight(consensus, height);
             if (receiptRequired) {
                 std::vector<unsigned char> vchData;
                 int nOut{-1};

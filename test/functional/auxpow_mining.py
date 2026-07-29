@@ -38,8 +38,8 @@ class AuxpowMiningTest (SyscoinTestFramework):
     # Must set '-dip3params=9000:9000' to create pre-dip3 blocks only.
     # Enable BTCPREV commitment checks for this test.
     self.extra_args = [
-      ['-dip3params=9000:9000', '-clreceiptstartheight=0'],
-      ['-dip3params=9000:9000', '-clreceiptstartheight=0'],
+      ['-dip3params=9000:9000', '-btccstartheight=0'],
+      ['-dip3params=9000:9000', '-btccstartheight=0'],
     ]
 
   def add_options (self, parser):

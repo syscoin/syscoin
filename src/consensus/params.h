@@ -171,6 +171,10 @@ struct Params {
     int nBridgeStartBlock;
     int nNEVMStartBlock;
     int nCLReceiptStartBlock;
+    // BTCC signing, in-block carrier receipts, and BTCPREV validation.
+    // Kept independent from bridge receipt activation so a future
+    // post-quantum checkpoint format can activate on its own boundary.
+    int nBTCCStartBlock{std::numeric_limits<int>::max()};
     // Bridge V2 vault-manager cutover (independent of nCLReceiptStartBlock).
     int nBridgeV2StartBlock;
     int64_t nNEVMStartTime;

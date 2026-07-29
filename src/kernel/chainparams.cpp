@@ -207,6 +207,8 @@ public:
         consensus.nNEVMStartBlock = 1317500;
         // ChainLock receipt activation height (set on deployment to avoid invalidating historical blocks)
         consensus.nCLReceiptStartBlock = std::numeric_limits<int>::max();
+        // Deferred until the post-quantum BTCC format and validation path are defined.
+        consensus.nBTCCStartBlock = std::numeric_limits<int>::max();
         // Independent of nCLReceiptStartBlock; set to Core cutover H when V2 proxy is live.
         consensus.nBridgeV2StartBlock = std::numeric_limits<int>::max();
         consensus.nNEVMStartTime = 1638791667;
@@ -371,6 +373,8 @@ public:
         consensus.nNEVMStartBlock = 840000;
         // Keep canonical receipt hardening active; do not couple manager switch to this.
         consensus.nCLReceiptStartBlock = 1746000;
+        // Deferred independently from canonical bridge receipt hardening.
+        consensus.nBTCCStartBlock = std::numeric_limits<int>::max();
         // Future H2 when V2 vault proxy is deployed (NEVM F2 = H2 - nNEVMStartBlock + 1).
         consensus.nBridgeV2StartBlock = std::numeric_limits<int>::max();
         consensus.nNEVMStartTime = 1632775675;
@@ -618,6 +622,8 @@ public:
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nCLReceiptStartBlock = opts.clreceiptstartblock;
+        // Disabled by default; BTCC-specific tests opt in explicitly.
+        consensus.nBTCCStartBlock = opts.btccstartblock;
         // Deferred by default; set via -bridgev2startheight for tests/private nets.
         consensus.nBridgeV2StartBlock = opts.bridgev2startblock;
         consensus.nNEVMStartTime = 0;

@@ -218,8 +218,7 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
   {
     LOCK (cs_main);
     const int nextHeight = chainman.ActiveChain().Height() + 1;
-    const int start = Params().GetConsensus().nCLReceiptStartBlock;
-    const bool btcpRequired = nextHeight >= start && (nextHeight % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET;
+    const bool btcpRequired = IsBTCCSignHeight(Params().GetConsensus(), nextHeight);
     CScriptID scriptID (scriptPubKey);
     auto iter = curBlocks.find(scriptID);
     if (iter != curBlocks.end())
@@ -369,8 +368,7 @@ AuxpowMiner::createAuxBlock (const node::JSONRPCRequest& request,
       const CBlock* pblock = getCurrentBlock (*node.chainman, mempool, scriptPubKey, target, btcPrevHash);
       CHECK_NONFATAL(pindexPrev != nullptr);
       const int nextHeight = pindexPrev->nHeight + 1;
-      const int start = Params().GetConsensus().nCLReceiptStartBlock;
-      const bool btcpRequired = nextHeight >= start && (nextHeight % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET;
+      const bool btcpRequired = IsBTCCSignHeight(Params().GetConsensus(), nextHeight);
       int nActiveHeight = pindexPrev->nHeight - 5;
       nActiveHeight -= nActiveHeight % 10;
       const CBlockIndex* refIndex = pindexPrev->GetAncestor(nActiveHeight);
