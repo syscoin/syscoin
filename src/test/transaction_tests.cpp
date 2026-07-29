@@ -978,9 +978,16 @@ BOOST_AUTO_TEST_CASE(syscoin_bridge_uses_clreceipt_activation)
     const auto testnet = CreateChainParams(*m_node.args, ChainType::TESTNET);
     BOOST_CHECK_EQUAL(main->GetConsensus().nCLReceiptStartBlock, std::numeric_limits<int>::max());
     BOOST_CHECK_EQUAL(testnet->GetConsensus().nCLReceiptStartBlock, 1746000);
-    // Manager cutover is independent and stays deferred until V2 deploy.
+    // Manager cutover is independent: mainnet is deferred, testnet is scheduled.
     BOOST_CHECK_EQUAL(main->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
-    BOOST_CHECK_EQUAL(testnet->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK_EQUAL(testnet->GetConsensus().nBridgeV2StartBlock, 1786999);
+    BOOST_CHECK(
+        testnet->GetConsensus().vchSyscoinVaultManager ==
+        ParseHex("28bD37C0926575f2568ea8f297c0745EF16174Ab"));
+    BOOST_CHECK_EQUAL(
+        testnet->GetConsensus().nBridgeV2StartBlock -
+            testnet->GetConsensus().nNEVMStartBlock + 1,
+        947000);
 
     ArgsManager args;
     args.ForceSetArg("-clreceiptstartheight", "123");

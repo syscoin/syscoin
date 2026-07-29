@@ -367,7 +367,7 @@ public:
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 5700;
         consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
-        consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
+        consensus.vchSyscoinVaultManager = ParseHex("28bD37C0926575f2568ea8f297c0745EF16174Ab");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 1000;
         consensus.nNEVMStartBlock = 840000;
@@ -375,8 +375,8 @@ public:
         consensus.nCLReceiptStartBlock = 1746000;
         // Deferred independently from canonical bridge receipt hardening.
         consensus.nBTCCStartBlock = std::numeric_limits<int>::max();
-        // Future H2 when V2 vault proxy is deployed (NEVM F2 = H2 - nNEVMStartBlock + 1).
-        consensus.nBridgeV2StartBlock = std::numeric_limits<int>::max();
+        // Bridge V2 cutover H, paired with Tanenbaum NEVM F=947000.
+        consensus.nBridgeV2StartBlock = 1786999;
         consensus.nNEVMStartTime = 1632775675;
         consensus.nPODAStartBlock = 1022500;
         consensus.nV19StartBlock = 1063000;
