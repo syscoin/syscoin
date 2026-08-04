@@ -176,7 +176,7 @@ struct Params {
     // post-quantum checkpoint format can activate on its own boundary.
     int nBTCCStartBlock{std::numeric_limits<int>::max()};
     // Bridge V2 vault-manager cutover (independent of nCLReceiptStartBlock).
-    int nBridgeV2StartBlock;
+    int nBridgeV2StartBlock{std::numeric_limits<int>::max()};
     int64_t nNEVMStartTime;
     int nPODAStartBlock;
     int nNexusStartBlock;
