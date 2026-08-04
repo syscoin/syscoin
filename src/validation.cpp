@@ -1845,6 +1845,31 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
     return true;
 }
 
+static bool CheckDirectBlockNotAuxpowParent(const CBlock& block, BlockValidationState& state,
+                                            int nHeight, const Consensus::Params& consensus)
+{
+    // Reuse the Bridge V2 cutover as the coordinated consensus activation.
+    if (nHeight < consensus.nBridgeV2StartBlock || block.IsAuxpow()) {
+        return true;
+    }
+
+    // Structural validation reports the primary error for malformed blocks.
+    if (block.vtx.empty() || !block.vtx[0] || block.vtx[0]->vin.empty()) {
+        return true;
+    }
+
+    const CScript& script = block.vtx[0]->vin[0].scriptSig;
+    const unsigned char* const header_begin = pchMergedMiningHeader;
+    const unsigned char* const header_end = header_begin + sizeof(pchMergedMiningHeader);
+    if (std::search(script.begin(), script.end(), header_begin, header_end) != script.end()) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-direct-auxpow-parent",
+                             "non-AuxPoW block coinbase contains merged-mining header");
+    }
+
+    return true;
+}
+
 CAmount GetBlockSubsidyRegtest(int nHeight, const Consensus::Params& consensusParams)
 {
     int halvings = nHeight / consensusParams.nSubsidyHalvingInterval;
@@ -2774,6 +2799,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             return FatalError(m_chainman.GetNotifications(), state, "Corrupt block found indicating potential hardware failure; shutting down");
         }
         return error("%s: Consensus::CheckBlock: %s", __func__, state.ToString());
+    }
+    if (!CheckDirectBlockNotAuxpowParent(block, state, pindex->nHeight, params.GetConsensus())) {
+        return error("%s: CheckDirectBlockNotAuxpowParent: %s", __func__, state.ToString());
     }
 
     // verify that the view's current state corresponds to the previous block
@@ -4939,6 +4967,10 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& state, const ChainstateManager& chainman, const CBlockIndex* pindexPrev)
 {
     const int nHeight = pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1;
+
+    if (!CheckDirectBlockNotAuxpowParent(block, state, nHeight, chainman.GetConsensus())) {
+        return false;
+    }
 
     // Enforce BIP113 (Median Time Past).
     bool enforce_locktime_median_time_past{false};
