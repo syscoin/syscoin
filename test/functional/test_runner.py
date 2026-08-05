@@ -409,6 +409,7 @@ BASE_SCRIPTS = [
     'auxpow_mining.py',
     'auxpow_mining.py --segwit',
     'auxpow_invalidpow.py',
+    'auxpow_self_parent.py',
     'auxpow_zerohash.py',
 ]
 
