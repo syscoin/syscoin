@@ -200,17 +200,18 @@ public:
         consensus.nSYSXAsset = 123456;
         consensus.nNEVMChainID = 57;
         consensus.vchSyscoinVaultManagerLegacy = ParseHex("7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f");
-        // Bridge V2 stub — replace with deployed vault proxy before setting nBridgeV2StartBlock.
-        consensus.vchSyscoinVaultManager = ParseHex("1111111111111111111111111111111111111111");
+        consensus.vchSyscoinVaultManager = ParseHex("28bD37C0926575f2568ea8f297c0745EF16174Ab");
         consensus.vchTokenFreezeMethod = ParseHex("0b8914e27c9a6c88836bc5547f82ccf331142c761f84e9f1d36934a6a31eefad");
         consensus.nBridgeStartBlock = 348000;
         consensus.nNEVMStartBlock = 1317500;
-        // ChainLock receipt activation height (set on deployment to avoid invalidating historical blocks)
-        consensus.nCLReceiptStartBlock = std::numeric_limits<int>::max();
+        // Activate canonical receipts with Bridge V2 so legacy parsing cannot
+        // remain enabled after the vault-manager cutover.
+        consensus.nCLReceiptStartBlock = 2292816;
         // Deferred until the post-quantum BTCC format and validation path are defined.
         consensus.nBTCCStartBlock = std::numeric_limits<int>::max();
-        // Independent of nCLReceiptStartBlock; set to Core cutover H when V2 proxy is live.
-        consensus.nBridgeV2StartBlock = std::numeric_limits<int>::max();
+        // NEVM F=975316 is committed one Core block earlier, making its roots
+        // available when manager validation switches at H=2292816.
+        consensus.nBridgeV2StartBlock = 2292816;
         consensus.nNEVMStartTime = 1638791667;
         consensus.nPODAStartBlock = 1586000;
         consensus.nV19StartBlock = 1586000;
