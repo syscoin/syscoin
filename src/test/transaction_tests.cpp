@@ -977,12 +977,21 @@ BOOST_AUTO_TEST_CASE(syscoin_bridge_uses_clreceipt_activation)
     const auto main = CreateChainParams(*m_node.args, ChainType::MAIN);
     const auto testnet = CreateChainParams(*m_node.args, ChainType::TESTNET);
     const auto signet = CreateChainParams(*m_node.args, ChainType::SIGNET);
-    BOOST_CHECK_EQUAL(main->GetConsensus().nCLReceiptStartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK_EQUAL(main->GetConsensus().nCLReceiptStartBlock, 2292816);
     BOOST_CHECK_EQUAL(testnet->GetConsensus().nCLReceiptStartBlock, 1746000);
-    // Manager cutover is independent: mainnet is deferred, testnet is scheduled.
-    BOOST_CHECK_EQUAL(main->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
+    // Manager cutover is independently scheduled per network.
+    BOOST_CHECK_EQUAL(main->GetConsensus().nBridgeV2StartBlock, 2292816);
     BOOST_CHECK_EQUAL(testnet->GetConsensus().nBridgeV2StartBlock, 1786999);
     BOOST_CHECK_EQUAL(signet->GetConsensus().nBridgeV2StartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK(
+        main->GetConsensus().vchSyscoinVaultManager ==
+        ParseHex("28bD37C0926575f2568ea8f297c0745EF16174Ab"));
+    // The NEVM migration runs one Core block before H so its roots are readable
+    // when manager validation switches at H.
+    BOOST_CHECK_EQUAL(
+        main->GetConsensus().nBridgeV2StartBlock -
+            main->GetConsensus().nNEVMStartBlock,
+        975316);
     BOOST_CHECK(
         testnet->GetConsensus().vchSyscoinVaultManager ==
         ParseHex("28bD37C0926575f2568ea8f297c0745EF16174Ab"));
