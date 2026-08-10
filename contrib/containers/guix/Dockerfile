@@ -75,7 +75,6 @@ RUN groupmod -g ${GROUP_ID} ubuntu; \
 # Copy required files to container
 COPY --from=docker_root ./motd.txt             /etc/motd
 COPY --from=docker_root ./scripts/entrypoint   /usr/local/bin/entrypoint
-COPY --from=docker_root ./scripts/guix-check   /usr/local/bin/guix-check
 COPY --from=docker_root ./scripts/guix-start   /usr/local/bin/guix-start
 COPY --from=docker_root ./scripts/setup-sdk    /usr/local/bin/setup-sdk
 
