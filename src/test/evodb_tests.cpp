@@ -104,6 +104,96 @@ BOOST_AUTO_TEST_CASE(TestFlushCacheToDisk) {
     BOOST_CHECK_EQUAL(fifoList.size(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(flush_batch_failure_preserves_dirty_and_erase_retries)
+{
+    auto db_params = DBParams{
+        .path = "testdb_flush_retry",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 8);
+
+    for (int key{1}; key <= 4; ++key) {
+        evo_db.WriteCache(key, key * 100);
+    }
+
+    // SYSCOIN: A failed write batch must retain every staged dirty value. The
+    // retry then commits the same values instead of silently dropping them.
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_CHECK_THROW(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/2, /*fSync=*/true),
+        dbwrapper_error);
+    BOOST_CHECK_EQUAL(evo_db.GetReadWriteCacheSize(), 4U);
+    BOOST_CHECK_EQUAL(evo_db.GetFifoList().size(), 4U);
+    for (int key{1}; key <= 4; ++key) {
+        int value{0};
+        BOOST_REQUIRE(evo_db.ReadCache(key, value));
+        BOOST_CHECK_EQUAL(value, key * 100);
+        BOOST_CHECK(!evo_db.Read(key, value));
+    }
+
+    BOOST_REQUIRE(evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/2, /*fSync=*/true));
+    BOOST_CHECK_EQUAL(evo_db.GetReadWriteCacheSize(), 0U);
+    for (int key{1}; key <= 4; ++key) {
+        int value{0};
+        BOOST_REQUIRE(evo_db.Read(key, value));
+        BOOST_CHECK_EQUAL(value, key * 100);
+    }
+
+    evo_db.EraseCache(1);
+    evo_db.EraseCache(2);
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_CHECK_THROW(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/2, /*fSync=*/true),
+        dbwrapper_error);
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 2U);
+    int value{0};
+    BOOST_CHECK(evo_db.Read(1, value));
+    BOOST_CHECK(evo_db.Read(2, value));
+
+    // SYSCOIN: The failed flush must leave the read-triggered tombstone
+    // barrier armed. Retrying the read commits both erases before lookup.
+    BOOST_CHECK(!evo_db.ReadCache(1, value));
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 0U);
+    BOOST_CHECK(!evo_db.Read(1, value));
+    BOOST_CHECK(!evo_db.Read(2, value));
+
+    BOOST_REQUIRE(evo_db.WriteThrough(3, 300));
+    evo_db.EraseCache(3);
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_CHECK_THROW(evo_db.ExistsCache(3), dbwrapper_error);
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 1U);
+    BOOST_CHECK(evo_db.Read(3, value));
+    BOOST_CHECK(!evo_db.ExistsCache(3));
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 0U);
+    BOOST_CHECK(!evo_db.Read(3, value));
+}
+
+BOOST_AUTO_TEST_CASE(empty_sync_flush_is_a_retryable_write_through_barrier)
+{
+    auto db_params = DBParams{
+        .path = "testdb_empty_sync_barrier",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 8);
+
+    BOOST_REQUIRE(evo_db.WriteThrough(1, 100, /*fSync=*/false));
+    BOOST_CHECK_EQUAL(evo_db.GetReadWriteCacheSize(), 0U);
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 0U);
+
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_REQUIRE(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/false));
+    BOOST_CHECK_THROW(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true),
+        dbwrapper_error);
+    BOOST_REQUIRE(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true));
+
+    int persisted{0};
+    BOOST_REQUIRE(evo_db.Read(1, persisted));
+    BOOST_CHECK_EQUAL(persisted, 100);
+}
+
 BOOST_AUTO_TEST_CASE(TestMaxCacheSize) {
     auto dbParams = DBParams{
         .path = "testdb",
@@ -379,6 +469,26 @@ BOOST_AUTO_TEST_CASE(TestStressTest) {
         BOOST_CHECK_EQUAL(value, i);
     }
 }
+
+BOOST_AUTO_TEST_CASE(write_through_survives_dirty_fifo_eviction)
+{
+    auto db_params = DBParams{
+        .path = "testdb_write_through",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 2);
+
+    BOOST_REQUIRE(evo_db.WriteThrough(42, 4242));
+    for (int key = 0; key < 16; ++key) {
+        evo_db.WriteCache(key, key);
+    }
+
+    int persisted{0};
+    BOOST_CHECK(evo_db.Read(42, persisted));
+    BOOST_CHECK_EQUAL(persisted, 4242);
+    BOOST_CHECK(evo_db.ReadCache(42, persisted));
+    BOOST_CHECK_EQUAL(persisted, 4242);
+}
 BOOST_AUTO_TEST_CASE(TestUint256KeyUniqueness)
 {
     auto dbParams = DBParams{
@@ -419,4 +529,3 @@ BOOST_AUTO_TEST_CASE(TestUint256KeyUniqueness)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
-

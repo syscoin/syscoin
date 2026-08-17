@@ -34,7 +34,8 @@ bool CZMQAbstractNotifier::NotifyNEVMBlockDisconnect(std::string &state, const u
 {
     return true;
 }
-bool CZMQAbstractNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state)
+// SYSCOIN: Carry the paired Syscoin tip hash with NEVM status.
+bool CZMQAbstractNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state)
 {
     return true;
 }

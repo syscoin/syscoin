@@ -12,6 +12,7 @@
 #include <compat/compat.h>
 #include <consensus/amount.h>
 #include <crypto/siphash.h>
+#include <evo/mnauth_types.h> // SYSCOIN: CNode stores transcript data, not the handler.
 #include <hash.h>
 #include <i2p.h>
 #include <kernel/messagestartchars.h>
@@ -62,6 +63,8 @@ static constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
 // SYSCOIN
 /** Time to wait since m_connected before disconnecting a probe node. */
 static const auto PROBE_WAIT_INTERVAL{5s};
+/** Grace between VERSION processing and main-thread MNAUTH admission. */
+static constexpr auto MNAUTH_SETUP_GRACE{5s};
 /** Run the feeler connection loop once every 2 minutes. **/
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
@@ -250,8 +253,9 @@ public:
     uint32_t m_mapped_as;
     // SYSCOIN In case this is a verified MN, this value is the proTx of the MN
     uint256 verifiedProRegTxHash;
-    // In case this is a verified MN, this value is the hashed operator pubkey of the MN
-    uint256 verifiedPubKeyHash;
+    // In case this is a verified MN, these identify the exact global SLH-DSA key.
+    uint256 verifiedGlobalKeyHash;
+    uint32_t verifiedGlobalKeyVersion{0};
     bool m_masternode_connection;
     ConnectionType m_conn_type;
     /** Transport protocol type. */
@@ -752,6 +756,8 @@ public:
     std::atomic<int64_t> nTimeOffset{0};
     // SYSCOIN
     std::atomic<std::chrono::seconds> nTimeFirstMessageReceived;
+    // Set once a MNAUTH proof is observed after VERACK. Its historical name is
+    // retained to avoid churn in connection-eviction code.
     std::atomic<bool> fFirstMessageIsMNAUTH;
     // If 'true' this node will be disconnected on CMasternodeMan::ProcessMasternodeConnections()
     std::atomic<bool> m_masternode_connection{false};
@@ -935,15 +941,16 @@ public:
     /** Lowest measured round-trip time. Used as an inbound peer eviction
      * criterium in CConnman::AttemptToEvictConnection. */
     // SYSCOIN
-    // Challenge sent in VERSION to be answered with MNAUTH (only happens between MNs)
+    // Immutable VERSION transcript and authenticated PQ masternode identity.
     mutable Mutex cs_mnauth;
-    uint256 sentMNAuthChallenge GUARDED_BY(cs_mnauth);
-    uint256 receivedMNAuthChallenge GUARDED_BY(cs_mnauth);
+    CMNAuthConnectionData m_mnauth_connection GUARDED_BY(cs_mnauth);
+    bool m_mnauth_response_reserved GUARDED_BY(cs_mnauth){false};
+    CMNAuthPendingState m_mnauth_pending GUARDED_BY(cs_mnauth);
     uint256 verifiedProRegTxHash GUARDED_BY(cs_mnauth);
-    uint256 verifiedPubKeyHash GUARDED_BY(cs_mnauth);
+    uint256 verifiedGlobalKeyHash GUARDED_BY(cs_mnauth);
+    uint32_t verifiedGlobalKeyVersion GUARDED_BY(cs_mnauth){0};
+    CService verifiedMasternodeService GUARDED_BY(cs_mnauth);
 
-    // If true, we will send him all quorum related messages, even if he is not a member of our quorums
-    std::atomic<bool> qwatch{false};
     std::atomic<std::chrono::microseconds> m_min_ping_time{std::chrono::microseconds::max()};
 
     CNode(NodeId id,
@@ -1016,14 +1023,87 @@ public:
 
     // SYSCOIN
     bool CanRelay() const { return !m_masternode_connection || m_masternode_iqr_connection; }
-    uint256 GetSentMNAuthChallenge() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+    CMNAuthConnectionData GetMNAuthConnectionData() const EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
-        return sentMNAuthChallenge;
+        return m_mnauth_connection;
     }
 
-    uint256 GetReceivedMNAuthChallenge() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+    bool SetLocalMNAuthConnectionData(const CMNAuthVersionData& version_data,
+                                      const uint256& challenge,
+                                      uint64_t version_nonce,
+                                      uint32_t protocol_version,
+                                      uint64_t service_flags) EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
-        return receivedMNAuthChallenge;
+        if (m_mnauth_connection.has_local ||
+            !version_data.IsStructurallyValid() || challenge.IsNull() ||
+            version_nonce == 0 || protocol_version == 0) {
+            return false;
+        }
+        m_mnauth_connection.local = version_data;
+        m_mnauth_connection.local_challenge = challenge;
+        m_mnauth_connection.local_version_nonce = version_nonce;
+        m_mnauth_connection.local_protocol_version = protocol_version;
+        m_mnauth_connection.local_service_flags = service_flags;
+        m_mnauth_connection.has_local = true;
+        return true;
+    }
+
+    bool SetRemoteMNAuthConnectionData(const CMNAuthVersionData& version_data,
+                                       const uint256& challenge,
+                                       uint64_t version_nonce,
+                                       uint32_t protocol_version,
+                                       uint64_t service_flags) EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+        LOCK(cs_mnauth);
+        if (m_mnauth_connection.has_remote ||
+            !version_data.IsStructurallyValid() || challenge.IsNull() ||
+            version_nonce == 0 || protocol_version == 0) {
+            return false;
+        }
+        m_mnauth_connection.remote = version_data;
+        m_mnauth_connection.remote_challenge = challenge;
+        m_mnauth_connection.remote_version_nonce = version_nonce;
+        m_mnauth_connection.remote_protocol_version = protocol_version;
+        m_mnauth_connection.remote_service_flags = service_flags;
+        m_mnauth_connection.has_remote = true;
+        return true;
+    }
+
+    bool ReserveMNAuthResponse() EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+        LOCK(cs_mnauth);
+        if (m_mnauth_response_reserved) return false;
+        m_mnauth_response_reserved = true;
+        return true;
+    }
+
+    void SetMNAuthPending(CMNAuthPendingPhase phase,
+                          int64_t deadline_micros)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth)
+    {
+        LOCK(cs_mnauth);
+        m_mnauth_pending = {phase, deadline_micros};
+    }
+
+    CMNAuthPendingState GetMNAuthPending() const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth)
+    {
+        LOCK(cs_mnauth);
+        return m_mnauth_pending;
+    }
+
+    bool TransitionMNAuthPending(
+        CMNAuthPendingPhase expected_phase,
+        CMNAuthPendingState replacement,
+        int64_t now_micros)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth)
+    {
+        LOCK(cs_mnauth);
+        if (m_mnauth_pending.phase != expected_phase ||
+            !m_mnauth_pending.IsLiveAt(now_micros) ||
+            !replacement.IsLiveAt(now_micros)) {
+            return false;
+        }
+        m_mnauth_pending = replacement;
+        return true;
     }
 
     uint256 GetVerifiedProRegTxHash() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
@@ -1031,29 +1111,30 @@ public:
         return verifiedProRegTxHash;
     }
 
-    uint256 GetVerifiedPubKeyHash() const  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+    uint256 GetVerifiedGlobalKeyHash() const EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
-        return verifiedPubKeyHash;
+        return verifiedGlobalKeyHash;
     }
 
-    void SetSentMNAuthChallenge(const uint256& newSentMNAuthChallenge)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+    uint32_t GetVerifiedGlobalKeyVersion() const EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
-        sentMNAuthChallenge = newSentMNAuthChallenge;
+        return verifiedGlobalKeyVersion;
     }
 
-    void SetReceivedMNAuthChallenge(const uint256& newReceivedMNAuthChallenge)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+    CService GetVerifiedMasternodeService() const EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
-        receivedMNAuthChallenge = newReceivedMNAuthChallenge;
+        return verifiedMasternodeService;
     }
 
-    void SetVerifiedProRegTxHash(const uint256& newVerifiedProRegTxHash)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
+    void SetVerifiedMasternode(const uint256& pro_tx_hash,
+                               const uint256& global_key_hash,
+                               uint32_t global_key_version,
+                               const CService& service = {}) EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
         LOCK(cs_mnauth);
-        verifiedProRegTxHash = newVerifiedProRegTxHash;
-    }
-
-    void SetVerifiedPubKeyHash(const uint256& newVerifiedPubKeyHash)  EXCLUSIVE_LOCKS_REQUIRED(!cs_mnauth) {
-        LOCK(cs_mnauth);
-        verifiedPubKeyHash = newVerifiedPubKeyHash;
+        verifiedProRegTxHash = pro_tx_hash;
+        verifiedGlobalKeyHash = global_key_hash;
+        verifiedGlobalKeyVersion = global_key_version;
+        verifiedMasternodeService = service;
     }
     std::string ConnectionTypeAsString() const { return ::ConnectionTypeAsString(m_conn_type); }
 
@@ -1109,6 +1190,9 @@ public:
 
     /** Handle removal of a peer (clear state) */
     virtual void FinalizeNode(const CNode& node) = 0;
+
+    /** SYSCOIN: Drain PQ MNAUTH worker results once per message-handler iteration. */
+    virtual void ProcessAsyncCompletions() = 0;
 
     /**
     * Process protocol messages received from a given node
@@ -1232,7 +1316,14 @@ public:
         Is_Not_Connection,
         Is_Connection,
     };
-    void OpenMasternodeConnection(const CAddress& addrConnect, MasternodeProbeConn probe = MasternodeProbeConn::Is_Connection) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    enum class MasternodeConnectionStatus {
+        NONE,
+        ORDINARY,
+        DEDICATED,
+        DISCONNECTING,
+    };
+    MasternodeConnectionStatus GetMasternodeConnectionStatus(const CService& addr) const;
+    bool OpenMasternodeConnection(const CAddress& addrConnect, MasternodeProbeConn probe = MasternodeProbeConn::Is_Connection) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_Outbound, const char *strDest, ConnectionType conn_type = ConnectionType::OUTBOUND_FULL_RELAY, bool use_v2transport = false, MasternodeConn masternode_connection = MasternodeConn::Is_Not_Connection, MasternodeProbeConn masternode_probe_connection = MasternodeProbeConn::Is_Not_Connection) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
 
@@ -1386,10 +1477,6 @@ public:
     bool AddPendingMasternode(const uint256& proTxHash);
     void SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
     void SetMasternodeQuorumNodes(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
-    bool HasMasternodeQuorumNodes(const uint256& quorumHash);
-    std::unordered_set<uint256, StaticSaltedHasher> GetMasternodeQuorums();
-    // also returns QWATCH nodes
-    void GetMasternodeQuorumNodes(const uint256& quorumHash, std::unordered_set<NodeId> &result) const;
     void RemoveMasternodeQuorumNodes(const uint256& quorumHash);
     bool IsMasternodeQuorumNode(const CNode* pnode);
     bool IsMasternodeQuorumRelayMember(const uint256& protxHash);
@@ -1588,6 +1675,8 @@ private:
      */
     // SYSCOIN
     bool AlreadyConnectedToAddress(const CAddress& addr);
+    bool ReservePendingOutboundAddress(const CService& addr);
+    void ReleasePendingOutboundAddress(const CService& addr);
 
     bool AttemptToEvictConnection();
     CNode* ConnectNode(CAddress addrConnect, const char *pszDest, bool fCountFailure, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
@@ -1675,6 +1764,9 @@ private:
     mutable RecursiveMutex cs_vPendingMasternodes;
     std::vector<CNode*> m_nodes GUARDED_BY(m_nodes_mutex);
     std::list<CNode*> m_nodes_disconnected;
+    // SYSCOIN: Reserve the canonical endpoint across the blocking connect so
+    // concurrent ordinary/dedicated callers cannot both pass the node scan.
+    std::unordered_set<CService, CServiceHash> m_pending_outbound_addresses GUARDED_BY(m_nodes_mutex);
     mutable RecursiveMutex m_nodes_mutex;
     std::atomic<NodeId> nLastNodeId{0};
     unsigned int nPrevNodeCount{0};

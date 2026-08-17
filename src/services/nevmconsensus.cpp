@@ -10,19 +10,32 @@
 #include <nevm/address.h>
 #include <nevm/sha3.h>
 #include <messagesigner.h>
-#include <logging.h>
 #include <util/rbf.h>
 #include <undo.h>
 #include <validationinterface.h>
 #include <timedata.h>
 #include <key_io.h>
 #include <logging.h>
+
 std::unique_ptr<CBlockIndexDB> pblockindexdb;
 std::unique_ptr<CNEVMDataDB> pnevmdatadb;
 std::unique_ptr<CNEVMDataBlobDB> pnevmdatablobdb;
 bool fNEVMConnection = false;
 bool fRegTest = false;
 bool fSigNet = false;
+
+namespace {
+bool PreferBlockBlobMetadata(const MapPoDAPayloadMeta& candidate,
+                             const MapPoDAPayloadMeta& current)
+{
+    // SYSCOIN: out-of-order blocks must never shorten a blob's retention.
+    // Equal-MTP duplicates choose the smaller txid so every arrival order
+    // converges on the same informational transaction reference.
+    return candidate.nMedianTime > current.nMedianTime ||
+           (candidate.nMedianTime == current.nMedianTime &&
+            candidate.txid < current.txid);
+}
+} // namespace
 
 bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs) {
  
@@ -46,8 +59,9 @@ void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, PoDAFlushSource
         MapPoDAPayloadMeta meta;
         if(Read(key, meta)) {
             if(source == PoDAFlushSource::Block && meta.nSize == val.nSize) {
-                auto inserted = mapCache.try_emplace(key, val.txid, meta.nSize, val.nMedianTime);
-                if(!inserted.second) {
+                auto inserted = mapCache.try_emplace(key, meta);
+                if(inserted.first->second.nSize == val.nSize &&
+                   PreferBlockBlobMetadata(val, inserted.first->second)) {
                     inserted.first->second.nMedianTime = val.nMedianTime;
                     inserted.first->second.txid = val.txid;
                 }
@@ -56,7 +70,9 @@ void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, PoDAFlushSource
         }
         auto inserted = mapCache.try_emplace(key, val.txid, val.nSize, val.nMedianTime);
         if(!inserted.second) {
-            if(source == PoDAFlushSource::Block && inserted.first->second.nSize == val.nSize) {
+            if(source == PoDAFlushSource::Block &&
+               inserted.first->second.nSize == val.nSize &&
+               PreferBlockBlobMetadata(val, inserted.first->second)) {
                 inserted.first->second.nMedianTime = val.nMedianTime;
                 inserted.first->second.txid = val.txid;
             }
@@ -177,19 +193,10 @@ bool CNEVMDataDB::PruneToBatch(
 {
     AssertLockHeld(cs_cache);
     int nCount = 0;
-    auto it = mapCache.begin();
-    while (it != mapCache.end()) {
-        const int64_t entryTime = it->second.nMedianTime;
-        bool isExpired = nMedianTime > (entryTime + NEVM_DATA_EXPIRE_TIME);
-        if (isExpired) {
-            batchblob.Erase(it->first);
-            it = mapCache.erase(it);
-            ++nCount;
-        } else {
-            ++it;
-        }
-    }
-    
+
+    // SYSCOIN: mapCache is the authoritative overlay for duplicate blob
+    // inclusions. Scan disk while the complete overlay is intact and ignore
+    // every shadowed key so stale metadata cannot retain or delete its bytes.
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
     pcursor->SeekToFirst();
     std::vector<uint8_t> vchVersionHash;
@@ -200,8 +207,13 @@ bool CNEVMDataDB::PruneToBatch(
                 pcursor->Next();
                 continue;
             }
+            if (mapCache.find(vchVersionHash) != mapCache.end()) {
+                pcursor->Next();
+                continue;
+            }
             if (pcursor->GetValue(meta)) {
-                bool isExpired = nMedianTime > (meta.nMedianTime + NEVM_DATA_EXPIRE_TIME);
+                const bool isExpired{
+                    IsNEVMDataExpired(nMedianTime, meta.nMedianTime)};
                 if (isExpired) {
                     batch.Erase(vchVersionHash);
                     batchblob.Erase(vchVersionHash);
@@ -211,6 +223,20 @@ bool CNEVMDataDB::PruneToBatch(
             pcursor->Next();
         } catch (const std::exception& e) {
             return error("%s() : deserialize error: %s", __func__, e.what());
+        }
+    }
+
+    auto it = mapCache.begin();
+    while (it != mapCache.end()) {
+        const int64_t entryTime = it->second.nMedianTime;
+        const bool isExpired{IsNEVMDataExpired(nMedianTime, entryTime)};
+        if (isExpired) {
+            batch.Erase(it->first);
+            batchblob.Erase(it->first);
+            it = mapCache.erase(it);
+            ++nCount;
+        } else {
+            ++it;
         }
     }
     if(nCount > 0)

@@ -22,11 +22,11 @@ os.environ["MYPY_CACHE_DIR"] = str(cache_dir)
 DEPS = ['flake8', 'lief', 'mypy', 'pyzmq']
 
 # All .py files, except those in src/ (to exclude subtrees there)
-FLAKE_FILES_ARGS = ['git', 'ls-files', '*.py', ':!:src/*.py', '--', ':(exclude)src/dashbls/', ':(exclude)src/immer/']
+FLAKE_FILES_ARGS = ['git', 'ls-files', '*.py', ':!:src/*.py', '--', ':(exclude)src/immer/']
 
 # Only .py files in test/functional and contrib/devtools have type annotations
 # enforced.
-MYPY_FILES_ARGS = ['git', 'ls-files', 'test/functional/*.py', 'contrib/devtools/*.py', '--', ':(exclude)src/dashbls/', ':(exclude)src/immer/']
+MYPY_FILES_ARGS = ['git', 'ls-files', 'test/functional/*.py', 'contrib/devtools/*.py', '--', ':(exclude)src/immer/']
 
 ENABLED = (
     'E101,'  # indentation contains mixed spaces and tabs

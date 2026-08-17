@@ -71,7 +71,10 @@ public:
     virtual bool NotifyGovernanceObject(const uint256& object);
     virtual bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff);
     virtual bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff);
-    virtual bool NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state);
+    // SYSCOIN: Return count plus the exact paired Syscoin tip hash.
+    virtual bool NotifyGetNEVMBlockInfo(uint64_t &nHeight,
+                                        uint256& nSYSBlockHash,
+                                        std::string &state);
     virtual bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
     virtual bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse);
 

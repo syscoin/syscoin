@@ -153,6 +153,16 @@ public:
   static std::unique_ptr<CAuxPow> createAuxPow (const CPureBlockHeader& header);
 
   /**
+   * SYSCOIN: Construct a validation-only parent proof for an AuxPoW work
+   * template.  The parent prevhash and required SYSCOIN reference output are
+   * known before a miner supplies the real parent header and proof.
+   */
+  static std::unique_ptr<CAuxPow> createAuxPowForTemplate(
+      const CPureBlockHeader& header,
+      const uint256& parentPrevHash,
+      const CScript& syscoinTagOutput);
+
+  /**
    * Initialises the auxpow of the given block header.  This builds a minimal
    * auxpow object like createAuxPow and sets it on the block header.  Returns
    * a reference to the parent header so it can be mined as a follow-up.

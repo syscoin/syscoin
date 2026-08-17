@@ -15,11 +15,11 @@
 #include <checkqueue.h>
 #include <clientversion.h>
 #include <common/args.h>
-#include <common/run_command.h>
-#include <llmq/quorums_btccheckpoints.h>
+#include <llmq/pq_btcc.h> // SYSCOIN: branch-bound BTCC receipt validation.
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
+#include <consensus/pq_migration.h> // SYSCOIN: pinned PQ migration boundary.
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
@@ -34,8 +34,8 @@
 #include <logging.h>
 #include <logging/timer.h>
 #include <node/blockstorage.h>
+#include <node/btcheader_state.h> // SYSCOIN: narrow managed-helper state API.
 #include <node/utxo_snapshot.h>
-#include <nevm/sha3.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <policy/settings.h>
@@ -51,12 +51,14 @@
 #include <txdb.h>
 #include <txmempool.h>
 #include <uint256.h>
+#include <univalue.h> // SYSCOIN: managed Bitcoin-header RPC responses.
 #include <undo.h>
 #include <util/check.h> // For NDEBUG compile time check
 #include <util/fs.h>
 #include <util/fs_helpers.h>
 #include <util/hasher.h>
 #include <util/moneystr.h>
+#include <util/readwritefile.h> // SYSCOIN: durable managed-helper ownership records.
 #include <util/rbf.h>
 #include <util/signalinterrupt.h>
 #include <util/chaintype.h>
@@ -68,21 +70,25 @@
 #include <warnings.h>
 
 #include <algorithm>
+#include <array> // SYSCOIN: fixed managed-helper policy fields.
 #include <cassert>
 #include <chrono>
 #include <deque>
+#include <limits> // SYSCOIN: bounded PQ receipt and helper state.
 #include <numeric>
 #include <optional>
 #include <string>
+#include <string_view> // SYSCOIN: managed-helper argument validation.
 #include <tuple>
 #include <utility>
 // SYSCOIN
 #include <masternode/masternodepayments.h>
+#include <masternode/masternodesync.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_chainlocks.h>
+#include <llmq/btc_header_policy.h>
 #include <services/nevmconsensus.h>
-#include <llmq/quorums.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <governance/governance.h>
 #include <governance/governanceclasses.h>
@@ -90,7 +96,6 @@
 #include <fstream>
 #include <cachemultimap.h>
 #include <nevm/sha3.h>
-#include <common/system.h> // runCommand
 #include <core_io.h>
 #ifndef WIN32
 #include <sys/wait.h>
@@ -120,7 +125,6 @@ ManagedProcessId gethpid = -1;
 ManagedProcessId btcheaderpid = -1;
 RecursiveMutex cs_geth;
 RecursiveMutex cs_btcheader;
-std::string g_managed_btcheader_rpc_cmd;
 static const char* GETH_STATE_BOOTSTRAP_STATUS_FILENAME = "state-bootstrap.status";
 NEVMMintTxSet setMintTxsMempool;
 std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
@@ -173,6 +177,18 @@ uint256 g_best_block;
 std::atomic_bool fReindexGeth(false);
 unsigned int fRPCSerialVersion;
 std::vector<std::string> g_managed_btcheader_rpc_args;
+bool g_managed_btcheader_adopted GUARDED_BY(cs_btcheader){false};
+std::string g_managed_btcheader_owner_token GUARDED_BY(cs_btcheader);
+fs::path g_managed_btcheader_owner_path GUARDED_BY(cs_btcheader);
+int64_t g_btcheader_last_probe_time GUARDED_BY(cs_btcheader){0};
+int64_t g_btcheader_last_restart_time GUARDED_BY(cs_btcheader){0};
+int64_t g_btcheader_last_progress_time GUARDED_BY(cs_btcheader){0};
+int64_t g_btcheader_last_tip_height GUARDED_BY(cs_btcheader){-1};
+uint256 g_btcheader_last_tip_hash GUARDED_BY(cs_btcheader);
+int32_t g_btcheader_restart_failures GUARDED_BY(cs_btcheader){0};
+bool g_btcheader_reindex_attempted GUARDED_BY(cs_btcheader){false};
+bool g_btcheader_last_probe_healthy GUARDED_BY(cs_btcheader){false};
+std::string g_btcheader_last_probe_reason GUARDED_BY(cs_btcheader);
 
 bool GetManagedBTCHeaderRPCCommandArgs(std::vector<std::string>& args_out)
 {
@@ -181,14 +197,11 @@ bool GetManagedBTCHeaderRPCCommandArgs(std::vector<std::string>& args_out)
     return false;
 #else
     LOCK(cs_btcheader);
-    if (g_managed_btcheader_rpc_args.empty()) {
-        return false;
-    }
+    if (g_managed_btcheader_rpc_args.empty()) return false;
     args_out = g_managed_btcheader_rpc_args;
     return true;
 #endif
 }
-
 const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locator) const
 {
     AssertLockHeld(cs_main);
@@ -369,6 +382,18 @@ static bool IsCurrentForFeeEstimation(Chainstate& active_chainstate) EXCLUSIVE_L
     return true;
 }
 
+// SYSCOIN: Provider authorization is derived from the active deterministic
+// masternode branch, so these transactions cannot be resurrected across reorgs.
+static bool IsBranchBoundProviderMempoolTransaction(
+    const CTransaction& tx) noexcept
+{
+    return tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
+}
+
 void Chainstate::MaybeUpdateMempoolForReorg(
     DisconnectedBlockTransactions& disconnectpool,
     bool fAddToMempool)
@@ -389,6 +414,10 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         while (it != queuedTx.rend()) {
             // ignore validation errors in resurrected transactions
             if (!fAddToMempool || (*it)->IsCoinBase() ||
+                // SYSCOIN: Reorg policy drops branch-bound entries below. Avoid
+                // needlessly re-running SLH/provider authorization under the
+                // global locks only to evict the transaction immediately.
+                IsBranchBoundProviderMempoolTransaction(**it) ||
                 AcceptToMemoryPool(*this, *it, GetTime(),
                     /*bypass_limits=*/true, /*test_accept=*/false).m_result_type !=
                         MempoolAcceptResult::ResultType::VALID) {
@@ -455,12 +484,21 @@ void Chainstate::MaybeUpdateMempoolForReorg(
                 }
             }
         }
+
         // Transaction is still valid and cached LockPoints are updated.
         return false;
     };
 
     // We also need to remove any now-immature transactions
     m_mempool->removeForReorg(m_chain, filter_final_and_mature);
+    // SYSCOIN: Provider authentication and membership are branch-bound. Evict before
+    // capacity reclassification so an invalid old reservation cannot displace
+    // a valid later entry. Peers may relay still-valid transactions again.
+    m_mempool->RemoveProviderTransactionsForReorg();
+    // The active branch can change whether a pending tx86 consumes a new
+    // operator/tree slot. Reclassify before admitting another transaction so
+    // permanent registry capacity is reserved against the exact new tip.
+    m_mempool->RebuildPQRegistryReservations(m_chain.Tip());
     // Re-limit mempool size, in case we added any transactions
     LimitMempoolSize(*m_mempool, this->CoinsTip());
 }
@@ -704,6 +742,13 @@ private:
         /** Txid. */
         const uint256& m_hash;
         TxValidationState m_state;
+        // SYSCOIN: Prevent package admission from bypassing the post-script
+        // special-transaction authorization pass.
+        bool m_special_tx_auth_checked{false};
+        // SYSCOIN: Resolved against the same explicit tip used by provider conflict
+        // checks, so Finalize cannot publish a PQ mutation with a partial
+        // collateral index after an EvoDB read failure.
+        std::optional<COutPoint> m_pq_operator_collateral;
         /** A temporary cache containing serialized transaction data for signature verification.
          * Reused across PolicyScriptChecks and ConsensusScriptChecks. */
         PrecomputedTransactionData m_precomputed_txdata;
@@ -729,6 +774,11 @@ private:
     // Run the script checks using our policy flags. As this can be slow, we should
     // only invoke this on transactions that have otherwise passed policy checks.
     bool PolicyScriptChecks(const ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+
+    // SYSCOIN: Verify special-transaction authorizations only after input
+    // scripts have passed. SLH-DSA verification is substantially more
+    // expensive than the structural special-transaction prepass in PreChecks().
+    bool SpecialTxAuthChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
     // Re-run the script checks, using consensus flags, and try to cache the
     // result in the scriptcache. This should be done after
@@ -1082,13 +1132,19 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         if (!ancestors) return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-long-mempool-chain", error_message);
     }
 
-    // check special TXs after all the other checks. If we'd do this before the other checks, we might end up
-    // DoS scoring a node for non-critical errors, e.g. duplicate keys because a TX is received that was already
-    // mined
-    if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip(), state, m_active_chainstate.CoinsTip(), true, true))
+    // SYSCOIN: Validate special-TX encoding and branch state here, but defer
+    // all signatures until the input scripts have screened unsolicited traffic.
+    if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx,
+                        m_active_chainstate.m_chain.Tip(), state,
+                        m_active_chainstate.CoinsTip(), /*fJustCheck=*/true,
+                        /*check_sigs=*/false,
+                        SpecialTxValidationContext::MEMPOOL_PRECHECK))
         return false;
 
-    if (m_pool.existsProviderTxConflict(tx)) {
+    // SYSCOIN: Resolve provider and PQ registry conflicts against this exact tip.
+    if (m_pool.existsProviderTxConflict(
+            tx, m_active_chainstate.m_chain.Tip(),
+            &ws.m_pq_operator_collateral)) {
         return state.Invalid(TxValidationResult::TX_CONFLICT, "protx-dup");
     }
     ws.m_ancestors = *ancestors;
@@ -1180,8 +1236,8 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
 
     constexpr unsigned int scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
 
-    // Check input scripts and signatures.
-    // This is done last to help prevent CPU exhaustion denial-of-service attacks.
+    // SYSCOIN: Screen input scripts before any expensive special-transaction
+    // authorization to limit CPU exhaustion denial-of-service attacks.
     if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata)) {
         // SCRIPT_VERIFY_CLEANSTACK requires SCRIPT_VERIFY_WITNESS, so we
         // need to turn both off, and compare against just turning off CLEANSTACK
@@ -1197,6 +1253,17 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     }
 
     return true;
+}
+
+// SYSCOIN: Expensive fork-specific authorization follows ordinary script checks.
+bool MemPoolAccept::SpecialTxAuthChecks(Workspace& ws)
+{
+    ws.m_special_tx_auth_checked = CheckSpecialTx(
+        m_active_chainstate.m_blockman, *ws.m_ptx,
+        m_active_chainstate.m_chain.Tip(), ws.m_state,
+        m_active_chainstate.CoinsTip(), /*fJustCheck=*/true,
+        /*check_sigs=*/true, SpecialTxValidationContext::NORMAL);
+    return ws.m_special_tx_auth_checked;
 }
 
 bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
@@ -1230,6 +1297,8 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
 
 bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
 {
+    // SYSCOIN: Every fork-specific authorization must precede indexed admission.
+    assert(ws.m_special_tx_auth_checked);
     const CTransaction& tx = *ws.m_ptx;
     const uint256& hash = ws.m_hash;
     TxValidationState& state = ws.m_state;
@@ -1268,7 +1337,14 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     bool validForFeeEstimation = !bypass_limits && !args.m_package_submission && IsCurrentForFeeEstimation(m_active_chainstate) && m_pool.HasNoInputsOf(tx);
 
     // Store transaction in memory
-    m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation);
+    // SYSCOIN: Publish the resolved branch-bound PQ reservation atomically
+    // with the ordinary mempool entry.
+    if (!m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation,
+                             m_active_chainstate.m_chain.Tip(),
+                             ws.m_pq_operator_collateral)) {
+        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                             "protx-index-unavailable");
+    }
 
     // SYSCOIN
     if(pnevmdatadb)
@@ -1372,9 +1448,11 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
 
     if (m_rbf && !ReplacementChecks(ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
-    // Perform the inexpensive checks first and avoid hashing and signature verification unless
-    // those checks pass, to mitigate CPU exhaustion denial-of-service attacks.
+    // SYSCOIN: Perform the inexpensive checks first and avoid PQ
+    // authorization work until ordinary transaction policy and scripts pass.
     if (!PolicyScriptChecks(args, ws)) return MempoolAcceptResult::Failure(ws.m_state);
+
+    if (!SpecialTxAuthChecks(ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
     if (!ConsensusScriptChecks(args, ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
@@ -1382,6 +1460,7 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     const std::vector<uint256> single_wtxid{ws.m_ptx->GetWitnessHash()};
     // Tx was accepted, but not added
     if (args.m_test_accept) {
+        assert(ws.m_special_tx_auth_checked);
         return MempoolAcceptResult::Success(std::move(ws.m_replaced_transactions), ws.m_vsize,
                                             ws.m_base_fees, effective_feerate, single_wtxid);
     }
@@ -1426,6 +1505,23 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         m_viewmempool.PackageAddTransaction(ws.m_ptx);
     }
 
+    // SYSCOIN: A package must not bypass provider/PQ registry uniqueness by
+    // splitting mutually conflicting mutations across its members.
+    if (const auto conflict_index{
+            m_pool.FindPackageProviderTxConflict(
+                txns, m_active_chainstate.m_chain.Tip())}) {
+        Assume(*conflict_index < workspaces.size());
+        Workspace& offender{workspaces.at(*conflict_index)};
+        offender.m_state.Invalid(TxValidationResult::TX_CONFLICT,
+                                 "protx-dup");
+        package_state.Invalid(PackageValidationResult::PCKG_TX,
+                              "transaction failed");
+        results.emplace(offender.m_ptx->GetWitnessHash(),
+                        MempoolAcceptResult::Failure(offender.m_state));
+        return PackageMempoolAcceptResult(package_state,
+                                          std::move(results));
+    }
+
     // Transactions must meet two minimum feerates: the mempool minimum fee and min relay fee.
     // For transactions consisting of exactly one child and its parents, it suffices to use the
     // package feerate (total modified fees / total virtual size) to check this requirement.
@@ -1461,13 +1557,22 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
                    [](const auto& ws) { return ws.m_ptx->GetWitnessHash(); });
     for (Workspace& ws : workspaces) {
         ws.m_package_feerate = package_feerate;
+        // SYSCOIN: Package members follow the same scripts-before-SLH ordering
+        // as single-transaction admission so package relay cannot bypass the
+        // expensive-authentication gate.
         if (!PolicyScriptChecks(args, ws)) {
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
             package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
         }
+        if (!SpecialTxAuthChecks(ws)) {
+            package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
+            return PackageMempoolAcceptResult(package_state, std::move(results));
+        }
         if (args.m_test_accept) {
+            assert(ws.m_special_tx_auth_checked);
             const auto effective_feerate = args.m_package_feerates ? ws.m_package_feerate :
                 CFeeRate{ws.m_modified_fees, static_cast<uint32_t>(ws.m_vsize)};
             const auto effective_feerate_wtxids = args.m_package_feerates ? all_package_wtxids :
@@ -1845,6 +1950,7 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
     return true;
 }
 
+// SYSCOIN BEGIN: PQ receipt validation and branch-state transitions.
 static bool CheckDirectBlockNotAuxpowParent(const CBlock& block, BlockValidationState& state,
                                             int nHeight, const Consensus::Params& consensus)
 {
@@ -1869,6 +1975,627 @@ static bool CheckDirectBlockNotAuxpowParent(const CBlock& block, BlockValidation
 
     return true;
 }
+
+static bool CheckBTCPREVCommitment(const CBlock& block,
+                                   BlockValidationState& state,
+                                   int32_t height,
+                                   const Consensus::Params& consensus)
+{
+    if (!llmq::pq::IsBTCPREVCommitmentHeight(consensus, height)) {
+        return true;
+    }
+
+    // SYSCOIN: The committed Bitcoin parent prevhash is authenticated by the
+    // AuxPoW parent header. A direct Syscoin PoW block has no equivalent
+    // carrier, so accepting one at a scheduled height would let its miner
+    // choose an unauthenticated BTCC candidate.
+    if (!block.auxpow) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-missing-auxpow");
+    }
+
+    uint256 committed;
+    if (!ExtractBTCPREVCommitment(block, committed)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-missing");
+    }
+    if (committed.IsNull()) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-null");
+    }
+    if (committed != block.auxpow->getParentPrevBlockHash()) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-mismatch");
+    }
+    return true;
+}
+
+static bool CheckBTCCReceiptCommitment(const CBlock& block,
+                                       BlockValidationState& state,
+                                       int32_t height,
+                                       const Consensus::Params& consensus,
+                                       llmq::pq::BTCCReceipt* decoded = nullptr)
+{
+    const auto config{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!config.IsValid()) return true;
+
+    const bool carrier{llmq::pq::IsBTCCReceiptCarrierHeight(config, height)};
+    const bool tagged{HasBTCCReceiptCommitment(block)};
+    llmq::pq::BTCCReceipt receipt;
+    const bool extracted{tagged && ExtractBTCCReceipt(block, receipt)};
+    if (!carrier) {
+        if (tagged) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-btcc-receipt-unexpected");
+        }
+        return true;
+    }
+    if (!extracted) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcc-receipt-missing");
+    }
+    if (decoded != nullptr) *decoded = receipt;
+    return true;
+}
+
+// SYSCOIN: Persisted BTCC cursor/state fields form the compact branch-local
+// transition witness used only after full-validation provenance is checked.
+static llmq::pq::BTCCReceiptState IndexedBTCCReceiptState(
+    const CBlockIndex* index)
+{
+    if (index == nullptr) return {};
+    return {
+        llmq::pq::BTCCursor{index->pqBTCCReceiptCursorHeight,
+                            index->pqBTCCReceiptCursorSysHash,
+                            index->pqBTCCReceiptCursorBTCHash},
+        index->pqBTCCReceiptStateHash};
+}
+
+// SYSCOIN: A missing exact ADVANCE certificate is a retryable dependency, not
+// block invalidity, while its prospective replay obligation is durable.
+static constexpr std::string_view BTCC_RECEIPT_CERTIFICATE_PENDING{
+    "pq-btcc-receipt-certificate-pending"};
+static constexpr std::string_view PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING{
+    "pq-payment-audit-certificate-pending"};
+
+// SYSCOIN: A release anchor may assume only the historical receipt-certificate
+// checks. The exact block ancestry still comes from the fully validated base
+// chain, and the cumulative state is checked at the pinned boundary.
+static bool IsBTCCReceiptCoveredByAssumption(
+    const ChainstateManager& chainman,
+    const CBlockIndex& carrier,
+    const llmq::pq::ChainLockFinalityStoreConfig& config)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const auto& anchor{config.btcc_receipt_assumption_anchor};
+    if (anchor.IsDisabled() || carrier.nHeight > anchor.height) return false;
+    const CBlockIndex* anchor_index{
+        chainman.m_blockman.LookupBlockIndex(anchor.block_hash)};
+    return anchor_index != nullptr && anchor_index->nHeight == anchor.height &&
+           anchor_index->GetAncestor(carrier.nHeight) == &carrier;
+}
+
+// SYSCOIN: Connect every carrier through one deterministic accumulator path;
+// historical preseal changes availability, never the committed transition.
+static bool ConnectBTCCReceiptState(ChainstateManager& chainman,
+                                    const CBlock& block,
+                                    CBlockIndex& index,
+                                    BlockValidationState& state,
+                                    bool* receipt_state_changed,
+                                    bool require_live_certificate,
+                                    bool allow_historical_preseal)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    Assume(receipt_state_changed != nullptr);
+    *receipt_state_changed = false;
+    const auto& consensus{chainman.GetConsensus()};
+    const auto btcc_schedule{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!btcc_schedule.IsValid()) return true;
+    const auto chainlock_schedule{
+        llmq::pq::MakeChainLockScheduleConfig(consensus.nPQChainLockEpochOrigin)};
+    const auto finality_config{
+        llmq::MakePQChainLockFinalityStoreConfig(consensus)};
+    if (!chainlock_schedule || !finality_config) {
+        return state.Error("pq-btcc-receipt-invalid-schedule");
+    }
+
+    llmq::pq::BTCCReceipt receipt;
+    if (!CheckBTCCReceiptCommitment(block, state, index.nHeight, consensus,
+                                    &receipt)) {
+        return false;
+    }
+    const auto previous{IndexedBTCCReceiptState(index.pprev)};
+    if (!previous.IsStructurallyValid()) {
+        return state.Error("pq-btcc-receipt-state-unavailable");
+    }
+
+    llmq::pq::BTCCReceiptState next{previous};
+    index.m_pq_btcc_receipt_live_verified = false;
+    if (llmq::pq::IsBTCCReceiptCarrierHeight(btcc_schedule,
+                                              index.nHeight)) {
+        if (!llmq::pq::ValidateBTCCReceiptOnBranch(
+                btcc_schedule, index, receipt)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-btcc-receipt-branch");
+        }
+        const auto applied{llmq::pq::ApplyBTCCReceiptState(
+            consensus.hashGenesisBlock, *chainlock_schedule, btcc_schedule,
+            index.nHeight, index.GetBlockHash(), previous, receipt)};
+        if (!applied) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-btcc-receipt-transition");
+        }
+        next = *applied;
+
+        if (!receipt.IsNull()) {
+            const auto certificate_status{
+                llmq::chainLocksHandler == nullptr
+                    ? llmq::CChainLocksHandler::BTCCReceiptCertificateStatus::MISSING
+                    : llmq::chainLocksHandler->CheckBTCCReceiptCertificate(
+                          receipt, index)};
+            if (certificate_status ==
+                llmq::CChainLocksHandler::BTCCReceiptCertificateStatus::INVALID) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                     "bad-btcc-receipt-certificate");
+            }
+            if (certificate_status ==
+                llmq::CChainLocksHandler::BTCCReceiptCertificateStatus::MISSING) {
+                if (IsBTCCReceiptCoveredByAssumption(
+                        chainman, index, *finality_config)) {
+                    index.m_pq_btcc_receipt_live_verified = true;
+                } else if (llmq::chainLocksHandler != nullptr &&
+                           llmq::chainLocksHandler
+                               ->IsBTCCPrefixAuthenticated(index)) {
+                    index.m_pq_btcc_receipt_live_verified = true;
+                } else if (require_live_certificate) {
+                    if (llmq::chainLocksHandler == nullptr) {
+                        return state.Error(
+                            "pq-btcc-chainlock-handler-unavailable");
+                    }
+                    // SYSCOIN: IBD can validate base/registry history without
+                    // every historical 3.62 MB CLSIG. Persist the branch-local
+                    // defer boundary before continuing; NEVM and signing stay
+                    // disabled until a recent catch-up seal authenticates the
+                    // recomputed receipt accumulator.
+                    const bool preseal_allowed{
+                        allow_historical_preseal &&
+                        (chainman.IsInitialBlockDownload() ||
+                         llmq::chainLocksHandler->IsBTCCPresealActive())};
+                    if (!preseal_allowed ||
+                        !llmq::chainLocksHandler->BeginBTCCPreseal(
+                            index, receipt)) {
+                        llmq::chainLocksHandler
+                            ->NotePendingBTCCReceiptCertificate(
+                                receipt.chainlock_logical_id, index);
+                        return state.Error(
+                            std::string{BTCC_RECEIPT_CERTIFICATE_PENDING});
+                    }
+                }
+            } else {
+                index.m_pq_btcc_receipt_live_verified = true;
+            }
+        }
+
+    }
+
+    // SYSCOIN: The release-pinned boundary is all-or-none. Its exact block and
+    // accumulated receipt state must match before descendants can rely on the
+    // historical crypto assumption.
+    const auto& assumption{
+        finality_config->btcc_receipt_assumption_anchor};
+    if (!assumption.IsDisabled() && index.nHeight >= assumption.height) {
+        const CBlockIndex* anchor_index{index.GetAncestor(assumption.height)};
+        if (anchor_index == nullptr ||
+            anchor_index->GetBlockHash() != assumption.block_hash ||
+            (index.nHeight == assumption.height && next != assumption.receipt_state)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-btcc-receipt-anchor");
+        }
+    }
+    const bool changed{
+        index.pqBTCCReceiptCursorHeight != next.cursor.sys_height ||
+        index.pqBTCCReceiptCursorSysHash != next.cursor.sys_hash ||
+        index.pqBTCCReceiptCursorBTCHash != next.cursor.btc_hash ||
+        index.pqBTCCReceiptStateHash != next.cumulative_hash};
+    index.pqBTCCReceiptCursorHeight = next.cursor.sys_height;
+    index.pqBTCCReceiptCursorSysHash = next.cursor.sys_hash;
+    index.pqBTCCReceiptCursorBTCHash = next.cursor.btc_hash;
+    index.pqBTCCReceiptStateHash = next.cumulative_hash;
+    *receipt_state_changed = changed;
+    return true;
+}
+
+static llmq::pq::PaymentAuditReceiptState
+IndexedPaymentAuditReceiptState(const CBlockIndex* index)
+{
+    if (index == nullptr) return {};
+    return {
+        llmq::pq::PaymentAuditReceiptCursor{
+            index->pqPaymentAuditReceiptCursorHeight,
+            index->pqPaymentAuditReceiptCursorEpoch,
+            index->pqPaymentAuditReceiptCursorSealHash,
+            index->pqPaymentAuditReceiptCursorLogicalId,
+            index->pqPaymentAuditReceiptCursorWitnessId},
+        index->pqPaymentAuditReceiptStateHash};
+}
+
+// SYSCOIN: A non-IBD block-data backlog can outlive the bounded audit
+// archive. Start its durable compact replay only when this exact branch is
+// already historical enough to contain the signing height for a later
+// ChainLock target. Merely knowing later headers is insufficient: the branch
+// must be the active prefix or the candidate FindMostWorkChain selected, and
+// every block through that signing height must remain locally replayable.
+bool IsPaymentAuditHistoricalPresealCoverable(
+    ChainstateManager& chainman,
+    const CBlockIndex& carrier,
+    const llmq::pq::ChainLockScheduleConfig& schedule)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    if (!schedule.IsValid()) return false;
+
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const CBlockIndex* available_tip{chainman.ActiveTip()};
+    if (available_tip == nullptr ||
+        available_tip->nHeight < carrier.nHeight ||
+        available_tip->GetAncestor(carrier.nHeight) != &carrier) {
+        if (!chainstate.IsCurrentMostWorkBranch(carrier) ||
+            chainstate.setBlockIndexCandidates.empty()) {
+            return false;
+        }
+        available_tip = *chainstate.setBlockIndexCandidates.rbegin();
+        if (available_tip == nullptr ||
+            available_tip->nHeight < carrier.nHeight ||
+            available_tip->GetAncestor(carrier.nHeight) != &carrier) {
+            return false;
+        }
+    }
+
+    const int64_t first_possible{
+        std::max<int64_t>(static_cast<int64_t>(carrier.nHeight) + 1,
+                          schedule.epoch_origin)};
+    const int64_t offset{first_possible - schedule.epoch_origin};
+    const int64_t remainder{offset % schedule.chainlock_period};
+    int64_t target_height{
+        first_possible +
+        (remainder == 0 ? 0 : schedule.chainlock_period - remainder)};
+    while (target_height <= std::numeric_limits<int32_t>::max() &&
+           !llmq::pq::IsEligibleChainLockTarget(
+               schedule, static_cast<int32_t>(target_height))) {
+        target_height += schedule.chainlock_period;
+    }
+    if (target_height > std::numeric_limits<int32_t>::max()) return false;
+
+    const auto signing_height{llmq::pq::SigningHeightForTarget(
+        schedule, static_cast<int32_t>(target_height))};
+    if (!signing_height || available_tip->nHeight < *signing_height) {
+        return false;
+    }
+    const CBlockIndex* walk{available_tip->GetAncestor(*signing_height)};
+    while (walk != nullptr && walk->nHeight > carrier.nHeight) {
+        if ((walk->nStatus &
+             (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) ||
+            !(walk->nStatus & BLOCK_HAVE_DATA) ||
+            !walk->HaveNumChainTxs() ||
+            !walk->IsValid(BLOCK_VALID_TRANSACTIONS)) {
+            return false;
+        }
+        walk = walk->pprev;
+    }
+    return walk == &carrier;
+}
+
+static bool CheckPaymentAuditReceiptCommitment(
+    const CBlock& block,
+    BlockValidationState& state,
+    int32_t height,
+    const llmq::pq::PaymentAuditScheduleConfig& schedule,
+    llmq::pq::PaymentAuditReceipt* decoded = nullptr)
+{
+    const auto slot_epoch{
+        llmq::pq::PaymentAuditReceiptSlotEpoch(schedule, height)};
+    const bool tagged{HasPaymentAuditReceiptCommitment(block)};
+    llmq::pq::PaymentAuditReceipt receipt;
+    const bool extracted{tagged && ExtractPaymentAuditReceipt(block, receipt)};
+    if (!slot_epoch) {
+        if (tagged) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-payment-audit-receipt-unexpected");
+        }
+        return true;
+    }
+    if (!extracted) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-payment-audit-receipt-missing");
+    }
+    if (!receipt.IsNull() && receipt.epoch != *slot_epoch) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-payment-audit-receipt-epoch");
+    }
+    if (decoded != nullptr) *decoded = receipt;
+    return true;
+}
+
+struct AppliedPaymentAuditArchiveReference {
+    uint32_t epoch{0};
+    uint256 witness_id;
+};
+
+static bool ConnectPaymentAuditReceiptState(
+    ChainstateManager& chainman,
+    const CBlock& block,
+    CBlockIndex& index,
+    BlockValidationState& state,
+    bool fJustCheck,
+    bool allow_historical_preseal,
+    bool* state_changed,
+    std::optional<AppliedPaymentAuditArchiveReference>* archive_reference)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    Assume(state_changed != nullptr);
+    Assume(archive_reference != nullptr);
+    *state_changed = false;
+    archive_reference->reset();
+    const auto& consensus{chainman.GetConsensus()};
+    const auto chainlock_schedule{
+        llmq::pq::MakeChainLockScheduleConfig(
+            consensus.nPQChainLockEpochOrigin)};
+    const auto btcc_schedule{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!chainlock_schedule || !btcc_schedule.IsValid()) {
+        if (HasPaymentAuditReceiptCommitment(block)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-payment-audit-disabled");
+        }
+        return true;
+    }
+    if (deterministicMNManager == nullptr) {
+        return state.Error("pq-payment-audit-dmn-manager-unavailable");
+    }
+    const llmq::pq::PaymentAuditScheduleConfig schedule{
+        *chainlock_schedule, btcc_schedule};
+    if (!schedule.IsValid()) {
+        return state.Error("pq-payment-audit-invalid-schedule");
+    }
+
+    llmq::pq::PaymentAuditReceipt receipt;
+    if (!CheckPaymentAuditReceiptCommitment(
+            block, state, index.nHeight, schedule, &receipt)) {
+        return false;
+    }
+    const auto previous_receipt{
+        IndexedPaymentAuditReceiptState(index.pprev)};
+    if (!previous_receipt.IsStructurallyValid()) {
+        return state.Error("pq-payment-audit-receipt-state-unavailable");
+    }
+    const uint256 previous_probation_hash{
+        index.pprev == nullptr ||
+                index.pprev->pqPaymentProbationStateHash.IsNull()
+            ? deterministicMNManager->EmptyPaymentProbationStateHash()
+            : index.pprev->pqPaymentProbationStateHash};
+    if (previous_probation_hash.IsNull()) {
+        return state.Error("pq-payment-audit-probation-root-unavailable");
+    }
+
+    auto next_receipt{previous_receipt};
+    uint256 next_probation_hash{previous_probation_hash};
+    const auto slot_epoch{llmq::pq::PaymentAuditReceiptSlotEpoch(
+        schedule, index.nHeight)};
+    if (slot_epoch) {
+        const auto applied_receipt{llmq::pq::ApplyPaymentAuditReceipt(
+            consensus.hashGenesisBlock, previous_receipt, receipt)};
+        if (!applied_receipt) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-payment-audit-receipt-transition");
+        }
+        next_receipt = *applied_receipt;
+
+        if (!receipt.IsNull()) {
+            if (llmq::chainLocksHandler == nullptr) {
+                return state.Error(
+                    "pq-payment-audit-handler-unavailable");
+            }
+            llmq::pq::FinalPaymentAudit audit;
+            llmq::pq::FrozenQuorumRoster subject;
+            llmq::pq::PQPaymentRecoverySelection recovery;
+            llmq::pq::PQPaymentProbationTransitionInput input;
+            bool compact_replay{false};
+            bool start_preseal{false};
+            const auto certificate_status{
+                llmq::chainLocksHandler
+                    ->CheckPaymentAuditReceiptCertificate(
+                        receipt, index, &audit, &subject, &recovery)};
+            using CertificateStatus =
+                llmq::CChainLocksHandler::
+                    PaymentAuditReceiptCertificateStatus;
+            if (certificate_status == CertificateStatus::MISSING) {
+                const bool prefix_authenticated{
+                    llmq::chainLocksHandler
+                        ->IsPaymentAuditPrefixAuthenticated(index)};
+                const bool preseal_allowed{
+                    allow_historical_preseal &&
+                    (chainman.IsInitialBlockDownload() ||
+                     llmq::chainLocksHandler
+                         ->IsPaymentAuditPresealActive() ||
+                     IsPaymentAuditHistoricalPresealCoverable(
+                         chainman, index, *chainlock_schedule))};
+                if (!prefix_authenticated && !preseal_allowed) {
+                    llmq::chainLocksHandler
+                        ->NotePendingPaymentAuditReceiptCertificate(
+                            receipt, index);
+                    return state.Error(
+                        std::string{
+                            PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING});
+                }
+                const auto compact_status{
+                    llmq::chainLocksHandler
+                        ->BuildCompactPaymentAuditTransitionInput(
+                            receipt, index, input)};
+                if (compact_status ==
+                    llmq::PaymentAuditContextStatus::INVALID) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-compact-context");
+                }
+                if (compact_status !=
+                    llmq::PaymentAuditContextStatus::READY) {
+                    return state.Error(
+                        "pq-payment-audit-compact-context-unavailable");
+                }
+                compact_replay = true;
+                start_preseal = !prefix_authenticated;
+            }
+            if (certificate_status == CertificateStatus::UNAVAILABLE) {
+                return state.Error(
+                    "pq-payment-audit-archive-unavailable");
+            }
+            if (certificate_status == CertificateStatus::LOCAL_ERROR) {
+                return state.Error(
+                    "pq-payment-audit-archive-local-error");
+            }
+            if (certificate_status != CertificateStatus::VERIFIED) {
+                if (!compact_replay) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-certificate");
+                }
+            } else {
+                const auto& commitment{audit.statement.commitment};
+                const auto classification{
+                    llmq::pq::ClassifyPaymentAuditReports(audit)};
+                if (!classification ||
+                    commitment.previous_probation_state_hash !=
+                        previous_probation_hash) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-probation-root");
+                }
+                input.receipt = {
+                    receipt.epoch, receipt.carrier_height,
+                    receipt.result_hash};
+                input.roster_valid_members =
+                    commitment.subject_valid_members;
+                input.observed_members = receipt.online_members;
+                input.recovery_seats = recovery;
+                for (std::size_t member{0};
+                     member < llmq::pq::QUORUM_SIZE; ++member) {
+                    input.frozen_roster[member] =
+                        subject.members[member].pro_tx_hash;
+                }
+                try {
+                    const auto carrier_parent_list{
+                        deterministicMNManager->GetListForBlock(
+                            index.pprev)};
+                    carrier_parent_list.ForEachMN(
+                        false, [&](const CDeterministicMN& dmn) {
+                            input.existing_pro_tx_hashes.push_back(
+                                dmn.proTxHash);
+                            if (CDeterministicMNList::IsMNValid(dmn)) {
+                                input.current_valid_pro_tx_hashes.push_back(
+                                    dmn.proTxHash);
+                            }
+                        });
+                } catch (const std::exception&) {
+                    return state.Error(
+                        "pq-payment-audit-carrier-state-unavailable");
+                }
+                std::sort(input.existing_pro_tx_hashes.begin(),
+                          input.existing_pro_tx_hashes.end());
+                std::sort(input.current_valid_pro_tx_hashes.begin(),
+                          input.current_valid_pro_tx_hashes.end());
+            }
+
+            llmq::pq::PQPaymentProbationState previous_probation;
+            if (!deterministicMNManager->GetPaymentProbationState(
+                    index.pprev, previous_probation)) {
+                return state.Error(
+                    "pq-payment-audit-probation-state-unavailable");
+            }
+            llmq::pq::PQPaymentProbationError transition_error{
+                llmq::pq::PQPaymentProbationError::NONE};
+            const auto transition{
+                llmq::pq::ApplyPQPaymentProbationTransition(
+                    previous_probation, input, &transition_error)};
+            if (!transition ||
+                transition->undo.applied_state_hash !=
+                    receipt.next_probation_state_hash) {
+                return state.Invalid(
+                    BlockValidationResult::BLOCK_CONSENSUS,
+                    "bad-pq-payment-audit-result");
+            }
+            next_probation_hash = transition->undo.applied_state_hash;
+            if (start_preseal && !fJustCheck &&
+                !llmq::chainLocksHandler->BeginPaymentAuditPreseal(
+                    index, receipt, previous_receipt,
+                    previous_probation_hash)) {
+                return state.Error(
+                    "failed-pq-payment-audit-preseal-persist");
+            }
+            if (!deterministicMNManager->CommitPaymentProbationState(
+                    transition->state, next_probation_hash, fJustCheck)) {
+                return state.Error(
+                    "failed-pq-payment-audit-state-persist");
+            }
+            if (!compact_replay) {
+                *archive_reference = AppliedPaymentAuditArchiveReference{
+                    receipt.epoch, receipt.audit_witness_id};
+            }
+        }
+    }
+
+    const bool changed{
+        index.pqPaymentAuditReceiptCursorHeight !=
+                next_receipt.cursor.carrier_height ||
+        index.pqPaymentAuditReceiptCursorEpoch !=
+                next_receipt.cursor.epoch ||
+        index.pqPaymentAuditReceiptCursorSealHash !=
+                next_receipt.cursor.seal_block_hash ||
+        index.pqPaymentAuditReceiptCursorLogicalId !=
+                next_receipt.cursor.audit_logical_id ||
+        index.pqPaymentAuditReceiptCursorWitnessId !=
+                next_receipt.cursor.audit_witness_id ||
+        index.pqPaymentAuditReceiptStateHash !=
+                next_receipt.cumulative_hash ||
+        index.pqPaymentProbationStateHash != next_probation_hash};
+    index.pqPaymentAuditReceiptCursorHeight =
+        next_receipt.cursor.carrier_height;
+    index.pqPaymentAuditReceiptCursorEpoch = next_receipt.cursor.epoch;
+    index.pqPaymentAuditReceiptCursorSealHash =
+        next_receipt.cursor.seal_block_hash;
+    index.pqPaymentAuditReceiptCursorLogicalId =
+        next_receipt.cursor.audit_logical_id;
+    index.pqPaymentAuditReceiptCursorWitnessId =
+        next_receipt.cursor.audit_witness_id;
+    index.pqPaymentAuditReceiptStateHash = next_receipt.cumulative_hash;
+    index.pqPaymentProbationStateHash = next_probation_hash;
+    *state_changed = changed;
+    return true;
+}
+
+static bool PinAppliedPaymentAuditArchiveReference(
+    const std::optional<AppliedPaymentAuditArchiveReference>& reference,
+    BlockValidationState& state)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    if (!reference) return true;
+    if (llmq::chainLocksHandler == nullptr) {
+        return state.Error("pq-payment-audit-handler-unavailable");
+    }
+    const auto status{
+        llmq::chainLocksHandler->PinPaymentAuditReceiptCertificate(
+            reference->epoch, reference->witness_id)};
+    if (status == llmq::CChainLocksHandler::
+                      PaymentAuditReceiptCertificateStatus::VERIFIED) {
+        return true;
+    }
+    // The exact certificate was already read and verified above. Any failure
+    // to retain it now is local archive state, never peer-controlled invalidity
+    // and never a reason to quarantine it as a missing network object.
+    return state.Error("pq-payment-audit-archive-pin-failed");
+}
+// SYSCOIN END: PQ receipt validation and branch-state transitions.
 
 CAmount GetBlockSubsidyRegtest(int nHeight, const Consensus::Params& consensusParams)
 {
@@ -2304,7 +3031,9 @@ static bool ShouldBypassExternalNEVMNotifyCalls(const ChainstateManager& chainma
     return bypass_height > 0 && nHeight <= bypass_height;
 }
 
-bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff) {
+// SYSCOIN: Authenticated BTCC catch-up may replay NEVM without treating an
+// equal-height but different Syscoin branch as already applied.
+bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated) {
     CNEVMHeader nevmBlockHeader;
     std::vector<unsigned char> coinbase_payload;
     if(!GetNEVMData(state, block, nevmBlockHeader, &coinbase_payload)) {
@@ -2322,31 +3051,44 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     if(bSkipValidation) {
         LogPrintf("ConnectNEVMCommitment: skipping validation result...\n");
     }
-    // Derive the BTC anchor once from consensus-indexed chain state and pass it through
-    // to ZMQ, avoiding BTCC payload parsing in notifier code.
+    // SYSCOIN: Geth exposes BTCPrevHash immediately and has no provisional
+    // distinction. A real receipt is forwarded with its exact hash or the
+    // entire block notification is deferred; it is never rewritten to zero.
     uint256 btcPrevHashForNEVM{};
+    llmq::pq::BTCCReceipt receipt;
+    const auto btcc_schedule{
+        llmq::pq::GetBTCCScheduleConfig(m_chainman.GetConsensus())};
+    const bool has_receipt{
+        pindex != nullptr && btcc_schedule.IsValid() &&
+        llmq::pq::IsBTCCReceiptCarrierHeight(
+            btcc_schedule, static_cast<int32_t>(nHeight)) &&
+        ExtractBTCCReceipt(block, receipt)};
+    const bool nonnull_receipt{has_receipt && !receipt.IsNull()};
+    bool receipt_live_verified{false};
+    bool defer_btcc_nevm{false};
     {
-        const auto& consensus = m_chainman.GetConsensus();
-        const bool carrier_height = IsBTCCCarrierHeight(consensus, nHeight);
-        if (carrier_height) {
-            // Only forward a BTC anchor if this carrier block has a non-null BTCC receipt.
-            // (Null receipts are allowed for censorship resistance and must result in no NEVM checkpoint.)
-            llmq::CBTCCheckpointSig btcc;
-            const bool extracted = ExtractBTCCReceipt(coinbase_payload, btcc);
-            if (extracted && !btcc.IsNull()) {
-                if (pindex != nullptr) {
-                    const int expected_height = static_cast<int>(nHeight) - BTCCHECK_PROP_BUFFER;
-                    const CBlockIndex* pindexReceipt = pindex->GetAncestor(expected_height);
-                    if (pindexReceipt != nullptr) {
-                        btcPrevHashForNEVM = pindexReceipt->btcpPrevCommitment;
-                    }
-                }
-            }
+        // SYSCOIN: Snapshot receipt authorization under cs_main, then release
+        // this local acquisition before a catch-up replay waits on Geth.
+        // Ordinary ConnectBlock callers already hold the recursive lock.
+        LOCK(cs_main);
+        receipt_live_verified =
+            pindex != nullptr && pindex->m_pq_btcc_receipt_live_verified;
+        defer_btcc_nevm =
+            !btcc_prefix_authenticated && pindex != nullptr &&
+            llmq::chainLocksHandler != nullptr &&
+            llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*pindex);
+    }
+    if (nonnull_receipt) {
+        if (btcc_prefix_authenticated ||
+            receipt_live_verified) {
+            btcPrevHashForNEVM = receipt.accepted_cursor.btc_hash;
+        } else if (!defer_btcc_nevm) {
+            return state.Error("pq-btcc-nevm-receipt-unauthenticated");
         }
     }
     std::string stateStr;
     const bool bypass_external_notify = ShouldBypassExternalNEVMNotifyCalls(m_chainman, nHeight);
-    if(fNEVMConnection && !bypass_external_notify) {
+    if(fNEVMConnection && !bypass_external_notify && !defer_btcc_nevm) {
         if (m_chainman.m_interrupt) {
             return state.Error("shutdown");
         }
@@ -2399,12 +3141,294 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
 
     return res;
 }
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
+
+bool Chainstate::ReplayDeferredBTCCNEVM(
+    int32_t through_height,
+    const uint256& through_hash,
+    bool& complete,
+    std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(m_chainstate_mutex);
+    // SYSCOIN: Keep the authenticated replay branch stable while releasing
+    // cs_main around the synchronous Geth notification below. This is the
+    // same serialization used by ActivateBestChain, without holding the
+    // global validation lock across an external process boundary.
+    LOCK(m_chainstate_mutex);
+    complete = false;
+    error.clear();
+    if (!fNEVMConnection || through_height < 0 || through_hash.IsNull()) {
+        error = "deferred-nevm-replay-invalid-request";
+        return false;
+    }
+
+    uint64_t geth_count{0};
+    uint256 geth_last_syscoin_hash;
+    std::string state_string;
+    GetMainSignals().NotifyGetNEVMBlockInfo(
+        geth_count, geth_last_syscoin_hash, state_string);
+    if (!state_string.empty()) {
+        error = "deferred-nevm-height-unavailable:" + state_string;
+        return false;
+    }
+
+    const int64_t nevm_start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (nevm_start < 0 ||
+        geth_count > static_cast<uint64_t>(
+            std::numeric_limits<int64_t>::max() - nevm_start)) {
+        error = "deferred-nevm-height-overflow";
+        return false;
+    }
+    const int64_t next_height{
+        nevm_start + static_cast<int64_t>(geth_count)};
+    if (next_height > static_cast<int64_t>(through_height) + 1) {
+        error = "deferred-nevm-ahead-of-authenticated-prefix";
+        return false;
+    }
+    if (geth_count == 0) {
+        if (!geth_last_syscoin_hash.IsNull()) {
+            error = "deferred-nevm-unexpected-genesis-syscoin-hash";
+            return false;
+        }
+    } else {
+        const int64_t last_applied_height{next_height - 1};
+        if (last_applied_height < 0 ||
+            last_applied_height > std::numeric_limits<uint32_t>::max()) {
+            error = "deferred-nevm-last-syscoin-height-overflow";
+            return false;
+        }
+        LOCK(cs_main);
+        const CBlockIndex* applied_index{
+            m_chainman.ActiveChain()[static_cast<int32_t>(last_applied_height)]};
+        if (applied_index == nullptr ||
+            !DoesNEVMBlockInfoMatchSyscoinBlock(
+                nevm_start, geth_count,
+                static_cast<uint32_t>(last_applied_height),
+                geth_last_syscoin_hash, applied_index->GetBlockHash())) {
+            error = "deferred-nevm-applied-syscoin-branch-mismatch";
+            return false;
+        }
+    }
+    if (next_height == static_cast<int64_t>(through_height) + 1) {
+        LOCK(cs_main);
+        const CBlockIndex* index{m_chainman.ActiveChain()[through_height]};
+        complete = index != nullptr && index->GetBlockHash() == through_hash;
+        if (!complete) error = "deferred-nevm-prefix-reorged";
+        return complete;
+    }
+
+    // SYSCOIN: Bound scheduler work. Geth's reported height makes every batch
+    // and crash retry idempotent without trusting a local replay counter.
+    static constexpr int32_t MAX_DEFERRED_NEVM_REPLAY_BATCH{64};
+    const int32_t first_height{static_cast<int32_t>(std::max<int64_t>(
+        next_height, nevm_start))};
+    const int32_t last_height{static_cast<int32_t>(std::min<int64_t>(
+        through_height,
+        static_cast<int64_t>(first_height) +
+            MAX_DEFERRED_NEVM_REPLAY_BATCH - 1))};
+
+    for (int32_t height{first_height}; height <= last_height; ++height) {
+        CBlockIndex* index{nullptr};
+        uint256 block_hash;
+        int64_t median_time_past{0};
+        CBlock block;
+        CDeterministicMNListNEVMAddressDiff nevm_diff;
+        {
+            LOCK(cs_main);
+            const CBlockIndex* through_index{
+                m_chainman.ActiveChain()[through_height]};
+            index = m_chainman.ActiveChain()[height];
+            if (through_index == nullptr ||
+                through_index->GetBlockHash() != through_hash ||
+                index == nullptr || index->pprev == nullptr) {
+                error = "deferred-nevm-prefix-reorged";
+                return false;
+            }
+
+            if (!m_blockman.ReadBlockFromDisk(block, *index)) {
+                error = strprintf("deferred-nevm-block-unavailable:%d", height);
+                return false;
+            }
+
+            try {
+                CDeterministicMNListDiff ignored_diff;
+                const CDeterministicMNList previous{
+                    deterministicMNManager->GetListForBlock(index->pprev)};
+                const CDeterministicMNList current{
+                    deterministicMNManager->GetListForBlock(index)};
+                previous.BuildDiff(current, ignored_diff, nevm_diff);
+            } catch (const std::exception& exception) {
+                error = strprintf("deferred-nevm-dmn-diff:%s", exception.what());
+                return false;
+            }
+            block_hash = index->GetBlockHash();
+            median_time_past = index->GetMedianTimePast();
+        }
+
+        // SYSCOIN: The base block already passed PoDA validation. Rebuild only
+        // the version-hash vector for Geth; applying today's age policy again
+        // would make historical replay depend on wall-clock time.
+        PoDAMAPMemory poda;
+        for (const CTransactionRef& tx : block.vtx) {
+            if (!tx->IsNEVMData()) continue;
+            const CNEVMData payload{*tx};
+            if (payload.IsNull()) {
+                error = strprintf("deferred-nevm-poda-unavailable:%d", height);
+                return false;
+            }
+            poda.try_emplace(
+                payload.vchVersionHash,
+                MapPoDAPayloadMeta{payload, median_time_past});
+        }
+
+        // SYSCOIN: Revalidate the exact replay slot after disk/PoDA work. The
+        // chainstate mutex prevents activation from changing it between this
+        // check and the external notification.
+        {
+            LOCK(cs_main);
+            const CBlockIndex* through_index{
+                m_chainman.ActiveChain()[through_height]};
+            const CBlockIndex* active_index{m_chainman.ActiveChain()[height]};
+            if (through_index == nullptr ||
+                through_index->GetBlockHash() != through_hash ||
+                active_index != index || active_index->GetBlockHash() != block_hash) {
+                error = "deferred-nevm-prefix-reorged";
+                return false;
+            }
+        }
+
+        BlockValidationState state;
+        NEVMTxRootMap roots;
+        if (!ConnectNEVMCommitment(
+                state, roots, block, index, block_hash,
+                static_cast<uint32_t>(height), /*fJustCheck=*/false, poda,
+                nevm_diff, /*btcc_prefix_authenticated=*/true) ||
+            !state.IsValid()) {
+            error = strprintf("deferred-nevm-connect:%d:%s", height,
+                              state.ToString());
+            return false;
+        }
+        if (pnevmdatadb) {
+            pnevmdatadb->FlushDataToCache(poda, PoDAFlushSource::Block);
+        }
+        if (pnevmtxrootsdb) pnevmtxrootsdb->FlushDataToCache(roots);
+    }
+
+    complete = last_height == through_height;
+    return true;
+}
+
+bool Chainstate::RunWithStableActiveChain(
+    const std::function<bool()>& callback)
+{
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(m_chainstate_mutex);
+    // SYSCOIN: ActivateBestChain uses this same outer lock. Holding it through
+    // the final context recheck, block-index fsync, certificate fsync, and store
+    // publication closes the best-work catch-up reorg race.
+    LOCK(m_chainstate_mutex);
+    return callback && callback();
+}
+
+std::optional<bool> IsNEVMBlockAppliedForDisconnect(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t disconnect_height) noexcept
+{
+    if (nevm_start_height < 0 ||
+        geth_count > static_cast<uint64_t>(
+                         std::numeric_limits<int64_t>::max() -
+                         nevm_start_height)) {
+        return std::nullopt;
+    }
+    if (static_cast<int64_t>(disconnect_height) < nevm_start_height) {
+        return false;
+    }
+    return static_cast<int64_t>(disconnect_height) <
+           nevm_start_height + static_cast<int64_t>(geth_count);
+}
+
+bool DoesNEVMBlockInfoMatchSyscoinBlock(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t expected_syscoin_height,
+    const uint256& reported_syscoin_hash,
+    const uint256& expected_syscoin_hash) noexcept
+{
+    if (nevm_start_height < 0 || geth_count == 0 ||
+        reported_syscoin_hash.IsNull() || expected_syscoin_hash.IsNull() ||
+        geth_count > static_cast<uint64_t>(
+                         std::numeric_limits<int64_t>::max() -
+                         nevm_start_height)) {
+        return false;
+    }
+    const int64_t last_applied_height{
+        nevm_start_height + static_cast<int64_t>(geth_count) - 1};
+    return last_applied_height ==
+               static_cast<int64_t>(expected_syscoin_height) &&
+           reported_syscoin_hash == expected_syscoin_hash;
+}
+
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
     CNEVMHeader evmBlock;
     if(!GetNEVMData(state, block, evmBlock)) {
         return false; // state filled by GetNEVMData
     }
-    if(fNEVMConnection && !ShouldBypassExternalNEVMNotifyCalls(chainman, nHeight)) {
+    bool notify_external{
+        fNEVMConnection &&
+        !ShouldBypassExternalNEVMNotifyCalls(chainman, nHeight)};
+    // SYSCOIN: A durable BTCC pre-seal defers connect notifications from its
+    // carrier onward. During a reorg, disconnect only the prefix Geth reports
+    // as actually applied; asking it to remove a never-sent block can wedge
+    // both chains. Pre-marker blocks retain the normal unconditional path.
+    if (notify_external && llmq::chainLocksHandler != nullptr &&
+        llmq::chainLocksHandler->ShouldDeferBTCCNEVM(index)) {
+        uint64_t geth_count{0};
+        uint256 geth_last_syscoin_hash;
+        std::string height_error;
+        GetMainSignals().NotifyGetNEVMBlockInfo(
+            geth_count, geth_last_syscoin_hash, height_error);
+        const int64_t nevm_start{chainman.GetConsensus().nNEVMStartBlock};
+        const auto applied{IsNEVMBlockAppliedForDisconnect(
+            nevm_start, geth_count, nHeight)};
+        if (!height_error.empty() || !applied) {
+            return state.Error(
+                height_error.empty()
+                    ? "pq-btcc-nevm-disconnect-height-overflow"
+                    : "pq-btcc-nevm-disconnect-height-unavailable:" +
+                          height_error);
+        }
+        // SYSCOIN: Count alone cannot distinguish equal-height Syscoin forks.
+        // Bind Geth's last applied pair to the exact ancestry being unwound
+        // before deciding whether any external disconnect is safe.
+        if (geth_count == 0) {
+            if (!geth_last_syscoin_hash.IsNull()) {
+                return state.Error(
+                    "pq-btcc-nevm-disconnect-unexpected-zero-count-hash");
+            }
+        } else {
+            const int64_t last_applied_height{
+                nevm_start + static_cast<int64_t>(geth_count) - 1};
+            if (last_applied_height < 0 ||
+                last_applied_height > index.nHeight ||
+                last_applied_height >
+                    std::numeric_limits<uint32_t>::max()) {
+                return state.Error(
+                    "pq-btcc-nevm-disconnect-branch-height-mismatch");
+            }
+            const CBlockIndex* applied_index{
+                index.GetAncestor(static_cast<int32_t>(last_applied_height))};
+            if (applied_index == nullptr ||
+                !DoesNEVMBlockInfoMatchSyscoinBlock(
+                    nevm_start, geth_count,
+                    static_cast<uint32_t>(last_applied_height),
+                    geth_last_syscoin_hash,
+                    applied_index->GetBlockHash())) {
+                return state.Error(
+                    "pq-btcc-nevm-disconnect-syscoin-branch-mismatch");
+            }
+        }
+        notify_external = *applied;
+    }
+    if(notify_external) {
         if (chainman.m_interrupt) {
             return state.Error("shutdown");
         }
@@ -2641,7 +3665,9 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     }
     BlockValidationState state;
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, pindex->nHeight, block.GetHash(), diffNEVM)) {
+    // SYSCOIN: pass the exact branch index so pre-seal disconnect symmetry can
+    // distinguish deferred blocks from the Geth-applied prefix.
+    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, *pindex, pindex->nHeight, block.GetHash(), diffNEVM)) {
         const std::string errStr = strprintf("DisconnectBlock(): NEVM block failed to disconnect: %s\n", state.ToString().c_str());
         error(errStr.c_str());
         return DISCONNECT_FAILED;
@@ -2778,6 +3804,15 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     const auto time_start{SteadyClock::now()};
     const CChainParams& params{m_chainman.GetParams()};
 
+    // SYSCOIN: Refuse block connection unless it descends from the immutable
+    // migration anchor and carries the scheduled Bitcoin-parent commitment.
+    const auto pq_anchor_result = Consensus::CheckPQLegacyAnchor(
+        params.GetConsensus(), pindex->nHeight, block_hash, pindex->pprev);
+    if (pq_anchor_result != Consensus::PQLegacyAnchorResult::DISABLED &&
+        pq_anchor_result != Consensus::PQLegacyAnchorResult::VALID) {
+        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-pq-legacy-anchor");
+    }
+
     // Check it again in case a previous version let a bad block in
     // NOTE: We don't currently (re-)invoke ContextualCheckBlock() or
     // ContextualCheckBlockHeader() here. This means that if we add a new
@@ -2800,8 +3835,15 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
         return error("%s: Consensus::CheckBlock: %s", __func__, state.ToString());
     }
+    // SYSCOIN: Apply fork-specific AuxPoW and BTCPREV context at the Bitcoin
+    // ConnectBlock boundary, including replay of previously indexed blocks.
     if (!CheckDirectBlockNotAuxpowParent(block, state, pindex->nHeight, params.GetConsensus())) {
         return error("%s: CheckDirectBlockNotAuxpowParent: %s", __func__, state.ToString());
+    }
+    if (!CheckBTCPREVCommitment(block, state, pindex->nHeight,
+                                params.GetConsensus())) {
+        return error("%s: CheckBTCPREVCommitment: %s", __func__,
+                     state.ToString());
     }
 
     // verify that the view's current state corresponds to the previous block
@@ -2818,18 +3860,35 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         return true;
     }
 
+    // SYSCOIN: Both provenance bits attest the exact persisted accumulators.
+    // Revalidation revokes them before touching branch-derived metadata and
+    // restores them only at the fully successful tail of ConnectBlock.
+    const auto revoke_btcc_index_provenance = [&]()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        constexpr uint32_t provenance_mask{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        if (pindex->nStatus & provenance_mask) {
+            pindex->nStatus = static_cast<BlockStatus>(
+                pindex->nStatus & ~provenance_mask);
+            m_blockman.m_dirty_blockindex.insert(pindex);
+        }
+    };
+    if (!fJustCheck) revoke_btcc_index_provenance();
+
     // SYSCOIN: Persist BTCPREV commitment in block index only for consensus-relevant
-    // sign-offset BTCC heights. Reuse the contextual-validation cache in the common
+    // PQ candidate heights. Reuse the contextual-validation cache in the common
     // accept->connect flow; otherwise fall back to reparsing.
     if (!fJustCheck) {
         const auto& consensus = params.GetConsensus();
-        const bool btcp_required = IsBTCCSignHeight(consensus, pindex->nHeight) &&
+        const bool btcp_required = llmq::pq::IsBTCPREVCommitmentHeight(consensus, pindex->nHeight) &&
                                    block.auxpow;
         if (btcp_required) {
             const uint256& btcp_expected = block.auxpow->getParentPrevBlockHash();
             if (pindex->m_btcp_prev_contextually_validated &&
                 pindex->m_btcp_prev_contextual_commitment == btcp_expected) {
                 if (pindex->btcpPrevCommitment != btcp_expected) {
+                    revoke_btcc_index_provenance();
                     pindex->btcpPrevCommitment = btcp_expected;
                     m_blockman.m_dirty_blockindex.insert(pindex);
                 }
@@ -2838,11 +3897,46 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 if (ExtractBTCPREVCommitment(block, btcp) &&
                     btcp == btcp_expected &&
                     pindex->btcpPrevCommitment != btcp) {
+                    revoke_btcc_index_provenance();
                     pindex->btcpPrevCommitment = btcp;
                     m_blockman.m_dirty_blockindex.insert(pindex);
                 }
             }
         }
+    }
+
+    // SYSCOIN: Syscoin and NEVM must advance together. Until an explicit compiled or
+    // catch-up seal authenticates a historical prefix, every non-null carrier
+    // waits non-punitively for its exact ADVANCE certificate, including IBD.
+    // Canonical null carriers never introduce an off-chain dependency.
+    bool btcc_receipt_state_changed{false};
+    if (!ConnectBTCCReceiptState(
+            m_chainman, block, *pindex, state,
+            &btcc_receipt_state_changed,
+            /*require_live_certificate=*/true,
+            /*allow_historical_preseal=*/!fJustCheck)) {
+        return error("%s: ConnectBTCCReceiptState: %s", __func__,
+                     state.ToString());
+    }
+    if (!fJustCheck && btcc_receipt_state_changed) {
+        revoke_btcc_index_provenance();
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    bool payment_audit_state_changed{false};
+    std::optional<AppliedPaymentAuditArchiveReference>
+        payment_audit_archive_reference;
+    if (!ConnectPaymentAuditReceiptState(
+            m_chainman, block, *pindex, state, fJustCheck,
+            /*allow_historical_preseal=*/!fJustCheck,
+            &payment_audit_state_changed,
+            &payment_audit_archive_reference)) {
+        return error("%s: ConnectPaymentAuditReceiptState: %s", __func__,
+                     state.ToString());
+    }
+    if (!fJustCheck && payment_audit_state_changed) {
+        revoke_btcc_index_provenance();
+        m_blockman.m_dirty_blockindex.insert(pindex);
     }
 
     bool fScriptChecks = true;
@@ -3012,7 +4106,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     fScriptChecks = fScriptChecks && fNexusContext;
     CDeterministicMNListNEVMAddressDiff diff;
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
-    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {
+    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, view,
+                                  fJustCheck, fScriptChecks,
+                                  m_chainman.IsInitialBlockDownload(),
+                                  SpecialTxValidationContext::NORMAL)) {
         LogPrintf("ERROR: %s: ProcessSpecialTxsInBlock for block %s failed with %s\n", __func__,
                      pindex->GetBlockHash().ToString().c_str(), state.ToString().c_str());
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, state.ToString());
@@ -3153,7 +4250,22 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // A ChainLock may provide the historical fallback only for strict
         // ancestors. The ChainLocked block itself must pass exact governance
         // validation.
-        const bool check_superblock = llmq::chainLocksHandler->GetBestChainLock().nHeight <= pindex->nHeight;
+        const auto best_chainlock = llmq::chainLocksHandler
+            ? llmq::chainLocksHandler->GetBestChainLock()
+            : nullptr;
+        const bool check_superblock = !best_chainlock ||
+                                      best_chainlock->statement.height <= pindex->nHeight;
+        if (check_superblock && masternodeSync.IsSynced() &&
+            AreSuperblocksEnabled() &&
+            CSuperblock::IsValidBlockHeight(pindex->nHeight)) {
+            if (governance == nullptr || pindex->pprev == nullptr) {
+                return state.Error("governance-state-unavailable");
+            }
+            if (!governance->IsReadyForTip(pindex->pprev) &&
+                !governance->RevalidatePQGovernance(*pindex->pprev)) {
+                return state.Error("governance-state-unavailable");
+            }
+        }
         // detect MN was paid properly, accounting for seniority which is added to subsidy
         if (!IsBlockPayeeValid(m_chain, *block.vtx[0], pindex->nHeight, blockReward, nFees, nMNSeniorityRet, nMNFloorDiffRet, &matched_payment_outputs)) {
             LogPrintf("ERROR: ConnectBlock(): couldn't find masternode or superblock payments\n");
@@ -3161,8 +4273,19 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
 
         std::string strError;
+        bool governance_state_available{true};
         // add seniority to reward when checking for limit
-        if (!IsBlockValueValid(block, pindex, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError, fJustCheck, check_superblock, &exact_superblock_validation, &matched_payment_outputs) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
+        const bool block_value_valid{IsBlockValueValid(
+            block, pindex,
+            blockReward + nFees + nMNSeniorityRet + nMNFloorDiffRet,
+            strError, fJustCheck, check_superblock,
+            &exact_superblock_validation, &matched_payment_outputs,
+            &governance_state_available)};
+        if (!block_value_valid && !governance_state_available) {
+            LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
+            return state.Error("governance-state-unavailable");
+        }
+        if (!block_value_valid && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
             LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             // hack for feature_signet.py to pass which uses bitcoin blocks signed by the signet witness
             if(!fSigNet || pindex->nHeight > 100) {
@@ -3195,6 +4318,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (fJustCheck)
         return true;
 
+    // SYSCOIN: Pin the exact verified payment witness before block durability
+    // can make its receipt state authoritative.
+    if (!PinAppliedPaymentAuditArchiveReference(
+            payment_audit_archive_reference, state)) {
+        return false;
+    }
+
     if (!m_blockman.WriteUndoDataForBlock(blockundo, state, *pindex)) {
         return false;
     }
@@ -3213,6 +4343,31 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     if (!pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
         pindex->RaiseValidity(BLOCK_VALID_SCRIPTS);
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    // SYSCOIN: BLOCK_VALID_SCRIPTS alone can come from assumevalid or an
+    // assumeutxo snapshot. Record the independently reconstructible receipt
+    // provenance only after this invocation actually checked scripts and
+    // completed the special-transaction and receipt-state paths above.
+    const bool receipt_index_validated{
+        fScriptChecks && !pindex->IsAssumedValid() &&
+        IndexedBTCCReceiptState(pindex).IsStructurallyValid() &&
+        IndexedPaymentAuditReceiptState(pindex).IsStructurallyValid() &&
+        !pindex->pqPaymentProbationStateHash.IsNull()};
+    if (receipt_index_validated &&
+        !(pindex->nStatus & BLOCK_PQ_RECEIPT_INDEX_VALIDATED)) {
+        pindex->nStatus |= BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    // The stronger bit remains exact-governance provenance for live finality.
+    const bool exact_governance_validated{
+        !CSuperblock::IsValidBlockHeight(pindex->nHeight) ||
+        (pindex->nStatus & BLOCK_GOVERNANCE_VALIDATED)};
+    if (receipt_index_validated && exact_governance_validated &&
+        !(pindex->nStatus & BLOCK_PQ_BTCC_INDEX_VALIDATED)) {
+        pindex->nStatus |= BLOCK_PQ_BTCC_INDEX_VALIDATED;
         m_blockman.m_dirty_blockindex.insert(pindex);
     }
 
@@ -3414,20 +4569,6 @@ bool Chainstate::FlushStateToDisk(
             if (governance && !governance->FlushCacheToDisk(sys_sync_flush)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit governance DB");
             }
-            if (llmq::quorumBlockProcessor && !llmq::quorumBlockProcessor->FlushCacheToDisk(sys_sync_flush)) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QC DB");
-            }
-            const bool force_quorum_manager_maintenance = mode == FlushStateMode::ALWAYS;
-            // QuorumManager persists derived vvec/sk-share caches, so avoid reset/rewrite
-            // maintenance churn during IBD and only force it on clean shutdown.
-            const bool run_quorum_manager_maintenance =
-                llmq::quorumManager &&
-                (force_quorum_manager_maintenance || !in_ibd);
-            if (run_quorum_manager_maintenance &&
-                !llmq::quorumManager->FlushCacheToDisk(force_quorum_manager_maintenance, sys_sync_flush)) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QM DB");
-            }
-            
             m_last_write = nNow;
         }
         // Flush best chain related state. This can only be done if the blocks / block index write was also done.
@@ -3448,6 +4589,16 @@ bool Chainstate::FlushStateToDisk(
             if (pnevmtxmintdb &&
                 !pnevmtxmintdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit NEVM mint replay database");
+            }
+            // SYSCOIN: The DMN list and PQ registry are consensus state keyed
+            // by the UTXO best-block marker. Flush dirty DMN records and place
+            // a durability barrier after asynchronous per-block PQ writes
+            // immediately before publishing that marker, including during IBD.
+            if (deterministicMNManager &&
+                !deterministicMNManager->FlushPendingSnapshotsToDisk(
+                    /*fSync=*/true)) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  "Failed to commit deterministic masternode state");
             }
             // Flush the chainstate (which may refer to block index entries).
             if (!CoinsTip().Flush())
@@ -3548,6 +4699,17 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
         return;
     }
 
+    // SYSCOIN: PQ finality depends on governance provenance at this exact tip.
+    if (governance) {
+        governance->ObserveChainTip(pindexNew);
+        if (governance->IsValid() &&
+            !governance->RevalidatePQGovernance(*pindexNew)) {
+            LogPrint(BCLog::GOBJECT,
+                     "%s: governance unavailable for active tip %s\n",
+                     __func__, pindexNew->GetBlockHash().ToString());
+        }
+    }
+
     // New best block
     if (m_mempool) {
         m_mempool->AddTransactionsUpdated(1);
@@ -3617,22 +4779,45 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         bool flushed = view.Flush();
         assert(flushed);
     }
-    // SYSCOIN: durable UTXO mint(T) => durable replay marker(T). Persist any
-    // pending marker additions, commit the disconnected UTXO tip, then erase.
-    // Extra markers after a crash are fail-closed (may require -reindex-chainstate).
+    // SYSCOIN: A durable disconnected UTXO tip requires both its replay marker
+    // and branch-bound DMN/PQ state. Persist those additions, publish the UTXO
+    // parent, then erase the disconnected records. Extra records after a crash
+    // are fail-closed (may require -reindex-chainstate).
     if (pnevmtxmintdb != nullptr) {
-        if (!setMintTxs.empty()) {
-            if (!pnevmtxmintdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
-                return error("DisconnectTip(): Failed to persist mint replay additions %s",
-                             pindexDelete->GetBlockHash().ToString());
+        try {
+            if (!setMintTxs.empty()) {
+                if (!pnevmtxmintdb->FlushCacheToDisk(
+                        /*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        strprintf("DisconnectTip(): Failed to persist mint replay additions %s",
+                                  pindexDelete->GetBlockHash().ToString()));
+                }
+                if (deterministicMNManager &&
+                    !deterministicMNManager->FlushPendingSnapshotsToDisk(
+                        /*fSync=*/true)) {
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        strprintf("DisconnectTip(): Failed to persist deterministic state for parent of %s",
+                                  pindexDelete->GetBlockHash().ToString()));
+                }
+                if (!CoinsTip().Flush()) {
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        strprintf("DisconnectTip(): Failed to flush disconnected UTXO state %s",
+                                  pindexDelete->GetBlockHash().ToString()));
+                }
             }
-            if (!CoinsTip().Flush()) {
-                return error("DisconnectTip(): Failed to flush disconnected UTXO state %s",
-                             pindexDelete->GetBlockHash().ToString());
+            if (!pnevmtxmintdb->FlushErase(setMintTxs) ||
+                !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) ||
+                !pblockindexdb->FlushErase(vecTXIDPairs)) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  strprintf("DisconnectTip(): Error flushing to asset dbs on disconnect %s",
+                                            pindexDelete->GetBlockHash().ToString()));
             }
-        }
-        if (!pnevmtxmintdb->FlushErase(setMintTxs) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs)) {
-            return error("DisconnectTip(): Error flushing to asset dbs on disconnect %s", pindexDelete->GetBlockHash().ToString());
+        } catch (const std::runtime_error& e) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              std::string{"System error while disconnecting: "} + e.what());
         }
     }
     LogPrint(BCLog::BENCHMARK, "- Disconnect block: %.2fms\n",
@@ -3809,6 +4994,10 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
     UpdateTip(pindexNew);
+    // SYSCOIN: The active branch determines outstanding PQ registry capacity.
+    if (m_mempool) {
+        m_mempool->RebuildPQRegistryReservations(pindexNew);
+    }
 
     const auto time_6{SteadyClock::now()};
     time_post_connect += time_6 - time_5;
@@ -3850,6 +5039,29 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             if (it == setBlockIndexCandidates.rend())
                 return nullptr;
             pindexNew = *it;
+        }
+
+        // SYSCOIN: Generic candidate-repopulation paths need not understand
+        // the transient BTCC dependency index. Enforce the exclusion again at
+        // the only work-selection boundary so a missing certificate cannot
+        // regain priority until its exact logical object is accepted.
+        if (const auto dependency{
+                FindDeferredBTCCReceiptDependency(*pindexNew)}) {
+            AddDeferredBTCCReceiptCandidate(
+                dependency->first, *dependency->second, *pindexNew);
+            setBlockIndexCandidates.erase(pindexNew);
+            continue;
+        }
+
+        // SYSCOIN: Work selection must also respect the immutable migration anchor.
+        const CBlockIndex* known_pq_anchor = m_blockman.LookupBlockIndex(
+            m_chainman.GetConsensus().hashPQLegacyAnchorBlock);
+        if (!Consensus::IsPQLegacyAnchorCompatible(
+                m_chainman.GetConsensus(), pindexNew, known_pq_anchor)) {
+            pindexNew->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
+            m_blockman.m_dirty_blockindex.insert(pindexNew);
+            setBlockIndexCandidates.erase(pindexNew);
+            continue;
         }
 
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
@@ -3905,8 +5117,437 @@ CBlockIndex* Chainstate::FindMostWorkChain()
     } while(true);
 }
 
+// SYSCOIN: A bounded prospective preseal slot follows only the branch that
+// ActivateBestChain is actually prepared to connect.
+bool Chainstate::IsCurrentMostWorkBranch(const CBlockIndex& ancestor)
+{
+    AssertLockHeld(cs_main);
+    if (m_chain.Contains(&ancestor)) return false;
+    const CBlockIndex* candidate{FindMostWorkChain()};
+    return candidate != nullptr && candidate->nHeight >= ancestor.nHeight &&
+           candidate->GetAncestor(ancestor.nHeight) == &ancestor;
+}
+
+bool Chainstate::DeferBTCCReceiptCandidates(
+    const uint256& logical_id,
+    const CBlockIndex& carrier)
+{
+    return DeferReceiptCandidates(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK,
+        logical_id, carrier);
+}
+
+bool Chainstate::DeferPaymentAuditReceiptCandidates(
+    const uint256& logical_id,
+    const CBlockIndex& carrier)
+{
+    return DeferReceiptCandidates(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT,
+        logical_id, carrier);
+}
+
+bool Chainstate::DeferReceiptCandidates(
+    DeferredReceiptCertificateKind kind,
+    const uint256& logical_id,
+    const CBlockIndex& carrier)
+{
+    AssertLockHeld(cs_main);
+    if (logical_id.IsNull()) return false;
+
+    auto [dependency_it, dependency_inserted]{
+        m_deferred_btcc_receipt_candidates.try_emplace(logical_id)};
+    auto& dependency{dependency_it->second};
+    if (dependency_inserted) {
+        dependency.kind = kind;
+    } else if (dependency.kind != kind) {
+        return false;
+    }
+    const CBlockIndex* branch_carrier{&carrier};
+    for (const auto& [existing, _] : dependency.branches) {
+        if (carrier.nHeight >= existing->nHeight &&
+            carrier.GetAncestor(existing->nHeight) == existing) {
+            branch_carrier = existing;
+            break;
+        }
+    }
+    auto [branch, inserted]{dependency.branches.try_emplace(branch_carrier)};
+    if (branch_carrier == &carrier) {
+        for (auto existing{dependency.branches.begin()};
+             existing != dependency.branches.end();) {
+            const CBlockIndex* const existing_carrier{existing->first};
+            if (existing_carrier == &carrier ||
+                existing_carrier->nHeight < carrier.nHeight ||
+                existing_carrier->GetAncestor(carrier.nHeight) != &carrier) {
+                ++existing;
+                continue;
+            }
+            auto candidates{std::move(existing->second)};
+            existing = dependency.branches.erase(existing);
+            for (CBlockIndex* candidate : candidates) {
+                AddDeferredBTCCReceiptCandidate(
+                    logical_id, carrier, *candidate);
+            }
+        }
+        branch = dependency.branches.find(&carrier);
+    }
+
+    size_t moved{0};
+    for (auto it{setBlockIndexCandidates.begin()};
+         it != setBlockIndexCandidates.end();) {
+        CBlockIndex* const candidate{*it};
+        if (candidate->nHeight >= carrier.nHeight &&
+            candidate->GetAncestor(carrier.nHeight) == &carrier) {
+            AddDeferredBTCCReceiptCandidate(
+                logical_id, *branch_carrier, *candidate);
+            it = setBlockIndexCandidates.erase(it);
+            ++moved;
+        } else {
+            ++it;
+        }
+    }
+    const bool carrier_has_candidate{std::any_of(
+        branch->second.begin(), branch->second.end(),
+        [&](const CBlockIndex* candidate) {
+            return candidate->nHeight >= carrier.nHeight &&
+                   candidate->GetAncestor(carrier.nHeight) == &carrier;
+        })};
+    if (!carrier_has_candidate && inserted) {
+        dependency.branches.erase(branch_carrier);
+    }
+    if (dependency.branches.empty()) {
+        m_deferred_btcc_receipt_candidates.erase(logical_id);
+        return false;
+    }
+    LogPrint(BCLog::CHAINLOCKS,
+             "Chainstate::%s -- deferred %u candidate(s) through carrier %s "
+             "for ADVANCE %s\n",
+             __func__, moved, carrier.GetBlockHash().ToString(),
+             logical_id.ToString());
+    return carrier_has_candidate;
+}
+
+bool Chainstate::ReconsiderBTCCReceiptCandidates(const uint256& logical_id)
+{
+    return ReconsiderReceiptCandidates(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK, logical_id);
+}
+
+bool Chainstate::ReconsiderPaymentAuditReceiptCandidates(
+    const uint256& logical_id)
+{
+    return ReconsiderReceiptCandidates(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT, logical_id);
+}
+
+bool Chainstate::ReconsiderReceiptCandidates(
+    DeferredReceiptCertificateKind kind,
+    const uint256& logical_id)
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_deferred_btcc_receipt_candidates.find(logical_id)};
+    if (found == m_deferred_btcc_receipt_candidates.end() ||
+        found->second.kind != kind) {
+        return false;
+    }
+
+    std::set<CBlockIndex*, CBlockIndexWorkComparator> candidates;
+    for (auto& [_, branch_candidates] : found->second.branches) {
+        candidates.insert(branch_candidates.begin(), branch_candidates.end());
+    }
+    m_deferred_btcc_receipt_candidates.erase(found);
+    CBlockIndexWorkComparator compare;
+    for (CBlockIndex* candidate : candidates) {
+        for (CBlockIndex* restore{candidate};
+             restore != nullptr && !m_chain.Contains(restore);
+             restore = restore->pprev) {
+            if (m_chain.Tip() != nullptr && compare(restore, m_chain.Tip())) {
+                break;
+            }
+            if ((restore->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                !restore->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                !restore->HaveNumChainTxs()) {
+                continue;
+            }
+            TryAddBlockIndexCandidate(restore);
+        }
+    }
+    LogPrint(BCLog::CHAINLOCKS,
+             "Chainstate::%s -- reconsidering %u candidate(s) for accepted "
+             "ADVANCE %s\n",
+             __func__, candidates.size(), logical_id.ToString());
+    return !candidates.empty();
+}
+
+bool Chainstate::HasDeferredBTCCReceiptCandidates(
+    const uint256& logical_id) const
+{
+    return HasDeferredReceiptCandidates(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK, logical_id);
+}
+
+bool Chainstate::HasDeferredPaymentAuditReceiptCandidates(
+    const uint256& logical_id) const
+{
+    return HasDeferredReceiptCandidates(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT, logical_id);
+}
+
+bool Chainstate::HasDeferredReceiptCandidates(
+    DeferredReceiptCertificateKind kind,
+    const uint256& logical_id) const
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_deferred_btcc_receipt_candidates.find(logical_id)};
+    return found != m_deferred_btcc_receipt_candidates.end() &&
+           found->second.kind == kind &&
+           std::any_of(found->second.branches.begin(),
+                       found->second.branches.end(),
+                       [](const auto& branch) {
+                           return !branch.second.empty();
+                       });
+}
+
+std::optional<DeferredBTCCReceiptCandidate>
+Chainstate::GetBestDeferredBTCCReceiptCandidate() const
+{
+    return GetBestDeferredReceiptCandidate(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK);
+}
+
+std::optional<DeferredBTCCReceiptCandidate>
+Chainstate::GetBestDeferredPaymentAuditReceiptCandidate() const
+{
+    return GetBestDeferredReceiptCandidate(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT);
+}
+
+std::optional<DeferredBTCCReceiptCandidate>
+Chainstate::GetBestDeferredReceiptCandidate(
+    DeferredReceiptCertificateKind kind) const
+{
+    AssertLockHeld(cs_main);
+    std::optional<DeferredBTCCReceiptCandidate> best;
+    CBlockIndexWorkComparator compare;
+    for (const auto& [logical_id, dependency] :
+         m_deferred_btcc_receipt_candidates) {
+        if (dependency.kind != kind) continue;
+        for (const auto& [carrier, candidates] : dependency.branches) {
+            if ((carrier->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                (carrier->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                carrier->IsAssumedValid() ||
+                !carrier->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                !carrier->HaveNumChainTxs()) {
+                continue;
+            }
+            for (auto it{candidates.rbegin()}; it != candidates.rend(); ++it) {
+                CBlockIndex* const candidate{*it};
+                if ((candidate->nStatus &
+                     (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                    (candidate->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                    candidate->IsAssumedValid() ||
+                    !candidate->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                    !candidate->HaveNumChainTxs() ||
+                    (m_chain.Tip() != nullptr &&
+                     candidate->nChainWork <= m_chain.Tip()->nChainWork)) {
+                    continue;
+                }
+                if (!best || compare(best->best_candidate, candidate)) {
+                    best = DeferredBTCCReceiptCandidate{
+                        logical_id, carrier, candidate};
+                }
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+bool Chainstate::IsBTCCReceiptCandidateDeferred(
+    const CBlockIndex& candidate) const
+{
+    AssertLockHeld(cs_main);
+    return FindDeferredBTCCReceiptDependency(candidate).has_value();
+}
+
+std::optional<std::pair<uint256, const CBlockIndex*>>
+Chainstate::FindDeferredBTCCReceiptDependency(
+    const CBlockIndex& candidate) const
+{
+    AssertLockHeld(cs_main);
+    std::optional<std::pair<uint256, const CBlockIndex*>> earliest;
+    for (const auto& [logical_id, dependency] :
+        m_deferred_btcc_receipt_candidates) {
+        for (const auto& [carrier, _] : dependency.branches) {
+            if ((carrier->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                (carrier->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                !carrier->HaveNumChainTxs() ||
+                candidate.nHeight < carrier->nHeight ||
+                candidate.GetAncestor(carrier->nHeight) != carrier) {
+                continue;
+            }
+            if (!earliest ||
+                carrier->nHeight < earliest->second->nHeight ||
+                (carrier->nHeight == earliest->second->nHeight &&
+                 logical_id < earliest->first)) {
+                earliest = std::pair{logical_id, carrier};
+            }
+        }
+    }
+    return earliest;
+}
+
+void Chainstate::AddDeferredBTCCReceiptCandidate(
+    const uint256& logical_id,
+    const CBlockIndex& carrier,
+    CBlockIndex& candidate)
+{
+    AssertLockHeld(cs_main);
+    const auto dependency{m_deferred_btcc_receipt_candidates.find(logical_id)};
+    Assume(dependency != m_deferred_btcc_receipt_candidates.end());
+    const auto branch{dependency->second.branches.find(&carrier)};
+    Assume(branch != dependency->second.branches.end());
+    auto& candidates{branch->second};
+    for (auto it{candidates.begin()}; it != candidates.end();) {
+        CBlockIndex* const existing{*it};
+        if (existing->nHeight >= candidate.nHeight &&
+            existing->GetAncestor(candidate.nHeight) == &candidate) {
+            return;
+        }
+        if (candidate.nHeight >= existing->nHeight &&
+            candidate.GetAncestor(existing->nHeight) == existing) {
+            it = candidates.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    candidates.insert(&candidate);
+}
+
+void Chainstate::RemoveDeferredBTCCReceiptCandidatesThrough(
+    const CBlockIndex& unusable)
+{
+    AssertLockHeld(cs_main);
+    const auto descends_from = [&](const CBlockIndex& candidate) {
+        return candidate.nHeight >= unusable.nHeight &&
+               candidate.GetAncestor(unusable.nHeight) == &unusable;
+    };
+
+    for (auto dependency{m_deferred_btcc_receipt_candidates.begin()};
+         dependency != m_deferred_btcc_receipt_candidates.end();) {
+        auto& branches{dependency->second.branches};
+        for (auto branch{branches.begin()}; branch != branches.end();) {
+            if (descends_from(*branch->first)) {
+                branch = branches.erase(branch);
+                continue;
+            }
+            auto& candidates{branch->second};
+            for (auto candidate{candidates.begin()};
+                 candidate != candidates.end();) {
+                candidate = descends_from(**candidate)
+                                ? candidates.erase(candidate)
+                                : std::next(candidate);
+            }
+            branch = candidates.empty() ? branches.erase(branch)
+                                        : std::next(branch);
+        }
+        if (branches.empty()) {
+            dependency = m_deferred_btcc_receipt_candidates.erase(dependency);
+        } else {
+            ++dependency;
+        }
+    }
+}
+
+// SYSCOIN: Retire only the exact deferred branch whose witness proved invalid.
+bool ChainstateManager::RetireDeferredPaymentAuditReceiptCarrier(
+    const uint256& witness_id,
+    CBlockIndex& carrier)
+{
+    AssertLockHeld(cs_main);
+    if (witness_id.IsNull()) return false;
+
+    bool exact_branch_found{false};
+    for (Chainstate* chainstate : GetAll()) {
+        if (chainstate->m_chain.Contains(&carrier)) return false;
+        const auto dependency{
+            chainstate->m_deferred_btcc_receipt_candidates.find(witness_id)};
+        if (dependency !=
+                chainstate->m_deferred_btcc_receipt_candidates.end() &&
+            dependency->second.kind ==
+                DeferredReceiptCertificateKind::PAYMENT_AUDIT &&
+            dependency->second.branches.contains(&carrier)) {
+            exact_branch_found = true;
+        }
+    }
+    if (!exact_branch_found) return false;
+
+    BlockValidationState state;
+    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                  "bad-pq-payment-audit-certificate");
+    ActiveChainstate().InvalidBlockFound(&carrier, state);
+    for (Chainstate* chainstate : GetAll()) {
+        chainstate->RemoveDeferredBTCCReceiptCandidatesThrough(carrier);
+    }
+    return true;
+}
+
 /** Delete all entries in setBlockIndexCandidates that are worse than the current tip. */
 void Chainstate::PruneBlockIndexCandidates() {
+    // SYSCOIN: A deferred branch stops mattering once it cannot improve the active
+    // chain. Dropping equal-work entries also preserves the ordinary rule that
+    // an already-active sibling is not reorganized merely because delayed
+    // auxiliary validation became available.
+    for (auto dependency{m_deferred_btcc_receipt_candidates.begin()};
+         dependency != m_deferred_btcc_receipt_candidates.end();) {
+        auto& branches{dependency->second.branches};
+        for (auto branch{branches.begin()}; branch != branches.end();) {
+            const CBlockIndex* const carrier{branch->first};
+            if ((carrier->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                (carrier->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                !carrier->HaveNumChainTxs()) {
+                branch = branches.erase(branch);
+                continue;
+            }
+            auto& candidates{branch->second};
+            for (auto candidate{candidates.begin()};
+                 candidate != candidates.end();) {
+                CBlockIndex* const index{*candidate};
+                const bool unusable{
+                    (index->nStatus &
+                     (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                    !(index->nStatus & BLOCK_HAVE_DATA) ||
+                    !index->HaveNumChainTxs() ||
+                    (m_chain.Tip() != nullptr &&
+                     index->nChainWork <= m_chain.Tip()->nChainWork)};
+                candidate = unusable ? candidates.erase(candidate)
+                                     : std::next(candidate);
+            }
+            branch = candidates.empty() ? branches.erase(branch)
+                                        : std::next(branch);
+        }
+        if (branches.empty()) {
+            dependency = m_deferred_btcc_receipt_candidates.erase(dependency);
+        } else {
+            ++dependency;
+        }
+    }
+
+    const CBlockIndex* known_pq_anchor = m_blockman.LookupBlockIndex(
+        m_chainman.GetConsensus().hashPQLegacyAnchorBlock);
+    if (m_chain.Tip() != nullptr && known_pq_anchor != nullptr &&
+        !Consensus::IsPQLegacyAnchorCompatible(
+            m_chainman.GetConsensus(), m_chain.Tip(), known_pq_anchor)) {
+        // SYSCOIN: The mandatory anchor can first become known while a
+        // higher-work pre-anchor fork is active. Compatible recovery
+        // candidates are intentionally allowed to have less work than that
+        // now-forbidden tip, so it must not be used as the pruning baseline.
+        return;
+    }
+
     // Note that we can't delete the current block itself, as we may need to return to it later in case a
     // reorganization to a better block fails.
     std::set<CBlockIndex*, CBlockIndexWorkComparator>::iterator it = setBlockIndexCandidates.begin();
@@ -3923,7 +5564,8 @@ void Chainstate::PruneBlockIndexCandidates() {
  *
  * @returns true unless a system error occurred
  */
-bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace)
+// SYSCOIN: A missing authenticated receipt defers a candidate without making it invalid.
+bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
@@ -3975,6 +5617,60 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                     }
                     state = BlockValidationState();
                     fInvalidFound = true;
+                    fContinue = false;
+                    break;
+                } else if (state.GetRejectReason() ==
+                               BTCC_RECEIPT_CERTIFICATE_PENDING ||
+                           state.GetRejectReason() ==
+                               PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING) {
+                    // SYSCOIN: The block is neither valid nor invalid until its
+                    // exact ADVANCE certificate arrives. Quarantine every
+                    // currently eligible tip through this carrier so an
+                    // attacker-selected nonexistent ID cannot monopolize the
+                    // work selector. Acceptance of that exact logical object
+                    // restores the branch below.
+                    const CBlock* carrier_block{
+                        pindexConnect == pindexMostWork && pblock
+                            ? pblock.get()
+                            : nullptr};
+                    CBlock disk_block;
+                    if (carrier_block == nullptr) {
+                        if (!m_blockman.ReadBlockFromDisk(disk_block,
+                                                          *pindexConnect)) {
+                            state = BlockValidationState{};
+                            return state.Error(
+                                "pq-btcc-pending-carrier-read-failed");
+                        }
+                        carrier_block = &disk_block;
+                    }
+                    const bool payment_audit_dependency{
+                        state.GetRejectReason() ==
+                        PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING};
+                    bool deferred{false};
+                    if (payment_audit_dependency) {
+                        llmq::pq::PaymentAuditReceipt receipt;
+                        deferred =
+                            ExtractPaymentAuditReceipt(*carrier_block,
+                                                       receipt) &&
+                            !receipt.IsNull() &&
+                            DeferPaymentAuditReceiptCandidates(
+                                receipt.audit_witness_id, *pindexConnect);
+                    } else {
+                        llmq::pq::BTCCReceipt receipt;
+                        deferred = ExtractBTCCReceipt(*carrier_block,
+                                                      receipt) &&
+                                   !receipt.IsNull() &&
+                                   DeferBTCCReceiptCandidates(
+                                       receipt.chainlock_logical_id,
+                                       *pindexConnect);
+                    }
+                    if (!deferred) {
+                        state = BlockValidationState{};
+                        return state.Error(
+                            "pq-receipt-pending-candidate-defer-failed");
+                    }
+                    state = BlockValidationState{};
+                    fReceiptCandidateDeferred = true;
                     fContinue = false;
                     break;
                 } else {
@@ -4087,7 +5783,11 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             const bool was_in_ibd = m_chainman.IsInitialBlockDownload();
             CBlockIndex* starting_tip = m_chain.Tip();
             bool blocks_connected = false;
+            // SYSCOIN: A deferred receipt branch yields immediately to another
+            // already-known candidate rather than waiting for a scheduler tick.
+            bool select_alternative_after_btcc_defer{false};
             do {
+                select_alternative_after_btcc_defer = false;
                 // We absolutely may not unlock cs_main until we've made forward progress
                 // (with the exception of shutdown due to hardware issues, low disk space, etc).
                 ConnectTrace connectTrace; // Destructed before cs_main is unlocked
@@ -4102,13 +5802,21 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 }
 
                 bool fInvalidFound = false;
+                bool fReceiptCandidateDeferred = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
                 // SYSCOIN
-                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, connectTrace)) {
+                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace)) {
                     // A system error occurred
                     return false;
                 }
-                blocks_connected = true;
+                // SYSCOIN: A pending auxiliary certificate can end this step
+                // without connecting a block. Consume ConnectTrace's
+                // single-use result exactly once while distinguishing that
+                // case from real chain progress.
+                auto& connected_blocks = connectTrace.GetBlocksConnected();
+                blocks_connected = blocks_connected ||
+                                   starting_tip != m_chain.Tip() ||
+                                   !connected_blocks.empty();
 
                 if (fInvalidFound) {
                     // Wipe cache, we may need another branch now.
@@ -4116,9 +5824,19 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 }
                 pindexNewTip = m_chain.Tip();
 
-                for (const PerBlockConnectTrace& trace : connectTrace.GetBlocksConnected()) {
+                for (const PerBlockConnectTrace& trace : connected_blocks) {
                     assert(trace.pblock && trace.pindex);
                     GetMainSignals().BlockConnected(this->GetRole(), trace.pblock, trace.pindex);
+                }
+
+                if (fReceiptCandidateDeferred) {
+                    // The quarantined branch is deliberately absent from the
+                    // work set. Select again immediately so an already-known
+                    // verifiable sibling can make progress without waiting for
+                    // another block or scheduler tick.
+                    pindexMostWork = nullptr;
+                    select_alternative_after_btcc_defer = true;
+                    continue;
                 }
 
                 // This will have been toggled in
@@ -4129,7 +5847,10 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 if (m_disabled) {
                     break;
                 }
-            } while (!m_chain.Tip() || (starting_tip && CBlockIndexWorkComparator()(m_chain.Tip(), starting_tip)));
+            } while (select_alternative_after_btcc_defer ||
+                     !m_chain.Tip() ||
+                     (starting_tip && CBlockIndexWorkComparator()(
+                                          m_chain.Tip(), starting_tip)));
             if (!blocks_connected) return true;
             const CBlockIndex* pindexFork = m_chain.FindFork(starting_tip);
             bool still_in_ibd = m_chainman.IsInitialBlockDownload();
@@ -4225,7 +5946,10 @@ bool Chainstate::PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
 
     return ActivateBestChain(state, std::shared_ptr<const CBlock>());
 }
-bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex)
+// SYSCOIN BEGIN: PQ ChainLock enforcement with explicit provenance.
+bool Chainstate::EnforceBestChainLock(
+    const CBlockIndex* bestChainLockBlockIndex,
+    ChainLockEnforcementProvenance provenance)
 {
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(cs_main);
@@ -4236,7 +5960,7 @@ bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex
     BlockValidationState state;
     // Go backwards through the chain referenced by clsig until we find a block that is part of the main chain and invalidate the fork block (next block in main chain).
     LogPrint(BCLog::CHAINLOCKS, "Chainstate::%s -- enforcing block %s via CLSIG\n", __func__, bestChainLockBlockIndex->GetBlockHash().ToString());
-    if (!EnforceBlock(state, bestChainLockBlockIndex)) {
+    if (!EnforceBlock(state, bestChainLockBlockIndex, provenance)) {
         return false;
     }
     // no cs_main allowed
@@ -4261,7 +5985,9 @@ bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex
     }
     return true;
 }
-bool Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pindex)
+bool Chainstate::EnforceBlock(
+    BlockValidationState& state, const CBlockIndex* pindex,
+    ChainLockEnforcementProvenance provenance)
 {
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(cs_main);
@@ -4270,10 +5996,27 @@ bool Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pi
     // blocks.
     LOCK(m_chainstate_mutex);
     LOCK(cs_main);
-    if (!(pindex->nStatus & BLOCK_HAVE_DATA) ||
+    const bool exact_local{
+        provenance == ChainLockEnforcementProvenance::EXACT_LOCAL};
+    const bool verified_durable{
+        provenance == ChainLockEnforcementProvenance::
+                          VERIFIED_DURABLE_CERTIFICATE};
+    constexpr uint32_t exact_local_provenance{
+        BLOCK_PQ_BTCC_INDEX_VALIDATED |
+        BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+    const bool receipt_provenance{
+        exact_local
+            ? (pindex->nStatus & exact_local_provenance) ==
+                  exact_local_provenance
+            : (pindex->nStatus &
+               BLOCK_PQ_RECEIPT_INDEX_VALIDATED) != 0};
+    if ((!exact_local && !verified_durable) ||
+        !(pindex->nStatus & BLOCK_HAVE_DATA) ||
         (pindex->nStatus & BLOCK_FAILED_MASK) ||
+        pindex->IsAssumedValid() || !receipt_provenance ||
         !pindex->IsValid(BLOCK_VALID_SCRIPTS) ||
         (CSuperblock::IsValidBlockHeight(pindex->nHeight) &&
+         !verified_durable &&
          !(pindex->nStatus & BLOCK_GOVERNANCE_VALIDATED))) {
         LogPrintf("Chainstate::%s -- refusing invalid or unverified ChainLock target %s\n",
                   __func__, pindex->GetBlockHash().ToString());
@@ -4300,6 +6043,7 @@ bool Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pi
     }
     return true;
 }
+// SYSCOIN END: PQ ChainLock enforcement with explicit provenance.
 // SYSCOIN
 bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pindex, bool bReverify, bool bUpdateSpecialTxState)
 {
@@ -4419,6 +6163,10 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
         m_blockman.m_dirty_blockindex.insert(to_mark_failed);
         setBlockIndexCandidates.erase(to_mark_failed);
         m_chainman.m_failed_blocks.insert(to_mark_failed);
+        // SYSCOIN: Quarantined BTCC descendants bypass the ordinary
+        // FindMostWorkChain failed-child walk, so invalidate their carrier
+        // dependency at the root instead of leaving a stale GETCLSIG target.
+        RemoveDeferredBTCCReceiptCandidatesThrough(*pindex);
 
         // If any new blocks somehow arrived while we were disconnecting
         // (above), then the pre-calculation of what should go into
@@ -4506,6 +6254,10 @@ bool Chainstate::MarkConflictingBlock(BlockValidationState& state, CBlockIndex *
     // Mark the block itself as conflicting.
     pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
     setBlockIndexCandidates.erase(pindex);
+    // SYSCOIN: A ChainLock conflict makes every quarantined descendant
+    // irrelevant even when those descendants have not inherited the status
+    // bit through ordinary work selection.
+    RemoveDeferredBTCCReceiptCandidatesThrough(*pindex);
 
     // DisconnectTip will add transactions to disconnectpool; try to add these
     // back to the mempool.
@@ -4612,9 +6364,32 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
+    // SYSCOIN: Preserve certificate-deferred quarantine across generic
+    // candidate-repopulation paths.
+    if (const auto dependency{FindDeferredBTCCReceiptDependency(*pindex)}) {
+        AddDeferredBTCCReceiptCandidate(
+            dependency->first, *dependency->second, *pindex);
+        return;
+    }
+    // SYSCOIN: Never admit a candidate whose ancestry conflicts with the
+    // immutable PQ migration anchor, even if it has more accumulated work.
+    const CBlockIndex* known_pq_anchor = m_blockman.LookupBlockIndex(
+        m_chainman.GetConsensus().hashPQLegacyAnchorBlock);
+    if (!Consensus::IsPQLegacyAnchorCompatible(
+            m_chainman.GetConsensus(), pindex, known_pq_anchor)) {
+        pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
+        m_blockman.m_dirty_blockindex.insert(pindex);
+        return;
+    }
+    const bool recovering_from_incompatible_tip =
+        m_chain.Tip() != nullptr && known_pq_anchor != nullptr &&
+        !Consensus::IsPQLegacyAnchorCompatible(
+            m_chainman.GetConsensus(), m_chain.Tip(), known_pq_anchor);
     // The block only is a candidate for the most-work-chain if it has the same
-    // or more work than our current tip.
-    if (m_chain.Tip() != nullptr && setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
+    // or more work than our current tip. A tip excluded by the mandatory
+    // anchor is not a valid work baseline while recovering to the anchor.
+    if (!recovering_from_incompatible_tip && m_chain.Tip() != nullptr &&
+        setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
         return;
     }
     bool is_active_chainstate = this == &m_chainman.ActiveChainstate();
@@ -4848,6 +6623,16 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 
     // Check proof of work
     const Consensus::Params& consensusParams = chainman.GetConsensus();
+    // SYSCOIN: Bind header admission to the migration anchor before PoW fork
+    // choice can make an incompatible pre-PQ state branch selectable.
+    const CBlockIndex* known_pq_anchor =
+        blockman.LookupBlockIndex(consensusParams.hashPQLegacyAnchorBlock);
+    const auto pq_anchor_result = Consensus::CheckPQLegacyAnchor(
+        consensusParams, nHeight, block.GetHash(), pindexPrev, known_pq_anchor);
+    if (pq_anchor_result != Consensus::PQLegacyAnchorResult::DISABLED &&
+        pq_anchor_result != Consensus::PQLegacyAnchorResult::VALID) {
+        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-pq-legacy-anchor");
+    }
     // Disallow legacy blocks after merge-mining start.
     if (!consensusParams.AllowLegacyBlocks(nHeight) && block.IsLegacy()){
         LogPrintf("ERROR: %s: legacy block after auxpow start\n", __func__);
@@ -5035,25 +6820,35 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
             }
         }
     }
-    // SYSCOIN: BTC prev-hash commitment binding for BTCC sign-offset blocks.
-    // Miners commit BTCPREV into the block's coinbase payload (merkle-root committed).
-    // Consensus verifies that it matches this block's AuxPoW parent prev-block hash.
-    {
-        const Consensus::Params& consensusParams = chainman.GetConsensus();
-        const bool btcpRequired = IsBTCCSignHeight(consensusParams, nHeight);
-        if (btcpRequired && block.auxpow) {
-            uint256 btcPrevHashCommit;
-            if (!ExtractBTCPREVCommitment(block, btcPrevHashCommit)) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-btcp-missing");
-            }
-            if (btcPrevHashCommit.IsNull()) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-btcp-null");
-            }
-            const uint256 btcPrevHashExpected = block.auxpow->getParentPrevBlockHash();
-            if (btcPrevHashCommit != btcPrevHashExpected) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-btcp-mismatch");
-            }
+    // SYSCOIN: Contextual checks reject malformed candidates before storing them. The
+    // same helper also runs in ConnectBlock and rollforward because those paths
+    // can be reached without ContextualCheckBlock during state reconstruction.
+    if (!CheckBTCPREVCommitment(block, state, nHeight,
+                                chainman.GetConsensus())) {
+        return false;
+    }
+    if (!CheckBTCCReceiptCommitment(block, state, nHeight,
+                                    chainman.GetConsensus())) {
+        return false;
+    }
+    const auto audit_chainlock_schedule{
+        llmq::pq::MakeChainLockScheduleConfig(
+            chainman.GetConsensus().nPQChainLockEpochOrigin)};
+    const auto audit_btcc_schedule{
+        llmq::pq::GetBTCCScheduleConfig(chainman.GetConsensus())};
+    if (audit_chainlock_schedule && audit_btcc_schedule.IsValid()) {
+        const llmq::pq::PaymentAuditScheduleConfig audit_schedule{
+            *audit_chainlock_schedule, audit_btcc_schedule};
+        if (!audit_schedule.IsValid()) {
+            return state.Error("pq-payment-audit-invalid-schedule");
         }
+        if (!CheckPaymentAuditReceiptCommitment(
+                block, state, nHeight, audit_schedule)) {
+            return false;
+        }
+    } else if (HasPaymentAuditReceiptCommitment(block)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-payment-audit-disabled");
     }
     // After the coinbase witness reserved value and commitment are verified,
     // we can check if the block weight passes (before we've checked the
@@ -5199,6 +6994,14 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     if(pindex == nullptr)
         pindex = m_blockman.AddToBlockIndex(block, m_best_header, nStatus);
 
+    // SYSCOIN: Once the exact anchor header arrives, quarantine every indexed
+    // competing branch before exposing it to normal candidate selection.
+    if (hash == GetConsensus().hashPQLegacyAnchorBlock &&
+        !EnforcePQLegacyAnchorBranches()) {
+        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT,
+                             "bad-pq-legacy-anchor-index");
+    }
+
     if (ppindex)
         *ppindex = pindex;
 
@@ -5340,7 +7143,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // SYSCOIN: cache the contextually validated BTCPREV so ConnectBlock can reuse it
     // without reparsing the coinbase payload in the common accept->connect flow.
     {
-        const bool btcp_required = IsBTCCSignHeight(params.GetConsensus(), pindex->nHeight) &&
+        const bool btcp_required = llmq::pq::IsBTCPREVCommitmentHeight(params.GetConsensus(), pindex->nHeight) &&
                                    block.auxpow;
         if (btcp_required) {
             pindex->m_btcp_prev_contextually_validated = true;
@@ -5492,6 +7295,71 @@ bool TestBlockValidity(BlockValidationState& state,
     assert(state.IsValid());
 
     return true;
+}
+
+// SYSCOIN: Validate an AuxPoW template against its policy-selected Bitcoin parent.
+bool TestAuxpowBlockTemplateValidity(
+    BlockValidationState& state,
+    const CChainParams& chainparams,
+    Chainstate& chainstate,
+    const CBlock& block,
+    CBlockIndex* pindexPrev,
+    const uint256& expected_btc_prev,
+    const std::function<NodeClock::time_point()>& adjusted_time_callback)
+{
+    AssertLockHeld(cs_main);
+    const int32_t height{pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1};
+    uint256 committed;
+    if (pindexPrev == nullptr || block.IsAuxpow() || block.auxpow ||
+        expected_btc_prev.IsNull() ||
+        !llmq::pq::IsBTCPREVCommitmentHeight(
+            chainparams.GetConsensus(), height) ||
+        !ExtractBTCPREVCommitment(block, committed) ||
+        committed != expected_btc_prev) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-template-context");
+    }
+
+    // SYSCOIN: Nexus validates a chain-reference output in the parent
+    // coinbase. Build that exact output on a copied template so all ordinary
+    // block checks run unchanged before the real parent proof is available.
+    int32_t active_height{pindexPrev->nHeight - 5};
+    active_height -= active_height % 10;
+    const CBlockIndex* const reference{
+        pindexPrev->GetAncestor(active_height)};
+    if (reference == nullptr || reference->nHeight < 0) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-template-reference");
+    }
+    CDataStream tag_data{SER_NETWORK, PROTOCOL_VERSION};
+    tag_data << pchSyscoinHeader << reference->GetBlockHash() <<
+        static_cast<uint32_t>(reference->nHeight);
+    const auto tag_bytes{MakeUCharSpan(tag_data)};
+    const CScript tag_script{
+        CScript{} << OP_RETURN <<
+            std::vector<unsigned char>{tag_bytes.begin(), tag_bytes.end()}};
+
+    CBlock validation_block{block};
+    validation_block.fChecked = false;
+    // SYSCOIN: generic template assembly and weight accounting must retain
+    // Bitcoin's invariant that an AuxPoW version always has a proof.  Mark
+    // only this private validation copy before constructing its synthetic
+    // parent; AuxpowMiner marks the returned proof-less work afterward.
+    validation_block.SetAuxpowVersion(true);
+    const uint256 expected_work_hash{validation_block.GetHash()};
+    validation_block.SetAuxpow(CAuxPow::createAuxPowForTemplate(
+        validation_block, expected_btc_prev, tag_script));
+    if (!validation_block.auxpow ||
+        validation_block.auxpow->getParentPrevBlockHash() !=
+            expected_btc_prev ||
+        validation_block.GetHash() != expected_work_hash) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-template-proof");
+    }
+    return TestBlockValidity(
+        state, chainparams, chainstate, validation_block, pindexPrev,
+        adjusted_time_callback, /*fCheckPOW=*/false,
+        /*fCheckMerkleRoot=*/false);
 }
 
 /* This function is called from the RPC code for pruneblockchain */
@@ -5687,7 +7555,8 @@ VerifyDBResult CVerifyDB::VerifyDB(
 }
 
 /** Apply the effects of a block on the utxo cache, ignoring that it may already have been applied. */
-bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
+// SYSCOIN: Rollforward reconstructs branch-bound receipt state before NEVM replay.
+bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
 {
     // TODO: merge with ConnectBlock
     CBlock block;
@@ -5696,12 +7565,74 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
     if (!m_blockman.ReadBlockFromDisk(block, *pindex)) {
         return error("ReplayBlock(): ReadBlockFromDisk failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
     }
+    BlockValidationState state;
+    if (!CheckBTCPREVCommitment(block, state, pindex->nHeight, chainParams)) {
+        return error("ReplayBlock(): CheckBTCPREVCommitment failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    if (!CheckBTCCReceiptCommitment(block, state, pindex->nHeight,
+                                    chainParams)) {
+        return error("ReplayBlock(): CheckBTCCReceiptCommitment failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    // SYSCOIN: A coins-database rollforward must recompute and reauthorize the
+    // receipt accumulator before it can notify NEVM. A crash-persisted pre-seal
+    // keeps the block replayable without ever substituting zero for a real hash.
+    bool btcc_receipt_state_changed{false};
+    if (!ConnectBTCCReceiptState(
+            m_chainman, block, *pindex, state,
+            &btcc_receipt_state_changed,
+            /*require_live_certificate=*/true,
+            /*allow_historical_preseal=*/true)) {
+        return error("ReplayBlock(): ConnectBTCCReceiptState failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    if (btcc_receipt_state_changed) {
+        // SYSCOIN: A valid provenance bit and its accumulator share one block
+        // index record, so rollforward should never observe one without the
+        // other. If recovery does rewrite the accumulator, fail closed rather
+        // than carrying an attestation across an unexpected state change.
+        pindex->nStatus = static_cast<BlockStatus>(
+            pindex->nStatus &
+            ~(BLOCK_PQ_BTCC_INDEX_VALIDATED |
+              BLOCK_PQ_RECEIPT_INDEX_VALIDATED));
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+    bool payment_audit_state_changed{false};
+    std::optional<AppliedPaymentAuditArchiveReference>
+        payment_audit_archive_reference;
+    if (!ConnectPaymentAuditReceiptState(
+            m_chainman, block, *pindex, state,
+            /*fJustCheck=*/false,
+            /*allow_historical_preseal=*/true,
+            &payment_audit_state_changed,
+            &payment_audit_archive_reference)) {
+        return error(
+            "ReplayBlock(): ConnectPaymentAuditReceiptState failed at %d, "
+            "hash=%s state=%s",
+            pindex->nHeight, pindex->GetBlockHash().ToString(),
+            state.ToString());
+    }
+    if (payment_audit_state_changed) {
+        pindex->nStatus = static_cast<BlockStatus>(
+            pindex->nStatus &
+            ~(BLOCK_PQ_BTCC_INDEX_VALIDATED |
+              BLOCK_PQ_RECEIPT_INDEX_VALIDATED));
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
     // SYSCOIN
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     const bool ibd = m_chainman.IsInitialBlockDownload();
     CDeterministicMNListNEVMAddressDiff diff;
-    BlockValidationState state;
-    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, ibd)) {
+    // SYSCOIN: Rollforward only reapplies database effects for blocks which completed
+    // full validation before an interrupted coins-database flush.
+    if (!ProcessSpecialTxsInBlock(
+            m_chainman, block, pindex, state, diff, inputs,
+            false /*fJustCheck*/, false /*fScriptChecks*/, ibd,
+            SpecialTxValidationContext::ALREADY_VALIDATED_ROLLFORWARD)) {
         return error("%s: ProcessSpecialTxsInBlock for block %s failed with %s", __func__,
             pindex->GetBlockHash().ToString(), state.ToString());
     }
@@ -5736,6 +7667,14 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         if (!state.IsValid()) {
             return false;
         }
+    }
+    if (!PinAppliedPaymentAuditArchiveReference(
+            payment_audit_archive_reference, state)) {
+        return error(
+            "ReplayBlock(): payment-audit archive pin failed at %d, "
+            "hash=%s state=%s",
+            pindex->nHeight, pindex->GetBlockHash().ToString(),
+            state.ToString());
     }
     return true;
 }
@@ -5808,11 +7747,15 @@ bool Chainstate::ReplayBlocks()
     // Roll forward from the forking point to the new tip.
     int nForkHeight = pindexFork ? pindexFork->nHeight : 0;
     for (int nHeight = nForkHeight + 1; nHeight <= pindexNew->nHeight; ++nHeight) {
-        const CBlockIndex& pindex{*Assert(pindexNew->GetAncestor(nHeight))};
-        LogPrintf("Rolling forward %s (%i)\n", pindex.GetBlockHash().ToString(), nHeight);
+        const CBlockIndex* ancestor{Assert(pindexNew->GetAncestor(nHeight))};
+        // SYSCOIN: Receipt replay mutates the persisted accumulator on the
+        // canonical in-memory index entry, not an immutable ancestor view.
+        CBlockIndex* pindex{Assert(
+            m_blockman.LookupBlockIndex(ancestor->GetBlockHash()))};
+        LogPrintf("Rolling forward %s (%i)\n", pindex->GetBlockHash().ToString(), nHeight);
         m_chainman.GetNotifications().progress(_("Replaying blocks…"), (int)((nHeight - nForkHeight) * 100.0 / (pindexNew->nHeight - nForkHeight)), false);
         // SYSCOIN
-        if (!RollforwardBlock(&pindex, cache, mapNEVMTxRoots, setMintTxsConnect, mapPoDAConnect, vecTXIDPairs)) return false;
+        if (!RollforwardBlock(pindex, cache, mapNEVMTxRoots, setMintTxsConnect, mapPoDAConnect, vecTXIDPairs)) return false;
     }
 
     cache.SetBestBlock(pindexNew->GetBlockHash());
@@ -5872,6 +7815,84 @@ void Chainstate::ClearBlockIndexCandidates()
 {
     AssertLockHeld(::cs_main);
     setBlockIndexCandidates.clear();
+    // SYSCOIN: Candidate reset also discards transient receipt quarantine.
+    m_deferred_btcc_receipt_candidates.clear();
+}
+
+// SYSCOIN: Quarantine every indexed branch incompatible with the pinned migration anchor.
+bool ChainstateManager::EnforcePQLegacyAnchorBranches()
+{
+    AssertLockHeld(cs_main);
+    const auto& consensus = GetConsensus();
+    const auto configuration = Consensus::CheckPQLegacyAnchorConfiguration(consensus);
+    if (configuration == Consensus::PQLegacyAnchorResult::DISABLED) return true;
+    if (configuration != Consensus::PQLegacyAnchorResult::VALID) return false;
+
+    CBlockIndex* anchor = m_blockman.LookupBlockIndex(consensus.hashPQLegacyAnchorBlock);
+    if (anchor == nullptr) return true;
+    if (anchor->nHeight != consensus.nPQLegacyAnchorHeight) return false;
+
+    const auto chainstates = GetAll();
+    m_best_header = nullptr;
+    for (auto& [_, index] : m_blockman.m_block_index) {
+        CBlockIndex* pindex = &index;
+        if (!Consensus::IsPQLegacyAnchorCompatible(consensus, pindex, anchor)) {
+            if (!(pindex->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
+                pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
+                m_blockman.m_dirty_blockindex.insert(pindex);
+            }
+            for (Chainstate* chainstate : chainstates) {
+                chainstate->setBlockIndexCandidates.erase(pindex);
+            }
+            continue;
+        }
+        if (!(pindex->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+            pindex->IsValid(BLOCK_VALID_TREE) &&
+            (m_best_header == nullptr ||
+             CBlockIndexWorkComparator()(m_best_header, pindex))) {
+            m_best_header = pindex;
+        }
+    }
+
+    // SYSCOIN: The anchor scan marks every incompatible carrier directly,
+    // including branches hidden from ordinary candidate selection.
+    for (Chainstate* chainstate : chainstates) {
+        if (chainstate->m_chain.Tip() != nullptr &&
+            !chainstate->setBlockIndexCandidates.empty()) {
+            chainstate->PruneBlockIndexCandidates();
+        }
+    }
+
+    // SYSCOIN: Before the anchor header arrived, ordinary work-based pruning
+    // may have removed every compatible candidate below a higher-work fork.
+    // Seed each recovering chainstate from the anchored branch. Full anchor
+    // block receipt will subsequently promote the anchor itself through the
+    // normal candidate path.
+    for (Chainstate* chainstate : chainstates) {
+        if (chainstate->m_chain.Tip() == nullptr ||
+            Consensus::IsPQLegacyAnchorCompatible(
+                consensus, chainstate->m_chain.Tip(), anchor)) {
+            continue;
+        }
+
+        for (CBlockIndex* recovery = anchor; recovery != nullptr;
+             recovery = recovery->pprev) {
+            const bool eligible =
+                recovery == GetSnapshotBaseBlock() ||
+                (recovery->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                 !(recovery->nStatus & BLOCK_CONFLICT_CHAINLOCK) &&
+                 (recovery->HaveNumChainTxs() || recovery->pprev == nullptr));
+            if (!eligible) continue;
+
+            const size_t candidate_count = chainstate->setBlockIndexCandidates.size();
+            chainstate->TryAddBlockIndexCandidate(recovery);
+            if (chainstate->setBlockIndexCandidates.size() != candidate_count ||
+                chainstate->setBlockIndexCandidates.count(recovery) != 0) {
+                break;
+            }
+        }
+    }
+    return m_best_header != nullptr;
 }
 
 bool ChainstateManager::LoadBlockIndex()
@@ -5889,8 +7910,36 @@ bool ChainstateManager::LoadBlockIndex()
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
 
+        // SYSCOIN: Enforce the pinned migration boundary before ordinary
+        // best-header and candidate reconstruction.
+        const auto pq_anchor_configuration =
+            Consensus::CheckPQLegacyAnchorConfiguration(GetConsensus());
+        if (pq_anchor_configuration == Consensus::PQLegacyAnchorResult::INVALID_CONFIGURATION) {
+            LogPrintf("%s: incomplete mandatory PQ legacy anchor configuration\n", __func__);
+            return false;
+        }
+
+        if (!EnforcePQLegacyAnchorBranches()) {
+            LogPrintf("%s: failed to enforce mandatory PQ legacy anchor branches\n", __func__);
+            return false;
+        }
+
+        const CBlockIndex* known_pq_anchor =
+            m_blockman.LookupBlockIndex(GetConsensus().hashPQLegacyAnchorBlock);
+
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
+            if (!Consensus::IsPQLegacyAnchorCompatible(
+                    GetConsensus(), pindex, known_pq_anchor)) {
+                // SYSCOIN: exclude stale pre-fork database branches before
+                // candidate/header selection. A header-only branch must not
+                // remain m_best_header and poison headers-first sync.
+                if (!(pindex->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
+                    pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
+                    m_blockman.m_dirty_blockindex.insert(pindex);
+                }
+                continue;
+            }
             // If we have an assumeutxo-based chainstate, then the snapshot
             // block will be a candidate for the tip, but it may not be
             // VALID_TRANSACTIONS (eg if we haven't yet downloaded the block),
@@ -6319,7 +8368,8 @@ void ChainstateManager::CheckBlockIndex()
                         // as a candidate, but a background chainstate should
                         // only have it if it is an ancestor of the snapshot base.
                         if (is_active || GetSnapshotBaseBlock()->GetAncestor(pindex->nHeight) == pindex) {
-                            assert(c->setBlockIndexCandidates.count(pindex));
+                            assert(c->setBlockIndexCandidates.count(pindex) ||
+                                   c->IsBTCCReceiptCandidateDeferred(*pindex));
                         }
                     }
                     // If some parent is missing, then it could be that this block was in
@@ -6360,7 +8410,11 @@ void ChainstateManager::CheckBlockIndex()
             // setBlockIndexCandidates, then it must be in m_blocks_unlinked.
             for (auto c : GetAll()) {
                 const bool is_active = c == &ActiveChainstate();
-                if (!CBlockIndexWorkComparator()(pindex, c->m_chain.Tip()) && c->setBlockIndexCandidates.count(pindex) == 0) {
+                // SYSCOIN: Receipt-deferred candidates are intentionally absent
+                // from the ordinary work set and need not be unlinked.
+                if (!CBlockIndexWorkComparator()(pindex, c->m_chain.Tip()) &&
+                    c->setBlockIndexCandidates.count(pindex) == 0 &&
+                    !c->IsBTCCReceiptCandidateDeferred(*pindex)) {
                     if (pindexFirstInvalid == nullptr) {
                         if (is_active || GetSnapshotBaseBlock()->GetAncestor(pindex->nHeight) == pindex) {
                             assert(foundInUnlinked);
@@ -6422,23 +8476,25 @@ void ChainstateManager::CheckBlockIndex()
     assert(nNodes == forward.size());
 }
 
-// SYSCOIN: fill btcpPrevCommitment for recent sign-offset blocks if missing.
+// SYSCOIN: fill recent PQ BTCPREV candidate commitments if missing.
 void ChainstateManager::BackfillRecentBTCPREVCommitments()
 {
     LOCK(cs_main);
 
     const auto& consensus = GetConsensus();
-    if (!IsBTCCDeploymentConfigured(consensus)) return;
+    const auto config{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!config.IsValid()) return;
 
-    const int start = consensus.nBTCCStartBlock;
+    const int start = config.candidate_origin;
     const int tip = ActiveHeight();
     if (tip < 0 || tip < start) return;
 
-    // Only need a small window: carriers reference the (h-5) sign-offset block.
-    const int low = std::max(start, tip - (BTCCHECK_PERIOD * 2));
+    // The deterministic NEVM lag and live cursor validation only need a small
+    // recent window; older values are populated during normal block replay.
+    const int low = std::max(start, tip - static_cast<int>(config.candidate_period * 2));
 
     for (int h = tip; h >= low; --h) {
-        if (!IsBTCCSignHeight(consensus, h)) continue;
+        if (!llmq::pq::IsBTCPREVCommitmentHeight(consensus, h)) continue;
         CBlockIndex* pindex = ActiveChain()[h];
         if (!pindex) continue;
         if (!pindex->btcpPrevCommitment.IsNull()) continue;
@@ -7349,14 +9405,10 @@ namespace {
 int GetManagedBTCHeaderDefaultP2PPort(ChainType chain_type)
 {
     switch (chain_type) {
-    case ChainType::MAIN:
-        return DEFAULT_BTC_HEADER_MAINNET_P2P_PORT;
-    case ChainType::TESTNET:
-        return DEFAULT_BTC_HEADER_TESTNET_P2P_PORT;
-    case ChainType::SIGNET:
-        return DEFAULT_BTC_HEADER_SIGNET_P2P_PORT;
-    case ChainType::REGTEST:
-        return DEFAULT_BTC_HEADER_REGTEST_P2P_PORT;
+    case ChainType::MAIN: return DEFAULT_BTC_HEADER_MAINNET_P2P_PORT;
+    case ChainType::TESTNET: return DEFAULT_BTC_HEADER_TESTNET_P2P_PORT;
+    case ChainType::SIGNET: return DEFAULT_BTC_HEADER_SIGNET_P2P_PORT;
+    case ChainType::REGTEST: return DEFAULT_BTC_HEADER_REGTEST_P2P_PORT;
     }
     return DEFAULT_BTC_HEADER_MAINNET_P2P_PORT;
 }
@@ -7364,28 +9416,26 @@ int GetManagedBTCHeaderDefaultP2PPort(ChainType chain_type)
 int GetManagedBTCHeaderDefaultRPCPort(ChainType chain_type)
 {
     switch (chain_type) {
-    case ChainType::MAIN:
-        return DEFAULT_BTC_HEADER_MAINNET_RPC_PORT;
-    case ChainType::TESTNET:
-        return DEFAULT_BTC_HEADER_TESTNET_RPC_PORT;
-    case ChainType::SIGNET:
-        return DEFAULT_BTC_HEADER_SIGNET_RPC_PORT;
-    case ChainType::REGTEST:
-        return DEFAULT_BTC_HEADER_REGTEST_RPC_PORT;
+    case ChainType::MAIN: return DEFAULT_BTC_HEADER_MAINNET_RPC_PORT;
+    case ChainType::TESTNET: return DEFAULT_BTC_HEADER_TESTNET_RPC_PORT;
+    case ChainType::SIGNET: return DEFAULT_BTC_HEADER_SIGNET_RPC_PORT;
+    case ChainType::REGTEST: return DEFAULT_BTC_HEADER_REGTEST_RPC_PORT;
     }
     return DEFAULT_BTC_HEADER_MAINNET_RPC_PORT;
 }
 
 bool ParseManagedBTCHeaderPorts(int& p2p_port_out, int& rpc_port_out)
 {
-    const int64_t p2p_port = gArgs.GetIntArg("-btcheaderport", GetManagedBTCHeaderDefaultP2PPort(Params().GetChainType()));
-    const int64_t rpc_port = gArgs.GetIntArg("-btcheaderrpcport", GetManagedBTCHeaderDefaultRPCPort(Params().GetChainType()));
-    if (p2p_port < 1 || p2p_port > 65535) {
-        LogPrintf("Invalid -btcheaderport=%d (must be 1..65535)\n", p2p_port);
-        return false;
-    }
-    if (rpc_port < 1 || rpc_port > 65535) {
-        LogPrintf("Invalid -btcheaderrpcport=%d (must be 1..65535)\n", rpc_port);
+    const int64_t p2p_port{gArgs.GetIntArg(
+        "-btcheaderport",
+        GetManagedBTCHeaderDefaultP2PPort(Params().GetChainType()))};
+    const int64_t rpc_port{gArgs.GetIntArg(
+        "-btcheaderrpcport",
+        GetManagedBTCHeaderDefaultRPCPort(Params().GetChainType()))};
+    if (p2p_port < 1 || p2p_port > 65535 ||
+        rpc_port < 1 || rpc_port > 65535 || p2p_port == rpc_port) {
+        LogPrintf("Invalid managed BTC header ports (p2p=%d rpc=%d)\n",
+                  p2p_port, rpc_port);
         return false;
     }
     p2p_port_out = static_cast<int>(p2p_port);
@@ -7411,144 +9461,545 @@ std::string GetBTCHeaderCliFilename()
 #endif
 }
 
-void AppendBTCHeaderNetworkArg(std::vector<std::string>& args_out)
+void AppendBTCHeaderNetworkArg(std::vector<std::string>& args)
 {
     switch (Params().GetChainType()) {
-    case ChainType::MAIN:
-        break;
-    case ChainType::TESTNET:
-        args_out.emplace_back("-testnet=1");
-        break;
-    case ChainType::SIGNET:
-        args_out.emplace_back("-signet=1");
-        break;
-    case ChainType::REGTEST:
-        args_out.emplace_back("-regtest=1");
-        break;
+    case ChainType::MAIN: break;
+    case ChainType::TESTNET: args.emplace_back("-testnet=1"); break;
+    case ChainType::SIGNET: args.emplace_back("-signet=1"); break;
+    case ChainType::REGTEST: args.emplace_back("-regtest=1"); break;
     }
 }
 
-void AppendBTCHeaderNetworkArgCli(std::string& cmd_out)
+std::vector<std::string> BuildManagedBTCHeaderRPCArgs(
+    const fs::path& cli_binary, const fs::path& data_dir, int rpc_port)
 {
-    switch (Params().GetChainType()) {
-    case ChainType::MAIN:
-        break;
-    case ChainType::TESTNET:
-        cmd_out += " -testnet";
-        break;
-    case ChainType::SIGNET:
-        cmd_out += " -signet";
-        break;
-    case ChainType::REGTEST:
-        cmd_out += " -regtest";
-        break;
-    }
-}
-
-std::vector<std::string> BuildManagedBTCHeaderRPCArgs(const fs::path& cli_binary, const fs::path& data_dir, int rpc_port)
-{
-    std::vector<std::string> args;
-    args.emplace_back(fs::PathToString(cli_binary));
-    args.emplace_back(strprintf("-datadir=%s", fs::PathToString(data_dir)));
-    args.emplace_back(strprintf("-rpcport=%d", rpc_port));
+    std::vector<std::string> args{
+        fs::PathToString(cli_binary),
+        strprintf("-datadir=%s", fs::PathToString(data_dir)),
+        strprintf("-rpcport=%d", rpc_port),
+    };
     AppendBTCHeaderNetworkArg(args);
     return args;
 }
 
 fs::path ResolveFirstExistingPath(const std::vector<fs::path>& candidates)
 {
-    for (const auto& candidate : candidates) {
+    for (fs::path candidate : candidates) {
         if (candidate.empty()) continue;
-        fs::path preferred = candidate;
-        preferred.make_preferred();
-        if (fs::exists(preferred)) return preferred;
+        candidate.make_preferred();
+        if (fs::is_regular_file(candidate)) return candidate;
     }
-    return fs::path{};
+    return {};
 }
 
-fs::path ResolveManagedBTCHeaderBinaryPath(const fs::path& exec_path, const fs::path& datadir_base, const std::string& filename)
+fs::path AppendPath(fs::path base, const fs::path& child)
 {
-    const fs::path filename_path = fs::u8path(filename);
-    const std::string configured = gArgs.GetArg("-btcheaderbinary", "");
-    if (!configured.empty()) {
-        const fs::path configured_path = fs::u8path(configured).make_preferred();
-        if (fs::exists(configured_path)) return configured_path;
-        LogPrintf("Configured -btcheaderbinary not found: %s\n", fs::PathToString(configured_path));
-        return fs::path{};
-    }
+    base /= child;
+    return base;
+}
 
+fs::path ResolveManagedBTCHeaderBinaryPath(
+    const fs::path& exec_path, const fs::path& datadir_base,
+    const std::string& filename)
+{
+    const std::string configured{gArgs.GetArg("-btcheaderbinary", "")};
+    if (!configured.empty()) {
+        const fs::path path{fs::PathFromString(configured)};
+        if (fs::is_regular_file(path)) return path;
+        LogPrintf("Configured -btcheaderbinary not found: %s\n",
+                  fs::PathToString(path));
+        return {};
+    }
+    const fs::path name{fs::PathFromString(filename)};
     return ResolveFirstExistingPath({
-        exec_path / "../Resources" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "bin" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "btcheadernode" / "bin" / filename_path,
-        exec_path / "../Resources" / filename_path,
-        exec_path / filename_path,
-        exec_path / "daemon" / filename_path,
-        datadir_base / "btcheadernode" / "bin" / filename_path,
-        datadir_base / filename_path,
+        AppendPath(exec_path / "../Resources" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "bin" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "../Resources", name),
+        AppendPath(exec_path, name),
+        AppendPath(exec_path / "daemon", name),
+        AppendPath(datadir_base / "btcheadernode" / "bin", name),
 #ifndef WIN32
-        fs::u8path("/usr/local/bin") / filename_path,
-        fs::u8path("/usr/bin") / filename_path,
+        AppendPath(fs::PathFromString("/usr/local/bin"), name),
+        AppendPath(fs::PathFromString("/usr/bin"), name),
 #endif
     });
 }
 
-fs::path ResolveManagedBTCHeaderCliPath(const fs::path& bitcoind_path, const fs::path& exec_path, const fs::path& datadir_base, const std::string& filename)
+fs::path ResolveManagedBTCHeaderCliPath(
+    const fs::path& bitcoind_path, const fs::path& exec_path,
+    const fs::path& datadir_base, const std::string& filename)
 {
-    const fs::path filename_path = fs::u8path(filename);
-    fs::path sibling_cli = bitcoind_path.parent_path();
-    sibling_cli /= filename_path;
-    const std::string configured = gArgs.GetArg("-btcheaderclibinary", "");
+    const std::string configured{gArgs.GetArg("-btcheaderclibinary", "")};
     if (!configured.empty()) {
-        const fs::path configured_path = fs::u8path(configured).make_preferred();
-        if (fs::exists(configured_path)) return configured_path;
-        LogPrintf("Configured -btcheaderclibinary not found: %s\n", fs::PathToString(configured_path));
-        return fs::path{};
+        const fs::path path{fs::PathFromString(configured)};
+        if (fs::is_regular_file(path)) return path;
+        LogPrintf("Configured -btcheaderclibinary not found: %s\n",
+                  fs::PathToString(path));
+        return {};
     }
-
+    const fs::path name{fs::PathFromString(filename)};
     return ResolveFirstExistingPath({
-        sibling_cli,
-        exec_path / "../Resources" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "bin" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "btcheadernode" / "bin" / filename_path,
-        exec_path / "../Resources" / filename_path,
-        exec_path / filename_path,
-        exec_path / "daemon" / filename_path,
-        datadir_base / "btcheadernode" / "bin" / filename_path,
-        datadir_base / filename_path,
+        AppendPath(bitcoind_path.parent_path(), name),
+        AppendPath(exec_path / "../Resources" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "bin" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "../Resources", name),
+        AppendPath(exec_path, name),
+        AppendPath(exec_path / "daemon", name),
+        AppendPath(datadir_base / "btcheadernode" / "bin", name),
 #ifndef WIN32
-        fs::u8path("/usr/local/bin") / filename_path,
-        fs::u8path("/usr/bin") / filename_path,
+        AppendPath(fs::PathFromString("/usr/local/bin"), name),
+        AppendPath(fs::PathFromString("/usr/bin"), name),
 #endif
     });
 }
 
-std::vector<std::string> SanitizeBTCHeaderNodeCmdLine(const std::vector<std::string>& extra_args, const fs::path& binary_url, const fs::path& data_dir, int p2p_port, int rpc_port, bool force_reindex)
+bool IsUnsafeManagedBTCHeaderDataDir(const fs::path& data_dir,
+                                     const fs::path& syscoin_data_dir)
 {
-    std::vector<std::string> cmd;
-    cmd.push_back(fs::PathToString(binary_url));
-    for (const auto& arg : extra_args) cmd.push_back(arg);
-    cmd.push_back("-headersonly=1");
-    cmd.push_back("-server=1");
-    cmd.push_back("-daemon=0");
-    cmd.push_back(strprintf("-datadir=%s", fs::PathToString(data_dir)));
-    cmd.push_back(strprintf("-port=%d", p2p_port));
-    cmd.push_back(strprintf("-rpcport=%d", rpc_port));
-    if (force_reindex) {
-        cmd.push_back("-reindex=1");
+    try {
+        // SYSCOIN: Resolve all existing symlink components before doing ancestry and
+        // equivalence checks. The caller repeats this after mkdir and passes
+        // the resolved path to both daemon and CLI, so an alias cannot turn a
+        // dedicated child datadir into the Syscoin datadir or filesystem root.
+        const fs::path child{
+            fs::weakly_canonical(fs::absolute(data_dir))};
+        const fs::path syscoin{
+            fs::weakly_canonical(fs::absolute(syscoin_data_dir))};
+        if (child.empty() || child == child.root_path() || child == syscoin) {
+            return true;
+        }
+        auto child_it{child.begin()};
+        auto syscoin_it{syscoin.begin()};
+        while (child_it != child.end() && syscoin_it != syscoin.end() &&
+               *child_it == *syscoin_it) {
+            ++child_it;
+            ++syscoin_it;
+        }
+        if (child_it == child.end()) return true;
+        if ((fs::exists(child) && !fs::is_directory(child)) ||
+            !fs::is_directory(syscoin) ||
+            (fs::exists(child) && fs::equivalent(child, syscoin))) {
+            return true;
+        }
+    } catch (const fs::filesystem_error&) {
+        return true;
     }
-    AppendBTCHeaderNetworkArg(cmd);
-    return cmd;
+    return false;
 }
 
-std::string BuildManagedBTCHeaderRPCCommand(const fs::path& cli_binary, const fs::path& data_dir, int rpc_port)
+bool IsProtectedBTCHeaderArg(const std::string& arg)
 {
-    std::string cmd = strprintf("%s -datadir=%s -rpcport=%d",
-        fs::quoted(fs::PathToString(cli_binary)),
-        fs::quoted(fs::PathToString(data_dir)),
-        rpc_port);
-    AppendBTCHeaderNetworkArgCli(cmd);
-    return cmd;
+    if (arg.empty() || arg.front() != '-') return false;
+    const std::size_t name_end{arg.find('=')};
+    std::string name{arg.substr(0, name_end)};
+    while (!name.empty() && name.front() == '-') name.erase(name.begin());
+    if (name.rfind("no", 0) == 0) name.erase(0, 2);
+    // SYSCOIN: Headers-only must remain transaction-relay-free even if an
+    // operator appends a conflicting child argument after the fixed profile.
+    static const std::array<const char*, 13> protected_names{
+        "chain", "testnet", "signet", "regtest", "datadir", "port",
+        "rpcport", "server", "daemon", "headersonly", "blocksonly", "reindex",
+        "uacomment"};
+    return std::any_of(protected_names.begin(), protected_names.end(),
+                       [&](const char* protected_name) {
+                           return name == protected_name;
+                       });
+}
+
+std::optional<std::vector<std::string>> BuildManagedBTCHeaderNodeArgs(
+    const std::vector<std::string>& extra_args,
+    const fs::path& binary, const fs::path& data_dir,
+    int p2p_port, int rpc_port, bool force_reindex,
+    const std::string& owner_comment)
+{
+    if (extra_args.size() > 64 || owner_comment.empty() ||
+        owner_comment.size() > 128 ||
+        owner_comment.find_first_not_of(
+            "abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos) {
+        return std::nullopt;
+    }
+    std::vector<std::string> args{fs::PathToString(binary)};
+    for (const std::string& arg : extra_args) {
+        if (arg.size() > 4096 || arg.find('\0') != std::string::npos ||
+            IsProtectedBTCHeaderArg(arg)) {
+            return std::nullopt;
+        }
+        args.push_back(arg);
+    }
+    args.emplace_back("-headersonly=1");
+    args.emplace_back("-blocksonly=1");
+    args.emplace_back("-server=1");
+    args.emplace_back("-daemon=0");
+    args.emplace_back(strprintf("-datadir=%s", fs::PathToString(data_dir)));
+    args.emplace_back(strprintf("-port=%d", p2p_port));
+    args.emplace_back(strprintf("-rpcport=%d", rpc_port));
+    args.emplace_back("-uacomment=" + owner_comment);
+    if (force_reindex) args.emplace_back("-reindex=1");
+    AppendBTCHeaderNetworkArg(args);
+    return args;
+}
+
+// SYSCOIN: Version 2 persists the observed Bitcoin tip and wall-clock time so
+// a child restart cannot reset the configured no-progress/eclipse window.
+constexpr int MANAGED_BTC_HEADER_OWNER_VERSION{2};
+constexpr std::size_t MAX_MANAGED_BTC_HEADER_OWNER_FILE{8192};
+constexpr std::string_view MANAGED_BTC_HEADER_OWNER_FILENAME{
+    ".syscoin-btcheader-owner-v2.json"};
+constexpr std::string_view MANAGED_BTC_HEADER_OWNER_PREFIX{
+    "syscoinbtcc_"};
+constexpr int64_t MANAGED_BTC_HEADER_OWNER_MAX_FUTURE_TIME{300};
+
+struct ManagedBTCHeaderOwnerRecord {
+    std::string comment;
+    fs::path node_binary;
+    fs::path cli_binary;
+    std::string chain;
+    int p2p_port{0};
+    int rpc_port{0};
+    int64_t pid{-1};
+    int64_t last_tip_height{-1};
+    uint256 last_tip_hash;
+    int64_t last_progress_time{0};
+};
+
+std::optional<ManagedBTCHeaderOwnerRecord> g_managed_btcheader_owner_record
+    GUARDED_BY(cs_btcheader);
+
+bool IsValidManagedBTCHeaderOwnerComment(const std::string& comment)
+{
+    if (comment.size() != MANAGED_BTC_HEADER_OWNER_PREFIX.size() + 64 ||
+        comment.compare(0, MANAGED_BTC_HEADER_OWNER_PREFIX.size(),
+                        MANAGED_BTC_HEADER_OWNER_PREFIX.data(),
+                        MANAGED_BTC_HEADER_OWNER_PREFIX.size()) != 0) {
+        return false;
+    }
+    const std::string token{
+        comment.substr(MANAGED_BTC_HEADER_OWNER_PREFIX.size())};
+    return IsHex(token) && token.find_first_not_of('0') != std::string::npos;
+}
+
+bool ParseOwnerInteger(const UniValue& object, const char* key,
+                       int64_t& value)
+{
+    const UniValue& encoded{object.find_value(key)};
+    if (!encoded.isNum()) return false;
+    try {
+        value = encoded.getInt<int64_t>();
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool ReadManagedBTCHeaderOwnerRecord(
+    const fs::path& owner_path, const fs::path& expected_node_binary,
+    const fs::path& expected_cli_binary, const std::string& expected_chain,
+    int expected_p2p_port, int expected_rpc_port,
+    ManagedBTCHeaderOwnerRecord& record, std::string& error)
+{
+    error.clear();
+    try {
+        if (!fs::exists(owner_path)) {
+            error = "owner-record-missing";
+            return false;
+        }
+        if (fs::is_symlink(owner_path) || !fs::is_regular_file(owner_path)) {
+            error = "owner-record-not-regular-file";
+            return false;
+        }
+    } catch (const fs::filesystem_error& e) {
+        error = strprintf("owner-record-stat-failed:%s", e.what());
+        return false;
+    }
+
+    const auto [read_ok, contents]{ReadBinaryFile(
+        owner_path, MAX_MANAGED_BTC_HEADER_OWNER_FILE + 1)};
+    if (!read_ok || contents.size() > MAX_MANAGED_BTC_HEADER_OWNER_FILE) {
+        error = "owner-record-read-failed";
+        return false;
+    }
+    UniValue object;
+    if (!object.read(contents) || !object.isObject()) {
+        error = "owner-record-invalid-json";
+        return false;
+    }
+
+    int64_t version{0};
+    int64_t p2p_port{0};
+    int64_t rpc_port{0};
+    int64_t pid{-1};
+    int64_t last_tip_height{-1};
+    int64_t last_progress_time{0};
+    const UniValue& comment{object.find_value("comment")};
+    const UniValue& node_binary{object.find_value("node_binary")};
+    const UniValue& cli_binary{object.find_value("cli_binary")};
+    const UniValue& chain{object.find_value("chain")};
+    const UniValue& last_tip_hash{object.find_value("last_tip_hash")};
+    if (!ParseOwnerInteger(object, "version", version) ||
+        version != MANAGED_BTC_HEADER_OWNER_VERSION ||
+        !ParseOwnerInteger(object, "p2p_port", p2p_port) ||
+        !ParseOwnerInteger(object, "rpc_port", rpc_port) ||
+        !ParseOwnerInteger(object, "pid", pid) ||
+        !ParseOwnerInteger(object, "last_tip_height", last_tip_height) ||
+        !ParseOwnerInteger(object, "last_progress_time", last_progress_time) ||
+        !comment.isStr() || !node_binary.isStr() || !cli_binary.isStr() ||
+        !chain.isStr() || !last_tip_hash.isStr() ||
+        !IsValidManagedBTCHeaderOwnerComment(comment.get_str()) ||
+        p2p_port != expected_p2p_port || rpc_port != expected_rpc_port ||
+        (pid != -1 && pid <= 0)) {
+        error = "owner-record-invalid-fields";
+        return false;
+    }
+
+    uint256 parsed_tip_hash;
+    if (last_tip_hash.get_str().size() != 64 ||
+        !IsHex(last_tip_hash.get_str())) {
+        error = "owner-record-invalid-progress";
+        return false;
+    }
+    parsed_tip_hash.SetHex(last_tip_hash.get_str());
+    const bool progress_unset{
+        last_tip_height == -1 && parsed_tip_hash.IsNull() &&
+        last_progress_time == 0};
+    const bool progress_set{
+        last_tip_height >= 0 && !parsed_tip_hash.IsNull() &&
+        last_progress_time > 0 &&
+        last_progress_time <=
+            GetTime() + MANAGED_BTC_HEADER_OWNER_MAX_FUTURE_TIME};
+    if (!progress_unset && !progress_set) {
+        error = "owner-record-invalid-progress";
+        return false;
+    }
+
+    record = ManagedBTCHeaderOwnerRecord{
+        comment.get_str(), fs::PathFromString(node_binary.get_str()),
+        fs::PathFromString(cli_binary.get_str()), chain.get_str(),
+        static_cast<int>(p2p_port), static_cast<int>(rpc_port), pid,
+        last_tip_height, parsed_tip_hash, last_progress_time};
+    if (record.node_binary != expected_node_binary ||
+        record.cli_binary != expected_cli_binary ||
+        record.chain != expected_chain) {
+        error = "owner-record-config-mismatch";
+        return false;
+    }
+    return true;
+}
+
+bool WriteManagedBTCHeaderOwnerRecord(
+    const fs::path& owner_path, const ManagedBTCHeaderOwnerRecord& record,
+    std::string& error)
+{
+    error.clear();
+    if (!IsValidManagedBTCHeaderOwnerComment(record.comment) ||
+        record.node_binary.empty() || record.cli_binary.empty() ||
+        record.chain.empty() || record.p2p_port <= 0 ||
+        record.rpc_port <= 0 || (record.pid != -1 && record.pid <= 0)) {
+        error = "owner-record-invalid-fields";
+        return false;
+    }
+    const bool progress_unset{
+        record.last_tip_height == -1 && record.last_tip_hash.IsNull() &&
+        record.last_progress_time == 0};
+    const bool progress_set{
+        record.last_tip_height >= 0 && !record.last_tip_hash.IsNull() &&
+        record.last_progress_time > 0 &&
+        record.last_progress_time <=
+            GetTime() + MANAGED_BTC_HEADER_OWNER_MAX_FUTURE_TIME};
+    if (!progress_unset && !progress_set) {
+        error = "owner-record-invalid-progress";
+        return false;
+    }
+
+    UniValue object(UniValue::VOBJ);
+    object.pushKV("version", MANAGED_BTC_HEADER_OWNER_VERSION);
+    object.pushKV("comment", record.comment);
+    object.pushKV("node_binary", fs::PathToString(record.node_binary));
+    object.pushKV("cli_binary", fs::PathToString(record.cli_binary));
+    object.pushKV("chain", record.chain);
+    object.pushKV("p2p_port", record.p2p_port);
+    object.pushKV("rpc_port", record.rpc_port);
+    object.pushKV("pid", record.pid);
+    object.pushKV("last_tip_height", record.last_tip_height);
+    object.pushKV("last_tip_hash", record.last_tip_hash.GetHex());
+    object.pushKV("last_progress_time", record.last_progress_time);
+
+    const fs::path temporary_path{fs::PathFromString(
+        fs::PathToString(owner_path) + ".tmp." + record.comment)};
+    if (!WriteBinaryFile(temporary_path, object.write() + "\n") ||
+        !RenameOver(temporary_path, owner_path)) {
+        try {
+            fs::remove(temporary_path);
+        } catch (const fs::filesystem_error&) {
+        }
+        error = "owner-record-write-failed";
+        return false;
+    }
+    return true;
+}
+
+void RestoreManagedBTCHeaderProgress(
+    const ManagedBTCHeaderOwnerRecord& record)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    g_btcheader_last_tip_height = record.last_tip_height;
+    g_btcheader_last_tip_hash = record.last_tip_hash;
+    g_btcheader_last_progress_time = record.last_progress_time;
+}
+
+bool PersistManagedBTCHeaderProgress(int64_t tip_height,
+                                     const uint256& tip_hash,
+                                     int64_t progress_time,
+                                     std::string& error)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (!g_managed_btcheader_owner_record ||
+        g_managed_btcheader_owner_path.empty()) {
+        error = "owner-record-runtime-missing";
+        return false;
+    }
+    ManagedBTCHeaderOwnerRecord updated{
+        *g_managed_btcheader_owner_record};
+    updated.last_tip_height = tip_height;
+    updated.last_tip_hash = tip_hash;
+    updated.last_progress_time = progress_time;
+    if (!WriteManagedBTCHeaderOwnerRecord(
+            g_managed_btcheader_owner_path, updated, error)) {
+        return false;
+    }
+    g_managed_btcheader_owner_record = std::move(updated);
+    return true;
+}
+
+void PersistStoppedManagedBTCHeaderOwner()
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (!g_managed_btcheader_owner_record ||
+        g_managed_btcheader_owner_path.empty()) {
+        return;
+    }
+    ManagedBTCHeaderOwnerRecord stopped{
+        *g_managed_btcheader_owner_record};
+    stopped.pid = -1;
+    std::string error;
+    if (!WriteManagedBTCHeaderOwnerRecord(
+            g_managed_btcheader_owner_path, stopped, error)) {
+        // SYSCOIN: The previous record still contains the same authenticated token and
+        // progress observation. Its PID is diagnostic only and is never used
+        // as process ownership, so retaining it is safer than erasing state.
+        LogPrintf("Unable to mark managed Bitcoin header owner stopped: %s\n",
+                  error);
+        return;
+    }
+    g_managed_btcheader_owner_record = std::move(stopped);
+}
+
+bool VerifyManagedBTCHeaderEndpoint(const std::string& owner_comment,
+                                    std::string& error)
+{
+    if (!IsValidManagedBTCHeaderOwnerComment(owner_comment)) {
+        error = "owner-comment-invalid";
+        return false;
+    }
+    UniValue chain_info;
+    if (!llmq::pq::RunConfiguredBTCHeaderCommand(
+            {"getblockchaininfo"}, chain_info, error) ||
+        !chain_info.isObject()) {
+        if (error.empty()) error = "managed-chaininfo-invalid";
+        return false;
+    }
+    const UniValue& chain{chain_info.find_value("chain")};
+    const UniValue& headers_only{chain_info.find_value("headersonly")};
+    if (!chain.isStr() || chain.get_str() != Params().GetChainTypeString() ||
+        !headers_only.isBool() || !headers_only.get_bool()) {
+        error = "managed-endpoint-not-expected-headers-only-chain";
+        return false;
+    }
+
+    UniValue network_info;
+    if (!llmq::pq::RunConfiguredBTCHeaderCommand(
+            {"getnetworkinfo"}, network_info, error) ||
+        !network_info.isObject()) {
+        if (error.empty()) error = "managed-networkinfo-invalid";
+        return false;
+    }
+    const UniValue& subversion{network_info.find_value("subversion")};
+    if (!subversion.isStr() ||
+        subversion.get_str().find(owner_comment) == std::string::npos) {
+        error = "managed-endpoint-owner-token-mismatch";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+#ifndef WIN32
+// SYSCOIN: Distinguish a child we just reaped from a PID that was never ours.
+// Only the former authorizes deleting the durable ownership record and
+// starting a replacement without first authenticating an orphaned endpoint.
+enum class OwnedBTCHeaderChildState : uint8_t {
+    MISSING = 0,
+    RUNNING,
+    EXITED_REAPED,
+    NOT_OWNED,
+};
+
+OwnedBTCHeaderChildState GetOwnedBTCHeaderChildState(
+    std::string* reason = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (btcheaderpid <= 0) {
+        if (reason != nullptr) *reason = "pid-missing";
+        return OwnedBTCHeaderChildState::MISSING;
+    }
+    int status{0};
+    pid_t result{-1};
+    do {
+        result = waitpid(btcheaderpid, &status, WNOHANG);
+    } while (result == -1 && errno == EINTR);
+    if (result == 0) {
+        if (reason != nullptr) reason->clear();
+        return OwnedBTCHeaderChildState::RUNNING;
+    }
+    if (result == btcheaderpid) {
+        if (reason != nullptr) {
+            *reason = strprintf("owned-child-exited(status=%d)", status);
+        }
+        btcheaderpid = -1;
+        return OwnedBTCHeaderChildState::EXITED_REAPED;
+    }
+    // SYSCOIN: ECHILD means this PID is not ours (for example after a syscoind crash).
+    // Never fall back to kill(pid, 0): PID reuse could otherwise make a later
+    // Stop or watchdog signal an unrelated process.
+    if (reason != nullptr) {
+        *reason = strprintf("owned-child-wait-failed(errno=%d)", errno);
+    }
+    btcheaderpid = -1;
+    return OwnedBTCHeaderChildState::NOT_OWNED;
+}
+#endif
+
+void ClearManagedBTCHeaderRuntime(bool remove_owner_record)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (remove_owner_record && !g_managed_btcheader_owner_path.empty()) {
+        try {
+            fs::remove(g_managed_btcheader_owner_path);
+        } catch (const fs::filesystem_error& e) {
+            LogPrintf("Failed removing managed Bitcoin header ownership "
+                      "record %s: %s\n",
+                      fs::PathToString(g_managed_btcheader_owner_path),
+                      e.what());
+        }
+    }
+    btcheaderpid = -1;
+    g_managed_btcheader_adopted = false;
+    g_managed_btcheader_owner_token.clear();
+    g_managed_btcheader_owner_path.clear();
+    g_managed_btcheader_owner_record.reset();
+    g_managed_btcheader_rpc_args.clear();
 }
 
 #ifndef WIN32
@@ -7913,12 +10364,20 @@ bool Chainstate::DoGethStartupProcedure() {
 bool Chainstate::RestartBTCHeaderNode(bool force_reindex)
 {
     LOCK(cs_btcheader);
-
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        LogPrintf("%s: Managed BTC header node is disabled (-btcheadermanaged=0)\n", __func__);
+        LogPrintf("%s: managed Bitcoin header node is disabled\n", __func__);
         return false;
     }
-    StopBTCHeaderNodeInternal(/*bOnStart=*/false);
+    const bool had_runtime{btcheaderpid > 0 || g_managed_btcheader_adopted ||
+                           !g_managed_btcheader_owner_token.empty() ||
+                           !g_managed_btcheader_rpc_args.empty()};
+    if (!StopBTCHeaderNodeInternal(/*bOnStart=*/false) && had_runtime) {
+        LogPrintf("%s: authenticated managed Bitcoin header backend did not "
+                  "stop; refusing to start or adopt a replacement\n", __func__);
+        return false;
+    }
+    // SYSCOIN: Start/adoption restores the persisted observation. A managed
+    // child restart must never grant a fresh no-progress window.
     return StartBTCHeaderNodeInternal(force_reindex);
 }
 
@@ -7930,101 +10389,223 @@ bool Chainstate::StartBTCHeaderNode(bool force_reindex)
 
 bool Chainstate::StartBTCHeaderNodeInternal(bool force_reindex)
 {
-
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        LogPrintf("%s: Managed BTC header node is disabled (-btcheadermanaged=0)\n", __func__);
+        LogPrintf("%s: managed Bitcoin header node is disabled\n", __func__);
+        return false;
+    }
+#ifdef WIN32
+    LogPrintf("%s: managed Bitcoin header node is unsupported on Windows\n",
+              __func__);
+    return false;
+#else
+    // SYSCOIN: The bundled helper is pinned to Bitcoin's standard signet.
+    // Syscoin signet deployments can use different challenge parameters, so
+    // silently treating that view as authoritative would approve the wrong
+    // chain. Require an explicitly configured external backend instead.
+    if (Params().GetChainType() == ChainType::SIGNET) {
+        LogPrintf("%s: managed Bitcoin header node is unsupported on signet; "
+                  "use -btcheadermanaged=0 with an explicit -btcheadercmd\n",
+                  __func__);
         return false;
     }
 
-#ifdef WIN32
-    LogPrintf("%s: Managed BTC header node is not supported on WIN32 builds\n", __func__);
-    return false;
-#else
-    LogPrintf("%s: Starting managed BTC header node\n", __func__);
+    const OwnedBTCHeaderChildState child_state{
+        GetOwnedBTCHeaderChildState()};
+    if (child_state == OwnedBTCHeaderChildState::RUNNING) {
+        LogPrintf("%s: managed Bitcoin header node is already running (pid=%d)\n",
+                  __func__, btcheaderpid);
+        return true;
+    }
+    if (child_state == OwnedBTCHeaderChildState::EXITED_REAPED) {
+        // SYSCOIN: The waitpid result proves this was our child and prevents PID reuse
+        // until it was reaped, so its ownership record can be retired safely.
+        PersistStoppedManagedBTCHeaderOwner();
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+    } else if (child_state == OwnedBTCHeaderChildState::NOT_OWNED) {
+        // SYSCOIN: Keep the record for authenticated orphan adoption below. Never use
+        // the stale numeric PID as proof that signalling is safe.
+        btcheaderpid = -1;
+    }
+    if (g_managed_btcheader_adopted &&
+        !g_managed_btcheader_owner_token.empty()) {
+        std::string adoption_error;
+        if (VerifyManagedBTCHeaderEndpoint(
+                g_managed_btcheader_owner_token, adoption_error)) {
+            return true;
+        }
+        LogPrintf("%s: previously adopted Bitcoin header backend is no "
+                  "longer ready: %s\n", __func__, adoption_error);
+        g_managed_btcheader_adopted = false;
+    }
 
     int p2p_port{0};
     int rpc_port{0};
-    if (!ParseManagedBTCHeaderPorts(p2p_port, rpc_port)) {
-        return false;
-    }
+    if (!ParseManagedBTCHeaderPorts(p2p_port, rpc_port)) return false;
 
-    std::string binArchitectureTag;
-    const fs::path exec_path = FindExecPath(binArchitectureTag);
-    const fs::path node_binary = ResolveManagedBTCHeaderBinaryPath(exec_path, m_chainman.m_options.datadir_base, GetBTCHeaderNodeFilename());
+    std::string architecture;
+    const fs::path exec_path{FindExecPath(architecture)};
+    fs::path node_binary{ResolveManagedBTCHeaderBinaryPath(
+        exec_path, m_chainman.m_options.datadir_base,
+        GetBTCHeaderNodeFilename())};
     if (node_binary.empty()) {
-        LogPrintf("%s: Could not locate bitcoind for managed BTC header node. Configure -btcheaderbinary.\n", __func__);
+        LogPrintf("%s: bitcoind not found; set -btcheaderbinary or build the "
+                  "pinned btcheadernode helper\n", __func__);
         return false;
     }
-
-    const fs::path cli_binary = ResolveManagedBTCHeaderCliPath(node_binary, exec_path, m_chainman.m_options.datadir_base, GetBTCHeaderCliFilename());
+    fs::path cli_binary{ResolveManagedBTCHeaderCliPath(
+        node_binary, exec_path, m_chainman.m_options.datadir_base,
+        GetBTCHeaderCliFilename())};
     if (cli_binary.empty()) {
-        LogPrintf("%s: Could not locate bitcoin-cli for managed BTC header node. Configure -btcheaderclibinary.\n", __func__);
+        LogPrintf("%s: bitcoin-cli not found; set -btcheaderclibinary\n",
+                  __func__);
+        return false;
+    }
+    try {
+        node_binary = fs::weakly_canonical(fs::absolute(node_binary));
+        cli_binary = fs::weakly_canonical(fs::absolute(cli_binary));
+    } catch (const fs::filesystem_error& e) {
+        LogPrintf("%s: failed to canonicalize managed Bitcoin binaries: %s\n",
+                  __func__, e.what());
         return false;
     }
 
-    const fs::path data_dir = gArgs.GetPathArg("-btcheaderdatadir", m_chainman.m_options.datadir / "btcheader");
-    const fs::path log_path = m_chainman.m_options.datadir / "btcheadernode.log";
+    fs::path data_dir{gArgs.GetPathArg(
+        "-btcheaderdatadir", m_chainman.m_options.datadir / "btcheader")};
+    if (IsUnsafeManagedBTCHeaderDataDir(data_dir,
+                                       m_chainman.m_options.datadir)) {
+        LogPrintf("%s: refusing unsafe -btcheaderdatadir=%s\n", __func__,
+                  fs::PathToString(data_dir));
+        return false;
+    }
     try {
         fs::create_directories(data_dir);
+        data_dir = fs::weakly_canonical(fs::absolute(data_dir));
     } catch (const fs::filesystem_error& e) {
-        LogPrintf("%s: Failed to create managed BTC header datadir %s (%s)\n", __func__, fs::PathToString(data_dir), e.what());
+        LogPrintf("%s: failed to create managed Bitcoin header datadir %s: %s\n",
+                  __func__, fs::PathToString(data_dir), e.what());
+        return false;
+    }
+    if (IsUnsafeManagedBTCHeaderDataDir(data_dir,
+                                       m_chainman.m_options.datadir)) {
+        LogPrintf("%s: managed Bitcoin header datadir became unsafe after "
+                  "canonicalization: %s\n", __func__,
+                  fs::PathToString(data_dir));
         return false;
     }
 
-    std::vector<std::string> cmdline = SanitizeBTCHeaderNodeCmdLine(gArgs.GetArgs("-btcheadercommandline"), node_binary, data_dir, p2p_port, rpc_port, force_reindex);
+    g_managed_btcheader_rpc_args =
+        BuildManagedBTCHeaderRPCArgs(cli_binary, data_dir, rpc_port);
+    g_managed_btcheader_owner_path = data_dir /
+        fs::PathFromString(std::string{MANAGED_BTC_HEADER_OWNER_FILENAME});
 
-    g_managed_btcheader_rpc_args = BuildManagedBTCHeaderRPCArgs(cli_binary, data_dir, rpc_port);
-    g_managed_btcheader_rpc_cmd = BuildManagedBTCHeaderRPCCommand(cli_binary, data_dir, rpc_port);
-    if (gArgs.IsArgSet("-btcheadercmd")) {
-        LogPrintf("%s: Overriding user-provided -btcheadercmd with managed local bitcoin-cli command\n", __func__);
-    }
-    gArgs.ForceSetArg("-btcheadercmd", g_managed_btcheader_rpc_cmd);
-
-    // Best-effort cleanup for stale managed instances from previous unclean exits.
-    if (!g_managed_btcheader_rpc_args.empty()) {
-        std::vector<std::string> stop_cmd = g_managed_btcheader_rpc_args;
-        stop_cmd.emplace_back("stop");
-        try {
-            (void)RunCommandParseJSON(stop_cmd);
-            UninterruptibleSleep(std::chrono::milliseconds{200});
-        } catch (const std::exception&) {
-            // Ignore when no previous node is reachable.
-        }
-    }
-
-    std::string spawn_error;
-    if (!SpawnDetachedProcessWithStderrLog(cmdline, log_path, btcheaderpid, spawn_error)) {
-        LogPrintf("%s: Could not start managed BTC header node (%s)\n", __func__, spawn_error);
-        btcheaderpid = -1;
-        g_managed_btcheader_rpc_cmd.clear();
-        g_managed_btcheader_rpc_args.clear();
-        return false;
-    }
-
-    LogPrintf("%s: Managed BTC header node started with pid %d (reindex=%d)\n", __func__, btcheaderpid, force_reindex ? 1 : 0);
-
-    // Ensure the child stays alive beyond initial spawn, without depending on
-    // external signer support for JSON command execution.
-    for (int i = 0; i < 15; ++i) {
-        int status = 0;
-        const pid_t result = waitpid(btcheaderpid, &status, WNOHANG);
-        if (result == btcheaderpid) {
-            LogPrintf("%s: Managed BTC header node exited early with status %d\n", __func__, status);
+    ManagedBTCHeaderOwnerRecord owner_record;
+    std::string owner_error;
+    const bool reusable_owner_record{ReadManagedBTCHeaderOwnerRecord(
+        g_managed_btcheader_owner_path, node_binary, cli_binary,
+        Params().GetChainTypeString(), p2p_port, rpc_port, owner_record,
+        owner_error)};
+    if (reusable_owner_record) {
+        g_managed_btcheader_owner_token = owner_record.comment;
+        g_managed_btcheader_owner_record = owner_record;
+        RestoreManagedBTCHeaderProgress(owner_record);
+        std::string adoption_error;
+        if (VerifyManagedBTCHeaderEndpoint(owner_record.comment,
+                                           adoption_error)) {
+            g_managed_btcheader_adopted = true;
             btcheaderpid = -1;
-            g_managed_btcheader_rpc_cmd.clear();
-            g_managed_btcheader_rpc_args.clear();
+            LogPrintf("%s: adopted the authenticated orphaned managed "
+                      "Bitcoin headers-only backend (recorded pid=%d)\n",
+                      __func__, owner_record.pid);
+            return true;
+        }
+        LogPrintf("%s: ownership record found but its backend is not ready "
+                  "for adoption: %s\n", __func__, adoption_error);
+    } else if (owner_error != "owner-record-missing") {
+        LogPrintf("%s: existing ownership record is unusable: %s\n",
+                  __func__, owner_error);
+        // SYSCOIN: Never overwrite a corrupt progress/ownership record and
+        // grant a fresh eclipse window. Operators must resolve the dedicated
+        // backend state explicitly.
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    if (!reusable_owner_record) {
+        owner_record = ManagedBTCHeaderOwnerRecord{
+            std::string{MANAGED_BTC_HEADER_OWNER_PREFIX} +
+                GetRandHash().GetHex(),
+            node_binary, cli_binary, Params().GetChainTypeString(),
+            p2p_port, rpc_port, -1, g_btcheader_last_tip_height,
+            g_btcheader_last_tip_hash, g_btcheader_last_progress_time};
+        if (!WriteManagedBTCHeaderOwnerRecord(
+                g_managed_btcheader_owner_path, owner_record,
+                owner_error)) {
+            LogPrintf("%s: cannot persist managed Bitcoin header ownership "
+                      "record before spawn: %s\n", __func__, owner_error);
+            ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
             return false;
         }
-        if (result == -1 && errno == ECHILD) {
-            LogPrintf("%s: Managed BTC header node exited early (ECHILD)\n", __func__);
-            btcheaderpid = -1;
-            g_managed_btcheader_rpc_cmd.clear();
-            g_managed_btcheader_rpc_args.clear();
+    }
+    g_managed_btcheader_owner_token = owner_record.comment;
+    g_managed_btcheader_owner_record = owner_record;
+    g_managed_btcheader_adopted = false;
+
+    const auto child_args{BuildManagedBTCHeaderNodeArgs(
+        gArgs.GetArgs("-btcheadercommandline"), node_binary, data_dir,
+        p2p_port, rpc_port, force_reindex, owner_record.comment)};
+    if (!child_args) {
+        LogPrintf("%s: invalid or protected -btcheadercommandline argument\n",
+                  __func__);
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    // SYSCOIN: If a backend with this dedicated datadir survived a syscoind crash, it
+    // was adopted above only after the RPC cookie, chain, headers-only flag,
+    // and random user-agent token all matched. We never signal the recorded
+    // PID; if adoption failed, a new child must acquire the datadir lock and
+    // ports itself.
+
+    const fs::path log_path{m_chainman.m_options.datadir /
+                            "btcheadernode.log"};
+    std::string spawn_error;
+    if (!SpawnDetachedProcessWithStderrLog(
+            *child_args, log_path, btcheaderpid, spawn_error)) {
+        LogPrintf("%s: failed to start managed Bitcoin header node: %s\n",
+                  __func__, spawn_error);
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    owner_record.pid = btcheaderpid;
+    if (!WriteManagedBTCHeaderOwnerRecord(
+            g_managed_btcheader_owner_path, owner_record, owner_error)) {
+        // SYSCOIN: The pre-spawn record already binds the random child token, so crash
+        // recovery remains authenticated even if this informational PID
+        // update cannot be committed.
+        LogPrintf("%s: warning: could not update ownership record PID: %s\n",
+                  __func__, owner_error);
+    } else {
+        g_managed_btcheader_owner_record = owner_record;
+    }
+
+    LogPrintf("%s: managed Bitcoin header node started (pid=%d reindex=%d)\n",
+              __func__, btcheaderpid, force_reindex);
+    for (int i = 0; i < 15; ++i) {
+        int status{0};
+        const pid_t result{waitpid(btcheaderpid, &status, WNOHANG)};
+        if (result == btcheaderpid || result == -1) {
+            LogPrintf("%s: managed Bitcoin header node exited during startup "
+                      "(status=%d errno=%d)\n",
+                      __func__, status, errno);
+            if (result == btcheaderpid) {
+                PersistStoppedManagedBTCHeaderOwner();
+            }
+            ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
             return false;
         }
         UninterruptibleSleep(std::chrono::milliseconds{200});
     }
-
     return true;
 #endif
 }
@@ -8037,67 +10618,144 @@ bool Chainstate::StopBTCHeaderNode(bool bOnStart)
 
 bool Chainstate::StopBTCHeaderNodeInternal(bool bOnStart)
 {
-
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
         return false;
     }
-
 #ifdef WIN32
     return false;
 #else
-    if (!bOnStart && !g_managed_btcheader_rpc_args.empty()) {
-        try {
-            std::vector<std::string> stop_cmd = g_managed_btcheader_rpc_args;
-            stop_cmd.emplace_back("stop");
-            (void)RunCommandParseJSON(stop_cmd);
-        } catch (const std::exception& e) {
-            LogPrintf("%s: Managed BTC header node graceful shutdown request failed: %s\n", __func__, e.what());
+    std::string child_reason;
+    OwnedBTCHeaderChildState child_state{
+        GetOwnedBTCHeaderChildState(&child_reason)};
+    if (child_state == OwnedBTCHeaderChildState::EXITED_REAPED) {
+        PersistStoppedManagedBTCHeaderOwner();
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return true;
+    }
+    bool owned_child{child_state == OwnedBTCHeaderChildState::RUNNING};
+    const bool adopted{g_managed_btcheader_adopted};
+    if (!owned_child && !adopted) {
+        // SYSCOIN: A stale numeric PID is never evidence of ownership. In particular,
+        // ECHILD must not fall through to kill(2) after PID reuse.
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    bool endpoint_verified{false};
+    if (!bOnStart && !g_managed_btcheader_owner_token.empty() &&
+        !g_managed_btcheader_rpc_args.empty()) {
+        std::string verify_error;
+        endpoint_verified = VerifyManagedBTCHeaderEndpoint(
+            g_managed_btcheader_owner_token, verify_error);
+        if (endpoint_verified) {
+            std::string stop_error;
+            if (!llmq::pq::RequestManagedBTCHeaderStop(stop_error)) {
+                LogPrintf("%s: authenticated bitcoin-cli stop failed: %s\n",
+                          __func__, stop_error);
+            }
+        } else {
+            LogPrintf("%s: refusing RPC stop for an unauthenticated managed "
+                      "endpoint: %s\n", __func__, verify_error);
         }
     }
 
-    // Always send SIGTERM for managed restarts, including startup stop path.
-    if (btcheaderpid > 0) {
+    if (adopted) {
+        if (!endpoint_verified) {
+            // SYSCOIN: An adopted process is not our child. Its recorded PID is only
+            // diagnostic and is never signalled.
+            return false;
+        }
+        for (int i{0}; i < 20; ++i) {
+            UniValue ignored;
+            std::string probe_error;
+            if (!llmq::pq::RunConfiguredBTCHeaderCommand(
+                    {"getblockchaininfo"}, ignored, probe_error)) {
+                PersistStoppedManagedBTCHeaderOwner();
+                ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+                return true;
+            }
+            UninterruptibleSleep(std::chrono::milliseconds{500});
+        }
+        LogPrintf("%s: authenticated adopted Bitcoin header backend did not "
+                  "stop; leaving its ownership record intact\n", __func__);
+        return false;
+    }
+
+    // SYSCOIN: For a process spawned by this syscoind, waitpid(WNOHANG)==0 is the
+    // ownership proof immediately before every signal. An exited but
+    // unreaped child also prevents PID reuse, closing the check/signal race.
+    if (!endpoint_verified && owned_child) {
         if (kill(btcheaderpid, SIGTERM) != 0 && errno != ESRCH) {
-            LogPrintf("Failed to SIGTERM BTC header node pid %d (errno=%d)\n", btcheaderpid, errno);
+            LogPrintf("%s: SIGTERM failed for owned Bitcoin header pid %d "
+                      "(errno=%d)\n", __func__, btcheaderpid, errno);
         }
     }
-
-    if (btcheaderpid > 0) {
-        for (int i = 0; i < 20; ++i) {
-            int status = 0;
-            const pid_t result = waitpid(btcheaderpid, &status, WNOHANG);
-            if (result == btcheaderpid) {
-                if (WIFEXITED(status)) {
-                    LogPrintf("BTC header node shutdown gracefully with exit code %d.\n", WEXITSTATUS(status));
-                } else if (WIFSIGNALED(status)) {
-                    LogPrintf("BTC header node terminated by signal %d.\n", WTERMSIG(status));
-                }
-                btcheaderpid = -1;
-                g_managed_btcheader_rpc_cmd.clear();
-                g_managed_btcheader_rpc_args.clear();
-                return true;
-            }
-            if (result == -1 && errno == ECHILD) {
-                LogPrintf("BTC header node process no longer exists (ECHILD).\n");
-                btcheaderpid = -1;
-                g_managed_btcheader_rpc_cmd.clear();
-                g_managed_btcheader_rpc_args.clear();
-                return true;
-            }
-            LogPrintf("BTC header node shutdown check (%d)\n", i);
-            UninterruptibleSleep(std::chrono::milliseconds{2000});
-        }
-        LogPrintf("Graceful BTC header node shutdown failed; explicitly killing pid %d\n", btcheaderpid);
-        if (kill(btcheaderpid, SIGKILL) != 0) {
-            LogPrintf("Failed to kill BTC header node pid %d (errno=%d)\n", btcheaderpid, errno);
-        }
-        int status = 0;
-        waitpid(btcheaderpid, &status, 0);
+    for (int i{0}; i < 20 && owned_child; ++i) {
+        UninterruptibleSleep(std::chrono::milliseconds{500});
+        child_state = GetOwnedBTCHeaderChildState(&child_reason);
+        owned_child = child_state == OwnedBTCHeaderChildState::RUNNING;
     }
+    if (owned_child &&
+        GetOwnedBTCHeaderChildState(&child_reason) ==
+            OwnedBTCHeaderChildState::RUNNING) {
+        LogPrintf("%s: forcing owned Bitcoin header pid %d to stop\n",
+                  __func__, btcheaderpid);
+        if (kill(btcheaderpid, SIGKILL) != 0 && errno != ESRCH) {
+            LogPrintf("%s: SIGKILL failed for owned pid %d (errno=%d)\n",
+                      __func__, btcheaderpid, errno);
+            return false;
+        }
+        int status{0};
+        pid_t result{-1};
+        do {
+            result = waitpid(btcheaderpid, &status, 0);
+        } while (result == -1 && errno == EINTR);
+        if (result == -1) {
+            LogPrintf("%s: waitpid failed after SIGKILL (errno=%d)\n",
+                      __func__, errno);
+            return false;
+        }
+        owned_child = false;
+    }
+    if (owned_child) return false;
+    PersistStoppedManagedBTCHeaderOwner();
+    ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+    return true;
+#endif
+}
 
-    btcheaderpid = -1;
-    g_managed_btcheader_rpc_cmd.clear();
-    g_managed_btcheader_rpc_args.clear();
+// SYSCOIN: The watchdog already holds cs_btcheader while it evaluates and
+// possibly restarts the backend. Keep the actual probe non-locking to avoid
+// recursive public API entry and make the lock contract explicit.
+static bool IsManagedBTCHeaderNodeRunningLocked(std::string& reason)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
+        reason = "managed-disabled";
+        return true;
+    }
+#ifdef WIN32
+    reason = "managed-unsupported-win32";
+    return false;
+#else
+    const OwnedBTCHeaderChildState child_state{
+        GetOwnedBTCHeaderChildState(&reason)};
+    if (child_state == OwnedBTCHeaderChildState::RUNNING) return true;
+    if (child_state == OwnedBTCHeaderChildState::EXITED_REAPED) {
+        PersistStoppedManagedBTCHeaderOwner();
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+    if (!g_managed_btcheader_adopted ||
+        g_managed_btcheader_owner_token.empty()) {
+        return false;
+    }
+    if (!VerifyManagedBTCHeaderEndpoint(g_managed_btcheader_owner_token,
+                                        reason)) {
+        reason = "adopted-backend-unhealthy:" + reason;
+        return false;
+    }
+    reason.clear();
     return true;
 #endif
 }
@@ -8105,59 +10763,239 @@ bool Chainstate::StopBTCHeaderNodeInternal(bool bOnStart)
 bool Chainstate::IsManagedBTCHeaderNodeRunning(std::string& reason)
 {
     LOCK(cs_btcheader);
+    return IsManagedBTCHeaderNodeRunningLocked(reason);
+}
 
-    if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        reason = "managed-disabled";
-        return true;
-    }
-
-#ifdef WIN32
-    reason = "managed-unsupported-win32";
+// SYSCOIN: These helpers make the watchdog's ownership/health mutations
+// statically auditable. Capturing a held mutex in a lambda loses Clang's
+// capability proof and previously hid the public-method recursive lock bug.
+static bool RecordBTCHeaderHealthFailure(int64_t now,
+                                         const std::string& failure,
+                                         std::string& reason)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    g_btcheader_last_probe_time = now;
+    g_btcheader_last_probe_healthy = false;
+    g_btcheader_last_probe_reason = failure;
+    reason = failure;
     return false;
-#else
-    if (btcheaderpid <= 0) {
-        reason = "pid-missing";
+}
+
+bool Chainstate::RestartBTCHeaderNodeForWatchdog(
+    bool recover,
+    int64_t now,
+    const std::string& cause,
+    std::string& reason)
+{
+    const int64_t cooldown{std::max<int64_t>(
+        1, gArgs.GetIntArg("-btcheaderwatchdogrestartcooldown",
+                           DEFAULT_BTC_HEADER_WATCHDOG_RESTART_COOLDOWN))};
+    if (!recover) return false;
+    if (g_btcheader_last_restart_time > 0 &&
+        now - g_btcheader_last_restart_time < cooldown) {
+        reason = strprintf("btcheader-watchdog-restart-cooldown(%d):%s",
+                           cooldown -
+                               (now - g_btcheader_last_restart_time),
+                           cause);
         return false;
     }
-    if (kill(btcheaderpid, 0) == 0 || errno == EPERM) {
-        reason.clear();
-        return true;
-    }
-    if (errno == ESRCH) {
-        btcheaderpid = -1;
-        g_managed_btcheader_rpc_cmd.clear();
-        g_managed_btcheader_rpc_args.clear();
-        reason = "process-not-found";
+
+    const int64_t reindex_after{std::max<int64_t>(
+        0, gArgs.GetIntArg("-btcheaderwatchdogreindexafter",
+                           DEFAULT_BTC_HEADER_WATCHDOG_REINDEX_AFTER))};
+    const bool force_reindex{
+        reindex_after > 0 && !g_btcheader_reindex_attempted &&
+        g_btcheader_restart_failures >= reindex_after};
+    if (force_reindex) g_btcheader_reindex_attempted = true;
+    g_btcheader_last_restart_time = now;
+
+    // SYSCOIN: Stop either proves waitpid ownership of this process's child or
+    // authenticates an adopted orphan through its dedicated RPC cookie,
+    // headers-only chain view, and random user-agent token. It never signals a
+    // recorded/stale PID.
+    const bool had_runtime{
+        btcheaderpid > 0 || g_managed_btcheader_adopted ||
+        !g_managed_btcheader_owner_token.empty() ||
+        !g_managed_btcheader_rpc_args.empty()};
+    if (!StopBTCHeaderNodeInternal(/*bOnStart=*/false) && had_runtime) {
+        reason = "btcheader-watchdog-authenticated-stop-failed:" + cause;
         return false;
     }
-    reason = strprintf("process-check-failed(errno=%d)", errno);
-    return false;
-#endif
+    if (!StartBTCHeaderNodeInternal(force_reindex)) {
+        ++g_btcheader_restart_failures;
+        reason = strprintf(
+            "btcheader-watchdog-restart-failed(reindex=%d failures=%d):%s",
+            force_reindex, g_btcheader_restart_failures, cause);
+        return false;
+    }
+    LogPrintf("Bitcoin header watchdog restarted managed child "
+              "(reindex=%d reason=%s)\n", force_reindex, cause);
+    return true;
+}
+
+bool Chainstate::CheckBTCHeaderNodeHealth(bool recover, std::string& reason)
+{
+    LOCK(cs_btcheader);
+    reason.clear();
+    const int64_t now{GetTime()};
+    const bool managed{
+        gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)};
+    recover = recover && managed &&
+              gArgs.GetBoolArg("-btcheaderwatchdog",
+                               DEFAULT_BTC_HEADER_WATCHDOG);
+
+    const auto probe = [&](UniValue& chain_info,
+                           std::string& probe_error) {
+        return llmq::pq::RunConfiguredBTCHeaderCommand(
+                   {"getblockchaininfo"}, chain_info, probe_error) &&
+               chain_info.isObject();
+    };
+
+    if (managed) {
+        std::string process_reason;
+        if (!IsManagedBTCHeaderNodeRunningLocked(process_reason) &&
+            !RestartBTCHeaderNodeForWatchdog(
+                recover, now, "process-not-running:" + process_reason,
+                reason)) {
+            return RecordBTCHeaderHealthFailure(
+                now, reason.empty() ? process_reason : reason, reason);
+        }
+    }
+
+    UniValue chain_info;
+    std::string probe_error;
+    if (!probe(chain_info, probe_error)) {
+        if (!RestartBTCHeaderNodeForWatchdog(
+                recover, now, "rpc-unreachable:" + probe_error, reason)) {
+            return RecordBTCHeaderHealthFailure(
+                now, reason.empty() ? probe_error : reason, reason);
+        }
+        // SYSCOIN: A new process can need a short interval to publish its RPC cookie
+        // and bind the endpoint. Keep the scheduler bounded while permitting
+        // immediate recovery from a transient crash.
+        for (int attempt{0}; attempt < 10; ++attempt) {
+            UninterruptibleSleep(std::chrono::milliseconds{200});
+            probe_error.clear();
+            if (probe(chain_info, probe_error)) break;
+        }
+        if (!chain_info.isObject()) {
+            ++g_btcheader_restart_failures;
+            return RecordBTCHeaderHealthFailure(
+                now,
+                "btcheader-watchdog-rpc-unreachable-after-restart:" +
+                    probe_error,
+                reason);
+        }
+    }
+
+    const UniValue& ibd_value{chain_info.find_value("initialblockdownload")};
+    const UniValue& headers_value{chain_info.find_value("headers")};
+    const UniValue& blocks_value{chain_info.find_value("blocks")};
+    const UniValue& best_hash_value{chain_info.find_value("bestblockhash")};
+    const UniValue& chain_value{chain_info.find_value("chain")};
+    const UniValue& headers_only_value{chain_info.find_value("headersonly")};
+    if (!ibd_value.isBool() ||
+        (!headers_value.isNum() && !blocks_value.isNum()) ||
+        !best_hash_value.isStr() || best_hash_value.get_str().size() != 64 ||
+        !IsHex(best_hash_value.get_str()) ||
+        !chain_value.isStr() ||
+        chain_value.get_str() != Params().GetChainTypeString() ||
+        (managed && (!headers_only_value.isBool() ||
+                     !headers_only_value.get_bool()))) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-invalid-chaininfo", reason);
+    }
+    const bool ibd{ibd_value.get_bool()};
+    const int64_t tip_height{headers_value.isNum()
+                                 ? headers_value.getInt<int64_t>()
+                                 : blocks_value.getInt<int64_t>()};
+    if (tip_height < 0) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-negative-tip", reason);
+    }
+    uint256 tip_hash;
+    tip_hash.SetHex(best_hash_value.get_str());
+    if (tip_hash.IsNull()) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-null-tip", reason);
+    }
+
+    const bool tip_changed{
+        g_btcheader_last_progress_time == 0 ||
+        tip_height != g_btcheader_last_tip_height ||
+        tip_hash != g_btcheader_last_tip_hash};
+    if (tip_changed) {
+        if (managed) {
+            std::string persist_error;
+            if (!PersistManagedBTCHeaderProgress(
+                    tip_height, tip_hash, now, persist_error)) {
+                return RecordBTCHeaderHealthFailure(
+                    now,
+                    "btcheader-progress-persistence-failed:" +
+                        persist_error,
+                    reason);
+            }
+        }
+        g_btcheader_last_progress_time = now;
+        g_btcheader_last_tip_height = tip_height;
+        g_btcheader_last_tip_hash = tip_hash;
+    } else if (now < g_btcheader_last_progress_time) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-progress-clock-regressed", reason);
+    }
+    const int64_t stall_timeout{std::max<int64_t>(
+        0, gArgs.GetIntArg("-btcheaderwatchdogstalltimeout",
+                           DEFAULT_BTC_HEADER_WATCHDOG_STALL_TIMEOUT))};
+    if (ibd && stall_timeout > 0 &&
+        now - g_btcheader_last_progress_time >= stall_timeout) {
+        const std::string stalled{strprintf(
+            "ibd-stalled(headers=%d seconds=%d)", tip_height,
+            now - g_btcheader_last_progress_time)};
+        if (!RestartBTCHeaderNodeForWatchdog(
+                recover, now, stalled, reason)) {
+            return RecordBTCHeaderHealthFailure(
+                now, reason.empty() ? stalled : reason, reason);
+        }
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-restarted-stalled-backend", reason);
+    }
+    const int64_t maximum_no_progress{std::max<int64_t>(
+        0, gArgs.GetIntArg("-btcheadertipmaxnoprogress",
+                           DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS))};
+    if (!ibd && maximum_no_progress > 0 &&
+        now - g_btcheader_last_progress_time >= maximum_no_progress) {
+        return RecordBTCHeaderHealthFailure(
+            now,
+            strprintf(
+                "btcheader-tip-no-progress(headers=%d hash=%s seconds=%d)",
+                tip_height, tip_hash.ToString(),
+                now - g_btcheader_last_progress_time),
+            reason);
+    }
+
+    g_btcheader_last_probe_time = now;
+    g_btcheader_last_probe_healthy = true;
+    g_btcheader_last_probe_reason.clear();
+    g_btcheader_restart_failures = 0;
+    g_btcheader_reindex_attempted = false;
+    return true;
 }
 
 bool Chainstate::DoBTCHeaderStartupProcedure()
 {
-    if (m_chainman.m_interrupt) {
-        return false;
-    }
-
+    if (m_chainman.m_interrupt) return false;
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        const std::string cmd = gArgs.GetArg("-btcheadercmd", "");
-        if (cmd.empty()) {
-            LogPrintf("%s: -btcheadermanaged=0 requires -btcheadercmd to be configured\n", __func__);
+        if (gArgs.GetArg("-btcheadercmd", "").empty()) {
+            LogPrintf("%s: external mode requires -btcheadercmd\n", __func__);
             return false;
         }
-        LogPrintf("%s: Using external -btcheadercmd backend (managed node disabled)\n", __func__);
+        LogPrintf("%s: using external Bitcoin header backend\n", __func__);
         return true;
     }
-
-    LogPrintf("%s: Restarting managed BTC header node\n", __func__);
-    StopBTCHeaderNode(true);
-    if (!StartBTCHeaderNode()) {
-        LogPrintf("%s: Failed to start managed BTC header node\n", __func__);
-        return false;
-    }
-    return true;
+    // SYSCOIN: Start authenticates and adopts an exact dedicated orphan left by a
+    // previous syscoind crash. It must not issue an unauthenticated stop to
+    // whatever happens to occupy the configured RPC port first.
+    return StartBTCHeaderNode();
 }
 
 void ChainstateManager::MaybeRebalanceCaches()

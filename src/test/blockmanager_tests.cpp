@@ -24,6 +24,35 @@ using node::MAX_BLOCKFILE_SIZE;
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
 
+// SYSCOIN: A replay-retention floor may move backward but never forward implicitly.
+BOOST_AUTO_TEST_CASE(replay_prune_lock_never_raises_a_reorg_floor)
+{
+    const auto params{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    KernelNotifications notifications{m_node.exit_status};
+    const BlockManager::Options blockman_opts{
+        .chainparams = *params,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+    };
+    BlockManager blockman{m_node.kernel->interrupt, blockman_opts};
+
+    LOCK(::cs_main);
+    const std::string name{"btcc-nevm-replay-test"};
+    BOOST_CHECK_EQUAL(blockman.UpdatePruneLockLowerOnly(
+                          name, node::PruneLockInfo{120}),
+                      120);
+    // SYSCOIN: Model DisconnectTip rewinding the live floor to a deep fork.
+    // A later marker refresh at a higher carrier must preserve rollback data.
+    blockman.UpdatePruneLock(name, node::PruneLockInfo{80});
+    BOOST_CHECK_EQUAL(blockman.UpdatePruneLockLowerOnly(
+                          name, node::PruneLockInfo{160}),
+                      80);
+    blockman.RemovePruneLock(name);
+    BOOST_CHECK_EQUAL(blockman.UpdatePruneLockLowerOnly(
+                          name, node::PruneLockInfo{160}),
+                      160);
+}
+
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
 {
     const auto params {CreateChainParams(ArgsManager{}, ChainType::MAIN)};

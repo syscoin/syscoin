@@ -93,8 +93,14 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                     nevm_block.vchNEVMBlockData = self._last_nevm_block_data
                     self._zmq_sock.send_multipart([b"nevmblock", nevm_block.serialize()])
                 elif topic == b"nevmblockinfo":
+                    # SYSCOIN: Status binds the count to the exact paired
+                    # Syscoin branch tip so equal-height forks cannot replay.
                     self._zmq_sock.send_multipart(
-                        [b"nevmblockinfo", str(self.nodes[0].getblockcount()).encode()]
+                        [
+                            b"nevmblockinfo",
+                            str(self.nodes[0].getblockcount()).encode(),
+                            self.nodes[0].getbestblockhash().encode(),
+                        ]
                     )
                 elif topic == b"nevmconnect":
                     try:

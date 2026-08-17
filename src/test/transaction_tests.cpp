@@ -14,6 +14,7 @@
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <key.h>
+#include <llmq/pq_btcc.h> // SYSCOIN: PQ BTCC activation schedule coverage.
 #include <nevm/nevm.h>
 #include <nevm/sha3.h>
 #include <policy/policy.h>
@@ -1015,31 +1016,43 @@ BOOST_AUTO_TEST_CASE(syscoin_bridge_uses_clreceipt_activation)
                 regtest_v2->GetConsensus().vchSyscoinVaultManager);
 }
 
-BOOST_AUTO_TEST_CASE(syscoin_btcc_activation_is_independent)
+// SYSCOIN: The PQ BTCC schedule is independent from legacy bridge receipts.
+BOOST_AUTO_TEST_CASE(syscoin_pq_btcc_activation_is_independent)
 {
     const auto main = CreateChainParams(*m_node.args, ChainType::MAIN);
     const auto testnet = CreateChainParams(*m_node.args, ChainType::TESTNET);
-    BOOST_CHECK_EQUAL(main->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
-    BOOST_CHECK_EQUAL(testnet->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK(!llmq::pq::GetBTCCScheduleConfig(main->GetConsensus()).IsValid());
+    BOOST_CHECK(!llmq::pq::GetBTCCScheduleConfig(testnet->GetConsensus()).IsValid());
 
     ArgsManager args_cl;
     args_cl.ForceSetArg("-clreceiptstartheight", "123");
     const auto regtest_cl = CreateChainParams(args_cl, ChainType::REGTEST);
     BOOST_CHECK_EQUAL(regtest_cl->GetConsensus().nCLReceiptStartBlock, 123);
-    BOOST_CHECK_EQUAL(regtest_cl->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
-    BOOST_CHECK(!IsBTCCDeploymentConfigured(regtest_cl->GetConsensus()));
-    BOOST_CHECK(!IsBTCCSignHeight(regtest_cl->GetConsensus(), 1000002));
-    BOOST_CHECK(!IsBTCCCarrierHeight(regtest_cl->GetConsensus(), 1000007));
+    BOOST_CHECK(!llmq::pq::GetBTCCScheduleConfig(regtest_cl->GetConsensus()).IsValid());
 
-    ArgsManager args_btcc;
-    args_btcc.ForceSetArg("-btccstartheight", "321");
-    const auto regtest_btcc = CreateChainParams(args_btcc, ChainType::REGTEST);
-    BOOST_CHECK_EQUAL(regtest_btcc->GetConsensus().nCLReceiptStartBlock, std::numeric_limits<int>::max());
-    BOOST_CHECK_EQUAL(regtest_btcc->GetConsensus().nBTCCStartBlock, 321);
-    BOOST_CHECK(IsBTCCDeploymentConfigured(regtest_btcc->GetConsensus()));
-    BOOST_CHECK(!IsBTCCSignHeight(regtest_btcc->GetConsensus(), 321));
-    BOOST_CHECK(IsBTCCSignHeight(regtest_btcc->GetConsensus(), 322));
-    BOOST_CHECK(IsBTCCCarrierHeight(regtest_btcc->GetConsensus(), 327));
+    ArgsManager args_pq_btcc;
+    args_pq_btcc.ForceSetArg("-pqbtcccandidateorigin", "407");
+    const auto regtest_pq_btcc = CreateChainParams(args_pq_btcc, ChainType::REGTEST);
+    const auto config{llmq::pq::GetBTCCScheduleConfig(regtest_pq_btcc->GetConsensus())};
+    BOOST_REQUIRE(config.IsValid());
+    BOOST_CHECK(!llmq::pq::IsBTCCCandidateHeight(config, 406));
+    BOOST_CHECK(llmq::pq::IsBTCPREVCommitmentHeight(regtest_pq_btcc->GetConsensus(), 407));
+    BOOST_CHECK(!llmq::pq::IsBTCPREVCommitmentHeight(regtest_pq_btcc->GetConsensus(), 416));
+    BOOST_CHECK(llmq::pq::IsBTCPREVCommitmentHeight(regtest_pq_btcc->GetConsensus(), 417));
+
+    ArgsManager args_genesis_origin;
+    args_genesis_origin.ForceSetArg("-pqbtcccandidateorigin", "0");
+    const auto regtest_genesis_origin =
+        CreateChainParams(args_genesis_origin, ChainType::REGTEST);
+    const auto genesis_config{llmq::pq::GetBTCCScheduleConfig(
+        regtest_genesis_origin->GetConsensus())};
+    BOOST_REQUIRE(genesis_config.IsValid());
+    BOOST_CHECK(llmq::pq::IsBTCCCandidateHeight(genesis_config, 0));
+    // SYSCOIN: Genesis is a schedule sentinel, not an AuxPoW BTCPREV carrier.
+    BOOST_CHECK(!llmq::pq::IsBTCPREVCommitmentHeight(
+        regtest_genesis_origin->GetConsensus(), 0));
+    BOOST_CHECK(llmq::pq::IsBTCPREVCommitmentHeight(
+        regtest_genesis_origin->GetConsensus(), 10));
 }
 
 struct BridgeV2CutoverTestingSetup : BasicTestingSetup {

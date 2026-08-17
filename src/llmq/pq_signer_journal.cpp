@@ -1,0 +1,692 @@
+// Copyright (c) 2026 The Syscoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <llmq/pq_signer_journal.h>
+
+#include <llmq/pq_chainlock_types.h>
+
+#include <algorithm>
+#include <exception>
+#include <tuple>
+
+namespace llmq {
+namespace {
+
+constexpr std::uint8_t DB_SCHEMA_KEY{0x70};
+constexpr std::uint8_t DB_USAGE_PREFIX{0x71};
+constexpr std::uint8_t DB_SLOT_PREFIX{0x72};
+constexpr std::uint8_t DB_BRANCH_LOCK_PREFIX{0x73};
+constexpr std::uint8_t DB_ACCEPTED_CERTIFICATE_PREFIX{0x74};
+constexpr std::uint32_t SCHEMA_GUARD{0x50514a33}; // "PQJ3"
+constexpr std::uint32_t USAGE_GUARD{0x55534733};  // "USG3"
+constexpr std::uint32_t SLOT_GUARD{0x534c5433};   // "SLT3"
+constexpr std::uint32_t BRANCH_LOCK_GUARD{0x42524c33}; // "BRL3"
+constexpr std::uint32_t ACCEPTED_CERTIFICATE_GUARD{0x41434333}; // "ACC3"
+constexpr std::uint8_t SLOT_RESERVED{1};
+constexpr std::uint8_t SLOT_SIGNED{2};
+
+struct SchemaValue
+{
+    std::uint32_t version{CPQSignerJournal::DB_FORMAT_VERSION};
+    std::uint32_t guard{SCHEMA_GUARD};
+
+    SERIALIZE_METHODS(SchemaValue, obj)
+    {
+        READWRITE(obj.version, obj.guard);
+    }
+};
+
+struct ChildUsageKey
+{
+    std::uint8_t prefix{DB_USAGE_PREFIX};
+    std::uint32_t db_version{CPQSignerJournal::DB_FORMAT_VERSION};
+    uint256 genesis_hash;
+    std::uint16_t child_profile{0};
+    uint256 pro_tx_hash;
+    std::uint32_t quorum_epoch{0};
+    uint256 child_key_hash;
+
+    explicit ChildUsageKey(const PQSignerJournalKey& key) :
+        genesis_hash{key.genesis_hash},
+        child_profile{key.child_profile},
+        pro_tx_hash{key.pro_tx_hash},
+        quorum_epoch{key.quorum_epoch},
+        child_key_hash{key.child_key_hash}
+    {
+    }
+
+    SERIALIZE_METHODS(ChildUsageKey, obj)
+    {
+        READWRITE(obj.prefix,
+                  obj.db_version,
+                  obj.genesis_hash,
+                  obj.child_profile,
+                  obj.pro_tx_hash,
+                  obj.quorum_epoch,
+                  obj.child_key_hash);
+    }
+};
+
+struct UsageSlot
+{
+    PQSignerPurpose purpose{static_cast<PQSignerPurpose>(0)};
+    std::int32_t height{-1};
+
+    bool operator==(const UsageSlot&) const = default;
+    bool operator<(const UsageSlot& other) const
+    {
+        return std::tie(height, purpose) <
+               std::tie(other.height, other.purpose);
+    }
+
+    SERIALIZE_METHODS(UsageSlot, obj)
+    {
+        std::uint8_t purpose{static_cast<std::uint8_t>(obj.purpose)};
+        READWRITE(purpose, obj.height);
+        SER_READ(obj, obj.purpose = static_cast<PQSignerPurpose>(purpose));
+    }
+};
+
+struct UsageValue
+{
+    std::uint32_t version{CPQSignerJournal::DB_FORMAT_VERSION};
+    std::uint16_t reserved_count{0};
+    std::uint16_t reserved_count_complement{0xffff};
+    std::array<UsageSlot, PQ_C11_CHILD_USAGE_CAP> reserved_slots;
+    std::uint32_t guard{USAGE_GUARD};
+
+    SERIALIZE_METHODS(UsageValue, obj)
+    {
+        READWRITE(obj.version,
+                  obj.reserved_count,
+                  obj.reserved_count_complement);
+        for (auto& slot : obj.reserved_slots) READWRITE(slot);
+        READWRITE(obj.guard);
+    }
+};
+
+struct SlotDatabaseKey
+{
+    std::uint8_t prefix{DB_SLOT_PREFIX};
+    std::uint32_t db_version{CPQSignerJournal::DB_FORMAT_VERSION};
+    PQSignerJournalKey key;
+
+    explicit SlotDatabaseKey(const PQSignerJournalKey& key_in) : key{key_in} {}
+
+    SERIALIZE_METHODS(SlotDatabaseKey, obj)
+    {
+        READWRITE(obj.prefix, obj.db_version, obj.key);
+    }
+};
+
+struct SlotValue
+{
+    std::uint32_t version{CPQSignerJournal::DB_FORMAT_VERSION};
+    std::uint8_t state{SLOT_RESERVED};
+    uint256 message_hash;
+    PQC11Signature signature{};
+    std::uint32_t guard{SLOT_GUARD};
+
+    SERIALIZE_METHODS(SlotValue, obj)
+    {
+        // Keeping this fixed-size makes truncated and state-confused records
+        // fail deserialization instead of being interpreted permissively.
+        READWRITE(obj.version,
+                  obj.state,
+                  obj.message_hash,
+                  obj.signature,
+                  obj.guard);
+    }
+};
+
+struct BranchLockDatabaseKey
+{
+    std::uint8_t prefix{DB_BRANCH_LOCK_PREFIX};
+    std::uint32_t db_version{CPQSignerJournal::DB_FORMAT_VERSION};
+    uint256 genesis_hash;
+    uint256 pro_tx_hash;
+
+    BranchLockDatabaseKey(const uint256& genesis_hash_in,
+                          const uint256& pro_tx_hash_in)
+        : genesis_hash{genesis_hash_in}, pro_tx_hash{pro_tx_hash_in}
+    {
+    }
+
+    SERIALIZE_METHODS(BranchLockDatabaseKey, obj)
+    {
+        READWRITE(obj.prefix, obj.db_version, obj.genesis_hash,
+                  obj.pro_tx_hash);
+    }
+};
+
+struct BranchLockValue
+{
+    std::uint32_t version{CPQSignerJournal::DB_FORMAT_VERSION};
+    PQSignerBranchLock lock;
+    std::uint32_t guard{BRANCH_LOCK_GUARD};
+
+    SERIALIZE_METHODS(BranchLockValue, obj)
+    {
+        READWRITE(obj.version, obj.lock, obj.guard);
+    }
+};
+
+struct AcceptedCertificateDatabaseKey
+{
+    std::uint8_t prefix{DB_ACCEPTED_CERTIFICATE_PREFIX};
+    std::uint32_t db_version{CPQSignerJournal::DB_FORMAT_VERSION};
+    uint256 genesis_hash;
+    uint256 pro_tx_hash;
+
+    AcceptedCertificateDatabaseKey(const uint256& genesis_hash_in,
+                                   const uint256& pro_tx_hash_in)
+        : genesis_hash{genesis_hash_in}, pro_tx_hash{pro_tx_hash_in}
+    {
+    }
+
+    SERIALIZE_METHODS(AcceptedCertificateDatabaseKey, obj)
+    {
+        READWRITE(obj.prefix, obj.db_version, obj.genesis_hash,
+                  obj.pro_tx_hash);
+    }
+};
+
+struct AcceptedCertificateValue
+{
+    std::uint32_t version{CPQSignerJournal::DB_FORMAT_VERSION};
+    PQSignerBranchLock lock;
+    uint256 logical_id;
+    uint256 witness_id;
+    std::uint32_t guard{ACCEPTED_CERTIFICATE_GUARD};
+
+    SERIALIZE_METHODS(AcceptedCertificateValue, obj)
+    {
+        READWRITE(obj.version, obj.lock, obj.logical_id, obj.witness_id,
+                  obj.guard);
+    }
+
+    bool operator==(const AcceptedCertificateValue&) const = default;
+};
+
+bool IsValidKey(const PQSignerJournalKey& key)
+{
+    return !key.genesis_hash.IsNull() &&
+           key.child_profile != 0 &&
+           !key.pro_tx_hash.IsNull() &&
+           !key.child_key_hash.IsNull() &&
+           (key.purpose == PQSignerPurpose::CHAINLOCK ||
+            key.purpose == PQSignerPurpose::PAYMENT_AUDIT) &&
+           key.absolute_height >= 0;
+}
+
+bool IsValidUsage(const UsageValue& usage)
+{
+    if (usage.version != CPQSignerJournal::DB_FORMAT_VERSION ||
+        usage.guard != USAGE_GUARD ||
+        usage.reserved_count == 0 ||
+        usage.reserved_count > PQ_C11_CHILD_USAGE_CAP ||
+        static_cast<std::uint16_t>(usage.reserved_count ^ usage.reserved_count_complement) != 0xffff) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < usage.reserved_slots.size(); ++i) {
+        if (i < usage.reserved_count) {
+            const auto& slot{usage.reserved_slots[i]};
+            if (slot.height < 0 ||
+                (slot.purpose != PQSignerPurpose::CHAINLOCK &&
+                 slot.purpose != PQSignerPurpose::PAYMENT_AUDIT) ||
+                (i != 0 &&
+                 !(usage.reserved_slots[i - 1] < slot))) {
+                return false;
+            }
+        } else if (usage.reserved_slots[i] != UsageSlot{}) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ContainsSlot(const UsageValue& usage, const PQSignerJournalKey& key)
+{
+    const UsageSlot slot{key.purpose, key.absolute_height};
+    return std::binary_search(
+        usage.reserved_slots.begin(),
+        usage.reserved_slots.begin() + usage.reserved_count,
+        slot);
+}
+
+void InsertSlot(UsageValue& usage, const PQSignerJournalKey& key)
+{
+    const UsageSlot slot{key.purpose, key.absolute_height};
+    const auto begin = usage.reserved_slots.begin();
+    const auto end = begin + usage.reserved_count;
+    const auto position = std::lower_bound(begin, end, slot);
+    std::move_backward(position, end, end + 1);
+    *position = slot;
+}
+
+bool IsValidSlot(const SlotValue& slot)
+{
+    if (slot.version != CPQSignerJournal::DB_FORMAT_VERSION || slot.guard != SLOT_GUARD) {
+        return false;
+    }
+    if (slot.state == SLOT_SIGNED) return true;
+    if (slot.state != SLOT_RESERVED) return false;
+    return std::all_of(slot.signature.begin(), slot.signature.end(), [](unsigned char byte) {
+        return byte == 0;
+    });
+}
+
+bool IsValidBranchLock(const BranchLockValue& value)
+{
+    return value.version == CPQSignerJournal::DB_FORMAT_VERSION &&
+           value.guard == BRANCH_LOCK_GUARD &&
+           value.lock.IsStructurallyValid();
+}
+
+bool IsValidAcceptedCertificate(const AcceptedCertificateValue& value)
+{
+    return value.version == CPQSignerJournal::DB_FORMAT_VERSION &&
+           value.guard == ACCEPTED_CERTIFICATE_GUARD &&
+           value.lock.IsStructurallyValid() &&
+           value.lock.statement_hash == value.logical_id &&
+           !value.witness_id.IsNull();
+}
+
+bool IsValidBranchIdentity(const uint256& genesis_hash,
+                           const uint256& pro_tx_hash)
+{
+    return !genesis_hash.IsNull() && !pro_tx_hash.IsNull();
+}
+
+PQSignerJournalResult Result(PQSignerJournalOutcome outcome)
+{
+    return {.outcome = outcome, .signature = std::nullopt};
+}
+
+PQSignerJournalResult Replay(const PQC11Signature& signature)
+{
+    return {.outcome = PQSignerJournalOutcome::REPLAY, .signature = signature};
+}
+
+} // namespace
+
+bool PQSignerJournalKey::operator<(const PQSignerJournalKey& other) const
+{
+    return std::tie(genesis_hash,
+                    child_profile,
+                    pro_tx_hash,
+                    quorum_epoch,
+                    child_key_hash,
+                    purpose,
+                    absolute_height) <
+           std::tie(other.genesis_hash,
+                    other.child_profile,
+                    other.pro_tx_hash,
+                    other.quorum_epoch,
+                    other.child_key_hash,
+                    other.purpose,
+                    other.absolute_height);
+}
+
+CPQSignerJournal::CPQSignerJournal(const fs::path& path, std::size_t cache_bytes) :
+    m_db{DBParams{
+        .path = path,
+        .cache_bytes = cache_bytes,
+        .memory_only = false,
+        .wipe_data = false,
+        .obfuscate = false}}
+{
+    Initialize();
+}
+
+void CPQSignerJournal::Initialize()
+{
+    LOCK(m_mutex);
+    try {
+        if (!m_db.Exists(DB_SCHEMA_KEY)) {
+            // A schema-less nonempty store may be an old journal or a partial
+            // restore. Adopting it as empty would refund unknown signatures.
+            if (!m_db.IsEmpty()) {
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                return;
+            }
+            if (!m_db.Write(DB_SCHEMA_KEY, SchemaValue{}, /*fSync=*/true)) {
+                m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            }
+            return;
+        }
+
+        SchemaValue schema;
+        if (!m_db.Read(DB_SCHEMA_KEY, schema) ||
+            schema.version != DB_FORMAT_VERSION ||
+            schema.guard != SCHEMA_GUARD) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+        }
+    } catch (const std::exception&) {
+        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+    }
+}
+
+PQSignerJournalResult CPQSignerJournal::Reserve(
+    const PQSignerJournalKey& key,
+    const uint256& message_hash,
+    const PQSignerBranchLock& candidate_lock,
+    const std::optional<PQSignerBranchLock>& expected_lock)
+{
+    LOCK(m_mutex);
+    if (m_failure) return Result(*m_failure);
+    if (!IsValidKey(key) || message_hash.IsNull() ||
+        !candidate_lock.IsStructurallyValid() ||
+        candidate_lock.height != key.absolute_height ||
+        (expected_lock && !expected_lock->IsStructurallyValid())) {
+        return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
+    }
+
+    try {
+        const BranchLockDatabaseKey branch_key{key.genesis_hash,
+                                               key.pro_tx_hash};
+        BranchLockValue durable_branch;
+        const bool branch_exists = m_db.Exists(branch_key);
+        if (branch_exists &&
+            (!m_db.Read(branch_key, durable_branch) ||
+             !IsValidBranchLock(durable_branch))) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+        if (branch_exists != expected_lock.has_value() ||
+            (branch_exists && durable_branch.lock != *expected_lock)) {
+            return Result(PQSignerJournalOutcome::BRANCH_CONFLICT);
+        }
+        if (branch_exists &&
+            (candidate_lock.height < durable_branch.lock.height ||
+             (candidate_lock.height == durable_branch.lock.height &&
+              candidate_lock != durable_branch.lock))) {
+            return Result(PQSignerJournalOutcome::BRANCH_CONFLICT);
+        }
+
+        const ChildUsageKey usage_key{key};
+        UsageValue usage;
+        const bool usage_exists = m_db.Exists(usage_key);
+        if (usage_exists && (!m_db.Read(usage_key, usage) || !IsValidUsage(usage))) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        const SlotDatabaseKey slot_key{key};
+        SlotValue slot;
+        const bool slot_exists = m_db.Exists(slot_key);
+        if (slot_exists) {
+            if (!usage_exists || !ContainsSlot(usage, key) ||
+                !m_db.Read(slot_key, slot) || !IsValidSlot(slot)) {
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                m_pending.clear();
+                return Result(*m_failure);
+            }
+            if (slot.message_hash != message_hash) {
+                return Result(PQSignerJournalOutcome::CONFLICT);
+            }
+            if (slot.state == SLOT_SIGNED) return Replay(slot.signature);
+
+            // A second Reserve call cannot establish whether signing started.
+            // The original live owner may still commit through StoreSignature.
+            return Result(PQSignerJournalOutcome::CONSUMED);
+        }
+
+        if (usage_exists && ContainsSlot(usage, key)) {
+            // The atomic slot disappeared while its monotonic height marker
+            // survived. Treat this as corruption, never as a refunded use.
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        if (m_pending.find(key) != m_pending.end()) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+        if (usage_exists && usage.reserved_count == PQ_C11_CHILD_USAGE_CAP) {
+            return Result(PQSignerJournalOutcome::CAP_EXHAUSTED);
+        }
+
+        UsageValue next_usage = usage;
+        if (!usage_exists) next_usage = UsageValue{};
+        InsertSlot(next_usage, key);
+        ++next_usage.reserved_count;
+        next_usage.reserved_count_complement =
+            static_cast<std::uint16_t>(next_usage.reserved_count ^ 0xffff);
+
+        SlotValue reserved;
+        reserved.message_hash = message_hash;
+
+        // The usage counter, slot, and operator-wide branch lock advance in one
+        // atomic batch. Sync=true is the burn-before-sign boundary; no signer
+        // may run before return.
+        CDBBatch batch{m_db};
+        batch.Write(usage_key, next_usage);
+        batch.Write(slot_key, reserved);
+        if (!branch_exists || candidate_lock.height > durable_branch.lock.height) {
+            batch.Write(branch_key, BranchLockValue{.lock = candidate_lock});
+        }
+        if (!m_db.WriteBatch(batch, /*fSync=*/true)) {
+            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        m_pending.emplace(key, PendingReservation{message_hash});
+        return Result(PQSignerJournalOutcome::RESERVED);
+    } catch (const std::exception&) {
+        // A failed synchronous write has uncertain durability. Clearing the
+        // live ownership prevents this process from attempting the signer.
+        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+        m_pending.clear();
+        return Result(*m_failure);
+    }
+}
+
+std::optional<PQSignerBranchLock> CPQSignerJournal::GetBranchLock(
+    const uint256& genesis_hash,
+    const uint256& pro_tx_hash)
+{
+    LOCK(m_mutex);
+    if (m_failure || !IsValidBranchIdentity(genesis_hash, pro_tx_hash)) {
+        return std::nullopt;
+    }
+    try {
+        const BranchLockDatabaseKey key{genesis_hash, pro_tx_hash};
+        if (!m_db.Exists(key)) return std::nullopt;
+        BranchLockValue value;
+        if (!m_db.Read(key, value) || !IsValidBranchLock(value)) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return std::nullopt;
+        }
+        return value.lock;
+    } catch (const std::exception&) {
+        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+        m_pending.clear();
+        return std::nullopt;
+    }
+}
+
+PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
+    const uint256& genesis_hash,
+    const uint256& pro_tx_hash,
+    const pq::FinalChainLock& chainlock)
+{
+    LOCK(m_mutex);
+    if (m_failure) return Result(*m_failure);
+    if (!IsValidBranchIdentity(genesis_hash, pro_tx_hash) ||
+        !chainlock.IsStructurallyValid()) {
+        return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
+    }
+
+    const uint256 logical_id{chainlock.GetLogicalId(genesis_hash)};
+    const uint256 witness_id{chainlock.GetWitnessId(genesis_hash)};
+    const AcceptedCertificateValue accepted{
+        .lock = PQSignerBranchLock{
+            chainlock.statement.height,
+            chainlock.statement.block_hash,
+            logical_id},
+        .logical_id = logical_id,
+        .witness_id = witness_id};
+    if (!IsValidAcceptedCertificate(accepted)) {
+        return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
+    }
+
+    try {
+        const AcceptedCertificateDatabaseKey certificate_key{genesis_hash,
+                                                             pro_tx_hash};
+        AcceptedCertificateValue durable_certificate;
+        const bool certificate_exists{m_db.Exists(certificate_key)};
+        if (certificate_exists &&
+            (!m_db.Read(certificate_key, durable_certificate) ||
+             !IsValidAcceptedCertificate(durable_certificate))) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        const BranchLockDatabaseKey branch_key{genesis_hash, pro_tx_hash};
+        BranchLockValue durable_branch;
+        const bool branch_exists{m_db.Exists(branch_key)};
+        if (branch_exists &&
+            (!m_db.Read(branch_key, durable_branch) ||
+             !IsValidBranchLock(durable_branch))) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        if (certificate_exists) {
+            if (accepted.lock.height < durable_certificate.lock.height ||
+                (accepted.lock.height == durable_certificate.lock.height &&
+                 accepted != durable_certificate)) {
+                // The finality persistence source supplied an older or
+                // conflicting winner. Continuing could turn a restored DB
+                // snapshot into authority to re-sign an adjudicated fork.
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                m_pending.clear();
+                return Result(*m_failure);
+            }
+            if (accepted == durable_certificate) {
+                // The certificate marker and branch lock were committed in
+                // one batch. A missing/older/conflicting lock cannot be an
+                // interrupted reconciliation and therefore fails closed.
+                if (!branch_exists ||
+                    durable_branch.lock.height < accepted.lock.height ||
+                    (durable_branch.lock.height == accepted.lock.height &&
+                     durable_branch.lock != accepted.lock)) {
+                    m_failure = PQSignerJournalOutcome::CORRUPT;
+                    m_pending.clear();
+                    return Result(*m_failure);
+                }
+                return Result(PQSignerJournalOutcome::CERTIFICATE_REPLAY);
+            }
+        }
+
+        const bool rebase_branch{
+            !branch_exists || durable_branch.lock.height <= accepted.lock.height};
+        CDBBatch batch{m_db};
+        batch.Write(certificate_key, accepted);
+        if (rebase_branch) {
+            batch.Write(branch_key, BranchLockValue{.lock = accepted.lock});
+        }
+        if (!m_db.WriteBatch(batch, /*fSync=*/true)) {
+            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+        return Result(rebase_branch
+                          ? PQSignerJournalOutcome::CERTIFICATE_RECONCILED
+                          : PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+    } catch (const std::exception&) {
+        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+        m_pending.clear();
+        return Result(*m_failure);
+    }
+}
+
+PQSignerJournalResult CPQSignerJournal::StoreSignature(
+    const PQSignerJournalKey& key,
+    const uint256& message_hash,
+    const PQC11Signature& signature)
+{
+    LOCK(m_mutex);
+    if (m_failure) return Result(*m_failure);
+    if (!IsValidKey(key) || message_hash.IsNull()) {
+        return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
+    }
+
+    try {
+        const ChildUsageKey usage_key{key};
+        UsageValue usage;
+        const bool usage_exists = m_db.Exists(usage_key);
+        if (usage_exists && (!m_db.Read(usage_key, usage) || !IsValidUsage(usage))) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        const SlotDatabaseKey slot_key{key};
+        SlotValue slot;
+        const bool slot_exists = m_db.Exists(slot_key);
+        if (!slot_exists) {
+            if (m_pending.find(key) != m_pending.end()) {
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                m_pending.clear();
+                return Result(*m_failure);
+            }
+            return Result(PQSignerJournalOutcome::NOT_RESERVED);
+        }
+        if (!usage_exists || !ContainsSlot(usage, key) ||
+            !m_db.Read(slot_key, slot) || !IsValidSlot(slot)) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+        if (slot.message_hash != message_hash) {
+            return Result(PQSignerJournalOutcome::CONFLICT);
+        }
+        if (slot.state == SLOT_SIGNED) return Replay(slot.signature);
+
+        const auto pending = m_pending.find(key);
+        if (pending == m_pending.end()) {
+            // This includes RESERVED state loaded after a restart.
+            return Result(PQSignerJournalOutcome::CONSUMED);
+        }
+        if (pending->second.message_hash != message_hash) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        slot.state = SLOT_SIGNED;
+        slot.signature = signature;
+        if (!m_db.Write(slot_key, slot, /*fSync=*/true)) {
+            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            m_pending.clear();
+            return Result(*m_failure);
+        }
+
+        m_pending.erase(pending);
+        return Result(PQSignerJournalOutcome::STORED);
+    } catch (const std::exception&) {
+        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+        m_pending.clear();
+        return Result(*m_failure);
+    }
+}
+
+bool CPQSignerJournal::IsHealthy() const
+{
+    LOCK(m_mutex);
+    return !m_failure.has_value();
+}
+
+} // namespace llmq

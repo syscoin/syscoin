@@ -8,6 +8,7 @@
 #include <chain.h>
 #include <coins.h>
 #include <consensus/params.h>
+#include <consensus/pq_migration.h> // SYSCOIN: preserve PQ state across reindex modes.
 #include <logging.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
@@ -38,6 +39,49 @@
 #include <vector>
 
 namespace node {
+namespace {
+
+// SYSCOIN: A loaded coins database is usable only when its deterministic-MN
+// and PQ-registry snapshots agree with the release-pinned migration branch.
+// This prevents a stale pre-PQ database from silently bootstrapping finality.
+bool VerifyActivePQLegacyAnchor(const Chainstate& chainstate)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const auto& consensus = chainstate.m_chainman.GetConsensus();
+    llmq::pq::PQRegistryConfig pq_config;
+    const auto pq_deployment =
+        llmq::pq::GetPQRegistryConfig(consensus, pq_config);
+    if (pq_deployment ==
+        llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
+        return false;
+    }
+    const auto configuration = Consensus::CheckPQLegacyAnchorConfiguration(consensus);
+    const CBlockIndex* tip = chainstate.m_chain.Tip();
+    if (configuration == Consensus::PQLegacyAnchorResult::DISABLED) {
+        return pq_deployment != llmq::pq::PQRegistryDeploymentResult::VALID ||
+               tip == nullptr ||
+               (deterministicMNManager != nullptr &&
+                deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip));
+    }
+    if (configuration != Consensus::PQLegacyAnchorResult::VALID) return false;
+
+    if (tip == nullptr) return true;
+    if (tip->nHeight < consensus.nPQLegacyAnchorHeight) {
+        return deterministicMNManager != nullptr &&
+               deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip);
+    }
+    const auto ancestry = Consensus::CheckPQLegacyAnchor(
+        consensus, tip->nHeight, tip->GetBlockHash(), tip->pprev);
+    if (ancestry != Consensus::PQLegacyAnchorResult::VALID) return false;
+
+    const CBlockIndex* anchor = tip->GetAncestor(consensus.nPQLegacyAnchorHeight);
+    return deterministicMNManager != nullptr &&
+           deterministicMNManager->VerifyPQLegacyAnchorState(anchor) &&
+           deterministicMNManager->VerifyPersistedSnapshot(tip) &&
+           deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip);
+}
+
+} // namespace
 // Complete initialization of chainstates after the initial call has been made
 // to ChainstateManager::InitializeChainstate().
 static ChainstateLoadResult CompleteChainstateInitialization(
@@ -76,7 +120,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         LogPrintf("Continuing reindex from persisted marker; forcing NEVM/LLMQ database reinitialization.\n");
     }
 
-    LogPrintf("Creating LLMQ databases...\n");
+    // SYSCOIN: Recreate fork-owned deterministic-MN, governance, and PQ
+    // finality state alongside the Bitcoin block-tree lifecycle.
+    LogPrintf("Creating legacy quorum replay state and PQ finality...\n");
     llmq::DestroyLLMQSystem();
     auto evoDmnDbParams = DBParams{
         .path = chainman.m_options.datadir / "evodb_dmn",
@@ -94,25 +140,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     netfulfilledman.reset(new CNetFulfilledRequestManager());
     mmetaman.reset();
     mmetaman.reset(new CMasternodeMetaMan());
-    auto quorumCommitmentDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qc",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qc_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = effective_reindex_geth,
-        .options = chainman.m_options.block_tree_db};
-    auto quorumVectorDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qvvecs",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qvvecs_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = effective_reindex_geth,
-        .options = chainman.m_options.block_tree_db};
-    auto quorumSkDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qsk",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qsk_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = effective_reindex_geth,
-        .options = chainman.m_options.block_tree_db};
-    llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, effective_reindex_geth);
+    // SYSCOIN: Initialize the fork-owned finality stack against this rebuilt chainstate.
+    llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman);
     pnevmtxrootsdb.reset();
     pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
         .path = chainman.m_options.datadir / "nevmtxroots",
@@ -233,6 +262,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
+            // SYSCOIN: Treat an anchor/registry mismatch as an incompatible
+            // database, not a recoverable tip-selection error; reindexing is
+            // required to reconstruct the branch-bound snapshots.
+            if (!VerifyActivePQLegacyAnchor(*chainstate)) {
+                return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        _("Mandatory post-quantum migration anchor, deterministic masternode state, or PQ key registry is missing or invalid. Reindex with the matching Syscoin release.")};
+            }
         }
         // SYSCOIN
         else {
@@ -249,6 +285,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         };
     }
     // if coinsview is empty we clear all SYS db's overriding anything we did before
+    // SYSCOIN: An empty UTXO view cannot reuse branch-bound deterministic-MN
+    // or PQ finality databases from the prior chainstate.
     if(coinsViewEmpty && !effective_reindex_geth) {
         LogPrintf("coinsViewEmpty recreating LLMQ and NEVM databases\n");
         llmq::DestroyLLMQSystem();
@@ -268,25 +306,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         netfulfilledman.reset(new CNetFulfilledRequestManager());
         mmetaman.reset();
         mmetaman.reset(new CMasternodeMetaMan());
-        auto quorumCommitmentDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qc",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qc_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = coinsViewEmpty,
-        .options = chainman.m_options.block_tree_db};
-        auto quorumVectorDB = DBParams{
-            .path = chainman.m_options.datadir / "evodb_qvvecs",
-            .cache_bytes = static_cast<size_t>(cache_sizes.evo_qvvecs_db),
-            .memory_only = options.block_tree_db_in_memory,
-            .wipe_data = coinsViewEmpty,
-            .options = chainman.m_options.block_tree_db};
-        auto quorumSkDB = DBParams{
-            .path = chainman.m_options.datadir / "evodb_qsk",
-            .cache_bytes = static_cast<size_t>(cache_sizes.evo_qsk_db),
-            .memory_only = options.block_tree_db_in_memory,
-            .wipe_data = coinsViewEmpty,
-            .options = chainman.m_options.block_tree_db};
-        llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, coinsViewEmpty);
+        // SYSCOIN: Rebind fork-owned finality after empty-coins recovery.
+        llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman);
         pnevmtxrootsdb.reset();
         pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
             .path = chainman.m_options.datadir / "nevmtxroots",

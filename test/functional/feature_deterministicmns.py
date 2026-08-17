@@ -9,7 +9,7 @@
 from test_framework.blocktools import create_block, create_coinbase, get_masternode_payment, add_witness_commitment
 from test_framework.messages import CTransaction, from_hex, COIN, CTxOut
 from test_framework.test_framework import SyscoinTestFramework
-from test_framework.util import p2p_port, Decimal, force_finish_mnsync, assert_equal, MAX_INITIAL_BROADCAST_DELAY
+from test_framework.util import p2p_port, Decimal, force_finish_mnsync, assert_equal, get_rpc_proxy, MAX_INITIAL_BROADCAST_DELAY
 class Masternode(object):
     pass
 
@@ -19,8 +19,13 @@ class DIP3Test(SyscoinTestFramework):
         self.add_wallet_options(parser, descriptors=True, legacy=False)
 
     def set_test_params(self):
-        self.num_initial_mn = 11 # Should be >= 11 to make sure quorums are not always the same MNs
-        self.num_nodes = 1 + self.num_initial_mn + 2 # +1 for controller, +1 for mn-qt, +1 for mn created after dip3 activation
+        # No prebuilt legacy-anchor fixture exists for this dynamically mined
+        # chain. Five post-anchor records are enough to retain the collateral
+        # removal, reorg, and replacement matrix. Only the payment-eligible
+        # record needs a live MN process; PQ lifecycle behavior has its own
+        # focused functional test.
+        self.num_initial_mn = 4
+        self.num_nodes = 2
         self.setup_clean_chain = True
 
         self.extra_args = ["-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"]
@@ -36,6 +41,10 @@ class DIP3Test(SyscoinTestFramework):
     def setup_network(self):
         self.add_nodes(1)
         self.start_controller_node()
+        # This chain must reach DIP3 before its exact PQ migration anchor can
+        # be discovered. Superblocks cannot be evaluated against PQ
+        # governance until then, so keep them off only for that bootstrap.
+        self.nodes[0].spork("SPORK_9_SUPERBLOCKS_ENABLED", 4070908800)
 
     def start_controller_node(self):
         self.log.info("starting controller node")
@@ -53,6 +62,59 @@ class DIP3Test(SyscoinTestFramework):
         self.stop_controller_node()
         self.start_controller_node()
 
+    def configure_pq_migration_anchor(self):
+        anchor = self.nodes[0].protx_migration_info()
+        assert_equal(anchor['height'], self.nodes[0].getblockcount())
+        registration_cutoff_blocks = 288
+        # SYSCOIN: roster membership is sampled only after root registration closes.
+        roster_snapshot_lag = 288
+        btcc_candidate_origin = 1_000_000
+        assert registration_cutoff_blocks >= roster_snapshot_lag
+        self.extra_args += [
+            '-pqlegacyanchorheight=%d' % anchor['height'],
+            '-pqlegacyanchorblockhash=%s' % anchor['blockHash'],
+            '-pqlegacydmnstatehash=%s' % anchor['dmnStateHash'],
+            '-pqlegacypqregistrystatehash=%s' % anchor['pqRegistryStateHash'],
+            '-pqpreparationheight=%d' % anchor['height'],
+            '-pqchainlockepochorigin=1440',
+            '-pqregistrationcutoffblocks=%d' % registration_cutoff_blocks,
+            '-pqrostersnapshotlag=%d' % roster_snapshot_lag,
+            '-pqfuturehorizonepochs=8',
+            '-pqbtcccandidateorigin=%d' % btcc_candidate_origin,
+            # SYSCOIN: First activation commits the separate empty BTCC
+            # receipt state before the first carrier.
+            '-pqbtccreceiptanchorheight=%d' % anchor['height'],
+            '-pqbtccreceiptanchorblockhash=%s' % anchor['blockHash'],
+            '-pqbtccreceiptanchorcursorheight=-1',
+            '-pqbtccreceiptanchorcursorsyshash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorcursorbtchash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorstatehash=%s' % ('0' * 64),
+        ]
+        self.stop_controller_node()
+        self.nodes[0].extra_args = list(self.extra_args)
+        self.start_node(0, extra_args=self.extra_args + ['-reindex'])
+        # The manual restart replaces the harness wallet arguments along with
+        # the migration profile, so restore the controller wallet explicitly.
+        if self.default_wallet_name not in self.nodes[0].listwallets():
+            self.nodes[0].loadwallet(self.default_wallet_name)
+        force_finish_mnsync(self.nodes[0])
+        assert_equal(self.nodes[0].protx_migration_info(), anchor)
+        # The reindexed chain now has an exact PQ registry at the active tip;
+        # restore normal superblock enforcement for the remainder of the test.
+        self.nodes[0].spork("SPORK_9_SUPERBLOCKS_ENABLED", 0)
+
+        # SYSCOIN: A configured node with no persisted winner must discover the
+        # pinned anchor over P2P before ChainLock ancestry can be classified.
+        # Exercise that bootstrap before expensive PQ authorization blocks so a
+        # finality lifecycle regression cannot be hidden by crypto-test timing.
+        self.add_nodes(1, offset=1)
+        self.start_node(1, extra_args=self.extra_args)
+        self.connect_nodes(1, 0)
+        self.sync_blocks(self.nodes[:2], timeout=120)
+        assert_equal(self.nodes[1].getbestblockhash(), anchor['blockHash'])
+        assert_equal(self.nodes[1].protx_migration_info(), anchor)
+        self.stop_node(1)
+
     def run_test(self):
         if self.is_wallet_compiled():
             self.nodes[0].createwallet(self.default_wallet_name, descriptors=True)
@@ -60,44 +122,34 @@ class DIP3Test(SyscoinTestFramework):
         while self.nodes[0].getbalance() < (self.num_initial_mn + 3) * 100:
             self.generatetoaddress(self.nodes[0], 10, self.nodes[0].getnewaddress()) # generate enough for collaterals
         self.log.info("controller node has {} syscoin".format(self.nodes[0].getbalance()))
-
-        # Make sure we're below block 432 (which activates dip3)
+        # Preserve the historical DIP3 activation boundary before installing
+        # the private post-quantum migration anchor.
         self.log.info("testing rejection of ProTx before dip3 activation")
         assert self.nodes[0].getblockchaininfo()['blocks'] < 432
-
         mns = []
 
-        # prepare mn which should still be accepted later when dip3 activates
         self.log.info("creating collateral for mn-before-dip3")
-        before_dip3_mn = self.prepare_mn(self.nodes[0], 1, 'mn-before-dip3')
+        before_dip3_mn = self.prepare_mn(
+            self.nodes[0], 1, 'mn-before-dip3')
         self.create_mn_collateral(self.nodes[0], before_dip3_mn)
         mns.append(before_dip3_mn)
 
-        # block 432 starts enforcing DIP3 MN payments
-        self.generate(self.nodes[0], 432 - self.nodes[0].getblockcount())
-        assert self.nodes[0].getblockcount() == 432
-
+        self.generate(
+            self.nodes[0], 432 - self.nodes[0].getblockcount())
+        assert_equal(self.nodes[0].getblockcount(), 432)
         self.log.info("mining final block for DIP3 activation")
         self.generate(self.nodes[0], 1)
-
-        # We have hundreds of blocks to sync here, give it more time
-        self.log.info("syncing blocks for all nodes")
         self.sync_blocks(self.nodes, timeout=120)
 
-        # DIP3 is fully enforced here
-
+        self.configure_pq_migration_anchor()
         self.register_mn(self.nodes[0], before_dip3_mn)
+        self.activate_payment_mn(self.nodes[0], before_dip3_mn)
         self.start_mn(before_dip3_mn)
 
-        self.log.info("registering MNs")
+        self.log.info("registering inactive list-only MNs")
         for i in range(0, self.num_initial_mn):
             mn = self.prepare_mn(self.nodes[0], i + 2, "mn-%d" % i)
             mns.append(mn)
-
-            # start a few MNs before they are registered and a few after they are registered
-            start = (i % 3) == 0
-            if start:
-                self.start_mn(mn)
 
             # let a few of the protx MNs refer to the existing collaterals
             fund = (i % 2) == 0
@@ -111,10 +163,6 @@ class DIP3Test(SyscoinTestFramework):
                 self.register_mn(self.nodes[0], mn)
 
             self.generate(self.nodes[0], 1)
-
-            if not start:
-                self.start_mn(mn)
-
             self.sync_all()
             self.assert_mnlists(mns)
 
@@ -147,12 +195,15 @@ class DIP3Test(SyscoinTestFramework):
             self.generate(self.nodes[0], 1)
 
         self.log.info("testing ProUpServTx")
-        for mn in mns:
-            # lock again after reorg above
-            try:
-                mn.node.lockunspent(False, [{'txid': mn.collateral_txid, 'vout': mn.collateral_vout}], True)
-            except Exception:
-                pass
+        payment_mn = mns[0]
+        try:
+            payment_mn.node.lockunspent(
+                False,
+                [{'txid': payment_mn.collateral_txid,
+                  'vout': payment_mn.collateral_vout}],
+                True)
+        except Exception:
+            pass
 
         for mn in mns:
             # lock again after reorg above
@@ -161,8 +212,7 @@ class DIP3Test(SyscoinTestFramework):
             except Exception:
                 pass
 
-        for mn in mns:
-            self.test_protx_update_service(mn)
+        self.test_protx_update_service(payment_mn)
 
         self.log.info("testing P2SH/multisig for payee addresses")
 
@@ -174,7 +224,7 @@ class DIP3Test(SyscoinTestFramework):
         addr2Obj = self.nodes[0].getaddressinfo(addr2)
 
         multisig = self.nodes[0].createmultisig(1, [addr1Obj['pubkey'], addr2Obj['pubkey']])['address']
-        self.update_mn_payee(mns[0], multisig)
+        self.update_mn_payee(payment_mn, multisig)
         found_multisig_payee = False
         for i in range(len(mns)):
             bt = self.nodes[0].getblocktemplate({'rules': ['segwit']})
@@ -190,8 +240,8 @@ class DIP3Test(SyscoinTestFramework):
                             found_multisig_payee = True
         assert found_multisig_payee
 
-        self.log.info("testing reusing of collaterals for replaced MNs")
-        for i in range(0, 5):
+        self.log.info("testing reusing of collaterals for replaced inactive MNs")
+        for i in range(1, len(mns)):
             mn = mns[i]
             # a few of these will actually refer to old ProRegTx internal collaterals,
             # which should work the same as external collaterals
@@ -204,14 +254,13 @@ class DIP3Test(SyscoinTestFramework):
             mns[i] = new_mn
             self.generate(self.nodes[0], 1)
             self.assert_mnlists(mns)
-            self.log.info("restarting MN %s" % new_mn.alias)
-            self.stop_node(new_mn.idx)
-            self.start_mn(new_mn)
-            self.sync_all()
 
         self.log.info("testing masternode status updates")
+        # Restore a wallet-controlled payout after the multisig payment case
+        # so the empty fee-source path below can select and spend it.
+        self.update_mn_payee(payment_mn, payment_mn.rewards_address)
         # change voting address and see if changes are reflected in `masternode status` rpc output
-        mn = mns[0]
+        mn = payment_mn
         node = self.nodes[0]
         old_dmnState = mn.node.masternode_status()["dmnState"]
         old_voting_address = old_dmnState["votingAddress"]
@@ -234,12 +283,12 @@ class DIP3Test(SyscoinTestFramework):
         mn.is_protx = True
         mn.p2p_port = p2p_port(mn.idx)
 
-        blsKey = node.bls_generate()
+        operator_keys = node.protx_generate_operator_keypair()
         mn.fundsAddr = node.getnewaddress()
         mn.ownerAddr = node.getnewaddress()
-        mn.operatorAddr = blsKey['public']
         mn.votingAddr = mn.ownerAddr
-        mn.blsMnkey = blsKey['secret']
+        mn.operatorKey = operator_keys['operatorKey']
+        mn.c11Seed = operator_keys['c11Seed']
 
         return mn
 
@@ -264,7 +313,7 @@ class DIP3Test(SyscoinTestFramework):
         mn.collateral_address = node.getnewaddress()
         mn.rewards_address = node.getnewaddress()
 
-        mn.protx_hash = node.protx_register_fund( mn.collateral_address, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, mn.operatorAddr, mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
+        mn.protx_hash = node.protx_register_fund( mn.collateral_address, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
         mn.collateral_txid = mn.protx_hash
         mn.collateral_vout = -1
 
@@ -280,8 +329,26 @@ class DIP3Test(SyscoinTestFramework):
         node.sendtoaddress(mn.fundsAddr, 0.001)
         mn.rewards_address = node.getnewaddress()
 
-        mn.protx_hash = node.protx_register(mn.collateral_txid, mn.collateral_vout, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, mn.operatorAddr, mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
-        self.generate(node, 1)
+        mn.protx_hash = node.protx_register(mn.collateral_txid, mn.collateral_vout, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
+
+    def activate_payment_mn(self, node, mn):
+        # The migration bootstrap verifier occupying node 1 is deliberately
+        # stopped until start_mn() reuses that slot.
+        self.generate(node, 1, sync_fun=self.no_op)
+        # Building the fixed 65,536-leaf C11 commitment can exceed the
+        # ordinary RPC timeout on low-core test hosts. The focused operator
+        # lifecycle test owns rotation and mempool-auth coverage; this broad
+        # test builds exactly one root solely to retain payment enforcement.
+        registration_rpc = get_rpc_proxy(
+            node.url, node.index, timeout=600,
+            coveragedir=node.coverage_dir)
+        registration_rpc.protx_register_operator_key(
+            mn.protx_hash, mn.operatorKey, mn.c11Seed, mn.fundsAddr)
+        self.generate(node, 1, sync_fun=self.no_op)
+        node.protx_update_service(
+            mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,
+            mn.operatorKey, "", "", mn.fundsAddr)
+        self.generate(node, 1, sync_fun=self.no_op)
 
     def start_mn(self, mn):
         start_idx = len(self.nodes) - 1
@@ -289,7 +356,10 @@ class DIP3Test(SyscoinTestFramework):
         for idx in range(start_idx, mn.idx):
             self.add_nodes(1, offset=idx+1)
 
-        extra_args = ['-masternodeblsprivkey=%s' % mn.blsMnkey]
+        extra_args = [
+            '-masternodeslhprivkey=%s' % mn.operatorKey,
+            '-masternodec11seed=%s' % mn.c11Seed,
+        ]
         self.start_node(mn.idx, extra_args = self.extra_args + extra_args)
         force_finish_mnsync(self.nodes[mn.idx])
         mn.node = self.nodes[mn.idx]
@@ -309,7 +379,7 @@ class DIP3Test(SyscoinTestFramework):
 
     def test_protx_update_service(self, mn):
         self.nodes[0].sendtoaddress(mn.fundsAddr, 0.001)
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, "", "", mn.fundsAddr)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.operatorKey, "", "", mn.fundsAddr)
         self.generate(self.nodes[0], 1)
         for node in self.nodes:
             protx_info = node.protx_info( mn.protx_hash)
@@ -318,7 +388,7 @@ class DIP3Test(SyscoinTestFramework):
             assert_equal(mn_list['%s-%d' % (mn.collateral_txid, mn.collateral_vout)]['address'], '127.0.0.2:%d' % mn.p2p_port)
 
         # undo
-        self.nodes[0].protx_update_service(mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port, mn.blsMnkey, "", "", mn.fundsAddr)
+        self.nodes[0].protx_update_service(mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port, mn.operatorKey, "", "", mn.fundsAddr)
         self.generate(self.nodes[0], 1)
 
     def assert_mnlists(self, mns):

@@ -1,8 +1,10 @@
-# Locked upstream source for optional BTC header-node helper binaries.
-# Keep this file pinned to an immutable commit.
+# Locked upstream source for the managed BTC header-node helper binaries.
+# Keep both the source content hash and Git commit pinned.
 BITCOIN_REPO=https://github.com/bitcoin/bitcoin.git
 BITCOIN_REF=v30.2
 BITCOIN_COMMIT=4d7d5f6b79d4c11c47e7a828d81296918fd11d4d
+BITCOIN_SOURCE_ARCHIVE_URL=https://github.com/bitcoin/bitcoin/archive/refs/tags/v30.2.tar.gz
+BITCOIN_SOURCE_ARCHIVE_SHA256=a6e1b694de7a7b9ed1f9a7990fcaec13b88bcfc8a9e2c0fcdf93dc658996a127
 
 # Optional patch path relative to contrib/btcheadernode/.
 # Leave empty to build upstream unpatched sources.

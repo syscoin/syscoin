@@ -1,5 +1,6 @@
 #!/bin/bash
 # Script to notarize signed Syscoin macOS binaries
+export LC_ALL=C
 set -e
 
 # Check for version parameter
@@ -83,4 +84,4 @@ echo ""
 echo "Next step: Run ./staple-notarization.sh ${VERSION}"
 echo ""
 echo "To check notarization status later:"
-echo "xcrun notarytool history --keychain-profile \"syscoin-notary\"" 
+echo "xcrun notarytool history --keychain-profile \"syscoin-notary\""

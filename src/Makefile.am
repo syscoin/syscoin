@@ -6,7 +6,7 @@
 print-%: FORCE
 	@echo '$*'='$($*)'
 
-DIST_SUBDIRS = secp256k1 dashbls
+DIST_SUBDIRS = secp256k1
 
 AM_LDFLAGS = $(LIBTOOL_LDFLAGS) $(HARDENED_LDFLAGS) $(GPROF_LDFLAGS) $(SANITIZER_LDFLAGS) $(CORE_LDFLAGS)
 AM_CXXFLAGS = $(DEBUG_CXXFLAGS) $(HARDENED_CXXFLAGS) $(WARN_CXXFLAGS) $(NOWARN_CXXFLAGS) $(ERROR_CXXFLAGS) $(GPROF_CXXFLAGS) $(SANITIZER_CXXFLAGS) $(CORE_CXXFLAGS)
@@ -25,7 +25,6 @@ TESTS =
 BENCHMARKS =
 
 SYSCOIN_INCLUDES=-I$(builddir) -I$(srcdir)/$(MINISKETCH_INCLUDE_DIR_INT) -I$(srcdir)/secp256k1/include -I$(srcdir)/$(UNIVALUE_INCLUDE_DIR_INT)
-SYSCOIN_INCLUDES+=-I$(srcdir)/dashbls/include -I$(srcdir)/dashbls/depends/relic/include -I$(srcdir)/dashbls/depends/mimalloc/include
 SYSCOIN_INCLUDES+=-I$(srcdir)/immer
 
 
@@ -36,7 +35,6 @@ LIBSYSCOIN_CLI=libsyscoin_cli.a
 LIBSYSCOIN_UTIL=libsyscoin_util.a
 LIBSYSCOIN_CRYPTO_BASE=crypto/libsyscoin_crypto_base.la
 LIBSYSCOINQT=qt/libsyscoinqt.a
-LIBDASHBLS=dashbls/libdashbls.la
 LIBSECP256K1=secp256k1/libsecp256k1.la
 LIBNEVM=nevm/libnevm.a
 if ENABLE_ZMQ
@@ -69,9 +67,6 @@ LIBSYSCOIN_CRYPTO_ARM_SHANI = crypto/libsyscoin_crypto_arm_shani.la
 LIBSYSCOIN_CRYPTO += $(LIBSYSCOIN_CRYPTO_ARM_SHANI)
 endif
 noinst_LTLIBRARIES += $(LIBSYSCOIN_CRYPTO)
-
-$(LIBDASHBLS):
-	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D)
 
 $(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
@@ -118,7 +113,8 @@ endif
 endif
 
 .PHONY: FORCE check-symbols check-security
-# syscoin core #
+# SYSCOIN: Fork-owned headers are interleaved with inherited core headers in
+# this contiguous manifest.
 SYSCOIN_CORE_H = \
   addresstype.h \
   services/nevmconsensus.h \
@@ -131,6 +127,9 @@ SYSCOIN_CORE_H = \
   governance/governancecommon.h \
   governance/governanceexceptions.h \
   governance/governanceobject.h \
+  governance/governancepages.h \
+  governance/pq_governance_auth.h \
+  governance/pq_governance_auth_interface.h \
   governance/governancevalidators.h \
   governance/governancevote.h \
   governance/governancevotedb.h \
@@ -138,10 +137,14 @@ SYSCOIN_CORE_H = \
   evo/deterministicmns.h \
   evo/evodb.h \
   evo/mnauth.h \
+  evo/mnauth_types.h \
   evo/dmnstate.h \
   evo/providertx.h \
+  evo/pq_registry.h \
+  evo/specialtx_payload.h \
   evo/specialtx.h \
   masternode/activemasternode.h \
+  masternode/pq_operatorkeys.h \
   masternode/masternodemeta.h \
   masternode/masternodepayments.h \
   masternode/masternodesync.h \
@@ -184,8 +187,11 @@ SYSCOIN_CORE_H = \
   common/system.h \
   node/connection_types.h \
   consensus/consensus.h \
+  consensus/pq_migration_config.h \
+  consensus/pq_migration.h \
   consensus/tx_check.h \
   consensus/tx_verify.h \
+  crypto/legacy_bls.h \
   core_io.h \
   core_memusage.h \
   cuckoocache.h \
@@ -234,18 +240,10 @@ SYSCOIN_CORE_H = \
   kernel/validation_cache_sizes.h \
   key.h \
   key_io.h \
-  llmq/quorums.h \
   llmq/quorums_blockprocessor.h \
   llmq/quorums_commitment.h \
   llmq/quorums_chainlocks.h \
-  llmq/quorums_btccheckpoints.h \
-  llmq/quorums_debug.h \
-  llmq/quorums_dkgsessionhandler.h \
-  llmq/quorums_dkgsessionmgr.h \
-  llmq/quorums_dkgsession.h \
   llmq/quorums_init.h \
-  llmq/quorums_signing.h \
-  llmq/quorums_signing_shares.h \
   llmq/quorums_utils.h \
   logging.h \
   logging/timer.h \
@@ -264,6 +262,7 @@ SYSCOIN_CORE_H = \
   node/abort.h \
   node/blockmanager_args.h \
   node/blockstorage.h \
+  node/btcheader_state.h \
   node/caches.h \
   node/chainstate.h \
   node/chainstatemanager_args.h \
@@ -457,7 +456,8 @@ libsyscoin_util_a-clientversion.$(OBJEXT): obj/build.h
 
 
 
-# node #
+# SYSCOIN: Fork-owned services are interleaved with inherited node sources in
+# this contiguous archive manifest.
 libsyscoin_node_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(LEVELDB_CPPFLAGS) $(BOOST_CPPFLAGS) $(MINIUPNPC_CPPFLAGS) $(NATPMP_CPPFLAGS) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libsyscoin_node_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_node_a_SOURCES = \
@@ -471,6 +471,7 @@ libsyscoin_node_a_SOURCES = \
   governance/governanceclasses.cpp \
   governance/governancecommon.cpp \
   governance/governanceobject.cpp \
+  governance/pq_governance_auth.cpp \
   governance/governanceexceptions.cpp \
   governance/governancevalidators.cpp \
   governance/governancevote.cpp \
@@ -478,22 +479,74 @@ libsyscoin_node_a_SOURCES = \
   evo/deterministicmns.cpp \
   evo/mnauth.cpp \
   evo/dmnstate.cpp \
+  evo/provider_revoke_payload.h \
   evo/providertx.cpp \
+  evo/pq_providertx.cpp \
+  evo/pq_providertx.h \
+  evo/pq_payment_probation.cpp \
+  evo/pq_payment_probation.h \
+  evo/pq_payment_probation_db.cpp \
+  evo/pq_payment_probation_db.h \
+  evo/pq_registry.cpp \
+  evo/pq_registry.h \
   evo/specialtx.cpp \
-  llmq/quorums.cpp \
   llmq/quorums_blockprocessor.cpp \
   llmq/quorums_commitment.cpp \
   llmq/quorums_chainlocks.cpp \
-  llmq/quorums_btccheckpoints.cpp \
-  llmq/quorums_debug.cpp \
-  llmq/quorums_dkgsessionhandler.cpp \
-  llmq/quorums_dkgsessionmgr.cpp \
-  llmq/quorums_dkgsession.cpp \
   llmq/quorums_init.cpp \
-  llmq/quorums_signing.cpp \
-  llmq/quorums_signing_shares.cpp \
   llmq/quorums_utils.cpp \
+  llmq/legacy_quorum_commitment.cpp \
+  llmq/legacy_quorum_commitment.h \
+  llmq/btc_header_policy.cpp \
+  llmq/btc_header_policy.h \
+  llmq/pq_chainlock_types.cpp \
+  llmq/pq_chainlock_types.h \
+  llmq/pq_chainlock_collector.cpp \
+  llmq/pq_chainlock_collector.h \
+  llmq/pq_chainlock_persistence.cpp \
+  llmq/pq_chainlock_persistence.h \
+  llmq/pq_chainlock_test_fixture.cpp \
+  llmq/pq_chainlock_test_fixture.h \
+  llmq/pq_btcc.cpp \
+  llmq/pq_btcc.h \
+  llmq/pq_payment_audit.cpp \
+  llmq/pq_payment_audit.h \
+  llmq/pq_payment_audit_collector.cpp \
+  llmq/pq_payment_audit_collector.h \
+  llmq/pq_payment_audit_signer.cpp \
+  llmq/pq_payment_audit_signer.h \
+  llmq/pq_payment_audit_staging_store.cpp \
+  llmq/pq_payment_audit_staging_store.h \
+  llmq/pq_payment_audit_store.cpp \
+  llmq/pq_payment_audit_store.h \
+  llmq/pq_payment_audit_verify.cpp \
+  llmq/pq_payment_audit_verify.h \
+  llmq/pq_chainlock_schedule.cpp \
+  llmq/pq_chainlock_schedule.h \
+  llmq/pq_chainlock_store.cpp \
+  llmq/pq_chainlock_store.h \
+  llmq/pq_child_key_derivation.h \
+  llmq/pq_child_key_tree.cpp \
+  llmq/pq_child_key_tree.h \
+  llmq/pq_chainlock_signer.cpp \
+  llmq/pq_chainlock_signer.h \
+  llmq/pq_chainlock_verify.cpp \
+  llmq/pq_chainlock_verify.h \
+  llmq/pq_global_auth.cpp \
+  llmq/pq_global_auth.h \
+  llmq/pq_mnauth.cpp \
+  llmq/pq_mnauth.h \
+  llmq/pq_operator_key_state.cpp \
+  llmq/pq_operator_key_state.h \
+  llmq/pq_quorum_builder.cpp \
+  llmq/pq_quorum_builder.h \
+  llmq/pq_quorum_overlay.cpp \
+  llmq/pq_quorum_overlay.h \
+  llmq/pq_signer_journal.cpp \
+  llmq/pq_signer_journal.h \
   masternode/activemasternode.cpp \
+  masternode/pq_operatorkeys.cpp \
+  masternode/pq_operatorkeys.h \
   masternode/masternodemeta.cpp \
   masternode/masternodepayments.cpp \
   masternode/masternodesync.cpp \
@@ -689,6 +742,8 @@ crypto_libsyscoin_crypto_base_la_CPPFLAGS = $(AM_CPPFLAGS)
 crypto_libsyscoin_crypto_base_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -static
 crypto_libsyscoin_crypto_base_la_LDFLAGS = $(AM_LDFLAGS) -static
 
+# SYSCOIN: Fork-only SLH-DSA and SPHINCS/C11 sources are grouped at the tail
+# of this contiguous list because the MSVC project generator consumes it whole.
 crypto_libsyscoin_crypto_base_la_SOURCES = \
   crypto/aes.cpp \
   crypto/aes.h \
@@ -718,7 +773,27 @@ crypto_libsyscoin_crypto_base_la_SOURCES = \
   crypto/sha512.cpp \
   crypto/sha512.h \
   crypto/siphash.cpp \
-  crypto/siphash.h
+  crypto/siphash.h \
+  crypto/slhdsa/secure.cpp \
+  crypto/slhdsa/secure.h \
+  crypto/slhdsa/selftest.cpp \
+  crypto/slhdsa/selftest.h \
+  crypto/slhdsa/slhdsa.cpp \
+  crypto/slhdsa/slhdsa.h \
+  crypto/slhdsa/vendor/cbmc.h \
+  crypto/slhdsa/vendor/plat_local.h \
+  crypto/slhdsa/vendor/sha3_api.c \
+  crypto/slhdsa/vendor/sha3_api.h \
+  crypto/slhdsa/vendor/sha3_f1600.c \
+  crypto/slhdsa/vendor/slh_adrs.h \
+  crypto/slhdsa/vendor/slh_dsa.c \
+  crypto/slhdsa/vendor/slh_dsa.h \
+  crypto/slhdsa/vendor/slh_param.h \
+  crypto/slhdsa/vendor/slh_shake.c \
+  crypto/slhdsa/vendor/slh_sys.h \
+  crypto/slhdsa/vendor/slh_var.h \
+  crypto/sphincs_c11/sphincs_c11.cpp \
+  crypto/sphincs_c11/sphincs_c11.h
 
 if USE_ASM
 crypto_libsyscoin_crypto_base_la_SOURCES += crypto/sha256_sse4.cpp
@@ -766,8 +841,6 @@ libsyscoin_consensus_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_consensus_a_SOURCES = \
   arith_uint256.cpp \
   arith_uint256.h \
-  bls/bls.cpp \
-  bls/bls.h \
   consensus/amount.h \
   consensus/merkle.cpp \
   consensus/merkle.h \
@@ -868,11 +941,6 @@ endif
 libsyscoin_util_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
 libsyscoin_util_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_util_a_SOURCES = \
-  bls/bls_batchverifier.h \
-  bls/bls_ies.cpp \
-  bls/bls_ies.h \
-  bls/bls_worker.cpp \
-  bls/bls_worker.h \
   support/lockedpool.cpp \
   chainparamsbase.cpp \
   clientversion.cpp \
@@ -944,14 +1012,12 @@ syscoin_bin_ldadd = \
   $(LIBSYSCOIN_ZMQ) \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_CRYPTO) \
-  $(LIBDASHBLS) \
   $(LIBLEVELDB) \
   $(LIBMEMENV) \
   $(LIBSECP256K1) \
-  $(LIBNEVM) \
-  $(LIBDASHBLS)
+  $(LIBNEVM)
 
-syscoin_bin_ldadd += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS) $(GMP_LIBS)
+syscoin_bin_ldadd += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
 
 syscoind_SOURCES = $(syscoin_daemon_sources) init/syscoind.cpp
 syscoind_CPPFLAGS = $(syscoin_bin_cppflags)
@@ -983,7 +1049,7 @@ syscoin_cli_LDADD = \
   $(LIBSYSCOIN_UTIL) \
   $(LIBSYSCOIN_CRYPTO)
 
-syscoin_cli_LDADD += $(EVENT_LIBS) $(LIBDASHBLS)
+syscoin_cli_LDADD += $(EVENT_LIBS)
 #
 
 # syscoin-tx binary #
@@ -1004,11 +1070,8 @@ syscoin_tx_LDADD = \
   $(LIBSYSCOIN_CRYPTO) \
   $(LIBLEVELDB) \
   $(LIBMEMENV) \
-  $(LIBDASHBLS) \
   $(LIBSECP256K1) \
-  $(LIBNEVM) \
-  $(LIBDASHBLS) \
-  $(GMP_LIBS)
+  $(LIBNEVM)
 #
 
 # syscoin-util binary #
@@ -1026,12 +1089,9 @@ syscoin_util_LDADD = \
   $(LIBSYSCOIN_UTIL) \
   $(LIBSYSCOIN_CONSENSUS) \
   $(LIBSYSCOIN_CRYPTO) \
-  $(LIBDASHBLS) \
   $(LIBSECP256K1) \
   $(LIBNEVM) \
-  $(LIBDASHBLS) \
-  $(LIBUNIVALUE) \
-  $(GMP_LIBS)
+  $(LIBUNIVALUE)
 #
 
 # syscoin-wallet binary #
@@ -1056,9 +1116,8 @@ libsyscoinconsensus_la_SOURCES = support/cleanse.cpp $(crypto_libsyscoin_crypto_
 
 
 libsyscoinconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)
-libsyscoinconsensus_la_LIBADD = $(LIBDASHBLS) $(LIBSECP256K1) $(GMP_LIBS)
+libsyscoinconsensus_la_LIBADD = $(LIBSECP256K1)
 libsyscoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_SYSCOIN_INTERNAL
-libsyscoinconsensus_la_CPPFLAGS += -I$(srcdir)/dashbls/include -I$(srcdir)/dashbls/depends/relic/include -I$(srcdir)/dashbls/depends/mimalloc/include
 libsyscoinconsensus_la_CPPFLAGS += -I$(srcdir)/immer
 libsyscoinconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
@@ -1068,18 +1127,26 @@ endif
 # syscoin pre-built binaries #
 dist_bin_SCRIPTS =
 nodist_bin_SCRIPTS =
+# SYSCOIN: Package the managed Bitcoin-header helper and its license.
+btcheadernodedocdir = $(docdir)/btcheadernode
+nodist_btcheadernodedoc_DATA =
 if TARGET_X86_64_LINUX
 dist_bin_SCRIPTS += bin/linux/x86_64/sysgeth
+endif
+# SYSCOIN: release builds enable this helper on every supported Linux/macOS
+# architecture. Developer builds retain an explicit configure opt-out.
 if ENABLE_BTCHEADERNODE_BUILD
 BTCHEADERNODE_BIN_STAMP = bin/btcheadernode/.build-stamp
 nodist_bin_SCRIPTS += \
   bin/btcheadernode/bin/bitcoind \
   bin/btcheadernode/bin/bitcoin-cli
+nodist_btcheadernodedoc_DATA += bin/btcheadernode/COPYING.bitcoin-core
 
 $(BTCHEADERNODE_BIN_STAMP): $(top_srcdir)/contrib/btcheadernode/build-bitcoin-header-node.sh \
 	$(top_srcdir)/contrib/btcheadernode/bitcoin.lock \
+	$(top_srcdir)/contrib/btcheadernode/COPYING.bitcoin-core \
 	$(top_srcdir)/contrib/btcheadernode/patches/headers-only.diff
-	$(AM_V_at)CC="$(CC)" CXX="$(CXX)" CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" CXXFLAGS="$(CXXFLAGS)" LDFLAGS="$(LDFLAGS)" $(top_srcdir)/contrib/btcheadernode/build-bitcoin-header-node.sh --src-root "$(abs_top_srcdir)" --build-root "$(abs_top_builddir)"
+	$(AM_V_at)HOST="$(host)" CC="$(CC)" CXX="$(CXX)" AR="$(AR)" RANLIB="$(RANLIB)" NM="$(NM)" STRIP="$(STRIP)" CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" CXXFLAGS="$(CXXFLAGS)" LDFLAGS="$(LDFLAGS)" $(top_srcdir)/contrib/btcheadernode/build-bitcoin-header-node.sh --src-root "$(abs_top_srcdir)" --build-root "$(abs_top_builddir)"
 	$(AM_V_at)mkdir -p "$(dir $@)"
 	$(AM_V_at)touch "$@"
 
@@ -1088,7 +1155,9 @@ bin/btcheadernode/bin/bitcoind: $(BTCHEADERNODE_BIN_STAMP)
 
 bin/btcheadernode/bin/bitcoin-cli: $(BTCHEADERNODE_BIN_STAMP)
 	@test -x "$@"
-endif
+
+bin/btcheadernode/COPYING.bitcoin-core: $(BTCHEADERNODE_BIN_STAMP)
+	@test -f "$@"
 endif
 # if TARGET_ARM_LINUX
 # dist_bin_SCRIPTS += bin/linux/arm/sysgeth
@@ -1104,13 +1173,26 @@ CTAES_DIST += crypto/ctaes/ctaes.h
 CTAES_DIST += crypto/ctaes/README.md
 CTAES_DIST += crypto/ctaes/test.c
 
+# SYSCOIN: Keep the exact research-profile provenance, licenses, and independent
+# differential/KAT tooling in source distributions. These files are part of
+# the review boundary even though they are not linked into binaries.
+PQ_CRYPTO_DIST = \
+  crypto/slhdsa/README.md \
+  crypto/sphincs_c11/README.md \
+  crypto/sphincs_c11/tests/standalone_test.cpp \
+  crypto/sphincs_c11/tools/differential.py
+
+# SYSCOIN: Binary packages must carry the exact third-party notices for both linked PQ
+# implementations; the source-distribution list alone is insufficient.
+slhdsadocdir = $(docdir)/pq-crypto/slhdsa
+dist_slhdsadoc_DATA = crypto/slhdsa/LICENSE.upstream
+sphincsc11docdir = $(docdir)/pq-crypto/sphincs_c11
+dist_sphincsc11doc_DATA = crypto/sphincs_c11/LICENSE
+
 CLEANFILES = $(EXTRA_LIBRARIES)
-if TARGET_X86_64_LINUX
 if ENABLE_BTCHEADERNODE_BUILD
 CLEANFILES += bin/btcheadernode/.build-stamp
 endif
-endif
-
 CLEANFILES += *.gcda *.gcno
 CLEANFILES += compat/*.gcda compat/*.gcno
 CLEANFILES += consensus/*.gcda consensus/*.gcno
@@ -1133,12 +1215,10 @@ CLEANFILES += obj/build.h
 
 
 IMMER_DIST = immer/immer
-LIBDASHBLS_DIST = dashbls
-
 EXTRA_DIST = \
   $(CTAES_DIST)   \
   $(IMMER_DIST)   \
-  $(LIBDASHBLS_DIST)
+  $(PQ_CRYPTO_DIST)
 
 config/syscoin-config.h: config/stamp-h1
 	@$(MAKE) -C $(top_builddir) $(subdir)/$(@)
@@ -1148,7 +1228,6 @@ $(top_srcdir)/$(subdir)/config/syscoin-config.h.in:  $(am__configure_deps)
 	$(AM_V_at)$(MAKE) -C $(top_srcdir) $(subdir)/config/syscoin-config.h.in
 
 clean-local:
-	-$(MAKE) -C dashbls clean
 	-$(MAKE) -C secp256k1 clean
 	-rm -f leveldb/*/*.gcda leveldb/*/*.gcno leveldb/helpers/memenv/*.gcda leveldb/helpers/memenv/*.gcno
 	-rm -f config.h

@@ -5,10 +5,31 @@ Upstream-Contact: Satoshi Nakamoto <satoshin@gmx.com>
 Source: https://github.com/syscoin/syscoin
 
 Files: *
-Copyright: 2009-2023, Syscoin Core Developers
+Copyright: 2009-2026, Syscoin Core Developers
 License: Expat
 Comment: The Syscoin Core Developers encompasses all contributors to the
          project, listed in the release notes or the git log.
+
+Files: src/crypto/slhdsa/vendor/*
+       src/crypto/slhdsa/LICENSE.upstream
+Copyright: 2023-2025, Markku-Juhani O. Saarinen
+           The slhdsa-c project authors
+           The mlkem-native project authors
+License: Apache-2.0 or ISC or Expat
+Comment: The exact upstream tri-license text is preserved in
+         src/crypto/slhdsa/LICENSE.upstream.
+
+Files: src/crypto/sphincs_c11/*
+Copyright: 2026, Nicolas Consigny <nicolas@ethereum.org>
+           2026, The Syscoin Core developers
+License: Expat
+
+Files: contrib/btcheadernode/COPYING.bitcoin-core
+Copyright: 2009-2026, The Bitcoin Core developers
+           2009-2026, Bitcoin Developers
+License: Expat
+Comment: This notice is byte-identical to COPYING from the Bitcoin Core
+         commit pinned in contrib/btcheadernode/bitcoin.lock.
 
 Files: debian/*
 Copyright: 2010-2011, Jonas Smedegaard <dr@jones.dk>
@@ -145,3 +166,16 @@ License: Apache-2.0
  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  See the License for the specific language governing permissions and
  limitations under the License.
+
+License: ISC
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+ SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+ OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

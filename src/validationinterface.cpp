@@ -285,8 +285,9 @@ void CMainSignals::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBl
 void CMainSignals::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockDisconnect(state, nBlockHash, diff); });
 }
-void CMainSignals::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlockInfo(nHeight, state);});
+void CMainSignals::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state) {
+    // SYSCOIN: Count-only status cannot distinguish equal-height Syscoin forks.
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlockInfo(nHeight, nSYSBlockHash, state);});
 }
 void CMainSignals::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlock(evmBlock, state);});

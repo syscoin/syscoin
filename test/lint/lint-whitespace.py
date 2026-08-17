@@ -22,9 +22,11 @@ EXCLUDED_DIRS = ["depends/patches/",
                  "src/crc32c/",
                  "src/secp256k1/",
                  "src/minisketch/",
+                 # SYSCOIN: Preserve whitespace in the pinned SLH-DSA
+                 # reference sources; local wrappers remain linted.
+                 "src/crypto/slhdsa/vendor/",
                  "doc/release-notes/",
                  "src/qt/locale",
-                 "src/dashbls/",
                  "src/immer/"]
 
 def parse_args():
@@ -94,8 +96,9 @@ def main():
         if args.prev_commits:
             commit_range = "HEAD~" + args.prev_commits + "...HEAD"
         else:
-            # This assumes that the target branch of the pull request will be master.
-            merge_base = check_output(["git", "merge-base", "HEAD", "dev-4.x"], text=True, encoding="utf8").rstrip("\n")
+            # SYSCOIN: Keep the local default aligned with ci/lint/06_script.sh
+            # and the repository's current pull-request target.
+            merge_base = check_output(["git", "merge-base", "HEAD", "master"], text=True, encoding="utf8").rstrip("\n")
             commit_range = merge_base + "..HEAD"
     else:
         commit_range = os.getenv("COMMIT_RANGE")

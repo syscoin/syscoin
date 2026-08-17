@@ -45,10 +45,13 @@ void CheckAndWriteBudget(const CAmount& nSuperblockPayment, const CAmount& nPaym
 *   - When non-superblocks are detected, the normal schedule should be maintained
 */
 
-bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock, bool* exact_superblock_validation, const std::vector<bool>* matched_outputs)
+bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock, bool* exact_superblock_validation, const std::vector<bool>* matched_outputs, bool* governance_state_available)
 {
     if (exact_superblock_validation != nullptr) {
         *exact_superblock_validation = false;
+    }
+    if (governance_state_available != nullptr) {
+        *governance_state_available = true;
     }
     bool isBlockRewardValueMet = (block.vtx[0]->GetValueOut() <= blockReward);
     const int nBlockHeight = pindex->nHeight;
@@ -119,10 +122,22 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
             CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
         return true;
     }
+    const SuperblockTriggerState trigger_state{
+        CSuperblockManager::GetSuperblockTriggerState(
+            nBlockHeight, pindex->pprev)};
+    if (trigger_state == SuperblockTriggerState::UNAVAILABLE) {
+        if (governance_state_available != nullptr) {
+            *governance_state_available = false;
+        }
+        strErrorRet = strprintf(
+            "governance state is unavailable for parent of height %d",
+            nBlockHeight);
+        return false;
+    }
     if (exact_superblock_validation != nullptr) {
         *exact_superblock_validation = true;
     }
-    if (!CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
+    if (trigger_state == SuperblockTriggerState::NOT_TRIGGERED) {
         // we are on a valid superblock height but a superblock was not triggered
         // revert to block reward limits in this case
         if(!isBlockRewardValueMet) {
@@ -135,7 +150,9 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         return isBlockRewardValueMet;
     }
     // this actually also checks for correct payees and not only amount
-    if (!CSuperblockManager::IsValidSuperblock(*block.vtx[0], nBlockHeight, blockReward, nGovernanceBudgetUp, matched_outputs)) {
+    if (!CSuperblockManager::IsValidSuperblock(
+            *block.vtx[0], nBlockHeight, blockReward,
+            nGovernanceBudgetUp, matched_outputs, pindex->pprev)) {
         // triggered but invalid? that's weird
         LogPrintf("%s -- ERROR: Invalid superblock detected at height %d: %s", __func__, nBlockHeight, block.vtx[0]->ToString()); /* Continued */
         // should NOT allow invalid superblocks, when superblocks are enabled
@@ -175,20 +192,35 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
     return false;
 }
 
-void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, std::vector<CTxOut>& voutMasternodePaymentsRet, std::vector<CTxOut>& voutSuperblockPaymentsRet)
+bool FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, std::vector<CTxOut>& voutMasternodePaymentsRet, std::vector<CTxOut>& voutSuperblockPaymentsRet)
 {
     // only create superblocks if spork is enabled AND if superblock is actually triggered
     // (height should be validated inside)
-    if(AreSuperblocksEnabled() &&
-        CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
+    if (AreSuperblocksEnabled() &&
+        CSuperblock::IsValidBlockHeight(nBlockHeight)) {
+        const CBlockIndex* expected_tip{activeChain.Tip()};
+        const auto trigger_state{
+            CSuperblockManager::GetSuperblockTriggerState(
+                nBlockHeight, expected_tip)};
+        if (trigger_state == SuperblockTriggerState::UNAVAILABLE) {
+            LogPrintf("%s -- governance state unavailable at height %d\n",
+                      __func__, nBlockHeight);
+            return false;
+        }
+        if (trigger_state == SuperblockTriggerState::TRIGGERED) {
             LogPrint(BCLog::GOBJECT, "%s -- triggered superblock creation at height %d\n", __func__, nBlockHeight);
-            CSuperblockManager::GetSuperblockPayments(nBlockHeight, voutSuperblockPaymentsRet);
+            if (!CSuperblockManager::GetSuperblockPayments(
+                    nBlockHeight, voutSuperblockPaymentsRet,
+                    expected_tip)) {
+                return false;
+            }
+        }
     }
 
     const CAmount nHalfFee = fees / 2;
     if (!CMasternodePayments::GetMasternodeTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee)) {
         LogPrint(BCLog::MNPAYMENTS, "%s -- no masternode to pay (MN list probably empty)\n", __func__);
-        return;
+        return true;
     }
 	// miner takes 25% of the reward and half fees
     CAmount minerRewardWithMN = (blockReward + 3) / 4; 
@@ -208,6 +240,7 @@ void FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
 
     LogPrint(BCLog::MNPAYMENTS, "%s -- nBlockHeight %d blockReward %lld voutMasternodePaymentsRet \"%s\"\n", __func__,
                             nBlockHeight, blockReward, voutMasternodeStr);
+    return true;
 }
 
 /**
@@ -266,8 +299,8 @@ bool CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, 
         const CBlockIndex* pindex = activeChain[nBlockHeight - 1];
         if(!pindex)
             return false;
-        dmnPayee = deterministicMNManager->GetListForBlock(pindex).GetMNPayee();
-        if (!dmnPayee) {
+        if (!deterministicMNManager->GetMNPayeeForBlock(pindex, dmnPayee) ||
+            !dmnPayee) {
             return false;
         }
     }

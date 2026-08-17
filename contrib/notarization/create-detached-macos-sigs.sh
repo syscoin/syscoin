@@ -1,5 +1,6 @@
 #!/bin/bash
 # Helper script to create detached macOS signatures for Guix builds
+export LC_ALL=C
 set -e
 
 # Check for version parameter
@@ -111,4 +112,4 @@ echo "3. After signatures are merged and tagged, builders can create signed bina
 echo "4. Notarize the signed binaries using ./contrib/notarization/notarize-all.sh"
 
 # Clean up
-rm -rf dist/ 
+rm -rf dist/

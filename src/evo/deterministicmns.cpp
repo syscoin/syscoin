@@ -8,25 +8,77 @@
 #include <base58.h>
 #include <chainparams.h>
 #include <core_io.h>
+#include <consensus/pq_migration.h>
 #include <script/script.h>
 #include <node/interface_ui.h>
 #include <validation.h>
 #include <validationinterface.h>
 
-#include <llmq/quorums_commitment.h>
-#include <llmq/quorums_utils.h>
 #include <univalue.h>
 #include <shutdown.h>
 #include <common/args.h>
 #include <logging.h>
 #include <interfaces/chain.h>
+#include <llmq/quorums_commitment.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
 
 #include <algorithm>
 #include <chrono>
+
+namespace {
+constexpr std::string_view PQ_LEGACY_STATE_DOMAIN{"SYS_PQ_LEGACY_DMN_STATE_V1"};
+
+DBParams MakePQRegistryDBParams(DBParams params)
+{
+    if (params.path.empty()) {
+        params.path = "evodb_pq_registry";
+    } else {
+        const std::string sibling_name =
+            fs::PathToString(params.path.filename()) + "_pq_registry";
+        params.path = params.path.parent_path() / sibling_name;
+    }
+    // SYSCOIN: PQRegistryManager creates two LevelDBs from this budget.
+    params.cache_bytes = std::max<std::size_t>(1, params.cache_bytes / 2);
+    return params;
+}
+
+std::optional<uint256> EmptyPQRegistryStateRoot(const uint256& genesis_hash)
+{
+    llmq::pq::PQRegistrySnapshot empty;
+    return empty.RecomputeConsensusStateRoot(genesis_hash);
+}
+
+llmq::pq::PQRegistryCallbacks MakePQRegistryCallbacks(
+    const CDeterministicMNList& before,
+    const CDeterministicMNList& after,
+    const uint256& genesis_hash)
+{
+    llmq::pq::PQRegistryCallbacks callbacks;
+    callbacks.dmn_exists_before = [&before](const uint256& pro_tx_hash) {
+        return before.HasMN(pro_tx_hash);
+    };
+    callbacks.dmn_exists_after = [&after](const uint256& pro_tx_hash) {
+        return after.HasMN(pro_tx_hash);
+    };
+    callbacks.verify_initial_owner_authorization =
+        [&before, genesis_hash](
+            const llmq::pq::GlobalKeyTxPayload& payload,
+            const uint256& expected_authorization_hash) {
+            const auto dmn = before.GetMN(payload.pro_tx_hash);
+            const auto actual_authorization_hash =
+                llmq::pq::GetGlobalOwnerRegistrationAuthorizationHash(
+                    genesis_hash, payload);
+            return dmn != nullptr && actual_authorization_hash &&
+                   *actual_authorization_hash == expected_authorization_hash &&
+                   llmq::pq::VerifyGlobalOwnerRegistrationAuthorization(
+                       genesis_hash, payload, dmn->pdmnState->keyIDOwner);
+        };
+    return callbacks;
+}
+}
+
 bool fMasternodeMode = false;
-int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE = 60 * 60 * 24 * 7; // keep them for a week
 
 std::unique_ptr<CDeterministicMNManager> deterministicMNManager;
 
@@ -55,11 +107,27 @@ void CollectRetainedSnapshotHashes(
         ordered_hashes.emplace_back(block_hash);
         retained_hashes.insert(block_hash);
     }
+
+    // SYSCOIN: A genesis-active deployment has one exact base snapshot that
+    // cannot be reproduced by ConnectBlock. Keep this single record outside
+    // the bounded hot window; ordinary historical snapshots remain subject to
+    // pruning.
+    if (consensus.DIP0003Height == 0) {
+        retained_hashes.insert(consensus.hashGenesisBlock);
+    }
+
+    if (consensus.nPQLegacyAnchorHeight != std::numeric_limits<int>::max() &&
+        tip != nullptr && tip->nHeight >= consensus.nPQLegacyAnchorHeight) {
+        if (const CBlockIndex* anchor = tip->GetAncestor(consensus.nPQLegacyAnchorHeight)) {
+            retained_hashes.insert(anchor->GetBlockHash());
+        }
+    }
 }
 
 bool CollectPersistedKeysOutsideWindow(
     CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>& evo_db,
     const EvoEraseSet& retained_hashes,
+    std::optional<int32_t> finality_retention_floor,
     std::vector<uint256>& prune_keys,
     size_t& persisted_snapshot_count)
 {
@@ -71,14 +139,30 @@ bool CollectPersistedKeysOutsideWindow(
 
     for (cursor->SeekToFirst(); cursor->Valid(); cursor->Next()) {
         uint256 key;
-        if (!cursor->GetKey(key)) {
-            continue;
-        }
+        if (!cursor->GetKey(key)) return false;
 
         ++persisted_snapshot_count;
-        if (retained_hashes.count(key) == 0) {
-            prune_keys.emplace_back(key);
+        std::optional<int32_t> snapshot_height;
+        if (finality_retention_floor) {
+            CDeterministicMNList snapshot;
+            if (!cursor->GetValue(snapshot) ||
+                snapshot.IsNull() ||
+                snapshot.GetBlockHash() != key ||
+                snapshot.GetHeight() < Params().GetConsensus().DIP0003Height) {
+                // SYSCOIN: A corrupt value must not evade a height-aware
+                // finality floor or be silently erased as if it were merely
+                // old. Stop maintenance and require explicit DB recovery.
+                LogPrintf("CDeterministicMNManager::%s -- invalid persisted "
+                          "snapshot %s under finality retention\n",
+                          __func__, key.ToString());
+                return false;
+            }
+            snapshot_height = snapshot.GetHeight();
         }
+        if (retained_hashes.count(key) != 0) continue;
+        if (snapshot_height &&
+            *snapshot_height >= *finality_retention_floor) continue;
+        prune_keys.emplace_back(key);
     }
 
     return true;
@@ -106,12 +190,133 @@ bool WarmReadCacheFromWindow(
 } // namespace
 
 CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
+    : m_pq_registry_db_params(MakePQRegistryDBParams(db_params)),
+      m_payment_probation(
+          std::make_unique<llmq::pq::PQPaymentProbationManager>(db_params))
 {
     m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>>(db_params, LIST_CACHE_SIZE);
-    if (m_evoDb->CountPersistedEntries() > 0) {
-        m_persistent_window_initialized.store(true, std::memory_order_relaxed);
+    // SYSCOIN: Persist and validate the sole canonical base for a
+    // genesis-active deterministic-masternode deployment.
+    const auto& consensus{Params().GetConsensus()};
+    const int64_t persisted_entry_count{m_evoDb->CountPersistedEntries()};
+    if (consensus.DIP0003Height == 0) {
+        CDeterministicMNList genesis_snapshot;
+        const bool has_genesis_snapshot{m_evoDb->ReadCache(
+            consensus.hashGenesisBlock, genesis_snapshot)};
+        if (has_genesis_snapshot) {
+            if (genesis_snapshot.IsNull() ||
+                genesis_snapshot.GetHeight() != 0 ||
+                genesis_snapshot.GetBlockHash() != consensus.hashGenesisBlock ||
+                genesis_snapshot.GetAllMNsCount() != 0 ||
+                genesis_snapshot.GetTotalRegisteredCount() != 0) {
+                throw std::runtime_error(
+                    "Invalid deterministic masternode genesis snapshot");
+            }
+        } else {
+            // Genesis bypasses ConnectBlock's special-transaction state
+            // transition, so an activation at height zero needs this one exact
+            // empty base. Every later snapshot must still come from ProcessBlock.
+            const CDeterministicMNList empty_genesis{
+                consensus.hashGenesisBlock, 0, 0};
+            if (!m_evoDb->WriteThrough(consensus.hashGenesisBlock,
+                                       empty_genesis, /*fSync=*/true)) {
+                throw std::runtime_error(
+                    "Failed to persist deterministic masternode genesis snapshot");
+            }
+        }
+
+    }
+
+    // SYSCOIN: A raw entry count cannot prove that the current rolling window
+    // was completely maintained before shutdown. Enable disk-backed reads now,
+    // but let this process's first successful maintenance establish the flag.
+    if (persisted_entry_count > 0 || consensus.DIP0003Height == 0) {
         m_evoDb->SetReadCacheSize(HOT_LIST_CACHE_SIZE);
     }
+}
+
+bool CDeterministicMNManager::GetPaymentProbationState(
+    const CBlockIndex* pindex,
+    llmq::pq::PQPaymentProbationState& state) const
+{
+    const uint256 state_hash{
+        pindex == nullptr || pindex->pqPaymentProbationStateHash.IsNull()
+            ? m_payment_probation->EmptyStateHash()
+            : pindex->pqPaymentProbationStateHash};
+    return m_payment_probation->GetState(state_hash, state);
+}
+
+bool CDeterministicMNManager::CommitPaymentProbationState(
+    const llmq::pq::PQPaymentProbationState& state,
+    const uint256& expected_hash,
+    bool fJustCheck)
+{
+    return m_payment_probation->CommitState(state, expected_hash,
+                                            fJustCheck);
+}
+
+uint256 CDeterministicMNManager::EmptyPaymentProbationStateHash() const
+{
+    return m_payment_probation->EmptyStateHash();
+}
+
+bool CDeterministicMNManager::PrunePaymentProbationStatesThroughEpoch(
+    uint32_t prune_through_epoch,
+    std::span<const uint256> retained_state_hashes)
+{
+    return m_payment_probation->PruneStatesThroughEpoch(
+        prune_through_epoch, retained_state_hashes);
+}
+
+bool CDeterministicMNManager::GetMNPayeeForBlock(
+    const CBlockIndex* pindex,
+    CDeterministicMNCPtr& payee)
+{
+    payee.reset();
+    if (pindex == nullptr) return false;
+    llmq::pq::PQPaymentProbationState payment_state;
+    if (!GetPaymentProbationState(pindex, payment_state)) return false;
+    const auto list{GetListForBlock(pindex)};
+    payee = list.GetMNPayee(&payment_state);
+    return true;
+}
+
+llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
+    std::string& error) const
+{
+    llmq::pq::PQRegistryConfig config;
+    const auto deployment = llmq::pq::GetPQRegistryConfig(
+        Params().GetConsensus(), config);
+    if (deployment == llmq::pq::PQRegistryDeploymentResult::DISABLED) {
+        error = "pq-registry-disabled";
+        return nullptr;
+    }
+    if (deployment != llmq::pq::PQRegistryDeploymentResult::VALID) {
+        error = "pq-registry-invalid-configuration";
+        return nullptr;
+    }
+
+    m_pq_registry_init_requested.store(true, std::memory_order_release);
+    try {
+        std::call_once(m_pq_registry_init_once, [this, &config] {
+            m_pq_registry = std::make_unique<llmq::pq::PQRegistryManager>(
+                m_pq_registry_db_params,
+                Params().GetConsensus().hashGenesisBlock, config);
+        });
+    } catch (const std::exception& e) {
+        error = strprintf("pq-registry-open-failed: %s", e.what());
+        return nullptr;
+    }
+    if (!m_pq_registry) {
+        error = "pq-registry-open-failed";
+        return nullptr;
+    }
+    if (m_pq_registry->GetConfig() != config) {
+        error = "pq-registry-configuration-changed";
+        return nullptr;
+    }
+    error.clear();
+    return m_pq_registry.get();
 }
 
 uint64_t CDeterministicMN::GetInternalId() const
@@ -190,6 +395,31 @@ CDeterministicMNCPtr CDeterministicMNList::GetMN(const uint256& proTxHash) const
     return *p;
 }
 
+uint256 CDeterministicMNList::GetPQLegacyStateHash(const uint256& genesis_hash) const
+{
+    std::vector<CDeterministicMNCPtr> ordered;
+    ordered.reserve(mnMap.size());
+    for (const auto& item : mnMap) ordered.emplace_back(item.second);
+    std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->proTxHash < rhs->proTxHash;
+    });
+
+    CHashWriter writer{SER_GETHASH, 0};
+    writer.write(AsBytes(Span{PQ_LEGACY_STATE_DOMAIN.data(), PQ_LEGACY_STATE_DOMAIN.size()}));
+    writer << genesis_hash << blockHash << nHeight << nTotalRegisteredCount;
+    writer << static_cast<uint32_t>(ordered.size());
+    for (const auto& dmn : ordered) {
+        // SYSCOIN: this byte layout is deliberately independent from the
+        // mutable database serializers used by post-anchor PQ state.
+        writer << dmn->proTxHash
+               << static_cast<uint64_t>(dmn->GetInternalId())
+               << dmn->collateralOutpoint
+               << dmn->nOperatorReward;
+        dmn->pdmnState->SerializePQLegacyAnchorV1(writer);
+    }
+    return writer.GetHash();
+}
+
 CDeterministicMNCPtr CDeterministicMNList::GetValidMN(const uint256& proTxHash) const
 {
     auto dmn = GetMN(proTxHash);
@@ -197,16 +427,6 @@ CDeterministicMNCPtr CDeterministicMNList::GetValidMN(const uint256& proTxHash) 
         return nullptr;
     }
     return dmn;
-}
-
-CDeterministicMNCPtr CDeterministicMNList::GetMNByOperatorKey(const CBLSPublicKey& pubKey) const
-{
-    const auto it = ranges::find_if(mnMap,
-                              [&pubKey](const auto& p){return p.second->pdmnState->pubKeyOperator.Get() == pubKey;});
-    if (it == mnMap.end()) {
-        return nullptr;
-    }
-    return it->second;
 }
 
 CDeterministicMNCPtr CDeterministicMNList::GetMNByCollateral(const COutPoint& collateralOutpoint) const
@@ -237,7 +457,9 @@ CDeterministicMNCPtr CDeterministicMNList::GetMNByInternalId(uint64_t internalId
     return GetMN(*proTxHash);
 }
 
-static int CompareByLastPaid_GetHeight(const CDeterministicMN& dmn)
+static int CompareByLastPaid_GetHeight(
+    const CDeterministicMN& dmn,
+    const llmq::pq::PQPaymentProbationState* payment_state = nullptr)
 {
     int height = dmn.pdmnState->nLastPaidHeight;
     if (dmn.pdmnState->nPoSeRevivedHeight != -1 && dmn.pdmnState->nPoSeRevivedHeight > height) {
@@ -245,61 +467,93 @@ static int CompareByLastPaid_GetHeight(const CDeterministicMN& dmn)
     } else if (height == 0) {
         height = dmn.pdmnState->nRegisteredHeight;
     }
+    if (payment_state != nullptr) {
+        height = std::max(
+            height,
+            payment_state->PaymentEligibleSinceHeight(dmn.proTxHash));
+    }
     return height;
 }
 
-static bool CompareByLastPaid(const CDeterministicMN& _a, const CDeterministicMN& _b)
+static bool CompareByLastPaid(
+    const CDeterministicMN& _a,
+    const CDeterministicMN& _b,
+    const llmq::pq::PQPaymentProbationState* payment_state = nullptr)
 {
-    int ah = CompareByLastPaid_GetHeight(_a);
-    int bh = CompareByLastPaid_GetHeight(_b);
+    int ah = CompareByLastPaid_GetHeight(_a, payment_state);
+    int bh = CompareByLastPaid_GetHeight(_b, payment_state);
     if (ah == bh) {
         return _a.proTxHash < _b.proTxHash;
     } else {
         return ah < bh;
     }
 }
-static bool CompareByLastPaid(const CDeterministicMN* _a, const CDeterministicMN* _b)
+static bool CompareByLastPaid(const CDeterministicMN* _a,
+                              const CDeterministicMN* _b)
 {
     return CompareByLastPaid(*_a, *_b);
 }
 
-CDeterministicMNCPtr CDeterministicMNList::GetMNPayee() const
+CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
+    const llmq::pq::PQPaymentProbationState* payment_state) const
 {
     if (mnMap.size() == 0) {
         return nullptr;
     }
 
     CDeterministicMNCPtr best;
+    CDeterministicMNCPtr ordinary_best;
     ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
-        if (!best || CompareByLastPaid(dmn.get(), best.get())) {
+        if (!ordinary_best ||
+            CompareByLastPaid(dmn.get(), ordinary_best.get())) {
+            ordinary_best = dmn;
+        }
+        if (payment_state != nullptr &&
+            payment_state->IsPaymentWithheld(dmn->proTxHash)) {
+            return;
+        }
+        if (!best || CompareByLastPaid(*dmn, *best, payment_state)) {
             best = dmn;
         }
     });
 
-    return best;
+    // Consensus must retain a payee even if every eligible MN is withheld.
+    // This fail-open fallback prevents an audit result from burning rewards or
+    // halting mining while still removing isolated free riders from rotation.
+    return best ? best : ordinary_best;
 }
 
-std::vector<CDeterministicMNCPtr> CDeterministicMNList::GetProjectedMNPayees(int nCount) const
+std::vector<CDeterministicMNCPtr>
+CDeterministicMNList::GetProjectedMNPayees(
+    int nCount,
+    const llmq::pq::PQPaymentProbationState* payment_state) const
 {
     if (nCount < 0 ) {
         return {};
     }
-    const size_t validCount = GetValidMNsCount();
-    if ((size_t)nCount > validCount) {
-        nCount = validCount;
-    }
 
     std::vector<CDeterministicMNCPtr> result;
-    result.reserve(nCount);
+    std::vector<CDeterministicMNCPtr> ordinary_fallback;
+    result.reserve(GetValidMNsCount());
+    ordinary_fallback.reserve(GetValidMNsCount());
 
     ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
-        result.emplace_back(dmn);
-    });
-    std::sort(result.begin(), result.end(), [&](const CDeterministicMNCPtr& a, const CDeterministicMNCPtr& b) {
-        return CompareByLastPaid(a.get(), b.get());
+        ordinary_fallback.emplace_back(dmn);
+        if (payment_state == nullptr ||
+            !payment_state->IsPaymentWithheld(dmn->proTxHash)) {
+            result.emplace_back(dmn);
+        }
     });
 
-    result.resize(nCount);
+    const bool all_withheld{result.empty() && !ordinary_fallback.empty()};
+    if (all_withheld) result = ordinary_fallback;
+    std::sort(result.begin(), result.end(), [&](const auto& a, const auto& b) {
+        return CompareByLastPaid(*a, *b,
+                                 all_withheld ? nullptr : payment_state);
+    });
+
+    result.resize(std::min<std::size_t>(
+        result.size(), static_cast<std::size_t>(nCount)));
 
     return result;
 }
@@ -579,7 +833,7 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
         throw(std::runtime_error(strprintf("%s: Can't add a masternode %s with a duplicate keyIDOwner=%s", __func__,
                 dmn->proTxHash.ToString(), EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDOwner)))));
     }
-    if (dmn->pdmnState->pubKeyOperator.Get().IsValid() && !AddUniqueProperty(*dmn, dmn->pdmnState->pubKeyOperator)) {
+    if (dmn->pdmnState->pubKeyOperator.IsValid() && !AddUniqueProperty(*dmn, dmn->pdmnState->pubKeyOperator)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't add a masternode %s with a duplicate pubKeyOperator=%s", __func__,
                 dmn->proTxHash.ToString(), dmn->pdmnState->pubKeyOperator.ToString())));
@@ -673,7 +927,7 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
         throw(std::runtime_error(strprintf("%s: Can't delete a masternode %s with a keyIDOwner=%s", __func__,
                 proTxHash.ToString(), EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDOwner)))));
     }
-    if (dmn->pdmnState->pubKeyOperator.Get().IsValid() && !DeleteUniqueProperty(*dmn, dmn->pdmnState->pubKeyOperator)) {
+    if (dmn->pdmnState->pubKeyOperator.IsValid() && !DeleteUniqueProperty(*dmn, dmn->pdmnState->pubKeyOperator)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't delete a masternode %s with a pubKeyOperator=%s", __func__,
                 proTxHash.ToString(), dmn->pdmnState->pubKeyOperator.ToString())));
@@ -710,7 +964,7 @@ std::string CDeterministicMNListNEVMAddressDiff::ToString() const {
     );
 }
 
-bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& _state, const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, CDeterministicMNListNEVMAddressDiff &diffNEVM, bool fJustCheck, bool ibd)
+bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& _state, const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload& legacy_commitment, CDeterministicMNListNEVMAddressDiff &diffNEVM, bool fJustCheck, bool ibd)
 {
     const auto& consensusParams = Params().GetConsensus();
     bool fDIP0003Active = pindex->nHeight >= consensusParams.DIP0003Height;
@@ -725,19 +979,77 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
     int nHeight = pindex->nHeight;
     try {
 
-        if (!BuildNewListFromBlock(block, pindex->pprev, _state, view, newList, oldList, qcTx)) {
+        if (!BuildNewListFromBlock(block, pindex->pprev, _state, view, newList,
+                                   oldList, legacy_commitment)) {
             // pass the state returned by the function above
             return false;
         }
+
+        newList.SetBlockHash(pindex->GetBlockHash());
+
+        uint256 pq_registry_state_root;
+        llmq::pq::PQRegistryConfig pq_config;
+        const auto pq_deployment = llmq::pq::GetPQRegistryConfig(
+            consensusParams, pq_config);
+        if (pq_deployment ==
+            llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-pq-registry-configuration");
+        }
+        if (pq_deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
+            std::string registry_open_error;
+            auto* registry = GetOrCreatePQRegistry(registry_open_error);
+            if (registry == nullptr) {
+                LogPrintf("%s -- %s\n", __func__, registry_open_error);
+                return _state.Error("failed-pq-registry-open");
+            }
+            const auto callbacks = MakePQRegistryCallbacks(
+                oldList, newList, consensusParams.hashGenesisBlock);
+            llmq::pq::PQRegistryError registry_error;
+            if (!registry->ProcessBlock(block, nHeight, callbacks, fJustCheck,
+                                        registry_error,
+                                        &pq_registry_state_root)) {
+                LogPrintf("%s -- PQ registry rejected height=%d tx=%u protx=%s result=%s state_result=%u\n",
+                          __func__, nHeight,
+                          static_cast<unsigned>(registry_error.transaction_index),
+                          registry_error.pro_tx_hash.ToString(),
+                          std::string{llmq::pq::PQRegistryResultString(
+                              registry_error.result)},
+                          static_cast<unsigned>(registry_error.state_result));
+                return _state.Invalid(
+                    BlockValidationResult::BLOCK_CONSENSUS,
+                    strprintf("bad-pq-%s",
+                              std::string{llmq::pq::PQRegistryResultString(
+                                  registry_error.result)}));
+            }
+        } else {
+            for (const auto& transaction : block.vtx) {
+                if (transaction &&
+                    transaction->nVersion ==
+                        llmq::pq::PQ_GLOBAL_KEY_TX_VERSION) {
+                    return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                          "bad-pq-registry-disabled");
+                }
+            }
+            const auto empty_root = EmptyPQRegistryStateRoot(
+                consensusParams.hashGenesisBlock);
+            if (!empty_root) {
+                return _state.Error("failed-pq-empty-registry-root");
+            }
+            pq_registry_state_root = *empty_root;
+        }
+
+        if (!Consensus::CheckPQLegacyState(
+                consensusParams, nHeight,
+                newList.GetPQLegacyStateHash(consensusParams.hashGenesisBlock),
+                pq_registry_state_root)) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-pq-legacy-state");
+        }
+
         if (fJustCheck) {
             return true;
         }
-
-        if (newList.GetHeight() == -1) {
-            newList.SetHeight(nHeight);
-        }
-
-        newList.SetBlockHash(pindex->GetBlockHash());
 
         if(!ibd || (fNEVMConnection && fNexusActive && newList.m_changed_nevm_address)) {
             oldList.BuildDiff(newList, diff, diffNEVM);
@@ -749,8 +1061,55 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
             // always update interface for payment detail changes
             uiInterface.NotifyMasternodeListChanged(newList);
         }
-        m_evoDb->WriteCache(pindex->GetBlockHash(), std::move(newList));
+        bool replay_write_through{false};
+        int finality_retention_floor{std::numeric_limits<int>::max()};
+        {
+            LOCK(cs);
+            replay_write_through =
+                m_replay_snapshot_retention_floor !=
+                    std::numeric_limits<int>::max() ||
+                m_finality_snapshot_publication_pending;
+            finality_retention_floor = m_finality_snapshot_retention_floor;
+        }
+        const bool finality_roster_write_through{
+            !replay_write_through &&
+            finality_retention_floor != std::numeric_limits<int>::max() &&
+            nHeight >= finality_retention_floor &&
+            pq_deployment == llmq::pq::PQRegistryDeploymentResult::VALID &&
+            consensusParams.nPQRosterSnapshotLag > 0 &&
+            llmq::pq::IsRegistrationCutoffHeight(
+                pq_config.schedule,
+                static_cast<uint32_t>(consensusParams.nPQRosterSnapshotLag),
+                nHeight)};
+        if (nHeight == consensusParams.nPQLegacyAnchorHeight ||
+            replay_write_through || finality_roster_write_through) {
+            // SYSCOIN: IBD deliberately postpones normal EvoDB maintenance. The
+            // migration snapshot must reach disk before the bounded dirty FIFO
+            // can evict it as replay advances beyond the cache window. A live
+            // BTCC/NEVM replay marker extends the same write-ahead requirement
+            // to every later snapshot, including an arbitrarily long NULL-
+            // receipt tail whose marker never otherwise mutates. Without a
+            // marker, only exact roster cutoffs are written through on every
+            // branch; persisting every historical full list would make IBD
+            // disk use grow with chain history while maintenance is deferred.
+            if (!m_evoDb->WriteThrough(pindex->GetBlockHash(), newList, /*fSync=*/true)) {
+                if (replay_write_through) {
+                    return _state.Error("failed-btcc-replay-dmn-persist");
+                }
+                return _state.Error(finality_roster_write_through
+                    ? "failed-finality-roster-dmn-persist"
+                    : "failed-pq-anchor-dmn-persist");
+            }
+        } else {
+            m_evoDb->WriteCache(pindex->GetBlockHash(), std::move(newList));
+        }
        
+    // SYSCOIN: EvoDB failures are local availability errors, not evidence
+    // that every peer must reject this otherwise-valid block as consensus bad.
+    } catch (const dbwrapper_error& e) {
+        LogPrintf("CDeterministicMNManager::%s -- database error: %s\n",
+                  __func__, e.what());
+        return _state.Error("failed-dmn-persist");
     } catch (const std::exception& e) {
         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- internal error: %s\n", __func__, e.what());
         return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "failed-dmn-block");
@@ -762,6 +1121,32 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
 
 bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff &inversedDiffNEVMAddress)
 {
+    if (pindex == nullptr) return false;
+    llmq::pq::PQRegistryConfig pq_config;
+    const auto pq_deployment = llmq::pq::GetPQRegistryConfig(
+        Params().GetConsensus(), pq_config);
+    if (pq_deployment ==
+        llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
+        return false;
+    }
+    if (pq_deployment == llmq::pq::PQRegistryDeploymentResult::VALID &&
+        pindex->nHeight >= pq_config.preparation_height) {
+        std::string registry_open_error;
+        auto* registry = GetOrCreatePQRegistry(registry_open_error);
+        if (registry == nullptr) return false;
+        llmq::pq::PQRegistrySnapshot parent_snapshot;
+        llmq::pq::PQRegistryError registry_error;
+        if (!registry->UndoBlock(pindex->GetBlockHash(), pindex->nHeight,
+                                 parent_snapshot, registry_error)) {
+            LogPrintf("%s -- PQ registry undo failed at height=%d block=%s result=%s\n",
+                      __func__, pindex->nHeight,
+                      pindex->GetBlockHash().ToString(),
+                      std::string{llmq::pq::PQRegistryResultString(
+                          registry_error.result)});
+            return false;
+        }
+    }
+
     uint256 blockHash = pindex->GetBlockHash();
 
     CDeterministicMNList curList;
@@ -780,7 +1165,7 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
     return true;
 }
 
-bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& _state, const CCoinsViewCache& view, CDeterministicMNList& mnListRet, CDeterministicMNList& oldList, const llmq::CFinalCommitmentTxPayload &qcTxIn)
+bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& _state, const CCoinsViewCache& view, CDeterministicMNList& mnListRet, CDeterministicMNList& oldList, const llmq::CFinalCommitmentTxPayload& legacy_commitment)
 {
 
     int nHeight = pindexPrev->nHeight + 1;
@@ -799,7 +1184,11 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
     } else {
         decreasePoSE = true;
     }
-    auto payee = oldList.GetMNPayee();
+    llmq::pq::PQPaymentProbationState payment_state;
+    if (!GetPaymentProbationState(pindexPrev, payment_state)) {
+        return _state.Error("failed-pq-payment-probation-state");
+    }
+    auto payee = oldList.GetMNPayee(&payment_state);
     // at least 2 rounds of payments before registered MN's gets put in list
     const size_t mnCountThreshold = oldList.GetValidMNsCount()*2;
     // we iterate the oldList here and update the newList
@@ -829,17 +1218,100 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
         DecreasePoSePenalties(newList, toDecrease);
     }
 
-    if(!qcTxIn.commitment.IsNull()) {
-        const auto& params = Params().GetConsensus().llmqTypeChainLocks;
-        uint32_t quorumHeight = qcTxIn.nHeight - (qcTxIn.nHeight % params.dkgInterval);
-        auto quorumIndex = pindexPrev->GetAncestor(quorumHeight);
-        if (!quorumIndex || quorumIndex->GetBlockHash() != qcTxIn.commitment.quorumHash) {
-            // we should actually never get into this case as validation should have caught it...but let's be sure
-            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-qc-quorum-hash");
+    if (!legacy_commitment.IsNull()) {
+        const auto& consensus{Params().GetConsensus()};
+        const auto anchor_result{
+            Consensus::CheckPQLegacyAnchorConfiguration(consensus)};
+        if (anchor_result != Consensus::PQLegacyAnchorResult::VALID ||
+            nHeight > consensus.nPQLegacyAnchorHeight) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-qc-retired");
         }
-        HandleQuorumCommitment(qcTxIn.commitment, quorumIndex, newList);            
+        if (legacy_commitment.nHeight != static_cast<uint32_t>(nHeight)) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-qc-cbtx-height");
+        }
+
+        const auto& replay{consensus.legacyQuorumReplay};
+        if (replay.size <= 0 ||
+            replay.size > static_cast<int>(llmq::legacy::MAX_QUORUM_MEMBERS) ||
+            replay.threshold <= 0 || replay.threshold > replay.size ||
+            replay.session_interval <= 0) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-qc-replay-params");
+        }
+        const int quorum_height{
+            nHeight - (nHeight % replay.session_interval)};
+        const CBlockIndex* quorum_base{
+            pindexPrev != nullptr ? pindexPrev->GetAncestor(quorum_height)
+                                  : nullptr};
+        if (quorum_base == nullptr ||
+            quorum_base->GetBlockHash() !=
+                legacy_commitment.commitment.quorumHash) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-qc-quorum-hash");
+        }
+
+        const auto quorum_list{GetListForBlock(quorum_base)};
+        const auto members{quorum_list.CalculateQuorum(
+            static_cast<std::size_t>(replay.size),
+            quorum_base->GetBlockHash())};
+        if (std::any_of(members.begin(), members.end(),
+                        [](const CDeterministicMNCPtr& member) {
+                            return member == nullptr;
+                        })) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-qc-structure");
+        }
+        const auto& commitment{legacy_commitment.commitment};
+        if (!commitment.IsStructurallyValid(
+                static_cast<std::size_t>(replay.size), members.size(),
+                static_cast<std::size_t>(replay.threshold),
+                llmq::CFinalCommitment::GetVersion(
+                    quorum_base->nHeight >= consensus.nV19StartBlock))) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-qc-structure");
+        }
+
+        // SYSCOIN: this is historical state reconstruction, not live DKG.
+        // Missing participation changed PoSe bans and subsequent payee state,
+        // which an anchor hash alone cannot recreate without a snapshot.
+        if (!commitment.IsNull()) {
+            for (std::size_t i{0}; i < members.size(); ++i) {
+                if (!newList.HasMN(members[i]->proTxHash)) {
+                    continue;
+                }
+                if (!commitment.validMembers[i]) {
+                    newList.PoSePunish(members[i]->proTxHash,
+                                       newList.CalcPenalty(66));
+                }
+            }
+        }
     }
-    
+
+    // SYSCOIN: A PQ revocation is the terminal provider mutation for its block. Without
+    // this rule, a later service update could repopulate fields that an earlier
+    // revocation cleared, making the resulting DMN state order-dependent.
+    std::unordered_map<uint256, std::size_t, StaticSaltedHasher>
+        provider_mutation_counts;
+    std::unordered_set<uint256, StaticSaltedHasher> pq_revocations;
+    for (const auto& transaction : block.vtx) {
+        if (!transaction) continue;
+        const auto mutation = DecodeProviderMutationIdentity(*transaction);
+        if (!mutation) continue;
+        ++provider_mutation_counts[mutation->pro_tx_hash];
+        if (mutation->is_pq_revocation) {
+            pq_revocations.emplace(mutation->pro_tx_hash);
+        }
+    }
+    for (const auto& pro_tx_hash : pq_revocations) {
+        const auto count = provider_mutation_counts.find(pro_tx_hash);
+        if (count == provider_mutation_counts.end() || count->second != 1) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-protx-pq-revoke-conflict");
+        }
+    }
+
     // for all other tx's MN register/update tx handling
     for (int i = 1; i < (int)block.vtx.size(); i++) {
         const CTransaction& tx = *block.vtx[i];
@@ -884,7 +1356,9 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 if (newList.HasUniqueProperty(proTx.addr)) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-addr");
                 }
-                if (newList.HasUniqueProperty(proTx.keyIDOwner) || newList.HasUniqueProperty(proTx.pubKeyOperator)) {
+                if (newList.HasUniqueProperty(proTx.keyIDOwner) ||
+                    (proTx.nVersion <= CProRegTx::BASIC_BLS_VERSION &&
+                     newList.HasUniqueProperty(proTx.pubKeyOperator))) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-key");
                 }
                 dmn->nOperatorReward = proTx.nOperatorReward;
@@ -897,8 +1371,9 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 else
                     dmnState->nCollateralHeight = nHeight;
 
-                if (proTx.addr == CService()) {
-                    // start in banned pdmnState as we need to wait for a ProUpServTx
+                if (proTx.addr == CService() || proTx.nVersion == CProRegTx::PQ_VERSION) {
+                    // SYSCOIN: A PQ registration has no operator key until a later tx86
+                    // is committed against this DMN's parent snapshot.
                     if(!dmnState->vchNEVMAddress.empty()) {
                         newList.m_changed_nevm_address = true;
                     }
@@ -950,8 +1425,24 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     newState->vchNEVMAddress = proTx.vchNEVMAddress;
                 }
                 if (newState->IsBanned()) {
-                    // only revive when all keys are set
-                    if (newState->pubKeyOperator.Get().IsValid() && !newState->keyIDVoting.IsNull() && !newState->keyIDOwner.IsNull()) {
+                    bool has_active_operator_key{false};
+                    if (proTx.nVersion <= CProUpServTx::UPDATE_NEVM_VERSION) {
+                        has_active_operator_key = newState->pubKeyOperator.IsValid();
+                    } else {
+                        llmq::pq::PQRegistrySnapshot parent_snapshot;
+                        std::string registry_error;
+                        if (!GetPQRegistrySnapshot(pindexPrev, parent_snapshot, registry_error)) {
+                            LogPrintf("%s -- failed to load parent PQ registry for %s: %s\n",
+                                      __func__, proTx.proTxHash.ToString(), registry_error);
+                            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                                  "bad-protx-pq-registry-state");
+                        }
+                        const auto* operator_state = parent_snapshot.FindOperator(proTx.proTxHash);
+                        has_active_operator_key = operator_state != nullptr &&
+                                                  operator_state->HasActiveGlobalKey() &&
+                                                  pq_revocations.count(proTx.proTxHash) == 0;
+                    }
+                    if (has_active_operator_key && !newState->keyIDVoting.IsNull() && !newState->keyIDOwner.IsNull()) {
                         newState->Revive(nHeight);
                         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s revived at height %d\n",
                                 __func__, proTx.proTxHash.ToString(), nHeight);
@@ -977,8 +1468,10 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
             
                 auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
             
-                // Handle pubKeyOperator changes
-                if (newState->pubKeyOperator != proTx.pubKeyOperator) {
+                // SYSCOIN: Opaque BLS bytes are historical state after the PQ fork. A
+                // PQ registrar update changes only owner-controlled metadata.
+                if (proTx.nVersion <= CProUpRegTx::BASIC_BLS_VERSION &&
+                    newState->pubKeyOperator != proTx.pubKeyOperator) {
                     if(!newState->vchNEVMAddress.empty()) {
                         newList.m_changed_nevm_address = true;
                     }
@@ -986,6 +1479,9 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     newState->BanIfNotBanned(nHeight);
                     newState->nVersion = proTx.nVersion;
                     newState->pubKeyOperator = proTx.pubKeyOperator;
+                }
+                if (proTx.nVersion == CProUpRegTx::PQ_VERSION) {
+                    newState->nVersion = proTx.nVersion;
                 }
             
                 newState->keyIDVoting = proTx.keyIDVoting;
@@ -1051,25 +1547,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
     return true;
 }
 
-void CDeterministicMNManager::HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList)
-{
-    // The commitment has already been validated at this point, so it's safe to use members of it
-    auto members = llmq::CLLMQUtils::GetAllQuorumMembers(pQuorumBaseBlockIndex);
-
-    for (size_t i = 0; i < members.size(); i++) {
-        if (!mnList.HasMN(members[i]->proTxHash)) {
-            continue;
-        }
-        if (!qc.validMembers[i]) {
-            // punish MN for failed DKG participation
-            // The idea is to immediately ban a MN when it fails 2 DKG sessions with only a few blocks in-between
-            // If there were enough blocks between failures, the MN has a chance to recover as he reduces his penalty by 1 every block
-            // If it however fails 3 times in the timespan of a single payment cycle, it should definitely get banned
-            mnList.PoSePunish(members[i]->proTxHash, mnList.CalcPenalty(66));
-        }
-    }
-}
-
 void CDeterministicMNManager::DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease)
 {
     for (const CDeterministicMNCPtr& dmnPtr : toDecrease) {
@@ -1086,13 +1563,16 @@ const CDeterministicMNList CDeterministicMNManager::GetListForBlockInternal(cons
         return snapshot;
     }
     if (!m_evoDb->ReadCache(pindex->GetBlockHash(), snapshot)) {
-        snapshot = CDeterministicMNList(pindex->GetBlockHash(), pindex->nHeight, 0);
-        m_evoDb->WriteCache(pindex->GetBlockHash(), snapshot);
-        LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- initial snapshot. blockHash=%s nHeight=%d\n", __func__,
-                    snapshot.GetBlockHash().ToString(), snapshot.GetHeight());
-        return snapshot;
+        throw std::runtime_error(strprintf(
+            "%s: missing deterministic masternode snapshot at height=%d block=%s",
+            __func__, pindex->nHeight, pindex->GetBlockHash().ToString()));
     }
-    assert(snapshot.GetHeight() != -1);
+    if (snapshot.IsNull() || snapshot.GetHeight() != pindex->nHeight ||
+        snapshot.GetBlockHash() != pindex->GetBlockHash()) {
+        throw std::runtime_error(strprintf(
+            "%s: invalid deterministic masternode snapshot at height=%d block=%s",
+            __func__, pindex->nHeight, pindex->GetBlockHash().ToString()));
+    }
     return snapshot;
 }
 const CDeterministicMNList CDeterministicMNManager::GetListForBlock(const CBlockIndex* pindex) {
@@ -1109,6 +1589,182 @@ const CDeterministicMNList CDeterministicMNManager::GetListAtChainTip()
         return CDeterministicMNList();
     }
     return GetListForBlockInternal(pindex);
+}
+
+bool CDeterministicMNManager::CheckPQTransaction(
+    const CTransaction& tx,
+    const CBlockIndex* pindexPrev,
+    TxValidationState& state,
+    bool fJustCheck,
+    bool check_sigs)
+{
+    if (tx.nVersion != llmq::pq::PQ_GLOBAL_KEY_TX_VERSION) {
+        return FormatSyscoinErrorMessage(state, "bad-pq-tx-version",
+                                         fJustCheck);
+    }
+    if (pindexPrev == nullptr) {
+        return FormatSyscoinErrorMessage(state, "bad-pq-missing-parent",
+                                         fJustCheck);
+    }
+
+    std::string registry_error;
+    auto* registry = GetOrCreatePQRegistry(registry_error);
+    if (registry == nullptr) {
+        return FormatSyscoinErrorMessage(state, registry_error, fJustCheck);
+    }
+
+    CDeterministicMNList parent_list;
+    try {
+        parent_list = GetListForBlockInternal(pindexPrev);
+    } catch (const std::exception&) {
+        return FormatSyscoinErrorMessage(state, "bad-pq-missing-dmn-parent",
+                                         fJustCheck);
+    }
+    const auto callbacks = MakePQRegistryCallbacks(
+        parent_list, parent_list, Params().GetConsensus().hashGenesisBlock);
+    llmq::pq::PQRegistryError error;
+    if (!registry->ValidateTransaction(tx, pindexPrev->GetBlockHash(),
+                                       pindexPrev->nHeight + 1, callbacks,
+                                       check_sigs, error)) {
+        return FormatSyscoinErrorMessage(
+            state,
+            strprintf("bad-pq-%s",
+                      std::string{llmq::pq::PQRegistryResultString(
+                          error.result)}),
+            fJustCheck);
+    }
+    return true;
+}
+
+bool CDeterministicMNManager::GetPQRegistrySnapshot(
+    const CBlockIndex* pindex,
+    llmq::pq::PQRegistrySnapshot& snapshot,
+    std::string& error) const
+{
+    if (pindex == nullptr) {
+        error = "pq-registry-null-block-index";
+        return false;
+    }
+    auto* registry = GetOrCreatePQRegistry(error);
+    if (registry == nullptr) return false;
+
+    llmq::pq::PQRegistryError registry_error;
+    const uint256 previous_hash =
+        pindex->pprev == nullptr ? uint256{} : pindex->pprev->GetBlockHash();
+    if (!registry->GetSnapshot(pindex->GetBlockHash(), previous_hash,
+                               pindex->nHeight, snapshot, registry_error)) {
+        error = strprintf("%s at height=%d block=%s",
+                          std::string{llmq::pq::PQRegistryResultString(
+                              registry_error.result)},
+                          pindex->nHeight,
+                          pindex->GetBlockHash().ToString());
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool CDeterministicMNManager::GetPQRegistryMempoolView(
+    const CBlockIndex* pindex,
+    std::span<const uint256> requested_operators,
+    llmq::pq::PQRegistryMempoolView& view,
+    std::string& error) const
+{
+    if (pindex == nullptr) {
+        error = "pq-registry-null-block-index";
+        return false;
+    }
+    auto* registry = GetOrCreatePQRegistry(error);
+    if (registry == nullptr) return false;
+
+    llmq::pq::PQRegistryError registry_error;
+    if (!registry->GetMempoolView(
+            pindex->GetBlockHash(), pindex->nHeight, requested_operators,
+            view, registry_error)) {
+        error = strprintf(
+            "pq-registry-mempool-view-%s",
+            std::string{llmq::pq::PQRegistryResultString(
+                registry_error.result)});
+        return false;
+    }
+    return true;
+}
+
+bool CDeterministicMNManager::VerifyPQLegacyAnchorState(const CBlockIndex* anchor)
+{
+    if (anchor == nullptr ||
+        anchor->nHeight != Params().GetConsensus().nPQLegacyAnchorHeight ||
+        anchor->GetBlockHash() != Params().GetConsensus().hashPQLegacyAnchorBlock) {
+        return false;
+    }
+
+    CDeterministicMNList snapshot;
+    if (!m_evoDb->ReadCache(anchor->GetBlockHash(), snapshot)) return false;
+    uint256 pq_state_root;
+    llmq::pq::PQRegistryConfig config;
+    const auto deployment = llmq::pq::GetPQRegistryConfig(
+        Params().GetConsensus(), config);
+    if (deployment ==
+        llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
+        return false;
+    }
+    if (deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
+        llmq::pq::PQRegistrySnapshot pq_snapshot;
+        std::string error;
+        if (!GetPQRegistrySnapshot(anchor, pq_snapshot, error)) return false;
+        pq_state_root = pq_snapshot.consensus_state_root;
+    } else {
+        const auto empty_root = EmptyPQRegistryStateRoot(
+            Params().GetConsensus().hashGenesisBlock);
+        if (!empty_root) return false;
+        pq_state_root = *empty_root;
+    }
+    return !snapshot.IsNull() &&
+           snapshot.GetHeight() == anchor->nHeight &&
+           snapshot.GetBlockHash() == anchor->GetBlockHash() &&
+           Consensus::CheckPQLegacyState(
+               Params().GetConsensus(), anchor->nHeight,
+               snapshot.GetPQLegacyStateHash(
+                   Params().GetConsensus().hashGenesisBlock),
+               pq_state_root);
+}
+
+bool CDeterministicMNManager::VerifyPersistedPQRegistrySnapshot(
+    const CBlockIndex* pindex)
+{
+    if (pindex == nullptr) return false;
+    llmq::pq::PQRegistryConfig config;
+    const auto deployment = llmq::pq::GetPQRegistryConfig(
+        Params().GetConsensus(), config);
+    if (deployment == llmq::pq::PQRegistryDeploymentResult::DISABLED) {
+        return true;
+    }
+    if (deployment != llmq::pq::PQRegistryDeploymentResult::VALID) {
+        return false;
+    }
+    if (pindex->nHeight < config.preparation_height) return true;
+
+    llmq::pq::PQRegistrySnapshot snapshot;
+    std::string error;
+    if (!GetPQRegistrySnapshot(pindex, snapshot, error)) {
+        LogPrintf("%s -- %s\n", __func__, error);
+        return false;
+    }
+    return snapshot.height == pindex->nHeight &&
+           snapshot.block_hash == pindex->GetBlockHash() &&
+           snapshot.IsStructurallyValid();
+}
+
+bool CDeterministicMNManager::VerifyPersistedSnapshot(const CBlockIndex* pindex)
+{
+    if (pindex == nullptr) return false;
+    if (pindex->nHeight < Params().GetConsensus().DIP0003Height) return true;
+
+    CDeterministicMNList snapshot;
+    if (!m_evoDb->Read(pindex->GetBlockHash(), snapshot)) return false;
+    return !snapshot.IsNull() &&
+           snapshot.GetHeight() == pindex->nHeight &&
+           snapshot.GetBlockHash() == pindex->GetBlockHash();
 }
 
 void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {
@@ -1147,9 +1803,38 @@ bool CDeterministicMNManager::DoMaintenance(bool bForceFlush, bool fSync) {
         return true;
     }
 
+    llmq::pq::PQRegistryManager* pq_registry{nullptr};
+    if (m_pq_registry_init_requested.load(std::memory_order_acquire)) {
+        std::string registry_error;
+        pq_registry = GetOrCreatePQRegistry(registry_error);
+        if (pq_registry == nullptr) {
+            LogPrintf("%s -- PQ registry unavailable during maintenance: %s\n",
+                      __func__, registry_error);
+            return false;
+        }
+    }
+    if (pq_registry != nullptr && !pq_registry->Flush(fSync)) {
+        return false;
+    }
+
     LOCK(m_evoDb->cs);
     const auto maintenance_start = std::chrono::steady_clock::now();
-    const CBlockIndex* tip = WITH_LOCK(cs, return tipIndex;);
+    const CBlockIndex* tip{nullptr};
+    int replay_retention_floor{std::numeric_limits<int>::max()};
+    int finality_retention_floor{std::numeric_limits<int>::max()};
+    bool retain_all_finality_snapshots{false};
+    uint64_t replay_retention_generation{0};
+    {
+        LOCK(cs);
+        tip = tipIndex;
+        replay_retention_floor = m_replay_snapshot_retention_floor;
+        finality_retention_floor = m_finality_snapshot_retention_floor;
+        retain_all_finality_snapshots =
+            m_finality_snapshot_verifications_in_flight != 0 ||
+            m_finality_snapshot_publication_pending;
+        replay_retention_generation =
+            m_replay_snapshot_retention_generation;
+    }
     if (tip == nullptr) {
         const size_t cache_entry_count{m_evoDb->GetReadWriteCacheSize()};
         const size_t erase_entry_count{m_evoDb->GetEraseCacheSize()};
@@ -1204,13 +1889,38 @@ bool CDeterministicMNManager::DoMaintenance(bool bForceFlush, bool fSync) {
 
     std::vector<uint256> prune_keys;
     size_t persisted_snapshot_count{0};
-    if (!CollectPersistedKeysOutsideWindow(
-            *m_evoDb, retained_hashes, prune_keys, persisted_snapshot_count)) {
+    const bool retain_replay_snapshots{
+        replay_retention_floor != std::numeric_limits<int>::max()};
+    if (retain_replay_snapshots || retain_all_finality_snapshots) {
+        // SYSCOIN: A replay marker can protect both active and prospective
+        // branches. Skipping disk pruning while it exists preserves every
+        // fork-local DMN snapshot without warming the bounded read cache. An
+        // in-flight verification or durable side-branch winner uses the same
+        // fail-closed policy until publication is either abandoned or fully
+        // enforced. Outage disk growth is intentionally unbounded.
+        const int64_t count{m_evoDb->CountPersistedEntries()};
+        if (count < 0) return false;
+        persisted_snapshot_count = static_cast<size_t>(count);
+    } else if (!CollectPersistedKeysOutsideWindow(
+                   *m_evoDb, retained_hashes,
+                   finality_retention_floor == std::numeric_limits<int>::max()
+                       ? std::nullopt
+                       : std::optional<int32_t>{finality_retention_floor},
+                   prune_keys,
+                   persisted_snapshot_count)) {
         return false;
     }
 
     for (const uint256& key : prune_keys) {
         m_evoDb->EraseCache(key);
+        if (pq_registry != nullptr &&
+            !pq_registry->PruneSnapshot(key, /*fSync=*/false)) {
+            return false;
+        }
+    }
+    if (!prune_keys.empty() && pq_registry != nullptr &&
+        !pq_registry->Flush(fSync)) {
+        return false;
     }
     if (!prune_keys.empty() && !m_evoDb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, fSync)) {
         return false;
@@ -1226,13 +1936,24 @@ bool CDeterministicMNManager::DoMaintenance(bool bForceFlush, bool fSync) {
         m_persistent_window_initialized.store(true, std::memory_order_relaxed);
     }
 
-    WITH_LOCK(cs, m_last_maintained_tip = tip_hash;);
+    {
+        LOCK(cs);
+        if (m_replay_snapshot_retention_generation ==
+            replay_retention_generation) {
+            m_last_maintained_tip = tip_hash;
+        } else {
+            m_last_maintained_tip.SetNull();
+        }
+    }
     LogPrint(BCLog::SYS,
-             "CDeterministicMNManager::%s maintenance complete tip=%s persisted=%zu pruned=%zu read_cache=%zu initialized_hot_cache=%d elapsed=%d ms\n",
+             "CDeterministicMNManager::%s maintenance complete tip=%s persisted=%zu pruned=%zu replay_retention_floor=%d finality_retention_floor=%d retain_all_finality=%d read_cache=%zu initialized_hot_cache=%d elapsed=%d ms\n",
              __func__,
              tip_hash.ToString(),
              persisted_snapshot_count,
              prune_keys.size(),
+             replay_retention_floor,
+             finality_retention_floor,
+             retain_all_finality_snapshots,
              m_evoDb->GetReadCacheSize(),
              should_initialize_hot_cache,
              ElapsedMillis(maintenance_start));
@@ -1240,6 +1961,97 @@ bool CDeterministicMNManager::DoMaintenance(bool bForceFlush, bool fSync) {
 }
 bool CDeterministicMNManager::FlushCacheToDisk(bool bForceFlush, bool fSync) {
     return DoMaintenance(bForceFlush, fSync);
+}
+
+bool CDeterministicMNManager::FlushPendingSnapshotsToDisk(bool fSync)
+{
+    if (!m_evoDb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, fSync)) return false;
+    if (!m_payment_probation->Flush(fSync)) return false;
+    if (!m_pq_registry_init_requested.load(std::memory_order_acquire)) {
+        return true;
+    }
+    std::string registry_error;
+    auto* pq_registry = GetOrCreatePQRegistry(registry_error);
+    if (pq_registry == nullptr) {
+        LogPrintf("%s -- PQ registry unavailable while flushing: %s\n",
+                  __func__, registry_error);
+        return false;
+    }
+    return pq_registry->Flush(fSync);
+}
+
+int CDeterministicMNManager::UpdateReplaySnapshotRetentionFloor(
+    std::optional<int32_t> floor)
+{
+    LOCK(cs);
+    const int disabled{std::numeric_limits<int>::max()};
+    const int requested{
+        floor ? std::max<int>(*floor, Params().GetConsensus().DIP0003Height)
+              : disabled};
+    const int next{
+        floor ? std::min(m_replay_snapshot_retention_floor, requested)
+              : disabled};
+    if (next != m_replay_snapshot_retention_floor) {
+        m_replay_snapshot_retention_floor = next;
+        ++m_replay_snapshot_retention_generation;
+        // SYSCOIN: Clearing the crash-restored replay obligation must force
+        // same-tip maintenance to revisit and compact the retained disk set.
+        m_last_maintained_tip.SetNull();
+    }
+    return m_replay_snapshot_retention_floor;
+}
+
+int CDeterministicMNManager::UpdateFinalitySnapshotRetentionFloor(
+    std::optional<int32_t> floor)
+{
+    LOCK(cs);
+    const int next{
+        floor ? std::max<int>(*floor, Params().GetConsensus().DIP0003Height)
+              : std::numeric_limits<int>::max()};
+    if (next != m_finality_snapshot_retention_floor) {
+        m_finality_snapshot_retention_floor = next;
+        ++m_replay_snapshot_retention_generation;
+        // SYSCOIN: Durable best/unsealed replacement can make a same-tip
+        // database either newly protected or newly eligible for compaction.
+        m_last_maintained_tip.SetNull();
+    }
+    return m_finality_snapshot_retention_floor;
+}
+
+void CDeterministicMNManager::BeginFinalitySnapshotVerificationRetention()
+{
+    // SYSCOIN: Match DoMaintenance's EvoDB->manager lock order. When this
+    // returns, an already-running pruning pass has completed and no later pass
+    // can sample an unprotected state before the candidate reads its rosters.
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    ++m_finality_snapshot_verifications_in_flight;
+    ++m_replay_snapshot_retention_generation;
+    m_last_maintained_tip.SetNull();
+}
+
+void CDeterministicMNManager::EndFinalitySnapshotVerificationRetention()
+{
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    assert(m_finality_snapshot_verifications_in_flight != 0);
+    --m_finality_snapshot_verifications_in_flight;
+    ++m_replay_snapshot_retention_generation;
+    m_last_maintained_tip.SetNull();
+}
+
+void CDeterministicMNManager::UpdateFinalitySnapshotPublicationRetention(
+    bool retain)
+{
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    if (m_finality_snapshot_publication_pending == retain) return;
+    m_finality_snapshot_publication_pending = retain;
+    ++m_replay_snapshot_retention_generation;
+    // SYSCOIN: Both arming and releasing must defeat the same-tip maintenance
+    // shortcut. Arming follows any already-running prune; releasing permits
+    // accumulated fork snapshots to be compacted immediately.
+    m_last_maintained_tip.SetNull();
 }
 bool CDeterministicMNManager::HasPersistentWindow() const
 {

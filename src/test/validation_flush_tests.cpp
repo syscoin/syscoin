@@ -3,12 +3,16 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
 #include <sync.h>
+#include <evo/deterministicmns.h> // SYSCOIN: auxiliary snapshot durability barrier.
+#include <node/kernel_notifications.h> // SYSCOIN: injected flush failure handling.
 #include <test/util/coins.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 
 #include <boost/test/unit_test.hpp>
+
+#include <cstdlib> // SYSCOIN: injected flush-failure environment control.
 
 BOOST_FIXTURE_TEST_SUITE(validation_flush_tests, TestingSetup)
 
@@ -153,6 +157,55 @@ BOOST_AUTO_TEST_CASE(getcoinscachesizestate)
     BOOST_CHECK_EQUAL(
         chainstate.GetCoinsCacheSizeState(MAX_COINS_CACHE_BYTES, 0),
         CoinsCacheSizeState::OK);
+}
+
+// SYSCOIN: Auxiliary deterministic state must become durable before the
+// Bitcoin coins best-block marker advances.
+BOOST_AUTO_TEST_CASE(auxiliary_snapshot_barrier_precedes_ibd_coins_marker)
+{
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    Chainstate chainstate{/*mempool=*/nullptr, chainman.m_blockman, chainman};
+    chainstate.InitCoinsDB(/*cache_size_bytes=*/1 << 20,
+                           /*in_memory=*/true, /*should_wipe=*/true,
+                           "chainstate_auxiliary_barrier");
+
+    LOCK(::cs_main);
+    chainstate.InitCoinsCache(/*cache_size_bytes=*/1);
+    CBlockIndex* const active_tip{chainman.ActiveTip()};
+    BOOST_REQUIRE(active_tip != nullptr);
+    chainstate.m_chain.SetTip(*active_tip);
+    BOOST_REQUIRE(chainman.IsInitialBlockDownload());
+    BOOST_REQUIRE(chainstate.GetCoinsCacheSizeState() ==
+                  CoinsCacheSizeState::CRITICAL);
+
+    const uint256 durable_best{chainstate.CoinsDB().GetBestBlock()};
+    const uint256 pending_best{InsecureRand256()};
+    BOOST_REQUIRE(!pending_best.IsNull());
+    chainstate.CoinsTip().SetBestBlock(pending_best);
+
+    const uint256 snapshot_hash{InsecureRand256()};
+    BOOST_REQUIRE(deterministicMNManager->m_evoDb->WriteThrough(
+        snapshot_hash,
+        CDeterministicMNList{snapshot_hash, active_tip->nHeight, 0},
+        /*fSync=*/false));
+    BOOST_CHECK_EQUAL(
+        deterministicMNManager->m_evoDb->GetReadWriteCacheSize(), 0U);
+    deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+
+    m_node.notifications->m_shutdown_on_fatal_error = false;
+    BlockValidationState state;
+    const bool flushed{chainstate.FlushStateToDisk(
+        state, FlushStateMode::IF_NEEDED)};
+    m_node.notifications->m_shutdown_on_fatal_error = true;
+    m_node.exit_status.store(EXIT_SUCCESS);
+
+    BOOST_CHECK(!flushed);
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK_EQUAL(
+        state.GetRejectReason(),
+        "System error while flushing: injected EvoDB flush-batch failure");
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_best);
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == pending_best);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

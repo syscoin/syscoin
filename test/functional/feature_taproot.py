@@ -1286,8 +1286,13 @@ class TaprootTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        # SYSCOIN
-        self.extra_args = [["-dip3params=2000:2000","-par=1"]]
+        # SYSCOIN: The synthetic Bitcoin script chain has no governance
+        # profile, so provide the regtest key needed to keep superblocks off.
+        self.extra_args = [[
+            "-dip3params=2000:2000",
+            "-par=1",
+            "-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW",
+        ]]
 
     def block_submit(self, node, txs, msg, err_msg, cb_pubkey=None, fees=0, sigops_weight=0, witness=False, accept=False):
 
@@ -1756,9 +1761,15 @@ class TaprootTest(SyscoinTestFramework):
             print(json.dumps(tests, indent=4, sort_keys=False))
 
     def run_test(self):
-        # SYSCOIN
+        # SYSCOIN: This Bitcoin script test has no PQ registry or governance
+        # state, so keep superblock validation out of its synthetic chain.
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
+            assert_equal(
+                self.nodes[i].spork(
+                    "SPORK_9_SUPERBLOCKS_ENABLED", 4070908800),
+                "success",
+            )
         self.gen_test_vectors()
 
         self.log.info("Post-activation tests...")

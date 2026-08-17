@@ -23,6 +23,13 @@
 #include <services/nevmconsensus.h>
 #include <util/fs.h>
 
+#include <array>
+#include <cstddef>
+// SYSCOIN: overflow boundary coverage for deferred NEVM disconnects.
+#include <limits>
+#include <utility>
+#include <vector>
+
 namespace {
 CTransaction MakeNEVMDataTx(const std::vector<uint8_t>& version_hash, const std::vector<uint8_t>& data)
 {
@@ -47,6 +54,32 @@ MapPoDAPayloadMeta MakePoDAMeta(const uint256& txid, uint32_t size, int64_t medi
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(nevm_tests, BasicTestingSetup)
+BOOST_AUTO_TEST_CASE(preseal_disconnect_tracks_only_geth_applied_prefix)
+{
+    // SYSCOIN: Geth count N means heights [start, start + N) were applied.
+    BOOST_CHECK(!*IsNEVMBlockAppliedForDisconnect(100, 0, 100));
+    BOOST_CHECK(*IsNEVMBlockAppliedForDisconnect(100, 1, 100));
+    BOOST_CHECK(!*IsNEVMBlockAppliedForDisconnect(100, 1, 101));
+    BOOST_CHECK(*IsNEVMBlockAppliedForDisconnect(100, 8, 107));
+    BOOST_CHECK(!*IsNEVMBlockAppliedForDisconnect(100, 8, 108));
+    BOOST_CHECK(!IsNEVMBlockAppliedForDisconnect(
+        std::numeric_limits<int64_t>::max(), 1, 100));
+
+    // SYSCOIN: Equal height is insufficient: replay completes only when Geth
+    // reports the exact paired Syscoin hash for that applied boundary.
+    const uint256 active_hash{uint256::ONEV};
+    uint256 side_hash{active_hash};
+    side_hash.begin()[1] = 1;
+    BOOST_CHECK(DoesNEVMBlockInfoMatchSyscoinBlock(
+        100, 8, 107, active_hash, active_hash));
+    BOOST_CHECK(!DoesNEVMBlockInfoMatchSyscoinBlock(
+        100, 8, 107, side_hash, active_hash));
+    BOOST_CHECK(!DoesNEVMBlockInfoMatchSyscoinBlock(
+        100, 8, 108, active_hash, active_hash));
+    BOOST_CHECK(!DoesNEVMBlockInfoMatchSyscoinBlock(
+        100, 0, 99, uint256{}, uint256{}));
+}
+
 BOOST_AUTO_TEST_CASE(seniority_test)
 {
     const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
@@ -477,11 +510,43 @@ BOOST_AUTO_TEST_CASE(nevm_blob_versionhash_formats_and_hashes)
     BOOST_CHECK(EncodeNEVMVersionHash(keccak, NEVM_DATA_LEGACY_VERSION_BYTE) == keccak);
     BOOST_CHECK(EncodeNEVMVersionHash(blake, NEVM_DATA_BLAKE2S_VERSION_BYTE) == versioned_blake);
 }
+
+BOOST_AUTO_TEST_CASE(blake2s_rfc7693_block_boundaries)
+{
+    const std::array<std::pair<std::size_t, const char*>, 5> vectors{{
+        {0, "69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9"},
+        {64, "56f34e8b96557e90c1f24b52d0c89d51086acf1b00f634cf1dde9233b8eaaa3e"},
+        {65, "1b53ee94aaf34e4b159d48de352c7f0661d0a40edff95a0b1639b4090e974472"},
+        {128, "1fa877de67259d19863a2a34bcc6962a2b25fcbf5cbecd7ede8f1fa36688a796"},
+        {256, "5fdeb59f681d975f52c8e69c5502e02a12a3afcc5836ba58f42784c439228781"},
+    }};
+    for (const auto& [size, expected] : vectors) {
+        std::vector<uint8_t> input(size);
+        for (std::size_t i{0}; i < input.size(); ++i) {
+            input[i] = static_cast<uint8_t>(i);
+        }
+        const auto digest = dev::blake2s(dev::bytesConstRef(&input)).asBytes();
+        BOOST_CHECK_EQUAL(HexStr(digest), expected);
+    }
+}
 BOOST_AUTO_TEST_SUITE_END()
 
-BOOST_FIXTURE_TEST_SUITE(nevm_poda_validation_tests, RegTestingSetup)
+BOOST_AUTO_TEST_SUITE(nevm_poda_validation_tests)
 
-BOOST_AUTO_TEST_CASE(nevm_blob_sidecar_failures_are_auxiliary)
+BOOST_AUTO_TEST_CASE(nevm_blob_expiry_uses_active_tip_mtp)
+{
+    constexpr int64_t BLOB_MTP{1'000};
+    BOOST_CHECK(!IsNEVMDataExpired(
+        BLOB_MTP + NEVM_DATA_EXPIRE_TIME, BLOB_MTP));
+    BOOST_CHECK(IsNEVMDataExpired(
+        BLOB_MTP + NEVM_DATA_EXPIRE_TIME + 1, BLOB_MTP));
+    BOOST_CHECK(!IsNEVMDataExpired(BLOB_MTP - 1, BLOB_MTP));
+    BOOST_CHECK(!IsNEVMDataExpired(
+        std::numeric_limits<int64_t>::max(),
+        std::numeric_limits<int64_t>::max() - NEVM_DATA_EXPIRE_TIME + 1));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_blob_sidecar_failures_are_auxiliary, RegTestingSetup)
 {
     pnevmdatadb = std::make_unique<CNEVMDataDB>(DBParams{
         .path = "poda_meta",
@@ -529,7 +594,7 @@ BOOST_AUTO_TEST_CASE(nevm_blob_sidecar_failures_are_auxiliary)
         ProcessNEVMDataResult::CONSENSUS_INVALID);
 }
 
-BOOST_AUTO_TEST_CASE(nevm_duplicate_blob_metadata_refresh_rules)
+BOOST_FIXTURE_TEST_CASE(nevm_duplicate_blob_metadata_refresh_rules, RegTestingSetup)
 {
     pnevmdatadb = std::make_unique<CNEVMDataDB>(DBParams{
         .path = "poda_meta_duplicates",
@@ -547,6 +612,9 @@ BOOST_AUTO_TEST_CASE(nevm_duplicate_blob_metadata_refresh_rules)
     const uint256 small_txid = uint256S("02");
     const uint256 mempool_txid = uint256S("03");
     const uint256 block_txid = uint256S("04");
+    const uint256 older_block_txid = uint256S("05");
+    const uint256 equal_larger_txid = uint256S("06");
+    const uint256 equal_smaller_txid = uint256S("03");
 
     PoDAMAPMemory mapPoDA;
     mapPoDA.emplace(version_hash, MakePoDAMeta(original_txid, /*size=*/100, /*median_time=*/1000));
@@ -582,10 +650,38 @@ BOOST_AUTO_TEST_CASE(nevm_duplicate_blob_metadata_refresh_rules)
     BOOST_CHECK_EQUAL(meta.txid, block_txid);
     BOOST_CHECK_EQUAL(meta.nSize, 100);
     BOOST_CHECK_EQUAL(meta.nMedianTime, 4000);
+    BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(/*nMedianTime=*/4000));
+
+    mapPoDA.clear();
+    mapPoDA.emplace(
+        version_hash,
+        MakePoDAMeta(older_block_txid, /*size=*/100, /*median_time=*/3500));
+    pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+    BOOST_REQUIRE(pnevmdatadb->GetBlobMetaData(version_hash, meta));
+    BOOST_CHECK_EQUAL(meta.txid, block_txid);
+    BOOST_CHECK_EQUAL(meta.nMedianTime, 4000);
+
+    mapPoDA.clear();
+    mapPoDA.emplace(
+        version_hash,
+        MakePoDAMeta(equal_larger_txid, /*size=*/100, /*median_time=*/4000));
+    pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+    BOOST_REQUIRE(pnevmdatadb->GetBlobMetaData(version_hash, meta));
+    BOOST_CHECK_EQUAL(meta.txid, block_txid);
+    BOOST_CHECK_EQUAL(meta.nMedianTime, 4000);
+
+    mapPoDA.clear();
+    mapPoDA.emplace(
+        version_hash,
+        MakePoDAMeta(equal_smaller_txid, /*size=*/100, /*median_time=*/4000));
+    pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+    BOOST_REQUIRE(pnevmdatadb->GetBlobMetaData(version_hash, meta));
+    BOOST_CHECK_EQUAL(meta.txid, equal_smaller_txid);
+    BOOST_CHECK_EQUAL(meta.nMedianTime, 4000);
 
     BOOST_REQUIRE(pnevmdatadb->FlushMempoolErase(version_hash, original_txid));
     BOOST_REQUIRE(pnevmdatadb->GetBlobMetaData(version_hash, meta));
-    BOOST_CHECK_EQUAL(meta.txid, block_txid);
+    BOOST_CHECK_EQUAL(meta.txid, equal_smaller_txid);
     BOOST_CHECK_EQUAL(meta.nSize, 100);
     BOOST_CHECK_EQUAL(meta.nMedianTime, 4000);
     BOOST_CHECK(pnevmdatadb->Exists(version_hash));
@@ -593,17 +689,94 @@ BOOST_AUTO_TEST_CASE(nevm_duplicate_blob_metadata_refresh_rules)
 
     BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(/*nMedianTime=*/4000));
     BOOST_REQUIRE(pnevmdatadb->GetBlobMetaData(version_hash, meta));
-    BOOST_CHECK_EQUAL(meta.txid, block_txid);
+    BOOST_CHECK_EQUAL(meta.txid, equal_smaller_txid);
     BOOST_CHECK_EQUAL(meta.nSize, 100);
     BOOST_CHECK_EQUAL(meta.nMedianTime, 4000);
 }
 
+BOOST_FIXTURE_TEST_CASE(nevm_blob_pruning_uses_cache_as_disk_overlay, RegTestingSetup)
+{
+    pnevmdatadb = std::make_unique<CNEVMDataDB>(DBParams{
+        .path = "poda_meta_prune_overlay",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true});
+    pnevmdatablobdb = std::make_unique<CNEVMDataBlobDB>(DBParams{
+        .path = "poda_blob_prune_overlay",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true});
+
+    const std::vector<uint8_t> version_hash =
+        dev::sha3(std::vector<uint8_t>{'o', 'v', 'e', 'r', 'l', 'a', 'y'}).asBytes();
+    constexpr uint32_t DATA_SIZE{64};
+    constexpr int64_t STALE_MTP{1'000};
+    constexpr int64_t REFRESHED_MTP{STALE_MTP + NEVM_DATA_EXPIRE_TIME};
+    constexpr int64_t PRUNE_MTP{STALE_MTP + NEVM_DATA_EXPIRE_TIME + 1};
+    const uint256 stale_txid = uint256S("11");
+    const uint256 refreshed_txid = uint256S("12");
+
+    PoDAMAPMemory mapPoDA;
+    mapPoDA.emplace(
+        version_hash, MakePoDAMeta(stale_txid, DATA_SIZE, STALE_MTP));
+    pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+    BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(STALE_MTP));
+
+    mapPoDA.clear();
+    mapPoDA.emplace(
+        version_hash,
+        MakePoDAMeta(refreshed_txid, DATA_SIZE, REFRESHED_MTP));
+    pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+
+    // SYSCOIN: the refreshed cache value shadows the expired disk value; a
+    // ChainLock prune must retain both its metadata and content bytes.
+    BOOST_REQUIRE(pnevmdatadb->PruneStandalone(PRUNE_MTP));
+    MapPoDAPayloadMeta meta;
+    BOOST_REQUIRE(pnevmdatadb->GetBlobMetaData(version_hash, meta));
+    BOOST_CHECK_EQUAL(meta.txid, refreshed_txid);
+    BOOST_CHECK_EQUAL(meta.nMedianTime, REFRESHED_MTP);
+    BOOST_CHECK(pnevmdatablobdb->Exists(version_hash));
+
+    BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(PRUNE_MTP));
+    BOOST_CHECK(pnevmdatadb->Exists(version_hash));
+    BOOST_CHECK(pnevmdatablobdb->Exists(version_hash));
+
+    constexpr int64_t DISK_MTP{1'000};
+    constexpr int64_t CACHE_MTP{10'000};
+    constexpr int64_t SECOND_PRUNE_MTP{
+        CACHE_MTP + NEVM_DATA_EXPIRE_TIME + 1};
+    const std::vector<uint8_t> expired_version_hash =
+        dev::sha3(std::vector<uint8_t>{'e', 'x', 'p', 'i', 'r', 'e', 'd'}).asBytes();
+    const uint256 disk_txid = uint256S("21");
+    const uint256 cache_txid = uint256S("22");
+
+    mapPoDA.clear();
+    mapPoDA.emplace(
+        expired_version_hash,
+        MakePoDAMeta(disk_txid, DATA_SIZE, DISK_MTP));
+    pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+    BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(DISK_MTP));
+
+    mapPoDA.clear();
+    mapPoDA.emplace(
+        expired_version_hash,
+        MakePoDAMeta(cache_txid, DATA_SIZE, CACHE_MTP));
+    pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+
+    // SYSCOIN: an expired cache value also shadows disk metadata. Pruning must
+    // erase both databases instead of exposing metadata for missing bytes.
+    BOOST_REQUIRE(pnevmdatadb->PruneStandalone(SECOND_PRUNE_MTP));
+    BOOST_CHECK(!pnevmdatadb->GetBlobMetaData(expired_version_hash, meta));
+    BOOST_CHECK(!pnevmdatadb->Exists(expired_version_hash));
+    BOOST_CHECK(!pnevmdatablobdb->Exists(expired_version_hash));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
-BOOST_FIXTURE_TEST_SUITE(nevm_mint_replay_lifecycle_tests, BasicTestingSetup)
+BOOST_AUTO_TEST_SUITE(nevm_mint_replay_lifecycle_tests)
 
 // nevmminttx markers must survive a non-wipe reopen (geth-aux rebuild path).
-BOOST_AUTO_TEST_CASE(mint_replay_db_survives_non_wipe_reopen)
+BOOST_FIXTURE_TEST_CASE(mint_replay_db_survives_non_wipe_reopen, BasicTestingSetup)
 {
     const fs::path db_dir = gArgs.GetDataDirNet() / "nevmminttx_wipe_policy";
     fs::remove_all(db_dir);
@@ -645,7 +818,7 @@ BOOST_AUTO_TEST_CASE(mint_replay_db_survives_non_wipe_reopen)
 }
 
 // Disconnect crash-order: persist pending additions before selective erase.
-BOOST_AUTO_TEST_CASE(mint_replay_flush_additions_before_selective_erase)
+BOOST_FIXTURE_TEST_CASE(mint_replay_flush_additions_before_selective_erase, BasicTestingSetup)
 {
     const fs::path db_dir = gArgs.GetDataDirNet() / "nevmminttx_crash_order";
     fs::remove_all(db_dir);
@@ -674,7 +847,7 @@ BOOST_AUTO_TEST_CASE(mint_replay_flush_additions_before_selective_erase)
 }
 
 // ReplayBlocks erase set: old-branch mints minus mints also on the new branch.
-BOOST_AUTO_TEST_CASE(mint_replay_disconnect_only_excludes_reconnected)
+BOOST_FIXTURE_TEST_CASE(mint_replay_disconnect_only_excludes_reconnected, BasicTestingSetup)
 {
     const uint256 old_only = uint256S(
         "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");

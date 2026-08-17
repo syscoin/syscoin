@@ -7,10 +7,12 @@
 
 #include <node/miner.h>
 #include <script/script.h>
+#include <sync.h>
 #include <txmempool.h>
 #include <uint256.h>
 #include <univalue.h>
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -40,6 +42,13 @@ class AuxpowMiner
 
 private:
 
+  // A no-check decision at an unscheduled height must not be reusable after
+  // the tip advances into a height where independent Bitcoin policy applies.
+  struct BTCPrevResolution {
+    int32_t next_height{-1};
+    std::optional<uint256> hash;
+  };
+
   /** The lock used for state in this object.  */
   mutable RecursiveMutex cs;
   /** All currently "active" block templates.  */
@@ -65,13 +74,24 @@ private:
    */
   const CBlock* getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mempool,
                                  const CScript& scriptPubKey, uint256& target,
-                                 const std::optional<uint256>& btcPrevHash = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
+                                 const BTCPrevResolution& btcPrev) EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+  // SYSCOIN: pure cache-key predicate kept separate from consensus activation
+  // so invalid partial PQ profiles are unnecessary in unit tests.
+  static bool TemplateMatchesBTCPREV(
+      const CBlock* block,
+      bool required,
+      const std::optional<uint256>& expected);
 
   /**
    * Looks up a previously constructed block by its (hex-encoded) hash.  If the
    * block is found, it is returned.  Otherwise, a JSONRPCError is thrown.
    */
   const CBlock* lookupSavedBlock (const std::string& hashHex) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+  BTCPrevResolution resolveBTCPrevHash(
+      ChainstateManager& chainman,
+      const std::optional<uint256>& requested);
 
   friend class auxpow_tests::AuxpowMinerForTest;
 
@@ -85,7 +105,8 @@ public:
    * necessary information for the miner to construct an auxpow for it.
    */
   UniValue createAuxBlock (const node::JSONRPCRequest& request,
-                           const CScript& scriptPubKey);
+                           const CScript& scriptPubKey,
+                           const std::optional<uint256>& btcPrevHash = std::nullopt);
 
   // SYSCOIN
   /**

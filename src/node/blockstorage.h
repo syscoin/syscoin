@@ -360,6 +360,15 @@ public:
 
     //! Create or update a prune lock identified by its name
     void UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Durable replay markers may move forward, but they must never
+    // undo a lower floor installed by DisconnectTip for reorg rollback data.
+    int UpdatePruneLockLowerOnly(const std::string& name,
+                                 const PruneLockInfo& lock_info)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Replay obligations must erase released locks; an INT_MAX
+    // sentinel would be moved backward by DisconnectTip and become active.
+    void RemovePruneLock(const std::string& name)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Open a block file (blk?????.dat) */
     CAutoFile OpenBlockFile(const FlatFilePos& pos, bool fReadOnly = false) const;

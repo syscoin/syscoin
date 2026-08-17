@@ -34,6 +34,7 @@ from .util import (
     assert_equal,
     check_json_precision,
     get_datadir_path,
+    get_rpc_proxy,  # SYSCOIN: deterministic-masternode RPC bootstrap.
     initialize_datadir,
     p2p_port,
     wait_until_helper_internal,
@@ -867,8 +868,10 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
                 return os.path.join(cache_node_dir, self.chain, *paths)
 
             os.rmdir(cache_path('wallets'))  # Remove empty wallets dir
+            # SYSCOIN: Preserve fork-owned deterministic/PQ/NEVM sidecars in
+            # the reusable cached chain.
             for entry in os.listdir(cache_path()):
-                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'llmq', 'evodb_dmn', 'evodb_qc', 'evodb_qc', 'evodb_qvvecs', 'evodb_qsk', 'evodb_sb', 'nevmdata', 'nevmblobdata']:  # Only keep chainstate and blocks folder
+                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'evodb_dmn', 'evodb_dmn_pq_registry', 'evodb_dmn_pq_payment_probation_v2', 'evodb_sb', 'nevmdata', 'nevmblobdata']:
                     os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
@@ -1041,13 +1044,14 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
         set_node_times(nodes or self.nodes, self.mocktime)
 
 
+# SYSCOIN BEGIN: deterministic-masternode and PQ functional framework.
 class MasternodeInfo:
-    def __init__(self, proTxHash, ownerAddr, votingAddr, pubKeyOperator, keyOperator, collateral_address, collateral_txid, collateral_vout):
+    def __init__(self, proTxHash, ownerAddr, votingAddr, operatorKey, c11Seed, collateral_address, collateral_txid, collateral_vout):
         self.proTxHash = proTxHash
         self.ownerAddr = ownerAddr
         self.votingAddr = votingAddr
-        self.pubKeyOperator = pubKeyOperator
-        self.keyOperator = keyOperator
+        self.operatorKey = operatorKey
+        self.c11Seed = c11Seed
         self.collateral_address = collateral_address
         self.collateral_txid = collateral_txid
         self.collateral_vout = collateral_vout
@@ -1076,7 +1080,7 @@ class DashTestFramework(SyscoinTestFramework):
     def set_test_params(self):
         """Tests must this method to change default values for number of nodes, topology, etc"""
         raise NotImplementedError
-    def set_dash_test_params(self, num_nodes, masterodes_count, extra_args=None, fast_dip3_enforcement=False, default_legacy_bls=False):
+    def set_dash_test_params(self, num_nodes, masterodes_count, extra_args=None, fast_dip3_enforcement=False):
         self.mn_count = masterodes_count
         self.num_nodes = num_nodes
         self.mninfo = []
@@ -1088,24 +1092,62 @@ class DashTestFramework(SyscoinTestFramework):
         self.extra_args = [copy.deepcopy(a) for a in extra_args]
         self.extra_args[0] += ["-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"]
         self.fast_dip3_enforcement = fast_dip3_enforcement
-        self.default_legacy_bls = default_legacy_bls
-        if fast_dip3_enforcement:
-            for i in range(0, num_nodes):
-                self.extra_args[i].append("-dip3params=30:50")
         for i in range(0, num_nodes):
+            self.extra_args[i] = [
+                arg for arg in self.extra_args[i]
+                if not arg.startswith("-dip3params=")
+            ]
+            # The first empty DIP3 block becomes the exact, dynamically pinned
+            # migration anchor before any provider transaction is accepted.
+            self.extra_args[i].append("-dip3params=1:1")
             self.extra_args[i].append("-mncollateral=100")
             # Enable CL receipt consensus rules for Syscoin/Dash functional tests.
             self.extra_args[i].append("-clreceiptstartheight=0")
-        # LLMQ default test params (no need to pass -llmqtestparams)
-        self.llmq_size = 3
-        self.llmq_threshold = 2
         self.disable_autoconnect = False
 
-    def set_dash_llmq_test_params(self, llmq_size, llmq_threshold):
-        self.llmq_size = llmq_size
-        self.llmq_threshold = llmq_threshold
-        for i in range(0, self.num_nodes):
-            self.extra_args[i].append("-llmqtestparams=%d:%d" % (self.llmq_size, self.llmq_threshold))
+    def configure_pq_migration_anchor(self):
+        assert_equal(self.nodes[0].getblockcount(), 0)
+        self.bump_mocktime(1, nodes=[self.nodes[0]])
+        self.generatetoaddress(
+            self.nodes[0], 1, self.nodes[0].getnewaddress(),
+            sync_fun=self.no_op)
+        anchor = self.nodes[0].protx_migration_info()
+        assert_equal(anchor["height"], 1)
+
+        registration_cutoff_blocks = 288
+        # SYSCOIN: roster membership is sampled only after root registration closes.
+        roster_snapshot_lag = 288
+        btcc_candidate_origin = 1_000_000
+        assert registration_cutoff_blocks >= roster_snapshot_lag
+        pq_args = [
+            "-pqlegacyanchorheight=%d" % anchor["height"],
+            "-pqlegacyanchorblockhash=%s" % anchor["blockHash"],
+            "-pqlegacydmnstatehash=%s" % anchor["dmnStateHash"],
+            "-pqlegacypqregistrystatehash=%s" % anchor["pqRegistryStateHash"],
+            "-pqpreparationheight=1",
+            "-pqchainlockepochorigin=1440",
+            "-pqregistrationcutoffblocks=%d" % registration_cutoff_blocks,
+            "-pqrostersnapshotlag=%d" % roster_snapshot_lag,
+            "-pqfuturehorizonepochs=8",
+            "-pqbtcccandidateorigin=%d" % btcc_candidate_origin,
+            # SYSCOIN: The distinct BTCC assumption record is mandatory even
+            # at first activation; before the first carrier it commits the
+            # canonical empty receipt state at the migration block.
+            "-pqbtccreceiptanchorheight=%d" % anchor["height"],
+            "-pqbtccreceiptanchorblockhash=%s" % anchor["blockHash"],
+            "-pqbtccreceiptanchorcursorheight=-1",
+            "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+        ]
+        for node_args in self.extra_args:
+            node_args.extend(pq_args)
+
+        self.stop_node(0)
+        self.nodes[0].extra_args = copy.deepcopy(self.extra_args[0])
+        self.start_node(0, extra_args=self.extra_args[0] + ["-reindex"])
+        force_finish_mnsync(self.nodes[0])
+        assert_equal(self.nodes[0].protx_migration_info(), anchor)
 
     def create_simple_node(self):
         idx = len(self.nodes)
@@ -1123,7 +1165,7 @@ class DashTestFramework(SyscoinTestFramework):
     def prepare_masternode(self, idx):
         register_fund = (idx % 2) == 0
 
-        bls = self.nodes[0].bls_generate(self.default_legacy_bls)
+        operator_keys = self.nodes[0].protx_generate_operator_keypair()
         address = self.nodes[0].getnewaddress()
         txid = self.nodes[0].sendtoaddress(address, MASTERNODE_COLLATERAL)
 
@@ -1149,25 +1191,50 @@ class DashTestFramework(SyscoinTestFramework):
         submit = (idx % 4) < 2
         if register_fund:
             # self.nodes[0].lockunspent(True, [{'txid': txid, 'vout': collateral_vout}])
-            protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit, self.default_legacy_bls)
+            protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, "", votingAddr, operatorReward, rewardsAddr, address, submit)
         else:
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            protx_result = self.nodes[0].protx_register(txid, collateral_vout, ipAndPort, ownerAddr, bls['public'], votingAddr, operatorReward, rewardsAddr, address, submit, self.default_legacy_bls)
+            protx_result = self.nodes[0].protx_register(txid, collateral_vout, ipAndPort, ownerAddr, "", votingAddr, operatorReward, rewardsAddr, address, submit)
 
         if submit:
             proTxHash = protx_result
         else:
             proTxHash = self.nodes[0].sendrawtransaction(protx_result)
 
-        if operatorReward > 0:
-            self.generate(self.nodes[0], 1)
-            operatorPayoutAddress = self.nodes[0].getnewaddress()
-            nevmAddress = ""
-            self.nodes[0].protx_update_service(proTxHash, ipAndPort, bls['secret'], nevmAddress, operatorPayoutAddress, address, self.default_legacy_bls)
+        # A PQ ProReg starts inactive. One owner-authorized transaction binds
+        # the global key and its deterministic C11 tree root; no recurring
+        # child-key registration transaction is required.
+        self.generate(self.nodes[0], 1)
+        registered_mn = self.nodes[0].protx_info(proTxHash)
+        collateral_txid = registered_mn["collateralHash"]
+        collateral_vout = registered_mn["collateralIndex"]
+        # SYSCOIN: constructing the fixed 65,536-leaf C11 commitment is the
+        # only setup RPC that can exceed the ordinary 60-second test budget on
+        # low-core CI builders. Give this one call a bounded fresh connection
+        # without weakening timeout detection for every other RPC.
+        operator_registration_rpc = get_rpc_proxy(
+            self.nodes[0].url,
+            self.nodes[0].index,
+            timeout=600,
+            coveragedir=self.nodes[0].coverage_dir,
+        )
+        operator_registration_rpc.protx_register_operator_key(
+            proTxHash, operator_keys["operatorKey"],
+            operator_keys["c11Seed"], address)
+        self.generate(self.nodes[0], 1)
+        operatorPayoutAddress = (
+            self.nodes[0].getnewaddress() if operatorReward > 0 else "")
+        self.nodes[0].protx_update_service(
+            proTxHash, ipAndPort, operator_keys["operatorKey"], "",
+            operatorPayoutAddress, address)
+        self.generate(self.nodes[0], 1)
 
-        self.mninfo.append(MasternodeInfo(proTxHash, ownerAddr, votingAddr, bls['public'], bls['secret'], address, txid, collateral_vout))
+        self.mninfo.append(MasternodeInfo(
+            proTxHash, ownerAddr, votingAddr,
+            operator_keys["operatorKey"], operator_keys["c11Seed"],
+            address, collateral_txid, collateral_vout))
 
-        self.log.info("Prepared masternode %d: collateral_txid=%s, collateral_vout=%d, protxHash=%s" % (idx, txid, collateral_vout, proTxHash))
+        self.log.info("Prepared masternode %d: collateral_txid=%s, collateral_vout=%d, protxHash=%s" % (idx, collateral_txid, collateral_vout, proTxHash))
 
     def remove_masternode(self, idx):
         mn = self.mninfo[idx]
@@ -1200,8 +1267,10 @@ class DashTestFramework(SyscoinTestFramework):
             self.add_nodes(1, offset=idx + start_idx, extra_args=[self.extra_args[idx + start_idx]])
 
         def do_connect(idx):
-            # Connect to the control node only, masternodes should take care of intra-quorum connections themselves
-            self.connect_nodes(self.mninfo[idx].nodeIdx, 0)
+            # SYSCOIN: a non-masternode rejects identity-bearing inbound peers.
+            # Initiate from the controller so the masternode's identity is
+            # authenticated on the controller's outbound connection.
+            self.connect_nodes(0, self.mninfo[idx].nodeIdx)
 
 
         # start up nodes in parallel
@@ -1216,8 +1285,14 @@ class DashTestFramework(SyscoinTestFramework):
 
 
     def start_masternode(self, mninfo, extra_args=None):
-        args = ['-masternodeblsprivkey=%s' % mninfo.keyOperator] + self.extra_args[mninfo.nodeIdx]
-        self.extra_args[mninfo.nodeIdx].append('-masternodeblsprivkey=%s' % mninfo.keyOperator)
+        key_args = [
+            '-masternodeslhprivkey=%s' % mninfo.operatorKey,
+            '-masternodec11seed=%s' % mninfo.c11Seed,
+        ]
+        for arg in key_args:
+            if arg not in self.extra_args[mninfo.nodeIdx]:
+                self.extra_args[mninfo.nodeIdx].append(arg)
+        args = list(self.extra_args[mninfo.nodeIdx])
         if extra_args is not None:
             args += extra_args
         self.start_node(mninfo.nodeIdx, extra_args=args)
@@ -1239,6 +1314,7 @@ class DashTestFramework(SyscoinTestFramework):
         if self.is_wallet_compiled():
             self.import_deterministic_coinbase_privkeys()
         self.num_nodes = num_nodes_copy
+        self.configure_pq_migration_anchor()
         required_balance = MASTERNODE_COLLATERAL * self.mn_count + 1
         self.log.info("Generating %d coins" % required_balance)
         force_finish_mnsync(self.nodes[0])
@@ -1270,7 +1346,11 @@ class DashTestFramework(SyscoinTestFramework):
         self.generate(self.nodes[0], 1)
         # Enable ChainLocks by default
         self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
-        self.wait_for_sporks_same()
+        # SYSCOIN: first-run PQ masternodes build 65,536-leaf public child-key
+        # caches concurrently. Match the bounded registration RPC so parallel
+        # functional jobs cannot exhaust this positive convergence wait while
+        # the message handlers are CPU-starved by those cache builders.
+        self.wait_for_sporks_same(timeout=600)
         self.bump_mocktime(1)
 
         mn_info = self.nodes[0].masternode_list("status")
@@ -1361,116 +1441,6 @@ class DashTestFramework(SyscoinTestFramework):
             return all(node.spork('show') == sporks for node in self.nodes)
         self.wait_until(check_sporks_same, timeout=timeout)
 
-    def wait_for_quorum_connections(self, quorum_hash, expected_connections, mninfos, timeout = 60, wait_proc=None):
-        def check_quorum_connections():
-            def ret():
-                if wait_proc is not None:
-                    wait_proc()
-                return False
-
-            for mn in mninfos:
-                s = mn.node.quorum_dkgstatus()
-                for qs in s["session"]:
-                    if qs["status"]["quorumHash"] != quorum_hash:
-                        continue
-                    for qc in s["quorumConnections"]:
-                        if "quorumConnections" not in qc:
-                            continue
-                        if qc["quorumHash"] != quorum_hash:
-                            continue
-                        if len(qc["quorumConnections"]) == 0:
-                            continue
-                        cnt = 0
-                        for c in qc["quorumConnections"]:
-                            if c["connected"]:
-                                cnt += 1
-                        if cnt < expected_connections:
-                            return ret()
-                        return True
-                    # a session with no matching connections - not ok
-                    return ret()
-                # a node with no sessions - ok
-                pass
-            # no sessions at all - not ok
-            return ret()
-
-        wait_until_helper_internal(check_quorum_connections, timeout=timeout)
-        
-    def wait_for_masternode_probes(self, mninfos, timeout = 60, wait_proc=None):
-        def check_probes():
-            def ret():
-                if wait_proc is not None:
-                    wait_proc()
-                return False
-
-            for mn in mninfos:
-                s = mn.node.quorum_dkgstatus()
-                if "quorumConnections" not in s:
-                    return ret()
-                s = s["quorumConnections"]
-                for c in s:
-                    c = c["quorumConnections"]
-                    if not "proTxHash" in c or c["proTxHash"] == mn.proTxHash:
-                        continue
-                    if not c["outbound"]:
-                        mn2 = mn.node.protx_info(c["proTxHash"])
-                        if [m for m in mninfos if c["proTxHash"] == m.proTxHash]:
-                            # MN is expected to be online and functioning, so let's verify that the last successful
-                            # probe is not too old. Probes are retried after 50 minutes, while DKGs consider a probe
-                            # as failed after 60 minutes
-                            if mn2['metaInfo']['lastOutboundSuccessElapsed'] > 55 * 60:
-                                return ret()
-                        else:
-                            # MN is expected to be offline, so let's only check that the last probe is not too long ago
-                            if mn2['metaInfo']['lastOutboundAttemptElapsed'] > 55 * 60 and mn2['metaInfo']['lastOutboundSuccessElapsed'] > 55 * 60:
-                                return ret()
-
-            return True
-        wait_until_helper_internal(check_probes, timeout=timeout)
-
-    def wait_for_quorum_phase(self, quorum_hash, phase, expected_member_count, check_received_messages, check_received_messages_count, mninfos, wait_proc=None, timeout=60):
-        def check_dkg_session():
-            if wait_proc is not None:
-                wait_proc()
-            member_count = 0
-            for mn in mninfos:
-                s = mn.node.quorum_dkgstatus()["session"]
-                for qs in s:
-                    qstatus = qs["status"]
-                    if "quorumHash" not in qstatus or qstatus["quorumHash"] != quorum_hash:
-                        continue
-                    if qstatus["phase"] != phase:
-                        return False
-                    if check_received_messages is not None:
-                        if qstatus[check_received_messages] < check_received_messages_count:
-                            return False
-                    member_count += 1
-                    break
-            return member_count >= expected_member_count
-
-        wait_until_helper_internal(check_dkg_session, timeout=timeout)
-
-    def wait_for_quorum_commitment(self, quorum_hash, nodes, wait_proc=None, timeout=60):
-        def check_dkg_comitments():
-            if wait_proc is not None:
-                wait_proc()
-            for node in nodes:
-                s = node.quorum_dkgstatus()
-                if "minableCommitments" not in s:
-                    return False
-                commits = s["minableCommitments"]
-                c_ok = False
-                for c in commits:
-                    if c["quorumHash"] != quorum_hash:
-                        continue
-                    c_ok = True
-                    break
-                if not c_ok:
-                    return False
-            return True
-
-        wait_until_helper_internal(check_dkg_comitments, timeout=timeout)
-
     def sync_mempools_helper(self, nodes):
         try:
             self._throttled_bump_mocktime("sync_mempools_helper", step=1, nodes=nodes)
@@ -1506,14 +1476,20 @@ class DashTestFramework(SyscoinTestFramework):
     def sync_mnsync_helper(self, nodes, mode="all"):
         try:
             self._throttled_bump_mocktime("sync_mnsync_helper", step=1, nodes=nodes)
-            self.sync_gov(timeout=1, mode=mode, nodes=nodes)
+            if mode == "all":
+                return all(node.mnsync("status")["IsSynced"] for node in nodes)
+            if mode == "blockchain":
+                return all(node.mnsync("status")["IsBlockchainSynced"] for node in nodes)
         except:
             return False
-        return True
+        return False
     
-    def sync_mnsync(self, nodes, mode="all"):
+    def sync_mnsync(self, nodes, mode="all", timeout=60):
         try:
-            self.wait_until(lambda: self.sync_mnsync_helper(nodes=nodes, mode=mode))
+            self.wait_until(
+                lambda: self.sync_mnsync_helper(nodes=nodes, mode=mode),
+                timeout=timeout,
+            )
         except:
             return False
         return True  
@@ -1537,152 +1513,6 @@ class DashTestFramework(SyscoinTestFramework):
         for i in range(number):
             self.wait_until(lambda: self.generate_block_helper(node, 1, sync_fun, nodes))
 
-    def wait_for_quorum_list(self, quorum_hash, nodes, timeout=60):
-        def wait_func():
-            if quorum_hash in self.nodes[0].quorum_list()["quorums"]:
-                return True
-            self._throttled_bump_mocktime("wait_for_quorum_list", step=2, nodes=nodes)
-            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
-            return False
-        wait_until_helper_internal(wait_func, timeout=timeout)
-
-    def move_blocks(self, nodes, num_blocks):
-        self.generate_helper(self.nodes[0], num_blocks, sync_fun=self.no_op)
-        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
-
-    def mine_quorum(self, expected_connections=None, expected_members=None, expected_contributions=None, expected_complaints=0, expected_justifications=0, expected_commitments=None, mninfos_online=None, mninfos_valid=None):
-        spork21_active = self.nodes[0].spork('show')['SPORK_21_QUORUM_ALL_CONNECTED'] <= 1
-        spork23_active = self.nodes[0].spork('show')['SPORK_23_QUORUM_POSE'] <= 1
-
-        if expected_connections is None:
-            expected_connections = (self.llmq_size - 1) if spork21_active else 2
-        if expected_members is None:
-            expected_members = self.llmq_size
-        if expected_contributions is None:
-            expected_contributions = self.llmq_size
-        if expected_commitments is None:
-            expected_commitments = self.llmq_size
-        if mninfos_online is None:
-            mninfos_online = self.mninfo.copy()
-        if mninfos_valid is None:
-            mninfos_valid = self.mninfo.copy()
-
-        self.log.info("Mining quorum: expected_members=%d, expected_connections=%d, expected_contributions=%d, expected_complaints=%d, expected_justifications=%d, "
-                      "expected_commitments=%d" % (expected_members, expected_connections, expected_contributions, expected_complaints,
-                                                   expected_justifications, expected_commitments))
-
-        nodes = [self.nodes[0]] + [mn.node for mn in mninfos_online]
-
-        def timeout_func():
-            self._throttled_bump_mocktime("mine_quorum_timeout_func", step=1, nodes=nodes)
-
-        # move forward to next DKG
-        skip_count = 24 - (self.nodes[0].getblockcount() % 24)
-        if skip_count != 0:
-            self.bump_mocktime(1, nodes=nodes)
-            self.generate_helper(self.nodes[0], skip_count, sync_fun=self.no_op)
-        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
-
-        q = self.nodes[0].getbestblockhash()
-        self.log.info("Expected quorum_hash:"+str(q))
-        self.log.info("Waiting for phase 1 (init)")
-        self.wait_for_quorum_phase(q, 1, expected_members, None, 0, mninfos_online, wait_proc=timeout_func)
-        self.wait_for_quorum_connections(q, expected_connections, mninfos_online, wait_proc=lambda: self._throttled_bump_mocktime("mine_quorum_wait_conn", step=1, nodes=nodes))
-        if spork23_active:
-            self.wait_for_masternode_probes(mninfos_valid, wait_proc=lambda: self._throttled_bump_mocktime("mine_quorum_wait_probes", step=1, nodes=nodes))
-
-        self.move_blocks(nodes, 2)
-
-        self.log.info("Waiting for phase 2 (contribute)")
-        self.wait_for_quorum_phase(q, 2, expected_members, "receivedContributions", expected_contributions, mninfos_online, wait_proc=timeout_func)
-
-        self.move_blocks(nodes, 2)
-
-        self.log.info("Waiting for phase 3 (complain)")
-        self.wait_for_quorum_phase(q, 3, expected_members, "receivedComplaints", expected_complaints, mninfos_online, wait_proc=timeout_func)
-
-        self.move_blocks(nodes, 2)
-
-        self.log.info("Waiting for phase 4 (justify)")
-        self.wait_for_quorum_phase(q, 4, expected_members, "receivedJustifications", expected_justifications, mninfos_online, wait_proc=timeout_func)
-
-        self.move_blocks(nodes, 2)
-
-        self.log.info("Waiting for phase 5 (commit)")
-        self.wait_for_quorum_phase(q, 5, expected_members, "receivedPrematureCommitments", expected_commitments, mninfos_online, wait_proc=timeout_func)
-
-        self.move_blocks(nodes, 2)
-
-        self.log.info("Waiting for phase 6 (mining)")
-        self.wait_for_quorum_phase(q, 6, expected_members, None, 0, mninfos_online, wait_proc=timeout_func)
-
-        self.log.info("Waiting final commitment")
-        self.wait_for_quorum_commitment(q, nodes, wait_proc=timeout_func)
-
-        self.log.info("Mining final commitment")
-        self.bump_mocktime(1, nodes=nodes)
-        self.nodes[0].getblocktemplate({"rules": ["segwit"]}) # this calls CreateNewBlock
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
-
-        self.log.info("Waiting for quorum to appear in the list")
-        self.wait_for_quorum_list(q, nodes)
-
-        new_quorum = self.nodes[0].quorum_list(1)["quorums"][0]
-        assert_equal(q, new_quorum)
-        quorum_info = self.nodes[0].quorum_info(new_quorum)
-
-        # Mine 5 (SIGN_HEIGHT_OFFSET) more blocks to make sure that the new quorum gets eligible for signing sessions
-        skip_count = 5 - (self.nodes[0].getblockcount() % 5)
-        if skip_count:
-            self.generate_helper(self.nodes[0], skip_count, sync_fun=self.no_op)
-        self.sync_all_helper(nodes=nodes)
-
-
-        self.log.info("New quorum: height=%d, quorumHash=%s, minedBlock=%s" % (quorum_info["height"], new_quorum, quorum_info["minedBlock"]))
-
-        for mn in mninfos_valid:
-            assert not check_punished(self.nodes[0], mn)
-            assert not check_banned(self.nodes[0], mn)
-
-        return new_quorum
-
-    def move_to_next_cycle(self):
-        cycle_length = 24
-        mninfos_online = self.mninfo.copy()
-        nodes = [self.nodes[0]] + [mn.node for mn in mninfos_online]
-        cur_block = self.nodes[0].getblockcount()
-
-        # move forward to next DKG
-        skip_count = cycle_length - (cur_block % cycle_length)
-        if skip_count != 0:
-            self.bump_mocktime(1, nodes=nodes)
-            self.generate(self.nodes[0], skip_count)
-        self.wait_until(lambda: self.sync_blocks_helper(nodes=nodes))
-        time.sleep(1)
-        self.log.info('Moved from block %d to %d' % (cur_block, self.nodes[0].getblockcount()))
-
-    def get_recovered_sig(self, rec_sig_id, rec_sig_msg_hash, node=None):
-        # Note: recsigs aren't relayed no regular nodes by default,
-        # make sure to pick a mn as a node to query for recsigs.
-        node = self.mninfo[0].node if node is None else node
-        time_start = time.time()
-        while time.time() - time_start < 10:
-            try:
-                self.bump_mocktime(5, nodes=self.nodes)
-                return node.quorum_getrecsig(rec_sig_id, rec_sig_msg_hash)
-            except JSONRPCException:
-                time.sleep(0.1)
-        return False
-
-    def get_quorum_masternodes(self, q):
-        qi = self.nodes[0].quorum_info(q)
-        result = []
-        for m in qi['members']:
-            result.append(self.get_mninfo(m['proTxHash']))
-        return result
-
     def get_mninfo(self, proTxHash):
         for mn in self.mninfo:
             if mn.proTxHash == proTxHash:
@@ -1698,3 +1528,5 @@ class DashTestFramework(SyscoinTestFramework):
                     c += 1
             return c >= count
         wait_until_helper_internal(test, timeout=timeout)
+
+# SYSCOIN END: deterministic-masternode and PQ functional framework.

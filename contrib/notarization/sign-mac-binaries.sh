@@ -1,5 +1,6 @@
 #!/bin/bash
 # Script to sign Syscoin macOS binaries
+export LC_ALL=C
 set -e
 
 # Check for version parameter
@@ -95,4 +96,4 @@ echo -e "\n=== Signing complete! ==="
 echo "Created:"
 echo "  - syscoin-${VERSION}-arm64-apple-darwin-signed.zip"
 echo "  - syscoin-${VERSION}-x86_64-apple-darwin-signed.zip"
-echo -e "\nNext step: Run ./notarize-mac-binaries.sh ${VERSION}" 
+echo -e "\nNext step: Run ./notarize-mac-binaries.sh ${VERSION}"

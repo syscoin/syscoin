@@ -1,0 +1,312 @@
+// Copyright (c) 2026 The Syscoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <llmq/pq_payment_audit_staging_store.h>
+
+#include <test/util/setup_common.h>
+
+#include <cstddef>
+#include <cstdint>
+
+#include <boost/test/unit_test.hpp>
+
+using namespace llmq::pq;
+
+namespace {
+
+uint256 NonNullHash(uint64_t value)
+{
+    uint256 hash;
+    for (std::size_t byte{0}; byte < sizeof(value); ++byte) {
+        hash.begin()[byte] = static_cast<uint8_t>(value >> (8 * byte));
+    }
+    if (hash.IsNull()) hash.begin()[0] = 1;
+    return hash;
+}
+
+void SetBit(QuorumBitmap& bitmap, std::size_t member)
+{
+    bitmap[member / 8] |=
+        static_cast<uint8_t>(uint8_t{1} << (member % 8));
+}
+
+ChainLockShare ResponseShare(int32_t height,
+                             uint16_t member,
+                             uint64_t branch_salt)
+{
+    ChainLockShare share;
+    auto& transcript{share.transcript};
+    transcript.height = height;
+    transcript.block_hash =
+        NonNullHash(branch_salt + static_cast<uint64_t>(height));
+    transcript.previous_chainlock_height = height - 5;
+    transcript.previous_chainlock_hash = NonNullHash(branch_salt + 1);
+    transcript.quorum_context_hash = NonNullHash(branch_salt + 2);
+    transcript.quorum_epoch = 7;
+    transcript.quorum_base_hash = NonNullHash(branch_salt + 3);
+    transcript.member_index = member;
+    transcript.member_pro_tx_hash = NonNullHash(branch_salt + 100 + member);
+    transcript.previous_btcc_cursor =
+        BTCCursor{height - 10, NonNullHash(branch_salt + 4),
+                  NonNullHash(branch_salt + 5)};
+    transcript.accepted_btcc_cursor =
+        BTCCursor{height, transcript.block_hash,
+                  NonNullHash(branch_salt + 6)};
+    transcript.btcc_advance = BTCCAdvance::ADVANCE;
+    transcript.payment_probation_state_hash = NonNullHash(branch_salt + 7);
+    share.authenticated_signature.key_proof.public_key[0] = 1;
+    share.authenticated_signature.signature[0] =
+        static_cast<uint8_t>(member + 1);
+    BOOST_REQUIRE(share.IsStructurallyValid());
+    return share;
+}
+
+PaymentAuditStagingRow Row(const uint256& genesis_hash,
+                           uint32_t epoch,
+                           uint8_t row_index,
+                           uint64_t branch_salt = 1'000)
+{
+    const int32_t height{
+        static_cast<int32_t>(1'000 + epoch * 300 + row_index * 10)};
+    const auto response{ResponseShare(height, 0, branch_salt)};
+    PaymentAuditStagingRow row;
+    row.expected.epoch = epoch;
+    row.expected.row_index = row_index;
+    row.expected.response_height = height;
+    row.expected.response_chainlock_logical_id =
+        GetLogicalChainLockId(genesis_hash, response.GetStatement());
+    row.expected.subject_descriptor_hash = NonNullHash(branch_salt + 8);
+    row.deadline_height = height + PAYMENT_AUDIT_ROW_DEADLINE_DELAY;
+    row.response_block_hash = response.GetStatement().block_hash;
+    for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
+        SetBit(row.subject_valid_members, member);
+    }
+    BOOST_REQUIRE(row.IsStructurallyValid(genesis_hash));
+    return row;
+}
+
+PaymentAuditResponse Response(const PaymentAuditStagingRow& row,
+                              uint16_t member,
+                              uint64_t branch_salt = 1'000)
+{
+    PaymentAuditResponse response;
+    response.epoch = row.expected.epoch;
+    response.row_index = row.expected.row_index;
+    response.subject_descriptor_hash = row.expected.subject_descriptor_hash;
+    response.response = ResponseShare(
+        row.expected.response_height, member, branch_salt);
+    BOOST_REQUIRE(response.response.GetStatement().block_hash ==
+                  row.response_block_hash);
+    BOOST_REQUIRE(response.IsStructurallyValid());
+    return response;
+}
+
+void FreezeEpoch(PaymentAuditStagingStore& store,
+                 const uint256& genesis_hash,
+                 uint32_t epoch)
+{
+    for (uint8_t index{0}; index < PAYMENT_AUDIT_ROW_COUNT; ++index) {
+        const auto row{Row(genesis_hash, epoch, index)};
+        BOOST_REQUIRE(store.EnsureRow(row) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_REQUIRE(store.FreezeRow(
+                          epoch, index, row.response_block_hash,
+                          NonNullHash(50'000 + epoch * 100 + index)) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+    }
+}
+
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(pq_payment_audit_staging_store_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(deadline_barrier_compacts_and_survives_restart)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_restart"};
+    const uint256 genesis_hash{NonNullHash(1)};
+    const auto row{Row(genesis_hash, 4, 0)};
+    const auto first{Response(row, 0)};
+    const auto late{Response(row, 1)};
+    const uint256 deadline_hash{NonNullHash(2)};
+    {
+        PaymentAuditStagingStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.IsHealthy());
+        BOOST_REQUIRE(store.ActivateEpoch(4) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_REQUIRE(store.EnsureRow(row) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_CHECK(store.AddVerifiedResponse(
+                        4, 0, row.deadline_height - 1, first) ==
+                    PaymentAuditStagingResult::ACCEPTED);
+        BOOST_CHECK(store.AddVerifiedResponse(
+                        4, 0, row.deadline_height, late) ==
+                    PaymentAuditStagingResult::DEADLINE_REACHED);
+        BOOST_REQUIRE(store.FreezeRow(
+                          4, 0, row.response_block_hash, deadline_hash) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_CHECK(!store.GetOpenRow(4, 0));
+    }
+    PaymentAuditStagingStore restarted{path, genesis_hash};
+    BOOST_REQUIRE(restarted.IsHealthy());
+    BOOST_CHECK(restarted.ActiveEpoch() == 4);
+    BOOST_CHECK(!restarted.GetOpenRow(4, 0));
+    const auto summary{restarted.GetSummary(4, 0)};
+    BOOST_REQUIRE(summary);
+    BOOST_CHECK(summary->deadline_block_hash == deadline_hash);
+    BOOST_CHECK_EQUAL(CountSet(summary->locally_observed_members), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(unsealed_wal_rows_are_discarded_after_restart)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_unsealed"};
+    const uint256 genesis_hash{NonNullHash(3)};
+    const auto row{Row(genesis_hash, 5, 0)};
+    {
+        PaymentAuditStagingStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.ActivateEpoch(5) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_REQUIRE(store.EnsureRow(row) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_REQUIRE(store.AddVerifiedResponse(
+                          5, 0, row.deadline_height - 1,
+                          Response(row, 0)) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+    }
+    PaymentAuditStagingStore restarted{path, genesis_hash};
+    BOOST_REQUIRE(restarted.IsHealthy());
+    BOOST_CHECK(!restarted.GetOpenRow(5, 0));
+    BOOST_CHECK(!restarted.GetSummary(5, 0));
+}
+
+BOOST_AUTO_TEST_CASE(branch_replacement_drops_old_evidence)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_reorg"};
+    const uint256 genesis_hash{NonNullHash(10)};
+    const auto old_row{Row(genesis_hash, 6, 3, 2'000)};
+    const auto replacement{Row(genesis_hash, 6, 3, 3'000)};
+    PaymentAuditStagingStore store{path, genesis_hash};
+    BOOST_REQUIRE(store.ActivateEpoch(6) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_REQUIRE(store.EnsureRow(old_row) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_REQUIRE(store.AddVerifiedResponse(
+                      6, 3, old_row.deadline_height - 1,
+                      Response(old_row, 0, 2'000)) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(store.EnsureRow(replacement) ==
+                PaymentAuditStagingResult::BRANCH_CONFLICT);
+    BOOST_REQUIRE(store.ReplaceRowBranch(replacement) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    const auto loaded{store.GetOpenRow(6, 3)};
+    BOOST_REQUIRE(loaded);
+    BOOST_CHECK(loaded->response_block_hash == replacement.response_block_hash);
+    BOOST_CHECK(loaded->responses.empty());
+}
+
+BOOST_AUTO_TEST_CASE(two_open_rows_are_bounded)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_bound"};
+    const uint256 genesis_hash{NonNullHash(20)};
+    PaymentAuditStagingStore store{path, genesis_hash};
+    BOOST_REQUIRE(store.ActivateEpoch(7) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    const auto first{Row(genesis_hash, 7, 0)};
+    const auto second{Row(genesis_hash, 7, 1)};
+    const auto third{Row(genesis_hash, 7, 2)};
+    BOOST_REQUIRE(store.EnsureRow(first) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_REQUIRE(store.EnsureRow(second) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(store.EnsureRow(third) ==
+                PaymentAuditStagingResult::CAPACITY_EXCEEDED);
+    BOOST_REQUIRE(store.FreezeRow(7, 0, first.response_block_hash,
+                                  NonNullHash(70'000)) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_REQUIRE(store.EnsureRow(third) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_REQUIRE(store.DiscardOpenRow(7, 1) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(!store.GetOpenRow(7, 1));
+}
+
+BOOST_AUTO_TEST_CASE(prior_epoch_summaries_survive_current_collection)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_overlap"};
+    const uint256 genesis_hash{NonNullHash(30)};
+    {
+        PaymentAuditStagingStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.ActivateEpoch(8) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        FreezeEpoch(store, genesis_hash, 8);
+        BOOST_CHECK_EQUAL(store.GetEpochSummaries(8).size(),
+                          PAYMENT_AUDIT_ROW_COUNT);
+        BOOST_REQUIRE(store.ActivateEpoch(9) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_CHECK(store.RetainedEpoch() == 8);
+        FreezeEpoch(store, genesis_hash, 9);
+        BOOST_CHECK_EQUAL(store.GetEpochSummaries(8).size(),
+                          PAYMENT_AUDIT_ROW_COUNT);
+        BOOST_CHECK_EQUAL(store.GetEpochSummaries(9).size(),
+                          PAYMENT_AUDIT_ROW_COUNT);
+    }
+    PaymentAuditStagingStore restarted{path, genesis_hash};
+    BOOST_REQUIRE(restarted.IsHealthy());
+    BOOST_CHECK(restarted.RetainedEpoch() == 8);
+    BOOST_CHECK_EQUAL(restarted.GetEpochSummaries(8).size(),
+                      PAYMENT_AUDIT_ROW_COUNT);
+    BOOST_REQUIRE(restarted.ClearRetainedEpoch(8) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(restarted.GetEpochSummaries(8).empty());
+}
+
+BOOST_AUTO_TEST_CASE(incomplete_epoch_forces_selection_abstention)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_incomplete"};
+    const uint256 genesis_hash{NonNullHash(40)};
+    PaymentAuditStagingStore store{path, genesis_hash};
+    BOOST_REQUIRE(store.ActivateEpoch(10) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    for (uint8_t index{0}; index + 1 < PAYMENT_AUDIT_ROW_COUNT; ++index) {
+        const auto row{Row(genesis_hash, 10, index)};
+        BOOST_REQUIRE(store.EnsureRow(row) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_REQUIRE(store.FreezeRow(
+                          10, index, row.response_block_hash,
+                          NonNullHash(80'000 + index)) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+    }
+    BOOST_CHECK_EQUAL(store.GetEpochSummaries(10).size(),
+                      PAYMENT_AUDIT_ROW_COUNT - 1);
+    BOOST_CHECK(!store.GetSummary(10, PAYMENT_AUDIT_ROW_COUNT - 1));
+}
+
+BOOST_AUTO_TEST_CASE(failed_sync_barrier_never_leaves_a_summary)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_barrier"};
+    const uint256 genesis_hash{NonNullHash(50)};
+    const auto row{Row(genesis_hash, 11, 0)};
+    {
+        PaymentAuditStagingStore store{
+            path, genesis_hash, 8 << 20, false, [] { return false; }};
+        BOOST_REQUIRE(store.ActivateEpoch(11) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_REQUIRE(store.EnsureRow(row) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_REQUIRE(store.AddVerifiedResponse(
+                          11, 0, row.deadline_height - 1,
+                          Response(row, 0)) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_CHECK(store.FreezeRow(
+                        11, 0, row.response_block_hash,
+                        NonNullHash(90'000)) ==
+                    PaymentAuditStagingResult::DATABASE_ERROR);
+        BOOST_CHECK(!store.IsHealthy());
+    }
+    PaymentAuditStagingStore restarted{path, genesis_hash};
+    BOOST_REQUIRE(restarted.IsHealthy());
+    BOOST_CHECK(!restarted.GetOpenRow(11, 0));
+    BOOST_CHECK(!restarted.GetSummary(11, 0));
+}
+
+BOOST_AUTO_TEST_SUITE_END()

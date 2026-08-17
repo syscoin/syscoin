@@ -38,7 +38,6 @@
 #include <algorithm>
 #include <deque>
 #include <llmq/quorums_chainlocks.h>
-#include <llmq/quorums_btccheckpoints.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
 namespace Consensus {
@@ -489,7 +488,9 @@ bool CZMQPublishNEVMBlockDisconnectNotifier::NotifyNEVMBlockDisconnect(std::stri
     }
     return true;
 }
-bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state)
+// SYSCOIN: NEVM reports the paired Syscoin hash so equal-height reorgs cannot
+// authorize replay by count alone.
+bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state)
 {
     LOCK(cs_nevm);
     if(bFirstTime) {
@@ -512,7 +513,9 @@ bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight,
     }
     std::vector<std::string> parts;
     if(ReceiveZmqMessage(parts)) {
-        if(parts.size() != 2) {
+        // SYSCOIN: A count without its paired Syscoin hash is ambiguous after
+        // an equal-height reorg and cannot authorize deferred BTCC replay.
+        if(parts.size() != 3) {
             state = "nevm-response-invalid-parts";
             return false;
         }
@@ -522,6 +525,15 @@ bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight,
         }
         if(!ParseUInt64(parts[1], &nHeight)) {
             state = "nevm-response-unserialize";
+            return false;
+        }
+        if (parts[2].size() != 64 || !IsHex(parts[2])) {
+            state = "nevm-response-invalid-sysblockhash";
+            return false;
+        }
+        nSYSBlockHash.SetHex(parts[2]);
+        if (nHeight > 0 && nSYSBlockHash.IsNull()) {
+            state = "nevm-response-null-sysblockhash";
             return false;
         }
             

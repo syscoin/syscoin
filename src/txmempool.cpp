@@ -26,6 +26,7 @@
 #include <validationinterface.h>
 // SYSCOIN
 #include <util/rbf.h>
+#include <evo/pq_providertx.h>
 #include <evo/specialtx.h>
 #include <evo/providertx.h>
 #include <evo/deterministicmns.h>   
@@ -38,6 +39,75 @@ extern std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>
 #include <optional>
 #include <string_view>
 #include <utility>
+
+// SYSCOIN: begin branch-bound PQ provider mempool helpers.
+namespace {
+
+std::optional<llmq::pq::GlobalKeyTxPayload> GetPQGlobalKeyPayload(
+    const CTransaction& tx)
+{
+    if (tx.nVersion != SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY) {
+        return std::nullopt;
+    }
+    std::vector<unsigned char> encoded;
+    int output_index{-1};
+    llmq::pq::GlobalKeyTxPayload payload;
+    if (!GetSyscoinData(tx, encoded, output_index) ||
+        !llmq::pq::DecodeGlobalKeyTxPayload(encoded, payload)) {
+        return std::nullopt;
+    }
+    return payload;
+}
+
+std::optional<uint256> GetPQOperatorUpdate(const CTransaction& tx)
+{
+    if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY) {
+        const auto payload{GetPQGlobalKeyPayload(tx)};
+        return payload ? std::optional<uint256>{payload->pro_tx_hash}
+                       : std::nullopt;
+    }
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+        const auto mutation{DecodeProviderMutationIdentity(tx)};
+        if (!mutation || !mutation->is_pq_revocation) {
+            return std::nullopt;
+        }
+        return mutation->pro_tx_hash;
+    }
+    return std::nullopt;
+}
+
+bool IsStandalonePQRegistryTx(const CTransaction& tx)
+{
+    return tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
+}
+
+std::optional<uint256> GetProviderMutation(const CTransaction& tx)
+{
+    const auto mutation{DecodeProviderMutationIdentity(tx)};
+    return mutation ? std::optional<uint256>{mutation->pro_tx_hash}
+                    : std::nullopt;
+}
+
+bool HasPQRegistryCapacity(std::size_t base,
+                           std::size_t reserved,
+                           std::size_t additional,
+                           std::size_t maximum) noexcept
+{
+    return base <= maximum && reserved <= maximum - base &&
+           additional <= maximum - base - reserved;
+}
+
+bool IsBranchBoundProviderTransaction(const CTransaction& tx) noexcept
+{
+    return tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
+}
+
+} // namespace
+// SYSCOIN: end branch-bound PQ provider mempool helpers.
 
 bool TestLockPointValidity(CChain& active_chain, const LockPoints& lp)
 {
@@ -439,11 +509,26 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 {
     nTransactionsUpdated += n;
 }
-void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate)
+// SYSCOIN: Extend Bitcoin mempool insertion with branch-bound PQ reservations.
+bool CTxMemPool::addUnchecked(
+    const CTxMemPoolEntry& entry,
+    setEntries& setAncestors,
+    bool validFeeEstimate,
+    const CBlockIndex* pq_registry_tip,
+    std::optional<COutPoint> pq_operator_collateral)
 {
     // Add to memory pool without checking anything.
     // Used by AcceptToMemoryPool(), which DOES do
     // all the appropriate checks.
+    const CTransaction& tx = entry.GetTx();
+    const auto pq_operator_hash{GetPQOperatorUpdate(tx)};
+    if (pq_registry_tip != nullptr && pq_operator_hash &&
+        !pq_operator_collateral) {
+        LogPrintf("%s: refusing to add PQ provider transaction %s without "
+                  "resolved collateral\n",
+                  __func__, tx.GetHash().ToString());
+        return false;
+    }
     indexed_transaction_set::iterator newit = mapTx.insert(entry).first;
 
     // Update transaction for any feeDelta created by PrioritiseTransaction
@@ -460,7 +545,6 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     // further updated.)
     cachedInnerUsage += entry.DynamicMemoryUsage();
 
-    const CTransaction& tx = newit->GetTx();
     std::set<uint256> setParentTransactions;
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         mapNextTx.insert(std::make_pair(&tx.vin[i].prevout, &tx));
@@ -494,6 +578,68 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     // fully checked by AcceptToMemoryPool() at this point, so we just assume that
     // everything is fine here.
     const uint256 tx_hash{tx.GetHash()};
+    if (const auto global{GetPQGlobalKeyPayload(tx)}) {
+        PQGlobalReservation reservation;
+        reservation.pro_tx_hash = global->pro_tx_hash;
+        reservation.public_key = global->candidate.public_key;
+        const auto& commitment{global->candidate.child_key_commitment};
+        reservation.commitment = {
+            .version = commitment.version,
+            .profile = commitment.profile,
+            .usage_cap = commitment.usage_cap,
+            .depth = commitment.depth,
+            .generation = commitment.generation,
+            .first_epoch = commitment.first_epoch,
+            .tree_id = commitment.tree_id,
+            .root = commitment.root,
+        };
+
+        if (pq_registry_tip != nullptr && deterministicMNManager) {
+            const std::array<uint256, 1> requested{global->pro_tx_hash};
+            llmq::pq::PQRegistryMempoolView view;
+            std::string error;
+            if (deterministicMNManager->GetPQRegistryMempoolView(
+                    pq_registry_tip, requested, view, error)) {
+                const auto* current{view.FindOperator(global->pro_tx_hash)};
+                if (current != nullptr) {
+                    reservation.introduces_operator =
+                        current->state_exists == 0;
+                    reservation.introduces_tree =
+                        current->state_exists == 0 ||
+                        current->has_global_key == 0 ||
+                        current->current_commitment != commitment;
+                }
+            } else {
+                LogPrint(BCLog::MEMPOOL,
+                         "%s: failed to classify PQ reservation %s: %s\n",
+                         __func__, tx_hash.ToString(), error);
+            }
+        }
+        mapPQGlobalKeys.emplace(reservation.public_key, tx_hash);
+        mapPQTreeIds.emplace(reservation.commitment.tree_id, tx_hash);
+        const auto [position, inserted]{mapPQGlobalReservations.emplace(
+            tx_hash, std::move(reservation))};
+        if (inserted) {
+            m_pq_operator_introductions +=
+                position->second.introduces_operator ? 1 : 0;
+            m_pq_tree_introductions +=
+                position->second.introduces_tree ? 1 : 0;
+        }
+    }
+    if (pq_operator_hash) {
+        mapPQOperatorUpdates.emplace(*pq_operator_hash, tx_hash);
+        if (pq_operator_collateral) {
+            mapPQUpdateCollaterals.emplace(*pq_operator_collateral, tx_hash);
+            mapPQUpdateCollateralByTx.emplace(tx_hash,
+                                               *pq_operator_collateral);
+        }
+        if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+            mapPQRevocations.emplace(*pq_operator_hash, tx_hash);
+        }
+        if (IsStandalonePQRegistryTx(tx)) {
+            mapProTxRefs.emplace(*pq_operator_hash, tx_hash);
+        }
+    }
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if(GetTxPayload(tx, proTx)) {
@@ -502,7 +648,6 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
             }
             mapProTxAddresses.emplace(proTx.addr, tx_hash);
             mapProTxPubKeyIDs.emplace(proTx.keyIDOwner, tx_hash);
-            mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx_hash);
             if (!proTx.collateralOutpoint.hash.IsNull()) {
                 mapProTxCollaterals.emplace(proTx.collateralOutpoint, tx_hash);
             } else {
@@ -522,26 +667,11 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
         CProUpRegTx proTx;
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
-            mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx_hash);
-            auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
-            if(dmn) {
-                newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
-                if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
-                    newit->isKeyChangeProTx = true;
-                }
-            }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
-            auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
-            if(dmn) {
-                newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
-                if (dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey()) {
-                    newit->isKeyChangeProTx = true;
-                }
-            }
         }
     }
 
@@ -550,6 +680,7 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
         entry.GetTxSize(),
         entry.GetFee()
     );
+    return true;
 }
 
 void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
@@ -604,33 +735,97 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
             }
         }
     };
+    auto erasePQOperatorUpdate = [&](const uint256& proTxHash,
+                                     const uint256& txHash) {
+        const auto update{mapPQOperatorUpdates.find(proTxHash)};
+        if (update != mapPQOperatorUpdates.end() && update->second == txHash) {
+            mapPQOperatorUpdates.erase(update);
+        }
+    };
+    const auto eraseExact = [&](auto& index, const auto& key,
+                                const uint256& txHash) {
+        const auto position{index.find(key)};
+        if (position != index.end() && position->second == txHash) {
+            index.erase(position);
+        }
+    };
     const uint256 tx_hash{it->GetTx().GetHash()};
+    const auto global_reservation{mapPQGlobalReservations.find(tx_hash)};
+    if (global_reservation != mapPQGlobalReservations.end()) {
+        const auto key{mapPQGlobalKeys.find(
+            global_reservation->second.public_key)};
+        if (key != mapPQGlobalKeys.end() && key->second == tx_hash) {
+            mapPQGlobalKeys.erase(key);
+        }
+        const auto tree{mapPQTreeIds.find(
+            global_reservation->second.commitment.tree_id)};
+        if (tree != mapPQTreeIds.end() && tree->second == tx_hash) {
+            mapPQTreeIds.erase(tree);
+        }
+        if (global_reservation->second.introduces_operator) {
+            Assume(m_pq_operator_introductions != 0);
+            if (m_pq_operator_introductions != 0) {
+                --m_pq_operator_introductions;
+            }
+        }
+        if (global_reservation->second.introduces_tree) {
+            Assume(m_pq_tree_introductions != 0);
+            if (m_pq_tree_introductions != 0) {
+                --m_pq_tree_introductions;
+            }
+        }
+        mapPQGlobalReservations.erase(global_reservation);
+    }
+    if (const auto operator_hash{GetPQOperatorUpdate(it->GetTx())}) {
+        erasePQOperatorUpdate(*operator_hash, tx_hash);
+        const auto reverse{mapPQUpdateCollateralByTx.find(tx_hash)};
+        if (reverse != mapPQUpdateCollateralByTx.end()) {
+            const auto collateral{
+                mapPQUpdateCollaterals.find(reverse->second)};
+            if (collateral != mapPQUpdateCollaterals.end() &&
+                collateral->second == tx_hash) {
+                mapPQUpdateCollaterals.erase(collateral);
+            }
+            mapPQUpdateCollateralByTx.erase(reverse);
+        }
+        if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+            const auto revoke{mapPQRevocations.find(*operator_hash)};
+            if (revoke != mapPQRevocations.end() && revoke->second == tx_hash) {
+                mapPQRevocations.erase(revoke);
+            }
+        }
+        if (IsStandalonePQRegistryTx(it->GetTx())) {
+            eraseProTxRef(*operator_hash, tx_hash);
+        }
+    }
     if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) {
             if (!proTx.collateralOutpoint.IsNull()) {
                 eraseProTxRef(tx_hash, proTx.collateralOutpoint.hash);
             }
-            mapProTxAddresses.erase(proTx.addr);
-            mapProTxPubKeyIDs.erase(proTx.keyIDOwner);
-            mapProTxBlsPubKeyHashes.erase(proTx.pubKeyOperator.GetHash());
-            mapProTxCollaterals.erase(proTx.collateralOutpoint);
-            mapProTxCollaterals.erase(COutPoint(tx_hash, proTx.collateralOutpoint.n));
+            eraseExact(mapProTxAddresses, proTx.addr, tx_hash);
+            eraseExact(mapProTxPubKeyIDs, proTx.keyIDOwner, tx_hash);
+            eraseExact(mapProTxCollaterals, proTx.collateralOutpoint,
+                       tx_hash);
+            eraseExact(mapProTxCollaterals,
+                       COutPoint(tx_hash, proTx.collateralOutpoint.n),
+                       tx_hash);
         }
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
         CProUpServTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) {
             eraseProTxRef(proTx.proTxHash, tx_hash);
-            mapProTxAddresses.erase(proTx.addr);
+            eraseExact(mapProTxAddresses, proTx.addr, tx_hash);
             if(!proTx.vchNEVMAddress.empty()) {
-                mapProTxNEVMAddresses.erase(proTx.vchNEVMAddress);
+                eraseExact(mapProTxNEVMAddresses, proTx.vchNEVMAddress,
+                           tx_hash);
             }
         }
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         CProUpRegTx proTx;
         if (GetTxPayload(it->GetTx(), proTx)) { 
             eraseProTxRef(proTx.proTxHash, tx_hash);
-            mapProTxBlsPubKeyHashes.erase(proTx.pubKeyOperator.GetHash());
         }
     } else if (it->GetTx().nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
@@ -894,16 +1089,6 @@ void CTxMemPool::removeProTxPubKeyConflicts(const CTransaction &tx, const CKeyID
     }
 }
 
-void CTxMemPool::removeProTxPubKeyConflicts(const CTransaction &tx, const CBLSLazyPublicKey &pubKey)
-{
-    if (mapProTxBlsPubKeyHashes.count(pubKey.GetHash())) {
-        uint256 conflictHash = mapProTxBlsPubKeyHashes[pubKey.GetHash()];
-        if (conflictHash != tx.GetHash() && mapTx.count(conflictHash)) {
-            removeRecursive(mapTx.find(conflictHash)->GetTx(), MemPoolRemovalReason::CONFLICT);
-        }
-    }
-}
-
 void CTxMemPool::removeProTxCollateralConflicts(const CTransaction &tx, const COutPoint &collateralOutpoint)
 {
     if (mapProTxCollaterals.count(collateralOutpoint)) {
@@ -915,6 +1100,19 @@ void CTxMemPool::removeProTxCollateralConflicts(const CTransaction &tx, const CO
 }
 
 void CTxMemPool::removeProTxSpentCollateralConflicts(const CTransaction &tx)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+    const CDeterministicMNList mn_list{
+        deterministicMNManager
+            ? deterministicMNManager->GetListAtChainTip()
+            : CDeterministicMNList{}};
+    removeProTxSpentCollateralConflicts(tx, mn_list);
+}
+
+void CTxMemPool::removeProTxSpentCollateralConflicts(
+    const CTransaction& tx,
+    const CDeterministicMNList& mn_list)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
@@ -938,14 +1136,20 @@ void CTxMemPool::removeProTxSpentCollateralConflicts(const CTransaction &tx)
             }
         }
     };
-    auto mnList = deterministicMNManager->GetListAtChainTip();
     for (const auto& in : tx.vin) {
         auto collateralIt = mapProTxCollaterals.find(in.prevout);
         if (collateralIt != mapProTxCollaterals.end()) {
             // These are not yet mined ProRegTxs
-            removeSpentCollateralConflict(collateralIt->second);
+            const uint256 pro_reg_txid{collateralIt->second};
+            const auto pending_registration{mapTx.find(pro_reg_txid)};
+            if (pending_registration != mapTx.end()) {
+                removeRecursive(pending_registration->GetTx(),
+                                MemPoolRemovalReason::CONFLICT);
+            } else {
+                mapProTxCollaterals.erase(collateralIt);
+            }
         }
-        auto dmn = mnList.GetMNByCollateral(in.prevout);
+        auto dmn = mn_list.GetMNByCollateral(in.prevout);
         if (dmn) {
             // These are updates referring to a mined ProRegTx
             removeSpentCollateralConflict(dmn->proTxHash);
@@ -953,30 +1157,103 @@ void CTxMemPool::removeProTxSpentCollateralConflicts(const CTransaction &tx)
     }
 }
 
-void CTxMemPool::removeProTxKeyChangedConflicts(const CTransaction &tx, const uint256& proTxHash, const uint256& newKeyHash)
-{
-    std::set<uint256> conflictingTxs;
-    for (auto its = mapProTxRefs.equal_range(proTxHash); its.first != its.second; ++its.first) {
-        auto txit = mapTx.find(its.first->second);
-        if (txit == mapTx.end()) {
-            continue;
-        }
-        if (txit->validForProTxKey != newKeyHash) {
-            conflictingTxs.emplace(txit->GetTx().GetHash());
-        }
-    }
-    for (const auto& txHash : conflictingTxs) {
-        auto& tx = mapTx.find(txHash)->GetTx();
-        removeRecursive(tx, MemPoolRemovalReason::CONFLICT);
-    }
-}
-
 void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
-    removeProTxSpentCollateralConflicts(tx);
+    const CDeterministicMNList mn_list{
+        deterministicMNManager
+            ? deterministicMNManager->GetListAtChainTip()
+            : CDeterministicMNList{}};
+    removeProTxConflicts(tx, mn_list);
+}
+
+void CTxMemPool::removeProTxConflicts(
+    const CTransaction& tx,
+    const CDeterministicMNList& mn_list)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+    removeProTxSpentCollateralConflicts(tx, mn_list);
     const uint256 tx_hash{tx.GetHash()};
+
+    // A connected block can contain a conflicting provider mutation that was
+    // never in this mempool. Copy ids before recursive removal mutates indexes.
+    std::set<uint256> pq_conflicts;
+    const auto global_payload{GetPQGlobalKeyPayload(tx)};
+    const auto pq_operator_update{GetPQOperatorUpdate(tx)};
+    const auto provider_mutation{GetProviderMutation(tx)};
+    if (global_payload) {
+        const auto key{
+            mapPQGlobalKeys.find(global_payload->candidate.public_key)};
+        if (key != mapPQGlobalKeys.end() && key->second != tx_hash) {
+            pq_conflicts.emplace(key->second);
+        }
+        const auto tree{mapPQTreeIds.find(
+            global_payload->candidate.child_key_commitment.tree_id)};
+        if (tree != mapPQTreeIds.end() && tree->second != tx_hash) {
+            pq_conflicts.emplace(tree->second);
+        }
+        const auto refs{
+            mapProTxRefs.equal_range(global_payload->pro_tx_hash)};
+        for (auto ref = refs.first; ref != refs.second; ++ref) {
+            if (ref->second != tx_hash) pq_conflicts.emplace(ref->second);
+        }
+    }
+    if (pq_operator_update) {
+        const auto update{mapPQOperatorUpdates.find(*pq_operator_update)};
+        if (update != mapPQOperatorUpdates.end() && update->second != tx_hash) {
+            pq_conflicts.emplace(update->second);
+        }
+        const auto dmn{mn_list.GetMN(*pq_operator_update)};
+        if (dmn) {
+            const auto replacement{
+                mapProTxCollaterals.find(dmn->collateralOutpoint)};
+            if (replacement != mapProTxCollaterals.end() &&
+                replacement->second != tx_hash) {
+                pq_conflicts.emplace(replacement->second);
+            }
+        }
+    }
+    if (provider_mutation) {
+        const auto revoke{mapPQRevocations.find(*provider_mutation)};
+        if (revoke != mapPQRevocations.end() && revoke->second != tx_hash) {
+            pq_conflicts.emplace(revoke->second);
+        }
+    }
+    const bool is_pq_revoke =
+        tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE &&
+        pq_operator_update.has_value();
+    if (is_pq_revoke) {
+        const auto refs{mapProTxRefs.equal_range(*pq_operator_update)};
+        for (auto ref = refs.first; ref != refs.second; ++ref) {
+            if (ref->second != tx_hash) pq_conflicts.emplace(ref->second);
+        }
+    }
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
+        CProRegTx registration;
+        if (GetTxPayload(tx, registration) &&
+            !registration.collateralOutpoint.hash.IsNull()) {
+            const auto replaced{
+                mn_list.GetMNByCollateral(registration.collateralOutpoint)};
+            if (replaced) {
+                const auto refs{
+                    mapProTxRefs.equal_range(replaced->proTxHash)};
+                for (auto ref = refs.first; ref != refs.second; ++ref) {
+                    if (ref->second != tx_hash) {
+                        pq_conflicts.emplace(ref->second);
+                    }
+                }
+            }
+        }
+    }
+    for (const auto& conflict_hash : pq_conflicts) {
+        const auto conflict{mapTx.find(conflict_hash)};
+        if (conflict != mapTx.end()) {
+            removeRecursive(conflict->GetTx(), MemPoolRemovalReason::CONFLICT);
+        }
+    }
+
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
@@ -991,7 +1268,6 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
             }
         }
         removeProTxPubKeyConflicts(tx, proTx.keyIDOwner);
-        removeProTxPubKeyConflicts(tx, proTx.pubKeyOperator);
         if (!proTx.collateralOutpoint.hash.IsNull()) {
             removeProTxCollateralConflicts(tx, proTx.collateralOutpoint);
         } else {
@@ -1011,23 +1287,542 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
             }
         }
         removeProTxNEVMKeyConflicts(tx, proTx.vchNEVMAddress);
-    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
-        CProUpRegTx proTx;
-        if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
-            return;
+    }
+}
+
+std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
+    const std::vector<CTransactionRef>& package,
+    const CBlockIndex* active_tip) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    if (std::none_of(
+            package.begin(), package.end(), [](const CTransactionRef& tx) {
+                return tx && IsBranchBoundProviderTransaction(*tx);
+            })) {
+        // Per-transaction PreChecks already used the indexed ordinary path.
+        return std::nullopt;
+    }
+
+    std::set<uint256> requested_operators;
+    for (const auto& [_, reservation] : mapPQGlobalReservations) {
+        requested_operators.insert(reservation.pro_tx_hash);
+    }
+    std::optional<size_t> first_global;
+    for (size_t index{0}; index < package.size(); ++index) {
+        if (!package[index] ||
+            package[index]->nVersion != SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY) {
+            continue;
+        }
+        if (!first_global) first_global = index;
+        const auto payload{GetPQGlobalKeyPayload(*package[index])};
+        if (!payload) return index;
+        requested_operators.insert(payload->pro_tx_hash);
+    }
+
+    llmq::pq::PQRegistryMempoolView view;
+    if (first_global) {
+        if (active_tip == nullptr || !deterministicMNManager ||
+            requested_operators.size() >
+                llmq::pq::MAX_PQ_MEMPOOL_OPERATOR_REQUESTS) {
+            return first_global;
+        }
+        std::vector<uint256> requested{requested_operators.begin(),
+                                       requested_operators.end()};
+        std::string error;
+        if (!deterministicMNManager->GetPQRegistryMempoolView(
+                active_tip, requested, view, error)) {
+            LogPrint(BCLog::MEMPOOL,
+                     "%s: failed to load PQ reservation view: %s\n",
+                     __func__, error);
+            return first_global;
+        }
+    }
+    return FindPackageProviderTxConflict(package, active_tip, view);
+}
+
+std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
+    const std::vector<CTransactionRef>& package,
+    const CBlockIndex* active_tip,
+    const llmq::pq::PQRegistryMempoolView& registry_view) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    CDeterministicMNList mn_list;
+    if (active_tip != nullptr && deterministicMNManager) {
+        try {
+            mn_list = deterministicMNManager->GetListForBlock(active_tip);
+        } catch (const std::exception&) {
+            for (size_t index{0}; index < package.size(); ++index) {
+                if (package[index] &&
+                    (GetPQOperatorUpdate(*package[index]) ||
+                     GetProviderMutation(*package[index]) ||
+                     package[index]->nVersion ==
+                         SYSCOIN_TX_VERSION_MN_REGISTER)) {
+                    return index;
+                }
+            }
+        }
+    }
+    return FindPackageProviderTxConflict(package, mn_list, registry_view);
+}
+
+std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
+    const std::vector<CTransactionRef>& package,
+    const CDeterministicMNList& mn_list,
+    const llmq::pq::PQRegistryMempoolView& registry_view) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    std::set<uint256> pq_operator_updates;
+    for (const auto& [pro_tx_hash, _] : mapPQOperatorUpdates) {
+        pq_operator_updates.insert(pro_tx_hash);
+    }
+    std::set<uint256> provider_references;
+    std::map<uint256, std::set<uint256>> provider_reference_txids;
+    for (const auto& [pro_tx_hash, _] : mapProTxRefs) {
+        provider_references.insert(pro_tx_hash);
+    }
+    for (const auto& [pro_tx_hash, txid] : mapProTxRefs) {
+        if (mapTx.find(txid) != mapTx.end()) {
+            provider_reference_txids[pro_tx_hash].insert(txid);
+        }
+    }
+    std::set<uint256> pq_revocations;
+    for (const auto& [pro_tx_hash, _] : mapPQRevocations) {
+        pq_revocations.insert(pro_tx_hash);
+    }
+    std::set<std::array<uint8_t, 32>> global_keys;
+    for (const auto& [key, _] : mapPQGlobalKeys) global_keys.insert(key);
+    std::set<uint256> tree_ids;
+    for (const auto& [tree_id, _] : mapPQTreeIds) tree_ids.insert(tree_id);
+    std::set<CService> provider_addresses;
+    for (const auto& [address, _] : mapProTxAddresses) {
+        provider_addresses.insert(address);
+    }
+    std::set<std::vector<unsigned char>> provider_nevm_addresses;
+    for (const auto& [address, _] : mapProTxNEVMAddresses) {
+        provider_nevm_addresses.insert(address);
+    }
+    std::set<CKeyID> provider_owner_keys;
+    for (const auto& [owner, _] : mapProTxPubKeyIDs) {
+        provider_owner_keys.insert(owner);
+    }
+    std::set<COutPoint> provider_collaterals;
+    for (const auto& [collateral, _] : mapProTxCollaterals) {
+        provider_collaterals.insert(collateral);
+    }
+    std::set<COutPoint> spent_inputs;
+    std::map<uint256, const CTransaction*> prior_package_transactions;
+
+    const auto collect_ancestor_txids =
+        [&](const CTransaction& descendant)
+            EXCLUSIVE_LOCKS_REQUIRED(cs) {
+            std::vector<uint256> pending;
+            pending.reserve(descendant.vin.size());
+            for (const auto& input : descendant.vin) {
+                pending.push_back(input.prevout.hash);
+            }
+            std::set<uint256> visited;
+            while (!pending.empty()) {
+                const uint256 txid{pending.back()};
+                pending.pop_back();
+                if (!visited.insert(txid).second) continue;
+
+                const CTransaction* parent{nullptr};
+                const auto package_parent{
+                    prior_package_transactions.find(txid)};
+                if (package_parent != prior_package_transactions.end()) {
+                    parent = package_parent->second;
+                } else {
+                    const auto mempool_parent{mapTx.find(txid)};
+                    if (mempool_parent != mapTx.end()) {
+                        parent = &mempool_parent->GetTx();
+                    }
+                }
+                if (parent == nullptr) continue;
+                for (const auto& input : parent->vin) {
+                    pending.push_back(input.prevout.hash);
+                }
+            }
+            return visited;
+        };
+
+    size_t package_operator_introductions{0};
+    size_t package_tree_introductions{0};
+    for (size_t index{0}; index < package.size(); ++index) {
+        if (!package[index]) continue;
+        const CTransaction& tx{*package[index]};
+        const auto global{GetPQGlobalKeyPayload(tx)};
+        if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY && !global) {
+            return index;
+        }
+        const auto pq_operator_update{GetPQOperatorUpdate(tx)};
+        const auto provider_mutation{GetProviderMutation(tx)};
+        const bool is_pq_revoke{
+            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE &&
+            pq_operator_update.has_value()};
+
+        // Registry updates require the target DMN to survive the complete
+        // block. Ordinary provider mutations may precede a collateral spend,
+        // but tx86/revoke cannot coexist with one in either transaction order.
+        for (const auto& input : tx.vin) {
+            const auto dmn{mn_list.GetMNByCollateral(input.prevout)};
+            if (dmn && pq_operator_updates.count(dmn->proTxHash) != 0) {
+                return index;
+            }
+        }
+        if (pq_operator_update) {
+            const auto dmn{mn_list.GetMN(*pq_operator_update)};
+            if (dmn &&
+                (spent_inputs.count(dmn->collateralOutpoint) != 0 ||
+                 mapNextTx.count(dmn->collateralOutpoint) != 0 ||
+                 provider_collaterals.count(dmn->collateralOutpoint) != 0)) {
+                return index;
+            }
+        }
+        if (provider_mutation) {
+            const auto dmn{mn_list.GetMN(*provider_mutation)};
+            if (dmn &&
+                provider_collaterals.count(dmn->collateralOutpoint) != 0) {
+                // An ordinary mutation followed by the replacement can be
+                // consensus-valid, but independent mempool transactions have
+                // no ordering guarantee. Excluding both orders keeps every
+                // template valid without fee-dependent provider semantics.
+                return index;
+            }
         }
 
-        removeProTxPubKeyConflicts(tx, proTx.pubKeyOperator);
-        removeProTxKeyChangedConflicts(tx, proTx.proTxHash, ::SerializeHash(proTx.pubKeyOperator));
-    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
-        CProUpRevTx proTx;
-        if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
-            return;
+        if (pq_operator_update &&
+            !pq_operator_updates.insert(*pq_operator_update).second) {
+            return index;
+        }
+        if (provider_mutation &&
+            pq_revocations.count(*provider_mutation) != 0) {
+            return index;
+        }
+        if (is_pq_revoke &&
+            provider_references.count(*pq_operator_update) != 0) {
+            return index;
         }
 
-        removeProTxKeyChangedConflicts(tx, proTx.proTxHash, ::SerializeHash(CBLSPublicKey()));
+        if (global) {
+            const auto& commitment{global->candidate.child_key_commitment};
+            if (!global_keys.insert(global->candidate.public_key).second ||
+                !tree_ids.insert(commitment.tree_id).second) {
+                return index;
+            }
+            const auto* current{
+                registry_view.FindOperator(global->pro_tx_hash)};
+            if (current == nullptr) return index;
+            const bool introduces_operator{current->state_exists == 0};
+            const bool introduces_tree{
+                current->state_exists == 0 ||
+                current->has_global_key == 0 ||
+                current->current_commitment != commitment};
+            const size_t next_operator_introductions{
+                package_operator_introductions +
+                (introduces_operator ? 1U : 0U)};
+            const size_t next_tree_introductions{
+                package_tree_introductions +
+                (introduces_tree ? 1U : 0U)};
+            if (!HasPQRegistryCapacity(
+                    registry_view.operator_state_count,
+                    m_pq_operator_introductions,
+                    next_operator_introductions,
+                    llmq::pq::MAX_PQ_OPERATOR_STATES) ||
+                !HasPQRegistryCapacity(
+                    registry_view.used_tree_id_count,
+                    m_pq_tree_introductions,
+                    next_tree_introductions,
+                    llmq::pq::MAX_PQ_USED_TREE_IDS)) {
+                return index;
+            }
+            package_operator_introductions = next_operator_introductions;
+            package_tree_introductions = next_tree_introductions;
+        }
+
+        if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
+            CProRegTx payload;
+            if (!GetTxPayload(tx, payload)) return index;
+            if (!provider_addresses.insert(payload.addr).second ||
+                !provider_owner_keys.insert(payload.keyIDOwner).second) {
+                return index;
+            }
+
+            COutPoint collateral{payload.collateralOutpoint};
+            if (collateral.hash.IsNull()) {
+                collateral.hash = tx.GetHash();
+            } else {
+                if (spent_inputs.count(collateral) != 0 ||
+                    mapNextTx.count(collateral) != 0) {
+                    return index;
+                }
+                const auto replaced{mn_list.GetMNByCollateral(collateral)};
+                if (replaced) {
+                    if (pq_operator_updates.count(replaced->proTxHash) != 0) {
+                        return index;
+                    }
+                    const auto refs{provider_reference_txids.find(
+                        replaced->proTxHash)};
+                    if (refs != provider_reference_txids.end()) {
+                        const auto ancestors{collect_ancestor_txids(tx)};
+                        if (std::any_of(
+                                refs->second.begin(), refs->second.end(),
+                                [&](const uint256& mutation_txid) {
+                                    return ancestors.count(mutation_txid) == 0;
+                                })) {
+                            // Ordinary mutations may precede a replacement
+                            // only when UTXO ancestry forces that
+                            // consensus-valid order.
+                            return index;
+                        }
+                    }
+                }
+            }
+            if (!provider_collaterals.insert(collateral).second) {
+                return index;
+            }
+            if (!payload.collateralOutpoint.hash.IsNull()) {
+                provider_references.insert(tx.GetHash());
+            }
+        } else if (tx.nVersion ==
+                   SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
+            CProUpServTx payload;
+            if (!GetTxPayload(tx, payload)) return index;
+            if (payload.addr != CService() &&
+                provider_addresses.count(payload.addr) != 0) {
+                return index;
+            }
+            provider_addresses.insert(payload.addr);
+            if (!payload.vchNEVMAddress.empty() &&
+                !provider_nevm_addresses
+                     .insert(payload.vchNEVMAddress)
+                     .second) {
+                return index;
+            }
+        }
+
+        if (provider_mutation) {
+            provider_references.insert(*provider_mutation);
+            provider_reference_txids[*provider_mutation].insert(tx.GetHash());
+        } else if (global) {
+            provider_references.insert(global->pro_tx_hash);
+            provider_reference_txids[global->pro_tx_hash].insert(tx.GetHash());
+        }
+        if (is_pq_revoke) {
+            pq_revocations.insert(*pq_operator_update);
+        }
+        for (const auto& input : tx.vin) {
+            spent_inputs.insert(input.prevout);
+        }
+        prior_package_transactions.emplace(tx.GetHash(), &tx);
+    }
+    return std::nullopt;
+}
+
+bool CTxMemPool::RebuildPQRegistryReservations(
+    const CBlockIndex* active_tip)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    if (mapPQGlobalReservations.empty()) {
+        m_pq_operator_introductions = 0;
+        m_pq_tree_introductions = 0;
+        return true;
+    }
+
+    std::set<uint256> requested_set;
+    for (const auto& [_, reservation] : mapPQGlobalReservations) {
+        requested_set.insert(reservation.pro_tx_hash);
+    }
+    llmq::pq::PQRegistryMempoolView view;
+    std::string error;
+    const bool loaded{
+        active_tip != nullptr && deterministicMNManager &&
+        requested_set.size() <=
+            llmq::pq::MAX_PQ_MEMPOOL_OPERATOR_REQUESTS &&
+        deterministicMNManager->GetPQRegistryMempoolView(
+            active_tip,
+            std::vector<uint256>{requested_set.begin(), requested_set.end()},
+            view, error)};
+    if (!loaded) {
+        LogPrint(BCLog::MEMPOOL,
+                 "%s: dropping PQ reservations after view failure: %s\n",
+                 __func__, error);
+        std::vector<uint256> txids;
+        txids.reserve(mapPQGlobalReservations.size());
+        for (const auto& [txid, _] : mapPQGlobalReservations) {
+            txids.push_back(txid);
+        }
+        for (const auto& txid : txids) {
+            const auto entry{mapTx.find(txid)};
+            if (entry != mapTx.end()) {
+                removeRecursive(entry->GetTx(),
+                                MemPoolRemovalReason::REORG);
+            }
+        }
+        return false;
+    }
+
+    return RebuildPQRegistryReservations(view);
+}
+
+bool CTxMemPool::RebuildPQRegistryReservations(
+    const llmq::pq::PQRegistryMempoolView& view)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    std::vector<uint256> aged;
+    for (const auto& [txid, reservation] : mapPQGlobalReservations) {
+        const auto* current{view.FindOperator(reservation.pro_tx_hash)};
+        bool same_commitment{false};
+        if (current != nullptr && current->has_global_key != 0) {
+            const auto& candidate{reservation.commitment};
+            const auto& existing{current->current_commitment};
+            same_commitment =
+                candidate.version == existing.version &&
+                candidate.profile == existing.profile &&
+                candidate.usage_cap == existing.usage_cap &&
+                candidate.depth == existing.depth &&
+                candidate.generation == existing.generation &&
+                candidate.first_epoch == existing.first_epoch &&
+                candidate.tree_id == existing.tree_id &&
+                candidate.root == existing.root;
+        }
+        llmq::pq::ChildKeyTreeCommitment candidate;
+        candidate.version = reservation.commitment.version;
+        candidate.profile = reservation.commitment.profile;
+        candidate.usage_cap = reservation.commitment.usage_cap;
+        candidate.depth = reservation.commitment.depth;
+        candidate.generation = reservation.commitment.generation;
+        candidate.first_epoch = reservation.commitment.first_epoch;
+        candidate.tree_id = reservation.commitment.tree_id;
+        candidate.root = reservation.commitment.root;
+        if (!same_commitment &&
+            (view.has_next_block_schedule == 0 ||
+             !candidate.IsStructurallyValid() ||
+             candidate.first_epoch != view.next_first_mutable_epoch)) {
+            aged.push_back(txid);
+        }
+    }
+    for (const auto& txid : aged) {
+        const auto entry{mapTx.find(txid)};
+        if (entry != mapTx.end()) {
+            removeRecursive(entry->GetTx(), MemPoolRemovalReason::REORG);
+        }
+    }
+
+    m_pq_operator_introductions = 0;
+    m_pq_tree_introductions = 0;
+    for (auto& [_, reservation] : mapPQGlobalReservations) {
+        const auto* current{view.FindOperator(reservation.pro_tx_hash)};
+        reservation.introduces_operator =
+            current == nullptr || current->state_exists == 0;
+        bool same_commitment{false};
+        if (current != nullptr && current->has_global_key != 0) {
+            const auto& candidate{reservation.commitment};
+            const auto& existing{current->current_commitment};
+            same_commitment =
+                candidate.version == existing.version &&
+                candidate.profile == existing.profile &&
+                candidate.usage_cap == existing.usage_cap &&
+                candidate.depth == existing.depth &&
+                candidate.generation == existing.generation &&
+                candidate.first_epoch == existing.first_epoch &&
+                candidate.tree_id == existing.tree_id &&
+                candidate.root == existing.root;
+        }
+        reservation.introduces_tree =
+            current == nullptr || current->state_exists == 0 ||
+            current->has_global_key == 0 || !same_commitment;
+        m_pq_operator_introductions +=
+            reservation.introduces_operator ? 1 : 0;
+        m_pq_tree_introductions += reservation.introduces_tree ? 1 : 0;
+    }
+
+    struct OrderedReservation {
+        std::chrono::seconds time;
+        uint256 txid;
+    };
+    std::vector<OrderedReservation> ordered;
+    ordered.reserve(mapPQGlobalReservations.size());
+    for (const auto& [txid, _] : mapPQGlobalReservations) {
+        const auto entry{mapTx.find(txid)};
+        if (entry != mapTx.end()) {
+            ordered.push_back({entry->GetTime(), txid});
+        }
+    }
+    std::sort(ordered.begin(), ordered.end(),
+              [](const OrderedReservation& lhs,
+                 const OrderedReservation& rhs) {
+                  return lhs.time < rhs.time ||
+                         (lhs.time == rhs.time && lhs.txid < rhs.txid);
+              });
+
+    const size_t available_operators{
+        view.operator_state_count <= llmq::pq::MAX_PQ_OPERATOR_STATES
+            ? llmq::pq::MAX_PQ_OPERATOR_STATES -
+                  view.operator_state_count
+            : 0};
+    const size_t available_trees{
+        view.used_tree_id_count <= llmq::pq::MAX_PQ_USED_TREE_IDS
+            ? llmq::pq::MAX_PQ_USED_TREE_IDS - view.used_tree_id_count
+            : 0};
+    size_t retained_operators{0};
+    size_t retained_trees{0};
+    std::vector<uint256> overflow;
+    for (const auto& item : ordered) {
+        const auto reservation{mapPQGlobalReservations.find(item.txid)};
+        if (reservation == mapPQGlobalReservations.end()) continue;
+        const bool operator_overflow{
+            reservation->second.introduces_operator &&
+            retained_operators >= available_operators};
+        const bool tree_overflow{
+            reservation->second.introduces_tree &&
+            retained_trees >= available_trees};
+        if (operator_overflow || tree_overflow) {
+            overflow.push_back(item.txid);
+            continue;
+        }
+        retained_operators +=
+            reservation->second.introduces_operator ? 1 : 0;
+        retained_trees += reservation->second.introduces_tree ? 1 : 0;
+    }
+    for (const auto& txid : overflow) {
+        const auto entry{mapTx.find(txid)};
+        if (entry != mapTx.end()) {
+            removeRecursive(entry->GetTx(), MemPoolRemovalReason::REORG);
+        }
+    }
+    return true;
+}
+
+void CTxMemPool::RemoveProviderTransactionsForReorg()
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    // Provider authorization and membership are parent-branch state. Reorgs
+    // are rare, and dropping these entries avoids doing attacker-amplifiable
+    // SLH verification while holding the chain and mempool locks. Valid
+    // transactions can be relayed again against the new branch.
+    std::vector<uint256> txids;
+    for (const auto& entry : mapTx) {
+        if (IsBranchBoundProviderTransaction(entry.GetTx())) {
+            txids.push_back(entry.GetTx().GetHash());
+        }
+    }
+    for (const auto& txid : txids) {
+        const auto entry{mapTx.find(txid)};
+        if (entry != mapTx.end()) {
+            removeRecursive(entry->GetTx(), MemPoolRemovalReason::REORG);
+        }
     }
 }
 /**
@@ -1299,106 +2094,178 @@ TxMempoolInfo CTxMemPool::info(const GenTxid& gtxid) const
 }
 // SYSCOIN
 
-bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
+bool CTxMemPool::existsProviderTxConflict(
+    const CTransaction& tx,
+    const CBlockIndex* active_tip,
+    std::optional<COutPoint>* pq_operator_collateral) const
+{
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
+    if (pq_operator_collateral != nullptr) {
+        pq_operator_collateral->reset();
+    }
+    if (std::any_of(
+            tx.vin.begin(), tx.vin.end(), [&](const CTxIn& input) {
+                return mapPQUpdateCollaterals.count(input.prevout) != 0;
+            })) {
+        return true;
+    }
+    if (!IsBranchBoundProviderTransaction(tx)) return false;
+    if (active_tip == nullptr || !deterministicMNManager) return true;
 
-    auto hasKeyChangeInMempool = [&](const uint256& proTxHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main) {
-        AssertLockHeld(cs_main);
-        AssertLockHeld(cs);
-        for (auto its = mapProTxRefs.equal_range(proTxHash); its.first != its.second; ++its.first) {
-            auto txit = mapTx.find(its.first->second);
-            if (txit == mapTx.end()) {
-                continue;
+    const auto global{GetPQGlobalKeyPayload(tx)};
+    if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY && !global) {
+        return true;
+    }
+    const auto pq_operator_update{GetPQOperatorUpdate(tx)};
+    const auto provider_mutation{GetProviderMutation(tx)};
+    const bool is_pq_revoke{
+        tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE &&
+        pq_operator_update.has_value()};
+
+    // Resolve conflicts that depend only on exact mempool reservations before
+    // loading branch state. Apart from avoiding unnecessary snapshot work,
+    // this preserves fail-closed conflict detection if the target DMN lookup
+    // itself is unavailable.
+    if (pq_operator_update &&
+        mapPQOperatorUpdates.count(*pq_operator_update) != 0) {
+        return true;
+    }
+    if (provider_mutation &&
+        mapPQRevocations.count(*provider_mutation) != 0) {
+        return true;
+    }
+    if (is_pq_revoke && mapProTxRefs.count(*pq_operator_update) != 0) {
+        return true;
+    }
+    if (global &&
+        (mapPQGlobalKeys.count(global->candidate.public_key) != 0 ||
+         mapPQTreeIds.count(
+             global->candidate.child_key_commitment.tree_id) != 0)) {
+        return true;
+    }
+
+    CDeterministicMNList mn_list;
+    try {
+        mn_list = deterministicMNManager->GetListForBlock(active_tip);
+    } catch (const std::exception&) {
+        return true;
+    }
+
+    const auto collect_ancestor_txids =
+        [&](const CTransaction& descendant)
+            EXCLUSIVE_LOCKS_REQUIRED(cs) {
+            std::vector<uint256> pending;
+            pending.reserve(descendant.vin.size());
+            for (const auto& input : descendant.vin) {
+                pending.push_back(input.prevout.hash);
             }
-            if (txit->isKeyChangeProTx) {
-                return true;
+            std::set<uint256> visited;
+            while (!pending.empty()) {
+                const uint256 txid{pending.back()};
+                pending.pop_back();
+                if (!visited.insert(txid).second) continue;
+                const auto parent{mapTx.find(txid)};
+                if (parent == mapTx.end()) continue;
+                for (const auto& input : parent->GetTx().vin) {
+                    pending.push_back(input.prevout.hash);
+                }
             }
+            return visited;
+        };
+
+    if (pq_operator_update) {
+        const auto dmn{mn_list.GetMN(*pq_operator_update)};
+        if (!dmn) {
+            // Production callers request admission metadata. Test-only
+            // conflict probes may intentionally use a synthetic empty list.
+            return pq_operator_collateral != nullptr;
         }
-        return false;
-    };
-    const uint256 tx_hash{tx.GetHash()};
+        if (pq_operator_collateral != nullptr) {
+            *pq_operator_collateral = dmn->collateralOutpoint;
+        }
+        if (mapNextTx.count(dmn->collateralOutpoint) != 0 ||
+            mapProTxCollaterals.count(dmn->collateralOutpoint) != 0) {
+            return true;
+        }
+    }
+    if (provider_mutation) {
+        const auto dmn{mn_list.GetMN(*provider_mutation)};
+        if (dmn &&
+            mapProTxCollaterals.count(dmn->collateralOutpoint) != 0) {
+            return true;
+        }
+    }
+    if (global) {
+        const std::array<uint256, 1> requested{global->pro_tx_hash};
+        llmq::pq::PQRegistryMempoolView view;
+        std::string error;
+        if (!deterministicMNManager->GetPQRegistryMempoolView(
+                active_tip, requested, view, error)) {
+            return true;
+        }
+        const auto* current{view.FindOperator(global->pro_tx_hash)};
+        if (current == nullptr) return true;
+        const bool introduces_operator{current->state_exists == 0};
+        const bool introduces_tree{
+            current->state_exists == 0 || current->has_global_key == 0 ||
+            current->current_commitment !=
+                global->candidate.child_key_commitment};
+        if (!HasPQRegistryCapacity(
+                view.operator_state_count, m_pq_operator_introductions,
+                introduces_operator ? 1 : 0,
+                llmq::pq::MAX_PQ_OPERATOR_STATES) ||
+            !HasPQRegistryCapacity(
+                view.used_tree_id_count, m_pq_tree_introductions,
+                introduces_tree ? 1 : 0,
+                llmq::pq::MAX_PQ_USED_TREE_IDS)) {
+            return true;
+        }
+    }
+
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
-        CProRegTx proTx;
-        if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
-            return true; // i.e. can't decode payload == conflict
-        }
-        if (mapProTxAddresses.count(proTx.addr) || mapProTxPubKeyIDs.count(proTx.keyIDOwner) || mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()))
-            return true;
-        if (!proTx.collateralOutpoint.hash.IsNull()) {
-            if (mapProTxCollaterals.count(proTx.collateralOutpoint)) {
-                // there is another ProRegTx that refers to the same collateral
-                return true;
-            }
-            if (mapNextTx.count(proTx.collateralOutpoint)) {
-                // there is another tx that spends the collateral
-                return true;
-            }
-        }
-        return false;
-    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
-        CProUpServTx proTx;
-        if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
-            return true; // i.e. can't decode payload == conflict
-        }
-        if(proTx.addr != CService()) {
-            if(mapProTxAddresses.count(proTx.addr)) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx_hash.ToString());
-                return true;
-            }
-        }
-        if(!proTx.vchNEVMAddress.empty()) {
-            // Check NEVM address uniqueness
-            if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx_hash.ToString());
-                return true;
-            }
-        }
-    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
-        CProUpRegTx proTx;
-        if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
+        CProRegTx payload;
+        if (!GetTxPayload(tx, payload) ||
+            mapProTxAddresses.count(payload.addr) != 0 ||
+            mapProTxPubKeyIDs.count(payload.keyIDOwner) != 0) {
             return true;
         }
-    
-        auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
-        if (!dmn) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
-            return true;
-        }
-        // only allow one operator key change in the mempool
-        if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
-            if (hasKeyChangeInMempool(proTx.proTxHash)) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Key change already in mempool (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx_hash.ToString());
+        COutPoint collateral{payload.collateralOutpoint};
+        if (collateral.hash.IsNull()) {
+            collateral.hash = tx.GetHash();
+        } else {
+            if (mapNextTx.count(collateral) != 0 ||
+                mapProTxCollaterals.count(collateral) != 0) {
                 return true;
             }
-        }
-        if(proTx.pubKeyOperator.Get().IsValid()) {
-            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx_hash.ToString());
-                return true;
+            const auto replaced{mn_list.GetMNByCollateral(collateral)};
+            if (replaced) {
+                if (mapPQOperatorUpdates.count(replaced->proTxHash) != 0) {
+                    return true;
+                }
+                const auto refs{mapProTxRefs.equal_range(replaced->proTxHash)};
+                const auto ancestors{collect_ancestor_txids(tx)};
+                for (auto ref = refs.first; ref != refs.second; ++ref) {
+                    if (mapTx.find(ref->second) != mapTx.end() &&
+                        ancestors.count(ref->second) == 0) {
+                        return true;
+                    }
+                }
             }
         }
-    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
-        CProUpRevTx proTx;
-        if (!GetTxPayload(tx, proTx)) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
-            return true; // i.e. can't decode payload == conflict
-        }
+        return mapProTxCollaterals.count(collateral) != 0;
+    }
 
-        // this method should only be called with validated ProTxs
-        auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
-        if (!dmn) {
-            LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
-            return true; // i.e. failed to find validated ProTx == conflict
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
+        CProUpServTx payload;
+        if (!GetTxPayload(tx, payload)) return true;
+        if (payload.addr != CService() &&
+            mapProTxAddresses.count(payload.addr) != 0) {
+            return true;
         }
-        // only allow one operator key change in the mempool
-        if (dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey()) {
-            if (hasKeyChangeInMempool(proTx.proTxHash)) {
-                return true;
-            }
+        if (!payload.vchNEVMAddress.empty() &&
+            mapProTxNEVMAddresses.count(payload.vchNEVMAddress) != 0) {
+            return true;
         }
     }
     return false;
@@ -1569,7 +2436,24 @@ void CCoinsViewMemPool::Reset()
 size_t CTxMemPool::DynamicMemoryUsage() const {
     LOCK(cs);
     // Estimate the overhead of mapTx to be 15 pointers + an allocation, as no exact formula for boost::multi_index_contained is implemented.
-    return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 15 * sizeof(void*)) * mapTx.size() + memusage::DynamicUsage(mapNextTx) + memusage::DynamicUsage(mapDeltas) + memusage::DynamicUsage(vTxHashes) + cachedInnerUsage;
+    return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 15 * sizeof(void*)) *
+               mapTx.size() +
+           memusage::DynamicUsage(mapNextTx) +
+           memusage::DynamicUsage(mapDeltas) +
+           memusage::DynamicUsage(vTxHashes) +
+           // SYSCOIN: Include every bounded PQ/provider reservation index.
+           memusage::DynamicUsage(mapPQOperatorUpdates) +
+           memusage::DynamicUsage(mapPQUpdateCollaterals) +
+           memusage::DynamicUsage(mapPQUpdateCollateralByTx) +
+           memusage::DynamicUsage(mapPQRevocations) +
+           memusage::DynamicUsage(mapPQGlobalKeys) +
+           memusage::DynamicUsage(mapPQTreeIds) +
+           memusage::DynamicUsage(mapPQGlobalReservations) +
+           memusage::DynamicUsage(mapProTxAddresses) +
+           memusage::DynamicUsage(mapProTxNEVMAddresses) +
+           memusage::DynamicUsage(mapProTxPubKeyIDs) +
+           memusage::DynamicUsage(mapProTxCollaterals) +
+           cachedInnerUsage;
 }
 
 void CTxMemPool::RemoveUnbroadcastTx(const uint256& txid, const bool unchecked) {
@@ -1606,10 +2490,16 @@ int CTxMemPool::Expire(std::chrono::seconds time)
     return stage.size();
 }
 
-void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, bool validFeeEstimate)
+// SYSCOIN: Forward branch-bound PQ reservation context to full insertion.
+bool CTxMemPool::addUnchecked(
+    const CTxMemPoolEntry& entry,
+    bool validFeeEstimate,
+    const CBlockIndex* pq_registry_tip,
+    std::optional<COutPoint> pq_operator_collateral)
 {
     auto ancestors{AssumeCalculateMemPoolAncestors(__func__, entry, Limits::NoLimits())};
-    return addUnchecked(entry, ancestors, validFeeEstimate);
+    return addUnchecked(entry, ancestors, validFeeEstimate,
+                        pq_registry_tip, std::move(pq_operator_collateral));
 }
 
 void CTxMemPool::UpdateChild(txiter entry, txiter child, bool add)

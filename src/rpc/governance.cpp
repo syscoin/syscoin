@@ -37,6 +37,13 @@ static RPCHelpMan gobject_count()
         strMode = request.params[0].get_str();
     }
 
+    node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    LOCK2(cs_main, governance->cs);
+    if (!governance->IsReadyForTip(node.chainman->ActiveTip())) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            "Governance authority state is unavailable for the active tip");
+    }
     return strMode == "json" ? governance->ToJson() : governance->ToString();
 },
     };
@@ -133,17 +140,28 @@ static RPCHelpMan gobject_submit()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    if(!masternodeSync.IsBlockchainSynced()) {
+    if(!masternodeSync.IsSynced()) {
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "Must wait for client to sync with masternode network. Try again in a minute or so.");
     }
     node::NodeContext& node = EnsureAnyNodeContext(request.context);
     if(!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
-    auto mnList = deterministicMNManager->GetListAtChainTip();
+    const CBlockIndex* admission_tip{nullptr};
+    CDeterministicMNList mnList;
+    {
+        LOCK(node.chainman->GetMutex());
+        admission_tip = node.chainman->ActiveTip();
+        if (governance == nullptr ||
+            !governance->IsReadyForTip(admission_tip)) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "Governance authority state is unavailable for the active tip");
+        }
+        mnList = deterministicMNManager->GetListForBlock(admission_tip);
+    }
     bool fMnFound = WITH_LOCK(activeMasternodeInfoCs, return mnList.HasValidMNByCollateral(activeMasternodeInfo.outpoint));
 
-    LogPrint(BCLog::GOBJECT, "gobject_submit -- pubKeyOperator = %s, outpoint = %s, params.size() = %lld, fMnFound = %d\n",
-            (WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsPubKeyOperator ? activeMasternodeInfo.blsPubKeyOperator->ToString() : "N/A")),
+    LogPrint(BCLog::GOBJECT, "gobject_submit -- outpoint = %s, params.size() = %lld, fMnFound = %d\n",
             WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.outpoint.ToStringShort()), request.params.size(), fMnFound);
 
     // ASSEMBLE NEW GOVERNANCE OBJECT FROM USER PARAMETERS
@@ -189,9 +207,22 @@ static RPCHelpMan gobject_submit()
 
     std::string strError;
     bool fMissingConfirmations;
+    const CBlockIndex* validation_tip{nullptr};
     {
         LOCK2(cs_main, node.mempool->cs);
-        if (!govobj.IsValidLocally(*node.chainman, deterministicMNManager->GetListAtChainTip(), strError, fMissingConfirmations, true) && !fMissingConfirmations) {
+        validation_tip = node.chainman->ActiveTip();
+        if (validation_tip != admission_tip ||
+            !governance->IsReadyForTip(validation_tip)) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "Governance authority state changed during validation");
+        }
+        if (!govobj.IsValidLocally(*node.chainman,
+                                   deterministicMNManager->GetListForBlock(
+                                       validation_tip),
+                                   strError, fMissingConfirmations, true,
+                                   /*fPQSignaturePreverified=*/false) &&
+            !fMissingConfirmations) {
             LogPrintf("gobject(submit) -- Object submission rejected because object is not valid - hash = %s, strError = %s\n", strHash, strError);
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + strHash + " - " + strError);
         }
@@ -199,28 +230,47 @@ static RPCHelpMan gobject_submit()
 
     // RELAY THIS OBJECT
     // Reject if rate check fails but don't update buffer
-    if (!governance->MasternodeRateCheck(govobj)) {
-        LogPrintf("gobject(submit) -- Object submission rejected because of rate check failure - hash = %s\n", strHash);
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "Object creation rate limit exceeded");
+    {
+        LOCK(governance->cs);
+        if (!governance->MasternodeRateCheck(govobj)) {
+            LogPrintf("gobject(submit) -- Object submission rejected because of rate check failure - hash = %s\n", strHash);
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Object creation rate limit exceeded");
+        }
     }
 
     LogPrintf("gobject(submit) -- Adding locally created governance object - %s\n", strHash);
 
+    GovernanceObjectAdmissionResult admission;
     if (fMissingConfirmations) {
-        governance->AddPostponedObject(govobj);
-        govobj.Relay(*node.peerman);
+        admission = governance->AddPostponedObject(
+            govobj, validation_tip);
+        if (admission == GovernanceObjectAdmissionResult::ACCEPTED) {
+            govobj.Relay(*node.peerman);
+        }
     } else {
-        governance->AddGovernanceObject(govobj, *node.peerman);
+        admission = governance->AddGovernanceObject(
+            govobj, *node.peerman, /*pfrom=*/nullptr,
+            /*expected_tip=*/validation_tip,
+            /*pq_preverified_tip=*/nullptr);
+    }
+    if (admission != GovernanceObjectAdmissionResult::ACCEPTED) {
+        throw JSONRPCError(
+            admission == GovernanceObjectAdmissionResult::DUPLICATE
+                ? RPC_INVALID_PARAMETER
+                : RPC_INTERNAL_ERROR,
+            strprintf("Governance object was not admitted: %s",
+                      GovernanceObjectAdmissionError(admission)));
     }
 
-    return govobj.GetHash().ToString();
+    return strHash;
 },
     };
 } 
 
 
-UniValue ListObjects(ChainstateManager& chainman, const CDeterministicMNList& tip_mn_list, const std::string& strCachedSignal,
-                            const std::string& strType, int nStartTime)
+UniValue ListObjects(ChainstateManager& chainman,
+                     const std::string& strCachedSignal,
+                     const std::string& strType, int nStartTime)
 {
     UniValue objResult(UniValue::VOBJ);
 
@@ -229,6 +279,14 @@ UniValue ListObjects(ChainstateManager& chainman, const CDeterministicMNList& ti
         g_txindex->BlockUntilSyncedToCurrentChain();
     }
     LOCK2(cs_main, governance->cs);
+    const CBlockIndex* validation_tip{chainman.ActiveTip()};
+    if (!governance->IsReadyForTip(validation_tip)) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            "Governance authority state is unavailable for the active tip");
+    }
+    const auto tip_mn_list{
+        deterministicMNManager->GetListForBlock(validation_tip)};
 
     std::vector<CGovernanceObject> objs;
     governance->GetAllNewerThan(objs, nStartTime);
@@ -307,7 +365,7 @@ static RPCHelpMan gobject_list()
     if (strType != "proposals" && strType != "triggers" && strType != "all")
         return "Invalid type, should be 'proposals', 'triggers' or 'all'";
     
-    return ListObjects(*node.chainman, deterministicMNManager->GetListAtChainTip(), strCachedSignal, strType, 0);
+    return ListObjects(*node.chainman, strCachedSignal, strType, 0);
 },
     };
 } 
@@ -342,7 +400,8 @@ static RPCHelpMan gobject_diff()
     if (strType != "proposals" && strType != "triggers" && strType != "all")
         return "Invalid type, should be 'proposals', 'triggers' or 'all'";
 
-    return ListObjects(*node.chainman, deterministicMNManager->GetListAtChainTip(), strCachedSignal, strType, governance->GetLastDiffTime());
+    return ListObjects(*node.chainman, strCachedSignal, strType,
+                       governance->GetLastDiffTime());
 },
     };
 } 
@@ -368,6 +427,14 @@ static RPCHelpMan gobject_get()
     }
     node::NodeContext& node = EnsureAnyNodeContext(request.context);
     LOCK2(cs_main, governance->cs);
+    const CBlockIndex* validation_tip{node.chainman->ActiveTip()};
+    if (!governance->IsReadyForTip(validation_tip)) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            "Governance authority state is unavailable for the active tip");
+    }
+    const auto validation_mn_list{
+        deterministicMNManager->GetListForBlock(validation_tip)};
 
     // FIND THE GOVERNANCE OBJECT THE USER IS LOOKING FOR
     CGovernanceObject* pGovObj = governance->FindGovernanceObject(hash);
@@ -426,7 +493,7 @@ static RPCHelpMan gobject_get()
 
     // --
     std::string strError;
-    objResult.pushKV("fLocalValidity",  pGovObj->IsValidLocally(*node.chainman, deterministicMNManager->GetListAtChainTip(), strError, false));
+    objResult.pushKV("fLocalValidity",  pGovObj->IsValidLocally(*node.chainman, validation_mn_list, strError, false));
     objResult.pushKV("IsValidReason",  strError.c_str());
     objResult.pushKV("fCachedValid",  pGovObj->IsSetCachedValid());
     objResult.pushKV("fCachedFunding",  pGovObj->IsSetCachedFunding());
@@ -466,7 +533,13 @@ static RPCHelpMan gobject_getcurrentvotes()
 
     // FIND OBJECT USER IS LOOKING FOR
 
-    LOCK(governance->cs);
+    LOCK2(cs_main, governance->cs);
+    node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    if (!governance->IsReadyForTip(node.chainman->ActiveTip())) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            "Governance authority state is unavailable for the active tip");
+    }
 
     CGovernanceObject* pGovObj = governance->FindGovernanceObject(hash);
 
@@ -501,7 +574,7 @@ static RPCHelpMan voteraw()
             {"voteSignal", RPCArg::Type::STR, RPCArg::Optional::NO, "One of following (funding|valid|delete|endorsed)."}, 
             {"voteOutcome", RPCArg::Type::STR, RPCArg::Optional::NO, "One of following (yes|no|abstain)."},
             {"time", RPCArg::Type::NUM, RPCArg::Optional::NO, "Time of vote."},
-            {"voteSig", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Vote signature. Must be encoded in base64."},                 
+            {"voteSig", RPCArg::Type::STR, RPCArg::Optional::NO, "Base64 voting-key ECDSA signature for proposal funding, or fixed SLH operator authorization envelope for all trigger votes and other proposal signals."},
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
@@ -534,14 +607,6 @@ static RPCHelpMan voteraw()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid vote outcome. Please use one of the following: 'yes', 'no' or 'abstain'");
     }
 
-    GovernanceObject govObjType = WITH_LOCK(governance->cs, return [&](){
-        const CGovernanceObject *pGovObj = governance->FindConstGovernanceObject(hashGovObj);
-        if (!pGovObj) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Governance object not found");
-        }
-        return pGovObj->GetObjectType();
-    }());
-
     int64_t nTime = request.params[5].getInt<int64_t>();
     std::string strSig = request.params[6].get_str();
     auto vchSig = DecodeBase64(strSig);
@@ -549,7 +614,25 @@ static RPCHelpMan voteraw()
     if (!vchSig) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Malformed base64 encoding");
     }
-    auto mnList = deterministicMNManager->GetListAtChainTip();
+    CDeterministicMNList mnList;
+    const CBlockIndex* validation_tip{nullptr};
+    int govObjType{GOVERNANCE_OBJECT_UNKNOWN};
+    {
+        LOCK2(cs_main, governance->cs);
+        validation_tip = node.chainman->ActiveTip();
+        if (!governance->IsReadyForTip(validation_tip)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR,
+                               "Governance authority state is unavailable for the active tip");
+        }
+        const CGovernanceObject* pGovObj{
+            governance->FindConstGovernanceObject(hashGovObj)};
+        if (!pGovObj) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Governance object not found");
+        }
+        govObjType = pGovObj->GetObjectType();
+        mnList = deterministicMNManager->GetListForBlock(validation_tip);
+    }
     auto dmn = mnList.GetValidMNByCollateral(outpoint);
 
     if (!dmn) {
@@ -560,9 +643,23 @@ static RPCHelpMan voteraw()
     vote.SetTime(nTime);
     vote.SetSignature(*vchSig);
 
-    bool onlyVotingKeyAllowed = govObjType.GetValue() == GOVERNANCE_OBJECT_PROPOSAL && vote.GetSignal() == VOTE_SIGNAL_FUNDING;
-    if (!vote.IsValid(mnList, onlyVotingKeyAllowed)) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Failure to verify vote.");
+    bool signature_valid{false};
+    std::string signature_error;
+    const auto pq_purpose{GetGovernanceVoteAuthPurpose(
+        govObjType, eVoteSignal)};
+    if (pq_purpose) {
+        signature_valid = vote.IsValidPQ(
+            *validation_tip, mnList, *pq_purpose, signature_error);
+    } else {
+        signature_valid = vote.IsValid(mnList);
+    }
+    if (!signature_valid) {
+        if (signature_error.empty()) {
+            signature_error = "invalid voting-key ECDSA signature";
+        }
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failure to verify governance authorization: " +
+                               signature_error);
     }
 
     CGovernanceException exception;
@@ -662,11 +759,23 @@ static RPCHelpMan getgovernanceinfo()
 {
     node::NodeContext& node = EnsureAnyNodeContext(request.context);
 
+    LOCK2(cs_main, governance->cs);
+    const CBlockIndex* validation_tip{node.chainman->ActiveTip()};
+    if (!governance->IsReadyForTip(validation_tip)) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            "Governance authority state is unavailable for the active tip");
+    }
+
     int nLastSuperblock = 0, nNextSuperblock = 0;
-    int nBlockHeight = WITH_LOCK(cs_main, return node.chainman->ActiveHeight());
+    const int nBlockHeight{validation_tip->nHeight};
 
     CSuperblock::GetNearestSuperblocksHeights(nBlockHeight, nLastSuperblock, nNextSuperblock);
-    const CBlockIndex* nLastSBIndex = WITH_LOCK(cs_main, return node.chainman->ActiveChain()[nLastSuperblock]);
+    const CBlockIndex* nLastSBIndex{node.chainman->ActiveChain()[nLastSuperblock]};
+    const int funding_threshold{static_cast<int>(
+        deterministicMNManager->GetListForBlock(validation_tip)
+            .GetValidMNsCount() /
+        10)};
     
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("governanceminquorum", Params().GetConsensus().nGovernanceMinQuorum);
@@ -675,7 +784,7 @@ static RPCHelpMan getgovernanceinfo()
     obj.pushKV("superblockmaturitywindow", Params().GetConsensus().nSuperblockMaturityWindow);
     obj.pushKV("lastsuperblock", nLastSuperblock);
     obj.pushKV("nextsuperblock", nNextSuperblock);
-    obj.pushKV("fundingthreshold", int(deterministicMNManager->GetListAtChainTip().GetValidMNsCount() / 10));
+    obj.pushKV("fundingthreshold", funding_threshold);
     obj.pushKV("governancebudget", ValueFromAmount(CSuperblock::GetPaymentsLimit(nLastSBIndex)));
     UniValue oLimits(UniValue::VARR);
     if(!ScanGovLimits(oLimits, nLastSBIndex)) {

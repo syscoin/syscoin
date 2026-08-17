@@ -1,140 +1,120 @@
-// Copyright (c) 2018-2019 The Dash Core developers
-// Distributed under the MIT/X11 software license, see the accompanying
+// Copyright (c) 2026 The Syscoin Core developers
+// Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef SYSCOIN_LLMQ_QUORUMS_COMMITMENT_H
 #define SYSCOIN_LLMQ_QUORUMS_COMMITMENT_H
 
-#include <llmq/quorums_utils.h>
+#include <llmq/legacy_quorum_commitment.h>
 #include <primitives/transaction.h>
-#include <bls/bls.h>
 
 #include <univalue.h>
-namespace node {
-class BlockManager;
-}
-namespace llmq
-{
 
-// This message is an aggregation of all received premature commitments and only valid if
-// enough (>=threshold) premature commitments were aggregated
-// This is mined on-chain as part of SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT
-class CFinalCommitment
-{
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+class CBlockIndex;
+
+namespace llmq {
+
+/**
+ * Compatibility view of a historical on-chain DKG commitment. Cryptographic
+ * fields are opaque bytes; this type can decode the anchored prefix but cannot
+ * verify or create a BLS signature.
+ */
+class CFinalCommitment {
 public:
-    static constexpr auto SPECIALTX_TYPE = SYSCOIN_TX_VERSION_MN_REGISTER;
-
-    static constexpr uint16_t LEGACY_BLS_NON_INDEXED_QUORUM_VERSION = 1;
-    static constexpr uint16_t BASIC_BLS_NON_INDEXED_QUORUM_VERSION = 3;
+    static constexpr uint16_t LEGACY_BLS_NON_INDEXED_QUORUM_VERSION =
+        legacy::LEGACY_SCHEME_COMMITMENT_VERSION;
+    static constexpr uint16_t BASIC_BLS_NON_INDEXED_QUORUM_VERSION =
+        legacy::BASIC_SCHEME_COMMITMENT_VERSION;
 
     uint16_t nVersion{LEGACY_BLS_NON_INDEXED_QUORUM_VERSION};
     uint256 quorumHash;
     std::vector<bool> signers;
     std::vector<bool> validMembers;
-
-    CBLSPublicKey quorumPublicKey;
+    CLegacyBLSPublicKey quorumPublicKey;
     uint256 quorumVvecHash;
+    CLegacyBLSSignature quorumSig;
+    CLegacyBLSSignature membersSig;
 
-    CBLSSignature quorumSig; // recovered threshold sig of blockHash+validMembers+pubKeyHash+vvecHash
-    CBLSSignature membersSig; // aggregated member sig of blockHash+validMembers+pubKeyHash+vvecHash
-
-public:
     CFinalCommitment() = default;
-    CFinalCommitment(const uint256& _quorumHash);
+    explicit CFinalCommitment(const uint256& quorum_hash);
 
-    int CountSigners() const
+    [[nodiscard]] int CountSigners() const noexcept
     {
-        return (int)std::count(signers.begin(), signers.end(), true);
+        return static_cast<int>(std::count(signers.begin(), signers.end(), true));
     }
-    int CountValidMembers() const
+    [[nodiscard]] int CountValidMembers() const noexcept
     {
-        return (int)std::count(validMembers.begin(), validMembers.end(), true);
+        return static_cast<int>(
+            std::count(validMembers.begin(), validMembers.end(), true));
+    }
+    [[nodiscard]] bool IsNull() const noexcept;
+    [[nodiscard]] bool VerifyNull() const noexcept;
+    [[nodiscard]] bool VerifySizes() const noexcept;
+    [[nodiscard]] bool IsStructurallyValid(
+        std::size_t expected_size,
+        std::size_t actual_member_count,
+        std::size_t minimum_signers,
+        uint16_t expected_version) const;
+
+    /** Structural replay only. check_sigs is accepted for source compatibility. */
+    [[nodiscard]] bool Verify(const CBlockIndex* quorum_base,
+                              bool check_sigs) const;
+
+    [[nodiscard]] static constexpr uint16_t GetVersion(bool basic_scheme)
+    {
+        return basic_scheme ? BASIC_BLS_NON_INDEXED_QUORUM_VERSION
+                            : LEGACY_BLS_NON_INDEXED_QUORUM_VERSION;
     }
 
-    bool Verify(const CBlockIndex* pQuorumBaseBlockIndex, bool checkSigs) const;
-    bool VerifyNull() const;
-    bool VerifySizes() const;
-    [[nodiscard]] static constexpr uint16_t GetVersion(const bool is_basic_scheme_active)
-    {
-        return is_basic_scheme_active ? BASIC_BLS_NON_INDEXED_QUORUM_VERSION : LEGACY_BLS_NON_INDEXED_QUORUM_VERSION;
-    }
-
-public:
     SERIALIZE_METHODS(CFinalCommitment, obj)
     {
+        READWRITE(obj.nVersion, obj.quorumHash);
         READWRITE(
-                obj.nVersion,
-                obj.quorumHash
-        );
-        READWRITE(
-                DYNBITSET(obj.signers),
-                DYNBITSET(obj.validMembers),
-                CBLSPublicKeyVersionWrapper(const_cast<CBLSPublicKey&>(obj.quorumPublicKey), (obj.nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION)),
-                obj.quorumVvecHash,
-                CBLSSignatureVersionWrapper(const_cast<CBLSSignature&>(obj.quorumSig), (obj.nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION)),
-                CBLSSignatureVersionWrapper(const_cast<CBLSSignature&>(obj.membersSig), (obj.nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION))
-        );
-    }
-public:
-    bool IsNull() const
-    {
-        if (std::count(signers.begin(), signers.end(), true) ||
-            std::count(validMembers.begin(), validMembers.end(), true)) {
-            return false;
-        }
-        if (quorumPublicKey.IsValid() ||
-            !quorumVvecHash.IsNull() ||
-            membersSig.IsValid() ||
-            quorumSig.IsValid()) {
-            return false;
-        }
-        return true;
+            Using<legacy::BoundedDynamicBitSetFormatter<
+                legacy::MAX_QUORUM_MEMBERS>>(obj.signers),
+            Using<legacy::BoundedDynamicBitSetFormatter<
+                legacy::MAX_QUORUM_MEMBERS>>(obj.validMembers),
+            obj.quorumPublicKey,
+            obj.quorumVvecHash,
+            obj.quorumSig,
+            obj.membersSig);
     }
 
-    void ToJson(UniValue& obj) const
-    {
-        obj.setObject();
-        obj.pushKV("version", (int)nVersion);
-        obj.pushKV("quorumHash", quorumHash.ToString());
-        obj.pushKV("signersCount", CountSigners());
-        obj.pushKV("signers", CLLMQUtils::ToHexStr(signers));
-        obj.pushKV("validMembersCount", CountValidMembers());
-        obj.pushKV("validMembers", CLLMQUtils::ToHexStr(validMembers));
-        obj.pushKV("quorumPublicKey", quorumPublicKey.ToString(nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION));
-        obj.pushKV("quorumVvecHash", quorumVvecHash.ToString());
-        obj.pushKV("quorumSig", quorumSig.ToString(nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION));
-        obj.pushKV("membersSig", membersSig.ToString(nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION));
-    }
+    void ToJson(UniValue& object) const;
 };
+
 using CFinalCommitmentPtr = std::unique_ptr<CFinalCommitment>;
 
-class CFinalCommitmentTxPayload
-{
+class CFinalCommitmentTxPayload {
 public:
-    static constexpr uint16_t CURRENT_VERSION = 2;
+    static constexpr uint16_t CURRENT_VERSION =
+        legacy::FINAL_COMMITMENT_PAYLOAD_VERSION;
+
     uint16_t nVersion{CURRENT_VERSION};
     uint32_t nHeight{0};
     CFinalCommitment commitment;
 
-public:
-    SERIALIZE_METHODS(CFinalCommitmentTxPayload, obj) {
-        READWRITE(obj.nVersion, obj.nHeight, obj.commitment);
-    }   
-
-    void ToJson(UniValue& obj) const
+    SERIALIZE_METHODS(CFinalCommitmentTxPayload, obj)
     {
-        obj.clear();
-        obj.setObject();
-        UniValue qcObj;
-        commitment.ToJson(qcObj);
-        obj.pushKV("version", nVersion);
-        obj.pushKV("height", nHeight);
-        obj.pushKV("commitment", qcObj);
+        READWRITE(obj.nVersion, obj.nHeight, obj.commitment);
     }
-    inline bool IsNull() const {return nHeight == 0;}
+
+    void ToJson(UniValue& object) const;
+    [[nodiscard]] bool IsNull() const noexcept { return nHeight == 0; }
 };
 
-uint256 BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash);
+[[nodiscard]] uint256 BuildCommitmentHash(
+    const uint256& block_hash,
+    const std::vector<bool>& valid_members,
+    const CLegacyBLSPublicKey& public_key,
+    const uint256& vvec_hash);
+
 } // namespace llmq
 
 #endif // SYSCOIN_LLMQ_QUORUMS_COMMITMENT_H

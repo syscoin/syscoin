@@ -3,7 +3,9 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/validation.h>
+#include <chainparams.h>
 #include <core_io.h>
+#include <evo/pq_registry.h>
 #include <init.h>
 #include <rpc/server.h>
 #include <util/moneystr.h>
@@ -11,16 +13,17 @@
 
 #include <evo/deterministicmns.h>
 
-#include <bls/bls.h>
-
 #include <masternode/masternodemeta.h>
 #include <rpc/util.h>
 #include <rpc/blockchain.h>
 #include <node/context.h>
 #include <rpc/server_util.h>
-#include <llmq/quorums_utils.h>
 #include <index/txindex.h>
-UniValue BuildDMNListEntry(const node::NodeContext& node, const CDeterministicMN& dmn, bool detailed)
+UniValue BuildDMNListEntry(
+    const node::NodeContext& node,
+    const CDeterministicMN& dmn,
+    bool detailed,
+    const llmq::pq::PQPaymentProbationState* payment_state = nullptr)
 {
     if (!detailed) {
         return dmn.proTxHash.ToString();
@@ -39,6 +42,19 @@ UniValue BuildDMNListEntry(const node::NodeContext& node, const CDeterministicMN
     o.pushKV("confirmations", confirmations);
     auto metaInfo = mmetaman->GetMetaInfo(dmn.proTxHash);
     o.pushKV("metaInfo", metaInfo->ToJson());
+    if (payment_state != nullptr) {
+        UniValue payment_audit{UniValue::VOBJ};
+        payment_audit.pushKV(
+            "consecutiveMisses",
+            static_cast<int>(payment_state->MissCount(dmn.proTxHash)));
+        payment_audit.pushKV(
+            "paymentWithheld",
+            payment_state->IsPaymentWithheld(dmn.proTxHash));
+        payment_audit.pushKV(
+            "paymentEligibleSinceHeight",
+            payment_state->PaymentEligibleSinceHeight(dmn.proTxHash));
+        o.pushKV("paymentAudit", std::move(payment_audit));
+    }
 
     return o;
 }
@@ -77,6 +93,7 @@ static RPCHelpMan protx_list()
     }
     if (type == "valid" || type == "registered") {
         CDeterministicMNList mnList;
+        llmq::pq::PQPaymentProbationState payment_state;
         bool detailed = !request.params[1].isNull() ? request.params[1].get_bool() : false;
         {
             LOCK(cs_main);
@@ -84,11 +101,21 @@ static RPCHelpMan protx_list()
             if (height < 1 || height > node.chainman->ActiveHeight()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid height specified");
             }
-            mnList = deterministicMNManager->GetListForBlock(node.chainman->ActiveChain()[height]);
+            const CBlockIndex* index{node.chainman->ActiveChain()[height]};
+            mnList = deterministicMNManager->GetListForBlock(index);
+            if (detailed &&
+                !deterministicMNManager->GetPaymentProbationState(
+                    index, payment_state)) {
+                throw JSONRPCError(
+                    RPC_INTERNAL_ERROR,
+                    "payment audit state is unavailable at requested height");
+            }
         }
         bool onlyValid = type == "valid";
         mnList.ForEachMN(onlyValid, [&](const auto& dmn) {
-            ret.push_back(BuildDMNListEntry(node, dmn, detailed));
+            ret.push_back(BuildDMNListEntry(
+                node, dmn, detailed,
+                detailed ? &payment_state : nullptr));
         });
 
     } else {
@@ -120,93 +147,172 @@ static RPCHelpMan protx_info()
     }
     const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     uint256 proTxHash = ParseHashV(request.params[0], "proTxHash");
-    auto mnList = deterministicMNManager->GetListAtChainTip();
+    CDeterministicMNList mnList;
+    llmq::pq::PQPaymentProbationState payment_state;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip{node.chainman->ActiveTip()};
+        if (tip == nullptr ||
+            !deterministicMNManager->GetPaymentProbationState(
+                tip, payment_state)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR,
+                               "payment audit state is unavailable");
+        }
+        mnList = deterministicMNManager->GetListForBlock(tip);
+    }
     auto dmn = mnList.GetMN(proTxHash);
     if (!dmn) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s not found", proTxHash.ToString()));
     }
    
-    return BuildDMNListEntry(node, *dmn, true);
+    return BuildDMNListEntry(node, *dmn, true, &payment_state);
 },
     };
 }
 
-static RPCHelpMan bls_generate()
+static RPCHelpMan protx_operator_key_info()
 {
-     return RPCHelpMan{"bls_generate",
-        "\nReturns a BLS secret/public key pair.\n",
-        {   
-            {"legacy", RPCArg::Type::BOOL, RPCArg::Default{false}, "Use legacy BLS scheme"},           
+    return RPCHelpMan{
+        "protx_operator_key_info",
+        "\nReturns the active post-quantum operator public key and version for a deterministic masternode.\n",
+        {
+            {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The hash of the initial ProRegTx."},
         },
-        RPCResult{RPCResult::Type::ANY, "", ""},
-        RPCExamples{
-                HelpExampleCli("bls_generate", "")
-            + HelpExampleRpc("bls_generate", "")
-        },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    CBLSSecretKey sk;
-    sk.MakeNewKey();
-    bool bls_legacy_scheme{false};
-    if (!request.params[0].isNull()) {
-        bls_legacy_scheme = request.params[0].get_bool();
-    }
-    UniValue ret(UniValue::VOBJ);
-    ret.pushKV("secret", sk.ToString());
-    ret.pushKV("public", sk.GetPublicKey().ToString(bls_legacy_scheme));
-    std::string bls_scheme_str = bls_legacy_scheme ? "legacy" : "basic";
-    ret.pushKV("scheme", bls_scheme_str);
-    return ret;
-},
-    };
-} 
-static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::string& paramName)
-{
-    CBLSSecretKey secKey;
-    // Actually, bool flag for bls::PrivateKey has other meaning (modOrder)
-    if (!secKey.SetHexStr(hexKey, false)) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
-    }
-    return secKey;
-}
-static RPCHelpMan bls_fromsecret()
-{
-     return RPCHelpMan{"bls_fromsecret",
-        "\nParses a BLS secret key and returns the secret/public key pair.\n",
-        {              
-             {"secret", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The BLS secret key."},  
-             {"legacy", RPCArg::Type::BOOL, RPCArg::Default{false}, "Use legacy BLS scheme"},
-        },
-        RPCResult{RPCResult::Type::ANY, "", ""},
-        RPCExamples{
-                HelpExampleCli("bls_fromsecret", "")
-            + HelpExampleRpc("bls_fromsecret", "")
-        },
-    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
-{
-    bool bls_legacy_scheme{false};
-    if (!request.params[1].isNull()) {
-        bls_legacy_scheme = request.params[1].get_bool();
-    }
-    CBLSSecretKey sk = ParseBLSSecretKey(request.params[0].get_str(), "secretKey");
-    UniValue ret(UniValue::VOBJ);
-    ret.pushKV("secret", sk.ToString());
-    ret.pushKV("public", sk.GetPublicKey().ToString(bls_legacy_scheme));
-    std::string bls_scheme_str = bls_legacy_scheme ? "legacy" : "basic";
-    ret.pushKV("scheme", bls_scheme_str);
-    return ret;
-},
-    };
+        RPCResult{
+            RPCResult::Type::OBJ,
+            "",
+            "Active PQ operator identity.",
+            {
+                {RPCResult::Type::STR_HEX, "publicKey", "32-byte SLH-DSA public key"},
+                {RPCResult::Type::NUM, "keyVersion", "Nonzero global key version"},
+            }},
+        RPCExamples{HelpExampleCli("protx_operator_key_info", "<proTxHash>") +
+                    HelpExampleRpc("protx_operator_key_info", "\"<proTxHash>\"")},
+        [&](const RPCHelpMan& self,
+            const node::JSONRPCRequest& request) -> UniValue {
+            const node::NodeContext& node =
+                EnsureAnyNodeContext(request.context);
+            const uint256 pro_tx_hash =
+                ParseHashV(request.params[0], "proTxHash");
+
+            llmq::pq::PQRegistrySnapshot snapshot;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip = node.chainman->ActiveChain().Tip();
+                if (tip == nullptr) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR,
+                                       "Active chain tip is unavailable");
+                }
+                std::string error;
+                if (!deterministicMNManager->GetPQRegistrySnapshot(
+                        tip, snapshot, error)) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        strprintf("Unable to read PQ registry snapshot: %s",
+                                  error));
+                }
+            }
+            const auto* state = snapshot.FindOperator(pro_tx_hash);
+            if (state == nullptr || !state->HasActiveGlobalKey()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Masternode has no active global key");
+            }
+
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("publicKey",
+                          HexStr(state->global_key.public_key));
+            result.pushKV("keyVersion", state->global_key.key_version);
+            return result;
+        }};
 }
 
+static RPCHelpMan protx_migration_info()
+{
+    return RPCHelpMan{
+        "protx_migration_info",
+        "\nReturns the exact block and consensus-state commitments needed to "
+        "pin a post-quantum migration anchor.\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ,
+            "",
+            "Canonical migration-anchor data for the active tip.",
+            {
+                {RPCResult::Type::NUM, "height", "Anchor block height"},
+                {RPCResult::Type::STR_HEX, "blockHash", "Anchor block hash"},
+                {RPCResult::Type::STR_HEX, "dmnStateHash", "Deterministic-masternode state commitment"},
+                {RPCResult::Type::STR_HEX, "pqRegistryStateHash", "PQ operator-key registry state commitment"},
+            }},
+        RPCExamples{HelpExampleCli("protx_migration_info", "") +
+                    HelpExampleRpc("protx_migration_info", "")},
+        [&](const RPCHelpMan& self,
+            const node::JSONRPCRequest& request) -> UniValue {
+            const node::NodeContext& node =
+                EnsureAnyNodeContext(request.context);
+
+            CDeterministicMNList mn_list;
+            llmq::pq::PQRegistrySnapshot pq_snapshot;
+            int anchor_height{-1};
+            uint256 anchor_block_hash;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip = node.chainman->ActiveChain().Tip();
+                if (tip == nullptr ||
+                    tip->nHeight < Params().GetConsensus().DIP0003Height) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        "DIP3 must be active before deriving a migration anchor");
+                }
+                anchor_height = tip->nHeight;
+                anchor_block_hash = tip->GetBlockHash();
+                mn_list = deterministicMNManager->GetListForBlock(tip);
+
+                llmq::pq::PQRegistryConfig config;
+                const auto deployment = llmq::pq::GetPQRegistryConfig(
+                    Params().GetConsensus(), config);
+                if (deployment ==
+                    llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR,
+                                       "Invalid PQ registry configuration");
+                }
+                if (deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
+                    std::string error;
+                    if (!deterministicMNManager->GetPQRegistrySnapshot(
+                            tip, pq_snapshot, error)) {
+                        throw JSONRPCError(
+                            RPC_INTERNAL_ERROR,
+                            strprintf("Unable to read PQ registry snapshot: %s",
+                                      error));
+                    }
+                }
+            }
+
+            const uint256 genesis_hash = Params().GetConsensus().hashGenesisBlock;
+            const auto pq_root = pq_snapshot.RecomputeConsensusStateRoot(
+                genesis_hash);
+            if (!pq_root) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR,
+                                   "Unable to derive PQ registry state root");
+            }
+
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("height", anchor_height);
+            result.pushKV("blockHash", anchor_block_hash.GetHex());
+            result.pushKV("dmnStateHash",
+                          mn_list.GetPQLegacyStateHash(genesis_hash).GetHex());
+            result.pushKV("pqRegistryStateHash", pq_root->GetHex());
+            return result;
+        }};
+}
 
 void RegisterEvoRPCCommands(CRPCTable &t)
 {
     static const CRPCCommand commands[]{
-        {"evo", &bls_generate},
-        {"evo", &bls_fromsecret},
         {"evo", &protx_list},
         {"evo", &protx_info},
+        {"evo", &protx_operator_key_info},
+        {"evo", &protx_migration_info},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);

@@ -3,8 +3,12 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
 #include <chainparams.h>
+#include <consensus/pq_migration.h> // SYSCOIN: pinned migration-anchor tests.
 #include <consensus/validation.h>
+#include <evo/pq_payment_probation_db.h> // SYSCOIN: multi-chainstate probation GC.
 #include <kernel/disconnected_transactions.h>
+#include <llmq/pq_chainlock_schedule.h> // SYSCOIN: payment-audit preseal coverage.
+#include <llmq/quorums_chainlocks.h> // SYSCOIN: retained probation roots.
 #include <node/kernel_notifications.h>
 #include <node/utxo_snapshot.h>
 #include <random.h>
@@ -22,6 +26,7 @@
 
 #include <tinyformat.h>
 
+#include <array> // SYSCOIN: synthetic migration-anchor fixtures.
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -29,6 +34,12 @@
 using node::BlockManager;
 using node::KernelNotifications;
 using node::SnapshotMetadata;
+
+// SYSCOIN: Test seam for branch-local compact payment-audit replay.
+bool IsPaymentAuditHistoricalPresealCoverable(
+    ChainstateManager& chainman,
+    const CBlockIndex& carrier,
+    const llmq::pq::ChainLockScheduleConfig& schedule);
 
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
@@ -106,6 +117,107 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager, TestChain100Setup)
     SyncWithValidationInterfaceQueue();
 }
 
+// SYSCOIN: GC must retain roots referenced by every usable chainstate tip.
+BOOST_FIXTURE_TEST_CASE(
+    payment_probation_gc_retains_every_chainstate_tip,
+    TestChain100Setup)
+{
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    Chainstate& background{chainman.ActiveChainstate()};
+
+    mineBlocks(10);
+    const CBlockIndex* snapshot_base{
+        WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(snapshot_base != nullptr);
+    Chainstate& snapshot{WITH_LOCK(
+        ::cs_main,
+        return chainman.ActivateExistingSnapshot(
+            snapshot_base->GetBlockHash()))};
+    snapshot.InitCoinsDB(/*cache_size_bytes=*/1 << 23,
+                         /*in_memory=*/true,
+                         /*should_wipe=*/false);
+    {
+        LOCK(::cs_main);
+        snapshot.InitCoinsCache(1 << 23);
+        snapshot.CoinsTip().SetBestBlock(snapshot_base->GetBlockHash());
+        snapshot.setBlockIndexCandidates.insert(
+            chainman.m_blockman.LookupBlockIndex(
+                snapshot_base->GetBlockHash()));
+        snapshot.LoadChainTip();
+    }
+    BlockValidationState activation_state;
+    BOOST_REQUIRE(snapshot.ActivateBestChain(activation_state, nullptr));
+    mineBlocks(1);
+
+    const auto non_null_hash = [](uint8_t tag) {
+        uint256 hash;
+        hash.begin()[0] = tag;
+        return hash;
+    };
+    const auto make_state = [&](uint32_t epoch, uint8_t tag) {
+        llmq::pq::PQPaymentProbationState state;
+        state.cursor.has_receipt = 1;
+        state.cursor.receipt = {
+            epoch, static_cast<int32_t>(1'000 + epoch),
+            non_null_hash(tag)};
+        state.entries.push_back(
+            {non_null_hash(static_cast<uint8_t>(tag + 32)), 1, -1});
+        return state;
+    };
+    llmq::pq::PQPaymentProbationManager probation_db{DBParams{
+        .path = m_path_root / "probation_multichain_retention",
+        .cache_bytes = static_cast<std::size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    }};
+    const auto commit = [&](const auto& state) {
+        const auto hash{llmq::pq::GetPQPaymentProbationStateHash(state)};
+        BOOST_REQUIRE(hash.has_value());
+        BOOST_REQUIRE(probation_db.CommitState(
+            state, *hash, /*fJustCheck=*/false));
+        return *hash;
+    };
+    const uint256 background_root{commit(make_state(4, 1))};
+    const uint256 snapshot_root{commit(make_state(5, 2))};
+    const uint256 unreferenced_root{commit(make_state(5, 3))};
+
+    std::vector<uint256> retained_roots;
+    {
+        LOCK(::cs_main);
+        CBlockIndex* background_tip{background.m_chain.Tip()};
+        CBlockIndex* snapshot_tip{snapshot.m_chain.Tip()};
+        BOOST_REQUIRE(background_tip != nullptr);
+        BOOST_REQUIRE(snapshot_tip != nullptr);
+        BOOST_REQUIRE(background_tip != snapshot_tip);
+        const uint256 saved_background_root{
+            background_tip->pqPaymentProbationStateHash};
+        const uint256 saved_snapshot_root{
+            snapshot_tip->pqPaymentProbationStateHash};
+        background_tip->pqPaymentProbationStateHash = background_root;
+        snapshot_tip->pqPaymentProbationStateHash = snapshot_root;
+        retained_roots =
+            llmq::CollectChainstatePaymentProbationRoots(chainman);
+        background_tip->pqPaymentProbationStateHash =
+            saved_background_root;
+        snapshot_tip->pqPaymentProbationStateHash = saved_snapshot_root;
+    }
+
+    BOOST_CHECK_EQUAL(retained_roots.size(), 2U);
+    BOOST_CHECK(std::find(retained_roots.begin(), retained_roots.end(),
+                          background_root) != retained_roots.end());
+    BOOST_CHECK(std::find(retained_roots.begin(), retained_roots.end(),
+                          snapshot_root) != retained_roots.end());
+    BOOST_REQUIRE(probation_db.PruneStatesThroughEpoch(
+        /*prune_through_epoch=*/5, retained_roots));
+
+    llmq::pq::PQPaymentProbationState loaded;
+    BOOST_CHECK(probation_db.GetState(background_root, loaded));
+    BOOST_CHECK(probation_db.GetState(snapshot_root, loaded));
+    BOOST_CHECK(!probation_db.GetState(unreferenced_root, loaded));
+
+    SyncWithValidationInterfaceQueue();
+}
+
 //! Test rebalancing the caches associated with each chainstate.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebalance_caches, TestChain100Setup)
 {
@@ -176,6 +288,639 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebalance_caches, TestChain100Setup)
     // This avoids use-after-free races against chainstate structures.
     SyncWithValidationInterfaceQueue();
 }
+
+// SYSCOIN BEGIN: PQ migration and payment-audit chainstate-manager regressions.
+// The exact migration anchor can arrive after a higher-work fork below
+// the anchor height became active. That forbidden tip must not prevent the node
+// from selecting the lower-work anchored branch for recovery.
+BOOST_FIXTURE_TEST_CASE(pq_anchor_recovery_ignores_forbidden_tip_work,
+                        TestChain100Setup)
+{
+    // SYSCOIN: BasicTestingSetup pins DIP3 at 550. Extend the already-checked
+    // 100-block fixture here so the synthetic migration anchor is genuinely
+    // post-DIP3 without depending on a brittle hard-coded 600-block tip hash.
+    mineBlocks(500);
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int old_anchor_height = consensus.nPQLegacyAnchorHeight;
+    const uint256 old_anchor_block = consensus.hashPQLegacyAnchorBlock;
+    const uint256 old_anchor_state = consensus.hashPQLegacyMNState;
+    const uint256 old_anchor_pq_state =
+        consensus.hashPQLegacyPQRegistryState;
+    struct RestoreAnchorParams {
+        Consensus::Params& consensus;
+        int height;
+        uint256 block;
+        uint256 state;
+        uint256 pq_state;
+        ~RestoreAnchorParams()
+        {
+            consensus.nPQLegacyAnchorHeight = height;
+            consensus.hashPQLegacyAnchorBlock = block;
+            consensus.hashPQLegacyMNState = state;
+            consensus.hashPQLegacyPQRegistryState = pq_state;
+        }
+    } restore{consensus, old_anchor_height, old_anchor_block, old_anchor_state,
+              old_anchor_pq_state};
+
+    LOCK(::cs_main);
+    constexpr int anchor_height{600};
+    CBlockIndex* const original_tip = chainstate.m_chain.Tip();
+    CBlockIndex* const anchor = chainstate.m_chain[anchor_height];
+    BOOST_REQUIRE(original_tip != nullptr);
+    BOOST_REQUIRE(anchor != nullptr);
+    BOOST_REQUIRE(anchor->pprev != nullptr);
+
+    consensus.nPQLegacyAnchorHeight = anchor_height;
+    consensus.hashPQLegacyAnchorBlock = anchor->GetBlockHash();
+    consensus.hashPQLegacyMNState = uint256::ONEV;
+    consensus.hashPQLegacyPQRegistryState = uint256S("3");
+
+    BOOST_REQUIRE(
+        Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
+        Consensus::PQLegacyAnchorResult::VALID);
+    BOOST_REQUIRE_EQUAL(
+        chainman.m_blockman.LookupBlockIndex(anchor->GetBlockHash()), anchor);
+    BOOST_REQUIRE(Consensus::IsPQLegacyAnchorCompatible(
+        consensus, original_tip, anchor));
+    BOOST_REQUIRE(original_tip->IsValid(BLOCK_VALID_TREE));
+    BOOST_REQUIRE(!(original_tip->nStatus &
+                    (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)));
+
+    uint256 fork_hash = GetRandHash();
+    while (fork_hash == anchor->pprev->GetBlockHash()) fork_hash = GetRandHash();
+    CBlockIndex forbidden_tip;
+    forbidden_tip.phashBlock = &fork_hash;
+    forbidden_tip.pprev = anchor->pprev->pprev;
+    forbidden_tip.nHeight = anchor_height - 1;
+    forbidden_tip.nChainWork = original_tip->nChainWork + 1;
+
+    const auto original_candidates = chainstate.setBlockIndexCandidates;
+    CBlockIndex* const original_best_header = chainman.m_best_header;
+    chainstate.m_chain.SetTip(forbidden_tip);
+    chainstate.setBlockIndexCandidates.clear();
+
+    BOOST_CHECK(!Consensus::IsPQLegacyAnchorCompatible(
+        consensus, chainstate.m_chain.Tip(), anchor));
+    BOOST_CHECK(node::CBlockIndexWorkComparator()(anchor, &forbidden_tip));
+    BOOST_CHECK(chainman.EnforcePQLegacyAnchorBranches());
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(anchor), 1U);
+
+    chainstate.setBlockIndexCandidates.clear();
+    chainstate.TryAddBlockIndexCandidate(anchor);
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(anchor), 1U);
+    chainstate.PruneBlockIndexCandidates();
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(anchor), 1U);
+
+    chainstate.m_chain.SetTip(*original_tip);
+    chainstate.setBlockIndexCandidates = original_candidates;
+    chainman.m_best_header = original_best_header;
+}
+
+// A missing BTCC receipt certificate is a data dependency, not block
+// invalidity. Its first-seen carrier must nevertheless leave the work selector
+// so an equally worked, fully verifiable sibling can activate.
+BOOST_FIXTURE_TEST_CASE(btcc_pending_candidate_yields_and_requeues_exactly,
+                        TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    WAIT_LOCK(::cs_main, main_lock);
+    CBlockIndex* const active_tip{chainstate.m_chain.Tip()};
+    BOOST_REQUIRE(active_tip != nullptr);
+
+    uint256 pending_hash{GetRandHash()};
+    uint256 sibling_hash{GetRandHash()};
+    while (sibling_hash == pending_hash) sibling_hash = GetRandHash();
+    CBlockIndex pending;
+    pending.phashBlock = &pending_hash;
+    pending.pprev = active_tip;
+    pending.nHeight = active_tip->nHeight + 1;
+    pending.nChainWork = active_tip->nChainWork + 1;
+    pending.nTx = 1;
+    pending.nChainTx = active_tip->nChainTx + 1;
+    pending.nSequenceId = 1;
+    pending.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+
+    CBlockIndex sibling;
+    sibling.phashBlock = &sibling_hash;
+    sibling.pprev = active_tip;
+    sibling.nHeight = pending.nHeight;
+    sibling.nChainWork = pending.nChainWork;
+    sibling.nTx = 1;
+    sibling.nChainTx = pending.nChainTx;
+    sibling.nSequenceId = 2;
+    sibling.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+
+    const auto original_candidates{chainstate.setBlockIndexCandidates};
+    struct RestoreCandidates {
+        Chainstate& chainstate;
+        CBlockIndex* tip;
+        const std::set<CBlockIndex*, node::CBlockIndexWorkComparator>
+            candidates;
+        ~RestoreCandidates()
+        {
+            chainstate.ClearBlockIndexCandidates();
+            chainstate.m_chain.SetTip(*tip);
+            chainstate.setBlockIndexCandidates = candidates;
+        }
+    } restore{chainstate, active_tip, original_candidates};
+
+    chainstate.setBlockIndexCandidates.clear();
+    chainstate.setBlockIndexCandidates.insert(active_tip);
+    chainstate.setBlockIndexCandidates.insert(&pending);
+    chainstate.setBlockIndexCandidates.insert(&sibling);
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(pending));
+
+    uint256 logical_id{GetRandHash()};
+    while (logical_id.IsNull()) logical_id = GetRandHash();
+    BOOST_REQUIRE(
+        chainstate.DeferBTCCReceiptCandidates(logical_id, pending));
+    BOOST_CHECK(
+        chainstate.DeferBTCCReceiptCandidates(logical_id, pending));
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(&pending), 0U);
+    BOOST_CHECK(chainstate.IsBTCCReceiptCandidateDeferred(pending));
+    BOOST_CHECK(chainstate.HasDeferredBTCCReceiptCandidates(logical_id));
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(sibling));
+
+    // Even generic candidate reconstruction cannot bypass the quarantine at
+    // FindMostWorkChain's selection boundary.
+    chainstate.setBlockIndexCandidates.insert(&pending);
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(sibling));
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(&pending), 0U);
+
+    // A descendant learned after the carrier was quarantined must inherit the
+    // dependency before it can displace or disconnect the active sibling.
+    uint256 descendant_hash{GetRandHash()};
+    CBlockIndex descendant;
+    descendant.phashBlock = &descendant_hash;
+    descendant.pprev = &pending;
+    descendant.nHeight = pending.nHeight + 1;
+    descendant.nChainWork = pending.nChainWork + 1;
+    descendant.nTx = 1;
+    descendant.nChainTx = pending.nChainTx + 1;
+    descendant.nSequenceId = 3;
+    descendant.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    chainstate.TryAddBlockIndexCandidate(&descendant);
+    BOOST_CHECK(chainstate.IsBTCCReceiptCandidateDeferred(descendant));
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(&descendant), 0U);
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(sibling));
+
+    // Quarantine state scales with live fork tips, not every block on a long
+    // descendant chain. Exact release reconstructs ordinary ancestry
+    // membership from that single maximal tip.
+    std::array<uint256, 32> descendant_hashes;
+    std::array<CBlockIndex, 32> descendants;
+    CBlockIndex* descendant_tip{&descendant};
+    for (size_t i{0}; i < descendants.size(); ++i) {
+        descendant_hashes[i] = GetRandHash();
+        CBlockIndex& next{descendants[i]};
+        next.phashBlock = &descendant_hashes[i];
+        next.pprev = descendant_tip;
+        next.nHeight = descendant_tip->nHeight + 1;
+        next.nChainWork = descendant_tip->nChainWork + 1;
+        next.nTx = 1;
+        next.nChainTx = descendant_tip->nChainTx + 1;
+        next.nSequenceId = 4 + static_cast<int32_t>(i);
+        next.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+        chainstate.TryAddBlockIndexCandidate(&next);
+        descendant_tip = &next;
+    }
+    uint256 rebuilt_hash{GetRandHash()};
+    CBlockIndex rebuilt_descendant;
+    rebuilt_descendant.phashBlock = &rebuilt_hash;
+    rebuilt_descendant.pprev = descendant_tip;
+    rebuilt_descendant.nHeight = descendant_tip->nHeight + 1;
+    rebuilt_descendant.nChainWork = descendant_tip->nChainWork + 1;
+    rebuilt_descendant.nTx = 1;
+    rebuilt_descendant.nChainTx = descendant_tip->nChainTx + 1;
+    rebuilt_descendant.nSequenceId = 500;
+    rebuilt_descendant.nStatus =
+        BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    chainstate.setBlockIndexCandidates.insert(&rebuilt_descendant);
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(sibling));
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(&rebuilt_descendant), 0U);
+    descendant_tip = &rebuilt_descendant;
+
+    const auto compact_dependency{
+        chainstate.GetBestDeferredBTCCReceiptCandidate()};
+    BOOST_REQUIRE(compact_dependency.has_value());
+    BOOST_CHECK_EQUAL(compact_dependency->logical_id, logical_id);
+    BOOST_CHECK_EQUAL(compact_dependency->best_candidate, descendant_tip);
+    BOOST_CHECK(chainstate.IsBTCCReceiptCandidateDeferred(pending));
+    BOOST_CHECK(chainstate.IsBTCCReceiptCandidateDeferred(descendant));
+    BOOST_CHECK(chainstate.IsBTCCReceiptCandidateDeferred(*descendant_tip));
+
+    // Multiple mined receipt IDs remain bounded by their block candidates,
+    // while the single request lane deterministically selects the dependency
+    // with the highest-work tip.
+    uint256 higher_hash{GetRandHash()};
+    CBlockIndex higher_pending;
+    higher_pending.phashBlock = &higher_hash;
+    higher_pending.pprev = active_tip;
+    higher_pending.nHeight = pending.nHeight;
+    higher_pending.nChainWork = descendant_tip->nChainWork + 1;
+    higher_pending.nTx = 1;
+    higher_pending.nChainTx = pending.nChainTx;
+    higher_pending.nSequenceId = 1000;
+    higher_pending.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    chainstate.TryAddBlockIndexCandidate(&higher_pending);
+    uint256 higher_logical_id{GetRandHash()};
+    while (higher_logical_id.IsNull() ||
+           higher_logical_id == logical_id) {
+        higher_logical_id = GetRandHash();
+    }
+    BOOST_REQUIRE(chainstate.DeferBTCCReceiptCandidates(
+        higher_logical_id, higher_pending));
+    const auto best_dependency{
+        chainstate.GetBestDeferredBTCCReceiptCandidate()};
+    BOOST_REQUIRE(best_dependency.has_value());
+    BOOST_CHECK_EQUAL(best_dependency->logical_id, higher_logical_id);
+    BOOST_CHECK_EQUAL(best_dependency->carrier, &higher_pending);
+    BOOST_CHECK_EQUAL(best_dependency->best_candidate, &higher_pending);
+
+    // The request lane may be empty after an exact certificate clears its
+    // former dependency. The public tip callback must promote the best
+    // remaining quarantine instead of waiting for another ConnectTip failure.
+    BOOST_REQUIRE(llmq::chainLocksHandler != nullptr);
+    {
+        REVERSE_LOCK(main_lock);
+        llmq::chainLocksHandler->UpdatedBlockTip(nullptr,
+                                                 /*initial_download=*/true);
+    }
+    BOOST_CHECK(llmq::chainLocksHandler->IsPendingBTCCReceiptCertificate(
+        higher_logical_id));
+
+    uint256 unrelated_id{GetRandHash()};
+    while (unrelated_id.IsNull() || unrelated_id == logical_id ||
+           unrelated_id == higher_logical_id) {
+        unrelated_id = GetRandHash();
+    }
+    BOOST_CHECK(
+        !chainstate.ReconsiderBTCCReceiptCandidates(unrelated_id));
+    BOOST_CHECK(chainstate.IsBTCCReceiptCandidateDeferred(pending));
+
+    BOOST_REQUIRE(
+        chainstate.ReconsiderBTCCReceiptCandidates(logical_id));
+    BOOST_CHECK(!chainstate.IsBTCCReceiptCandidateDeferred(pending));
+    BOOST_CHECK(!chainstate.IsBTCCReceiptCandidateDeferred(descendant));
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(&pending), 1U);
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(&descendant), 1U);
+    for (CBlockIndex& restored : descendants) {
+        BOOST_CHECK_EQUAL(
+            chainstate.setBlockIndexCandidates.count(&restored), 1U);
+    }
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(descendant_tip), 1U);
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*descendant_tip));
+    BOOST_CHECK(chainstate.IsBTCCReceiptCandidateDeferred(higher_pending));
+    chainman.CheckBlockIndex();
+    const auto remaining_dependency{
+        chainstate.GetBestDeferredBTCCReceiptCandidate()};
+    BOOST_REQUIRE(remaining_dependency.has_value());
+    BOOST_CHECK_EQUAL(remaining_dependency->logical_id, higher_logical_id);
+    BOOST_REQUIRE(chainstate.ReconsiderBTCCReceiptCandidates(
+        higher_logical_id));
+    BOOST_CHECK(!chainstate.IsBTCCReceiptCandidateDeferred(higher_pending));
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(&higher_pending), 1U);
+
+    // Payment-audit receipts share the same ancestry-safe quarantine but
+    // retain a domain-specific request and release lane.
+    uint256 payment_hash{GetRandHash()};
+    CBlockIndex payment_pending;
+    payment_pending.phashBlock = &payment_hash;
+    payment_pending.pprev = active_tip;
+    payment_pending.nHeight = pending.nHeight;
+    payment_pending.nChainWork = higher_pending.nChainWork + 1;
+    payment_pending.nTx = 1;
+    payment_pending.nChainTx = pending.nChainTx;
+    payment_pending.nSequenceId = 1'500;
+    payment_pending.nStatus =
+        BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    chainstate.TryAddBlockIndexCandidate(&payment_pending);
+    uint256 payment_logical_id{GetRandHash()};
+    while (payment_logical_id.IsNull() ||
+           payment_logical_id == logical_id ||
+           payment_logical_id == higher_logical_id) {
+        payment_logical_id = GetRandHash();
+    }
+    BOOST_REQUIRE(chainstate.DeferPaymentAuditReceiptCandidates(
+        payment_logical_id, payment_pending));
+    BOOST_CHECK(chainstate.HasDeferredPaymentAuditReceiptCandidates(
+        payment_logical_id));
+    BOOST_CHECK(!chainstate.HasDeferredBTCCReceiptCandidates(
+        payment_logical_id));
+    const auto payment_dependency{
+        chainstate.GetBestDeferredPaymentAuditReceiptCandidate()};
+    BOOST_REQUIRE(payment_dependency);
+    BOOST_CHECK_EQUAL(payment_dependency->logical_id,
+                      payment_logical_id);
+    BOOST_CHECK(!chainstate.ReconsiderBTCCReceiptCandidates(
+        payment_logical_id));
+    {
+        REVERSE_LOCK(main_lock);
+        llmq::chainLocksHandler->UpdatedBlockTip(nullptr,
+                                                 /*initial_download=*/true);
+    }
+    // A synthetic carrier has no canonical block bytes on disk. Selection
+    // must not synthesize a pending receipt from its witness ID.
+    BOOST_CHECK(
+        !llmq::chainLocksHandler
+             ->IsPendingPaymentAuditReceiptCertificate(
+                 payment_logical_id));
+
+    llmq::pq::PaymentAuditReceipt known_payment_receipt;
+    known_payment_receipt.has_audit = 1;
+    known_payment_receipt.epoch = 1;
+    known_payment_receipt.seal_height = payment_pending.nHeight - 10;
+    known_payment_receipt.seal_block_hash = GetRandHash();
+    known_payment_receipt.carrier_height = payment_pending.nHeight;
+    known_payment_receipt.audit_logical_id = GetRandHash();
+    known_payment_receipt.audit_witness_id = payment_logical_id;
+    known_payment_receipt.commitment_hash = GetRandHash();
+    known_payment_receipt.result_hash = GetRandHash();
+    known_payment_receipt.next_probation_state_hash = GetRandHash();
+    BOOST_REQUIRE(known_payment_receipt.IsStructurallyValid());
+    llmq::chainLocksHandler->NotePendingPaymentAuditReceiptCertificate(
+        known_payment_receipt, payment_pending);
+    {
+        REVERSE_LOCK(main_lock);
+        llmq::chainLocksHandler->UpdatedBlockTip(nullptr,
+                                                 /*initial_download=*/true);
+    }
+    BOOST_CHECK(
+        llmq::chainLocksHandler
+            ->IsPendingPaymentAuditReceiptCertificate(
+                payment_logical_id));
+
+    // A definitive exact-witness failure retires only its carrier branch.
+    // Sibling carriers sharing the witness and unrelated witness IDs remain
+    // quarantined and independently recoverable.
+    uint256 payment_sibling_hash{GetRandHash()};
+    CBlockIndex payment_sibling;
+    payment_sibling.phashBlock = &payment_sibling_hash;
+    payment_sibling.pprev = active_tip;
+    payment_sibling.nHeight = payment_pending.nHeight;
+    payment_sibling.nChainWork = higher_pending.nChainWork;
+    payment_sibling.nTx = 1;
+    payment_sibling.nChainTx = payment_pending.nChainTx;
+    payment_sibling.nSequenceId = 1'501;
+    payment_sibling.nStatus =
+        BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    chainstate.TryAddBlockIndexCandidate(&payment_sibling);
+    BOOST_REQUIRE(chainstate.DeferPaymentAuditReceiptCandidates(
+        payment_logical_id, payment_sibling));
+
+    uint256 other_payment_hash{GetRandHash()};
+    CBlockIndex other_payment;
+    other_payment.phashBlock = &other_payment_hash;
+    other_payment.pprev = active_tip;
+    other_payment.nHeight = payment_pending.nHeight;
+    other_payment.nChainWork = active_tip->nChainWork + 1;
+    other_payment.nTx = 1;
+    other_payment.nChainTx = payment_pending.nChainTx;
+    other_payment.nSequenceId = 1'502;
+    other_payment.nStatus =
+        BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    chainstate.TryAddBlockIndexCandidate(&other_payment);
+    uint256 other_payment_id{GetRandHash()};
+    while (other_payment_id.IsNull() ||
+           other_payment_id == payment_logical_id) {
+        other_payment_id = GetRandHash();
+    }
+    BOOST_REQUIRE(chainstate.DeferPaymentAuditReceiptCandidates(
+        other_payment_id, other_payment));
+
+    BOOST_REQUIRE(chainman.RetireDeferredPaymentAuditReceiptCarrier(
+        payment_logical_id, payment_pending));
+    BOOST_CHECK(payment_pending.nStatus & BLOCK_FAILED_VALID);
+    BOOST_REQUIRE(chainman.m_blockman.WriteBlockIndexDB());
+    BOOST_CHECK(chainstate.HasDeferredPaymentAuditReceiptCandidates(
+        payment_logical_id));
+    const auto surviving_payment{
+        chainstate.GetBestDeferredPaymentAuditReceiptCandidate()};
+    BOOST_REQUIRE(surviving_payment);
+    BOOST_CHECK_EQUAL(surviving_payment->logical_id,
+                      payment_logical_id);
+    BOOST_CHECK_EQUAL(surviving_payment->carrier, &payment_sibling);
+    BOOST_CHECK(chainstate.HasDeferredPaymentAuditReceiptCandidates(
+        other_payment_id));
+
+    BOOST_REQUIRE(chainstate.ReconsiderPaymentAuditReceiptCandidates(
+        payment_logical_id));
+    BOOST_CHECK(!chainstate.HasDeferredPaymentAuditReceiptCandidates(
+        payment_logical_id));
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(&payment_pending), 0U);
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(&payment_sibling), 1U);
+    BOOST_CHECK(chainstate.HasDeferredPaymentAuditReceiptCandidates(
+        other_payment_id));
+    BOOST_REQUIRE(chainstate.ReconsiderPaymentAuditReceiptCandidates(
+        other_payment_id));
+    BOOST_CHECK_EQUAL(
+        chainstate.setBlockIndexCandidates.count(&other_payment), 1U);
+
+    chainstate.ResetBlockFailureFlags(&payment_pending);
+    BOOST_REQUIRE(chainman.m_blockman.WriteBlockIndexDB());
+    {
+        REVERSE_LOCK(main_lock);
+        llmq::chainLocksHandler->UpdatedBlockTip(nullptr,
+                                                 /*initial_download=*/true);
+    }
+    BOOST_CHECK(
+        !llmq::chainLocksHandler
+             ->IsPendingPaymentAuditReceiptCertificate(
+                 payment_logical_id));
+
+    // A runtime conflict on an ancestor before the carrier must retire the
+    // hidden branch immediately. Quarantined descendants do not pass through
+    // FindMostWorkChain, so they cannot rely on its failed-child propagation.
+    uint256 conflict_ancestor_hash{GetRandHash()};
+    uint256 conflict_carrier_hash{GetRandHash()};
+    CBlockIndex conflict_ancestor;
+    conflict_ancestor.phashBlock = &conflict_ancestor_hash;
+    conflict_ancestor.pprev = active_tip;
+    conflict_ancestor.nHeight = active_tip->nHeight + 1;
+    conflict_ancestor.nChainWork = higher_pending.nChainWork + 1;
+    conflict_ancestor.nTx = 1;
+    conflict_ancestor.nChainTx = active_tip->nChainTx + 1;
+    conflict_ancestor.nSequenceId = 2000;
+    conflict_ancestor.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    CBlockIndex conflict_carrier;
+    conflict_carrier.phashBlock = &conflict_carrier_hash;
+    conflict_carrier.pprev = &conflict_ancestor;
+    conflict_carrier.nHeight = conflict_ancestor.nHeight + 1;
+    conflict_carrier.nChainWork = conflict_ancestor.nChainWork + 1;
+    conflict_carrier.nTx = 1;
+    conflict_carrier.nChainTx = conflict_ancestor.nChainTx + 1;
+    conflict_carrier.nSequenceId = 2001;
+    conflict_carrier.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    chainstate.TryAddBlockIndexCandidate(&conflict_carrier);
+    uint256 conflict_logical_id{GetRandHash()};
+    while (conflict_logical_id.IsNull() ||
+           conflict_logical_id == logical_id ||
+           conflict_logical_id == higher_logical_id) {
+        conflict_logical_id = GetRandHash();
+    }
+    BOOST_REQUIRE(chainstate.DeferBTCCReceiptCandidates(
+        conflict_logical_id, conflict_carrier));
+    BlockValidationState conflict_state;
+    BOOST_REQUIRE(chainstate.MarkConflictingBlock(conflict_state,
+                                                   &conflict_ancestor));
+    BOOST_CHECK(!chainstate.HasDeferredBTCCReceiptCandidates(
+        conflict_logical_id));
+    BOOST_CHECK(!chainstate.IsBTCCReceiptCandidateDeferred(
+        conflict_carrier));
+    conflict_ancestor.nStatus &= ~BLOCK_CONFLICT_CHAINLOCK;
+
+    // Once the sibling is active, the equal-work quarantine is no longer a
+    // useful retry candidate and is garbage-collected with normal pruning.
+    BOOST_REQUIRE(
+        chainstate.DeferBTCCReceiptCandidates(logical_id, *descendant_tip));
+    chainstate.setBlockIndexCandidates.erase(&sibling);
+    sibling.nChainWork = descendant_tip->nChainWork;
+    chainstate.setBlockIndexCandidates.insert(&sibling);
+    chainstate.m_chain.SetTip(sibling);
+    chainstate.PruneBlockIndexCandidates();
+    BOOST_CHECK(!chainstate.HasDeferredBTCCReceiptCandidates(logical_id));
+    BOOST_CHECK(!chainstate.IsBTCCReceiptCandidateDeferred(pending));
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(&sibling), 1U);
+    BOOST_CHECK(
+        !chainstate.ReconsiderBTCCReceiptCandidates(logical_id));
+    {
+        REVERSE_LOCK(main_lock);
+        llmq::chainLocksHandler->UpdatedBlockTip(nullptr,
+                                                 /*initial_download=*/true);
+    }
+    BOOST_CHECK(!llmq::chainLocksHandler->IsPendingBTCCReceiptCertificate(
+        higher_logical_id));
+}
+
+// A locally available block backlog may use compact payment-audit replay even
+// after IBD has latched false, but a live carrier or an unrelated/header-only
+// future must keep requesting its exact audit certificate.
+BOOST_FIXTURE_TEST_CASE(
+    payment_audit_historical_preseal_requires_signable_block_backlog,
+    TestChain100Setup)
+{
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const auto schedule{llmq::pq::MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(schedule.has_value());
+
+    LOCK(::cs_main);
+    CBlockIndex* const original_tip{chainstate.m_chain.Tip()};
+    BOOST_REQUIRE(original_tip != nullptr);
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    const int32_t carrier_height{
+        schedule->epoch_origin +
+        static_cast<int32_t>(llmq::pq::PQ_FIRST_ELIGIBLE_TARGET_OFFSET)};
+    const int32_t later_target{
+        carrier_height + static_cast<int32_t>(schedule->chainlock_period)};
+    const auto signing_height{
+        llmq::pq::SigningHeightForTarget(*schedule, later_target)};
+    BOOST_REQUIRE(signing_height.has_value());
+    BOOST_REQUIRE(original_tip->nHeight < carrier_height);
+    BOOST_REQUIRE(llmq::pq::IsEligibleChainLockTarget(
+        *schedule, carrier_height));
+    BOOST_REQUIRE(llmq::pq::IsEligibleChainLockTarget(
+        *schedule, later_target));
+
+    const std::size_t branch_size{static_cast<std::size_t>(
+        *signing_height - original_tip->nHeight)};
+    std::vector<uint256> hashes(branch_size);
+    std::vector<CBlockIndex> branch(branch_size);
+    CBlockIndex* previous{original_tip};
+    for (std::size_t i{0}; i < branch.size(); ++i) {
+        hashes[i] = GetRandHash();
+        CBlockIndex& index{branch[i]};
+        index.phashBlock = &hashes[i];
+        index.pprev = previous;
+        index.nHeight = previous->nHeight + 1;
+        index.nChainWork = previous->nChainWork + 1;
+        index.nTx = 1;
+        index.nChainTx = previous->nChainTx + 1;
+        index.nSequenceId = static_cast<int32_t>(i + 1);
+        index.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+        index.BuildSkip();
+        previous = &index;
+    }
+    const auto at_height = [&](int32_t height) -> CBlockIndex* {
+        BOOST_REQUIRE(height > original_tip->nHeight);
+        return &branch[static_cast<std::size_t>(
+            height - original_tip->nHeight - 1)];
+    };
+    CBlockIndex* const carrier{at_height(carrier_height)};
+    CBlockIndex* const before_signing{at_height(*signing_height - 1)};
+    CBlockIndex* const signable_tip{at_height(*signing_height)};
+
+    const auto original_candidates{chainstate.setBlockIndexCandidates};
+    struct RestoreChainstate {
+        Chainstate& chainstate;
+        CBlockIndex* tip;
+        std::set<CBlockIndex*, node::CBlockIndexWorkComparator> candidates;
+        ~RestoreChainstate()
+        {
+            chainstate.ClearBlockIndexCandidates();
+            chainstate.m_chain.SetTip(*tip);
+            chainstate.setBlockIndexCandidates = std::move(candidates);
+        }
+    } restore{chainstate, original_tip, original_candidates};
+    const auto select_candidate = [&](CBlockIndex* candidate) {
+        chainstate.setBlockIndexCandidates.clear();
+        chainstate.setBlockIndexCandidates.insert(original_tip);
+        chainstate.setBlockIndexCandidates.insert(candidate);
+    };
+
+    // The carrier itself and a branch one block short of the later target's
+    // signing height are live/uncoverable, despite being the most-work branch.
+    select_candidate(carrier);
+    BOOST_CHECK(!IsPaymentAuditHistoricalPresealCoverable(
+        chainman, *carrier, *schedule));
+    select_candidate(before_signing);
+    BOOST_CHECK(!IsPaymentAuditHistoricalPresealCoverable(
+        chainman, *carrier, *schedule));
+
+    // Once all blocks through the signing height are locally available, the
+    // current most-work backlog can durably wait for its covering CLSIG.
+    select_candidate(signable_tip);
+    BOOST_CHECK(IsPaymentAuditHistoricalPresealCoverable(
+        chainman, *carrier, *schedule));
+
+    // A same-height carrier on another fork cannot borrow that opportunity.
+    uint256 fork_hash{GetRandHash()};
+    CBlockIndex fork_carrier;
+    fork_carrier.phashBlock = &fork_hash;
+    fork_carrier.pprev = carrier->pprev;
+    fork_carrier.nHeight = carrier->nHeight;
+    fork_carrier.nChainWork = carrier->nChainWork;
+    fork_carrier.nTx = 1;
+    fork_carrier.nChainTx = carrier->nChainTx;
+    fork_carrier.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    BOOST_CHECK(!IsPaymentAuditHistoricalPresealCoverable(
+        chainman, fork_carrier, *schedule));
+
+    // Replay of an already-active historical prefix has the same requirement,
+    // including retaining every intervening block needed for deferred NEVM.
+    chainstate.m_chain.SetTip(*signable_tip);
+    BOOST_CHECK(IsPaymentAuditHistoricalPresealCoverable(
+        chainman, *carrier, *schedule));
+    CBlockIndex* const target{at_height(later_target)};
+    const BlockStatus original_status{target->nStatus};
+    target->nStatus = static_cast<BlockStatus>(
+        target->nStatus & ~BLOCK_HAVE_DATA);
+    BOOST_CHECK(!IsPaymentAuditHistoricalPresealCoverable(
+        chainman, *carrier, *schedule));
+    target->nStatus = original_status;
+}
+
+// SYSCOIN END: PQ migration and payment-audit chainstate-manager regressions.
 
 struct SnapshotTestSetup : TestChain100Setup {
     // Run with coinsdb on the filesystem to support, e.g., moving invalidated

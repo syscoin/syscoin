@@ -32,7 +32,6 @@ import unittest
 from test_framework.siphash import siphash256
 from test_framework.util import assert_equal
 # SYSCOIN
-from collections import namedtuple
 MAX_LOCATOR_SZ = 101
 MAX_BLOCK_WEIGHT = 4000000
 MAX_BLOOM_FILTER_SIZE = 36000
@@ -75,14 +74,9 @@ MSG_WITNESS_TX = MSG_TX | MSG_WITNESS_FLAG
 MSG_SPORK = 11
 MSG_GOVERNANCE_OBJECT = 12
 MSG_GOVERNANCE_OBJECT_VOTE = 13
-MSG_QUORUM_FINAL_COMMITMENT = 14
-MSG_QUORUM_CONTRIB = 15
-MSG_QUORUM_COMPLAINT = 16
-MSG_QUORUM_JUSTIFICATION = 17
-MSG_QUORUM_PREMATURE_COMMITMENT = 18
-MSG_QUORUM_RECOVERED_SIG = 19
 MSG_CLSIG = 20
-MSG_BTCCSIG = 21
+MSG_PQPOSECERT = 22
+PQ_MNAUTH_PROTO_VERSION = 70018
 VERSION_NEVM = (1 << 7)
 # Constants for the auxpow block version.
 VERSION_AUXPOW = (1 << 8)
@@ -610,14 +604,8 @@ class CInv:
         MSG_SPORK: "spork",
         MSG_GOVERNANCE_OBJECT: "govobj",
         MSG_GOVERNANCE_OBJECT_VOTE: "govobjvote",
-        MSG_QUORUM_FINAL_COMMITMENT: "qfcommit",
-        MSG_QUORUM_CONTRIB: "qcontrib",
-        MSG_QUORUM_COMPLAINT: "qcomplaint",
-        MSG_QUORUM_JUSTIFICATION: "qjustify",
-        MSG_QUORUM_PREMATURE_COMMITMENT: "qpcommit",
-        MSG_QUORUM_RECOVERED_SIG: "qsigrec",
         MSG_CLSIG: "clsig",
-        MSG_BTCCSIG: "btccsig",
+        MSG_PQPOSECERT: "pqposecert",
     }
 
     def __init__(self, t=0, h=0):
@@ -1547,80 +1535,14 @@ class CGovernanceVote:
         return r
 
 
-class CRecoveredSig:
-    __slots__ = ("quorumHash", "id", "msgHash", "sig")
-
-    def __init__(self):
-        self.quorumHash = 0
-        self.id = 0
-        self.msgHash = 0
-        self.sig = b'\x00' * 96
-
-    def deserialize(self, f):
-        self.quorumHash = deser_uint256(f)
-        self.id = deser_uint256(f)
-        self.msgHash = deser_uint256(f)
-        self.sig = f.read(96)
-
-    def serialize(self):
-        r = b""
-        r += ser_uint256(self.quorumHash)
-        r += ser_uint256(self.id)
-        r += ser_uint256(self.msgHash)
-        r += self.sig
-        return r
-
-
-class CSigShare:
-    __slots__ = ("quorumHash", "quorumMember", "id", "msgHash", "sigShare")
-
-    def __init__(self):
-        self.quorumHash = 0
-        self.quorumMember = 0
-        self.id = 0
-        self.msgHash = 0
-        self.sigShare = b'\x00' * 96
-
-    def deserialize(self, f):
-        self.quorumHash = deser_uint256(f)
-        self.quorumMember = struct.unpack("<H", f.read(2))[0]
-        self.id = deser_uint256(f)
-        self.msgHash = deser_uint256(f)
-        self.sigShare = f.read(96)
-
-    def serialize(self):
-        r = b""
-        r += ser_uint256(self.quorumHash)
-        r += struct.pack("<H", self.quorumMember)
-        r += ser_uint256(self.id)
-        r += ser_uint256(self.msgHash)
-        r += self.sigShare
-        return r
-
-class msg_qsigshare:
-    msgtype = b"qsigshare"
-
-    def __init__(self, sig_shares=None):
-        if sig_shares is None:
-            self.sig_shares = []
-        else:
-            self.sig_shares = sig_shares
-
-    def deserialize(self, f):
-        self.sig_shares = deser_vector(f, CSigShare)
-
-    def serialize(self):
-        r = b""
-        r += ser_vector(self.sig_shares)
-        return r
-
-    def __repr__(self):
-        return "msg_qsigshare(sigShares=%d)" % (len(self.sig_shares))
-
 # Objects that correspond to messages on the wire
 class msg_version:
+    # SYSCOIN: PQ MNAUTH binds the masternode identity to the VERSION transcript.
     __slots__ = ("addrFrom", "addrTo", "nNonce", "relay", "nServices",
-                 "nStartingHeight", "nTime", "nVersion", "strSubVer", "receivedMNAuthChallenge", "fOtherMasternode")
+                 "nStartingHeight", "nTime", "nVersion", "strSubVer",
+                 "receivedMNAuthChallenge", "fOtherMasternode",
+                 "mnAuthVersion", "mnAuthProTxHash",
+                 "mnAuthGlobalKeyVersion", "mnAuthCookie")
     msgtype = b"version"
 
     def __init__(self):
@@ -1629,13 +1551,18 @@ class msg_version:
         self.nTime = int(time.time())
         self.addrTo = CAddress()
         self.addrFrom = CAddress()
-        self.nNonce = random.getrandbits(64)
+        # SYSCOIN: Zero is reserved and cannot bind an MNAUTH transcript.
+        self.nNonce = random.randrange(1, 1 << 64)
         self.strSubVer = ''
         self.nStartingHeight = -1
         self.relay = 0
         # SYSCOIN
-        self.receivedMNAuthChallenge = 0
+        self.receivedMNAuthChallenge = random.randrange(1, 1 << 256)
         self.fOtherMasternode = 0
+        self.mnAuthVersion = 1
+        self.mnAuthProTxHash = 0
+        self.mnAuthGlobalKeyVersion = 0
+        self.mnAuthCookie = random.randrange(1, 1 << 256)
 
 
     def deserialize(self, f):
@@ -1658,8 +1585,14 @@ class msg_version:
             self.relay = struct.unpack("<b", f.read(1))[0]
         except struct.error:
             self.relay = 0
+        # SYSCOIN: Decode the legacy challenge/role and protocol-gated PQ suffix.
         self.receivedMNAuthChallenge = deser_uint256(f)
         self.fOtherMasternode = struct.unpack("<b", f.read(1))[0]
+        if self.nVersion >= PQ_MNAUTH_PROTO_VERSION:
+            self.mnAuthVersion = struct.unpack("<H", f.read(2))[0]
+            self.mnAuthProTxHash = deser_uint256(f)
+            self.mnAuthGlobalKeyVersion = struct.unpack("<I", f.read(4))[0]
+            self.mnAuthCookie = deser_uint256(f)
 
     def serialize(self):
         r = b""
@@ -1672,8 +1605,14 @@ class msg_version:
         r += ser_string(self.strSubVer.encode('utf-8'))
         r += struct.pack("<i", self.nStartingHeight)
         r += struct.pack("<b", self.relay)
+        # SYSCOIN: Serialize the same role-scoped transcript consumed by Core.
         r += ser_uint256(self.receivedMNAuthChallenge)
         r += struct.pack("<b", self.fOtherMasternode)
+        if self.nVersion >= PQ_MNAUTH_PROTO_VERSION:
+            r += struct.pack("<H", self.mnAuthVersion)
+            r += ser_uint256(self.mnAuthProTxHash)
+            r += struct.pack("<I", self.mnAuthGlobalKeyVersion)
+            r += ser_uint256(self.mnAuthCookie)
         return r
 
     def __repr__(self):
@@ -1875,7 +1814,8 @@ class msg_block:
 # for cases where a user needs tighter control over what is sent over the wire
 # note that the user must supply the name of the msgtype, and the data
 class msg_generic:
-    __slots__ = ("data")
+    # SYSCOIN: malformed PQ-message tests need the documented dynamic command.
+    __slots__ = ("data", "msgtype")
 
     def __init__(self, msgtype, data=None):
         self.msgtype = msgtype
@@ -2256,89 +2196,100 @@ class msg_getmnlistd():
     def __repr__(self):
         return "msg_getmnlistd(baseBlockHash=%064x, blockHash=%064x)" % (self.baseBlockHash, self.blockHash)
 
-QuorumId = namedtuple('QuorumId', ['quorumHash'])
+# SYSCOIN: GETCLSIG supports either an empty best-certificate request or one
+# exact logical ID for a targeted retry.
+class msg_getclsig:
+    __slots__ = ("logical_id",)
+    msgtype = b"getclsig"
 
-class msg_qsendrecsigs():
-    __slots__ = ()
-    msgtype = b"qsendrecsigs"
-
-    def __init__(self):
-        pass
+    def __init__(self, logical_id=None):
+        self.logical_id = logical_id
 
     def deserialize(self, f):
-        pass
+        payload = f.read()
+        assert len(payload) in (0, 32)
+        self.logical_id = None if not payload else uint256_from_str(payload)
 
     def serialize(self):
-        return b""
+        return b"" if self.logical_id is None else ser_uint256(self.logical_id)
 
     def __repr__(self):
-        return "msg_qsendrecsigs()"
+        if self.logical_id is None:
+            return "msg_getclsig(best=True)"
+        return "msg_getclsig(logical_id=%064x)" % self.logical_id
 
-class msg_clsig():
+
+# SYSCOIN BEGIN: Post-quantum ChainLock and payment-audit wire messages.
+class msg_pqclshare:
+    """Opaque fixed-width post-quantum ChainLock share."""
+    msgtype = b"pqclshare"
+
+    def __init__(self, payload=b""):
+        self.payload = payload
+
+    def deserialize(self, f):
+        self.payload = f.read()
+
+    def serialize(self):
+        return self.payload
+
+    def __repr__(self):
+        return "msg_pqclshare(bytes=%d)" % len(self.payload)
+
+class msg_clsig:
+    """Opaque final post-quantum ChainLock certificate."""
     msgtype = b"clsig"
 
-    def __init__(self, height=0, blockHash=0, sig=b'\\x0' * 96, signers=None):
-        self.height = height
-        self.blockHash = blockHash
-        self.sig = sig
-        if signers is None:
-            signers = []
-        self.signers = signers
+    def __init__(self, payload=b""):
+        self.payload = payload
 
     def deserialize(self, f):
-        self.height = struct.unpack('<i', f.read(4))[0]
-        self.blockHash = deser_uint256(f)
-        self.sig = f.read(96)
-        self.signers = deser_dyn_bitset(f, False)
-
+        self.payload = f.read()
 
     def serialize(self):
-        r = b""
-        r += struct.pack('<i', self.height)
-        r += ser_uint256(self.blockHash)
-        r += self.sig
-        r += ser_dyn_bitset(self.signers, False)
-        return r
+        return self.payload
 
     def __repr__(self):
-        return "msg_clsig(height=%d, blockHash=%064x)" % (self.height, self.blockHash)
+        return "msg_clsig(bytes=%d)" % len(self.payload)
 
-class msg_btccsig():
-    """
-    CBTCCheckpointSig wire format (used as an in-block receipt, not a P2P message).
 
-    Serialized fields match the C++ struct:
-      int32 nHeight
-      uint256 sysHash
-      bytes[96] sig
-      dyn_bitset signers
-    """
-    msgtype = b"btccsig"
+class msg_getpqpose:
+    """Request one exact payment-audit witness from durable storage."""
+    __slots__ = ("witness_id",)
+    msgtype = b"getpqpose"
 
-    def __init__(self, height=0, sysHash=0, sig=b'\x00' * 96, signers=None):
-        self.height = height
-        self.sysHash = sysHash
-        self.sig = sig
-        if signers is None:
-            signers = []
-        self.signers = signers
+    def __init__(self, witness_id=0):
+        self.witness_id = witness_id
 
     def deserialize(self, f):
-        self.height = struct.unpack('<i', f.read(4))[0]
-        self.sysHash = deser_uint256(f)
-        self.sig = f.read(96)
-        self.signers = deser_dyn_bitset(f, False)
+        self.witness_id = deser_uint256(f)
+        assert not f.read()
 
     def serialize(self):
-        r = b""
-        r += struct.pack('<i', self.height)
-        r += ser_uint256(self.sysHash)
-        r += self.sig
-        r += ser_dyn_bitset(self.signers, False)
-        return r
+        return ser_uint256(self.witness_id)
 
     def __repr__(self):
-        return "msg_btccsig(height=%d, sysHash=%064x)" % (self.height, self.sysHash)
+        return "msg_getpqpose(witness_id=%064x)" % self.witness_id
+
+
+class msg_pqposecert:
+    """Opaque fixed-width final payment-audit certificate."""
+    __slots__ = ("payload",)
+    msgtype = b"pqposecert"
+
+    def __init__(self, payload=b""):
+        self.payload = payload
+
+    def deserialize(self, f):
+        self.payload = f.read()
+
+    def serialize(self):
+        return self.payload
+
+    def __repr__(self):
+        return "msg_pqposecert(bytes=%d)" % len(self.payload)
+
+# SYSCOIN END: Post-quantum ChainLock and payment-audit wire messages.
 
 class msg_no_witness_blocktxn(msg_blocktxn):
     __slots__ = ()

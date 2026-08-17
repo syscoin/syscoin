@@ -33,12 +33,18 @@
 
 // SYSCOIN
 #include <pubkey.h>
-#include <bls/bls.h>
 class CBlockIndex;
 class CChain;
+class CDeterministicMNList;
 class Chainstate;
+struct PQMempoolTestAccess;
+namespace llmq::pq {
+struct PQRegistryMempoolView;
+}
 
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -417,6 +423,30 @@ public:
 private:
     typedef std::map<txiter, setEntries, CompareIteratorByHash> cacheMap;
 
+    // SYSCOIN: begin branch-bound PQ provider reservations.
+    struct PQChildTreeReservation {
+        uint16_t version{0};
+        uint16_t profile{0};
+        uint16_t usage_cap{0};
+        uint16_t depth{0};
+        uint32_t generation{0};
+        uint32_t first_epoch{0};
+        uint256 tree_id;
+        uint256 root;
+
+        friend bool operator==(const PQChildTreeReservation&,
+                               const PQChildTreeReservation&) = default;
+    };
+
+    struct PQGlobalReservation {
+        uint256 pro_tx_hash;
+        std::array<uint8_t, 32> public_key{};
+        PQChildTreeReservation commitment;
+        bool introduces_operator{true};
+        bool introduces_tree{true};
+    };
+    // SYSCOIN: end branch-bound PQ provider reservations.
+
 
     void UpdateParent(txiter entry, txiter parent, bool add) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void UpdateChild(txiter entry, txiter child, bool add) EXCLUSIVE_LOCKS_REQUIRED(cs);
@@ -429,11 +459,39 @@ private:
     std::set<uint256> m_unbroadcast_txids GUARDED_BY(cs);
     // SYSCOIN
     std::multimap<uint256, uint256> mapProTxRefs; // proTxHash -> transaction (all TXs that refer to an existing proTx)
+    // Consensus allows only one PQ registry mutation per operator in a block.
+    std::map<uint256, uint256> mapPQOperatorUpdates; // proTxHash -> transaction
+    std::map<COutPoint, uint256> mapPQUpdateCollaterals;
+    std::map<uint256, COutPoint> mapPQUpdateCollateralByTx;
+    // A PQ revoke excludes every provider mutation for the operator in its block.
+    std::map<uint256, uint256> mapPQRevocations; // proTxHash -> transaction
+    std::map<std::array<uint8_t, 32>, uint256> mapPQGlobalKeys;
+    std::map<uint256, uint256> mapPQTreeIds;
+    std::map<uint256, PQGlobalReservation> mapPQGlobalReservations;
+    std::size_t m_pq_operator_introductions{0};
+    std::size_t m_pq_tree_introductions{0};
     std::map<CService, uint256> mapProTxAddresses;
     std::map<std::vector<unsigned char>, uint256> mapProTxNEVMAddresses;
     std::map<CKeyID, uint256> mapProTxPubKeyIDs;
-    std::map<uint256, uint256> mapProTxBlsPubKeyHashes;
     std::map<COutPoint, uint256> mapProTxCollaterals;
+
+    std::optional<size_t> FindPackageProviderTxConflict(
+        const std::vector<CTransactionRef>& package,
+        const CDeterministicMNList& mn_list,
+        const llmq::pq::PQRegistryMempoolView& registry_view) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    bool RebuildPQRegistryReservations(
+        const llmq::pq::PQRegistryMempoolView& registry_view)
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void removeProTxSpentCollateralConflicts(
+        const CTransaction& tx,
+        const CDeterministicMNList& mn_list)
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void removeProTxConflicts(const CTransaction& tx,
+                              const CDeterministicMNList& mn_list)
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+
+    friend struct PQMempoolTestAccess;
 
 
     /**
@@ -493,17 +551,40 @@ public:
     // Note that addUnchecked is ONLY called from ATMP outside of tests
     // and any other callers may break wallet's in-mempool tracking (due to
     // lack of CValidationInterface::TransactionAddedToMempool callbacks).
-    void addUnchecked(const CTxMemPoolEntry& entry, bool validFeeEstimate = true) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void addUnchecked(const CTxMemPoolEntry& entry, setEntries& setAncestors, bool validFeeEstimate = true) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    // SYSCOIN: Carry branch-bound PQ registry context into insertion.
+    bool addUnchecked(const CTxMemPoolEntry& entry,
+                      bool validFeeEstimate = true,
+                      const CBlockIndex* pq_registry_tip = nullptr,
+                      std::optional<COutPoint> pq_operator_collateral =
+                          std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    bool addUnchecked(const CTxMemPoolEntry& entry,
+                      setEntries& setAncestors,
+                      bool validFeeEstimate = true,
+                      const CBlockIndex* pq_registry_tip = nullptr,
+                      std::optional<COutPoint> pq_operator_collateral =
+                          std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeRecursive(const CTransaction& tx, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
     // SYSCOIN
     void removeProTxPubKeyConflicts(const CTransaction &tx, const CKeyID &keyId) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxNEVMKeyConflicts(const CTransaction &tx, const std::vector<unsigned char> &vchNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void removeProTxPubKeyConflicts(const CTransaction &tx, const CBLSLazyPublicKey &pubKey) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxCollateralConflicts(const CTransaction &tx, const COutPoint &collateralOutpoint) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxSpentCollateralConflicts(const CTransaction &tx) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void removeProTxKeyChangedConflicts(const CTransaction &tx, const uint256& proTxHash, const uint256& newKeyHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxConflicts(const CTransaction &tx) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    std::optional<size_t> FindPackageProviderTxConflict(
+        const std::vector<CTransactionRef>& package,
+        const CBlockIndex* active_tip) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    std::optional<size_t> FindPackageProviderTxConflict(
+        const std::vector<CTransactionRef>& package,
+        const CBlockIndex* active_tip,
+        const llmq::pq::PQRegistryMempoolView& registry_view) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    bool RebuildPQRegistryReservations(const CBlockIndex* active_tip)
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void RemoveProviderTransactionsForReorg()
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     bool existsConflicts(const CTransaction& tx) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     bool isSyscoinConflictIsFirstSeen(const CTransaction &tx) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeZDAGConflicts(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
@@ -730,7 +811,11 @@ public:
 
     std::vector<TxMempoolInfo> infoAll() const;
     // SYSCOIN
-    bool existsProviderTxConflict(const CTransaction &tx) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    bool existsProviderTxConflict(
+        const CTransaction& tx,
+        const CBlockIndex* active_tip,
+        std::optional<COutPoint>* pq_operator_collateral = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     size_t DynamicMemoryUsage() const;
 
     /** Adds a transaction to the unbroadcast set */

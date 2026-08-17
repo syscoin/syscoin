@@ -8,6 +8,8 @@ endif
 
 if ENABLE_TESTS
 bin_PROGRAMS += test/test_syscoin
+# SYSCOIN: Build the full-dimension PQ fixture outside the installed binaries.
+noinst_PROGRAMS += test/pq_chainlock_fixture
 endif
 
 TEST_SRCDIR = test
@@ -37,8 +39,10 @@ RAW_TEST_FILES = \
 
 GENERATED_TEST_FILES = $(JSON_TEST_FILES:.json=.json.h) $(RAW_TEST_FILES:.raw=.raw.h)
 
+# SYSCOIN: Include shared PQ fixture utilities in the Syscoin test harness.
 SYSCOIN_TEST_SUITE = \
   test/main.cpp \
+  test/pq_test_util.h \
   $(TEST_UTIL_H)
 
 FUZZ_SUITE_LD_COMMON = \
@@ -51,7 +55,6 @@ FUZZ_SUITE_LD_COMMON = \
  $(LIBSYSCOIN_CONSENSUS) \
  $(LIBSYSCOIN_CRYPTO) \
  $(LIBSYSCOIN_CLI) \
- $(LIBDASHBLS) \
  $(LIBUNIVALUE) \
  $(LIBLEVELDB) \
  $(LIBMEMENV) \
@@ -59,9 +62,7 @@ FUZZ_SUITE_LD_COMMON = \
  $(MINISKETCH_LIBS) \
  $(EVENT_LIBS) \
  $(EVENT_PTHREADS_LIBS) \
- $(LIBNEVM) \
- $(LIBDASHBLS) \
- $(GMP_LIBS)
+ $(LIBNEVM)
 
 if USE_UPNP
 FUZZ_SUITE_LD_COMMON += $(MINIUPNPC_LIBS)
@@ -72,6 +73,8 @@ FUZZ_SUITE_LD_COMMON += $(NATPMP_LIBS)
 endif
 
 # test_syscoin binary #
+# SYSCOIN: In this mixed upstream/fork list, fork additions retain descriptive
+# btc_header_*, legacy_*, pq_*, governance_*, Evo, or NEVM source names.
 SYSCOIN_TESTS =\
   test/addrman_tests.cpp \
   test/allocator_tests.cpp \
@@ -92,7 +95,6 @@ SYSCOIN_TESTS =\
   test/blockfilter_tests.cpp \
   test/blockmanager_tests.cpp \
   test/bloom_tests.cpp \
-  test/bls_tests.cpp \
   test/bswap_tests.cpp \
   test/checkqueue_tests.cpp \
   test/coins_tests.cpp \
@@ -117,8 +119,8 @@ SYSCOIN_TESTS =\
   test/i2p_tests.cpp \
   test/interfaces_tests.cpp \
   test/key_tests.cpp \
-  test/llmq_dkg_tests.cpp \
-  test/llmq_sigshare_cache_tests.cpp \
+  test/legacy_bls_tests.cpp \
+  test/legacy_quorum_commitment_tests.cpp \
   test/logging_tests.cpp \
   test/mempool_tests.cpp \
   test/merkle_tests.cpp \
@@ -136,6 +138,38 @@ SYSCOIN_TESTS =\
   test/policyestimator_tests.cpp \
   test/pool_tests.cpp \
   test/pow_tests.cpp \
+  test/btc_header_policy_tests.cpp \
+  test/pq_chainlock_types_tests.cpp \
+  test/pq_chainlock_collector_tests.cpp \
+  test/pq_chainlock_integration_tests.cpp \
+  test/pq_chainlock_handler_tests.cpp \
+  test/pq_chainlock_persistence_tests.cpp \
+  test/pq_btcc_tests.cpp \
+  test/pq_payment_audit_tests.cpp \
+  test/pq_payment_audit_staging_store_tests.cpp \
+  test/pq_payment_audit_store_tests.cpp \
+  test/pq_payment_audit_verify_tests.cpp \
+  test/pq_payment_probation_tests.cpp \
+  test/pq_payment_probation_db_tests.cpp \
+  test/pq_chainlock_schedule_tests.cpp \
+  test/pq_chainlock_store_tests.cpp \
+  test/pq_chainlock_signer_tests.cpp \
+  test/pq_chainlock_verify_tests.cpp \
+  test/pq_crypto_tests.cpp \
+  test/pq_child_key_tree_tests.cpp \
+  test/pq_global_auth_tests.cpp \
+  test/pq_governance_auth_tests.cpp \
+  test/pq_mnauth_tests.cpp \
+  test/pq_migration_tests.cpp \
+  test/pq_operator_keys_tests.cpp \
+  test/pq_operator_key_state_tests.cpp \
+  test/pq_provider_auth_tests.cpp \
+  test/pq_provider_codec_tests.cpp \
+  test/pq_providertx_tests.cpp \
+  test/pq_registry_tests.cpp \
+  test/pq_quorum_builder_tests.cpp \
+  test/pq_quorum_overlay_tests.cpp \
+  test/pq_signer_journal_tests.cpp \
   test/prevector_tests.cpp \
   test/raii_event_tests.cpp \
   test/random_tests.cpp \
@@ -239,11 +273,20 @@ test_test_syscoin_CPPFLAGS += $(BDB_CPPFLAGS)
 endif
 
 test_test_syscoin_LDADD += $(LIBSYSCOIN_NODE) $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_CONSENSUS) $(LIBSYSCOIN_CRYPTO) $(LIBUNIVALUE) \
-  $(LIBDASHBLS) $(LIBLEVELDB) $(LIBMEMENV) $(LIBSECP256K1) $(EVENT_LIBS) $(EVENT_PTHREADS_LIBS) $(MINISKETCH_LIBS) $(LIBNEVM) $(LIBDASHBLS)
+  $(LIBLEVELDB) $(LIBMEMENV) $(LIBSECP256K1) $(EVENT_LIBS) $(EVENT_PTHREADS_LIBS) $(MINISKETCH_LIBS) $(LIBNEVM)
 test_test_syscoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
-test_test_syscoin_LDADD += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(SQLITE_LIBS) $(GMP_LIBS)
+test_test_syscoin_LDADD += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(SQLITE_LIBS)
 test_test_syscoin_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS) -static
+
+# SYSCOIN: Non-installed generator for the full-dimension daemon fixture. It feeds
+# snapshots and shares into public production interfaces; it is never linked
+# into syscoind and cannot inject a completed certificate.
+test_pq_chainlock_fixture_SOURCES = test/pq_chainlock_fixture.cpp
+test_pq_chainlock_fixture_CPPFLAGS = $(syscoin_bin_cppflags)
+test_pq_chainlock_fixture_CXXFLAGS = $(syscoin_bin_cxxflags)
+test_pq_chainlock_fixture_LDFLAGS = $(syscoin_bin_ldflags)
+test_pq_chainlock_fixture_LDADD = $(syscoin_bin_ldadd)
 
 if ENABLE_ZMQ
 test_test_syscoin_LDADD += $(LIBSYSCOIN_ZMQ) $(ZMQ_LIBS)
@@ -251,6 +294,7 @@ FUZZ_SUITE_LD_COMMON += $(LIBSYSCOIN_ZMQ) $(ZMQ_LIBS)
 endif
 
 if ENABLE_FUZZ_BINARY
+# SYSCOIN: Fork fuzz targets in this mixed list retain pq_* or syscoin_* names.
 test_fuzz_fuzz_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES) $(BOOST_CPPFLAGS)
 test_fuzz_fuzz_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 test_fuzz_fuzz_LDADD = $(FUZZ_SUITE_LD_COMMON)
@@ -328,6 +372,11 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/poolresource.cpp \
  test/fuzz/pow.cpp \
  test/fuzz/prevector.cpp \
+ test/fuzz/pq_chainlock_types.cpp \
+ test/fuzz/pq_governance_auth.cpp \
+ test/fuzz/pq_providertx.cpp \
+ test/fuzz/pq_slhdsa.cpp \
+ test/fuzz/pq_sphincs_c11.cpp \
  test/fuzz/primitives_transaction.cpp \
  test/fuzz/process_message.cpp \
  test/fuzz/process_messages.cpp \

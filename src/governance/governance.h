@@ -7,13 +7,22 @@
 
 #include <governance/governanceobject.h>
 
+#include <array>
+#include <atomic>
 #include <cachemap.h>
 #include <cachemultimap.h>
-#include <net_types.h>
-#include <util/check.h>
+#include <chrono>
 #include <evo/evodb.h>
-#include <atomic>
+#include <limits>
+#include <map>
+#include <memory>
+#include <net_types.h>
 #include <optional>
+#include <set>
+#include <string_view>
+#include <tuple>
+#include <util/check.h>
+#include <utility>
 
 class CBloomFilter;
 class CBlockIndex;
@@ -39,7 +48,164 @@ using CDeterministicMNListPtr = std::shared_ptr<CDeterministicMNList>;
 
 namespace governance_tests {
 class CGovernanceManagerTestAccess;
+bool PublishGovernanceReadyForTest(CGovernanceManager& manager,
+                                   const CBlockIndex& tip);
 }
+
+enum class GovernanceObjectAdmissionResult {
+    ACCEPTED,
+    UNAVAILABLE,
+    LOCAL_INELIGIBLE,
+    STALE_TIP,
+    DUPLICATE,
+    RESOURCE_LIMIT,
+    INVALID,
+};
+
+enum class GovernanceTriggerAdmissionResult {
+    ACCEPTED,
+    UNAVAILABLE,
+    LOCAL_INELIGIBLE,
+    INVALID,
+};
+
+[[nodiscard]] std::string_view GovernanceObjectAdmissionError(
+    GovernanceObjectAdmissionResult result);
+
+// SYSCOIN: bound peer-triggered SLH work when serving governance votes.
+class GovernanceVoteSyncRateLimiter final
+{
+public:
+    static constexpr std::size_t MAX_SOURCES{512};
+    static constexpr std::size_t MAX_VERIFICATIONS_PER_REQUEST{256};
+    static constexpr uint8_t SOURCE_BURST{2};
+    static constexpr auto SOURCE_REFILL_INTERVAL{std::chrono::minutes{5}};
+    static constexpr auto GLOBAL_MIN_INTERVAL{std::chrono::seconds{2}};
+    static constexpr auto SOURCE_EXPIRY{std::chrono::hours{24}};
+
+    [[nodiscard]] bool Consume(
+        int64_t peer, const uint256& authenticated_pro_tx,
+        uint64_t keyed_net_group, std::chrono::microseconds now);
+    [[nodiscard]] std::size_t Size() const noexcept { return m_buckets.size(); }
+
+private:
+    struct SourceIdentity {
+        uint256 authenticated_pro_tx;
+        uint64_t keyed_net_group{0};
+        int64_t fallback_peer{-1};
+
+        friend bool operator<(const SourceIdentity& lhs,
+                              const SourceIdentity& rhs) noexcept
+        {
+            return std::tie(lhs.authenticated_pro_tx,
+                            lhs.keyed_net_group, lhs.fallback_peer) <
+                   std::tie(rhs.authenticated_pro_tx,
+                            rhs.keyed_net_group, rhs.fallback_peer);
+        }
+    };
+
+    struct Bucket {
+        uint8_t tokens{SOURCE_BURST};
+        std::chrono::microseconds last_refill{0};
+        std::chrono::microseconds last_seen{0};
+    };
+
+    std::map<SourceIdentity, Bucket> m_buckets;
+    std::chrono::microseconds m_next_global_request{0};
+};
+// SYSCOIN: end bounded governance vote sync admission.
+
+// Cheap page requests are rate-limited independently of expensive payload
+// verification. Authenticated peers remain constrained by both their ProTx
+// identity and the keyed netgroup they used before MNAUTH.
+class GovernancePageServeRateLimiter final
+{
+public:
+    enum class RequestResult : uint8_t {
+        ACCEPTED,
+        GLOBAL_BUSY,
+        SOURCE_LIMITED,
+    };
+
+    static constexpr std::size_t MAX_SOURCE_RECORDS{1024};
+    static constexpr uint8_t SOURCE_BURST{2};
+    static constexpr auto SOURCE_REFILL_INTERVAL{
+        std::chrono::milliseconds{500}};
+    static constexpr auto GLOBAL_MIN_INTERVAL{
+        std::chrono::milliseconds{25}};
+    static constexpr auto SOURCE_EXPIRY{std::chrono::hours{1}};
+    static constexpr std::size_t SOURCE_BYTE_CAPACITY{
+        MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES};
+    static constexpr std::size_t GLOBAL_BYTE_CAPACITY{
+        2 * MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES};
+    static constexpr std::size_t SOURCE_BYTE_REFILL_PER_SECOND{1ULL << 20};
+    static constexpr std::size_t GLOBAL_BYTE_REFILL_PER_SECOND{4ULL << 20};
+
+    [[nodiscard]] RequestResult Consume(
+        int64_t peer, const uint256& authenticated_pro_tx,
+        uint64_t keyed_net_group, std::chrono::microseconds now);
+
+    /** Charge an authorized payload before allocating its wire encoding. */
+    [[nodiscard]] bool ConsumePayloadBytes(
+        int64_t peer, const uint256& authenticated_pro_tx,
+        uint64_t keyed_net_group, std::size_t bytes,
+        std::chrono::microseconds now);
+
+private:
+    struct SourceKey {
+        bool authenticated{false};
+        uint256 pro_tx_hash;
+        uint64_t keyed_net_group{0};
+        int64_t fallback_peer{-1};
+
+        friend bool operator<(const SourceKey& lhs,
+                              const SourceKey& rhs) noexcept
+        {
+            return std::tie(lhs.authenticated, lhs.pro_tx_hash,
+                            lhs.keyed_net_group, lhs.fallback_peer) <
+                   std::tie(rhs.authenticated, rhs.pro_tx_hash,
+                            rhs.keyed_net_group, rhs.fallback_peer);
+        }
+    };
+    struct Bucket {
+        uint8_t tokens{SOURCE_BURST};
+        std::chrono::microseconds last_refill{0};
+        std::chrono::microseconds last_seen{0};
+        std::size_t byte_tokens{SOURCE_BYTE_CAPACITY};
+        std::chrono::microseconds byte_last_refill{0};
+    };
+
+    std::map<SourceKey, Bucket> m_buckets;
+    std::chrono::microseconds m_next_global_request{0};
+    std::size_t m_global_byte_tokens{GLOBAL_BYTE_CAPACITY};
+    std::chrono::microseconds m_global_byte_last_refill{0};
+};
+
+// Cache hits are cheap, but constructing a new immutable scope can serialize
+// tens of MiB. Charge that work independently from the per-request limiter so
+// rotating peers/scopes cannot repeatedly hold governance validation locks.
+class GovernancePageBuildRateLimiter final
+{
+public:
+    static constexpr std::size_t TOKEN_CAPACITY{
+        MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES};
+    static constexpr std::size_t MINIMUM_BUILD_CHARGE{1ULL << 20};
+    static constexpr std::size_t REFILL_BYTES_PER_SECOND{1ULL << 20};
+    static constexpr auto MIN_BUILD_INTERVAL{
+        std::chrono::milliseconds{500}};
+
+    /** Reserve the minimum work charge before inspecting an uncached scope. */
+    [[nodiscard]] bool Begin(std::chrono::microseconds now);
+
+    /** Charge the measured remainder after the bounded size preflight. */
+    [[nodiscard]] bool Charge(std::size_t retained_bytes);
+
+private:
+    std::size_t m_tokens{TOKEN_CAPACITY};
+    std::chrono::microseconds m_last_refill{0};
+    std::chrono::microseconds m_next_build{0};
+    bool m_build_active{false};
+};
 
 class CRateCheckBuffer
 {
@@ -138,6 +304,8 @@ public:
 
 class GovernanceStore
 {
+    friend class governance_tests::CGovernanceManagerTestAccess;
+
 protected:
     struct last_object_rec {
         explicit last_object_rec(bool fStatusOKIn = true) :
@@ -161,6 +329,9 @@ protected:
 
 protected:
     static constexpr int MAX_CACHE_SIZE = 1000000;
+    // SYSCOIN: orphan votes are unauthenticated until their parent arrives.
+    static constexpr std::size_t MAX_ORPHAN_VOTES{4096};
+    static constexpr std::size_t MAX_ORPHAN_VOTES_PER_OBJECT{32};
     static const std::string SERIALIZATION_VERSION_STRING;
 
 public:
@@ -170,6 +341,15 @@ public:
 protected:
     // keep track of the scanning errors
     std::map<uint256, CGovernanceObject> mapObjects GUARDED_BY(cs);
+    // Shared immutable object-page view. It is rebuilt only when object
+    // eligibility changes or the next cached trigger reaches its event height.
+    mutable bool m_object_page_dirty GUARDED_BY(cs){true};
+    mutable std::weak_ptr<const GovernancePageImmutableSnapshot>
+        m_object_page_snapshot GUARDED_BY(cs);
+    mutable int m_object_page_next_trigger_height GUARDED_BY(cs){
+        std::numeric_limits<int>::max()};
+    std::shared_ptr<GovernancePageSnapshotBudget> m_page_snapshot_budget;
+    mutable uint64_t m_next_page_snapshot_instance GUARDED_BY(cs){1};
     // mapErasedGovernanceObjects contains key-value pairs, where
     //   key   - governance object's hash
     //   value - expiration time for deleted objects
@@ -220,6 +400,13 @@ public:
 
     void Clear();
 
+protected:
+    void InvalidateObjectPageCache() const EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] std::optional<uint64_t>
+    NextGovernancePageSnapshotInstance() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+public:
     std::string ToString() const;
 };
 
@@ -230,10 +417,88 @@ class CGovernanceManager : public GovernanceStore
 {
     friend class CGovernanceObject;
     friend class governance_tests::CGovernanceManagerTestAccess;
+    friend bool governance_tests::PublishGovernanceReadyForTest(
+        CGovernanceManager& manager, const CBlockIndex& tip);
 
 private:
     using hash_s_t = std::set<uint256>;
     using db_type = CFlatDB<GovernanceStore>;
+
+    struct PQGovernanceTipIdentity {
+        int32_t height{-1};
+        uint256 hash;
+
+        PQGovernanceTipIdentity() = default;
+        explicit PQGovernanceTipIdentity(const CBlockIndex& tip);
+
+        friend bool operator==(const PQGovernanceTipIdentity&,
+                               const PQGovernanceTipIdentity&) = default;
+    };
+
+    struct PQGovernanceReadinessState {
+        std::optional<PQGovernanceTipIdentity> observed_tip;
+        std::optional<PQGovernanceTipIdentity> ready_tip;
+        uint64_t validation_context_epoch{1};
+    };
+
+    // MSVC deprecates the legacy shared-pointer atomics, while supported older
+    // libc++ releases do not yet provide the C++20 specialization.
+    class AtomicPQGovernanceReadiness
+    {
+        using value_type =
+            std::shared_ptr<const PQGovernanceReadinessState>;
+
+    public:
+        explicit AtomicPQGovernanceReadiness(value_type value) noexcept : m_value{std::move(value)}
+        {
+        }
+
+        value_type load(std::memory_order order) const noexcept
+        {
+#if defined(__cpp_lib_atomic_shared_ptr) && \
+    __cpp_lib_atomic_shared_ptr >= 201711L
+            return m_value.load(order);
+#else
+            return std::atomic_load_explicit(&m_value, order);
+#endif
+        }
+
+        bool compare_exchange_weak(value_type& expected,
+                                   value_type desired,
+                                   std::memory_order success,
+                                   std::memory_order failure) noexcept
+        {
+#if defined(__cpp_lib_atomic_shared_ptr) && \
+    __cpp_lib_atomic_shared_ptr >= 201711L
+            return m_value.compare_exchange_weak(
+                expected, std::move(desired), success, failure);
+#else
+            return std::atomic_compare_exchange_weak_explicit(
+                &m_value, &expected, std::move(desired), success, failure);
+#endif
+        }
+
+    private:
+#if defined(__cpp_lib_atomic_shared_ptr) && \
+    __cpp_lib_atomic_shared_ptr >= 201711L
+        std::atomic<value_type> m_value;
+#else
+        value_type m_value;
+#endif
+    };
+
+    struct PQGovernanceAuthority {
+        uint256 pro_tx_hash;
+        uint32_t global_key_version{0};
+
+        friend bool operator==(const PQGovernanceAuthority&,
+                               const PQGovernanceAuthority&) = default;
+    };
+    using pq_authority_map_t =
+        std::map<COutPoint, PQGovernanceAuthority>;
+    using delegated_authority_map_t = std::map<COutPoint, CKeyID>;
+    using pq_vote_object_index_t =
+        std::map<COutPoint, std::set<uint256>>;
 
     class ScopedLockBool
     {
@@ -258,11 +523,14 @@ private:
 private:
     static const int MAX_TIME_FUTURE_DEVIATION;
     static const int RELIABLE_PROPAGATION_TIME;
+    static constexpr uint64_t MAX_PERSISTED_VOTE_BYTES{512ULL << 20};
+    static constexpr uint64_t MAX_GOVERNANCE_CACHE_FILE_BYTES{768ULL << 20};
 
 private:
     ChainstateManager& chainman;
     const std::unique_ptr<db_type> m_db;
-    bool is_valid{false};
+    std::atomic<bool> is_valid{false};
+    AtomicPQGovernanceReadiness m_pq_governance_readiness;
 
 
     int64_t nTimeLastDiff;
@@ -270,11 +538,35 @@ private:
     std::atomic<int> nCachedBlockHeight;
     std::map<uint256, CGovernanceObject> mapPostponedObjects;
     hash_s_t setAdditionalRelayObjects;
-    hash_s_t setRequestedObjects;
-    hash_s_t setRequestedVotes;
     bool fRateChecksEnabled;
     std::optional<uint256> votedFundingYesTriggerHash;
     std::map<uint256, std::shared_ptr<CSuperblock>> mapTrigger;
+    std::set<uint256> m_pq_inactive_triggers GUARDED_BY(cs);
+    Mutex m_vote_sync_rate_mutex;
+    GovernanceVoteSyncRateLimiter m_vote_sync_rate
+        GUARDED_BY(m_vote_sync_rate_mutex);
+    Mutex m_page_serve_rate_mutex;
+    GovernancePageServeRateLimiter m_page_serve_rate
+        GUARDED_BY(m_page_serve_rate_mutex);
+    mutable Mutex m_page_build_rate_mutex;
+    mutable GovernancePageBuildRateLimiter m_page_build_rate
+        GUARDED_BY(m_page_build_rate_mutex);
+    pq_authority_map_t m_pq_authorities GUARDED_BY(cs);
+    delegated_authority_map_t m_delegated_funding_authorities
+        GUARDED_BY(cs);
+    pq_vote_object_index_t m_pq_vote_objects GUARDED_BY(cs);
+    pq_vote_object_index_t m_delegated_funding_vote_objects
+        GUARDED_BY(cs);
+    uint256 m_pq_authority_tip_hash GUARDED_BY(cs);
+    int32_t m_pq_authority_tip_height GUARDED_BY(cs){-1};
+    bool m_pq_authority_snapshot_valid GUARDED_BY(cs){false};
+    std::size_t m_governance_valid_mn_count GUARDED_BY(cs){0};
+    bool m_rebuilding_cached_triggers GUARDED_BY(cs){false};
+    bool m_pq_trigger_state_initialized GUARDED_BY(cs){false};
+    uint64_t m_pq_vote_context_checks GUARDED_BY(cs){0};
+    uint64_t m_delegated_vote_context_checks GUARDED_BY(cs){0};
+    uint64_t m_pq_full_revalidations GUARDED_BY(cs){0};
+    uint64_t m_persisted_vote_bytes GUARDED_BY(cs){0};
 
 public:
     const std::unique_ptr<CEvoDB<uint256, CAmount, StaticSaltedHasher>> m_sb;
@@ -284,19 +576,35 @@ public:
 
     bool LoadCache(bool load_cache);
 
-    bool IsValid() const { return is_valid; }
+    bool IsValid() const
+    {
+        return is_valid.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool IsReady() const;
+    [[nodiscard]] bool IsReadyForTip(const CBlockIndex* tip) const;
+    [[nodiscard]] std::optional<uint64_t>
+    GetPQGovernanceValidationContextEpoch() const;
+    void ObserveChainTip(const CBlockIndex* tip);
 
-    /**
-     * This is called by AlreadyHave in net_processing.cpp as part of the inventory
-     * retrieval process.  Returns true if we want to retrieve the object, otherwise
-     * false. (Note logic is inverted in AlreadyHave).
-     */
-    bool ConfirmInventoryRequest(const GenTxid& gtxid);
-
-    void SyncSingleObjVotes(CNode* pnode, const uint256& nProp, const CBloomFilter& filter, CConnman& connman, PeerManager& peerman);
+    // SYSCOIN: SLH vote verification is forbidden under global state locks.
+    void SyncSingleObjVotes(CNode* pnode, const uint256& nProp,
+                            const CBloomFilter& filter, CConnman& connman,
+                            PeerManager& peerman);
     void SyncObjects(CNode* pnode, CConnman& connman, PeerManager &peerman) const;
 
-    void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, CConnman& connman, PeerManager& peerman);
+    void ProcessMessage(CNode* pfrom, const std::string& strCommand,
+                        CDataStream& vRecv, CConnman& connman,
+                        PeerManager& peerman)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_page_serve_rate_mutex);
+
+    /** Build a deterministic bounded page for objects or one parent's votes. */
+    [[nodiscard]] std::optional<GovernancePageBuildResult>
+    BuildGovernancePage(
+        const CGovernancePageRequest& request,
+        std::shared_ptr<const GovernancePageImmutableSnapshot>
+            continuation = {},
+        std::optional<std::chrono::microseconds>
+            build_request_time = std::nullopt) const;
 
     void ResetVotedFundingTrigger();
 
@@ -311,15 +619,29 @@ public:
     std::vector<CGovernanceVote> GetCurrentVotes(const uint256& nParentHash, const COutPoint& mnCollateralOutpointFilter) const;
     void GetAllNewerThan(std::vector<CGovernanceObject>& objs, int64_t nMoreThanTime) const;
 
-    void AddGovernanceObject(CGovernanceObject& govobj, PeerManager& peerman, const CNode* pfrom = nullptr);
+    [[nodiscard]] GovernanceObjectAdmissionResult AddGovernanceObject(
+        CGovernanceObject& govobj, PeerManager& peerman,
+        const CNode* pfrom = nullptr,
+        const CBlockIndex* expected_tip = nullptr,
+        const CBlockIndex* pq_preverified_tip = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !cs);
 
     void CheckAndRemove();
 
     UniValue ToJson() const;
 
-    void UpdatedBlockTip(const CBlockIndex* pindex, CConnman& connman, PeerManager& peerman);
-    int64_t GetLastDiffTime() const { return nTimeLastDiff; }
-    void UpdateLastDiffTime(int64_t nTimeIn) { nTimeLastDiff = nTimeIn; }
+    void UpdatedBlockTip(const CBlockIndex* pindex, CConnman& connman,
+                         PeerManager& peerman);
+    int64_t GetLastDiffTime() const
+    {
+        LOCK(cs);
+        return nTimeLastDiff;
+    }
+    void UpdateLastDiffTime(int64_t nTimeIn)
+    {
+        LOCK(cs);
+        nTimeLastDiff = nTimeIn;
+    }
 
     int GetCachedBlockHeight() const { return nCachedBlockHeight.load(std::memory_order_relaxed); }
 
@@ -334,11 +656,42 @@ public:
 
     bool SerializeVoteForHash(const uint256& nHash, CDataStream& ss) const;
 
-    void AddPostponedObject(const CGovernanceObject& govobj)
-    {
-        LOCK(cs);
-        mapPostponedObjects.insert(std::make_pair(govobj.GetHash(), govobj));
-    }
+    /** Size a currently serviceable payload before consuming upload bytes. */
+    [[nodiscard]] std::optional<std::size_t>
+    GetObjectSerializedSizeForHash(const uint256& nHash, int version) const;
+
+    /** Includes signature slack because vote hashes omit wire signatures. */
+    [[nodiscard]] std::optional<std::size_t>
+    GetVoteSerializedSizeUpperBoundForHash(const uint256& nHash,
+                                           int version) const;
+
+    /** Charge a one-shot governance upload before it enters a peer send queue. */
+    [[nodiscard]] bool ConsumeGovernancePayloadBytes(
+        int64_t peer, const uint256& authenticated_pro_tx,
+        uint64_t keyed_net_group, std::size_t bytes,
+        std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_page_serve_rate_mutex);
+
+    /** Exact upload paths authorized by a preceding GOVPAGE response. */
+    bool SerializeObjectForPage(const uint256& hash, CDataStream& ss) const;
+    bool SerializeVoteForPage(const uint256& parent_hash,
+                              const uint256& vote_hash,
+                              CDataStream& ss) const;
+    bool HaveObjectForPage(const uint256& hash) const;
+    bool HaveVoteForPage(const uint256& parent_hash,
+                         const uint256& vote_hash) const;
+
+    /**
+     * Return the exact bounded root-page object set used to seed vote scopes.
+     * A missing result means the current governance view is not ready or is
+     * too large to satisfy the paged protocol contract.
+     */
+    [[nodiscard]] GovernancePageObjectHashesResult
+    GetGovernancePageObjectHashes() const;
+
+    [[nodiscard]] GovernanceObjectAdmissionResult AddPostponedObject(
+        const CGovernanceObject& govobj,
+        const CBlockIndex* expected_tip = nullptr);
 
     void MasternodeRateUpdate(const CGovernanceObject& govobj);
 
@@ -356,7 +709,7 @@ public:
         return fRateChecksEnabled;
     }
 
-    void InitOnLoad();
+    bool InitOnLoad();
 
     int RequestGovernanceObjectVotes(CNode* pnode, CConnman& connman, const PeerManager& peerman) const;
     int RequestGovernanceObjectVotes(const std::vector<CNode*>& vNodesCopy, CConnman& connman, const PeerManager& peerman) const;
@@ -366,46 +719,169 @@ public:
      *   - Track governance objects which are triggers
      *   - After triggers are activated and executed, they can be removed
     */
-    std::vector<std::shared_ptr<CSuperblock>> GetActiveTriggers() EXCLUSIVE_LOCKS_REQUIRED(cs);
-    bool AddNewTrigger(uint256 nHash, int active_height) EXCLUSIVE_LOCKS_REQUIRED(cs);
-    void CleanAndRemoveTriggers();
+    std::vector<std::shared_ptr<CSuperblock>> GetActiveTriggers(
+        const CBlockIndex* expected_tip = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] GovernanceTriggerAdmissionResult AddNewTrigger(
+        uint256 nHash, int active_height) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void CleanAndRemoveTriggers() EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] bool RevalidatePQGovernance(
+        const CBlockIndex& validation_tip);
     bool UndoBlock(const CBlockIndex* pindex);
 
+    std::string ToString() const;
+
 private:
+    [[nodiscard]] bool IsGovernancePageObjectEligible(
+        const uint256& hash, const CGovernanceObject& object,
+        int active_height) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     std::optional<const CSuperblock> CreateSuperblockCandidate(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    std::optional<const CGovernanceObject> CreateGovernanceTrigger(const std::optional<const CSuperblock>& sb_opt, PeerManager& peerman) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    std::optional<const CGovernanceObject> CreateGovernanceTrigger(
+        const std::optional<const CSuperblock>& sb_opt,
+        const CBlockIndex* expected_tip, PeerManager& peerman)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void VoteGovernanceTriggers(const std::optional<const CGovernanceObject>& trigger_opt, CConnman& connman, PeerManager& peerman) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool VoteFundingTrigger(const uint256& nHash, const vote_outcome_enum_t outcome, CConnman& connman, PeerManager& peerman);
+    [[nodiscard]] std::vector<uint256> GetNoFundingTriggerHashes() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    bool VoteFundingTrigger(const uint256& nHash,
+                            const vote_outcome_enum_t outcome,
+                            CConnman& connman, PeerManager& peerman);
     bool HasAlreadyVotedFundingTrigger() const;
 
     void RequestGovernanceObject(CNode* pfrom, const uint256& nHash, CConnman& connman, bool fUseFilter = false) const;
 
-    void AddInvalidVote(const CGovernanceVote& vote)
-    {
-        cmapInvalidVotes.Insert(vote.GetHash(), vote);
-    }
+    bool ProcessVote(CNode* pfrom, const CGovernanceVote& vote,
+                     CGovernanceException& exception, CConnman& connman,
+                     bool* orphan_vote_retained = nullptr);
 
-    bool ProcessVote(CNode* pfrom, const CGovernanceVote& vote, CGovernanceException& exception, CConnman& connman);
+    // SYSCOIN: performs SLH verification without chain/governance/object locks.
+    void CheckOrphanVotes(const uint256& object_hash, PeerManager& peerman);
+    void DrainReadyOrphanVotes(PeerManager& peerman)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !cs);
 
-    /// Called to indicate a requested object has been received
-    bool AcceptObjectMessage(const uint256& nHash);
+    [[nodiscard]] bool StoreOrphanVote(
+        const uint256& object_hash, const vote_time_pair_t& vote_pair)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
 
-    /// Called to indicate a requested vote has been received
-    bool AcceptVoteMessage(const uint256& nHash);
+    [[nodiscard]] bool VerifyPQVoteUnlocked(
+        const CGovernanceVote& vote,
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        llmq::pq::GovernanceAuthPurpose purpose,
+        std::string& error) const;
 
-    static bool AcceptMessage(const uint256& nHash, hash_s_t& setHash);
+    [[nodiscard]] bool VerifyOrphanPQVoteUnlocked(
+        const CGovernanceVote& vote,
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        std::string& error) const;
 
-    void CheckOrphanVotes(CGovernanceObject& govobj, PeerManager& peerman) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] bool VerifyTriggerObjectUnlocked(
+        const CGovernanceObject& object,
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        std::string& error) const;
 
-    void RebuildIndexes();
+    [[nodiscard]] bool RevalidatePQGovernanceImpl(
+        const CBlockIndex& validation_tip);
 
-    void AddCachedTriggers(int active_height);
+    [[nodiscard]] static bool BuildPQGovernanceAuthorityMap(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+        pq_authority_map_t& authorities,
+        std::string& error);
+
+    [[nodiscard]] static bool BuildDelegatedGovernanceAuthorityMap(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        delegated_authority_map_t& authorities,
+        std::string& error);
+
+    [[nodiscard]] bool IsStraightPQGovernanceExtension(
+        const CBlockIndex& validation_tip) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    [[nodiscard]] bool IsRememberedPQGovernanceTip(
+        const CBlockIndex& validation_tip) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    [[nodiscard]] static std::set<COutPoint>
+    FindChangedPQGovernanceAuthorities(
+        const pq_authority_map_t& previous,
+        const pq_authority_map_t& next);
+
+    [[nodiscard]] static std::set<COutPoint>
+    FindChangedDelegatedGovernanceAuthorities(
+        const delegated_authority_map_t& previous,
+        const delegated_authority_map_t& next);
+
+    void IndexGovernanceVote(const uint256& object_hash, int object_type,
+                             const CGovernanceVote& vote)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void RemoveObjectFromGovernanceVoteIndexes(
+        const uint256& object_hash, const CGovernanceObject& object)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] bool ReconcileGovernanceVotes(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+        bool full_revalidation,
+        const std::set<COutPoint>& changed_pq_operators,
+        const std::set<COutPoint>& changed_delegated_operators,
+        const std::set<uint256>& reactivated_triggers,
+        std::set<uint256>& flags_to_refresh,
+        std::size_t& checked_pq_votes,
+        std::size_t& checked_delegated_votes)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void RememberFailedPQGovernanceTip(
+        const CBlockIndex& validation_tip)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    void MarkPQGovernanceUnavailableForTip(
+        const CBlockIndex& validation_tip);
+    [[nodiscard]] bool AdvancePQGovernanceValidationContext();
+    [[nodiscard]] bool PublishPQGovernanceReadyForTip(
+        const CBlockIndex& validation_tip,
+        bool advance_validation_context = false);
+
+    [[nodiscard]] bool RebuildPQTriggerState(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+        bool recompute_cached_flags,
+        std::set<uint256>* reactivated_triggers = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] bool IsPQInactiveTrigger(const uint256& object_hash) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    [[nodiscard]] static uint64_t PersistedVoteBytes(
+        const CGovernanceVote& vote);
+    [[nodiscard]] bool CanAdmitPersistedVoteBytes(
+        uint64_t current_object_bytes, uint64_t projected_object_bytes) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] bool ProcessVoteWithBudget(
+        CGovernanceObject& object,
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const CGovernanceVote& vote,
+        CGovernanceException& exception,
+        bool pq_signature_preverified)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] bool RebuildPersistedVoteBytes()
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void EraseOrphanVote(const uint256& object_hash,
+                         const vote_time_pair_t& vote_pair)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void EraseOrphanVotes(const uint256& object_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    [[nodiscard]] bool RebuildIndexes();
 
     void RequestOrphanObjects(CConnman& connman);
 
     void CleanOrphanObjects();
-
-    void RemoveInvalidVotes();
 
 };
 

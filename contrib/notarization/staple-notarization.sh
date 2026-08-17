@@ -1,5 +1,6 @@
 #!/bin/bash
 # Script to staple notarization tickets to Syscoin apps
+export LC_ALL=C
 set -e
 
 # Check for version parameter
@@ -76,4 +77,4 @@ echo "They will run on any macOS without security warnings!"
 echo ""
 echo "You can verify the final apps with:"
 echo "  codesign --verify --deep --strict --verbose=2 <extracted-app>"
-echo "  xcrun stapler validate <extracted-app>" 
+echo "  xcrun stapler validate <extracted-app>"

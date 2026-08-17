@@ -10,16 +10,23 @@
 #include <consensus/params.h>
 #include <crypto/common.h>
 #include <evo/evodb.h>
+#include <evo/pq_registry.h>
+#include <evo/pq_payment_probation_db.h>
 #include <evo/providertx.h>
 #include <saltedhasher.h>
 #include <scheduler.h>
 #include <sync.h>
+#include <util/ranges.h>
 
 #include <immer/map.hpp>
 
 #include <atomic>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <optional>
+#include <span>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -29,12 +36,9 @@ class UniValue;
 class CBlockIndex;
 class TxValidationState;
 class ChainstateManager;
-namespace llmq
-{
-    class CFinalCommitmentTxPayload;
-    class CFinalCommitment;
-} // namespace llmq
-
+namespace llmq {
+class CFinalCommitmentTxPayload;
+}
 class CDeterministicMN
 {
 private:
@@ -199,6 +203,11 @@ public:
     {
         blockHash = _blockHash;
     }
+    /** The default list is the intentional pre-DIP3 / unavailable sentinel. */
+    [[nodiscard]] bool IsNull() const noexcept
+    {
+        return nHeight < 0;
+    }
     [[nodiscard]] int GetHeight() const
     {
         assert(nHeight >= 0);
@@ -213,6 +222,9 @@ public:
     {
         return nTotalRegisteredCount;
     }
+
+    /** SYSCOIN: Stable versioned digest for migration anchors. */
+    [[nodiscard]] uint256 GetPQLegacyStateHash(const uint256& genesis_hash) const;
 
     [[nodiscard]] bool IsMNValid(const uint256& proTxHash) const;
     [[nodiscard]] bool IsMNPoSeBanned(const uint256& proTxHash) const;
@@ -233,12 +245,12 @@ public:
     }
     [[nodiscard]] CDeterministicMNCPtr GetMN(const uint256& proTxHash) const;
     [[nodiscard]] CDeterministicMNCPtr GetValidMN(const uint256& proTxHash) const;
-    [[nodiscard]] CDeterministicMNCPtr GetMNByOperatorKey(const CBLSPublicKey& pubKey) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByCollateral(const COutPoint& collateralOutpoint) const;
     [[nodiscard]] CDeterministicMNCPtr GetValidMNByCollateral(const COutPoint& collateralOutpoint) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByService(const CService& service) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByInternalId(uint64_t internalId) const;
-    [[nodiscard]] CDeterministicMNCPtr GetMNPayee() const;
+    [[nodiscard]] CDeterministicMNCPtr GetMNPayee(
+        const llmq::pq::PQPaymentProbationState* payment_state = nullptr) const;
 
     /**
      * Calculates the projected MN payees for the next *count* blocks. The result is not guaranteed to be correct
@@ -246,7 +258,9 @@ public:
      * @param nCount the number of payees to return. "nCount = max()"" means "all", use it to avoid calling GetValidMNsCount twice.
      * @return
      */
-    [[nodiscard]] std::vector<CDeterministicMNCPtr> GetProjectedMNPayees(int nCount = std::numeric_limits<int>::max()) const;
+    [[nodiscard]] std::vector<CDeterministicMNCPtr> GetProjectedMNPayees(
+        int nCount = std::numeric_limits<int>::max(),
+        const llmq::pq::PQPaymentProbationState* payment_state = nullptr) const;
 
     /**
      * Calculate a quorum based on the modifier. The resulting list is deterministically sorted by score
@@ -318,7 +332,6 @@ private:
     template <typename T>
     [[nodiscard]] uint256 GetUniquePropertyHash(const T& v) const
     {
-        static_assert(!std::is_same<T, CBLSPublicKey>(), "GetUniquePropertyHash cannot be templated against CBLSPublicKey");
         return ::SerializeHash(v);
     }
     template <typename T>
@@ -494,6 +507,34 @@ private:
 
     const CBlockIndex* tipIndex GUARDED_BY(cs) {nullptr};
     uint256 m_last_maintained_tip GUARDED_BY(cs);
+    // SYSCOIN: A crash-durable BTCC/NEVM replay obligation retains every
+    // branch snapshot at or above this floor. It is memory-only because the
+    // preseal marker is the authoritative crash-restored record.
+    int m_replay_snapshot_retention_floor GUARDED_BY(cs){
+        std::numeric_limits<int>::max()};
+    // SYSCOIN: This replaceable floor keeps every persisted branch snapshot
+    // that can still supply a roster for an admissible finality certificate.
+    int m_finality_snapshot_retention_floor GUARDED_BY(cs){
+        std::numeric_limits<int>::max()};
+    // SYSCOIN: Candidate verification and durable-but-not-yet-enforced
+    // finality must temporarily retain every branch. The transient count is
+    // globally bounded by the ChainLock verifier mutex; the publication flag
+    // survives verification until the durable winner is active.
+    size_t m_finality_snapshot_verifications_in_flight GUARDED_BY(cs){0};
+    bool m_finality_snapshot_publication_pending GUARDED_BY(cs){false};
+    uint64_t m_replay_snapshot_retention_generation GUARDED_BY(cs){0};
+    DBParams m_pq_registry_db_params;
+    // SYSCOIN: The registry is immutable after successful publication. A
+    // once-flag models that lifetime directly and avoids imposing a private
+    // initialization-lock precondition on every consensus caller.
+    mutable std::once_flag m_pq_registry_init_once;
+    mutable std::atomic_bool m_pq_registry_init_requested{false};
+    mutable std::unique_ptr<llmq::pq::PQRegistryManager> m_pq_registry;
+    std::unique_ptr<llmq::pq::PQPaymentProbationManager>
+        m_payment_probation;
+
+    llmq::pq::PQRegistryManager* GetOrCreatePQRegistry(
+        std::string& error) const;
 public:
     struct EvoDBStats {
         int64_t approxPersistedEntries{0};
@@ -508,31 +549,105 @@ public:
     ~CDeterministicMNManager() = default;
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state,
-                      const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, CDeterministicMNListNEVMAddressDiff &diff, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+                      const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload& legacy_commitment,
+                      CDeterministicMNListNEVMAddressDiff &diff, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool UndoBlock(const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff &inversedDiffNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,
-                                CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet, const llmq::CFinalCommitmentTxPayload &qcTx) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList);
+                                CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet,
+                                const llmq::CFinalCommitmentTxPayload& legacy_commitment) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease);
 
     const CDeterministicMNList GetListForBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void GetListForBlock(const CBlockIndex* pindex, CDeterministicMNList& list);
     const CDeterministicMNList GetListAtChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** SYSCOIN: Validate PQ operator-key transactions against exact parent snapshots. */
+    bool CheckPQTransaction(const CTransaction& tx,
+                            const CBlockIndex* pindexPrev,
+                            TxValidationState& state,
+                            bool fJustCheck,
+                            bool check_sigs)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+
+    /** SYSCOIN: Exact branch lookup used by quorum construction and MNAUTH. */
+    bool GetPQRegistrySnapshot(const CBlockIndex* pindex,
+                               llmq::pq::PQRegistrySnapshot& snapshot,
+                               std::string& error) const;
+
+    /** Resolve the exact branch-local payment-only probation state. */
+    bool GetPaymentProbationState(
+        const CBlockIndex* pindex,
+        llmq::pq::PQPaymentProbationState& state) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Publish one receipt-derived state before the block index root is durable. */
+    bool CommitPaymentProbationState(
+        const llmq::pq::PQPaymentProbationState& state,
+        const uint256& expected_hash,
+        bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    [[nodiscard]] uint256 EmptyPaymentProbationStateHash() const;
+
+    /**
+     * After an authenticated audit checkpoint is durably committed, prune
+     * covered payment-state roots synchronously. Callers must retain every
+     * root referenced by active/prospective replay markers and the
+     * authenticated current suffix.
+     */
+    bool PrunePaymentProbationStatesThroughEpoch(
+        uint32_t prune_through_epoch,
+        std::span<const uint256> retained_state_hashes)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Select the deterministic payee after applying payment-only probation. */
+    bool GetMNPayeeForBlock(const CBlockIndex* pindex,
+                            CDeterministicMNCPtr& payee)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** SYSCOIN: Bounded exact-parent registry view for mempool reservations. */
+    bool GetPQRegistryMempoolView(
+        const CBlockIndex* pindex,
+        std::span<const uint256> requested_operators,
+        llmq::pq::PQRegistryMempoolView& view,
+        std::string& error) const;
+
     // Test if given TX is a ProRegTx which also contains the collateral at index n
     static bool IsProTxWithCollateral(const CTransactionRef& tx, uint32_t n);
     bool IsDIP3Enforced(int nHeight = -1) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool FlushCacheToDisk(bool bForceFlush, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /**
+     * SYSCOIN: Persist dirty DMN snapshots and order prior asynchronous PQ
+     * registry writes without pruning against a potentially stale tip.
+     */
+    bool FlushPendingSnapshotsToDisk(bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool DoMaintenance(bool bForceFlush, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool GetEvoDBStats(EvoDBStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool HasPersistentWindow() const;
+    bool VerifyPQLegacyAnchorState(const CBlockIndex* anchor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool VerifyPersistedPQRegistrySnapshot(const CBlockIndex* pindex);
+    /** SYSCOIN: Read an existing snapshot without creating recovery state on a miss. */
+    bool VerifyPersistedSnapshot(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
+    int UpdateReplaySnapshotRetentionFloor(
+        std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Replace the roster floor derived from durable certificates. */
+    int UpdateFinalitySnapshotRetentionFloor(
+        std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Serialize candidate-roster use against snapshot pruning. */
+    void BeginFinalitySnapshotVerificationRetention()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Release one globally bounded candidate-verification hold. */
+    void EndFinalitySnapshotVerificationRetention()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Retain all branches until durable finality is active. */
+    void UpdateFinalitySnapshotPublicationRetention(bool retain)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };
-extern int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE; // keep them for a week
 extern std::unique_ptr<CDeterministicMNManager> deterministicMNManager;
 extern bool fMasternodeMode;
 #endif // SYSCOIN_EVO_DETERMINISTICMNS_H

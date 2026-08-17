@@ -17,8 +17,11 @@
 #include <util/time.h>
 
 #include <vector>
-// SYSCOIN
-class ChainstateManager;
+// SYSCOIN: BTCC replay pruning is coordinated through the block manager from
+// validation-owned ChainLock state without importing blockstorage internals.
+namespace node {
+class BlockManager;
+}
 /**
  * Maximum amount of time that a block timestamp is allowed to exceed the
  * current network-adjusted time before the block will be accepted.
@@ -138,6 +141,7 @@ enum BlockStatus : uint32_t {
     BLOCK_ASSUMED_VALID      =   256,
     // SYSCOIN
     BLOCK_CONFLICT_CHAINLOCK =   512, //!< conflicts with chainlock system
+    // SYSCOIN: Persist exact governance provenance for PQ finality.
     /**
      * Exact governance validation was performed for this superblock while the
      * required governance data was available. This is persisted so ChainLock
@@ -145,6 +149,20 @@ enum BlockStatus : uint32_t {
      * through the bounded historical-sync fallback.
      */
     BLOCK_GOVERNANCE_VALIDATED = 1024,
+    // SYSCOIN: This block's persisted BTCPREV/BTCC accumulator was produced
+    // only after full script, special-transaction, and exact governance
+    // validation. This predates the full payment-audit accumulator bit below;
+    // live finality requires both on its target, while BTCC-only compatibility
+    // paths may continue to recognize this narrower provenance.
+    BLOCK_PQ_BTCC_INDEX_VALIDATED = 2048,
+    /**
+     * SYSCOIN:
+     * Full scripts and Syscoin special-transaction receipt accumulators were
+     * derived locally for this block. This deliberately says nothing about
+     * historical off-chain governance; live finality continues to require the
+     * stronger BLOCK_PQ_BTCC_INDEX_VALIDATED provenance above.
+     */
+    BLOCK_PQ_RECEIPT_INDEX_VALIDATED = 4096,
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -211,9 +229,33 @@ public:
     uint32_t nBits{0};
     uint32_t nNonce{0};
     // SYSCOIN: BTC prev-block-hash commitment (BTCPREV) extracted from this block's coinbase payload.
-    // Persisted in the block index so later logic (e.g. BTCC carrier handling / ZMQ forwarding) can
+    // Persisted in the block index so BTCC cursor validation and lagged NEVM forwarding can
     // deterministically map sysHash -> BTCPREV without reading block data from disk.
     uint256 btcpPrevCommitment{};
+    // SYSCOIN: branch-local authenticated BTCC receipt accumulator. The four
+    // fields are canonical-null together until a verified ADVANCE receipt is
+    // connected; PQ ChainLocks sign this state to seal historical receipts.
+    int32_t pqBTCCReceiptCursorHeight{-1};
+    uint256 pqBTCCReceiptCursorSysHash{};
+    uint256 pqBTCCReceiptCursorBTCHash{};
+    uint256 pqBTCCReceiptStateHash{};
+    // SYSCOIN: Branch-local payment-audit receipt accumulator and the exact
+    // hash-addressed probation state used for deterministic payment selection.
+    // These fields never affect PoSe validity or quorum membership.
+    int32_t pqPaymentAuditReceiptCursorHeight{-1};
+    uint32_t pqPaymentAuditReceiptCursorEpoch{0};
+    uint256 pqPaymentAuditReceiptCursorSealHash{};
+    uint256 pqPaymentAuditReceiptCursorLogicalId{};
+    // The logical id names the common audit statement; this id names the
+    // exact signer-report witness whose result was applied.
+    uint256 pqPaymentAuditReceiptCursorWitnessId{};
+    uint256 pqPaymentAuditReceiptStateHash{};
+    uint256 pqPaymentProbationStateHash{};
+    // SYSCOIN: Runtime-only authorization for forwarding this carrier's BTC
+    // cursor to NEVM. Receipt bytes and their accumulator remain persistent,
+    // but an off-chain ADVANCE certificate must be verified again after a
+    // restart before its checkpoint is exposed to Geth.
+    bool m_pq_btcc_receipt_live_verified{false};
     // SYSCOIN: memory-only cache populated after contextual BTCPREV validation so
     // ConnectBlock can avoid reparsing in the hot path without changing persisted
     // side-chain index semantics.
@@ -269,7 +311,10 @@ public:
         block.nNonce = nNonce;
         return block;
     }
-    CBlockHeader GetBlockHeader(const ChainstateManager& chainman) const;
+    // SYSCOIN: Header reconstruction needs block storage only. Keeping the
+    // validation manager out of this boundary avoids importing consensus
+    // validation back into the chain-index implementation.
+    CBlockHeader GetBlockHeader(const node::BlockManager& blockman) const;
     CBlockHeader GetBlockHeader() const;
 
     uint256 GetBlockHash() const
@@ -416,10 +461,19 @@ class CDiskBlockIndex : public CBlockIndex
      * Hard-code to the highest client version ever written.
      * SerParams can be used if the field requires any meaning in the future.
      **/
+    // SYSCOIN: BTCPREV and the cumulative BTCC receipt state must survive
+    // restart and reindex. Version-gating the extended block-index record
+    // preserves decoding of databases written before either field existed.
     // NOTE: This is a legacy, historically-unused on-disk version marker for CDiskBlockIndex records.
     // Bumping it allows backwards-compatible extension of the serialized format.
     static constexpr int DUMMY_VERSION = 259900;
     static constexpr int DISK_INDEX_VERSION_BTCPREV = DUMMY_VERSION + 1;
+    static constexpr int DISK_INDEX_VERSION_PQ_BTCC_RECEIPT_STATE =
+        DUMMY_VERSION + 2;
+    static constexpr int DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_STATE =
+        DUMMY_VERSION + 3;
+    static constexpr int DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_WITNESS =
+        DUMMY_VERSION + 4;
 
 public:
     uint256 hashPrev;
@@ -438,8 +492,24 @@ public:
     {
         LOCK(::cs_main);
         int _nVersion = DUMMY_VERSION;
+        // SYSCOIN: Write the newest block-index record version required by
+        // the non-null branch-bound receipt state.
         SER_WRITE(obj, {
-            if (!obj.btcpPrevCommitment.IsNull()) {
+            if (!obj.pqPaymentAuditReceiptCursorWitnessId.IsNull()) {
+                _nVersion = DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_WITNESS;
+            } else if (obj.pqPaymentAuditReceiptCursorHeight != -1 ||
+                obj.pqPaymentAuditReceiptCursorEpoch != 0 ||
+                !obj.pqPaymentAuditReceiptCursorSealHash.IsNull() ||
+                !obj.pqPaymentAuditReceiptCursorLogicalId.IsNull() ||
+                !obj.pqPaymentAuditReceiptStateHash.IsNull() ||
+                !obj.pqPaymentProbationStateHash.IsNull()) {
+                _nVersion = DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_STATE;
+            } else if (obj.pqBTCCReceiptCursorHeight != -1 ||
+                !obj.pqBTCCReceiptCursorSysHash.IsNull() ||
+                !obj.pqBTCCReceiptCursorBTCHash.IsNull() ||
+                !obj.pqBTCCReceiptStateHash.IsNull()) {
+                _nVersion = DISK_INDEX_VERSION_PQ_BTCC_RECEIPT_STATE;
+            } else if (!obj.btcpPrevCommitment.IsNull()) {
                 _nVersion = DISK_INDEX_VERSION_BTCPREV;
             }
         });
@@ -461,6 +531,25 @@ public:
         READWRITE(obj.nNonce);
         if (_nVersion >= DISK_INDEX_VERSION_BTCPREV) {
             READWRITE(obj.btcpPrevCommitment);
+        }
+        // SYSCOIN: Extended receipt fields are version-gated so old block
+        // indexes remain readable during migration and reindex.
+        if (_nVersion >= DISK_INDEX_VERSION_PQ_BTCC_RECEIPT_STATE) {
+            READWRITE(obj.pqBTCCReceiptCursorHeight,
+                      obj.pqBTCCReceiptCursorSysHash,
+                      obj.pqBTCCReceiptCursorBTCHash,
+                      obj.pqBTCCReceiptStateHash);
+        }
+        if (_nVersion >= DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_STATE) {
+            READWRITE(obj.pqPaymentAuditReceiptCursorHeight,
+                      obj.pqPaymentAuditReceiptCursorEpoch,
+                      obj.pqPaymentAuditReceiptCursorSealHash,
+                      obj.pqPaymentAuditReceiptCursorLogicalId,
+                      obj.pqPaymentAuditReceiptStateHash,
+                      obj.pqPaymentProbationStateHash);
+        }
+        if (_nVersion >= DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_WITNESS) {
+            READWRITE(obj.pqPaymentAuditReceiptCursorWitnessId);
         }
     }
 

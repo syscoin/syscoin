@@ -195,6 +195,26 @@ CAuxPow::createAuxPow (const CPureBlockHeader& header)
   return auxpow;
 }
 
+std::unique_ptr<CAuxPow>
+CAuxPow::createAuxPowForTemplate(const CPureBlockHeader& header,
+                                 const uint256& parentPrevHash,
+                                 const CScript& syscoinTagOutput)
+{
+  // SYSCOIN: TestBlockValidity must see the same authenticated parent-prev
+  // and Nexus reference tag that a submitted AuxPoW will carry.  This proof
+  // exists only on a copied template and is never returned to the miner.
+  std::unique_ptr<CAuxPow> auxpow{createAuxPow(header)};
+  assert(auxpow != nullptr);
+
+  CMutableTransaction coinbase{*auxpow->coinbaseTx};
+  coinbase.vout.emplace_back(/*nValue=*/0, syscoinTagOutput);
+  auxpow->coinbaseTx = MakeTransactionRef(std::move(coinbase));
+  auxpow->parentBlock.hashPrevBlock = parentPrevHash;
+  // The validation-only parent contains exactly this coinbase transaction.
+  auxpow->parentBlock.hashMerkleRoot = auxpow->coinbaseTx->GetHash();
+  return auxpow;
+}
+
 CPureBlockHeader&
 CAuxPow::initAuxPow (CBlockHeader& header)
 {

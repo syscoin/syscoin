@@ -85,20 +85,15 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
     "savemempool",           // disabled as a precautionary measure: may take a file path argument in the future
     "setban",                // avoid DNS lookups
     "stop",                  // avoid shutdown state
+    // SYSCOIN: begin RPCs requiring subsystem state absent from this harness.
     "getnevmblockchaininfo",
-    "syscoinstartbtcheadernode", // avoid starting network service threads
-    "syscoinstopbtcheadernode",  // avoid mutating network service state
     // The generic RPC fuzz setup does not initialize Syscoin's service,
-    // masternode, governance, LLMQ, ProTx, or NEVM state. Cover these RPCs,
-    // along with the Syscoin BLS and auxiliary-mining RPCs, in a dedicated
+    // masternode, governance, PQ ChainLock, ProTx, or NEVM state. Cover these
+    // RPCs, along with the Syscoin auxiliary-mining RPCs, in a dedicated
     // follow-up harness.
     "assetallocationverifyzdag",
-    "bls_fromsecret",
-    "bls_generate",
     "createauxblock",
-    "getbestbtccheckpoint",
     "getbestchainlock",
-    "getbtccheckpoints",
     "getchainlocks",
     "getevodbstats",
     "getgovernanceinfo",
@@ -130,30 +125,23 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
     "masternode_winners",
     "mnauth",
     "mnsync",
+    "protx_generate_operator_keypair",
     "protx_info",
     "protx_info_wallet",
     "protx_list",
     "protx_list_wallet",
+    "protx_migration_info",
+    "protx_operator_key_info",
     "protx_register",
     "protx_register_fund",
+    "protx_register_operator_key",
     "protx_register_prepare",
     "protx_register_submit",
     "protx_revoke",
+    "protx_rotate_operator_key",
     "protx_update_registrar",
     "protx_update_service",
-    "quorum_dkgsimerror",
-    "quorum_dkgstatus",
-    "quorum_getrecsig",
-    "quorum_hasrecsig",
-    "quorum_info",
-    "quorum_isconflicting",
-    "quorum_list",
-    "quorum_memberof",
-    "quorum_selectquorum",
-    "quorum_sign",
-    "quorum_verify",
     "spork",
-    "submitchainlock",
     "submitauxblock",
     "syscoincheckmint",
     "syscoincreatenevmblob",
@@ -161,10 +149,13 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
     "syscoindecoderawtransaction",
     "syscoingetspvproof",
     "syscoingettxroots",
+    "syscoinbtcheaderstatus",
+    "syscoinstartbtcheadernode",
     "syscoinstartgeth",
+    "syscoinstopbtcheadernode",
     "syscoinstopgeth",
-    "verifychainlock",
     "voteraw",
+    // SYSCOIN: end RPCs requiring subsystem state absent from this harness.
 };
 
 // RPC commands which are safe for fuzzing.

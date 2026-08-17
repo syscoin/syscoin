@@ -20,6 +20,7 @@
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/cs_main.h> // IWYU pragma: export
 #include <node/blockstorage.h>
+#include <node/btcheader_state.h> // SYSCOIN: shared managed-backend state boundary.
 #include <policy/feerate.h>
 #include <policy/packages.h>
 #include <policy/policy.h>
@@ -36,6 +37,8 @@
 #include <versionbits.h>
 
 #include <atomic>
+// SYSCOIN: callback used to serialize PQ catch-up persistence with activation.
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -57,6 +60,22 @@ class DisconnectedBlockTransactions;
 class CDeterministicMNListNEVMAddressDiff;
 struct PrecomputedTransactionData;
 struct LockPoints;
+
+// SYSCOIN: Expose only the highest-work missing-receipt dependency so the
+// ChainLock scheduler can multiplex one bounded GETCLSIG request lane.
+struct DeferredBTCCReceiptCandidate {
+    uint256 logical_id;
+    const CBlockIndex* carrier{nullptr};
+    CBlockIndex* best_candidate{nullptr};
+};
+enum class DeferredReceiptCertificateKind : uint8_t {
+    BTCC_CHAINLOCK = 0,
+    PAYMENT_AUDIT,
+};
+enum class ChainLockEnforcementProvenance : uint8_t {
+    EXACT_LOCAL = 0,
+    VERIFIED_DURABLE_CERTIFICATE,
+};
 // SYSCOIN
 namespace llmq {
     class CChainLockSig;
@@ -108,20 +127,13 @@ extern bool fNEVMConnection;
 extern std::atomic_bool fReindexGeth;
 extern RecursiveMutex cs_btcheader;
 static constexpr uint8_t NEVM_MAGIC_BYTES[4] = {'n', 'e', 'v', 'm'};
-static constexpr uint8_t BTCCHECK_MAGIC_BYTES[4] = {'b', 't', 'c', 'c'};
-static constexpr uint8_t BTCPREV_MAGIC_BYTES[4] = {'b', 't', 'c', 'p'};
-static constexpr bool DEFAULT_BTC_HEADER_MANAGED{true};
 static constexpr bool DEFAULT_BTC_HEADER_POLICY_ON_DEMAND{false};
 static constexpr bool DEFAULT_BTC_HEADER_WATCHDOG{true};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_PROBE_INTERVAL{15};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_RESTART_COOLDOWN{60};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_STALL_TIMEOUT{1800};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_REINDEX_AFTER{3};
-static constexpr int DEFAULT_BTC_HEADER_TIP_MAX_AGE{2 * 60 * 60};      // seconds
-static constexpr int DEFAULT_BTC_HEADER_RECENT_FORK_DEPTH{2};           // blocks from active tip
-static constexpr int DEFAULT_BTC_HEADER_MAX_LAG_BLOCKS{36};             // candidate lag behind active tip
-static constexpr int DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS{1800};      // seconds
-// Keep mainnet managed btcheader defaults off Bitcoin Core regtest ports (18444/18443).
+static constexpr int DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS{1800};
 static constexpr int DEFAULT_BTC_HEADER_MAINNET_P2P_PORT{18544};
 static constexpr int DEFAULT_BTC_HEADER_MAINNET_RPC_PORT{18543};
 static constexpr int DEFAULT_BTC_HEADER_TESTNET_P2P_PORT{19444};
@@ -131,36 +143,8 @@ static constexpr int DEFAULT_BTC_HEADER_SIGNET_RPC_PORT{20443};
 static constexpr int DEFAULT_BTC_HEADER_REGTEST_P2P_PORT{21444};
 static constexpr int DEFAULT_BTC_HEADER_REGTEST_RPC_PORT{21443};
 
-// SYSCOIN: BTC checkpoint cadence (must remain in sync across miner/specialtx/llmq handler)
-static constexpr int BTCCHECK_PERIOD{10};
-static constexpr int BTCCHECK_SIGN_OFFSET{2};   // within [0, BTCCHECK_PERIOD)
-static constexpr int BTCCHECK_PROP_BUFFER{5};   // blocks between signing and carrier mining
-static constexpr int BTCCHECK_CARRIER_OFFSET{BTCCHECK_SIGN_OFFSET + BTCCHECK_PROP_BUFFER}; // 7
-
-inline bool IsBTCCDeploymentConfigured(const Consensus::Params& consensus)
-{
-    return consensus.nBTCCStartBlock != std::numeric_limits<int>::max();
-}
-
-inline bool IsBTCCSignHeight(const Consensus::Params& consensus, const int height)
-{
-    return IsBTCCDeploymentConfigured(consensus) &&
-           height >= consensus.nBTCCStartBlock &&
-           (height % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET;
-}
-
-inline bool IsBTCCCarrierHeight(const Consensus::Params& consensus, const int height)
-{
-    return height >= BTCCHECK_PROP_BUFFER &&
-           IsBTCCSignHeight(consensus, height - BTCCHECK_PROP_BUFFER);
-}
-
 /** Documentation for argument 'checklevel'. */
 extern const std::vector<std::string> CHECKLEVEL_DOC;
-
-// Returns the managed bitcoin-cli base argv used for BTC header policy RPC checks.
-// When managed mode is disabled or uninitialized, this returns false.
-bool GetManagedBTCHeaderRPCCommandArgs(std::vector<std::string>& args_out);
 
 /** Run instances of script checking worker threads */
 void StartScriptCheckWorkerThreads(int threads_num);
@@ -419,6 +403,22 @@ bool TestBlockValidity(BlockValidationState& state,
                        const std::function<NodeClock::time_point()>& adjusted_time_callback,
                        bool fCheckPOW = true,
                        bool fCheckMerkleRoot = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+/**
+ * SYSCOIN: Validate an AuxPoW work template before the parent proof exists.
+ * The temporary proof binds the already-embedded BTCPREV commitment to the
+ * independently selected Bitcoin parent prevhash; normal block admission
+ * continues to require and validate the miner-supplied AuxPoW.
+ */
+bool TestAuxpowBlockTemplateValidity(
+    BlockValidationState& state,
+    const CChainParams& chainparams,
+    Chainstate& chainstate,
+    const CBlock& block,
+    CBlockIndex* pindexPrev,
+    const uint256& expected_btc_prev,
+    const std::function<NodeClock::time_point()>& adjusted_time_callback)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 // SYSCOIN
 static std::vector<unsigned char> emptyVec;
 /** Check with the proof of work on each blockheader matches the value in nBits */
@@ -629,6 +629,23 @@ public:
      */
     std::set<CBlockIndex*, node::CBlockIndexWorkComparator> setBlockIndexCandidates;
 
+    // SYSCOIN: A branch whose BTCC carrier references an unavailable exact
+    // certificate is not invalid, but it must not monopolize best-chain
+    // selection while another fully verifiable branch is available. These
+    // maximal fork tips remain memory-only and are reconsidered when that
+    // exact logical certificate is accepted.
+    // SYSCOIN BEGIN: Branches quarantined while an authenticated receipt is unavailable.
+    struct DeferredBTCCReceiptDependency {
+        DeferredReceiptCertificateKind kind{
+            DeferredReceiptCertificateKind::BTCC_CHAINLOCK};
+        std::map<const CBlockIndex*,
+                 std::set<CBlockIndex*, node::CBlockIndexWorkComparator>>
+            branches;
+    };
+    std::map<uint256, DeferredBTCCReceiptDependency>
+        m_deferred_btcc_receipt_candidates;
+    // SYSCOIN END: Branches quarantined while an authenticated receipt is unavailable.
+
     //! @returns A reference to the in-memory cache of the UTXO set.
     CCoinsViewCache& CoinsTip() EXCLUSIVE_LOCKS_REQUIRED(cs_main)
     {
@@ -761,13 +778,31 @@ public:
     bool StartBTCHeaderNode(bool force_reindex = false);
     bool StopBTCHeaderNode(bool bOnStart = false);
     bool IsManagedBTCHeaderNodeRunning(std::string& reason);
-    bool EnforceBlock(BlockValidationState& state, const CBlockIndex* pindex)
+    // SYSCOIN: Probe policy readiness and recover only an authenticated owned child.
+    bool CheckBTCHeaderNodeHealth(bool recover, std::string& reason);
+    bool EnforceBlock(BlockValidationState& state, const CBlockIndex* pindex,
+                      ChainLockEnforcementProvenance provenance)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(cs_main);
     bool MarkConflictingBlock(BlockValidationState& state, CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    bool EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex)
+    bool EnforceBestChainLock(
+        const CBlockIndex* bestChainLockBlockIndex,
+        ChainLockEnforcementProvenance provenance)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(cs_main);
+    /** SYSCOIN: Replay one bounded batch of a catch-up-authenticated prefix. */
+    bool ReplayDeferredBTCCNEVM(int32_t through_height,
+                                const uint256& through_hash,
+                                bool& complete,
+                                std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainstate_mutex);
+    /**
+     * SYSCOIN: Serialize a PQ catch-up rebase with active-chain activation.
+     * The callback may take cs_main and synchronously persist its branch-bound
+     * result; no external notification may run inside this boundary.
+     */
+    bool RunWithStableActiveChain(const std::function<bool()>& callback)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainstate_mutex);
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool ResetLastBlock() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -782,7 +817,39 @@ public:
 
     void TryAddBlockIndexCandidate(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    void PruneBlockIndexCandidates();
+    /** Temporarily remove one missing-certificate branch from work selection. */
+    // SYSCOIN BEGIN: Deferred PQ receipt candidate lifecycle.
+    [[nodiscard]] bool DeferBTCCReceiptCandidates(
+        const uint256& logical_id,
+        const CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool DeferPaymentAuditReceiptCandidates(
+        const uint256& logical_id,
+        const CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Restore candidates waiting on an exact certificate after it is accepted. */
+    [[nodiscard]] bool ReconsiderBTCCReceiptCandidates(
+        const uint256& logical_id) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool ReconsiderPaymentAuditReceiptCandidates(
+        const uint256& logical_id) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool HasDeferredBTCCReceiptCandidates(
+        const uint256& logical_id) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool HasDeferredPaymentAuditReceiptCandidates(
+        const uint256& logical_id) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<DeferredBTCCReceiptCandidate>
+    GetBestDeferredBTCCReceiptCandidate() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<DeferredBTCCReceiptCandidate>
+    GetBestDeferredPaymentAuditReceiptCandidate() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool IsBTCCReceiptCandidateDeferred(
+        const CBlockIndex& candidate) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: Deferred PQ receipt candidate lifecycle.
+
+    // SYSCOIN: Preseal replacement may follow only the current best-work candidate.
+    [[nodiscard]] bool IsCurrentMostWorkBranch(const CBlockIndex& ancestor)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    // SYSCOIN: Pruning also maintains the deferred receipt-candidate index.
+    void PruneBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -810,15 +877,49 @@ public:
     }
 
 private:
+    // SYSCOIN BEGIN: Internal deferred-receipt index maintenance.
+    [[nodiscard]] bool DeferReceiptCandidates(
+        DeferredReceiptCertificateKind kind,
+        const uint256& logical_id,
+        const CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool ReconsiderReceiptCandidates(
+        DeferredReceiptCertificateKind kind,
+        const uint256& logical_id) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool HasDeferredReceiptCandidates(
+        DeferredReceiptCertificateKind kind,
+        const uint256& logical_id) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<DeferredBTCCReceiptCandidate>
+    GetBestDeferredReceiptCandidate(DeferredReceiptCertificateKind kind) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<std::pair<uint256, const CBlockIndex*>>
+    FindDeferredBTCCReceiptDependency(const CBlockIndex& candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void AddDeferredBTCCReceiptCandidate(
+        const uint256& logical_id,
+        const CBlockIndex& carrier,
+        CBlockIndex& candidate) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void RemoveDeferredBTCCReceiptCandidatesThrough(
+        const CBlockIndex& unusable) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: Internal deferred-receipt index maintenance.
     bool StartBTCHeaderNodeInternal(bool force_reindex) EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
     bool StopBTCHeaderNodeInternal(bool bOnStart) EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
-    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    // SYSCOIN: Keep watchdog mutation in a lock-annotated member instead of a
+    // lambda whose captured lock state Clang cannot prove.
+    bool RestartBTCHeaderNodeForWatchdog(bool recover,
+                                         int64_t now,
+                                         const std::string& cause,
+                                         std::string& reason)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
+    // SYSCOIN: Report certificate-deferred work separately from invalid blocks.
+    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Rollforward reauthorizes branch-local BTCC receipt state before
+    // replaying any non-null Bitcoin checkpoint to NEVM.
+    bool RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void CheckForkWarningConditions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void InvalidChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ConflictingChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -845,8 +946,12 @@ private:
     void UpdateTip(const CBlockIndex* pindexNew)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     // SYSCOIN
-    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-
+    // SYSCOIN: btcc_prefix_authenticated is reserved for deterministic replay
+    // after a fully verified catch-up seal; live callers leave it false.
+    // SYSCOIN: Normal block connection requires cs_main. Authenticated
+    // catch-up replay instead holds m_chainstate_mutex while releasing
+    // cs_main across the synchronous Geth call.
+    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false);
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
 
@@ -1011,8 +1116,8 @@ public:
      */
     void CheckBlockIndex();
 
-    // SYSCOIN: Startup hardening for BTCC carrier validation.
-    // Backfill btcpPrevCommitment for recent sign-offset blocks if missing in the block index.
+    // SYSCOIN: Startup hardening for deterministic PQ BTCC candidate lookup.
+    // Backfill btcpPrevCommitment for recent candidate blocks if missing in the block index.
     // This is intended to run after loading/verifying chainstate, before processing new blocks,
     // avoiding consensus-path disk reads while remaining tolerant to crashes/upgrades.
     void BackfillRecentBTCPREVCommitments();
@@ -1141,6 +1246,11 @@ public:
     CChain& ActiveChain() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChainstate().m_chain; }
     int ActiveHeight() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Height(); }
     CBlockIndex* ActiveTip() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Tip(); }
+
+    /** SYSCOIN: Persistently retire only one definitively invalid deferred audit branch. */
+    [[nodiscard]] bool RetireDeferredPaymentAuditReceiptCarrier(
+        const uint256& witness_id,
+        CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! The state of a background sync (for net processing)
     bool BackgroundSyncInProgress() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) {
@@ -1286,6 +1396,8 @@ public:
 
     //! Load the block tree and coins database from disk, initializing state if we're running with -reindex
     bool LoadBlockIndex() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Quarantine every indexed branch that conflicts with the pinned migration anchor.
+    bool EnforcePQLegacyAnchorBranches() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Check to see if caches are out of balance and if so, call
     //! ResizeCoinsCaches() as needed.
@@ -1370,7 +1482,17 @@ extern std::unique_ptr<CBlockIndexDB> pblockindexdb;
 // SYSCOIN
 static const unsigned int DEFAULT_RPC_SERIALIZE_VERSION = 1;
 int RPCSerializationFlags();
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+// SYSCOIN: Return whether Geth has applied this height under its count contract.
+[[nodiscard]] std::optional<bool> IsNEVMBlockAppliedForDisconnect(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t disconnect_height) noexcept;
+// SYSCOIN: Count equality alone cannot authenticate an equal-height branch.
+[[nodiscard]] bool DoesNEVMBlockInfoMatchSyscoinBlock(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t expected_syscoin_height,
+    const uint256& reported_syscoin_hash,
+    const uint256& expected_syscoin_hash) noexcept;
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &evmBlock, std::vector<unsigned char>* coinbase_payload = nullptr);
 bool FillNEVMData(CBlock &block);
 bool EraseMempoolNEVMData(const std::vector<uint8_t>& vchVersionHash, const uint256& txid);

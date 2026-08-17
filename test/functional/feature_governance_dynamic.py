@@ -17,8 +17,9 @@ SUPERBLOCK_PAYMENT_LIMIT_DOWN = Decimal('-10')
 SUPERBLOCK_PAYMENT_LIMIT_SAME = Decimal('0')
 GOVERNANCE_FEE_CONFIRMATIONS = 6
 MASTERNODE_SYNC_TICK_SECONDS = 6
+GOVERNANCE_PROPAGATION_TIMEOUT = 60
 MAX_GOVERNANCE_BUDGET = Decimal('5000000.00000000') 
-PROPOSAL_END_EPOCH = 60
+PROPOSAL_END_EPOCH = 600
 class SyscoinGovernanceTest(DashTestFramework):
     def set_test_params(self):
         # Using adjusted v20 deployment params to test an edge case where superblock maturity window is equal to deployment window size
@@ -57,16 +58,50 @@ class SyscoinGovernanceTest(DashTestFramework):
         assert_equal(self.nodes[0].getsuperblockbudget(), satoshi_round(self.expected_budget))
 
     def have_trigger_for_height(self, sb_block_height):
-        count = 0
+        common_winner = None
         for node in self.nodes:
             valid_triggers = node.gobject_list("valid", "triggers")
-            for trigger in list(valid_triggers.values()):
-                if json.loads(trigger["DataString"])["event_block_height"] != sb_block_height:
-                    continue
-                if trigger['AbsoluteYesCount'] > 0:
-                    count = count + 1
-                    break
-        return count == len(self.nodes)
+            matching_triggers = {
+                trigger_hash: trigger
+                for trigger_hash, trigger in valid_triggers.items()
+                if (json.loads(trigger["DataString"])["event_block_height"] ==
+                    sb_block_height and trigger['AbsoluteYesCount'] > 0)
+            }
+            if not matching_triggers:
+                return False
+            max_yes_count = max(
+                trigger['AbsoluteYesCount']
+                for trigger in matching_triggers.values())
+            winners = [
+                (trigger_hash, trigger["DataString"])
+                for trigger_hash, trigger in matching_triggers.items()
+                if trigger['AbsoluteYesCount'] == max_yes_count
+            ]
+            if len(winners) != 1:
+                return False
+            if common_winner is None:
+                common_winner = winners[0]
+            elif winners[0] != common_winner:
+                return False
+        return common_winner is not None
+
+    def all_nodes_have_same_trigger_object_for_height(self, sb_block_height):
+        expected_triggers = None
+        for node in self.nodes:
+            triggers = {
+                (trigger_hash, trigger["DataString"])
+                for trigger_hash, trigger in
+                node.gobject_list("valid", "triggers").items()
+                if json.loads(trigger["DataString"])["event_block_height"] ==
+                sb_block_height
+            }
+            if len(triggers) != 1:
+                return False
+            if expected_triggers is None:
+                expected_triggers = triggers
+            elif triggers != expected_triggers:
+                return False
+        return expected_triggers is not None
 
     def run_test(self):
         
@@ -280,6 +315,7 @@ class SyscoinGovernanceTest(DashTestFramework):
             force_finish_mnsync(node)
 
         proposal_time = self.mocktime
+        self.active_proposal_expiry_time = proposal_time + PROPOSAL_END_EPOCH
         proposals_data = []
 
         # Prepare proposals first
@@ -298,12 +334,20 @@ class SyscoinGovernanceTest(DashTestFramework):
 
         self.generate(self.nodes[0], GOVERNANCE_FEE_CONFIRMATIONS, sync_fun=self.no_op)
         self.sync_blocks()
+        # The large mocktime jumps used to exercise trigger-rate limits can
+        # restart the submitting node's mnsync while confirmations connect.
+        # Refreshing every relay here would also flood their bounded request
+        # lanes with stale inventory immediately before the new proposal.
+        force_finish_mnsync(self.nodes[0])
 
         # Submit proposals and store returned hashes explicitly
         for i, proposal in enumerate(proposals_data):
             proposal_hash = self.nodes[0].gobject_submit("0", 1, proposal_time, proposal["hex"], proposal["collateralHash"])
             proposal["hash"] = proposal_hash
             self.log.info(f"Submitted proposal {i} with hash {proposal_hash}")
+            # This fixture originates every proposal from one peer. Drain its
+            # bounded governance lane before announcing the next object.
+            self.sync_gobject_list(i + 1)
 
         return proposals_data
 
@@ -312,25 +356,120 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.log.info(f"Voting on proposals: {proposal_hashes}")  # Debug statement
         self.sync_gobject_list(len(proposal_hashes))  # Ensure all nodes have the proposals
         for proposal_hash in proposal_hashes:
-            self.nodes[0].gobject_vote_many(proposal_hash, map_vote_signals[1], map_vote_outcomes[1])
+            for expected_yes_count, mn in enumerate(self.mninfo, start=1):
+                self.nodes[0].gobject_vote_alias(
+                    proposal_hash, map_vote_signals[1],
+                    map_vote_outcomes[1], mn.proTxHash)
+                # Node 0 owns every fixture MN voting key, unlike independent
+                # live MN sources. Drain each vote before originating another.
+                self.sync_proposal_votes(proposal_hash, expected_yes_count)
 
-    def sync_gobject_list(self, expected_count=4):
-        # Ensures that each node has processed all governance objects
-        def check_each_node_has_gobjects(node, expected_count=expected_count):
-            self.bump_mocktime(1)
-            return len(node.gobject_list("valid", "proposals")) == expected_count
+    def sync_gobject_list(self, expected_count):
+        def all_nodes_have_exact_count():
+            self._throttled_bump_mocktime(
+                "feature_governance_dynamic_object_sync", step=1)
+            return all(
+                len(node.gobject_list("valid", "proposals")) == expected_count
+                for node in self.nodes)
 
-        # Check for each node individually
-        for i in range(len(self.nodes)):
-            self.wait_until(lambda: check_each_node_has_gobjects(self.nodes[i]), timeout=10)
-        
-        # Double-check that all nodes are synchronized
-        self.wait_until(lambda: all(len(node.gobject_list("valid", "proposals")) > 0 for node in self.nodes), timeout=10)
+        self.wait_until(
+            all_nodes_have_exact_count,
+            timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
 
-    def wait_for_trigger(self, sb_block_height, timeout=10):
+    def capture_proposal_vote_hashes(self, proposal_hashes):
+        expected_vote_count = len(self.mninfo)
+        assert_equal(expected_vote_count, 5)
+        expected_vote_hashes = {}
+        for proposal_hash in proposal_hashes:
+            vote_hashes = set(
+                self.nodes[0].gobject_getcurrentvotes(proposal_hash))
+            assert_equal(len(vote_hashes), expected_vote_count)
+            funding_result = self.nodes[0].gobject_get(
+                proposal_hash)["FundingResult"]
+            assert_equal(funding_result["YesCount"], expected_vote_count)
+            assert_equal(funding_result["NoCount"], 0)
+            assert_equal(funding_result["AbstainCount"], 0)
+            expected_vote_hashes[proposal_hash] = vote_hashes
+        return expected_vote_hashes
+
+    def wait_for_governance_recovery(
+            self, proposal_hashes, expected_vote_hashes, sb_block_height):
+        expected_proposal_hashes = set(proposal_hashes)
+        assert_equal(set(expected_vote_hashes), expected_proposal_hashes)
+        expected_vote_count = len(self.mninfo)
+
+        def all_nodes_have_exact_governance():
+            remaining_blocks = max(
+                0, sb_block_height - self.nodes[0].getblockcount())
+            last_safe_mocktime = (
+                self.active_proposal_expiry_time - remaining_blocks - 1)
+            if self.mocktime < last_safe_mocktime:
+                self._throttled_bump_mocktime(
+                    "feature_governance_dynamic_recovery", step=1)
+
+            for node in self.nodes:
+                if (set(node.gobject_list("valid", "proposals")) !=
+                        expected_proposal_hashes):
+                    return False
+                for proposal_hash in proposal_hashes:
+                    if (set(node.gobject_getcurrentvotes(proposal_hash)) !=
+                            expected_vote_hashes[proposal_hash]):
+                        return False
+                    funding_result = node.gobject_get(
+                        proposal_hash)["FundingResult"]
+                    if (funding_result["YesCount"] != expected_vote_count or
+                            funding_result["NoCount"] != 0 or
+                            funding_result["AbstainCount"] != 0):
+                        return False
+            return True
+
+        self.wait_until(
+            all_nodes_have_exact_governance,
+            timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
+
+    def sync_proposal_votes(self, proposal_hash, expected_yes_count):
+        def all_nodes_have_exact_count():
+            self._throttled_bump_mocktime(
+                "feature_governance_dynamic_vote_sync", step=1)
+            for node in self.nodes:
+                funding_result = node.gobject_get(
+                    proposal_hash)["FundingResult"]
+                if (funding_result["YesCount"] != expected_yes_count or
+                        funding_result["NoCount"] != 0 or
+                        funding_result["AbstainCount"] != 0):
+                    return False
+            return True
+
+        self.wait_until(
+            all_nodes_have_exact_count,
+            timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
+
+    def wait_for_trigger(
+            self, sb_block_height,
+            timeout=GOVERNANCE_PROPAGATION_TIMEOUT):
         def check_for_trigger():
-            if((self.nodes[0].getblockcount()+1) >= sb_block_height):
-                return self.have_trigger_for_height(sb_block_height)
+            block_count = self.nodes[0].getblockcount()
+            maturity_height = sb_block_height - self.sb_maturity_window
+            if block_count >= maturity_height:
+                # PQ trigger signing needs a stable tip, while the bounded
+                # governance request lane needs mocktime to refill. Preserve
+                # one second for each final block plus a validity margin.
+                last_safe_mocktime = (
+                    self.active_proposal_expiry_time -
+                    (sb_block_height - block_count) - 1)
+                if self.mocktime < last_safe_mocktime:
+                    self._throttled_bump_mocktime(
+                        "feature_governance_dynamic_trigger_sync", step=1)
+                if self.have_trigger_for_height(sb_block_height):
+                    return True
+                # A remote trigger can arrive after this tip's governance
+                # callback. Advance once only after its exact object converges,
+                # then keep the new tip stable while every MN signs its vote.
+                if (block_count == maturity_height and
+                        self.all_nodes_have_same_trigger_object_for_height(
+                            sb_block_height)):
+                    self.generate_synced_blocks(1)
+                return False
             self.bump_mocktime(6)
             self.sync_blocks()
             time.sleep(2)
@@ -338,6 +477,15 @@ class SyscoinGovernanceTest(DashTestFramework):
             self.sync_blocks()
             return self.have_trigger_for_height(sb_block_height)
         self.wait_until(check_for_trigger, timeout=timeout)
+
+    def mine_superblock_with_trigger_recheck(self, sb_block_height):
+        remaining_blocks = sb_block_height - self.nodes[0].getblockcount()
+        assert remaining_blocks > 0
+        if remaining_blocks > 1:
+            self.generate_synced_blocks(remaining_blocks - 1)
+        assert_equal(self.nodes[0].getblockcount(), sb_block_height - 1)
+        assert self.have_trigger_for_height(sb_block_height)
+        self.generate_synced_blocks(1)
 
     def generate_synced_blocks(self, count):
         for _ in range(count):
@@ -412,6 +560,9 @@ class SyscoinGovernanceTest(DashTestFramework):
         gov_info = self.nodes[0].getgovernanceinfo()
         sb_cycle = gov_info['superblockcycle']
         sb_height = gov_info['nextsuperblock']
+        proposal_hashes = [proposal["hash"] for proposal in proposals_data]
+        expected_vote_hashes = self.capture_proposal_vote_hashes(
+            proposal_hashes)
 
         # Move until 1 block before the Superblock maturity window starts
         n = self.sb_immaturity_window - block_count % sb_cycle
@@ -425,13 +576,15 @@ class SyscoinGovernanceTest(DashTestFramework):
                 if node_inner.index != node_outer.index:
                     self.connect_nodes(node_inner.index, node_outer.index, wait_for_connect=False)
 
-        self.sync_mnsync([self.nodes[1]])
+        # Page serving has time-based work and byte budgets on both sides of
+        # the connection. Advance every participant's mock clock while only
+        # node1 is recovering so honest servers can refill those budgets.
+        assert self.sync_mnsync(self.nodes, timeout=180)
+        self.wait_for_governance_recovery(
+            proposal_hashes, expected_vote_hashes, sb_height)
         self.log.info(f"Waiting for trigger")
         self.wait_for_trigger(sb_height)
-        block_count = self.nodes[0].getblockcount()
-        n = sb_height - block_count
-        if n > 0:
-            self.generate_synced_blocks(n)
+        self.mine_superblock_with_trigger_recheck(sb_height)
         self.log.info(f"Mined superblock at height {sb_height}")
         total_funded_amount = self.verify_proposals_in_superblock(proposals_data)
 
@@ -458,6 +611,9 @@ class SyscoinGovernanceTest(DashTestFramework):
         gov_info = self.nodes[0].getgovernanceinfo()
         sb_cycle = gov_info['superblockcycle']
         sb_height = gov_info['nextsuperblock']
+        proposal_hashes = [proposal["hash"] for proposal in proposals_data]
+        expected_vote_hashes = self.capture_proposal_vote_hashes(
+            proposal_hashes)
 
         # Move until 1 block before the Superblock maturity window starts
         n = self.sb_immaturity_window - block_count % sb_cycle
@@ -473,13 +629,13 @@ class SyscoinGovernanceTest(DashTestFramework):
                 if node_inner.index != node_outer.index:
                     self.connect_nodes(node_inner.index, node_outer.index, wait_for_connect=False)
 
-        self.sync_mnsync([self.nodes[1]])
+        # Keep serving peers' page-rate clocks moving during DB-free recovery.
+        assert self.sync_mnsync(self.nodes, timeout=180)
+        self.wait_for_governance_recovery(
+            proposal_hashes, expected_vote_hashes, sb_height)
         self.log.info(f"Waiting for trigger")
         self.wait_for_trigger(sb_height)
-        block_count = self.nodes[0].getblockcount()
-        n = sb_height - block_count
-        if n > 0:
-            self.generate_synced_blocks(n)
+        self.mine_superblock_with_trigger_recheck(sb_height)
         self.log.info(f"Mined superblock at height {sb_height}")
         total_funded_amount = self.verify_proposals_in_superblock(proposals_data)
 
