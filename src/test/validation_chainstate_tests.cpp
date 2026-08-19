@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -2300,6 +2301,43 @@ BOOST_AUTO_TEST_CASE(governance_page_payload_authorization_is_byte_bounded)
     BOOST_CHECK(!full_byte_table.ConsumePayloadBytes(
         3000, {}, target_netgroup, 1,
         start + std::chrono::microseconds{3}));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    legacy_governance_sync_rejects_oversized_bloom_filter,
+    TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    BOOST_REQUIRE(governance != nullptr);
+    Access::SetReady(*governance, true);
+    BOOST_REQUIRE(masternodeSync.IsSynced());
+
+    in_addr ipv4_addr;
+    ipv4_addr.s_addr = 0xa0b0c006;
+    const CAddress address{CService{ipv4_addr, 7782}, NODE_NETWORK};
+    CNode node{
+        /*id=*/7, /*sock=*/nullptr, address,
+        /*nKeyedNetGroupIn=*/6, /*nLocalHostNonceIn=*/7, CAddress{},
+        /*addrNameIn=*/std::string{}, ConnectionType::INBOUND,
+        /*inbound_onion=*/false};
+    node.SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
+    m_node.peerman->InitializeNode(node, NODE_NETWORK);
+
+    CDataStream request{
+        SER_NETWORK, GOVERNANCE_PAGE_PROTO_VERSION - 1};
+    request << uint256::ONEV;
+    request << std::vector<unsigned char>{0xff};
+    request << std::numeric_limits<unsigned int>::max();
+    request << static_cast<unsigned int>(0);
+    request << static_cast<unsigned char>(BLOOM_UPDATE_NONE);
+
+    governance->ProcessMessage(
+        &node, NetMsgType::MNGOVERNANCESYNC, request,
+        *m_node.connman, *m_node.peerman);
+
+    BOOST_CHECK(request.empty());
+    BOOST_CHECK(m_node.peerman->IsBanned(node.GetId()));
+    m_node.peerman->FinalizeNode(node);
 }
 
 BOOST_AUTO_TEST_CASE(

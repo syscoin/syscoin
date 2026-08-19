@@ -1334,6 +1334,14 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
 
         vRecv >> filter;
 
+        if (!filter.IsWithinSizeConstraints()) {
+            const PeerRef peer{peerman.GetPeerRef(pfrom->GetId())};
+            if (peer) {
+                peerman.Misbehaving(*peer, 100, "too-large bloom filter");
+            }
+            return;
+        }
+
         LogPrint(BCLog::GOBJECT, "MNGOVERNANCESYNC -- syncing governance objects to our peer %s\n", pfrom->addr.ToStringAddr());
         const auto legacy_request_time{
             GetTime<std::chrono::microseconds>()};
