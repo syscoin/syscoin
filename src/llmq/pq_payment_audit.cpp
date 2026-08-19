@@ -356,6 +356,37 @@ bool PaymentAuditSeedPoint::IsStructurallyValid() const noexcept
            advance == BTCCAdvance::ADVANCE;
 }
 
+std::optional<PaymentAuditSeedPoint>
+PaymentAuditSeedPointFromBTCCReceipt(const BTCCReceipt& receipt) noexcept
+{
+    if (!receipt.IsStructurallyValid() || receipt.IsNull() ||
+        receipt.chainlock_target_height !=
+            receipt.accepted_cursor.sys_height ||
+        receipt.chainlock_target_hash != receipt.accepted_cursor.sys_hash) {
+        return std::nullopt;
+    }
+    PaymentAuditSeedPoint seed_point{
+        receipt.chainlock_target_height, receipt.chainlock_logical_id,
+        receipt.accepted_cursor, BTCCAdvance::ADVANCE};
+    return seed_point.IsStructurallyValid()
+               ? std::optional<PaymentAuditSeedPoint>{seed_point}
+               : std::nullopt;
+}
+
+std::optional<BTCCReceipt> BTCCReceiptFromPaymentAuditSeedPoint(
+    const PaymentAuditSeedPoint& seed_point) noexcept
+{
+    if (!seed_point.IsStructurallyValid()) return std::nullopt;
+    BTCCReceipt receipt;
+    receipt.chainlock_target_height = seed_point.target_height;
+    receipt.chainlock_target_hash = seed_point.accepted_cursor.sys_hash;
+    receipt.chainlock_logical_id = seed_point.chainlock_logical_id;
+    receipt.accepted_cursor = seed_point.accepted_cursor;
+    return receipt.IsStructurallyValid()
+               ? std::optional<BTCCReceipt>{receipt}
+               : std::nullopt;
+}
+
 bool PaymentAuditSeed::IsStructurallyValid() const noexcept
 {
     return anchor.IsStructurallyValid() && anchor_btc_height >= 0 &&

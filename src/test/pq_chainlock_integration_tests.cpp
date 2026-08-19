@@ -36,6 +36,7 @@ constexpr int32_t PREVIOUS_CHAINLOCK_HEIGHT{2300};
 constexpr int32_t EPOCH_ORIGIN{1440};
 constexpr uint32_t SNAPSHOT_LAG{144};
 constexpr std::size_t MAX_TEST_WORKERS{8};
+constexpr uint8_t AUTHORIZATION_MASK{0b0111};
 constexpr std::size_t CHILD_KEY_COUNT{ACTIVE_QUORUMS * QUORUM_MIN_VALID};
 
 uint256 NonNullHash(uint64_t value, uint64_t salt = 0)
@@ -355,7 +356,8 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
         fixture.statement.block_hash, descriptors);
     return fixture.statement.IsStructurallyValid() &&
            ValidateFrozenQuorumContext(
-               fixture.genesis_hash, fixture.statement, *fixture.rosters);
+               fixture.genesis_hash, fixture.statement, *fixture.rosters,
+               AUTHORIZATION_MASK);
 }
 
 bool BuildAndSignShares(FullDimensionFixture& fixture)
@@ -561,6 +563,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{ChainLockCollector::Create(
         fixture->genesis_hash, fixture->statement, fixture->rosters,
+        AUTHORIZATION_MASK,
         &collection_error)};
     BOOST_REQUIRE(collector);
     BOOST_CHECK(collection_error == ShareCollectionError::NONE);
@@ -619,6 +622,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     ChainLockVerifier verifier{/*worker_threads=*/TestWorkerCount()};
     BOOST_CHECK(verifier.Verify(
         fixture->genesis_hash, decoded, *fixture->rosters,
+        AUTHORIZATION_MASK,
         &verification_error));
     BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
 
@@ -633,7 +637,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
 
     auto audit_collector{PaymentAuditCollector::Create(
         fixture->genesis_hash, *audit_statement, *final,
-        fixture->rosters, &collection_error)};
+        fixture->rosters, AUTHORIZATION_MASK, &collection_error)};
     BOOST_REQUIRE(audit_collector);
     BOOST_CHECK(collection_error == ShareCollectionError::NONE);
     for (std::size_t arrival{PAYMENT_AUDIT_SIGNATURE_COUNT - 1};
@@ -679,7 +683,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         PaymentAuditVerificationError::INVALID_ARGUMENT};
     BOOST_CHECK(VerifyFinalPaymentAudit(
         fixture->genesis_hash, decoded_audit, *fixture->rosters,
-        nullptr, &audit_error));
+        AUTHORIZATION_MASK, nullptr, &audit_error));
     BOOST_CHECK(audit_error == PaymentAuditVerificationError::NONE);
 }
 

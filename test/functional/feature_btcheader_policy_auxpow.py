@@ -240,6 +240,7 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
     # SYSCOIN: The random-receipt quarantine case needs an eligible ChainLock
     # target; pre-warmup BTCPREV candidates can only carry null receipts.
     BTC_CANDIDATE_ORIGIN = 2305
+    FINALITY_ANCHOR_HEIGHT = 2304
     BTC_CANDIDATE_PERIOD = 10
     BTCC_NEVM_LAG = 10
     BTC_MINE_DESC_NODE0 = "raw(51)"
@@ -369,30 +370,52 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
             self.zmq_context = None
 
     def configure_pq_migration_anchor(self):
-        # SYSCOIN: The legacy cached setup is replaced by one exact,
-        # dynamically derived PQ anchor and the complete fixed profile.
         assert_equal(self.nodes[0].getblockcount(), 0)
         self.bump_mocktime(1, nodes=[self.nodes[0]])
         self.generatetoaddress(
             self.nodes[0], 1, self.nodes[0].getnewaddress(),
             sync_fun=self.no_op)
-        anchor = self.nodes[0].protx_migration_info()
-        assert_equal(anchor["height"], 1)
-        pq_args = [
-            f'-pqlegacyanchorheight={anchor["height"]}',
-            f'-pqlegacyanchorblockhash={anchor["blockHash"]}',
-            f'-pqlegacydmnstatehash={anchor["dmnStateHash"]}',
-            f'-pqlegacypqregistrystatehash={anchor["pqRegistryStateHash"]}',
+        migration_anchor = self.nodes[0].protx_migration_info()
+        assert_equal(migration_anchor["height"], 1)
+        profile_args = [
+            f'-pqlegacyanchorheight={migration_anchor["height"]}',
+            f'-pqlegacyanchorblockhash={migration_anchor["blockHash"]}',
+            f'-pqlegacydmnstatehash={migration_anchor["dmnStateHash"]}',
+            f'-pqlegacypqregistrystatehash={migration_anchor["pqRegistryStateHash"]}',
             "-pqpreparationheight=1",
             "-pqchainlockepochorigin=1440",
             "-pqregistrationcutoffblocks=288",
             "-pqrostersnapshotlag=288",
             "-pqfuturehorizonepochs=8",
+        ]
+
+        # SYSCOIN: build the provider/roster history first. No finality store
+        # exists in this explicit preparation state, so the exact bootstrap
+        # predecessor can be learned without circular quorum authorization.
+        preparation_args = (
+            self.extra_args[0] + profile_args + ["-pqfinalitypreparation=1"])
+        self.stop_node(0)
+        self.nodes[0].extra_args = list(preparation_args)
+        self.start_node(0, extra_args=preparation_args + ["-reindex"])
+        force_finish_mnsync(self.nodes[0])
+        self.generatetoaddress(
+            self.nodes[0],
+            self.FINALITY_ANCHOR_HEIGHT - self.nodes[0].getblockcount(),
+            self.nodes[0].getnewaddress(), sync_fun=self.no_op)
+        finality_anchor = {
+            "height": self.FINALITY_ANCHOR_HEIGHT,
+            "blockHash": self.nodes[0].getblockhash(
+                self.FINALITY_ANCHOR_HEIGHT),
+        }
+
+        pq_args = profile_args + [
+            f'-pqchainlockanchorheight={finality_anchor["height"]}',
+            f'-pqchainlockanchorblockhash={finality_anchor["blockHash"]}',
             f"-pqbtcccandidateorigin={self.BTC_CANDIDATE_ORIGIN}",
-            # SYSCOIN: First activation pins the empty BTCC receipt state at
-            # the distinct, pre-carrier assumption boundary.
-            f'-pqbtccreceiptanchorheight={anchor["height"]}',
-            f'-pqbtccreceiptanchorblockhash={anchor["blockHash"]}',
+            # SYSCOIN: This independent boundary is before the first carrier,
+            # so the authenticated receipt state is canonically empty.
+            f'-pqbtccreceiptanchorheight={finality_anchor["height"]}',
+            f'-pqbtccreceiptanchorblockhash={finality_anchor["blockHash"]}',
             "-pqbtccreceiptanchorcursorheight=-1",
             f'-pqbtccreceiptanchorcursorsyshash={"0" * 64}',
             f'-pqbtccreceiptanchorcursorbtchash={"0" * 64}',
@@ -404,7 +427,15 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
         self.nodes[0].extra_args = list(self.extra_args[0])
         self.start_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         force_finish_mnsync(self.nodes[0])
-        assert_equal(self.nodes[0].protx_migration_info(), anchor)
+        assert_equal(
+            self.nodes[0].getblockhash(migration_anchor["height"]),
+            migration_anchor["blockHash"])
+        tip_state = self.nodes[0].protx_migration_info()
+        assert_equal(tip_state["height"], finality_anchor["height"])
+        assert_equal(tip_state["blockHash"], finality_anchor["blockHash"])
+        assert_equal(
+            self.nodes[0].getblockhash(finality_anchor["height"]),
+            finality_anchor["blockHash"])
 
     def setup_network(self):
         self._start_nevm_responder()
@@ -808,7 +839,7 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
         assert status["ready"]
         owner_path = (
             self.managed_node_cfg[node_index]["datadir"] /
-            ".syscoin-btcheader-owner-v2.json")
+            ".syscoin-btcheader-owner.json")
         with owner_path.open("r", encoding="utf8") as owner_file:
             owner_before = json.load(owner_file)
         progress_before = (

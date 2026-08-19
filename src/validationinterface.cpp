@@ -13,6 +13,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <scheduler.h>
+#include <validation.h>
 
 #include <future>
 #include <unordered_map>
@@ -206,6 +207,27 @@ void CMainSignals::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockInd
                           pindexNew->GetBlockHash().ToString(),
                           pindexFork ? pindexFork->GetBlockHash().ToString() : "null",
                           fInitialDownload);
+}
+void CMainSignals::InitialBlockDownloadCompleted(
+    ChainstateManager& chainman)
+{
+    auto event = [&chainman, this] {
+        CBlockIndex* tip{nullptr};
+        {
+            LOCK(cs_main);
+            tip = chainman.ActiveTip();
+        }
+        if (tip == nullptr) return;
+        (void)chainman.GetNotifications().blockTip(
+            SynchronizationState::POST_INIT, *tip);
+        m_internals->Iterate([&](CValidationInterface& callbacks) {
+            callbacks.InitialBlockDownloadCompleted(tip, chainman);
+        });
+        (void)chainman.MaybeStartNEVMNetwork();
+    };
+    LogPrint(BCLog::VALIDATION,
+             "Enqueuing %s: public IBD completed\n", __func__);
+    m_internals->m_schedulerClient.AddToProcessQueue(std::move(event));
 }
 void CMainSignals::TransactionAddedToMempool(const CTransactionRef& tx, uint64_t mempool_sequence) {
     auto event = [tx, mempool_sequence, this] {

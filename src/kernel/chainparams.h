@@ -160,6 +160,11 @@ public:
             uint256 pq_registry_state_hash;
         };
 
+        struct PQChainLockAnchorOptions {
+            int height;
+            uint256 block_hash;
+        };
+
         // SYSCOIN: Separate from the immutable migration-state anchor.
         struct PQBTCCReceiptAnchorOptions {
             int height;
@@ -179,6 +184,7 @@ public:
         int nevmstartblock{2050};
         int clreceiptstartblock{std::numeric_limits<int>::max()};
         std::optional<PQLegacyAnchorOptions> pqlegacyanchor;
+        std::optional<PQChainLockAnchorOptions> pqchainlockanchor;
         std::optional<PQBTCCReceiptAnchorOptions> pqbtccreceiptanchor;
         int pqpreparationheight{std::numeric_limits<int>::max()};
         int pqchainlockepochorigin{std::numeric_limits<int>::max()};

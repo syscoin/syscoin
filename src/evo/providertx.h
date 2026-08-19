@@ -26,15 +26,8 @@ class CBlockIndex;
 class CCoinsViewCache;
 enum class SpecialTxValidationContext : uint8_t;
 
-enum class ProviderMutationKind : uint8_t {
-    SERVICE,
-    REGISTRAR,
-    REVOKE,
-};
-
 struct ProviderMutationIdentity {
     uint256 pro_tx_hash;
-    ProviderMutationKind kind;
     bool is_pq_revocation{false};
 };
 
@@ -54,8 +47,6 @@ public:
     {
         return is_basic_scheme_active ? BASIC_BLS_VERSION : LEGACY_BLS_VERSION;
     }
-    [[nodiscard]] static constexpr uint16_t GetPQVersion() { return PQ_VERSION; }
-
     uint16_t nVersion{LEGACY_BLS_VERSION};                 // message version
     uint16_t nType{0};                                     // only 0 supported for now
     uint16_t nMode{0};                                     // only 0 supported for now
@@ -141,8 +132,6 @@ public:
     {
         return is_basic_scheme_active ? UPDATE_NEVM_VERSION : LEGACY_BLS_VERSION;
     }
-    [[nodiscard]] static constexpr uint16_t GetPQVersion() { return PQ_VERSION; }
-
     uint16_t nVersion{LEGACY_BLS_VERSION}; // message version
     uint256 proTxHash;
     CService addr;
@@ -212,8 +201,6 @@ public:
     {
         return is_basic_scheme_active ? BASIC_BLS_VERSION : LEGACY_BLS_VERSION;
     }
-    [[nodiscard]] static constexpr uint16_t GetPQVersion() { return PQ_VERSION; }
-
     uint16_t nVersion{LEGACY_BLS_VERSION}; // message version
     uint256 proTxHash;
     uint16_t nMode{0}; // only 0 supported for now

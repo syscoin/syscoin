@@ -53,6 +53,7 @@ public:
     [[nodiscard]] ChainLockSigningResult Sign(
         const ChainLockStatement& statement,
         const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+        uint8_t authorization_mask,
         uint8_t quorum_slot,
         uint16_t member_index,
         const sphincs_c11::SecretKey& child_secret_key,

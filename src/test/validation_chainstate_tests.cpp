@@ -903,9 +903,10 @@ BOOST_AUTO_TEST_CASE(validation_chainstate_resize_caches)
         LOCK(::cs_main);
         const auto outpoint = AddTestCoin(c1.CoinsTip());
 
-        // Set a meaningless bestblock value in the coinsview cache - otherwise we won't
-        // flush during ResizecoinsCaches() and will subsequently hit an assertion.
-        c1.CoinsTip().SetBestBlock(InsecureRand256());
+        // Set a real indexed best block so the resize exercises the flush path
+        // without violating the recovery-marker invariant.
+        c1.CoinsTip().SetBestBlock(
+            Params().GetConsensus().hashGenesisBlock);
 
         BOOST_CHECK(c1.CoinsTip().HaveCoinInCache(outpoint));
 
@@ -1325,8 +1326,24 @@ BOOST_FIXTURE_TEST_CASE(chainlock_enforcement_provenance_mode_matrix,
     BOOST_CHECK(!enforce(
         usable | BLOCK_PQ_RECEIPT_INDEX_VALIDATED | BLOCK_FAILED_VALID,
         Provenance::VERIFIED_DURABLE_CERTIFICATE));
-    BOOST_CHECK(!enforce(
+    // Pruning the body cannot prevent restart from recognizing a fully
+    // validated durable target that is already on the active chain. A real
+    // reorg still requires the candidate's block data below.
+    BOOST_CHECK(enforce(
         BLOCK_VALID_SCRIPTS | BLOCK_PQ_RECEIPT_INDEX_VALIDATED,
+        Provenance::VERIFIED_DURABLE_CERTIFICATE));
+    CBlockIndex detached;
+    const uint256 detached_hash{InsecureRand256()};
+    detached.phashBlock = &detached_hash;
+    detached.nHeight = target->nHeight;
+    {
+        LOCK(::cs_main);
+        detached.nStatus =
+            BLOCK_VALID_SCRIPTS | BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+    }
+    BlockValidationState detached_state;
+    BOOST_CHECK(!chainstate.EnforceBlock(
+        detached_state, &detached,
         Provenance::VERIFIED_DURABLE_CERTIFICATE));
     BOOST_CHECK(!enforce(
         BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA |

@@ -164,7 +164,6 @@ private:
     [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false);
 
     [[nodiscard]] bool FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
     bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize);
 
     FlatFileSeq BlockFileSeq() const;
@@ -294,6 +293,9 @@ public:
     std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked;
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
+
+    /** Flush the current block and undo file for the chainstate type at the given height. */
+    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
 
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)

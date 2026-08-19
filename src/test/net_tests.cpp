@@ -936,6 +936,33 @@ BOOST_AUTO_TEST_CASE(pq_chainlock_upload_budget_survives_reconnect)
     BOOST_CHECK_EQUAL(limiter.Size(), 3U);
 }
 
+BOOST_AUTO_TEST_CASE(pq_payment_audit_archive_probe_budget_is_independent)
+{
+    ChainLockUploadRateLimiter upload_budget;
+    ChainLockUploadRateLimiter archive_probe_budget;
+    const uint64_t keyed_net_group{0xabc};
+    const auto now{std::chrono::microseconds{100}};
+
+    BOOST_CHECK(archive_probe_budget.Consume({}, keyed_net_group, now));
+    BOOST_CHECK(archive_probe_budget.Consume({}, keyed_net_group, now));
+    BOOST_CHECK(!archive_probe_budget.Consume({}, keyed_net_group, now));
+
+    // Speculative INV presence checks must not spend either of the two
+    // full-certificate upload tokens reserved for an authorized GETDATA.
+    BOOST_CHECK(upload_budget.Consume({}, keyed_net_group, now));
+    BOOST_CHECK(upload_budget.Consume({}, keyed_net_group, now));
+    BOOST_CHECK(!upload_budget.Consume({}, keyed_net_group, now));
+
+    // Both buckets key reconnects to the same deterministic source identity.
+    BOOST_CHECK(!archive_probe_budget.Consume(
+        {}, keyed_net_group,
+        now + ChainLockUploadRateLimiter::REFILL_INTERVAL -
+            std::chrono::microseconds{1}));
+    BOOST_CHECK(archive_probe_budget.Consume(
+        {}, keyed_net_group,
+        now + ChainLockUploadRateLimiter::REFILL_INTERVAL));
+}
+
 namespace {
 
 CGovernancePageRequest MakeGovernancePageRequest(

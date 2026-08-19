@@ -164,6 +164,20 @@ enum class BTCCValidationError : uint8_t {
     const BTCCReceiptState& previous,
     const BTCCReceipt& receipt);
 
+/**
+ * Reconstruct the exact receipt carried by one already-indexed carrier.
+ * The caller supplies the per-carrier logical id retained by CBlockIndex;
+ * every other byte is fixed by the schedule, branch, and indexed transition.
+ */
+[[nodiscard]] std::optional<BTCCReceipt> ReconstructBTCCReceipt(
+    const uint256& genesis_hash,
+    const ChainLockScheduleConfig& chainlock_schedule,
+    const BTCCScheduleConfig& btcc_schedule,
+    const CBlockIndex& carrier,
+    const BTCCReceiptState& previous,
+    const BTCCReceiptState& current,
+    const uint256& receipt_logical_id);
+
 } // namespace llmq::pq
 
 // SYSCOIN: bounded, ambiguity-rejecting extraction belongs to the BTCC

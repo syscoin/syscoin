@@ -20,7 +20,7 @@ namespace llmq::pq {
 enum class PaymentAuditStoreResult : uint8_t {
     ACCEPTED = 0,
     DUPLICATE_WITNESS,
-    VARIANT_LIMIT,
+    LIVE_CANDIDATE_SLOT_FULL,
     INVALID,
     CORRUPT,
     DATABASE_ERROR,
@@ -63,14 +63,14 @@ struct PaymentAuditStoreCheckpoint {
 };
 
 /**
- * Exact V2 certificate archive. Historical audit witnesses remain available
+ * Exact certificate archive. Historical audit witnesses remain available
  * independently of the bounded live-row staging database until an
  * authenticated checkpoint retires their prefix.
  */
 class PaymentAuditStore final {
 public:
-    static constexpr uint32_t DB_FORMAT_VERSION{5};
-    static constexpr std::size_t MAX_UNREFERENCED_VARIANTS{
+    static constexpr uint32_t DB_FORMAT_VERSION{1};
+    static constexpr std::size_t MAX_LIVE_CANDIDATES{
         ACTIVE_QUORUMS};
 
     PaymentAuditStore(fs::path path,
@@ -80,6 +80,15 @@ public:
 
     [[nodiscard]] bool IsHealthy() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Avoid expensive verification when an unreferenced live certificate
+     * cannot enter its deterministic missing-quorum slot. Required historical
+     * witnesses deliberately bypass this admission hint and use
+     * AcceptVerified() with required_witness set.
+     */
+    [[nodiscard]] PaymentAuditStoreResult ProbeLiveCandidateSlot(
+        uint32_t epoch, uint8_t selected_quorum_mask) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] PaymentAuditStoreResult AcceptVerified(
         const FinalPaymentAudit& audit,
         bool required_witness = false)
@@ -87,12 +96,13 @@ public:
     [[nodiscard]] std::optional<FinalPaymentAudit> Get(
         const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    [[nodiscard]] std::optional<FinalPaymentAudit> GetByEpoch(
-        uint32_t epoch) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
-     * The preferred applied witness plus at most four bounded live variants.
+     * The preferred applied witness plus at most four bounded live candidates,
+     * one for each possible missing reporter quorum.
      * Older applied witnesses remain directly addressable by witness ID but
-     * are deliberately excluded from live carrier selection.
+     * are deliberately excluded from live carrier selection. A reorg can
+     * change the seal or probation root, so a new branch-compatible candidate
+     * must be selectable before any carrier can reference it.
      */
     [[nodiscard]] std::vector<FinalPaymentAudit> GetEpochCandidates(
         uint32_t epoch) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -104,7 +114,7 @@ public:
      * Mark the exact applied carrier dependency as preferred. Applied
      * witnesses remain available for block-index fork replay until an
      * authenticated checkpoint retires their epoch; only never-referenced
-     * variants are pruned before then.
+     * candidates are pruned before then.
      */
     [[nodiscard]] PaymentAuditStoreResult PinReferencedWitness(
         uint32_t epoch, const uint256& witness_id)

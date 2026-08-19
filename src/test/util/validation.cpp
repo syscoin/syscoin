@@ -15,6 +15,14 @@ void TestChainstateManager::ResetIbd()
     assert(IsInitialBlockDownload());
 }
 
+void TestChainstateManager::ResetIbd(PQHistoryAuthState state)
+{
+    LOCK(cs_main);
+    m_cached_finished_ibd.store(false, std::memory_order_relaxed);
+    m_pq_history_auth_state = state;
+    m_nevm_network_start_sent.store(false, std::memory_order_relaxed);
+}
+
 void TestChainstateManager::JumpOutOfIbd()
 {
     Assert(IsInitialBlockDownload());

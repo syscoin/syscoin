@@ -106,6 +106,11 @@ struct Params {
     uint256 hashPQLegacyAnchorBlock;
     uint256 hashPQLegacyMNState;
     uint256 hashPQLegacyPQRegistryState;
+    // Immutable predecessor of the first PQ ChainLock. This is distinct from
+    // the migration-state anchor so preparation history can be built before
+    // finality is enabled without leaving bootstrap rosters branch-derived.
+    int nPQChainLockAnchorHeight{std::numeric_limits<int>::max()};
+    uint256 hashPQChainLockAnchorBlock;
     // PQ ChainLock deployment remains fail-closed until a release pins all
     // values. Preparation is the first height accepting key-registry
     // transactions; it must precede both the migration anchor and epoch zero's
@@ -121,7 +126,7 @@ struct Params {
     // receipted after the fixed five-block propagation buffer at H+10.
     int nPQBTCCNEVMInjectionLag{10};
     // SYSCOIN: Release-updatable historical BTCC receipt assumption boundary.
-    // This is intentionally independent from nPQLegacyAnchorHeight: only the
+    // This is intentionally independent from both immutable anchors: only the
     // pre-boundary receipt-certificate crypto is assumed here.
     int nPQBTCCReceiptAnchorHeight{std::numeric_limits<int>::max()};
     uint256 hashPQBTCCReceiptAnchorBlock;

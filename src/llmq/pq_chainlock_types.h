@@ -24,7 +24,7 @@ namespace llmq::pq {
 inline constexpr uint16_t GLOBAL_KEY_RECORD_VERSION{1};
 inline constexpr uint16_t CHILD_KEY_TREE_COMMITMENT_VERSION{1};
 inline constexpr uint16_t QUORUM_DESCRIPTOR_VERSION{1};
-inline constexpr uint16_t CHAINLOCK_VERSION{2};
+inline constexpr uint16_t CHAINLOCK_VERSION{1};
 
 inline constexpr uint16_t GLOBAL_SLH_DSA_SHAKE_128S_V1{1};
 inline constexpr uint16_t CHILD_C11_SHA_V1{1};
@@ -59,10 +59,10 @@ inline constexpr std::string_view GLOBAL_REGISTER_DOMAIN{"SYS_PQ_GLOBAL_REGISTER
 inline constexpr std::string_view GLOBAL_ROTATE_DOMAIN{"SYS_PQ_GLOBAL_ROTATE_V1"};
 inline constexpr std::string_view CHILD_ROOT_LEAF_DOMAIN{"SYS_PQ_CHILD_ROOT_LEAF_V1"};
 inline constexpr std::string_view QUORUM_CONTEXT_DOMAIN{"SYS_PQ_QUORUM_CONTEXT_V1"};
-inline constexpr std::string_view CHAINLOCK_SHARE_DOMAIN{"SYS_PQ_CHAINLOCK_SHARE_V2"};
-inline constexpr std::string_view CHAINLOCK_SHARE_ID_DOMAIN{"SYS_PQ_CHAINLOCK_SHARE_ID_V2"};
-inline constexpr std::string_view CHAINLOCK_LOGICAL_ID_DOMAIN{"SYS_PQ_CHAINLOCK_LOGICAL_ID_V2"};
-inline constexpr std::string_view CHAINLOCK_WITNESS_ID_DOMAIN{"SYS_PQ_CHAINLOCK_WITNESS_ID_V2"};
+inline constexpr std::string_view CHAINLOCK_SHARE_DOMAIN{"SYS_PQ_CHAINLOCK_SHARE_V1"};
+inline constexpr std::string_view CHAINLOCK_SHARE_ID_DOMAIN{"SYS_PQ_CHAINLOCK_SHARE_ID_V1"};
+inline constexpr std::string_view CHAINLOCK_LOGICAL_ID_DOMAIN{"SYS_PQ_CHAINLOCK_LOGICAL_ID_V1"};
+inline constexpr std::string_view CHAINLOCK_WITNESS_ID_DOMAIN{"SYS_PQ_CHAINLOCK_WITNESS_ID_V1"};
 
 static_assert(QUORUM_SIZE % 8 == 0);
 static_assert(QUORUM_THRESHOLD == 2 * QUORUM_MAX_BYZANTINE + 1);
@@ -411,6 +411,7 @@ struct ChainLockShare {
 
 [[nodiscard]] std::size_t CountSet(const QuorumBitmap& bitmap);
 [[nodiscard]] bool IsSelectedQuorumMask(uint8_t mask);
+[[nodiscard]] bool IsSigningRosterAuthorizationMask(uint8_t mask);
 
 struct FinalChainLock {
     static constexpr std::size_t WIRE_SIZE{

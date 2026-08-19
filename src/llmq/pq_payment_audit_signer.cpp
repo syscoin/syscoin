@@ -66,6 +66,7 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
     const QuorumBitmap& reporter_observed_members,
     const FinalChainLock& seal_chainlock,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     uint8_t quorum_slot,
     uint16_t member_index,
     const sphincs_c11::SecretKey& child_secret_key,
@@ -86,16 +87,27 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
                                    statement.commitment.seal_height)) {
         return Failure(error, ChainLockSigningError::INELIGIBLE_HEIGHT);
     }
+    const auto expected_seal{NextEligibleChainLockTargetHeight(
+        m_schedule,
+        statement.seal_statement.previous_chainlock_height)};
+    if (!expected_seal || statement.commitment.seal_height !=
+                              *expected_seal) {
+        return Failure(error, ChainLockSigningError::INELIGIBLE_HEIGHT);
+    }
+    if (quorum_slot >= ACTIVE_QUORUMS) {
+        return Failure(error, ChainLockSigningError::INVALID_QUORUM_SLOT);
+    }
+    if ((authorization_mask & (uint8_t{1} << quorum_slot)) == 0) {
+        return Failure(error, ChainLockSigningError::INACTIVE_QUORUM);
+    }
     PaymentAuditVerificationError context_error{
         PaymentAuditVerificationError::NONE};
     if (!ValidatePaymentAuditLiveSeal(m_genesis_hash, statement,
                                       seal_chainlock, &context_error) ||
         !ValidatePaymentAuditContext(m_genesis_hash, statement, rosters,
+                                     authorization_mask,
                                      &context_error)) {
         return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
-    }
-    if (quorum_slot >= ACTIVE_QUORUMS) {
-        return Failure(error, ChainLockSigningError::INVALID_QUORUM_SLOT);
     }
     const auto& roster{rosters[quorum_slot]};
     if (!IsEpochActiveForTarget(m_schedule, roster.descriptor.epoch,

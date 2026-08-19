@@ -55,6 +55,27 @@ PQQuorumConnectionSet Connections(std::initializer_list<uint256> members)
 
 BOOST_AUTO_TEST_SUITE(pq_quorum_overlay_tests)
 
+BOOST_AUTO_TEST_CASE(relay_target_tracks_the_current_recovery_window)
+{
+    const auto schedule{pq::MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(schedule);
+
+    BOOST_CHECK(!GetPQQuorumOverlayTargetHeight(
+        *schedule, /*predecessor_height=*/864, /*tip_height=*/869));
+    BOOST_CHECK_EQUAL(
+        *GetPQQuorumOverlayTargetHeight(
+            *schedule, /*predecessor_height=*/864, /*tip_height=*/870),
+        865);
+    BOOST_CHECK_EQUAL(
+        *GetPQQuorumOverlayTargetHeight(
+            *schedule, /*predecessor_height=*/864, /*tip_height=*/1400),
+        1395);
+    BOOST_CHECK_EQUAL(
+        *GetPQQuorumOverlayTargetHeight(
+            *schedule, /*predecessor_height=*/865, /*tip_height=*/1400),
+        1395);
+}
+
 BOOST_AUTO_TEST_CASE(topology_is_deterministic_bounded_and_connected)
 {
     std::vector<uint256> participants;

@@ -26,6 +26,14 @@ namespace llmq {
 using PQQuorumConnectionSet =
     std::unordered_set<uint256, StaticSaltedHasher>;
 using PQQuorumOverlayPlan = std::map<uint256, PQQuorumConnectionSet>;
+using PQChainLockPredecessorHeight =
+    std::function<std::optional<int32_t>()>;
+
+/** Resolve the current relay target, including a missed-window recovery. */
+[[nodiscard]] std::optional<int32_t> GetPQQuorumOverlayTargetHeight(
+    const pq::ChainLockScheduleConfig& schedule,
+    int32_t predecessor_height,
+    int32_t tip_height) noexcept;
 
 /**
  * Select a bounded directed ring-plus-shortcuts neighborhood.
@@ -89,7 +97,8 @@ public:
     CPQQuorumConnectionOverlay(
         CConnman& connman,
         const uint256& genesis_hash,
-        std::optional<pq::QuorumBuildConfig> quorum_config);
+        std::optional<pq::QuorumBuildConfig> quorum_config,
+        PQChainLockPredecessorHeight predecessor_height);
     ~CPQQuorumConnectionOverlay();
 
     CPQQuorumConnectionOverlay(const CPQQuorumConnectionOverlay&) = delete;
@@ -111,6 +120,7 @@ private:
 
     const uint256 m_genesis_hash;
     const std::optional<pq::QuorumBuildConfig> m_quorum_config;
+    const PQChainLockPredecessorHeight m_predecessor_height;
     Mutex m_mutex;
     void ClearLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     PQQuorumOverlayReconciler m_reconciler GUARDED_BY(m_mutex);

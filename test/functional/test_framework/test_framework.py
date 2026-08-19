@@ -871,7 +871,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             # SYSCOIN: Preserve fork-owned deterministic/PQ/NEVM sidecars in
             # the reusable cached chain.
             for entry in os.listdir(cache_path()):
-                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'evodb_dmn', 'evodb_dmn_pq_registry', 'evodb_dmn_pq_payment_probation_v2', 'evodb_sb', 'nevmdata', 'nevmblobdata']:
+                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'evodb_dmn', 'evodb_dmn_inverse', 'evodb_dmn_pq_registry', 'evodb_dmn_pq_payment_probation', 'evodb_sb', 'nevmdata', 'nevmblobdata']:
                     os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
@@ -1117,7 +1117,6 @@ class DashTestFramework(SyscoinTestFramework):
         registration_cutoff_blocks = 288
         # SYSCOIN: roster membership is sampled only after root registration closes.
         roster_snapshot_lag = 288
-        btcc_candidate_origin = 1_000_000
         assert registration_cutoff_blocks >= roster_snapshot_lag
         pq_args = [
             "-pqlegacyanchorheight=%d" % anchor["height"],
@@ -1129,16 +1128,7 @@ class DashTestFramework(SyscoinTestFramework):
             "-pqregistrationcutoffblocks=%d" % registration_cutoff_blocks,
             "-pqrostersnapshotlag=%d" % roster_snapshot_lag,
             "-pqfuturehorizonepochs=8",
-            "-pqbtcccandidateorigin=%d" % btcc_candidate_origin,
-            # SYSCOIN: The distinct BTCC assumption record is mandatory even
-            # at first activation; before the first carrier it commits the
-            # canonical empty receipt state at the migration block.
-            "-pqbtccreceiptanchorheight=%d" % anchor["height"],
-            "-pqbtccreceiptanchorblockhash=%s" % anchor["blockHash"],
-            "-pqbtccreceiptanchorcursorheight=-1",
-            "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
-            "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
-            "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+            "-pqfinalitypreparation=1",
         ]
         for node_args in self.extra_args:
             node_args.extend(pq_args)

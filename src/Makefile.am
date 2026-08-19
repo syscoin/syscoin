@@ -1112,7 +1112,21 @@ if BUILD_SYSCOIN_LIBS
 lib_LTLIBRARIES += $(LIBSYSCOINCONSENSUS)
 
 include_HEADERS = script/syscoinconsensus.h
-libsyscoinconsensus_la_SOURCES = support/cleanse.cpp $(crypto_libsyscoin_crypto_base_la_SOURCES) $(libsyscoin_consensus_a_SOURCES)
+# SYSCOIN: The public script-verification library has no PQ API. Keep its
+# crypto closure explicit so node-only algorithms cannot become exported
+# dependencies merely by being added to libsyscoin_crypto_base.
+libsyscoinconsensus_la_SOURCES = \
+  support/cleanse.cpp \
+  crypto/hmac_sha512.cpp \
+  crypto/ripemd160.cpp \
+  crypto/sha1.cpp \
+  crypto/sha256.cpp \
+  crypto/sha512.cpp \
+  $(libsyscoin_consensus_a_SOURCES)
+
+if USE_ASM
+libsyscoinconsensus_la_SOURCES += crypto/sha256_sse4.cpp
+endif
 
 
 libsyscoinconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)

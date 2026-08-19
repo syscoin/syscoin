@@ -609,6 +609,12 @@ public:
             consensus.hashPQLegacyPQRegistryState =
                 opts.pqlegacyanchor->pq_registry_state_hash;
         }
+        if (opts.pqchainlockanchor) {
+            consensus.nPQChainLockAnchorHeight =
+                opts.pqchainlockanchor->height;
+            consensus.hashPQChainLockAnchorBlock =
+                opts.pqchainlockanchor->block_hash;
+        }
         consensus.nPQPreparationHeight = opts.pqpreparationheight;
         consensus.nPQChainLockEpochOrigin = opts.pqchainlockepochorigin;
         consensus.nPQRegistrationCutoffBlocks =
@@ -644,9 +650,14 @@ public:
         consensus.DIP0003Height = opts.dip3startblock;
         consensus.DIP0003EnforcementHeight = opts.dip3enforcement;
         if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
-            Consensus::PQLegacyAnchorResult::INVALID_CONFIGURATION) {
+            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
             throw std::runtime_error(
                 "Invalid regtest PQ legacy anchor configuration");
+        }
+        if (Consensus::CheckPQChainLockAnchorConfiguration(consensus) ==
+            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
+            throw std::runtime_error(
+                "Invalid regtest PQ ChainLock anchor configuration");
         }
         // SYSCOIN: end regtest PQ migration and receipt-anchor configuration.
 

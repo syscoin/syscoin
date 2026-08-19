@@ -23,6 +23,7 @@ public:
         PaymentAuditStatement statement,
         FinalChainLock seal_chainlock,
         FrozenQuorumRostersPtr rosters,
+        uint8_t authorization_mask,
         ShareCollectionError* error = nullptr);
 
     PaymentAuditCollector(const PaymentAuditCollector&) = delete;
@@ -40,7 +41,8 @@ private:
     PaymentAuditCollector(uint256 genesis_hash,
                           PaymentAuditStatement statement,
                           FinalChainLock seal_chainlock,
-                          FrozenQuorumRostersPtr rosters);
+                          FrozenQuorumRostersPtr rosters,
+                          uint8_t authorization_mask);
 
     [[nodiscard]] std::optional<std::size_t> FindQuorumSlot(
         const PaymentAuditShareTranscript& transcript) const;
@@ -49,6 +51,7 @@ private:
     PaymentAuditStatement m_statement;
     FinalChainLock m_seal_chainlock;
     FrozenQuorumRostersPtr m_rosters;
+    uint8_t m_authorization_mask{0};
     std::array<std::map<uint16_t, PaymentAuditReportWitness>,
                ACTIVE_QUORUMS> m_shares;
 };

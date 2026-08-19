@@ -61,6 +61,26 @@ void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, con
     if (governance && governance->IsValid()) governance->UpdatedBlockTip(pindexNew, connman, peerman);
 }
 
+void CDSNotificationInterface::InitialBlockDownloadCompleted(
+    const CBlockIndex* tip, ChainstateManager& chainman)
+{
+    if (tip == nullptr || ShutdownRequested()) return;
+    masternodeSync.UpdatedBlockTip(tip, chainman,
+                                  /*fInitialDownload=*/false);
+    if (llmq::pqQuorumConnectionOverlay) {
+        llmq::pqQuorumConnectionOverlay->UpdatedBlockTip(
+            tip, /*initial_download=*/false);
+    }
+    if (llmq::chainLocksHandler) {
+        llmq::chainLocksHandler->UpdatedBlockTip(
+            tip, /*initial_download=*/false);
+    }
+    CMNAuth::UpdatedBlockTip(tip, connman);
+    if (governance && governance->IsValid()) {
+        governance->UpdatedBlockTip(tip, connman, peerman);
+    }
+}
+
 void CDSNotificationInterface::NotifyMasternodeListChanged(
     bool, const CDeterministicMNList&, const CDeterministicMNListDiff&)
 {

@@ -33,11 +33,6 @@ public:
         return is_basic_scheme_active ? BASIC_BLS_VERSION
                                       : LEGACY_BLS_VERSION;
     }
-    [[nodiscard]] static constexpr uint16_t GetPQVersion()
-    {
-        return PQ_VERSION;
-    }
-
     // These values are informational and do not alter revocation semantics.
     enum {
         REASON_NOT_SPECIFIED = 0,

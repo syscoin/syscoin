@@ -261,8 +261,10 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
         if (verify_fixture && tree->GetRoot() != fixture_root) {
             throw JSONRPCError(
                 RPC_INTERNAL_ERROR,
-                "PQ operator commitment test fixture does not match the "
-                "production builder");
+                strprintf("PQ operator commitment test fixture root %s does "
+                          "not match production builder root %s",
+                          fixture_root.ToString(),
+                          tree->GetRoot().ToString()));
         }
     }
 
@@ -312,7 +314,7 @@ static void EnsurePQProviderRPCActive(int current_height)
 {
     const auto& consensus = Params().GetConsensus();
     if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQLegacyAnchorResult::VALID ||
+            Consensus::PQAnchorResult::VALID ||
         current_height + 1 <= consensus.nPQLegacyAnchorHeight) {
         throw JSONRPCError(
             RPC_MISC_ERROR,

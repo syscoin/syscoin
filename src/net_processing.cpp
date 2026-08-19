@@ -2463,6 +2463,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_recent_confirmed_transactions_mutex);
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    void InitialBlockDownloadCompleted(
+        const CBlockIndex* tip, ChainstateManager& chainman) override;
     void BlockChecked(const CBlock& block, const BlockValidationState& state) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) override
@@ -2774,6 +2776,11 @@ private:
     ChainLockRequestTracker m_payment_audit_requests GUARDED_BY(::cs_main);
     GovernanceRequestTracker m_governance_requests GUARDED_BY(::cs_main);
     ChainLockUploadRateLimiter m_clsig_upload_rate
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    // A speculative payment-audit INV must not consume upload capacity, but
+    // it also must not cause an unbounded archive lookup before request-table
+    // admission. Keep its reconnect-resistant budget independent.
+    ChainLockUploadRateLimiter m_payment_audit_inv_probe_rate
         GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
     std::unique_ptr<TxReconciliationTracker> m_txreconciliation;
 
@@ -4882,6 +4889,14 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
             peer->m_blocks_for_headers_relay.push_back(hash);
         }
     });
+    m_connman.WakeMessageHandler();
+}
+
+void PeerManagerImpl::InitialBlockDownloadCompleted(
+    const CBlockIndex* tip, ChainstateManager&)
+{
+    if (tip != nullptr) SetBestHeight(tip->nHeight);
+    SetServiceFlagsIBDCache(true);
     m_connman.WakeMessageHandler();
 }
 
@@ -7204,6 +7219,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         required_chainlock || required_payment_audit)) {
                     continue;
                 }
+                if (inv.type == MSG_PQPOSECERT &&
+                    !required_payment_audit &&
+                    !pfrom.HasPermission(NetPermissionFlags::Download) &&
+                    !m_payment_audit_inv_probe_rate.Consume(
+                        pfrom.GetVerifiedProRegTxHash(),
+                        pfrom.nKeyedNetGroup, current_time)) {
+                    LogPrint(BCLog::NET,
+                             "PQ payment-audit archive probe budget "
+                             "exhausted peer=%d\n",
+                             pfrom.GetId());
+                    continue;
+                }
                 const bool already_have{AlreadyHaveTx(ToGenTxid(inv))};
                 LogPrint(BCLog::NET, "got PQ certificate inv: %s  %s peer=%d\n",
                          inv.ToString(), already_have ? "have" : "new",
@@ -8243,6 +8270,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
         } else {
             const CInv inv{MSG_CLSIG, *requested};
+            if (!llmq::chainLocksHandler ||
+                !llmq::chainLocksHandler->AlreadyHave(inv.hash)) {
+                return;
+            }
             bool upload_authorized{false};
             {
                 LOCK(peer->m_pq_certificate_mutex);
@@ -8257,24 +8288,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 Misbehaving(*peer, 20, "repeated-pq-clsig-retry");
                 return;
             }
-            llmq::CChainLockSig chainlock;
-            if (llmq::chainLocksHandler &&
-                llmq::chainLocksHandler->GetChainLockByHash(
-                    *requested, chainlock)) {
-                {
-                    LOCK(peer->m_pq_certificate_mutex);
-                    peer->m_pq_certificate_known_filter.insert(inv.hash);
-                }
-                if (auto tx_relay = peer->GetTxRelay();
-                    tx_relay != nullptr) {
-                    LOCK(tx_relay->m_tx_inventory_mutex);
-                    tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
-                }
-                CNetMsgMaker maker{pfrom.GetCommonVersion()};
-                m_connman.PushMessage(
-                    &pfrom, maker.Make(NetMsgType::INV,
-                                      std::vector<CInv>{inv}));
+            {
+                LOCK(peer->m_pq_certificate_mutex);
+                peer->m_pq_certificate_known_filter.insert(inv.hash);
             }
+            if (auto tx_relay = peer->GetTxRelay();
+                tx_relay != nullptr) {
+                LOCK(tx_relay->m_tx_inventory_mutex);
+                tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
+            }
+            CNetMsgMaker maker{pfrom.GetCommonVersion()};
+            m_connman.PushMessage(
+                &pfrom, maker.Make(NetMsgType::INV,
+                                  std::vector<CInv>{inv}));
         }
         return;
     }

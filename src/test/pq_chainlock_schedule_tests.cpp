@@ -85,6 +85,49 @@ BOOST_AUTO_TEST_CASE(cadence_and_sign_lag_boundaries)
     BOOST_CHECK(!TargetHeightForSigningHeight(config, 2309));
 }
 
+BOOST_AUTO_TEST_CASE(next_target_is_the_unique_eligible_successor)
+{
+    const ChainLockScheduleConfig config{.epoch_origin = 1440};
+    BOOST_CHECK_EQUAL(*NextEligibleChainLockTargetHeight(config, -1), 2305);
+    BOOST_CHECK_EQUAL(*NextEligibleChainLockTargetHeight(config, 2304), 2305);
+    BOOST_CHECK_EQUAL(*NextEligibleChainLockTargetHeight(config, 2305), 2310);
+    BOOST_CHECK_EQUAL(*NextEligibleChainLockTargetHeight(config, 2306), 2310);
+    BOOST_CHECK(!NextEligibleChainLockTargetHeight(config, -2));
+
+    auto invalid{config};
+    ++invalid.epoch_origin;
+    BOOST_CHECK(!NextEligibleChainLockTargetHeight(invalid, 2305));
+}
+
+BOOST_AUTO_TEST_CASE(current_window_recovers_without_skipping_the_wire_predecessor)
+{
+    const ChainLockScheduleConfig config{.epoch_origin = 0};
+
+    BOOST_CHECK(!LatestEligibleChainLockTargetHeight(config, 869));
+    BOOST_CHECK_EQUAL(*LatestEligibleChainLockTargetHeight(config, 870), 865);
+    BOOST_CHECK_EQUAL(*LatestEligibleChainLockTargetHeight(config, 884), 875);
+    BOOST_CHECK_EQUAL(*LatestEligibleChainLockTargetHeight(config, 885), 880);
+
+    const auto exact{CurrentChainLockSigningWindow(
+        config, /*durable_predecessor_height=*/864, /*tip_height=*/870)};
+    BOOST_REQUIRE(exact);
+    BOOST_CHECK_EQUAL(exact->target_height, 865);
+    BOOST_CHECK_EQUAL(exact->declared_predecessor_height, 864);
+
+    const auto recovered{CurrentChainLockSigningWindow(
+        config, /*durable_predecessor_height=*/864, /*tip_height=*/885)};
+    BOOST_REQUIRE(recovered);
+    BOOST_CHECK_EQUAL(recovered->target_height, 880);
+    BOOST_CHECK_EQUAL(recovered->declared_predecessor_height, 875);
+    BOOST_CHECK_EQUAL(
+        *NextEligibleChainLockTargetHeight(
+            config, recovered->declared_predecessor_height),
+        recovered->target_height);
+
+    BOOST_CHECK(!CurrentChainLockSigningWindow(
+        config, /*durable_predecessor_height=*/880, /*tip_height=*/885));
+}
+
 BOOST_AUTO_TEST_CASE(cutoff_and_expiry_are_checked)
 {
     const ChainLockScheduleConfig config{.epoch_origin = 0};
@@ -172,6 +215,12 @@ BOOST_AUTO_TEST_CASE(overflow_and_signed_height_edges_fail_closed)
 
     BOOST_CHECK(IsEligibleChainLockTarget(config, LAST_CADENCE));
     BOOST_CHECK(!SigningHeightForTarget(config, LAST_CADENCE));
+    BOOST_CHECK_EQUAL(
+        *NextEligibleChainLockTargetHeight(
+            config, LAST_CADENCE - PQ_CL_PERIOD),
+        LAST_CADENCE);
+    BOOST_CHECK(!NextEligibleChainLockTargetHeight(config, LAST_CADENCE));
+    BOOST_CHECK(!NextEligibleChainLockTargetHeight(config, MAX_HEIGHT));
     BOOST_CHECK(IsEligibleChainLockTarget(config, LAST_CADENCE - PQ_CL_PERIOD));
     BOOST_CHECK_EQUAL(*SigningHeightForTarget(config, LAST_CADENCE - PQ_CL_PERIOD),
                       LAST_CADENCE);

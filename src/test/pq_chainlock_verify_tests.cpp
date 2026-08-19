@@ -24,6 +24,8 @@ using namespace llmq::pq;
 
 namespace {
 
+constexpr uint8_t AUTHORIZATION_MASK{0b0111};
+
 uint256 NonNullHash(uint64_t value)
 {
     uint256 hash;
@@ -159,7 +161,8 @@ BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)
     const auto fixture = MakeVerificationFixture();
     ChainLockVerificationError error{ChainLockVerificationError::INVALID_ARGUMENT};
     auto prepared = PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->chainlock, fixture->rosters, &error);
+        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        AUTHORIZATION_MASK, &error);
     BOOST_REQUIRE(prepared.has_value());
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
     BOOST_REQUIRE_EQUAL(prepared->checks.size(), FINAL_SIGNATURE_COUNT);
@@ -200,7 +203,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         bad_member_root->rosters[0].descriptor.member_root.begin()[0] ^= 1;
         BOOST_CHECK(!PrepareFinalChainLockVerification(
             bad_member_root->genesis_hash, bad_member_root->chainlock,
-            bad_member_root->rosters, &error));
+            bad_member_root->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
     }
 
@@ -209,7 +212,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         bad_child_root->rosters[0].descriptor.child_key_root.begin()[0] ^= 1;
         BOOST_CHECK(!PrepareFinalChainLockVerification(
             bad_child_root->genesis_hash, bad_child_root->chainlock,
-            bad_child_root->rosters, &error));
+            bad_child_root->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::CHILD_KEY_ROOT_MISMATCH);
     }
 
@@ -218,7 +221,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         bad_context->chainlock.statement.quorum_context_hash.begin()[0] ^= 1;
         BOOST_CHECK(!PrepareFinalChainLockVerification(
             bad_context->genesis_hash, bad_context->chainlock,
-            bad_context->rosters, &error));
+            bad_context->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
     }
 
@@ -230,7 +233,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         BOOST_REQUIRE(bad_index->chainlock.IsStructurallyValid());
         BOOST_CHECK(!PrepareFinalChainLockVerification(
             bad_index->genesis_hash, bad_index->chainlock, bad_index->rosters,
-            &error));
+            AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::INVALID_SIGNER);
     }
 
@@ -240,7 +243,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
                     QUORUM_THRESHOLD - 1);
         BOOST_CHECK(!PrepareFinalChainLockVerification(
             bad_bitmap->genesis_hash, bad_bitmap->chainlock,
-            bad_bitmap->rosters, &error));
+            bad_bitmap->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHAINLOCK);
     }
 }
@@ -253,14 +256,14 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_mutated_child_membership_witness)
         .begin()[0] ^= 1;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
         bad_sibling->genesis_hash, bad_sibling->chainlock,
-        bad_sibling->rosters, &error));
+        bad_sibling->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHILD_PROOF);
 
     auto bad_public_key = MakeVerificationFixture();
     bad_public_key->chainlock.signatures[0].key_proof.public_key[0] ^= 1;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
         bad_public_key->genesis_hash, bad_public_key->chainlock,
-        bad_public_key->rosters, &error));
+        bad_public_key->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHILD_PROOF);
 }
 
@@ -272,7 +275,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_duplicate_members_and_child_keys)
         duplicate_member->rosters[0].members[QUORUM_SIZE - 2].pro_tx_hash;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
         duplicate_member->genesis_hash, duplicate_member->chainlock,
-        duplicate_member->rosters, &error));
+        duplicate_member->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_MEMBER);
 
     auto duplicate_key = MakeVerificationFixture();
@@ -282,7 +285,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_duplicate_members_and_child_keys)
             .child_root->commitment.tree_id;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
         duplicate_key->genesis_hash, duplicate_key->chainlock,
-        duplicate_key->rosters, &error));
+        duplicate_key->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_CHILD_KEY);
 }
 
@@ -332,13 +335,57 @@ BOOST_AUTO_TEST_CASE(real_signature_check_and_owned_queue_lifecycle)
     memory_cleanse(secret_seed.data(), secret_seed.size());
 }
 
+BOOST_AUTO_TEST_CASE(authorization_mask_allows_one_transition_and_rejects_wider_selection)
+{
+    auto fixture = MakeVerificationFixture();
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    BOOST_CHECK(PrepareFinalChainLockVerification(
+        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        AUTHORIZATION_MASK, &error));
+
+    auto future_snapshot = MakeVerificationFixture();
+    future_snapshot->rosters[3].descriptor.base_height = 1'999;
+    future_snapshot->rosters[3].descriptor.snapshot_height = 1'996;
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = future_snapshot->rosters[slot].descriptor;
+    }
+    future_snapshot->chainlock.statement.quorum_context_hash =
+        GetQuorumContextHash(
+            future_snapshot->genesis_hash,
+            future_snapshot->chainlock.statement.height,
+            future_snapshot->chainlock.statement.block_hash, descriptors);
+    BOOST_CHECK(PrepareFinalChainLockVerification(
+        future_snapshot->genesis_hash, future_snapshot->chainlock,
+        future_snapshot->rosters, AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(!PrepareFinalChainLockVerification(
+        future_snapshot->genesis_hash, future_snapshot->chainlock,
+        future_snapshot->rosters, 0b1111, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_DESCRIPTOR);
+
+    BOOST_CHECK(!PrepareFinalChainLockVerification(
+        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        0b0011, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    fixture->chainlock.selected_quorum_mask = 0b1011;
+    fixture->chainlock.signer_bitmaps[3] =
+        fixture->chainlock.signer_bitmaps[2];
+    fixture->chainlock.signer_bitmaps[2].fill(0);
+    BOOST_REQUIRE(fixture->chainlock.IsStructurallyValid());
+    BOOST_CHECK(!PrepareFinalChainLockVerification(
+        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+}
+
 BOOST_AUTO_TEST_CASE(full_verifier_reports_bad_signature_after_cheap_checks)
 {
     const auto fixture = MakeVerificationFixture();
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
     BOOST_CHECK(!VerifyFinalChainLock(
         fixture->genesis_hash, fixture->chainlock, fixture->rosters,
-        /*queue=*/nullptr, &error));
+        AUTHORIZATION_MASK, /*queue=*/nullptr, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_SIGNATURE);
 }
 

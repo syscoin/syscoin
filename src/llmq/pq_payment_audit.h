@@ -27,9 +27,8 @@ inline constexpr uint8_t PAYMENT_AUDIT_RECEIPT_MAGIC_BYTES[4]{
 
 namespace llmq::pq {
 
-inline constexpr uint16_t PAYMENT_AUDIT_V1_VERSION{1};
-inline constexpr uint16_t PAYMENT_AUDIT_VERSION{2};
-inline constexpr uint16_t PAYMENT_AUDIT_RECEIPT_VERSION{3};
+inline constexpr uint16_t PAYMENT_AUDIT_VERSION{1};
+inline constexpr uint16_t PAYMENT_AUDIT_RECEIPT_VERSION{1};
 inline constexpr std::size_t PAYMENT_AUDIT_ROW_COUNT{24};
 inline constexpr uint32_t PAYMENT_AUDIT_ROW_PERIOD{
     PQ_BTCC_CANDIDATE_PERIOD};
@@ -47,23 +46,23 @@ inline constexpr uint16_t PAYMENT_AUDIT_MAX_USES_PER_CHILD{ACTIVE_QUORUMS};
 inline constexpr std::size_t MAX_PAYMENT_AUDIT_CERTIFICATE_SIZE{4'000'000};
 
 inline constexpr std::string_view PAYMENT_AUDIT_SELECTION_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_SELECTION_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_SELECTION_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_COMMITMENT_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_COMMITMENT_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_COMMITMENT_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_DESCRIPTOR_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_DESCRIPTOR_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_DESCRIPTOR_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_SHARE_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_SHARE_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_SHARE_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_SHARE_ID_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_SHARE_ID_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_SHARE_ID_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_LOGICAL_ID_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_LOGICAL_ID_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_LOGICAL_ID_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_WITNESS_ID_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_WITNESS_ID_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_WITNESS_ID_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_RESULT_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_RESULT_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_RESULT_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_RECEIPT_STATE_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_RECEIPT_STATE_V3"};
+    "SYS_PQ_PAYMENT_AUDIT_RECEIPT_STATE_V1"};
 
 static_assert(PAYMENT_AUDIT_ROW_PERIOD == PQ_BTCC_CANDIDATE_PERIOD);
 static_assert(PAYMENT_AUDIT_ROW_DEADLINE_DELAY % PQ_CL_PERIOD == 0);
@@ -226,6 +225,15 @@ struct PaymentAuditSeedPoint {
 };
 
 static_assert(PaymentAuditSeedPoint::WIRE_SIZE == 105);
+
+/** Convert the exact non-null K+10 BTCC receipt into the audit seed point. */
+[[nodiscard]] std::optional<PaymentAuditSeedPoint>
+PaymentAuditSeedPointFromBTCCReceipt(const BTCCReceipt& receipt) noexcept;
+
+/** Reconstruct the exact BTCC receipt bytes committed by one seed point. */
+[[nodiscard]] std::optional<BTCCReceipt>
+BTCCReceiptFromPaymentAuditSeedPoint(
+    const PaymentAuditSeedPoint& seed_point) noexcept;
 
 struct PaymentAuditSeed {
     static constexpr std::size_t WIRE_SIZE{

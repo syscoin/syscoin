@@ -23,12 +23,12 @@ constexpr uint8_t DB_REFERENCE_PREFIX{0xa3};
 constexpr uint8_t DB_PRESENCE_PREFIX{0xa4};
 constexpr uint8_t DB_CHECKPOINT_KEY{0xa5};
 // Changing the archive layout must fail closed against an old local DB.
-constexpr uint32_t SCHEMA_GUARD{0x50413542}; // "PA5B"
-constexpr uint32_t WITNESS_GUARD{0x50575235}; // "PWR5"
-constexpr uint32_t EPOCH_GUARD{0x50455236}; // "PER6"
-constexpr uint32_t REFERENCE_GUARD{0x50524635}; // "PRF5"
-constexpr uint32_t PRESENCE_GUARD{0x50525035}; // "PRP5"
-constexpr uint32_t CHECKPOINT_GUARD{0x50414335}; // "PAC5"
+constexpr uint32_t SCHEMA_GUARD{0x50414131}; // "PAA1"
+constexpr uint32_t WITNESS_GUARD{0x50575231}; // "PWR1"
+constexpr uint32_t EPOCH_GUARD{0x50455231}; // "PER1"
+constexpr uint32_t REFERENCE_GUARD{0x50524631}; // "PRF1"
+constexpr uint32_t PRESENCE_GUARD{0x50525031}; // "PRP1"
+constexpr uint32_t CHECKPOINT_GUARD{0x50414331}; // "PAC1"
 
 struct CorruptArchiveIndex {};
 
@@ -118,15 +118,15 @@ struct EpochRecord {
     uint32_t version{PaymentAuditStore::DB_FORMAT_VERSION};
     uint32_t epoch{0};
     uint256 pinned_witness_id;
-    std::array<uint256, PaymentAuditStore::MAX_UNREFERENCED_VARIANTS>
-        unreferenced_variants{};
+    std::array<uint256, PaymentAuditStore::MAX_LIVE_CANDIDATES>
+        live_candidates_by_missing_quorum{};
     uint32_t guard{EPOCH_GUARD};
 
     SERIALIZE_METHODS(EpochRecord, obj)
     {
         READWRITE(obj.version, obj.epoch, obj.pinned_witness_id);
-        for (auto& variant : obj.unreferenced_variants) {
-            READWRITE(variant);
+        for (auto& candidate : obj.live_candidates_by_missing_quorum) {
+            READWRITE(candidate);
         }
         READWRITE(obj.guard);
     }
@@ -219,13 +219,16 @@ bool IsEpochRecordValid(const EpochRecord& record, uint32_t epoch)
         return false;
     }
     for (std::size_t first{0};
-         first < record.unreferenced_variants.size(); ++first) {
-        const auto& id{record.unreferenced_variants[first]};
+         first < record.live_candidates_by_missing_quorum.size(); ++first) {
+        const auto& id{record.live_candidates_by_missing_quorum[first]};
         if (id.IsNull()) continue;
         if (id == record.pinned_witness_id) return false;
         for (std::size_t second{first + 1};
-             second < record.unreferenced_variants.size(); ++second) {
-            if (id == record.unreferenced_variants[second]) return false;
+             second < record.live_candidates_by_missing_quorum.size();
+             ++second) {
+            if (id == record.live_candidates_by_missing_quorum[second]) {
+                return false;
+            }
         }
     }
     return true;
@@ -330,7 +333,8 @@ bool HasValidPresence(const CDBWrapper& db, const uint256& genesis_hash,
            IsPresenceRecordValid(record, epoch, witness_id);
 }
 
-std::optional<std::size_t> VariantSlot(uint8_t selected_quorum_mask)
+std::optional<std::size_t> MissingQuorumSlot(
+    uint8_t selected_quorum_mask)
 {
     for (std::size_t missing{0}; missing < ACTIVE_QUORUMS; ++missing) {
         const uint8_t mask{static_cast<uint8_t>(
@@ -341,11 +345,12 @@ std::optional<std::size_t> VariantSlot(uint8_t selected_quorum_mask)
     return std::nullopt;
 }
 
-bool ContainsUnreferencedWitness(const EpochRecord& record,
-                                 const uint256& witness_id)
+bool ContainsLiveCandidate(const EpochRecord& record,
+                           const uint256& witness_id)
 {
-    for (const auto& variant : record.unreferenced_variants) {
-        if (variant == witness_id) return true;
+    for (const auto& candidate :
+         record.live_candidates_by_missing_quorum) {
+        if (candidate == witness_id) return true;
     }
     return false;
 }
@@ -414,6 +419,45 @@ bool PaymentAuditStore::IsHealthy() const
     return !m_failure.has_value();
 }
 
+PaymentAuditStoreResult PaymentAuditStore::ProbeLiveCandidateSlot(
+    uint32_t epoch, uint8_t selected_quorum_mask) const
+{
+    LOCK(m_mutex);
+    if (m_failure) return *m_failure;
+    const auto missing_quorum_slot{
+        MissingQuorumSlot(selected_quorum_mask)};
+    if (!missing_quorum_slot) return PaymentAuditStoreResult::INVALID;
+    if (m_prune_checkpoint &&
+        epoch <= m_prune_checkpoint->prune_through_epoch) {
+        return PaymentAuditStoreResult::INVALID;
+    }
+
+    try {
+        const EpochKey epoch_key{DB_EPOCH_PREFIX, DB_FORMAT_VERSION,
+                                 m_genesis_hash, epoch};
+        if (!m_db.Exists(epoch_key)) {
+            return PaymentAuditStoreResult::ACCEPTED;
+        }
+        EpochRecord epoch_record;
+        if (!m_db.Read(epoch_key, epoch_record) ||
+            !IsEpochRecordValid(epoch_record, epoch) ||
+            (!epoch_record.pinned_witness_id.IsNull() &&
+             !HasValidReference(m_db, m_genesis_hash, epoch,
+                                epoch_record.pinned_witness_id))) {
+            m_failure = PaymentAuditStoreResult::CORRUPT;
+            return *m_failure;
+        }
+        return epoch_record.live_candidates_by_missing_quorum[
+                   *missing_quorum_slot]
+                       .IsNull()
+                   ? PaymentAuditStoreResult::ACCEPTED
+                   : PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL;
+    } catch (const std::exception&) {
+        m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
+        return *m_failure;
+    }
+}
+
 PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
     const FinalPaymentAudit& audit, bool required_witness)
 {
@@ -424,8 +468,10 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
     const uint256 logical_id{audit.GetLogicalId(m_genesis_hash)};
     const uint256 witness_id{audit.GetWitnessId(m_genesis_hash)};
     const uint32_t epoch{audit.statement.commitment.seed.epoch};
-    const auto variant_slot{VariantSlot(audit.selected_quorum_mask)};
-    if (logical_id.IsNull() || witness_id.IsNull() || !variant_slot) {
+    const auto missing_quorum_slot{
+        MissingQuorumSlot(audit.selected_quorum_mask)};
+    if (logical_id.IsNull() || witness_id.IsNull() ||
+        !missing_quorum_slot) {
         return PaymentAuditStoreResult::INVALID;
     }
     if (m_prune_checkpoint &&
@@ -479,11 +525,10 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
                 existing.audit.statement.commitment.seed.epoch != epoch ||
                 !has_epoch ||
                 (has_reference &&
-                 ContainsUnreferencedWitness(epoch_record, witness_id)) ||
+                 ContainsLiveCandidate(epoch_record, witness_id)) ||
                 (!has_reference &&
                  (epoch_record.pinned_witness_id == witness_id ||
-                  !ContainsUnreferencedWitness(epoch_record,
-                                               witness_id)))) {
+                  !ContainsLiveCandidate(epoch_record, witness_id)))) {
                 m_failure = PaymentAuditStoreResult::CORRUPT;
                 return *m_failure;
             }
@@ -507,7 +552,7 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
         // same batch when the carrier originally connected.
         if (has_reference) {
             if (!has_epoch || !required_witness ||
-                ContainsUnreferencedWitness(epoch_record, witness_id)) {
+                ContainsLiveCandidate(epoch_record, witness_id)) {
                 m_failure = PaymentAuditStoreResult::CORRUPT;
                 return *m_failure;
             }
@@ -527,12 +572,14 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
             return *m_failure;
         }
 
-        // Applied witnesses do not consume the four live variant slots. They
+        // Applied witnesses do not consume the four live candidate slots. They
         // remain available across receipt reorgs until an authenticated
         // checkpoint atomically retires their epoch.
-        auto& slot{epoch_record.unreferenced_variants[*variant_slot]};
+        auto& slot{
+            epoch_record.live_candidates_by_missing_quorum[
+                *missing_quorum_slot]};
         if (!slot.IsNull() && !required_witness) {
-            return PaymentAuditStoreResult::VARIANT_LIMIT;
+            return PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL;
         }
 
         CDBBatch batch{m_db};
@@ -631,60 +678,6 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::Get(
     }
 }
 
-std::optional<FinalPaymentAudit> PaymentAuditStore::GetByEpoch(
-    uint32_t epoch) const
-{
-    LOCK(m_mutex);
-    if (m_failure) return std::nullopt;
-    if (m_prune_checkpoint &&
-        epoch <= m_prune_checkpoint->prune_through_epoch) {
-        return std::nullopt;
-    }
-    try {
-        const EpochKey epoch_key{DB_EPOCH_PREFIX, DB_FORMAT_VERSION,
-                                 m_genesis_hash, epoch};
-        EpochRecord epoch_record;
-        if (!m_db.Exists(epoch_key)) return std::nullopt;
-        if (!m_db.Read(epoch_key, epoch_record) ||
-            !IsEpochRecordValid(epoch_record, epoch)) {
-            m_failure = PaymentAuditStoreResult::CORRUPT;
-            return std::nullopt;
-        }
-        if (!epoch_record.pinned_witness_id.IsNull() &&
-            !HasValidReference(m_db, m_genesis_hash, epoch,
-                               epoch_record.pinned_witness_id)) {
-            m_failure = PaymentAuditStoreResult::CORRUPT;
-            return std::nullopt;
-        }
-        uint256 witness_id{epoch_record.pinned_witness_id};
-        if (witness_id.IsNull()) {
-            for (const auto& variant : epoch_record.unreferenced_variants) {
-                if (!variant.IsNull()) {
-                    witness_id = variant;
-                    break;
-                }
-            }
-        }
-        if (witness_id.IsNull()) return std::nullopt;
-
-        const WitnessKey witness_key{DB_WITNESS_PREFIX, DB_FORMAT_VERSION,
-                                     m_genesis_hash, witness_id};
-        AuditRecord record;
-        if (!m_db.Read(witness_key, record) ||
-            !IsRecordValid(record, m_genesis_hash) ||
-            !HasValidPresence(m_db, m_genesis_hash, epoch, witness_id) ||
-            record.witness_id != witness_id ||
-            record.audit.statement.commitment.seed.epoch != epoch) {
-            m_failure = PaymentAuditStoreResult::CORRUPT;
-            return std::nullopt;
-        }
-        return record.audit;
-    } catch (const std::exception&) {
-        m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
-        return std::nullopt;
-    }
-}
-
 std::vector<FinalPaymentAudit> PaymentAuditStore::GetEpochCandidates(
     uint32_t epoch) const
 {
@@ -719,7 +712,8 @@ std::vector<FinalPaymentAudit> PaymentAuditStore::GetEpochCandidates(
             }
         };
         append_unique(epoch_record.pinned_witness_id);
-        for (const auto& id : epoch_record.unreferenced_variants) {
+        for (const auto& id :
+             epoch_record.live_candidates_by_missing_quorum) {
             append_unique(id);
         }
         result.reserve(ids.size());
@@ -806,16 +800,16 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
             m_failure = PaymentAuditStoreResult::CORRUPT;
             return *m_failure;
         }
-        const bool unreferenced{
-            ContainsUnreferencedWitness(epoch_record, witness_id)};
+        const bool live_candidate{
+            ContainsLiveCandidate(epoch_record, witness_id)};
         const bool already_pinned{
             epoch_record.pinned_witness_id == witness_id};
-        if ((has_reference && unreferenced) ||
+        if ((has_reference && live_candidate) ||
             (!has_reference && already_pinned)) {
             m_failure = PaymentAuditStoreResult::CORRUPT;
             return *m_failure;
         }
-        if (!has_reference && !unreferenced) {
+        if (!has_reference && !live_candidate) {
             return PaymentAuditStoreResult::INVALID;
         }
         const WitnessKey target_key{DB_WITNESS_PREFIX, DB_FORMAT_VERSION,
@@ -831,32 +825,33 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
         }
 
         CDBBatch batch{m_db};
-        for (auto& variant : epoch_record.unreferenced_variants) {
-            if (variant.IsNull()) continue;
+        for (auto& candidate :
+             epoch_record.live_candidates_by_missing_quorum) {
+            if (candidate.IsNull()) continue;
             const WitnessKey victim_key{DB_WITNESS_PREFIX,
                                         DB_FORMAT_VERSION,
-                                        m_genesis_hash, variant};
+                                        m_genesis_hash, candidate};
             const PresenceKey victim_presence_key{
                 DB_PRESENCE_PREFIX, DB_FORMAT_VERSION,
-                m_genesis_hash, variant};
+                m_genesis_hash, candidate};
             const ReferenceKey victim_reference_key{
                 DB_REFERENCE_PREFIX, DB_FORMAT_VERSION,
-                m_genesis_hash, variant};
+                m_genesis_hash, candidate};
             AuditRecord victim;
             if (!m_db.Read(victim_key, victim) ||
                 !IsRecordValid(victim, m_genesis_hash) ||
-                victim.witness_id != variant ||
+                victim.witness_id != candidate ||
                 victim.audit.statement.commitment.seed.epoch != epoch ||
-                !HasValidPresence(m_db, m_genesis_hash, epoch, variant) ||
+                !HasValidPresence(m_db, m_genesis_hash, epoch, candidate) ||
                 m_db.Exists(victim_reference_key)) {
                 m_failure = PaymentAuditStoreResult::CORRUPT;
                 return *m_failure;
             }
-            if (variant != witness_id) {
+            if (candidate != witness_id) {
                 batch.Erase(victim_key);
                 batch.Erase(victim_presence_key);
             }
-            variant.SetNull();
+            candidate.SetNull();
         }
         if (!has_reference) {
             batch.Write(reference_key,
@@ -896,7 +891,7 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
         std::map<uint256, uint32_t> epoch_index_epochs;
         std::set<uint32_t> epoch_records;
         std::set<uint256> pinned_witnesses;
-        std::set<uint256> unreferenced_witnesses;
+        std::set<uint256> live_candidate_witnesses;
         std::vector<EpochKey> epoch_keys_to_prune;
         bool found_schema{false};
         bool found_checkpoint{false};
@@ -957,11 +952,11 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
                     }
                 }
                 for (const auto& witness_id :
-                     record.unreferenced_variants) {
+                     record.live_candidates_by_missing_quorum) {
                     if (witness_id.IsNull()) continue;
                     if (!note_epoch(epoch_index_epochs, witness_id,
                                     key.epoch) ||
-                        !unreferenced_witnesses.insert(witness_id).second) {
+                        !live_candidate_witnesses.insert(witness_id).second) {
                         throw CorruptArchiveIndex{};
                     }
                 }
@@ -1059,7 +1054,7 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
             if (presence == presence_epochs.end() ||
                 presence->second != epoch ||
                 !epoch_records.contains(epoch) ||
-                unreferenced_witnesses.contains(witness_id)) {
+                live_candidate_witnesses.contains(witness_id)) {
                 throw CorruptArchiveIndex{};
             }
         }

@@ -15,6 +15,8 @@
 #include <masternode/masternodemeta.h>
 #include <streams.h>
 #include <test/util/random.h>
+#include <test/util/setup_common.h>
+#include <validation.h>
 #include <version.h>
 #include <boost/test/unit_test.hpp>
 
@@ -26,8 +28,31 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+static fs::path SiblingDBPath(const fs::path& path, std::string_view suffix)
+{
+    fs::path sibling{path.parent_path()};
+    sibling /= fs::PathFromString(
+        fs::PathToString(path.filename()) + std::string{suffix});
+    return sibling;
+}
+
+static uint64_t DirectorySizeBytes(const fs::path& path)
+{
+    uint64_t total{0};
+    std::error_code error;
+    for (auto entry = fs::recursive_directory_iterator(path, error);
+         !error && entry != fs::recursive_directory_iterator();
+         entry.increment(error)) {
+        if (!entry->is_regular_file(error) || error) continue;
+        total += entry->file_size(error);
+        if (error) return 0;
+    }
+    return error ? 0 : total;
+}
 
 class ScopedDiskDBPath
 {
@@ -39,7 +64,18 @@ public:
     {
     }
 
-    ~ScopedDiskDBPath() { fs::remove_all(path); }
+    ~ScopedDiskDBPath()
+    {
+        std::error_code error;
+        fs::remove_all(path, error);
+        error.clear();
+        fs::remove_all(SiblingDBPath(path, "_inverse"), error);
+        error.clear();
+        fs::remove_all(
+            SiblingDBPath(path, "_pq_payment_probation"), error);
+        error.clear();
+        fs::remove_all(SiblingDBPath(path, "_pq_registry"), error);
+    }
 
     const fs::path path;
 };
@@ -601,6 +637,97 @@ BOOST_AUTO_TEST_CASE(pq_legacy_state_hash_v1_is_order_independent_and_pinned)
         "1a57c3f045901d8750b060fb692223e47d5ffbbf0cf0e1737ab41ab2b90f9989");
 }
 
+BOOST_AUTO_TEST_CASE(inverse_diff_round_trip_restores_all_mutation_kinds)
+{
+    CDataStream oversized_diff{SER_DISK, PROTOCOL_VERSION};
+    WriteCompactSize(
+        oversized_diff, CDeterministicMNListDiff::MAX_CHANGES + 1);
+    CDeterministicMNListDiff rejected_diff;
+    BOOST_CHECK_THROW(oversized_diff >> rejected_diff,
+                      std::ios_base::failure);
+
+    const uint256 genesis_hash{MakeSnapshotKey(60'000)};
+    const uint256 parent_hash{MakeSnapshotKey(60'001)};
+    const uint256 child_hash{MakeSnapshotKey(60'002)};
+    constexpr int parent_height{4321};
+    CDeterministicMNList parent{
+        MakeNontrivialAnchorSnapshot(parent_hash, parent_height, false)};
+    const uint256 parent_state_hash{
+        parent.GetPQLegacyStateHash(genesis_hash)};
+
+    CDeterministicMNList child{parent};
+    child.ResetTrackedChanges();
+    child.SetBlockHash(child_hash);
+    child.SetHeight(parent_height + 1);
+
+    const auto removed{parent.GetMNByInternalId(9)};
+    BOOST_REQUIRE(removed);
+    child.RemoveMN(removed->proTxHash);
+
+    const auto added{MakeAnchorMN(17, 4)};
+    child.AddMN(added);
+
+    const auto updated_before{parent.GetMNByInternalId(2)};
+    BOOST_REQUIRE(updated_before);
+    auto updated_state{
+        std::make_shared<CDeterministicMNState>(*updated_before->pdmnState)};
+    updated_state->nLastPaidHeight += 77;
+    updated_state->nPoSePenalty += 5;
+    // The child validly takes a unique property freed by the removal. The
+    // inverse must release it from this node before restoring the removed
+    // parent node, independent of unordered update iteration.
+    updated_state->vchNEVMAddress = removed->pdmnState->vchNEVMAddress;
+    child.UpdateMN(updated_before->proTxHash, updated_state);
+
+    CDeterministicMNListDiff inverse;
+    child.BuildTrackedInverseDiff(parent, inverse);
+    BOOST_REQUIRE_EQUAL(inverse.addedMNs.size(), 1U);
+    BOOST_REQUIRE_EQUAL(inverse.updatedMNs.size(), 1U);
+    BOOST_REQUIRE_EQUAL(inverse.removedMns.size(), 1U);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << inverse;
+    CDeterministicMNListDiff decoded;
+    encoded >> decoded;
+
+    CBlockIndex parent_index;
+    parent_index.nHeight = parent_height;
+    parent_index.phashBlock = &parent_hash;
+    const CDeterministicMNList recovered{child.ApplyDiff(
+        &parent_index, decoded, parent.GetTotalRegisteredCount())};
+
+    BOOST_CHECK_EQUAL(recovered.GetAllMNsCount(), parent.GetAllMNsCount());
+    BOOST_CHECK_EQUAL(recovered.GetTotalRegisteredCount(),
+                      parent.GetTotalRegisteredCount());
+    BOOST_CHECK(recovered.GetPQLegacyStateHash(genesis_hash) ==
+                parent_state_hash);
+    CDataStream encoded_parent{SER_DISK, PROTOCOL_VERSION};
+    CDataStream encoded_recovered{SER_DISK, PROTOCOL_VERSION};
+    encoded_parent << parent;
+    encoded_recovered << recovered;
+    BOOST_REQUIRE_EQUAL(encoded_recovered.size(), encoded_parent.size());
+    BOOST_CHECK(std::equal(encoded_recovered.begin(),
+                           encoded_recovered.end(),
+                           encoded_parent.begin()));
+    parent.ForEachMN(false, [&recovered](const CDeterministicMN& expected) {
+        const auto actual{recovered.GetMN(expected.proTxHash)};
+        BOOST_REQUIRE(actual);
+        BOOST_CHECK_EQUAL(actual->GetInternalId(), expected.GetInternalId());
+        BOOST_REQUIRE(recovered.GetMNByInternalId(expected.GetInternalId()));
+        BOOST_CHECK(recovered.GetMNByInternalId(expected.GetInternalId())
+                        ->proTxHash == expected.proTxHash);
+        const auto by_collateral{
+            recovered.GetUniquePropertyMN(expected.collateralOutpoint)};
+        BOOST_REQUIRE(by_collateral);
+        BOOST_CHECK(by_collateral->proTxHash == expected.proTxHash);
+        const auto by_owner{
+            recovered.GetUniquePropertyMN(expected.pdmnState->keyIDOwner)};
+        BOOST_REQUIRE(by_owner);
+        BOOST_CHECK(by_owner->proTxHash == expected.proTxHash);
+    });
+    BOOST_CHECK(!recovered.HasMN(added->proTxHash));
+}
+
 BOOST_AUTO_TEST_CASE(pq_anchor_write_through_survives_dirty_cache_eviction)
 {
     SelectParams(ChainType::MAIN);
@@ -722,6 +849,13 @@ BOOST_AUTO_TEST_CASE(pending_snapshot_sync_flush_orders_prior_write_through)
         block_hash, MakeSnapshot(height), /*fSync=*/false));
     BOOST_CHECK_EQUAL(manager.m_evoDb->GetReadWriteCacheSize(), 0U);
 
+    manager.FailNextInverseJournalFlushForTesting();
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/false));
+    BOOST_CHECK_THROW(
+        manager.FlushPendingSnapshotsToDisk(/*fSync=*/true),
+        dbwrapper_error);
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+
     manager.m_evoDb->FailNextFlushBatchForTesting();
     BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/false));
     BOOST_CHECK_THROW(
@@ -765,6 +899,142 @@ BOOST_AUTO_TEST_CASE(first_forced_flush_initializes_persisted_window_and_hot_cac
     BOOST_CHECK_EQUAL(snapshot.GetHeight(), oldest_retained_height);
     BOOST_REQUIRE(manager.m_evoDb->Read(MakeSnapshotKey(start_height + total_snapshots - 1), snapshot));
     BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height + total_snapshots - 1);
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_retains_all_chainstate_recovery_snapshots)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit = CDeterministicMNManager::LIST_CACHE_SIZE;
+    const int start_height = Params().GetConsensus().DIP0003Height;
+    const int total_snapshots = cache_limit + 8;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_durable_coins_recovery",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const auto chain = BuildSnapshotIndexChain(start_height, total_snapshots);
+    manager.UpdatedBlockTip(chain.Tip());
+    const uint256 durable_hash{MakeSnapshotKey(start_height)};
+    const uint256 prospective_hash{MakeSnapshotKey(start_height + 1)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        durable_hash, MakeSnapshot(start_height), /*fSync=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        prospective_hash, MakeSnapshot(start_height + 1),
+        /*fSync=*/true));
+    WriteSnapshotRange(manager, start_height + 2, total_snapshots - 2);
+
+    const std::array<const CBlockIndex*, 3> recovery_indexes{
+        chain.At(start_height), chain.At(start_height + 1),
+        chain.At(start_height)};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery_indexes));
+
+    CDeterministicMNList snapshot;
+    BOOST_REQUIRE(manager.m_evoDb->Read(durable_hash, snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height);
+    BOOST_REQUIRE(manager.m_evoDb->Read(prospective_hash, snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height + 1);
+    BOOST_CHECK(!manager.m_evoDb->Read(MakeSnapshotKey(start_height + 2),
+                                       snapshot));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(),
+                      cache_limit + 2);
+
+    // Once every chainstate advances, same-tip maintenance must reconsider
+    // both old recovery snapshots rather than taking its normal no-op path.
+    const std::array<const CBlockIndex*, 1> advanced_recovery{
+        chain.Tip()};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false,
+        advanced_recovery));
+    BOOST_CHECK(!manager.m_evoDb->Read(durable_hash, snapshot));
+    BOOST_CHECK(!manager.m_evoDb->Read(prospective_hash, snapshot));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(), cache_limit);
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_retains_each_chainstate_random_access_window)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    const auto active_chain{BuildSnapshotIndexChain(
+        start_height, 2 * cache_limit + 17)};
+    auto background_chain{BuildSnapshotIndexChain(
+        start_height, cache_limit + 6)};
+    for (uint256& hash : background_chain.hashes) {
+        hash.begin()[31] ^= 0x80;
+    }
+    const int background_height{start_height + cache_limit + 4};
+    const int oldest_retained_height{
+        background_height - cache_limit + 1};
+    const int representative_ancestor_height{
+        background_height - cache_limit / 2};
+    const int outside_window_height{background_height - cache_limit};
+    BOOST_REQUIRE_GT(active_chain.Tip()->nHeight - background_height,
+                     cache_limit);
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_multichain_window",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(active_chain.Tip());
+    const auto write_snapshot = [&](const CBlockIndex* pindex) {
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            pindex->GetBlockHash(),
+            CDeterministicMNList{
+                pindex->GetBlockHash(), pindex->nHeight, 0},
+            /*fSync=*/true));
+    };
+    WriteSnapshotRange(
+        manager, active_chain.Tip()->nHeight - cache_limit + 1,
+        cache_limit);
+    for (const int height : {background_height,
+                             oldest_retained_height,
+                             representative_ancestor_height,
+                             outside_window_height}) {
+        write_snapshot(background_chain.At(height));
+    }
+
+    const std::array<const CBlockIndex*, 2> recovery_indexes{
+        active_chain.Tip(), background_chain.At(background_height)};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery_indexes));
+
+    const auto oldest_retained{manager.GetListForBlock(
+        background_chain.At(oldest_retained_height))};
+    BOOST_CHECK_EQUAL(oldest_retained.GetHeight(), oldest_retained_height);
+    const auto representative_ancestor{manager.GetListForBlock(
+        background_chain.At(representative_ancestor_height))};
+    BOOST_CHECK_EQUAL(representative_ancestor.GetHeight(),
+                      representative_ancestor_height);
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(
+        background_chain.At(outside_window_height)->GetBlockHash(),
+        snapshot));
+
+    // Changing only the background marker must bypass the same-active-tip
+    // no-op and reclaim the single ancestor that fell out of its new window.
+    const CBlockIndex* advanced_background{
+        background_chain.At(background_height + 1)};
+    write_snapshot(advanced_background);
+    const std::array<const CBlockIndex*, 2> advanced_recovery_indexes{
+        active_chain.Tip(), advanced_background};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false,
+        advanced_recovery_indexes));
+    BOOST_CHECK(!manager.m_evoDb->Read(
+        background_chain.At(oldest_retained_height)->GetBlockHash(),
+        snapshot));
+    BOOST_REQUIRE(manager.VerifyPersistedSnapshot(advanced_background));
+    BOOST_CHECK_EQUAL(
+        manager.GetListForBlock(
+                   background_chain.At(representative_ancestor_height))
+            .GetHeight(),
+        representative_ancestor_height);
 }
 
 BOOST_AUTO_TEST_CASE(subsequent_forced_flush_appends_and_prunes_without_rewrite)
@@ -840,6 +1110,386 @@ BOOST_AUTO_TEST_CASE(older_snapshot_reads_fall_back_to_disk_after_hot_cache_shri
     BOOST_CHECK_EQUAL(
         manager.m_evoDb->GetReadCacheSize(),
         static_cast<size_t>(CDeterministicMNManager::HOT_LIST_CACHE_SIZE));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    nonempty_deep_rollback_reconstructs_pruned_parents_after_restart,
+    ChainTestingSetup)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        bool regtest{fRegTest};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int anchor_height{consensus.nPQLegacyAnchorHeight};
+        ~RestoreProfile()
+        {
+            fRegTest = regtest;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQLegacyAnchorHeight = anchor_height;
+        }
+    } restore{consensus};
+    fRegTest = false;
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
+
+    const int start_height{consensus.DIP0003Height};
+    const int rollback_depth{CDeterministicMNManager::LIST_CACHE_SIZE + 2};
+    std::vector<uint256> hashes(static_cast<size_t>(rollback_depth + 1));
+    std::vector<CBlockIndex> indices(static_cast<size_t>(rollback_depth + 1));
+    hashes[0] = MakeSnapshotKey(start_height);
+    indices[0].nHeight = start_height;
+    indices[0].phashBlock = &hashes[0];
+    const CDeterministicMNList base_snapshot{
+        MakeNontrivialAnchorSnapshot(hashes[0], start_height, false)};
+    const uint256 base_state_hash{base_snapshot.GetPQLegacyStateHash(
+        consensus.hashGenesisBlock)};
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+
+    {
+        CDeterministicMNManager manager(db_params);
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            hashes[0], base_snapshot, /*fSync=*/true));
+        CCoinsView base_view;
+        CCoinsViewCache view(&base_view);
+        const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+        const uint256 empty_base_hash{
+            MakeSnapshotKey(start_height + rollback_depth + 100)};
+        CBlockIndex empty_base_index;
+        empty_base_index.nHeight = start_height;
+        empty_base_index.phashBlock = &empty_base_hash;
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            empty_base_hash,
+            CDeterministicMNList{empty_base_hash, start_height, 0},
+            /*fSync=*/true));
+        CBlock empty_block{MakeProviderMutationBlock({})};
+        empty_block.hashPrevBlock = empty_base_hash;
+        empty_block.nTime = 0xf00d;
+        empty_block.nNonce = 0xbeef;
+        const uint256 empty_child_hash{empty_block.GetHash()};
+        CBlockIndex empty_child_index;
+        empty_child_index.nHeight = start_height + 1;
+        empty_child_index.pprev = &empty_base_index;
+        empty_child_index.phashBlock = &empty_child_hash;
+        BlockValidationState empty_state;
+        CDeterministicMNListNEVMAddressDiff empty_nevm_diff;
+        BOOST_REQUIRE(manager.ProcessBlock(
+            empty_block, &empty_child_index, empty_state, view,
+            no_legacy_commitment, empty_nevm_diff,
+            /*fJustCheck=*/false, /*ibd=*/true));
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            empty_stats;
+        BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+            empty_child_hash, empty_stats));
+        BOOST_CHECK_EQUAL(empty_stats.added_mns, 0U);
+        BOOST_CHECK_EQUAL(empty_stats.updated_mns, 0U);
+        BOOST_CHECK_EQUAL(empty_stats.removed_mns, 0U);
+        BOOST_CHECK_EQUAL(empty_stats.serialized_size, 245U);
+
+        for (int offset{1}; offset <= rollback_depth; ++offset) {
+            CBlock block{MakeProviderMutationBlock({})};
+            block.hashPrevBlock = hashes[static_cast<size_t>(offset - 1)];
+            block.nTime = static_cast<uint32_t>(offset + 1);
+            block.nNonce = static_cast<uint32_t>(offset);
+            hashes[static_cast<size_t>(offset)] = block.GetHash();
+            auto& index{indices[static_cast<size_t>(offset)]};
+            index.nHeight = start_height + offset;
+            index.pprev = &indices[static_cast<size_t>(offset - 1)];
+            index.phashBlock = &hashes[static_cast<size_t>(offset)];
+
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff diff;
+            BOOST_REQUIRE_MESSAGE(
+                manager.ProcessBlock(
+                    block, &index, state, view, no_legacy_commitment, diff,
+                    /*fJustCheck=*/false, /*ibd=*/true),
+                state.ToString());
+            if (offset == 1) {
+                CDeterministicMNManager::InverseJournalEntryStatsForTesting
+                    update_stats;
+                BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+                    hashes[1], update_stats));
+                BOOST_CHECK_EQUAL(update_stats.added_mns, 0U);
+                BOOST_CHECK_EQUAL(update_stats.updated_mns, 1U);
+                BOOST_CHECK_EQUAL(update_stats.removed_mns, 0U);
+                BOOST_CHECK_EQUAL(update_stats.serialized_size, 251U);
+                const auto stored_child{
+                    manager.GetListForBlock(&indices[1])};
+                BOOST_CHECK_EQUAL(
+                    stored_child.TrackedChangeCountForTesting(), 0U);
+                BOOST_CHECK(
+                    stored_child.HasPQLegacyStateHashCacheForTesting(
+                        consensus.hashGenesisBlock));
+                BOOST_TEST_MESSAGE(
+                    "DMN inverse payload sizes: empty=245 bytes, "
+                    "one-state-update=251 bytes");
+            }
+        }
+        manager.UpdatedBlockTip(&indices.back());
+        BOOST_REQUIRE(manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true));
+        BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(),
+                          CDeterministicMNManager::LIST_CACHE_SIZE);
+        BOOST_CHECK(!manager.VerifyPersistedSnapshot(&indices.front()));
+    }
+
+    const uint64_t inverse_disk_bytes{DirectorySizeBytes(
+        SiblingDBPath(disk_db.path, "_inverse"))};
+    BOOST_REQUIRE_GT(inverse_disk_bytes, 0U);
+    BOOST_TEST_MESSAGE(strprintf(
+        "DMN inverse LevelDB: %u records occupy %u bytes (%.1f bytes/record)",
+        static_cast<unsigned>(rollback_depth + 1), inverse_disk_bytes,
+        static_cast<double>(inverse_disk_bytes) /
+            static_cast<double>(rollback_depth + 1)));
+
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager restarted(db_params);
+        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(&indices.back()));
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(&indices.back()));
+        for (int offset{rollback_depth}; offset > 1; --offset) {
+            CDeterministicMNListNEVMAddressDiff inverse_nevm;
+            BOOST_TEST_CONTEXT("undo offset=" << offset) {
+                BOOST_REQUIRE(restarted.UndoBlock(
+                    &indices[static_cast<size_t>(offset)], inverse_nevm));
+            }
+            BOOST_REQUIRE(restarted.EnsureRetainedSnapshotWindow(
+                &indices[static_cast<size_t>(offset - 1)]));
+            restarted.UpdatedBlockTip(
+                &indices[static_cast<size_t>(offset - 1)]);
+            if (offset <= 3) {
+                BOOST_TEST_CONTEXT("maintenance after undo offset=" << offset) {
+                    BOOST_REQUIRE(restarted.FlushCacheToDisk(
+                        /*bForceFlush=*/true, /*fSync=*/true));
+                }
+            }
+        }
+        BOOST_REQUIRE(restarted.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(&indices[1]));
+        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(&indices.front()));
+        BOOST_CHECK(restarted.GetListForBlock(&indices.front())
+                        .GetPQLegacyStateHash(consensus.hashGenesisBlock) ==
+                    base_state_hash);
+    }
+
+    {
+        CDeterministicMNManager reopened(db_params);
+        BOOST_REQUIRE(reopened.VerifyInverseJournalTipSeal(&indices[1]));
+        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(&indices.front()));
+        BOOST_CHECK(reopened.GetListForBlock(&indices.front())
+                        .GetPQLegacyStateHash(consensus.hashGenesisBlock) ==
+                    base_state_hash);
+        CDeterministicMNListNEVMAddressDiff inverse_nevm;
+        BOOST_REQUIRE(reopened.UndoBlock(&indices[1], inverse_nevm));
+        const auto recovered{reopened.GetListForBlock(&indices.front())};
+        BOOST_CHECK_EQUAL(recovered.GetAllMNsCount(), 3U);
+        BOOST_CHECK_EQUAL(recovered.GetTotalRegisteredCount(), 17U);
+        BOOST_CHECK(
+            recovered.GetPQLegacyStateHash(consensus.hashGenesisBlock) ==
+            base_state_hash);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(missing_inverse_coverage_fails_closed)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    const int parent_height{Params().GetConsensus().DIP0003Height};
+    auto chain{BuildSnapshotIndexChain(parent_height, 2)};
+    auto db_params = DBParams{
+        .path = "testdb_dmn_missing_inverse",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        chain.Tip()->GetBlockHash(),
+        CDeterministicMNList{chain.Tip()->GetBlockHash(),
+                             chain.Tip()->nHeight, 0},
+        /*fSync=*/true));
+
+    CDeterministicMNListNEVMAddressDiff inverse_nevm;
+    BOOST_CHECK(!manager.VerifyInverseJournalTipSeal(chain.Tip()));
+    BOOST_CHECK(!manager.UndoBlock(chain.Tip(), inverse_nevm));
+    BOOST_CHECK(!manager.VerifyPersistedSnapshot(chain.At(parent_height)));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    corrupt_inverse_parent_hash_is_rejected_before_undo,
+    ChainTestingSetup)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int anchor_height{consensus.nPQLegacyAnchorHeight};
+        ~RestoreProfile()
+        {
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQLegacyAnchorHeight = anchor_height;
+        }
+    } restore{consensus};
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
+
+    const int base_height{consensus.DIP0003Height};
+    std::array<uint256, 2> hashes{MakeSnapshotKey(base_height), uint256{}};
+    std::array<CBlockIndex, 2> indices;
+    indices[0].nHeight = base_height;
+    indices[0].phashBlock = &hashes[0];
+    auto db_params = DBParams{
+        .path = "testdb_dmn_corrupt_inverse",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const auto base_snapshot{
+        MakeNontrivialAnchorSnapshot(hashes[0], base_height, false)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        hashes[0], base_snapshot, /*fSync=*/true));
+
+    CBlock block{MakeProviderMutationBlock({})};
+    block.hashPrevBlock = hashes[0];
+    block.nTime = 1;
+    block.nNonce = 1;
+    hashes[1] = block.GetHash();
+    indices[1].nHeight = base_height + 1;
+    indices[1].pprev = &indices[0];
+    indices[1].phashBlock = &hashes[1];
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    BlockValidationState state;
+    CDeterministicMNListNEVMAddressDiff diff;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        block, &indices[1], state, view,
+        llmq::CFinalCommitmentTxPayload{}, diff,
+        /*fJustCheck=*/false, /*ibd=*/true));
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    BOOST_REQUIRE(manager.VerifyInverseJournalTipSeal(&indices[1]));
+    BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(hashes[1]));
+    BOOST_CHECK(!manager.VerifyInverseJournalTipSeal(&indices[1]));
+
+    CDeterministicMNListNEVMAddressDiff inverse_nevm;
+    BOOST_CHECK(!manager.UndoBlock(&indices[1], inverse_nevm));
+    BOOST_REQUIRE(manager.VerifyPersistedSnapshot(&indices[1]));
+
+    // A tip seal intentionally does not rescan the complete LevelDB history.
+    // If an older key is damaged after publication, sequential undo must stop
+    // at the last verified link before reconstructing its missing parent (and
+    // therefore before the later PQ-registry rollback stage is entered).
+    constexpr int gap_depth{5};
+    std::array<uint256, gap_depth + 1> gap_hashes;
+    std::array<CBlockIndex, gap_depth + 1> gap_indices;
+    gap_hashes[0] = MakeSnapshotKey(base_height + 100);
+    gap_indices[0].nHeight = base_height;
+    gap_indices[0].phashBlock = &gap_hashes[0];
+    const ScopedDiskDBPath gap_disk;
+    auto gap_db_params = DBParams{
+        .path = gap_disk.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    {
+        CDeterministicMNManager builder(gap_db_params);
+        BOOST_REQUIRE(builder.m_evoDb->WriteThrough(
+            gap_hashes[0],
+            MakeNontrivialAnchorSnapshot(
+                gap_hashes[0], base_height, false),
+            /*fSync=*/true));
+        CCoinsView gap_base_view;
+        CCoinsViewCache gap_view(&gap_base_view);
+        for (int offset{1}; offset <= gap_depth; ++offset) {
+            CBlock gap_block{MakeProviderMutationBlock({})};
+            gap_block.hashPrevBlock = gap_hashes[offset - 1];
+            gap_block.nTime = static_cast<uint32_t>(50 + offset);
+            gap_block.nNonce = static_cast<uint32_t>(100 + offset);
+            gap_hashes[offset] = gap_block.GetHash();
+            gap_indices[offset].nHeight = base_height + offset;
+            gap_indices[offset].pprev = &gap_indices[offset - 1];
+            gap_indices[offset].phashBlock = &gap_hashes[offset];
+            BlockValidationState gap_state;
+            CDeterministicMNListNEVMAddressDiff gap_diff;
+            BOOST_REQUIRE_MESSAGE(builder.ProcessBlock(
+                gap_block, &gap_indices[offset], gap_state, gap_view,
+                llmq::CFinalCommitmentTxPayload{}, gap_diff,
+                /*fJustCheck=*/false, /*ibd=*/true),
+                gap_state.ToString());
+        }
+        BOOST_REQUIRE(builder.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    }
+
+    gap_db_params.wipe_data = false;
+    {
+        CDeterministicMNManager damaged(gap_db_params);
+        BOOST_REQUIRE(damaged.EraseInverseJournalEntryForTesting(
+            gap_hashes[2]));
+        damaged.m_evoDb->EraseCache(gap_hashes[2]);
+        BOOST_REQUIRE(damaged.m_evoDb->FlushCacheToDisk(
+            /*CHUNK_ITEMS=*/256, /*fSync=*/true));
+    }
+
+    {
+        CDeterministicMNManager restarted(gap_db_params);
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(
+            &gap_indices.back()));
+        CDeterministicMNList gap_child_before;
+        BOOST_REQUIRE(restarted.m_evoDb->Read(
+            gap_hashes[3], gap_child_before));
+        const uint256 gap_child_state_hash{
+            gap_child_before.GetPQLegacyStateHash(
+                consensus.hashGenesisBlock)};
+
+        CDeterministicMNListNEVMAddressDiff gap_nevm;
+        BOOST_REQUIRE(restarted.UndoBlock(&gap_indices[5], gap_nevm));
+        gap_nevm = {};
+        BOOST_REQUIRE(restarted.UndoBlock(&gap_indices[4], gap_nevm));
+        BOOST_CHECK(!restarted.VerifyPersistedSnapshot(&gap_indices[2]));
+        gap_nevm = {};
+        BOOST_CHECK(!restarted.UndoBlock(&gap_indices[3], gap_nevm));
+        BOOST_CHECK(gap_nevm.addedMNNEVM.empty());
+        BOOST_CHECK(gap_nevm.updatedMNNEVM.empty());
+        BOOST_CHECK(gap_nevm.removedMNNEVM.empty());
+        BOOST_CHECK(!restarted.VerifyPersistedSnapshot(&gap_indices[2]));
+
+        CDeterministicMNList gap_child_after;
+        BOOST_REQUIRE(restarted.m_evoDb->Read(
+            gap_hashes[3], gap_child_after));
+        BOOST_CHECK(gap_child_after.GetPQLegacyStateHash(
+                        consensus.hashGenesisBlock) ==
+                    gap_child_state_hash);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(replay_floor_retains_all_persisted_branches_until_clear)
@@ -1127,6 +1777,7 @@ BOOST_AUTO_TEST_CASE(finality_roster_process_block_uses_sparse_write_through)
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     struct RestoreProfile {
         Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
         int preparation_height{consensus.nPQPreparationHeight};
         int epoch_origin{consensus.nPQChainLockEpochOrigin};
         uint32_t registration_cutoff{consensus.nPQRegistrationCutoffBlocks};
@@ -1138,6 +1789,7 @@ BOOST_AUTO_TEST_CASE(finality_roster_process_block_uses_sparse_write_through)
         uint256 anchor_pq_state{consensus.hashPQLegacyPQRegistryState};
         ~RestoreProfile()
         {
+            consensus.DIP0003Height = dip3_height;
             consensus.nPQPreparationHeight = preparation_height;
             consensus.nPQChainLockEpochOrigin = epoch_origin;
             consensus.nPQRegistrationCutoffBlocks = registration_cutoff;
@@ -1165,6 +1817,7 @@ BOOST_AUTO_TEST_CASE(finality_roster_process_block_uses_sparse_write_through)
     consensus.nPQFutureHorizonEpochs = 8;
     consensus.nPQPreparationHeight =
         consensus.nPQChainLockEpochOrigin - roster_lag - 1;
+    consensus.DIP0003Height = consensus.nPQPreparationHeight - 1;
     consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
     consensus.hashPQLegacyAnchorBlock.SetNull();
     consensus.hashPQLegacyMNState.SetNull();

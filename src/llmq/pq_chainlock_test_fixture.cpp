@@ -25,9 +25,9 @@
 namespace llmq::pq::test {
 namespace {
 
-constexpr uint64_t FIXTURE_MAGIC{0x3458464c43515053ULL}; // "SPQCLFX4"
+constexpr uint64_t FIXTURE_MAGIC{0x3158464c43515053ULL}; // "SPQCLFX1"
 constexpr std::string_view FIXTURE_CHECKSUM_DOMAIN{
-    "SYS_PQ_CHAINLOCK_SNAPSHOT_FIXTURE_V4"};
+    "SYS_PQ_CHAINLOCK_SNAPSHOT_FIXTURE_V1"};
 
 uint256 SyntheticMemberHash(uint64_t value)
 {

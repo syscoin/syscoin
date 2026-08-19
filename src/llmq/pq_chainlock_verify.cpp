@@ -127,6 +127,7 @@ bool ValidateFrozenQuorumContextInternal(
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     uint8_t selected_quorum_mask,
     ChainLockVerificationError* error)
 {
@@ -138,21 +139,28 @@ bool ValidateFrozenQuorumContextInternal(
         SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
         return false;
     }
+    if (!IsSigningRosterAuthorizationMask(authorization_mask) ||
+        (selected_quorum_mask & ~authorization_mask) != 0) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return false;
+    }
 
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
     std::set<std::pair<uint32_t, uint256>> quorum_identities;
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         const auto& roster = rosters[slot];
         const auto& descriptor = roster.descriptor;
-        // This height bound is necessary but not standalone transition
-        // evidence. Live admission separately requires the statement's exact
-        // locally accepted predecessor; trusted restart import is limited to
-        // the node's previously fsynced winner.
+        // The predecessor-derived mask is the transition evidence. A newest
+        // unselected roster may already be context-bound before its snapshot
+        // is authorized, but no authorized descriptor may cross the boundary.
+        const int32_t authorization_height{
+            descriptor.epoch < ACTIVE_QUORUMS
+                ? descriptor.base_height
+                : descriptor.snapshot_height};
         if (!IsDescriptorHeaderValid(descriptor, statement.height) ||
             !quorum_identities.emplace(descriptor.epoch, descriptor.base_hash).second ||
-            (descriptor.epoch >= ACTIVE_QUORUMS &&
-             descriptor.snapshot_height >
-                 statement.previous_chainlock_height) ||
+            (IsSelected(authorization_mask, slot) &&
+             authorization_height > statement.previous_chainlock_height) ||
             (slot != 0 &&
              (descriptor.epoch <= rosters[slot - 1].descriptor.epoch ||
               descriptor.base_height <= rosters[slot - 1].descriptor.base_height))) {
@@ -324,11 +332,12 @@ bool ValidateFrozenQuorumContext(
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
     SetError(error, ChainLockVerificationError::NONE);
     return ValidateFrozenQuorumContextInternal(
-        genesis_hash, statement, rosters,
+        genesis_hash, statement, rosters, authorization_mask,
         /*selected_quorum_mask=*/0, error);
 }
 
@@ -336,6 +345,7 @@ std::optional<C11SignatureCheck> PrepareChainLockShareVerification(
     const uint256& genesis_hash,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
     SetError(error, ChainLockVerificationError::NONE);
@@ -343,18 +353,18 @@ std::optional<C11SignatureCheck> PrepareChainLockShareVerification(
         SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
         return std::nullopt;
     }
+    const auto quorum_slot{FindQuorumSlot(share.transcript, rosters)};
+    if (!quorum_slot || !IsSelected(authorization_mask, *quorum_slot)) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return std::nullopt;
+    }
     const ChainLockStatement statement{share.GetStatement()};
     if (!ValidateFrozenQuorumContextInternal(
-            genesis_hash, statement, rosters,
+            genesis_hash, statement, rosters, authorization_mask,
             /*selected_quorum_mask=*/0, error)) {
         return std::nullopt;
     }
 
-    const auto quorum_slot{FindQuorumSlot(share.transcript, rosters)};
-    if (!quorum_slot) {
-        SetError(error, ChainLockVerificationError::INVALID_SIGNER);
-        return std::nullopt;
-    }
     const auto& roster{rosters[*quorum_slot]};
     if (roster.descriptor.valid_count < QUORUM_MIN_VALID) {
         SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
@@ -402,10 +412,11 @@ bool VerifyChainLockShare(
     const uint256& genesis_hash,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
     auto check{PrepareChainLockShareVerification(
-        genesis_hash, share, rosters, error)};
+        genesis_hash, share, rosters, authorization_mask, error)};
     if (!check) return false;
     if (!(*check)()) {
         SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
@@ -419,6 +430,7 @@ std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
     const uint256& genesis_hash,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
     SetError(error, ChainLockVerificationError::NONE);
@@ -427,7 +439,7 @@ std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
         return std::nullopt;
     }
     if (!ValidateFrozenQuorumContextInternal(
-            genesis_hash, chainlock.statement, rosters,
+            genesis_hash, chainlock.statement, rosters, authorization_mask,
             chainlock.selected_quorum_mask, error)) {
         return std::nullopt;
     }
@@ -509,11 +521,12 @@ bool VerifyFinalChainLock(
     const uint256& genesis_hash,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     C11SignatureCheckQueue* queue,
     ChainLockVerificationError* error)
 {
     auto prepared = PrepareFinalChainLockVerification(
-        genesis_hash, chainlock, rosters, error);
+        genesis_hash, chainlock, rosters, authorization_mask, error);
     if (!prepared) return false;
     if (!VerifyC11SignatureChecks(std::move(prepared->checks), queue)) {
         SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
@@ -547,10 +560,11 @@ bool ChainLockVerifier::Verify(
     const uint256& genesis_hash,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
     auto prepared = PrepareFinalChainLockVerification(
-        genesis_hash, chainlock, rosters, error);
+        genesis_hash, chainlock, rosters, authorization_mask, error);
     if (!prepared) return false;
     if (!VerifyChecks(std::move(prepared->checks))) {
         SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);

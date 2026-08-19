@@ -404,4 +404,48 @@ BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
     BOOST_CHECK(advanced->cumulative_hash != accepted->cumulative_hash);
 }
 
+BOOST_AUTO_TEST_CASE(indexed_receipt_reconstruction_is_exact_and_prune_safe)
+{
+    const auto chainlock_schedule{MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(chainlock_schedule);
+    const BTCCScheduleConfig btcc_schedule{.candidate_origin = 0};
+    BOOST_REQUIRE(btcc_schedule.IsValid());
+
+    const uint256 genesis{NonNullHash(23000)};
+    IndexChain chain{891};
+    chain.At(870).btcpPrevCommitment = NonNullHash(23001);
+
+    BTCCReceipt receipt;
+    receipt.chainlock_target_height = 870;
+    receipt.chainlock_target_hash = chain.At(870).GetBlockHash();
+    receipt.chainlock_logical_id = NonNullHash(23002);
+    receipt.accepted_cursor = Cursor(chain, 870);
+    const BTCCReceiptState previous;
+    const auto current{ApplyBTCCReceiptState(
+        genesis, *chainlock_schedule, btcc_schedule, 880,
+        chain.At(880).GetBlockHash(), previous, receipt)};
+    BOOST_REQUIRE(current);
+
+    const auto reconstructed{ReconstructBTCCReceipt(
+        genesis, *chainlock_schedule, btcc_schedule, chain.At(880),
+        previous, *current, receipt.chainlock_logical_id)};
+    BOOST_REQUIRE(reconstructed);
+    BOOST_CHECK(*reconstructed == receipt);
+
+    BOOST_CHECK(!ReconstructBTCCReceipt(
+        genesis, *chainlock_schedule, btcc_schedule, chain.At(880),
+        previous, *current, NonNullHash(23003)));
+    auto wrong_state{*current};
+    wrong_state.cumulative_hash = NonNullHash(23004);
+    BOOST_CHECK(!ReconstructBTCCReceipt(
+        genesis, *chainlock_schedule, btcc_schedule, chain.At(880),
+        previous, wrong_state, receipt.chainlock_logical_id));
+
+    const auto null_receipt{ReconstructBTCCReceipt(
+        genesis, *chainlock_schedule, btcc_schedule, chain.At(890),
+        *current, *current, uint256{})};
+    BOOST_REQUIRE(null_receipt);
+    BOOST_CHECK(null_receipt->IsNull());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

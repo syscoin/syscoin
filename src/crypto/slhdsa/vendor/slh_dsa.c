@@ -2,7 +2,8 @@
  * Copyright (c) The slhdsa-c project authors
  * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
  *
- * Modified by the Syscoin project: cleanse transient key-derived buffers.
+ * Modified by the Syscoin project: cleanse transient key-derived buffers and
+ * perform byte-size arithmetic in size_t.
  */
 
 /* === FIPS 205 Stateless Hash-Based Digital Signature Standard */
@@ -54,7 +55,8 @@ static SLH_INLINE uint32_t get_len(const slh_param_t *prm)
 /* Return signature size in bytes for parameter set *prm. */
 size_t slh_sig_sz(const slh_param_t *prm)
 {
-  return (1 + prm->k * (1 + prm->a) + prm->h + prm->d * get_len(prm)) * prm->n;
+  return (1 + (size_t) prm->k * (1 + prm->a) + prm->h +
+          (size_t) prm->d * get_len(prm)) * prm->n;
 }
 
 /* === Compute the base 2**b representation of X. */
@@ -333,7 +335,7 @@ static int ht_verify(slh_var_t *var, const uint8_t *m, const uint8_t *sig_ht,
 
   xmss_pk_from_sig(var, node, i_leaf, sig_ht, m);
 
-  st_sz = (prm->hp + get_len(prm)) * prm->n;
+  st_sz = ((size_t) prm->hp + get_len(prm)) * prm->n;
 
   for (j = 1; j < prm->d; j++)
   {

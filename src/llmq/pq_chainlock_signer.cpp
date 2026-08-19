@@ -59,6 +59,7 @@ ChainLockShareSigner::ChainLockShareSigner(
 ChainLockSigningResult ChainLockShareSigner::Sign(
     const ChainLockStatement& statement,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     uint8_t quorum_slot,
     uint16_t member_index,
     const sphincs_c11::SecretKey& child_secret_key,
@@ -77,13 +78,17 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
     if (!IsEligibleChainLockTarget(m_schedule, statement.height)) {
         return Failure(error, ChainLockSigningError::INELIGIBLE_HEIGHT);
     }
-    ChainLockVerificationError context_error{ChainLockVerificationError::NONE};
-    if (!ValidateFrozenQuorumContext(m_genesis_hash, statement, rosters,
-                                     &context_error)) {
-        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
-    }
     if (quorum_slot >= ACTIVE_QUORUMS) {
         return Failure(error, ChainLockSigningError::INVALID_QUORUM_SLOT);
+    }
+    if ((authorization_mask & (uint8_t{1} << quorum_slot)) == 0) {
+        return Failure(error, ChainLockSigningError::INACTIVE_QUORUM);
+    }
+    ChainLockVerificationError context_error{ChainLockVerificationError::NONE};
+    if (!ValidateFrozenQuorumContext(m_genesis_hash, statement, rosters,
+                                     authorization_mask,
+                                     &context_error)) {
+        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
     }
     const auto& roster{rosters[quorum_slot]};
     if (!IsEpochActiveForTarget(m_schedule, roster.descriptor.epoch,

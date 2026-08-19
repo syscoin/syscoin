@@ -35,12 +35,14 @@ PreparePaymentAuditResponseVerification(
     const PaymentAuditResponse& response,
     const PaymentAuditHave& expected,
     const FrozenQuorumRosters& response_rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error = nullptr);
 
 [[nodiscard]] bool ValidatePaymentAuditContext(
     const uint256& genesis_hash,
     const PaymentAuditStatement& statement,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error = nullptr);
 
 /** Live-only gate: B must already have the exact ordinary ChainLock witness. */
@@ -62,6 +64,7 @@ PreparePaymentAuditShareVerification(
     const uint256& genesis_hash,
     const PaymentAuditShare& share,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error = nullptr);
 
 [[nodiscard]] std::optional<PreparedPaymentAuditVerification>
@@ -69,12 +72,14 @@ PrepareFinalPaymentAuditVerification(
     const uint256& genesis_hash,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error = nullptr);
 
 [[nodiscard]] bool VerifyFinalPaymentAudit(
     const uint256& genesis_hash,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     C11SignatureCheckQueue* queue = nullptr,
     PaymentAuditVerificationError* error = nullptr);
 

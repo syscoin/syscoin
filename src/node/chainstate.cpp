@@ -44,7 +44,7 @@ namespace {
 // SYSCOIN: A loaded coins database is usable only when its deterministic-MN
 // and PQ-registry snapshots agree with the release-pinned migration branch.
 // This prevents a stale pre-PQ database from silently bootstrapping finality.
-bool VerifyActivePQLegacyAnchor(const Chainstate& chainstate)
+bool VerifyActivePQAnchors(const Chainstate& chainstate)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     const auto& consensus = chainstate.m_chainman.GetConsensus();
@@ -56,27 +56,66 @@ bool VerifyActivePQLegacyAnchor(const Chainstate& chainstate)
         return false;
     }
     const auto configuration = Consensus::CheckPQLegacyAnchorConfiguration(consensus);
+    const auto finality_configuration =
+        Consensus::CheckPQChainLockAnchorConfiguration(consensus);
     const CBlockIndex* tip = chainstate.m_chain.Tip();
-    if (configuration == Consensus::PQLegacyAnchorResult::DISABLED) {
-        return pq_deployment != llmq::pq::PQRegistryDeploymentResult::VALID ||
-               tip == nullptr ||
-               (deterministicMNManager != nullptr &&
-                deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip));
+    llmq::pq::PQPaymentProbationState probation_state;
+    if (tip != nullptr && tip->nHeight >= consensus.DIP0003Height &&
+        (deterministicMNManager == nullptr ||
+         !deterministicMNManager->VerifyPersistedSnapshot(tip) ||
+         !deterministicMNManager->VerifyInverseJournalTipSeal(tip) ||
+         !deterministicMNManager->GetPaymentProbationState(
+             tip, probation_state))) {
+        // The inverse DB is intentionally versioned and not backfilled from a
+        // bounded snapshot window. Fresh sync or reindex inductively publishes
+        // each predecessor seal. Startup also resolves the exact probation
+        // root referenced by the tip; later physical LevelDB damage remains
+        // fail-closed at point of use.
+        return false;
     }
-    if (configuration != Consensus::PQLegacyAnchorResult::VALID) return false;
+    if (configuration == Consensus::PQAnchorResult::DISABLED) {
+        return finality_configuration ==
+                   Consensus::PQAnchorResult::DISABLED &&
+               (pq_deployment !=
+                    llmq::pq::PQRegistryDeploymentResult::VALID ||
+                tip == nullptr ||
+                (deterministicMNManager != nullptr &&
+                 deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip)));
+    }
+    if (configuration != Consensus::PQAnchorResult::VALID ||
+        finality_configuration ==
+            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
+        return false;
+    }
 
     if (tip == nullptr) return true;
-    if (tip->nHeight < consensus.nPQLegacyAnchorHeight) {
-        return deterministicMNManager != nullptr &&
-               deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip);
-    }
+    const CBlockIndex* known_legacy_anchor{
+        chainstate.m_chainman.m_blockman.LookupBlockIndex(
+            consensus.hashPQLegacyAnchorBlock)};
     const auto ancestry = Consensus::CheckPQLegacyAnchor(
-        consensus, tip->nHeight, tip->GetBlockHash(), tip->pprev);
-    if (ancestry != Consensus::PQLegacyAnchorResult::VALID) return false;
+        consensus, tip->nHeight, tip->GetBlockHash(), tip->pprev,
+        known_legacy_anchor);
+    if (ancestry != Consensus::PQAnchorResult::VALID) return false;
 
-    const CBlockIndex* anchor = tip->GetAncestor(consensus.nPQLegacyAnchorHeight);
+    if (finality_configuration == Consensus::PQAnchorResult::VALID) {
+        const CBlockIndex* known_finality_anchor{
+            chainstate.m_chainman.m_blockman.LookupBlockIndex(
+                consensus.hashPQChainLockAnchorBlock)};
+        if (Consensus::CheckPQChainLockAnchor(
+                consensus, tip->nHeight, tip->GetBlockHash(), tip->pprev,
+                known_finality_anchor) !=
+            Consensus::PQAnchorResult::VALID) {
+            return false;
+        }
+    }
+
+    const CBlockIndex* anchor{
+        tip->nHeight >= consensus.nPQLegacyAnchorHeight
+            ? tip->GetAncestor(consensus.nPQLegacyAnchorHeight)
+            : nullptr};
     return deterministicMNManager != nullptr &&
-           deterministicMNManager->VerifyPQLegacyAnchorState(anchor) &&
+           (anchor == nullptr ||
+            deterministicMNManager->VerifyPQLegacyAnchorState(anchor)) &&
            deterministicMNManager->VerifyPersistedSnapshot(tip) &&
            deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip);
 }
@@ -265,9 +304,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             // SYSCOIN: Treat an anchor/registry mismatch as an incompatible
             // database, not a recoverable tip-selection error; reindexing is
             // required to reconstruct the branch-bound snapshots.
-            if (!VerifyActivePQLegacyAnchor(*chainstate)) {
+            if (!VerifyActivePQAnchors(*chainstate)) {
                 return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
-                        _("Mandatory post-quantum migration anchor, deterministic masternode state, or PQ key registry is missing or invalid. Reindex with the matching Syscoin release.")};
+                        _("Mandatory post-quantum anchors, deterministic masternode state, rollback-journal tip seal, or PQ key registry is missing or invalid. Reindex with the matching Syscoin release; existing pre-journal datadirs cannot be backfilled from the bounded snapshot window.")};
             }
         }
         // SYSCOIN

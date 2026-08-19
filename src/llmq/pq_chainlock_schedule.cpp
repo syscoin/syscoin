@@ -179,6 +179,73 @@ bool IsEligibleChainLockTarget(const ChainLockScheduleConfig& config,
            ActiveEpochsAtHeight(config, target_height).has_value();
 }
 
+std::optional<int32_t> NextEligibleChainLockTargetHeight(
+    const ChainLockScheduleConfig& config,
+    int32_t predecessor_height) noexcept
+{
+    if (!config.IsValid() || predecessor_height < -1 ||
+        predecessor_height == std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    const auto warmup_height{
+        EpochBaseHeight(config, ACTIVE_QUORUMS - 1)};
+    if (!warmup_height) return std::nullopt;
+    const int64_t first_height{std::max<int64_t>(
+        static_cast<int64_t>(predecessor_height) + 1,
+        *warmup_height)};
+    if (first_height > MAX_BLOCK_HEIGHT) return std::nullopt;
+    const auto target{FirstCadenceAtOrAfter(
+        config, static_cast<int32_t>(first_height))};
+    if (!target || !IsEligibleChainLockTarget(config, *target)) {
+        return std::nullopt;
+    }
+    return target;
+}
+
+std::optional<int32_t> LatestEligibleChainLockTargetHeight(
+    const ChainLockScheduleConfig& config, int32_t tip_height) noexcept
+{
+    if (!config.IsValid()) return std::nullopt;
+    const int64_t available_height{
+        static_cast<int64_t>(tip_height) - config.sign_lag};
+    const int64_t offset{available_height - config.epoch_origin};
+    if (offset < 0) return std::nullopt;
+    const int64_t target_height{
+        available_height - offset % config.chainlock_period};
+    if (target_height < 0 || target_height > MAX_BLOCK_HEIGHT ||
+        !IsEligibleChainLockTarget(
+            config, static_cast<int32_t>(target_height))) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(target_height);
+}
+
+std::optional<ChainLockSigningWindow> CurrentChainLockSigningWindow(
+    const ChainLockScheduleConfig& config,
+    int32_t durable_predecessor_height,
+    int32_t tip_height) noexcept
+{
+    const auto next{NextEligibleChainLockTargetHeight(
+        config, durable_predecessor_height)};
+    const auto latest{LatestEligibleChainLockTargetHeight(config, tip_height)};
+    if (!next || !latest || *latest < *next) return std::nullopt;
+
+    if (*latest == *next) {
+        return ChainLockSigningWindow{*latest,
+                                      durable_predecessor_height};
+    }
+    const int64_t declared_predecessor{
+        static_cast<int64_t>(*latest) - config.chainlock_period};
+    if (declared_predecessor < 0 ||
+        declared_predecessor > std::numeric_limits<int32_t>::max() ||
+        !IsEligibleChainLockTarget(
+            config, static_cast<int32_t>(declared_predecessor))) {
+        return std::nullopt;
+    }
+    return ChainLockSigningWindow{
+        *latest, static_cast<int32_t>(declared_predecessor)};
+}
+
 std::optional<int32_t> SigningHeightForTarget(const ChainLockScheduleConfig& config,
                                               int32_t target_height) noexcept
 {

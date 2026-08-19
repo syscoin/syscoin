@@ -24,7 +24,7 @@
 namespace {
 
 enum class ProviderAuthEra {
-    LEGACY_VERIFIED,
+    DISABLED,
     LEGACY_ANCHORED,
     POST_QUANTUM,
     INVALID,
@@ -35,10 +35,10 @@ ProviderAuthEra GetProviderAuthEra(const CBlockIndex* pindex_prev)
     if (pindex_prev == nullptr) return ProviderAuthEra::INVALID;
     const auto& consensus = Params().GetConsensus();
     const auto anchor = Consensus::CheckPQLegacyAnchorConfiguration(consensus);
-    if (anchor == Consensus::PQLegacyAnchorResult::DISABLED) {
-        return ProviderAuthEra::LEGACY_VERIFIED;
+    if (anchor == Consensus::PQAnchorResult::DISABLED) {
+        return ProviderAuthEra::DISABLED;
     }
-    if (anchor != Consensus::PQLegacyAnchorResult::VALID) {
+    if (anchor != Consensus::PQAnchorResult::VALID) {
         return ProviderAuthEra::INVALID;
     }
     return pindex_prev->nHeight + 1 > consensus.nPQLegacyAnchorHeight
@@ -141,8 +141,7 @@ DecodeProviderMutationIdentity(const CTransaction& tx) noexcept
                 payload.proTxHash.IsNull()) {
                 return std::nullopt;
             }
-            return ProviderMutationIdentity{
-                payload.proTxHash, ProviderMutationKind::SERVICE, false};
+            return ProviderMutationIdentity{payload.proTxHash, false};
         }
         case SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR: {
             CProUpRegTx payload;
@@ -152,8 +151,7 @@ DecodeProviderMutationIdentity(const CTransaction& tx) noexcept
                 payload.proTxHash.IsNull()) {
                 return std::nullopt;
             }
-            return ProviderMutationIdentity{
-                payload.proTxHash, ProviderMutationKind::REGISTRAR, false};
+            return ProviderMutationIdentity{payload.proTxHash, false};
         }
         case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE: {
             CProUpRevTx payload;
@@ -164,7 +162,7 @@ DecodeProviderMutationIdentity(const CTransaction& tx) noexcept
                 return std::nullopt;
             }
             return ProviderMutationIdentity{
-                payload.proTxHash, ProviderMutationKind::REVOKE,
+                payload.proTxHash,
                 payload.nVersion == CProUpRevTx::PQ_VERSION};
         }
         default:
@@ -453,12 +451,6 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
         }
         if (ShouldCheckProviderAuthorization(
                 auth_era, check_sigs, validation_context)) {
-            if (auth_era == ProviderAuthEra::LEGACY_VERIFIED) {
-                // A BLS-free binary must not silently accept live legacy
-                // operator authorization without a pinned migration anchor.
-                return FormatSyscoinErrorMessage(
-                    state, "bad-protx-pq-anchor-required", fJustCheck);
-            }
             if (auth_era == ProviderAuthEra::POST_QUANTUM) {
                 llmq::pq::PQRegistrySnapshot registry_snapshot;
                 const llmq::pq::OperatorKeyState* operator_state{nullptr};
@@ -616,10 +608,6 @@ bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
         if (!registry_owns_authorization &&
             ShouldCheckProviderAuthorization(
                 auth_era, check_sigs, validation_context)) {
-            if (auth_era == ProviderAuthEra::LEGACY_VERIFIED) {
-                return FormatSyscoinErrorMessage(
-                    state, "bad-protx-pq-anchor-required", fJustCheck);
-            }
             if (auth_era == ProviderAuthEra::POST_QUANTUM) {
                 llmq::pq::PQRegistrySnapshot registry_snapshot;
                 const llmq::pq::OperatorKeyState* operator_state{nullptr};

@@ -98,6 +98,9 @@ protected:
      * Called on a background thread. Only called for the active chainstate.
      */
     virtual void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) {}
+    /** Public IBD completed without necessarily changing the active tip. */
+    virtual void InitialBlockDownloadCompleted(
+        const CBlockIndex* tip, ChainstateManager& chainman) {}
     /**
      * Notifies listeners of a transaction having been added to mempool.
      *
@@ -221,6 +224,7 @@ public:
 
 
     void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, ChainstateManager&, bool fInitialDownload);
+    void InitialBlockDownloadCompleted(ChainstateManager& chainman);
     // SYSCOIN
     void NotifyHeaderTip(const CBlockIndex *pindexNew);
     void TransactionAddedToMempool(const CTransactionRef&, uint64_t mempool_sequence);

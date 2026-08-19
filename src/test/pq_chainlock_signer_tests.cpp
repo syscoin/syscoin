@@ -18,6 +18,8 @@ using namespace llmq::pq;
 
 namespace {
 
+constexpr uint8_t AUTHORIZATION_MASK{0b0111};
+
 uint256 NonNullHash(uint64_t value)
 {
     uint256 hash;
@@ -60,7 +62,8 @@ std::unique_ptr<SignerFixture> MakeFixture()
     auto fixture{std::make_unique<SignerFixture>()};
     fixture->statement.height = 2305;
     fixture->statement.block_hash = NonNullHash(8100);
-    fixture->statement.previous_chainlock_height = -1;
+    fixture->statement.previous_chainlock_height = 2300;
+    fixture->statement.previous_chainlock_hash = NonNullHash(8099);
     fixture->statement.payment_probation_state_hash = NonNullHash(8101);
 
     sphincs_c11::SecretSeed secret_seed{};
@@ -131,7 +134,7 @@ BOOST_AUTO_TEST_CASE(signs_after_durable_reservation_and_replays_exact_share)
     ChainLockSigningError error{ChainLockSigningError::INVALID_ARGUMENT};
 
     const auto first{signer.Sign(
-        fixture->statement, fixture->rosters, 0, 0,
+        fixture->statement, fixture->rosters, AUTHORIZATION_MASK, 0, 0,
         fixture->child_secret_key, fixture->child_key_proof,
         std::nullopt, &error)};
     BOOST_REQUIRE(first.share);
@@ -139,10 +142,11 @@ BOOST_AUTO_TEST_CASE(signs_after_durable_reservation_and_replays_exact_share)
     BOOST_CHECK(error == ChainLockSigningError::NONE);
     ChainLockVerificationError verify_error{ChainLockVerificationError::INVALID_ARGUMENT};
     BOOST_CHECK(VerifyChainLockShare(
-        fixture->genesis_hash, *first.share, fixture->rosters, &verify_error));
+        fixture->genesis_hash, *first.share, fixture->rosters,
+        AUTHORIZATION_MASK, &verify_error));
 
     const auto replay{signer.Sign(
-        fixture->statement, fixture->rosters, 0, 0,
+        fixture->statement, fixture->rosters, AUTHORIZATION_MASK, 0, 0,
         fixture->child_secret_key, fixture->child_key_proof,
         journal.GetBranchLock(fixture->genesis_hash,
                               fixture->local_pro_tx_hash),
@@ -160,7 +164,7 @@ BOOST_AUTO_TEST_CASE(refuses_equivocation_and_wrong_secret_key)
         fixture->genesis_hash, fixture->local_pro_tx_hash, fixture->schedule, journal};
     ChainLockSigningError error{ChainLockSigningError::NONE};
     BOOST_REQUIRE(signer.Sign(
-        fixture->statement, fixture->rosters, 0, 0,
+        fixture->statement, fixture->rosters, AUTHORIZATION_MASK, 0, 0,
         fixture->child_secret_key, fixture->child_key_proof,
         std::nullopt, &error).share);
 
@@ -173,7 +177,7 @@ BOOST_AUTO_TEST_CASE(refuses_equivocation_and_wrong_secret_key)
     competing.quorum_context_hash = GetQuorumContextHash(
         fixture->genesis_hash, competing.height, competing.block_hash, descriptors);
     BOOST_CHECK(!signer.Sign(
-        competing, fixture->rosters, 0, 0,
+        competing, fixture->rosters, AUTHORIZATION_MASK, 0, 0,
         fixture->child_secret_key, fixture->child_key_proof,
         journal.GetBranchLock(fixture->genesis_hash,
                               fixture->local_pro_tx_hash),
@@ -196,12 +200,30 @@ BOOST_AUTO_TEST_CASE(refuses_equivocation_and_wrong_secret_key)
     other_height.quorum_context_hash = GetQuorumContextHash(
         fixture->genesis_hash, other_height.height, other_height.block_hash, descriptors);
     BOOST_CHECK(!signer.Sign(
-        other_height, fixture->rosters, 0, 0,
+        other_height, fixture->rosters, AUTHORIZATION_MASK, 0, 0,
         other_secret_key, fixture->child_key_proof,
         journal.GetBranchLock(fixture->genesis_hash,
                               fixture->local_pro_tx_hash),
         &error).share);
     BOOST_CHECK(error == ChainLockSigningError::SECRET_KEY_MISMATCH);
+}
+
+BOOST_AUTO_TEST_CASE(rejects_unauthorized_roster_before_journal_reservation)
+{
+    auto fixture{MakeFixture()};
+    llmq::CPQSignerJournal journal{
+        m_path_root / "pq_chainlock_signer_unauthorized"};
+    ChainLockShareSigner signer{
+        fixture->genesis_hash, fixture->local_pro_tx_hash,
+        fixture->schedule, journal};
+    ChainLockSigningError error{ChainLockSigningError::NONE};
+    BOOST_CHECK(!signer.Sign(
+        fixture->statement, fixture->rosters, AUTHORIZATION_MASK, 3, 0,
+        fixture->child_secret_key, fixture->child_key_proof,
+        std::nullopt, &error).share);
+    BOOST_CHECK(error == ChainLockSigningError::INACTIVE_QUORUM);
+    BOOST_CHECK(!journal.GetBranchLock(
+        fixture->genesis_hash, fixture->local_pro_tx_hash));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

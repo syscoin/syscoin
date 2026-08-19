@@ -18,11 +18,11 @@ constexpr std::uint8_t DB_USAGE_PREFIX{0x71};
 constexpr std::uint8_t DB_SLOT_PREFIX{0x72};
 constexpr std::uint8_t DB_BRANCH_LOCK_PREFIX{0x73};
 constexpr std::uint8_t DB_ACCEPTED_CERTIFICATE_PREFIX{0x74};
-constexpr std::uint32_t SCHEMA_GUARD{0x50514a33}; // "PQJ3"
-constexpr std::uint32_t USAGE_GUARD{0x55534733};  // "USG3"
-constexpr std::uint32_t SLOT_GUARD{0x534c5433};   // "SLT3"
-constexpr std::uint32_t BRANCH_LOCK_GUARD{0x42524c33}; // "BRL3"
-constexpr std::uint32_t ACCEPTED_CERTIFICATE_GUARD{0x41434333}; // "ACC3"
+constexpr std::uint32_t SCHEMA_GUARD{0x50514a31}; // "PQJ1"
+constexpr std::uint32_t USAGE_GUARD{0x55534731};  // "USG1"
+constexpr std::uint32_t SLOT_GUARD{0x534c5431};   // "SLT1"
+constexpr std::uint32_t BRANCH_LOCK_GUARD{0x42524c31}; // "BRL1"
+constexpr std::uint32_t ACCEPTED_CERTIFICATE_GUARD{0x41434331}; // "ACC1"
 constexpr std::uint8_t SLOT_RESERVED{1};
 constexpr std::uint8_t SLOT_SIGNED{2};
 

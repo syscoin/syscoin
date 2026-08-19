@@ -136,7 +136,7 @@ public:
         h.Finalize(confirmedHashWithProRegTxHash.begin());
     }
 
-    /** Fixed V1 field encoding used only by the immutable migration anchor. */
+    /** Fixed field encoding used only by the immutable migration anchor. */
     template <typename Stream>
     void SerializePQLegacyAnchorV1(Stream& stream) const
     {

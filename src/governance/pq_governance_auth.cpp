@@ -21,7 +21,7 @@ bool CheckPostAnchorBranch(const CBlockIndex& block, std::string& error)
 {
     const auto& consensus{Params().GetConsensus()};
     if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-        Consensus::PQLegacyAnchorResult::VALID) {
+        Consensus::PQAnchorResult::VALID) {
         error = "PQ legacy anchor is not configured";
         return false;
     }

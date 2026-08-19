@@ -426,7 +426,7 @@ BOOST_AUTO_TEST_CASE(state_and_diff_serialization_are_versioned_and_canonical)
     BOOST_CHECK_THROW(invalid_stream << unsorted, std::ios_base::failure);
 
     auto bad_version{applied->state};
-    bad_version.version = PQ_PAYMENT_PROBATION_STATE_V1_VERSION;
+    bad_version.version = PQ_PAYMENT_PROBATION_STATE_VERSION - 1;
     BOOST_CHECK(!bad_version.IsStructurallyValid());
 
     auto noncanonical_cursor{applied->state};

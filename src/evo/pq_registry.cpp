@@ -295,8 +295,8 @@ PQRegistryDeploymentResult GetPQRegistryConfig(
         params.nPQRegistrationCutoffBlocks == 0 ||
         params.nPQFutureHorizonEpochs == 0 ||
         anchor_configuration ==
-            Consensus::PQLegacyAnchorResult::INVALID_CONFIGURATION ||
-        (anchor_configuration == Consensus::PQLegacyAnchorResult::VALID &&
+            Consensus::PQAnchorResult::INVALID_CONFIGURATION ||
+        (anchor_configuration == Consensus::PQAnchorResult::VALID &&
          params.nPQPreparationHeight > params.nPQLegacyAnchorHeight)) {
         return PQRegistryDeploymentResult::INVALID_CONFIGURATION;
     }
@@ -436,7 +436,6 @@ std::string_view PQRegistryResultString(PQRegistryResult result) noexcept
     case PQRegistryResult::INVALID_BLOCK: return "invalid-block";
     case PQRegistryResult::PQ_TX_BEFORE_PREPARATION: return "pq-tx-before-preparation";
     case PQRegistryResult::MISSING_PARENT_SNAPSHOT: return "missing-parent-snapshot";
-    case PQRegistryResult::CORRUPT_PARENT_SNAPSHOT: return "corrupt-parent-snapshot";
     case PQRegistryResult::INVALID_SCHEDULE: return "invalid-schedule";
     case PQRegistryResult::CALLBACK_MISSING: return "callback-missing";
     case PQRegistryResult::CALLBACK_FAILED: return "callback-failed";
@@ -490,7 +489,7 @@ PQRegistryManager::PQRegistryManager(const DBParams& db_params,
       m_config(config),
       m_snapshot_db(std::make_unique<CEvoDB<
           uint256, PQRegistryDiskSnapshot, StaticSaltedHasher>>(
-          RegistryDBParams(db_params, "snapshots_v3"),
+          RegistryDBParams(db_params, "snapshots"),
           /*maxCacheSizeIn=*/0, PQ_REGISTRY_SNAPSHOT_CACHE_SIZE))
 {
 }

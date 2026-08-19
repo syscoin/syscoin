@@ -29,6 +29,16 @@ void InitLLMQSystem(CConnman& connman,
                     ChainstateManager& chainman)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
+    const PQHistoryAuthState initialization_state{
+        MakePQChainLockFinalityStoreConfig(chainman.GetConsensus())
+            ? PQHistoryAuthState::UNINITIALIZED
+            : PQHistoryAuthState::READY};
+    if (!chainman.PublishPQHistoryAuthState(
+            initialization_state)) {
+        throw std::runtime_error(
+            "cannot recreate PQ finality after public IBD completed");
+    }
+
     pq::QuorumSnapshotLookup snapshot_lookup{
         [](const CBlockIndex& index)
             -> std::optional<pq::QuorumSnapshotState> {
@@ -90,9 +100,18 @@ void InitLLMQSystem(CConnman& connman,
     chainLocksHandler = new CChainLocksHandler(connman, peerman, chainman);
     // SYSCOIN: Frozen SLH rosters need only deterministic share-relay
     // connectivity; there is no DKG or threshold-key lifecycle.
+    const int32_t initial_predecessor_height{
+        chainman.GetConsensus().nPQChainLockAnchorHeight};
     pqQuorumConnectionOverlay = new CPQQuorumConnectionOverlay(
         connman, chainman.GetConsensus().hashGenesisBlock,
-        MakePQQuorumBuildConfig(chainman.GetConsensus()));
+        MakePQQuorumBuildConfig(chainman.GetConsensus()),
+        [initial_predecessor_height]() -> std::optional<int32_t> {
+            const auto best{chainLocksHandler
+                                ? chainLocksHandler->GetBestChainLock()
+                                : nullptr};
+            return best ? best->statement.height
+                        : initial_predecessor_height;
+        });
     chainLocksHandler->SetQuorumSnapshotLookup(std::move(snapshot_lookup));
 }
 

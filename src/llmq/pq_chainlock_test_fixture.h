@@ -18,7 +18,7 @@ class ChainstateManager;
 
 namespace llmq::pq::test {
 
-inline constexpr uint16_t QUORUM_SNAPSHOT_FIXTURE_VERSION{4};
+inline constexpr uint16_t QUORUM_SNAPSHOT_FIXTURE_VERSION{1};
 inline constexpr std::size_t MAX_QUORUM_SNAPSHOT_FIXTURE_BYTES{8U << 20};
 inline constexpr std::size_t MAX_QUORUM_SNAPSHOT_FIXTURE_POINTS{16};
 
@@ -50,12 +50,12 @@ struct QuorumSnapshotFixture {
     std::vector<FixtureSnapshot> snapshots;
 };
 
-/** Validate the complete in-memory v4 shape without touching disk. */
+/** Validate the complete in-memory shape without touching disk. */
 [[nodiscard]] bool ValidateQuorumSnapshotFixture(
     const QuorumSnapshotFixture& fixture,
     std::string& error) noexcept;
 
-/** Write the versioned and checksummed bounded format used by the test helper. */
+/** Write the checksummed bounded format used by the test helper. */
 [[nodiscard]] bool WriteQuorumSnapshotFixture(
     const fs::path& path,
     const QuorumSnapshotFixture& fixture,

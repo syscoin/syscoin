@@ -270,8 +270,7 @@ BOOST_AUTO_TEST_CASE(class_methods)
 BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
 {
     const auto make_disk_index = [](const uint256& btcp_prev,
-                                    bool with_receipt_state = false,
-                                    bool with_audit_witness = true) {
+                                    bool with_receipt_state = false) {
         LOCK(cs_main);
         CBlockIndex index{};
         index.nHeight = 42;
@@ -291,14 +290,13 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
             index.pqBTCCReceiptCursorSysHash = uint256S(std::string(64, '2'));
             index.pqBTCCReceiptCursorBTCHash = uint256S(std::string(64, '3'));
             index.pqBTCCReceiptStateHash = uint256S(std::string(64, '4'));
+            index.pqBTCCReceiptLogicalId = uint256S(std::string(64, 'a'));
             index.pqPaymentAuditReceiptCursorHeight = 41;
             index.pqPaymentAuditReceiptCursorEpoch = 7;
             index.pqPaymentAuditReceiptCursorSealHash = uint256S(std::string(64, '5'));
             index.pqPaymentAuditReceiptCursorLogicalId = uint256S(std::string(64, '6'));
-            if (with_audit_witness) {
-                index.pqPaymentAuditReceiptCursorWitnessId =
-                    uint256S(std::string(64, '9'));
-            }
+            index.pqPaymentAuditReceiptCursorWitnessId =
+                uint256S(std::string(64, '9'));
             index.pqPaymentAuditReceiptStateHash = uint256S(std::string(64, '7'));
             index.pqPaymentProbationStateHash = uint256S(std::string(64, '8'));
         }
@@ -310,8 +308,6 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
         uint256S("00000000000000000000000000000000000000000000000000000000000000aa"));
     const CDiskBlockIndex with_receipt_state = make_disk_index(
         with_btcp_prev.btcpPrevCommitment, true);
-    const CDiskBlockIndex with_legacy_audit_state = make_disk_index(
-        with_btcp_prev.btcpPrevCommitment, true, false);
 
     DataStream without_btcp_prev_ser{};
     without_btcp_prev_ser << without_btcp_prev;
@@ -319,8 +315,6 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
     with_btcp_prev_ser << with_btcp_prev;
     DataStream with_receipt_state_ser{};
     with_receipt_state_ser << with_receipt_state;
-    DataStream with_legacy_audit_state_ser{};
-    with_legacy_audit_state_ser << with_legacy_audit_state;
 
     int without_btcp_prev_version{0};
     {
@@ -345,29 +339,7 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
     }
     BOOST_CHECK(with_receipt_state_version > with_btcp_prev_version);
     BOOST_CHECK_EQUAL(with_receipt_state_ser.size() - with_btcp_prev_ser.size(),
-                      268U);
-
-    int with_legacy_audit_state_version{0};
-    {
-        DataStream version_stream{with_legacy_audit_state_ser};
-        version_stream >> VARINT_MODE(with_legacy_audit_state_version,
-                                      VarIntMode::NONNEGATIVE_SIGNED);
-    }
-    BOOST_CHECK(with_legacy_audit_state_version > with_btcp_prev_version);
-    BOOST_CHECK(with_legacy_audit_state_version < with_receipt_state_version);
-    BOOST_CHECK_EQUAL(
-        with_legacy_audit_state_ser.size() - with_btcp_prev_ser.size(),
-        236U);
-
-    CDiskBlockIndex legacy_audit_state_roundtrip;
-    DataStream legacy_audit_state_read{with_legacy_audit_state_ser};
-    legacy_audit_state_read >> legacy_audit_state_roundtrip;
-    BOOST_CHECK(
-        legacy_audit_state_roundtrip.pqPaymentAuditReceiptCursorWitnessId
-            .IsNull());
-    BOOST_CHECK(
-        legacy_audit_state_roundtrip.pqPaymentAuditReceiptCursorLogicalId ==
-        with_legacy_audit_state.pqPaymentAuditReceiptCursorLogicalId);
+                      300U);
 
     CDiskBlockIndex without_btcp_prev_roundtrip;
     DataStream without_btcp_prev_read{without_btcp_prev_ser};
@@ -392,6 +364,8 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
                 with_receipt_state.pqBTCCReceiptCursorBTCHash);
     BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptStateHash ==
                 with_receipt_state.pqBTCCReceiptStateHash);
+    BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptLogicalId ==
+                with_receipt_state.pqBTCCReceiptLogicalId);
     BOOST_CHECK_EQUAL(
         with_receipt_state_roundtrip.pqPaymentAuditReceiptCursorHeight,
         with_receipt_state.pqPaymentAuditReceiptCursorHeight);

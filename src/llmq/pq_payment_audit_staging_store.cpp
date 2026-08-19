@@ -21,21 +21,21 @@ constexpr uint8_t DB_STATE_KEY{0xa1};
 constexpr uint8_t DB_ROW_PREFIX{0xa2};
 constexpr uint8_t DB_RESPONSE_PREFIX{0xa3};
 constexpr uint8_t DB_SUMMARY_PREFIX{0xa4};
-constexpr uint32_t SCHEMA_GUARD{0x50415332}; // "PAS2"
+constexpr uint32_t SCHEMA_GUARD{0x50415331}; // "PAS1"
 constexpr uint32_t STATE_GUARD{0x50415354}; // "PAST"
-constexpr uint32_t ROW_GUARD{0x50415232}; // "PAR2"
-constexpr uint32_t RESPONSE_GUARD{0x50415032}; // "PAP2"
-constexpr uint32_t SUMMARY_GUARD{0x50414632}; // "PAF2"
+constexpr uint32_t ROW_GUARD{0x50415231}; // "PAR1"
+constexpr uint32_t RESPONSE_GUARD{0x50415031}; // "PAP1"
+constexpr uint32_t SUMMARY_GUARD{0x50414631}; // "PAF1"
 constexpr std::string_view SCHEMA_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_STAGING_SCHEMA_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_STAGING_SCHEMA_V1"};
 constexpr std::string_view STATE_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_STAGING_STATE_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_STAGING_STATE_V1"};
 constexpr std::string_view ROW_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_STAGING_ROW_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_STAGING_ROW_V1"};
 constexpr std::string_view RESPONSE_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_STAGING_RESPONSE_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_STAGING_RESPONSE_V1"};
 constexpr std::string_view SUMMARY_DOMAIN{
-    "SYS_PQ_PAYMENT_AUDIT_STAGING_SUMMARY_V2"};
+    "SYS_PQ_PAYMENT_AUDIT_STAGING_SUMMARY_V1"};
 
 using RowKey = std::pair<uint32_t, uint8_t>;
 
@@ -230,7 +230,8 @@ uint256 GetRowChecksum(const uint256& genesis_hash, const DiskRow& row)
 }
 
 DiskRow MakeDiskRow(const uint256& genesis_hash,
-                    const PaymentAuditStagingRow& row)
+                    const PaymentAuditStagingRow& row,
+                    const QuorumBitmap& available_members)
 {
     DiskRow disk;
     disk.expected = row.expected;
@@ -238,10 +239,7 @@ DiskRow MakeDiskRow(const uint256& genesis_hash,
     disk.response_block_hash = row.response_block_hash;
     disk.subject_valid_members = row.subject_valid_members;
     disk.response_advance = static_cast<uint8_t>(row.response_advance);
-    for (const auto& [member, response] : row.responses) {
-        (void)response;
-        SetBit(disk.available_members, member);
-    }
+    disk.available_members = available_members;
     disk.checksum = GetRowChecksum(genesis_hash, disk);
     return disk;
 }
@@ -391,6 +389,23 @@ bool SameRowIdentity(const PaymentAuditStagingRow& first,
            first.response_advance == second.response_advance;
 }
 
+struct OpenRowState {
+    PaymentAuditStagingRow row;
+    QuorumBitmap available_members{};
+};
+
+PaymentAuditOpenRowMetadata MakeOpenRowMetadata(
+    const OpenRowState& state)
+{
+    return PaymentAuditOpenRowMetadata{
+        state.row.expected,
+        state.row.deadline_height,
+        state.row.response_block_hash,
+        state.row.subject_valid_members,
+        state.available_members,
+        state.row.response_advance};
+}
+
 } // namespace
 
 bool PaymentAuditStagingRow::IsStructurallyValid(
@@ -459,8 +474,8 @@ struct PaymentAuditStagingStore::Impl {
         if (open_rows.size() > PaymentAuditStagingStore::MAX_OPEN_ROWS) {
             return false;
         }
-        for (const auto& [key, row] : open_rows) {
-            (void)row;
+        for (const auto& [key, state] : open_rows) {
+            (void)state;
             if (key.first != *active_epoch) return false;
         }
         std::map<uint32_t, std::size_t> counts;
@@ -595,10 +610,10 @@ struct PaymentAuditStagingStore::Impl {
 
     void EraseOpenRow(CDBBatch& batch,
                       const RowKey& key,
-                      const PaymentAuditStagingRow& row)
+                      const OpenRowState& state)
     {
         batch.Erase(RowDiskKey(key));
-        for (const auto& [member, response] : row.responses) {
+        for (const auto& [member, response] : state.row.responses) {
             (void)response;
             batch.Erase(ResponseDiskKey(key, member));
         }
@@ -610,7 +625,7 @@ struct PaymentAuditStagingStore::Impl {
     PaymentAuditStagingSyncHook sync_hook;
     std::optional<uint32_t> active_epoch;
     std::optional<uint32_t> retained_epoch;
-    std::map<RowKey, PaymentAuditStagingRow> open_rows;
+    std::map<RowKey, OpenRowState> open_rows;
     std::map<RowKey, PaymentAuditFrozenRowSummary> summaries;
     std::optional<PaymentAuditStagingResult> failure;
 };
@@ -664,8 +679,8 @@ PaymentAuditStagingResult PaymentAuditStagingStore::ActivateEpoch(
             retained = *m_impl->active_epoch;
         }
         CDBBatch batch{m_impl->db};
-        for (const auto& [key, row] : m_impl->open_rows) {
-            m_impl->EraseOpenRow(batch, key, row);
+        for (const auto& [key, state] : m_impl->open_rows) {
+            m_impl->EraseOpenRow(batch, key, state);
         }
         std::vector<RowKey> erase_summaries;
         for (const auto& [key, summary] : m_impl->summaries) {
@@ -713,7 +728,7 @@ PaymentAuditStagingResult PaymentAuditStagingStore::EnsureRow(
     }
     if (const auto existing{m_impl->open_rows.find(key)};
         existing != m_impl->open_rows.end()) {
-        return SameRowIdentity(existing->second, row)
+        return SameRowIdentity(existing->second.row, row)
                    ? PaymentAuditStagingResult::DUPLICATE
                    : PaymentAuditStagingResult::BRANCH_CONFLICT;
     }
@@ -722,11 +737,11 @@ PaymentAuditStagingResult PaymentAuditStagingStore::EnsureRow(
     }
     try {
         if (!m_impl->db.Write(RowDiskKey(key),
-                              MakeDiskRow(m_genesis_hash, row), false)) {
+                              MakeDiskRow(m_genesis_hash, row, {}), false)) {
             m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
             return *m_impl->failure;
         }
-        m_impl->open_rows.emplace(key, row);
+        m_impl->open_rows.emplace(key, OpenRowState{row, {}});
         return PaymentAuditStagingResult::ACCEPTED;
     } catch (const std::exception&) {
         m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
@@ -755,18 +770,19 @@ PaymentAuditStagingResult PaymentAuditStagingStore::ReplaceRowBranch(
     if (existing == m_impl->open_rows.end()) {
         return PaymentAuditStagingResult::NOT_FOUND;
     }
-    if (SameRowIdentity(existing->second, row)) {
+    if (SameRowIdentity(existing->second.row, row)) {
         return PaymentAuditStagingResult::DUPLICATE;
     }
     try {
         CDBBatch batch{m_impl->db};
         m_impl->EraseOpenRow(batch, key, existing->second);
-        batch.Write(RowDiskKey(key), MakeDiskRow(m_genesis_hash, row));
+        batch.Write(RowDiskKey(key),
+                    MakeDiskRow(m_genesis_hash, row, {}));
         if (!m_impl->db.WriteBatch(batch, false)) {
             m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
             return *m_impl->failure;
         }
-        existing->second = row;
+        existing->second = OpenRowState{row, {}};
         return PaymentAuditStagingResult::ACCEPTED;
     } catch (const std::exception&) {
         m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
@@ -789,7 +805,8 @@ PaymentAuditStagingResult PaymentAuditStagingStore::AddVerifiedResponse(
                    ? PaymentAuditStagingResult::FROZEN
                    : PaymentAuditStagingResult::NOT_FOUND;
     }
-    auto& row{found->second};
+    auto& state{found->second};
+    auto& row{state.row};
     if (observed_tip_height >= row.deadline_height) {
         return PaymentAuditStagingResult::DEADLINE_REACHED;
     }
@@ -804,20 +821,22 @@ PaymentAuditStagingResult PaymentAuditStagingStore::AddVerifiedResponse(
                    : PaymentAuditStagingResult::INVALID;
     }
     try {
-        auto updated{row};
-        updated.responses.emplace(member, response);
+        QuorumBitmap updated_members{state.available_members};
+        SetBit(updated_members, member);
         CDBBatch batch{m_impl->db};
         batch.Write(ResponseDiskKey(key, member),
                     MakeDiskResponse(m_genesis_hash, key, member,
                                      response));
-        batch.Write(RowDiskKey(key), MakeDiskRow(m_genesis_hash, updated));
+        batch.Write(RowDiskKey(key),
+                    MakeDiskRow(m_genesis_hash, row, updated_members));
         // The WAL append must succeed before relay, but fsync is deliberately
         // deferred to the row's single deadline barrier.
         if (!m_impl->db.WriteBatch(batch, false)) {
             m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
             return *m_impl->failure;
         }
-        row = std::move(updated);
+        row.responses.emplace(member, response);
+        state.available_members = updated_members;
         return PaymentAuditStagingResult::ACCEPTED;
     } catch (const std::exception&) {
         m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
@@ -876,7 +895,8 @@ PaymentAuditStagingResult PaymentAuditStagingStore::FreezeRow(
     if (found == m_impl->open_rows.end()) {
         return PaymentAuditStagingResult::NOT_FOUND;
     }
-    const auto& row{found->second};
+    const auto& state{found->second};
+    const auto& row{state.row};
     if (response_block_hash.IsNull() || deadline_block_hash.IsNull() ||
         row.response_block_hash != response_block_hash) {
         return PaymentAuditStagingResult::BRANCH_CONFLICT;
@@ -888,10 +908,7 @@ PaymentAuditStagingResult PaymentAuditStagingStore::FreezeRow(
     summary.deadline_block_hash = deadline_block_hash;
     summary.subject_valid_members = row.subject_valid_members;
     summary.response_advance = row.response_advance;
-    for (const auto& [member, response] : row.responses) {
-        (void)response;
-        SetBit(summary.locally_observed_members, member);
-    }
+    summary.locally_observed_members = state.available_members;
     if (!summary.IsStructurallyValid()) {
         return PaymentAuditStagingResult::INVALID;
     }
@@ -903,7 +920,7 @@ PaymentAuditStagingResult PaymentAuditStagingStore::FreezeRow(
         CDBBatch batch{m_impl->db};
         batch.Write(SummaryDiskKey(key),
                     MakeDiskSummary(m_genesis_hash, summary));
-        m_impl->EraseOpenRow(batch, key, row);
+        m_impl->EraseOpenRow(batch, key, state);
         // This is the durability boundary: prior asynchronous response WAL
         // entries and this summary/deletion batch are ordered by one fSync.
         if (!m_impl->db.WriteBatch(batch, true)) {
@@ -928,7 +945,7 @@ PaymentAuditStagingStore::GetOpenRow(uint32_t epoch,
     const auto found{m_impl->open_rows.find(RowKey{epoch, row_index})};
     return found == m_impl->open_rows.end()
                ? std::nullopt
-               : std::optional<PaymentAuditStagingRow>{found->second};
+               : std::optional<PaymentAuditStagingRow>{found->second.row};
 }
 
 std::vector<PaymentAuditStagingRow>
@@ -937,8 +954,62 @@ PaymentAuditStagingStore::GetOpenRows(uint32_t epoch) const
     LOCK(m_mutex);
     std::vector<PaymentAuditStagingRow> result;
     if (m_impl->failure) return result;
-    for (const auto& [key, row] : m_impl->open_rows) {
-        if (key.first == epoch) result.push_back(row);
+    for (const auto& [key, state] : m_impl->open_rows) {
+        if (key.first == epoch) result.push_back(state.row);
+    }
+    return result;
+}
+
+std::optional<PaymentAuditOpenRowMetadata>
+PaymentAuditStagingStore::GetOpenRowMetadata(
+    uint32_t epoch,
+    uint8_t row_index) const
+{
+    LOCK(m_mutex);
+    if (m_impl->failure) return std::nullopt;
+    const auto found{m_impl->open_rows.find(RowKey{epoch, row_index})};
+    return found == m_impl->open_rows.end()
+               ? std::nullopt
+               : std::optional<PaymentAuditOpenRowMetadata>{
+                     MakeOpenRowMetadata(found->second)};
+}
+
+std::vector<PaymentAuditOpenRowMetadata>
+PaymentAuditStagingStore::GetOpenRowsMetadata(uint32_t epoch) const
+{
+    LOCK(m_mutex);
+    std::vector<PaymentAuditOpenRowMetadata> result;
+    if (m_impl->failure) return result;
+    result.reserve(MAX_OPEN_ROWS);
+    for (const auto& [key, state] : m_impl->open_rows) {
+        if (key.first == epoch) {
+            result.push_back(MakeOpenRowMetadata(state));
+        }
+    }
+    return result;
+}
+
+std::optional<std::vector<PaymentAuditResponse>>
+PaymentAuditStagingStore::GetVerifiedResponses(
+    const PaymentAuditHave& expected,
+    const QuorumBitmap& requested_members) const
+{
+    LOCK(m_mutex);
+    if (m_impl->failure || !IsExpectedIdentity(expected)) {
+        return std::nullopt;
+    }
+    const auto found{m_impl->open_rows.find(
+        RowKey{expected.epoch, expected.row_index})};
+    if (found == m_impl->open_rows.end() ||
+        found->second.row.expected != expected) {
+        return std::nullopt;
+    }
+    std::vector<PaymentAuditResponse> result;
+    result.reserve(CountSet(requested_members));
+    for (const auto& [member, response] : found->second.row.responses) {
+        if (IsBitSet(requested_members, member)) {
+            result.push_back(response);
+        }
     }
     return result;
 }

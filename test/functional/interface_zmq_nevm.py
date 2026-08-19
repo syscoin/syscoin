@@ -271,7 +271,6 @@ class ZMQTest(SyscoinTestFramework):
         registration_cutoff_blocks = 288
         # SYSCOIN: roster membership is sampled only after root registration closes.
         roster_snapshot_lag = 288
-        btcc_candidate_origin = 1_000_000
         assert registration_cutoff_blocks >= roster_snapshot_lag
         pq_args = [
             '-pqlegacyanchorheight=%d' % anchor['height'],
@@ -283,15 +282,7 @@ class ZMQTest(SyscoinTestFramework):
             '-pqregistrationcutoffblocks=%d' % registration_cutoff_blocks,
             '-pqrostersnapshotlag=%d' % roster_snapshot_lag,
             '-pqfuturehorizonepochs=8',
-            '-pqbtcccandidateorigin=%d' % btcc_candidate_origin,
-            # SYSCOIN: First activation uses a distinct pre-carrier empty
-            # receipt-state assumption record at the migration boundary.
-            '-pqbtccreceiptanchorheight=%d' % anchor['height'],
-            '-pqbtccreceiptanchorblockhash=%s' % anchor['blockHash'],
-            '-pqbtccreceiptanchorcursorheight=-1',
-            '-pqbtccreceiptanchorcursorsyshash=%s' % ('0' * 64),
-            '-pqbtccreceiptanchorcursorbtchash=%s' % ('0' * 64),
-            '-pqbtccreceiptanchorstatehash=%s' % ('0' * 64),
+            '-pqfinalitypreparation=1',
         ]
         for args in self.extra_args:
             args.extend(pq_args)

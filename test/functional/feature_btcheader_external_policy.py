@@ -86,6 +86,9 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
     BTC_CANDIDATE_PERIOD = 10
     BTC_CANDIDATE_ORIGIN = (
         CHAINLOCK_EPOCH_ORIGIN + FIRST_ELIGIBLE_TARGET_OFFSET)
+    FINALITY_ANCHOR_HEIGHT = (
+        CHAINLOCK_EPOCH_ORIGIN +
+        (ACTIVE_QUORUMS - 1) * PQ_EPOCH_BLOCKS)
 
     def set_test_params(self):
         self.num_nodes = 1
@@ -167,27 +170,44 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
         node = self.nodes[0]
         assert_equal(node.getblockcount(), 0)
         mineAuxpowBlock(node, None)
-        anchor = node.protx_migration_info()
-        assert_equal(anchor["height"], 1)
+        migration_anchor = node.protx_migration_info()
+        assert_equal(migration_anchor["height"], 1)
 
-        # SYSCOIN: finality deployment is all-or-none. The first block pins the
-        # exact legacy state; reindex proves the same boundary before enabling
-        # the first production-valid joint BTCC and ChainLock target.
-        pq_args = [
-            f'-pqlegacyanchorheight={anchor["height"]}',
-            f'-pqlegacyanchorblockhash={anchor["blockHash"]}',
-            f'-pqlegacydmnstatehash={anchor["dmnStateHash"]}',
-            f'-pqlegacypqregistrystatehash={anchor["pqRegistryStateHash"]}',
+        profile_args = [
+            f'-pqlegacyanchorheight={migration_anchor["height"]}',
+            f'-pqlegacyanchorblockhash={migration_anchor["blockHash"]}',
+            f'-pqlegacydmnstatehash={migration_anchor["dmnStateHash"]}',
+            f'-pqlegacypqregistrystatehash={migration_anchor["pqRegistryStateHash"]}',
             "-pqpreparationheight=1",
             f"-pqchainlockepochorigin={self.CHAINLOCK_EPOCH_ORIGIN}",
             f"-pqregistrationcutoffblocks={self.PQ_EPOCH_BLOCKS}",
             f"-pqrostersnapshotlag={self.PQ_EPOCH_BLOCKS}",
             "-pqfuturehorizonepochs=8",
+        ]
+
+        # SYSCOIN: preparation authenticates the provider and roster history
+        # without constructing any finality state. Finality is enabled only
+        # after the fourth bootstrap roster base has an exact immutable block.
+        self.stop_node(0)
+        preparation_args = (
+            self.extra_args[0] + profile_args + ["-pqfinalitypreparation=1"])
+        self.start_node(0, extra_args=preparation_args + ["-reindex"])
+        force_finish_mnsync(node)
+        while node.getblockcount() < self.FINALITY_ANCHOR_HEIGHT:
+            mineAuxpowBlock(node, None)
+        finality_anchor = {
+            "height": self.FINALITY_ANCHOR_HEIGHT,
+            "blockHash": node.getblockhash(self.FINALITY_ANCHOR_HEIGHT),
+        }
+
+        pq_args = profile_args + [
+            f'-pqchainlockanchorheight={finality_anchor["height"]}',
+            f'-pqchainlockanchorblockhash={finality_anchor["blockHash"]}',
             f"-pqbtcccandidateorigin={self.BTC_CANDIDATE_ORIGIN}",
-            # SYSCOIN: Before the first carrier, the separate receipt
-            # assumption record commits the empty state at migration.
-            f'-pqbtccreceiptanchorheight={anchor["height"]}',
-            f'-pqbtccreceiptanchorblockhash={anchor["blockHash"]}',
+            # SYSCOIN: Before the first carrier, the independent receipt
+            # assumption authenticates the canonical empty state.
+            f'-pqbtccreceiptanchorheight={finality_anchor["height"]}',
+            f'-pqbtccreceiptanchorblockhash={finality_anchor["blockHash"]}',
             "-pqbtccreceiptanchorcursorheight=-1",
             f'-pqbtccreceiptanchorcursorsyshash={"0" * 64}',
             f'-pqbtccreceiptanchorcursorbtchash={"0" * 64}',
@@ -200,7 +220,17 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
             arg for arg in pq_args
             if not arg.startswith("-pqbtccreceiptanchor")
         ]
+        invalid_preparation_args = profile_args + [
+            "-pqfinalitypreparation=1",
+            f'-pqchainlockanchorheight={finality_anchor["height"]}',
+            f'-pqchainlockanchorblockhash={finality_anchor["blockHash"]}',
+        ]
         self.stop_node(0)
+        node.assert_start_raises_init_error(
+            extra_args=self.extra_args[0] + invalid_preparation_args,
+            expected_msg="Regtest preparation requires",
+            match=ErrorMatch.PARTIAL_REGEX,
+        )
         node.assert_start_raises_init_error(
             extra_args=self.extra_args[0] + [
                 f"-pqbtcccandidateorigin={self.BTC_CANDIDATE_ORIGIN}"],
@@ -216,8 +246,16 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
         self.nodes[0].extra_args = list(self.extra_args[0])
         self.start_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         force_finish_mnsync(node)
-        assert_equal(node.protx_migration_info(), anchor)
-        return anchor
+        assert_equal(
+            node.getblockhash(migration_anchor["height"]),
+            migration_anchor["blockHash"])
+        tip_state = node.protx_migration_info()
+        assert_equal(tip_state["height"], finality_anchor["height"])
+        assert_equal(tip_state["blockHash"], finality_anchor["blockHash"])
+        assert_equal(
+            node.getblockhash(finality_anchor["height"]),
+            finality_anchor["blockHash"])
+        return migration_anchor, finality_anchor
 
     def _assert_raw_btcprev_binding(self, block_hash, expected_btcprev):
         node = self.nodes[0]
@@ -240,9 +278,10 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
 
     def run_test(self):
         node = self.nodes[0]
-        anchor = self._configure_pq_migration()
+        _, finality_anchor = self._configure_pq_migration()
         address = node.get_deterministic_priv_key().address
-        first_candidate = self._candidate_at_or_after(anchor["height"] + 1)
+        first_candidate = self._candidate_at_or_after(
+            finality_anchor["height"] + 1)
         second_candidate = first_candidate + self.BTC_CANDIDATE_PERIOD
         while node.getblockcount() < first_candidate - 1:
             mineAuxpowBlock(node, None)
@@ -312,7 +351,9 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
         # covers historical replay without exposing a test-only block-index RPC.
         self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         force_finish_mnsync(node)
-        assert_equal(node.getblockhash(anchor["height"]), anchor["blockHash"])
+        assert_equal(
+            node.getblockhash(finality_anchor["height"]),
+            finality_anchor["blockHash"])
         assert_equal(node.getblock(template["hash"], 0), raw_candidate)
         self._assert_raw_btcprev_binding(template["hash"], self.NEXT_TIP)
 

@@ -16,6 +16,7 @@
 #include <uint256.h>
 #include <util/time.h>
 
+#include <ios>
 #include <vector>
 // SYSCOIN: BTCC replay pruning is coordinated through the block manager from
 // validation-owned ChainLock state without importing blockstorage internals.
@@ -239,6 +240,11 @@ public:
     uint256 pqBTCCReceiptCursorSysHash{};
     uint256 pqBTCCReceiptCursorBTCHash{};
     uint256 pqBTCCReceiptStateHash{};
+    // Exact logical id physically carried by this block's non-null BTCC
+    // receipt. It is null outside carrier blocks and for canonical null
+    // receipts. The cumulative state binds this value, while retaining it in
+    // the index permits exact receipt reconstruction after block pruning.
+    uint256 pqBTCCReceiptLogicalId{};
     // SYSCOIN: Branch-local payment-audit receipt accumulator and the exact
     // hash-addressed probation state used for deterministic payment selection.
     // These fields never affect PoSe validity or quorum membership.
@@ -468,12 +474,8 @@ class CDiskBlockIndex : public CBlockIndex
     // Bumping it allows backwards-compatible extension of the serialized format.
     static constexpr int DUMMY_VERSION = 259900;
     static constexpr int DISK_INDEX_VERSION_BTCPREV = DUMMY_VERSION + 1;
-    static constexpr int DISK_INDEX_VERSION_PQ_BTCC_RECEIPT_STATE =
+    static constexpr int DISK_INDEX_VERSION_PQ_RECEIPT_STATE =
         DUMMY_VERSION + 2;
-    static constexpr int DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_STATE =
-        DUMMY_VERSION + 3;
-    static constexpr int DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_WITNESS =
-        DUMMY_VERSION + 4;
 
 public:
     uint256 hashPrev;
@@ -492,28 +494,32 @@ public:
     {
         LOCK(::cs_main);
         int _nVersion = DUMMY_VERSION;
-        // SYSCOIN: Write the newest block-index record version required by
-        // the non-null branch-bound receipt state.
+        // SYSCOIN: BTCPREV predates PQ receipt indexing. All first-release PQ
+        // receipt fields share one extension version; there are no supported
+        // intermediate PQ block-index layouts.
         SER_WRITE(obj, {
-            if (!obj.pqPaymentAuditReceiptCursorWitnessId.IsNull()) {
-                _nVersion = DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_WITNESS;
-            } else if (obj.pqPaymentAuditReceiptCursorHeight != -1 ||
+            if (obj.pqPaymentAuditReceiptCursorHeight != -1 ||
                 obj.pqPaymentAuditReceiptCursorEpoch != 0 ||
                 !obj.pqPaymentAuditReceiptCursorSealHash.IsNull() ||
                 !obj.pqPaymentAuditReceiptCursorLogicalId.IsNull() ||
+                !obj.pqPaymentAuditReceiptCursorWitnessId.IsNull() ||
                 !obj.pqPaymentAuditReceiptStateHash.IsNull() ||
-                !obj.pqPaymentProbationStateHash.IsNull()) {
-                _nVersion = DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_STATE;
-            } else if (obj.pqBTCCReceiptCursorHeight != -1 ||
+                !obj.pqPaymentProbationStateHash.IsNull() ||
+                obj.pqBTCCReceiptCursorHeight != -1 ||
                 !obj.pqBTCCReceiptCursorSysHash.IsNull() ||
                 !obj.pqBTCCReceiptCursorBTCHash.IsNull() ||
-                !obj.pqBTCCReceiptStateHash.IsNull()) {
-                _nVersion = DISK_INDEX_VERSION_PQ_BTCC_RECEIPT_STATE;
+                !obj.pqBTCCReceiptStateHash.IsNull() ||
+                !obj.pqBTCCReceiptLogicalId.IsNull()) {
+                _nVersion = DISK_INDEX_VERSION_PQ_RECEIPT_STATE;
             } else if (!obj.btcpPrevCommitment.IsNull()) {
                 _nVersion = DISK_INDEX_VERSION_BTCPREV;
             }
         });
         READWRITE(VARINT_MODE(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
+        SER_READ(obj, if (_nVersion > DISK_INDEX_VERSION_PQ_RECEIPT_STATE) {
+            throw std::ios_base::failure(
+                "unsupported PQ block-index record version");
+        });
 
         READWRITE(VARINT_MODE(obj.nHeight, VarIntMode::NONNEGATIVE_SIGNED));
         READWRITE(VARINT(obj.nStatus));
@@ -532,24 +538,21 @@ public:
         if (_nVersion >= DISK_INDEX_VERSION_BTCPREV) {
             READWRITE(obj.btcpPrevCommitment);
         }
-        // SYSCOIN: Extended receipt fields are version-gated so old block
-        // indexes remain readable during migration and reindex.
-        if (_nVersion >= DISK_INDEX_VERSION_PQ_BTCC_RECEIPT_STATE) {
+        // SYSCOIN: The sole PQ extension is exact and indivisible. Historical
+        // DUMMY/BTCPREV-only block indexes remain readable.
+        if (_nVersion >= DISK_INDEX_VERSION_PQ_RECEIPT_STATE) {
             READWRITE(obj.pqBTCCReceiptCursorHeight,
                       obj.pqBTCCReceiptCursorSysHash,
                       obj.pqBTCCReceiptCursorBTCHash,
-                      obj.pqBTCCReceiptStateHash);
-        }
-        if (_nVersion >= DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_STATE) {
-            READWRITE(obj.pqPaymentAuditReceiptCursorHeight,
+                      obj.pqBTCCReceiptStateHash,
+                      obj.pqBTCCReceiptLogicalId,
+                      obj.pqPaymentAuditReceiptCursorHeight,
                       obj.pqPaymentAuditReceiptCursorEpoch,
                       obj.pqPaymentAuditReceiptCursorSealHash,
                       obj.pqPaymentAuditReceiptCursorLogicalId,
+                      obj.pqPaymentAuditReceiptCursorWitnessId,
                       obj.pqPaymentAuditReceiptStateHash,
                       obj.pqPaymentProbationStateHash);
-        }
-        if (_nVersion >= DISK_INDEX_VERSION_PQ_PAYMENT_AUDIT_WITNESS) {
-            READWRITE(obj.pqPaymentAuditReceiptCursorWitnessId);
         }
     }
 

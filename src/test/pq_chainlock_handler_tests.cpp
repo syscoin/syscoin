@@ -62,12 +62,14 @@ Consensus::Params ValidConsensus()
     consensus.hashPQLegacyAnchorBlock = NonNullHash(2);
     consensus.hashPQLegacyMNState = NonNullHash(3);
     consensus.hashPQLegacyPQRegistryState = NonNullHash(4);
+    consensus.nPQChainLockAnchorHeight = 2304;
+    consensus.hashPQChainLockAnchorBlock = NonNullHash(5);
     consensus.nPQPreparationHeight = 1000;
     consensus.nPQChainLockEpochOrigin = 1440;
     consensus.nPQRegistrationCutoffBlocks = 288;
     consensus.nPQFutureHorizonEpochs = 8;
     consensus.nPQRosterSnapshotLag = 288;
-    consensus.nPQBTCCCandidateOrigin = 1000;
+    consensus.nPQBTCCCandidateOrigin = 2310;
     consensus.nPQBTCCNEVMInjectionLag = llmq::pq::PQ_BTCC_NEVM_LAG;
     consensus.nPQBTCCReceiptAnchorHeight = 1000;
     consensus.hashPQBTCCReceiptAnchorBlock =
@@ -113,9 +115,9 @@ llmq::pq::ChainLockFinalityStoreConfig CatchupStoreConfig()
     llmq::pq::ChainLockFinalityStoreConfig config;
     config.chainlock_schedule =
         *llmq::pq::MakeChainLockScheduleConfig(/*epoch_origin=*/0);
-    config.btcc_schedule.candidate_origin = 0;
-    config.anchor.height = 860;
-    config.anchor.block_hash = NonNullHash(860);
+    config.btcc_schedule.candidate_origin = 870;
+    config.anchor.height = 864;
+    config.anchor.block_hash = NonNullHash(864);
     return config;
 }
 
@@ -161,7 +163,8 @@ private:
             /*btcc_transition_validated=*/true,
             request.statement.height,
             request.statement.block_hash,
-            NonNullHash(40'000)};
+            NonNullHash(40'000),
+            std::nullopt};
     }
 };
 
@@ -174,13 +177,23 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     auto consensus{ValidConsensus()};
     const auto config{llmq::MakePQChainLockFinalityStoreConfig(consensus)};
     BOOST_REQUIRE(config);
-    BOOST_CHECK_EQUAL(config->anchor.height, consensus.nPQLegacyAnchorHeight);
-    BOOST_CHECK(config->anchor.block_hash == consensus.hashPQLegacyAnchorBlock);
+    BOOST_CHECK_EQUAL(config->anchor.height,
+                      consensus.nPQChainLockAnchorHeight);
+    BOOST_CHECK(config->anchor.block_hash ==
+                consensus.hashPQChainLockAnchorBlock);
     BOOST_CHECK_EQUAL(config->chainlock_schedule.epoch_origin,
                       consensus.nPQChainLockEpochOrigin);
     BOOST_CHECK_EQUAL(config->btcc_schedule.candidate_origin,
                       consensus.nPQBTCCCandidateOrigin);
     BOOST_CHECK_EQUAL(config->btcc_receipt_assumption_anchor.height, 1000);
+    const auto first_target{llmq::pq::NextEligibleChainLockTargetHeight(
+        config->chainlock_schedule, config->anchor.height)};
+    BOOST_REQUIRE(first_target);
+    BOOST_CHECK_EQUAL(*first_target, 2305);
+    BOOST_CHECK_EQUAL(
+        *llmq::pq::SigningHeightForTarget(
+            config->chainlock_schedule, *first_target),
+        2310);
     const auto quorum_config{llmq::MakePQQuorumBuildConfig(consensus)};
     BOOST_REQUIRE(quorum_config);
     BOOST_CHECK_EQUAL(quorum_config->registration_cutoff_blocks, 288U);
@@ -188,14 +201,27 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
 
     consensus = ValidConsensus();
     consensus.nPQChainLockEpochOrigin = 2880;
-    consensus.nPQRegistrationCutoffBlocks = 531;
-    consensus.nPQRosterSnapshotLag = 531;
+    consensus.nPQRegistrationCutoffBlocks = 288;
+    consensus.nPQRosterSnapshotLag = 288;
     BOOST_CHECK(llmq::MakePQQuorumBuildConfig(consensus));
-    consensus.nPQRegistrationCutoffBlocks = 532;
-    consensus.nPQRosterSnapshotLag = 532;
+    consensus.nPQRegistrationCutoffBlocks = 289;
+    consensus.nPQRosterSnapshotLag = 289;
     BOOST_CHECK(!llmq::MakePQQuorumBuildConfig(consensus));
 
     consensus.hashPQLegacyPQRegistryState.SetNull();
+    BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
+
+    consensus = ValidConsensus();
+    consensus.hashPQChainLockAnchorBlock.SetNull();
+    BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
+
+    consensus = ValidConsensus();
+    consensus.nPQChainLockAnchorHeight--;
+    BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
+
+    consensus = ValidConsensus();
+    consensus.nPQChainLockAnchorHeight =
+        consensus.nPQBTCCCandidateOrigin;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     consensus = ValidConsensus();
@@ -236,12 +262,12 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     consensus = ValidConsensus();
-    consensus.nPQBTCCReceiptAnchorHeight = 1011;
+    consensus.nPQBTCCReceiptAnchorHeight = 2321;
     consensus.hashPQBTCCReceiptAnchorBlock = NonNullHash(5);
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     consensus = ValidConsensus();
-    consensus.nPQBTCCReceiptAnchorHeight = 1010;
+    consensus.nPQBTCCReceiptAnchorHeight = 2320;
     consensus.hashPQBTCCReceiptAnchorBlock = NonNullHash(5);
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
@@ -249,8 +275,248 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
     consensus.nDefaultAssumeValidHeight = 1001;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
-    consensus.nDefaultAssumeValidHeight = 1010;
+    consensus.nDefaultAssumeValidHeight = 2320;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
+}
+
+BOOST_AUTO_TEST_CASE(live_chainlock_candidates_are_current_and_one_window_bound)
+{
+    const auto schedule{
+        llmq::pq::MakeChainLockScheduleConfig(/*epoch_origin=*/0)};
+    BOOST_REQUIRE(schedule);
+
+    std::array<CBlockIndex, 21> active;
+    std::array<uint256, 21> active_hashes;
+    for (std::size_t offset{0}; offset < active.size(); ++offset) {
+        active_hashes[offset] = NonNullHash(50'000 + offset);
+        active[offset].nHeight = 870 + static_cast<int32_t>(offset);
+        active[offset].phashBlock = &active_hashes[offset];
+        active[offset].pprev = offset == 0 ? nullptr : &active[offset - 1];
+    }
+
+    std::array<CBlockIndex, 5> shallow_fork;
+    std::array<uint256, 5> shallow_hashes;
+    for (std::size_t offset{0}; offset < shallow_fork.size(); ++offset) {
+        shallow_hashes[offset] = NonNullHash(51'000 + offset);
+        shallow_fork[offset].nHeight = 871 + static_cast<int32_t>(offset);
+        shallow_fork[offset].phashBlock = &shallow_hashes[offset];
+        shallow_fork[offset].pprev =
+            offset == 0 ? &active[0] : &shallow_fork[offset - 1];
+    }
+
+    // At tip 880, target 875 is the current signable round. A competing
+    // target that shares its height-870 boundary remains admissible.
+    BOOST_CHECK(llmq::IsLiveChainLockCandidateAdmissible(
+        *schedule, active[10], shallow_fork.back()));
+
+    // Advancing one round makes the same certificate stale even though its
+    // target is now an ancestor of one known branch.
+    BOOST_CHECK(!llmq::IsLiveChainLockCandidateAdmissible(
+        *schedule, active[15], shallow_fork.back()));
+    BOOST_CHECK(!llmq::IsLiveChainLockCandidateAdmissible(
+        *schedule, active[15], active[5]));
+    BOOST_CHECK(llmq::IsLiveChainLockCandidateAdmissible(
+        *schedule, active[15], active[10]));
+
+    std::array<CBlockIndex, 6> deep_fork;
+    std::array<uint256, 6> deep_hashes;
+    for (std::size_t offset{0}; offset < deep_fork.size(); ++offset) {
+        deep_hashes[offset] = NonNullHash(52'000 + offset);
+        deep_fork[offset].nHeight = 870 + static_cast<int32_t>(offset);
+        deep_fork[offset].phashBlock = &deep_hashes[offset];
+        deep_fork[offset].pprev =
+            offset == 0 ? nullptr : &deep_fork[offset - 1];
+    }
+    BOOST_CHECK(!llmq::IsLiveChainLockCandidateAdmissible(
+        *schedule, active[10], deep_fork.back()));
+
+    std::array<CBlockIndex, 5> current_side_fork;
+    std::array<uint256, 5> current_side_hashes;
+    for (std::size_t offset{0}; offset < current_side_fork.size(); ++offset) {
+        current_side_hashes[offset] = NonNullHash(53'000 + offset);
+        current_side_fork[offset].nHeight =
+            876 + static_cast<int32_t>(offset);
+        current_side_fork[offset].phashBlock =
+            &current_side_hashes[offset];
+        current_side_fork[offset].pprev =
+            offset == 0 ? &active[5] : &current_side_fork[offset - 1];
+    }
+
+    // Recovery uses the same current-round fork bound as LIVE: a competing
+    // target may win while it shares the H-5 boundary, but expires with the
+    // round and a deeper fork is never admissible.
+    BOOST_CHECK(llmq::IsCurrentChainLockCatchupCandidateAdmissible(
+        *schedule, active[15], active[10]));
+    BOOST_CHECK(!llmq::IsCurrentChainLockCatchupCandidateAdmissible(
+        *schedule, active[15], active[5]));
+    BOOST_CHECK(llmq::IsCurrentChainLockCatchupCandidateAdmissible(
+        *schedule, active[15], current_side_fork.back()));
+    BOOST_CHECK(!llmq::IsCurrentChainLockCatchupCandidateAdmissible(
+        *schedule, active[20], active[10]));
+    BOOST_CHECK(!llmq::IsCurrentChainLockCatchupCandidateAdmissible(
+        *schedule, active[20], current_side_fork.back()));
+    BOOST_CHECK(!llmq::IsCurrentChainLockCatchupCandidateAdmissible(
+        *schedule, active[10], deep_fork.back()));
+}
+
+BOOST_AUTO_TEST_CASE(
+    current_btcc_selection_waits_for_and_then_obeys_the_exact_carrier)
+{
+    const uint256 genesis{NonNullHash(54'000)};
+    const auto config{CatchupStoreConfig()};
+    std::array<CBlockIndex, 17> chain;
+    std::array<uint256, 17> hashes;
+    LOCK(cs_main);
+    for (std::size_t offset{0}; offset < chain.size(); ++offset) {
+        hashes[offset] = offset == 0
+            ? config.anchor.block_hash
+            : NonNullHash(54'100 + offset);
+        chain[offset].nHeight = 864 + static_cast<int32_t>(offset);
+        chain[offset].phashBlock = &hashes[offset];
+        chain[offset].pprev = offset == 0 ? nullptr : &chain[offset - 1];
+        chain[offset].nStatus = static_cast<BlockStatus>(
+            BLOCK_VALID_SCRIPTS | BLOCK_PQ_RECEIPT_INDEX_VALIDATED);
+    }
+    CBlockIndex& source{chain[6]};
+    CBlockIndex& pre_carrier_target{chain[11]};
+    CBlockIndex& carrier_target{chain[16]};
+    source.btcpPrevCommitment = NonNullHash(54'200);
+    carrier_target.btcpPrevCommitment = NonNullHash(54'201);
+
+    auto advance{MakeCatchupChainLock(
+        870, 865, chain[1].GetBlockHash(), 54'300)};
+    advance.statement.block_hash = source.GetBlockHash();
+    advance.statement.accepted_btcc_cursor = llmq::pq::BTCCursor{
+        source.nHeight, source.GetBlockHash(), source.btcpPrevCommitment};
+    advance.statement.btcc_advance = llmq::pq::BTCCAdvance::ADVANCE;
+    BOOST_REQUIRE(advance.IsStructurallyValid());
+
+    const auto before_carrier{llmq::SelectCurrentChainLockBTCC(
+        genesis, config, pre_carrier_target, &advance)};
+    BOOST_REQUIRE(before_carrier);
+    BOOST_CHECK(before_carrier->previous_cursor ==
+                advance.statement.accepted_btcc_cursor);
+    BOOST_CHECK(before_carrier->selected.cursor ==
+                advance.statement.accepted_btcc_cursor);
+    BOOST_CHECK(before_carrier->selected.advance ==
+                llmq::pq::BTCCAdvance::KEEP);
+    BOOST_CHECK(!before_carrier->cursor_reconciliation);
+
+    const auto at_null_carrier{llmq::SelectCurrentChainLockBTCC(
+        genesis, config, carrier_target, &advance)};
+    BOOST_REQUIRE(at_null_carrier);
+    BOOST_CHECK(at_null_carrier->previous_cursor.IsNull());
+    BOOST_CHECK(at_null_carrier->selected.advance ==
+                llmq::pq::BTCCAdvance::ADVANCE);
+    BOOST_CHECK_EQUAL(at_null_carrier->selected.cursor.sys_height, 880);
+    BOOST_REQUIRE(at_null_carrier->cursor_reconciliation);
+    BOOST_CHECK_EQUAL(
+        at_null_carrier->cursor_reconciliation->carrier_height, 880);
+
+    // Catching up directly to KEEP(C) retains no ADVANCE archive, but its
+    // signed cursor-vs-receipt gap yields the identical objective proof.
+    auto keep{MakeCatchupChainLock(
+        875, 870, source.GetBlockHash(), 54'301)};
+    keep.statement.block_hash = pre_carrier_target.GetBlockHash();
+    keep.statement.previous_btcc_cursor =
+        advance.statement.accepted_btcc_cursor;
+    keep.statement.accepted_btcc_cursor =
+        advance.statement.accepted_btcc_cursor;
+    const auto caught_up_at_null_carrier{
+        llmq::SelectCurrentChainLockBTCC(
+            genesis, config, carrier_target, &keep)};
+    BOOST_REQUIRE(caught_up_at_null_carrier);
+    BOOST_REQUIRE(caught_up_at_null_carrier->cursor_reconciliation);
+    BOOST_CHECK(caught_up_at_null_carrier->previous_cursor.IsNull());
+
+    // A non-null carrier advances the indexed receipt cursor to C, so there is
+    // no rollback proof and both durable/indexed views select from C.
+    llmq::pq::BTCCReceipt receipt;
+    receipt.chainlock_target_height = advance.statement.height;
+    receipt.chainlock_target_hash = advance.statement.block_hash;
+    receipt.chainlock_logical_id = advance.GetLogicalId(genesis);
+    receipt.accepted_cursor = advance.statement.accepted_btcc_cursor;
+    const auto applied{llmq::pq::ApplyBTCCReceiptState(
+        genesis, config.chainlock_schedule, config.btcc_schedule,
+        carrier_target.nHeight, carrier_target.GetBlockHash(), {}, receipt)};
+    BOOST_REQUIRE(applied);
+    carrier_target.pqBTCCReceiptCursorHeight = applied->cursor.sys_height;
+    carrier_target.pqBTCCReceiptCursorSysHash = applied->cursor.sys_hash;
+    carrier_target.pqBTCCReceiptCursorBTCHash = applied->cursor.btc_hash;
+    carrier_target.pqBTCCReceiptStateHash = applied->cumulative_hash;
+    carrier_target.pqBTCCReceiptLogicalId = receipt.chainlock_logical_id;
+    const auto at_nonnull_carrier{llmq::SelectCurrentChainLockBTCC(
+        genesis, config, carrier_target, &keep)};
+    BOOST_REQUIRE(at_nonnull_carrier);
+    BOOST_CHECK(at_nonnull_carrier->previous_cursor ==
+                advance.statement.accepted_btcc_cursor);
+    BOOST_CHECK(!at_nonnull_carrier->cursor_reconciliation);
+
+    // Equal heights with a different cursor identity are never ordered.
+    carrier_target.pqBTCCReceiptCursorSysHash = NonNullHash(54'999);
+    BOOST_CHECK(!llmq::SelectCurrentChainLockBTCC(
+        genesis, config, carrier_target, &keep));
+}
+
+BOOST_AUTO_TEST_CASE(
+    current_side_candidates_cannot_orphan_durable_preseal_state)
+{
+    // Exact-successor LIVE and rolling CURRENT_CATCHUP share this publication
+    // guard. Active candidates and non-current marker recovery are unchanged.
+    BOOST_CHECK(!llmq::IsCurrentChainLockCandidateBlockedByPreseal(
+        /*candidate_is_active=*/false,
+        /*current_round_candidate=*/true,
+        /*has_btcc_preseal=*/false,
+        /*has_payment_audit_preseal=*/false));
+    BOOST_CHECK(llmq::IsCurrentChainLockCandidateBlockedByPreseal(
+        /*candidate_is_active=*/false,
+        /*current_round_candidate=*/true,
+        /*has_btcc_preseal=*/true,
+        /*has_payment_audit_preseal=*/false));
+    BOOST_CHECK(llmq::IsCurrentChainLockCandidateBlockedByPreseal(
+        /*candidate_is_active=*/false,
+        /*current_round_candidate=*/true,
+        /*has_btcc_preseal=*/false,
+        /*has_payment_audit_preseal=*/true));
+    BOOST_CHECK(!llmq::IsCurrentChainLockCandidateBlockedByPreseal(
+        /*candidate_is_active=*/true,
+        /*current_round_candidate=*/true,
+        /*has_btcc_preseal=*/true,
+        /*has_payment_audit_preseal=*/true));
+    BOOST_CHECK(!llmq::IsCurrentChainLockCandidateBlockedByPreseal(
+        /*candidate_is_active=*/false,
+        /*current_round_candidate=*/false,
+        /*has_btcc_preseal=*/true,
+        /*has_payment_audit_preseal=*/true));
+}
+
+BOOST_AUTO_TEST_CASE(
+    marker_recovery_cannot_self_choose_an_exact_local_cursor)
+{
+    const llmq::pq::BTCCursor local{
+        870, NonNullHash(55'000), NonNullHash(55'001)};
+    const llmq::pq::BTCCursor alternate{
+        865, NonNullHash(55'002), NonNullHash(55'003)};
+
+    BOOST_CHECK(llmq::IsHistoricalLocalPredecessorCursorCompatible(
+        /*current_round_candidate=*/false,
+        /*declared_predecessor_is_local=*/true,
+        local, local));
+    BOOST_CHECK(!llmq::IsHistoricalLocalPredecessorCursorCompatible(
+        /*current_round_candidate=*/false,
+        /*declared_predecessor_is_local=*/true,
+        alternate, local));
+
+    // P>S has no locally retained predecessor certificate, while CURRENT
+    // derives its exceptional cursor transition from the candidate branch.
+    BOOST_CHECK(llmq::IsHistoricalLocalPredecessorCursorCompatible(
+        /*current_round_candidate=*/false,
+        /*declared_predecessor_is_local=*/false,
+        alternate, local));
+    BOOST_CHECK(llmq::IsHistoricalLocalPredecessorCursorCompatible(
+        /*current_round_candidate=*/true,
+        /*declared_predecessor_is_local=*/true,
+        alternate, local));
 }
 
 BOOST_AUTO_TEST_CASE(verification_worker_count_is_bounded)
@@ -722,19 +988,33 @@ BOOST_AUTO_TEST_CASE(payment_audit_required_history_ingress_survives_kill_switch
         /*operational=*/false, /*local_certificate=*/false,
         /*required_remote_response=*/false));
 
-    using Mode = llmq::PaymentAuditCertificateContextMode;
-    BOOST_CHECK(llmq::ClassifyPaymentAuditCertificateContext(
-                    /*historical_required=*/true,
-                    /*historical_resolved=*/true) == Mode::HISTORICAL);
-    BOOST_CHECK(llmq::ClassifyPaymentAuditCertificateContext(
-                    /*historical_required=*/true,
-                    /*historical_resolved=*/false) == Mode::RETRY);
-    BOOST_CHECK(llmq::ClassifyPaymentAuditCertificateContext(
-                    /*historical_required=*/false,
-                    /*historical_resolved=*/false) == Mode::LIVE);
-    BOOST_CHECK(llmq::ClassifyPaymentAuditCertificateContext(
-                    /*historical_required=*/false,
-                    /*historical_resolved=*/true) == Mode::HISTORICAL);
+    BOOST_CHECK(!llmq::MustRetryPaymentAuditCertificateContext(
+        /*historical_required=*/true,
+        /*historical_resolved=*/true));
+    BOOST_CHECK(llmq::MustRetryPaymentAuditCertificateContext(
+        /*historical_required=*/true,
+        /*historical_resolved=*/false));
+    BOOST_CHECK(!llmq::MustRetryPaymentAuditCertificateContext(
+        /*historical_required=*/false,
+        /*historical_resolved=*/false));
+    BOOST_CHECK(!llmq::MustRetryPaymentAuditCertificateContext(
+        /*historical_required=*/false,
+        /*historical_resolved=*/true));
+}
+
+BOOST_AUTO_TEST_CASE(payment_audit_finalization_retry_is_rate_limited)
+{
+    using Microseconds = std::chrono::microseconds;
+    const Microseconds first_attempt{100'000'000};
+
+    BOOST_CHECK(llmq::IsPaymentAuditFinalizationRetryDue(
+        first_attempt, std::nullopt));
+    BOOST_CHECK(!llmq::IsPaymentAuditFinalizationRetryDue(
+        first_attempt + std::chrono::seconds{29}, first_attempt));
+    BOOST_CHECK(llmq::IsPaymentAuditFinalizationRetryDue(
+        first_attempt + std::chrono::seconds{30}, first_attempt));
+    BOOST_CHECK(llmq::IsPaymentAuditFinalizationRetryDue(
+        first_attempt - std::chrono::seconds{1}, first_attempt));
 }
 
 BOOST_AUTO_TEST_CASE(preseal_never_disables_durable_base_finality)
@@ -753,10 +1033,30 @@ BOOST_AUTO_TEST_CASE(preseal_never_disables_durable_base_finality)
         /*btcc_preseal_active=*/false));
 }
 
+BOOST_AUTO_TEST_CASE(chainlock_recovery_survives_operational_kill_switch)
+{
+    BOOST_CHECK(llmq::ShouldVerifyChainLockCertificate(
+        /*configured_and_healthy=*/true,
+        /*persisted_import_pending=*/false,
+        /*persistence_failed=*/false));
+    BOOST_CHECK(!llmq::ShouldVerifyChainLockCertificate(
+        /*configured_and_healthy=*/false,
+        /*persisted_import_pending=*/false,
+        /*persistence_failed=*/false));
+    BOOST_CHECK(!llmq::ShouldVerifyChainLockCertificate(
+        /*configured_and_healthy=*/true,
+        /*persisted_import_pending=*/true,
+        /*persistence_failed=*/false));
+    BOOST_CHECK(!llmq::ShouldVerifyChainLockCertificate(
+        /*configured_and_healthy=*/true,
+        /*persisted_import_pending=*/false,
+        /*persistence_failed=*/true));
+}
+
 BOOST_AUTO_TEST_CASE(updated_receipt_anchor_routes_exact_target_to_catchup)
 {
-    constexpr int32_t local_best{1000};
-    constexpr int32_t receipt_anchor{1010};
+    constexpr int32_t local_best{2305};
+    constexpr int32_t receipt_anchor{2310};
     constexpr int32_t carrier{receipt_anchor +
                               static_cast<int32_t>(
                                   llmq::pq::PQ_BTCC_NEVM_LAG)};
@@ -813,10 +1113,19 @@ BOOST_AUTO_TEST_CASE(payment_audit_checkpoint_boundary_ignores_authorizer_refres
     BOOST_REQUIRE(checkpoint.IsStructurallyValid());
     BOOST_CHECK(llmq::HasSamePaymentAuditCheckpointBoundary(
         checkpoint, checkpoint));
+    BOOST_CHECK(!llmq::ShouldRunPaymentAuditDurableGC(
+        /*reuse_archive_checkpoint=*/true,
+        /*probation_gc_complete=*/true));
+    BOOST_CHECK(llmq::ShouldRunPaymentAuditDurableGC(
+        /*reuse_archive_checkpoint=*/false,
+        /*probation_gc_complete=*/true));
+    BOOST_CHECK(llmq::ShouldRunPaymentAuditDurableGC(
+        /*reuse_archive_checkpoint=*/true,
+        /*probation_gc_complete=*/false));
 
     auto refreshed{checkpoint};
-    // Authorizer-only changes permit archive reuse. The handler still runs
-    // probation-state GC because its durable commit is independent.
+    // Authorizer-only changes permit archive and completed state-GC reuse;
+    // the five-second enforcement pass therefore performs no full flush.
     refreshed.authorizing_target_height = 120;
     refreshed.authorizing_target_hash = NonNullHash(109);
     refreshed.authorizing_chainlock_logical_id = NonNullHash(110);
@@ -912,6 +1221,48 @@ BOOST_AUTO_TEST_CASE(compatibility_object_contains_no_legacy_signature_state)
     BOOST_CHECK(chainlock.statement.block_hash == NonNullHash(10));
 }
 
+BOOST_AUTO_TEST_CASE(accepted_winner_preserves_only_its_exact_successor_view)
+{
+    const auto schedule{llmq::pq::MakeChainLockScheduleConfig(
+        /*epoch_origin=*/0)};
+    BOOST_REQUIRE(schedule);
+
+    llmq::pq::ChainLockStatement winner;
+    winner.height = 865;
+    winner.block_hash = NonNullHash(11);
+    winner.accepted_btcc_cursor.sys_height = 42;
+    winner.accepted_btcc_cursor.sys_hash = NonNullHash(13);
+    winner.accepted_btcc_cursor.btc_hash = NonNullHash(14);
+
+    llmq::pq::ChainLockStatement collector;
+    collector.height = 870;
+    collector.previous_chainlock_height = winner.height;
+    collector.previous_chainlock_hash = winner.block_hash;
+    collector.previous_btcc_cursor = winner.accepted_btcc_cursor;
+    BOOST_CHECK(llmq::IsChainLockCollectorOnAcceptedSuccessorView(
+        *schedule, collector, winner));
+
+    auto stale{collector};
+    stale.previous_chainlock_height = 864;
+    BOOST_CHECK(!llmq::IsChainLockCollectorOnAcceptedSuccessorView(
+        *schedule, stale, winner));
+
+    auto skipped{collector};
+    skipped.height = 875;
+    BOOST_CHECK(!llmq::IsChainLockCollectorOnAcceptedSuccessorView(
+        *schedule, skipped, winner));
+
+    auto wrong_hash{collector};
+    wrong_hash.previous_chainlock_hash = NonNullHash(12);
+    BOOST_CHECK(!llmq::IsChainLockCollectorOnAcceptedSuccessorView(
+        *schedule, wrong_hash, winner));
+
+    auto wrong_cursor{collector};
+    ++wrong_cursor.previous_btcc_cursor.sys_height;
+    BOOST_CHECK(!llmq::IsChainLockCollectorOnAcceptedSuccessorView(
+        *schedule, wrong_cursor, winner));
+}
+
 BOOST_AUTO_TEST_CASE(share_relay_identity_is_independent_from_original_signer)
 {
     std::array<llmq::pq::FrozenQuorumRoster, llmq::pq::ACTIVE_QUORUMS>
@@ -949,7 +1300,7 @@ BOOST_AUTO_TEST_CASE(share_relay_identity_is_independent_from_original_signer)
 
 BOOST_FIXTURE_TEST_CASE(
     updated_receipt_anchor_is_a_valid_historical_range_boundary,
-    RegTestingSetup)
+    TestChain100Setup)
 {
     constexpr int32_t receipt_anchor_height{1010};
     constexpr std::size_t range_size{11};
@@ -975,19 +1326,11 @@ BOOST_FIXTURE_TEST_CASE(
 
     auto& chainman{
         static_cast<TestChainstateManager&>(*Assert(m_node.chainman))};
+    chainman.ResetIbd(PQHistoryAuthState::PENDING);
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
     {
         LOCK(::cs_main);
-        candidate.nStatus = static_cast<BlockStatus>(
-            BLOCK_VALID_SCRIPTS | BLOCK_PQ_BTCC_INDEX_VALIDATED |
-            BLOCK_GOVERNANCE_VALIDATED);
-        BOOST_CHECK(
-            llmq::GetFullyValidatedBTCCCatchupRangeStatus(
-                chainman, candidate, anchor) ==
-            llmq::BTCCCatchupRangeStatus::TRANSIENT_UNAVAILABLE);
-    }
-    chainman.JumpOutOfIbd();
-    {
-        LOCK(::cs_main);
+        BOOST_CHECK(chainman.IsBaseBlockSyncComplete());
         candidate.nStatus = static_cast<BlockStatus>(
             BLOCK_VALID_SCRIPTS | BLOCK_PQ_RECEIPT_INDEX_VALIDATED);
         BOOST_CHECK(

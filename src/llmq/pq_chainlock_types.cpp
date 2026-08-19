@@ -231,6 +231,18 @@ bool IsSelectedQuorumMask(uint8_t mask)
     return (mask & ~ACTIVE_MASK) == 0 && std::popcount(mask) == REQUIRED_QUORUMS;
 }
 
+bool IsSigningRosterAuthorizationMask(uint8_t mask)
+{
+    constexpr uint8_t ACTIVE_MASK{(uint8_t{1} << ACTIVE_QUORUMS) - 1};
+    if ((mask & ~ACTIVE_MASK) != 0 ||
+        static_cast<std::size_t>(std::popcount(mask)) < REQUIRED_QUORUMS) {
+        return false;
+    }
+    // Authorized rosters are always an oldest-to-newest prefix. This leaves
+    // exactly 0111 during one in-flight transition and 1111 otherwise.
+    return (mask & static_cast<uint8_t>(mask + 1)) == 0;
+}
+
 bool FinalChainLock::IsStructurallyValid() const
 {
     if (!statement.IsStructurallyValid() || !IsSelectedQuorumMask(selected_quorum_mask)) {

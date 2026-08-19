@@ -49,6 +49,19 @@ struct PaymentAuditStagingRow {
                            const PaymentAuditStagingRow&) = default;
 };
 
+/** Fixed-size open-row state used for network admission and inventory. */
+struct PaymentAuditOpenRowMetadata {
+    PaymentAuditHave expected;
+    int32_t deadline_height{-1};
+    uint256 response_block_hash;
+    QuorumBitmap subject_valid_members{};
+    QuorumBitmap available_members{};
+    BTCCAdvance response_advance{BTCCAdvance::ADVANCE};
+
+    friend bool operator==(const PaymentAuditOpenRowMetadata&,
+                           const PaymentAuditOpenRowMetadata&) = default;
+};
+
 /**
  * Compact result produced only by the row's successful same-database sync
  * barrier. Raw response signatures are no longer needed after this record is
@@ -84,7 +97,7 @@ using PaymentAuditStagingSyncHook = std::function<bool()>;
  */
 class PaymentAuditStagingStore final {
 public:
-    static constexpr uint32_t DB_FORMAT_VERSION{2};
+    static constexpr uint32_t DB_FORMAT_VERSION{1};
     static constexpr std::size_t MAX_OPEN_ROWS{2};
 
     PaymentAuditStagingStore(
@@ -141,6 +154,18 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::vector<PaymentAuditStagingRow> GetOpenRows(
         uint32_t epoch) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PaymentAuditOpenRowMetadata>
+    GetOpenRowMetadata(uint32_t epoch, uint8_t row_index) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::vector<PaymentAuditOpenRowMetadata>
+    GetOpenRowsMetadata(uint32_t epoch) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Copy only requested responses from the exact open-row identity. */
+    [[nodiscard]] std::optional<std::vector<PaymentAuditResponse>>
+    GetVerifiedResponses(
+        const PaymentAuditHave& expected,
+        const QuorumBitmap& requested_members) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<PaymentAuditFrozenRowSummary> GetSummary(
         uint32_t epoch, uint8_t row_index) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

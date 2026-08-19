@@ -10,7 +10,8 @@ profile is standardized, audited, or ready for mainnet.
 
 The final activated implementation has no BLS cryptography and no DKG. It keeps
 only byte-exact, non-cryptographic legacy decoders needed to replay the chain up
-to a mandatory activation anchor.
+to the mandatory migration-state boundary `H`; the later immutable finality
+predecessor `F` is a separate block-only anchor.
 
 ## 1. Decisions and non-goals
 
@@ -38,7 +39,7 @@ The design fixes the following decisions:
   path. No DA service, SNARK, Flock proof, or historical signature archive is
   part of the security model.
 - ChainLocks continue to target one absolute eligible height every five blocks.
-  A syncing node needs a recent/latest valid ChainLock, not every historical
+  A syncing node needs the latest valid ChainLock, not every historical
   ChainLock, because that ChainLock fixes its Syscoin ancestry.
 - Bitcoin checkpoint acceptance is a cursor in the ChainLock transcript. A
   ChainLock may keep the previous cursor (a null advance), so a missing bound
@@ -46,17 +47,21 @@ The design fixes the following decisions:
 - A scheduled candidate can reach NEVM only through its fixed `H + 10`
   on-chain receipt. Live admission verifies the receipt's exact `ADVANCE`
   CLSIG; historical sync authenticates a recomputed compact receipt prefix
-  with a release anchor and either ordinary recent catch-up or the narrowly
+  with a release anchor and either current-window catch-up or the narrowly
   marker-bound prolonged-outage recovery below, instead of retaining every old
   multi-megabyte certificate.
 - A payment-audit certificate is required while its receipt is live, but it is
-  not a permanent historical dependency. `PaymentAuditReceiptV3` commits the
+  not a permanent historical dependency. `PaymentAuditReceipt` commits the
   classified 400-member bitmap on chain; historical IBD may replay that compact
   prefix provisionally, then authenticate it with a normally verified covering
   CLSIG and prune the covered full audit certificates.
-- A mandatory height/hash/state-root anchor authorizes skipping historical BLS
-  verification. `defaultAssumeValid` and ordinary optional checkpoints are not
-  substitutes for this rule.
+- The immutable migration-state anchor `H` pins one block plus the reconstructed
+  deterministic-masternode and PQ-registry roots that authorize opaque legacy
+  replay. The distinct immutable finality anchor `F` pins the initial PQ
+  ChainLock predecessor and its bootstrap-roster ancestry. The independently
+  updateable receipt assumption `R` authenticates only compact BTCC receipt
+  history. `defaultAssumeValid` and ordinary optional checkpoints are not
+  substitutes for any of these rules.
 
 The design does not attempt to:
 
@@ -261,7 +266,7 @@ never sign:
 - a BTCC-only message outside the ChainLock transcript.
 
 The reference signer imports an independent 32-byte ChainLock master seed. It
-derives each C11 secret under `SYS_PQ_CHAINLOCK_CHILD_KDF_V3`, binding the
+derives each C11 secret under `SYS_PQ_CHAINLOCK_CHILD_KDF_V1`, binding the
 network genesis hash, a nonzero random 256-bit `treeId`, tree generation,
 absolute epoch, and child profile. The actual `proTxHash` is independently
 bound by every frozen roster leaf and share transcript; `treeId` is never a
@@ -302,14 +307,14 @@ SYS_PQ_PROVIDER_SERVICE_V1
 SYS_PQ_PROVIDER_REVOKE_V1
 SYS_PQ_GOV_TRIGGER_V1
 SYS_PQ_GOV_VOTE_V1
-SYS_PQ_CHAINLOCK_CHILD_KDF_V3
+SYS_PQ_CHAINLOCK_CHILD_KDF_V1
 SYS_PQ_CHILD_TREE_LEAF_V1
 SYS_PQ_CHILD_TREE_NODE_V1
 SYS_PQ_CHILD_ROOT_LEAF_V1
-SYS_PQ_CHAINLOCK_SHARE_V2
-SYS_PQ_CHAINLOCK_SHARE_ID_V2
-SYS_PQ_CHAINLOCK_LOGICAL_ID_V2
-SYS_PQ_CHAINLOCK_WITNESS_ID_V2
+SYS_PQ_CHAINLOCK_SHARE_V1
+SYS_PQ_CHAINLOCK_SHARE_ID_V1
+SYS_PQ_CHAINLOCK_LOGICAL_ID_V1
+SYS_PQ_CHAINLOCK_WITNESS_ID_V1
 SYS_PQ_MNAUTH_V1
 SYS_PQ_QUORUM_MODIFIER_V1
 SYS_PQ_QUORUM_CONTEXT_V1
@@ -320,8 +325,8 @@ SYS_PQ_QUORUM_CHILD_ABSENT_V1
 SYS_PQ_QUORUM_CHILD_PAD_V1
 SYS_PQ_QUORUM_CHILD_NODE_V1
 SYS_PQ_BTCC_RECEIPT_STATE_V1
-SYS_PQ_OPERATOR_KEY_STATE_V6
-SYS_PQ_KEY_CONSENSUS_STATE_V7
+SYS_PQ_OPERATOR_KEY_STATE_V1
+SYS_PQ_KEY_CONSENSUS_STATE_V1
 SYS_PQ_USED_TREE_ID_SET_V1
 ```
 
@@ -448,10 +453,11 @@ from consuming the registry's global one-million-ID safety bound through cheap
 successive root rotations. Root rotation still pays and validates an ordinary
 tx86 transaction; there is no periodic transaction or coordinator.
 
-The mandatory activation anchor commits the canonically sorted deterministic-
-masternode state and this complete PQ registry state at the same height. The
-registry schema intentionally differs from the abandoned per-key prototype, so
-stale databases fail closed instead of being reinterpreted.
+The immutable migration-state anchor `H` commits the canonically sorted
+deterministic-masternode state and this complete PQ registry state at the same
+height. It does not double as the initial ChainLock predecessor. The registry
+schema intentionally differs from the abandoned per-key prototype, so stale
+databases fail closed instead of being reinterpreted.
 
 ## 6. Deterministic quorum construction
 
@@ -463,8 +469,17 @@ For epoch `e`:
    precedes it by the deployment's snapshot lag. The independently configured
    registration cutoff must be at or before this snapshot (`cutoffLag >=
    snapshotLag`), so every key resolved from the snapshot is already frozen.
-2. Require the snapshot block to be covered by an accepted ChainLock before
-   members sign for epoch `e`.
+2. Derive a non-serialized authorization mask from the statement's exact
+   predecessor boundary. For bootstrap epochs zero through three, the
+   authorization point is the descriptor's exact epoch-base block; for every
+   later epoch it is the exact roster-snapshot block. A slot is authorized only
+   when that point is on the predecessor's ancestry. Authorized slots must form
+   an oldest-to-newest prefix and at least three slots must be authorized. Thus
+   normal operation uses `1111`, while one in-flight rotation uses `0111` and
+   still has the unchanged three older rosters needed for a certificate;
+   `0011` fails closed. `F` is at or after the fourth bootstrap base and the
+   configured first eligible target after `F` is checked to ensure every
+   initially active authorization point is already on `F`'s ancestry.
 3. Load the deterministic masternode list at the snapshot.
 4. Use the existing deterministic score ordering, with the epoch base block
    hash as modifier, to select 400 roster slots.
@@ -478,7 +493,7 @@ For epoch `e`:
 The descriptor is derived state, not a miner-chosen commitment:
 
 ```text
-PQQuorumDescriptorV1 {
+PQQuorumDescriptor {
     uint16  version;
     uint32  epoch;
     int32   baseHeight;
@@ -543,7 +558,7 @@ where each descriptor is serialized completely in the prescribed order.
 Every valid member signs a member-specific transcript:
 
 ```text
-PQChainLockShareTranscriptV2 {
+PQChainLockShareTranscript {
     uint16  chainLockVersion;
     uint16  childProfile;
     int32   height;
@@ -563,14 +578,18 @@ PQChainLockShareTranscriptV2 {
 ```
 
 The signature input is the canonical transcript prefixed with
-`SYS_PQ_CHAINLOCK_SHARE_V2` and the genesis hash. Binding the epoch, base hash,
+`SYS_PQ_CHAINLOCK_SHARE_V1` and the genesis hash. Binding the epoch, base hash,
 member index, and proTxHash prevents a signature from being counted in another
 quorum or slot.
 
 `height` is eligible only when it is on the absolute five-block schedule. The
 signer waits `PQ_CL_SIGN_LAG` blocks and signs only a block locally valid through
-scripts and all consensus-special processing. It also requires the referenced
-previous ChainLock to be its accepted winner.
+scripts and all consensus-special processing. For a durable predecessor `S`,
+the normal signable height is its first eligible successor while that height is
+current. If the round expires without a durable certificate, signing advances
+to the latest target `H` with active immediate scheduled predecessor
+`P = H - chainlock_period`; `S` remains the state and ancestry floor for the
+recovery statement.
 
 ### 7.2 Final raw CLSIG
 
@@ -580,7 +599,7 @@ from the deterministic frozen roster and needs no auxiliary registry object, DA
 object, SNARK, or external lookup:
 
 ```text
-PQChainLockV2 {
+PQChainLock {
     uint16  version;
     uint16  childProfile;
     int32   height;
@@ -631,7 +650,7 @@ subsets. This is not a consensus conflict. Define:
 
 ```text
 logicalChainLockId = Hash(common statement excluding mask, bitmaps, signatures)
-witnessId          = Hash(full canonical PQChainLockV2)
+witnessId          = Hash(full canonical PQChainLock)
 ```
 
 Conflict and finality logic operates on the logical statement. P2P invalid-data
@@ -646,9 +665,12 @@ A verifier performs cheap checks before any C11 work:
 2. Check version/profile, eligible height, known fully validated block, previous
    ChainLock, and absence of a conflicting accepted logical statement.
 3. Rebuild the four-epoch context at the signing snapshot and compare
-   `quorumContextHash`.
-4. Require a three-bit mask, zero unselected bitmap, and exactly 267 bits in
-   every selected bitmap.
+   `quorumContextHash`. Derive the authorization mask from the declared
+   predecessor's exact candidate-branch ancestry; all four descriptors remain
+   structurally and cryptographically bound even when the newest is not yet
+   authorized.
+4. Require a three-bit selection mask that is a subset of the authorization
+   mask, zero unselected bitmap, and exactly 267 bits in every selected bitmap.
 5. Require every selected member to be valid in that descriptor, verify its
    canonical child-key proof against the frozen root, and reconstruct the exact
    share transcript.
@@ -708,24 +730,47 @@ The final `CLSIG` is available to ordinary full nodes and through `GETCLSIG`.
 Durable CLSIG storage is exactly one best certificate plus at most one fully
 verified `ADVANCE` certificate that has not yet been sealed by a descendant
 BTCC receipt. The live store keeps the most recent eight certificates in RAM
-for bounded relay and catch-up; it is not a historical signature archive.
+for bounded relay and exact lookup; it is not a historical signature archive.
 Normal `LIVE` admission requires the receiver's exact durable winner as
-predecessor, including the exact accepted BTCC cursor. Target heights may be
-skipped, but a live predecessor may not. This prevents a post-bootstrap roster
-from authorizing itself by signing a fabricated, merely eligible predecessor.
+predecessor, including the exact accepted BTCC cursor, and requires the target
+to be the first eligible height after that predecessor. It also restores the
+released bounded-reorg rule: the target must be the latest signable height for
+the active tip, and the candidate and active chain must share the block at one
+signing lag before the target. With the fixed five-block cadence and lag, a
+target is 5--9 blocks behind the tip and the shared boundary is 10--14 blocks
+behind it. A withheld certificate expires when the next signing window opens.
+The same predecessor-to-successor relation is checked for trusted-persistence
+import, archive, and catch-up admission. Collectors and their deterministic relay
+overlay follow the current signing window. If the immediate successor of the
+durable winner misses its window, nodes do not keep signing that expired
+height: they move to the latest target `H`, declare the active block at
+`H - chainlock_period` as `P`, and produce the unique `H = N(P)` recovery
+statement. The durable winner remains the ancestry, receipt-state, and cursor
+floor. This prevents multiple valid target heights in one declared-predecessor
+view without making a missed round permanent.
+Before the first winner, `F` is that durable predecessor and its BTCC cursor is
+canonically null. The deployment therefore requires `F` to precede the first
+BTCC candidate source rather than silently inventing cursor state at `F`.
 
-A distinct ordinary bounded `CATCHUP` admission handles a fresh node or a node
-that missed one or more certificates. It is allowed only after IBD has ended on
-a fully executed best-work AuxPoW branch, ordinary assume-valid shortcuts are
-no longer in the candidate range, and any snapshot background validation has
-completed. Its active-branch candidate must be the latest eligible target or
-one of its seven immediately preceding eligible targets: eight targets total,
-currently the latest through latest-minus-35. Its declared predecessor must be
-an active ancestor at or beyond the node's durable winner, and that durable
-winner must also be its ancestor.
+A distinct current `CATCHUP` admission handles a fresh node, a node that missed
+one or more certificates, or the rolling recovery statement above. It is
+allowed only after base block sync has completed on a fully executed best-work
+AuxPoW branch, ordinary assume-valid shortcuts are no longer in the candidate
+range, and any snapshot background validation has completed. Public IBD may
+remain true while this final authentication tail is resolved. The candidate
+must be exactly the latest signable target and share the active chain's
+`H - sign_lag` boundary. It may be the active target or a current competing
+branch, so the first valid recovery certificate can cause the same bounded
+reorg as a `LIVE` certificate. Its declared predecessor must be an ancestor of
+the candidate at or beyond the node's durable winner, and that durable winner
+must also be its ancestor. The candidate is still the first eligible target
+after its own declared predecessor. Catch-up can therefore skip certificates
+missing from the local store, but no certificate skips forward within its
+signed predecessor view and no expired certificate becomes valid merely
+because it is locally known or active.
 
-An uncovered crash-durable V2 BTCC pre-seal marker adds only two
-prolonged-outage admissions outside that ordinary latest-plus-seven window:
+An uncovered crash-durable BTCC pre-seal marker adds only two
+prolonged-outage admissions outside that ordinary current window:
 
 - the exact terminal receipt's `ADVANCE` certificate, whose target is
   `T = terminalCarrier - 10`; below the durable winner it is stored only as the
@@ -737,19 +782,24 @@ prolonged-outage admissions outside that ordinary latest-plus-seven window:
 The second case still obeys the normal declared-predecessor and durable-winner
 ancestry rules. The marker cannot authorize another old certificate, invent a
 certificate, waive a signature, or turn a losing branch into the active one.
-Legacy V1 markers lack the terminal dependency and fail closed rather than
-being upgraded by inference.
+Truncated or incomplete marker records lack the terminal dependency and fail
+closed rather than being upgraded by inference.
 
 Every historical admission first rebuilds the four exact rosters from the
-candidate branch and verifies all 801 signatures under the single bounded
-verifier. Only then may it read retained carrier bodies or perform other
-chain-age-dependent receipt I/O. Ordinary bounded catch-up accepts the exact
-indexed receipt state only after proving every post-anchor index in range was
-fully validated without an assume-valid shortcut. A marker-authorized covering
-certificate additionally starts from the durable state immediately before the
-earliest carrier, rereads and validates every retained carrier through the
-candidate, recomputes the accumulator, and requires exact equality with the
-candidate's indexed and signed state.
+candidate branch, derives the same contiguous authorization prefix from the
+certificate's declared predecessor on that branch, and verifies all 801
+signatures under the single bounded verifier. An unselected unauthorized
+newest descriptor may have a snapshot above that predecessor, but it remains
+fully structure-, root-, and context-bound and its slot cannot contribute a
+share or final signature. Only then may admission read retained carrier bodies
+or perform other chain-age-dependent receipt I/O. Ordinary current catch-up accepts the exact
+indexed receipt state only after proving every index after the receipt
+assumption boundary in range was fully validated without an assume-valid
+shortcut. A marker-authorized covering certificate additionally starts from
+the durable state immediately before the earliest carrier, rereads and
+validates every retained carrier through the candidate, recomputes the
+accumulator, and requires exact equality with the candidate's indexed and
+signed state.
 
 Durable publication orders the block-index `BTCPREV`/receipt fsync before the
 DMN/PQ snapshot and certificate fsyncs. A marker-authorized preparation carries
@@ -761,11 +811,19 @@ marker change or any failed barrier aborts publication. A later gap may use the
 same constrained process again; neither the ordinary catch-up audit record nor
 the pre-seal marker is a one-use permission bit.
 
+The live winner's final branch recheck, block-index flush, certificate fsync,
+and store publication share the active-chain transition lock with forced
+invalidation. An invalidation therefore either completes before the final
+recheck, causing publication to retry, or observes the newly durable winner
+and cannot cross its active target, invalidate that target's side-branch
+ancestry, or cross the active fork of a validated winner whose enforcement was
+interrupted by a crash.
+
 This is intentionally a current-quorum bootstrap, not a portable proof that
 every historical quorum transition produced a certificate. Its security claim
-is the intersection of the fully validated best-work AuxPoW branch and a valid
-three-of-four certificate from the rosters deterministically derived at the
-catch-up target. The V2 exception is additionally bound to the exact durable
+is the intersection of a fully validated branch inside the current bounded
+fork window and a valid three-of-four certificate from the rosters
+deterministically derived at the catch-up target. The exception is additionally bound to the exact durable
 carrier range that caused execution to pause. It does not retroactively recover
 historical ChainLock transition security. Recovery still requires an honest
 peer to serve either the exact terminal certificate or a valid active-branch
@@ -863,7 +921,7 @@ choice. It remains peer identity/DoS protection, not an encrypted secure
 channel.
 
 ```text
-PQMNAUTHV1 {
+PQMNAUTH {
     uint16  version;
     uint256 signerProTxHash;
     uint32  signerGlobalKeyVersion;
@@ -1009,7 +1067,7 @@ an old certificate forward.
 Every carrier coinbase contains one canonical fixed-width slot:
 
 ```text
-BTCCReceiptV1 {                    // 138 bytes
+BTCCReceipt {                      // 138 bytes
     uint16  version;
     int32   chainLockTargetHeight;
     uint256 chainLockTargetHash;
@@ -1025,6 +1083,19 @@ ancestor, and its accepted cursor names the same source block and persisted
 block cannot omit the parent binding. `KEEP`, a missing certificate at its one
 carrier slot, or a backend outage therefore produces a null receipt and leaves
 the previously accepted NEVM Bitcoin checkpoint unchanged.
+
+An off-chain winner may temporarily carry an accepted Bitcoin cursor that is
+newer than the indexed receipt cursor. Before that cursor's fixed carrier, the
+next signing round keeps using the durable cursor; a descendant tip cannot be
+used as premature evidence. At or after the carrier, the ChainLock target's own
+ancestry makes the outcome objective. A non-null carrier advances the indexed
+cursor normally. A canonical null carrier instead makes current-window signers
+resume from the indexed cursor. A node whose durable winner is still ahead may
+accept that reconciliation only after reconstructing the exact null carrier
+from fully validated block-index provenance and binding the resulting proof to
+the candidate, store recheck, and certificate fsync. This also covers a node
+that learned a later `KEEP` winner without retaining the original `ADVANCE`;
+it never makes an expired certificate or deeper fork admissible.
 
 Live block admission verifies the exact certificate selected by
 `chainLockLogicalId`, including all 801 signatures and the complete
@@ -1046,17 +1117,21 @@ BTCCReceiptState {
 The hash commits the prior state, carrier height/hash, and exact receipt. Every
 ChainLock statement signs the indexed state at its target. Once a fully
 verified descendant ChainLock covers the carrier, that threshold statement
-seals the ordered prefix and the original 3,621,236-byte receipt certificate
-may be pruned; until then the exact `ADVANCE` remains durably retained and
-servable. Compact receipt bytes and their logical IDs remain on chain for
-deterministic replay and audit.
+seals the ordered prefix. A non-null outcome makes the original 3,621,236-byte
+receipt certificate prunable; a canonical null outcome objectively retires the
+unreceipted cursor. Until the carrier outcome is covered, a locally accepted
+exact `ADVANCE` remains durably retained and servable. The block index retains
+each carrier's exact receipt logical ID beside the cumulative cursor/state,
+allowing the receipt bytes to be
+reconstructed and checked against that accumulator after the block body is
+pruned. No covered full certificate is retained for audit seeding.
 
 Historical sync starts from a separate release-pinned receipt-assumption
 record containing an exact block hash, cursor, and cumulative hash. Above that
 boundary all base blocks, AuxPoW, deterministic-masternode/PQ state, receipt
 structure, ancestry, and accumulator transitions are executed. If an old
-post-anchor non-null carrier no longer has its exact certificate, IBD durably
-records a V2 pre-seal marker and continues base Syscoin validation and sync.
+post-boundary non-null carrier no longer has its exact certificate, IBD durably
+records a pre-seal marker and continues base Syscoin validation and sync.
 The marker commits the earliest carrier and the receipt state immediately
 before it, plus the terminal carrier, that carrier's exact non-null receipt,
 and a monotonic revision. Another missing non-null receipt on the same branch
@@ -1090,8 +1165,56 @@ verification/publication temporarily suppresses snapshot pruning. Once those
 obligations clear, normal compaction may discard old snapshots and sealed
 certificates. The design does not retain every historical CLSIG forever.
 
-After base IBD, recovery follows Section 7.4. Ordinary catch-up remains limited
-to the latest eligible target plus seven predecessors. An older uncovered
+The 1,728 full-list entries are a random-access availability and performance
+window, not a rollback-depth limit. Every connected post-DIP3 child also writes
+one branch-local inverse record to `evodb_dmn_inverse`. The record
+binds the network genesis, child and parent identities, both stable DMN-state
+hashes, the exact parent registration count, a chained history commitment, and
+an inverse diff proportional to the DMNs changed by that block. It is written
+asynchronously, then ordered by the same synchronous DMN/PQ barrier that must
+precede publication of a durable UTXO best-block marker. `ReplayBlocks` uses the
+same ordering.
+
+Sequential disconnect verifies each link and reconstructs a missing parent
+before mutating the PQ registry. An active disconnect also restores the one
+older full snapshot entering the 1,728-entry random-access window before an
+alternate branch can request a historical roster. Startup verifies the durable
+tip seal and can reconstruct a contiguous missing window prefix. Missing,
+conflicting, or unreadable records fail closed and require reindex; arbitrary
+post-write LevelDB key deletion is detected when the affected link is used.
+Fresh sync, full reindex, and `-reindex-chainstate` build the inverse database
+inductively. Existing pre-journal datadirs cannot prove or backfill the pruned
+prefix from the bounded full-list cache and must reindex once with this format.
+
+The inverse database is append-only today, including accepted side branches.
+Measured records are 245 bytes with no DMN changes and 251 bytes for one small
+state update before LevelDB overhead; a three-DMN 1,731-block test occupied
+about 301 bytes per record. This is roughly 63 MB/year at 2.5-minute blocks for
+that light workload, but it is not a fixed bound: mass PoSe/state updates can
+touch thousands of DMNs and plausibly raise journal growth into gigabytes per
+year. The append-only PQ-registry history and its full periodic checkpoints can
+also dominate this cost. Production activation therefore requires metrics,
+capacity policy, compaction evidence, and finality-safe checkpoint/GC design;
+pruning either history back to 1,728 would recreate the rollback defect.
+
+This does not synthesize deleted Core history. Sequential rollback still needs
+the corresponding `blk` and `rev` records, so the arbitrary-depth property is
+for nodes that retain those records. Standard prune mode remains bounded by its
+block/undo horizon except where a durable replay obligation installs its own
+lower-only prune floor. Geth startup alignment rolls back only a Core suffix
+that Geth never applied and does not emit Geth disconnects for that suffix. It
+must not cross a durable ChainLock finality floor; if Geth is behind finalized
+Core state, operators must rebuild or bootstrap Geth instead.
+
+The separate `preseal_snapshot_window <= 1,728` deployment check remains
+intentional. Before the first durable missing-certificate marker exists, all
+four historical quorum rosters must be available by arbitrary block lookup.
+The inverse journal supports sequential parent reconstruction and is not a
+replacement for those random-access roster snapshots.
+
+After base IBD, recovery follows Section 7.4. Ordinary catch-up is limited to
+the current latest signable target on the active branch or a competing branch
+that shares its `H - sign_lag` boundary. An older uncovered
 marker can instead be authenticated only by its exact terminal `ADVANCE` at
 `T = C - 10`, or by a fully valid active-branch certificate at or above `C`
 that descends through the terminal carrier. For the covering form, the node
@@ -1126,7 +1249,8 @@ exhaustion or an fsync failure stops the affected transition fail-closed.
 Old `CBTCCheckpointSig`, BLS BTCC shares, `BTCCSIG`, and aggregate BLS
 verification are removed. The compact PQ receipt described above replaces the
 legacy carrier proof. Public-network BTCC activation remains disabled until the
-candidate schedule and both mandatory anchors are release-pinned.
+candidate schedule, both immutable block anchors, and the receipt assumption
+boundary are release-pinned.
 
 ### 10.3 Payment-only participation audit
 
@@ -1162,20 +1286,34 @@ with an effective maximum lag of 36 Bitcoin blocks. The audit seal `B` is the
 first non-BTCC ChainLock target at least 240 Syscoin blocks after K. Before
 signing the audit, each node rechecks K on the active Bitcoin chain, selects
 the exact active Bitcoin header at `H(K)+37`, and requires at least six
-confirmations (or the larger configured minimum). That future Bitcoin hash,
-K, the network genesis, and the subject descriptor select one already frozen
-row. An operator cannot wait for row selection and then back-sign the selected
-old response.
+confirmations (or the larger configured minimum). The audit seed is the exact
+non-null BTCC receipt carried at `K+10`, not a retained copy of K's full
+certificate. Its logical ID, target, and accepted cursor are reconstructed
+from the branch-local receipt index and checked against the cumulative receipt
+state; a null K+10 receipt means that epoch produces no audit. That future
+Bitcoin hash, receipt-bound K, the network genesis, and the subject descriptor
+select one already frozen row. An operator cannot wait for row selection and
+then back-sign the selected old response.
 
 The audit uses a separate purpose-domain C11 certificate. Its common statement
-binds K, the selected row and deadline, the ordinary B statement, the subject
-descriptor and valid-member bitmap, and the previous payment-state root.
+binds the exact K+10 receipt projection, the selected row and deadline, the
+ordinary B statement, the subject descriptor and valid-member bitmap, and the
+previous payment-state root.
 Observation is deliberately not a common bitmap: every one of the 801 audit
 signers carries its own frozen 400-bit report. This avoids fragmenting the
 one-time audit slot when honest signers observed slightly different response
 sets. Each audit share is 5,502 bytes. The final `PQPOSECERT` is 3,661,635
 bytes: exactly 267 reporter/signature witnesses from each of three selected
 active rosters, announced and requested by exact witness ID.
+
+Reporter-roster authorization is portable with the audit statement: it is
+derived from `B`'s declared previous ChainLock on `B`'s branch, using the same
+`0111`/`1111` prefix rule as the ordinary seal. Caching the full `B`
+certificate does not widen that mask. `B` plus each retained response share
+must name the unique eligible successor of its own declared predecessor before
+crypto or staging. Audit shares from an unauthorized slot are discarded before
+signature verification or signer-journal reservation, and the final audit
+selection must be a subset of the derived mask.
 
 For each subject and selected reporter roster, at least 134 positive reports
 classify the subject online in that roster. The subject is online if any of the
@@ -1214,8 +1352,17 @@ consulting probation state. The same 24 response rows and report certificate
 cover these seats, so there is no `PQPOSEREC` message or extra signature type.
 Even if all 32 coverage members are offline, 368 roster positions remain; the
 ordinary 300-valid-key usability floor and 267-share threshold are unchanged.
+For `N = 3000`, the suffix therefore gives a 94-epoch/47-day static-set maximum
+to first forced exposure. Under an unbiased epoch-score model, all 400 subject
+seats instead give a `400/3000` marginal selection rate and a 7.5-epoch/3.75-day
+long-run mean roster-appearance interval; that expectation is not a consensus
+guarantee, and payment withholding still requires two conclusive missed
+appearances. The fixed 32-seat suffix deliberately preserves 68 positions of
+incidental-offline slack above the 300-member audit-conclusiveness floor.
+Membership churn starts a new coverage interval, and missing or inconclusive
+audits never create a bounded penalty time.
 
-The only on-chain audit data is `pqar || PaymentAuditReceiptV3`, a fixed
+The only on-chain audit data is `pqar || PaymentAuditReceipt`, a fixed
 261-byte tagged segment (four-byte marker plus 257-byte receipt) placed before
 the ordinary `btcr` receipt and optional `btcp` suffix. Each receipt slot from
 the first carrier at least ten blocks after B until the next audit seal may
@@ -1223,7 +1370,7 @@ carry the oldest applicable audit; honest miners retry throughout the roughly
 27/28-carrier window. Null is an explicit fail-open no-op and has an all-zero
 bitmap. A non-null receipt names the logical ID, exact report-witness ID,
 commitment hash, result hash, seal block, carrier height, next probation-state
-root, and the appended 50-byte `online_members` bitmap. The V3 receipt-state
+root, and the appended 50-byte `online_members` bitmap. The receipt-state
 accumulator hashes the entire canonical receipt, so the classified 400-member
 bitmap is part of the on-chain hash-linked commitment.
 
@@ -1241,7 +1388,7 @@ and is never converted into peer misbehavior or permanent block invalidity.
 Historical IBD and marker-bound replay do not require an already pruned
 3,661,635-byte certificate. If the full witness is absent, the node rederives
 the subject roster and probation-independent coverage seats from the historical
-snapshot, applies the committed V3 `online_members` bitmap, and requires both
+snapshot, applies the committed `online_members` bitmap, and requires both
 the resulting probation root and cumulative receipt state to match the block
 index. This compact replay is provisional, not quorum authentication. Before
 publishing the provisional transition, the node fsyncs a checksummed pre-seal
@@ -1256,12 +1403,25 @@ accepted active branch at or above the terminal carrier, descends through that
 carrier and the durable predecessor, and signs the exactly recomputed cumulative
 receipt state and probation root. The marker supplies replay bounds, never
 quorum authority. After that covering CLSIG and the reconstructed state are
-durable, the node atomically persists a monotonic audit checkpoint and deletes
-every full audit certificate at or below the checkpoint epoch. The checkpoint
-binds the terminal carrier's receipt epoch and cumulative hash to the covering
-winner's target height/hash and exact logical/witness IDs; regressions and
-same-epoch conflicts fail closed. Reads, admissions, and pins for the retired
-prefix are rejected, while the live/uncovered suffix remains servable.
+durable, the node first forces the active chainstate to disk, ordering the DMN,
+PQ-registry, payment-state, and UTXO best-block markers before any irreversible
+GC. It then atomically persists a monotonic audit checkpoint and deletes every
+full audit certificate at or below the checkpoint epoch; hash-addressed
+probation-state GC follows as a separately committed, idempotent step. A crash
+can therefore leave extra data to prune, but cannot restart below a state root
+that GC already removed. The checkpoint binds the terminal carrier's receipt
+epoch and cumulative hash to the covering winner's target height/hash and exact
+logical/witness IDs; regressions and same-epoch conflicts fail closed. Reads,
+admissions, and pins for the retired prefix are rejected, while the
+live/uncovered suffix remains servable.
+
+A completion record in the probation-state database binds the immutable
+authenticated deletion boundary. The periodic finality scheduler therefore
+does not flush chainstate, rewrite the archive, rescan probation state, or issue
+an fsync when revisiting the same boundary, including under a newer authorizing
+winner. One synchronous chainstate-and-GC sequence runs only when the boundary
+advances or when a crash or `-reindex-chainstate` leaves that completion record
+behind the durable archive checkpoint.
 
 While either marker is unresolved, base block sync and enforcement of an
 already durable ChainLock continue, as do inbound CLSIG verification and
@@ -1271,7 +1431,7 @@ NEVM notifications from the provisional boundary are gated fail-closed. A
 crash, marker revision, branch change, or failed state/checkpoint/certificate
 fsync cannot clear the obligation or expose provisional state as authenticated.
 
-Consequently, a fresh node replays the on-chain V3 receipt chain, obtains one
+Consequently, a fresh node replays the on-chain receipt chain, obtains one
 later covering CLSIG through the ordinary P2P path, and discards covered audit
 certificates; it does not download or retain a permanent 3.66 MB-per-epoch
 audit archive. Full certificates are stored and served only while live or not
@@ -1284,45 +1444,78 @@ remain ready for all 24 retrospective opportunities, while BTCC safety
 continues to rely on the threshold of independent sentries that validate
 `ADVANCE` against their Bitcoin views. Payment-audit activation is part of the
 same currently unshipped PQ/BTCC consensus launch; no released chain contains
-an earlier V1 or V2 payment-audit history.
+any payment-audit history.
 
-## 11. Mandatory activation anchor and legacy replay
+## 11. Immutable anchors and legacy replay
 
-### 11.1 Anchor
+### 11.1 Migration state `H` and finality predecessor `F`
 
-The activation release hardcodes per network:
+The activation release hardcodes two different immutable block boundaries per
+network:
 
 ```text
-PQActivationAnchor {
+PQMigrationStateAnchor {
     int32   height;                 // H
     uint256 blockHash;              // exact hash at H
     uint256 deterministicMNRoot;    // canonical DMN state after connecting H
     uint256 pqRegistryRoot;         // canonical PQ key state after connecting H
     uint256 minimumChainWork;
 }
+
+PQChainLockAnchor {
+    int32   height;                 // F
+    uint256 blockHash;              // exact initial PQ ChainLock predecessor
+}
 ```
 
-The rule is mandatory and is not controlled by `-checkpoints`:
+Both rules are mandatory and are not controlled by `-checkpoints`:
 
 - A header/block at `H` must have exactly `blockHash`.
 - Every accepted header/block above `H` must have that block as ancestor at
   height `H`.
 - Connecting `H` must reconstruct both pinned state roots exactly.
+- `F` must be at or after `H` and, when they are equal, name the same block.
+- A header/block at `F` must have exactly the configured finality-anchor hash,
+  and every accepted branch above or below it must agree with that immutable
+  prefix once the exact anchor is known.
+- `F` must cover the exact authorization points for every roster active at the
+  first eligible target after `F`. In the normal bootstrap geometry it is at
+  or after the epoch-three base block.
+- `F` must precede the first configured BTCC candidate source. Its initial
+  ChainLock predecessor cursor is therefore canonically null; a deployment
+  cannot silently infer a non-null cursor from earlier receipt history.
 - The checks run during normal header acceptance, block connection, reindex,
   `-reindex-chainstate`, roll-forward recovery, and VerifyDB paths.
-- A reorg whose fork point is below `H` is invalid.
+- A reorg that conflicts with either immutable prefix is invalid.
 
 `defaultAssumeValid` may also be set to `H`, and `nMinimumChainWork` must be
 updated, but neither supplies the mandatory ancestry/state rule.
 
-Regtest exposes the anchor only through four debug arguments that must be set
-together: `-pqlegacyanchorheight`, `-pqlegacyanchorblockhash`,
-`-pqlegacydmnstatehash`, and `-pqlegacypqregistrystatehash`. Hashes are exactly
-64 hexadecimal characters and non-zero. Partial, malformed, pre-DIP3, or
-public-network overrides fail during chain-parameter construction. Registry
-tests must additionally configure preparation height, epoch origin,
-registration cutoff, and future horizon; setting an anchor alone does not
-implicitly enable the PQ registry.
+Regtest exposes `H` through four debug arguments that must be set together:
+`-pqlegacyanchorheight`, `-pqlegacyanchorblockhash`,
+`-pqlegacydmnstatehash`, and `-pqlegacypqregistrystatehash`. It exposes `F`
+through the atomic pair `-pqchainlockanchorheight` and
+`-pqchainlockanchorblockhash`. Hashes are exactly 64 hexadecimal characters
+and non-zero. Partial, malformed, pre-DIP3, inconsistent, or public-network
+overrides fail during chain-parameter construction. Registry tests must
+additionally configure preparation height, epoch origin, registration cutoff,
+snapshot lag, and future horizon; setting either anchor alone does not
+implicitly enable finality.
+
+The release-updatable BTCC receipt assumption `R` remains a third, separate
+record containing an exact block, cursor, and cumulative receipt-state hash. It
+does not become the ChainLock predecessor and need not be at or after `F`.
+Before the first carrier it is valid only with the canonical empty state;
+afterward it must land on an exact carrier and match the recomputed state. The
+compiled assume-valid boundary must not exceed `H` and must remain strictly
+below `R`.
+
+This split adds no wire field and no block-index serialization version. The
+existing finality database configuration record already commits its initial
+anchor height and hash, so an unshipped regtest database created with `H` in
+that slot fails the configuration check and must be rebuilt with the staged
+`F` profile. Public profiles are still disabled, so there is no released
+production database migration to infer or accept.
 
 The canonical state root includes at least:
 
@@ -1336,7 +1529,9 @@ The canonical state root includes at least:
 - explicit serialization/version tags for every component.
 
 The root algorithm and ordering require independent tooling and a published
-mainnet reproduction manifest before `H` can be assigned.
+mainnet reproduction manifest before `H` can be assigned. The same manifest
+must independently derive `F`, prove that it descends from `H`, and enumerate
+the bootstrap roster authorization points covered by its ancestry.
 
 ### 11.2 Opaque legacy codecs
 
@@ -1368,9 +1563,9 @@ syncing from genesis must still reproduce their narrow deterministic
 `validMembers` PoSe transition through `H`. Those bounded opaque bitmaps affect
 ban state, payee eligibility, seniority, and therefore later coinbase validity;
 a root checked only at `H` cannot recover state that was needed to validate
-earlier blocks. This replay performs no BLS operation and is disabled above the
-anchor. Provider/collateral/payment state likewise remains live input to the
-anchor and post-anchor DMN list.
+earlier blocks. This replay performs no BLS operation and is disabled above
+`H`. Provider/collateral/payment state likewise remains live input to the `H`
+state roots and the post-`H` deterministic-masternode list.
 
 Above `H`, legacy provider versions that require BLS, BLS final-commitment
 coinbases, DKG messages, BLS recovered signatures, and BLS ChainLocks are
@@ -1391,12 +1586,18 @@ features retained in the final activated protocol. The code described by this
 document is already the final BLS-free target, not the BLS-authoritative
 preparatory binary. Its public-network parameters are deliberately the complete
 all-sentinel disabled profile. Supplying only part of a public profile is a
-startup error, and regtest applies the same all-or-none rule as soon as any PQ
-deployment argument is supplied.
+startup error. Regtest additionally exposes one explicit preparation-only
+configuration: `H` plus the registry/quorum schedule are complete,
+`-pqfinalitypreparation=1` is present, and every `F`, BTCC candidate, and
+receipt-assumption field remains unassigned. That state constructs no finality
+store and cannot sign, accept, restore, or enforce a PQ ChainLock.
 
 Consequently Stages A and B require a separate, BLS-capable preparation line
 (or another explicitly specified migration mechanism). They cannot be enabled
-by partially assigning parameters in this BLS-free binary.
+on a public network by partially assigning parameters in this BLS-free binary.
+The regtest preparation state exists to exercise the same H-authenticated
+registry history and to derive an exact `F` before restarting with the complete
+finality profile.
 
 ### Stage A: preparatory release
 
@@ -1420,36 +1621,44 @@ fork choice.
 ### Stage B: four complete shadow epochs
 
 The network must complete at least four consecutive usable shadow epochs so the
-activation block already has a full four-quorum PQ active set. Each must have at
-least 300 valid registered roots and repeatedly demonstrate 267-member shares.
-Missing the coverage/readiness criteria delays assigning `H`; it does not alter
-the eventual fixed epoch rules.
+finality boundary already has a full four-quorum PQ active set. Each must have
+at least 300 valid registered roots and repeatedly demonstrate 267-member
+shares. Missing the coverage/readiness criteria delays assigning `F` and the
+complete activation manifest; it does not alter the eventual fixed epoch
+rules.
 
 ### Stage C: anchor release
 
-After a deeply ChainLocked candidate `H` is known, freeze a complete activation
-manifest that pins `H`, its exact block hash, both state roots, minimum
-chainwork, epoch/BTCC origins, roster parameters, and the separate BTCC receipt
-assumption anchor. `defaultAssumeValid` must not be above the receipt boundary.
-Reproducible tools must independently derive every value from the public chain.
+After `H` and four complete shadow epochs are known, choose a deeply finalized
+`F` that descends from `H`, covers the initial roster authorization points, and
+precedes the first BTCC candidate source. Freeze a complete activation manifest
+that pins `H`, its exact block hash and both state roots, `F` and its exact block
+hash, minimum chainwork, epoch/BTCC origins, roster parameters, and the separate
+BTCC receipt assumption `R`. `defaultAssumeValid` must not exceed `H` and must
+remain strictly below `R`. Reproducible tools must independently derive every
+value from the public chain.
 
 The boundary is unambiguous:
 
 - legacy BLS/DKG chain-derived objects are replayed through `H` with opaque
   codecs and assumed cryptographic validity;
 - no legacy DKG/BLS object is produced or accepted for live authority after
-  `H`; and
-- the first eligible post-anchor PQ ChainLock uses the already-shadowed four
-  quorum descriptors selected by the specified signing snapshot rule.
+  `H`;
+- the interval from `H` through `F` continues the authenticated provider and
+  PQ-registry history without PQ finality; and
+- the first eligible target after `F` uses `F` as its exact predecessor and the
+  already-shadowed four quorum descriptors selected by the specified snapshot
+  rule.
 
 ### Stage D: final BLS-free activation release
 
 Publish the BLS-free activation release only with the complete manifest. The
 only remaining legacy support is the isolated opaque decoder/state-transition
 module for heights through `H`. Nodes sync from genesis without a centrally
-distributed state snapshot and verify the mandatory anchor/state roots when
-reached. A release that still has the all-sentinel profile remains
-intentionally disabled; a partially populated profile must never start.
+distributed state snapshot, verify the mandatory block and state roots at `H`,
+then verify the separate immutable block at `F` before finality can start. A
+release that still has the all-sentinel profile remains intentionally disabled;
+a partially populated profile must never start.
 
 Old peers may remain ordinary block-relay peers if otherwise compatible, but
 they cannot authenticate as quorum peers or contribute to ChainLocks after
@@ -1466,32 +1675,37 @@ The implementation must preserve these invariants:
 4. A child key is authorized for one epoch, one profile, and at most 256
    absolute eligible heights.
 5. A sentry never generates two child signatures at the same absolute height.
-6. A reorg cannot refund a journal entry or cross an accepted ChainLock/anchor.
+6. A reorg cannot refund a journal entry or cross an accepted ChainLock or
+   conflict with either immutable block anchor.
 7. A final CLSIG proves exactly 267 valid distinct slots in each of exactly
    three distinct active quorums for one common statement.
 8. Failure to form a CLSIG affects finality/bridge liveness, not base-chain
    block validity or mining.
 9. A missing scheduled BTC candidate keeps the prior cursor and does not stop a
    Syscoin ChainLock.
-10. Historical base-chain replay depends on chain data and the immutable
-    migration anchor. Assuming pruned historical receipt certificates also
-    requires the separate release-pinned receipt anchor; resuming after a gap
-    requires exact `LIVE` predecessor chaining, ordinary latest-plus-seven
-    `CATCHUP`, or the exact-terminal/covering exception bound by a durable V2
+10. Historical base-chain replay depends on chain data and the immutable `H`
+    migration-state anchor. The first finality predecessor and bootstrap roster
+    ancestry depend separately on immutable `F`. Assuming pruned historical
+    receipt certificates requires release-pinned `R`; resuming after a gap
+    requires exact current-window `LIVE` predecessor chaining, bounded-current
+    `CATCHUP`, or the exact-terminal/covering exception bound by a durable
     pre-seal marker.
 11. ECDSA alone cannot replace an already active global PQ key.
 12. No final-production code path invokes BLS or DKG cryptography.
 13. Every `LIVE` CLSIG names the exact locally durable predecessor certificate.
+    Before the first certificate, it names exact `F` with a null BTCC cursor.
     Trusted startup restoration may reinstall only this node's checksummed,
     fsynced winner; network `CATCHUP` is a distinct admission that authenticates
-    the validated best-work branch with either an ordinary recent certificate
-    or the marker-bound prolonged-outage proof described above.
+    either an ordinary certificate inside the current fork window or the
+    marker-bound prolonged-outage proof described above.
 14. An uncovered pre-seal never weakens base block validation. It pauses signing
     and paired Geth execution, durably retains the exact replay inputs, and
     permits base Syscoin sync to continue until an exact or covering certificate
     is supplied and verified.
 15. A public deployment is either the deliberate all-sentinel disabled profile
-    or a complete, internally consistent anchor/schedule/roster profile.
+    or a complete, internally consistent `H`/`F`/`R`, schedule, and roster
+    profile. Preparation-only configuration is regtest-scoped and creates no
+    finality service.
 16. Payment-audit state is keyed by collateral identity and branch history.
     Process restart, connection churn, IP changes, and local cache loss never
     erase a miss, while an authenticated later positive may clear it.
@@ -1500,7 +1714,7 @@ The implementation must preserve these invariants:
     coverage suffix is derived only from epoch and the canonical root-capable
     set, never probation; if every valid payee is withheld, the ordinary
     deterministic payee remains the consensus fallback.
-18. Compact V3 payment-audit replay is provisional until one fully verified,
+18. Compact payment-audit replay is provisional until one fully verified,
     durable descendant CLSIG authenticates its cumulative receipt state and
     probation root. A marker or checkpoint is never quorum authority, and no
     covered full-audit prefix remains a permanent archive.
@@ -1520,11 +1734,12 @@ Expected failures are fail-closed:
 | Missing scheduled BTCPREV candidate | Use `KEEP`; do not search older candidates |
 | Malformed/oversize CLSIG | Reject before expensive verification/allocation |
 | Context changes during verification | Discard result and rebuild against current snapshot |
-| Missing `LIVE` predecessor | Reject normal admission; ordinary `CATCHUP` admits only latest plus seven after full branch validation |
+| Missing `LIVE` predecessor | Reject normal admission; current `CATCHUP` admits only the latest signable target on the active branch or a branch sharing its `H - sign_lag` boundary after full validation |
 | Missing live non-null BTCC receipt certificate | Hold one bounded, non-punitive block dependency and request its exact logical ID |
-| Missing historical BTCC receipt certificate during IBD | Fsync the V2 earliest/terminal pre-seal and required snapshots, retain replay data, continue base Syscoin sync, and pause signing/Geth from the earliest carrier |
+| Null K+10 BTCC receipt for a payment-audit anchor | Produce no audit for that epoch; never substitute K's retained certificate or the prior cursor |
+| Missing historical BTCC receipt certificate during IBD | Fsync the earliest/terminal pre-seal and required snapshots, retain replay data, continue base Syscoin sync, and pause signing/Geth from the earliest carrier |
 | Prolonged-outage recovery certificate absent or withheld | Keep requesting the exact terminal logical ID or a valid covering active-branch CLSIG; the marker alone grants no recovery, so signing/Geth remain paused while base sync continues |
-| Old, off-branch, below-terminal, or wrong terminal certificate | Reject; a V2 marker authorizes only exact terminal `ADVANCE` at `T=C-10` or an active-branch certificate covering its terminal carrier |
+| Old, off-branch, below-terminal, or wrong terminal certificate | Reject; a marker authorizes only exact terminal `ADVANCE` at `T=C-10` or an active-branch certificate covering its terminal carrier |
 | Marker revision/branch changes across historical verification or fsync | Abort publication and rebuild; never persist a winner under a stale marker token |
 | Replay marker survives a prolonged outage | Keep the lower-only block floor and retained DMN/PQ branch snapshots; accept unbounded disk growth and synchronous DMN write latency until recovery |
 | Geth unavailable or reports the wrong applied hash | Keep the replay marker and skip paired execution notifications; never substitute a null checkpoint, while base Syscoin may continue |
@@ -1534,12 +1749,13 @@ Expected failures are fail-closed:
 | Subject has one conclusive audit miss | Persist miss count one; leave payments unchanged |
 | Subject has two unrecovered conclusive audit misses | Cap at two and withhold payments until a later authenticated positive; never alter finality membership/order, quorum validity, or MNAUTH |
 | Live payment-audit certificate is missing at a non-null carrier | Quarantine only the dependent branch, request the exact audit witness ID, and activate an available valid sibling |
-| Covered payment-audit certificate is absent during historical IBD/replay | Recompute the V3 bitmap transition, fsync an active/prospective marker before provisional use, continue base sync, and gate signing/readiness until a covering CLSIG is durable |
+| Covered payment-audit certificate is absent during historical IBD/replay | Recompute the bitmap transition, fsync an active/prospective marker before provisional use, continue base sync, and gate signing/readiness until a covering CLSIG is durable |
 | Covering payment-audit CLSIG is absent, off-branch, below-terminal, or invalid | Keep requesting a valid descendant; the marker grants no authority and no covered certificate may be pruned |
 | Payment-audit state, pre-seal, checkpoint, certificate, or prune-batch fsync fails | Keep the obligation and gates active; never publish provisional state, clear a marker, advance a checkpoint, or infer an empty audit |
 | All valid payees are payment-withheld | Use the ordinary deterministic payee as the explicit liveness fallback |
-| Partial PQ deployment profile | Fail startup; never infer missing anchors or schedule values |
-| Anchor hash/state-root mismatch | Reject chain and halt synchronization on that branch |
+| Regtest preparation profile supplies `F`, candidate, or receipt fields | Fail startup; preparation has registry/quorum history only and no finality state |
+| Partial public or full regtest deployment profile | Fail startup; never infer missing anchors, cursor state, or schedule values |
+| `H` block/state-root or `F` block mismatch | Reject the incompatible branch and halt synchronization if no compatible branch remains |
 
 ## 14. Required test matrix
 
@@ -1577,7 +1793,10 @@ Expected failures are fail-closed:
 - Exactly 299/300 valid keys and networks with fewer than 400 eligible members.
 - Fixed epoch advance when an epoch is unusable; no fallback to last successful
   quorum.
-- Four-epoch bootstrap and all epoch-boundary/reorg positions.
+- Four-epoch bootstrap and all epoch-boundary/reorg positions. Bootstrap
+  descriptors must authorize their exact base height/hash through `F`; epochs
+  after bootstrap must authorize their exact roster snapshot through an
+  accepted ChainLock, and neither path may accept a branch-derived substitute.
 - Depth-16 tree build/cache round-trip, internal-node mutation with a recomputed
   file checksum, proof/public-key/sibling mutation, and refusal to build on a
   consensus or network-processing thread.
@@ -1615,13 +1834,21 @@ Expected failures are fail-closed:
   invalid witness caching does not suppress a valid witness.
 - Conflicting statements, previous-ChainLock mismatch, stale context, unknown
   block, headers-only block, and block not valid through scripts.
+- A target that skips the first eligible successor of its declared predecessor
+  is rejected in live, raw-storage, trusted-persistence import, archive, and
+  catch-up admission. Advancing into a new signing window expires the old
+  collector and relay roster and creates the unique current `H = N(P)` view;
+  accepting its winner clears stale statement variants while preserving any
+  concurrently created exact-successor view.
 - Reorg before signing lag, during parallel verification, after witness receipt,
   and after accepted finality.
-- Ordinary catch-up accepts exactly the latest eligible target plus its seven
-  immediate eligible predecessors and rejects the ninth, as well as admission
-  during IBD, incomplete snapshot validation, assume-valid above the receipt
-  anchor, and candidates off the best-work branch. Marker cases do not widen
-  this set except for the exact terminal or covering forms specified above.
+- Ordinary catch-up accepts exactly the latest signable active target or a
+  competing target sharing its `H - sign_lag` boundary, and rejects an expired
+  prior target, a future target, and a deeper fork, as well as admission before
+  base sync, during incomplete snapshot validation, or with assume-valid above
+  the receipt anchor. Marker
+  cases do not widen this set except for the exact terminal or covering forms
+  specified above.
 - Historical admission verifies all 801 signatures before any retained-body or
   chain-age-dependent receipt I/O; an invalid first/middle/last signature
   performs no such scan. It then rechecks the exact branch, rosters, marker
@@ -1661,8 +1888,9 @@ Expected failures are fail-closed:
 ### Payment-audit tests
 
 - Twenty-four retrospective `ADVANCE` rows, exact row deadlines, strict-fresh
-  `K`, exact active Bitcoin `H(K)+37`, the non-BTCC `B`, the bounded carrier
-  window, `KEEP`/stale-Bitcoin-hash skips, and every epoch edge.
+  `K`, the exact non-null K+10 BTCC receipt projection, exact active Bitcoin
+  `H(K)+37`, the non-BTCC `B`, the bounded carrier window,
+  `KEEP`/null-receipt/stale-Bitcoin-hash skips, and every epoch edge.
 - Capture valid row responses before their ordinary certificates exist,
   reconcile HAVE/RESP sets, fsync each local bitmap at its height deadline
   rather than local wall time, select only after all 24 rows are frozen, and
@@ -1687,14 +1915,16 @@ Expected failures are fail-closed:
   one common base statement, 801 signer-bound report bitmaps, exact 134-of-267
   per-roster classification, and no common-bitmap convergence requirement.
 - Exact 5,502-byte share and 3,661,635-byte final audit bounds, exact-witness-ID
-  requested retrieval, bounded unreferenced variants, one-large-object-per-pass
-  upload accounting, timeout, and wrong-ID handling.
-- Exact 257-byte V3 null/non-null receipt and 261-byte tagged coinbase segment,
+  requested retrieval, at most four live unapplied witness candidates (one per
+  three-of-four reporter mask), one-large-object-per-pass upload accounting,
+  timeout, and wrong-ID handling.
+- Exact 257-byte null/non-null receipt and 261-byte tagged coinbase segment,
   with the canonical 50-byte `online_members` suffix and fixed ordering before
-  BTCC/BTCPREV. The null bitmap must be zero; V1/V2, truncation, a mutated
-  bitmap, certificate/bitmap disagreement, off-branch, stale-epoch, wrong-seal,
+  BTCC/BTCPREV. The null bitmap must be zero; unsupported versions, truncation,
+  a mutated bitmap, certificate/bitmap disagreement, off-branch, stale-epoch,
+  wrong-seal,
   wrong-root, and conflicting receipts are rejected. Differential accumulator
-  tests prove that every bitmap bit changes the V3 cumulative hash.
+  tests prove that every bitmap bit changes the cumulative hash.
 - Live carriers require and fully verify the exact certificate before applying
   the bitmap transition; missing-certificate branch quarantine/requeue, reorg
   undo, and local store corruption remain non-punitive.
@@ -1716,7 +1946,7 @@ Expected failures are fail-closed:
   rejected, every certificate/index at or below the boundary disappears, and
   the live suffix remains readable after crash/restart.
 - Fresh sync, full reindex, `-reindex-chainstate`, and roll-forward recovery
-  replay a long on-chain V3 receipt prefix without its covered full witnesses,
+  replay a long on-chain receipt prefix without its covered full witnesses,
   remain signing/readiness-gated until one later P2P CLSIG covers the prefix,
   and reproduce the same accumulator, probation root, and checkpoint as a node
   that originally verified every certificate.
@@ -1740,10 +1970,10 @@ Expected failures are fail-closed:
 - Receipt-anchor records are all-or-none, are either the canonical empty state
   before the first carrier or land on an exact carrier, and reject a compiled
   assume-valid height above the boundary.
-- A missing historical non-null receipt creates a checksummed V2 pre-seal with
+- A missing historical non-null receipt creates a checksummed pre-seal with
   the earliest carrier/predecessor state, terminal carrier/exact receipt, and
   increasing revision. A later missing receipt advances only the terminal;
-  malformed or legacy V1 state fails closed.
+  malformed, truncated, or incomplete state fails closed.
 - The marker admits the exact terminal `ADVANCE` at `T=C-10` as archive below
   the durable winner or catch-up above it, and admits a later certificate only
   when its active-branch target is at/above and descends through every uncovered
@@ -1769,6 +1999,14 @@ Expected failures are fail-closed:
   cannot evict exact branch-local roster-cutoff DMN/PQ snapshots, while ordinary
   non-cutoff snapshots remain bounded and may be discarded. Maintenance keeps
   the protected persisted snapshots until replay/finality retention clears.
+- A non-empty deterministic-MN chain writes an inverse link for every block,
+  crosses the 1,728-full-snapshot horizon, flushes and restarts, then
+  reconstructs exact parent hashes, IDs, registration count, unique-property
+  transfers, payee/PoSe state, and the newly entering random-access boundary.
+  Missing tip/interior links and conflicting persisted parents fail closed.
+  A disk-backed Chainstate regression repeats the greater-than-1,728 rollback
+  through `InvalidateBlock` and verifies the resulting DMN, PQ-registry, and
+  payment-probation roots across restart without live 801-signature crypto.
 - With the historical certificate withheld, base Syscoin reaches and validates
   its tip while signing and all paired Geth notifications after the earliest
   carrier remain paused. Supplying an exact or covering certificate resumes
@@ -1787,8 +2025,15 @@ Expected failures are fail-closed:
 ### Migration and legacy tests
 
 - Exact `H-1`, `H`, and `H+1` boundaries for all legacy and PQ payloads.
-- Mandatory anchor enforcement with `-checkpoints=0`, normal sync, headers-first
-  sync, reindex, `-reindex-chainstate`, VerifyDB, and roll-forward recovery.
+- Exact `F-1`, `F`, and `F+1` ancestry checks, including a higher-work fork
+  that ends before `F`, a branch with the wrong block at `F`, and startup where
+  `F` does not descend from `H`.
+- Mandatory `H` and `F` enforcement with `-checkpoints=0`, normal sync,
+  headers-first sync, reindex, `-reindex-chainstate`, VerifyDB, and roll-forward
+  recovery.
+- Reject `F < H`, `F` before an initially active roster authorization point,
+  `F` at or after the first BTCC candidate source, and a non-null initial
+  predecessor cursor.
 - Differential replay through `H`: a legacy BLS build and opaque-codec build
   must produce identical transaction/block hashes, deterministic MN state,
   PoSe state, and activation state root.
@@ -1799,18 +2044,24 @@ Expected failures are fail-closed:
 - Old/new peer interoperability before `H` and deterministic rejection or
   ordinary-peer downgrade after `H`.
 - Fresh genesis sync without an externally supplied deterministic-MN snapshot.
-- Public all-sentinel parameters start with PQ finality disabled; any partial
-  public profile fails. Regtest with no PQ argument stays disabled, while any
-  one of the deployment arguments activates complete-profile validation.
+- Public all-sentinel parameters start with PQ finality disabled and any
+  partial public profile fails. Regtest with no PQ argument stays disabled;
+  explicit preparation accepts only complete `H` plus registry/quorum fields
+  and proves that no finality store/signing/admission/enforcement exists; full
+  regtest activation requires complete `H`, `F`, `R`, and schedule fields.
 
 ## 15. Unresolved deployment constants and activation blockers
 
 The following must be resolved in code and release artifacts before activation:
 
-- each supported public network's `H`, exact block hash, both state roots, and
-  minimum chainwork;
+- each supported public network's `H`, exact block hash, both state roots,
+  minimum chainwork, and a distinct exact `F` that descends from `H`;
+- the receipt assumption `R` and independently reproduced cursor/accumulator,
+  without imposing an artificial `R >= F` ordering;
 - `PQ_EPOCH_ORIGIN`, registration cutoff lag, snapshot lag, and the precise
-  first post-anchor eligible ChainLock height;
+  first eligible ChainLock height after `F`, including proof that `F` covers
+  every initially active roster authorization point and precedes the first
+  BTCC candidate source;
 - global-key registration start and shadow-protocol start heights;
 - maximum future registry horizon and transaction fee/relay policy for the
   8,112-byte tx86 payload;
@@ -1824,7 +2075,7 @@ The following must be resolved in code and release artifacts before activation:
   vectors;
 - production resource targets for the fixed protocol-70018 share/CLSIG relay,
   verification caches, and bounded worker pools;
-- production resource bounds and independent review for the payment-audit V3
+- production resource bounds and independent review for the payment-audit
   compact-replay, active/prospective pre-seal, covering-CLSIG checkpoint, and
   atomic pruning lifecycle, including proof that normal multi-year operation
   retains only a live/uncovered certificate suffix rather than accumulating
@@ -1832,11 +2083,23 @@ The following must be resolved in code and release artifacts before activation:
 - operational sizing, alerts, and recovery tests for synchronous replay-snapshot
   writes and the intentionally unbounded block/DMN/PQ retention during a
   prolonged certificate or Geth outage;
-- durable, restart-safe deterministic-MN state reconstruction for every
-  protocol-permitted active-DIP3 reorg, including depths beyond the 1,728-entry
-  `LIST_CACHE_SIZE`; add a post-DIP3, non-empty-DMN regression that crosses the
-  cache horizon, flushes and restarts, and verifies the final DMN, PQ, and
-  payment roots without an empty-list fallback;
+- independent review and whole-chain soak evidence for the implemented
+  restart-safe deterministic-MN inverse journal. With the corresponding Core
+  block and undo records retained, sequential post-DIP3 rollback reconstructs
+  DMN parents beyond the bounded 1,728-full-snapshot window; a missing or
+  corrupt link fails closed and requires reindex. Retain the non-empty deep
+  rollback/restart and disk-backed Chainstate root regressions. Standard prune
+  mode remains bounded by retained `blk`/`rev` data, while live replay markers
+  separately retain ranges owned by their durable obligations;
+- a frozen inverse-journal encoder/decoder and explicit format migration or
+  reindex policy before any deterministic-MN record/state layout changes; the
+  current field mask rejects later state fields, but mutable DMN serializers
+  must never acquire new disk meaning under the existing schema number;
+- operational sizing, metrics, alerts, corruption drills, and a
+  finality-safe checkpoint/GC policy for the append-only DMN inverse and PQ
+  registry histories. Validate both normal update rates and adversarial
+  mass-PoSe/state-update amplification; never reduce retained rollback history
+  to the 1,728 full-snapshot cache horizon;
 - production benchmark calibration, independent review, metrics/alert policy,
   and adversarial soak evidence for the implemented bounded asynchronous
   MNAUTH executors, reconnect-resistant actual-keyed-netgroup/global
@@ -1850,8 +2113,9 @@ The following must be resolved in code and release artifacts before activation:
 - reproducible real-chain migration evidence: differential replay through `H`
   comparing the legacy BLS-capable and opaque-codec builds, upgrade of an
   existing datadir containing retired DKG/vvec/secret-share databases, and
-  independent reproduction of the exact block, DMN-state, and PQ-registry
-  anchor values from public chain data;
+  independent reproduction of the exact `H` block and state roots, `F` block
+  and covered bootstrap roster bases, and `R` receipt state from public chain
+  data;
 - reproducible evidence from the separate BLS-capable preparation/shadow line
   before publishing the already BLS-free activation build; and
 - the rollback-resistant signer fence and operational recovery procedure that

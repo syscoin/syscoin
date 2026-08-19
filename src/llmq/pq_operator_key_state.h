@@ -23,7 +23,7 @@ namespace llmq::pq {
 
 struct ProviderRevokeAuthorization;
 
-inline constexpr uint16_t OPERATOR_KEY_STATE_VERSION{6};
+inline constexpr uint16_t OPERATOR_KEY_STATE_VERSION{1};
 inline constexpr std::size_t MAX_OPERATOR_SCHEDULE_EPOCHS{32};
 inline constexpr std::size_t MAX_RETAINED_FROZEN_CHILD_ROOTS{32};
 /** Owner recovery cannot replace a live key and remains observable for the
@@ -31,10 +31,10 @@ inline constexpr std::size_t MAX_RETAINED_FROZEN_CHILD_ROOTS{32};
 inline constexpr uint32_t OWNER_RECOVERY_DELAY_BLOCKS{
     static_cast<uint32_t>(ACTIVE_QUORUMS) * PQ_EPOCH_BLOCKS};
 inline constexpr std::string_view OPERATOR_KEY_STATE_DOMAIN{
-    "SYS_PQ_OPERATOR_KEY_STATE_V6"};
-inline constexpr uint16_t PQ_KEY_CONSENSUS_STATE_VERSION{7};
+    "SYS_PQ_OPERATOR_KEY_STATE_V1"};
+inline constexpr uint16_t PQ_KEY_CONSENSUS_STATE_VERSION{1};
 inline constexpr std::string_view PQ_KEY_CONSENSUS_STATE_DOMAIN{
-    "SYS_PQ_KEY_CONSENSUS_STATE_V7"};
+    "SYS_PQ_KEY_CONSENSUS_STATE_V1"};
 
 struct OperatorKeyScheduleView {
     int32_t block_height{-1};
@@ -87,7 +87,6 @@ enum class OperatorKeyStateResult : uint8_t {
     GLOBAL_RECOVERY_NOT_ALLOWED,
     PROVIDER_REVOCATION_AUTH_FAILED,
     INVALID_CHILD_ROOT_COMMITMENT,
-    CHILD_TREE_ID_REUSED,
     STATE_CAP_EXCEEDED,
 };
 

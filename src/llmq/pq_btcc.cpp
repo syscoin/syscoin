@@ -439,4 +439,44 @@ std::optional<BTCCReceiptState> ApplyBTCCReceiptState(
     return BTCCReceiptState{receipt.accepted_cursor, writer.GetHash()};
 }
 
+std::optional<BTCCReceipt> ReconstructBTCCReceipt(
+    const uint256& genesis_hash,
+    const ChainLockScheduleConfig& chainlock_schedule,
+    const BTCCScheduleConfig& btcc_schedule,
+    const CBlockIndex& carrier,
+    const BTCCReceiptState& previous,
+    const BTCCReceiptState& current,
+    const uint256& receipt_logical_id)
+{
+    if (genesis_hash.IsNull() || !chainlock_schedule.IsValid() ||
+        !btcc_schedule.IsValid() || !previous.IsStructurallyValid() ||
+        !current.IsStructurallyValid() ||
+        !IsBTCCReceiptCarrierHeight(btcc_schedule, carrier.nHeight)) {
+        return std::nullopt;
+    }
+
+    BTCCReceipt receipt;
+    if (!receipt_logical_id.IsNull()) {
+        const auto source_height{BTCCSourceHeightForNEVMInjection(
+            btcc_schedule, carrier.nHeight)};
+        if (!source_height || current.cursor.IsNull() ||
+            current.cursor.sys_height != *source_height) {
+            return std::nullopt;
+        }
+        receipt.chainlock_target_height = *source_height;
+        receipt.chainlock_target_hash = current.cursor.sys_hash;
+        receipt.chainlock_logical_id = receipt_logical_id;
+        receipt.accepted_cursor = current.cursor;
+    }
+    if (!ValidateBTCCReceiptOnBranch(btcc_schedule, carrier, receipt)) {
+        return std::nullopt;
+    }
+    const auto applied{ApplyBTCCReceiptState(
+        genesis_hash, chainlock_schedule, btcc_schedule, carrier.nHeight,
+        carrier.GetBlockHash(), previous, receipt)};
+    return applied && *applied == current
+               ? std::optional<BTCCReceipt>{receipt}
+               : std::nullopt;
+}
+
 } // namespace llmq::pq

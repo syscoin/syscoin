@@ -22,7 +22,7 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
     FIXTURE_C11_SEED = "11" * 32
     FIXTURE_C11_SEED_HASH = "3fd852825ad83c1d655939d69cbe8afbbfc94c46ca22585aed5303b8360d4259"
     FIXTURE_TREE_ID = "2ed3eab46dd542daf231ad8519f0e81c9d45aeec9904ade4272befd99c9b0b18"
-    FIXTURE_ROOT = "3e7d12bd5e7fc0bd4b7aa2201263c6e95c36cf1bdbca2ade72326682732201d2"
+    FIXTURE_ROOT = "1d3d53cbe19874206c1d24e2585b74d67699a5ebdd398a2f0d6cde35079cefe3"
 
     def add_options(self, parser):
         self.add_wallet_options(parser, descriptors=True, legacy=False)
@@ -105,13 +105,7 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             "-pqregistrationcutoffblocks=%d" % registration_cutoff_blocks,
             "-pqrostersnapshotlag=%d" % roster_snapshot_lag,
             "-pqfuturehorizonepochs=8",
-            "-pqbtcccandidateorigin=1000000",
-            "-pqbtccreceiptanchorheight=%d" % anchor["height"],
-            "-pqbtccreceiptanchorblockhash=%s" % anchor["blockHash"],
-            "-pqbtccreceiptanchorcursorheight=-1",
-            "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
-            "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
-            "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+            "-pqfinalitypreparation=1",
         ]
         self.stop_node(0)
         node.extra_args = list(self.extra_args)

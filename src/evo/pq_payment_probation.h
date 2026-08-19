@@ -22,9 +22,8 @@
 
 namespace llmq::pq {
 
-inline constexpr uint16_t PQ_PAYMENT_PROBATION_STATE_V1_VERSION{1};
-inline constexpr uint16_t PQ_PAYMENT_PROBATION_STATE_VERSION{2};
-inline constexpr uint16_t PQ_PAYMENT_PROBATION_DIFF_VERSION{2};
+inline constexpr uint16_t PQ_PAYMENT_PROBATION_STATE_VERSION{1};
+inline constexpr uint16_t PQ_PAYMENT_PROBATION_DIFF_VERSION{1};
 inline constexpr uint8_t PQ_PAYMENT_PROBATION_MAX_MISSES{2};
 inline constexpr std::size_t PQ_PAYMENT_AUDIT_CONCLUSIVE_MEMBERS{
     QUORUM_MIN_VALID};
@@ -34,7 +33,7 @@ inline constexpr std::size_t MAX_PQ_PAYMENT_PROBATION_CHANGES{
 static_assert(MAX_PQ_PAYMENT_PROBATION_CHANGES <=
               std::numeric_limits<uint32_t>::max());
 inline constexpr std::string_view PQ_PAYMENT_PROBATION_STATE_HASH_DOMAIN{
-    "SYS_PQ_PAYMENT_PROBATION_STATE_V2"};
+    "SYS_PQ_PAYMENT_PROBATION_STATE_V1"};
 
 struct PQPaymentAuditReceiptIdentity {
     uint32_t epoch{0};

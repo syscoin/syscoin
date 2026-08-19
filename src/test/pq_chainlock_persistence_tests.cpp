@@ -67,10 +67,25 @@ ChainLockFinalityStoreConfig MakeConfig()
 {
     ChainLockFinalityStoreConfig config;
     config.chainlock_schedule = *MakeChainLockScheduleConfig(0);
-    config.btcc_schedule.candidate_origin = 0;
-    config.anchor.height = 860;
-    config.anchor.block_hash = NonNullHash(860);
+    config.btcc_schedule.candidate_origin = 870;
+    config.anchor.height = 864;
+    config.anchor.block_hash = NonNullHash(864);
     return config;
+}
+
+BTCCCursorReconciliationProof MakeReconciliationProof(
+    const FinalChainLock& durable, uint64_t salt)
+{
+    BTCCCursorReconciliationProof proof;
+    proof.carrier_height =
+        durable.statement.accepted_btcc_cursor.sys_height +
+        static_cast<int32_t>(PQ_BTCC_NEVM_LAG);
+    proof.carrier_hash = NonNullHash(90'000 + salt);
+    proof.carrier_parent_hash = NonNullHash(91'000 + salt);
+    proof.skipped_cursor = durable.statement.accepted_btcc_cursor;
+    proof.previous_receipt_state = durable.statement.btcc_receipt_state;
+    proof.current_receipt_state = durable.statement.btcc_receipt_state;
+    return proof;
 }
 
 ChainLockFinalityStoreConfig MakePaymentAuditConfig()
@@ -104,22 +119,22 @@ struct RawDiskKey {
     SERIALIZE_METHODS(RawDiskKey, obj) { READWRITE(obj.type); }
 };
 
-struct RawBTCCPresealMarkerV1 {
+struct RawTruncatedBTCCPresealMarker {
     uint16_t version{1};
     uint256 schema_hash;
     int32_t carrier_height{-1};
     uint256 carrier_hash;
     uint256 checksum;
 
-    SERIALIZE_METHODS(RawBTCCPresealMarkerV1, obj)
+    SERIALIZE_METHODS(RawTruncatedBTCCPresealMarker, obj)
     {
         READWRITE(obj.version, obj.schema_hash, obj.carrier_height,
                   obj.carrier_hash, obj.checksum);
     }
 };
 
-struct RawBTCCPresealMarkerV2 {
-    uint16_t version{2};
+struct RawBTCCPresealMarkerV1 {
+    uint16_t version{1};
     uint256 schema_hash;
     int32_t earliest_carrier_height{-1};
     uint256 earliest_carrier_hash;
@@ -130,7 +145,7 @@ struct RawBTCCPresealMarkerV2 {
     uint64_t revision{0};
     uint256 checksum;
 
-    SERIALIZE_METHODS(RawBTCCPresealMarkerV2, obj)
+    SERIALIZE_METHODS(RawBTCCPresealMarkerV1, obj)
     {
         READWRITE(obj.version, obj.schema_hash,
                   obj.earliest_carrier_height,
@@ -276,8 +291,11 @@ FinalChainLock MakeBTCCWinner(const DurableBTCCIndexState& index_state,
                               const ChainLockFinalityStoreConfig& config,
                               uint64_t salt)
 {
-    auto winner{MakeChainLock(870, config.anchor.height,
-                              config.anchor.block_hash, salt)};
+    const auto predecessor{NextEligibleChainLockTargetHeight(
+        config.chainlock_schedule, config.anchor.height)};
+    BOOST_REQUIRE(predecessor);
+    auto winner{MakeChainLock(
+        870, *predecessor, NonNullHash(*predecessor), salt)};
     winner.statement.block_hash = index_state.block_hash;
     winner.statement.accepted_btcc_cursor = index_state.receipt_state.cursor;
     winner.statement.btcc_advance = BTCCAdvance::ADVANCE;
@@ -290,9 +308,9 @@ FinalChainLock MakeBTCCWinner(const DurableBTCCIndexState& index_state,
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_persistence_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(legacy_audit_cursor_without_witness_requires_reindex)
+BOOST_AUTO_TEST_CASE(incomplete_audit_cursor_requires_reindex)
 {
-    const fs::path path{m_path_root / "pqcl_legacy_audit_index"};
+    const fs::path path{m_path_root / "pqcl_incomplete_audit_index"};
     CBlockHeader header;
     header.nVersion = 1;
     header.nTime = 1;
@@ -372,19 +390,20 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
         860, NonNullHash(860), BTCCReceiptState{}};
     BOOST_REQUIRE(config.IsValid());
 
-    const BTCCPresealMarker active_b_v1{
+    const BTCCPresealMarker active_b_revision_1{
         MakePresealMarker(880, 880, 1, 880)};
-    const BTCCPresealMarker active_b_v2{
+    const BTCCPresealMarker active_b_revision_2{
         MakePresealMarker(880, 880, 2, 880)};
-    const BTCCPresealMarker prospective_a_v2{
+    const BTCCPresealMarker prospective_a_revision_2{
         MakePresealMarker(890, 890, 2, 890)};
-    const BTCCPresealState both{active_b_v2, prospective_a_v2};
+    const BTCCPresealState both{
+        active_b_revision_2, prospective_a_revision_2};
 
     {
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
         BOOST_REQUIRE(persistence.PersistBTCCPresealState(
-            BTCCPresealState{active_b_v1, std::nullopt}));
+            BTCCPresealState{active_b_revision_1, std::nullopt}));
         // Crash cut: A's prospective boundary is fsynced before A activates.
         // B's earlier active replay obligation must remain in the same atomic
         // state rather than being overwritten by A.
@@ -395,10 +414,10 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
             DiskParams(path), genesis, config};
         BOOST_CHECK(persistence.LoadBTCCPresealState() == both);
 
-        const BTCCPresealMarker prospective_a_v3{
+        const BTCCPresealMarker prospective_a_revision_3{
             MakePresealMarker(890, 890, 3, 890)};
         const BTCCPresealState after_b_replay{
-            std::nullopt, prospective_a_v3};
+            std::nullopt, prospective_a_revision_3};
         BOOST_REQUIRE(
             persistence.PersistBTCCPresealState(after_b_replay));
     }
@@ -411,7 +430,7 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
     }
 }
 
-BOOST_AUTO_TEST_CASE(preseal_marker_revisions_and_v2_fields_fail_closed)
+BOOST_AUTO_TEST_CASE(preseal_marker_revisions_and_dependencies_fail_closed)
 {
     const fs::path path{m_path_root / "pqcl_preseal_revision"};
     const uint256 genesis{NonNullHash(24)};
@@ -463,40 +482,41 @@ BOOST_AUTO_TEST_CASE(payment_audit_preseal_state_is_atomic_and_monotonic)
     const auto config{MakePaymentAuditConfig()};
     BOOST_REQUIRE(config.IsValid());
 
-    const auto active_v1{
+    const auto active_revision_1{
         MakePaymentAuditPresealMarker(config, 3, 1, 1)};
-    const auto active_v2{
+    const auto active_revision_2{
         MakePaymentAuditPresealMarker(config, 3, 2, 1)};
-    auto prospective_v2{
+    auto prospective_revision_2{
         MakePaymentAuditPresealMarker(config, 4, 2, 2)};
     // Two branches can share the first missing receipt and diverge only at a
     // later carrier. Both crash-durable obligations must survive together.
-    prospective_v2.earliest_carrier_height =
-        active_v2.earliest_carrier_height;
-    prospective_v2.earliest_carrier_hash =
-        active_v2.earliest_carrier_hash;
-    prospective_v2.predecessor_receipt_state =
-        active_v2.predecessor_receipt_state;
-    prospective_v2.predecessor_probation_state_hash =
-        active_v2.predecessor_probation_state_hash;
-    const PaymentAuditPresealState both{active_v2, prospective_v2};
+    prospective_revision_2.earliest_carrier_height =
+        active_revision_2.earliest_carrier_height;
+    prospective_revision_2.earliest_carrier_hash =
+        active_revision_2.earliest_carrier_hash;
+    prospective_revision_2.predecessor_receipt_state =
+        active_revision_2.predecessor_receipt_state;
+    prospective_revision_2.predecessor_probation_state_hash =
+        active_revision_2.predecessor_probation_state_hash;
+    const PaymentAuditPresealState both{
+        active_revision_2, prospective_revision_2};
 
     {
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
         BOOST_CHECK(persistence.LoadPaymentAuditPresealState().IsEmpty());
         BOOST_REQUIRE(persistence.PersistPaymentAuditPresealState(
-            PaymentAuditPresealState{active_v1, std::nullopt}));
+            PaymentAuditPresealState{active_revision_1, std::nullopt}));
         BOOST_REQUIRE(
             persistence.PersistPaymentAuditPresealState(both));
         BOOST_CHECK(persistence.LoadPaymentAuditPresealState() == both);
 
-        auto stale{active_v2};
+        auto stale{active_revision_2};
         stale.terminal_receipt.audit_witness_id = NonNullHash(999'002);
         BOOST_CHECK(!persistence.PersistPaymentAuditPresealState(
             PaymentAuditPresealState{stale, std::nullopt}));
 
-        auto impossible_schedule{active_v2};
+        auto impossible_schedule{active_revision_2};
         ++impossible_schedule.terminal_receipt.seal_height;
         ++impossible_schedule.revision;
         BOOST_CHECK(!persistence.PersistPaymentAuditPresealState(
@@ -507,10 +527,10 @@ BOOST_AUTO_TEST_CASE(payment_audit_preseal_state_is_atomic_and_monotonic)
             DiskParams(path), genesis, config};
         BOOST_CHECK(persistence.LoadPaymentAuditPresealState() == both);
 
-        const auto prospective_v3{
+        const auto prospective_revision_3{
             MakePaymentAuditPresealMarker(config, 4, 3, 2)};
         const PaymentAuditPresealState after_active_replay{
-            std::nullopt, prospective_v3};
+            std::nullopt, prospective_revision_3};
         BOOST_REQUIRE(persistence.PersistPaymentAuditPresealState(
             after_active_replay));
         BOOST_REQUIRE(persistence.ClearPaymentAuditPresealState());
@@ -525,9 +545,9 @@ BOOST_AUTO_TEST_CASE(payment_audit_preseal_state_is_atomic_and_monotonic)
     }
 }
 
-BOOST_AUTO_TEST_CASE(legacy_preseal_marker_fails_closed)
+BOOST_AUTO_TEST_CASE(truncated_preseal_marker_fails_closed)
 {
-    const fs::path path{m_path_root / "pqcl_preseal_v1"};
+    const fs::path path{m_path_root / "pqcl_preseal_truncated"};
     const uint256 genesis{NonNullHash(25)};
     auto config{MakeConfig()};
     config.btcc_receipt_assumption_anchor = BTCCReceiptAssumptionAnchor{
@@ -539,7 +559,7 @@ BOOST_AUTO_TEST_CASE(legacy_preseal_marker_fails_closed)
         CDBWrapper raw{DiskParams(path)};
         BOOST_REQUIRE(raw.Write(
             RawDiskKey{PQ_CHAINLOCK_PERSISTENCE_BTCC_PRESEAL_KEY},
-            RawBTCCPresealMarkerV1{
+            RawTruncatedBTCCPresealMarker{
                 1, NonNullHash(1), 870, NonNullHash(870), NonNullHash(2)},
             true));
     }
@@ -548,9 +568,9 @@ BOOST_AUTO_TEST_CASE(legacy_preseal_marker_fails_closed)
         std::runtime_error);
 }
 
-BOOST_AUTO_TEST_CASE(corrupt_v2_preseal_marker_fails_closed)
+BOOST_AUTO_TEST_CASE(corrupt_preseal_marker_fails_closed)
 {
-    const fs::path path{m_path_root / "pqcl_preseal_v2_corrupt"};
+    const fs::path path{m_path_root / "pqcl_preseal_corrupt"};
     const uint256 genesis{NonNullHash(26)};
     auto config{MakeConfig()};
     config.btcc_receipt_assumption_anchor = BTCCReceiptAssumptionAnchor{
@@ -563,7 +583,7 @@ BOOST_AUTO_TEST_CASE(corrupt_v2_preseal_marker_fails_closed)
     }
     {
         CDBWrapper raw{DiskParams(path)};
-        RawBTCCPresealMarkerV2 marker;
+        RawBTCCPresealMarkerV1 marker;
         BOOST_REQUIRE(raw.Read(
             RawDiskKey{PQ_CHAINLOCK_PERSISTENCE_BTCC_PRESEAL_KEY}, marker));
         BOOST_CHECK_EQUAL(GetSerializeSize(marker), 384U);
@@ -685,14 +705,41 @@ BOOST_AUTO_TEST_CASE(writes_are_monotonic_and_first_winner_is_durable)
     BOOST_CHECK(*loaded == next);
 }
 
+BOOST_AUTO_TEST_CASE(durable_records_require_the_unique_successor_geometry)
+{
+    const uint256 genesis{NonNullHash(60)};
+    const auto config{MakeConfig()};
+    PQChainLockPersistence persistence{
+        MemoryParams(m_path_root / "pqcl_successor_geometry"),
+        genesis, config};
+    const auto skipped{MakeChainLock(
+        870, config.anchor.height, config.anchor.block_hash, 60)};
+    ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+
+    BOOST_CHECK(!persistence.PersistBest(skipped, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.PersistCatchupBest(skipped, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.LoadBest());
+
+    const auto predecessor{NextEligibleChainLockTargetHeight(
+        config.chainlock_schedule, config.anchor.height)};
+    BOOST_REQUIRE(predecessor);
+    const auto exact{MakeChainLock(
+        870, *predecessor, NonNullHash(*predecessor), 61)};
+    BOOST_REQUIRE(persistence.PersistBest(exact, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::NONE);
+    BOOST_REQUIRE(persistence.LoadBest());
+    BOOST_CHECK(*persistence.LoadBest() == exact);
+}
+
 BOOST_AUTO_TEST_CASE(unsealed_advance_survives_restart_until_descendant_seal)
 {
     const fs::path path{m_path_root / "pqcl_unsealed_btcc"};
     const uint256 genesis{NonNullHash(10)};
     const auto config{MakeConfig()};
 
-    auto advance{
-        MakeChainLock(870, config.anchor.height, config.anchor.block_hash, 10)};
+    auto advance{MakeChainLock(870, 865, NonNullHash(865), 10)};
     advance.statement.accepted_btcc_cursor =
         BTCCursor{870, advance.statement.block_hash, NonNullHash(8700)};
     advance.statement.btcc_advance = BTCCAdvance::ADVANCE;
@@ -709,8 +756,8 @@ BOOST_AUTO_TEST_CASE(unsealed_advance_survives_restart_until_descendant_seal)
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
         BOOST_REQUIRE(persistence.PersistBest(advance));
         BOOST_REQUIRE(persistence.PersistBest(before_seal));
-        // A normal live winner seals receipt history identically to a
-        // catch-up winner; catch-up is only a one-shot admission path.
+        // A LIVE winner below the carrier retains the outstanding advance.
+        // CATCHUP is a per-candidate mode and follows the same sealing rule.
         BOOST_CHECK(!persistence.HasCatchupMarker());
         const auto unsealed{persistence.LoadUnsealedBTCC()};
         BOOST_REQUIRE(unsealed);
@@ -734,6 +781,97 @@ BOOST_AUTO_TEST_CASE(unsealed_advance_survives_restart_until_descendant_seal)
         BOOST_REQUIRE(persistence.PersistBest(seal));
         BOOST_CHECK(!persistence.LoadUnsealedBTCC());
         BOOST_CHECK(!persistence.HasCatchupMarker());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    candidate_bound_cursor_reconciliation_is_atomic_across_restart)
+{
+    const fs::path path{m_path_root / "pqcl_cursor_reconciliation"};
+    const fs::path no_unsealed_path{
+        m_path_root / "pqcl_cursor_reconciliation_no_unsealed"};
+    const uint256 genesis{NonNullHash(13)};
+    const auto config{MakeConfig()};
+    const auto prior{MakeChainLock(
+        865, config.anchor.height, config.anchor.block_hash, 13)};
+    auto advance{MakeChainLock(870, 865, prior.statement.block_hash, 14)};
+    advance.statement.accepted_btcc_cursor =
+        BTCCursor{870, advance.statement.block_hash, NonNullHash(87'014)};
+    advance.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    auto premature{
+        MakeChainLock(875, 870, advance.statement.block_hash, 15)};
+    auto keep{MakeChainLock(875, 870, advance.statement.block_hash, 16)};
+    keep.statement.previous_btcc_cursor =
+        advance.statement.accepted_btcc_cursor;
+    keep.statement.accepted_btcc_cursor =
+        advance.statement.accepted_btcc_cursor;
+    const auto recovery{
+        MakeChainLock(880, 875, keep.statement.block_hash, 17)};
+    const auto proof{MakeReconciliationProof(keep, 17)};
+    BOOST_REQUIRE(proof.IsStructurallyValid());
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(prior));
+        BOOST_REQUIRE(persistence.PersistBest(advance));
+        BOOST_REQUIRE(persistence.LoadUnsealedBTCC());
+
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistCatchupBest(
+            premature, &error, proof));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+
+        BOOST_REQUIRE(persistence.PersistBest(keep, &error));
+        BOOST_REQUIRE(persistence.LoadUnsealedBTCC());
+        BOOST_CHECK(!persistence.PersistCatchupBest(recovery, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::NON_MONOTONIC_BTCC);
+
+        auto wrong_proof{proof};
+        ++wrong_proof.carrier_height;
+        BOOST_CHECK(!persistence.PersistCatchupBest(
+            recovery, &error, wrong_proof));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+
+        BOOST_REQUIRE(persistence.PersistCatchupBest(
+            recovery, &error, proof));
+        BOOST_CHECK(error == ChainLockPersistenceError::NONE);
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+        BOOST_CHECK(persistence.HasCatchupMarker());
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        const auto best{persistence.LoadBest()};
+        BOOST_REQUIRE(best);
+        BOOST_CHECK(*best == recovery);
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+        BOOST_CHECK(persistence.HasCatchupMarker());
+    }
+
+    // A peer can catch up directly to KEEP(C) without ever archiving the
+    // ADVANCE(C). Its signed winner still carries the same cursor-vs-receipt
+    // gap and must converge through the identical null-carrier proof.
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(no_unsealed_path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(prior));
+        BOOST_REQUIRE(persistence.PersistCatchupBest(keep));
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+    }
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(no_unsealed_path), genesis, config};
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(*persistence.LoadBest() == keep);
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+        BOOST_REQUIRE(persistence.PersistCatchupBest(
+            recovery, nullptr, proof));
+    }
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(no_unsealed_path), genesis, config};
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(*persistence.LoadBest() == recovery);
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
     }
 }
 
@@ -817,7 +955,7 @@ BOOST_AUTO_TEST_CASE(catchup_audit_marker_advances_across_later_outages)
     const auto first{MakeChainLock(
         865, config.anchor.height, config.anchor.block_hash, 220)};
     const auto live{MakeChainLock(
-        875, first.statement.height, first.statement.block_hash, 221)};
+        870, first.statement.height, first.statement.block_hash, 221)};
     const auto second{MakeChainLock(895, 890, NonNullHash(890), 222)};
 
     {

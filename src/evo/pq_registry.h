@@ -35,8 +35,8 @@ struct Params;
 
 namespace llmq::pq {
 
-inline constexpr uint16_t PQ_REGISTRY_SNAPSHOT_VERSION{2};
-inline constexpr uint16_t PQ_REGISTRY_DISK_VERSION{3};
+inline constexpr uint16_t PQ_REGISTRY_SNAPSHOT_VERSION{1};
+inline constexpr uint16_t PQ_REGISTRY_DISK_VERSION{1};
 inline constexpr int32_t PQ_REGISTRY_CHECKPOINT_INTERVAL{288};
 inline constexpr std::size_t PQ_REGISTRY_SNAPSHOT_CACHE_SIZE{64};
 inline constexpr std::size_t MAX_PQ_OPERATOR_STATES{65'535};
@@ -186,7 +186,6 @@ enum class PQRegistryResult : uint8_t {
     INVALID_BLOCK,
     PQ_TX_BEFORE_PREPARATION,
     MISSING_PARENT_SNAPSHOT,
-    CORRUPT_PARENT_SNAPSHOT,
     INVALID_SCHEDULE,
     CALLBACK_MISSING,
     CALLBACK_FAILED,

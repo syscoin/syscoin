@@ -179,6 +179,32 @@ T RoundTrip(const T& value)
 
 BOOST_FIXTURE_TEST_SUITE(pq_payment_audit_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(seed_point_is_exact_btcc_receipt_projection)
+{
+    const auto seed_point{SeedPoint(870, 41)};
+    const auto receipt{BTCCReceiptFromPaymentAuditSeedPoint(seed_point)};
+    BOOST_REQUIRE(receipt);
+    BOOST_CHECK_EQUAL(receipt->chainlock_target_height,
+                      seed_point.target_height);
+    BOOST_CHECK(receipt->chainlock_target_hash ==
+                seed_point.accepted_cursor.sys_hash);
+    BOOST_CHECK(receipt->chainlock_logical_id ==
+                seed_point.chainlock_logical_id);
+    BOOST_CHECK(receipt->accepted_cursor == seed_point.accepted_cursor);
+
+    const auto roundtrip{PaymentAuditSeedPointFromBTCCReceipt(*receipt)};
+    BOOST_REQUIRE(roundtrip);
+    BOOST_CHECK(*roundtrip == seed_point);
+    BOOST_CHECK(!PaymentAuditSeedPointFromBTCCReceipt(BTCCReceipt{}));
+
+    auto wrong_target{*receipt};
+    wrong_target.chainlock_target_hash = NonNullHash(41'001);
+    BOOST_CHECK(!PaymentAuditSeedPointFromBTCCReceipt(wrong_target));
+    auto stale_cursor{*receipt};
+    --stale_cursor.accepted_cursor.sys_height;
+    BOOST_CHECK(!PaymentAuditSeedPointFromBTCCReceipt(stale_cursor));
+}
+
 BOOST_AUTO_TEST_CASE(schedule_has_24_retrospective_rows_and_retry_window)
 {
     const auto config{ScheduleConfig()};
@@ -362,9 +388,9 @@ BOOST_AUTO_TEST_CASE(commitment_is_carrier_independent_and_canonical)
     auto keep{commitment};
     keep.response_advance = BTCCAdvance::KEEP;
     BOOST_CHECK(!keep.IsStructurallyValid());
-    auto legacy{commitment};
-    legacy.version = PAYMENT_AUDIT_V1_VERSION;
-    BOOST_CHECK(!legacy.IsStructurallyValid());
+    auto unsupported{commitment};
+    unsupported.version = PAYMENT_AUDIT_VERSION + 1;
+    BOOST_CHECK(!unsupported.IsStructurallyValid());
 }
 
 BOOST_AUTO_TEST_CASE(reporter_thresholds_derive_semantic_result_hash)
@@ -608,7 +634,7 @@ BOOST_AUTO_TEST_CASE(null_then_later_nonnull_carrier_applies_once)
         config, expired.carrier_height));
 }
 
-BOOST_AUTO_TEST_CASE(payment_audit_receipt_v3_commits_online_members)
+BOOST_AUTO_TEST_CASE(payment_audit_receipt_commits_online_members)
 {
     PaymentAuditReceipt receipt;
     receipt.has_audit = 1;
@@ -642,24 +668,26 @@ BOOST_AUTO_TEST_CASE(payment_audit_receipt_v3_commits_online_members)
     BOOST_CHECK(!noncanonical_null.IsNull());
     BOOST_CHECK(!noncanonical_null.IsStructurallyValid());
 
-    auto legacy{receipt};
-    legacy.version = 2;
-    BOOST_CHECK(!legacy.IsStructurallyValid());
-    DataStream legacy_wire;
-    legacy_wire << legacy;
+    auto unsupported{receipt};
+    unsupported.version = PAYMENT_AUDIT_RECEIPT_VERSION + 1;
+    BOOST_CHECK(!unsupported.IsStructurallyValid());
+    DataStream unsupported_wire;
+    unsupported_wire << unsupported;
     PaymentAuditReceipt rejected;
-    BOOST_CHECK_THROW(legacy_wire >> rejected, std::ios_base::failure);
+    BOOST_CHECK_THROW(unsupported_wire >> rejected,
+                      std::ios_base::failure);
 
-    DataStream actual_v2_wire;
-    const uint16_t legacy_version{2};
-    actual_v2_wire << legacy_version << receipt.has_audit << receipt.epoch
-                   << receipt.seal_height << receipt.seal_block_hash
-                   << receipt.carrier_height << receipt.audit_logical_id
-                   << receipt.audit_witness_id << receipt.commitment_hash
-                   << receipt.result_hash
-                   << receipt.next_probation_state_hash;
-    BOOST_CHECK_EQUAL(actual_v2_wire.size(), 207U);
-    BOOST_CHECK_THROW(actual_v2_wire >> rejected,
+    DataStream truncated_wrong_version_wire;
+    const uint16_t unsupported_version{
+        PAYMENT_AUDIT_RECEIPT_VERSION + 1};
+    truncated_wrong_version_wire
+        << unsupported_version << receipt.has_audit << receipt.epoch
+        << receipt.seal_height << receipt.seal_block_hash
+        << receipt.carrier_height << receipt.audit_logical_id
+        << receipt.audit_witness_id << receipt.commitment_hash
+        << receipt.result_hash << receipt.next_probation_state_hash;
+    BOOST_CHECK_EQUAL(truncated_wrong_version_wire.size(), 207U);
+    BOOST_CHECK_THROW(truncated_wrong_version_wire >> rejected,
                       std::ios_base::failure);
 
     const uint256 genesis_hash{NonNullHash(66)};

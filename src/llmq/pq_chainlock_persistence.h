@@ -92,7 +92,7 @@ struct BTCCPresealState {
 /**
  * Crash-durable boundary for compact historical payment-audit replay.
  *
- * Receipt V3 carries the deterministic transition bitmap, so the exact large
+ * The receipt carries the deterministic transition bitmap, so the exact large
  * audit witness is not needed to reconstruct state.  The reconstructed prefix
  * remains provisional until a normally verified descendant ChainLock signs
  * both the cumulative receipt state and the resulting probation-state root.
@@ -163,7 +163,7 @@ enum class ChainLockPersistenceError : uint8_t {
  * Durable storage for the single best post-quantum ChainLock certificate.
  *
  * The database schema binds the record to the network genesis, complete
- * finality configuration, migration anchor, and fixed cryptographic profile.
+ * finality configuration, immutable anchors, and fixed cryptographic profile.
  * Construction validates every database key and every byte of the record;
  * callers must still perform full branch, roster, and signature verification
  * before importing LoadBest() into live finality state.
@@ -205,7 +205,9 @@ public:
     /** Atomically advance the winner and highest catch-up audit marker. */
     [[nodiscard]] bool PersistCatchupBest(
         const FinalChainLock& chainlock,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        const std::optional<BTCCCursorReconciliationProof>&
+            btcc_cursor_reconciliation = std::nullopt);
 
     /** Atomically replace both deferred-NEVM branch obligations. */
     [[nodiscard]] bool PersistBTCCPresealState(

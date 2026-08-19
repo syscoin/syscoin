@@ -42,6 +42,8 @@ public:
 
 namespace {
 
+constexpr uint8_t FULL_AUTHORIZATION_MASK{0b1111};
+
 uint256 NonNullHash(uint64_t value)
 {
     uint256 hash;
@@ -176,6 +178,7 @@ BOOST_AUTO_TEST_CASE(cloned_signer_cannot_add_quorum_weight)
     ShareCollectionError error{ShareCollectionError::INVALID_ARGUMENT};
     auto collector{ChainLockCollector::Create(
         fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        FULL_AUTHORIZATION_MASK,
         &error)};
     BOOST_REQUIRE(collector);
     BOOST_CHECK(error == ShareCollectionError::NONE);
@@ -219,7 +222,8 @@ BOOST_AUTO_TEST_CASE(rejects_wrong_statement_member_and_signature)
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture))};
+        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        FULL_AUTHORIZATION_MASK)};
     BOOST_REQUIRE(collector);
     const ChainLockShare valid{SignFirstShare(*fixture)};
     ShareCollectionError error{ShareCollectionError::NONE};
@@ -248,7 +252,8 @@ BOOST_AUTO_TEST_CASE(invalid_impersonation_does_not_reserve_signer_slot)
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture))};
+        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        FULL_AUTHORIZATION_MASK)};
     BOOST_REQUIRE(collector);
     const ChainLockShare valid{SignFirstShare(*fixture)};
     auto invalid{valid};
@@ -271,7 +276,8 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture))};
+        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        FULL_AUTHORIZATION_MASK)};
     BOOST_REQUIRE(collector);
 
     llmq_tests::ChainLockCollectorTestAccess::Insert(
@@ -297,6 +303,37 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
     BOOST_CHECK(!final->SignatureOffset(0, 0));
     BOOST_CHECK_EQUAL(*final->SignatureOffset(3, QUORUM_THRESHOLD - 1),
                       FINAL_SIGNATURE_COUNT - 1);
+}
+
+BOOST_AUTO_TEST_CASE(one_transition_ignores_and_rejects_newest_roster)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    auto collector{ChainLockCollector::Create(
+        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        0b0111)};
+    BOOST_REQUIRE(collector);
+
+    auto unauthorized{SignFirstShare(*fixture)};
+    unauthorized.transcript.quorum_epoch =
+        fixture->rosters[3].descriptor.epoch;
+    unauthorized.transcript.quorum_base_hash =
+        fixture->rosters[3].descriptor.base_hash;
+    unauthorized.transcript.member_pro_tx_hash =
+        fixture->rosters[3].members[0].pro_tx_hash;
+    ShareCollectionError error{ShareCollectionError::NONE};
+    BOOST_CHECK(collector->AddVerifiedShare(unauthorized, &error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(error == ShareCollectionError::INVALID_CONTEXT);
+
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        llmq_tests::ChainLockCollectorTestAccess::Insert(
+            *collector, slot, QUORUM_THRESHOLD,
+            static_cast<uint8_t>(0xa0 + slot));
+    }
+    const auto final{collector->Finalize()};
+    BOOST_REQUIRE(final);
+    BOOST_CHECK_EQUAL(final->selected_quorum_mask, 0b0111);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

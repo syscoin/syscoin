@@ -21,17 +21,17 @@ namespace llmq::pq {
 namespace {
 
 inline constexpr std::array<uint8_t, 8> SCHEMA_MAGIC{
-    'S', 'Y', 'S', 'P', 'Q', 'C', 'L', '2'};
-inline constexpr uint16_t SCHEMA_VERSION{6};
-inline constexpr uint16_t RECORD_VERSION{6};
+    'S', 'Y', 'S', 'P', 'Q', 'C', 'L', '1'};
+inline constexpr uint16_t SCHEMA_VERSION{1};
+inline constexpr uint16_t RECORD_VERSION{1};
 inline constexpr std::string_view SCHEMA_HASH_DOMAIN{
-    "SYS_PQ_CHAINLOCK_PERSISTENCE_SCHEMA_V6"};
+    "SYS_PQ_CHAINLOCK_PERSISTENCE_SCHEMA_V1"};
 inline constexpr std::string_view RECORD_HASH_DOMAIN{
-    "SYS_PQ_CHAINLOCK_PERSISTENCE_RECORD_V6"};
+    "SYS_PQ_CHAINLOCK_PERSISTENCE_RECORD_V1"};
 inline constexpr std::string_view CATCHUP_MARKER_HASH_DOMAIN{
     "SYS_PQ_CHAINLOCK_CATCHUP_MARKER_V1"};
 inline constexpr std::string_view BTCC_PRESEAL_MARKER_HASH_DOMAIN{
-    "SYS_PQ_BTCC_PRESEAL_MARKER_V2"};
+    "SYS_PQ_BTCC_PRESEAL_MARKER_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_PRESEAL_MARKER_HASH_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_PRESEAL_MARKER_V1"};
 
@@ -279,10 +279,7 @@ struct DiskCatchupMarker {
 };
 
 struct DiskBTCCPresealMarker {
-    // V1 retained only one carrier hash and cannot reconstruct the exact
-    // receipt dependency after pruning. Its distinct size/version therefore
-    // fails closed instead of being upgraded with guessed authorization data.
-    static constexpr uint16_t VERSION{2};
+    static constexpr uint16_t VERSION{1};
     static constexpr std::size_t WIRE_SIZE{
         sizeof(uint16_t) + 2 * sizeof(int32_t) + sizeof(uint64_t) +
         4 * 32 + BTCCReceiptState::WIRE_SIZE + BTCCReceipt::WIRE_SIZE};
@@ -456,61 +453,6 @@ DiskPaymentAuditPresealMarker MakePaymentAuditPresealMarker(
 static_assert(DiskRecord::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 384);
 static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 571);
-
-bool IsCursorMonotonic(const BTCCursor& previous,
-                       const BTCCursor& candidate) noexcept
-{
-    if (previous.IsNull()) return true;
-    if (candidate.IsNull() || candidate.sys_height < previous.sys_height) {
-        return false;
-    }
-    return candidate.sys_height != previous.sys_height || candidate == previous;
-}
-
-bool IsReceiptStateMonotonic(const BTCCReceiptState& previous,
-                             const BTCCReceiptState& candidate) noexcept
-{
-    if (!previous.IsStructurallyValid() ||
-        !candidate.IsStructurallyValid()) {
-        return false;
-    }
-    if (previous.cursor.IsNull()) return true;
-    if (candidate.cursor.IsNull() ||
-        candidate.cursor.sys_height < previous.cursor.sys_height) {
-        return false;
-    }
-    if (candidate.cursor.sys_height == previous.cursor.sys_height) {
-        return candidate == previous;
-    }
-    return true;
-}
-
-bool IsPaymentAuditStateMonotonic(
-    const PaymentAuditReceiptState& previous_receipt,
-    const uint256& previous_probation,
-    const PaymentAuditReceiptState& candidate_receipt,
-    const uint256& candidate_probation) noexcept
-{
-    if (!previous_receipt.IsStructurallyValid() ||
-        !candidate_receipt.IsStructurallyValid() ||
-        previous_probation.IsNull() || candidate_probation.IsNull()) {
-        return false;
-    }
-    if (previous_receipt.cursor.IsNull()) return true;
-    if (candidate_receipt.cursor.IsNull() ||
-        candidate_receipt.cursor.epoch < previous_receipt.cursor.epoch ||
-        candidate_receipt.cursor.carrier_height <
-            previous_receipt.cursor.carrier_height) {
-        return false;
-    }
-    if (candidate_receipt.cursor.epoch == previous_receipt.cursor.epoch ||
-        candidate_receipt.cursor.carrier_height ==
-            previous_receipt.cursor.carrier_height) {
-        return candidate_receipt == previous_receipt &&
-               candidate_probation == previous_probation;
-    }
-    return true;
-}
 
 bool IsValidBTCCPresealMarker(
     const ChainLockFinalityStoreConfig& config,
@@ -727,7 +669,11 @@ struct PQChainLockPersistence::Impl {
         }
 
         const auto& statement{record.chainlock.statement};
-        return statement.height > config.anchor.height &&
+        const auto next_target{NextEligibleChainLockTargetHeight(
+            config.chainlock_schedule,
+            statement.previous_chainlock_height)};
+        return next_target && statement.height == *next_target &&
+               statement.height > config.anchor.height &&
                statement.previous_chainlock_height >= config.anchor.height &&
                (statement.previous_chainlock_height != config.anchor.height ||
                 statement.previous_chainlock_hash == config.anchor.block_hash);
@@ -977,7 +923,9 @@ struct PQChainLockPersistence::Impl {
 
     bool PersistBest(const FinalChainLock& chainlock,
                      ChainLockPersistenceError* error,
-                     bool catchup = false)
+                     bool catchup = false,
+                     const std::optional<BTCCCursorReconciliationProof>&
+                         btcc_cursor_reconciliation = std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -998,6 +946,19 @@ struct PQChainLockPersistence::Impl {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
+        const bool cursor_regresses{
+            best && !IsDurableBTCCursorMonotonic(
+                best->chainlock.statement.accepted_btcc_cursor,
+                candidate.chainlock.statement.accepted_btcc_cursor)};
+        const bool reconciles_cursor{
+            cursor_regresses && catchup && btcc_cursor_reconciliation &&
+            IsBTCCCursorReconciliationProof(
+                best->chainlock, candidate.chainlock,
+                *btcc_cursor_reconciliation, config)};
+        if (btcc_cursor_reconciliation && !reconciles_cursor) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
         if (best) {
             if (candidate.chainlock.statement.height <
                 best->chainlock.statement.height) {
@@ -1015,20 +976,18 @@ struct PQChainLockPersistence::Impl {
                 SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
                 return false;
             }
-            if (!IsCursorMonotonic(
-                    best->chainlock.statement.accepted_btcc_cursor,
-                    candidate.chainlock.statement.accepted_btcc_cursor)) {
+            if (cursor_regresses && !reconciles_cursor) {
                 SetError(error, ChainLockPersistenceError::NON_MONOTONIC_BTCC);
                 return false;
             }
-            if (!IsReceiptStateMonotonic(
+            if (!IsDurableBTCCReceiptStateMonotonic(
                     best->chainlock.statement.btcc_receipt_state,
                     candidate.chainlock.statement.btcc_receipt_state)) {
                 SetError(error,
                          ChainLockPersistenceError::NON_MONOTONIC_RECEIPT_STATE);
                 return false;
             }
-            if (!IsPaymentAuditStateMonotonic(
+            if (!IsDurablePaymentAuditStateMonotonic(
                     best->chainlock.statement.payment_audit_receipt_state,
                     best->chainlock.statement.payment_probation_state_hash,
                     candidate.chainlock.statement
@@ -1349,10 +1308,14 @@ bool PQChainLockPersistence::PersistUnsealedBTCC(
 
 bool PQChainLockPersistence::PersistCatchupBest(
     const FinalChainLock& chainlock,
-    ChainLockPersistenceError* error)
+    ChainLockPersistenceError* error,
+    const std::optional<BTCCCursorReconciliationProof>&
+        btcc_cursor_reconciliation)
 {
     LOCK(m_impl->mutex);
-    return m_impl->PersistBest(chainlock, error, /*catchup=*/true);
+    return m_impl->PersistBest(
+        chainlock, error, /*catchup=*/true,
+        btcc_cursor_reconciliation);
 }
 
 bool PQChainLockPersistence::PersistBTCCPresealState(

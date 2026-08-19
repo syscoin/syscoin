@@ -57,7 +57,7 @@ ChainLockShare ResponseShare(int32_t height,
     transcript.payment_probation_state_hash = NonNullHash(branch_salt + 7);
     share.authenticated_signature.key_proof.public_key[0] = 1;
     share.authenticated_signature.signature[0] =
-        static_cast<uint8_t>(member + 1);
+        static_cast<uint8_t>(member % 255 + 1);
     BOOST_REQUIRE(share.IsStructurallyValid());
     return share;
 }
@@ -202,6 +202,77 @@ BOOST_AUTO_TEST_CASE(branch_replacement_drops_old_evidence)
     BOOST_REQUIRE(loaded);
     BOOST_CHECK(loaded->response_block_hash == replacement.response_block_hash);
     BOOST_CHECK(loaded->responses.empty());
+    const auto metadata{store.GetOpenRowMetadata(6, 3)};
+    BOOST_REQUIRE(metadata);
+    BOOST_CHECK(!CountSet(metadata->available_members));
+}
+
+BOOST_AUTO_TEST_CASE(compact_inventory_preserves_full_quorum_burst)
+{
+    const fs::path path{m_path_root / "pq_payment_audit_staging_inventory"};
+    const uint256 genesis_hash{NonNullHash(15)};
+    auto row{Row(genesis_hash, 12, 0)};
+    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+        SetBit(row.subject_valid_members, member);
+    }
+    BOOST_REQUIRE(row.IsStructurallyValid(genesis_hash));
+
+    std::size_t sync_barriers{0};
+    PaymentAuditStagingStore store{
+        path, genesis_hash, 8 << 20, false,
+        [&] {
+            ++sync_barriers;
+            return true;
+        }};
+    BOOST_REQUIRE(store.ActivateEpoch(12) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_REQUIRE(store.EnsureRow(row) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    for (uint16_t member{0}; member < QUORUM_SIZE; ++member) {
+        BOOST_REQUIRE(store.AddVerifiedResponse(
+                          12, 0, row.deadline_height - 1,
+                          Response(row, member)) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+    }
+
+    const auto metadata{store.GetOpenRowMetadata(12, 0)};
+    BOOST_REQUIRE(metadata);
+    BOOST_CHECK_EQUAL(CountSet(metadata->available_members), QUORUM_SIZE);
+    const auto rows{store.GetOpenRowsMetadata(12)};
+    BOOST_REQUIRE_EQUAL(rows.size(), 1U);
+    BOOST_CHECK(rows.front() == *metadata);
+    const auto burst{store.GetVerifiedResponses(
+        row.expected, metadata->available_members)};
+    BOOST_REQUIRE(burst);
+    BOOST_CHECK_EQUAL(burst->size(), QUORUM_SIZE);
+
+    QuorumBitmap requested{};
+    SetBit(requested, 0);
+    SetBit(requested, QUORUM_SIZE - 1);
+    const auto selected{
+        store.GetVerifiedResponses(row.expected, requested)};
+    BOOST_REQUIRE(selected);
+    BOOST_REQUIRE_EQUAL(selected->size(), 2U);
+    BOOST_CHECK_EQUAL(
+        selected->front().response.transcript.member_index, 0U);
+    BOOST_CHECK_EQUAL(
+        selected->back().response.transcript.member_index,
+        QUORUM_SIZE - 1);
+
+    auto stale_identity{row.expected};
+    stale_identity.response_chainlock_logical_id = NonNullHash(16);
+    BOOST_CHECK(!store.GetVerifiedResponses(stale_identity, requested));
+    BOOST_CHECK_EQUAL(sync_barriers, 0U);
+
+    BOOST_REQUIRE(store.FreezeRow(
+                      12, 0, row.response_block_hash,
+                      NonNullHash(17)) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK_EQUAL(sync_barriers, 1U);
+    const auto summary{store.GetSummary(12, 0)};
+    BOOST_REQUIRE(summary);
+    BOOST_CHECK_EQUAL(
+        CountSet(summary->locally_observed_members), QUORUM_SIZE);
 }
 
 BOOST_AUTO_TEST_CASE(two_open_rows_are_bounded)

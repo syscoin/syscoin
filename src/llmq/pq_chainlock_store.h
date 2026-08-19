@@ -36,8 +36,11 @@ inline constexpr std::size_t MAX_RECENT_CHAINLOCKS_SIZE{64};
  * Bounded memoization for the expensive fixed-anchor catch-up proof.
  * Candidate hashes commit to their ancestry, so immutable candidate proofs
  * survive descendant tip extensions and temporary reorgs. Integration must
- * independently require the candidate to be active and change the validation
- * domain token whenever anchor/config/validation provenance changes.
+ * independently enforce the exact admission class and signing-window branch
+ * bound, and change the validation domain token whenever anchor, configuration,
+ * active-tip, marker, or validation provenance changes. Ordinary current
+ * catch-up may select a shallow competing branch; marker recovery remains
+ * active-branch-only.
  */
 class CatchupHistoricalProofCache final {
 public:
@@ -125,6 +128,44 @@ struct ChainLockFinalityStoreConfig {
     [[nodiscard]] bool IsValid() const noexcept;
 };
 
+/** Durable winner state may advance or remain exact, never regress. */
+[[nodiscard]] bool IsDurableBTCCursorMonotonic(
+    const BTCCursor& previous, const BTCCursor& candidate) noexcept;
+
+struct BTCCCursorReconciliationProof {
+    int32_t carrier_height{-1};
+    uint256 carrier_hash;
+    uint256 carrier_parent_hash;
+    BTCCursor skipped_cursor;
+    BTCCReceiptState previous_receipt_state;
+    BTCCReceiptState current_receipt_state;
+    uint256 receipt_logical_id;
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const BTCCCursorReconciliationProof&,
+                           const BTCCCursorReconciliationProof&) = default;
+};
+
+/** Structural half of one candidate-bound canonical-null carrier recovery. */
+[[nodiscard]] bool IsBTCCCursorReconciliation(
+    const FinalChainLock& best,
+    const FinalChainLock& candidate,
+    const ChainLockFinalityStoreConfig& config) noexcept;
+/** Bind an integration-verified carrier proof to the durable transition. */
+[[nodiscard]] bool IsBTCCCursorReconciliationProof(
+    const FinalChainLock& best,
+    const FinalChainLock& candidate,
+    const BTCCCursorReconciliationProof& proof,
+    const ChainLockFinalityStoreConfig& config) noexcept;
+[[nodiscard]] bool IsDurableBTCCReceiptStateMonotonic(
+    const BTCCReceiptState& previous,
+    const BTCCReceiptState& candidate) noexcept;
+[[nodiscard]] bool IsDurablePaymentAuditStateMonotonic(
+    const PaymentAuditReceiptState& previous_receipt,
+    const uint256& previous_probation,
+    const PaymentAuditReceiptState& candidate_receipt,
+    const uint256& candidate_probation) noexcept;
+
 struct ChainLockPredecessor {
     int32_t height{-1};
     uint256 block_hash;
@@ -173,6 +214,8 @@ struct ChainLockCandidateContext {
     int32_t block_height{-1};
     uint256 block_hash;
     uint256 context_token;
+    /** Exact branch proof authorizing one canonical-null cursor reconciliation. */
+    std::optional<BTCCCursorReconciliationProof> btcc_cursor_reconciliation;
 
     friend bool operator==(const ChainLockCandidateContext&,
                            const ChainLockCandidateContext&) = default;
@@ -233,7 +276,9 @@ enum class ChainLockFinalityError : uint8_t {
 
 using ChainLockDurableAccept = std::function<bool(const FinalChainLock&)>;
 using ChainLockDurableArchive = std::function<bool(const FinalChainLock&)>;
-using ChainLockDurableCatchup = std::function<bool(const FinalChainLock&)>;
+using ChainLockDurableCatchup = std::function<bool(
+    const FinalChainLock&,
+    const std::optional<BTCCCursorReconciliationProof>&)>;
 using ChainLockPreDurableCatchup = std::function<bool()>;
 using ChainLockDurableAuthorization = std::function<bool(
     const std::function<bool()>&, ChainLockFinalityError*)>;
@@ -368,6 +413,8 @@ public:
                                                bool unknown_is_conflict = true) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetBest() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::shared_ptr<const FinalChainLock> GetUnsealedBTCC() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetByWitness(
         const uint256& witness_id) const

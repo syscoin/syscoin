@@ -23,33 +23,54 @@ call Bitcoin RPC.
 
 This separation does not mean a BTCC receipt can be trusted without a PQ
 certificate. A non-null carrier at Syscoin height `C` can reference only the
-`ADVANCE` certificate for target/cursor `H = C - 10`. Before forwarding its
+`ADVANCE` certificate for target/cursor `T = C - 10`. Before forwarding its
 Bitcoin hash to NEVM, a live node verifies the exact certificate. Missing data
 is one bounded, non-punitive block dependency and is requested by logical ID;
 a null carrier remains valid. Historical releases pin a separate BTCC receipt
-assumption anchor (block hash, cursor, and cumulative receipt-state hash), so
-pre-anchor receipt crypto can be assumed without changing the immutable PQ
-migration anchor. All base blocks, AuxPoW, deterministic-masternode state, and
-post-anchor receipt transitions are still checked.
+assumption `R` (block hash, cursor, and cumulative receipt-state hash), so
+pre-`R` receipt crypto can be assumed without changing either the immutable
+migration-state anchor `H` or the immutable initial ChainLock predecessor `F`.
+All base blocks, AuxPoW, deterministic-masternode state, and post-`R` receipt
+transitions are still checked.
+
+A durable off-chain `ADVANCE` can be ahead of this indexed receipt state until
+its one carrier. Current-window signing keeps that cursor before the carrier.
+At or after it, the candidate branch itself decides: a non-null receipt keeps
+the advance, while a reconstructed canonical null receipt makes every signer
+resume from the indexed cursor. Any resulting durable cursor reconciliation is
+accepted only with the exact carrier hash, parent hash, unchanged accumulator,
+null logical ID, fully validated index provenance, and a store/persistence
+recheck. It is not a stale-certificate exception and cannot widen the bounded
+ChainLock reorganization window.
 
 The receipt assumption record is mandatory whenever the PQ BTCC schedule is
-enabled. At first activation it may be a distinct record at the migration
-checkpoint before the first carrier, but only with the canonical empty cursor
-and accumulator. Once carriers exist, release-updated boundaries must name an
-exact carrier and its recomputed state. The compiled `defaultAssumeValid`
-height must not exceed this receipt boundary; a custom `-assumevalid` above it
-causes catch-up admission to remain fail-closed.
+enabled. `F` must descend from `H`, cover the bootstrap roster bases, and
+precede the first candidate source, so the initial ChainLock predecessor cursor
+is canonically null. `R` authenticates a different history and need not be at
+or after `F`: before the first carrier it is valid only with the canonical
+empty cursor and accumulator, while a later release-updated boundary must name
+an exact carrier and its recomputed state. The compiled `defaultAssumeValid`
+height must not exceed `H` and must remain strictly below `R`; a custom
+`-assumevalid` above `R` causes catch-up admission to remain fail-closed.
 
-Ordinary network catch-up is limited to the latest eligible ChainLock target
-plus its seven immediate eligible predecessors. A crash-durable V2 pre-seal
-marker supplies the separate, narrowly bound prolonged-outage recovery
-described below; it does not turn arbitrary historical certificates into valid
-catch-up objects.
+Ordinary network catch-up is limited to the latest signable ChainLock target
+on the active branch or a competing branch sharing its `H - sign_lag`
+boundary; an expired prior target or deeper fork is rejected. A
+crash-durable pre-seal marker supplies the separate, narrowly bound
+prolonged-outage recovery described below; it does not turn arbitrary
+historical certificates into valid catch-up objects. Every admitted certificate
+still targets the first eligible height after its own declared predecessor;
+catch-up bridges certificates absent from the local store, not a gap inside the
+signed predecessor view.
 
 Until a release pins that complete profile, public networks remain in an
 explicit pre-activation state and start without the PQ finality service.
-Regtest behaves the same only when no PQ deployment option is supplied; any
-single PQ option opts into all-or-none startup validation.
+Regtest behaves the same when no PQ deployment option is supplied. It also has
+an explicit preparation-only state with complete `H` and registry/quorum
+fields but no `F`, candidate schedule, receipt assumption, finality store,
+signing, admission, restoration, or enforcement. Any other partial profile
+fails startup; full activation requires complete `H`, `F`, `R`, and schedule
+fields.
 
 ## Managed mode (default)
 
@@ -220,17 +241,19 @@ Until then the exact certificate is persisted and served across restart.
 
 ## Prolonged-outage recovery
 
-If historical sync encounters a post-anchor non-null carrier whose certificate
-is unavailable, it does not download every prior CLSIG. It durably records a V2
+If historical sync encounters a post-`R` non-null carrier whose certificate is
+unavailable, it does not download every prior CLSIG. It durably records a
 pre-seal marker containing the earliest carrier/hash, the receipt state just
 before it, the terminal carrier/hash, that terminal carrier's exact non-null
 receipt, and a monotonic revision. Further missing receipts on the same branch
 advance the terminal dependency without moving the earliest replay boundary.
 Active and prospective-most-work markers are separate so a crash or branch
 activation cannot discard the obligation belonging to the winning branch;
-legacy V1 markers fail closed.
+truncated or incomplete marker records fail closed.
 
-Ordinary catch-up remains latest plus seven. An uncovered durable marker can
+Ordinary catch-up remains restricted to the latest signable target on the
+active branch or a competing branch sharing its `H - sign_lag` boundary. An
+uncovered durable marker can
 authorize only one of these additional forms:
 
 - the terminal receipt's exact `ADVANCE` certificate at

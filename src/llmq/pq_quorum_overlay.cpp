@@ -15,33 +15,23 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace llmq {
-namespace {
-
-std::optional<int32_t> LatestEligibleChainLockTargetHeight(
-    const pq::ChainLockScheduleConfig& config,
-    int32_t tip_height)
+std::optional<int32_t> GetPQQuorumOverlayTargetHeight(
+    const pq::ChainLockScheduleConfig& schedule,
+    int32_t predecessor_height,
+    int32_t tip_height) noexcept
 {
-    if (!config.IsValid()) return std::nullopt;
-    const int64_t available_height{
-        static_cast<int64_t>(tip_height) - config.sign_lag};
-    const int64_t offset{available_height - config.epoch_origin};
-    if (offset < 0) return std::nullopt;
-    const int64_t target_height{
-        available_height - offset % config.chainlock_period};
-    if (target_height < 0 ||
-        target_height > std::numeric_limits<int32_t>::max() ||
-        !pq::IsEligibleChainLockTarget(
-            config, static_cast<int32_t>(target_height))) {
-        return std::nullopt;
-    }
-    return static_cast<int32_t>(target_height);
+    const auto window{pq::CurrentChainLockSigningWindow(
+        schedule, predecessor_height, tip_height)};
+    return window ? std::optional<int32_t>{window->target_height}
+                  : std::nullopt;
 }
+
+namespace {
 
 std::optional<pq::GlobalPublicKey> GetLocalGlobalPublicKey()
 {
@@ -219,9 +209,11 @@ void PQQuorumOverlayReconciler::Clear()
 CPQQuorumConnectionOverlay::CPQQuorumConnectionOverlay(
     CConnman& connman,
     const uint256& genesis_hash,
-    std::optional<pq::QuorumBuildConfig> quorum_config)
+    std::optional<pq::QuorumBuildConfig> quorum_config,
+    PQChainLockPredecessorHeight predecessor_height)
     : m_genesis_hash{genesis_hash},
       m_quorum_config{std::move(quorum_config)},
+      m_predecessor_height{std::move(predecessor_height)},
       m_reconciler{
           [&connman](const uint256& group,
                      const PQQuorumConnectionSet& connections) {
@@ -255,6 +247,8 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     const CBlockIndex* new_tip,
     bool initial_download)
 {
+    const auto predecessor_height{
+        m_predecessor_height ? m_predecessor_height() : std::nullopt};
     // Validation callbacks normally hold cs_main. Taking it recursively also
     // makes direct startup/test calls safe and fixes the lock order relative
     // to active-chain updates.
@@ -263,13 +257,14 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
 
     if (initial_download || new_tip == nullptr || !m_quorum_config ||
         !m_quorum_config->IsValid() || m_genesis_hash.IsNull() ||
-        !deterministicMNManager) {
+        !deterministicMNManager || !predecessor_height) {
         ClearLocked();
         return;
     }
 
-    const auto target_height{LatestEligibleChainLockTargetHeight(
-        m_quorum_config->schedule, new_tip->nHeight)};
+    const auto target_height{GetPQQuorumOverlayTargetHeight(
+        m_quorum_config->schedule, *predecessor_height,
+        new_tip->nHeight)};
     const CBlockIndex* target{
         target_height ? new_tip->GetAncestor(*target_height) : nullptr};
     const auto active_epochs{

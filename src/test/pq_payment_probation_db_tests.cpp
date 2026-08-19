@@ -64,6 +64,26 @@ uint256 Commit(PQPaymentProbationManager& manager,
     return *state_hash;
 }
 
+PaymentAuditStoreCheckpoint Checkpoint(uint32_t epoch, uint8_t tag)
+{
+    PaymentAuditStoreCheckpoint checkpoint;
+    checkpoint.prune_through_epoch = epoch;
+    checkpoint.covered_through_height = 2'000 + epoch;
+    checkpoint.covered_through_hash = NonNullHash(tag);
+    checkpoint.authenticated_probation_state_hash =
+        NonNullHash(static_cast<uint8_t>(tag + 1));
+    checkpoint.authorizing_target_height =
+        checkpoint.covered_through_height + 10;
+    checkpoint.authorizing_target_hash =
+        NonNullHash(static_cast<uint8_t>(tag + 2));
+    checkpoint.authorizing_chainlock_logical_id =
+        NonNullHash(static_cast<uint8_t>(tag + 3));
+    checkpoint.authorizing_chainlock_witness_id =
+        NonNullHash(static_cast<uint8_t>(tag + 4));
+    BOOST_REQUIRE(checkpoint.IsStructurallyValid());
+    return checkpoint;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_payment_probation_db_tests, BasicTestingSetup)
@@ -126,6 +146,7 @@ BOOST_AUTO_TEST_CASE(probation_survives_process_restart)
 BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
 {
     const fs::path path{m_path_root / "pq_payment_probation_gc"};
+    const auto checkpoint{Checkpoint(/*epoch=*/5, /*tag=*/40)};
     uint256 pruned_hash;
     uint256 retained_hash;
     uint256 newer_hash;
@@ -149,8 +170,10 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         BOOST_REQUIRE(manager.GetState(pruned_hash, loaded));
 
         const std::array<uint256, 1> retained{retained_hash};
-        BOOST_REQUIRE(manager.PruneStatesThroughEpoch(
-            /*prune_through_epoch=*/5, retained));
+        BOOST_CHECK(!manager.IsGCCompleteForCheckpoint(checkpoint));
+        BOOST_REQUIRE(manager.PruneStatesThroughCheckpoint(
+            checkpoint, retained));
+        BOOST_CHECK(manager.IsGCCompleteForCheckpoint(checkpoint));
 
         BOOST_CHECK(!manager.GetState(pruned_hash, loaded));
         BOOST_CHECK(manager.GetState(retained_hash, loaded));
@@ -160,14 +183,22 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         BOOST_CHECK(loaded == PQPaymentProbationState{});
     }
 
-    PQPaymentProbationManager restarted{DiskDB(path, /*wipe=*/false)};
-    PQPaymentProbationState loaded;
-    BOOST_CHECK(!restarted.GetState(pruned_hash, loaded));
-    BOOST_CHECK(restarted.GetState(retained_hash, loaded));
-    BOOST_CHECK(restarted.GetState(newer_hash, loaded));
-    BOOST_CHECK(restarted.GetState(cursorless_hash, loaded));
-    BOOST_CHECK(restarted.GetState(empty_hash, loaded));
-    BOOST_CHECK(loaded == PQPaymentProbationState{});
+    {
+        PQPaymentProbationManager restarted{DiskDB(path, /*wipe=*/false)};
+        BOOST_CHECK(restarted.IsGCCompleteForCheckpoint(checkpoint));
+        PQPaymentProbationState loaded;
+        BOOST_CHECK(!restarted.GetState(pruned_hash, loaded));
+        BOOST_CHECK(restarted.GetState(retained_hash, loaded));
+        BOOST_CHECK(restarted.GetState(newer_hash, loaded));
+        BOOST_CHECK(restarted.GetState(cursorless_hash, loaded));
+        BOOST_CHECK(restarted.GetState(empty_hash, loaded));
+        BOOST_CHECK(loaded == PQPaymentProbationState{});
+    }
+
+    // Chainstate rebuilds wipe this state-owned marker along with the roots,
+    // forcing the archive checkpoint to run one repair pass after replay.
+    PQPaymentProbationManager rebuilt{DiskDB(path, /*wipe=*/true)};
+    BOOST_CHECK(!rebuilt.IsGCCompleteForCheckpoint(checkpoint));
 }
 
 BOOST_AUTO_TEST_CASE(checkpoint_gc_validates_every_record_before_erasing)
@@ -181,8 +212,9 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_validates_every_record_before_erasing)
     BOOST_REQUIRE(manager.StateDatabaseForTesting().WriteThrough(
         wrong_hash, corrupt, /*fSync=*/false));
 
-    BOOST_CHECK(!manager.PruneStatesThroughEpoch(
-        /*prune_through_epoch=*/10, std::span<const uint256>{}));
+    BOOST_CHECK(!manager.PruneStatesThroughCheckpoint(
+        Checkpoint(/*epoch=*/10, /*tag=*/50),
+        std::span<const uint256>{}));
 
     // Validation happens before any tombstones are staged.
     PQPaymentProbationState loaded;
@@ -197,16 +229,51 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_rejects_missing_or_null_retained_roots)
     const uint256 covered_hash{Commit(manager, covered)};
 
     const std::array<uint256, 1> missing{NonNullHash(251)};
-    BOOST_CHECK(!manager.PruneStatesThroughEpoch(
-        /*prune_through_epoch=*/10, missing));
+    const auto checkpoint{Checkpoint(/*epoch=*/10, /*tag=*/60)};
+    BOOST_CHECK(!manager.PruneStatesThroughCheckpoint(checkpoint, missing));
 
     const std::array<uint256, 1> null_retained{uint256{}};
-    BOOST_CHECK(!manager.PruneStatesThroughEpoch(
-        /*prune_through_epoch=*/10, null_retained));
+    BOOST_CHECK(!manager.PruneStatesThroughCheckpoint(
+        checkpoint, null_retained));
 
     PQPaymentProbationState loaded;
     BOOST_CHECK(manager.GetState(covered_hash, loaded));
     BOOST_CHECK(loaded == covered);
+}
+
+BOOST_AUTO_TEST_CASE(completed_checkpoint_is_a_zero_flush_noop)
+{
+    PQPaymentProbationManager manager{MemoryDB()};
+    const auto checkpoint{Checkpoint(/*epoch=*/12, /*tag=*/70)};
+    BOOST_REQUIRE(manager.PruneStatesThroughCheckpoint(
+        checkpoint, std::span<const uint256>{}));
+    BOOST_REQUIRE(manager.IsGCCompleteForCheckpoint(checkpoint));
+
+    // The exact completed checkpoint returns before the pre-scan durability
+    // barrier. A newer authorizer for the same deletion boundary does too.
+    // The injected failure remains armed for the explicit flush.
+    manager.StateDatabaseForTesting().FailNextFlushBatchForTesting();
+    BOOST_CHECK(manager.PruneStatesThroughCheckpoint(
+        checkpoint, std::span<const uint256>{}));
+
+    auto refreshed_authorizer{checkpoint};
+    refreshed_authorizer.authorizing_target_height++;
+    refreshed_authorizer.authorizing_target_hash = NonNullHash(80);
+    refreshed_authorizer.authorizing_chainlock_logical_id = NonNullHash(81);
+    refreshed_authorizer.authorizing_chainlock_witness_id = NonNullHash(82);
+    BOOST_REQUIRE(refreshed_authorizer.IsStructurallyValid());
+    BOOST_CHECK(manager.IsGCCompleteForCheckpoint(refreshed_authorizer));
+    BOOST_CHECK(manager.PruneStatesThroughCheckpoint(
+        refreshed_authorizer, std::span<const uint256>{}));
+    BOOST_CHECK_THROW((void)manager.Flush(/*fSync=*/true), dbwrapper_error);
+    BOOST_CHECK(manager.Flush(/*fSync=*/true));
+
+    auto conflicting{refreshed_authorizer};
+    conflicting.authenticated_probation_state_hash = NonNullHash(83);
+    BOOST_REQUIRE(conflicting.IsStructurallyValid());
+    BOOST_CHECK(!manager.IsGCCompleteForCheckpoint(conflicting));
+    BOOST_CHECK(!manager.PruneStatesThroughCheckpoint(
+        conflicting, std::span<const uint256>{}));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

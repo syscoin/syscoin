@@ -64,19 +64,44 @@ BTCCursor MakeCursor(int32_t height, uint64_t salt)
                      NonNullHash(40000 + salt)};
 }
 
+PaymentAuditReceiptState MakePaymentAuditReceiptState(
+    int32_t carrier_height, uint32_t epoch, uint64_t salt)
+{
+    return PaymentAuditReceiptState{
+        PaymentAuditReceiptCursor{
+            carrier_height, epoch, NonNullHash(50'000 + salt),
+            NonNullHash(60'000 + salt), NonNullHash(70'000 + salt)},
+        NonNullHash(80'000 + salt)};
+}
+
 ChainLockFinalityStoreConfig MakeConfig(std::size_t cache_capacity = 4,
                                         std::size_t recent_capacity = 2)
 {
     ChainLockFinalityStoreConfig config;
     config.chainlock_schedule = *MakeChainLockScheduleConfig(0);
-    config.btcc_schedule.candidate_origin = 0;
-    config.anchor.height = 860;
-    config.anchor.block_hash = NonNullHash(860);
+    config.btcc_schedule.candidate_origin = 870;
+    config.anchor.height = 864;
+    config.anchor.block_hash = NonNullHash(864);
     config.seen_logical_capacity = cache_capacity;
     config.seen_witness_capacity = cache_capacity;
     config.rejected_witness_capacity = cache_capacity;
     config.recent_chainlocks_capacity = recent_capacity;
     return config;
+}
+
+BTCCCursorReconciliationProof MakeReconciliationProof(
+    const FinalChainLock& durable, uint64_t salt)
+{
+    BTCCCursorReconciliationProof proof;
+    proof.carrier_height =
+        durable.statement.accepted_btcc_cursor.sys_height +
+        static_cast<int32_t>(PQ_BTCC_NEVM_LAG);
+    proof.carrier_hash = NonNullHash(90'000 + salt);
+    proof.carrier_parent_hash = NonNullHash(91'000 + salt);
+    proof.skipped_cursor = durable.statement.accepted_btcc_cursor;
+    proof.previous_receipt_state = durable.statement.btcc_receipt_state;
+    proof.current_receipt_state = durable.statement.btcc_receipt_state;
+    return proof;
 }
 
 class TestFinalityContext final : public ChainLockFinalityContext {
@@ -86,6 +111,7 @@ public:
     bool special{true};
     bool descendant{true};
     bool btcc{true};
+    std::optional<BTCCCursorReconciliationProof> btcc_cursor_reconciliation;
     bool reject_recheck{false};
     uint64_t generation{1};
     mutable ChainLockCandidateAdmission last_admission{
@@ -128,7 +154,8 @@ private:
         return ChainLockCandidateContext{
             known, scripts, special, descendant, descendant, btcc,
             request.statement.height, request.statement.block_hash,
-            NonNullHash(generation)};
+            NonNullHash(generation),
+            btcc_cursor_reconciliation};
     }
 };
 
@@ -228,7 +255,7 @@ BOOST_AUTO_TEST_CASE(first_verified_statement_wins_and_queries_are_branch_aware)
 {
     TestFinalityContext context;
     ChainLockFinalityStore store{NonNullHash(1), MakeConfig(), context};
-    const auto first{MakeChainLock(865, 860, NonNullHash(860), 1)};
+    const auto first{MakeChainLock(865, 864, NonNullHash(864), 1)};
 
     auto prepared{store.PrepareCandidate(first)};
     BOOST_REQUIRE(prepared);
@@ -241,7 +268,7 @@ BOOST_AUTO_TEST_CASE(first_verified_statement_wins_and_queries_are_branch_aware)
     BOOST_CHECK(store.GetBest() && *store.GetBest() == first);
     BOOST_CHECK(store.GetByWitness(first.GetWitnessId(NonNullHash(1))));
 
-    const auto conflict{MakeChainLock(865, 860, NonNullHash(860), 2)};
+    const auto conflict{MakeChainLock(865, 864, NonNullHash(864), 2)};
     BOOST_CHECK(!store.PrepareCandidate(conflict));
     BOOST_CHECK(store.GetBest()->statement.block_hash == first.statement.block_hash);
 }
@@ -275,7 +302,7 @@ BOOST_AUTO_TEST_CASE(witness_dedup_does_not_suppress_an_alternate_witness)
     const uint256 genesis{NonNullHash(2)};
     TestFinalityContext context;
     ChainLockFinalityStore store{genesis, MakeConfig(), context};
-    const auto bad_witness{MakeChainLock(865, 860, NonNullHash(860), 3)};
+    const auto bad_witness{MakeChainLock(865, 864, NonNullHash(864), 3)};
     auto good_witness{bad_witness};
     good_witness.signatures.back().signature[0] ^= 1;
     BOOST_REQUIRE(bad_witness.GetLogicalId(genesis) == good_witness.GetLogicalId(genesis));
@@ -295,7 +322,7 @@ BOOST_AUTO_TEST_CASE(preparation_and_acceptance_fail_closed_on_context_changes)
 {
     TestFinalityContext context;
     ChainLockFinalityStore store{NonNullHash(3), MakeConfig(), context};
-    const auto chainlock{MakeChainLock(865, 860, NonNullHash(860), 4)};
+    const auto chainlock{MakeChainLock(865, 864, NonNullHash(864), 4)};
     ChainLockFinalityError error{ChainLockFinalityError::NONE};
 
     context.special = false;
@@ -322,7 +349,7 @@ BOOST_AUTO_TEST_CASE(durable_accept_failure_leaves_store_unchanged)
             ++callback_count;
             return allow_persistence;
         }};
-    const auto chainlock{MakeChainLock(865, 860, NonNullHash(860), 30)};
+    const auto chainlock{MakeChainLock(865, 864, NonNullHash(864), 30)};
     ChainLockFinalityError error{ChainLockFinalityError::NONE};
 
     auto prepared{store.PrepareCandidate(chainlock, &error)};
@@ -347,7 +374,7 @@ BOOST_AUTO_TEST_CASE(precontext_crypto_rejection_is_deduplicated)
     TestFinalityContext context;
     const uint256 genesis{NonNullHash(31)};
     ChainLockFinalityStore store{genesis, MakeConfig(), context};
-    const auto chainlock{MakeChainLock(865, 860, NonNullHash(860), 31)};
+    const auto chainlock{MakeChainLock(865, 864, NonNullHash(864), 31)};
     const uint256 witness_id{chainlock.GetWitnessId(genesis)};
 
     BOOST_CHECK(!store.AlreadyHaveWitness(witness_id));
@@ -362,9 +389,7 @@ BOOST_AUTO_TEST_CASE(live_certificates_chain_exactly_and_caches_remain_bounded)
 {
     TestFinalityContext context;
     ChainLockFinalityStore store{NonNullHash(4), MakeConfig(2, 2), context};
-    // Target heights may be skipped, but the signed predecessor is always the
-    // exact locally accepted winner (the fork anchor for the first object).
-    auto previous{MakeChainLock(875, 860, NonNullHash(860), 10)};
+    auto previous{MakeChainLock(865, 864, NonNullHash(864), 10)};
     auto prepared{store.PrepareCandidate(previous)};
     BOOST_REQUIRE(prepared && store.AcceptVerified(*prepared, previous, true));
 
@@ -374,7 +399,7 @@ BOOST_AUTO_TEST_CASE(live_certificates_chain_exactly_and_caches_remain_bounded)
     BOOST_CHECK(!store.PrepareCandidate(fabricated_predecessor, &error));
     BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
 
-    for (int32_t height : {885, 895}) {
+    for (int32_t height : {870, 875}) {
         auto next{MakeChainLock(height, previous.statement.height,
                                 previous.statement.block_hash, height)};
         next.statement.previous_btcc_cursor =
@@ -388,19 +413,41 @@ BOOST_AUTO_TEST_CASE(live_certificates_chain_exactly_and_caches_remain_bounded)
     BOOST_CHECK_EQUAL(store.RecentSizeForTesting(), 2U);
     BOOST_CHECK_LE(store.SeenLogicalSizeForTesting(), 2U);
     BOOST_CHECK_LE(store.SeenWitnessSizeForTesting(), 2U);
-    BOOST_CHECK(!store.GetByWitness(MakeChainLock(875, 860, NonNullHash(860), 10)
+    BOOST_CHECK(!store.GetByWitness(MakeChainLock(865, 864, NonNullHash(864), 10)
                                         .GetWitnessId(NonNullHash(4))));
 
     auto wrong_predecessor{
-        MakeChainLock(900, previous.statement.height, NonNullHash(123), 20)};
+        MakeChainLock(880, previous.statement.height, NonNullHash(123), 20)};
     context.descendant = false;
     BOOST_CHECK(!store.PrepareCandidate(wrong_predecessor));
 
-    auto bad_btcc{MakeChainLock(900, previous.statement.height,
+    auto bad_btcc{MakeChainLock(880, previous.statement.height,
                                 previous.statement.block_hash, 21)};
     context.descendant = true;
     context.btcc = false;
     BOOST_CHECK(!store.PrepareCandidate(bad_btcc));
+}
+
+BOOST_AUTO_TEST_CASE(all_admissions_require_the_unique_predecessor_successor)
+{
+    TestFinalityContext context;
+    ChainLockFinalityStore store{NonNullHash(400), MakeConfig(), context};
+    auto skipped{MakeChainLock(870, 864, NonNullHash(864), 400)};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+
+    BOOST_CHECK(!store.PrepareCandidate(skipped, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
+    BOOST_CHECK(!store.PreparePersistedCandidate(skipped, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
+    BOOST_CHECK(!store.PrepareCatchupCandidate(skipped, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
+
+    skipped.statement.accepted_btcc_cursor = MakeCursor(870, 400);
+    skipped.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    BOOST_CHECK(!store.PrepareReceiptArchiveCandidate(skipped, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
+    BOOST_CHECK(!store.PreparePresealReceiptCandidate(skipped, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
 }
 
 BOOST_AUTO_TEST_CASE(persisted_latest_restore_is_separate_from_live_admission)
@@ -449,12 +496,13 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
     std::size_t catchup_writes{0};
     ChainLockFinalityStore store{
         genesis, MakeConfig(), context, {}, {},
-        [&](const FinalChainLock&) {
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>&) {
             ++catchup_writes;
             return true;
         }};
 
-    const auto local{MakeChainLock(865, 860, NonNullHash(860), 401)};
+    const auto local{MakeChainLock(865, 864, NonNullHash(864), 401)};
     auto prepared{store.PrepareCandidate(local)};
     BOOST_REQUIRE(prepared);
     BOOST_REQUIRE(store.AcceptVerified(*prepared, local, true));
@@ -478,7 +526,7 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
 
     // Exact chaining resumes through LIVE after the rebase.
     const auto exact{MakeChainLock(
-        895, first_rebase.statement.height,
+        890, first_rebase.statement.height,
         first_rebase.statement.block_hash, 403)};
     prepared = store.PrepareCandidate(exact, &error);
     BOOST_REQUIRE(prepared);
@@ -495,10 +543,213 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
     BOOST_CHECK(*store.GetBest() == second_rebase);
 
     const auto predecessor_before_local{
-        MakeChainLock(925, 900, NonNullHash(900), 405)};
+        MakeChainLock(905, 900, NonNullHash(900), 405)};
     BOOST_CHECK(!store.PrepareCatchupCandidate(
         predecessor_before_local, &error));
     BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+}
+
+BOOST_AUTO_TEST_CASE(
+    current_catchup_may_reconcile_a_cursor_view_but_never_regress_durable_state)
+{
+    const uint256 genesis{NonNullHash(420)};
+    TestFinalityContext context;
+    std::size_t catchup_writes{0};
+    ChainLockFinalityStore store{
+        genesis, MakeConfig(), context, {}, {},
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>&) {
+            ++catchup_writes;
+            return true;
+        }};
+
+    const BTCCursor durable_cursor{MakeCursor(870, 420)};
+    const BTCCReceiptState durable_receipt{
+        durable_cursor, NonNullHash(421)};
+    const PaymentAuditReceiptState durable_payment{
+        MakePaymentAuditReceiptState(870, 1, 422)};
+    const uint256 durable_probation{NonNullHash(423)};
+
+    auto local{MakeChainLock(875, 870, NonNullHash(870), 424)};
+    local.statement.previous_btcc_cursor = durable_cursor;
+    local.statement.accepted_btcc_cursor = durable_cursor;
+    local.statement.btcc_receipt_state = durable_receipt;
+    local.statement.payment_audit_receipt_state = durable_payment;
+    local.statement.payment_probation_state_hash = durable_probation;
+    auto prepared{store.PreparePersistedCandidate(local)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptPersistedVerified(*prepared, local, true));
+
+    const BTCCursor alternate_previous{MakeCursor(865, 425)};
+    const BTCCursor advanced_cursor{MakeCursor(880, 426)};
+    const auto make_recovery = [&](uint64_t salt) {
+        auto candidate{MakeChainLock(
+            880, local.statement.height, local.statement.block_hash, salt)};
+        candidate.statement.previous_btcc_cursor = alternate_previous;
+        candidate.statement.accepted_btcc_cursor = advanced_cursor;
+        candidate.statement.btcc_advance = BTCCAdvance::ADVANCE;
+        candidate.statement.btcc_receipt_state = durable_receipt;
+        candidate.statement.payment_audit_receipt_state = durable_payment;
+        candidate.statement.payment_probation_state_hash =
+            durable_probation;
+        return candidate;
+    };
+
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    const auto recovery{make_recovery(427)};
+    BOOST_CHECK(!store.PrepareCandidate(recovery, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+
+    auto regressed_cursor{make_recovery(428)};
+    regressed_cursor.statement.accepted_btcc_cursor = alternate_previous;
+    regressed_cursor.statement.btcc_advance = BTCCAdvance::KEEP;
+    regressed_cursor.statement.btcc_receipt_state = {};
+    BOOST_CHECK(!store.PrepareCatchupCandidate(regressed_cursor, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+
+    auto regressed_receipt{make_recovery(429)};
+    regressed_receipt.statement.btcc_receipt_state = {};
+    BOOST_CHECK(!store.PrepareCatchupCandidate(regressed_receipt, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+
+    auto regressed_payment{make_recovery(430)};
+    regressed_payment.statement.payment_audit_receipt_state = {};
+    BOOST_CHECK(!store.PrepareCatchupCandidate(regressed_payment, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+
+    auto changed_probation{make_recovery(431)};
+    changed_probation.statement.payment_probation_state_hash =
+        NonNullHash(432);
+    BOOST_CHECK(!store.PrepareCatchupCandidate(changed_probation, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+
+    prepared = store.PrepareCatchupCandidate(recovery, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptCatchupVerified(
+        *prepared, recovery, true, [] { return true; }, {}, &error));
+    BOOST_CHECK_EQUAL(catchup_writes, 1U);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == recovery);
+}
+
+BOOST_AUTO_TEST_CASE(
+    candidate_bound_null_carrier_reconciles_heterogeneous_durable_views)
+{
+    const uint256 genesis{NonNullHash(433)};
+    TestFinalityContext ahead_context;
+    TestFinalityContext caught_up_context;
+    TestFinalityContext behind_context;
+    bool ahead_reconciliation{false};
+    bool caught_up_reconciliation{false};
+    bool behind_reconciliation{true};
+    ChainLockFinalityStore ahead{
+        genesis, MakeConfig(), ahead_context, {}, {},
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>& reconciliation) {
+            ahead_reconciliation = reconciliation.has_value();
+            return true;
+        }};
+    ChainLockFinalityStore caught_up{
+        genesis, MakeConfig(), caught_up_context, {}, {},
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>& reconciliation) {
+            caught_up_reconciliation = reconciliation.has_value();
+            return true;
+        }};
+    ChainLockFinalityStore behind{
+        genesis, MakeConfig(), behind_context, {}, {},
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>& reconciliation) {
+            behind_reconciliation = reconciliation.has_value();
+            return true;
+        }};
+
+    const auto prior{MakeChainLock(865, 864, NonNullHash(864), 433)};
+    for (ChainLockFinalityStore* store : {&ahead, &caught_up, &behind}) {
+        auto prepared{store->PrepareCandidate(prior)};
+        BOOST_REQUIRE(prepared);
+        BOOST_REQUIRE(store->AcceptVerified(*prepared, prior, true));
+    }
+
+    auto advance{MakeChainLock(870, 865, prior.statement.block_hash, 434)};
+    advance.statement.accepted_btcc_cursor =
+        BTCCursor{870, advance.statement.block_hash, NonNullHash(43'400)};
+    advance.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    auto prepared{ahead.PrepareCandidate(advance)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(ahead.AcceptVerified(*prepared, advance, true));
+    BOOST_REQUIRE(ahead.GetUnsealedBTCC());
+
+    // H+5 does not commit to H+10's carrier and cannot use a descendant tip's
+    // null receipt as authority to roll back the durable ADVANCE.
+    const auto premature{
+        MakeChainLock(875, 870, advance.statement.block_hash, 435)};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_CHECK(!ahead.PrepareCatchupCandidate(premature, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+
+    // A normal T+5 KEEP carries C forward before C's carrier exists. A node
+    // that catches up directly to this certificate has the same durable gap
+    // without retaining the original ADVANCE as an unsealed archive row.
+    auto keep{MakeChainLock(875, 870, advance.statement.block_hash, 435)};
+    keep.statement.previous_btcc_cursor =
+        advance.statement.accepted_btcc_cursor;
+    keep.statement.accepted_btcc_cursor =
+        advance.statement.accepted_btcc_cursor;
+    prepared = ahead.PrepareCandidate(keep, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(ahead.AcceptVerified(*prepared, keep, true, &error));
+    BOOST_REQUIRE(ahead.GetUnsealedBTCC());
+
+    prepared = caught_up.PrepareCatchupCandidate(keep, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(caught_up.AcceptCatchupVerified(
+        *prepared, keep, true, [] { return true; }, {}, &error));
+    BOOST_CHECK(!caught_up.GetUnsealedBTCC());
+    BOOST_CHECK(!caught_up_reconciliation);
+
+    // H+10's target hash binds its own null carrier. Both the node that saw
+    // ADVANCE(H) and the node that did not can therefore install one exact
+    // KEEP(O) current winner. The chain integration must explicitly attest
+    // that null-carrier proof before storage will authorize the regression.
+    const auto recovery{
+        MakeChainLock(880, 875, keep.statement.block_hash, 436)};
+    prepared = ahead.PrepareCatchupCandidate(recovery, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(!ahead.AcceptCatchupVerified(
+        *prepared, recovery, true, [] { return true; }, {}, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::CONTEXT_CHANGED);
+    ahead.AbandonPrepared(*prepared);
+
+    const auto proof{MakeReconciliationProof(keep, 436)};
+    BOOST_REQUIRE(proof.IsStructurallyValid());
+    ahead_context.btcc_cursor_reconciliation = proof;
+    prepared = ahead.PrepareCatchupCandidate(recovery, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(ahead.AcceptCatchupVerified(
+        *prepared, recovery, true, [] { return true; }, {}, &error));
+    BOOST_CHECK(ahead_reconciliation);
+    BOOST_CHECK(!ahead.GetUnsealedBTCC());
+
+    caught_up_context.btcc_cursor_reconciliation = proof;
+    prepared = caught_up.PrepareCatchupCandidate(recovery, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(caught_up.AcceptCatchupVerified(
+        *prepared, recovery, true, [] { return true; }, {}, &error));
+    BOOST_CHECK(caught_up_reconciliation);
+    BOOST_CHECK(!caught_up.GetUnsealedBTCC());
+
+    prepared = behind.PrepareCatchupCandidate(recovery, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(behind.AcceptCatchupVerified(
+        *prepared, recovery, true, [] { return true; }, {}, &error));
+    BOOST_CHECK(!behind_reconciliation);
+    BOOST_REQUIRE(ahead.GetBest());
+    BOOST_REQUIRE(caught_up.GetBest());
+    BOOST_REQUIRE(behind.GetBest());
+    BOOST_CHECK(*ahead.GetBest() == recovery);
+    BOOST_CHECK(*caught_up.GetBest() == recovery);
+    BOOST_CHECK(*behind.GetBest() == recovery);
 }
 
 BOOST_AUTO_TEST_CASE(catchup_rechecks_context_after_index_durability_hook)
@@ -531,7 +782,8 @@ BOOST_AUTO_TEST_CASE(historical_durable_authorization_is_the_fsync_seam)
     std::size_t durable_writes{0};
     ChainLockFinalityStore store{
         genesis, MakeConfig(), context, {}, {},
-        [&](const FinalChainLock&) {
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>&) {
             ++durable_writes;
             return true;
         }};
@@ -561,7 +813,8 @@ BOOST_AUTO_TEST_CASE(historical_durable_authorization_is_the_fsync_seam)
     TestFinalityContext success_context;
     ChainLockFinalityStore success_store{
         genesis, MakeConfig(), success_context, {}, {},
-        [&](const FinalChainLock&) {
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>&) {
             ++durable_writes;
             return true;
         }};
@@ -597,15 +850,16 @@ BOOST_AUTO_TEST_CASE(preseal_receipt_at_updated_anchor_rebases_as_catchup)
             ++archive_writes;
             return true;
         },
-        [&](const FinalChainLock&) {
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>&) {
             ++catchup_writes;
             return true;
         }};
 
     BOOST_REQUIRE(IsBTCCReceiptCarrierHeight(
         MakeConfig().btcc_schedule, first_carrier_height));
-    const auto local{MakeChainLock(local_best_height, 860,
-                                   NonNullHash(860), 408)};
+    const auto local{MakeChainLock(local_best_height, 864,
+                                   NonNullHash(864), 408)};
     auto prepared{store.PrepareCandidate(local)};
     BOOST_REQUIRE(prepared);
     BOOST_REQUIRE(store.AcceptVerified(*prepared, local, true));
@@ -643,10 +897,10 @@ BOOST_AUTO_TEST_CASE(preseal_receipt_at_updated_anchor_rebases_as_catchup)
             return true;
         }};
     const auto later_local{
-        MakeChainLock(885, 860, NonNullHash(860), 411)};
-    prepared = archive_store.PrepareCandidate(later_local);
+        MakeChainLock(885, 880, NonNullHash(880), 411)};
+    prepared = archive_store.PreparePersistedCandidate(later_local);
     BOOST_REQUIRE(prepared);
-    BOOST_REQUIRE(archive_store.AcceptVerified(
+    BOOST_REQUIRE(archive_store.AcceptPersistedVerified(
         *prepared, later_local, true));
 
     auto older_receipt{
@@ -678,7 +932,7 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
             return true;
         }};
 
-    auto archived{MakeChainLock(870, 860, NonNullHash(860), 42)};
+    auto archived{MakeChainLock(870, 865, NonNullHash(865), 42)};
     archived.statement.accepted_btcc_cursor =
         MakeCursor(870, 42);
     archived.statement.btcc_advance = BTCCAdvance::ADVANCE;
@@ -709,7 +963,7 @@ BOOST_AUTO_TEST_CASE(live_predecessor_binds_the_exact_btcc_cursor)
 {
     TestFinalityContext context;
     ChainLockFinalityStore store{NonNullHash(41), MakeConfig(), context};
-    const auto first{MakeChainLock(865, 860, NonNullHash(860), 41)};
+    const auto first{MakeChainLock(865, 864, NonNullHash(864), 41)};
     auto prepared{store.PrepareCandidate(first)};
     BOOST_REQUIRE(prepared);
     ChainLockFinalityError error{ChainLockFinalityError::NONE};
@@ -718,7 +972,7 @@ BOOST_AUTO_TEST_CASE(live_predecessor_binds_the_exact_btcc_cursor)
     BOOST_REQUIRE(store.AcceptVerified(*prepared, first, true));
 
     auto mismatch{MakeChainLock(
-        875, first.statement.height, first.statement.block_hash, 42)};
+        870, first.statement.height, first.statement.block_hash, 42)};
     mismatch.statement.previous_btcc_cursor = MakeCursor(860, 2);
     mismatch.statement.accepted_btcc_cursor = mismatch.statement.previous_btcc_cursor;
     BOOST_CHECK(!store.PrepareCandidate(mismatch, &error));

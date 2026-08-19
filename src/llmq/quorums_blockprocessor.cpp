@@ -36,7 +36,7 @@ bool CQuorumBlockProcessor::ProcessBlock(
 
     const auto& consensus{Params().GetConsensus()};
     if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQLegacyAnchorResult::VALID ||
+            Consensus::PQAnchorResult::VALID ||
         index->nHeight > consensus.nPQLegacyAnchorHeight) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                              "bad-qc-retired");

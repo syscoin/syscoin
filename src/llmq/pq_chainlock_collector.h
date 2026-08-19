@@ -53,6 +53,7 @@ public:
         const uint256& genesis_hash,
         ChainLockStatement statement,
         FrozenQuorumRostersPtr rosters,
+        uint8_t authorization_mask,
         ShareCollectionError* error = nullptr);
 
     ChainLockCollector(const ChainLockCollector&) = delete;
@@ -77,7 +78,8 @@ private:
     ChainLockCollector(
         uint256 genesis_hash,
         ChainLockStatement statement,
-        FrozenQuorumRostersPtr rosters);
+        FrozenQuorumRostersPtr rosters,
+        uint8_t authorization_mask);
 
     [[nodiscard]] std::optional<std::size_t> FindQuorumSlot(
         const ChainLockShareTranscript& transcript) const;
@@ -85,6 +87,7 @@ private:
     uint256 m_genesis_hash;
     ChainLockStatement m_statement;
     FrozenQuorumRostersPtr m_rosters;
+    uint8_t m_authorization_mask{0};
     std::array<std::map<uint16_t, AuthenticatedChildSignature>,
                ACTIVE_QUORUMS> m_shares;
 

@@ -76,7 +76,7 @@ struct QuorumSnapshotState {
 using QuorumSnapshotLookup =
     std::function<std::optional<QuorumSnapshotState>(const CBlockIndex&)>;
 
-using FinalizedSnapshotLookup =
+using AuthorizationBoundaryLookup =
     std::function<bool(int32_t, const uint256&)>;
 
 /** Domain-separated replacement for the legacy opaque DKG/base modifier. */
@@ -120,14 +120,13 @@ BuildActiveFrozenQuorumRosters(
     QuorumBuildError* error = nullptr);
 
 /**
- * Gate validator-set rotation on finality of every newly introduced roster
- * snapshot. The four migration bootstrap epochs are fork-authorized because
- * no PQ ChainLock can precede them; every later epoch must be covered by an
- * already accepted certificate before a member may sign with it.
+ * Derive the oldest-to-newest authorization prefix at one exact finality
+ * boundary. Bootstrap rosters use their base; later rotations use their
+ * snapshot. Callers reject masks with fewer than three authorized slots.
  */
-[[nodiscard]] bool AreSigningRosterTransitionsFinalized(
+[[nodiscard]] uint8_t GetSigningRosterAuthorizationMask(
     const FrozenQuorumRosters& rosters,
-    const FinalizedSnapshotLookup& finalized_snapshot);
+    const AuthorizationBoundaryLookup& is_boundary_ancestor);
 
 } // namespace llmq::pq
 

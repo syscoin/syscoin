@@ -196,7 +196,10 @@ bool AddActiveChildRootsToSet(const FrozenQuorumRoster& roster,
 
 bool QuorumBuildConfig::IsValid() const noexcept
 {
+    // Keeping the snapshot within its epoch leaves at most one branch-derived
+    // roster after a finalized predecessor, preserving threshold intersection.
     if (!schedule.IsValid() || roster_snapshot_lag_blocks == 0 ||
+        roster_snapshot_lag_blocks > schedule.epoch_blocks ||
         registration_cutoff_blocks < roster_snapshot_lag_blocks ||
         future_horizon_epochs < ACTIVE_QUORUMS ||
         future_horizon_epochs > MAX_OPERATOR_SCHEDULE_EPOCHS) {
@@ -405,21 +408,33 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
     return rosters;
 }
 
-bool AreSigningRosterTransitionsFinalized(
+uint8_t GetSigningRosterAuthorizationMask(
     const FrozenQuorumRosters& rosters,
-    const FinalizedSnapshotLookup& finalized_snapshot)
+    const AuthorizationBoundaryLookup& is_boundary_ancestor)
 {
-    if (!finalized_snapshot) return false;
-    for (const auto& roster : rosters) {
+    if (!is_boundary_ancestor) return 0;
+    uint8_t mask{0};
+    bool found_unauthorized{false};
+    for (std::size_t slot{0}; slot < rosters.size(); ++slot) {
+        const auto& roster{rosters[slot]};
         const auto& descriptor{roster.descriptor};
-        if (descriptor.epoch < ACTIVE_QUORUMS) continue;
-        if (descriptor.snapshot_height < 0 || descriptor.snapshot_hash.IsNull() ||
-            !finalized_snapshot(descriptor.snapshot_height,
-                                descriptor.snapshot_hash)) {
-            return false;
+        const bool bootstrap{descriptor.epoch < ACTIVE_QUORUMS};
+        const int32_t authorization_height{
+            bootstrap ? descriptor.base_height : descriptor.snapshot_height};
+        const uint256& authorization_hash{
+            bootstrap ? descriptor.base_hash : descriptor.snapshot_hash};
+        const bool authorized{
+            authorization_height >= 0 && !authorization_hash.IsNull() &&
+            is_boundary_ancestor(authorization_height,
+                                 authorization_hash)};
+        if (!authorized) {
+            found_unauthorized = true;
+            continue;
         }
+        if (found_unauthorized) return 0;
+        mask |= static_cast<uint8_t>(uint8_t{1} << slot);
     }
-    return true;
+    return mask;
 }
 
 } // namespace llmq::pq

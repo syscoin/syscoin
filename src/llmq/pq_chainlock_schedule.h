@@ -73,6 +73,14 @@ struct EligibleTargetSpan {
     friend bool operator==(const EligibleTargetSpan&, const EligibleTargetSpan&) = default;
 };
 
+struct ChainLockSigningWindow {
+    int32_t target_height{-1};
+    int32_t declared_predecessor_height{-1};
+
+    friend bool operator==(const ChainLockSigningWindow&,
+                           const ChainLockSigningWindow&) = default;
+};
+
 /** Returns the fixed epoch containing height, or null before the origin. */
 [[nodiscard]] std::optional<uint32_t> EpochForHeight(
     const ChainLockScheduleConfig& config, int32_t height) noexcept;
@@ -126,6 +134,27 @@ struct EligibleTargetSpan {
 /** Requires only the cadence and four materialized epochs. */
 [[nodiscard]] bool IsEligibleChainLockTarget(
     const ChainLockScheduleConfig& config, int32_t target_height) noexcept;
+
+/** First eligible target strictly after the declared ChainLock predecessor. */
+[[nodiscard]] std::optional<int32_t> NextEligibleChainLockTargetHeight(
+    const ChainLockScheduleConfig& config,
+    int32_t predecessor_height) noexcept;
+
+/** Latest eligible target whose signing lag is satisfied by this tip. */
+[[nodiscard]] std::optional<int32_t> LatestEligibleChainLockTargetHeight(
+    const ChainLockScheduleConfig& config, int32_t tip_height) noexcept;
+
+/**
+ * Select the current signing round and its unique declared predecessor.
+ * The durable predecessor remains the state-validation floor; after a missed
+ * round the wire predecessor advances to the active block immediately before
+ * the current target so recovery cannot create a second successor edge.
+ */
+[[nodiscard]] std::optional<ChainLockSigningWindow>
+CurrentChainLockSigningWindow(
+    const ChainLockScheduleConfig& config,
+    int32_t durable_predecessor_height,
+    int32_t tip_height) noexcept;
 
 [[nodiscard]] std::optional<int32_t> SigningHeightForTarget(
     const ChainLockScheduleConfig& config, int32_t target_height) noexcept;

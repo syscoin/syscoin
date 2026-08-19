@@ -151,7 +151,7 @@ struct PQSignerJournalResult
 class CPQSignerJournal final
 {
 public:
-    static constexpr std::uint32_t DB_FORMAT_VERSION{3};
+    static constexpr std::uint32_t DB_FORMAT_VERSION{1};
 
     explicit CPQSignerJournal(const fs::path& path, std::size_t cache_bytes = 1 << 20);
 

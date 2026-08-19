@@ -28,6 +28,7 @@ public:
         const QuorumBitmap& reporter_observed_members,
         const FinalChainLock& seal_chainlock,
         const FrozenQuorumRosters& rosters,
+        uint8_t authorization_mask,
         uint8_t quorum_slot,
         uint16_t member_index,
         const sphincs_c11::SecretKey& child_secret_key,

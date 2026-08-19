@@ -84,6 +84,7 @@ PreparePaymentAuditResponseVerification(
     const PaymentAuditResponse& response,
     const PaymentAuditHave& expected,
     const FrozenQuorumRosters& response_rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error)
 {
     SetError(error, PaymentAuditVerificationError::NONE);
@@ -114,6 +115,7 @@ PreparePaymentAuditResponseVerification(
         ChainLockVerificationError::NONE};
     auto check{PrepareChainLockShareVerification(
         genesis_hash, response.response, response_rosters,
+        authorization_mask,
         &chainlock_error)};
     if (!check) {
         switch (chainlock_error) {
@@ -137,6 +139,7 @@ bool ValidatePaymentAuditContext(
     const uint256& genesis_hash,
     const PaymentAuditStatement& statement,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error)
 {
     SetError(error, PaymentAuditVerificationError::NONE);
@@ -148,6 +151,7 @@ bool ValidatePaymentAuditContext(
         ChainLockVerificationError::NONE};
     if (!ValidateFrozenQuorumContext(genesis_hash,
                                      statement.seal_statement, rosters,
+                                     authorization_mask,
                                      &context_error)) {
         SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
         return false;
@@ -188,6 +192,7 @@ std::optional<C11SignatureCheck> PreparePaymentAuditShareVerification(
     const uint256& genesis_hash,
     const PaymentAuditShare& share,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error)
 {
     SetError(error, PaymentAuditVerificationError::NONE);
@@ -195,13 +200,18 @@ std::optional<C11SignatureCheck> PreparePaymentAuditShareVerification(
         SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
         return std::nullopt;
     }
-    if (!ValidatePaymentAuditContext(genesis_hash, share.transcript.statement,
-                                     rosters, error)) {
+    const auto slot{FindQuorumSlot(share.transcript, rosters)};
+    if (!slot ||
+        (authorization_mask & (uint8_t{1} << *slot)) == 0) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
         return std::nullopt;
     }
-    const auto slot{FindQuorumSlot(share.transcript, rosters)};
-    if (!slot || share.transcript.member_index >= QUORUM_SIZE) {
+    if (share.transcript.member_index >= QUORUM_SIZE) {
         SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
+        return std::nullopt;
+    }
+    if (!ValidatePaymentAuditContext(genesis_hash, share.transcript.statement,
+                                     rosters, authorization_mask, error)) {
         return std::nullopt;
     }
     const auto& roster{rosters[*slot]};
@@ -221,6 +231,7 @@ PrepareFinalPaymentAuditVerification(
     const uint256& genesis_hash,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     PaymentAuditVerificationError* error)
 {
     SetError(error, PaymentAuditVerificationError::NONE);
@@ -228,8 +239,12 @@ PrepareFinalPaymentAuditVerification(
         SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
         return std::nullopt;
     }
+    if ((audit.selected_quorum_mask & ~authorization_mask) != 0) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return std::nullopt;
+    }
     if (!ValidatePaymentAuditContext(genesis_hash, audit.statement,
-                                     rosters, error)) {
+                                     rosters, authorization_mask, error)) {
         return std::nullopt;
     }
 
@@ -278,11 +293,12 @@ bool VerifyFinalPaymentAudit(
     const uint256& genesis_hash,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
     C11SignatureCheckQueue* queue,
     PaymentAuditVerificationError* error)
 {
     auto prepared{PrepareFinalPaymentAuditVerification(
-        genesis_hash, audit, rosters, error)};
+        genesis_hash, audit, rosters, authorization_mask, error)};
     if (!prepared) return false;
     if (!VerifyC11SignatureChecks(std::move(prepared->checks), queue)) {
         SetError(error, PaymentAuditVerificationError::INVALID_SIGNATURE);

@@ -50,11 +50,13 @@ PaymentAuditCollector::PaymentAuditCollector(
     uint256 genesis_hash,
     PaymentAuditStatement statement,
     FinalChainLock seal_chainlock,
-    FrozenQuorumRostersPtr rosters)
+    FrozenQuorumRostersPtr rosters,
+    uint8_t authorization_mask)
     : m_genesis_hash{std::move(genesis_hash)},
       m_statement{std::move(statement)},
       m_seal_chainlock{std::move(seal_chainlock)},
-      m_rosters{std::move(rosters)}
+      m_rosters{std::move(rosters)},
+      m_authorization_mask{authorization_mask}
 {
 }
 
@@ -63,6 +65,7 @@ std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
     PaymentAuditStatement statement,
     FinalChainLock seal_chainlock,
     FrozenQuorumRostersPtr rosters,
+    uint8_t authorization_mask,
     ShareCollectionError* error)
 {
     SetError(error, ShareCollectionError::NONE);
@@ -77,13 +80,14 @@ std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
                                       seal_chainlock,
                                       &verification_error) ||
         !ValidatePaymentAuditContext(genesis_hash, statement, *rosters,
+                                     authorization_mask,
                                      &verification_error)) {
         SetError(error, MapVerificationError(verification_error));
         return nullptr;
     }
     return std::unique_ptr<PaymentAuditCollector>{new PaymentAuditCollector{
         genesis_hash, std::move(statement), std::move(seal_chainlock),
-        std::move(rosters)}};
+        std::move(rosters), authorization_mask}};
 }
 
 std::optional<std::size_t> PaymentAuditCollector::FindQuorumSlot(
@@ -117,6 +121,10 @@ ShareCollectionResult PaymentAuditCollector::AddVerifiedShare(
         SetError(error, ShareCollectionError::UNKNOWN_QUORUM);
         return ShareCollectionResult::REJECTED;
     }
+    if ((m_authorization_mask & (uint8_t{1} << *slot)) == 0) {
+        SetError(error, ShareCollectionError::INVALID_CONTEXT);
+        return ShareCollectionResult::REJECTED;
+    }
     const uint16_t member_index{share.transcript.member_index};
     if (member_index >= QUORUM_SIZE) {
         SetError(error, ShareCollectionError::INVALID_MEMBER);
@@ -140,7 +148,7 @@ ShareCollectionResult PaymentAuditCollector::AddVerifiedShare(
     PaymentAuditVerificationError verification_error{
         PaymentAuditVerificationError::NONE};
     auto check{PreparePaymentAuditShareVerification(
-        m_genesis_hash, share, *m_rosters,
+        m_genesis_hash, share, *m_rosters, m_authorization_mask,
         &verification_error)};
     if (!check) {
         SetError(error, MapVerificationError(verification_error));
@@ -170,12 +178,14 @@ PaymentAuditCollector::ShareCounts() const
 
 bool PaymentAuditCollector::IsComplete() const
 {
-    const auto ready{std::count_if(m_shares.begin(), m_shares.end(),
-                                   [](const auto& shares) {
-                                       return shares.size() >=
-                                              QUORUM_THRESHOLD;
-                                   })};
-    return ready >= static_cast<decltype(ready)>(REQUIRED_QUORUMS);
+    std::size_t ready{0};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        if ((m_authorization_mask & (uint8_t{1} << slot)) != 0 &&
+            m_shares[slot].size() >= QUORUM_THRESHOLD) {
+            ++ready;
+        }
+    }
+    return ready >= REQUIRED_QUORUMS;
 }
 
 std::optional<FinalPaymentAudit> PaymentAuditCollector::Finalize() const
@@ -187,6 +197,7 @@ std::optional<FinalPaymentAudit> PaymentAuditCollector::Finalize() const
     std::size_t selected{0};
     for (std::size_t slot{0};
          slot < ACTIVE_QUORUMS && selected < REQUIRED_QUORUMS; ++slot) {
+        if ((m_authorization_mask & (uint8_t{1} << slot)) == 0) continue;
         if (m_shares[slot].size() < QUORUM_THRESHOLD) continue;
         result.selected_quorum_mask |=
             static_cast<uint8_t>(uint8_t{1} << slot);

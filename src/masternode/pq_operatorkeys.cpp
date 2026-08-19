@@ -20,7 +20,7 @@ namespace llmq::pq {
 namespace {
 
 constexpr std::string_view COMMITTED_CHILD_KDF_DOMAIN{
-    "SYS_PQ_CHAINLOCK_CHILD_KDF_V3"};
+    "SYS_PQ_CHAINLOCK_CHILD_KDF_V1"};
 constexpr uint8_t SECRET_SEED_LABEL{0};
 constexpr uint8_t PUBLIC_SEED_LABEL{1};
 

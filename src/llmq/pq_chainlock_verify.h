@@ -55,6 +55,7 @@ enum class ChainLockVerificationError : uint8_t {
     MEMBER_ROOT_MISMATCH,
     CHILD_KEY_ROOT_MISMATCH,
     QUORUM_CONTEXT_MISMATCH,
+    INVALID_AUTHORIZATION,
     INVALID_SIGNER,
     INVALID_CHILD_PROOF,
     INVALID_PUBLIC_KEY,
@@ -91,6 +92,7 @@ struct PreparedChainLockVerification {
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error = nullptr);
 
 /** Cheap/contextual preparation for one private quorum share. */
@@ -98,12 +100,14 @@ struct PreparedChainLockVerification {
     const uint256& genesis_hash,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error = nullptr);
 
 [[nodiscard]] bool VerifyChainLockShare(
     const uint256& genesis_hash,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error = nullptr);
 
 /**
@@ -133,6 +137,7 @@ struct PreparedChainLockVerification {
     const uint256& genesis_hash,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     ChainLockVerificationError* error = nullptr);
 
 /**
@@ -147,6 +152,7 @@ struct PreparedChainLockVerification {
     const uint256& genesis_hash,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
     C11SignatureCheckQueue* queue = nullptr,
     ChainLockVerificationError* error = nullptr);
 
@@ -165,6 +171,7 @@ public:
         const uint256& genesis_hash,
         const FinalChainLock& chainlock,
         const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+        uint8_t authorization_mask,
         ChainLockVerificationError* error = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_preflight_mutex);
 

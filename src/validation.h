@@ -43,6 +43,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <set>
 #include <stdint.h>
 #include <string>
@@ -75,6 +76,11 @@ enum class DeferredReceiptCertificateKind : uint8_t {
 enum class ChainLockEnforcementProvenance : uint8_t {
     EXACT_LOCAL = 0,
     VERIFIED_DURABLE_CERTIFICATE,
+};
+enum class PQHistoryAuthState : uint8_t {
+    UNINITIALIZED = 0,
+    PENDING,
+    READY,
 };
 // SYSCOIN
 namespace llmq {
@@ -790,9 +796,14 @@ public:
         ChainLockEnforcementProvenance provenance)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(cs_main);
-    /** SYSCOIN: Replay one bounded batch of a catch-up-authenticated prefix. */
+    /**
+     * SYSCOIN: Replay one bounded batch of a catch-up-authenticated prefix.
+     * When replay reaches the requested exact active tip, finalize is invoked
+     * synchronously while activation is excluded and cs_main is held.
+     */
     bool ReplayDeferredBTCCNEVM(int32_t through_height,
                                 const uint256& through_hash,
+                                const std::function<bool()>& finalize,
                                 bool& complete,
                                 std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainstate_mutex);
@@ -1150,6 +1161,13 @@ public:
      * const, which latches this for caching purposes.
      */
     mutable std::atomic<bool> m_cached_finished_ibd{false};
+    std::atomic<bool> m_nevm_network_start_sent{false};
+
+    // Public readiness is held behind cs_main until every durable provisional
+    // PQ-history obligation has been authenticated. The ordinary block-sync
+    // predicate remains independently available to the catch-up verifier.
+    PQHistoryAuthState m_pq_history_auth_state GUARDED_BY(::cs_main){
+        PQHistoryAuthState::UNINITIALIZED};
 
     /**
      * Every received block is assigned a unique and increasing identifier, so we
@@ -1212,6 +1230,29 @@ public:
 
     //! Get all chainstates currently being used.
     std::vector<Chainstate*> GetAll();
+
+    /**
+     * Get every initialized chainstate whose on-disk state may still be
+     * recovered or published. Disabled AssumeUTXO chainstates remain on disk
+     * until cleanup and therefore must participate in shared-state retention.
+     */
+    std::vector<Chainstate*> GetAllForPersistence();
+
+    /** Validate the normal, never-flushed, or interrupted CoinsDB markers. */
+    [[nodiscard]] static std::optional<std::vector<uint256>>
+    GetCoinsRecoveryMarkers(
+        const uint256& best_block,
+        std::span<const uint256> head_blocks,
+        const uint256& coins_tip,
+        std::string& error);
+
+    /**
+     * Resolve every crash-visible and prospective UTXO marker across all
+     * persistence chainstates. A partial CoinsDB batch exposes its new and old
+     * heads instead of a best block; malformed marker combinations fail.
+     */
+    [[nodiscard]] std::optional<std::vector<const CBlockIndex*>>
+    GetAllRecoveryBlockIndexes(std::string& error);
 
     //! Construct and activate a Chainstate on the basis of UTXO snapshot data.
     //!
@@ -1291,6 +1332,41 @@ public:
 
     /** Check whether we are doing an initial block download (synchronizing from disk or network) */
     bool IsInitialBlockDownload() const;
+
+    /** Base-chain synchronization only; excludes PQ authentication and Geth. */
+    bool IsBaseBlockSyncComplete() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** A preseal can begin only before the one-way public IBD latch closes. */
+    bool CanBeginPQHistoryAuthentication() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    bool HasCompletedInitialBlockDownload() const noexcept
+    {
+        return m_cached_finished_ibd.load(std::memory_order_relaxed);
+    }
+
+    /** Publish the aggregate PQ-history state without performing I/O/callbacks. */
+    [[nodiscard]] bool PublishPQHistoryAuthState(PQHistoryAuthState state)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Re-evaluate the one-way public IBD latch after publishing READY. */
+    void MaybeCompleteInitialBlockDownload()
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main);
+
+    /** Start NEVM peer networking after IBD and deferred replay are complete. */
+    [[nodiscard]] bool MaybeStartNEVMNetwork();
+    void ResetNEVMNetworkStart()
+    {
+        m_nevm_network_start_sent.store(false,
+                                        std::memory_order_relaxed);
+    }
+
+    PQHistoryAuthState GetPQHistoryAuthState() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_pq_history_auth_state;
+    }
 
     /**
      * Import blocks from an external file
@@ -1396,8 +1472,8 @@ public:
 
     //! Load the block tree and coins database from disk, initializing state if we're running with -reindex
     bool LoadBlockIndex() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    // SYSCOIN: Quarantine every indexed branch that conflicts with the pinned migration anchor.
-    bool EnforcePQLegacyAnchorBranches() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Quarantine every indexed branch conflicting with either immutable PQ block anchor.
+    bool EnforcePQAnchorBranches() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Check to see if caches are out of balance and if so, call
     //! ResizeCoinsCaches() as needed.

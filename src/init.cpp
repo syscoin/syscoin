@@ -23,6 +23,7 @@
 #include <common/args.h>
 #include <common/system.h>
 #include <consensus/amount.h>
+#include <consensus/pq_migration_config.h>
 #include <deploymentstatus.h>
 #include <hash.h>
 #include <httprpc.h>
@@ -667,6 +668,9 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqlegacyanchorblockhash=<hex>", "Exact non-zero block hash at the PQ migration anchor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqlegacydmnstatehash=<hex>", "Exact non-zero deterministic-masternode state root at the PQ migration anchor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqlegacypqregistrystatehash=<hex>", "Exact non-zero PQ registry state root at the PQ migration anchor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqchainlockanchorheight=<n>", "Immutable predecessor height for the first PQ ChainLock; regtest only and requires both PQ ChainLock anchor arguments", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqchainlockanchorblockhash=<hex>", "Exact non-zero block hash of the first PQ ChainLock predecessor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqfinalitypreparation", "Run the regtest PQ registry/quorum preparation phase without a finality store, signing, acceptance, or enforcement", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqpreparationheight=<n>", "First PQ key-registry transaction height used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqchainlockepochorigin=<n>", "PQ ChainLock epoch origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqregistrationcutoffblocks=<n>", "PQ child-key registration cutoff lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
@@ -679,7 +683,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqbtccnevminjectionlag=<n>", "PQ BTCC NEVM injection lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     // SYSCOIN: Regtest-only override for the release-pinned receipt-crypto
     // assumption. All six values are required together and never alter the
-    // immutable migration anchor.
+    // immutable migration-state or ChainLock anchors.
     argsman.AddArg("-pqbtccreceiptanchorheight=<n>", "Historical PQ BTCC receipt assumption carrier height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorblockhash=<hex>", "Exact block hash at the PQ BTCC receipt assumption height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorcursorheight=<n>", "Last receipted Syscoin cursor height at the PQ BTCC assumption boundary (-1 for none); regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
@@ -1421,13 +1425,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const ArgsManager& args = *Assert(node.args);
     const CChainParams& chainparams = Params();
     // SYSCOIN: Public chains remain explicitly pre-activation until a release
-    // pins the complete profile. On regtest, supplying any PQ deployment arg
-    // opts into that same all-or-none rule; otherwise a lone schedule or
-    // receipt value could silently leave finality disabled.
+    // pins the complete profile. Regtest additionally has an explicit
+    // preparation state which builds H-authenticated registry history while
+    // leaving every finality-specific field unassigned.
     const auto& consensus{chainparams.GetConsensus()};
-    static constexpr std::array<const char*, 17> REGTEST_PQ_DEPLOYMENT_ARGS{
+    static constexpr std::array<const char*, 20> REGTEST_PQ_DEPLOYMENT_ARGS{
         "-pqlegacyanchorheight", "-pqlegacyanchorblockhash",
         "-pqlegacydmnstatehash", "-pqlegacypqregistrystatehash",
+        "-pqchainlockanchorheight", "-pqchainlockanchorblockhash",
+        "-pqfinalitypreparation",
         "-pqpreparationheight", "-pqchainlockepochorigin",
         "-pqregistrationcutoffblocks", "-pqrostersnapshotlag",
         "-pqfuturehorizonepochs", "-pqbtcccandidateorigin",
@@ -1438,17 +1444,34 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         "-pqbtccreceiptanchorcursorbtchash",
         "-pqbtccreceiptanchorstatehash",
     };
+    static constexpr std::array<const char*, 10> REGTEST_PQ_FINALITY_ARGS{
+        "-pqchainlockanchorheight", "-pqchainlockanchorblockhash",
+        "-pqbtcccandidateorigin", "-pqbtccnevminjectionlag",
+        "-pqbtccreceiptanchorheight", "-pqbtccreceiptanchorblockhash",
+        "-pqbtccreceiptanchorcursorheight",
+        "-pqbtccreceiptanchorcursorsyshash",
+        "-pqbtccreceiptanchorcursorbtchash",
+        "-pqbtccreceiptanchorstatehash",
+    };
     const bool regtest_pq_arg_supplied{
         chainparams.GetChainType() == ChainType::REGTEST &&
         std::any_of(REGTEST_PQ_DEPLOYMENT_ARGS.begin(),
                     REGTEST_PQ_DEPLOYMENT_ARGS.end(),
                     [&](const char* name) { return args.IsArgSet(name); })};
+    const bool preparation_requested{
+        chainparams.GetChainType() == ChainType::REGTEST &&
+        args.GetBoolArg("-pqfinalitypreparation", false)};
+    const bool finality_arg_supplied{std::any_of(
+        REGTEST_PQ_FINALITY_ARGS.begin(), REGTEST_PQ_FINALITY_ARGS.end(),
+        [&](const char* name) { return args.IsArgSet(name); })};
     const bool public_profile_unassigned{
         chainparams.GetChainType() != ChainType::REGTEST &&
         consensus.nPQLegacyAnchorHeight == std::numeric_limits<int>::max() &&
         consensus.hashPQLegacyAnchorBlock.IsNull() &&
         consensus.hashPQLegacyMNState.IsNull() &&
         consensus.hashPQLegacyPQRegistryState.IsNull() &&
+        consensus.nPQChainLockAnchorHeight == std::numeric_limits<int>::max() &&
+        consensus.hashPQChainLockAnchorBlock.IsNull() &&
         consensus.nPQPreparationHeight == std::numeric_limits<int>::max() &&
         consensus.nPQChainLockEpochOrigin == std::numeric_limits<int>::max() &&
         consensus.nPQRegistrationCutoffBlocks == 0 &&
@@ -1464,14 +1487,37 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const bool complete_pq_profile{
         llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value() &&
         llmq::MakePQQuorumBuildConfig(consensus).has_value()};
-    if ((regtest_pq_arg_supplied ||
-         (chainparams.GetChainType() != ChainType::REGTEST &&
-          !public_profile_unassigned)) &&
-        !complete_pq_profile) {
+    const bool preparation_profile{
+        preparation_requested && !finality_arg_supplied &&
+        Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
+            Consensus::PQAnchorResult::VALID &&
+        Consensus::CheckPQChainLockAnchorConfiguration(consensus) ==
+            Consensus::PQAnchorResult::DISABLED &&
+        consensus.nPQBTCCCandidateOrigin == std::numeric_limits<int>::max() &&
+        consensus.nPQBTCCReceiptAnchorHeight ==
+            std::numeric_limits<int>::max() &&
+        consensus.hashPQBTCCReceiptAnchorBlock.IsNull() &&
+        consensus.nPQBTCCReceiptAnchorCursorHeight == -1 &&
+        consensus.hashPQBTCCReceiptAnchorCursorSysBlock.IsNull() &&
+        consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.IsNull() &&
+        consensus.hashPQBTCCReceiptAnchorState.IsNull() &&
+        llmq::MakePQQuorumBuildConfig(consensus).has_value() &&
+        !llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value()};
+    if ((preparation_requested && !preparation_profile) ||
+        (regtest_pq_arg_supplied && !preparation_requested &&
+         !complete_pq_profile) ||
+        (chainparams.GetChainType() != ChainType::REGTEST &&
+         !public_profile_unassigned && !complete_pq_profile)) {
         return InitError(_(
             "This BLS-free build has an incomplete PQ deployment: the "
-            "migration anchor, BTCC receipt assumption anchor, schedules, and "
-            "roster parameters must be assigned consistently."));
+            "migration anchor, ChainLock anchor, BTCC receipt assumption "
+            "anchor, schedules, and roster parameters must be assigned "
+            "consistently. Regtest preparation requires "
+            "-pqfinalitypreparation with all finality fields unassigned."));
+    }
+    if (preparation_profile) {
+        LogPrintf("PQ registry/quorum preparation is active on regtest; no "
+                  "PQ finality service will start\n");
     }
     if (public_profile_unassigned) {
         LogPrintf("PQ ChainLock/BTCC deployment is release-disabled on this "
@@ -2310,40 +2356,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             // validated farther than Geth while historical receipt finality
             // was unavailable. Preserve both databases in place; the PQ
             // handler replays the exact authenticated prefix after catch-up.
-            const bool btcc_preseal_active{
+            const bool preseal_replay_active{
                 llmq::chainLocksHandler != nullptr &&
-                llmq::chainLocksHandler->HasBTCCNEVMReplayObligation()};
-            if (btcc_preseal_active) {
+                llmq::chainLocksHandler->HasNEVMReplayObligation()};
+            if (preseal_replay_active) {
                 LogPrintf("Geth is intentionally behind while the durable "
                           "BTCC pre-seal awaits authenticated replay\n");
             // local height is higher so we need to rollback to geth height
             } else if(nHeightFromGeth > 0) {
                 if((int64_t)nHeightFromGeth < nHeightLocalGeth) {
                     const int64_t geth_lag_blocks = nHeightLocalGeth - (int64_t)nHeightFromGeth;
-                    const int64_t geth_reindex_lag_threshold = CDeterministicMNManager::LIST_CACHE_SIZE;
-                    if (geth_lag_blocks > geth_reindex_lag_threshold) {
-                        bool wrote_reindex_flag{false};
-                        {
-                            LOCK(cs_main);
-                            if (chainman.m_blockman.m_block_tree_db) {
-                                wrote_reindex_flag = chainman.m_blockman.m_block_tree_db->WriteReindexing(true);
-                            }
-                        }
-                        if (wrote_reindex_flag) {
-                            LogPrintf("Persisted reindex marker due to deep geth lag; next restart will reindex automatically.\n");
-                        } else {
-                            LogPrintf("Failed to persist reindex marker due to deep geth lag; restart with -reindex manually.\n");
-                        }
-                        const std::string err = strprintf(
-                            "Geth lag (%d blocks) exceeds deterministic masternode cache horizon (%d). Refusing automatic rollback to avoid deep reorg validation failures. %s",
-                            geth_lag_blocks, geth_reindex_lag_threshold,
-                            wrote_reindex_flag
-                                ? "Reindex marker persisted; restart to continue with automatic reindex (state bootstrap if configured)."
-                                : "Restart with -reindex (and state bootstrap if configured).");
-                        LogPrintf("%s\n", err);
-                        return InitError(Untranslated(err));
-                    }
-                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, rolling back...\n",nHeightFromGeth, nHeightLocalGeth);
+                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, rolling back %d blocks using the durable deterministic-MN inverse journal...\n",
+                              nHeightFromGeth, nHeightLocalGeth,
+                              geth_lag_blocks);
                     nHeightFromGeth += Params().GetConsensus().nNEVMStartBlock;
                     BlockValidationState rollback_state;
                     CBlockIndex *pblockindex;
@@ -2351,12 +2376,62 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                         LOCK(cs_main);
                         pblockindex = chainman.ActiveChain()[(int)nHeightFromGeth];
                     }
-                    chainman.ActiveChainstate().InvalidateBlock(rollback_state, pblockindex, false);
-                    if (rollback_state.IsValid()) {
+                    if (pblockindex == nullptr) {
+                        return InitError(Untranslated(strprintf(
+                            "Geth rollback target height %d is not in the "
+                            "active chain. Restart with -reindex.",
+                            nHeightFromGeth)));
+                    }
+                    // Resolve the floor before beginning recovery so the
+                    // operator gets a precise Geth-specific error. The
+                    // administrative invalidation repeats this check while
+                    // holding the active-chain transition lock.
+                    const CBlockIndex* durable_finality_floor{nullptr};
+                    const CBlockIndex* durable_finality_target{nullptr};
+                    std::string finality_floor_error;
+                    if (llmq::chainLocksHandler != nullptr &&
+                        !llmq::chainLocksHandler
+                             ->GetDurableFinalityRecoveryFloor(
+                                 durable_finality_floor,
+                                 durable_finality_target,
+                                 finality_floor_error)) {
+                        node.chainman->ActiveChainstate().StopGethNode(true);
+                        return InitError(Untranslated(strprintf(
+                            "Cannot establish the durable finality recovery "
+                            "floor before Geth alignment: %s. Preserve Core "
+                            "state and repair or reindex explicitly.",
+                            finality_floor_error)));
+                    }
+                    if (durable_finality_floor != nullptr &&
+                        pblockindex->nHeight <=
+                            durable_finality_floor->nHeight) {
+                        node.chainman->ActiveChainstate().StopGethNode(true);
+                        return InitError(Untranslated(strprintf(
+                            "Geth recovery would roll Core back through "
+                            "finalized height %d. Preserve the finalized Core "
+                            "chain and rebuild or bootstrap Geth state instead.",
+                            durable_finality_floor->nHeight)));
+                    }
+                    // Core is ahead of Geth here, so align Core without
+                    // emitting nevmdisconnect notifications for blocks Geth
+                    // has never applied. All local special-tx state still
+                    // follows the rollback.
+                    const bool rollback_succeeded{
+                        chainman.ActiveChainstate().InvalidateBlock(
+                            rollback_state, pblockindex,
+                            /*bReverify=*/false,
+                            /*bUpdateSpecialTxState=*/true)};
+                    if (rollback_succeeded && rollback_state.IsValid()) {
                         LOCK(cs_main);
                         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
                     } else {
-                        LogPrintf("InvalidateBlock failed %s...\n", rollback_state.ToString());
+                        const std::string error{strprintf(
+                            "Geth rollback failed because Core rollback "
+                            "data/state is unavailable: %s. Restart with "
+                            "-reindex or redownload as appropriate.",
+                            rollback_state.ToString())};
+                        LogPrintf("%s\n", error);
+                        return InitError(Untranslated(error));
                     }
                 } else if((int64_t)nHeightFromGeth > nHeightLocalGeth) {
                     LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth);

@@ -46,6 +46,7 @@ const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
 namespace {
 
 constexpr std::size_t MAX_TEST_WORKERS{8};
+constexpr uint8_t AUTHORIZATION_MASK{0b0111};
 constexpr std::size_t MAX_FIXTURE_EPOCHS{5};
 constexpr std::size_t CHILD_KEY_COUNT{
     MAX_FIXTURE_EPOCHS * QUORUM_MIN_VALID};
@@ -55,10 +56,15 @@ constexpr std::size_t MAX_SHARE_BUNDLE_BYTES{8U << 20};
 constexpr std::string_view SHARE_BUNDLE_CHECKSUM_DOMAIN{
     "SYS_PQ_CHAINLOCK_SHARE_FIXTURE_V1"};
 constexpr uint64_t PAYMENT_AUDIT_BUNDLE_MAGIC{0x3154414550505153ULL};
-constexpr uint16_t PAYMENT_AUDIT_BUNDLE_VERSION{2};
+constexpr uint16_t PAYMENT_AUDIT_BUNDLE_VERSION{1};
 constexpr std::size_t MAX_PAYMENT_AUDIT_BUNDLE_BYTES{24U << 20};
 constexpr std::string_view PAYMENT_AUDIT_BUNDLE_CHECKSUM_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_FUNCTIONAL_FIXTURE_V1"};
+constexpr uint64_t PAYMENT_AUDIT_PREFIX_BUNDLE_MAGIC{0x3158465250505153ULL};
+constexpr uint16_t PAYMENT_AUDIT_PREFIX_BUNDLE_VERSION{1};
+constexpr std::size_t MAX_PAYMENT_AUDIT_PREFIX_BUNDLE_BYTES{8U << 20};
+constexpr std::string_view PAYMENT_AUDIT_PREFIX_BUNDLE_CHECKSUM_DOMAIN{
+    "SYS_PQ_PAYMENT_AUDIT_PREFIX_FUNCTIONAL_FIXTURE_V1"};
 constexpr uint64_t POST_CHAINLOCK_BUNDLE_MAGIC{0x3154534f50435153ULL};
 constexpr uint16_t POST_CHAINLOCK_BUNDLE_VERSION{1};
 constexpr std::string_view POST_CHAINLOCK_BUNDLE_CHECKSUM_DOMAIN{
@@ -259,8 +265,12 @@ struct FullDimensionFixture {
     {
         snapshot_fixture.genesis_hash = args.genesis_hash;
         snapshot_fixture.build_config = args.build_config;
-        snapshot_fixture.branch_anchor =
-            {args.target_height, args.target_hash};
+        snapshot_fixture.branch_anchor = IsEligibleChainLockTarget(
+                args.build_config.schedule, args.predecessor_height)
+            ? test::FixtureBranchPoint{
+                  args.predecessor_height, args.predecessor_hash}
+            : test::FixtureBranchPoint{
+                  args.target_height, args.target_hash};
         snapshot_fixture.max_active_tip_height =
             args.target_height +
             static_cast<int32_t>(args.build_config.schedule.sign_lag) +
@@ -287,8 +297,12 @@ struct PaymentAuditArguments {
     uint256 genesis_hash;
     int32_t branch_anchor_height{-1};
     uint256 branch_anchor_hash;
-    int32_t predecessor_height{-1};
-    uint256 predecessor_hash;
+    int32_t response_predecessor_height{-1};
+    uint256 response_predecessor_hash;
+    int32_t anchor_predecessor_height{-1};
+    uint256 anchor_predecessor_hash;
+    int32_t seal_predecessor_height{-1};
+    uint256 seal_predecessor_hash;
     QuorumBuildConfig build_config;
     BTCCScheduleConfig btcc_config;
     uint32_t audit_epoch{0};
@@ -297,13 +311,16 @@ struct PaymentAuditArguments {
     uint256 anchor_hash;
     uint256 anchor_btc_hash;
     uint256 seal_hash;
+    uint256 seed_carrier_hash;
+    BTCCReceipt seed_receipt;
     std::array<uint256, MAX_FIXTURE_EPOCHS> base_hashes;
     std::array<uint256, MAX_FIXTURE_EPOCHS> snapshot_hashes;
 };
 
 struct PaymentAuditFixture {
     explicit PaymentAuditFixture(PaymentAuditArguments arguments,
-                                 int32_t tip_height)
+                                 int32_t tip_height,
+                                 std::size_t epoch_count = MAX_FIXTURE_EPOCHS)
         : args{std::move(arguments)}, chain{tip_height},
           public_keys(CHILD_KEY_COUNT), secret_keys(CHILD_KEY_COUNT)
     {
@@ -312,8 +329,8 @@ struct PaymentAuditFixture {
         snapshot_fixture.branch_anchor = {
             args.branch_anchor_height, args.branch_anchor_hash};
         snapshot_fixture.max_active_tip_height = tip_height;
-        snapshot_fixture.quorum_bases.resize(MAX_FIXTURE_EPOCHS);
-        snapshot_fixture.snapshots.resize(MAX_FIXTURE_EPOCHS);
+        snapshot_fixture.quorum_bases.resize(epoch_count);
+        snapshot_fixture.snapshots.resize(epoch_count);
     }
 
     PaymentAuditArguments args;
@@ -334,6 +351,7 @@ struct PaymentAuditPostArguments {
     BTCCursor cursor;
     QuorumBuildConfig build_config;
     BTCCScheduleConfig btcc_config;
+    BTCCReceiptState btcc_receipt_state;
     PaymentAuditReceiptState payment_audit_receipt_state;
     uint256 payment_probation_state_hash;
     std::array<uint256, MAX_FIXTURE_EPOCHS> base_hashes;
@@ -441,7 +459,14 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
                                     fixture.args.branch_anchor_hash)) {
         return false;
     }
-    for (uint32_t epoch{0}; epoch < MAX_FIXTURE_EPOCHS; ++epoch) {
+    if (fixture.snapshot_fixture.quorum_bases.size() !=
+            fixture.snapshot_fixture.snapshots.size() ||
+        fixture.snapshot_fixture.quorum_bases.size() < ACTIVE_QUORUMS ||
+        fixture.snapshot_fixture.quorum_bases.size() > MAX_FIXTURE_EPOCHS) {
+        return false;
+    }
+    for (uint32_t epoch{0};
+         epoch < fixture.snapshot_fixture.quorum_bases.size(); ++epoch) {
         const auto base_height{EpochBaseHeight(
             fixture.args.build_config.schedule, epoch)};
         const auto snapshot_height{RegistrationCutoffHeight(
@@ -521,9 +546,14 @@ std::optional<ChainLockStatement> MakeChainLockStatement(
     const BTCCursor& previous_cursor,
     const BTCCursor& accepted_cursor,
     BTCCAdvance advance,
+    const BTCCReceiptState& btcc_receipt_state,
     const PaymentAuditReceiptState& payment_receipt_state,
     const uint256& probation_state_hash)
 {
+    const auto next_target{NextEligibleChainLockTargetHeight(
+        fixture.args.build_config.schedule, predecessor_height)};
+    if (!next_target || *next_target != height) return std::nullopt;
+
     ChainLockStatement statement;
     statement.height = height;
     statement.block_hash = block_hash;
@@ -532,6 +562,7 @@ std::optional<ChainLockStatement> MakeChainLockStatement(
     statement.previous_btcc_cursor = previous_cursor;
     statement.accepted_btcc_cursor = accepted_cursor;
     statement.btcc_advance = advance;
+    statement.btcc_receipt_state = btcc_receipt_state;
     statement.payment_audit_receipt_state = payment_receipt_state;
     statement.payment_probation_state_hash = probation_state_hash;
     statement.quorum_context_hash = GetQuorumContextHash(
@@ -539,7 +570,8 @@ std::optional<ChainLockStatement> MakeChainLockStatement(
         Descriptors(rosters));
     if (!statement.IsStructurallyValid() ||
         !ValidateFrozenQuorumContext(
-            fixture.args.genesis_hash, statement, rosters)) {
+            fixture.args.genesis_hash, statement, rosters,
+            AUTHORIZATION_MASK)) {
         return std::nullopt;
     }
     return statement;
@@ -630,7 +662,8 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{ChainLockCollector::Create(
-        fixture.args.genesis_hash, statement, rosters, &collection_error)};
+        fixture.args.genesis_hash, statement, rosters,
+        AUTHORIZATION_MASK, &collection_error)};
     if (!collector) return std::nullopt;
     for (const auto& share : shares) {
         if (collector->AddVerifiedShare(share, &collection_error) !=
@@ -645,6 +678,7 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
     ChainLockVerifier verifier{WorkerCount()};
     if (!final ||
         !verifier.Verify(fixture.args.genesis_hash, *final, *rosters,
+                         AUTHORIZATION_MASK,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {
         return std::nullopt;
@@ -700,6 +734,7 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{PaymentAuditCollector::Create(
         fixture.args.genesis_hash, statement, seal_chainlock, rosters,
+        AUTHORIZATION_MASK,
         &collection_error)};
     if (!collector) return std::nullopt;
     for (const auto& share : shares) {
@@ -714,6 +749,7 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
         PaymentAuditVerificationError::NONE};
     auto prepared{final ? PrepareFinalPaymentAuditVerification(
                               fixture.args.genesis_hash, *final, *rosters,
+                              AUTHORIZATION_MASK,
                               &verification_error)
                         : std::nullopt};
     ChainLockVerifier verifier{WorkerCount()};
@@ -804,7 +840,11 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
 {
     const auto active_epochs{ActiveEpochsAtHeight(
         fixture.args.build_config.schedule, fixture.args.target_height)};
-    if (!active_epochs ||
+    const auto next_target{NextEligibleChainLockTargetHeight(
+        fixture.args.build_config.schedule,
+        fixture.args.predecessor_height)};
+    if (!active_epochs || !next_target ||
+        *next_target != fixture.args.target_height ||
         !fixture.chain.SetExactHash(fixture.args.target_height,
                                     fixture.args.target_hash) ||
         !fixture.chain.SetExactHash(fixture.args.predecessor_height,
@@ -902,7 +942,7 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
     return fixture.statement.IsStructurallyValid() &&
            ValidateFrozenQuorumContext(
                fixture.args.genesis_hash, fixture.statement,
-               *fixture.rosters);
+               *fixture.rosters, AUTHORIZATION_MASK);
 }
 
 bool BuildAndSignShares(FullDimensionFixture& fixture)
@@ -1068,6 +1108,7 @@ struct PaymentAuditArtifacts {
     FinalChainLock seal_chainlock;
     FinalPaymentAudit audit;
     PaymentAuditReceipt receipt;
+    BTCCReceiptState btcc_receipt_state;
     PaymentAuditReceiptState receipt_state;
     uint256 probation_state_hash;
 };
@@ -1124,6 +1165,8 @@ bool WritePaymentAuditBundle(const fs::path& path,
     body.write(MakeByteSpan(audit_bytes));
     if (!AppendFixedObject(body, artifacts.receipt,
                            PaymentAuditReceipt::WIRE_SIZE) ||
+        !AppendFixedObject(body, artifacts.btcc_receipt_state,
+                           BTCCReceiptState::WIRE_SIZE) ||
         !AppendFixedObject(body, artifacts.receipt_state,
                            PaymentAuditReceiptState::WIRE_SIZE)) {
         error = "payment audit receipt size mismatch";
@@ -1148,6 +1191,134 @@ bool WritePaymentAuditBundle(const fs::path& path,
     return true;
 }
 
+struct PaymentAuditPrefixArtifacts {
+    FinalChainLock response_chainlock;
+    FinalChainLock anchor_chainlock;
+};
+
+bool WritePaymentAuditPrefixBundle(
+    const fs::path& path,
+    const uint256& genesis_hash,
+    const PaymentAuditPrefixArtifacts& artifacts,
+    std::string& error)
+{
+    DataStream body;
+    body << PAYMENT_AUDIT_PREFIX_BUNDLE_MAGIC
+         << PAYMENT_AUDIT_PREFIX_BUNDLE_VERSION;
+    if (!AppendChainLockCertificate(
+            body, genesis_hash, artifacts.response_chainlock) ||
+        !AppendChainLockCertificate(
+            body, genesis_hash, artifacts.anchor_chainlock)) {
+        error = "payment audit prefix certificate size mismatch";
+        return false;
+    }
+    if (body.size() + uint256::size() >
+        MAX_PAYMENT_AUDIT_PREFIX_BUNDLE_BYTES) {
+        error = "payment audit prefix bundle exceeds size cap";
+        return false;
+    }
+    const uint256 checksum{FixtureBodyChecksum(
+        PAYMENT_AUDIT_PREFIX_BUNDLE_CHECKSUM_DOMAIN,
+        MakeUCharSpan(body))};
+    DataStream file;
+    file.write(MakeByteSpan(body));
+    file << checksum;
+    if (!WriteBinaryFile(path, file.str())) {
+        error = "unable to write payment audit prefix bundle";
+        return false;
+    }
+    return true;
+}
+
+std::optional<PaymentAuditPrefixArtifacts> BuildPaymentAuditPrefixArtifacts(
+    PaymentAuditFixture& fixture)
+{
+    const PaymentAuditScheduleConfig schedule_config{
+        fixture.args.build_config.schedule, fixture.args.btcc_config};
+    const auto schedule{BuildPaymentAuditEpochSchedule(
+        schedule_config, fixture.args.audit_epoch)};
+    if (!schedule) return std::nullopt;
+    const int32_t response_height{schedule->rows.back().response_height};
+    const int32_t anchor_height{schedule->anchor_height};
+    if (!fixture.chain.SetExactHash(
+            fixture.args.response_predecessor_height,
+            fixture.args.response_predecessor_hash) ||
+        !fixture.chain.SetExactHash(
+            response_height, fixture.args.response_hash) ||
+        !fixture.chain.SetExactHash(
+            fixture.args.anchor_predecessor_height,
+            fixture.args.anchor_predecessor_hash) ||
+        !fixture.chain.SetExactHash(
+            anchor_height, fixture.args.anchor_hash)) {
+        return std::nullopt;
+    }
+    fixture.chain.indices[response_height].btcpPrevCommitment =
+        fixture.args.response_btc_hash;
+    fixture.chain.indices[anchor_height].btcpPrevCommitment =
+        fixture.args.anchor_btc_hash;
+
+    const auto response_rosters{
+        BuildPaymentAuditRosters(fixture, response_height)};
+    const auto anchor_rosters{
+        BuildPaymentAuditRosters(fixture, anchor_height)};
+    if (!response_rosters || !anchor_rosters ||
+        response_rosters->back().descriptor.epoch !=
+            fixture.args.audit_epoch) {
+        return std::nullopt;
+    }
+    const auto empty_probation_hash{
+        GetPQPaymentProbationStateHash(PQPaymentProbationState{})};
+    if (!empty_probation_hash) return std::nullopt;
+    const BTCCursor response_cursor{
+        response_height, fixture.args.response_hash,
+        fixture.args.response_btc_hash};
+    const BTCCursor anchor_cursor{
+        anchor_height, fixture.args.anchor_hash,
+        fixture.args.anchor_btc_hash};
+    const auto anchor_selection{SelectBTCCForChainLock(
+        fixture.args.btcc_config,
+        fixture.chain.indices[anchor_height], BTCCursor{})};
+    BTCCValidationError btcc_error{BTCCValidationError::NONE};
+    if (!ValidateBTCCursorTransition(
+            fixture.args.btcc_config,
+            fixture.chain.indices[response_height], BTCCursor{},
+            response_cursor, BTCCAdvance::ADVANCE, &btcc_error) ||
+        !anchor_selection || anchor_selection->cursor != anchor_cursor ||
+        anchor_selection->advance != BTCCAdvance::ADVANCE) {
+        return std::nullopt;
+    }
+    const auto response_statement{MakeChainLockStatement(
+        fixture, *response_rosters, response_height,
+        fixture.args.response_hash,
+        fixture.args.response_predecessor_height,
+        fixture.args.response_predecessor_hash, BTCCursor{},
+        response_cursor, BTCCAdvance::ADVANCE, BTCCReceiptState{},
+        PaymentAuditReceiptState{}, *empty_probation_hash)};
+    const auto response_chainlock{
+        response_statement
+            ? SignAndVerifyChainLock(
+                  fixture, *response_statement, response_rosters)
+            : std::nullopt};
+    if (!response_chainlock) return std::nullopt;
+
+    const auto anchor_statement{MakeChainLockStatement(
+        fixture, *anchor_rosters, anchor_height,
+        fixture.args.anchor_hash,
+        fixture.args.anchor_predecessor_height,
+        fixture.args.anchor_predecessor_hash, BTCCursor{},
+        anchor_selection->cursor, anchor_selection->advance,
+        BTCCReceiptState{},
+        PaymentAuditReceiptState{}, *empty_probation_hash)};
+    const auto anchor_chainlock{
+        anchor_statement
+            ? SignAndVerifyChainLock(
+                  fixture, *anchor_statement, anchor_rosters)
+            : std::nullopt};
+    if (!anchor_chainlock) return std::nullopt;
+    return PaymentAuditPrefixArtifacts{
+        std::move(*response_chainlock), std::move(*anchor_chainlock)};
+}
+
 std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
     PaymentAuditFixture& fixture)
 {
@@ -1165,12 +1336,18 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
         static_cast<int32_t>(PQ_CL_PERIOD)};
 
     if (!fixture.chain.SetExactHash(
-            fixture.args.predecessor_height,
-            fixture.args.predecessor_hash) ||
+            fixture.args.response_predecessor_height,
+            fixture.args.response_predecessor_hash) ||
         !fixture.chain.SetExactHash(response_height,
                                     fixture.args.response_hash) ||
+        !fixture.chain.SetExactHash(
+            fixture.args.anchor_predecessor_height,
+            fixture.args.anchor_predecessor_hash) ||
         !fixture.chain.SetExactHash(anchor_height,
                                     fixture.args.anchor_hash) ||
+        !fixture.chain.SetExactHash(
+            fixture.args.seal_predecessor_height,
+            fixture.args.seal_predecessor_hash) ||
         !fixture.chain.SetExactHash(seal_height,
                                     fixture.args.seal_hash)) {
         return std::nullopt;
@@ -1204,15 +1381,16 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
     const BTCCursor anchor_cursor{
         anchor_height, fixture.args.anchor_hash,
         fixture.args.anchor_btc_hash};
+    const auto anchor_selection{SelectBTCCForChainLock(
+        fixture.args.btcc_config,
+        fixture.chain.indices[anchor_height], BTCCursor{})};
     BTCCValidationError btcc_error{BTCCValidationError::NONE};
     if (!ValidateBTCCursorTransition(
             fixture.args.btcc_config,
             fixture.chain.indices[response_height], BTCCursor{},
             response_cursor, BTCCAdvance::ADVANCE, &btcc_error) ||
-        !ValidateBTCCursorTransition(
-            fixture.args.btcc_config,
-            fixture.chain.indices[anchor_height], response_cursor,
-            anchor_cursor, BTCCAdvance::ADVANCE, &btcc_error) ||
+        !anchor_selection || anchor_selection->cursor != anchor_cursor ||
+        anchor_selection->advance != BTCCAdvance::ADVANCE ||
         !ValidateBTCCursorTransition(
             fixture.args.btcc_config,
             fixture.chain.indices[seal_height], anchor_cursor,
@@ -1225,9 +1403,11 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
     }
     const auto response_statement{MakeChainLockStatement(
         fixture, *response_rosters, response_height,
-        fixture.args.response_hash, fixture.args.predecessor_height,
-        fixture.args.predecessor_hash, BTCCursor{}, response_cursor,
-        BTCCAdvance::ADVANCE, PaymentAuditReceiptState{},
+        fixture.args.response_hash,
+        fixture.args.response_predecessor_height,
+        fixture.args.response_predecessor_hash, BTCCursor{},
+        response_cursor, BTCCAdvance::ADVANCE, BTCCReceiptState{},
+        PaymentAuditReceiptState{},
         *empty_probation_hash)};
     if (!response_statement) return std::nullopt;
     const auto response_chainlock{SignAndVerifyChainLock(
@@ -1236,20 +1416,43 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
 
     const auto anchor_statement{MakeChainLockStatement(
         fixture, *anchor_rosters, anchor_height,
-        fixture.args.anchor_hash, response_height,
-        fixture.args.response_hash, response_cursor, anchor_cursor,
-        BTCCAdvance::ADVANCE, PaymentAuditReceiptState{},
+        fixture.args.anchor_hash,
+        fixture.args.anchor_predecessor_height,
+        fixture.args.anchor_predecessor_hash, BTCCursor{},
+        anchor_selection->cursor, anchor_selection->advance,
+        BTCCReceiptState{},
+        PaymentAuditReceiptState{},
         *empty_probation_hash)};
     if (!anchor_statement) return std::nullopt;
     const auto anchor_chainlock{SignAndVerifyChainLock(
         fixture, *anchor_statement, anchor_rosters)};
     if (!anchor_chainlock) return std::nullopt;
 
+    BTCCReceipt expected_seed_receipt;
+    expected_seed_receipt.chainlock_target_height = anchor_height;
+    expected_seed_receipt.chainlock_target_hash = fixture.args.anchor_hash;
+    expected_seed_receipt.chainlock_logical_id =
+        anchor_chainlock->GetLogicalId(fixture.args.genesis_hash);
+    expected_seed_receipt.accepted_cursor = anchor_cursor;
+    if (fixture.args.seed_receipt != expected_seed_receipt) {
+        return std::nullopt;
+    }
+    const int32_t seed_carrier_height{
+        anchor_height +
+        static_cast<int32_t>(fixture.args.btcc_config.nevm_injection_lag)};
+    const auto btcc_receipt_state{ApplyBTCCReceiptState(
+        fixture.args.genesis_hash, fixture.args.build_config.schedule,
+        fixture.args.btcc_config, seed_carrier_height,
+        fixture.args.seed_carrier_hash, BTCCReceiptState{},
+        fixture.args.seed_receipt)};
+    if (!btcc_receipt_state) return std::nullopt;
+
     const auto seal_statement{MakeChainLockStatement(
         fixture, *seal_rosters, seal_height, fixture.args.seal_hash,
-        anchor_height, fixture.args.anchor_hash, anchor_cursor,
-        anchor_cursor, BTCCAdvance::KEEP, PaymentAuditReceiptState{},
-        *empty_probation_hash)};
+        fixture.args.seal_predecessor_height,
+        fixture.args.seal_predecessor_hash, anchor_cursor, anchor_cursor,
+        BTCCAdvance::KEEP, *btcc_receipt_state,
+        PaymentAuditReceiptState{}, *empty_probation_hash)};
     if (!seal_statement) return std::nullopt;
     const auto seal_chainlock{SignAndVerifyChainLock(
         fixture, *seal_statement, seal_rosters)};
@@ -1258,12 +1461,12 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
     const auto& subject{response_rosters->back()};
     const uint256 subject_descriptor_hash{GetPaymentAuditDescriptorHash(
         fixture.args.genesis_hash, subject.descriptor)};
+    const auto anchor_seed{
+        PaymentAuditSeedPointFromBTCCReceipt(fixture.args.seed_receipt)};
+    if (!anchor_seed) return std::nullopt;
     PaymentAuditSeed seed;
     seed.epoch = fixture.args.audit_epoch;
-    seed.anchor = PaymentAuditSeedPoint{
-        anchor_height,
-        anchor_chainlock->GetLogicalId(fixture.args.genesis_hash),
-        anchor_cursor, BTCCAdvance::ADVANCE};
+    seed.anchor = *anchor_seed;
     seed.anchor_btc_height = 800'000;
     seed.future_btc_height =
         seed.anchor_btc_height + PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA;
@@ -1391,6 +1594,7 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
         std::move(*seal_chainlock),
         std::move(*audit),
         receipt,
+        *btcc_receipt_state,
         *receipt_state,
         transition->undo.applied_state_hash};
 }
@@ -1445,11 +1649,13 @@ std::optional<GeneratorArguments> ParseArguments(int argc, char* argv[],
             return std::nullopt;
         }
     }
+    const auto next_target{NextEligibleChainLockTargetHeight(
+        args.build_config.schedule, args.predecessor_height)};
     if (!args.snapshot_output.is_absolute() ||
         !args.shares_output.is_absolute() ||
         !args.build_config.IsValid() ||
         args.predecessor_height < 0 ||
-        args.predecessor_height >= args.target_height ||
+        !next_target || *next_target != args.target_height ||
         !IsEligibleChainLockTarget(args.build_config.schedule,
                                    args.target_height)) {
         error = "invalid full-dimension fixture geometry";
@@ -1458,17 +1664,162 @@ std::optional<GeneratorArguments> ParseArguments(int argc, char* argv[],
     return args;
 }
 
+std::optional<PaymentAuditArguments> ParsePaymentAuditPrefixArguments(
+    int argc, char* argv[], std::string& error)
+{
+    if (argc != 29) {
+        error =
+            "usage: pq_chainlock_fixture payment-audit-prefix SNAPSHOT_OUT "
+            "BUNDLE_OUT GENESIS BRANCH_ANCHOR_HEIGHT BRANCH_ANCHOR_HASH "
+            "EPOCH_ORIGIN REGISTRATION_CUTOFF SNAPSHOT_LAG FUTURE_HORIZON "
+            "BTCC_ORIGIN AUDIT_EPOCH RESPONSE_PREDECESSOR_HEIGHT "
+            "RESPONSE_PREDECESSOR_HASH RESPONSE_HASH RESPONSE_BTC_HASH "
+            "ANCHOR_PREDECESSOR_HEIGHT ANCHOR_PREDECESSOR_HASH ANCHOR_HASH "
+            "ANCHOR_BTC_HASH BASE0 BASE1 BASE2 BASE3 "
+            "SNAPSHOT0 SNAPSHOT1 SNAPSHOT2 SNAPSHOT3";
+        return std::nullopt;
+    }
+
+    PaymentAuditArguments args;
+    args.snapshot_output = fs::u8path(argv[2]);
+    args.bundle_output = fs::u8path(argv[3]);
+    args.genesis_hash = uint256S(argv[4]);
+    int32_t epoch_origin{0};
+    int32_t btcc_origin{0};
+    uint32_t registration_cutoff{0};
+    uint32_t snapshot_lag{0};
+    uint32_t future_horizon{0};
+    if (!ParseInt32(argv[5], &args.branch_anchor_height) ||
+        !ParseInt32(argv[7], &epoch_origin) ||
+        !ParseUInt32(argv[8], &registration_cutoff) ||
+        !ParseUInt32(argv[9], &snapshot_lag) ||
+        !ParseUInt32(argv[10], &future_horizon) ||
+        !ParseInt32(argv[11], &btcc_origin) ||
+        !ParseUInt32(argv[12], &args.audit_epoch) ||
+        !ParseInt32(argv[13], &args.response_predecessor_height) ||
+        !ParseInt32(argv[17], &args.anchor_predecessor_height)) {
+        error = "invalid payment audit prefix numeric argument";
+        return std::nullopt;
+    }
+    args.branch_anchor_hash = uint256S(argv[6]);
+    args.response_predecessor_hash = uint256S(argv[14]);
+    args.response_hash = uint256S(argv[15]);
+    args.response_btc_hash = uint256S(argv[16]);
+    args.anchor_predecessor_hash = uint256S(argv[18]);
+    args.anchor_hash = uint256S(argv[19]);
+    args.anchor_btc_hash = uint256S(argv[20]);
+    args.build_config.schedule.epoch_origin = epoch_origin;
+    args.build_config.registration_cutoff_blocks = registration_cutoff;
+    args.build_config.roster_snapshot_lag_blocks = snapshot_lag;
+    args.build_config.future_horizon_epochs = future_horizon;
+    args.btcc_config.candidate_origin = btcc_origin;
+    for (std::size_t epoch{0}; epoch < ACTIVE_QUORUMS; ++epoch) {
+        args.base_hashes[epoch] = uint256S(argv[21 + epoch]);
+        args.snapshot_hashes[epoch] = uint256S(argv[25 + epoch]);
+        if (args.base_hashes[epoch].IsNull() ||
+            args.snapshot_hashes[epoch].IsNull()) {
+            error = "null payment audit prefix branch hash";
+            return std::nullopt;
+        }
+    }
+
+    const PaymentAuditScheduleConfig schedule_config{
+        args.build_config.schedule, args.btcc_config};
+    const auto schedule{BuildPaymentAuditEpochSchedule(
+        schedule_config, args.audit_epoch)};
+    const int32_t max_tip{
+        schedule
+            ? schedule->anchor_height +
+                  static_cast<int32_t>(args.btcc_config.nevm_injection_lag)
+            : -1};
+    const auto first_active{ActiveEpochsAtHeight(
+        args.build_config.schedule, args.branch_anchor_height)};
+    const auto last_active{ActiveEpochsAtHeight(
+        args.build_config.schedule, max_tip)};
+    const auto response_target{NextEligibleChainLockTargetHeight(
+        args.build_config.schedule, args.response_predecessor_height)};
+    const auto anchor_target{NextEligibleChainLockTargetHeight(
+        args.build_config.schedule, args.anchor_predecessor_height)};
+    if (!args.snapshot_output.is_absolute() ||
+        !args.bundle_output.is_absolute() || args.genesis_hash.IsNull() ||
+        args.branch_anchor_hash.IsNull() ||
+        args.response_predecessor_hash.IsNull() ||
+        args.anchor_predecessor_hash.IsNull() ||
+        args.response_hash.IsNull() ||
+        args.response_btc_hash.IsNull() || args.anchor_hash.IsNull() ||
+        args.anchor_btc_hash.IsNull() || !args.build_config.IsValid() ||
+        !schedule_config.IsValid() || !schedule || !first_active ||
+        !last_active || first_active->front().epoch != 0 ||
+        last_active->back().epoch != ACTIVE_QUORUMS - 1 ||
+        !response_target ||
+        *response_target != schedule->rows.back().response_height ||
+        !anchor_target || *anchor_target != schedule->anchor_height ||
+        args.branch_anchor_height > args.response_predecessor_height ||
+        !IsEligibleChainLockTarget(args.build_config.schedule,
+                                   args.branch_anchor_height)) {
+        error = "invalid payment audit prefix fixture geometry";
+        return std::nullopt;
+    }
+    return args;
+}
+
+int GeneratePaymentAuditPrefix(const PaymentAuditArguments& args)
+{
+    const PaymentAuditScheduleConfig schedule_config{
+        args.build_config.schedule, args.btcc_config};
+    const auto schedule{BuildPaymentAuditEpochSchedule(
+        schedule_config, args.audit_epoch)};
+    if (!schedule) {
+        throw std::runtime_error(
+            "unable to derive payment audit prefix schedule");
+    }
+    const int32_t max_tip{
+        schedule->anchor_height +
+        static_cast<int32_t>(args.btcc_config.nevm_injection_lag)};
+    auto fixture{std::make_unique<PaymentAuditFixture>(
+        args, max_tip, ACTIVE_QUORUMS)};
+    if (!GenerateMemberKeys(fixture->public_keys, fixture->secret_keys,
+                            fixture->member_indices) ||
+        !PopulatePaymentAuditSnapshots(*fixture)) {
+        throw std::runtime_error(
+            "unable to construct payment audit prefix fixture");
+    }
+    const auto artifacts{BuildPaymentAuditPrefixArtifacts(*fixture)};
+    if (!artifacts) {
+        throw std::runtime_error(
+            "unable to construct production-verified payment audit prefix");
+    }
+
+    std::string error;
+    if (!test::ValidateQuorumSnapshotFixture(
+            fixture->snapshot_fixture, error) ||
+        !test::WriteQuorumSnapshotFixture(
+            args.snapshot_output, fixture->snapshot_fixture, error)) {
+        throw std::runtime_error(
+            "unable to write payment audit prefix snapshot fixture: " +
+            error);
+    }
+    if (!WritePaymentAuditPrefixBundle(
+            args.bundle_output, args.genesis_hash, *artifacts, error)) {
+        throw std::runtime_error(error);
+    }
+    return 0;
+}
+
 std::optional<PaymentAuditArguments> ParsePaymentAuditArguments(
     int argc, char* argv[], std::string& error)
 {
-    if (argc != 30) {
+    if (argc != 36) {
         error =
             "usage: pq_chainlock_fixture payment-audit SNAPSHOT_OUT "
             "BUNDLE_OUT GENESIS BRANCH_ANCHOR_HEIGHT BRANCH_ANCHOR_HASH "
-            "PREDECESSOR_HEIGHT PREDECESSOR_HASH EPOCH_ORIGIN "
-            "REGISTRATION_CUTOFF SNAPSHOT_LAG FUTURE_HORIZON BTCC_ORIGIN "
-            "AUDIT_EPOCH RESPONSE_HASH RESPONSE_BTC_HASH ANCHOR_HASH "
-            "ANCHOR_BTC_HASH SEAL_HASH BASE0 BASE1 BASE2 BASE3 BASE4 "
+            "EPOCH_ORIGIN REGISTRATION_CUTOFF SNAPSHOT_LAG FUTURE_HORIZON "
+            "BTCC_ORIGIN AUDIT_EPOCH RESPONSE_PREDECESSOR_HEIGHT "
+            "RESPONSE_PREDECESSOR_HASH RESPONSE_HASH RESPONSE_BTC_HASH "
+            "ANCHOR_PREDECESSOR_HEIGHT ANCHOR_PREDECESSOR_HASH ANCHOR_HASH "
+            "ANCHOR_BTC_HASH SEAL_PREDECESSOR_HEIGHT "
+            "SEAL_PREDECESSOR_HASH SEAL_HASH SEED_CARRIER_HASH "
+            "SEED_RECEIPT_HEX BASE0 BASE1 BASE2 BASE3 BASE4 "
             "SNAPSHOT0 SNAPSHOT1 SNAPSHOT2 SNAPSHOT3 SNAPSHOT4";
         return std::nullopt;
     }
@@ -1483,31 +1834,48 @@ std::optional<PaymentAuditArguments> ParsePaymentAuditArguments(
     uint32_t snapshot_lag{0};
     uint32_t future_horizon{0};
     if (!ParseInt32(argv[5], &args.branch_anchor_height) ||
-        !ParseInt32(argv[7], &args.predecessor_height) ||
-        !ParseInt32(argv[9], &epoch_origin) ||
-        !ParseUInt32(argv[10], &registration_cutoff) ||
-        !ParseUInt32(argv[11], &snapshot_lag) ||
-        !ParseUInt32(argv[12], &future_horizon) ||
-        !ParseInt32(argv[13], &btcc_origin) ||
-        !ParseUInt32(argv[14], &args.audit_epoch)) {
+        !ParseInt32(argv[7], &epoch_origin) ||
+        !ParseUInt32(argv[8], &registration_cutoff) ||
+        !ParseUInt32(argv[9], &snapshot_lag) ||
+        !ParseUInt32(argv[10], &future_horizon) ||
+        !ParseInt32(argv[11], &btcc_origin) ||
+        !ParseUInt32(argv[12], &args.audit_epoch) ||
+        !ParseInt32(argv[13], &args.response_predecessor_height) ||
+        !ParseInt32(argv[17], &args.anchor_predecessor_height) ||
+        !ParseInt32(argv[21], &args.seal_predecessor_height)) {
         error = "invalid payment audit numeric argument";
         return std::nullopt;
     }
     args.branch_anchor_hash = uint256S(argv[6]);
-    args.predecessor_hash = uint256S(argv[8]);
+    args.response_predecessor_hash = uint256S(argv[14]);
     args.response_hash = uint256S(argv[15]);
     args.response_btc_hash = uint256S(argv[16]);
-    args.anchor_hash = uint256S(argv[17]);
-    args.anchor_btc_hash = uint256S(argv[18]);
-    args.seal_hash = uint256S(argv[19]);
+    args.anchor_predecessor_hash = uint256S(argv[18]);
+    args.anchor_hash = uint256S(argv[19]);
+    args.anchor_btc_hash = uint256S(argv[20]);
+    args.seal_predecessor_hash = uint256S(argv[22]);
+    args.seal_hash = uint256S(argv[23]);
+    args.seed_carrier_hash = uint256S(argv[24]);
+    const auto seed_receipt_bytes{ParseHex(argv[25])};
+    if (seed_receipt_bytes.size() != BTCCReceipt::WIRE_SIZE) {
+        error = "invalid payment audit seed-receipt size";
+        return std::nullopt;
+    }
+    DataStream seed_receipt_stream{seed_receipt_bytes};
+    try {
+        seed_receipt_stream >> args.seed_receipt;
+    } catch (const std::exception&) {
+        error = "invalid payment audit seed-receipt encoding";
+        return std::nullopt;
+    }
     args.build_config.schedule.epoch_origin = epoch_origin;
     args.build_config.registration_cutoff_blocks = registration_cutoff;
     args.build_config.roster_snapshot_lag_blocks = snapshot_lag;
     args.build_config.future_horizon_epochs = future_horizon;
     args.btcc_config.candidate_origin = btcc_origin;
     for (std::size_t epoch{0}; epoch < MAX_FIXTURE_EPOCHS; ++epoch) {
-        args.base_hashes[epoch] = uint256S(argv[20 + epoch]);
-        args.snapshot_hashes[epoch] = uint256S(argv[25 + epoch]);
+        args.base_hashes[epoch] = uint256S(argv[26 + epoch]);
+        args.snapshot_hashes[epoch] = uint256S(argv[31 + epoch]);
         if (args.base_hashes[epoch].IsNull() ||
             args.snapshot_hashes[epoch].IsNull()) {
             error = "null payment audit branch hash";
@@ -1527,20 +1895,32 @@ std::optional<PaymentAuditArguments> ParsePaymentAuditArguments(
         args.build_config.schedule, args.branch_anchor_height)};
     const auto last_active{ActiveEpochsAtHeight(
         args.build_config.schedule, max_tip)};
+    const auto response_target{NextEligibleChainLockTargetHeight(
+        args.build_config.schedule, args.response_predecessor_height)};
+    const auto anchor_target{NextEligibleChainLockTargetHeight(
+        args.build_config.schedule, args.anchor_predecessor_height)};
+    const auto seal_target{NextEligibleChainLockTargetHeight(
+        args.build_config.schedule, args.seal_predecessor_height)};
     if (!args.snapshot_output.is_absolute() ||
         !args.bundle_output.is_absolute() || args.genesis_hash.IsNull() ||
         args.branch_anchor_hash.IsNull() ||
-        args.predecessor_hash.IsNull() || args.response_hash.IsNull() ||
+        args.response_predecessor_hash.IsNull() ||
+        args.anchor_predecessor_hash.IsNull() ||
+        args.seal_predecessor_hash.IsNull() || args.response_hash.IsNull() ||
         args.response_btc_hash.IsNull() || args.anchor_hash.IsNull() ||
         args.anchor_btc_hash.IsNull() || args.seal_hash.IsNull() ||
+        args.seed_carrier_hash.IsNull() ||
+        !args.seed_receipt.IsStructurallyValid() ||
+        args.seed_receipt.IsNull() ||
         !args.build_config.IsValid() || !schedule_config.IsValid() ||
         !schedule || !first_active || !last_active ||
         first_active->front().epoch != 0 ||
         last_active->back().epoch != MAX_FIXTURE_EPOCHS - 1 ||
-        args.branch_anchor_height != args.predecessor_height ||
-        args.branch_anchor_hash != args.predecessor_hash ||
-        schedule->rows.back().response_height <=
-            args.predecessor_height ||
+        !response_target ||
+        *response_target != schedule->rows.back().response_height ||
+        !anchor_target || *anchor_target != schedule->anchor_height ||
+        !seal_target || *seal_target != schedule->seal_height ||
+        args.branch_anchor_height > args.response_predecessor_height ||
         !IsEligibleChainLockTarget(args.build_config.schedule,
                                    args.branch_anchor_height)) {
         error = "invalid payment audit fixture geometry";
@@ -1627,14 +2007,15 @@ int GeneratePaymentAudit(const PaymentAuditArguments& args)
 std::optional<PaymentAuditPostArguments> ParsePaymentAuditPostArguments(
     int argc, char* argv[], std::string& error)
 {
-    if (argc != 28) {
+    if (argc != 29) {
         error =
             "usage: pq_chainlock_fixture payment-audit-post BUNDLE_OUT "
             "GENESIS TARGET_HEIGHT TARGET_HASH PREDECESSOR_HEIGHT "
             "PREDECESSOR_HASH CURSOR_HEIGHT CURSOR_SYS_HASH "
             "CURSOR_BTC_HASH EPOCH_ORIGIN REGISTRATION_CUTOFF "
             "SNAPSHOT_LAG FUTURE_HORIZON BTCC_ORIGIN "
-            "PAYMENT_RECEIPT_STATE_HEX PROBATION_STATE_HASH "
+            "BTCC_RECEIPT_STATE_HEX PAYMENT_RECEIPT_STATE_HEX "
+            "PROBATION_STATE_HASH "
             "BASE0 BASE1 BASE2 BASE3 BASE4 "
             "SNAPSHOT0 SNAPSHOT1 SNAPSHOT2 SNAPSHOT3 SNAPSHOT4";
         return std::nullopt;
@@ -1668,7 +2049,19 @@ std::optional<PaymentAuditPostArguments> ParsePaymentAuditPostArguments(
     args.build_config.roster_snapshot_lag_blocks = snapshot_lag;
     args.build_config.future_horizon_epochs = future_horizon;
     args.btcc_config.candidate_origin = btcc_origin;
-    const auto receipt_bytes{ParseHex(argv[16])};
+    const auto btcc_receipt_bytes{ParseHex(argv[16])};
+    if (btcc_receipt_bytes.size() != BTCCReceiptState::WIRE_SIZE) {
+        error = "invalid BTCC receipt-state size";
+        return std::nullopt;
+    }
+    DataStream btcc_receipt_stream{btcc_receipt_bytes};
+    try {
+        btcc_receipt_stream >> args.btcc_receipt_state;
+    } catch (const std::exception&) {
+        error = "invalid BTCC receipt-state encoding";
+        return std::nullopt;
+    }
+    const auto receipt_bytes{ParseHex(argv[17])};
     if (receipt_bytes.size() != PaymentAuditReceiptState::WIRE_SIZE) {
         error = "invalid payment audit receipt-state size";
         return std::nullopt;
@@ -1680,10 +2073,10 @@ std::optional<PaymentAuditPostArguments> ParsePaymentAuditPostArguments(
         error = "invalid payment audit receipt-state encoding";
         return std::nullopt;
     }
-    args.payment_probation_state_hash = uint256S(argv[17]);
+    args.payment_probation_state_hash = uint256S(argv[18]);
     for (std::size_t epoch{0}; epoch < MAX_FIXTURE_EPOCHS; ++epoch) {
-        args.base_hashes[epoch] = uint256S(argv[18 + epoch]);
-        args.snapshot_hashes[epoch] = uint256S(argv[23 + epoch]);
+        args.base_hashes[epoch] = uint256S(argv[19 + epoch]);
+        args.snapshot_hashes[epoch] = uint256S(argv[24 + epoch]);
         if (args.base_hashes[epoch].IsNull() ||
             args.snapshot_hashes[epoch].IsNull()) {
             error = "null payment audit post branch hash";
@@ -1702,20 +2095,26 @@ std::optional<PaymentAuditPostArguments> ParsePaymentAuditPostArguments(
     const auto audit_schedule{receipt_epoch
         ? BuildPaymentAuditEpochSchedule(schedule_config, *receipt_epoch)
         : std::nullopt};
+    const auto next_target{NextEligibleChainLockTargetHeight(
+        args.build_config.schedule, args.predecessor_height)};
+    const int64_t expected_target{
+        window
+            ? static_cast<int64_t>(window->start_height) + PQ_CL_PERIOD
+            : -1};
     if (!args.bundle_output.is_absolute() || args.genesis_hash.IsNull() ||
         args.target_hash.IsNull() || args.predecessor_hash.IsNull() ||
         !args.cursor.IsStructurallyValid() || args.cursor.IsNull() ||
         !args.build_config.IsValid() || !schedule_config.IsValid() ||
+        !args.btcc_receipt_state.IsStructurallyValid() ||
+        args.btcc_receipt_state.cursor != args.cursor ||
         !args.payment_audit_receipt_state.IsStructurallyValid() ||
         args.payment_audit_receipt_state.cursor.IsNull() ||
         args.payment_probation_state_hash.IsNull() || !receipt_epoch ||
-        !window || window->start_height +
-                       static_cast<int32_t>(PQ_CL_PERIOD) !=
-                   args.target_height ||
+        !window || expected_target != args.target_height ||
         !audit_schedule ||
         args.payment_audit_receipt_state.cursor.carrier_height !=
             window->start_height ||
-        args.predecessor_height != audit_schedule->seal_height ||
+        !next_target || *next_target != args.target_height ||
         !IsEligibleChainLockTarget(args.build_config.schedule,
                                    args.target_height) ||
         IsBTCCCandidateHeight(args.btcc_config, args.target_height)) {
@@ -1762,8 +2161,6 @@ int GeneratePaymentAuditPost(const PaymentAuditPostArguments& args)
     fixture_args.genesis_hash = args.genesis_hash;
     fixture_args.branch_anchor_height = args.predecessor_height;
     fixture_args.branch_anchor_hash = args.predecessor_hash;
-    fixture_args.predecessor_height = args.predecessor_height;
-    fixture_args.predecessor_hash = args.predecessor_hash;
     fixture_args.build_config = args.build_config;
     fixture_args.btcc_config = args.btcc_config;
     fixture_args.base_hashes = args.base_hashes;
@@ -1794,7 +2191,7 @@ int GeneratePaymentAuditPost(const PaymentAuditPostArguments& args)
         ? MakeChainLockStatement(
         *fixture, *rosters, args.target_height, args.target_hash,
         args.predecessor_height, args.predecessor_hash, args.cursor,
-        args.cursor, BTCCAdvance::KEEP,
+        args.cursor, BTCCAdvance::KEEP, args.btcc_receipt_state,
         args.payment_audit_receipt_state,
         args.payment_probation_state_hash)
         : std::nullopt};
@@ -1824,6 +2221,7 @@ int Generate(const GeneratorArguments& args)
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{ChainLockCollector::Create(
         args.genesis_hash, fixture->statement, fixture->rosters,
+        AUTHORIZATION_MASK,
         &collection_error)};
     if (!collector) {
         throw std::runtime_error("unable to create production collector");
@@ -1845,6 +2243,7 @@ int Generate(const GeneratorArguments& args)
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{WorkerCount()};
     if (!verifier.Verify(args.genesis_hash, *final, *fixture->rosters,
+                         AUTHORIZATION_MASK,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {
         throw std::runtime_error(
@@ -1870,6 +2269,16 @@ int main(int argc, char* argv[])
 {
     try {
         std::string error;
+        if (argc > 1 &&
+            std::string_view{argv[1]} == "payment-audit-prefix") {
+            const auto args{
+                ParsePaymentAuditPrefixArguments(argc, argv, error)};
+            if (!args) {
+                std::cerr << error << '\n';
+                return 1;
+            }
+            return GeneratePaymentAuditPrefix(*args);
+        }
         if (argc > 1 && std::string_view{argv[1]} == "payment-audit") {
             const auto args{ParsePaymentAuditArguments(argc, argv, error)};
             if (!args) {

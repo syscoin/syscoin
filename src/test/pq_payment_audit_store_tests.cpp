@@ -183,51 +183,62 @@ void ErasePayloadAndPresence(const fs::path& path,
 
 BOOST_FIXTURE_TEST_SUITE(pq_payment_audit_store_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(archive_bounds_unreferenced_variants_by_selected_mask)
+BOOST_AUTO_TEST_CASE(archive_bounds_live_candidates_by_missing_quorum)
 {
-    const fs::path path{m_path_root / "pq_payment_audit_store_variants"};
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_live_candidates"};
     const uint256 genesis_hash{NonNullHash(1)};
     constexpr uint32_t epoch{7};
     const std::array<uint8_t, ACTIVE_QUORUMS> masks{0x0e, 0x0d, 0x0b,
                                                    0x07};
-    std::array<FinalPaymentAudit, ACTIVE_QUORUMS> variants;
+    std::array<FinalPaymentAudit, ACTIVE_QUORUMS> candidates;
 
     PaymentAuditStore store{path, genesis_hash};
     BOOST_REQUIRE(store.IsHealthy());
-    for (std::size_t slot{0}; slot < variants.size(); ++slot) {
-        variants[slot] = Audit(epoch, masks[slot], 100 + slot);
-        BOOST_CHECK(store.AcceptVerified(variants[slot]) ==
+    for (std::size_t slot{0}; slot < candidates.size(); ++slot) {
+        candidates[slot] = Audit(epoch, masks[slot], 100 + slot);
+        BOOST_CHECK(store.ProbeLiveCandidateSlot(epoch, masks[slot]) ==
                     PaymentAuditStoreResult::ACCEPTED);
+        BOOST_CHECK(store.AcceptVerified(candidates[slot]) ==
+                    PaymentAuditStoreResult::ACCEPTED);
+        BOOST_CHECK(store.ProbeLiveCandidateSlot(epoch, masks[slot]) ==
+                    PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
         BOOST_CHECK(store.Has(
-            variants[slot].GetWitnessId(genesis_hash)));
+            candidates[slot].GetWitnessId(genesis_hash)));
     }
 
-    auto replacement{variants[0]};
+    auto replacement{candidates[0]};
     replacement.report_witnesses[0]
         .authenticated_signature.signature[1] ^= 1;
     BOOST_REQUIRE(replacement.IsStructurallyValid());
     const uint256 replaced_id{
-        variants[0].GetWitnessId(genesis_hash)};
+        candidates[0].GetWitnessId(genesis_hash)};
     const uint256 replacement_id{
         replacement.GetWitnessId(genesis_hash)};
     BOOST_REQUIRE(replacement_id != replaced_id);
+    BOOST_CHECK(store.ProbeLiveCandidateSlot(
+                    epoch, replacement.selected_quorum_mask) ==
+                PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
     BOOST_CHECK(store.AcceptVerified(replacement) ==
-                PaymentAuditStoreResult::VARIANT_LIMIT);
+                PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
 
     // The exact witness named by an on-chain dependency always admits,
-    // evicting only the unreferenced variant with the same 3-of-4 mask.
+    // evicting only the live candidate with the same 3-of-4 mask.
     BOOST_CHECK(store.AcceptVerified(
                     replacement, /*required_witness=*/true) ==
                 PaymentAuditStoreResult::ACCEPTED);
     BOOST_CHECK(!store.Has(replaced_id));
     BOOST_CHECK(store.Has(replacement_id));
-    for (std::size_t slot{1}; slot < variants.size(); ++slot) {
+    BOOST_CHECK(store.ProbeLiveCandidateSlot(
+                    epoch, replacement.selected_quorum_mask) ==
+                PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
+    for (std::size_t slot{1}; slot < candidates.size(); ++slot) {
         BOOST_CHECK(store.Has(
-            variants[slot].GetWitnessId(genesis_hash)));
+            candidates[slot].GetWitnessId(genesis_hash)));
     }
 }
 
-BOOST_AUTO_TEST_CASE(pin_prunes_old_variants_but_accepts_new_live_candidate)
+BOOST_AUTO_TEST_CASE(pin_prunes_old_candidates_but_accepts_new_branch_candidate)
 {
     const fs::path path{m_path_root / "pq_payment_audit_store_pin"};
     const uint256 genesis_hash{NonNullHash(2)};
@@ -247,9 +258,10 @@ BOOST_AUTO_TEST_CASE(pin_prunes_old_variants_but_accepts_new_live_candidate)
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(!store.Has(first_id));
         BOOST_CHECK(store.Has(second_id));
-        const auto selected{store.GetByEpoch(epoch)};
-        BOOST_REQUIRE(selected);
-        BOOST_CHECK(selected->GetWitnessId(genesis_hash) == second_id);
+        const auto selected{store.GetEpochCandidates(epoch)};
+        BOOST_REQUIRE_EQUAL(selected.size(), 1U);
+        BOOST_CHECK(selected.front().GetWitnessId(genesis_hash) ==
+                    second_id);
 
         const auto unsolicited{Audit(epoch, 0x0d, 202)};
         BOOST_CHECK(store.AcceptVerified(unsolicited) ==
@@ -260,10 +272,9 @@ BOOST_AUTO_TEST_CASE(pin_prunes_old_variants_but_accepts_new_live_candidate)
         PaymentAuditStore restarted{path, genesis_hash};
         BOOST_REQUIRE(restarted.IsHealthy());
         BOOST_CHECK(!restarted.Has(first_id));
-        const auto selected{restarted.GetByEpoch(epoch)};
-        BOOST_REQUIRE(selected);
-        BOOST_CHECK(*selected == second);
-        BOOST_CHECK_EQUAL(restarted.GetEpochCandidates(epoch).size(), 2U);
+        const auto selected{restarted.GetEpochCandidates(epoch)};
+        BOOST_REQUIRE_EQUAL(selected.size(), 2U);
+        BOOST_CHECK(selected.front() == second);
         BOOST_CHECK(restarted.PinReferencedWitness(epoch, second_id) ==
                     PaymentAuditStoreResult::DUPLICATE_WITNESS);
     }
@@ -313,8 +324,6 @@ BOOST_AUTO_TEST_CASE(checkpoint_prunes_prefix_and_preserves_live_suffix)
             BOOST_CHECK(!store.Has(witness_id));
             BOOST_CHECK(!store.Get(witness_id));
         }
-        BOOST_CHECK(!store.GetByEpoch(9));
-        BOOST_CHECK(!store.GetByEpoch(10));
         BOOST_CHECK(store.GetEpochCandidates(9).empty());
         BOOST_CHECK(store.GetEpochCandidates(10).empty());
         BOOST_CHECK(store.AcceptVerified(
@@ -417,7 +426,6 @@ BOOST_AUTO_TEST_CASE(repeated_checkpoints_bound_all_archive_record_classes)
                     static_cast<int32_t>(70'000 + 5 * epoch));
                 BOOST_REQUIRE(
                     store.PruneThroughCheckpoint(final_checkpoint));
-                BOOST_CHECK(!store.GetByEpoch(epoch - 1));
                 BOOST_CHECK_EQUAL(store.GetEpochCandidates(epoch).size(), 1U);
                 BOOST_CHECK(store.Has(first_id));
                 BOOST_CHECK(store.Has(second_id));

@@ -7,6 +7,7 @@
 
 #include <evo/evodb.h>
 #include <evo/pq_payment_probation.h>
+#include <llmq/pq_payment_audit_store.h>
 #include <saltedhasher.h>
 #include <sync.h>
 
@@ -49,12 +50,22 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
+     * Return whether the last durable GC commit names the same authenticated
+     * deletion boundary. Authorizer refreshes do not change what can be
+     * deleted. The marker lives with the state DB, so rebuilding chainstate
+     * clears it and forces one repair pass.
+     */
+    [[nodiscard]] bool IsGCCompleteForCheckpoint(
+        const PaymentAuditStoreCheckpoint& checkpoint) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
      * Synchronously discard checkpoint-covered states while preserving every
      * explicitly retained branch root. The authenticated audit checkpoint
      * must already be durable before this irreversible operation begins.
      */
-    [[nodiscard]] bool PruneStatesThroughEpoch(
-        uint32_t prune_through_epoch,
+    [[nodiscard]] bool PruneStatesThroughCheckpoint(
+        const PaymentAuditStoreCheckpoint& checkpoint,
         std::span<const uint256> retained_state_hashes)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 

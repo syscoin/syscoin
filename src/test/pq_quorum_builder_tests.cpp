@@ -427,6 +427,12 @@ BOOST_AUTO_TEST_CASE(fewer_than_400_unsafe_cutoff_and_duplicate_keys_fail_closed
         Snapshot(2448, NonNullHash(14), QUORUM_SIZE), {}, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::INVALID_SCHEDULE);
 
+    auto epoch_boundary_config = BuildConfig(Schedule().epoch_blocks);
+    BOOST_CHECK(epoch_boundary_config.IsValid());
+    auto multi_epoch_lag_config =
+        BuildConfig(Schedule().epoch_blocks + 1);
+    BOOST_CHECK(!multi_epoch_lag_config.IsValid());
+
     const auto frozen_snapshot = Snapshot(2448, NonNullHash(16), QUORUM_SIZE);
     const auto first = BuildFrozenQuorumRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(17), frozen_snapshot, {},
@@ -594,44 +600,84 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
     ChainLockStatement statement;
     statement.height = TARGET_HEIGHT;
     statement.block_hash = side.Tip().GetBlockHash();
+    statement.previous_chainlock_height = TARGET_HEIGHT - PQ_CL_SIGN_LAG;
+    statement.previous_chainlock_hash =
+        side.At(statement.previous_chainlock_height).GetBlockHash();
     statement.payment_probation_state_hash = NonNullHash(60'001);
     statement.quorum_context_hash = GetQuorumContextHash(
         genesis, TARGET_HEIGHT, statement.block_hash, descriptors);
     BOOST_CHECK(ValidateFrozenQuorumContext(
-        genesis, statement, *rosters));
+        genesis, statement, *rosters, 0b0111));
+    BOOST_CHECK(!ValidateFrozenQuorumContext(
+        genesis, statement, *rosters, 0b1111));
     BOOST_CHECK(statement.quorum_context_hash != GetQuorumContextHash(
         genesis, TARGET_HEIGHT, active.At(TARGET_HEIGHT).GetBlockHash(),
         descriptors));
 }
 
-BOOST_AUTO_TEST_CASE(roster_rotation_requires_finalized_snapshot_after_bootstrap)
+BOOST_AUTO_TEST_CASE(roster_rotation_derives_contiguous_authorization_prefix)
 {
     auto rosters{std::make_unique<FrozenQuorumRosters>()};
     for (std::size_t slot{0}; slot < rosters->size(); ++slot) {
         (*rosters)[slot].descriptor.epoch = static_cast<uint32_t>(slot);
+        (*rosters)[slot].descriptor.base_height = 1'100 + slot;
+        (*rosters)[slot].descriptor.base_hash = NonNullHash(800 + slot);
         (*rosters)[slot].descriptor.snapshot_height = 1'000 + slot;
         (*rosters)[slot].descriptor.snapshot_hash = NonNullHash(900 + slot);
     }
 
     std::size_t lookups{0};
-    BOOST_CHECK(AreSigningRosterTransitionsFinalized(
+    BOOST_CHECK_EQUAL(GetSigningRosterAuthorizationMask(
         *rosters, [&](int32_t, const uint256&) {
             ++lookups;
             return false;
-        }));
-    BOOST_CHECK_EQUAL(lookups, 0U);
+        }), 0);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
+    lookups = 0;
+    BOOST_CHECK_EQUAL(GetSigningRosterAuthorizationMask(
+        *rosters, [&](int32_t height, const uint256& hash) {
+            ++lookups;
+            for (const auto& roster : *rosters) {
+                if (height == roster.descriptor.base_height &&
+                    hash == roster.descriptor.base_hash) {
+                    return true;
+                }
+            }
+            return false;
+        }), 0b1111);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
     rosters->back().descriptor.epoch = ACTIVE_QUORUMS;
     const int32_t required_height{
         rosters->back().descriptor.snapshot_height};
     const uint256 required_hash{rosters->back().descriptor.snapshot_hash};
-    BOOST_CHECK(!AreSigningRosterTransitionsFinalized(
-        *rosters, [](int32_t, const uint256&) { return false; }));
-    BOOST_CHECK(AreSigningRosterTransitionsFinalized(
+    BOOST_CHECK_EQUAL(GetSigningRosterAuthorizationMask(
         *rosters, [&](int32_t height, const uint256& hash) {
-            return height == required_height && hash == required_hash;
-        }));
-    BOOST_CHECK(!AreSigningRosterTransitionsFinalized(*rosters, {}));
+            for (std::size_t slot{0}; slot + 1 < rosters->size(); ++slot) {
+                const auto& descriptor{(*rosters)[slot].descriptor};
+                if (height == descriptor.base_height &&
+                    hash == descriptor.base_hash) {
+                    return true;
+                }
+            }
+            return false;
+        }), 0b0111);
+    BOOST_CHECK(IsSigningRosterAuthorizationMask(0b0111));
+    BOOST_CHECK(IsSigningRosterAuthorizationMask(0b1111));
+    BOOST_CHECK(!IsSigningRosterAuthorizationMask(0b0011));
+    BOOST_CHECK(!IsSigningRosterAuthorizationMask(0b1011));
+    BOOST_CHECK(!IsSigningRosterAuthorizationMask(0b10111));
+
+    BOOST_CHECK_EQUAL(GetSigningRosterAuthorizationMask(
+        *rosters, [&](int32_t height, const uint256& hash) {
+            if (height == required_height && hash == required_hash) {
+                return true;
+            }
+            const auto& first{(*rosters)[0].descriptor};
+            return height == first.base_height && hash == first.base_hash;
+        }), 0);
+    BOOST_CHECK_EQUAL(
+        GetSigningRosterAuthorizationMask(*rosters, {}), 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

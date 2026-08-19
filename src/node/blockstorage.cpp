@@ -112,17 +112,14 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
         if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
             CDiskBlockIndex diskindex;
             if (pcursor->GetValue(diskindex)) {
-                // SYSCOIN: The unshipped V3 audit cursor did not record the exact
-                // 801-report witness. That value cannot be recovered from the
-                // cumulative receipt hash, so silently upgrading would make
-                // historical validation depend on whichever certificate is
-                // found later. A full reindex reconstructs the V4 cursor from
-                // canonical receipt bytes and the exact archived witness.
-                if (!diskindex.pqPaymentAuditReceiptCursorLogicalId.IsNull() &&
+                // SYSCOIN: The final payment-audit cursor binds both the
+                // logical statement and the exact 801-report witness. A
+                // partial local record cannot be reconstructed safely.
+                if (diskindex.pqPaymentAuditReceiptCursorLogicalId.IsNull() !=
                     diskindex.pqPaymentAuditReceiptCursorWitnessId.IsNull()) {
                     return error(
-                        "%s: legacy payment-audit block index lacks exact "
-                        "witness id; restart with -reindex",
+                        "%s: incomplete payment-audit block index; restart "
+                        "with -reindex",
                         __func__);
                 }
                 // Construct block index object
@@ -145,6 +142,8 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->pqBTCCReceiptCursorSysHash = diskindex.pqBTCCReceiptCursorSysHash;
                 pindexNew->pqBTCCReceiptCursorBTCHash = diskindex.pqBTCCReceiptCursorBTCHash;
                 pindexNew->pqBTCCReceiptStateHash = diskindex.pqBTCCReceiptStateHash;
+                pindexNew->pqBTCCReceiptLogicalId =
+                    diskindex.pqBTCCReceiptLogicalId;
                 pindexNew->pqPaymentAuditReceiptCursorHeight =
                     diskindex.pqPaymentAuditReceiptCursorHeight;
                 pindexNew->pqPaymentAuditReceiptCursorEpoch =
@@ -555,20 +554,22 @@ bool BlockManager::WriteBlockIndexDB()
     AssertLockHeld(::cs_main);
     std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
     vFiles.reserve(m_dirty_fileinfo.size());
-    for (std::set<int>::iterator it = m_dirty_fileinfo.begin(); it != m_dirty_fileinfo.end();) {
-        vFiles.emplace_back(*it, &m_blockfile_info[*it]);
-        m_dirty_fileinfo.erase(it++);
+    for (const int file : m_dirty_fileinfo) {
+        vFiles.emplace_back(file, &m_blockfile_info[file]);
     }
     std::vector<const CBlockIndex*> vBlocks;
     vBlocks.reserve(m_dirty_blockindex.size());
-    for (std::set<CBlockIndex*>::iterator it = m_dirty_blockindex.begin(); it != m_dirty_blockindex.end();) {
-        vBlocks.push_back(*it);
-        m_dirty_blockindex.erase(it++);
+    for (const CBlockIndex* block : m_dirty_blockindex) {
+        vBlocks.push_back(block);
     }
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
     }
+    // A failed batch must remain retryable. This method holds cs_main, so no
+    // caller can add new dirty entries between the snapshots above and here.
+    m_dirty_fileinfo.clear();
+    m_dirty_blockindex.clear();
     return true;
 }
 

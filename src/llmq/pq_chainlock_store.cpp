@@ -47,6 +47,131 @@ bool SealsUnsealedBTCC(const FinalChainLock& seal,
 
 } // namespace
 
+bool IsDurableBTCCursorMonotonic(
+    const BTCCursor& previous, const BTCCursor& candidate) noexcept
+{
+    if (previous.IsNull()) return true;
+    if (candidate.IsNull() || candidate.sys_height < previous.sys_height) {
+        return false;
+    }
+    return candidate.sys_height != previous.sys_height ||
+           candidate == previous;
+}
+
+bool BTCCCursorReconciliationProof::IsStructurallyValid() const noexcept
+{
+    return carrier_height >= 0 && !carrier_hash.IsNull() &&
+           !carrier_parent_hash.IsNull() && skipped_cursor.IsStructurallyValid() &&
+           !skipped_cursor.IsNull() &&
+           previous_receipt_state.IsStructurallyValid() &&
+           current_receipt_state.IsStructurallyValid() &&
+           previous_receipt_state == current_receipt_state &&
+           receipt_logical_id.IsNull();
+}
+
+bool IsBTCCCursorReconciliation(
+    const FinalChainLock& best,
+    const FinalChainLock& candidate,
+    const ChainLockFinalityStoreConfig& config) noexcept
+{
+    if (!config.IsValid() || !best.IsStructurallyValid() ||
+        !candidate.IsStructurallyValid()) {
+        return false;
+    }
+    const auto& durable{best.statement};
+    const auto& recovery{candidate.statement};
+    const auto& skipped{durable.accepted_btcc_cursor};
+    const auto& authenticated{durable.btcc_receipt_state.cursor};
+    if (skipped.IsNull() ||
+        !IsBTCCCandidateHeight(config.btcc_schedule,
+                               skipped.sys_height) ||
+        (!authenticated.IsNull() &&
+         authenticated.sys_height >= skipped.sys_height)) {
+        return false;
+    }
+    const int64_t carrier_height{
+        static_cast<int64_t>(skipped.sys_height) +
+        config.btcc_schedule.nevm_injection_lag};
+    if (carrier_height > std::numeric_limits<int32_t>::max() ||
+        recovery.height < carrier_height ||
+        recovery.previous_chainlock_height < durable.height ||
+        (recovery.previous_chainlock_height == durable.height &&
+         recovery.previous_chainlock_hash != durable.block_hash)) {
+        return false;
+    }
+    return recovery.previous_btcc_cursor == authenticated &&
+           recovery.accepted_btcc_cursor == authenticated &&
+           recovery.btcc_advance == BTCCAdvance::KEEP &&
+           recovery.btcc_receipt_state == durable.btcc_receipt_state &&
+           !IsDurableBTCCursorMonotonic(
+               skipped,
+               recovery.accepted_btcc_cursor);
+}
+
+bool IsBTCCCursorReconciliationProof(
+    const FinalChainLock& best,
+    const FinalChainLock& candidate,
+    const BTCCCursorReconciliationProof& proof,
+    const ChainLockFinalityStoreConfig& config) noexcept
+{
+    if (!IsBTCCCursorReconciliation(best, candidate, config) ||
+        !proof.IsStructurallyValid()) {
+        return false;
+    }
+    const auto& durable{best.statement};
+    const int64_t carrier_height{
+        static_cast<int64_t>(durable.accepted_btcc_cursor.sys_height) +
+        config.btcc_schedule.nevm_injection_lag};
+    return carrier_height == proof.carrier_height &&
+           proof.skipped_cursor == durable.accepted_btcc_cursor &&
+           proof.previous_receipt_state == durable.btcc_receipt_state &&
+           proof.current_receipt_state == durable.btcc_receipt_state;
+}
+
+bool IsDurableBTCCReceiptStateMonotonic(
+    const BTCCReceiptState& previous,
+    const BTCCReceiptState& candidate) noexcept
+{
+    if (!previous.IsStructurallyValid() ||
+        !candidate.IsStructurallyValid()) {
+        return false;
+    }
+    if (previous.cursor.IsNull()) return true;
+    if (candidate.cursor.IsNull() ||
+        candidate.cursor.sys_height < previous.cursor.sys_height) {
+        return false;
+    }
+    return candidate.cursor.sys_height != previous.cursor.sys_height ||
+           candidate == previous;
+}
+
+bool IsDurablePaymentAuditStateMonotonic(
+    const PaymentAuditReceiptState& previous_receipt,
+    const uint256& previous_probation,
+    const PaymentAuditReceiptState& candidate_receipt,
+    const uint256& candidate_probation) noexcept
+{
+    if (!previous_receipt.IsStructurallyValid() ||
+        !candidate_receipt.IsStructurallyValid() ||
+        previous_probation.IsNull() || candidate_probation.IsNull()) {
+        return false;
+    }
+    if (previous_receipt.cursor.IsNull()) return true;
+    if (candidate_receipt.cursor.IsNull() ||
+        candidate_receipt.cursor.epoch < previous_receipt.cursor.epoch ||
+        candidate_receipt.cursor.carrier_height <
+            previous_receipt.cursor.carrier_height) {
+        return false;
+    }
+    if (candidate_receipt.cursor.epoch == previous_receipt.cursor.epoch ||
+        candidate_receipt.cursor.carrier_height ==
+            previous_receipt.cursor.carrier_height) {
+        return candidate_receipt == previous_receipt &&
+               candidate_probation == previous_probation;
+    }
+    return true;
+}
+
 CatchupHistoricalProofCache::CatchupHistoricalProofCache(
     std::size_t capacity, Clock now)
     : m_capacity{capacity},
@@ -164,9 +289,9 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
     const int64_t first_receipt_carrier{
         static_cast<int64_t>(btcc_schedule.candidate_origin) +
         btcc_schedule.nevm_injection_lag};
-    // The initial activation checkpoint can precede the first carrier only
-    // when it commits the canonical empty receipt state. Once carriers exist,
-    // release-updated assumption boundaries must land on an exact carrier.
+    // The receipt assumption can precede finality because it authenticates a
+    // different history. Before the first carrier its only valid state is the
+    // canonical empty state; later boundaries must land on an exact carrier.
     const bool valid_receipt_anchor_height{
         btcc_receipt_assumption_anchor.IsDisabled() ||
         IsBTCCReceiptCarrierHeight(
@@ -182,9 +307,9 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
                    chainlock_schedule.chainlock_period ==
                0 &&
            anchor.IsStructurallyValid() &&
+           anchor.height < btcc_schedule.candidate_origin &&
+           anchor.btcc_cursor.IsNull() &&
            btcc_receipt_assumption_anchor.IsStructurallyValid() &&
-           (btcc_receipt_assumption_anchor.IsDisabled() ||
-            btcc_receipt_assumption_anchor.height >= anchor.height) &&
            valid_receipt_anchor_height &&
            ValidCapacity(seen_logical_capacity, MAX_FINALITY_ID_CACHE_SIZE) &&
            ValidCapacity(seen_witness_capacity, MAX_FINALITY_ID_CACHE_SIZE) &&
@@ -261,6 +386,13 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
     }
 
     const auto& statement = chainlock.statement;
+    const auto next_target{NextEligibleChainLockTargetHeight(
+        m_config.chainlock_schedule,
+        statement.previous_chainlock_height)};
+    if (!next_target || statement.height != *next_target) {
+        SetError(error, ChainLockFinalityError::INELIGIBLE_HEIGHT);
+        return false;
+    }
     const ChainLockPredecessor predecessor{CurrentPredecessor()};
     if (admission == ChainLockCandidateAdmission::LIVE) {
         // A signed, merely eligible predecessor is not evidence that the
@@ -314,8 +446,7 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
         // active best-work relation and the full receipt accumulator.
         if (statement.previous_chainlock_height < predecessor.height ||
             (statement.previous_chainlock_height == predecessor.height &&
-             (statement.previous_chainlock_hash != predecessor.block_hash ||
-              statement.previous_btcc_cursor != predecessor.btcc_cursor)) ||
+             statement.previous_chainlock_hash != predecessor.block_hash) ||
             statement.previous_chainlock_height <
                 m_config.anchor.height ||
             (statement.previous_chainlock_height == m_config.anchor.height &&
@@ -325,6 +456,29 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
              !IsEligibleChainLockTarget(
                  m_config.chainlock_schedule,
                  statement.previous_chainlock_height))) {
+            SetError(error, ChainLockFinalityError::PREDECESSOR_MISMATCH);
+            return false;
+        }
+        const bool reconciles_cursor{
+            m_best && IsBTCCCursorReconciliation(
+                *m_best->chainlock, chainlock, m_config)};
+        if (m_best &&
+            ((!IsDurableBTCCursorMonotonic(
+                  m_best->chainlock->statement.accepted_btcc_cursor,
+                  statement.accepted_btcc_cursor) &&
+              !reconciles_cursor) ||
+             !IsDurableBTCCReceiptStateMonotonic(
+                 m_best->chainlock->statement.btcc_receipt_state,
+                 statement.btcc_receipt_state) ||
+             !IsDurablePaymentAuditStateMonotonic(
+                 m_best->chainlock->statement.payment_audit_receipt_state,
+                 m_best->chainlock->statement
+                     .payment_probation_state_hash,
+                 statement.payment_audit_receipt_state,
+                 statement.payment_probation_state_hash))) {
+            // Persistence repeats these checks at the fsync boundary. Reject
+            // a signed but non-monotonic recovery before an expected policy
+            // refusal can be mistaken for a local database failure.
             SetError(error, ChainLockFinalityError::PREDECESSOR_MISMATCH);
             return false;
         }
@@ -621,6 +775,8 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         prepared.declared_predecessor_btcc_cursor,
         admission, m_config.btcc_schedule};
     ChainLockCandidateContextRequest recheck_request{request};
+    bool reconciles_cursor{false};
+    std::shared_ptr<const FinalChainLock> reconciliation_best;
     {
         LOCK(m_mutex);
         if (m_revision != prepared.store_revision ||
@@ -637,6 +793,11 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
             admission != ChainLockCandidateAdmission::LIVE
                 ? prepared.declared_predecessor_btcc_cursor
                 : FindDeclaredPredecessorCursor(chainlock.statement);
+        reconciles_cursor =
+            admission == ChainLockCandidateAdmission::CATCHUP &&
+            m_best && IsBTCCCursorReconciliation(
+                *m_best->chainlock, chainlock, m_config);
+        if (reconciles_cursor) reconciliation_best = m_best->chainlock;
     }
 
     const auto rechecked{
@@ -646,7 +807,18 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         return false;
     }
     if (!ValidateContext(*rechecked, recheck_request, error)) return false;
-    if (rechecked->context_token != prepared.context.context_token) {
+    if (rechecked->context_token != prepared.context.context_token ||
+        rechecked->btcc_cursor_reconciliation !=
+            prepared.context.btcc_cursor_reconciliation) {
+        SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
+        return false;
+    }
+    if (reconciles_cursor !=
+        rechecked->btcc_cursor_reconciliation.has_value() ||
+        (reconciles_cursor &&
+         (!reconciliation_best || !IsBTCCCursorReconciliationProof(
+             *reconciliation_best, chainlock,
+             *rechecked->btcc_cursor_reconciliation, m_config)))) {
         SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
         return false;
     }
@@ -679,19 +851,41 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
             chainlock, logical_id, witness_id, admission, error)) {
         return false;
     }
+    const bool final_reconciles_cursor{
+        admission == ChainLockCandidateAdmission::CATCHUP &&
+        m_best && IsBTCCCursorReconciliation(
+            *m_best->chainlock, chainlock, m_config)};
+    if (final_reconciles_cursor !=
+            rechecked->btcc_cursor_reconciliation.has_value() ||
+        (final_reconciles_cursor &&
+         !IsBTCCCursorReconciliationProof(
+             *m_best->chainlock, chainlock,
+             *rechecked->btcc_cursor_reconciliation, m_config))) {
+        SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
+        return false;
+    }
 
     const bool archive_only{
         admission == ChainLockCandidateAdmission::RECEIPT_ARCHIVE ||
         admission == ChainLockCandidateAdmission::PRESEAL_RECEIPT};
-    const auto& durable_callback{
-        archive_only
-            ? m_durable_archive
-            : admission == ChainLockCandidateAdmission::CATCHUP
-                  ? m_durable_catchup
-                  : m_durable_accept};
+    const bool catchup_accept{
+        admission == ChainLockCandidateAdmission::CATCHUP};
+    const bool has_durable_callback{
+        archive_only ? static_cast<bool>(m_durable_archive)
+                     : catchup_accept
+                           ? static_cast<bool>(m_durable_catchup)
+                           : static_cast<bool>(m_durable_accept)};
     const auto persist_record = [&] {
         try {
-            if (!durable_callback || !durable_callback(chainlock)) {
+            const bool persisted{
+                archive_only
+                    ? m_durable_archive(chainlock)
+                    : catchup_accept
+                          ? m_durable_catchup(
+                                chainlock,
+                                rechecked->btcc_cursor_reconciliation)
+                          : m_durable_accept(chainlock)};
+            if (!persisted) {
                 SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
                 return false;
             }
@@ -701,7 +895,7 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         }
         return true;
     };
-    if (persist && durable_callback) {
+    if (persist && has_durable_callback) {
         // Marker-authorized historical admission must remain authorized at
         // the certificate fsync linearization point. The callback may hold
         // the marker mutex while invoking persist_record; m_mutex prevents a
@@ -847,6 +1041,13 @@ std::shared_ptr<const FinalChainLock> ChainLockFinalityStore::GetBest() const
 {
     LOCK(m_mutex);
     return m_best ? m_best->chainlock : nullptr;
+}
+
+std::shared_ptr<const FinalChainLock>
+ChainLockFinalityStore::GetUnsealedBTCC() const
+{
+    LOCK(m_mutex);
+    return m_unsealed_btcc ? m_unsealed_btcc->chainlock : nullptr;
 }
 
 std::shared_ptr<const FinalChainLock> ChainLockFinalityStore::GetByWitness(

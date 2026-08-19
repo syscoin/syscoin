@@ -13,6 +13,11 @@ on:
     tags-ignore:
       - '**'
 
+# SYSCOIN: CI only reads repository content; keep pull-request code from
+# inheriting broader repository or organization token defaults.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.event_name != 'pull_request' && github.run_id || github.ref }}
   cancel-in-progress: true

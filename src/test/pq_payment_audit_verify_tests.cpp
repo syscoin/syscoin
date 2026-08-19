@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_payment_audit_collector.h>
+#include <llmq/pq_payment_audit_signer.h>
 #include <llmq/pq_payment_audit_store.h>
 
 #include <crypto/sphincs_c11/sphincs_c11.h>
@@ -19,6 +20,8 @@
 using namespace llmq::pq;
 
 namespace {
+
+constexpr uint8_t AUTHORIZATION_MASK{0b0111};
 
 uint256 NonNullHash(uint64_t value)
 {
@@ -178,7 +181,8 @@ BOOST_AUTO_TEST_CASE(fresh_archive_preflight_needs_no_old_chainlock_store)
     PaymentAuditVerificationError error{
         PaymentAuditVerificationError::INVALID_ARGUMENT};
     const auto prepared{PrepareFinalPaymentAuditVerification(
-        fixture->genesis_hash, fixture->audit, fixture->rosters, &error)};
+        fixture->genesis_hash, fixture->audit, fixture->rosters,
+        AUTHORIZATION_MASK, &error)};
     BOOST_REQUIRE(prepared);
     BOOST_CHECK(error == PaymentAuditVerificationError::NONE);
     BOOST_CHECK_EQUAL(prepared->checks.size(),
@@ -212,7 +216,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)
     wrong_context->rosters[0].descriptor.member_root.begin()[0] ^= 1;
     BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
         wrong_context->genesis_hash, wrong_context->audit,
-        wrong_context->rosters, &error));
+        wrong_context->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
 
     auto wrong_proof{MakeFixture()};
@@ -221,7 +225,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)
         .begin()[0] ^= 1;
     BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
         wrong_proof->genesis_hash, wrong_proof->audit,
-        wrong_proof->rosters, &error));
+        wrong_proof->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CHILD_PROOF);
 }
 
@@ -231,7 +235,7 @@ BOOST_AUTO_TEST_CASE(full_verifier_reports_invalid_signature_after_preflight)
     PaymentAuditVerificationError error{PaymentAuditVerificationError::NONE};
     BOOST_CHECK(!VerifyFinalPaymentAudit(
         fixture->genesis_hash, fixture->audit, fixture->rosters,
-        nullptr, &error));
+        AUTHORIZATION_MASK, nullptr, &error));
     BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_SIGNATURE);
 }
 
@@ -267,7 +271,7 @@ BOOST_AUTO_TEST_CASE(preserved_archive_is_reverified_after_restart_and_reindex)
             PaymentAuditVerificationError::NONE};
         BOOST_CHECK(!VerifyFinalPaymentAudit(
             fixture->genesis_hash, preserved, fixture->rosters,
-            nullptr, &error));
+            AUTHORIZATION_MASK, nullptr, &error));
         BOOST_CHECK(error ==
                     PaymentAuditVerificationError::INVALID_SIGNATURE);
     }
@@ -286,7 +290,7 @@ BOOST_AUTO_TEST_CASE(preserved_archive_is_reverified_after_restart_and_reindex)
             PaymentAuditVerificationError::NONE};
         BOOST_CHECK(!VerifyFinalPaymentAudit(
             fixture->genesis_hash, *loaded, fixture->rosters,
-            nullptr, &error));
+            AUTHORIZATION_MASK, nullptr, &error));
         BOOST_CHECK(error ==
                     PaymentAuditVerificationError::INVALID_SIGNATURE);
     }
@@ -347,6 +351,7 @@ BOOST_AUTO_TEST_CASE(real_c11_share_verifies_and_enters_collector)
         PaymentAuditVerificationError::INVALID_ARGUMENT};
     const auto check{PreparePaymentAuditShareVerification(
         fixture->genesis_hash, share, fixture->rosters,
+        AUTHORIZATION_MASK,
         &verification_error)};
     BOOST_REQUIRE(check);
     BOOST_CHECK(verification_error == PaymentAuditVerificationError::NONE);
@@ -358,13 +363,77 @@ BOOST_AUTO_TEST_CASE(real_c11_share_verifies_and_enters_collector)
         ShareCollectionError::INVALID_ARGUMENT};
     auto collector{PaymentAuditCollector::Create(
         fixture->genesis_hash, fixture->audit.statement, fixture->seal,
-        rosters, &collection_error)};
+        rosters, AUTHORIZATION_MASK, &collection_error)};
     BOOST_REQUIRE(collector);
     BOOST_CHECK(collection_error == ShareCollectionError::NONE);
     BOOST_CHECK(collector->AddVerifiedShare(share, &collection_error) ==
                 ShareCollectionResult::ACCEPTED);
     BOOST_CHECK(collection_error == ShareCollectionError::NONE);
     BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 1U);
+
+    auto unauthorized_share{share};
+    unauthorized_share.transcript.quorum_epoch =
+        fixture->rosters[3].descriptor.epoch;
+    unauthorized_share.transcript.quorum_base_hash =
+        fixture->rosters[3].descriptor.base_hash;
+    unauthorized_share.transcript.member_pro_tx_hash =
+        fixture->rosters[3].members[0].pro_tx_hash;
+    BOOST_CHECK(collector->AddVerifiedShare(
+                    unauthorized_share, &collection_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(collection_error == ShareCollectionError::INVALID_CONTEXT);
+
+    llmq::CPQSignerJournal journal{
+        m_path_root / "pq_payment_audit_signer_unauthorized"};
+    PaymentAuditShareSigner signer{
+        fixture->genesis_hash, member.pro_tx_hash,
+        ChainLockScheduleConfig{.epoch_origin = 0}, journal};
+    ChainLockSigningError signing_error{ChainLockSigningError::NONE};
+    BOOST_CHECK(!signer.Sign(
+        fixture->audit.statement,
+        fixture->audit.report_witnesses[0].observed_members,
+        fixture->seal, fixture->rosters, AUTHORIZATION_MASK, 3, 0,
+        secret_key, authorization.proof, std::nullopt,
+        &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::INACTIVE_QUORUM);
+    BOOST_CHECK(!journal.GetBranchLock(
+        fixture->genesis_hash, member.pro_tx_hash));
+
+    auto skipped_statement{fixture->audit.statement};
+    skipped_statement.seal_statement.previous_chainlock_height -= 5;
+    auto skipped_seal{fixture->seal};
+    skipped_seal.statement = skipped_statement.seal_statement;
+    BOOST_REQUIRE(skipped_statement.IsStructurallyValid());
+    BOOST_REQUIRE(skipped_seal.IsStructurallyValid());
+    BOOST_CHECK(!signer.Sign(
+        skipped_statement,
+        fixture->audit.report_witnesses[0].observed_members,
+        skipped_seal, fixture->rosters, AUTHORIZATION_MASK, 0, 0,
+        secret_key, authorization.proof, std::nullopt,
+        &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::INELIGIBLE_HEIGHT);
+    BOOST_CHECK(!journal.GetBranchLock(
+        fixture->genesis_hash, member.pro_tx_hash));
+}
+
+BOOST_AUTO_TEST_CASE(audit_selection_cannot_exceed_predecessor_authorization)
+{
+    auto fixture{MakeFixture()};
+    PaymentAuditVerificationError error{
+        PaymentAuditVerificationError::NONE};
+    BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
+        fixture->genesis_hash, fixture->audit, fixture->rosters,
+        0b0011, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
+
+    fixture->audit.selected_quorum_mask = 0b1011;
+    fixture->audit.signer_bitmaps[3] = fixture->audit.signer_bitmaps[2];
+    fixture->audit.signer_bitmaps[2].fill(0);
+    BOOST_REQUIRE(fixture->audit.IsStructurallyValid());
+    BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
+        fixture->genesis_hash, fixture->audit, fixture->rosters,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

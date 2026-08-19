@@ -11,7 +11,7 @@
 
 namespace Consensus {
 
-enum class PQLegacyAnchorResult {
+enum class PQAnchorResult {
     DISABLED,
     VALID,
     INVALID_CONFIGURATION,
@@ -22,7 +22,7 @@ enum class PQLegacyAnchorResult {
 
 // SYSCOIN: Configuration validation is chain-independent so parameter
 // construction cannot import branch-navigation dependencies.
-inline PQLegacyAnchorResult CheckPQLegacyAnchorConfiguration(
+inline PQAnchorResult CheckPQLegacyAnchorConfiguration(
     const Params& params)
 {
     const bool disabled_height{
@@ -31,18 +31,40 @@ inline PQLegacyAnchorResult CheckPQLegacyAnchorConfiguration(
                            params.hashPQLegacyMNState.IsNull() &&
                            params.hashPQLegacyPQRegistryState.IsNull()};
     if (disabled_height) {
-        return null_hashes ? PQLegacyAnchorResult::DISABLED
-                           : PQLegacyAnchorResult::INVALID_CONFIGURATION;
+        return null_hashes ? PQAnchorResult::DISABLED
+                           : PQAnchorResult::INVALID_CONFIGURATION;
     }
     if (params.hashPQLegacyAnchorBlock.IsNull() ||
         params.hashPQLegacyMNState.IsNull() ||
         params.hashPQLegacyPQRegistryState.IsNull()) {
-        return PQLegacyAnchorResult::INVALID_CONFIGURATION;
+        return PQAnchorResult::INVALID_CONFIGURATION;
     }
     if (params.nPQLegacyAnchorHeight < params.DIP0003Height) {
-        return PQLegacyAnchorResult::INVALID_CONFIGURATION;
+        return PQAnchorResult::INVALID_CONFIGURATION;
     }
-    return PQLegacyAnchorResult::VALID;
+    return PQAnchorResult::VALID;
+}
+
+inline PQAnchorResult CheckPQChainLockAnchorConfiguration(
+    const Params& params)
+{
+    const bool disabled_height{
+        params.nPQChainLockAnchorHeight == std::numeric_limits<int>::max()};
+    if (disabled_height) {
+        return params.hashPQChainLockAnchorBlock.IsNull()
+            ? PQAnchorResult::DISABLED
+            : PQAnchorResult::INVALID_CONFIGURATION;
+    }
+    if (params.hashPQChainLockAnchorBlock.IsNull() ||
+        CheckPQLegacyAnchorConfiguration(params) !=
+            PQAnchorResult::VALID ||
+        params.nPQChainLockAnchorHeight < params.nPQLegacyAnchorHeight ||
+        (params.nPQChainLockAnchorHeight == params.nPQLegacyAnchorHeight &&
+         params.hashPQChainLockAnchorBlock !=
+             params.hashPQLegacyAnchorBlock)) {
+        return PQAnchorResult::INVALID_CONFIGURATION;
+    }
+    return PQAnchorResult::VALID;
 }
 
 } // namespace Consensus

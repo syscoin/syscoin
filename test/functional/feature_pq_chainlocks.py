@@ -4,10 +4,11 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Live P2P coverage for post-quantum ChainLock admission and finality.
 
-The test derives a private regtest migration anchor at runtime. It never changes
-the production 400-member, 267-threshold, four-roster profile. A non-installed
-C++ helper derives four snapshots from the mined branch and signs 801 real C11
-shares; syscoind receives them only through the production P2P collector.
+The test derives private regtest migration-state and finality anchors at
+runtime. It never changes the production 400-member, 267-threshold, four-roster
+profile. A non-installed C++ helper derives four snapshots from the mined
+branch and signs 801 real C11 shares; syscoind receives them only through the
+production P2P collector.
 """
 
 import os
@@ -50,7 +51,7 @@ from test_framework.util import (
 )
 
 
-CHAINLOCK_VERSION = 2
+CHAINLOCK_VERSION = 1
 CHILD_PROFILE = 1
 QUORUM_SIZE = 400
 QUORUM_THRESHOLD = 267
@@ -74,7 +75,11 @@ CHAINLOCK_SHARE_WIRE_SIZE = 5_103
 FINAL_CHAINLOCK_WIRE_SIZE = 3_621_236
 FINAL_PAYMENT_AUDIT_WIRE_SIZE = 3_661_635
 PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 257
+PAYMENT_AUDIT_RECEIPT_VERSION = 1
+PAYMENT_PROBATION_STATE_VERSION = 1
+CHAINLOCK_PERIOD = 5
 FIRST_ELIGIBLE_TARGET_HEIGHT = 2305
+FINALITY_ANCHOR_HEIGHT = FIRST_ELIGIBLE_TARGET_HEIGHT - 1
 SIGN_LAG = 5
 EPOCH_ORIGIN = 1440
 EPOCH_BLOCKS = 288
@@ -85,22 +90,43 @@ BTCC_CANDIDATE_ORIGIN = 2315
 BTCC_CANDIDATE_PERIOD = 10
 PAYMENT_AUDIT_EPOCH = 3
 PAYMENT_AUDIT_RESPONSE_HEIGHT = 2545
+PAYMENT_AUDIT_RESPONSE_PREDECESSOR_HEIGHT = \
+    PAYMENT_AUDIT_RESPONSE_HEIGHT - CHAINLOCK_PERIOD
+PAYMENT_AUDIT_RESPONSE_EXPIRY_HEIGHT = \
+    PAYMENT_AUDIT_RESPONSE_HEIGHT + SIGN_LAG + CHAINLOCK_PERIOD
 PAYMENT_AUDIT_ANCHOR_HEIGHT = 2575
+PAYMENT_AUDIT_ANCHOR_PREDECESSOR_HEIGHT = \
+    PAYMENT_AUDIT_ANCHOR_HEIGHT - CHAINLOCK_PERIOD
+PAYMENT_AUDIT_SEED_CARRIER_HEIGHT = PAYMENT_AUDIT_ANCHOR_HEIGHT + 10
 PAYMENT_AUDIT_SEAL_HEIGHT = 2820
+PAYMENT_AUDIT_SEAL_PREDECESSOR_HEIGHT = \
+    PAYMENT_AUDIT_SEAL_HEIGHT - CHAINLOCK_PERIOD
 PAYMENT_AUDIT_CARRIER_HEIGHT = 2835
 PAYMENT_AUDIT_POST_TARGET_HEIGHT = 2840
+PAYMENT_AUDIT_POST_PREDECESSOR_HEIGHT = \
+    PAYMENT_AUDIT_POST_TARGET_HEIGHT - CHAINLOCK_PERIOD
 PAYMENT_AUDIT_POST_SIGNING_HEIGHT = 2845
-LOGICAL_ID_DOMAIN = b"SYS_PQ_CHAINLOCK_LOGICAL_ID_V2"
+CURRENT_CATCHUP_PREDECESSOR_HEIGHT = \
+    FIRST_ELIGIBLE_TARGET_HEIGHT + CHAINLOCK_PERIOD
+CURRENT_CATCHUP_TARGET_HEIGHT = \
+    CURRENT_CATCHUP_PREDECESSOR_HEIGHT + CHAINLOCK_PERIOD
+CURRENT_CATCHUP_TIP_HEIGHT = CURRENT_CATCHUP_TARGET_HEIGHT + SIGN_LAG
+LOGICAL_ID_DOMAIN = b"SYS_PQ_CHAINLOCK_LOGICAL_ID_V1"
 SHARE_BUNDLE_MAGIC = 0x315246534C435150
 SHARE_BUNDLE_VERSION = 1
 SHARE_BUNDLE_MAX_SIZE = 8 << 20
 SHARE_BUNDLE_CHECKSUM_DOMAIN = b"SYS_PQ_CHAINLOCK_SHARE_FIXTURE_V1"
-PAYMENT_PROBATION_STATE_HASH_DOMAIN = b"SYS_PQ_PAYMENT_PROBATION_STATE_V2"
+PAYMENT_PROBATION_STATE_HASH_DOMAIN = b"SYS_PQ_PAYMENT_PROBATION_STATE_V1"
 PAYMENT_AUDIT_BUNDLE_MAGIC = 0x3154414550505153
-PAYMENT_AUDIT_BUNDLE_VERSION = 2
+PAYMENT_AUDIT_BUNDLE_VERSION = 1
 PAYMENT_AUDIT_BUNDLE_MAX_SIZE = 24 << 20
 PAYMENT_AUDIT_BUNDLE_CHECKSUM_DOMAIN = \
     b"SYS_PQ_PAYMENT_AUDIT_FUNCTIONAL_FIXTURE_V1"
+PAYMENT_AUDIT_PREFIX_BUNDLE_MAGIC = 0x3158465250505153
+PAYMENT_AUDIT_PREFIX_BUNDLE_VERSION = 1
+PAYMENT_AUDIT_PREFIX_BUNDLE_MAX_SIZE = 8 << 20
+PAYMENT_AUDIT_PREFIX_BUNDLE_CHECKSUM_DOMAIN = \
+    b"SYS_PQ_PAYMENT_AUDIT_PREFIX_FUNCTIONAL_FIXTURE_V1"
 POST_CHAINLOCK_BUNDLE_MAGIC = 0x3154534F50435153
 POST_CHAINLOCK_BUNDLE_VERSION = 1
 POST_CHAINLOCK_BUNDLE_CHECKSUM_DOMAIN = \
@@ -136,7 +162,7 @@ def serialize_payment_audit_receipt_state():
 def empty_payment_probation_state_hash():
     # version, null cursor (including its canonical null identity), count=0
     state = (
-        struct.pack("<HB", 2, 0)
+        struct.pack("<HB", PAYMENT_PROBATION_STATE_VERSION, 0)
         + struct.pack("<Ii", 0, -1)
         + ser_uint256(0)
         + struct.pack("<H", 0)
@@ -305,28 +331,50 @@ class PQChainLocksTest(SyscoinTestFramework):
         node = self.nodes[0]
         address = node.get_deterministic_priv_key().address
         self.generatetoaddress(node, 1, address, sync_fun=self.no_op)
-        anchor = node.protx_migration_info()
-        assert_equal(anchor["height"], 1)
+        migration_anchor = node.protx_migration_info()
+        assert_equal(migration_anchor["height"], 1)
 
         registration_cutoff_blocks = 288
         # SYSCOIN: roster membership is sampled only after root registration closes.
         roster_snapshot_lag = 288
         assert registration_cutoff_blocks >= roster_snapshot_lag
-        pq_args = self.base_args + [
-            "-pqlegacyanchorheight=%d" % anchor["height"],
-            "-pqlegacyanchorblockhash=%s" % anchor["blockHash"],
-            "-pqlegacydmnstatehash=%s" % anchor["dmnStateHash"],
-            "-pqlegacypqregistrystatehash=%s" % anchor["pqRegistryStateHash"],
+        profile_args = self.base_args + [
+            "-pqlegacyanchorheight=%d" % migration_anchor["height"],
+            "-pqlegacyanchorblockhash=%s" % migration_anchor["blockHash"],
+            "-pqlegacydmnstatehash=%s" % migration_anchor["dmnStateHash"],
+            "-pqlegacypqregistrystatehash=%s" %
+            migration_anchor["pqRegistryStateHash"],
             "-pqpreparationheight=1",
             "-pqchainlockepochorigin=1440",
             "-pqregistrationcutoffblocks=%d" % registration_cutoff_blocks,
             "-pqrostersnapshotlag=%d" % roster_snapshot_lag,
             "-pqfuturehorizonepochs=8",
+        ]
+        preparation_args = profile_args + ["-pqfinalitypreparation=1"]
+        self.stop_node(0)
+        node.extra_args = list(preparation_args)
+        with node.assert_debug_log([
+                "PQ registry/quorum preparation is active on regtest; no "
+                "PQ finality service will start"]):
+            self.start_node(0, extra_args=preparation_args + ["-reindex"])
+        force_finish_mnsync(node)
+        assert_equal(node.protx_migration_info(), migration_anchor)
+        self.assert_no_chainlock_rpcs(node)
+
+        self.generatetoaddress(
+            node, FINALITY_ANCHOR_HEIGHT - node.getblockcount(), address,
+            sync_fun=self.no_op)
+        assert_equal(node.getblockcount(), FINALITY_ANCHOR_HEIGHT)
+        finality_anchor = {
+            "height": FINALITY_ANCHOR_HEIGHT,
+            "blockHash": node.getblockhash(FINALITY_ANCHOR_HEIGHT),
+        }
+        pq_args = profile_args + [
+            "-pqchainlockanchorheight=%d" % finality_anchor["height"],
+            "-pqchainlockanchorblockhash=%s" % finality_anchor["blockHash"],
             "-pqbtcccandidateorigin=%d" % BTCC_CANDIDATE_ORIGIN,
-            # SYSCOIN: A distinct empty BTCC receipt boundary is mandatory
-            # before the first scheduled carrier can exist.
-            "-pqbtccreceiptanchorheight=%d" % anchor["height"],
-            "-pqbtccreceiptanchorblockhash=%s" % anchor["blockHash"],
+            "-pqbtccreceiptanchorheight=%d" % finality_anchor["height"],
+            "-pqbtccreceiptanchorblockhash=%s" % finality_anchor["blockHash"],
             "-pqbtccreceiptanchorcursorheight=-1",
             "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
@@ -336,12 +384,18 @@ class PQChainLocksTest(SyscoinTestFramework):
         self.extra_args[0] = pq_args
         node.extra_args = list(pq_args)
         self.start_node(0, extra_args=pq_args + ["-reindex"])
-        assert_equal(node.protx_migration_info(), anchor)
+        assert_equal(node.getblockhash(migration_anchor["height"]),
+                     migration_anchor["blockHash"])
+        tip_state = node.protx_migration_info()
+        assert_equal(tip_state["height"], finality_anchor["height"])
+        assert_equal(tip_state["blockHash"], finality_anchor["blockHash"])
+        assert_equal(node.getblockhash(finality_anchor["height"]),
+                     finality_anchor["blockHash"])
 
         node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
         self.generatetoaddress(node, 1, address, sync_fun=self.no_op)
         self.assert_no_chainlock_rpcs(node)
-        return anchor
+        return migration_anchor, finality_anchor
 
     def test_rpc_compatibility_without_winner(self, anchor):
         node = self.nodes[0]
@@ -353,8 +407,8 @@ class PQChainLocksTest(SyscoinTestFramework):
         )
 
         anchor_coinbase = node.getblock(anchor["blockHash"], 2)["tx"][0]["txid"]
-        # The migration anchor is the explicitly assumed historical finality
-        # boundary. It remains final even though no post-fork PQ winner exists.
+        # The migration block is an ancestor of the separately pinned finality
+        # predecessor. It remains final even though no PQ winner exists yet.
         assert_equal(
             node.gettxchainlocks([anchor_coinbase]),
             [{"height": anchor["height"], "chainlock": True,
@@ -368,15 +422,15 @@ class PQChainLocksTest(SyscoinTestFramework):
             -8, "Up to 100 txids only", node.gettxchainlocks,
             ["%064x" % (index + 1) for index in range(101)])
 
-    def test_share_admission(self, anchor):
+    def test_share_admission(self, finality_anchor):
         node = self.nodes[0]
         dmn_state_before = node.protx_migration_info()["dmnStateHash"]
         identity = 0x11
         statement_fields = (
             FIRST_ELIGIBLE_TARGET_HEIGHT,
             0x41,
-            anchor["height"],
-            int(anchor["blockHash"], 16),
+            finality_anchor["height"],
+            int(finality_anchor["blockHash"], 16),
             0x42,
         )
 
@@ -438,15 +492,15 @@ class PQChainLocksTest(SyscoinTestFramework):
         peer.wait_for_getdata([logical_hash], timeout=15)
         assert_equal(peer.last_message["getdata"].inv[0].type, MSG_CLSIG)
 
-    def test_final_chainlock_admission(self, anchor):
+    def test_final_chainlock_admission(self, finality_anchor):
         node = self.nodes[0]
         genesis_hash = int(node.getblockhash(0), 16)
-        previous_hash = int(anchor["blockHash"], 16)
+        previous_hash = int(finality_anchor["blockHash"], 16)
 
         requested_statement = serialize_statement(
             FIRST_ELIGIBLE_TARGET_HEIGHT,
             0x51,
-            anchor["height"],
+            finality_anchor["height"],
             previous_hash,
             0x52,
         )
@@ -472,7 +526,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         wrong_statement = serialize_statement(
             FIRST_ELIGIBLE_TARGET_HEIGHT,
             0x53,
-            anchor["height"],
+            finality_anchor["height"],
             previous_hash,
             0x52,
         )
@@ -611,6 +665,54 @@ class PQChainLocksTest(SyscoinTestFramework):
         }
 
     @staticmethod
+    def _decode_btcc_receipt(receipt):
+        assert_equal(len(receipt), BTCC_RECEIPT_WIRE_SIZE)
+        version, target_height = struct.unpack_from("<Hi", receipt, 0)
+        offset = struct.calcsize("<Hi")
+        target_hash = uint256_from_str(receipt[offset:offset + 32])
+        offset += 32
+        logical_hash = uint256_from_str(receipt[offset:offset + 32])
+        offset += 32
+        cursor_height = struct.unpack_from("<i", receipt, offset)[0]
+        offset += 4
+        cursor_sys_hash = uint256_from_str(receipt[offset:offset + 32])
+        offset += 32
+        cursor_btc_hash = uint256_from_str(receipt[offset:offset + 32])
+        offset += 32
+        assert_equal(offset, len(receipt))
+        return {
+            "version": version,
+            "target_height": target_height,
+            "target_hash": target_hash,
+            "logical_hash": logical_hash,
+            "cursor_height": cursor_height,
+            "cursor_sys_hash": cursor_sys_hash,
+            "cursor_btc_hash": cursor_btc_hash,
+        }
+
+    @staticmethod
+    def _decode_btcc_receipt_state(receipt_state):
+        assert_equal(len(receipt_state), BTCC_RECEIPT_STATE_SIZE)
+        cursor_height = struct.unpack_from("<i", receipt_state, 0)[0]
+        offset = 4
+        cursor_sys_hash = uint256_from_str(
+            receipt_state[offset:offset + 32])
+        offset += 32
+        cursor_btc_hash = uint256_from_str(
+            receipt_state[offset:offset + 32])
+        offset += 32
+        cumulative_hash = uint256_from_str(
+            receipt_state[offset:offset + 32])
+        offset += 32
+        assert_equal(offset, len(receipt_state))
+        return {
+            "cursor_height": cursor_height,
+            "cursor_sys_hash": cursor_sys_hash,
+            "cursor_btc_hash": cursor_btc_hash,
+            "cumulative_hash": cumulative_hash,
+        }
+
+    @staticmethod
     def _decode_payment_audit_receipt_state(receipt_state):
         assert_equal(len(receipt_state), PAYMENT_AUDIT_RECEIPT_STATE_SIZE)
         carrier_height, epoch = struct.unpack_from("<iI", receipt_state, 0)
@@ -670,6 +772,10 @@ class PQChainLocksTest(SyscoinTestFramework):
         receipt = body[offset:offset + PAYMENT_AUDIT_RECEIPT_WIRE_SIZE]
         assert_equal(len(receipt), PAYMENT_AUDIT_RECEIPT_WIRE_SIZE)
         offset += PAYMENT_AUDIT_RECEIPT_WIRE_SIZE
+        btcc_receipt_state = body[
+            offset:offset + BTCC_RECEIPT_STATE_SIZE]
+        assert_equal(len(btcc_receipt_state), BTCC_RECEIPT_STATE_SIZE)
+        offset += BTCC_RECEIPT_STATE_SIZE
         receipt_state = body[
             offset:offset + PAYMENT_AUDIT_RECEIPT_STATE_SIZE]
         assert_equal(len(receipt_state), PAYMENT_AUDIT_RECEIPT_STATE_SIZE)
@@ -678,6 +784,8 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(offset, len(body))
 
         decoded_receipt = cls._decode_payment_audit_receipt(receipt)
+        decoded_btcc_state = cls._decode_btcc_receipt_state(
+            btcc_receipt_state)
         decoded_state = cls._decode_payment_audit_receipt_state(
             receipt_state)
         assert_equal(decoded_receipt["audit_logical_hash"],
@@ -713,11 +821,32 @@ class PQChainLocksTest(SyscoinTestFramework):
             "audit_witness_hash": audit_witness_hash,
             "audit_certificate": audit_certificate,
             "receipt": receipt,
+            "btcc_receipt_state": btcc_receipt_state,
+            "decoded_btcc_receipt_state": decoded_btcc_state,
             "receipt_state": receipt_state,
             "decoded_receipt": decoded_receipt,
             "decoded_receipt_state": decoded_state,
             "probation_state_hash": probation_state_hash,
         }
+
+    @classmethod
+    def read_payment_audit_prefix_bundle(cls, path):
+        data = Path(path).read_bytes()
+        assert len(data) <= PAYMENT_AUDIT_PREFIX_BUNDLE_MAX_SIZE
+        assert len(data) > 32
+        body, checksum = data[:-32], data[-32:]
+        assert_equal(
+            hash256(PAYMENT_AUDIT_PREFIX_BUNDLE_CHECKSUM_DOMAIN + body),
+            checksum,
+        )
+        magic, version = struct.unpack_from("<QH", body, 0)
+        assert_equal(magic, PAYMENT_AUDIT_PREFIX_BUNDLE_MAGIC)
+        assert_equal(version, PAYMENT_AUDIT_PREFIX_BUNDLE_VERSION)
+        offset = struct.calcsize("<QH")
+        response, offset = cls._read_chainlock_artifact(body, offset)
+        anchor, offset = cls._read_chainlock_artifact(body, offset)
+        assert_equal(offset, len(body))
+        return {"response": response, "anchor": anchor}
 
     @classmethod
     def read_post_chainlock_bundle(cls, path):
@@ -759,7 +888,7 @@ class PQChainLocksTest(SyscoinTestFramework):
             "probation_state_hash": probation_state_hash,
         }
 
-    def generate_full_dimension_fixture(self, anchor):
+    def generate_full_dimension_fixture(self, finality_anchor):
         node = self.nodes[0]
         address = node.get_deterministic_priv_key().address
         # ChainLock targets require exact governance provenance. Rapid mining
@@ -804,8 +933,8 @@ class PQChainLocksTest(SyscoinTestFramework):
             genesis_hash,
             str(FIRST_ELIGIBLE_TARGET_HEIGHT),
             target_hash,
-            str(anchor["height"]),
-            anchor["blockHash"],
+            str(finality_anchor["height"]),
+            finality_anchor["blockHash"],
             str(EPOCH_ORIGIN),
             str(REGISTRATION_CUTOFF_BLOCKS),
             str(ROSTER_SNAPSHOT_LAG),
@@ -900,6 +1029,25 @@ class PQChainLocksTest(SyscoinTestFramework):
                 return output, pushes
         raise AssertionError("coinbase commitment output not found")
 
+    def read_btcc_receipt(self, block_hash):
+        raw = bytes.fromhex(self.nodes[0].getblock(block_hash, 0))
+        stream = BytesIO(raw)
+        block = CBlock()
+        block.deserialize(stream)
+        _, pushes = self.coinbase_commitment_data(block)
+        extra = pushes[-1]
+        btcc_offset = extra.rfind(b"btcr")
+        btcprev_offset = extra.rfind(b"btcp")
+        assert btcc_offset >= 0
+        assert_equal(
+            btcc_offset + 4 + BTCC_RECEIPT_WIRE_SIZE,
+            btcprev_offset,
+        )
+        receipt = extra[
+            btcc_offset + 4:btcc_offset + 4 + BTCC_RECEIPT_WIRE_SIZE]
+        assert_equal(len(receipt), BTCC_RECEIPT_WIRE_SIZE)
+        return receipt, self._decode_btcc_receipt(receipt)
+
     def attach_auxpow(self, block, previous_height, btcprev_hash=None):
         node = self.nodes[0]
         block.mark_auxpow()
@@ -924,25 +1072,29 @@ class PQChainLocksTest(SyscoinTestFramework):
         block.auxpow = CAuxPow()
         block.auxpow.deserialize(BytesIO(bytes.fromhex(encoded)))
 
-    def prepare_competing_work(self):
+    def prepare_competing_work(
+            self, fork_base_height=FIRST_ELIGIBLE_TARGET_HEIGHT - 1):
         """Admit and fully validate a fork before it is quarantined."""
         node = self.nodes[0]
         canonical_tip = node.getbestblockhash()
         canonical_height = node.getblockcount()
-        fork_base_height = FIRST_ELIGIBLE_TARGET_HEIGHT - 1
         previous_hash = int(node.getblockhash(fork_base_height), 16)
         competing_blocks = []
 
-        for height in range(FIRST_ELIGIBLE_TARGET_HEIGHT,
+        for height in range(fork_base_height + 1,
                             canonical_height + 1):
+            stream = BytesIO(bytes.fromhex(
+                node.getblock(node.getblockhash(height), 0)))
             block = CBlock()
-            block.deserialize(BytesIO(bytes.fromhex(
-                node.getblock(node.getblockhash(height), 0))))
+            block.deserialize(stream)
+            sidecar = stream.read()
             block.hashPrevBlock = previous_hash
             block.nNonce = (block.nNonce + height + 1) & 0xffffffff
-            self.attach_auxpow(block, height - 1)
+            btcprev = self.payment_btcprev(height) \
+                if self.is_btcc_candidate(height) else None
+            self.attach_auxpow(block, height - 1, btcprev)
             assert block.hash != node.getblockhash(height)
-            result = node.submitblock(block.serialize().hex())
+            result = node.submitblock((block.serialize() + sidecar).hex())
             assert result in (None, "inconclusive"), result
             previous_hash = block.sha256
             competing_blocks.append(block)
@@ -1001,10 +1153,10 @@ class PQChainLocksTest(SyscoinTestFramework):
         )
         assert_equal(side_tip["status"], "invalid")
 
-    def test_full_dimension_collection(self, anchor):
+    def test_full_dimension_collection(self, finality_anchor):
         node = self.nodes[0]
         target_hash, fixture_args, bundle = \
-            self.generate_full_dimension_fixture(anchor)
+            self.generate_full_dimension_fixture(finality_anchor)
         canonical_tip, competing_blocks = self.prepare_competing_work()
         dmn_state_before = node.protx_migration_info()["dmnStateHash"]
 
@@ -1052,7 +1204,8 @@ class PQChainLocksTest(SyscoinTestFramework):
             node.protx_migration_info()["dmnStateHash"], dmn_state_before)
         self.assert_no_chainlock_rpcs(node)
 
-        with node.assert_debug_log(["accepted PQ ChainLock"]):
+        with node.assert_debug_log(
+                ["accepted PQ ChainLock"], timeout=1200):
             sender.send_and_ping(
                 msg_pqclshare(bundle["shares"][-1]), timeout=600)
         observer.wait_until(
@@ -1112,17 +1265,163 @@ class PQChainLocksTest(SyscoinTestFramework):
 
     def generate_payment_audit_fixture(self):
         node = self.nodes[0]
-        assert_equal(node.getblockcount(), FIRST_ELIGIBLE_TARGET_HEIGHT + 6)
+        assert node.getblockcount() >= FIRST_ELIGIBLE_TARGET_HEIGHT + 6
         # The preceding persistence check restarts the daemon. Finish MN sync
         # before mining so every superblock in the attested range receives
         # exact governance provenance, not only script validity.
         force_finish_mnsync(node)
-        self.mine_pq_to_height(PAYMENT_AUDIT_SEAL_HEIGHT + 5)
+        self.mine_pq_to_height(PAYMENT_AUDIT_ANCHOR_HEIGHT + SIGN_LAG)
 
         genesis_hash = node.getblockhash(0)
-        predecessor_hash = node.getblockhash(FIRST_ELIGIBLE_TARGET_HEIGHT)
+        branch_anchor_hash = node.getblockhash(
+            FIRST_ELIGIBLE_TARGET_HEIGHT)
+        response_predecessor_hash = node.getblockhash(
+            PAYMENT_AUDIT_RESPONSE_PREDECESSOR_HEIGHT)
         response_hash = node.getblockhash(PAYMENT_AUDIT_RESPONSE_HEIGHT)
+        anchor_predecessor_hash = node.getblockhash(
+            PAYMENT_AUDIT_ANCHOR_PREDECESSOR_HEIGHT)
         anchor_hash = node.getblockhash(PAYMENT_AUDIT_ANCHOR_HEIGHT)
+        prefix_base_heights = [
+            EPOCH_ORIGIN + epoch * EPOCH_BLOCKS
+            for epoch in range(ACTIVE_QUORUMS)
+        ]
+        prefix_snapshot_heights = [
+            height - ROSTER_SNAPSHOT_LAG
+            for height in prefix_base_heights
+        ]
+        prefix_base_hashes = [
+            node.getblockhash(height) for height in prefix_base_heights
+        ]
+        prefix_snapshot_hashes = [
+            node.getblockhash(height) for height in prefix_snapshot_heights
+        ]
+
+        helper = os.path.join(
+            self.config["environment"]["BUILDDIR"], "src", "test",
+            "pq_chainlock_fixture" + self.config["environment"]["EXEEXT"],
+        )
+        assert os.path.isfile(helper), "missing pq_chainlock_fixture test helper"
+        prefix_snapshot_path = os.path.join(
+            self.options.tmpdir,
+            "pq-payment-audit-prefix-snapshots.dat",
+        )
+        prefix_bundle_path = os.path.join(
+            self.options.tmpdir, "pq-payment-audit-prefix-bundle.dat")
+
+        self.stop_node(0)
+        prefix_command = [
+            helper,
+            "payment-audit-prefix",
+            prefix_snapshot_path,
+            prefix_bundle_path,
+            genesis_hash,
+            str(FIRST_ELIGIBLE_TARGET_HEIGHT),
+            branch_anchor_hash,
+            str(EPOCH_ORIGIN),
+            str(REGISTRATION_CUTOFF_BLOCKS),
+            str(ROSTER_SNAPSHOT_LAG),
+            str(FUTURE_HORIZON_EPOCHS),
+            str(BTCC_CANDIDATE_ORIGIN),
+            str(PAYMENT_AUDIT_EPOCH),
+            str(PAYMENT_AUDIT_RESPONSE_PREDECESSOR_HEIGHT),
+            response_predecessor_hash,
+            response_hash,
+            self.payment_btcprev(PAYMENT_AUDIT_RESPONSE_HEIGHT),
+            str(PAYMENT_AUDIT_ANCHOR_PREDECESSOR_HEIGHT),
+            anchor_predecessor_hash,
+            anchor_hash,
+            self.payment_btcprev(PAYMENT_AUDIT_ANCHOR_HEIGHT),
+            *prefix_base_hashes,
+            *prefix_snapshot_hashes,
+        ]
+        subprocess.run(
+            prefix_command, check=True, capture_output=True, text=True,
+            timeout=3600 * self.options.timeout_factor,
+        )
+        prefix = self.read_payment_audit_prefix_bundle(prefix_bundle_path)
+
+        prefix_fixture_args = [
+            arg for arg in self.extra_args[0]
+            if not arg.startswith("-pqchainlocktestfixture=")
+        ] + ["-pqchainlocktestfixture=%s" % prefix_snapshot_path]
+        self.extra_args[0] = prefix_fixture_args
+        node.extra_args = list(prefix_fixture_args)
+        with node.assert_debug_log(
+                ["Loaded branch-bound PQ ChainLock regtest fixture"]):
+            self.start_node(0, extra_args=prefix_fixture_args)
+        assert_equal(
+            node.getblockcount(),
+            PAYMENT_AUDIT_ANCHOR_HEIGHT + SIGN_LAG,
+        )
+        node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
+        force_finish_mnsync(node)
+        prefix_tip = node.getbestblockhash()
+        response_expiry_hash = node.getblockhash(
+            PAYMENT_AUDIT_RESPONSE_EXPIRY_HEIGHT)
+        # The response and anchor are separate current signing rounds. The
+        # rewind also publishes the spork update without mining past either
+        # certificate's one-window admission bound.
+        node.invalidateblock(response_expiry_hash)
+        assert_equal(
+            node.getblockcount(),
+            PAYMENT_AUDIT_RESPONSE_EXPIRY_HEIGHT - 1,
+        )
+        self.admit_chainlock_artifact(
+            prefix["response"], PAYMENT_AUDIT_RESPONSE_HEIGHT,
+            response_hash, "pq-audit-response")
+
+        node.reconsiderblock(response_expiry_hash)
+        self.wait_until(
+            lambda: node.getbestblockhash() == prefix_tip,
+            timeout=1200,
+        )
+        assert_equal(
+            node.getblockcount(),
+            PAYMENT_AUDIT_ANCHOR_HEIGHT + SIGN_LAG,
+        )
+        _, response_carrier = self.read_btcc_receipt(
+            response_expiry_hash)
+        assert_equal(response_carrier["version"], 1)
+        assert_equal(response_carrier["target_height"], -1)
+        assert_equal(response_carrier["target_hash"], 0)
+        assert_equal(response_carrier["logical_hash"], 0)
+        assert_equal(response_carrier["cursor_height"], -1)
+        assert_equal(response_carrier["cursor_sys_hash"], 0)
+        assert_equal(response_carrier["cursor_btc_hash"], 0)
+        self.admit_chainlock_artifact(
+            prefix["anchor"], PAYMENT_AUDIT_ANCHOR_HEIGHT,
+            anchor_hash, "pq-audit-anchor")
+
+        self.mine_pq_to_height(PAYMENT_AUDIT_SEED_CARRIER_HEIGHT)
+        seed_carrier_hash = node.getblockhash(
+            PAYMENT_AUDIT_SEED_CARRIER_HEIGHT)
+        seed_receipt, decoded_seed_receipt = self.read_btcc_receipt(
+            seed_carrier_hash)
+        assert_equal(decoded_seed_receipt["version"], 1)
+        assert_equal(
+            decoded_seed_receipt["target_height"],
+            PAYMENT_AUDIT_ANCHOR_HEIGHT,
+        )
+        assert_equal(
+            decoded_seed_receipt["target_hash"], int(anchor_hash, 16))
+        assert_equal(
+            decoded_seed_receipt["logical_hash"],
+            prefix["anchor"]["logical_hash"],
+        )
+        assert_equal(
+            decoded_seed_receipt["cursor_height"],
+            PAYMENT_AUDIT_ANCHOR_HEIGHT,
+        )
+        assert_equal(
+            decoded_seed_receipt["cursor_sys_hash"], int(anchor_hash, 16))
+        assert_equal(
+            decoded_seed_receipt["cursor_btc_hash"],
+            int(self.payment_btcprev(PAYMENT_AUDIT_ANCHOR_HEIGHT), 16),
+        )
+
+        self.mine_pq_to_height(PAYMENT_AUDIT_SEAL_HEIGHT + SIGN_LAG)
+        seal_predecessor_hash = node.getblockhash(
+            PAYMENT_AUDIT_SEAL_PREDECESSOR_HEIGHT)
         seal_hash = node.getblockhash(PAYMENT_AUDIT_SEAL_HEIGHT)
         base_heights = [
             EPOCH_ORIGIN + epoch * EPOCH_BLOCKS
@@ -1135,16 +1434,10 @@ class PQChainLocksTest(SyscoinTestFramework):
         snapshot_hashes = [
             node.getblockhash(height) for height in snapshot_heights
         ]
-
         snapshot_path = os.path.join(
             self.options.tmpdir, "pq-payment-audit-snapshots.dat")
         bundle_path = os.path.join(
             self.options.tmpdir, "pq-payment-audit-bundle.dat")
-        helper = os.path.join(
-            self.config["environment"]["BUILDDIR"], "src", "test",
-            "pq_chainlock_fixture" + self.config["environment"]["EXEEXT"],
-        )
-        assert os.path.isfile(helper), "missing pq_chainlock_fixture test helper"
 
         self.stop_node(0)
         command = [
@@ -1154,20 +1447,26 @@ class PQChainLocksTest(SyscoinTestFramework):
             bundle_path,
             genesis_hash,
             str(FIRST_ELIGIBLE_TARGET_HEIGHT),
-            predecessor_hash,
-            str(FIRST_ELIGIBLE_TARGET_HEIGHT),
-            predecessor_hash,
+            branch_anchor_hash,
             str(EPOCH_ORIGIN),
             str(REGISTRATION_CUTOFF_BLOCKS),
             str(ROSTER_SNAPSHOT_LAG),
             str(FUTURE_HORIZON_EPOCHS),
             str(BTCC_CANDIDATE_ORIGIN),
             str(PAYMENT_AUDIT_EPOCH),
+            str(PAYMENT_AUDIT_RESPONSE_PREDECESSOR_HEIGHT),
+            response_predecessor_hash,
             response_hash,
             self.payment_btcprev(PAYMENT_AUDIT_RESPONSE_HEIGHT),
+            str(PAYMENT_AUDIT_ANCHOR_PREDECESSOR_HEIGHT),
+            anchor_predecessor_hash,
             anchor_hash,
             self.payment_btcprev(PAYMENT_AUDIT_ANCHOR_HEIGHT),
+            str(PAYMENT_AUDIT_SEAL_PREDECESSOR_HEIGHT),
+            seal_predecessor_hash,
             seal_hash,
+            seed_carrier_hash,
+            seed_receipt.hex(),
             *base_hashes,
             *snapshot_hashes,
         ]
@@ -1176,6 +1475,14 @@ class PQChainLocksTest(SyscoinTestFramework):
             timeout=7200 * self.options.timeout_factor,
         )
         bundle = self.read_payment_audit_bundle(bundle_path)
+        assert_equal(
+            bundle["response"]["logical_hash"],
+            prefix["response"]["logical_hash"],
+        )
+        assert_equal(
+            bundle["anchor"]["logical_hash"],
+            prefix["anchor"]["logical_hash"],
+        )
         assert_equal(bundle["epoch"], PAYMENT_AUDIT_EPOCH)
         assert_equal(bundle["selected_row"], 23)
         assert_equal(bundle["online_count"], QUORUM_MIN_VALID - 1)
@@ -1186,13 +1493,25 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(bundle["anchor_height"], PAYMENT_AUDIT_ANCHOR_HEIGHT)
         assert_equal(bundle["seal_height"], PAYMENT_AUDIT_SEAL_HEIGHT)
         assert_equal(bundle["carrier_height"], PAYMENT_AUDIT_CARRIER_HEIGHT)
-        assert_equal(bundle["decoded_receipt"]["version"], 3)
+        assert_equal(
+            bundle["decoded_receipt"]["version"],
+            PAYMENT_AUDIT_RECEIPT_VERSION,
+        )
         assert_equal(bundle["decoded_receipt"]["has_audit"], 1)
         assert_equal(bundle["decoded_receipt"]["carrier_height"],
                      PAYMENT_AUDIT_CARRIER_HEIGHT)
+        indexed_btcc = bundle["decoded_btcc_receipt_state"]
+        assert_equal(
+            indexed_btcc["cursor_height"], PAYMENT_AUDIT_ANCHOR_HEIGHT)
+        assert_equal(indexed_btcc["cursor_sys_hash"], int(anchor_hash, 16))
+        assert_equal(
+            indexed_btcc["cursor_btc_hash"],
+            int(self.payment_btcprev(PAYMENT_AUDIT_ANCHOR_HEIGHT), 16),
+        )
+        assert indexed_btcc["cumulative_hash"] != 0
 
         fixture_args = [
-            arg for arg in self.extra_args[0]
+            arg for arg in prefix_fixture_args
             if not arg.startswith("-pqchainlocktestfixture=")
         ] + ["-pqchainlocktestfixture=%s" % snapshot_path]
         self.extra_args[0] = fixture_args
@@ -1200,7 +1519,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         with node.assert_debug_log(
                 ["Loaded branch-bound PQ ChainLock regtest fixture"]):
             self.start_node(0, extra_args=fixture_args)
-        assert_equal(node.getblockcount(), PAYMENT_AUDIT_SEAL_HEIGHT + 5)
+        assert_equal(node.getblockcount(), PAYMENT_AUDIT_SEAL_HEIGHT + SIGN_LAG)
         node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
         force_finish_mnsync(node)
         # Match the full-dimension fixture path: the spork update becomes
@@ -1213,10 +1532,11 @@ class PQChainLocksTest(SyscoinTestFramework):
             "fixture_args": fixture_args,
             "bundle": bundle,
             "genesis_hash": genesis_hash,
-            "predecessor_hash": predecessor_hash,
             "response_hash": response_hash,
             "anchor_hash": anchor_hash,
             "seal_hash": seal_hash,
+            "seed_carrier_hash": seed_carrier_hash,
+            "seed_receipt": seed_receipt,
             "base_hashes": base_hashes,
             "snapshot_hashes": snapshot_hashes,
         }
@@ -1226,7 +1546,8 @@ class PQChainLocksTest(SyscoinTestFramework):
         peer = self.authenticate_peer(
             self.connect_peer(marker), marker, 0xc100 + height)
         self.request_chainlock(peer, artifact["logical_hash"])
-        with node.assert_debug_log(["accepted PQ ChainLock"]):
+        with node.assert_debug_log(
+                ["accepted PQ ChainLock"], timeout=1200):
             peer.send_and_ping(
                 msg_clsig(artifact["certificate"]), timeout=1200)
         expected_logical = "%064x" % artifact["logical_hash"]
@@ -1244,11 +1565,11 @@ class PQChainLocksTest(SyscoinTestFramework):
 
     def admit_payment_audit_chainlocks(self, context):
         bundle = context["bundle"]
+        best = self.nodes[0].getbestchainlock()
+        assert_equal(best["height"], PAYMENT_AUDIT_ANCHOR_HEIGHT)
+        assert_equal(
+            best["logicalid"], "%064x" % bundle["anchor"]["logical_hash"])
         for artifact, height, block_hash, marker in [
-            (bundle["response"], PAYMENT_AUDIT_RESPONSE_HEIGHT,
-             context["response_hash"], "pq-audit-response"),
-            (bundle["anchor"], PAYMENT_AUDIT_ANCHOR_HEIGHT,
-             context["anchor_hash"], "pq-audit-anchor"),
             (bundle["seal"], PAYMENT_AUDIT_SEAL_HEIGHT,
              context["seal_hash"], "pq-audit-seal"),
         ]:
@@ -1286,7 +1607,8 @@ class PQChainLocksTest(SyscoinTestFramework):
             audit_offset + 4 + PAYMENT_AUDIT_RECEIPT_WIRE_SIZE
         ]
         decoded_null = self._decode_payment_audit_receipt(null_receipt)
-        assert_equal(decoded_null["version"], 3)
+        assert_equal(
+            decoded_null["version"], PAYMENT_AUDIT_RECEIPT_VERSION)
         assert_equal(decoded_null["has_audit"], 0)
         assert_equal(decoded_null["online_members"], bytes(BITMAP_SIZE))
         assert_equal(
@@ -1358,22 +1680,21 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(node.getblockcount(), PAYMENT_AUDIT_CARRIER_HEIGHT)
         return carrier.hash, canonical_hash
 
-    def generate_post_audit_chainlock(self, context):
-        node = self.nodes[0]
+    def generate_payment_state_chainlock(
+            self, context, mode, output_name, target_height, target_hash,
+            predecessor_height, predecessor_hash):
         bundle = context["bundle"]
-        self.mine_pq_to_height(PAYMENT_AUDIT_POST_SIGNING_HEIGHT)
-        target_hash = node.getblockhash(PAYMENT_AUDIT_POST_TARGET_HEIGHT)
         post_path = os.path.join(
-            self.options.tmpdir, "pq-payment-audit-post-chainlock.dat")
+            self.options.tmpdir, output_name)
         command = [
             context["helper"],
-            "payment-audit-post",
+            mode,
             post_path,
             context["genesis_hash"],
-            str(PAYMENT_AUDIT_POST_TARGET_HEIGHT),
+            str(target_height),
             target_hash,
-            str(PAYMENT_AUDIT_SEAL_HEIGHT),
-            context["seal_hash"],
+            str(predecessor_height),
+            predecessor_hash,
             str(PAYMENT_AUDIT_ANCHOR_HEIGHT),
             context["anchor_hash"],
             self.payment_btcprev(PAYMENT_AUDIT_ANCHOR_HEIGHT),
@@ -1382,6 +1703,7 @@ class PQChainLocksTest(SyscoinTestFramework):
             str(ROSTER_SNAPSHOT_LAG),
             str(FUTURE_HORIZON_EPOCHS),
             str(BTCC_CANDIDATE_ORIGIN),
+            bundle["btcc_receipt_state"].hex(),
             bundle["receipt_state"].hex(),
             "%064x" % bundle["probation_state_hash"],
             *context["base_hashes"],
@@ -1392,12 +1714,28 @@ class PQChainLocksTest(SyscoinTestFramework):
             timeout=3600 * self.options.timeout_factor,
         )
         post = self.read_post_chainlock_bundle(post_path)
-        assert_equal(post["target_height"],
-                     PAYMENT_AUDIT_POST_TARGET_HEIGHT)
+        assert_equal(post["target_height"], target_height)
         assert_equal(post["target_hash"], int(target_hash, 16))
         assert_equal(post["receipt_state"], bundle["receipt_state"])
         assert_equal(post["probation_state_hash"],
                      bundle["probation_state_hash"])
+        return post
+
+    def generate_post_audit_chainlock(self, context):
+        node = self.nodes[0]
+        self.mine_pq_to_height(PAYMENT_AUDIT_POST_SIGNING_HEIGHT)
+        predecessor_hash = node.getblockhash(
+            PAYMENT_AUDIT_POST_PREDECESSOR_HEIGHT)
+        target_hash = node.getblockhash(PAYMENT_AUDIT_POST_TARGET_HEIGHT)
+        post = self.generate_payment_state_chainlock(
+            context,
+            "payment-audit-post",
+            "pq-payment-audit-post-chainlock.dat",
+            PAYMENT_AUDIT_POST_TARGET_HEIGHT,
+            target_hash,
+            PAYMENT_AUDIT_POST_PREDECESSOR_HEIGHT,
+            predecessor_hash,
+        )
         # The post-audit winner synchronously authorizes the compact archive
         # checkpoint. Wait for that durability boundary before testing that
         # the exact multi-megabyte witness has been retired.
@@ -1495,7 +1833,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         fixture_args = context["fixture_args"]
         self.restart_node(0, extra_args=fixture_args + ["-reindex"])
         # Full reindex deliberately wipes the bounded audit archive and the
-        # local CLSIG database. Receipt V3 still reconstructs the exact
+        # local CLSIG database. The compact receipt still reconstructs the exact
         # payment transition from the retained block backlog, allowing the
         # non-null carrier branch to reach its old tip without the large audit.
         assert_equal(node.getblockcount(), PAYMENT_AUDIT_POST_SIGNING_HEIGHT)
@@ -1517,8 +1855,10 @@ class PQChainLocksTest(SyscoinTestFramework):
                 "accepted PQ ChainLock",
                 "authenticated payment-audit archive through epoch",
                 ], timeout=1200):
-            provider.send_and_ping(
-                msg_clsig(post["certificate"]), timeout=1200)
+            # Enforcing the covering CLSIG invalidates this synthetic MNAUTH
+            # identity, so the transport closes before a ping round trip.
+            provider.send_message(msg_clsig(post["certificate"]))
+        provider.wait_for_disconnect(timeout=60)
         assert "getpqpose" not in provider.last_message
         self.assert_payment_audit_state(context, post, expected_tip)
         self.assert_payment_audit_retired(
@@ -1557,14 +1897,128 @@ class PQChainLocksTest(SyscoinTestFramework):
         self.restore_reindexed_payment_audit(
             context, post, expected_tip, carrier_hash, canonical_hash)
 
+    def test_current_catchup_side_branch_reorg(self):
+        node = self.nodes[0]
+        local_best = node.getbestchainlock()
+        assert_equal(local_best["height"], FIRST_ELIGIBLE_TARGET_HEIGHT)
+        assert FIRST_ELIGIBLE_TARGET_HEIGHT < \
+            CURRENT_CATCHUP_PREDECESSOR_HEIGHT
+
+        self.mine_pq_to_height(CURRENT_CATCHUP_TIP_HEIGHT)
+        canonical_tip = node.getbestblockhash()
+        canonical_target = node.getblockhash(CURRENT_CATCHUP_TARGET_HEIGHT)
+        expected_canonical_tip, competing_blocks = \
+            self.prepare_competing_work(CURRENT_CATCHUP_PREDECESSOR_HEIGHT)
+        assert_equal(expected_canonical_tip, canonical_tip)
+        assert_equal(node.getbestblockhash(), canonical_tip)
+        assert_equal(node.getblockcount(), CURRENT_CATCHUP_TIP_HEIGHT)
+
+        side_target = competing_blocks[
+            CURRENT_CATCHUP_TARGET_HEIGHT
+            - CURRENT_CATCHUP_PREDECESSOR_HEIGHT - 1
+        ].hash
+        side_tip = competing_blocks[-1].hash
+        assert side_target != canonical_target
+        assert side_tip != canonical_tip
+        assert_equal(
+            node.getblockheader(side_target)["height"],
+            CURRENT_CATCHUP_TARGET_HEIGHT,
+        )
+        predecessor_hash = node.getblockhash(
+            CURRENT_CATCHUP_PREDECESSOR_HEIGHT)
+        genesis_hash = node.getblockhash(0)
+
+        base_heights = [
+            EPOCH_ORIGIN + slot * EPOCH_BLOCKS
+            for slot in range(ACTIVE_QUORUMS)
+        ]
+        snapshot_heights = [
+            height - ROSTER_SNAPSHOT_LAG for height in base_heights
+        ]
+        base_hashes = [node.getblockhash(height) for height in base_heights]
+        snapshot_hashes = [
+            node.getblockhash(height) for height in snapshot_heights
+        ]
+        snapshot_path = os.path.join(
+            self.options.tmpdir, "pq-current-catchup-side-snapshots.dat")
+        shares_path = os.path.join(
+            self.options.tmpdir, "pq-current-catchup-side-shares.dat")
+        helper = os.path.join(
+            self.config["environment"]["BUILDDIR"], "src", "test",
+            "pq_chainlock_fixture" +
+            self.config["environment"]["EXEEXT"])
+        assert os.path.isfile(helper), \
+            "missing pq_chainlock_fixture test helper"
+
+        self.stop_node(0)
+        subprocess.run([
+            helper,
+            snapshot_path,
+            shares_path,
+            genesis_hash,
+            str(CURRENT_CATCHUP_TARGET_HEIGHT),
+            side_target,
+            str(CURRENT_CATCHUP_PREDECESSOR_HEIGHT),
+            predecessor_hash,
+            str(EPOCH_ORIGIN),
+            str(REGISTRATION_CUTOFF_BLOCKS),
+            str(ROSTER_SNAPSHOT_LAG),
+            str(FUTURE_HORIZON_EPOCHS),
+            *base_hashes,
+            *snapshot_hashes,
+        ], check=True, capture_output=True, text=True,
+            timeout=900 * self.options.timeout_factor)
+        catchup = self.read_full_dimension_bundle(shares_path)
+        fixture_args = [
+            arg for arg in self.extra_args[0]
+            if not arg.startswith("-pqchainlocktestfixture=")
+        ] + ["-pqchainlocktestfixture=%s" % snapshot_path]
+        self.extra_args[0] = fixture_args
+        node.extra_args = list(fixture_args)
+        with node.assert_debug_log(
+                ["Loaded branch-bound PQ ChainLock regtest fixture"]):
+            self.start_node(0, extra_args=fixture_args)
+        node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
+        force_finish_mnsync(node)
+        node.preciousblock(canonical_tip)
+
+        # The certificate names a fully validated side block in the current
+        # signing round. Its shared H-sign_lag boundary makes it admissible,
+        # while durable finality is still the older 2305 winner.
+        assert_equal(node.getbestblockhash(), canonical_tip)
+        assert_equal(node.getbestchainlock()["height"],
+                     FIRST_ELIGIBLE_TARGET_HEIGHT)
+        marker = "pq-current-catchup-side"
+        provider = self.authenticate_peer(
+            self.connect_peer(marker), marker, 0xc500)
+        self.request_chainlock(provider, catchup["logical_hash"])
+        with node.assert_debug_log(["accepted PQ ChainLock"], timeout=1200):
+            # Enforcing the side winner can disconnect the synthetic MNAUTH
+            # identity before a ping response, so submit without a round trip.
+            provider.send_message(msg_clsig(catchup["certificate"]))
+
+        expected_logical = "%064x" % catchup["logical_hash"]
+        self.wait_until(
+            lambda: node.getbestchainlock()["logicalid"] == expected_logical
+                    and node.getbestblockhash() == side_tip,
+            timeout=1200,
+        )
+        best = node.getbestchainlock()
+        assert_equal(best["height"], CURRENT_CATCHUP_TARGET_HEIGHT)
+        assert_equal(best["blockhash"], side_target)
+        assert_equal(node.getblockcount(), CURRENT_CATCHUP_TIP_HEIGHT)
+        assert node.getblock(side_target)["confirmations"] > 0
+        assert_equal(node.getblock(canonical_target)["confirmations"], -1)
+
     def run_test(self):
-        anchor = self.configure_private_migration()
-        self.test_rpc_compatibility_without_winner(anchor)
+        migration_anchor, finality_anchor = self.configure_private_migration()
+        self.test_rpc_compatibility_without_winner(migration_anchor)
         self.test_getclsig_requests()
-        self.test_share_admission(anchor)
-        self.test_final_chainlock_admission(anchor)
-        self.test_no_winner_survives_restart(anchor)
-        self.test_full_dimension_collection(anchor)
+        self.test_share_admission(finality_anchor)
+        self.test_final_chainlock_admission(finality_anchor)
+        self.test_no_winner_survives_restart(migration_anchor)
+        self.test_full_dimension_collection(finality_anchor)
+        self.test_current_catchup_side_branch_reorg()
         self.test_payment_audit_receipt()
 
 
