@@ -168,6 +168,13 @@ VALID_DATA = [
     ),
 ]
 
+# SYSCOIN: This inherited test selects mainnet, where the unassigned PQ profile
+# intentionally warns that compatibility replay provides no finality service.
+PUBLIC_PROFILE_WARNING = (
+    "Warning: PQ ChainLock/BTCC deployment is release-disabled on this network. "
+    "Legacy history uses compatibility replay and no ChainLock finality service will start."
+)
+
 
 class ValidateAddressMainTest(SyscoinTestFramework):
     def set_test_params(self):
@@ -197,6 +204,8 @@ class ValidateAddressMainTest(SyscoinTestFramework):
 
     def run_test(self):
         self.test_validateaddress()
+        # SYSCOIN: Preserve the operator-visible warning and assert it explicitly.
+        self.stop_node(0, expected_stderr=PUBLIC_PROFILE_WARNING)
 
 
 if __name__ == "__main__":
