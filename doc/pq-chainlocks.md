@@ -1582,27 +1582,32 @@ readable through the opaque codecs.
 ## 12. Rollout versus final activation
 
 Pre-registration and shadow operation are rollout requirements. They are not
-features retained in the final activated protocol. The code described by this
-document is already the final BLS-free target, not the BLS-authoritative
-preparatory binary. Its public-network parameters are deliberately the complete
-all-sentinel disabled profile. Supplying only part of a public profile is a
-startup error. Regtest additionally exposes one explicit preparation-only
-configuration: `H` plus the registry/quorum schedule are complete,
+features retained in the final activated protocol. This implementation is
+BLS-free. Its current public-network parameters deliberately select an
+all-sentinel compatibility-replay profile: legacy chain data remains replayable
+for sync and reindex, but no legacy or PQ ChainLock finality service starts. It
+is not an authoritative public-network upgrade, and supplying only part of a
+public activation profile remains a startup error.
+
+Regtest additionally exposes one explicit preparation-only configuration: `H`
+plus the registry/quorum schedule are complete,
 `-pqfinalitypreparation=1` is present, and every `F`, BTCC candidate, and
 receipt-assumption field remains unassigned. That state constructs no finality
 store and cannot sign, accept, restore, or enforce a PQ ChainLock.
 
-Consequently Stages A and B require a separate, BLS-capable preparation line
-(or another explicitly specified migration mechanism). They cannot be enabled
-on a public network by partially assigning parameters in this BLS-free binary.
-The regtest preparation state exists to exercise the same H-authenticated
-registry history and to derive an exact `F` before restarting with the complete
-finality profile.
+Stages A and B require a future, explicitly supported BLS-free public
+preparation profile. It is a complete rollout state in its own right, not a
+partial activation profile inferred by filling selected fields in this release.
+It starts from already-known accepted public-chain data, enables registry and
+shadow operation without finality authority, and leaves `H`, its block hash,
+and its state roots unassigned until the named block actually exists. The
+regtest preparation state remains the deterministic harness for the later
+H-authenticated registry history and exact `F` derivation.
 
 ### Stage A: preparatory release
 
-The preparatory release still contains the legacy BLS/DKG implementation because
-BLS remains authoritative while the network prepares. It adds:
+The future preparatory release contains no BLS or DKG implementation. It keeps
+only opaque compatibility replay for accepted legacy chain data and adds:
 
 - global SLH-DSA registration/rotation state;
 - fixed-depth C11 child-root commitments and automatic sentry caches;
@@ -1616,27 +1621,34 @@ BLS remains authoritative while the network prepares. It adds:
 Operators register each global key and its child root once before the required
 cutoff. There is no periodic key-maintenance transaction. Shadow PQ
 certificates are verified and compared across implementations but do not affect
-fork choice.
+fork choice. The release starts no ChainLock finality service and must not be
+operated as though it enforces either legacy or PQ finality.
 
 ### Stage B: four complete shadow epochs
 
 The network must complete at least four consecutive usable shadow epochs so the
-finality boundary already has a full four-quorum PQ active set. Each must have
+later migration boundary has a full four-quorum PQ active set. Each must have
 at least 300 valid registered roots and repeatedly demonstrate 267-member
-shares. Missing the coverage/readiness criteria delays assigning `F` and the
-complete activation manifest; it does not alter the eventual fixed epoch
-rules.
+shares. `H` remains unassigned during this phase. Missing the coverage/readiness
+criteria delays selecting `H` and the complete activation manifest; it does not
+alter the eventual fixed epoch rules.
 
 ### Stage C: anchor release
 
-After `H` and four complete shadow epochs are known, choose a deeply finalized
-`F` that descends from `H`, covers the initial roster authorization points, and
-precedes the first BTCC candidate source. Freeze a complete activation manifest
-that pins `H`, its exact block hash and both state roots, `F` and its exact block
-hash, minimum chainwork, epoch/BTCC origins, roster parameters, and the separate
-BTCC receipt assumption `R`. `defaultAssumeValid` must not exceed `H` and must
-remain strictly below `R`. Reproducible tools must independently derive every
-value from the public chain.
+After four complete shadow epochs, select `H` only after that exact block has
+been mined and ChainLocked on the intended public chain. Reproduce its exact
+block hash and both state roots from that chain; never predict a future `H`,
+hash, or root. The cutover is coordinated so `H` is the last block accepted
+under legacy-authority rules and `H+1` is the first post-quantum block; choosing
+an older `H` after legacy descendants already exist would be a retroactive fork
+and is forbidden. Choose an observed `F` at or after `H` that covers the initial
+roster authorization points and precedes the first BTCC candidate source.
+Freeze a complete activation manifest that pins `H`, its
+exact block hash and both state roots, `F` and its exact block hash, minimum
+chainwork, epoch/BTCC origins, roster parameters, and the separate BTCC receipt
+assumption `R`. `defaultAssumeValid` must not exceed `H` and must remain strictly
+below `R`. Reproducible tools must independently derive every value from the
+public chain.
 
 The boundary is unambiguous:
 
@@ -1656,9 +1668,11 @@ Publish the BLS-free activation release only with the complete manifest. The
 only remaining legacy support is the isolated opaque decoder/state-transition
 module for heights through `H`. Nodes sync from genesis without a centrally
 distributed state snapshot, verify the mandatory block and state roots at `H`,
-then verify the separate immutable block at `F` before finality can start. A
-release that still has the all-sentinel profile remains intentionally disabled;
-a partially populated profile must never start.
+then verify the separate immutable block at `F` before finality can start. An
+all-sentinel release remains a non-authoritative compatibility-replay/sync
+build, and a partially populated public profile must never start. The future
+preparation release must identify its no-finality profile explicitly rather
+than weakening that partial-profile check.
 
 Old peers may remain ordinary block-relay peers if otherwise compatible, but
 they cannot authenticate as quorum peers or contribute to ChainLocks after
@@ -1702,10 +1716,12 @@ The implementation must preserve these invariants:
     and paired Geth execution, durably retains the exact replay inputs, and
     permits base Syscoin sync to continue until an exact or covering certificate
     is supplied and verified.
-15. A public deployment is either the deliberate all-sentinel disabled profile
-    or a complete, internally consistent `H`/`F`/`R`, schedule, and roster
-    profile. Preparation-only configuration is regtest-scoped and creates no
-    finality service.
+15. An authoritative public finality deployment has a complete, internally
+    consistent `H`/`F`/`R`, schedule, and roster profile. The current
+    all-sentinel profile is non-authoritative compatibility replay/sync, and
+    current partial public profiles fail startup. A future BLS-free public
+    preparation profile must be explicitly defined as a complete no-finality
+    rollout state; it is never inferred from a partial activation profile.
 16. Payment-audit state is keyed by collateral identity and branch history.
     Process restart, connection churn, IP changes, and local cache loss never
     erase a miss, while an authenticated later positive may clear it.
@@ -2044,11 +2060,16 @@ Expected failures are fail-closed:
 - Old/new peer interoperability before `H` and deterministic rejection or
   ordinary-peer downgrade after `H`.
 - Fresh genesis sync without an externally supplied deterministic-MN snapshot.
-- Public all-sentinel parameters start with PQ finality disabled and any
-  partial public profile fails. Regtest with no PQ argument stays disabled;
-  explicit preparation accepts only complete `H` plus registry/quorum fields
-  and proves that no finality store/signing/admission/enforcement exists; full
-  regtest activation requires complete `H`, `F`, `R`, and schedule fields.
+- Public all-sentinel parameters replay historical commitments and legacy
+  provider payloads through sync/reindex while starting no ChainLock finality
+  service; any current partial public profile fails startup.
+- The future BLS-free public preparation profile starts from known chain data,
+  admits registry/shadow operation without finality authority, completes four
+  usable epochs, and selects no `H`, hash, or state root before the exact block
+  exists. Regtest with no PQ argument stays disabled; explicit regtest
+  preparation accepts only complete `H` plus registry/quorum fields and proves
+  that no finality store/signing/admission/enforcement exists; full regtest
+  activation requires complete `H`, `F`, `R`, and schedule fields.
 
 ## 15. Unresolved deployment constants and activation blockers
 
@@ -2111,13 +2132,15 @@ The following must be resolved in code and release artifacts before activation:
   compatibility of the consumer-facing header-proof/checkpoint interface;
 - bridge behavior before the first valid live PQ CLSIG;
 - reproducible real-chain migration evidence: differential replay through `H`
-  comparing the legacy BLS-capable and opaque-codec builds, upgrade of an
-  existing datadir containing retired DKG/vvec/secret-share databases, and
-  independent reproduction of the exact `H` block and state roots, `F` block
-  and covered bootstrap roster bases, and `R` receipt state from public chain
-  data;
-- reproducible evidence from the separate BLS-capable preparation/shadow line
-  before publishing the already BLS-free activation build; and
+  comparing a known-good pre-migration release and the opaque-codec build,
+  upgrade of an existing datadir containing retired DKG/vvec/secret-share
+  databases, and independent reproduction of the exact `H` block and state
+  roots, `F` block and covered bootstrap roster bases, and `R` receipt state
+  from public chain data;
+- an explicitly supported BLS-free public preparation/shadow release, with
+  reproducible evidence that it begins from already-known chain data, has no
+  finality authority, completes four usable shadow epochs, and selects `H` only
+  after its exact block, hash, and state roots exist; and
 - the rollback-resistant signer fence and operational recovery procedure that
   prevents datadir/VM clones from sharing one C11 child-key budget.
 
