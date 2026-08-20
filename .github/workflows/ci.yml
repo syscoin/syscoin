@@ -77,9 +77,13 @@ jobs:
           # SYSCOIN: Full-depth PQ setup makes six concurrent historical
           # functional matrices oversubscribe the runner, while old snapshots
           # cannot inherit later test-harness fixes. Preserve per-commit
-          # compile/unit validation and run the complete functional matrix once
-          # on the newest non-head snapshot; head sanitizers provide the
-          # independent current-tree functional pass.
+          # compile/unit validation, then rebuild the exact PR head and run its
+          # complete functional matrix once.
+          git checkout ${{ github.event.pull_request.head.sha }}
+          ./autogen.sh
+          CC=clang CXX=clang++ ./configure
+          make clean
+          make -j $(nproc) check
           ./test/functional/test_runner.py -j $(nproc)
 
   # SYSCOIN: The managed Bitcoin view is security-critical for BTCC signers.
