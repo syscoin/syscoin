@@ -49,7 +49,7 @@ BOOST_AUTO_TEST_CASE(llmq_dkgerror)
     BOOST_ASSERT(GetSimulatedErrorRate(llmq::DKGError::type::_COUNT) == 0.0);
 }
 
-BOOST_FIXTURE_TEST_CASE(preverify_rejects_invalid_member_signatures, TestChain100Setup)
+BOOST_FIXTURE_TEST_CASE(preverify_rejects_invalid_member_messages, TestChain100Setup)
 {
     using namespace llmq;
 
@@ -133,6 +133,22 @@ BOOST_FIXTURE_TEST_CASE(preverify_rejects_invalid_member_signatures, TestChain10
     justification.proTxHash = members.front()->proTxHash;
     justification.contributions.push_back({0, signing_key});
     check_preverification(justification);
+
+    justification.contributions.front().index =
+        static_cast<uint32_t>(members.size() - 1);
+    sign(justification);
+    auto decoded_justification{WireRoundTrip(justification)};
+    bool ban{true};
+    BOOST_CHECK(session.PreVerifyMessage(decoded_justification, ban));
+    BOOST_CHECK(!ban);
+
+    justification.contributions.front().index =
+        static_cast<uint32_t>(members.size());
+    sign(justification);
+    decoded_justification = WireRoundTrip(justification);
+    ban = false;
+    BOOST_CHECK(!session.PreVerifyMessage(decoded_justification, ban));
+    BOOST_CHECK(ban);
 }
 
 
