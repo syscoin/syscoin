@@ -20,6 +20,12 @@ enum class PQAnchorResult {
     ANCESTOR_HASH_MISMATCH,
 };
 
+enum class PQLegacyReplayResult {
+    ALLOWED,
+    RETIRED,
+    INVALID_CONFIGURATION,
+};
+
 // SYSCOIN: Configuration validation is chain-independent so parameter
 // construction cannot import branch-navigation dependencies.
 inline PQAnchorResult CheckPQLegacyAnchorConfiguration(
@@ -43,6 +49,22 @@ inline PQAnchorResult CheckPQLegacyAnchorConfiguration(
         return PQAnchorResult::INVALID_CONFIGURATION;
     }
     return PQAnchorResult::VALID;
+}
+
+inline PQLegacyReplayResult CheckPQLegacyReplay(
+    const Params& params,
+    int height)
+{
+    const auto configuration{CheckPQLegacyAnchorConfiguration(params)};
+    if (configuration == PQAnchorResult::DISABLED) {
+        return PQLegacyReplayResult::ALLOWED;
+    }
+    if (configuration != PQAnchorResult::VALID) {
+        return PQLegacyReplayResult::INVALID_CONFIGURATION;
+    }
+    return height <= params.nPQLegacyAnchorHeight
+        ? PQLegacyReplayResult::ALLOWED
+        : PQLegacyReplayResult::RETIRED;
 }
 
 inline PQAnchorResult CheckPQChainLockAnchorConfiguration(

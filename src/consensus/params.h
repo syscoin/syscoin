@@ -69,8 +69,9 @@ struct BIP9Deployment {
     static constexpr int64_t NEVER_ACTIVE = -2;
 };
 
-// SYSCOIN: Network-pinned parameters needed only to replay historical tx85
-// quorum commitments before the PQ migration anchor; they are not a live BLS
+// SYSCOIN: Structural parameters for replaying historical tx85 commitments.
+// An unassigned migration profile uses them for compatibility replay; a
+// configured profile retires that replay after H. They are not a live BLS
 // quorum configuration.
 struct LegacyQuorumReplayParams {
     int size;
@@ -99,9 +100,9 @@ struct Params {
     int nNEVMStartBlock;
     int nCLReceiptStartBlock;
     // SYSCOIN: begin post-quantum migration and receipt policy.
-    // Mandatory BLS-free migration boundary. Unlike ordinary checkpoints,
-    // this anchor cannot be disabled and also commits the reconstructed DMN
-    // state used to bootstrap deterministic post-quantum quorums.
+    // Mandatory BLS-free activation boundary. The all-sentinel profile is a
+    // compatibility-replay state only; activation pins this exact block and
+    // the reconstructed state used to bootstrap post-quantum quorums.
     int nPQLegacyAnchorHeight{std::numeric_limits<int>::max()};
     uint256 hashPQLegacyAnchorBlock;
     uint256 hashPQLegacyMNState;
@@ -113,8 +114,9 @@ struct Params {
     uint256 hashPQChainLockAnchorBlock;
     // PQ ChainLock deployment remains fail-closed until a release pins all
     // values. Preparation is the first height accepting key-registry
-    // transactions; it must precede both the migration anchor and epoch zero's
-    // registration cutoff so the anchor commits the reconstructed registry.
+    // transactions; it must be no later than the migration anchor and must
+    // precede epoch zero's registration cutoff so the anchor commits the
+    // reconstructed registry.
     // The epoch and BTCC origins are schedule anchors.
     int nPQPreparationHeight{std::numeric_limits<int>::max()};
     int nPQChainLockEpochOrigin{std::numeric_limits<int>::max()};

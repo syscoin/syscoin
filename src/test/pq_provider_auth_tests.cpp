@@ -15,9 +15,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -138,6 +140,14 @@ public:
         m_consensus.nPQFutureHorizonEpochs = m_old_future_horizon;
     }
 
+    void UseDisabledLegacyReplay()
+    {
+        m_consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
+        m_consensus.hashPQLegacyAnchorBlock.SetNull();
+        m_consensus.hashPQLegacyMNState.SetNull();
+        m_consensus.hashPQLegacyPQRegistryState.SetNull();
+    }
+
     CTransaction ServiceMutation() const
     {
         CMutableTransaction transaction;
@@ -173,11 +183,74 @@ public:
         SetTxPayload(transaction, payload);
         return CTransaction{transaction};
     }
+
+    CTransaction LegacyServiceMutation() const
+    {
+        CMutableTransaction transaction;
+        transaction.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
+        transaction.vin.emplace_back(COutPoint{NonNullHash(12), 0});
+        transaction.vout.emplace_back(1, CScript{} << OP_TRUE);
+
+        CProUpServTx payload;
+        payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+        payload.proTxHash = pro_tx_hash;
+        payload.addr = replacement_service;
+        payload.inputsHash = CalcTxInputsHash(CTransaction{transaction});
+        std::array<uint8_t, CLegacyBLSSignature::SERIALIZED_SIZE> signature{};
+        signature[0] = 1;
+        assert(payload.legacySig.SetBytes(signature));
+        SetTxPayload(transaction, payload);
+        return CTransaction{transaction};
+    }
+
+    CTransaction LegacyRevokeMutation() const
+    {
+        CMutableTransaction transaction;
+        transaction.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
+        transaction.vin.emplace_back(COutPoint{NonNullHash(13), 0});
+        transaction.vout.emplace_back(1, CScript{} << OP_TRUE);
+
+        CProUpRevTx payload;
+        payload.nVersion = CProUpRevTx::BASIC_BLS_VERSION;
+        payload.proTxHash = pro_tx_hash;
+        payload.nReason = CProUpRevTx::REASON_COMPROMISED_KEYS;
+        payload.inputsHash = CalcTxInputsHash(CTransaction{transaction});
+        std::array<uint8_t, CLegacyBLSSignature::SERIALIZED_SIZE> signature{};
+        signature[0] = 1;
+        assert(payload.legacySig.SetBytes(signature));
+        SetTxPayload(transaction, payload);
+        return CTransaction{transaction};
+    }
 };
 
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_provider_auth_tests, PostPQProviderAuthSetup)
+
+BOOST_AUTO_TEST_CASE(disabled_anchor_replays_legacy_provider_versions)
+{
+    UseDisabledLegacyReplay();
+    const CTransaction service{LegacyServiceMutation()};
+    const CTransaction revoke{LegacyRevokeMutation()};
+
+    LOCK(cs_main);
+
+    TxValidationState service_state;
+    BOOST_CHECK(CheckProUpServTx(
+        service, &parent_index, service_state, /*fJustCheck=*/false,
+        /*check_sigs=*/true, SpecialTxValidationContext::NORMAL));
+
+    TxValidationState revoke_state;
+    BOOST_CHECK(CheckProUpRevTx(
+        revoke, &parent_index, revoke_state, /*fJustCheck=*/false,
+        /*check_sigs=*/true, SpecialTxValidationContext::NORMAL));
+
+    TxValidationState pq_state;
+    BOOST_CHECK(!CheckProUpServTx(
+        ServiceMutation(), &parent_index, pq_state, /*fJustCheck=*/false,
+        /*check_sigs=*/true, SpecialTxValidationContext::NORMAL));
+    BOOST_CHECK_EQUAL(pq_state.GetRejectReason(), "bad-protx-version");
+}
 
 BOOST_AUTO_TEST_CASE(post_pq_auth_is_independent_of_script_checks)
 {

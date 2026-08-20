@@ -93,9 +93,9 @@ void InitLLMQSystem(CConnman& connman,
         LogPrintf("Loaded branch-bound PQ ChainLock regtest fixture\n");
     }
 
-    // SYSCOIN: This processor is retained only to reconstruct the deterministic
-    // masternode state committed by the mandatory migration anchor. It has no
-    // live P2P or mining path.
+    // SYSCOIN: This processor structurally replays legacy commitments for
+    // compatibility sync and reconstructs the state pinned by an assigned H.
+    // It has no live P2P or mining path.
     quorumBlockProcessor = new CQuorumBlockProcessor();
     chainLocksHandler = new CChainLocksHandler(connman, peerman, chainman);
     // SYSCOIN: Frozen SLH rosters need only deterministic share-relay

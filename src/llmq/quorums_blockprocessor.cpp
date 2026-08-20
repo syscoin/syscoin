@@ -29,15 +29,17 @@ bool CQuorumBlockProcessor::ProcessBlock(
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                              "bad-qc-null-index");
     }
+    commitment = {};
+    const auto& consensus{Params().GetConsensus()};
+    if (index->nHeight < consensus.nNexusStartBlock) return true;
+
     if (!GetCommitmentFromBlock(block, index->nHeight, commitment, state)) {
         return false;
     }
     if (commitment.IsNull()) return true;
 
-    const auto& consensus{Params().GetConsensus()};
-    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQAnchorResult::VALID ||
-        index->nHeight > consensus.nPQLegacyAnchorHeight) {
+    if (Consensus::CheckPQLegacyReplay(consensus, index->nHeight) !=
+        Consensus::PQLegacyReplayResult::ALLOWED) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                              "bad-qc-retired");
     }

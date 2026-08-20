@@ -1520,8 +1520,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                   "PQ finality service will start\n");
     }
     if (public_profile_unassigned) {
-        LogPrintf("PQ ChainLock/BTCC deployment is release-disabled on this "
-                  "network; no PQ finality service will start\n");
+        InitWarning(_(
+            "PQ ChainLock/BTCC deployment is release-disabled on this "
+            "network. Legacy history uses compatibility replay and no "
+            "ChainLock finality service will start."));
     }
     fRegTest = args.GetBoolArg("-regtest", false);
     fSigNet = args.GetBoolArg("-signet", false);

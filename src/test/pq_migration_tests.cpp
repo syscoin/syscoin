@@ -47,12 +47,16 @@ BOOST_AUTO_TEST_CASE(configuration_is_fail_closed)
     Consensus::Params params;
     BOOST_CHECK(Consensus::CheckPQLegacyAnchorConfiguration(params) ==
                 Consensus::PQAnchorResult::DISABLED);
+    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
+                Consensus::PQLegacyReplayResult::ALLOWED);
     BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 0, uint256::ZEROV, nullptr) ==
                 Consensus::PQAnchorResult::DISABLED);
 
     params.nPQLegacyAnchorHeight = 10;
     BOOST_CHECK(Consensus::CheckPQLegacyAnchorConfiguration(params) ==
                 Consensus::PQAnchorResult::INVALID_CONFIGURATION);
+    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
+                Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION);
     BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 0, uint256::ZEROV, nullptr) ==
                 Consensus::PQAnchorResult::INVALID_CONFIGURATION);
 
@@ -66,6 +70,10 @@ BOOST_AUTO_TEST_CASE(configuration_is_fail_closed)
 
     BOOST_CHECK(Consensus::CheckPQLegacyAnchorConfiguration(params) ==
                 Consensus::PQAnchorResult::VALID);
+    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
+                Consensus::PQLegacyReplayResult::ALLOWED);
+    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 11) ==
+                Consensus::PQLegacyReplayResult::RETIRED);
     BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 9, uint256::ZEROV, nullptr) ==
                 Consensus::PQAnchorResult::VALID);
     BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 10, uint256::TWOV, nullptr) ==

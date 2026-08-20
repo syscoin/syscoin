@@ -1868,10 +1868,8 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
 
     if (!legacy_commitment.IsNull()) {
         const auto& consensus{Params().GetConsensus()};
-        const auto anchor_result{
-            Consensus::CheckPQLegacyAnchorConfiguration(consensus)};
-        if (anchor_result != Consensus::PQAnchorResult::VALID ||
-            nHeight > consensus.nPQLegacyAnchorHeight) {
+        if (Consensus::CheckPQLegacyReplay(consensus, nHeight) !=
+            Consensus::PQLegacyReplayResult::ALLOWED) {
             return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                   "bad-qc-retired");
         }

@@ -15,9 +15,10 @@ class CBlockIndex;
 namespace llmq {
 
 /**
- * Bounded replay parser for historical quorum commitments below the mandatory
- * PQ migration anchor. There is deliberately no DKG, P2P, mining, key-share,
- * or signature-verification surface here.
+ * Compatibility replay parser for legacy on-chain quorum commitments. An
+ * unassigned migration profile keeps public history replayable; a configured
+ * anchor retires this path above its exact boundary. There is deliberately no
+ * DKG, P2P, mining, key-share, or signature-verification surface here.
  */
 class CQuorumBlockProcessor final {
 public:

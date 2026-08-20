@@ -24,8 +24,7 @@
 namespace {
 
 enum class ProviderAuthEra {
-    DISABLED,
-    LEGACY_ANCHORED,
+    LEGACY_REPLAY,
     POST_QUANTUM,
     INVALID,
 };
@@ -34,16 +33,14 @@ ProviderAuthEra GetProviderAuthEra(const CBlockIndex* pindex_prev)
 {
     if (pindex_prev == nullptr) return ProviderAuthEra::INVALID;
     const auto& consensus = Params().GetConsensus();
-    const auto anchor = Consensus::CheckPQLegacyAnchorConfiguration(consensus);
-    if (anchor == Consensus::PQAnchorResult::DISABLED) {
-        return ProviderAuthEra::DISABLED;
-    }
-    if (anchor != Consensus::PQAnchorResult::VALID) {
+    const auto replay{Consensus::CheckPQLegacyReplay(
+        consensus, pindex_prev->nHeight + 1)};
+    if (replay == Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION) {
         return ProviderAuthEra::INVALID;
     }
-    return pindex_prev->nHeight + 1 > consensus.nPQLegacyAnchorHeight
-        ? ProviderAuthEra::POST_QUANTUM
-        : ProviderAuthEra::LEGACY_ANCHORED;
+    return replay == Consensus::PQLegacyReplayResult::ALLOWED
+        ? ProviderAuthEra::LEGACY_REPLAY
+        : ProviderAuthEra::POST_QUANTUM;
 }
 
 template <typename Range>
@@ -77,7 +74,7 @@ bool CheckProviderVersion(uint16_t actual,
 {
     const bool valid = era == ProviderAuthEra::POST_QUANTUM
         ? actual == pq_version
-        : era == ProviderAuthEra::LEGACY_ANCHORED
+        : era == ProviderAuthEra::LEGACY_REPLAY
             ? actual != 0 && actual <= legacy_max
             : false;
     return valid || state.Invalid(TxValidationResult::TX_CONSENSUS,
