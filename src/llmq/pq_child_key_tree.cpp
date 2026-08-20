@@ -55,11 +55,20 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
                  Function&& function)
 {
     if (count == 0) return true;
+    const auto invoke = [&](std::size_t index) noexcept {
+        // No exception may cross a std::thread entry, and the optional builder
+        // result must not depend on whether this batch runs serially.
+        try {
+            return function(index);
+        } catch (...) {
+            return false;
+        }
+    };
     const std::size_t workers{
         std::max<std::size_t>(1, std::min(count, requested_workers))};
     if (workers == 1) {
         for (std::size_t i{0}; i < count; ++i) {
-            if (!function(i)) return false;
+            if (!invoke(i)) return false;
         }
         return true;
     }
@@ -80,15 +89,10 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
                         const std::size_t index{
                             next.fetch_add(1, std::memory_order_relaxed)};
                         if (index >= count) break;
-                        try {
-                            if (function(index)) continue;
-                        } catch (...) {
-                            // Exceptions may not escape a std::thread entry;
-                            // translate an unexpected worker failure into the
-                            // builder's existing fail-closed result.
+                        if (!invoke(index)) {
+                            success.store(false, std::memory_order_relaxed);
+                            break;
                         }
-                        success.store(false, std::memory_order_relaxed);
-                        break;
                     }
                 });
             }
