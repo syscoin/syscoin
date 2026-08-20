@@ -80,10 +80,15 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
                         const std::size_t index{
                             next.fetch_add(1, std::memory_order_relaxed)};
                         if (index >= count) break;
-                        if (!function(index)) {
-                            success.store(false, std::memory_order_relaxed);
-                            break;
+                        try {
+                            if (function(index)) continue;
+                        } catch (...) {
+                            // Exceptions may not escape a std::thread entry;
+                            // translate an unexpected worker failure into the
+                            // builder's existing fail-closed result.
                         }
+                        success.store(false, std::memory_order_relaxed);
+                        break;
                     }
                 });
             }
