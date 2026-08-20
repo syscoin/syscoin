@@ -10,7 +10,7 @@
 #include <compat/endian.h>
 
 #include <algorithm>
-#include <concepts>
+#include <concepts> // SYSCOIN: constrain legacy dense-bitset replay to sized streams.
 #include <cstdint>
 #include <cstring>
 #include <ios>
@@ -513,12 +513,8 @@ I ReadVarInt(Stream& is)
     }
 }
 
-/** TODO: describe FixedBitSet */
-inline unsigned int GetSizeOfFixedBitSet(size_t size)
-{
-    return (size + 7) / 8;
-}
-
+// SYSCOIN: Historical tx85 commitment replay retains this exact dense bitmap
+// encoding without restoring the retired live BLS/DKG protocol.
 template<typename Stream>
 void WriteFixedBitSet(Stream& s, const std::vector<bool>& vec, size_t size)
 {
@@ -559,105 +555,6 @@ void ReadFixedBitSet(Stream& s, std::vector<bool>& vec, size_t size)
     }
 }
 
-/**
- * Stores a fixed size bitset as a series of VarInts. Each VarInt is an offset from the last entry and the sum of the
- * last entry and the offset gives an index into the bitset for a set bit. The series of VarInts ends with a 0.
- */
-template<typename Stream>
-void WriteFixedVarIntsBitSet(Stream& s, const std::vector<bool>& vec, size_t size)
-{
-    int32_t last = -1;
-    for (int32_t i = 0; i < (int32_t)vec.size(); i++) {
-        if (vec[i]) {
-            WriteVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s, (uint32_t)(i - last));
-            last = i;
-        }
-    }
-    WriteVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s, 0); // stopper
-}
-
-template<typename Stream>
-void ReadFixedVarIntsBitSet(Stream& s, std::vector<bool>& vec, size_t size)
-{
-    vec.assign(size, false);
-
-    size_t index_plus_one{0};
-    while(true) {
-        uint32_t offset = ReadVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s);
-        if (offset == 0) {
-            break;
-        }
-        if (offset > size - index_plus_one) {
-            throw std::ios_base::failure("out of bounds index");
-        }
-        index_plus_one += offset;
-        vec[index_plus_one - 1] = true;
-    }
-}
-
-/**
- * Serializes either as a CFixedBitSet or CFixedVarIntsBitSet, depending on which would give a smaller size
- */
-typedef std::pair<std::vector<bool>, size_t> autobitset_t;
-
-struct CFixedBitSet
-{
-    const std::vector<bool>& vec;
-    size_t size;
-    CFixedBitSet(const std::vector<bool>& vecIn, size_t sizeIn) : vec(vecIn), size(sizeIn) {}
-    template<typename Stream>
-    void Serialize(Stream& s) const { WriteFixedBitSet(s, vec, size); }
-};
-
-struct CFixedVarIntsBitSet
-{
-    const std::vector<bool>& vec;
-    size_t size;
-    CFixedVarIntsBitSet(const std::vector<bool>& vecIn, size_t sizeIn) : vec(vecIn), size(sizeIn) {}
-    template<typename Stream>
-    void Serialize(Stream& s) const { WriteFixedVarIntsBitSet(s, vec, vec.size()); }
-};
-
-template<typename Stream>
-void WriteAutoBitSet(Stream& s, const autobitset_t& item)
-{
-    auto& vec = item.first;
-    auto& size = item.second;
-
-    assert(vec.size() == size);
-
-    size_t size1 = ::GetSerializeSize(s, CFixedBitSet(vec, size));
-    size_t size2 = ::GetSerializeSize(s, CFixedVarIntsBitSet(vec, size));
-
-    assert(size1 == GetSizeOfFixedBitSet(size));
-
-    if (size1 < size2) {
-        ser_writedata8(s, 0);
-        WriteFixedBitSet(s, vec, vec.size());
-    } else {
-        ser_writedata8(s, 1);
-        WriteFixedVarIntsBitSet(s, vec, vec.size());
-    }
-}
-
-template<typename Stream>
-void ReadAutoBitSet(Stream& s, autobitset_t& item)
-{
-    uint8_t isVarInts = ser_readdata8(s);
-    if (isVarInts != 0 && isVarInts != 1) {
-        throw std::ios_base::failure("invalid value for isVarInts byte");
-    }
-
-    auto& vec = item.first;
-    auto& size = item.second;
-
-    if (!isVarInts) {
-        ReadFixedBitSet(s, vec, size);
-    } else {
-        ReadFixedVarIntsBitSet(s, vec, size);
-    }
-}
-
 /** Simple wrapper class to serialize objects using a formatter; used by Using(). */
 template<typename Formatter, typename T>
 class Wrapper
@@ -688,54 +585,6 @@ static inline Wrapper<Formatter, T&> Using(T&& t) { return Wrapper<Formatter, T&
 #define VARINT(obj) Using<VarIntFormatter<VarIntMode::DEFAULT>>(obj)
 #define COMPACTSIZE(obj) Using<CompactSizeFormatter<true>>(obj)
 #define LIMITED_STRING(obj,n) Using<LimitedStringFormatter<n>>(obj)
-
-// SYSCOIN
-#define DYNBITSET(obj, limit) Using<DynamicBitSetFormatter<limit>>(obj)
-#define AUTOBITSET(obj, limit) Using<AutoBitSetFormatter<limit>>(obj)
-
-/** TODO: describe DynamicBitSet */
-template<size_t Limit>
-struct DynamicBitSetFormatter
-{
-    template<typename Stream>
-    void Ser(Stream& s, const std::vector<bool>& vec) const
-    {
-        WriteCompactSize(s, vec.size());
-        WriteFixedBitSet(s, vec, vec.size());
-    }
-
-    template<typename Stream>
-    void Unser(Stream& s, std::vector<bool>& vec)
-    {
-        const size_t size = ReadCompactSize(s);
-        if (size > Limit) {
-            throw std::ios_base::failure("DynamicBitSetFormatter: size exceeds limit");
-        }
-        ReadFixedBitSet(s, vec, size);
-    }
-};
-
-/**
- * Serializes either as a CFixedBitSet or CFixedVarIntsBitSet, depending on which would give a smaller size
- */
-template<size_t Limit>
-struct AutoBitSetFormatter
-{
-    template<typename Stream>
-    void Ser(Stream& s, const autobitset_t& item) const
-    {
-        WriteAutoBitSet(s, item);
-    }
-
-    template<typename Stream>
-    void Unser(Stream& s, autobitset_t& item)
-    {
-        if (item.second > Limit) {
-            throw std::ios_base::failure("AutoBitSetFormatter: size exceeds limit");
-        }
-        ReadAutoBitSet(s, item);
-    }
-};
 
 /** Serialization wrapper class for integers in VarInt format. */
 template<VarIntMode Mode>
@@ -877,27 +726,6 @@ struct LimitedStringFormatter
     }
 };
 
-namespace detail {
-template<class Formatter, typename Stream, typename V>
-void UnserializeVectorContents(Stream& s, V& v, size_t size)
-{
-    Formatter formatter;
-    size_t allocated{0};
-    while (allocated < size) {
-        // For DoS prevention, do not blindly allocate as much as the stream claims to contain.
-        // Instead, allocate in 5MiB batches, so that an attacker actually needs to provide
-        // X MiB of data to make us allocate X+5 Mib.
-        static_assert(sizeof(typename V::value_type) <= MAX_VECTOR_ALLOCATE, "Vector element size too large");
-        allocated = std::min(size, allocated + MAX_VECTOR_ALLOCATE / sizeof(typename V::value_type));
-        v.reserve(allocated);
-        while (v.size() < allocated) {
-            v.emplace_back();
-            formatter.Unser(s, v.back());
-        }
-    }
-}
-} // namespace detail
-
 /** Formatter to serialize/deserialize vector elements using another formatter
  *
  * Example:
@@ -927,8 +755,22 @@ struct VectorFormatter
     template<typename Stream, typename V>
     void Unser(Stream& s, V& v)
     {
+        Formatter formatter;
         v.clear();
-        detail::UnserializeVectorContents<Formatter>(s, v, ReadCompactSize(s));
+        size_t size = ReadCompactSize(s);
+        size_t allocated = 0;
+        while (allocated < size) {
+            // For DoS prevention, do not blindly allocate as much as the stream claims to contain.
+            // Instead, allocate in 5MiB batches, so that an attacker actually needs to provide
+            // X MiB of data to make us allocate X+5 Mib.
+            static_assert(sizeof(typename V::value_type) <= MAX_VECTOR_ALLOCATE, "Vector element size too large");
+            allocated = std::min(size, allocated + MAX_VECTOR_ALLOCATE / sizeof(typename V::value_type));
+            v.reserve(allocated);
+            while (v.size() < allocated) {
+                v.emplace_back();
+                formatter.Unser(s, v.back());
+            }
+        }
     };
 };
 
@@ -1036,27 +878,6 @@ struct DefaultFormatter
     template<typename Stream, typename T>
     static void Unser(Stream& s, T& t) { Unserialize(s, t); }
 };
-
-/**
- * Deserialize a vector only when its declared element count is within the
- * caller's protocol limit. Returns false without reading any elements when
- * the limit is exceeded.
- */
-template<class Formatter = DefaultFormatter, typename Stream, typename V>
-[[nodiscard]] bool UnserializeVectorWithMaxSize(Stream& s, V& v, size_t max_size)
-{
-    v.clear();
-    const size_t size = ReadCompactSize(s);
-    if (size > max_size) {
-        return false;
-    }
-    detail::UnserializeVectorContents<Formatter>(s, v, size);
-    return true;
-}
-
-
-
-
 
 /**
  * string
