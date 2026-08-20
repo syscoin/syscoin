@@ -40,7 +40,7 @@ llmq::legacy::FinalCommitment MakeCommitment()
     commitment.quorum_hash = uint256::ONEV;
     commitment.signers.assign(400, false);
     commitment.valid_members.assign(400, false);
-    for (std::size_t i{0}; i < 240; ++i) {
+    for (std::size_t i{0}; i < 300; ++i) {
         commitment.signers[i] = true;
         commitment.valid_members[i] = true;
     }
@@ -95,8 +95,17 @@ BOOST_FIXTURE_TEST_SUITE(legacy_quorum_commitment_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(opaque_roundtrip_and_structure)
 {
+    BOOST_CHECK_EQUAL(
+        Params().GetConsensus().legacyQuorumReplay.minimum_size, 300);
     const auto commitment{MakeCommitment()};
-    BOOST_CHECK(commitment.IsStructurallyValid(400, 400, 240,
+    BOOST_CHECK(commitment.IsStructurallyValid(400, 400, 300,
+        llmq::legacy::BASIC_SCHEME_COMMITMENT_VERSION));
+
+    auto below_minimum{commitment};
+    below_minimum.signers[299] = false;
+    below_minimum.valid_members[299] = false;
+    BOOST_CHECK(!below_minimum.IsStructurallyValid(
+        400, 400, 300,
         llmq::legacy::BASIC_SCHEME_COMMITMENT_VERSION));
 
     CDataStream encoded{SER_NETWORK, PROTOCOL_VERSION};
@@ -115,12 +124,12 @@ BOOST_AUTO_TEST_CASE(null_and_out_of_roster_bits)
     null_commitment.valid_members.assign(400, false);
     BOOST_CHECK(null_commitment.IsNull());
     BOOST_CHECK(null_commitment.IsStructurallyValid(
-        400, 300, 240, llmq::legacy::LEGACY_SCHEME_COMMITMENT_VERSION));
+        400, 300, 300, llmq::legacy::LEGACY_SCHEME_COMMITMENT_VERSION));
 
     auto commitment{MakeCommitment()};
     commitment.valid_members[399] = true;
     BOOST_CHECK(!commitment.IsStructurallyValid(
-        400, 300, 240, llmq::legacy::BASIC_SCHEME_COMMITMENT_VERSION));
+        400, 300, 300, llmq::legacy::BASIC_SCHEME_COMMITMENT_VERSION));
 }
 
 BOOST_AUTO_TEST_CASE(bitset_bound_is_checked_before_resize)

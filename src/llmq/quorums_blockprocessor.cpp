@@ -47,8 +47,8 @@ bool CQuorumBlockProcessor::ProcessBlock(
     const auto& quorum_params{consensus.legacyQuorumReplay};
     if (quorum_params.size <= 0 ||
         quorum_params.size > static_cast<int>(legacy::MAX_QUORUM_MEMBERS) ||
-        quorum_params.threshold <= 0 ||
-        quorum_params.threshold > quorum_params.size ||
+        quorum_params.minimum_size <= 0 ||
+        quorum_params.minimum_size > quorum_params.size ||
         quorum_params.session_interval <= 0) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                              "bad-qc-replay-params");

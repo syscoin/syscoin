@@ -75,7 +75,9 @@ struct BIP9Deployment {
 // quorum configuration.
 struct LegacyQuorumReplayParams {
     int size;
-    int threshold;
+    // Structural replay preserves final-commitment minSize, not the smaller
+    // recovered-signature threshold used by the removed BLS machinery.
+    int minimum_size;
     int session_interval;
 };
 /**

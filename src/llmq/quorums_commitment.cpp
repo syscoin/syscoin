@@ -77,7 +77,7 @@ bool CFinalCommitment::Verify(const CBlockIndex* quorum_base,
     const auto members{CLLMQUtils::GetAllQuorumMembers(quorum_base)};
     return IsStructurallyValid(
         static_cast<std::size_t>(params.size), members.size(),
-        static_cast<std::size_t>(params.threshold),
+        static_cast<std::size_t>(params.minimum_size),
         GetVersion(CLLMQUtils::IsV19Active(quorum_base->nHeight)));
 }
 

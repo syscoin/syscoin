@@ -95,13 +95,13 @@ static CBlock CreateGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits
 // removed.
 static constexpr Consensus::LegacyQuorumReplayParams legacy_quorum_test{
         .size = 3,
-        .threshold = 2,
+        .minimum_size = 2,
         .session_interval = 24,
 };
 
 static constexpr Consensus::LegacyQuorumReplayParams legacy_quorum_400_60{
         .size = 400,
-        .threshold = 240,
+        .minimum_size = 300,
         .session_interval = 24 * 12,
 };
 

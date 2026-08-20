@@ -1881,7 +1881,8 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
         const auto& replay{consensus.legacyQuorumReplay};
         if (replay.size <= 0 ||
             replay.size > static_cast<int>(llmq::legacy::MAX_QUORUM_MEMBERS) ||
-            replay.threshold <= 0 || replay.threshold > replay.size ||
+            replay.minimum_size <= 0 ||
+            replay.minimum_size > replay.size ||
             replay.session_interval <= 0) {
             return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                   "bad-qc-replay-params");
@@ -1912,7 +1913,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
         const auto& commitment{legacy_commitment.commitment};
         if (!commitment.IsStructurallyValid(
                 static_cast<std::size_t>(replay.size), members.size(),
-                static_cast<std::size_t>(replay.threshold),
+                static_cast<std::size_t>(replay.minimum_size),
                 llmq::CFinalCommitment::GetVersion(
                     quorum_base->nHeight >= consensus.nV19StartBlock))) {
             return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
