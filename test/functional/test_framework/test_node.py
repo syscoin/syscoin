@@ -363,6 +363,21 @@ class TestNode():
     def version_is_at_least(self, ver):
         return self.version is None or self.version >= ver
 
+    # SYSCOIN: Some config tests temporarily select a public profile without
+    # changing self.chain. Accept only the current binary's exact mandatory
+    # warning prefix so the remaining startup error keeps its original match
+    # semantics and unexpected stderr still fails.
+    def _stderr_without_public_profile_warning(self, stderr):
+        if self.version is not None:
+            return None
+        for separator in ('\r\n', '\n'):
+            prefix = PUBLIC_PROFILE_WARNING + separator
+            if stderr.startswith(prefix):
+                remainder = stderr[len(prefix):]
+                if not remainder.startswith(PUBLIC_PROFILE_WARNING):
+                    return remainder
+        return None
+
     # SYSCOIN: None preserves strict explicit expectations while allowing the
     # framework to derive the current public profile's mandatory warning.
     def stop_node(self, expected_stderr=None, *, wait=0, wait_until_stopped=True):
@@ -636,16 +651,29 @@ class TestNode():
                 if expected_msg is not None:
                     log_stderr.seek(0)
                     stderr = log_stderr.read().decode('utf-8').strip()
+
+                    # SYSCOIN: Match explicit expectations first, including
+                    # callers which already include the public-profile warning.
+                    # Otherwise compose that one exact warning with the expected
+                    # startup error while retaining the selected strictness.
+                    stderr_candidates = [stderr]
+                    stderr_without_warning = self._stderr_without_public_profile_warning(stderr)
+                    if stderr_without_warning is not None:
+                        stderr_candidates.append(stderr_without_warning)
+
                     if match == ErrorMatch.PARTIAL_REGEX:
-                        if re.search(expected_msg, stderr, flags=re.MULTILINE) is None:
+                        if not any(
+                            re.search(expected_msg, candidate, flags=re.MULTILINE)
+                            for candidate in stderr_candidates
+                        ):
                             self._raise_assertion_error(
                                 'Expected message "{}" does not partially match stderr:\n"{}"'.format(expected_msg, stderr))
                     elif match == ErrorMatch.FULL_REGEX:
-                        if re.fullmatch(expected_msg, stderr) is None:
+                        if not any(re.fullmatch(expected_msg, candidate) for candidate in stderr_candidates):
                             self._raise_assertion_error(
                                 'Expected message "{}" does not fully match stderr:\n"{}"'.format(expected_msg, stderr))
                     elif match == ErrorMatch.FULL_TEXT:
-                        if expected_msg != stderr:
+                        if expected_msg not in stderr_candidates:
                             self._raise_assertion_error(
                                 'Expected message "{}" does not fully match stderr:\n"{}"'.format(expected_msg, stderr))
             except subprocess.TimeoutExpired:
