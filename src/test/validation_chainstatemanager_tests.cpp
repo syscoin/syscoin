@@ -15,6 +15,8 @@
 #include <llmq/quorums_chainlocks.h> // SYSCOIN: retained probation roots.
 #include <llmq/quorums_init.h> // SYSCOIN: recreate pre-import finality handler.
 #include <netbase.h> // SYSCOIN: deterministic valid-MN fixture service.
+#include <node/blockstorage.h>
+#include <node/chainstate.h>
 #include <node/kernel_notifications.h>
 #include <node/utxo_snapshot.h>
 #include <pow.h>
@@ -67,6 +69,58 @@ void AssertMainLockHeldForTest() NO_THREAD_SAFETY_ANALYSIS
 }
 } // namespace
 
+BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, ChainTestingSetup)
+{
+    struct ReindexFlagsGuard {
+        const bool reindex{node::fReindex.load()};
+        const bool reindex_geth{fReindexGeth.load()};
+        ~ReindexFlagsGuard()
+        {
+            node::fReindex = reindex;
+            fReindexGeth = reindex_geth;
+        }
+    } flags_guard;
+
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const fs::path block_index_path = m_args.GetDataDirNet() / "blocks" / "index";
+    {
+        LOCK(::cs_main);
+        chainman.m_blockman.m_block_tree_db.reset();
+    }
+    {
+        kernel::BlockTreeDB block_tree{DBParams{
+            .path = block_index_path,
+            .cache_bytes = static_cast<size_t>(m_cache_sizes.block_tree_db),
+            .memory_only = false,
+            .wipe_data = true}};
+        BOOST_REQUIRE(block_tree.WriteFlag("reindex-sentinel", true));
+        BOOST_REQUIRE(block_tree.WriteReindexing(true));
+    }
+
+    node::fReindex = false;
+    fReindexGeth = false;
+    node::ChainstateLoadOptions options;
+    options.mempool = Assert(m_node.mempool.get());
+    options.block_tree_db_in_memory = false;
+    options.coins_db_in_memory = true;
+    options.connman = Assert(m_node.connman.get());
+    options.banman = Assert(m_node.banman.get());
+    options.peerman = Assert(m_node.peerman.get());
+
+    const auto [status, error] = node::LoadChainstate(chainman, m_cache_sizes, options);
+    BOOST_REQUIRE_MESSAGE(status == node::ChainstateLoadStatus::SUCCESS, error.original);
+    BOOST_CHECK(node::fReindex.load());
+    BOOST_CHECK(fReindexGeth.load());
+
+    {
+        LOCK(::cs_main);
+        bool sentinel{false};
+        BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->ReadFlag("reindex-sentinel", sentinel));
+        bool reindexing{false};
+        chainman.m_blockman.m_block_tree_db->ReadReindexing(reindexing);
+        BOOST_CHECK(reindexing);
+    }
+}
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
 // SYSCOIN: BEGIN public IBD remains latched until PQ-history authentication

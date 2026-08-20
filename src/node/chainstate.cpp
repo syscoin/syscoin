@@ -425,23 +425,45 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
 
     LOCK(cs_main);
 
+    ChainstateLoadOptions effective_options{options};
+    if (!effective_options.reindex && !effective_options.block_tree_db_in_memory) {
+        auto& pblocktree{chainman.m_blockman.m_block_tree_db};
+        pblocktree.reset();
+        pblocktree = std::make_unique<BlockTreeDB>(DBParams{
+            .path = chainman.m_options.datadir / "blocks" / "index",
+            .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
+            .memory_only = false,
+            .wipe_data = false,
+            .options = chainman.m_options.block_tree_db});
+        bool persisted_reindex{false};
+        pblocktree->ReadReindexing(persisted_reindex);
+        pblocktree.reset();
+        if (persisted_reindex) {
+            LogPrintf("Persisted reindex marker found before chainstate load; starting full block-file reindex.\n");
+            effective_options.reindex = true;
+            effective_options.fReindexGeth = true;
+            fReindex = true;
+            fReindexGeth = true;
+        }
+    }
+
     chainman.m_total_coinstip_cache = cache_sizes.coins;
     chainman.m_total_coinsdb_cache = cache_sizes.coins_db;
 
     // Load the fully validated chainstate.
-    chainman.InitializeChainstate(options.mempool);
+    chainman.InitializeChainstate(effective_options.mempool);
 
     // Load a chain created from a UTXO snapshot, if any exist.
     bool has_snapshot = chainman.DetectSnapshotChainstate();
 
-    if (has_snapshot && (options.reindex || options.reindex_chainstate)) {
+    if (has_snapshot && (effective_options.reindex || effective_options.reindex_chainstate)) {
         LogPrintf("[snapshot] deleting snapshot chainstate due to reindexing\n");
         if (!chainman.DeleteSnapshotChainstate()) {
             return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated("Couldn't remove snapshot chainstate.")};
         }
     }
 
-    auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, options);
+    auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, effective_options);
     if (init_status != ChainstateLoadStatus::SUCCESS) {
         return {init_status, init_error};
     }
@@ -471,13 +493,13 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
         assert(!chainman.IsSnapshotActive());
         assert(!chainman.IsSnapshotValidated());
 
-        chainman.InitializeChainstate(options.mempool);
+        chainman.InitializeChainstate(effective_options.mempool);
 
         // A reload of the block index is required to recompute setBlockIndexCandidates
         // for the fully validated chainstate.
         chainman.ActiveChainstate().ClearBlockIndexCandidates();
 
-        auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, options);
+        auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, effective_options);
         if (init_status != ChainstateLoadStatus::SUCCESS) {
             return {init_status, init_error};
         }

@@ -7,6 +7,7 @@
 #include <hash.h>
 #include <llmq/pq_btcc.h> // SYSCOIN: branch-bound BTCC receipt records.
 #include <llmq/pq_payment_audit.h> // SYSCOIN: payment-audit receipt records.
+#include <llmq/quorums_commitment.h>
 #include <primitives/block.h>
 #include <serialize.h>
 #include <script/script.h>
@@ -189,6 +190,50 @@ BOOST_AUTO_TEST_CASE(vector_bool)
 
     BOOST_CHECK(vec1 == std::vector<uint8_t>(vec2.begin(), vec2.end()));
     BOOST_CHECK((HashWriter{} << vec1).GetHash() == (HashWriter{} << vec2).GetHash());
+}
+
+static bool isBitSetSizeException(const std::ios_base::failure& ex)
+{
+    const std::ios_base::failure expected("ReadFixedBitSet(): declared size exceeds remaining bytes");
+    return strcmp(expected.what(), ex.what()) == 0;
+}
+
+BOOST_AUTO_TEST_CASE(dynbitset_rejects_underfilled_payload_before_allocation)
+{
+    CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
+    const std::vector<bool> original{true, false, true};
+    std::vector<bool> decoded{original};
+    BOOST_CHECK_EXCEPTION(ReadFixedBitSet(stream, decoded, 1'000'000), std::ios_base::failure, isBitSetSizeException);
+    BOOST_CHECK(decoded == original);
+}
+
+BOOST_AUTO_TEST_CASE(dynbitset_maximum_quorum_size_roundtrip)
+{
+    std::vector<bool> original(llmq::legacy::MAX_QUORUM_MEMBERS, false);
+    original.front() = true;
+    original.back() = true;
+
+    CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
+    stream << DYNBITSET(original, llmq::legacy::MAX_QUORUM_MEMBERS);
+
+    std::vector<bool> decoded;
+    BOOST_REQUIRE_NO_THROW(stream >> DYNBITSET(decoded, llmq::legacy::MAX_QUORUM_MEMBERS));
+    BOOST_CHECK(stream.empty());
+    BOOST_CHECK(decoded == original);
+}
+
+BOOST_AUTO_TEST_CASE(qfcommitment_rejects_underfilled_signers_before_allocation)
+{
+    CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
+    stream << static_cast<uint16_t>(llmq::CFinalCommitment::LEGACY_BLS_NON_INDEXED_QUORUM_VERSION);
+    stream << uint256{};
+    WriteCompactSize(stream, llmq::legacy::MAX_QUORUM_MEMBERS);
+    stream << uint8_t{0xaa};
+
+    llmq::CFinalCommitment commitment;
+    BOOST_CHECK_EXCEPTION(stream >> commitment, std::ios_base::failure, isBitSetSizeException);
+    BOOST_CHECK(commitment.signers.empty());
+    BOOST_CHECK_EQUAL(stream.size(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(noncanonical)

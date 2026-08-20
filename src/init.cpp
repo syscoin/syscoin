@@ -49,6 +49,7 @@
 #include <node/chainstate.h>
 #include <node/chainstatemanager_args.h>
 #include <node/context.h>
+#include <node/geth_startup.h>
 #include <node/interface_ui.h>
 #include <node/kernel_notifications.h>
 #include <node/mempool_args.h>
@@ -2241,9 +2242,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         const int64_t geth_startup_timeout = std::max<int64_t>(0, args.GetIntArg("-gethstartuptimeout", DEFAULT_GETH_STARTUP_TIMEOUT));
         const int64_t geth_bootstrap_startup_timeout = std::max<int64_t>(0, args.GetIntArg("-gethbootstrapstartuptimeout", DEFAULT_GETH_BOOTSTRAP_STARTUP_TIMEOUT));
         const auto wait_start = std::chrono::steady_clock::now();
-        auto wait_deadline = wait_start + std::chrono::seconds{geth_startup_timeout};
-        auto bootstrap_wait_deadline = wait_start + std::chrono::seconds{geth_bootstrap_startup_timeout};
-        bool bootstrap_wait_started{false};
+        node::GethStartupWaitState geth_wait{
+            wait_start,
+            std::chrono::seconds{geth_startup_timeout},
+            std::chrono::seconds{geth_bootstrap_startup_timeout}};
         auto next_wait_log = wait_start;
         uint64_t nHeightFromGeth{0};
         // SYSCOIN: The status protocol also authenticates Geth's paired branch.
@@ -2261,27 +2263,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
             const auto now = std::chrono::steady_clock::now();
             const std::string bootstrap_status = ReadGethStateBootstrapStatus(args.GetDataDirNet());
-            const bool bootstrap_active = !bootstrap_status.empty() && node.chainman->ActiveChainstate().IsGethNodeRunning();
-            if (bootstrap_active && !bootstrap_wait_started) {
-                bootstrap_wait_started = true;
-                bootstrap_wait_deadline = now + std::chrono::seconds{geth_bootstrap_startup_timeout};
-            }
+            const bool geth_running = node.chainman->ActiveChainstate().IsGethNodeRunning();
+            geth_wait.Observe(!bootstrap_status.empty(), geth_running, now);
+            const bool bootstrap_active = geth_wait.BootstrapActive();
             if (now >= next_wait_log) {
                 const std::string bootstrap_msg = bootstrap_active ? strprintf(", state bootstrap=%s", bootstrap_status) : "";
-                const int64_t active_timeout = bootstrap_active ? geth_bootstrap_startup_timeout : geth_startup_timeout;
+                const int64_t active_timeout = geth_wait.ActiveTimeout().count();
                 if (active_timeout == 0) {
                     LogPrintf("Waiting for sysgeth startup to complete before NEVM attach (%s%s)\n", stateStr, bootstrap_msg);
                 } else {
-                    const auto waited = std::chrono::duration_cast<std::chrono::seconds>(now - wait_start).count();
-                    LogPrintf("Waiting for sysgeth startup to complete before NEVM attach (%s%s), elapsed=%d timeout=%d seconds\n", stateStr, bootstrap_msg, waited, active_timeout);
+                    const auto phase_elapsed = geth_wait.ActiveElapsed(now).count();
+                    LogPrintf("Waiting for sysgeth startup to complete before NEVM attach (%s%s), phase_elapsed=%d timeout=%d seconds\n", stateStr, bootstrap_msg, phase_elapsed, active_timeout);
                 }
                 next_wait_log = now + std::chrono::seconds{DEFAULT_GETH_STARTUP_LOG_INTERVAL};
             }
 
-            if (!bootstrap_active && geth_startup_timeout != 0 && now >= wait_deadline) {
-                break;
-            }
-            if (bootstrap_active && geth_bootstrap_startup_timeout != 0 && bootstrap_wait_started && now >= bootstrap_wait_deadline) {
+            if (geth_wait.Expired(now)) {
                 break;
             }
             for (int64_t slept_ms{0}; slept_ms < DEFAULT_GETH_STARTUP_RETRY_INTERVAL_MS && !ShutdownRequested(); slept_ms += 200) {
