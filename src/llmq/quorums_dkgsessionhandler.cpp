@@ -344,6 +344,11 @@ std::set<NodeId> BatchVerifyMessageSigs(CDKGSession& session, const std::vector<
             ret.emplace(p.first);
             continue;
         }
+        if (!msg.sig.IsValid()) {
+            ret.emplace(p.first);
+            revertToSingleVerification = true;
+            continue;
+        }
 
         if (first) {
             aggSig = msg.sig;
