@@ -483,7 +483,9 @@ class DIP3Test(SyscoinTestFramework):
 
         coinbase.calc_sha256(with_witness=True)
 
-        block = create_block(int(tip_hash, 16), coinbase)
+        # SYSCOIN: Accelerated PQ setup can leave a fast-mined regtest chain
+        # ahead of the wall-clock fallback; the template time is MTP-safe.
+        block = create_block(int(tip_hash, 16), coinbase, ntime=bt['curtime'])
         block.nVersion = 4
         block.vtx += vtx
         block.hashMerkleRoot = block.calc_merkle_root()
