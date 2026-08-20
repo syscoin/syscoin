@@ -15,6 +15,7 @@
 #include <atomic>
 #include <limits>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -29,6 +30,25 @@ void WriteDomain(CHashWriter& writer, std::string_view domain)
 {
     writer.write(AsBytes(Span{domain.data(), domain.size()}));
 }
+
+class WorkerJoinGuard final
+{
+public:
+    explicit WorkerJoinGuard(std::vector<std::thread>& workers)
+        : m_workers{workers}
+    {
+    }
+
+    ~WorkerJoinGuard()
+    {
+        for (std::thread& worker : m_workers) {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+private:
+    std::vector<std::thread>& m_workers;
+};
 
 template <typename Function>
 bool ParallelFor(std::size_t count, std::size_t requested_workers,
@@ -48,20 +68,30 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
     std::atomic<bool> success{true};
     std::vector<std::thread> threads;
     threads.reserve(workers);
-    for (std::size_t worker{0}; worker < workers; ++worker) {
-        threads.emplace_back([&] {
-            while (success.load(std::memory_order_relaxed)) {
-                const std::size_t index{
-                    next.fetch_add(1, std::memory_order_relaxed)};
-                if (index >= count) break;
-                if (!function(index)) {
-                    success.store(false, std::memory_order_relaxed);
-                    break;
-                }
+    {
+        // A later worker can fail to start after earlier threads are live;
+        // keep the guard in scope before the first emplace so unwinding never
+        // destroys a joinable thread.
+        WorkerJoinGuard join_guard{threads};
+        try {
+            for (std::size_t worker{0}; worker < workers; ++worker) {
+                threads.emplace_back([&] {
+                    while (success.load(std::memory_order_relaxed)) {
+                        const std::size_t index{
+                            next.fetch_add(1, std::memory_order_relaxed)};
+                        if (index >= count) break;
+                        if (!function(index)) {
+                            success.store(false, std::memory_order_relaxed);
+                            break;
+                        }
+                    }
+                });
             }
-        });
+        } catch (const std::system_error&) {
+            success.store(false, std::memory_order_relaxed);
+            return false;
+        }
     }
-    for (auto& thread : threads) thread.join();
     return success.load(std::memory_order_relaxed);
 }
 
