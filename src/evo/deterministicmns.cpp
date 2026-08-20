@@ -2114,10 +2114,17 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
             
                 auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
             
-                // SYSCOIN: Opaque BLS bytes are historical state after the PQ fork. A
-                // PQ registrar update changes only owner-controlled metadata.
+                // SYSCOIN: The released lazy BLS wrapper compared the group
+                // value when a v1 key was reserialized as v2. Preserve that
+                // replay semantic without restoring BLS group operations.
+                const bool same_legacy_operator_key{
+                    AreLegacyBLSPublicKeyEncodingsEquivalent(
+                        newState->pubKeyOperator,
+                        newState->nVersion == CProRegTx::LEGACY_BLS_VERSION,
+                        proTx.pubKeyOperator,
+                        proTx.nVersion == CProUpRegTx::LEGACY_BLS_VERSION)};
                 if (proTx.nVersion <= CProUpRegTx::BASIC_BLS_VERSION &&
-                    newState->pubKeyOperator != proTx.pubKeyOperator) {
+                    !same_legacy_operator_key) {
                     if(!newState->vchNEVMAddress.empty()) {
                         newList.m_changed_nevm_address = true;
                     }

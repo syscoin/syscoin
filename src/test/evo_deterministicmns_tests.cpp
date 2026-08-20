@@ -16,6 +16,7 @@
 #include <streams.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
+#include <util/strencodings.h>
 #include <validation.h>
 #include <version.h>
 #include <boost/test/unit_test.hpp>
@@ -2090,6 +2091,122 @@ BOOST_AUTO_TEST_CASE(opaque_legacy_participation_penalties_replay_through_anchor
         empty_block, chain.At(anchor_height), retired_state, view, next_list,
         old_list, retired));
     BOOST_CHECK_EQUAL(retired_state.GetRejectReason(), "bad-qc-retired");
+}
+
+BOOST_AUTO_TEST_CASE(legacy_operator_scheme_migration_preserves_operator_state)
+{
+    SelectParams(ChainType::REGTEST);
+    const int parent_height{std::max(Params().GetConsensus().DIP0003Height, 1)};
+    const uint256 parent_hash{MakeSnapshotKey(parent_height)};
+    CBlockIndex parent_index;
+    parent_index.nHeight = parent_height;
+    parent_index.phashBlock = &parent_hash;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_legacy_operator_scheme_migration",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+
+    // The first same-key v1-to-v2 migration on mainnet occurred in ProUpReg
+    // dee303e3... at height 1,625,508 and must not reset operator state.
+    const auto legacy_bytes{ParseHex(
+        "0171e2a623a3f2709cb7d1802860be86ed5f5ef78c09c166"
+        "f3f58369e1bbd55b50a47f3ca5464819b21131026d678afb")};
+    const auto basic_bytes{ParseHex(
+        "8171e2a623a3f2709cb7d1802860be86ed5f5ef78c09c166"
+        "f3f58369e1bbd55b50a47f3ca5464819b21131026d678afb")};
+    CLegacyBLSPublicKey legacy_key;
+    CLegacyBLSPublicKey basic_key;
+    BOOST_REQUIRE(legacy_key.SetBytes(legacy_bytes));
+    BOOST_REQUIRE(basic_key.SetBytes(basic_bytes));
+
+    auto member = std::make_shared<CDeterministicMN>(1);
+    member->proTxHash = MakeSnapshotKey(30'001);
+    member->collateralOutpoint = COutPoint{MakeSnapshotKey(30'002), 0};
+    auto member_state = std::make_shared<CDeterministicMNState>();
+    member_state->nVersion = CProRegTx::LEGACY_BLS_VERSION;
+    member_state->nRegisteredHeight = parent_height - 1;
+    member_state->nCollateralHeight = parent_height - 1;
+    member_state->confirmedHash = MakeSnapshotKey(30'003);
+    member_state->confirmedHashWithProRegTxHash = MakeSnapshotKey(30'004);
+    member_state->keyIDOwner = MakeAnchorKeyID(0x21);
+    member_state->keyIDVoting = MakeAnchorKeyID(0x31);
+    member_state->pubKeyOperator = legacy_key;
+    member_state->scriptPayout = CScript{} << OP_TRUE;
+    member_state->scriptOperatorPayout = CScript{} << OP_DUP;
+    member_state->vchNEVMAddress = {1, 2, 3, 4};
+    member->pdmnState = member_state;
+
+    CDeterministicMNList parent_list{parent_hash, parent_height, 1};
+    parent_list.AddMN(member, /*fBumpTotalCount=*/false);
+    manager.m_evoDb->WriteCache(parent_hash, parent_list);
+
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+    const auto build_update = [&](const CLegacyBLSPublicKey& operator_key) {
+        CMutableTransaction tx;
+        tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+        tx.vin.emplace_back(COutPoint{MakeSnapshotKey(30'005), 0});
+        tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+
+        CProUpRegTx payload;
+        payload.nVersion = CProUpRegTx::BASIC_BLS_VERSION;
+        payload.proTxHash = member->proTxHash;
+        payload.pubKeyOperator = operator_key;
+        payload.keyIDVoting = member_state->keyIDVoting;
+        payload.scriptPayout = member_state->scriptPayout;
+        payload.inputsHash = MakeSnapshotKey(30'006);
+        payload.vchSig.assign(1, 1);
+        SetTxPayload(tx, payload);
+
+        BlockValidationState state;
+        CDeterministicMNList next_list;
+        CDeterministicMNList old_list;
+        BOOST_REQUIRE(manager.BuildNewListFromBlock(
+            MakeProviderMutationBlock({MakeTransactionRef(std::move(tx))}),
+            &parent_index, state, view, next_list, old_list,
+            no_legacy_commitment));
+        return next_list;
+    };
+
+    const auto migrated_list{build_update(basic_key)};
+    const auto migrated{migrated_list.GetMN(member->proTxHash)};
+    BOOST_REQUIRE(migrated);
+    BOOST_CHECK_EQUAL(migrated->pdmnState->nVersion,
+                      CProRegTx::LEGACY_BLS_VERSION);
+    BOOST_CHECK(migrated->pdmnState->pubKeyOperator == legacy_key);
+    BOOST_CHECK(!migrated->pdmnState->IsBanned());
+    BOOST_CHECK(migrated->pdmnState->scriptOperatorPayout ==
+                member_state->scriptOperatorPayout);
+    BOOST_CHECK(migrated->pdmnState->vchNEVMAddress ==
+                member_state->vchNEVMAddress);
+    BOOST_CHECK(!migrated_list.m_changed_nevm_address);
+    BOOST_REQUIRE(migrated_list.GetUniquePropertyMN(legacy_key));
+    BOOST_CHECK(!migrated_list.HasUniqueProperty(basic_key));
+    auto removable_list{migrated_list};
+    BOOST_CHECK_NO_THROW(removable_list.RemoveMN(member->proTxHash));
+    BOOST_CHECK(!removable_list.HasMN(member->proTxHash));
+
+    auto changed_bytes{basic_bytes};
+    changed_bytes.front() ^= 0x20U;
+    CLegacyBLSPublicKey changed_key;
+    BOOST_REQUIRE(changed_key.SetBytes(changed_bytes));
+    const auto changed_list{build_update(changed_key)};
+    const auto changed{changed_list.GetMN(member->proTxHash)};
+    BOOST_REQUIRE(changed);
+    BOOST_CHECK_EQUAL(changed->pdmnState->nVersion,
+                      CProRegTx::BASIC_BLS_VERSION);
+    BOOST_CHECK(changed->pdmnState->pubKeyOperator == changed_key);
+    BOOST_CHECK(changed->pdmnState->IsBanned());
+    BOOST_CHECK(changed->pdmnState->scriptOperatorPayout.empty());
+    BOOST_CHECK(changed->pdmnState->vchNEVMAddress.empty());
+    BOOST_CHECK(changed_list.m_changed_nevm_address);
+    BOOST_REQUIRE(changed_list.GetUniquePropertyMN(changed_key));
+    BOOST_CHECK(!changed_list.HasUniqueProperty(legacy_key));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
