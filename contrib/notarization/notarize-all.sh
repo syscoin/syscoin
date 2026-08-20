@@ -1,5 +1,6 @@
 #!/bin/bash
 # Helper script to run all notarization steps
+# SYSCOIN: Keep release transcript output deterministic across maintainer locales.
 export LC_ALL=C
 set -e
 

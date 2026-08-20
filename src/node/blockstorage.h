@@ -294,6 +294,8 @@ public:
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
 
+    // SYSCOIN: PQ catch-up durably flushes block and undo files before
+    // publishing replay progress.
     /** Flush the current block and undo file for the chainstate type at the given height. */
     [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
 

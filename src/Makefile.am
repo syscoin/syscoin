@@ -2,6 +2,7 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+# SYSCOIN: Legacy BLS and GMP are absent from the post-quantum build graph.
 # Pattern rule to print variables, e.g. make print-top_srcdir
 print-%: FORCE
 	@echo '$*'='$($*)'
@@ -24,6 +25,8 @@ check_PROGRAMS =
 TESTS =
 BENCHMARKS =
 
+# SYSCOIN: The common include and library aliases deliberately omit retired
+# Dash BLS, RELIC, mimalloc, and GMP paths.
 SYSCOIN_INCLUDES=-I$(builddir) -I$(srcdir)/$(MINISKETCH_INCLUDE_DIR_INT) -I$(srcdir)/secp256k1/include -I$(srcdir)/$(UNIVALUE_INCLUDE_DIR_INT)
 SYSCOIN_INCLUDES+=-I$(srcdir)/immer
 
@@ -68,6 +71,7 @@ LIBSYSCOIN_CRYPTO += $(LIBSYSCOIN_CRYPTO_ARM_SHANI)
 endif
 noinst_LTLIBRARIES += $(LIBSYSCOIN_CRYPTO)
 
+# SYSCOIN: secp256k1 is the only remaining bundled cryptographic subproject.
 $(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
 
@@ -836,6 +840,7 @@ crypto_libsyscoin_crypto_arm_shani_la_CPPFLAGS += -DENABLE_ARM_SHANI
 crypto_libsyscoin_crypto_arm_shani_la_SOURCES = crypto/sha256_arm_shani.cpp
 
 # consensus #
+# SYSCOIN: Historical BLS is opaque replay data, not linked consensus code.
 libsyscoin_consensus_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
 libsyscoin_consensus_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_consensus_a_SOURCES = \
@@ -938,6 +943,7 @@ endif
 #
 
 # util #
+# SYSCOIN: Live BLS verification and worker utilities are retired.
 libsyscoin_util_a_CPPFLAGS = $(AM_CPPFLAGS) $(SYSCOIN_INCLUDES)
 libsyscoin_util_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libsyscoin_util_a_SOURCES = \
@@ -1003,6 +1009,7 @@ if TARGET_WINDOWS
 syscoin_daemon_sources += syscoind-res.rc
 endif
 # SYSCOIN need getauxwork and mempool stuff inside of wallet so server needs linking here for now but order has to be after wallet
+# SYSCOIN: Node binaries link PQ crypto without the retired BLS/GMP closure.
 syscoin_bin_ldadd = \
   $(LIBSYSCOIN_WALLET) \
   $(LIBSYSCOIN_NODE) \
@@ -1042,6 +1049,7 @@ syscoin_cli_SOURCES += syscoin-cli-res.rc
 endif
 
 
+# SYSCOIN: The CLI has no legacy BLS runtime dependency.
 syscoin_cli_LDADD = \
   $(LIBSYSCOIN_CLI) \
   $(LIBUNIVALUE) \
@@ -1062,6 +1070,7 @@ if TARGET_WINDOWS
 syscoin_tx_SOURCES += syscoin-tx-res.rc
 endif
 
+# SYSCOIN: Offline transaction tooling uses the BLS-free consensus closure.
 syscoin_tx_LDADD = \
   $(LIBUNIVALUE) \
   $(LIBSYSCOIN_COMMON) \
@@ -1084,6 +1093,7 @@ if TARGET_WINDOWS
 syscoin_util_SOURCES += syscoin-util-res.rc
 endif
 
+# SYSCOIN: Utility binaries use the BLS-free consensus closure.
 syscoin_util_LDADD = \
   $(LIBSYSCOIN_COMMON) \
   $(LIBSYSCOIN_UTIL) \
@@ -1241,6 +1251,7 @@ config/stamp-h1: $(top_srcdir)/$(subdir)/config/syscoin-config.h.in $(top_buildd
 $(top_srcdir)/$(subdir)/config/syscoin-config.h.in:  $(am__configure_deps)
 	$(AM_V_at)$(MAKE) -C $(top_srcdir) $(subdir)/config/syscoin-config.h.in
 
+# SYSCOIN: Legacy BLS no longer has a nested build tree to clean.
 clean-local:
 	-$(MAKE) -C secp256k1 clean
 	-rm -f leveldb/*/*.gcda leveldb/*/*.gcno leveldb/helpers/memenv/*.gcda leveldb/helpers/memenv/*.gcno

@@ -23,6 +23,7 @@
 #include <common/args.h>
 #include <common/system.h>
 #include <consensus/amount.h>
+// SYSCOIN: Validate the release-pinned PQ deployment profile at startup.
 #include <consensus/pq_migration_config.h>
 #include <deploymentstatus.h>
 #include <hash.h>

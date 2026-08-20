@@ -2463,6 +2463,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_recent_confirmed_transactions_mutex);
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    // SYSCOIN: Publish fork services and wake relay when public IBD ends
+    // without a later tip update.
     void InitialBlockDownloadCompleted(
         const CBlockIndex* tip, ChainstateManager& chainman) override;
     void BlockChecked(const CBlock& block, const BlockValidationState& state) override
@@ -4892,6 +4894,8 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
     m_connman.WakeMessageHandler();
 }
 
+// SYSCOIN: Public IBD can end after PQ-history or NEVM readiness changes,
+// without another block arriving to wake the message handler.
 void PeerManagerImpl::InitialBlockDownloadCompleted(
     const CBlockIndex* tip, ChainstateManager&)
 {

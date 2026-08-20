@@ -15,6 +15,7 @@ export MSAN_AND_LIBCXX_FLAGS="${MSAN_FLAGS} ${LIBCXX_FLAGS}"
 export CONTAINER_NAME="ci_native_msan"
 export PACKAGES="cmake ninja-build clang-18 llvm-18 llvm-18-dev libclang-18-dev libclang-rt-18-dev"
 # BDB generates false positives and will be removed in future.
+# SYSCOIN: The post-BLS MSan depends build has no GMP configuration.
 export DEP_OPTS="NO_BDB=1 NO_QT=1 DEBUG=1 CC=clang CXX=clang++ CFLAGS='${MSAN_FLAGS}' CXXFLAGS='${MSAN_AND_LIBCXX_FLAGS}'"
 export GOAL="install"
 export SYSCOIN_CONFIG="--with-sanitizers=memory --disable-hardening --with-asm=no CPPFLAGS='-U_FORTIFY_SOURCE' CFLAGS='${MSAN_FLAGS}' CXXFLAGS='${MSAN_AND_LIBCXX_FLAGS}'"

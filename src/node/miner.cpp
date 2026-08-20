@@ -292,7 +292,8 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     pblock->nNonce         = 0;
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);
 
-    // SYSCOIN BlockValidationState state;
+    // SYSCOIN: Validate the template against the exact policy-selected
+    // Bitcoin parent before returning merge-mining work.
     if (m_options.test_block_validity) {
         const bool valid{
             auxpow_btc_prev

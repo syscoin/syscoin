@@ -16,6 +16,7 @@
 #include <uint256.h>
 #include <util/time.h>
 
+// SYSCOIN: Reject unsupported extended block-index record versions.
 #include <ios>
 #include <vector>
 // SYSCOIN: BTCC replay pruning is coordinated through the block manager from

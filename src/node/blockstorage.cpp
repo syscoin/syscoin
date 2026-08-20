@@ -566,8 +566,9 @@ bool BlockManager::WriteBlockIndexDB()
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
     }
-    // A failed batch must remain retryable. This method holds cs_main, so no
-    // caller can add new dirty entries between the snapshots above and here.
+    // SYSCOIN: A failed batch must remain retryable. This method holds
+    // cs_main, so no caller can add new dirty entries between the snapshots
+    // above and here.
     m_dirty_fileinfo.clear();
     m_dirty_blockindex.clear();
     return true;

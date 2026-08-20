@@ -1,5 +1,6 @@
 #!/bin/bash
 # Helper script to create detached macOS signatures for Guix builds
+# SYSCOIN: Keep release transcript output deterministic across maintainer locales.
 export LC_ALL=C
 set -e
 

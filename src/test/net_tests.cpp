@@ -39,7 +39,8 @@
 using namespace std::literals;
 
 BOOST_FIXTURE_TEST_SUITE(net_tests, RegTestingSetup)
-// SYSCOIN
+// SYSCOIN: BEGIN fork-only bounded admission and failover tests for PQ
+// certificates, paged governance relay, and masternode connection roles.
 BOOST_AUTO_TEST_CASE(masternode_connection_status_is_role_exact)
 {
     in_addr ipv4_addr;

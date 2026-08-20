@@ -45,6 +45,7 @@ SYSCOIN_TEST_SUITE = \
   test/pq_test_util.h \
   $(TEST_UTIL_H)
 
+# SYSCOIN: Post-BLS test and fuzz binaries omit the legacy BLS/GMP closure.
 FUZZ_SUITE_LD_COMMON = \
  $(LIBTEST_UTIL) \
  $(LIBTEST_FUZZ) \
@@ -272,6 +273,7 @@ test_test_syscoin_LDADD += $(LIBSYSCOIN_WALLET)
 test_test_syscoin_CPPFLAGS += $(BDB_CPPFLAGS)
 endif
 
+# SYSCOIN: Keep the unit-test link closure aligned with the BLS-free node.
 test_test_syscoin_LDADD += $(LIBSYSCOIN_NODE) $(LIBSYSCOIN_CLI) $(LIBSYSCOIN_COMMON) $(LIBSYSCOIN_UTIL) $(LIBSYSCOIN_CONSENSUS) $(LIBSYSCOIN_CRYPTO) $(LIBUNIVALUE) \
   $(LIBLEVELDB) $(LIBMEMENV) $(LIBSECP256K1) $(EVENT_LIBS) $(EVENT_PTHREADS_LIBS) $(MINISKETCH_LIBS) $(LIBNEVM)
 test_test_syscoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)

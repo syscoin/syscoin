@@ -77,6 +77,8 @@ def main():
 
         matching_files_filtered = []
         for matching_file in matching_files:
+            # SYSCOIN: The fork-owned tidy fixture intentionally contains
+            # malformed printf examples and is outside the production scan.
             if not re.search('^src/(leveldb|secp256k1|minisketch|tinyformat|test/fuzz/strprintf.cpp)|contrib/devtools/syscoin-tidy/example_logprintf.cpp', matching_file):
                 matching_files_filtered.append(matching_file)
         matching_files_filtered.sort()

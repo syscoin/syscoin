@@ -647,6 +647,8 @@ struct Peer {
     ChainLockUploadTracker m_payment_audit_uploads
         GUARDED_BY(m_pq_certificate_mutex);
 
+    // SYSCOIN: Bind bounded governance page and upload leases to each peer
+    // independently of transaction and consensus-certificate relay state.
     struct GovernancePageUpload {
         uint256 scope_hash;
         std::chrono::microseconds expiry{0};

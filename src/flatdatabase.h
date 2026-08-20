@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <limits>
 
+// SYSCOIN: Bound inherited flat-file caches before allocation while still
+// permitting independently configured cache sizes.
 [[nodiscard]] inline constexpr bool FlatDatabaseFileSizeAllowed(
     uintmax_t file_size, uint64_t max_file_size) noexcept
 {
@@ -69,8 +71,8 @@ private:
         if (fileout.IsNull())
             return error("%s: Failed to open file %s", __func__, pathDB.u8string());
 
-        // Stream directly to disk so a large but valid cache is never copied
-        // into one second whole-file allocation just to calculate its hash.
+        // SYSCOIN: Stream directly to disk so a large but valid cache is never
+        // copied into a second whole-file allocation just to calculate its hash.
         try {
             HashedSourceWriter<CAutoFile> writer{
                 fileout, SER_DISK, CLIENT_VERSION};
@@ -115,6 +117,7 @@ private:
             error("%s: File %s is too small", __func__, pathDB.u8string());
             return HashReadError;
         }
+        // SYSCOIN: Reject oversized cache files before allocating their payload.
         if (!FlatDatabaseFileSizeAllowed(fileSize, maxFileSize)) {
             error("%s: File %s exceeds its configured size limit",
                   __func__, pathDB.u8string());
@@ -124,6 +127,8 @@ private:
         MessageStartChars pchMsgTmp;
         std::string strMagicMessageTmp;
         uint256 hashIn;
+        // SYSCOIN: Hash the bounded payload while deserializing and require
+        // checksum EOF so appended data cannot be accepted.
         try {
             HashVerifier<CAutoFile> verifier{
                 filein, SER_DISK, CLIENT_VERSION};

@@ -264,6 +264,8 @@ mkdir -p "$DISTSRC"
                     ${HOST_CXXFLAGS:+CXXFLAGS="${HOST_CXXFLAGS}"} \
                     ${HOST_LDFLAGS:+LDFLAGS="${HOST_LDFLAGS}"}
 
+    # SYSCOIN: Legacy BLS is retired, so only the root and secp256k1 libtool
+    # outputs need deterministic Guix post-processing.
     sed -i.old 's/-lstdc++ //g' {./,src/secp256k1/}{config.status,libtool}
 
 

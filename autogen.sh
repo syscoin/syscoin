@@ -15,6 +15,8 @@ command -v autoreconf >/dev/null || \
   (echo "configuration failed, please install autoconf first" && exit 1)
 autoreconf --install --force --warnings=all
 
+# SYSCOIN: Legacy BLS is retired, so only secp256k1 receives refreshed
+# autotools host-triplet helpers.
 if expr "'$(build-aux/config.guess --timestamp)" \< "'$(depends/config.guess --timestamp)" > /dev/null; then
   chmod ug+w build-aux/config.guess
   chmod ug+w src/secp256k1/build-aux/config.guess

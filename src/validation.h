@@ -43,6 +43,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+// SYSCOIN: Validate persisted chainstate recovery markers without copying.
 #include <span>
 #include <set>
 #include <stdint.h>
@@ -1160,6 +1161,8 @@ public:
      * Mutable because we need to be able to mark IsInitialBlockDownload()
      * const, which latches this for caching purposes.
      */
+    // SYSCOIN: Gate one-shot NEVM publication and public readiness on
+    // authenticated PQ history rather than block sync alone.
     mutable std::atomic<bool> m_cached_finished_ibd{false};
     std::atomic<bool> m_nevm_network_start_sent{false};
 
@@ -1231,6 +1234,8 @@ public:
     //! Get all chainstates currently being used.
     std::vector<Chainstate*> GetAll();
 
+    // SYSCOIN: Preserve every crash-visible chainstate marker when retaining
+    // shared deterministic-MN and PQ history.
     /**
      * Get every initialized chainstate whose on-disk state may still be
      * recovered or published. Disabled AssumeUTXO chainstates remain on disk
@@ -1333,6 +1338,8 @@ public:
     /** Check whether we are doing an initial block download (synchronizing from disk or network) */
     bool IsInitialBlockDownload() const;
 
+    // SYSCOIN: Separate base sync from the one-way public-readiness latch used
+    // by PQ-history authentication and NEVM startup.
     /** Base-chain synchronization only; excludes PQ authentication and Geth. */
     bool IsBaseBlockSyncComplete() const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

@@ -400,6 +400,9 @@ TestChain100Setup::~TestChain100Setup()
     masternodeSync.SetSyncMode(m_previous_masternode_sync_mode);
 }
 
+// SYSCOIN: TestChain100Setup temporarily publishes tip-bound governance
+// readiness while mining the inherited bootstrap chain, then restores the
+// caller's masternode-sync mode.
 void TestChain100Setup::mineBlocks(int num_blocks)
 {
     CScript scriptPubKey = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
@@ -458,6 +461,8 @@ CBlock TestChain100Setup::CreateBlock(
     for (const CMutableTransaction& tx : txns) {
         block.vtx.push_back(MakeTransactionRef(tx));
     }
+    // SYSCOIN: Legacy DKG coinbase commitments are retired, so bootstrap
+    // blocks regenerate the remaining commitment payload with an empty set.
     RegenerateCommitments(block, *Assert(m_node.chainman), {});
     while (!CheckProofOfWork(block.GetHash(), block.nBits, m_node.chainman->GetConsensus())) ++block.nNonce;
 

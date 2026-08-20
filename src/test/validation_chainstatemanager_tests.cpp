@@ -69,6 +69,8 @@ void AssertMainLockHeldForTest() NO_THREAD_SAFETY_ANALYSIS
 
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
+// SYSCOIN: BEGIN public IBD remains latched until PQ-history authentication
+// and deferred NEVM recovery reach the exact active tip.
 BOOST_FIXTURE_TEST_CASE(pq_history_auth_state_gates_public_ibd,
                         TestChain100Setup)
 {
@@ -325,6 +327,7 @@ BOOST_AUTO_TEST_CASE(coins_recovery_marker_validation)
                      {}, null_new_head, {}, error)
                      .has_value());
 }
+// SYSCOIN: END public IBD and durable recovery-marker lifecycle tests.
 
 //! Basic tests for ChainstateManager.
 //!
@@ -1439,6 +1442,8 @@ struct SnapshotTestSetup : TestChain100Setup {
     }
 };
 
+// SYSCOIN: BEGIN durable ChainLock boundaries and reconstructed DMN/PQ roots
+// must protect active and side branches across block-index reloads.
 BOOST_FIXTURE_TEST_CASE(
     chainlock_conflicting_best_header_is_not_restored_after_restart,
     SnapshotTestSetup)
@@ -2048,6 +2053,7 @@ BOOST_FIXTURE_TEST_CASE(
     assert_rejected(durable_ancestor);
     assert_rejected(active_lca);
 }
+// SYSCOIN: END durable ChainLock restart and deep-invalidation tests.
 
 //! Test basic snapshot activation.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, SnapshotTestSetup)
@@ -2280,6 +2286,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion, SnapshotTestSetup
 
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& active_cs = chainman.ActiveChainstate();
+    // SYSCOIN: Disabled background chainstates remain persistence roots until
+    // destruction, preventing sidecar GC from pruning restart-recoverable data.
     Chainstate* background_cs{nullptr};
     {
         LOCK(::cs_main);
@@ -2330,6 +2338,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion, SnapshotTestSetup
                     persistence_chainstates.end());
     }
 
+    // SYSCOIN: Snapshot completion retains durable and prospective chainstate
+    // probation roots before pruning unreferenced states.
     const auto non_null_hash = [](uint8_t tag) {
         uint256 hash;
         hash.begin()[0] = tag;

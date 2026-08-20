@@ -2635,6 +2635,8 @@ void Chainstate::InitCoinsCache(size_t cache_size_bytes)
 // `const` so that `CValidationInterface` clients (which are given a `const Chainstate*`)
 // can call it.
 //
+// SYSCOIN: Keep public IBD latched until base sync, PQ-history
+// authentication, snapshot validation, and required Geth startup are ready.
 bool ChainstateManager::IsInitialBlockDownload() const
 {
     // Optimization: pre-test latch before taking the lock.
@@ -4547,7 +4549,8 @@ bool Chainstate::FlushStateToDisk(
             {
                 LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCHMARK);
 
-                // First make sure all block and undo data is flushed to disk.
+                // SYSCOIN: Never publish block-index metadata after its
+                // backing block or undo flat-file flush failed.
                 if (!m_blockman.FlushChainstateBlockFile(m_chain.Height())) {
                     return FatalError(
                         m_chainman.GetNotifications(), state,
@@ -5206,6 +5209,8 @@ bool Chainstate::IsCurrentMostWorkBranch(const CBlockIndex& ancestor)
            candidate->GetAncestor(ancestor.nHeight) == &ancestor;
 }
 
+// SYSCOIN: Quarantine and reconsider exact-certificate-dependent branches
+// without declaring their blocks invalid.
 bool Chainstate::DeferBTCCReceiptCandidates(
     const uint256& logical_id,
     const CBlockIndex& carrier)
@@ -5862,6 +5867,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             LOCK(cs_main);
             // Lock transaction pool for at least as long as it takes for connectTrace to be consumed
             LOCK(MempoolMutex());
+            // SYSCOIN: Cache priority follows base-chain sync even when PQ
+            // authentication keeps the public IBD latch active.
             const bool was_base_sync_complete{
                 m_chainman.IsBaseBlockSyncComplete()};
             CBlockIndex* starting_tip = m_chain.Tip();
@@ -8826,6 +8833,8 @@ std::vector<Chainstate*> ChainstateManager::GetAll()
     return out;
 }
 
+// SYSCOIN: Retain shared DMN/PQ state for every crash-visible chainstate
+// recovery marker, including disabled snapshot chainstates awaiting cleanup.
 std::vector<Chainstate*> ChainstateManager::GetAllForPersistence()
 {
     LOCK(::cs_main);
@@ -11355,6 +11364,8 @@ void ChainstateManager::MaybeRebalanceCaches()
         // If both chainstates exist, determine who needs more cache based on IBD status.
         //
         // Note: shrink caches first so that we don't inadvertently overwhelm available memory.
+        // SYSCOIN: PQ authentication may extend public IBD after cache
+        // priority must return to background snapshot validation.
         if (!IsBaseBlockSyncComplete()) {
             m_ibd_chainstate->ResizeCoinsCaches(
                 m_total_coinstip_cache * 0.05, m_total_coinsdb_cache * 0.05);
@@ -11395,6 +11406,8 @@ ChainstateManager::ChainstateManager(const util::SignalInterrupt& interrupt, Opt
       m_options{Flatten(std::move(options))},
       m_blockman{interrupt, std::move(blockman_options)}
 {
+    // SYSCOIN: A network without a PQ finality store has no historical
+    // certificate-authentication gate to hold public readiness.
     if (!llmq::MakePQChainLockFinalityStoreConfig(GetConsensus())) {
         m_pq_history_auth_state = PQHistoryAuthState::READY;
     }

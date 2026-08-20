@@ -98,6 +98,8 @@ protected:
      * Called on a background thread. Only called for the active chainstate.
      */
     virtual void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) {}
+    // SYSCOIN: Notify subscribers when public IBD ends without requiring a
+    // new active tip.
     /** Public IBD completed without necessarily changing the active tip. */
     virtual void InitialBlockDownloadCompleted(
         const CBlockIndex* tip, ChainstateManager& chainman) {}
@@ -224,6 +226,7 @@ public:
 
 
     void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, ChainstateManager&, bool fInitialDownload);
+    // SYSCOIN: Fan out public-readiness completion independently of a tip update.
     void InitialBlockDownloadCompleted(ChainstateManager& chainman);
     // SYSCOIN
     void NotifyHeaderTip(const CBlockIndex *pindexNew);

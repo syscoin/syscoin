@@ -163,6 +163,7 @@ jobs:
           key: ${{ github.job }}-ccache-${{ github.run_id }}
 
   win64-native:
+    # SYSCOIN: The post-BLS Windows build no longer provisions Dash BLS.
     name: 'Win64 native core, VS 2022'
     # Use latest image, but hardcode version to avoid silent upgrades (and breaks).
     # See: https://github.com/actions/runner-images#available-images.

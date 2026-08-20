@@ -13,6 +13,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <scheduler.h>
+// SYSCOIN: Publish post-IBD readiness through ChainstateManager.
 #include <validation.h>
 
 #include <future>
@@ -208,6 +209,8 @@ void CMainSignals::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockInd
                           pindexFork ? pindexFork->GetBlockHash().ToString() : "null",
                           fInitialDownload);
 }
+// SYSCOIN: Publish POST_INIT and start NEVM when public IBD ends without a
+// corresponding active-tip change.
 void CMainSignals::InitialBlockDownloadCompleted(
     ChainstateManager& chainman)
 {

@@ -1,5 +1,6 @@
 #!/bin/bash
 # Script to sign Syscoin macOS binaries
+# SYSCOIN: Keep release transcript output deterministic across maintainer locales.
 export LC_ALL=C
 set -e
 

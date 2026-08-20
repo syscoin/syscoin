@@ -15,6 +15,8 @@ void TestChainstateManager::ResetIbd()
     assert(IsInitialBlockDownload());
 }
 
+// SYSCOIN: Recovery tests reset public IBD, PQ-history authentication, and
+// the one-shot NEVM-start latch as one lifecycle state.
 void TestChainstateManager::ResetIbd(PQHistoryAuthState state)
 {
     LOCK(cs_main);

@@ -799,6 +799,7 @@ case $host in
            export PKG_CONFIG_PATH="$($BREW --prefix qt@5 2>/dev/null)/lib/pkgconfig:$PKG_CONFIG_PATH"
          fi
 
+         dnl SYSCOIN: Legacy BLS is retired, so macOS builds no longer discover GMP.
          case $host in
            *aarch64*)
              dnl The preferred Homebrew prefix for Apple Silicon is /opt/homebrew.
@@ -1660,6 +1661,7 @@ if test "$use_zmq" = "yes"; then
   esac
 fi
 
+dnl SYSCOIN: The post-BLS core has no global GMP header or library dependency.
 dnl libmultiprocess library check
 
 libmultiprocess_found=no
@@ -2005,6 +2007,7 @@ unset CPPFLAGS
 CPPFLAGS="$CPPFLAGS_TEMP"
 
 ac_configure_args="${ac_configure_args} --disable-shared --with-pic --enable-benchmark=no --enable-module-recovery --disable-module-ecdh --disable-openssl-tests"
+dnl SYSCOIN: Legacy BLS is retired; secp256k1 is the only bundled autotools subproject.
 AC_CONFIG_SUBDIRS([src/secp256k1])
 
 AC_OUTPUT

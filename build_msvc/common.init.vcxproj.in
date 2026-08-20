@@ -2,6 +2,8 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
 
+  <!-- SYSCOIN: The post-BLS build must not inherit Dash BLS, RELIC, GMP, or
+       mimalloc include and link dependencies. -->
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
     <UseNativeEnvironment>true</UseNativeEnvironment>
@@ -83,6 +85,8 @@
     </ClCompile>
   </ItemDefinitionGroup>
 
+  <!-- SYSCOIN: Keep inherited MSVC compile/link defaults free of retired
+       Dash BLS include and library search paths. -->
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>

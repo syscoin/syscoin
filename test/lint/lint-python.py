@@ -21,6 +21,7 @@ os.environ["MYPY_CACHE_DIR"] = str(cache_dir)
 
 DEPS = ['flake8', 'lief', 'mypy', 'pyzmq']
 
+# SYSCOIN: Preserve vendored Immer verbatim outside fork flake/mypy discovery.
 # All .py files, except those in src/ (to exclude subtrees there)
 FLAKE_FILES_ARGS = ['git', 'ls-files', '*.py', ':!:src/*.py', '--', ':(exclude)src/immer/']
 

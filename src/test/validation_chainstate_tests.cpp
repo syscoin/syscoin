@@ -904,8 +904,8 @@ BOOST_AUTO_TEST_CASE(validation_chainstate_resize_caches)
         LOCK(::cs_main);
         const auto outpoint = AddTestCoin(c1.CoinsTip());
 
-        // Set a real indexed best block so the resize exercises the flush path
-        // without violating the recovery-marker invariant.
+        // SYSCOIN: Set a real indexed best block so recovery-marker validation
+        // permits this inherited cache-resize flush path.
         c1.CoinsTip().SetBestBlock(
             Params().GetConsensus().hashGenesisBlock);
 
