@@ -1199,7 +1199,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             std::string s = args.GetArg("-llmqtestparams", "");
             std::vector<std::string> v = SplitString(s, ':');
             int size, threshold;
-            if (v.size() != 2 || !ParseInt32(v[0], &size) || !ParseInt32(v[1], &threshold)) {
+            if (v.size() != 2 || !ParseInt32(v[0], &size) || !ParseInt32(v[1], &threshold) ||
+                size <= 0 || size > Consensus::MAX_LLMQ_SIZE || threshold <= 0 || threshold > size) {
                 return InitError(Untranslated("Invalid -llmqtestparams specified"));
             }
             UpdateLLMQTestParams(size, threshold);

@@ -98,8 +98,8 @@ public:
         READWRITE(
                 obj.quorumHash,
                 obj.proTxHash,
-                DYNBITSET(obj.badMembers),
-                DYNBITSET(obj.complainForMembers),
+                DYNBITSET(obj.badMembers, Consensus::MAX_LLMQ_SIZE),
+                DYNBITSET(obj.complainForMembers, Consensus::MAX_LLMQ_SIZE),
                 obj.sig
                 );
     }
@@ -175,7 +175,7 @@ public:
         READWRITE(
                 obj.quorumHash,
                 obj.proTxHash,
-                DYNBITSET(obj.validMembers),
+                DYNBITSET(obj.validMembers, Consensus::MAX_LLMQ_SIZE),
                 obj.quorumPublicKey,
                 obj.quorumVvecHash,
                 obj.quorumSig,

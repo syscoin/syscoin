@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_COMMITMENT_H
 #define SYSCOIN_LLMQ_QUORUMS_COMMITMENT_H
 
+#include <consensus/params.h>
 #include <llmq/quorums_utils.h>
 #include <primitives/transaction.h>
 #include <bls/bls.h>
@@ -67,8 +68,8 @@ public:
                 obj.quorumHash
         );
         READWRITE(
-                DYNBITSET(obj.signers),
-                DYNBITSET(obj.validMembers),
+                DYNBITSET(obj.signers, Consensus::MAX_LLMQ_SIZE),
+                DYNBITSET(obj.validMembers, Consensus::MAX_LLMQ_SIZE),
                 CBLSPublicKeyVersionWrapper(const_cast<CBLSPublicKey&>(obj.quorumPublicKey), (obj.nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION)),
                 obj.quorumVvecHash,
                 CBLSSignatureVersionWrapper(const_cast<CBLSSignature&>(obj.quorumSig), (obj.nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION)),

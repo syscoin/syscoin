@@ -10,6 +10,7 @@
 #include <compat/endian.h>
 
 #include <algorithm>
+#include <concepts>
 #include <cstdint>
 #include <cstring>
 #include <ios>
@@ -528,12 +529,24 @@ void WriteFixedBitSet(Stream& s, const std::vector<bool>& vec, size_t size)
     s.write(MakeByteSpan(vBytes));
 }
 
-template<typename Stream>
+/** A stream that reports how many bytes remain available to read. */
+template<typename S>
+concept SizedStream = requires(const S& s) { { s.size() } -> std::convertible_to<size_t>; };
+
+template<SizedStream Stream>
 void ReadFixedBitSet(Stream& s, std::vector<bool>& vec, size_t size)
 {
+    const size_t nbytes = (size + 7) / 8;
+    // Dense bitsets require exactly ceil(size / 8) payload bytes. Check that invariant before
+    // allocating from a wire-declared size so truncated messages cannot amplify a few bytes into
+    // multi-megabyte temporary allocations.
+    if (nbytes > s.size()) {
+        throw std::ios_base::failure("ReadFixedBitSet(): declared size exceeds remaining bytes");
+    }
+
     vec.resize(size);
 
-    std::vector<unsigned char> vBytes((size + 7) / 8);
+    std::vector<unsigned char> vBytes(nbytes);
     s.read(MakeWritableByteSpan(vBytes));
     for (size_t p = 0; p < size; p++)
         vec[p] = (vBytes[p / 8] & (1 << (p % 8))) != 0;
@@ -568,21 +581,17 @@ void ReadFixedVarIntsBitSet(Stream& s, std::vector<bool>& vec, size_t size)
 {
     vec.assign(size, false);
 
-    int32_t last = -1;
+    size_t index_plus_one{0};
     while(true) {
         uint32_t offset = ReadVarInt<Stream, VarIntMode::DEFAULT, uint32_t>(s);
         if (offset == 0) {
             break;
         }
-        int32_t idx = last + offset;
-        if (idx >= (int32_t)size) {
+        if (offset > size - index_plus_one) {
             throw std::ios_base::failure("out of bounds index");
         }
-        if (last != -1 && idx <= last) {
-            throw std::ios_base::failure("offset overflow");
-        }
-        vec[idx] = true;
-        last = idx;
+        index_plus_one += offset;
+        vec[index_plus_one - 1] = true;
     }
 }
 
@@ -681,10 +690,11 @@ static inline Wrapper<Formatter, T&> Using(T&& t) { return Wrapper<Formatter, T&
 #define LIMITED_STRING(obj,n) Using<LimitedStringFormatter<n>>(obj)
 
 // SYSCOIN
-#define DYNBITSET(obj) Using<DynamicBitSetFormatter>(obj)
-#define AUTOBITSET(obj) Using<AutoBitSetFormatter>(obj)
+#define DYNBITSET(obj, limit) Using<DynamicBitSetFormatter<limit>>(obj)
+#define AUTOBITSET(obj, limit) Using<AutoBitSetFormatter<limit>>(obj)
 
 /** TODO: describe DynamicBitSet */
+template<size_t Limit>
 struct DynamicBitSetFormatter
 {
     template<typename Stream>
@@ -697,13 +707,18 @@ struct DynamicBitSetFormatter
     template<typename Stream>
     void Unser(Stream& s, std::vector<bool>& vec)
     {
-        ReadFixedBitSet(s, vec, ReadCompactSize(s));
+        const size_t size = ReadCompactSize(s);
+        if (size > Limit) {
+            throw std::ios_base::failure("DynamicBitSetFormatter: size exceeds limit");
+        }
+        ReadFixedBitSet(s, vec, size);
     }
 };
 
 /**
  * Serializes either as a CFixedBitSet or CFixedVarIntsBitSet, depending on which would give a smaller size
  */
+template<size_t Limit>
 struct AutoBitSetFormatter
 {
     template<typename Stream>
@@ -715,6 +730,9 @@ struct AutoBitSetFormatter
     template<typename Stream>
     void Unser(Stream& s, autobitset_t& item)
     {
+        if (item.second > Limit) {
+            throw std::ios_base::failure("AutoBitSetFormatter: size exceeds limit");
+        }
         ReadAutoBitSet(s, item);
     }
 };
@@ -859,6 +877,27 @@ struct LimitedStringFormatter
     }
 };
 
+namespace detail {
+template<class Formatter, typename Stream, typename V>
+void UnserializeVectorContents(Stream& s, V& v, size_t size)
+{
+    Formatter formatter;
+    size_t allocated{0};
+    while (allocated < size) {
+        // For DoS prevention, do not blindly allocate as much as the stream claims to contain.
+        // Instead, allocate in 5MiB batches, so that an attacker actually needs to provide
+        // X MiB of data to make us allocate X+5 Mib.
+        static_assert(sizeof(typename V::value_type) <= MAX_VECTOR_ALLOCATE, "Vector element size too large");
+        allocated = std::min(size, allocated + MAX_VECTOR_ALLOCATE / sizeof(typename V::value_type));
+        v.reserve(allocated);
+        while (v.size() < allocated) {
+            v.emplace_back();
+            formatter.Unser(s, v.back());
+        }
+    }
+}
+} // namespace detail
+
 /** Formatter to serialize/deserialize vector elements using another formatter
  *
  * Example:
@@ -888,22 +927,8 @@ struct VectorFormatter
     template<typename Stream, typename V>
     void Unser(Stream& s, V& v)
     {
-        Formatter formatter;
         v.clear();
-        size_t size = ReadCompactSize(s);
-        size_t allocated = 0;
-        while (allocated < size) {
-            // For DoS prevention, do not blindly allocate as much as the stream claims to contain.
-            // Instead, allocate in 5MiB batches, so that an attacker actually needs to provide
-            // X MiB of data to make us allocate X+5 Mib.
-            static_assert(sizeof(typename V::value_type) <= MAX_VECTOR_ALLOCATE, "Vector element size too large");
-            allocated = std::min(size, allocated + MAX_VECTOR_ALLOCATE / sizeof(typename V::value_type));
-            v.reserve(allocated);
-            while (v.size() < allocated) {
-                v.emplace_back();
-                formatter.Unser(s, v.back());
-            }
-        }
+        detail::UnserializeVectorContents<Formatter>(s, v, ReadCompactSize(s));
     };
 };
 
@@ -1011,6 +1036,23 @@ struct DefaultFormatter
     template<typename Stream, typename T>
     static void Unser(Stream& s, T& t) { Unserialize(s, t); }
 };
+
+/**
+ * Deserialize a vector only when its declared element count is within the
+ * caller's protocol limit. Returns false without reading any elements when
+ * the limit is exceeded.
+ */
+template<class Formatter = DefaultFormatter, typename Stream, typename V>
+[[nodiscard]] bool UnserializeVectorWithMaxSize(Stream& s, V& v, size_t max_size)
+{
+    v.clear();
+    const size_t size = ReadCompactSize(s);
+    if (size > max_size) {
+        return false;
+    }
+    detail::UnserializeVectorContents<Formatter>(s, v, size);
+    return true;
+}
 
 
 
