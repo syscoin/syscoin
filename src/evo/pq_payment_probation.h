@@ -184,29 +184,6 @@ struct PQPaymentProbationDiff {
 [[nodiscard]] std::optional<uint256> GetPQPaymentProbationStateHash(
     const PQPaymentProbationState& state);
 
-struct PQPaymentRecoverySelection {
-    uint8_t count{0};
-    std::array<uint256, PAYMENT_AUDIT_RECOVERY_SEATS> members{};
-
-    [[nodiscard]] bool IsStructurallyValid() const noexcept;
-
-    friend bool operator==(const PQPaymentRecoverySelection&,
-                           const PQPaymentRecoverySelection&) = default;
-};
-
-/**
- * Choose 32 state-independent audit-coverage seats from a canonical sorted
- * root-capable candidate set when not every candidate fits in the roster.
- * Consecutive epochs traverse one contiguous cyclic sequence, so a static set
- * is covered within ceil(size / 32) epochs. When at most 400 candidates exist,
- * root-first roster ordering already includes all of them and no seats need to
- * be reserved. Any membership change starts a new coverage interval.
- */
-[[nodiscard]] std::optional<PQPaymentRecoverySelection>
-SelectPQPaymentRecoveryMembers(
-    uint32_t epoch,
-    std::span<const uint256> sorted_root_capable_candidates);
-
 /**
  * All membership collections are exact transition inputs. The two collateral
  * lists must be strictly sorted; current_valid_pro_tx_hashes must be a subset
@@ -218,8 +195,6 @@ struct PQPaymentProbationTransitionInput {
     std::array<uint256, QUORUM_SIZE> frozen_roster;
     QuorumBitmap roster_valid_members{};
     QuorumBitmap observed_members{};
-    /** State-independent coverage seats rederived from the historical snapshot. */
-    PQPaymentRecoverySelection recovery_seats;
     std::vector<uint256> existing_pro_tx_hashes;
     std::vector<uint256> current_valid_pro_tx_hashes;
 

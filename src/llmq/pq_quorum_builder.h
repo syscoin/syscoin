@@ -6,7 +6,6 @@
 #define SYSCOIN_LLMQ_PQ_QUORUM_BUILDER_H
 
 #include <evo/deterministicmns.h>
-#include <evo/pq_payment_probation.h>
 #include <llmq/pq_chainlock_schedule.h>
 #include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_operator_key_state.h>
@@ -60,7 +59,6 @@ enum class QuorumBuildError : uint8_t {
     MISSING_BRANCH_ANCESTOR,
     SNAPSHOT_LOOKUP_FAILED,
     SNAPSHOT_MISMATCH,
-    INVALID_RECOVERY_SELECTION,
 };
 
 /**
@@ -88,12 +86,10 @@ using AuthorizationBoundaryLookup =
 /**
  * Build one canonical 400-slot roster from an exact deterministic-MN snapshot.
  * The base height is derived from the fixed schedule, not accepted from a
- * caller. Payment state never enters validator selection: when more than 400
- * root-capable operators compete, 32 state-independent audit-coverage seats
- * traverse their canonical cyclic order so every such operator has a bounded
- * opportunity to demonstrate recovery. Root-capable candidates otherwise
- * rank ahead of keyless records. Missing operator state or a frozen-absent key
- * leaves an otherwise selected slot without a child key.
+ * caller. Payment state never enters validator selection. Root-capable
+ * candidates rank ahead of keyless records, with each group ordered by the
+ * existing epoch score. Missing operator state or a frozen-absent key leaves
+ * an otherwise selected slot without a child key.
  */
 [[nodiscard]] std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     const uint256& genesis_hash,
@@ -102,8 +98,7 @@ using AuthorizationBoundaryLookup =
     const uint256& base_hash,
     const CDeterministicMNList& snapshot,
     std::span<const OperatorKeyState> operator_key_states,
-    QuorumBuildError* error = nullptr,
-    PQPaymentRecoverySelection* recovery_selection = nullptr);
+    QuorumBuildError* error = nullptr);
 
 /**
  * Build the four oldest-to-newest active rosters on one explicit branch. The

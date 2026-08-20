@@ -1338,29 +1338,15 @@ Payment probation affects payment selection only. It never enters finality
 membership or ordering, so withholding or recovery never removes or reorders an
 operator in a frozen finality roster. Recovery from the capped two-miss state
 sets payment eligibility to the positive receipt's carrier height, placing the
-operator at the back of the deterministic payment queue. The finality roster
-instead reserves a probation-independent 32-seat audit-coverage rotation when more
-than 400 root-capable operators compete. Let `N` be their canonical
-`proTxHash`-sorted count. For `N > 400`, the coverage window starts at
-`(epoch * 32) mod N`; those 32 cyclic members are removed from the ordinary
-candidates, 368 members are selected by the existing root-first, score, and
-collateral ordering, and the 32 coverage members are appended as the roster
-suffix. For `N <= 400`, no seats are reserved because ordinary root-first
-selection already includes every root-capable operator. A static set is covered
-within `ceil(N/32)` epochs; a membership change defines a new interval without
-consulting probation state. The same 24 response rows and report certificate
-cover these seats, so there is no `PQPOSEREC` message or extra signature type.
-Even if all 32 coverage members are offline, 368 roster positions remain; the
-ordinary 300-valid-key usability floor and 267-share threshold are unchanged.
-For `N = 3000`, the suffix therefore gives a 94-epoch/47-day static-set maximum
-to first forced exposure. Under an unbiased epoch-score model, all 400 subject
-seats instead give a `400/3000` marginal selection rate and a 7.5-epoch/3.75-day
-long-run mean roster-appearance interval; that expectation is not a consensus
-guarantee, and payment withholding still requires two conclusive missed
-appearances. The fixed 32-seat suffix deliberately preserves 68 positions of
-incidental-offline slack above the 300-member audit-conclusiveness floor.
-Membership churn starts a new coverage interval, and missing or inconclusive
-audits never create a bounded penalty time.
+operator at the back of the deterministic payment queue. All 400 roster seats
+continue to use the existing root-first, epoch-hash score, and collateral
+ordering; probation state never enters that selection. Under an unbiased
+epoch-score model, `N = 3000` confirmed, valid, root-capable candidates give
+each operator a `400/3000` marginal selection rate and a 7.5-epoch/3.75-day
+long-run mean roster-appearance interval. That expectation is not a consensus
+timing guarantee, and payment withholding still requires two conclusive missed
+appearances. Missing or inconclusive audits never create a bounded penalty or
+recovery time.
 
 The only on-chain audit data is `pqar || PaymentAuditReceipt`, a fixed
 261-byte tagged segment (four-byte marker plus 257-byte receipt) placed before
@@ -1375,7 +1361,7 @@ accumulator hashes the entire canonical receipt, so the classified 400-member
 bitmap is part of the on-chain hash-linked commitment.
 
 Live validation requires the full `PQPOSECERT`: it verifies all 801 signatures,
-rederives the exact subject and coverage seats, classifies the reports, requires
+rederives the exact subject roster, classifies the reports, requires
 exact equality with `online_members`, and replays the transition against the
 carrier parent's deterministic-MN and probation state. The receipt updates a
 branch-local audit accumulator and hash-addressed probation state; later
@@ -1387,8 +1373,8 @@ and is never converted into peer misbehavior or permanent block invalidity.
 
 Historical IBD and marker-bound replay do not require an already pruned
 3,661,635-byte certificate. If the full witness is absent, the node rederives
-the subject roster and probation-independent coverage seats from the historical
-snapshot, applies the committed `online_members` bitmap, and requires both
+the subject roster from the historical snapshot, applies the committed
+`online_members` bitmap, and requires both
 the resulting probation root and cumulative receipt state to match the block
 index. This compact replay is provisional, not quorum authentication. Before
 publishing the provisional transition, the node fsyncs a checksummed pre-seal
@@ -1726,10 +1712,9 @@ The implementation must preserve these invariants:
     Process restart, connection churn, IP changes, and local cache loss never
     erase a miss, while an authenticated later positive may clear it.
 17. Payment-audit results never mutate PoSe, deterministic-masternode validity,
-    collateral validity, MNAUTH, or finality membership/order. The 32-seat
-    coverage suffix is derived only from epoch and the canonical root-capable
-    set, never probation; if every valid payee is withheld, the ordinary
-    deterministic payee remains the consensus fallback.
+    collateral validity, MNAUTH, or finality membership/order. Roster selection
+    never consults probation state; if every valid payee is withheld, the
+    ordinary deterministic payee remains the consensus fallback.
 18. Compact payment-audit replay is provisional until one fully verified,
     durable descendant CLSIG authenticates its cumulative receipt state and
     probation root. A marker or checkpoint is never quorum authority, and no
@@ -1760,7 +1745,6 @@ Expected failures are fail-closed:
 | Replay marker survives a prolonged outage | Keep the lower-only block floor and retained DMN/PQ branch snapshots; accept unbounded disk growth and synchronous DMN write latency until recovery |
 | Geth unavailable or reports the wrong applied hash | Keep the replay marker and skip paired execution notifications; never substitute a null checkpoint, while base Syscoin may continue |
 | Replay/snapshot/index/certificate fsync fails or disk fills | Stop the affected transition and finality/signing fail-closed; never clear the marker or publish partially durable recovery |
-| All 32 probation-independent coverage seats are offline | Their offline status does not trigger reselection or change the 400-seat roster size or 267-share threshold; the remaining 368 positions can still supply 267 shares |
 | Audit has fewer than 300 current-valid positive subjects | Clear misses for classified-positive subjects only; add no misses |
 | Subject has one conclusive audit miss | Persist miss count one; leave payments unchanged |
 | Subject has two unrecovered conclusive audit misses | Cap at two and withhold payments until a later authenticated positive; never alter finality membership/order, quorum validity, or MNAUTH |
@@ -1919,12 +1903,11 @@ Expected failures are fail-closed:
   selection inputs. Snapshots that differ only in misses/withholding build
   byte-identical rosters, and a reorg restores probation and roster state
   independently.
-- Exact probation-independent coverage selection at `N=399/400/401` and larger:
-  zero reserved seats for `N <= 400`; otherwise start at `(epoch * 32) mod N`,
-  remove exactly 32 canonical root-capable members, select the ordinary 368 by
-  root/score/collateral order, and append the cyclic 32-member suffix. Cover
-  wraparound, static-set `ceil(N/32)` coverage, membership changes, and all 32
-  coverage members failing to sign without changing the 267 threshold.
+- Exact full-roster selection above and below 400 root-capable candidates:
+  preserve root-first ordering, rank all candidates by the existing
+  epoch-hash score and collateral tie break, and take the first 400 without a
+  predictable reserved suffix. Roster construction remains byte-identical
+  when snapshots differ only in payment-probation state.
 - A positive clearing one or two misses even when the overall audit is
   inconclusive; an absent or inconclusive audit never adds a miss.
 - Exactly 267 audit signatures in each of exactly three active rosters, with
@@ -2151,8 +2134,8 @@ horizon at the fixed cadence. These measurements are engineering inputs, not a
 security review.
 
 Activation remains disabled until the complete Section 14 matrix passes on all
-supported platforms, the payment-audit replay/checkpoint and 32-seat coverage
-rules receive independent consensus/security review, C11-SHA receives
+supported platforms, the payment-audit replay/checkpoint rules receive
+independent consensus/security review, C11-SHA receives
 independent cryptographic review, and the 801-signature/proof verifier and
 3,621,236-byte relay path meet explicit resource targets. Shadow success alone
 is not cryptographic validation.

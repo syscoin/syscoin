@@ -2335,14 +2335,13 @@ static bool ConnectPaymentAuditReceiptState(
             }
             llmq::pq::FinalPaymentAudit audit;
             llmq::pq::FrozenQuorumRoster subject;
-            llmq::pq::PQPaymentRecoverySelection recovery;
             llmq::pq::PQPaymentProbationTransitionInput input;
             bool compact_replay{false};
             bool start_preseal{false};
             const auto certificate_status{
                 llmq::chainLocksHandler
                     ->CheckPaymentAuditReceiptCertificate(
-                        receipt, index, &audit, &subject, &recovery)};
+                        receipt, index, &audit, &subject)};
             using CertificateStatus =
                 llmq::CChainLocksHandler::
                     PaymentAuditReceiptCertificateStatus;
@@ -2410,7 +2409,6 @@ static bool ConnectPaymentAuditReceiptState(
                 input.roster_valid_members =
                     commitment.subject_valid_members;
                 input.observed_members = receipt.online_members;
-                input.recovery_seats = recovery;
                 for (std::size_t member{0};
                      member < llmq::pq::QUORUM_SIZE; ++member) {
                     input.frozen_roster[member] =

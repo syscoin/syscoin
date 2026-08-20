@@ -6,6 +6,7 @@
 
 #include <arith_uint256.h>
 #include <chain.h>
+#include <crypto/sha256.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -15,7 +16,6 @@
 #include <cstdint>
 #include <memory>
 #include <ostream>
-#include <set>
 #include <span>
 #include <vector>
 
@@ -173,6 +173,41 @@ std::vector<OperatorKeyState> KeyStates(uint32_t count,
     return states;
 }
 
+std::vector<uint256> ScoreOrderedMembers(uint32_t count,
+                                         const uint256& modifier)
+{
+    struct Scored {
+        arith_uint256 score;
+        CDeterministicMNCPtr dmn;
+    };
+
+    std::vector<Scored> scored;
+    scored.reserve(count);
+    for (uint32_t tag{0}; tag < count; ++tag) {
+        auto dmn{Member(tag)};
+        uint256 score_hash;
+        CSHA256 hasher;
+        hasher.Write(dmn->pdmnState->confirmedHashWithProRegTxHash.begin(),
+                     dmn->pdmnState->confirmedHashWithProRegTxHash.size());
+        hasher.Write(modifier.begin(), modifier.size());
+        hasher.Finalize(score_hash.begin());
+        scored.push_back({UintToArith256(score_hash), std::move(dmn)});
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const Scored& lhs, const Scored& rhs) {
+                  if (lhs.score != rhs.score) return lhs.score > rhs.score;
+                  return rhs.dmn->collateralOutpoint <
+                         lhs.dmn->collateralOutpoint;
+              });
+
+    std::vector<uint256> ordered;
+    ordered.reserve(scored.size());
+    for (const auto& candidate : scored) {
+        ordered.push_back(candidate.dmn->proTxHash);
+    }
+    return ordered;
+}
+
 std::size_t FindMember(const FrozenQuorumRoster& roster, const uint256& pro_tx_hash)
 {
     const auto it = std::find_if(
@@ -315,70 +350,51 @@ BOOST_AUTO_TEST_CASE(eligibility_keys_and_roots_are_derived_not_fabricated)
                 roster->descriptor.member_root);
 }
 
-BOOST_AUTO_TEST_CASE(payment_audit_coverage_is_state_independent_and_bounded)
+BOOST_AUTO_TEST_CASE(more_than_400_candidates_select_top_scores_deterministically)
 {
     constexpr uint32_t EPOCH{4};
     constexpr int32_t SNAPSHOT_HEIGHT{2448};
-    constexpr uint32_t CANDIDATES{420};
+    constexpr uint32_t ROOT_CAPABLE{420};
+    constexpr uint32_t CANDIDATES{440};
     const uint256 genesis{NonNullHash(80)};
     const uint256 base_hash{NonNullHash(81)};
     const auto snapshot{Snapshot(
         SNAPSHOT_HEIGHT, NonNullHash(82), CANDIDATES)};
-    const auto states{KeyStates(CANDIDATES, EPOCH, SNAPSHOT_HEIGHT)};
+    const auto states{KeyStates(ROOT_CAPABLE, EPOCH, SNAPSHOT_HEIGHT)};
+    const auto modifier{GetPQQuorumModifier(genesis, EPOCH, base_hash)};
+    BOOST_REQUIRE(modifier);
+    const auto expected{ScoreOrderedMembers(ROOT_CAPABLE, *modifier)};
 
-    std::vector<uint256> root_capable;
-    root_capable.reserve(CANDIDATES);
-    for (uint32_t member{0}; member < CANDIDATES; ++member) {
-        root_capable.push_back(NonNullHash(10'000 + member));
-    }
-    std::sort(root_capable.begin(), root_capable.end());
-    const auto expected{SelectPQPaymentRecoveryMembers(EPOCH, root_capable)};
-    BOOST_REQUIRE(expected);
-    BOOST_CHECK_EQUAL(expected->count, PAYMENT_AUDIT_RECOVERY_SEATS);
-
-    PQPaymentRecoverySelection recovery;
     const auto roster{BuildFrozenQuorumRoster(
-        genesis, BuildConfig(), EPOCH, base_hash, snapshot, states,
-        nullptr, &recovery)};
+        genesis, BuildConfig(), EPOCH, base_hash, snapshot, states)};
     BOOST_REQUIRE(roster);
-    BOOST_CHECK(recovery == *expected);
     BOOST_CHECK_EQUAL(roster->descriptor.valid_count, QUORUM_SIZE);
-    for (std::size_t slot{0}; slot < recovery.count; ++slot) {
-        BOOST_CHECK(
-            roster->members[QUORUM_SIZE - recovery.count + slot]
-                .pro_tx_hash == recovery.members[slot]);
-        BOOST_CHECK(IsBitSet(roster->descriptor.valid_members,
-                             QUORUM_SIZE - recovery.count + slot));
+    for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
+        BOOST_CHECK(roster->members[slot].pro_tx_hash == expected[slot]);
+    }
+    for (std::size_t candidate{QUORUM_SIZE}; candidate < ROOT_CAPABLE;
+         ++candidate) {
+        BOOST_CHECK(!ContainsMember(*roster, expected[candidate]));
+    }
+    for (uint32_t candidate{ROOT_CAPABLE}; candidate < CANDIDATES;
+         ++candidate) {
+        BOOST_CHECK(!ContainsMember(
+            *roster, NonNullHash(10'000 + candidate)));
     }
 
-    PQPaymentRecoverySelection reverse_recovery;
     const auto reverse_snapshot{Snapshot(
         SNAPSHOT_HEIGHT, NonNullHash(82), CANDIDATES,
         /*reverse=*/true)};
     const auto reversed{BuildFrozenQuorumRoster(
-        genesis, BuildConfig(), EPOCH, base_hash, reverse_snapshot, states,
-        nullptr, &reverse_recovery)};
+        genesis, BuildConfig(), EPOCH, base_hash, reverse_snapshot, states)};
     BOOST_REQUIRE(reversed);
-    BOOST_CHECK(reverse_recovery == recovery);
     BOOST_CHECK(reversed->descriptor == roster->descriptor);
-
-    std::set<uint256> covered;
-    constexpr std::size_t COVERAGE_EPOCHS{
-        (CANDIDATES + PAYMENT_AUDIT_RECOVERY_SEATS - 1) /
-        PAYMENT_AUDIT_RECOVERY_SEATS};
-    for (std::size_t offset{0}; offset < COVERAGE_EPOCHS; ++offset) {
-        const auto selection{SelectPQPaymentRecoveryMembers(
-            EPOCH + static_cast<uint32_t>(offset), root_capable)};
-        BOOST_REQUIRE(selection);
-        BOOST_CHECK_EQUAL(selection->count, PAYMENT_AUDIT_RECOVERY_SEATS);
-        for (std::size_t slot{0}; slot < selection->count; ++slot) {
-            covered.insert(selection->members[slot]);
-        }
+    for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
+        BOOST_CHECK(reversed->members[slot].pro_tx_hash == expected[slot]);
     }
-    BOOST_CHECK_EQUAL(covered.size(), CANDIDATES);
 }
 
-BOOST_AUTO_TEST_CASE(coverage_is_unneeded_when_every_root_capable_member_fits)
+BOOST_AUTO_TEST_CASE(root_capable_members_rank_ahead_when_they_fit)
 {
     constexpr uint32_t EPOCH{4};
     constexpr int32_t SNAPSHOT_HEIGHT{2448};
@@ -390,15 +406,18 @@ BOOST_AUTO_TEST_CASE(coverage_is_unneeded_when_every_root_capable_member_fits)
     constexpr uint32_t ROOTS{300};
     const auto states{KeyStates(ROOTS, EPOCH, SNAPSHOT_HEIGHT)};
 
-    PQPaymentRecoverySelection recovery;
     const auto roster{BuildFrozenQuorumRoster(
-        genesis, BuildConfig(), EPOCH, base_hash, snapshot, states,
-        nullptr, &recovery)};
+        genesis, BuildConfig(), EPOCH, base_hash, snapshot, states)};
     BOOST_REQUIRE(roster);
-    BOOST_CHECK_EQUAL(recovery.count, 0U);
     BOOST_CHECK_EQUAL(roster->descriptor.valid_count, ROOTS);
     for (const auto& state : states) {
         BOOST_CHECK(ContainsMember(*roster, state.pro_tx_hash));
+    }
+    for (std::size_t slot{0}; slot < ROOTS; ++slot) {
+        BOOST_CHECK(roster->members[slot].child_root.has_value());
+    }
+    for (std::size_t slot{ROOTS}; slot < QUORUM_SIZE; ++slot) {
+        BOOST_CHECK(!roster->members[slot].child_root.has_value());
     }
 }
 

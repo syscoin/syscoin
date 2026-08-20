@@ -144,7 +144,6 @@ std::optional<uint256> DerivePaymentAuditProbationStateHash(
     int32_t carrier_height,
     const uint256& result_hash,
     const pq::QuorumBitmap& observed_members,
-    const pq::PQPaymentRecoverySelection& recovery_seats,
     bool* local_error = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
@@ -173,7 +172,6 @@ std::optional<uint256> DerivePaymentAuditProbationStateHash(
         commitment.seed.epoch, carrier_height, result_hash};
     input.roster_valid_members = commitment.subject_valid_members;
     input.observed_members = observed_members;
-    input.recovery_seats = recovery_seats;
     for (std::size_t member{0}; member < pq::QUORUM_SIZE; ++member) {
         input.frozen_roster[member] =
             subject.members[member].pro_tx_hash;
@@ -2244,7 +2242,6 @@ bool CChainLocksHandler::IsPaymentAuditLocalRosterBuildError(
     case pq::QuorumBuildError::SNAPSHOT_LOOKUP_FAILED:
     case pq::QuorumBuildError::SNAPSHOT_MISMATCH:
     case pq::QuorumBuildError::MISSING_BRANCH_ANCESTOR:
-    case pq::QuorumBuildError::INVALID_RECOVERY_SELECTION:
         return true;
     default:
         return false;
@@ -2316,15 +2313,14 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
             continue;
         }
         pq::FrozenQuorumRoster subject;
-        pq::PQPaymentRecoverySelection recovery;
         if (!BuildPaymentAuditVerificationRosters(
-                audit.statement, &subject, &recovery)) {
+                audit.statement, &subject)) {
             continue;
         }
         const auto next_hash{DerivePaymentAuditProbationStateHash(
             audit.statement.commitment, subject, carrier_parent,
             carrier_height, result_hash,
-            classification->online_members, recovery)};
+            classification->online_members)};
         if (!next_hash) continue;
         return pq::PaymentAuditReceipt{
             pq::PAYMENT_AUDIT_RECEIPT_VERSION,
@@ -2362,8 +2358,7 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     const pq::PaymentAuditReceipt& receipt,
     const CBlockIndex& carrier,
     pq::FinalPaymentAudit* audit_out,
-    pq::FrozenQuorumRoster* subject_out,
-    pq::PQPaymentRecoverySelection* recovery_out) const
+    pq::FrozenQuorumRoster* subject_out) const
 {
     AssertLockHeld(cs_main);
     if (receipt.IsNull()) {
@@ -2425,12 +2420,11 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
             carrier.pprev->GetBlockHash()},
         {}, -1};
     pq::FrozenQuorumRoster subject;
-    pq::PQPaymentRecoverySelection recovery;
     PaymentAuditRosterBuildStatus roster_status{
         PaymentAuditRosterBuildStatus::INVALID};
     uint8_t authorization_mask{0};
     const auto rosters{BuildPaymentAuditVerificationRosters(
-        audit->statement, &subject, &recovery,
+        audit->statement, &subject,
         &authorization_mask,
         /*require_live_transition_finality=*/false,
         &roster_status, &historical)};
@@ -2447,8 +2441,7 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     const auto next_hash{DerivePaymentAuditProbationStateHash(
         audit->statement.commitment, subject, *carrier.pprev,
         receipt.carrier_height, receipt.result_hash,
-        receipt.online_members, recovery,
-        &transition_local_error)};
+        receipt.online_members, &transition_local_error)};
     if (!next_hash || *next_hash != receipt.next_probation_state_hash) {
         return transition_local_error
             ? PaymentAuditReceiptCertificateStatus::LOCAL_ERROR
@@ -2456,7 +2449,6 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     }
     if (audit_out != nullptr) *audit_out = *audit;
     if (subject_out != nullptr) *subject_out = std::move(subject);
-    if (recovery_out != nullptr) *recovery_out = recovery;
     return PaymentAuditReceiptCertificateStatus::VERIFIED;
 }
 
@@ -2814,7 +2806,6 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
     }
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    pq::PQPaymentRecoverySelection recovery;
     std::unique_ptr<pq::FrozenQuorumRoster> subject;
     try {
         subject = pq::BuildFrozenQuorumRoster(
@@ -2823,7 +2814,7 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
             std::span<const pq::OperatorKeyState>{
                 snapshot_state->operator_key_states.data(),
                 snapshot_state->operator_key_states.size()},
-            &build_error, &recovery);
+            &build_error);
     } catch (const std::exception&) {
         return PaymentAuditContextStatus::LOCAL_ERROR;
     }
@@ -2846,7 +2837,6 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
             return PaymentAuditContextStatus::INVALID;
         }
     }
-    input.recovery_seats = recovery;
     for (std::size_t member{0}; member < pq::QUORUM_SIZE; ++member) {
         input.frozen_roster[member] =
             subject->members[member].pro_tx_hash;
@@ -7278,8 +7268,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         uint8_t authorization_mask{0};
         auto signing_rosters{
             BuildPaymentAuditVerificationRosters(
-                statement, nullptr, nullptr,
-                &authorization_mask,
+                statement, nullptr, &authorization_mask,
                 /*require_live_transition_finality=*/true)};
         if (!signing_rosters) continue;
         const auto existing_candidates{
@@ -7592,7 +7581,6 @@ pq::FrozenQuorumRostersPtr
 CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     const pq::PaymentAuditStatement& statement,
     pq::FrozenQuorumRoster* subject_out,
-    pq::PQPaymentRecoverySelection* recovery_out,
     uint8_t* authorization_mask_out,
     bool require_live_transition_finality,
     PaymentAuditRosterBuildStatus* status,
@@ -7861,7 +7849,6 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         }
         return nullptr;
     }
-    pq::PQPaymentRecoverySelection recovery;
     std::unique_ptr<pq::FrozenQuorumRoster> rebuilt_subject;
     try {
         rebuilt_subject = pq::BuildFrozenQuorumRoster(
@@ -7870,7 +7857,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
             std::span<const pq::OperatorKeyState>{
                 snapshot_state->operator_key_states.data(),
                 snapshot_state->operator_key_states.size()},
-            &build_error, &recovery);
+            &build_error);
     } catch (const std::exception&) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
@@ -7909,7 +7896,6 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         }
     }
     if (subject_out != nullptr) *subject_out = response_rosters->back();
-    if (recovery_out != nullptr) *recovery_out = recovery;
     if (authorization_mask_out != nullptr) {
         *authorization_mask_out = authorization_mask;
     }
@@ -8093,8 +8079,7 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
         PaymentAuditRosterBuildStatus::INVALID};
     uint8_t authorization_mask{0};
     const auto rosters{BuildPaymentAuditVerificationRosters(
-        audit.statement, nullptr, nullptr,
-        &authorization_mask,
+        audit.statement, nullptr, &authorization_mask,
         /*require_live_transition_finality=*/false, &roster_status,
         historical ? &*historical : nullptr)};
     if (historical) {
@@ -8166,8 +8151,7 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
                 PaymentAuditRosterBuildStatus::INVALID};
             uint8_t current_authorization_mask{0};
             const auto current_rosters{BuildPaymentAuditVerificationRosters(
-                audit.statement, nullptr, nullptr,
-                &current_authorization_mask,
+                audit.statement, nullptr, &current_authorization_mask,
                 /*require_live_transition_finality=*/false,
                 &current_status, &*current)};
             if (!current_rosters ||

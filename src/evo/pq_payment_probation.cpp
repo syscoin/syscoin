@@ -94,9 +94,6 @@ PQPaymentProbationError ValidateTransitionInput(
     if (BitmapCount(input.roster_valid_members) < QUORUM_MIN_VALID) {
         return PQPaymentProbationError::INVALID_BITMAP;
     }
-    if (!input.recovery_seats.IsStructurallyValid()) {
-        return PQPaymentProbationError::INVALID_BITMAP;
-    }
     for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
         if (input.frozen_roster[member].IsNull()) {
             return PQPaymentProbationError::INVALID_ROSTER;
@@ -111,15 +108,6 @@ PQPaymentProbationError ValidateTransitionInput(
     if (std::adjacent_find(sorted_roster.begin(), sorted_roster.end()) !=
         sorted_roster.end()) {
         return PQPaymentProbationError::INVALID_ROSTER;
-    }
-    for (std::size_t slot{0}; slot < input.recovery_seats.count; ++slot) {
-        const std::size_t roster_slot{
-            QUORUM_SIZE - input.recovery_seats.count + slot};
-        if (input.frozen_roster[roster_slot] !=
-                input.recovery_seats.members[slot] ||
-            !IsBitSet(input.roster_valid_members, roster_slot)) {
-            return PQPaymentProbationError::INVALID_ROSTER;
-        }
     }
     return PQPaymentProbationError::NONE;
 }
@@ -312,46 +300,6 @@ std::optional<uint256> GetPQPaymentProbationStateHash(
     writer << state;
     const uint256 hash{writer.GetHash()};
     return hash.IsNull() ? std::nullopt : std::optional<uint256>{hash};
-}
-
-bool PQPaymentRecoverySelection::IsStructurallyValid() const noexcept
-{
-    if (count > members.size()) return false;
-    for (std::size_t slot{0}; slot < members.size(); ++slot) {
-        if (slot < count) {
-            if (members[slot].IsNull()) return false;
-            for (std::size_t previous{0}; previous < slot; ++previous) {
-                if (members[previous] == members[slot]) return false;
-            }
-        } else if (!members[slot].IsNull()) {
-            return false;
-        }
-    }
-    return true;
-}
-
-std::optional<PQPaymentRecoverySelection>
-SelectPQPaymentRecoveryMembers(
-    uint32_t epoch,
-    std::span<const uint256> sorted_root_capable_candidates)
-{
-    if (!IsStrictlySortedUnique(sorted_root_capable_candidates)) {
-        return std::nullopt;
-    }
-
-    PQPaymentRecoverySelection selected;
-    if (sorted_root_capable_candidates.size() <= QUORUM_SIZE) return selected;
-    selected.count = static_cast<uint8_t>(PAYMENT_AUDIT_RECOVERY_SEATS);
-    const std::size_t start{static_cast<std::size_t>(
-        (static_cast<uint64_t>(epoch) * PAYMENT_AUDIT_RECOVERY_SEATS) %
-        sorted_root_capable_candidates.size())};
-    for (std::size_t slot{0}; slot < selected.count; ++slot) {
-        selected.members[slot] = sorted_root_capable_candidates[
-            (start + slot) % sorted_root_capable_candidates.size()];
-    }
-    return selected.IsStructurallyValid()
-               ? std::optional<PQPaymentRecoverySelection>{selected}
-               : std::nullopt;
 }
 
 bool PQPaymentProbationTransitionInput::IsStructurallyValid() const noexcept

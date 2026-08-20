@@ -309,7 +309,7 @@ void MasternodeList::updateDIP3List()
                 : tr("N/A"));
         paymentAuditMissesItem->setToolTip(
             paymentWithheld
-                ? tr("Payments are withheld until a later audit observes this operator in a normal or reserved audit-coverage seat.")
+                ? tr("Payments are withheld until a later audit includes and observes this operator.")
                 : tr("A later positive payment-audit observation clears consecutive misses."));
         QTableWidgetItem* registeredItem = new QTableWidgetItem(QString::number(dmn.pdmnState->nRegisteredHeight));
         QTableWidgetItem* lastPaidItem = new QTableWidgetItem(QString::number(dmn.pdmnState->nLastPaidHeight));

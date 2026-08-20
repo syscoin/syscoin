@@ -316,8 +316,7 @@ public:
         const pq::PaymentAuditReceipt& receipt,
         const CBlockIndex& carrier,
         pq::FinalPaymentAudit* audit = nullptr,
-        pq::FrozenQuorumRoster* subject = nullptr,
-        pq::PQPaymentRecoverySelection* recovery = nullptr) const
+        pq::FrozenQuorumRoster* subject = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main,
                                  !m_lookup_mutex,
                                  !m_verification_mutex);
@@ -633,7 +632,6 @@ private:
     BuildPaymentAuditVerificationRosters(
         const pq::PaymentAuditStatement& statement,
         pq::FrozenQuorumRoster* subject = nullptr,
-        pq::PQPaymentRecoverySelection* recovery = nullptr,
         uint8_t* authorization_mask = nullptr,
         bool require_live_transition_finality = false,
         PaymentAuditRosterBuildStatus* status = nullptr,

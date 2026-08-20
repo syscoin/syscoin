@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <map>
 #include <memory>
-#include <set>
 #include <utility>
 
 namespace llmq::pq {
@@ -44,7 +43,6 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
     const uint256& modifier,
     uint32_t epoch,
     const std::map<uint256, const OperatorKeyState*>& operator_states,
-    PQPaymentRecoverySelection* recovery_selection,
     QuorumBuildError* error)
 {
     std::vector<ScoredMember> candidates;
@@ -119,58 +117,9 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
         return rhs.dmn->collateralOutpoint < lhs.dmn->collateralOutpoint;
     };
 
-    std::vector<uint256> root_capable;
-    root_capable.reserve(candidates.size());
-    for (const auto& candidate : candidates) {
-        if (candidate.child_root) {
-            root_capable.push_back(candidate.dmn->proTxHash);
-        }
-    }
-    std::sort(root_capable.begin(), root_capable.end());
-    const auto recovery{SelectPQPaymentRecoveryMembers(epoch, root_capable)};
-    if (!recovery) {
-        SetError(error, QuorumBuildError::INVALID_RECOVERY_SELECTION);
-        return std::nullopt;
-    }
-
-    std::set<uint256> recovery_members;
-    for (std::size_t slot{0}; slot < recovery->count; ++slot) {
-        recovery_members.insert(recovery->members[slot]);
-    }
-    std::vector<ScoredMember> normal;
-    std::map<uint256, ScoredMember> recovery_by_hash;
-    normal.reserve(candidates.size());
-    for (auto& candidate : candidates) {
-        const uint256& pro_tx_hash{candidate.dmn->proTxHash};
-        if (recovery_members.find(pro_tx_hash) != recovery_members.end()) {
-            recovery_by_hash.emplace(pro_tx_hash, std::move(candidate));
-        } else {
-            normal.push_back(std::move(candidate));
-        }
-    }
-    const std::size_t ordinary_slots{QUORUM_SIZE - recovery->count};
-    if (normal.size() < ordinary_slots ||
-        recovery_by_hash.size() != recovery->count) {
-        SetError(error, QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
-        return std::nullopt;
-    }
-    std::sort(normal.begin(), normal.end(), score_less);
-
-    std::vector<ScoredMember> selected;
-    selected.reserve(QUORUM_SIZE);
-    for (std::size_t slot{0}; slot < ordinary_slots; ++slot) {
-        selected.push_back(std::move(normal[slot]));
-    }
-    for (std::size_t slot{0}; slot < recovery->count; ++slot) {
-        auto position{recovery_by_hash.find(recovery->members[slot])};
-        if (position == recovery_by_hash.end()) {
-            SetError(error, QuorumBuildError::INVALID_RECOVERY_SELECTION);
-            return std::nullopt;
-        }
-        selected.push_back(std::move(position->second));
-    }
-    if (recovery_selection != nullptr) *recovery_selection = *recovery;
-    return selected;
+    std::sort(candidates.begin(), candidates.end(), score_less);
+    candidates.resize(QUORUM_SIZE);
+    return candidates;
 }
 
 bool AddActiveChildRootsToSet(const FrozenQuorumRoster& roster,
@@ -231,13 +180,9 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     const uint256& base_hash,
     const CDeterministicMNList& snapshot,
     std::span<const OperatorKeyState> operator_key_states,
-    QuorumBuildError* error,
-    PQPaymentRecoverySelection* recovery_selection)
+    QuorumBuildError* error)
 {
     SetError(error, QuorumBuildError::NONE);
-    if (recovery_selection != nullptr) {
-        *recovery_selection = PQPaymentRecoverySelection{};
-    }
     if (genesis_hash.IsNull() || base_hash.IsNull()) {
         SetError(error, QuorumBuildError::INVALID_ARGUMENT);
         return nullptr;
@@ -293,8 +238,7 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     }
 
     auto selected{SelectRosterMembers(
-        snapshot, *modifier, epoch, operator_states, recovery_selection,
-        error)};
+        snapshot, *modifier, epoch, operator_states, error)};
     if (!selected) return nullptr;
 
     auto roster{std::make_unique<FrozenQuorumRoster>()};

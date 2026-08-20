@@ -161,75 +161,6 @@ BOOST_AUTO_TEST_CASE(positive_recovers_even_when_audit_is_inconclusive)
     BOOST_CHECK_EQUAL(result->state.MissCount(missed_once), 1U);
 }
 
-BOOST_AUTO_TEST_CASE(recovery_seats_use_ordinary_observations_without_state_cursor)
-{
-    auto input{Input(/*epoch=*/5, /*receipt_tag=*/44,
-                     /*observed_count=*/0)};
-    const uint256 recovered{input.frozen_roster[398]};
-    const uint256 still_withheld{input.frozen_roster[399]};
-    input.recovery_seats.count = 2;
-    input.recovery_seats.members[0] = recovered;
-    input.recovery_seats.members[1] = still_withheld;
-    SetBit(input.observed_members, 398);
-    BOOST_REQUIRE(input.IsStructurallyValid());
-    const auto previous{State({{recovered, 2}, {still_withheld, 2}})};
-
-    const auto result{ApplyPQPaymentProbationTransition(previous, input)};
-    BOOST_REQUIRE(result);
-    BOOST_REQUIRE_EQUAL(result->recovered_pro_tx_hashes.size(), 1U);
-    BOOST_CHECK(result->recovered_pro_tx_hashes.front() == recovered);
-    BOOST_CHECK(!result->state.IsPaymentWithheld(recovered));
-    BOOST_CHECK_EQUAL(
-        result->state.PaymentEligibleSinceHeight(recovered),
-        input.receipt.carrier_height);
-    BOOST_CHECK(result->state.IsPaymentWithheld(still_withheld));
-    BOOST_CHECK(!result->conclusive);
-
-    auto repeated_selection{input};
-    repeated_selection.receipt = Receipt(6, 45);
-    const auto repeated{ApplyPQPaymentProbationTransition(
-        result->state, repeated_selection)};
-    BOOST_REQUIRE(repeated);
-    BOOST_CHECK(repeated->state.IsPaymentWithheld(still_withheld));
-
-    auto inactive_member{input};
-    inactive_member.recovery_seats.members[2] =
-        input.frozen_roster[352];
-    BOOST_CHECK(!inactive_member.IsStructurallyValid());
-}
-
-BOOST_AUTO_TEST_CASE(recovery_selection_is_independent_of_payment_state)
-{
-    std::vector<uint256> candidates;
-    for (std::size_t i{0}; i < QUORUM_SIZE; ++i) {
-        const uint256 pro_tx_hash{NonNullHash(20'000 + i)};
-        candidates.push_back(pro_tx_hash);
-    }
-    std::sort(candidates.begin(), candidates.end());
-    const auto all_fit{SelectPQPaymentRecoveryMembers(37, candidates)};
-    BOOST_REQUIRE(all_fit);
-    BOOST_CHECK_EQUAL(all_fit->count, 0U);
-
-    candidates.push_back(NonNullHash(30'000));
-    std::sort(candidates.begin(), candidates.end());
-    const auto selected{SelectPQPaymentRecoveryMembers(37, candidates)};
-    const auto repeated{SelectPQPaymentRecoveryMembers(37, candidates)};
-    BOOST_REQUIRE(selected);
-    BOOST_REQUIRE(repeated);
-    BOOST_CHECK(*selected == *repeated);
-    BOOST_CHECK_EQUAL(selected->count, PAYMENT_AUDIT_RECOVERY_SEATS);
-
-    auto unsorted{candidates};
-    std::swap(unsorted[0], unsorted[1]);
-    BOOST_CHECK(!SelectPQPaymentRecoveryMembers(37, unsorted));
-    auto duplicate{candidates};
-    duplicate[1] = duplicate[0];
-    BOOST_CHECK(!SelectPQPaymentRecoveryMembers(37, duplicate));
-    auto null_member{candidates};
-    null_member[0].SetNull();
-    BOOST_CHECK(!SelectPQPaymentRecoveryMembers(37, null_member));
-}
-
 BOOST_AUTO_TEST_CASE(conclusive_gate_uses_observed_members_still_current_valid)
 {
     auto input{Input(/*epoch=*/5, /*receipt_tag=*/5,
@@ -486,20 +417,6 @@ BOOST_AUTO_TEST_CASE(rejects_malformed_rosters_bitmaps_and_membership_sets)
     BOOST_CHECK(!ApplyPQPaymentProbationTransition(
         PQPaymentProbationState{}, null_receipt, &error));
     BOOST_CHECK(error == PQPaymentProbationError::INVALID_RECEIPT);
-
-    auto duplicate_recovery{input};
-    duplicate_recovery.recovery_seats.count = 2;
-    duplicate_recovery.recovery_seats.members[0] =
-        duplicate_recovery.frozen_roster[0];
-    duplicate_recovery.recovery_seats.members[1] =
-        duplicate_recovery.frozen_roster[0];
-    BOOST_CHECK(!duplicate_recovery.IsStructurallyValid());
-
-    auto recovery_not_in_roster{input};
-    recovery_not_in_roster.recovery_seats.count = 1;
-    recovery_not_in_roster.recovery_seats.members[0] =
-        NonNullHash(80'000);
-    BOOST_CHECK(!recovery_not_in_roster.IsStructurallyValid());
 }
 
 BOOST_AUTO_TEST_CASE(payee_selection_filters_probation_but_never_all_to_none)
