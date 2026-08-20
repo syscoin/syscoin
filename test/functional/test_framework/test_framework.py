@@ -572,7 +572,8 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             for node in self.nodes:
                 coverage.write_all_rpc_commands(self.options.coveragedir, node.rpc)
 
-    def stop_node(self, i, expected_stderr='', wait=0):
+    # SYSCOIN: Preserve TestNode's dynamic public-profile stderr default.
+    def stop_node(self, i, expected_stderr=None, wait=0):
         """Stop a syscoind test node"""
         self.nodes[i].stop_node(expected_stderr, wait=wait)
 
