@@ -109,6 +109,7 @@ SYSCOIN_TESTS =\
   test/evodb_tests.cpp \
   test/flatfile_tests.cpp \
   test/fs_tests.cpp \
+  test/geth_startup_tests.cpp \
   test/getarg_tests.cpp \
   test/governance_validators_tests.cpp \
   test/hash_tests.cpp \
