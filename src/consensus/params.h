@@ -80,6 +80,8 @@ enum
 
 };
 
+static constexpr int MAX_LLMQ_SIZE{400};
+
 // Configures a LLMQ and its DKG
 // See https://github.com/dashpay/dips/blob/master/dip-0006.md for more details
 struct LLMQParams {

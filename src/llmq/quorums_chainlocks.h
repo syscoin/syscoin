@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_CHAINLOCKS_H
 #define SYSCOIN_LLMQ_QUORUMS_CHAINLOCKS_H
 
+#include <consensus/params.h>
 #include <kernel/cs_main.h>
 #include <llmq/quorums_signing.h>
 #include <atomic>
@@ -42,7 +43,7 @@ public:
     CChainLockSig() = default;
     SERIALIZE_METHODS(CChainLockSig, obj) {
         READWRITE(obj.nHeight, obj.blockHash, obj.sig);
-        READWRITE(DYNBITSET(obj.signers));
+        READWRITE(DYNBITSET(obj.signers, Consensus::MAX_LLMQ_SIZE));
     }
     // Equality operator
     bool operator==(const CChainLockSig& other) const

@@ -6,6 +6,7 @@
 #define SYSCOIN_LLMQ_QUORUMS_BTCCHECKPOINTS_H
 
 #include <bls/bls.h>
+#include <consensus/params.h>
 #include <llmq/quorums_signing.h>
 #include <uint256.h>
 
@@ -58,7 +59,7 @@ public:
 
     SERIALIZE_METHODS(CBTCCheckpointSig, obj) {
         READWRITE(obj.nHeight, obj.sysHash, obj.sig);
-        READWRITE(DYNBITSET(obj.signers));
+        READWRITE(DYNBITSET(obj.signers, Consensus::MAX_LLMQ_SIZE));
     }
 
     bool IsNull() const;
@@ -185,4 +186,3 @@ extern CBTCCheckpointsHandler* btcCheckpointsHandler;
 } // namespace llmq
 
 #endif // SYSCOIN_LLMQ_QUORUMS_BTCCHECKPOINTS_H
-

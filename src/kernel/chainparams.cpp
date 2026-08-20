@@ -90,6 +90,8 @@ static CBlock CreateGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
 void CChainParams::UpdateLLMQTestParams(int size, int threshold) {
+    assert(size > 0 && size <= Consensus::MAX_LLMQ_SIZE);
+    assert(threshold > 0 && threshold <= size);
     auto& params = consensus.llmqTypeChainLocks;
     params.size = size;
     params.minSize = threshold;

@@ -152,7 +152,7 @@ uint256 BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& v
 {
     CHashWriter hw(SER_GETHASH, 0);
     hw << blockHash;
-    hw << DYNBITSET(validMembers);
+    hw << DYNBITSET(validMembers, Consensus::MAX_LLMQ_SIZE);
     hw << pubKey;
     hw << vvecHash;
     return hw.GetHash();

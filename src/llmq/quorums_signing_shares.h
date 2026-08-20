@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_SIGNING_SHARES_H
 #define SYSCOIN_LLMQ_QUORUMS_SIGNING_SHARES_H
 
+#include <consensus/params.h>
 #include <llmq/quorums_signing.h>
 
 #include <serialize.h>
@@ -117,7 +118,7 @@ public:
         uint64_t invSize = obj.inv.size();
         READWRITE(VARINT(obj.sessionId), COMPACTSIZE(invSize));
         autobitset_t bitset = std::make_pair(obj.inv, (size_t)invSize);
-        READWRITE(AUTOBITSET(bitset));
+        READWRITE(AUTOBITSET(bitset, Consensus::MAX_LLMQ_SIZE));
         SER_READ(obj, obj.inv = bitset.first);
     }
 
@@ -140,7 +141,14 @@ public:
 public:
     SERIALIZE_METHODS(CBatchedSigShares, obj)
     {
-        READWRITE(VARINT(obj.sessionId), obj.sigShares);
+        READWRITE(VARINT(obj.sessionId));
+        if constexpr (Operation::ForRead()) {
+            if (!UnserializeVectorWithMaxSize(s, obj.sigShares, Consensus::MAX_LLMQ_SIZE)) {
+                throw std::ios_base::failure("batched sig shares size exceeds maximum quorum size");
+            }
+        } else {
+            READWRITE(obj.sigShares);
+        }
     }
 
     [[nodiscard]] std::string ToInvString() const;
@@ -360,8 +368,7 @@ private:
     static constexpr size_t MAX_MSGS_CNT_QSIGSESANN{100};
     static constexpr size_t MAX_MSGS_CNT_QGETSIGSHARES{200};
     static constexpr size_t MAX_MSGS_CNT_QSIGSHARESINV{200};
-    // 400 is the maximum quorum size, so this is also the maximum number of sigs we need to support
-    static constexpr size_t MAX_MSGS_TOTAL_BATCHED_SIGS{400};
+    static constexpr size_t MAX_MSGS_TOTAL_BATCHED_SIGS{Consensus::MAX_LLMQ_SIZE};
 
     static constexpr int64_t EXP_SEND_FOR_RECOVERY_TIMEOUT{2000};
     static constexpr int64_t MAX_SEND_FOR_RECOVERY_TIMEOUT{10000};
