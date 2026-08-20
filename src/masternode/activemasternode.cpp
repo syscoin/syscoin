@@ -422,6 +422,15 @@ void RequestActiveChildKeyTrees(
     const llmq::pq::OperatorKeyState& operator_state)
     EXCLUSIVE_LOCKS_REQUIRED(activeMasternodeInfoCs)
 {
+    // Preparation-only functional tests commit synthetic roots because their
+    // governance/MNAUTH coverage never requests a child signature. Do not
+    // wastefully build a production tree that cannot match that test root.
+    if (gArgs.GetBoolArg("-pqoperatorcommitmentteststub", false) &&
+        Params().GetChainType() == ChainType::REGTEST &&
+        Params().MineBlocksOnDemand() &&
+        gArgs.GetBoolArg("-pqfinalitypreparation", false)) {
+        return;
+    }
     if (!activeMasternodeInfo.operatorKeyManager ||
         !operator_state.HasActiveGlobalKey()) {
         return;

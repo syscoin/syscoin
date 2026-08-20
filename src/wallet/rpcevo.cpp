@@ -177,6 +177,8 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
     }
     uint256 tree_id;
     uint256 fixture_root;
+    const bool use_test_stub{
+        gArgs.GetBoolArg("-pqoperatorcommitmentteststub", false)};
     const std::string fixture{
         gArgs.GetArg("-pqoperatorcommitmenttestfixture", "")};
     const bool verify_fixture{
@@ -185,6 +187,15 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
         throw JSONRPCError(
             RPC_INVALID_PARAMETER,
             "-pqoperatorcommitmenttestfixtureverify requires a fixture");
+    }
+    if (use_test_stub && (!fixture.empty() || verify_fixture ||
+                          Params().GetChainType() != ChainType::REGTEST ||
+                          !Params().MineBlocksOnDemand() ||
+                          !gArgs.GetBoolArg("-pqfinalitypreparation", false))) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "PQ operator commitment test stubs require preparation-only "
+            "mine-on-demand regtest and no exact fixture");
     }
     if (!fixture.empty()) {
         // SYSCOIN: Low-core CI exercises the real registration signatures and
@@ -248,6 +259,21 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
         first_epoch,
         llmq::pq::CHILD_KEY_TREE_DEPTH,
     };
+    if (use_test_stub) {
+        // The broad governance/MN suite exercises global-key authorization and
+        // registry transitions, not child signing. A domain-separated fake
+        // root keeps those tests from multiplying the production 65,536-leaf
+        // build across every parallel test process.
+        CHashWriter writer{SER_GETHASH, 0};
+        writer << std::string{"SYS_PQ_OPERATOR_TEST_STUB_V1"}
+               << config.genesis_hash << config.tree_id << config.generation
+               << config.first_epoch << config.depth;
+        fixture_root = writer.GetHash();
+        if (fixture_root.IsNull()) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR,
+                               "Generated PQ operator test root is null");
+        }
+    }
     std::optional<llmq::pq::ChildKeyTree> tree;
     if (fixture_root.IsNull() || verify_fixture) {
         tree = llmq::pq::ChildKeyTree::Build(

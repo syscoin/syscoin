@@ -331,6 +331,14 @@ class SyscoinGovernanceTest (DashTestFramework):
         def sync_gobject_list_trigger(node, count):
             self._throttled_bump_mocktime("feature_governance_trigger_sync", step=5)
             return len(node.gobject_list("valid", "triggers")) == count
+
+        def sync_trigger_vote_count(node, count):
+            # SYSCOIN: The bounded governance request lane advances its
+            # verification cadence in mocktime after fetching the trigger.
+            self._throttled_bump_mocktime(
+                f"feature_governance_trigger_vote_sync:{node.index}", step=1)
+            return list(node.gobject_list(
+                "valid", "triggers").values())[0]['YesCount'] == count
             
         # The isolated "winner" should submit new trigger and vote for it
         self.wait_until(
@@ -338,8 +346,7 @@ class SyscoinGovernanceTest (DashTestFramework):
             timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
         isolated_trigger_hash = list(isolated.gobject_list("valid", "triggers").keys())[0]
         self.wait_until(
-            lambda: list(isolated.gobject_list(
-                "valid", "triggers").values())[0]['YesCount'] == 1,
+            lambda: sync_trigger_vote_count(isolated, 1),
             timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
         more_votes = wait_until_helper_internal(lambda: list(isolated.gobject_list("valid", "triggers").values())[0]['YesCount'] > 1, timeout=5, do_assert=False)
         assert_equal(more_votes, False)
@@ -370,8 +377,7 @@ class SyscoinGovernanceTest (DashTestFramework):
                 timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
         winning_trigger_hash = list(self.nodes[0].gobject_list("valid", "triggers").keys())[0]
         self.wait_until(
-            lambda: list(self.nodes[0].gobject_list(
-                "valid", "triggers").values())[0]['YesCount'] == 1,
+            lambda: sync_trigger_vote_count(self.nodes[0], 1),
             timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
         more_votes = wait_until_helper_internal(lambda: list(self.nodes[0].gobject_list("valid", "triggers").values())[0]['YesCount'] > 1, timeout=5, do_assert=False)
         assert_equal(more_votes, False)

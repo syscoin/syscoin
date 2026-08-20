@@ -680,6 +680,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqchainlocktestfixture=<path>", "Load a bounded branch-bound quorum snapshot fixture for full-dimension ChainLock functional tests; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-pqoperatorcommitmenttestfixture=<genesis>:<c11seedhash>:<treeid>:<generation>:<firstepoch>:<root>", "Use an exact precomputed depth-16 operator commitment; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep low-core lifecycle tests on real signatures without rebuilding 65,536 child keys.
     argsman.AddArg("-pqoperatorcommitmenttestfixtureverify", "Rebuild and verify the configured PQ operator commitment test fixture", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-pqoperatorcommitmentteststub", "Use synthetic child roots and disable child-tree cache construction in PQ preparation-only functional tests", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep unrelated regtest suites from multiplying the production 65,536-leaf build.
     argsman.AddArg("-pqbtcccandidateorigin=<n>", "PQ BTCC candidate origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccnevminjectionlag=<n>", "PQ BTCC NEVM injection lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     // SYSCOIN: Regtest-only override for the release-pinned receipt-crypto
@@ -1462,6 +1463,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const bool preparation_requested{
         chainparams.GetChainType() == ChainType::REGTEST &&
         args.GetBoolArg("-pqfinalitypreparation", false)};
+    const bool operator_commitment_test_stub{
+        args.GetBoolArg("-pqoperatorcommitmentteststub", false)};
+    if (operator_commitment_test_stub &&
+        (chainparams.GetChainType() != ChainType::REGTEST ||
+         !chainparams.MineBlocksOnDemand() || !preparation_requested ||
+         args.IsArgSet("-pqoperatorcommitmenttestfixture") ||
+         args.GetBoolArg("-pqoperatorcommitmenttestfixtureverify", false))) {
+        return InitError(Untranslated(
+            "-pqoperatorcommitmentteststub requires preparation-only "
+            "mine-on-demand regtest and cannot be combined with an exact "
+            "operator commitment fixture"));
+    }
     const bool finality_arg_supplied{std::any_of(
         REGTEST_PQ_FINALITY_ARGS.begin(), REGTEST_PQ_FINALITY_ARGS.end(),
         [&](const char* name) { return args.IsArgSet(name); })};

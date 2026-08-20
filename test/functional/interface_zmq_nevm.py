@@ -283,6 +283,9 @@ class ZMQTest(SyscoinTestFramework):
             '-pqrostersnapshotlag=%d' % roster_snapshot_lag,
             '-pqfuturehorizonepochs=8',
             '-pqfinalitypreparation=1',
+            # SYSCOIN: NEVM mapping exercises global operator authorization,
+            # not child signatures; avoid rebuilding a full tree in this test.
+            '-pqoperatorcommitmentteststub=1',
         ]
         for args in self.extra_args:
             args.extend(pq_args)

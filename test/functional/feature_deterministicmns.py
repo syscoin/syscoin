@@ -80,6 +80,9 @@ class DIP3Test(SyscoinTestFramework):
             '-pqrostersnapshotlag=%d' % roster_snapshot_lag,
             '-pqfuturehorizonepochs=8',
             '-pqfinalitypreparation=1',
+            # SYSCOIN: This broad replay/state test needs PQ registry behavior,
+            # while the focused lifecycle test owns the real 65,536-leaf tree.
+            '-pqoperatorcommitmentteststub=1',
         ]
         self.stop_controller_node()
         self.nodes[0].extra_args = list(self.extra_args)

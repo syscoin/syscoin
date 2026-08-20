@@ -1130,6 +1130,10 @@ class DashTestFramework(SyscoinTestFramework):
             "-pqrostersnapshotlag=%d" % roster_snapshot_lag,
             "-pqfuturehorizonepochs=8",
             "-pqfinalitypreparation=1",
+            # SYSCOIN: Generic MN/governance tests need registry and global-key
+            # authorization, not 65,536-leaf child signing trees. The focused
+            # PQ lifecycle test independently pins and verifies a real root.
+            "-pqoperatorcommitmentteststub=1",
         ]
         for node_args in self.extra_args:
             node_args.extend(pq_args)
