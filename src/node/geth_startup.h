@@ -18,6 +18,8 @@ public:
     GethStartupWaitState(Clock::time_point start, Seconds normal_timeout, Seconds bootstrap_timeout)
         : m_normal_timeout{normal_timeout},
           m_bootstrap_timeout{bootstrap_timeout},
+          m_normal_start{start},
+          m_bootstrap_start{start},
           m_normal_deadline{start + normal_timeout},
           m_bootstrap_deadline{start + bootstrap_timeout}
     {
@@ -28,9 +30,11 @@ public:
         m_bootstrap_active = bootstrap_status_present && geth_running;
         if (m_bootstrap_active && !m_bootstrap_started) {
             m_bootstrap_started = true;
+            m_bootstrap_start = now;
             m_bootstrap_deadline = now + m_bootstrap_timeout;
         } else if (!bootstrap_status_present && geth_running && m_bootstrap_started && !m_bootstrap_completed) {
             m_bootstrap_completed = true;
+            m_normal_start = now;
             m_normal_deadline = now + m_normal_timeout;
         }
     }
@@ -40,6 +44,11 @@ public:
     Seconds ActiveTimeout() const
     {
         return m_bootstrap_active ? m_bootstrap_timeout : m_normal_timeout;
+    }
+
+    Seconds ActiveElapsed(Clock::time_point now) const
+    {
+        return std::chrono::duration_cast<Seconds>(now - (m_bootstrap_active ? m_bootstrap_start : m_normal_start));
     }
 
     bool Expired(Clock::time_point now) const
@@ -52,6 +61,8 @@ public:
 private:
     const Seconds m_normal_timeout;
     const Seconds m_bootstrap_timeout;
+    Clock::time_point m_normal_start;
+    Clock::time_point m_bootstrap_start;
     Clock::time_point m_normal_deadline;
     Clock::time_point m_bootstrap_deadline;
     bool m_bootstrap_started{false};

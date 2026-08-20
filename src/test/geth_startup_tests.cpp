@@ -18,10 +18,12 @@ BOOST_AUTO_TEST_CASE(bootstrap_completion_starts_fresh_normal_timeout)
 
     wait.Observe(/*bootstrap_status_present=*/true, /*geth_running=*/true, start + Seconds{2});
     BOOST_CHECK(wait.BootstrapActive());
+    BOOST_CHECK_EQUAL(wait.ActiveElapsed(start + Seconds{66}).count(), 64);
     BOOST_CHECK(!wait.Expired(start + Seconds{66}));
 
     wait.Observe(/*bootstrap_status_present=*/false, /*geth_running=*/true, start + Seconds{72});
     BOOST_CHECK(!wait.BootstrapActive());
+    BOOST_CHECK_EQUAL(wait.ActiveElapsed(start + Seconds{101}).count(), 29);
     BOOST_CHECK(!wait.Expired(start + Seconds{101}));
     BOOST_CHECK(wait.Expired(start + Seconds{102}));
 }

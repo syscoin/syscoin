@@ -1970,8 +1970,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 if (active_timeout == 0) {
                     LogPrintf("Waiting for sysgeth startup to complete before NEVM attach (%s%s)\n", stateStr, bootstrap_msg);
                 } else {
-                    const auto waited = std::chrono::duration_cast<std::chrono::seconds>(now - wait_start).count();
-                    LogPrintf("Waiting for sysgeth startup to complete before NEVM attach (%s%s), elapsed=%d timeout=%d seconds\n", stateStr, bootstrap_msg, waited, active_timeout);
+                    const auto phase_elapsed = geth_wait.ActiveElapsed(now).count();
+                    LogPrintf("Waiting for sysgeth startup to complete before NEVM attach (%s%s), phase_elapsed=%d timeout=%d seconds\n", stateStr, bootstrap_msg, phase_elapsed, active_timeout);
                 }
                 next_wait_log = now + std::chrono::seconds{DEFAULT_GETH_STARTUP_LOG_INTERVAL};
             }
