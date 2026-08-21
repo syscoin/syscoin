@@ -16,11 +16,15 @@ endif
 
 export PYTHONPATH
 
+# SYSCOIN: Build the independently authenticated Bitcoin header view used by
+# BTCC miner/sentry policy; ordinary full-node builds may configure it out.
 BTCHEADERNODE_BUILD_SCRIPT = $(top_srcdir)/contrib/btcheadernode/build-bitcoin-header-node.sh
 BTCHEADERNODE_PATCH_SCRIPT = $(top_srcdir)/contrib/btcheadernode/generate-headers-only-patch.sh
 BTCHEADERNODE_LOCKFILE = $(top_srcdir)/contrib/btcheadernode/bitcoin.lock
+BTCHEADERNODE_LICENSE_FILE = $(top_srcdir)/contrib/btcheadernode/COPYING.bitcoin-core
 
 btcheadernode-build: $(BTCHEADERNODE_BUILD_SCRIPT) $(BTCHEADERNODE_LOCKFILE) \
+  $(BTCHEADERNODE_LICENSE_FILE) \
   $(top_srcdir)/contrib/btcheadernode/patches/headers-only.diff
 	$(AM_V_at)LDFLAGS="$(LDFLAGS)" $(BTCHEADERNODE_BUILD_SCRIPT) --src-root "$(abs_top_srcdir)" --build-root "$(abs_top_builddir)"
 
@@ -141,6 +145,48 @@ OSX_APP_BUILT=$(OSX_APP)/Contents/PkgInfo $(OSX_APP)/Contents/Resources/empty.lp
   $(OSX_APP)/Contents/Resources/syscoin.icns $(OSX_APP)/Contents/Info.plist \
   $(OSX_APP)/Contents/MacOS/Syscoin-Qt $(OSX_APP)/Contents/Resources/Base.lproj/InfoPlist.strings
 
+# SYSCOIN: Bundle linked PQ implementation notices in the macOS application.
+OSX_PQ_SLHDSA_LICENSE=$(OSX_APP)/Contents/Resources/licenses/pq-crypto/slhdsa/LICENSE.upstream
+OSX_PQ_SPHINCS_C11_LICENSE=$(OSX_APP)/Contents/Resources/licenses/pq-crypto/sphincs_c11/LICENSE
+
+$(OSX_PQ_SLHDSA_LICENSE): $(OSX_APP)/Contents/MacOS/Syscoin-Qt
+	$(MKDIR_P) $(@D)
+	$(INSTALL_DATA) $(top_srcdir)/src/crypto/slhdsa/LICENSE.upstream $@
+
+$(OSX_PQ_SPHINCS_C11_LICENSE): $(OSX_APP)/Contents/MacOS/Syscoin-Qt
+	$(MKDIR_P) $(@D)
+	$(INSTALL_DATA) $(top_srcdir)/src/crypto/sphincs_c11/LICENSE $@
+
+OSX_APP_BUILT += $(OSX_PQ_SLHDSA_LICENSE) $(OSX_PQ_SPHINCS_C11_LICENSE)
+
+# SYSCOIN: Managed BTCC policy is the runtime default for miner/sentry roles.
+# Keep the pinned helper inside the app path ResolveManagedBTCHeaderBinaryPath
+# searches; macdeployqtplus subsequently applies its deep ad-hoc signature.
+if ENABLE_BTCHEADERNODE_BUILD
+OSX_BTCHEADERNODE_DIR=$(OSX_APP)/Contents/Resources/btcheadernode/bin
+OSX_BTCHEADERNODE_BITCOIND=$(OSX_BTCHEADERNODE_DIR)/bitcoind
+OSX_BTCHEADERNODE_CLI=$(OSX_BTCHEADERNODE_DIR)/bitcoin-cli
+OSX_BTCHEADERNODE_LICENSE=$(OSX_APP)/Contents/Resources/btcheadernode/COPYING.bitcoin-core
+
+$(OSX_BTCHEADERNODE_BITCOIND): $(OSX_APP)/Contents/MacOS/Syscoin-Qt
+	$(MKDIR_P) $(@D)
+	$(INSTALL_PROGRAM) $(top_builddir)/src/bin/btcheadernode/bin/bitcoind $@
+	@test -x $@
+
+$(OSX_BTCHEADERNODE_CLI): $(OSX_APP)/Contents/MacOS/Syscoin-Qt
+	$(MKDIR_P) $(@D)
+	$(INSTALL_PROGRAM) $(top_builddir)/src/bin/btcheadernode/bin/bitcoin-cli $@
+	@test -x $@
+
+$(OSX_BTCHEADERNODE_LICENSE): $(OSX_APP)/Contents/MacOS/Syscoin-Qt
+	$(MKDIR_P) $(@D)
+	$(INSTALL_DATA) $(top_builddir)/src/bin/btcheadernode/COPYING.bitcoin-core $@
+	@test -f $@
+
+OSX_APP_BUILT += $(OSX_BTCHEADERNODE_BITCOIND) $(OSX_BTCHEADERNODE_CLI) \
+  $(OSX_BTCHEADERNODE_LICENSE)
+endif
+
 
 if BUILD_DARWIN
 $(OSX_ZIP): $(OSX_APP_BUILT) $(OSX_PACKAGING)
@@ -191,7 +237,6 @@ LCOV_FILTER_PATTERN = \
 	-p "/usr/lib/" \
 	-p "/usr/lib64/" \
 	-p "src/immer/" \
-	-p "src/dashbls/" \
 	-p "src/leveldb/" \
 	-p "src/crc32c/" \
 	-p "src/bench/" \
@@ -271,13 +316,19 @@ endif
 dist_noinst_SCRIPTS = autogen.sh $(BTCHEADERNODE_BUILD_SCRIPT) $(BTCHEADERNODE_PATCH_SCRIPT)
 
 EXTRA_DIST = $(DIST_SHARE) $(DIST_CONTRIB) $(WINDOWS_PACKAGING) $(OSX_PACKAGING) $(BIN_CHECKS)
+# SYSCOIN: Ship the pinned source provenance, patch, and black-box contract
+# tests together so release builders cannot omit the managed-view audit trail.
 EXTRA_DIST += \
   contrib/btcheadernode/README.md \
   contrib/btcheadernode/HEADERS_ONLY_PATCH_SPEC.md \
   contrib/btcheadernode/bitcoin.lock \
-  contrib/btcheadernode/patches/headers-only.diff
-
-EXTRA_DIST += \
+  contrib/btcheadernode/COPYING.bitcoin-core \
+  contrib/btcheadernode/test-headers-only.py \
+  contrib/btcheadernode/test-source-provenance.sh \
+  contrib/btcheadernode/test-toolchain-generation.sh \
+  contrib/btcheadernode/patches/headers-only.diff \
+    build_msvc \
+    doc/pq-chainlocks.md \
     test/functional \
     test/fuzz
 

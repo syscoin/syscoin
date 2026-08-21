@@ -24,6 +24,35 @@ using node::MAX_BLOCKFILE_SIZE;
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
 
+// SYSCOIN: A replay-retention floor may move backward but never forward implicitly.
+BOOST_AUTO_TEST_CASE(replay_prune_lock_never_raises_a_reorg_floor)
+{
+    const auto params{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    KernelNotifications notifications{m_node.exit_status};
+    const BlockManager::Options blockman_opts{
+        .chainparams = *params,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+    };
+    BlockManager blockman{m_node.kernel->interrupt, blockman_opts};
+
+    LOCK(::cs_main);
+    const std::string name{"btcc-nevm-replay-test"};
+    BOOST_CHECK_EQUAL(blockman.UpdatePruneLockLowerOnly(
+                          name, node::PruneLockInfo{120}),
+                      120);
+    // SYSCOIN: Model DisconnectTip rewinding the live floor to a deep fork.
+    // A later marker refresh at a higher carrier must preserve rollback data.
+    blockman.UpdatePruneLock(name, node::PruneLockInfo{80});
+    BOOST_CHECK_EQUAL(blockman.UpdatePruneLockLowerOnly(
+                          name, node::PruneLockInfo{160}),
+                      80);
+    blockman.RemovePruneLock(name);
+    BOOST_CHECK_EQUAL(blockman.UpdatePruneLockLowerOnly(
+                          name, node::PruneLockInfo{160}),
+                      160);
+}
+
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
 {
     const auto params {CreateChainParams(ArgsManager{}, ChainType::MAIN)};
@@ -199,6 +228,34 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     //   SaveBlockToDisk() did not call WriteBlockToDisk() because `FlatFilePos* dbp` was non-null
     blockman.ReadBlockFromDisk(read_block, pos2);
     BOOST_CHECK_EQUAL(read_block.nVersion, 2);
+}
+
+// SYSCOIN: Durability barriers select the independent normal/assumed block
+// streams by height and treat an uninitialized assumed stream as empty.
+BOOST_AUTO_TEST_CASE(blockmanager_flush_chainstate_block_file_by_type)
+{
+    KernelNotifications notifications{m_node.exit_status};
+    node::BlockManager::Options blockman_opts{
+        .chainparams = Params(),
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+    };
+    BlockManager blockman{m_node.kernel->interrupt, blockman_opts};
+
+    CBlock block;
+    block.nVersion = 1;
+    const FlatFilePos normal{
+        blockman.SaveBlockToDisk(block, /*nHeight=*/1, /*dbp=*/nullptr)};
+    blockman.m_snapshot_height = 2;
+
+    BOOST_CHECK(blockman.FlushChainstateBlockFile(/*tip_height=*/1));
+    BOOST_CHECK(blockman.FlushChainstateBlockFile(/*tip_height=*/2));
+
+    block.nVersion = 2;
+    const FlatFilePos assumed{
+        blockman.SaveBlockToDisk(block, /*nHeight=*/2, /*dbp=*/nullptr)};
+    BOOST_CHECK_NE(normal.nFile, assumed.nFile);
+    BOOST_CHECK(blockman.FlushChainstateBlockFile(/*tip_height=*/2));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

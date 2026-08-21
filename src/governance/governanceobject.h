@@ -14,8 +14,11 @@
 #include <univalue.h>
 #include <kernel/cs_main.h>
 
+#include <cstdint>
+#include <optional>
+
 class CActiveMasternodeManager;
-class CBLSPublicKey;
+class CBlockIndex;
 class CDeterministicMNList;
 class CGovernanceManager;
 class CGovernanceObject;
@@ -25,6 +28,10 @@ class CMasternodeSync;
 class CNode;
 class PeerManager;
 class ChainstateManager;
+
+namespace llmq::pq {
+struct PQRegistrySnapshot;
+}
 
 
 static constexpr double GOVERNANCE_FILTER_FP_RATE = 0.001;
@@ -121,6 +128,9 @@ private:
     /// true == minimum network support has been reached saying this object should be deleted from the system entirely
     bool fCachedDelete;
 
+    /** Memory-only distinction needed when revoked votes are removed. */
+    bool fCachedDeleteByVotes;
+
     /** true == minimum network support has been reached flagging this object as endorsed by an elected representative body
      * (e.g. business review board / technical review board /etc)
      */
@@ -193,6 +203,11 @@ public:
         return fCachedDelete;
     }
 
+    bool IsSetCachedDeleteByVotes() const
+    {
+        return fCachedDeleteByVotes;
+    }
+
     bool IsSetCachedEndorsed() const
     {
         return fCachedEndorsed;
@@ -218,30 +233,68 @@ public:
         return fileVotes;
     }
 
+    /** Capture one immutable generation of the authoritative vote index. */
+    [[nodiscard]] std::shared_ptr<const GovernancePageImmutableSnapshot>
+    GetVotePageSnapshot(
+        const std::shared_ptr<GovernancePageSnapshotBudget>& budget,
+        uint64_t instance_id,
+        uint64_t validation_context_epoch,
+        std::optional<std::size_t> retained_bytes = std::nullopt) const;
+
+    [[nodiscard]] std::optional<std::size_t>
+    GetVotePageSnapshotRetainedBytes() const;
+
+    [[nodiscard]] std::shared_ptr<
+        const GovernancePageImmutableSnapshot>
+    GetCachedVotePageSnapshot(
+        uint64_t validation_context_epoch) const;
+
+    /** Serve an exact paged vote without consulting the lossy global LRU. */
+    [[nodiscard]] bool SerializeVoteForPage(
+        const uint256& vote_hash, CDataStream& stream) const;
+
+    [[nodiscard]] bool HasVoteForPage(const uint256& vote_hash) const;
+
     // Signature related functions
 
     void SetMasternodeOutpoint(const COutPoint& outpoint);
-    bool Sign();
-    bool CheckSignature(const CBLSPublicKey& pubKey) const;
+    bool SignPQ(const CBlockIndex& signing_block,
+                const uint256& pro_tx_hash,
+                uint32_t global_key_version);
+    bool CheckPQSignature(const CBlockIndex& validation_branch,
+                          const CDeterministicMNList& validation_mn_list,
+                          std::string& error) const;
+    bool CheckPQAuthorizationContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        std::string& error) const;
+    bool CheckPQAuthorizationContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistrySnapshot& current_snapshot,
+        std::string& error) const;
 
     uint256 GetSignatureHash() const;
 
     // CORE OBJECT FUNCTIONS
 
-    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool fCheckCollateral) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool fCheckCollateral, bool fPQSignaturePreverified = false) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral, bool fPQSignaturePreverified = false) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /// Check the collateral transaction for the budget proposal/finalized budget
     bool IsCollateralValid(ChainstateManager &chainman, std::string& strError, bool& fMissingConfirmations) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void UpdateLocalValidity(ChainstateManager &chainman, const CDeterministicMNList& tip_mn_list) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    void UpdateSentinelVariables(const CDeterministicMNList& tip_mn_list);
+    void UpdateSentinelVariables(
+        const CDeterministicMNList& tip_mn_list,
+        bool reset_vote_caused_deletion = false);
 
     void PrepareDeletion(int64_t nDeletionTime_)
     {
         fCachedDelete = true;
+        fCachedDeleteByVotes = false;
         if (nDeletionTime == 0) {
             nDeletionTime = nDeletionTime_;
         }
@@ -255,6 +308,9 @@ public:
 
     uint256 GetHash() const;
     uint256 GetDataHash() const;
+    /** Exact network payload equality, including fields omitted by GetHash. */
+    [[nodiscard]] bool HasSameWireEncoding(
+        const CGovernanceObject& other) const;
 
     // GET VOTE COUNT FOR SIGNAL
 
@@ -293,17 +349,34 @@ public:
     void LoadData();
     void GetData(UniValue& objResult) const;
 
-    bool ProcessVote(const CDeterministicMNList& tip_mn_list,
-                     const CGovernanceVote& vote, CGovernanceException& exception);
+    bool ProcessVote(const CBlockIndex& validation_branch,
+                     const CDeterministicMNList& tip_mn_list,
+                     const CGovernanceVote& vote,
+                     CGovernanceException& exception,
+                     bool pq_signature_preverified = false);
 
     /// Called when MN's which have voted on this object have been removed
     void ClearMasternodeVotes(const CDeterministicMNList& tip_mn_list);
 
-    // Revalidate all votes from this MN and delete them if validation fails.
-    // This is the case for DIP3 MNs that changed voting or operator keys and
-    // also for MNs that were removed from the list completely.
-    // Returns deleted vote hashes.
-    std::set<uint256> RemoveInvalidVotes(const CDeterministicMNList& tip_mn_list, const COutPoint& mnOutpoint);
+    std::set<uint256> RemoveInvalidDelegatedFundingVotes(
+        const CDeterministicMNList& validation_mn_list,
+        const std::optional<COutPoint>& masternode_filter = std::nullopt,
+        std::size_t* checked_votes = nullptr,
+        std::set<COutPoint>* removed_operators = nullptr);
+    std::set<uint256> RemoveInvalidPQVotes(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistrySnapshot& current_snapshot,
+        const std::optional<COutPoint>& masternode_filter = std::nullopt,
+        std::size_t* checked_votes = nullptr,
+        std::set<COutPoint>* removed_operators = nullptr);
+    [[nodiscard]] bool HasPQVoteFromMasternode(
+        const COutPoint& masternode) const;
+    [[nodiscard]] bool HasDelegatedFundingVoteFromMasternode(
+        const COutPoint& masternode) const;
+    /** Whether a stored vote legitimately supersedes this candidate. */
+    [[nodiscard]] bool HasStoredSupersedingVote(
+        const CGovernanceVote& vote) const;
 };
 
 

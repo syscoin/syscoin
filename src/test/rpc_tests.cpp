@@ -4,6 +4,7 @@
 
 #include <core_io.h>
 #include <interfaces/chain.h>
+#include <llmq/pq_chainlock_types.h> // SYSCOIN: PQ operator RPC policy.
 #include <node/context.h>
 #include <rpc/blockchain.h>
 #include <rpc/client.h>
@@ -166,6 +167,87 @@ BOOST_AUTO_TEST_CASE(rpc_rawparams)
     BOOST_CHECK_THROW(CallRPC(std::string("sendrawtransaction ")+rawtx+" extra"), std::runtime_error);
 }
 
+// SYSCOIN: PQ RPC conversion and child-root generation policy.
+BOOST_AUTO_TEST_CASE(rpc_pq_client_parameter_conversion)
+{
+    BOOST_CHECK(llmq::pq::CanAdvanceChildKeyTreeGeneration(
+        llmq::pq::CHILD_KEY_TREE_MAX_GENERATION - 1));
+    BOOST_CHECK(!llmq::pq::CanAdvanceChildKeyTreeGeneration(
+        llmq::pq::CHILD_KEY_TREE_MAX_GENERATION));
+
+    const UniValue mnauth{RPCConvertValues(
+        "mnauth", {"7", "01", "02", "3"})};
+    BOOST_CHECK(mnauth[0].isNum());
+    BOOST_CHECK(mnauth[1].isStr());
+    BOOST_CHECK(mnauth[2].isStr());
+    BOOST_CHECK(mnauth[3].isNum());
+
+    const UniValue chainlocks{RPCConvertValues(
+        "gettxchainlocks", {R"(["01","02"])"})};
+    BOOST_CHECK(chainlocks[0].isArray());
+
+    const UniValue register_operator{RPCConvertValues(
+        "protx_register_operator_key", {"01", "02", "03", "", "false"})};
+    BOOST_CHECK(register_operator[4].isBool());
+
+    const UniValue rotate_operator{RPCConvertValues(
+        "protx_rotate_operator_key",
+        {"01", "02", "03", "", "false", "04"})};
+    BOOST_CHECK(rotate_operator[4].isBool());
+    BOOST_CHECK(rotate_operator[5].isStr());
+
+    const UniValue named{RPCConvertNamedValues(
+        "protx_rotate_operator_key", {"submit=false"})};
+    BOOST_CHECK(named.find_value("submit").isBool());
+    const UniValue named_root_rotation{RPCConvertNamedValues(
+        "protx_rotate_operator_key", {"newC11Seed=04"})};
+    BOOST_CHECK(named_root_rotation.find_value("newC11Seed").isStr());
+
+    const UniValue named_register{RPCConvertNamedValues(
+        "protx_register_operator_key", {"submit=true"})};
+    BOOST_CHECK(named_register.find_value("submit").isBool());
+    const UniValue named_mnauth{RPCConvertNamedValues(
+        "mnauth", {"globalKeyVersion=3"})};
+    BOOST_CHECK(named_mnauth.find_value("globalKeyVersion").isNum());
+    const UniValue named_chainlocks{RPCConvertNamedValues(
+        "gettxchainlocks", {R"(txids=["01","02"])"})};
+    BOOST_CHECK(named_chainlocks.find_value("txids").isArray());
+
+    // SYSCOIN: every removed BLS/DKG conversion must remain absent. Leaving a
+    // stale entry would silently reinterpret an argument to a future RPC that
+    // reuses the old name or position.
+    struct RemovedConversion {
+        const char* method;
+        size_t index;
+    };
+    static constexpr RemovedConversion removed_conversions[]{
+        {"bls_generate", 0},
+        {"bls_fromsecret", 1},
+        {"protx_register", 10},
+        {"protx_register_fund", 9},
+        {"protx_register_prepare", 9},
+        {"protx_update_service", 6},
+        {"protx_update_registrar", 5},
+        {"protx_revoke", 4},
+        {"quorum_list", 0},
+        {"quorum_info", 1},
+        {"quorum_dkgstatus", 0},
+        {"quorum_memberof", 1},
+        {"quorum_dkgsimerror", 1},
+        {"quorum_verify", 4},
+        {"quorum_sign", 3},
+    };
+    for (const auto& removed : removed_conversions) {
+        std::vector<std::string> args(removed.index + 1, "false");
+        const UniValue converted{RPCConvertValues(removed.method, args)};
+        BOOST_REQUIRE_EQUAL(converted.size(), args.size());
+        BOOST_CHECK_MESSAGE(
+            converted[removed.index].isStr(),
+            removed.method << " argument " << removed.index <<
+                " still has a stale client conversion");
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rpc_togglenetwork)
 {
     UniValue r;
@@ -173,6 +255,14 @@ BOOST_AUTO_TEST_CASE(rpc_togglenetwork)
     r = CallRPC("getnetworkinfo");
     bool netState = r.get_obj().find_value("networkactive").get_bool();
     BOOST_CHECK_EQUAL(netState, true);
+    // SYSCOIN: getnetworkinfo exposes bounded PQ MNAUTH worker state.
+    const UniValue& mnauth_stats{r.get_obj().find_value("mnauth")};
+    BOOST_REQUIRE(mnauth_stats.isObject());
+    BOOST_CHECK(mnauth_stats.find_value("verify_queue").isNum());
+    BOOST_CHECK(mnauth_stats.find_value("initiator_sign_queue").isNum());
+    BOOST_CHECK(mnauth_stats.find_value("responder_sign_queue").isNum());
+    BOOST_CHECK(mnauth_stats.find_value("completion_queue").isNum());
+    BOOST_CHECK(mnauth_stats.find_value("stale_completions").isNum());
 
     BOOST_CHECK_NO_THROW(CallRPC("setnetworkactive false"));
     r = CallRPC("getnetworkinfo");
@@ -499,62 +589,6 @@ BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)
     }
 }
 
-// SYSCOIN
-BOOST_AUTO_TEST_CASE(rpc_bls)
-{
-    UniValue r;
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_generate")));
-    auto obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_generate true")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    std::string secret_legacy = obj.find_value("secret").get_str();
-    std::string public_legacy = obj.find_value("public").get_str();
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_generate false")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
-    std::string secret_basic = obj.find_value("secret").get_str();
-    std::string public_basic = obj.find_value("public").get_str();
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_basic));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), public_basic);
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_legacy + std::string(" true")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), public_legacy);
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_basic + std::string(" false")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
-    BOOST_CHECK(obj.find_value("public").get_str() != public_legacy);
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_basic + std::string(" false")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), public_basic);
-
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret_basic + std::string(" true")));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    BOOST_CHECK(obj.find_value("public").get_str() != public_basic);
-
-    std::string secret = "0b072b1b8b28335b0460aa695ee8ce1f60dc01e6eb12655ece2a877379dfdb51";
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret + " true"));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "legacy");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), "9379c28e0f50546906fe733f1222c8f7e39574d513790034f1fec1476286eb652a350c8c0e630cd2cc60d10c26d6f6ee");
-    BOOST_CHECK_NO_THROW(r = CallRPC(std::string("bls_fromsecret ") + secret));
-    obj = r.get_obj();
-    BOOST_CHECK_EQUAL(obj.find_value("scheme").get_str(), "basic");
-    BOOST_CHECK_EQUAL(obj.find_value("public").get_str(), "b379c28e0f50546906fe733f1222c8f7e39574d513790034f1fec1476286eb652a350c8c0e630cd2cc60d10c26d6f6ee");
-}
-// Make sure errors are triggered appropriately if parameters have the same names.
 BOOST_AUTO_TEST_CASE(check_dup_param_names)
 {
     enum ParamType { POSITIONAL, NAMED, NAMED_ONLY };

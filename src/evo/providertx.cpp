@@ -3,8 +3,11 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <evo/deterministicmns.h>
+#include <evo/pq_registry.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
+#include <consensus/pq_migration.h>
+#include <llmq/pq_global_auth.h>
 #include <llmq/quorums_utils.h>
 
 #include <base58.h>
@@ -17,9 +20,161 @@
 #include <script/script.h>
 #include <validation.h>
 #include <common/args.h>
-bool CProRegTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const
+
+namespace {
+
+enum class ProviderAuthEra {
+    LEGACY_REPLAY,
+    POST_QUANTUM,
+    INVALID,
+};
+
+ProviderAuthEra GetProviderAuthEra(const CBlockIndex* pindex_prev)
 {
-    if (nVersion == 0 || nVersion > GetVersion(is_basic_scheme_active)) {
+    if (pindex_prev == nullptr) return ProviderAuthEra::INVALID;
+    const auto& consensus = Params().GetConsensus();
+    const auto replay{Consensus::CheckPQLegacyReplay(
+        consensus, pindex_prev->nHeight + 1)};
+    if (replay == Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION) {
+        return ProviderAuthEra::INVALID;
+    }
+    return replay == Consensus::PQLegacyReplayResult::ALLOWED
+        ? ProviderAuthEra::LEGACY_REPLAY
+        : ProviderAuthEra::POST_QUANTUM;
+}
+
+template <typename Range>
+bool HasNonZeroByte(const Range& range)
+{
+    return std::any_of(range.begin(), range.end(), [](uint8_t byte) {
+        return byte != 0;
+    });
+}
+
+bool GetParentOperatorKey(const CBlockIndex* pindex_prev,
+                          const uint256& pro_tx_hash,
+                          const llmq::pq::OperatorKeyState*& operator_state,
+                          llmq::pq::PQRegistrySnapshot& snapshot)
+{
+    if (pindex_prev == nullptr || deterministicMNManager == nullptr) return false;
+    std::string error;
+    if (!deterministicMNManager->GetPQRegistrySnapshot(pindex_prev, snapshot, error)) {
+        return false;
+    }
+    operator_state = snapshot.FindOperator(pro_tx_hash);
+    return operator_state != nullptr && operator_state->HasActiveGlobalKey() &&
+           operator_state->global_key.IsStructurallyValid();
+}
+
+bool CheckProviderVersion(uint16_t actual,
+                          uint16_t legacy_max,
+                          uint16_t pq_version,
+                          ProviderAuthEra era,
+                          TxValidationState& state)
+{
+    const bool valid = era == ProviderAuthEra::POST_QUANTUM
+        ? actual == pq_version
+        : era == ProviderAuthEra::LEGACY_REPLAY
+            ? actual != 0 && actual <= legacy_max
+            : false;
+    return valid || state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                  "bad-protx-version");
+}
+
+bool ShouldCheckProviderAuthorization(
+    ProviderAuthEra era,
+    bool check_sigs,
+    SpecialTxValidationContext validation_context) noexcept
+{
+    // assumevalid may omit Bitcoin/ECDSA script checks, but post-quantum
+    // operator authorization is independent consensus state. The mempool
+    // precheck is followed by NORMAL authentication; crash roll-forward reuses
+    // the result of the block's earlier full validation.
+    const bool explicitly_deferred =
+        validation_context == SpecialTxValidationContext::MEMPOOL_PRECHECK ||
+        validation_context ==
+            SpecialTxValidationContext::ALREADY_VALIDATED_ROLLFORWARD;
+    return check_sigs ||
+           (era == ProviderAuthEra::POST_QUANTUM && !explicitly_deferred);
+}
+
+template <typename Payload>
+bool GetProviderPayload(const CTransaction& tx,
+                        ProviderAuthEra era,
+                        Payload& payload)
+{
+    std::vector<unsigned char> encoded;
+    int output_index{-1};
+    if (!GetSyscoinData(tx, encoded, output_index)) return false;
+    if (era != ProviderAuthEra::POST_QUANTUM) {
+        return GetTxPayload(encoded, payload);
+    }
+    try {
+        CDataStream stream(encoded, SER_NETWORK, PROTOCOL_VERSION);
+        stream >> payload;
+        return stream.empty();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+} // namespace
+
+std::optional<ProviderMutationIdentity>
+DecodeProviderMutationIdentity(const CTransaction& tx) noexcept
+{
+    try {
+        std::vector<unsigned char> encoded;
+        int output_index{-1};
+        if (!GetSyscoinData(tx, encoded, output_index)) return std::nullopt;
+
+        CDataStream stream(encoded, SER_NETWORK, PROTOCOL_VERSION);
+        switch (tx.nVersion) {
+        case SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE: {
+            CProUpServTx payload;
+            stream >> payload;
+            if (!stream.empty() || payload.nVersion == 0 ||
+                payload.nVersion > CProUpServTx::PQ_VERSION ||
+                payload.proTxHash.IsNull()) {
+                return std::nullopt;
+            }
+            return ProviderMutationIdentity{payload.proTxHash, false};
+        }
+        case SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR: {
+            CProUpRegTx payload;
+            stream >> payload;
+            if (!stream.empty() || payload.nVersion == 0 ||
+                payload.nVersion > CProUpRegTx::PQ_VERSION ||
+                payload.proTxHash.IsNull()) {
+                return std::nullopt;
+            }
+            return ProviderMutationIdentity{payload.proTxHash, false};
+        }
+        case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE: {
+            CProUpRevTx payload;
+            stream >> payload;
+            if (!stream.empty() || payload.nVersion == 0 ||
+                payload.nVersion > CProUpRevTx::PQ_VERSION ||
+                payload.proTxHash.IsNull()) {
+                return std::nullopt;
+            }
+            return ProviderMutationIdentity{
+                payload.proTxHash,
+                payload.nVersion == CProUpRevTx::PQ_VERSION};
+        }
+        default:
+            return std::nullopt;
+        }
+    } catch (const std::exception&) {
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool CProRegTx::IsTriviallyValid(TxValidationState& state, bool) const
+{
+    if (nVersion == 0 || nVersion > PQ_VERSION) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-version");
     }
     if (nType != 0) {
@@ -29,11 +184,10 @@ bool CProRegTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-mode");
     }
 
-    if (keyIDOwner.IsNull() || !pubKeyOperator.Get().IsValid() || keyIDVoting.IsNull()) {
+    if (keyIDOwner.IsNull() || keyIDVoting.IsNull() ||
+        (nVersion <= BASIC_BLS_VERSION && !pubKeyOperator.IsValid()) ||
+        (nVersion == PQ_VERSION && !pubKeyOperator.IsNull())) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-key-null");
-    }
-    if (pubKeyOperator.IsLegacy() != (nVersion == LEGACY_BLS_VERSION)) {
-        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-operator-pubkey");
     }
     CTxDestination payoutDest;
     if (!ExtractDestination(scriptPayout, payoutDest)) {
@@ -95,15 +249,6 @@ static bool CheckStringSig(const ProTx& proTx, const CKeyID& keyID, TxValidation
 }
 
 template <typename ProTx>
-static bool CheckHashSig(const ProTx& proTx, const CBLSPublicKey& pubKey, TxValidationState& state, bool fJustCheck)
-{
-    if (!proTx.sig.VerifyInsecure(pubKey, ::SerializeHash(proTx))) {
-        return FormatSyscoinErrorMessage(state, "bad-protx-bls-sig", fJustCheck);
-    }
-    return true;
-}
-
-template <typename ProTx>
 static bool CheckInputsHash(const CTransaction& tx, const ProTx& proTx, TxValidationState& state, bool fJustCheck)
 {
     uint256 inputsHash = CalcTxInputsHash(tx);
@@ -121,12 +266,17 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
         return FormatSyscoinErrorMessage(state, "bad-protx-type", fJustCheck);
     }
 
+    const ProviderAuthEra auth_era = GetProviderAuthEra(pindexPrev);
     CProRegTx ptx;
-    if (!GetTxPayload(tx, ptx)) {
+    if (!GetProviderPayload(tx, auth_era, ptx)) {
         return FormatSyscoinErrorMessage(state, "bad-protx-payload", fJustCheck);
     }
-
-    if (!ptx.IsTriviallyValid(state, llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight))) {
+    const bool basic_scheme = pindexPrev != nullptr &&
+        llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight);
+    if (!CheckProviderVersion(ptx.nVersion,
+                              CProRegTx::GetVersion(basic_scheme),
+                              CProRegTx::PQ_VERSION, auth_era, state) ||
+        !ptx.IsTriviallyValid(state, basic_scheme)) {
         return FormatSyscoinErrorMessage(state, state.GetRejectReason(), fJustCheck);
     }
 
@@ -194,7 +344,9 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
         }
 
         // never allow duplicate keys, even if this ProTx would replace an existing MN
-        if (mnList.HasUniqueProperty(ptx.keyIDOwner) || mnList.HasUniqueProperty(ptx.pubKeyOperator)) {
+        if (mnList.HasUniqueProperty(ptx.keyIDOwner) ||
+            (ptx.nVersion <= CProRegTx::BASIC_BLS_VERSION &&
+             mnList.HasUniqueProperty(ptx.pubKeyOperator))) {
             return FormatSyscoinErrorMessage(state, "bad-protx-dup-key", fJustCheck);
         }
 
@@ -220,18 +372,23 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
     return true;
 }
 
-bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs)
+bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context)
 {
     if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
         return FormatSyscoinErrorMessage(state, "bad-protx-type", fJustCheck);
     }
 
+    const ProviderAuthEra auth_era = GetProviderAuthEra(pindexPrev);
     CProUpServTx ptx;
-    if (!GetTxPayload(tx, ptx)) {
+    if (!GetProviderPayload(tx, auth_era, ptx)) {
         return FormatSyscoinErrorMessage(state, "bad-protx-payload", fJustCheck);
     }
-
-    if (!ptx.IsTriviallyValid(state, llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight))) {
+    const bool basic_scheme = pindexPrev != nullptr &&
+        llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight);
+    if (!CheckProviderVersion(ptx.nVersion,
+                              CProUpServTx::GetVersion(basic_scheme),
+                              CProUpServTx::PQ_VERSION, auth_era, state) ||
+        !ptx.IsTriviallyValid(state, basic_scheme)) {
         return FormatSyscoinErrorMessage(state, state.GetRejectReason(), fJustCheck);
     }
 
@@ -289,9 +446,46 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
             // pass the state returned by the function above
             return false;
         }
-        if (check_sigs && !CheckHashSig(ptx, mn->pdmnState->pubKeyOperator.Get(), state, fJustCheck)) {
-            // pass the state returned by the function above
-            return false;
+        if (ShouldCheckProviderAuthorization(
+                auth_era, check_sigs, validation_context)) {
+            if (auth_era == ProviderAuthEra::POST_QUANTUM) {
+                llmq::pq::PQRegistrySnapshot registry_snapshot;
+                const llmq::pq::OperatorKeyState* operator_state{nullptr};
+                if (!GetParentOperatorKey(pindexPrev, ptx.proTxHash,
+                                          operator_state, registry_snapshot) ||
+                    ptx.globalKeyVersion != operator_state->global_key.key_version) {
+                    return FormatSyscoinErrorMessage(
+                        state, "bad-protx-pq-key", fJustCheck);
+                }
+                const auto endpoint = llmq::pq::MakeNetworkEndpoint(ptx.addr);
+                if (!endpoint) {
+                    return FormatSyscoinErrorMessage(
+                        state, "bad-protx-pq-service", fJustCheck);
+                }
+                llmq::pq::ProviderServiceAuthorization authorization;
+                authorization.payload_version = ptx.nVersion;
+                authorization.pro_tx_hash = ptx.proTxHash;
+                authorization.global_key_version = ptx.globalKeyVersion;
+                authorization.service = *endpoint;
+                authorization.operator_payout_script.assign(
+                    ptx.scriptOperatorPayout.begin(), ptx.scriptOperatorPayout.end());
+                if (!ptx.vchNEVMAddress.empty()) {
+                    if (ptx.vchNEVMAddress.size() != llmq::pq::NEVM_ADDRESS_SIZE) {
+                        return FormatSyscoinErrorMessage(
+                            state, "bad-protx-invalid-nevmaddress-size", fJustCheck);
+                    }
+                    authorization.nevm_address.emplace();
+                    std::copy(ptx.vchNEVMAddress.begin(), ptx.vchNEVMAddress.end(),
+                              authorization.nevm_address->begin());
+                }
+                authorization.transaction_inputs_hash = ptx.inputsHash;
+                if (!llmq::pq::VerifyProviderServiceAuthorization(
+                        Params().GetConsensus().hashGenesisBlock,
+                        operator_state->global_key, authorization, ptx.pqSig)) {
+                    return FormatSyscoinErrorMessage(
+                        state, "bad-protx-pq-sig", fJustCheck);
+                }
+            }
         }
     }
 
@@ -304,11 +498,17 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
         return FormatSyscoinErrorMessage(state, "bad-protx-type", fJustCheck);
     }
 
+    const ProviderAuthEra auth_era = GetProviderAuthEra(pindexPrev);
     CProUpRegTx ptx;
-    if (!GetTxPayload(tx, ptx)) {
+    if (!GetProviderPayload(tx, auth_era, ptx)) {
         return FormatSyscoinErrorMessage(state, "bad-protx-payload", fJustCheck);
     }
-    if (!ptx.IsTriviallyValid(state, llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight))) {
+    const bool basic_scheme = pindexPrev != nullptr &&
+        llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight);
+    if (!CheckProviderVersion(ptx.nVersion,
+                              CProUpRegTx::GetVersion(basic_scheme),
+                              CProUpRegTx::PQ_VERSION, auth_era, state) ||
+        !ptx.IsTriviallyValid(state, basic_scheme)) {
         return FormatSyscoinErrorMessage(state, state.GetRejectReason(), fJustCheck);
     }
     
@@ -346,7 +546,8 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
             return FormatSyscoinErrorMessage(state, "bad-protx-collateral-reuse", fJustCheck);
         }
 
-        if (mnList.HasUniqueProperty(ptx.pubKeyOperator)) {
+        if (ptx.nVersion <= CProUpRegTx::BASIC_BLS_VERSION &&
+            mnList.HasUniqueProperty(ptx.pubKeyOperator)) {
             auto otherDmn = mnList.GetUniquePropertyMN(ptx.pubKeyOperator);
             if (ptx.proTxHash != otherDmn->proTxHash) {
                 return FormatSyscoinErrorMessage(state, "bad-protx-dup-key", fJustCheck);
@@ -367,18 +568,23 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
     return true;
 }
 
-bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs)
+bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context)
 {
     if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         return FormatSyscoinErrorMessage(state, "bad-protx-type", fJustCheck);
     }
 
+    const ProviderAuthEra auth_era = GetProviderAuthEra(pindexPrev);
     CProUpRevTx ptx;
-    if (!GetTxPayload(tx, ptx)) {
+    if (!GetProviderPayload(tx, auth_era, ptx)) {
         return FormatSyscoinErrorMessage(state, "bad-protx-payload", fJustCheck);
     }
-
-    if (!ptx.IsTriviallyValid(state, llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight))) {
+    const bool basic_scheme = pindexPrev != nullptr &&
+        llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight);
+    if (!CheckProviderVersion(ptx.nVersion,
+                              CProUpRevTx::GetVersion(basic_scheme),
+                              CProUpRevTx::PQ_VERSION, auth_era, state) ||
+        !ptx.IsTriviallyValid(state, basic_scheme)) {
         return FormatSyscoinErrorMessage(state, state.GetRejectReason(), fJustCheck);
     }
 
@@ -392,9 +598,35 @@ bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
             // pass the state returned by the function above
             return false;
         }
-        if (check_sigs && !CheckHashSig(ptx, dmn->pdmnState->pubKeyOperator.Get(), state, fJustCheck)) {
-            // pass the state returned by the function above
-            return false;
+        const bool registry_owns_authorization{
+            auth_era == ProviderAuthEra::POST_QUANTUM &&
+            validation_context ==
+                SpecialTxValidationContext::PQ_REGISTRY_PRECHECK};
+        if (!registry_owns_authorization &&
+            ShouldCheckProviderAuthorization(
+                auth_era, check_sigs, validation_context)) {
+            if (auth_era == ProviderAuthEra::POST_QUANTUM) {
+                llmq::pq::PQRegistrySnapshot registry_snapshot;
+                const llmq::pq::OperatorKeyState* operator_state{nullptr};
+                if (!GetParentOperatorKey(pindexPrev, ptx.proTxHash,
+                                          operator_state, registry_snapshot) ||
+                    ptx.globalKeyVersion != operator_state->global_key.key_version) {
+                    return FormatSyscoinErrorMessage(
+                        state, "bad-protx-pq-key", fJustCheck);
+                }
+                llmq::pq::ProviderRevokeAuthorization authorization;
+                authorization.payload_version = ptx.nVersion;
+                authorization.pro_tx_hash = ptx.proTxHash;
+                authorization.global_key_version = ptx.globalKeyVersion;
+                authorization.reason = ptx.nReason;
+                authorization.transaction_inputs_hash = ptx.inputsHash;
+                if (!llmq::pq::VerifyProviderRevokeAuthorization(
+                        Params().GetConsensus().hashGenesisBlock,
+                        operator_state->global_key, authorization, ptx.pqSig)) {
+                    return FormatSyscoinErrorMessage(
+                        state, "bad-protx-pq-sig", fJustCheck);
+                }
+            }
         }
     }
 
@@ -438,10 +670,15 @@ std::string CProRegTx::ToString() const
     nVersion, collateralOutpoint.ToStringShort(), addr.ToStringAddr(), (double)nOperatorReward / 100, EncodeDestination(WitnessV0KeyHash(keyIDOwner)), pubKeyOperator.ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), payee);
 }
 
-bool CProUpServTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const
+bool CProUpServTx::IsTriviallyValid(TxValidationState& state, bool) const
 {
-    if (nVersion == 0 || nVersion > GetVersion(is_basic_scheme_active)) {
+    if (nVersion == 0 || nVersion > PQ_VERSION) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-version");
+    }
+    if (nVersion == PQ_VERSION &&
+        (globalKeyVersion == 0 || !HasNonZeroByte(pqSig))) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                             "bad-protx-pq-auth");
     }
     return true;
 }
@@ -458,20 +695,19 @@ std::string CProUpServTx::ToString() const
         nVersion, proTxHash.ToString(), addr.ToStringAddr(), payee, vchNEVMAddress.empty()? "" : "0x"+HexStr(vchNEVMAddress));
 }
 
-bool CProUpRegTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const
+bool CProUpRegTx::IsTriviallyValid(TxValidationState& state, bool) const
 {
-    if (nVersion == 0 || nVersion > GetVersion(is_basic_scheme_active)) {
+    if (nVersion == 0 || nVersion > PQ_VERSION) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-version");
     }
     if (nMode != 0) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-mode");
     }
 
-    if (!pubKeyOperator.Get().IsValid() || keyIDVoting.IsNull()) {
+    if (keyIDVoting.IsNull() ||
+        (nVersion <= BASIC_BLS_VERSION && !pubKeyOperator.IsValid()) ||
+        (nVersion == PQ_VERSION && !pubKeyOperator.IsNull())) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-key-null");
-    }
-    if (pubKeyOperator.IsLegacy() != (nVersion == LEGACY_BLS_VERSION)) {
-        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-operator-pubkey");
     }
     return true;
 }
@@ -488,9 +724,9 @@ std::string CProUpRegTx::ToString() const
         nVersion, proTxHash.ToString(), pubKeyOperator.ToString(), EncodeDestination(WitnessV0KeyHash(keyIDVoting)), payee);
 }
 
-bool CProUpRevTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const
+bool CProUpRevTx::IsTriviallyValid(TxValidationState& state, bool) const
 {
-    if (nVersion == 0 || nVersion > GetVersion(is_basic_scheme_active)) {
+    if (nVersion == 0 || nVersion > PQ_VERSION) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-version");
     }
 
@@ -498,6 +734,11 @@ bool CProUpRevTx::IsTriviallyValid(TxValidationState& state, bool is_basic_schem
     // nReason is unsigned and CProUpRevTx::REASON_NOT_SPECIFIED == 0
     if (nReason > CProUpRevTx::REASON_LAST) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-reason");
+    }
+    if (nVersion == PQ_VERSION &&
+        (globalKeyVersion == 0 || !HasNonZeroByte(pqSig))) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                             "bad-protx-pq-auth");
     }
     return true;
 }

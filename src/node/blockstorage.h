@@ -164,7 +164,6 @@ private:
     [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false);
 
     [[nodiscard]] bool FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
     bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize);
 
     FlatFileSeq BlockFileSeq() const;
@@ -295,6 +294,11 @@ public:
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
 
+    // SYSCOIN: PQ catch-up durably flushes block and undo files before
+    // publishing replay progress.
+    /** Flush the current block and undo file for the chainstate type at the given height. */
+    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
+
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -360,6 +364,15 @@ public:
 
     //! Create or update a prune lock identified by its name
     void UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Durable replay markers may move forward, but they must never
+    // undo a lower floor installed by DisconnectTip for reorg rollback data.
+    int UpdatePruneLockLowerOnly(const std::string& name,
+                                 const PruneLockInfo& lock_info)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Replay obligations must erase released locks; an INT_MAX
+    // sentinel would be moved backward by DisconnectTip and become active.
+    void RemovePruneLock(const std::string& name)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Open a block file (blk?????.dat) */
     CAutoFile OpenBlockFile(const FlatFilePos& pos, bool fReadOnly = false) const;

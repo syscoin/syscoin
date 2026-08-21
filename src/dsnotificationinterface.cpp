@@ -11,20 +11,24 @@
 #include <evo/deterministicmns.h>
 #include <evo/mnauth.h>
 
-#include <llmq/quorums.h>
-#include <llmq/quorums_dkgsessionmgr.h>
 #include <llmq/quorums_chainlocks.h>
+#include <llmq/pq_quorum_overlay.h>
 #include <shutdown.h>
 #include <net_processing.h>
 void CDSNotificationInterface::InitializeCurrentBlockTip(ChainstateManager& chainman)
 {
-    
+    const CBlockIndex* tip{nullptr};
+    bool initial_block_download{false};
     {
         LOCK(cs_main);
-        if(deterministicMNManager)
-            deterministicMNManager->UpdatedBlockTip(chainman.ActiveChain().Tip());
-        UpdatedBlockTip(chainman.ActiveChain().Tip(), nullptr, chainman, chainman.IsInitialBlockDownload());
+        tip = chainman.ActiveChain().Tip();
+        if (deterministicMNManager) {
+            deterministicMNManager->UpdatedBlockTip(tip);
+        }
+        initial_block_download = chainman.IsInitialBlockDownload();
     }
+    UpdatedBlockTip(
+        tip, nullptr, chainman, initial_block_download);
 }
 
 
@@ -42,22 +46,46 @@ void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, con
 
     masternodeSync.UpdatedBlockTip(pindexNew, chainman, fInitialDownload);
 
+    // SYSCOIN: Keep the bounded frozen-roster relay overlay synchronized even
+    // when entering IBD, which clears obsolete connection groups immediately.
+    if (llmq::pqQuorumConnectionOverlay) {
+        llmq::pqQuorumConnectionOverlay->UpdatedBlockTip(pindexNew,
+                                                          fInitialDownload);
+    }
+
     if (fInitialDownload)
         return;
-    if(llmq::quorumManager)
-        llmq::quorumManager->UpdatedBlockTip(pindexNew, fInitialDownload);
-    if(llmq::quorumDKGSessionManager)
-        llmq::quorumDKGSessionManager->UpdatedBlockTip(pindexNew, fInitialDownload);
     if(llmq::chainLocksHandler)
         llmq::chainLocksHandler->UpdatedBlockTip(pindexNew, fInitialDownload);
+    CMNAuth::UpdatedBlockTip(pindexNew, connman);
     if (governance && governance->IsValid()) governance->UpdatedBlockTip(pindexNew, connman, peerman);
 }
 
-void CDSNotificationInterface::NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff)
+void CDSNotificationInterface::InitialBlockDownloadCompleted(
+    const CBlockIndex* tip, ChainstateManager& chainman)
+{
+    if (tip == nullptr || ShutdownRequested()) return;
+    masternodeSync.UpdatedBlockTip(tip, chainman,
+                                  /*fInitialDownload=*/false);
+    if (llmq::pqQuorumConnectionOverlay) {
+        llmq::pqQuorumConnectionOverlay->UpdatedBlockTip(
+            tip, /*initial_download=*/false);
+    }
+    if (llmq::chainLocksHandler) {
+        llmq::chainLocksHandler->UpdatedBlockTip(
+            tip, /*initial_download=*/false);
+    }
+    CMNAuth::UpdatedBlockTip(tip, connman);
+    if (governance && governance->IsValid()) {
+        governance->UpdatedBlockTip(tip, connman, peerman);
+    }
+}
+
+void CDSNotificationInterface::NotifyMasternodeListChanged(
+    bool, const CDeterministicMNList&, const CDeterministicMNListDiff&)
 {
     if(ShutdownRequested())
         return;
-    CMNAuth::NotifyMasternodeListChanged(undo, oldMNList, diff, connman);
     if(governance && governance->IsValid()) {
         governance->CheckAndRemove();
     }

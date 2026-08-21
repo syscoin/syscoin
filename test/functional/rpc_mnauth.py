@@ -25,38 +25,66 @@ class FakeMNAUTHTest(DashTestFramework):
         self.skip_if_no_wallet()
 
     def run_test(self):
-
         masternode = self.mninfo[0]
-        p2p_masternode = masternode.node.add_p2p_connection(P2PInterface())
+        # SYSCOIN: exercise the regtest MNAUTH override with the active SLH
+        # operator identity and assert that no retired BLS peer fields survive.
+        marker = "pq-mnauth-rpc"
+        p2p_masternode = masternode.node.add_p2p_connection(
+            P2PInterface(), uacomment=marker)
         p2p_masternode.wait_for_verack()
 
         protx_hash = masternode.proTxHash
-        #TODO: Fix that with basic BLS
-        public_key = masternode.pubKeyOperator
+        operator_identity = masternode.node.protx_operator_key_info(protx_hash)
+        public_key = operator_identity["publicKey"]
+        key_version = operator_identity["keyVersion"]
 
-        # The peerinfo should not yet contain verified_proregtx_hash/verified_pubkey_hash
-        assert "verified_proregtx_hash" not in masternode.node.getpeerinfo()[-1]
-        assert "verified_pubkey_hash" not in masternode.node.getpeerinfo()[-1]
-        # Fake-Authenticate the P2P connection to the masternode
-        node_id = masternode.node.getpeerinfo()[-1]["id"]
-        assert masternode.node.mnauth(node_id, protx_hash, public_key)
-        # The peerinfo should now contain verified_proregtx_hash and verified_pubkey_hash
-        peerinfo = masternode.node.getpeerinfo()[-1]
+        # SYSCOIN: select the explicit Python peer instead of relying on
+        # getpeerinfo ordering among the live deterministic-node connections.
+        peerinfo = next(
+            peer for peer in masternode.node.getpeerinfo()
+            if marker in peer.get("subver", ""))
+        # The peerinfo should not yet contain a verified PQ identity.
+        assert "verified_proregtx_hash" not in peerinfo
+        assert "verified_global_pubkey_hash" not in peerinfo
+        assert "verified_pubkey_hash" not in peerinfo
+        # SYSCOIN: fake-authenticate the P2P connection to the masternode.
+        node_id = peerinfo["id"]
+        assert masternode.node.mnauth(node_id, protx_hash, public_key, key_version)
+        # The peerinfo should now contain the exact global-key identity.
+        peerinfo = next(
+            peer for peer in masternode.node.getpeerinfo()
+            if peer["id"] == node_id)
         assert "verified_proregtx_hash" in peerinfo
-        assert "verified_pubkey_hash" in peerinfo
+        assert "verified_global_pubkey_hash" in peerinfo
+        assert "verified_global_key_version" in peerinfo
         assert_equal(peerinfo["verified_proregtx_hash"], protx_hash)
-        assert_equal(peerinfo["verified_pubkey_hash"], bytes_to_hex_str(hash256(bytes.fromhex(public_key))[::-1]))
+        expected_key_hash = bytes_to_hex_str(
+            hash256(bytes.fromhex(public_key))[::-1])
+        assert_equal(peerinfo["verified_global_pubkey_hash"], expected_key_hash)
+        assert_equal(peerinfo["verified_global_key_version"], key_version)
         # Test some error cases
         null_hash = "0000000000000000000000000000000000000000000000000000000000000000"
         assert_raises_rpc_error(-8, "proTxHash invalid", masternode.node.mnauth,
                                                          node_id,
                                                          null_hash,
-                                                         public_key)
-        assert_raises_rpc_error(-8, "publicKey invalid", masternode.node.mnauth,
+                                                         public_key,
+                                                         key_version)
+        assert_raises_rpc_error(-8, "globalPublicKey must be a nonzero 32-byte key", masternode.node.mnauth,
                                                          node_id,
                                                          protx_hash,
-                                                         null_hash)
-        assert not masternode.node.mnauth(-1, protx_hash, public_key)
+                                                         null_hash,
+                                                         key_version)
+        assert_raises_rpc_error(-8, "globalPublicKey must be a nonzero 32-byte key", masternode.node.mnauth,
+                                                         node_id,
+                                                         protx_hash,
+                                                         "01",
+                                                         key_version)
+        assert_raises_rpc_error(-8, "globalKeyVersion must be nonzero", masternode.node.mnauth,
+                                                         node_id,
+                                                         protx_hash,
+                                                         public_key,
+                                                         0)
+        assert not masternode.node.mnauth(-1, protx_hash, public_key, key_version)
 
 
 if __name__ == '__main__':

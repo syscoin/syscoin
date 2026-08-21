@@ -213,7 +213,9 @@ mkdir -p "$OUTDIR"
 # CONFIGFLAGS
 CONFIGFLAGS+=" --enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary"
 case "$HOST" in
-    x86_64-linux-gnu) CONFIGFLAGS+=" --enable-btcheadernode-build" ;;
+    # SYSCOIN: managed BTC-header policy is part of every supported official
+    # Linux/macOS miner and sentry package, independent of CPU architecture.
+    *linux*|*darwin*) CONFIGFLAGS+=" --enable-btcheadernode-build" ;;
     *mingw*) CONFIGFLAGS+=" --disable-miner" ;;
 esac
 
@@ -262,7 +264,9 @@ mkdir -p "$DISTSRC"
                     ${HOST_CXXFLAGS:+CXXFLAGS="${HOST_CXXFLAGS}"} \
                     ${HOST_LDFLAGS:+LDFLAGS="${HOST_LDFLAGS}"}
 
-    sed -i.old 's/-lstdc++ //g' {./,src/dashbls/,src/secp256k1/}{config.status,libtool}
+    # SYSCOIN: Legacy BLS is retired, so only the root and secp256k1 libtool
+    # outputs need deterministic Guix post-processing.
+    sed -i.old 's/-lstdc++ //g' {./,src/secp256k1/}{config.status,libtool}
 
 
     # Build Syscoin Core
@@ -299,9 +303,34 @@ mkdir -p "$DISTSRC"
     # Install built Syscoin Core to $INSTALLPATH
     make install DESTDIR="${INSTALLPATH}" ${V:+V=1}
 
+    # SYSCOIN: fail the release build rather than publishing a package whose
+    # managed-by-default policy backend can never start.
+    case "$HOST" in
+        *linux*|*darwin*)
+            test -x "${INSTALLPATH}/bin/bitcoind"
+            test -x "${INSTALLPATH}/bin/bitcoin-cli"
+            cmp contrib/btcheadernode/COPYING.bitcoin-core \
+                "${INSTALLPATH}/share/doc/syscoin/btcheadernode/COPYING.bitcoin-core"
+            cmp src/crypto/slhdsa/LICENSE.upstream \
+                "${INSTALLPATH}/share/doc/syscoin/pq-crypto/slhdsa/LICENSE.upstream"
+            cmp src/crypto/sphincs_c11/LICENSE \
+                "${INSTALLPATH}/share/doc/syscoin/pq-crypto/sphincs_c11/LICENSE"
+            ;;
+    esac
+
     case "$HOST" in
         *darwin*)
             make deploydir ${V:+V=1}
+            # SYSCOIN: Refuse to publish a managed-by-default app whose
+            # runtime-searchable, deep-signed helper payload is absent.
+            test -x "dist/Syscoin-Qt.app/Contents/Resources/btcheadernode/bin/bitcoind"
+            test -x "dist/Syscoin-Qt.app/Contents/Resources/btcheadernode/bin/bitcoin-cli"
+            cmp contrib/btcheadernode/COPYING.bitcoin-core \
+                "dist/Syscoin-Qt.app/Contents/Resources/btcheadernode/COPYING.bitcoin-core"
+            cmp src/crypto/slhdsa/LICENSE.upstream \
+                "dist/Syscoin-Qt.app/Contents/Resources/licenses/pq-crypto/slhdsa/LICENSE.upstream"
+            cmp src/crypto/sphincs_c11/LICENSE \
+                "dist/Syscoin-Qt.app/Contents/Resources/licenses/pq-crypto/sphincs_c11/LICENSE"
             mkdir -p "unsigned-app-${HOST}"
             cp  --target-directory="unsigned-app-${HOST}" \
                 contrib/macdeploy/detached-sig-create.sh

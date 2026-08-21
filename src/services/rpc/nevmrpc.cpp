@@ -17,10 +17,15 @@
 #include <node/transaction.h>
 #include <rpc/server_util.h>
 #include <interfaces/node.h>
+#include <llmq/btc_header_policy.h>
 #include <llmq/quorums_chainlocks.h>
 #include <key_io.h>
 #include <common/args.h>
 #include <logging.h>
+#include <util/time.h>
+
+#include <algorithm>
+#include <chrono>
 using node::GetTransaction;
 
 static RPCHelpMan getnevmblockchaininfo()
@@ -156,6 +161,20 @@ static RPCHelpMan getnevmblobdata()
     BlockValidationState state;
     MapPoDAPayloadMeta meta;
     if(!pnevmdatadb->GetBlobMetaData(vchVH, meta)) {
+        throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find blob information for versionhash %s", HexStr(vchVH)));
+    }
+    int64_t active_tip_mtp{0};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* active_tip{node.chainman->ActiveChain().Tip()};
+        if (active_tip != nullptr) {
+            active_tip_mtp = active_tip->GetMedianTimePast();
+        }
+    }
+    // SYSCOIN: expiry is an active-chain query property even when ChainLocks
+    // are temporarily unavailable. Keep the underlying bytes until a verified
+    // ChainLock permits irreversible pruning so a reorg can expose them again.
+    if (IsNEVMDataExpired(active_tip_mtp, meta.nMedianTime)) {
         throw JSONRPCError(RPC_INVALID_PARAMS, strprintf("Could not find blob information for versionhash %s", HexStr(vchVH)));
     }
     oNEVM.pushKVEnd("versionhash", HexStr(vchVH));
@@ -444,7 +463,7 @@ static RPCHelpMan syscoingetspvproof()
         throw JSONRPCError(RPC_MISC_ERROR, "Block not found on disk");
     }
     CDataStream ssBlock(SER_NETWORK, PROTOCOL_VERSION);
-    ssBlock << pblockindex->GetBlockHeader(*node.chainman);
+    ssBlock << pblockindex->GetBlockHeader(node.chainman->m_blockman);
     const std::string rawTx = EncodeHexTx(*tx, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
     res.pushKVEnd("transaction",rawTx);
     // Witness-stripped coinbase for NEVM relay same-depth Merkle checks (GHSA-wg2x class).
@@ -545,7 +564,7 @@ static RPCHelpMan syscoinstartgeth()
 static RPCHelpMan syscoinstopbtcheadernode()
 {
     return RPCHelpMan{"syscoinstopbtcheadernode",
-    "\nStops the managed BTC header node.\n",
+    "\nStops the dedicated managed Bitcoin headers-only node.\n",
     {},
     RPCResult{
         RPCResult::Type::OBJ, "", "",
@@ -558,9 +577,16 @@ static RPCHelpMan syscoinstopbtcheadernode()
     },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
+    if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Managed Bitcoin headers are disabled; an external backend is not "
+            "owned by Syscoin and cannot be stopped by this RPC");
+    }
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     if (!chainman.ActiveChainstate().StopBTCHeaderNode()) {
-        throw JSONRPCError(RPC_MISC_ERROR, "Could not stop managed BTC header node (is -btcheadermanaged enabled?)");
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           "Could not stop the managed Bitcoin header node");
     }
     UniValue ret(UniValue::VOBJ);
     ret.pushKVEnd("status", "success");
@@ -569,10 +595,32 @@ static RPCHelpMan syscoinstopbtcheadernode()
     };
 }
 
+static bool BTCHeaderChainInfoReady(const UniValue& chain_info, bool managed,
+                                    std::string& error)
+{
+    if (!chain_info.isObject()) {
+        error = "btcheader-invalid-chaininfo";
+        return false;
+    }
+    const UniValue& chain{chain_info.find_value("chain")};
+    const UniValue& headers_only{chain_info.find_value("headersonly")};
+    if (!chain.isStr() || chain.get_str() != Params().GetChainTypeString()) {
+        error = "btcheader-wrong-chain";
+        return false;
+    }
+    if (managed &&
+        (!headers_only.isBool() || !headers_only.get_bool())) {
+        error = "btcheader-managed-endpoint-not-headers-only";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 static RPCHelpMan syscoinstartbtcheadernode()
 {
     return RPCHelpMan{"syscoinstartbtcheadernode",
-    "\nStarts (or restarts) the managed BTC header node.\n",
+    "\nStarts or restarts the dedicated managed Bitcoin headers-only node and waits for RPC readiness.\n",
     {},
     RPCResult{
         RPCResult::Type::OBJ, "", "",
@@ -585,12 +633,100 @@ static RPCHelpMan syscoinstartbtcheadernode()
     },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
+    if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Managed Bitcoin headers are disabled; configure and operate the "
+            "external backend independently");
+    }
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     if (!chainman.ActiveChainstate().RestartBTCHeaderNode()) {
-        throw JSONRPCError(RPC_MISC_ERROR, "Could not start managed BTC header node, see debug.log for details");
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Could not start the managed Bitcoin header node; see debug.log");
     }
+
+    const int64_t timeout{std::clamp<int64_t>(
+        gArgs.GetIntArg("-btcheaderstartuptimeout", 30), 1, 300)};
+    const auto deadline{SteadyClock::now() + std::chrono::seconds{timeout}};
+    std::string error;
+    do {
+        UniValue chain_info;
+        if (llmq::pq::RunConfiguredBTCHeaderCommand(
+                {"getblockchaininfo"}, chain_info, error) &&
+            BTCHeaderChainInfoReady(chain_info, /*managed=*/true, error)) {
+            UniValue ret(UniValue::VOBJ);
+            ret.pushKVEnd("status", "success");
+            return ret;
+        }
+        UninterruptibleSleep(std::chrono::milliseconds{200});
+    } while (SteadyClock::now() < deadline);
+
+    chainman.ActiveChainstate().StopBTCHeaderNode(/*bOnStart=*/true);
+    throw JSONRPCError(
+        RPC_MISC_ERROR,
+        strprintf("Managed Bitcoin header RPC did not become ready: %s", error));
+},
+    };
+}
+
+static RPCHelpMan syscoinbtcheaderstatus()
+{
+    return RPCHelpMan{"syscoinbtcheaderstatus",
+    "\nReturns Bitcoin-header policy backend process and RPC readiness without changing lifecycle state.\n",
+    {},
+    RPCResult{
+        RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::BOOL, "managed", "Whether the dedicated managed backend mode is configured"},
+            {RPCResult::Type::BOOL, "process_running", "Whether the managed process is running"},
+            {RPCResult::Type::BOOL, "policy_healthy", "Whether watchdog progress and chain-view checks pass"},
+            {RPCResult::Type::BOOL, "ready", "Whether the bounded RPC probe succeeded"},
+            {RPCResult::Type::STR, "reason", /*optional=*/true, "Readiness failure reason"},
+            {RPCResult::Type::ANY, "chaininfo", /*optional=*/true, "Backend getblockchaininfo response"},
+        }},
+    RPCExamples{
+        HelpExampleCli("syscoinbtcheaderstatus", "")
+        + HelpExampleRpc("syscoinbtcheaderstatus", "")
+    },
+    [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
+{
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const bool managed{
+        gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)};
+    bool process_running{true};
+    std::string reason;
+    if (managed) {
+        process_running =
+            chainman.ActiveChainstate().IsManagedBTCHeaderNodeRunning(reason);
+    }
+
+    // SYSCOIN: A responsive but frozen Bitcoin tip is not BTCC-ready. Reuse
+    // the non-recovering watchdog check so status exposes persisted
+    // no-progress/eclipse failures without restarting the managed child.
+    std::string health_reason;
+    const bool policy_healthy{process_running &&
+        chainman.ActiveChainstate().CheckBTCHeaderNodeHealth(
+            /*recover=*/false, health_reason)};
+    if (!policy_healthy && reason.empty()) reason = health_reason;
+
+    UniValue chain_info;
+    std::string rpc_error;
+    const bool ready{process_running && policy_healthy &&
+        llmq::pq::RunConfiguredBTCHeaderCommand(
+            {"getblockchaininfo"}, chain_info, rpc_error) &&
+        BTCHeaderChainInfoReady(chain_info, managed, rpc_error)};
+    if (!ready && reason.empty()) {
+        reason = rpc_error.empty() ? "btcheader-invalid-chaininfo" : rpc_error;
+    }
+
     UniValue ret(UniValue::VOBJ);
-    ret.pushKVEnd("status", "success");
+    ret.pushKV("managed", managed);
+    ret.pushKV("process_running", process_running);
+    ret.pushKV("policy_healthy", policy_healthy);
+    ret.pushKV("ready", ready);
+    if (!reason.empty()) ret.pushKV("reason", reason);
+    if (ready) ret.pushKV("chaininfo", std::move(chain_info));
     return ret;
 },
     };
@@ -606,6 +742,7 @@ void RegisterNEVMRPCCommands(CRPCTable &t)
         {"syscoin", &syscoinstartgeth},
         {"syscoin", &syscoinstopbtcheadernode},
         {"syscoin", &syscoinstartbtcheadernode},
+        {"syscoin", &syscoinbtcheaderstatus},
         {"syscoin", &getnevmblockchaininfo},
         {"syscoin", &getnevmblobdata},
     };

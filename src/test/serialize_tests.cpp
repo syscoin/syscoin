@@ -5,8 +5,9 @@
 #include <chain.h>
 #include <evo/specialtx.h>
 #include <hash.h>
-#include <llmq/quorums_btccheckpoints.h>
-#include <llmq/quorums_commitment.h>
+#include <llmq/pq_btcc.h> // SYSCOIN: branch-bound BTCC receipt records.
+#include <llmq/pq_payment_audit.h> // SYSCOIN: payment-audit receipt records.
+#include <llmq/quorums_commitment.h> // SYSCOIN: bounded historical tx85 replay.
 #include <primitives/block.h>
 #include <serialize.h>
 #include <script/script.h>
@@ -191,19 +192,15 @@ BOOST_AUTO_TEST_CASE(vector_bool)
     BOOST_CHECK((HashWriter{} << vec1).GetHash() == (HashWriter{} << vec2).GetHash());
 }
 
+// SYSCOIN: Historical tx85 replay must reject truncated dense signer bitmaps
+// before allocating or changing the destination vector.
 static bool isBitSetSizeException(const std::ios_base::failure& ex)
 {
     const std::ios_base::failure expected("ReadFixedBitSet(): declared size exceeds remaining bytes");
     return strcmp(expected.what(), ex.what()) == 0;
 }
 
-static bool isBitSetLimitException(const std::ios_base::failure& ex)
-{
-    const std::ios_base::failure expected("DynamicBitSetFormatter: size exceeds limit");
-    return strcmp(expected.what(), ex.what()) == 0;
-}
-
-BOOST_AUTO_TEST_CASE(dynbitset_rejects_underfilled_payload_before_allocation)
+BOOST_AUTO_TEST_CASE(fixedbitset_rejects_underfilled_payload_before_allocation)
 {
     CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
     const std::vector<bool> original{true, false, true};
@@ -212,31 +209,16 @@ BOOST_AUTO_TEST_CASE(dynbitset_rejects_underfilled_payload_before_allocation)
     BOOST_CHECK(decoded == original);
 }
 
-BOOST_AUTO_TEST_CASE(dynbitset_maximum_quorum_size_roundtrip)
-{
-    std::vector<bool> original(Consensus::MAX_LLMQ_SIZE, false);
-    original.front() = true;
-    original.back() = true;
-
-    CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
-    stream << DYNBITSET(original, Consensus::MAX_LLMQ_SIZE);
-
-    std::vector<bool> decoded;
-    BOOST_REQUIRE_NO_THROW(stream >> DYNBITSET(decoded, Consensus::MAX_LLMQ_SIZE));
-    BOOST_CHECK(stream.empty());
-    BOOST_CHECK(decoded == original);
-}
-
 BOOST_AUTO_TEST_CASE(qfcommitment_rejects_underfilled_signers_before_allocation)
 {
     CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
     stream << static_cast<uint16_t>(llmq::CFinalCommitment::LEGACY_BLS_NON_INDEXED_QUORUM_VERSION);
     stream << uint256{};
-    WriteCompactSize(stream, MAX_SIZE);
+    WriteCompactSize(stream, llmq::legacy::MAX_QUORUM_MEMBERS);
     stream << uint8_t{0xaa};
 
     llmq::CFinalCommitment commitment;
-    BOOST_CHECK_EXCEPTION(stream >> commitment, std::ios_base::failure, isBitSetLimitException);
+    BOOST_CHECK_EXCEPTION(stream >> commitment, std::ios_base::failure, isBitSetSizeException);
     BOOST_CHECK(commitment.signers.empty());
     BOOST_CHECK_EQUAL(stream.size(), 1U);
 }
@@ -316,10 +298,11 @@ BOOST_AUTO_TEST_CASE(class_methods)
         BOOST_CHECK_EQUAL(out_3, std::byte{'c'});
     }
 }
-// SYSCOIN
+// SYSCOIN BEGIN: fork block-index and payment-audit serialization.
 BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
 {
-    const auto make_disk_index = [](const uint256& btcp_prev) {
+    const auto make_disk_index = [](const uint256& btcp_prev,
+                                    bool with_receipt_state = false) {
         LOCK(cs_main);
         CBlockIndex index{};
         index.nHeight = 42;
@@ -334,17 +317,36 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
         index.nBits = 0x1d00ffff;
         index.nNonce = 9;
         index.btcpPrevCommitment = btcp_prev;
+        if (with_receipt_state) {
+            index.pqBTCCReceiptCursorHeight = 40;
+            index.pqBTCCReceiptCursorSysHash = uint256S(std::string(64, '2'));
+            index.pqBTCCReceiptCursorBTCHash = uint256S(std::string(64, '3'));
+            index.pqBTCCReceiptStateHash = uint256S(std::string(64, '4'));
+            index.pqBTCCReceiptLogicalId = uint256S(std::string(64, 'a'));
+            index.pqPaymentAuditReceiptCursorHeight = 41;
+            index.pqPaymentAuditReceiptCursorEpoch = 7;
+            index.pqPaymentAuditReceiptCursorSealHash = uint256S(std::string(64, '5'));
+            index.pqPaymentAuditReceiptCursorLogicalId = uint256S(std::string(64, '6'));
+            index.pqPaymentAuditReceiptCursorWitnessId =
+                uint256S(std::string(64, '9'));
+            index.pqPaymentAuditReceiptStateHash = uint256S(std::string(64, '7'));
+            index.pqPaymentProbationStateHash = uint256S(std::string(64, '8'));
+        }
         return CDiskBlockIndex{&index};
     };
 
     const CDiskBlockIndex without_btcp_prev = make_disk_index(uint256{});
     const CDiskBlockIndex with_btcp_prev = make_disk_index(
         uint256S("00000000000000000000000000000000000000000000000000000000000000aa"));
+    const CDiskBlockIndex with_receipt_state = make_disk_index(
+        with_btcp_prev.btcpPrevCommitment, true);
 
     DataStream without_btcp_prev_ser{};
     without_btcp_prev_ser << without_btcp_prev;
     DataStream with_btcp_prev_ser{};
     with_btcp_prev_ser << with_btcp_prev;
+    DataStream with_receipt_state_ser{};
+    with_receipt_state_ser << with_receipt_state;
 
     int without_btcp_prev_version{0};
     {
@@ -361,6 +363,16 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
     BOOST_CHECK(with_btcp_prev_version > without_btcp_prev_version);
     BOOST_CHECK_EQUAL(with_btcp_prev_ser.size() - without_btcp_prev_ser.size(), GetSerializeSize(uint256{}));
 
+    int with_receipt_state_version{0};
+    {
+        DataStream version_stream{with_receipt_state_ser};
+        version_stream >> VARINT_MODE(with_receipt_state_version,
+                                      VarIntMode::NONNEGATIVE_SIGNED);
+    }
+    BOOST_CHECK(with_receipt_state_version > with_btcp_prev_version);
+    BOOST_CHECK_EQUAL(with_receipt_state_ser.size() - with_btcp_prev_ser.size(),
+                      300U);
+
     CDiskBlockIndex without_btcp_prev_roundtrip;
     DataStream without_btcp_prev_read{without_btcp_prev_ser};
     without_btcp_prev_read >> without_btcp_prev_roundtrip;
@@ -370,6 +382,67 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
     DataStream with_btcp_prev_read{with_btcp_prev_ser};
     with_btcp_prev_read >> with_btcp_prev_roundtrip;
     BOOST_CHECK(with_btcp_prev_roundtrip.btcpPrevCommitment == with_btcp_prev.btcpPrevCommitment);
+
+    CDiskBlockIndex with_receipt_state_roundtrip;
+    DataStream with_receipt_state_read{with_receipt_state_ser};
+    with_receipt_state_read >> with_receipt_state_roundtrip;
+    BOOST_CHECK(with_receipt_state_roundtrip.btcpPrevCommitment ==
+                with_receipt_state.btcpPrevCommitment);
+    BOOST_CHECK_EQUAL(with_receipt_state_roundtrip.pqBTCCReceiptCursorHeight,
+                      with_receipt_state.pqBTCCReceiptCursorHeight);
+    BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptCursorSysHash ==
+                with_receipt_state.pqBTCCReceiptCursorSysHash);
+    BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptCursorBTCHash ==
+                with_receipt_state.pqBTCCReceiptCursorBTCHash);
+    BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptStateHash ==
+                with_receipt_state.pqBTCCReceiptStateHash);
+    BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptLogicalId ==
+                with_receipt_state.pqBTCCReceiptLogicalId);
+    BOOST_CHECK_EQUAL(
+        with_receipt_state_roundtrip.pqPaymentAuditReceiptCursorHeight,
+        with_receipt_state.pqPaymentAuditReceiptCursorHeight);
+    BOOST_CHECK_EQUAL(
+        with_receipt_state_roundtrip.pqPaymentAuditReceiptCursorEpoch,
+        with_receipt_state.pqPaymentAuditReceiptCursorEpoch);
+    BOOST_CHECK(
+        with_receipt_state_roundtrip.pqPaymentAuditReceiptCursorSealHash ==
+        with_receipt_state.pqPaymentAuditReceiptCursorSealHash);
+    BOOST_CHECK(
+        with_receipt_state_roundtrip.pqPaymentAuditReceiptCursorLogicalId ==
+        with_receipt_state.pqPaymentAuditReceiptCursorLogicalId);
+    BOOST_CHECK(
+        with_receipt_state_roundtrip.pqPaymentAuditReceiptCursorWitnessId ==
+        with_receipt_state.pqPaymentAuditReceiptCursorWitnessId);
+    BOOST_CHECK(with_receipt_state_roundtrip.pqPaymentAuditReceiptStateHash ==
+                with_receipt_state.pqPaymentAuditReceiptStateHash);
+    BOOST_CHECK(with_receipt_state_roundtrip.pqPaymentProbationStateHash ==
+                with_receipt_state.pqPaymentProbationStateHash);
+
+    for (const uint32_t provenance : {
+             static_cast<uint32_t>(BLOCK_PQ_BTCC_INDEX_VALIDATED),
+             static_cast<uint32_t>(BLOCK_PQ_RECEIPT_INDEX_VALIDATED),
+             static_cast<uint32_t>(BLOCK_PQ_BTCC_INDEX_VALIDATED |
+                                   BLOCK_PQ_RECEIPT_INDEX_VALIDATED)}) {
+        CBlockIndex index;
+        {
+            LOCK(cs_main);
+            index.nHeight = 43;
+            index.nStatus = static_cast<BlockStatus>(
+                BLOCK_VALID_SCRIPTS | provenance);
+        }
+        const CDiskBlockIndex disk{&index};
+        DataStream encoded;
+        encoded << disk;
+        CDiskBlockIndex decoded;
+        encoded >> decoded;
+        const uint32_t decoded_status{WITH_LOCK(
+            cs_main, return static_cast<uint32_t>(decoded.nStatus))};
+        BOOST_CHECK_EQUAL(
+            decoded_status &
+                (BLOCK_PQ_BTCC_INDEX_VALIDATED |
+                 BLOCK_PQ_RECEIPT_INDEX_VALIDATED),
+            provenance);
+    }
 }
 
 static CBlock BuildCoinbaseOnlyBlockWithPayload(const std::vector<unsigned char>& payload)
@@ -411,56 +484,100 @@ BOOST_AUTO_TEST_CASE(extract_btcprev_ignores_embedded_magic_in_hash_tail)
     BOOST_CHECK(std::equal(extracted_bytes.begin(), extracted_bytes.end(), hash_bytes.begin()));
 }
 
-BOOST_AUTO_TEST_CASE(extract_btcc_ignores_embedded_magic_inside_receipt_payload)
+// SYSCOIN: keep the BTCC decoder's canonical optional-BTCPREV tail contract
+// covered after moving it out of the special-transaction dispatcher.
+BOOST_AUTO_TEST_CASE(extract_btcc_receipt_accepts_canonical_coinbase_tails)
 {
-    static constexpr std::array<uint8_t, 4> BTCC_MAGIC{{'b', 't', 'c', 'c'}};
-
-    llmq::CBTCCheckpointSig expected{};
-    expected.nHeight = 0x63637462; // little-endian serialized bytes are "btcc"
-    expected.sysHash = uint256S("00000000000000000000000000000000000000000000000000000000000000ab");
-    expected.signers = {true, false, true, false};
-
+    const llmq::pq::BTCCReceipt expected;
     DataStream receipt_stream;
     receipt_stream << expected;
-    const std::string receipt_bytes = receipt_stream.str();
-    BOOST_CHECK(HexStr(receipt_bytes).find("62746363") != std::string::npos);
+    const auto receipt_bytes{MakeUCharSpan(receipt_stream)};
 
-    std::vector<unsigned char> payload{0x01, 0x02};
-    payload.insert(payload.end(), BTCC_MAGIC.begin(), BTCC_MAGIC.end());
+    std::vector<unsigned char> payload{
+        std::begin(BTCC_RECEIPT_MAGIC_BYTES),
+        std::end(BTCC_RECEIPT_MAGIC_BYTES)};
     payload.insert(payload.end(), receipt_bytes.begin(), receipt_bytes.end());
+    const uint256 btc_prev{uint256S(std::string(64, '1'))};
+    DataStream btcprev_stream;
+    btcprev_stream << BTCPREV_MAGIC_BYTES << btc_prev;
+    const auto btcprev_bytes{MakeUCharSpan(btcprev_stream)};
+    payload.insert(payload.end(), btcprev_bytes.begin(), btcprev_bytes.end());
 
-    const CBlock block = BuildCoinbaseOnlyBlockWithPayload(payload);
-
-    llmq::CBTCCheckpointSig extracted{};
+    const CBlock block{BuildCoinbaseOnlyBlockWithPayload(payload)};
+    llmq::pq::BTCCReceipt extracted;
+    BOOST_CHECK(HasBTCCReceiptCommitment(block));
     BOOST_CHECK(ExtractBTCCReceipt(block, extracted));
-    BOOST_CHECK_EQUAL(extracted.nHeight, expected.nHeight);
-    BOOST_CHECK(extracted.sysHash == expected.sysHash);
-    BOOST_CHECK(extracted.signers == expected.signers);
+    BOOST_CHECK(extracted == expected);
+
+    payload.pop_back();
+    const CBlock truncated{BuildCoinbaseOnlyBlockWithPayload(payload)};
+    BOOST_CHECK(HasBTCCReceiptCommitment(truncated));
+    BOOST_CHECK(!ExtractBTCCReceipt(truncated, extracted));
 }
 
-BOOST_AUTO_TEST_CASE(extract_btcc_ignores_false_markers_before_tail_receipt)
+BOOST_AUTO_TEST_CASE(payment_audit_and_btcc_use_one_canonical_coinbase_suffix)
 {
-    static constexpr std::array<uint8_t, 4> BTCC_MAGIC{{'b', 't', 'c', 'c'}};
+    const llmq::pq::PaymentAuditReceipt expected_audit;
+    const llmq::pq::BTCCReceipt expected_btcc;
+    DataStream audit_stream;
+    audit_stream << expected_audit;
+    BOOST_CHECK_EQUAL(audit_stream.size(),
+                      llmq::pq::PaymentAuditReceipt::WIRE_SIZE);
+    DataStream btcc_stream;
+    btcc_stream << expected_btcc;
 
-    std::vector<unsigned char> payload;
-    for (int i = 0; i < 4096; ++i) {
-        payload.insert(payload.end(), BTCC_MAGIC.begin(), BTCC_MAGIC.end());
-        payload.push_back(0xff);
-    }
+    std::vector<unsigned char> payload{
+        std::begin(PAYMENT_AUDIT_RECEIPT_MAGIC_BYTES),
+        std::end(PAYMENT_AUDIT_RECEIPT_MAGIC_BYTES)};
+    const auto audit_bytes{MakeUCharSpan(audit_stream)};
+    payload.insert(payload.end(), audit_bytes.begin(), audit_bytes.end());
+    payload.insert(payload.end(), std::begin(BTCC_RECEIPT_MAGIC_BYTES),
+                   std::end(BTCC_RECEIPT_MAGIC_BYTES));
+    const auto btcc_bytes{MakeUCharSpan(btcc_stream)};
+    payload.insert(payload.end(), btcc_bytes.begin(), btcc_bytes.end());
+    const uint256 btc_prev{uint256S(std::string(64, '2'))};
+    DataStream btcprev_stream;
+    btcprev_stream << BTCPREV_MAGIC_BYTES << btc_prev;
+    const auto btcprev_bytes{MakeUCharSpan(btcprev_stream)};
+    payload.insert(payload.end(), btcprev_bytes.begin(), btcprev_bytes.end());
 
-    llmq::CBTCCheckpointSig expected{};
-    DataStream receipt_stream;
-    receipt_stream << expected;
-    const std::string receipt_bytes = receipt_stream.str();
-    payload.insert(payload.end(), BTCC_MAGIC.begin(), BTCC_MAGIC.end());
-    payload.insert(payload.end(), receipt_bytes.begin(), receipt_bytes.end());
+    const CBlock canonical{BuildCoinbaseOnlyBlockWithPayload(payload)};
+    llmq::pq::PaymentAuditReceipt decoded_audit;
+    llmq::pq::BTCCReceipt decoded_btcc;
+    BOOST_CHECK(HasPaymentAuditReceiptCommitment(canonical));
+    BOOST_CHECK(ExtractPaymentAuditReceipt(canonical, decoded_audit));
+    BOOST_CHECK(decoded_audit == expected_audit);
+    BOOST_CHECK(HasBTCCReceiptCommitment(canonical));
+    BOOST_CHECK(ExtractBTCCReceipt(canonical, decoded_btcc));
+    BOOST_CHECK(decoded_btcc == expected_btcc);
 
-    const CBlock block = BuildCoinbaseOnlyBlockWithPayload(payload);
+    auto truncated_payload{payload};
+    truncated_payload.pop_back();
+    const CBlock truncated{
+        BuildCoinbaseOnlyBlockWithPayload(truncated_payload)};
+    BOOST_CHECK(!ExtractPaymentAuditReceipt(truncated, decoded_audit));
+    BOOST_CHECK(!ExtractBTCCReceipt(truncated, decoded_btcc));
 
-    llmq::CBTCCheckpointSig extracted{};
-    BOOST_CHECK(ExtractBTCCReceipt(block, extracted));
-    BOOST_CHECK(extracted.IsNull());
+    std::vector<unsigned char> reversed_payload{
+        std::begin(BTCC_RECEIPT_MAGIC_BYTES),
+        std::end(BTCC_RECEIPT_MAGIC_BYTES)};
+    reversed_payload.insert(reversed_payload.end(), btcc_bytes.begin(),
+                            btcc_bytes.end());
+    reversed_payload.insert(
+        reversed_payload.end(),
+        std::begin(PAYMENT_AUDIT_RECEIPT_MAGIC_BYTES),
+        std::end(PAYMENT_AUDIT_RECEIPT_MAGIC_BYTES));
+    reversed_payload.insert(reversed_payload.end(), audit_bytes.begin(),
+                            audit_bytes.end());
+    reversed_payload.insert(reversed_payload.end(), btcprev_bytes.begin(),
+                            btcprev_bytes.end());
+    const CBlock reversed{
+        BuildCoinbaseOnlyBlockWithPayload(reversed_payload)};
+    BOOST_CHECK(!ExtractPaymentAuditReceipt(reversed, decoded_audit));
+    BOOST_CHECK(!ExtractBTCCReceipt(reversed, decoded_btcc));
 }
+
+// SYSCOIN END: fork block-index and payment-audit serialization.
 
 enum class BaseFormat {
     RAW,

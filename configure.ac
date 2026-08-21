@@ -251,11 +251,13 @@ AC_ARG_ENABLE([zmq],
   [use_zmq=$enableval],
   [use_zmq=yes])
 
+dnl SYSCOIN BEGIN: managed Bitcoin-header helper configuration.
 AC_ARG_ENABLE([btcheadernode-build],
   [AS_HELP_STRING([--enable-btcheadernode-build],
-  [build optional Bitcoin Core BTC header-node helper binaries (default is no)])],
+  [build the pinned Bitcoin Core headers-only helper binaries; official Linux/macOS packages enable this, source developer builds default to no])],
   [enable_btcheadernode_build=$enableval],
   [enable_btcheadernode_build=no])
+dnl SYSCOIN END: managed Bitcoin-header helper configuration.
 
 AC_ARG_WITH([libmultiprocess],
   [AS_HELP_STRING([--with-libmultiprocess=yes|no|auto],
@@ -333,29 +335,23 @@ AC_ARG_ENABLE([werror],
     [enable_werror=$enableval],
     [enable_werror=no])
 
+dnl SYSCOIN BEGIN: argv-safe managed Bitcoin-header command support.
 AC_ARG_WITH([boost-process],
-    [AS_HELP_STRING([--with-boost-process],[Use Boost Process (yes|no|auto, default: auto; auto enables for --enable-btcheadernode-build)])],
+    [AS_HELP_STRING([--with-boost-process],
+                    [build bounded argv-based command support for the Bitcoin header policy backend (yes|no|auto, default: auto)])],
     [boost_process=$withval],
     [boost_process=auto])
-
 AS_CASE([$boost_process],
     [yes|no|auto], [],
-    [AC_MSG_ERROR([invalid value for --with-boost-process: $boost_process (expected yes, no, or auto)])]
-)
+    [AC_MSG_ERROR([invalid value for --with-boost-process: $boost_process (expected yes, no, or auto)])])
 
 if test "$enable_btcheadernode_build" = "yes"; then
     if test "$boost_process" = "no"; then
-        AC_MSG_ERROR([--enable-btcheadernode-build requires Boost Process support; use --with-boost-process=yes (or omit to auto-enable).])
+        AC_MSG_ERROR([--enable-btcheadernode-build requires Boost Process support; use --with-boost-process=yes])
     fi
-    if test "$boost_process" = "auto"; then
-        boost_process=yes
-    fi
+    boost_process=yes
 fi
-
-if test "$boost_process" = "auto"; then
-    boost_process=no
-fi
-with_boost_process=$boost_process
+dnl SYSCOIN END: argv-safe managed Bitcoin-header command support.
 
 AC_LANG_PUSH([C++])
 
@@ -803,12 +799,7 @@ case $host in
            export PKG_CONFIG_PATH="$($BREW --prefix qt@5 2>/dev/null)/lib/pkgconfig:$PKG_CONFIG_PATH"
          fi
 
-         gmp_prefix=$($BREW --prefix gmp 2>/dev/null)
-         if test "$gmp_prefix" != ""; then
-           CORE_CPPFLAGS="$CORE_CPPFLAGS -I$gmp_prefix/include"
-           CORE_LDFLAGS="$CORE_LDFLAGS -L$gmp_prefix/lib"
-         fi
-
+         dnl SYSCOIN: Legacy BLS is retired, so macOS builds no longer discover GMP.
          case $host in
            *aarch64*)
              dnl The preferred Homebrew prefix for Apple Silicon is /opt/homebrew.
@@ -1531,20 +1522,69 @@ dnl See: https://github.com/boostorg/config/pull/430.
 AX_CHECK_PREPROC_FLAG([-DBOOST_NO_CXX98_FUNCTION_BASE], [BOOST_CPPFLAGS="$BOOST_CPPFLAGS -DBOOST_NO_CXX98_FUNCTION_BASE"], [], [$CXXFLAG_WERROR],
                       [AC_LANG_PROGRAM([[#include <boost/config.hpp>]])])
 
-dnl Boost Process (auto-enabled for btcheadernode helper builds)
+dnl SYSCOIN BEGIN: validate the Boost.Process API used by the managed helper.
+dnl Boost.Process is header-only on supported Boost versions. Keep it optional
+dnl for consensus-library-only builds, but enable it by default when available.
 if test "$boost_process" != "no"; then
-AC_MSG_CHECKING(for Boost Process)
-AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <boost/process.hpp>]],
- [[ boost::process::child* child = new boost::process::child; delete child; ]])],
- [ AC_MSG_RESULT(yes); AC_DEFINE([HAVE_BOOST_PROCESS],,[define if Boost::Process is available])],
- [ AC_MSG_ERROR([Boost::Process is not available!])]
-)
+  AC_MSG_CHECKING([for Boost Process])
+  TEMP_CPPFLAGS="$CPPFLAGS"
+  CPPFLAGS="$CPPFLAGS $BOOST_CPPFLAGS"
+  TEMP_LDFLAGS="$LDFLAGS"
+  dnl Boost 1.73 and older require pthread flags while linking Boost.Process.
+  LDFLAGS="$LDFLAGS $PTHREAD_CFLAGS"
+  AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+    #define BOOST_PROCESS_USE_STD_FS
+    #include <boost/version.hpp>
+    #if BOOST_VERSION >= 108800
+    #include <boost/process/v1/args.hpp>
+    #include <boost/process/v1/child.hpp>
+    #include <boost/process/v1/exe.hpp>
+    #include <boost/process/v1/group.hpp>
+    #include <boost/process/v1/io.hpp>
+    #include <boost/process/v1/pipe.hpp>
+    namespace bp = boost::process::v1;
+    #else
+    #include <boost/process.hpp>
+    namespace bp = boost::process;
+    #endif
+    #include <chrono>
+    #include <string>
+    #include <vector>
+    ]],
+    [[
+      bp::ipstream stdout_stream;
+      bp::ipstream stderr_stream;
+      bp::group process_group;
+      std::vector<std::string> args;
+      bp::child child(bp::exe = "unused", bp::args = args,
+                      bp::std_out > stdout_stream,
+                      bp::std_err > stderr_stream, process_group);
+      (void)child.wait_for(std::chrono::seconds{1});
+      (void)child.running();
+      child.terminate();
+    ]])],
+    [AC_MSG_RESULT([yes])
+     boost_process=yes
+     AC_DEFINE([HAVE_BOOST_PROCESS], [1], [Define if Boost.Process is available])
+     AC_DEFINE([BOOST_PROCESS_USE_STD_FS], [1], [Define to prevent Boost.Process from using Boost.Filesystem])],
+    [AC_MSG_RESULT([no])
+     if test "$boost_process" = "yes"; then
+       AC_MSG_ERROR([Boost.Process requested but unavailable])
+     else
+       boost_process=no
+     fi])
+  LDFLAGS="$TEMP_LDFLAGS"
+  CPPFLAGS="$TEMP_CPPFLAGS"
 fi
 
   if test "$suppress_external_warnings" != "no"; then
     BOOST_CPPFLAGS=SUPPRESS_WARNINGS($BOOST_CPPFLAGS)
 fi
+else
+  boost_process=no
 fi
+AM_CONDITIONAL([ENABLE_BTC_HEADER_COMMAND], [test "$boost_process" = "yes"])
+dnl SYSCOIN END: validate the Boost.Process API used by the managed helper.
 
 dnl Check for reduced exports
 if test "$use_reduce_exports" = "yes"; then
@@ -1621,10 +1661,7 @@ if test "$use_zmq" = "yes"; then
   esac
 fi
 
-dnl check if libgmp is present
-AC_CHECK_HEADER([gmp.h],, AC_MSG_ERROR(libgmp headers missing))
-AC_CHECK_LIB([gmp],  [__gmpz_init],GMP_LIBS=-lgmp, AC_MSG_ERROR(libgmp missing))
-
+dnl SYSCOIN: The post-BLS core has no global GMP header or library dependency.
 dnl libmultiprocess library check
 
 libmultiprocess_found=no
@@ -1808,7 +1845,6 @@ fi
 
 AM_CONDITIONAL([ENABLE_ZMQ], [test "$use_zmq" = "yes"])
 AM_CONDITIONAL([ENABLE_BTCHEADERNODE_BUILD], [test "$enable_btcheadernode_build" = "yes"])
-
 AC_MSG_CHECKING([whether to build test_syscoin])
 if test "$use_tests" = "yes"; then
   if test "$enable_fuzz" = "yes"; then
@@ -1936,7 +1972,6 @@ AC_SUBST(USE_QRCODE)
 AC_SUBST(TESTDEFS)
 AC_SUBST(MINIUPNPC_CPPFLAGS)
 AC_SUBST(MINIUPNPC_LIBS)
-AC_SUBST(GMP_LIBS)
 AC_SUBST(NATPMP_CPPFLAGS)
 AC_SUBST(NATPMP_LIBS)
 AC_SUBST(DSYMUTIL_FLAT)
@@ -1972,7 +2007,8 @@ unset CPPFLAGS
 CPPFLAGS="$CPPFLAGS_TEMP"
 
 ac_configure_args="${ac_configure_args} --disable-shared --with-pic --enable-benchmark=no --enable-module-recovery --disable-module-ecdh --disable-openssl-tests"
-AC_CONFIG_SUBDIRS([src/dashbls src/secp256k1])
+dnl SYSCOIN: Legacy BLS is retired; secp256k1 is the only bundled autotools subproject.
+AC_CONFIG_SUBDIRS([src/secp256k1])
 
 AC_OUTPUT
 
@@ -1997,7 +2033,8 @@ esac
 
 echo
 echo "Options used to compile and link:"
-echo "  boost process       = $with_boost_process"
+dnl SYSCOIN: Report the effective managed-header command capability.
+echo "  boost process       = $boost_process"
 echo "  multiprocess        = $build_multiprocess"
 echo "  with libs           = $build_syscoin_libs"
 echo "  with util           = $build_syscoin_util"

@@ -240,10 +240,11 @@ void CZMQNotificationInterface::NotifyNEVMBlockDisconnect(std::string &state, co
         return notifier->NotifyNEVMBlockDisconnect(state, nBlockHash, diff);
     });
 }
-void CZMQNotificationInterface::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state)
+void CZMQNotificationInterface::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state)
 {
-    TryForEach(notifiers, [&nHeight, &state](CZMQAbstractNotifier* notifier) {
-        return notifier->NotifyGetNEVMBlockInfo(nHeight, state);
+    // SYSCOIN: Preserve the atomic count/hash pair from one notifier response.
+    TryForEach(notifiers, [&nHeight, &nSYSBlockHash, &state](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyGetNEVMBlockInfo(nHeight, nSYSBlockHash, state);
     });
 }
 

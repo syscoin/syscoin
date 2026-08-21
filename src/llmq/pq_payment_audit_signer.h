@@ -1,0 +1,48 @@
+// Copyright (c) 2026 The Syscoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef SYSCOIN_LLMQ_PQ_PAYMENT_AUDIT_SIGNER_H
+#define SYSCOIN_LLMQ_PQ_PAYMENT_AUDIT_SIGNER_H
+
+#include <llmq/pq_chainlock_signer.h>
+#include <llmq/pq_payment_audit_verify.h>
+
+namespace llmq::pq {
+
+struct PaymentAuditSigningResult {
+    std::optional<PaymentAuditShare> share;
+    bool replayed{false};
+};
+
+/** Purpose-separated signer which can run only after ordinary B finality. */
+class PaymentAuditShareSigner final {
+public:
+    PaymentAuditShareSigner(uint256 genesis_hash,
+                            uint256 local_pro_tx_hash,
+                            ChainLockScheduleConfig schedule,
+                            CPQSignerJournal& journal);
+
+    [[nodiscard]] PaymentAuditSigningResult Sign(
+        const PaymentAuditStatement& statement,
+        const QuorumBitmap& reporter_observed_members,
+        const FinalChainLock& seal_chainlock,
+        const FrozenQuorumRosters& rosters,
+        uint8_t authorization_mask,
+        uint8_t quorum_slot,
+        uint16_t member_index,
+        const sphincs_c11::SecretKey& child_secret_key,
+        const ChildKeyProof& child_key_proof,
+        const std::optional<PQSignerBranchLock>& expected_branch_lock,
+        ChainLockSigningError* error = nullptr);
+
+private:
+    uint256 m_genesis_hash;
+    uint256 m_local_pro_tx_hash;
+    ChainLockScheduleConfig m_schedule;
+    CPQSignerJournal& m_journal;
+};
+
+} // namespace llmq::pq
+
+#endif // SYSCOIN_LLMQ_PQ_PAYMENT_AUDIT_SIGNER_H

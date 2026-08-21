@@ -13,6 +13,8 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <scheduler.h>
+// SYSCOIN: Publish post-IBD readiness through ChainstateManager.
+#include <validation.h>
 
 #include <future>
 #include <unordered_map>
@@ -207,6 +209,29 @@ void CMainSignals::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockInd
                           pindexFork ? pindexFork->GetBlockHash().ToString() : "null",
                           fInitialDownload);
 }
+// SYSCOIN: Publish POST_INIT and start NEVM when public IBD ends without a
+// corresponding active-tip change.
+void CMainSignals::InitialBlockDownloadCompleted(
+    ChainstateManager& chainman)
+{
+    auto event = [&chainman, this] {
+        CBlockIndex* tip{nullptr};
+        {
+            LOCK(cs_main);
+            tip = chainman.ActiveTip();
+        }
+        if (tip == nullptr) return;
+        (void)chainman.GetNotifications().blockTip(
+            SynchronizationState::POST_INIT, *tip);
+        m_internals->Iterate([&](CValidationInterface& callbacks) {
+            callbacks.InitialBlockDownloadCompleted(tip, chainman);
+        });
+        (void)chainman.MaybeStartNEVMNetwork();
+    };
+    LogPrint(BCLog::VALIDATION,
+             "Enqueuing %s: public IBD completed\n", __func__);
+    m_internals->m_schedulerClient.AddToProcessQueue(std::move(event));
+}
 void CMainSignals::TransactionAddedToMempool(const CTransactionRef& tx, uint64_t mempool_sequence) {
     auto event = [tx, mempool_sequence, this] {
         m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.TransactionAddedToMempool(tx, mempool_sequence); });
@@ -285,8 +310,9 @@ void CMainSignals::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBl
 void CMainSignals::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockDisconnect(state, nBlockHash, diff); });
 }
-void CMainSignals::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlockInfo(nHeight, state);});
+void CMainSignals::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state) {
+    // SYSCOIN: Count-only status cannot distinguish equal-height Syscoin forks.
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlockInfo(nHeight, nSYSBlockHash, state);});
 }
 void CMainSignals::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlock(evmBlock, state);});

@@ -36,9 +36,10 @@ def parse_makefile(makefile):
         for line in file.read().splitlines():
             if current_lib:
                 source = line.split()[0]
-                if source.endswith('.cpp') and not source.startswith('$') and source not in ignore_list:
+                # SYSCOIN: Include vendored PQ C sources in generated MSVC projects.
+                if source.endswith(('.c', '.cpp')) and not source.startswith('$') and source not in ignore_list:
                     source_filename = source.replace('/', '\\')
-                    object_filename = source.replace('/', '_')[:-4] + ".obj"
+                    object_filename = os.path.splitext(source.replace('/', '_'))[0] + ".obj"
                     lib_sources[current_lib].append((source_filename, object_filename))
                 if not line.endswith('\\'):
                     current_lib = ''

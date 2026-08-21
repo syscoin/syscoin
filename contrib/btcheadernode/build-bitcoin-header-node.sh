@@ -1,26 +1,34 @@
 #!/usr/bin/env bash
 # Build pinned Bitcoin Core binaries for sentry BTC header-node checks.
+export LC_ALL=C
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
 Usage:
   build-bitcoin-header-node.sh --src-root <path> --build-root <path> [--jobs <n>] [--force-clean]
+  build-bitcoin-header-node.sh --emit-toolchain <path>
 
 Options:
   --src-root      Syscoin source root (contains contrib/btcheadernode/bitcoin.lock)
   --build-root    Syscoin build root (output goes to <build-root>/src/bin/btcheadernode)
   --jobs          Parallel make jobs (default: detected CPU count)
   --force-clean   Remove existing Bitcoin source/build workdirs before rebuilding
+  --emit-toolchain
+                  Write the CMake cross-toolchain derived from HOST/tool env
+                  and exit. This is intended for release-matrix smoke tests.
   -h, --help      Show this help
 
 Environment:
-  BTCHEADERNODE_SOURCE_ARCHIVE     Optional local Bitcoin source archive (tar/tar.gz/tar.xz)
-                                   used instead of cloning from BITCOIN_REPO.
+  BTCHEADERNODE_SOURCE_ARCHIVE     Optional local copy of the exact source archive pinned by
+                                   BITCOIN_SOURCE_ARCHIVE_SHA256; used instead of cloning.
   BTCHEADERNODE_STATIC_LINK_FLAGS  Linker flags for bitcoind/bitcoin-cli
                                    (default: "-static-libstdc++").
   LDFLAGS                          Optional base linker flags inherited from outer build
                                    (e.g. Guix HOST_LDFLAGS); helper appends static flags.
+  HOST, CC, CXX, AR, RANLIB, NM, STRIP
+                                   Target tuple and complete depends/Guix tool commands.
+                                   Required compiler argv (target/sysroot flags) is preserved.
 EOF
 }
 
@@ -31,7 +39,8 @@ hash_file() {
     elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$file_path" | awk '{print $1}'
     else
-        echo "no-sha256-tool"
+        echo "A SHA-256 tool (sha256sum or shasum) is required." >&2
+        return 1
     fi
 }
 
@@ -63,7 +72,13 @@ detect_jobs() {
     if command -v nproc >/dev/null 2>&1; then
         nproc
     elif command -v sysctl >/dev/null 2>&1; then
-        sysctl -n hw.ncpu
+        local cpu_count
+        cpu_count="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+        if [[ "$cpu_count" =~ ^[1-9][0-9]*$ ]]; then
+            printf '%s\n' "$cpu_count"
+        else
+            echo 1
+        fi
     else
         echo 1
     fi
@@ -85,6 +100,153 @@ detect_compiler() {
         fi
     done
     return 1
+}
+
+compiler_command_flags() {
+    local command_value="$1"
+    command_value="${command_value#"${command_value%%[![:space:]]*}"}"
+    if [[ "$command_value" != *[[:space:]]* ]]; then
+        return 0
+    fi
+    printf '%s\n' "${command_value#*[[:space:]]}"
+}
+
+resolve_optional_tool() {
+    local command_value="$1"
+    local command_bin="${command_value%% *}"
+    local resolved_path=""
+    local resolved_dir=""
+    [[ -n "$command_bin" ]] || return 0
+    # LLVM installs several tools as multicall symlinks whose basename selects
+    # the operation. In particular, resolving llvm-ranlib to llvm-ar makes
+    # CMake's archive-finish rule invoke llvm-ar without an operation.
+    resolved_path="$(command -v "$command_bin" 2>/dev/null)" || return 1
+    if [[ "$resolved_path" == /* ]]; then
+        printf '%s\n' "$resolved_path"
+        return 0
+    fi
+    resolved_dir="$(cd "$(dirname "$resolved_path")" && pwd -P)"
+    printf '%s/%s\n' "$resolved_dir" "$(basename "$resolved_path")"
+}
+
+cmake_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//;/\\;}"
+    printf '%s' "$value"
+}
+
+host_cmake_system() {
+    case "$1" in
+        *darwin*) printf '%s\n' Darwin ;;
+        *linux*) printf '%s\n' Linux ;;
+        *) return 1 ;;
+    esac
+}
+
+host_cmake_processor() {
+    local host="$1"
+    case "$host" in
+        aarch64-*darwin*|arm64-*darwin*) printf '%s\n' arm64 ;;
+        aarch64-*) printf '%s\n' aarch64 ;;
+        arm-*) printf '%s\n' arm ;;
+        x86_64-*) printf '%s\n' x86_64 ;;
+        i?86-*) printf '%s\n' x86 ;;
+        riscv64-*) printf '%s\n' riscv64 ;;
+        powerpc64le-*) printf '%s\n' ppc64le ;;
+        powerpc64-*) printf '%s\n' ppc64 ;;
+        *) printf '%s\n' "${host%%-*}" ;;
+    esac
+}
+
+extract_joined_flag_value() {
+    local flags="$1"
+    local prefix="$2"
+    local token=""
+    local expect_value=0
+    for token in $flags; do
+        if [[ "$expect_value" -eq 1 ]]; then
+            printf '%s\n' "$token"
+            return 0
+        fi
+        if [[ "$token" == "$prefix" ]]; then
+            expect_value=1
+        elif [[ "$token" == "$prefix"* ]]; then
+            printf '%s\n' "${token#"$prefix"}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+write_cmake_cross_toolchain() {
+    local output="$1"
+    local host="$2"
+    local c_compiler="$3"
+    local cxx_compiler="$4"
+    local c_flags="$5"
+    local cxx_flags="$6"
+    local linker_flags="$7"
+    local depends_prefix="$8"
+    local system_name=""
+    local processor=""
+    local sdk_root=""
+    local deployment_target=""
+
+    system_name="$(host_cmake_system "$host" || true)"
+    processor="$(host_cmake_processor "$host")"
+    sdk_root="$(extract_joined_flag_value "$cxx_flags $c_flags" -isysroot || true)"
+    deployment_target="$(extract_joined_flag_value "$cxx_flags $c_flags" -mmacos-version-min= || true)"
+    if [[ -z "$deployment_target" ]]; then
+        deployment_target="$(extract_joined_flag_value "$cxx_flags $c_flags" -mmacosx-version-min= || true)"
+    fi
+
+    {
+        printf '# Generated by Syscoin btcheadernode build; do not edit.\n'
+        if [[ -n "$system_name" ]]; then
+            printf 'set(CMAKE_SYSTEM_NAME "%s")\n' "$(cmake_escape "$system_name")"
+            printf 'set(CMAKE_SYSTEM_PROCESSOR "%s")\n' "$(cmake_escape "$processor")"
+        fi
+        printf 'set(CMAKE_C_COMPILER "%s")\n' "$(cmake_escape "$c_compiler")"
+        printf 'set(CMAKE_CXX_COMPILER "%s")\n' "$(cmake_escape "$cxx_compiler")"
+        if [[ -n "$host" ]]; then
+            printf 'set(CMAKE_C_COMPILER_TARGET "%s")\n' "$(cmake_escape "$host")"
+            printf 'set(CMAKE_CXX_COMPILER_TARGET "%s")\n' "$(cmake_escape "$host")"
+        fi
+        printf 'set(CMAKE_C_FLAGS_INIT "%s")\n' "$(cmake_escape "$c_flags")"
+        printf 'set(CMAKE_CXX_FLAGS_INIT "%s")\n' "$(cmake_escape "$cxx_flags")"
+        printf 'set(CMAKE_EXE_LINKER_FLAGS_INIT "%s")\n' "$(cmake_escape "$linker_flags")"
+        if [[ -n "${AR:-}" ]]; then
+            printf 'set(CMAKE_AR "%s")\n' "$(cmake_escape "$(resolve_optional_tool "$AR")")"
+        fi
+        if [[ -n "${RANLIB:-}" ]]; then
+            printf 'set(CMAKE_RANLIB "%s")\n' "$(cmake_escape "$(resolve_optional_tool "$RANLIB")")"
+        fi
+        if [[ -n "${NM:-}" ]]; then
+            printf 'set(CMAKE_NM "%s")\n' "$(cmake_escape "$(resolve_optional_tool "$NM")")"
+        fi
+        if [[ -n "${STRIP:-}" ]]; then
+            printf 'set(CMAKE_STRIP "%s")\n' "$(cmake_escape "$(resolve_optional_tool "$STRIP")")"
+        fi
+        if [[ "$system_name" == Darwin ]]; then
+            printf 'set(CMAKE_OSX_ARCHITECTURES "%s")\n' "$(cmake_escape "$processor")"
+            if [[ -n "$sdk_root" ]]; then
+                printf 'set(CMAKE_OSX_SYSROOT "%s")\n' "$(cmake_escape "$sdk_root")"
+            fi
+            if [[ -n "$deployment_target" ]]; then
+                printf 'set(CMAKE_OSX_DEPLOYMENT_TARGET "%s")\n' "$(cmake_escape "$deployment_target")"
+            fi
+        fi
+        if [[ -n "$depends_prefix" ]]; then
+            printf 'set(CMAKE_PREFIX_PATH "%s")\n' "$(cmake_escape "$depends_prefix")"
+            printf 'set(CMAKE_FIND_ROOT_PATH "%s")\n' "$(cmake_escape "$depends_prefix")"
+            printf 'set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n'
+            printf 'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n'
+            printf 'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n'
+            printf 'set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n'
+        fi
+    } > "$output"
 }
 
 detect_boost_version() {
@@ -198,6 +360,7 @@ SRC_ROOT=""
 BUILD_ROOT=""
 JOBS=""
 FORCE_CLEAN=0
+EMIT_TOOLCHAIN=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -220,6 +383,11 @@ while [[ $# -gt 0 ]]; do
             FORCE_CLEAN=1
             shift
             ;;
+        --emit-toolchain)
+            [[ $# -ge 2 ]] || { echo "Missing value for --emit-toolchain" >&2; exit 1; }
+            EMIT_TOOLCHAIN="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -232,6 +400,33 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -n "$EMIT_TOOLCHAIN" ]]; then
+    [[ -n "${HOST:-}" ]] || {
+        echo "HOST is required with --emit-toolchain." >&2
+        exit 1
+    }
+    C_COMPILER="$(detect_compiler "${CC:-}" "${HOST}-gcc" gcc cc)" || {
+        echo "Could not locate the configured C compiler." >&2
+        exit 1
+    }
+    CXX_COMPILER="$(detect_compiler "${CXX:-}" "${HOST}-g++" g++ c++)" || {
+        echo "Could not locate the configured C++ compiler." >&2
+        exit 1
+    }
+    CMAKE_C_FLAGS="$(compiler_command_flags "${CC:-}")"
+    CMAKE_C_FLAGS="${CMAKE_C_FLAGS}${CFLAGS:+${CMAKE_C_FLAGS:+ }${CFLAGS}}"
+    CMAKE_C_FLAGS="${CMAKE_C_FLAGS}${CPPFLAGS:+${CMAKE_C_FLAGS:+ }${CPPFLAGS}}"
+    CMAKE_CXX_FLAGS="$(compiler_command_flags "${CXX:-}")"
+    CMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}${CXXFLAGS:+${CMAKE_CXX_FLAGS:+ }${CXXFLAGS}}"
+    CMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}${CPPFLAGS:+${CMAKE_CXX_FLAGS:+ }${CPPFLAGS}}"
+    mkdir -p "$(dirname "$EMIT_TOOLCHAIN")"
+    write_cmake_cross_toolchain \
+        "$EMIT_TOOLCHAIN" "$HOST" "$C_COMPILER" "$CXX_COMPILER" \
+        "$CMAKE_C_FLAGS" "$CMAKE_CXX_FLAGS" "${LDFLAGS:-}" \
+        "${BTCHEADERNODE_DEPENDS_PREFIX:-}"
+    exit 0
+fi
+
 [[ -n "$SRC_ROOT" && -n "$BUILD_ROOT" ]] || {
     echo "Both --src-root and --build-root are required." >&2
     usage >&2
@@ -239,8 +434,13 @@ done
 }
 
 LOCK_FILE="$SRC_ROOT/contrib/btcheadernode/bitcoin.lock"
+LICENSE_FILE="$SRC_ROOT/contrib/btcheadernode/COPYING.bitcoin-core"
 if [[ ! -f "$LOCK_FILE" ]]; then
     echo "Missing lock file: $LOCK_FILE" >&2
+    exit 1
+fi
+if [[ ! -f "$LICENSE_FILE" ]]; then
+    echo "Missing pinned Bitcoin license: $LICENSE_FILE" >&2
     exit 1
 fi
 
@@ -249,12 +449,25 @@ source "$LOCK_FILE"
 
 : "${BITCOIN_REPO:?BITCOIN_REPO must be set in bitcoin.lock}"
 : "${BITCOIN_COMMIT:?BITCOIN_COMMIT must be set in bitcoin.lock}"
+: "${BITCOIN_SOURCE_ARCHIVE_URL:?BITCOIN_SOURCE_ARCHIVE_URL must be set in bitcoin.lock}"
+: "${BITCOIN_SOURCE_ARCHIVE_SHA256:?BITCOIN_SOURCE_ARCHIVE_SHA256 must be set in bitcoin.lock}"
+if [[ ! "$BITCOIN_SOURCE_ARCHIVE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "BITCOIN_SOURCE_ARCHIVE_SHA256 must be a 64-character hexadecimal digest." >&2
+    exit 1
+fi
+BITCOIN_SOURCE_ARCHIVE_SHA256="$(printf '%s' "$BITCOIN_SOURCE_ARCHIVE_SHA256" | tr '[:upper:]' '[:lower:]')"
 
 if [[ -z "$JOBS" ]]; then
     JOBS="$(detect_jobs)"
 fi
 
-STATIC_LINK_FLAGS="${BTCHEADERNODE_STATIC_LINK_FLAGS:--static-libstdc++}"
+if [[ "${BTCHEADERNODE_STATIC_LINK_FLAGS+x}" == "x" ]]; then
+    STATIC_LINK_FLAGS="$BTCHEADERNODE_STATIC_LINK_FLAGS"
+elif [[ "${HOST:-}" == *darwin* ]] || [[ "$(uname -s)" == "Darwin" ]]; then
+    STATIC_LINK_FLAGS=""
+else
+    STATIC_LINK_FLAGS="-static-libstdc++"
+fi
 SOURCE_ARCHIVE="${BTCHEADERNODE_SOURCE_ARCHIVE:-}"
 BASE_LDFLAGS="${LDFLAGS:-}"
 BASE_CPPFLAGS="${CPPFLAGS:-}"
@@ -266,6 +479,7 @@ WORK_ROOT="$OUT_ROOT/work"
 BITCOIN_SRC="$WORK_ROOT/bitcoin-src"
 BITCOIN_BUILD="$WORK_ROOT/bitcoin-build"
 OUTPUT_BIN_DIR="$OUT_ROOT/bin"
+OUTPUT_LICENSE="$OUT_ROOT/COPYING.bitcoin-core"
 STAMP_FILE="$OUT_ROOT/.build-stamp"
 
 PATCH_ABS=""
@@ -292,11 +506,20 @@ if [[ -n "$SOURCE_ARCHIVE" ]]; then
         exit 1
     fi
     SOURCE_ARCHIVE_DIGEST="$(hash_file "$SOURCE_ARCHIVE")"
+    SOURCE_ARCHIVE_DIGEST="$(printf '%s' "$SOURCE_ARCHIVE_DIGEST" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$SOURCE_ARCHIVE_DIGEST" != "$BITCOIN_SOURCE_ARCHIVE_SHA256" ]]; then
+        echo "Pinned Bitcoin source archive SHA-256 mismatch." >&2
+        echo "  archive:  $SOURCE_ARCHIVE" >&2
+        echo "  expected: $BITCOIN_SOURCE_ARCHIVE_SHA256" >&2
+        echo "  actual:   $SOURCE_ARCHIVE_DIGEST" >&2
+        exit 1
+    fi
 fi
 LOCK_DIGEST="$(hash_file "$LOCK_FILE")"
-BUILD_FINGERPRINT="${BITCOIN_COMMIT}:${LOCK_DIGEST}:${PATCH_DIGEST}:${SCRIPT_DIGEST}:${SOURCE_ARCHIVE_DIGEST}:${BASE_CPPFLAGS}:${BASE_CFLAGS}:${BASE_CXXFLAGS}:${BASE_LDFLAGS}:${STATIC_LINK_FLAGS}:${CC:-}:${CXX:-}"
+LICENSE_DIGEST="$(hash_file "$LICENSE_FILE")"
+BUILD_FINGERPRINT="${BITCOIN_COMMIT}:${LOCK_DIGEST}:${LICENSE_DIGEST}:${PATCH_DIGEST}:${SCRIPT_DIGEST}:${SOURCE_ARCHIVE_DIGEST}:${BASE_CPPFLAGS}:${BASE_CFLAGS}:${BASE_CXXFLAGS}:${BASE_LDFLAGS}:${STATIC_LINK_FLAGS}:${HOST:-}:${CC:-}:${CXX:-}:${AR:-}:${RANLIB:-}:${NM:-}:${STRIP:-}"
 
-if [[ -f "$STAMP_FILE" ]] && [[ -x "$OUTPUT_BIN_DIR/bitcoind" ]] && [[ -x "$OUTPUT_BIN_DIR/bitcoin-cli" ]]; then
+if [[ -f "$STAMP_FILE" ]] && [[ -x "$OUTPUT_BIN_DIR/bitcoind" ]] && [[ -x "$OUTPUT_BIN_DIR/bitcoin-cli" ]] && [[ -f "$OUTPUT_LICENSE" ]]; then
     if [[ "$(cat "$STAMP_FILE")" == "$BUILD_FINGERPRINT" ]]; then
         echo "btcheadernode: build is up-to-date ($BUILD_FINGERPRINT)"
         exit 0
@@ -347,6 +570,13 @@ if [[ -n "$PATCH_ABS" ]]; then
     git -C "$BITCOIN_SRC" apply "$PATCH_ABS"
 fi
 
+# A build from the right commit but the wrong notice is not a releasable
+# artifact. Check the source copy before spending compilation work.
+if ! cmp -s "$BITCOIN_SRC/COPYING" "$LICENSE_FILE"; then
+    echo "Pinned Bitcoin license does not match BITCOIN_COMMIT." >&2
+    exit 1
+fi
+
 fix_cmake_libevent_link_order_for_static "$BITCOIN_SRC"
 
 mkdir -p "$BITCOIN_BUILD"
@@ -387,11 +617,11 @@ else
     rm -rf "$BITCOIN_BUILD"
     mkdir -p "$BITCOIN_BUILD"
 
-    C_COMPILER="$(detect_compiler "${CC:-}" x86_64-linux-gnu-gcc gcc cc)" || {
+    C_COMPILER="$(detect_compiler "${CC:-}" "${HOST:+${HOST}-gcc}" x86_64-linux-gnu-gcc gcc cc)" || {
         echo "Could not locate a C compiler for Bitcoin CMake build." >&2
         exit 1
     }
-    CXX_COMPILER="$(detect_compiler "${CXX:-}" x86_64-linux-gnu-g++ g++ c++)" || {
+    CXX_COMPILER="$(detect_compiler "${CXX:-}" "${HOST:+${HOST}-g++}" x86_64-linux-gnu-g++ g++ c++)" || {
         echo "Could not locate a C++ compiler for Bitcoin CMake build." >&2
         exit 1
     }
@@ -421,21 +651,32 @@ else
     BOOST_CONFIG_DIR="$BITCOIN_BUILD/cmake/boost-config"
     write_boost_config_compat "$BOOST_CONFIG_DIR" "$BOOST_INCLUDE_DIR" "$BOOST_VERSION"
 
-    CMAKE_C_FLAGS="$BASE_CFLAGS"
+    CMAKE_C_FLAGS="$(compiler_command_flags "${CC:-}")"
+    if [[ -n "$BASE_CFLAGS" ]]; then
+        CMAKE_C_FLAGS="${CMAKE_C_FLAGS:+$CMAKE_C_FLAGS }$BASE_CFLAGS"
+    fi
     if [[ -n "$BASE_CPPFLAGS" ]]; then
         CMAKE_C_FLAGS="${CMAKE_C_FLAGS:+$CMAKE_C_FLAGS }$BASE_CPPFLAGS"
     fi
-    CMAKE_CXX_FLAGS="$BASE_CXXFLAGS"
+    CMAKE_CXX_FLAGS="$(compiler_command_flags "${CXX:-}")"
+    if [[ -n "$BASE_CXXFLAGS" ]]; then
+        CMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS:+$CMAKE_CXX_FLAGS }$BASE_CXXFLAGS"
+    fi
     if [[ -n "$BASE_CPPFLAGS" ]]; then
         CMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS:+$CMAKE_CXX_FLAGS }$BASE_CPPFLAGS"
     fi
 
+    DEPENDS_PREFIX="${BOOST_INCLUDE_DIR%/include}"
+    CMAKE_TOOLCHAIN_FILE="$BITCOIN_BUILD/cmake/syscoin-btcheader-toolchain.cmake"
+    mkdir -p "$(dirname "$CMAKE_TOOLCHAIN_FILE")"
+    write_cmake_cross_toolchain \
+        "$CMAKE_TOOLCHAIN_FILE" "${HOST:-}" "$C_COMPILER" "$CXX_COMPILER" \
+        "$CMAKE_C_FLAGS" "$CMAKE_CXX_FLAGS" "$EFFECTIVE_LINKER_FLAGS" \
+        "$DEPENDS_PREFIX"
+
     cmake -S "$BITCOIN_SRC" -B "$BITCOIN_BUILD" \
         -DCMAKE_BUILD_TYPE=Release \
-        "-DCMAKE_C_COMPILER=${C_COMPILER}" \
-        "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}" \
-        "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}" \
-        "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}" \
+        "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}" \
         "-DBoost_DIR=${BOOST_CONFIG_DIR}" \
         -DBUILD_GUI=OFF \
         -DBUILD_SHARED_LIBS=OFF \
@@ -450,7 +691,6 @@ else
         -DBUILD_WALLET_TOOL=OFF \
         -DENABLE_EXTERNAL_SIGNER=OFF \
         -DENABLE_IPC=OFF \
-        "-DCMAKE_EXE_LINKER_FLAGS=${EFFECTIVE_LINKER_FLAGS}" \
         -DWITH_ZMQ=OFF \
         -DINSTALL_MAN=OFF
     cmake --build "$BITCOIN_BUILD" --parallel "$JOBS" --target bitcoind bitcoin-cli
@@ -467,6 +707,7 @@ BITCOINCLI_BUILT_PATH="$(first_existing_file "$BITCOIN_BUILD/src/bitcoin-cli" "$
 
 cp "$BITCOIND_BUILT_PATH" "$OUTPUT_BIN_DIR/bitcoind"
 cp "$BITCOINCLI_BUILT_PATH" "$OUTPUT_BIN_DIR/bitcoin-cli"
+cp "$LICENSE_FILE" "$OUTPUT_LICENSE"
 chmod 755 "$OUTPUT_BIN_DIR/bitcoind" "$OUTPUT_BIN_DIR/bitcoin-cli"
 
 printf '%s\n' "$BUILD_FINGERPRINT" > "$STAMP_FILE"

@@ -5,26 +5,24 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_INIT_H
 #define SYSCOIN_LLMQ_QUORUMS_INIT_H
 
-class CDBWrapper;
+#include <kernel/cs_main.h> // SYSCOIN: Restore prune locks under cs_main.
+
 class CConnman;
-class BanMan;
 class PeerManager;
 class ChainstateManager;
-struct DBParams;
 namespace llmq
 {
 
-// If true, we will connect to all new quorums and watch their communication
-static const bool DEFAULT_WATCH_QUORUMS = false;
-
-// Init/destroy LLMQ globals
-void InitLLMQSystem(const DBParams& quorumCommitmentDB, const DBParams& quorumVectorDB, const DBParams& quorumSkDB, bool unitTests, CConnman& connman, BanMan& banman, PeerManager& peerman, ChainstateManager& chainman, bool fWipe = false);
+// Initialize the pre-anchor commitment replay shim and PQ finality service.
+void InitLLMQSystem(CConnman& connman,
+                    PeerManager& peerman,
+                    ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 void DestroyLLMQSystem();
 
-// Manage scheduled tasks, threads, listeners etc.
+// Manage the PQ ChainLock service lifecycle.
 void StartLLMQSystem();
 void StopLLMQSystem();
-void InterruptLLMQSystem();
 } // namespace llmq
 
 #endif // SYSCOIN_LLMQ_QUORUMS_INIT_H

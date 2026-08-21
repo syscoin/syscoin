@@ -6,7 +6,7 @@
 #define SYSCOIN_EVO_DMNSTATE_H
 
 #include <crypto/common.h>
-#include <bls/bls.h>
+#include <crypto/legacy_bls.h>
 #include <pubkey.h>
 #include <netaddress.h>
 #include <script/script.h>
@@ -45,7 +45,9 @@ public:
     uint256 confirmedHashWithProRegTxHash;
 
     CKeyID keyIDOwner;
-    CBLSLazyPublicKey pubKeyOperator;
+    // SYSCOIN: retained as bytes only for historical DMN replay and the
+    // immutable migration anchor. It is never a live post-anchor auth key.
+    CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
     CService addr;
     CScript scriptPayout;
@@ -84,7 +86,7 @@ public:
             obj.confirmedHash,
             obj.confirmedHashWithProRegTxHash,
             obj.keyIDOwner);
-        READWRITE(CBLSLazyPublicKeyVersionWrapper(const_cast<CBLSLazyPublicKey&>(obj.pubKeyOperator), obj.nVersion == CProRegTx::LEGACY_BLS_VERSION));
+        READWRITE(obj.pubKeyOperator);
         READWRITE(
             obj.keyIDVoting,
             obj.addr,
@@ -97,7 +99,7 @@ public:
     void ResetOperatorFields()
     {
         nVersion = CProUpServTx::LEGACY_BLS_VERSION;
-        pubKeyOperator = CBLSLazyPublicKey();
+        pubKeyOperator.SetNull();
         addr = CService();
         scriptOperatorPayout = CScript();
         nRevocationReason = CProUpRevTx::REASON_NOT_SPECIFIED;
@@ -132,6 +134,23 @@ public:
         h.Write(_proTxHash.begin(), _proTxHash.size());
         h.Write(_confirmedHash.begin(), _confirmedHash.size());
         h.Finalize(confirmedHashWithProRegTxHash.begin());
+    }
+
+    /** Fixed field encoding used only by the immutable migration anchor. */
+    template <typename Stream>
+    void SerializePQLegacyAnchorV1(Stream& stream) const
+    {
+        stream << static_cast<int32_t>(nVersion)
+               << static_cast<int32_t>(nRegisteredHeight)
+               << static_cast<int32_t>(nLastPaidHeight)
+               << static_cast<int32_t>(nPoSePenalty)
+               << static_cast<int32_t>(nPoSeRevivedHeight)
+               << static_cast<int32_t>(nPoSeBanHeight)
+               << nRevocationReason << confirmedHash << confirmedHashWithProRegTxHash
+               << keyIDOwner;
+        pubKeyOperator.Serialize(stream);
+        stream << keyIDVoting << addr << scriptPayout << scriptOperatorPayout
+               << static_cast<int32_t>(nCollateralHeight) << vchNEVMAddress;
     }
 
 public:
@@ -200,20 +219,18 @@ public:
 
     SERIALIZE_METHODS(CDeterministicMNStateDiff, obj)
     {
-        // NOTE: reading pubKeyOperator requires nVersion
         bool read_pubkey{false};
         READWRITE(VARINT(obj.fields));
 #define DMN_STATE_DIFF_LINE(f) \
         if (strcmp(#f, "pubKeyOperator") == 0 && (obj.fields & Field_pubKeyOperator)) {\
             SER_READ(obj, read_pubkey = true); \
-            READWRITE(CBLSLazyPublicKeyVersionWrapper(const_cast<CBLSLazyPublicKey&>(obj.state.pubKeyOperator), obj.state.nVersion == CProRegTx::LEGACY_BLS_VERSION)); \
+            READWRITE(obj.state.pubKeyOperator); \
         } else if (obj.fields & Field_##f) READWRITE(obj.state.f);
 
         DMN_STATE_DIFF_ALL_FIELDS
 #undef DMN_STATE_DIFF_LINE
         if (read_pubkey) {
             SER_READ(obj, obj.fields |= Field_nVersion);
-            SER_READ(obj, obj.state.pubKeyOperator.SetLegacy(obj.state.nVersion == CProRegTx::LEGACY_BLS_VERSION));
         }
     }
 

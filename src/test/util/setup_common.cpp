@@ -66,12 +66,10 @@
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_init.h>
-#include <llmq/quorums_commitment.h>
 #include <governance/governance.h>
 #include <services/nevmconsensus.h>
 #include <services/assetconsensus.h>
 #include <stdexcept>
-#include <llmq/quorums_blockprocessor.h>
 #include <spork.h>
 #include <netfulfilledman.h>
 #include <masternode/masternodemeta.h>
@@ -87,6 +85,18 @@ using node::KernelNotifications;
 using node::LoadChainstate;
 using node::RegenerateCommitments;
 using node::VerifyLoadedChainstate;
+
+// SYSCOIN BEGIN: publish exact PQ governance readiness in block fixtures.
+namespace governance_tests {
+bool PublishGovernanceReadyForTest(CGovernanceManager& manager,
+                                   const CBlockIndex& tip)
+{
+    manager.is_valid.store(true, std::memory_order_release);
+    manager.ObserveChainTip(&tip);
+    return manager.PublishPQGovernanceReadyForTip(tip);
+}
+} // namespace governance_tests
+// SYSCOIN END: publish exact PQ governance readiness in block fixtures.
 
 const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
 UrlDecodeFn* const URL_DECODE = nullptr;
@@ -134,7 +144,6 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, const std::vecto
         .cache_bytes = static_cast<size_t>(1 << 20),
         .memory_only = true,
         .wipe_data = true};
-    deterministicMNManager.reset(new CDeterministicMNManager(evoDmnDbParams));
     gArgs.ForceSetArg("-mncollateral", "100");
     gArgs.ForceSetArg("-dip3params", "550:550");
     gArgs.ClearPathCache();
@@ -147,6 +156,9 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, const std::vecto
         }
     }
     SelectParams(chainType);
+    // SYSCOIN: The DMN manager validates the selected chain's canonical
+    // genesis base during construction.
+    deterministicMNManager.reset(new CDeterministicMNManager(evoDmnDbParams));
     SeedInsecureRand();
     if (G_TEST_LOG_FUN) LogInstance().PushBackCallback(G_TEST_LOG_FUN);
     InitLogging(*m_node.args);
@@ -167,7 +179,6 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, const std::vecto
         noui_connect();
         noui_connected = true;
     }
-    bls::bls_legacy_scheme.store(true);
 }
 
 BasicTestingSetup::~BasicTestingSetup()
@@ -241,7 +252,6 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, const std::vecto
 ChainTestingSetup::~ChainTestingSetup()
 {
     // SYSCOIN
-    llmq::InterruptLLMQSystem();
     llmq::StopLLMQSystem();
     if (m_node.scheduler) m_node.scheduler->stop();
     StopScriptCheckWorkerThreads();
@@ -283,7 +293,19 @@ void ChainTestingSetup::LoadVerifyActivateChainstate()
     assert(status == node::ChainstateLoadStatus::SUCCESS);
 
     BlockValidationState state;
-    if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
+    // SYSCOIN: Fixture activation must expose exact governance state while
+    // preserving the caller's masternode-sync phase.
+    const int previous_sync_mode{masternodeSync.GetAssetID()};
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+    bool activated{false};
+    try {
+        activated = chainman.ActiveChainstate().ActivateBestChain(state);
+    } catch (...) {
+        masternodeSync.SetSyncMode(previous_sync_mode);
+        throw;
+    }
+    masternodeSync.SetSyncMode(previous_sync_mode);
+    if (!activated) {
         throw std::runtime_error(strprintf("ActivateBestChain failed. (%s)", state.ToString()));
     }
 }
@@ -338,11 +360,14 @@ TestingSetup::TestingSetup(
 TestChain100Setup::TestChain100Setup(
         const ChainType chain_type,
         const std::vector<const char*>& extra_args,
-        // SYSCOIN
+        // SYSCOIN: Keep the deterministic fixture vectors for each supported
+        // consensus serialization profile, including the PQ operator-state
+        // profile used by the post-BLS tests.
         int count,
         const bool coins_db_in_memory,
         const bool block_tree_db_in_memory)
-    : TestingSetup{ChainType::REGTEST, extra_args, coins_db_in_memory, block_tree_db_in_memory}
+    : TestingSetup{ChainType::REGTEST, extra_args, coins_db_in_memory, block_tree_db_in_memory},
+      m_previous_masternode_sync_mode{masternodeSync.GetAssetID()}
 {
     SetMockTime(1598887952);
     constexpr std::array<unsigned char, 32> vchKey = {
@@ -364,19 +389,40 @@ TestChain100Setup::TestChain100Setup(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
             "54731626e712d633f241acec278575c82b08dd89b21f9ed95af48391c3558bd5"  ||
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "0ce253966906f6bcc33ab5ad410b3ca4695436167474a5c9cbf67667c77c50ba");
+            "0ce253966906f6bcc33ab5ad410b3ca4695436167474a5c9cbf67667c77c50ba" ||
+            m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
+            "7848e4221161b38605d5e28c09479a54081b824e1fa1fe80ae48cd104b42e8d3");
     }
 }
 
+TestChain100Setup::~TestChain100Setup()
+{
+    masternodeSync.SetSyncMode(m_previous_masternode_sync_mode);
+}
+
+// SYSCOIN: TestChain100Setup temporarily publishes tip-bound governance
+// readiness while mining the inherited bootstrap chain, then restores the
+// caller's masternode-sync mode.
 void TestChain100Setup::mineBlocks(int num_blocks)
 {
     CScript scriptPubKey = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
-    for (int i = 0; i < num_blocks; i++) {
-        std::vector<CMutableTransaction> noTxns;
-        CBlock b = CreateAndProcessBlock(noTxns, scriptPubKey);
-        SetMockTime(GetTime() + 1);
-        m_coinbase_txns.push_back(b.vtx[0]);
+    const int previous_sync_mode{masternodeSync.GetAssetID()};
+    m_bootstrap_mining = true;
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+    try {
+        for (int i = 0; i < num_blocks; i++) {
+            std::vector<CMutableTransaction> noTxns;
+            CBlock b = CreateAndProcessBlock(noTxns, scriptPubKey);
+            SetMockTime(GetTime() + 1);
+            m_coinbase_txns.push_back(b.vtx[0]);
+        }
+    } catch (...) {
+        m_bootstrap_mining = false;
+        masternodeSync.SetSyncMode(previous_sync_mode);
+        throw;
     }
+    m_bootstrap_mining = false;
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
 }
 
 CBlock TestChain100Setup::CreateBlock(
@@ -385,32 +431,39 @@ CBlock TestChain100Setup::CreateBlock(
     Chainstate& chainstate)
 {
     // SYSCOIN
-    while(!masternodeSync.IsSynced()) {
+    while (!m_bootstrap_mining && !masternodeSync.IsSynced()) {
         masternodeSync.SwitchToNextAsset(*m_node.connman);
     }
+    struct ClearBootstrapGovernanceReadiness {
+        bool active;
+        ~ClearBootstrapGovernanceReadiness()
+        {
+            if (active && governance) governance->ObserveChainTip(nullptr);
+        }
+    } clear_bootstrap_readiness{m_bootstrap_mining};
+    if (m_bootstrap_mining) {
+        const CBlockIndex* tip{WITH_LOCK(
+            ::cs_main, return Assert(m_node.chainman)->ActiveTip())};
+        if (tip == nullptr || governance == nullptr ||
+            !governance_tests::PublishGovernanceReadyForTest(
+                *governance, *tip)) {
+            throw std::runtime_error(
+                "Unable to publish bootstrap governance readiness");
+        }
+    }
     CBlock block = BlockAssembler{chainstate, nullptr}.CreateNewBlock(scriptPubKey)->block;
+    if (m_bootstrap_mining) {
+        governance->ObserveChainTip(nullptr);
+        clear_bootstrap_readiness.active = false;
+    }
 
     Assert(block.vtx.size() == 1);
     for (const CMutableTransaction& tx : txns) {
         block.vtx.push_back(MakeTransactionRef(tx));
     }
-    // SYSCOIN Manually update CbTx as we modified the block here
-    CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
-    std::vector<unsigned char> vchCoinbaseCommitmentExtra;
-    if (block.vtx[0]->nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
-        LOCK(cs_main);
-        llmq::CFinalCommitmentTxPayload qc;
-        if (!GetTxPayload(*block.vtx[0], qc)) {
-            assert(false);
-        }
-        ds << qc;
-        // SYSCOIN
-        const auto &bytesVec = MakeUCharSpan(ds);
-        vchCoinbaseCommitmentExtra = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
-
-    }
-
-    RegenerateCommitments(block, *Assert(m_node.chainman), vchCoinbaseCommitmentExtra);
+    // SYSCOIN: Legacy DKG coinbase commitments are retired, so bootstrap
+    // blocks regenerate the remaining commitment payload with an empty set.
+    RegenerateCommitments(block, *Assert(m_node.chainman), {});
     while (!CheckProofOfWork(block.GetHash(), block.nBits, m_node.chainman->GetConsensus())) ++block.nNonce;
 
     return block;

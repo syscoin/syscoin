@@ -56,7 +56,10 @@ public:
 class CZMQPublishNEVMBlockInfoNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) override;
+    // SYSCOIN: Require the applied Syscoin tip hash with the NEVM count.
+    bool NotifyGetNEVMBlockInfo(uint64_t &nHeight,
+                                uint256& nSYSBlockHash,
+                                std::string &state) override;
 };
 class CZMQPublishNEVMBlockNotifier : public CZMQAbstractPublishNotifier
 {

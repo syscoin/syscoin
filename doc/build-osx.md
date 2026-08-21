@@ -48,7 +48,7 @@ See [dependencies.md](dependencies.md) for a complete overview.
 To install, run the following from your terminal:
 
 ``` bash
-brew install automake libtool boost pkg-config libevent curl-openssl gmp cmake
+brew install automake libtool boost pkg-config libevent curl-openssl cmake
 ```
 
 ### 4. Clone Syscoin repository

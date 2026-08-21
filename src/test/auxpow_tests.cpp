@@ -8,10 +8,12 @@
 #include <coins.h>
 #include <consensus/merkle.h>
 #include <evo/specialtx.h>
+#include <llmq/pq_btcc.h>
 #include <validation.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <rpc/auxpow_miner.h>
+#include <rpc/protocol.h>
 #include <script/script.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -524,10 +526,41 @@ class AuxpowMinerForTest : public AuxpowMiner
 
 public:
 
+  using Resolution = AuxpowMiner::BTCPrevResolution;
+
   using AuxpowMiner::cs;
 
-  using AuxpowMiner::getCurrentBlock;
   using AuxpowMiner::lookupSavedBlock;
+  using AuxpowMiner::TemplateMatchesBTCPREV;
+
+  Resolution resolveBTCPrevHash(
+      ChainstateManager& chainman,
+      const std::optional<uint256>& requested)
+  {
+    return AuxpowMiner::resolveBTCPrevHash(chainman, requested);
+  }
+
+  const CBlock* getCurrentBlock(
+      ChainstateManager& chainman, const CTxMemPool& mempool,
+      const CScript& scriptPubKey, uint256& target,
+      const std::optional<uint256>& btc_prev = std::nullopt)
+      EXCLUSIVE_LOCKS_REQUIRED(cs)
+  {
+    const int32_t next_height{
+        WITH_LOCK(cs_main, return chainman.ActiveHeight() + 1)};
+    return AuxpowMiner::getCurrentBlock(
+        chainman, mempool, scriptPubKey, target,
+        Resolution{next_height, btc_prev});
+  }
+
+  const CBlock* getCurrentBlockWithResolution(
+      ChainstateManager& chainman, const CTxMemPool& mempool,
+      const CScript& scriptPubKey, uint256& target,
+      const Resolution& resolution) EXCLUSIVE_LOCKS_REQUIRED(cs)
+  {
+    return AuxpowMiner::getCurrentBlock(
+        chainman, mempool, scriptPubKey, target, resolution);
+  }
 
 };
 
@@ -619,6 +652,70 @@ struct AuxpowCLReceiptOnlySetup : TestChain100Setup {
       : TestChain100Setup(ChainType::REGTEST, {"-clreceiptstartheight=0"}) {}
 };
 
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_miner_btcp_resolution_is_bound_to_exact_next_height,
+    TestChain100Setup)
+{
+  CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
+  AuxpowMinerForTest miner;
+  CScript script_pub_key;
+  uint256 target;
+  const uint256 requested{uint256S(std::string(64, '1'))};
+
+  const auto stale_resolution{
+      miner.resolveBTCPrevHash(*m_node.chainman, requested)};
+  BOOST_REQUIRE_EQUAL(stale_resolution.next_height, 101);
+  auto boundary_schedule{
+      llmq::pq::GetBTCCScheduleConfig(Params().GetConsensus())};
+  // Isolate the height-binding invariant without mutating the complete PQ
+  // deployment profile required by block validation.
+  boundary_schedule.candidate_origin = 102;
+  BOOST_REQUIRE(boundary_schedule.IsValid());
+  BOOST_REQUIRE(!llmq::pq::IsBTCCCandidateHeight(
+      boundary_schedule, stale_resolution.next_height));
+  BOOST_REQUIRE(llmq::pq::IsBTCCCandidateHeight(
+      boundary_schedule, /*height=*/102));
+  {
+    LOCK(miner.cs);
+    const CBlock* unscheduled{miner.getCurrentBlockWithResolution(
+        *m_node.chainman, mempool, script_pub_key, target,
+        stale_resolution)};
+    BOOST_REQUIRE(unscheduled != nullptr);
+    uint256 committed;
+    BOOST_CHECK(!ExtractBTCPREVCommitment(*unscheduled, committed));
+  }
+
+  CreateAndProcessBlock({}, script_pub_key);
+  BOOST_REQUIRE_EQUAL(
+      WITH_LOCK(cs_main, return m_node.chainman->ActiveHeight() + 1), 102);
+  const auto tip_changed = [](const UniValue& error) {
+    return error["code"].getInt<int>() == RPC_MISC_ERROR &&
+           error["message"].get_str() ==
+               "Syscoin tip changed while selecting BTCPREV; retry template request";
+  };
+  {
+    LOCK(miner.cs);
+    BOOST_CHECK_EXCEPTION(
+        miner.getCurrentBlockWithResolution(
+            *m_node.chainman, mempool, script_pub_key, target,
+            stale_resolution),
+        UniValue, tip_changed);
+  }
+
+  const auto current_resolution{
+      miner.resolveBTCPrevHash(*m_node.chainman, requested)};
+  BOOST_REQUIRE_EQUAL(current_resolution.next_height, 102);
+  {
+    LOCK(miner.cs);
+    const CBlock* current{miner.getCurrentBlockWithResolution(
+        *m_node.chainman, mempool, script_pub_key, target,
+        current_resolution)};
+    BOOST_REQUIRE(current != nullptr);
+    uint256 committed;
+    BOOST_CHECK(!ExtractBTCPREVCommitment(*current, committed));
+  }
+}
+
 BOOST_FIXTURE_TEST_CASE(auxpow_miner_doesNotEmbedBTCPREVWhenBTCCDisabled, AuxpowCLReceiptOnlySetup)
 {
   CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
@@ -626,8 +723,7 @@ BOOST_FIXTURE_TEST_CASE(auxpow_miner_doesNotEmbedBTCPREVWhenBTCCDisabled, Auxpow
   CScript scriptPubKey;
 
   // CL receipt rules are active, but BTCC remains at its disabled default.
-  // Move to height 101 so the next template would otherwise be a BTCC
-  // sign-offset block at height 102.
+  // Move to height 101 so the next template can be a PQ BTCC candidate.
   CreateAndProcessBlock({}, scriptPubKey);
   const int next_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
   BOOST_CHECK_EQUAL(next_height, 102);
@@ -641,50 +737,34 @@ BOOST_FIXTURE_TEST_CASE(auxpow_miner_doesNotEmbedBTCPREVWhenBTCCDisabled, Auxpow
   BOOST_CHECK(!ExtractBTCPREVCommitment(*pblock, committed));
 }
 
-struct AuxpowBTCCStartSetup : TestChain100Setup {
-  AuxpowBTCCStartSetup()
-      : TestChain100Setup(ChainType::REGTEST, {"-btccstartheight=102"}) {}
-};
-
-BOOST_FIXTURE_TEST_CASE(auxpow_miner_regeneratesTemplateOnBTCPREVChange, AuxpowBTCCStartSetup)
+BOOST_AUTO_TEST_CASE(auxpow_miner_btcp_cache_key_requires_exact_commitment)
 {
-  CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
-  AuxpowMinerForTest miner;
-  CScript scriptPubKey;
   const uint256 btc_prev_1 = uint256S(std::string(64, '1'));
   const uint256 btc_prev_2 = uint256S(std::string(64, '2'));
+  CDataStream payload{SER_NETWORK, PROTOCOL_VERSION};
+  payload << BTCPREV_MAGIC_BYTES << btc_prev_1;
+  const auto bytes{MakeUCharSpan(payload)};
 
-  // Move to height 101 so next template is for height 102 (sign-offset height).
-  CreateAndProcessBlock({}, scriptPubKey);
-  const int next_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
-  BOOST_CHECK_EQUAL(next_height, 102);
+  CMutableTransaction coinbase;
+  coinbase.vin.resize(1);
+  coinbase.vin[0].prevout.SetNull();
+  coinbase.vout.emplace_back(
+      /*nValue=*/0,
+      CScript{} << OP_RETURN <<
+          std::vector<unsigned char>{bytes.begin(), bytes.end()});
+  CBlock block;
+  block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
 
-  LOCK(miner.cs);
-  uint256 target;
-  const CBlock* pblock1 = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_1);
-  BOOST_REQUIRE(pblock1 != nullptr);
-  const uint256 hash1 = pblock1->GetHash();
-
-  uint256 committed;
-  BOOST_CHECK(ExtractBTCPREVCommitment(*pblock1, committed));
-  BOOST_CHECK_EQUAL(committed, btc_prev_1);
-
-  // Same BTCPREV should reuse the cached template.
-  const CBlock* pblock_same = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_1);
-  BOOST_CHECK(pblock_same == pblock1);
-  BOOST_CHECK_EQUAL(pblock_same->GetHash(), hash1);
-
-  // Different BTCPREV must invalidate and rebuild template.
-  const CBlock* pblock2 = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_2);
-  BOOST_REQUIRE(pblock2 != nullptr);
-  BOOST_CHECK_NE(pblock2->GetHash(), hash1);
-  BOOST_CHECK(ExtractBTCPREVCommitment(*pblock2, committed));
-  BOOST_CHECK_EQUAL(committed, btc_prev_2);
-
-  // After rebuilding, subsequent polls must reuse the new cached template.
-  const CBlock* pblock2_same = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_2);
-  BOOST_CHECK(pblock2_same == pblock2);
-  BOOST_CHECK_EQUAL(pblock2_same->GetHash(), pblock2->GetHash());
+  BOOST_CHECK(AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/false, std::nullopt));
+  BOOST_CHECK(!AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      nullptr, /*required=*/true, btc_prev_1));
+  BOOST_CHECK(!AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/true, std::nullopt));
+  BOOST_CHECK(AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/true, btc_prev_1));
+  BOOST_CHECK(!AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/true, btc_prev_2));
 }
 
 /* ************************************************************************** */

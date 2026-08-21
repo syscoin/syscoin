@@ -5,8 +5,10 @@
 #ifndef SYSCOIN_EVO_PROVIDERTX_H
 #define SYSCOIN_EVO_PROVIDERTX_H
 
-#include <bls/bls.h>
+#include <crypto/legacy_bls.h>
 #include <consensus/validation.h>
+#include <evo/provider_revoke_payload.h>
+#include <llmq/pq_chainlock_types.h>
 #include <primitives/transaction.h>
 
 #include <base58.h>
@@ -16,27 +18,42 @@
 #include <script/script.h>
 #include <key_io.h>
 #include <kernel/cs_main.h>
+
+#include <cstdint>
+#include <optional>
+
 class CBlockIndex;
 class CCoinsViewCache;
+enum class SpecialTxValidationContext : uint8_t;
+
+struct ProviderMutationIdentity {
+    uint256 pro_tx_hash;
+    bool is_pq_revocation{false};
+};
+
+/** Strict, non-throwing decoding for provider-update conflict detection. */
+[[nodiscard]] std::optional<ProviderMutationIdentity>
+DecodeProviderMutationIdentity(const CTransaction& tx) noexcept;
+
 class CProRegTx
 {
 public:
     static constexpr auto SPECIALTX_TYPE = SYSCOIN_TX_VERSION_MN_REGISTER;
     static constexpr uint16_t LEGACY_BLS_VERSION = 1;
     static constexpr uint16_t BASIC_BLS_VERSION = 2;
+    static constexpr uint16_t PQ_VERSION = 3;
 
     [[nodiscard]] static constexpr auto GetVersion(const bool is_basic_scheme_active) -> uint16_t
     {
         return is_basic_scheme_active ? BASIC_BLS_VERSION : LEGACY_BLS_VERSION;
     }
-
     uint16_t nVersion{LEGACY_BLS_VERSION};                 // message version
     uint16_t nType{0};                                     // only 0 supported for now
     uint16_t nMode{0};                                     // only 0 supported for now
     COutPoint collateralOutpoint{uint256(), (uint32_t)-1}; // if hash is null, we refer to a ProRegTx output
     CService addr;
     CKeyID keyIDOwner;
-    CBLSLazyPublicKey pubKeyOperator;
+    CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
     uint16_t nOperatorReward{0};
     CScript scriptPayout;
@@ -48,7 +65,7 @@ public:
         READWRITE(
                 obj.nVersion
         );
-        if (obj.nVersion == 0 || obj.nVersion > BASIC_BLS_VERSION) {
+        if (obj.nVersion == 0 || obj.nVersion > PQ_VERSION) {
             // unknown version, bail out early
             return;
         }
@@ -57,8 +74,11 @@ public:
                 obj.nMode,
                 obj.collateralOutpoint,
                 obj.addr,
-                obj.keyIDOwner,
-                CBLSLazyPublicKeyVersionWrapper(const_cast<CBLSLazyPublicKey&>(obj.pubKeyOperator), (obj.nVersion == LEGACY_BLS_VERSION)),
+                obj.keyIDOwner);
+        if (obj.nVersion <= BASIC_BLS_VERSION) {
+            READWRITE(obj.pubKeyOperator);
+        }
+        READWRITE(
                 obj.keyIDVoting,
                 obj.nOperatorReward,
                 obj.scriptPayout,
@@ -90,7 +110,9 @@ public:
         if (ExtractDestination(scriptPayout, dest)) {
             obj.pushKV("payoutAddress", EncodeDestination(dest));
         }
-        obj.pushKV("pubKeyOperator", pubKeyOperator.ToString());
+        if (nVersion <= BASIC_BLS_VERSION) {
+            obj.pushKV("legacyPubKeyOperator", pubKeyOperator.ToString());
+        }
         obj.pushKV("operatorReward", (double)nOperatorReward / 100);
 
         obj.pushKV("inputsHash", inputsHash.ToString());
@@ -104,18 +126,20 @@ public:
     static constexpr uint16_t LEGACY_BLS_VERSION = 1;
     static constexpr uint16_t BASIC_BLS_VERSION = 2;
     static constexpr uint16_t UPDATE_NEVM_VERSION = 3;
+    static constexpr uint16_t PQ_VERSION = 4;
 
     [[nodiscard]] static constexpr auto GetVersion(const bool is_basic_scheme_active) -> uint16_t
     {
         return is_basic_scheme_active ? UPDATE_NEVM_VERSION : LEGACY_BLS_VERSION;
     }
-
     uint16_t nVersion{LEGACY_BLS_VERSION}; // message version
     uint256 proTxHash;
     CService addr;
     CScript scriptOperatorPayout;
     uint256 inputsHash; // replay protection
-    CBLSSignature sig;
+    CLegacyBLSSignature legacySig;
+    uint32_t globalKeyVersion{0};
+    llmq::pq::GlobalSignature pqSig{};
     std::vector<unsigned char> vchNEVMAddress;
 
     SERIALIZE_METHODS(CProUpServTx, obj)
@@ -123,7 +147,7 @@ public:
         READWRITE(
                 obj.nVersion
         );
-        if (obj.nVersion == 0 || obj.nVersion > UPDATE_NEVM_VERSION) {
+        if (obj.nVersion == 0 || obj.nVersion > PQ_VERSION) {
             // unknown version, bail out early
             return;
         }
@@ -133,10 +157,11 @@ public:
                 obj.scriptOperatorPayout,
                 obj.inputsHash
         );
-        if (!(s.GetType() & SER_GETHASH)) {
-            READWRITE(
-                    CBLSSignatureVersionWrapper(const_cast<CBLSSignature&>(obj.sig), (obj.nVersion == LEGACY_BLS_VERSION))
-            );
+        if (obj.nVersion <= UPDATE_NEVM_VERSION) {
+            if (!(s.GetType() & SER_GETHASH)) READWRITE(obj.legacySig);
+        } else {
+            READWRITE(obj.globalKeyVersion);
+            if (!(s.GetType() & SER_GETHASH)) READWRITE(obj.pqSig);
         }
         if (obj.nVersion >= UPDATE_NEVM_VERSION) {
             READWRITE(obj.vchNEVMAddress);
@@ -170,16 +195,16 @@ public:
     static constexpr auto SPECIALTX_TYPE = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
     static constexpr uint16_t LEGACY_BLS_VERSION = 1;
     static constexpr uint16_t BASIC_BLS_VERSION = 2;
+    static constexpr uint16_t PQ_VERSION = 3;
 
     [[nodiscard]] static constexpr auto GetVersion(const bool is_basic_scheme_active) -> uint16_t
     {
         return is_basic_scheme_active ? BASIC_BLS_VERSION : LEGACY_BLS_VERSION;
     }
-
     uint16_t nVersion{LEGACY_BLS_VERSION}; // message version
     uint256 proTxHash;
     uint16_t nMode{0}; // only 0 supported for now
-    CBLSLazyPublicKey pubKeyOperator;
+    CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
     CScript scriptPayout;
     uint256 inputsHash; // replay protection
@@ -190,14 +215,17 @@ public:
         READWRITE(
                 obj.nVersion
         );
-        if (obj.nVersion == 0 || obj.nVersion > BASIC_BLS_VERSION) {
+        if (obj.nVersion == 0 || obj.nVersion > PQ_VERSION) {
             // unknown version, bail out early
             return;
         }
         READWRITE(
                 obj.proTxHash,
-                obj.nMode,
-                CBLSLazyPublicKeyVersionWrapper(const_cast<CBLSLazyPublicKey&>(obj.pubKeyOperator), (obj.nVersion == LEGACY_BLS_VERSION)),
+                obj.nMode);
+        if (obj.nVersion <= BASIC_BLS_VERSION) {
+            READWRITE(obj.pubKeyOperator);
+        }
+        READWRITE(
                 obj.keyIDVoting,
                 obj.scriptPayout,
                 obj.inputsHash
@@ -223,81 +251,18 @@ public:
         if (ExtractDestination(scriptPayout, dest)) {
             obj.pushKV("payoutAddress", EncodeDestination(dest));
         }
-        obj.pushKV("pubKeyOperator", pubKeyOperator.ToString());
+        if (nVersion <= BASIC_BLS_VERSION) {
+            obj.pushKV("legacyPubKeyOperator", pubKeyOperator.ToString());
+        }
         obj.pushKV("inputsHash", inputsHash.ToString());
     }
 
     bool IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const;
 };
-
-class CProUpRevTx
-{
-public:
-    static constexpr auto SPECIALTX_TYPE = SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
-    static constexpr uint16_t LEGACY_BLS_VERSION = 1;
-    static constexpr uint16_t BASIC_BLS_VERSION = 2;
-
-    [[nodiscard]] static constexpr auto GetVersion(const bool is_basic_scheme_active) -> uint16_t
-    {
-        return is_basic_scheme_active ? BASIC_BLS_VERSION : LEGACY_BLS_VERSION;
-    }
-
-    // these are just informational and do not have any effect on the revocation
-    enum {
-        REASON_NOT_SPECIFIED = 0,
-        REASON_TERMINATION_OF_SERVICE = 1,
-        REASON_COMPROMISED_KEYS = 2,
-        REASON_CHANGE_OF_KEYS = 3,
-        REASON_LAST = REASON_CHANGE_OF_KEYS
-    };
-
-    uint16_t nVersion{LEGACY_BLS_VERSION}; // message version
-    uint256 proTxHash;
-    uint16_t nReason{REASON_NOT_SPECIFIED};
-    uint256 inputsHash; // replay protection
-    CBLSSignature sig;
-
-    SERIALIZE_METHODS(CProUpRevTx, obj)
-    {
-        READWRITE(
-                obj.nVersion
-        );
-        if (obj.nVersion == 0 || obj.nVersion > BASIC_BLS_VERSION) {
-            // unknown version, bail out early
-            return;
-        }
-        READWRITE(
-                obj.proTxHash,
-                obj.nReason,
-                obj.inputsHash
-        );
-        if (!(s.GetType() & SER_GETHASH)) {
-            READWRITE(
-                    CBLSSignatureVersionWrapper(const_cast<CBLSSignature&>(obj.sig), (obj.nVersion == LEGACY_BLS_VERSION))
-            );
-        }
-    }
-
-public:
-    std::string ToString() const;
-
-    void ToJson(UniValue& obj) const
-    {
-        obj.clear();
-        obj.setObject();
-        obj.pushKV("version", nVersion);
-        obj.pushKV("proTxHash", proTxHash.ToString());
-        obj.pushKV("reason", (int)nReason);
-        obj.pushKV("inputsHash", inputsHash.ToString());
-    }
-
-    bool IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const;
-};
-
 
 bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 #endif // SYSCOIN_EVO_PROVIDERTX_H

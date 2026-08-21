@@ -9,6 +9,7 @@
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
+#include <consensus/pq_migration_config.h> // SYSCOIN: validate pinned PQ activation anchors.
 #include <hash.h>
 #include <kernel/messagestartchars.h>
 #include <logging.h>
@@ -89,52 +90,19 @@ static CBlock CreateGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits
     const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
-void CChainParams::UpdateLLMQTestParams(int size, int threshold) {
-    assert(size > 0 && size <= Consensus::MAX_LLMQ_SIZE);
-    assert(threshold > 0 && threshold <= size);
-    auto& params = consensus.llmqTypeChainLocks;
-    params.size = size;
-    params.minSize = threshold;
-    params.threshold = threshold;
-    params.dkgBadVotesThreshold = threshold;
-}
-// this one is for testing only
-static Consensus::LLMQParams llmq_test = {
-        .type = Consensus::LLMQ_TEST,
-        .name = "llmq_test",
+// SYSCOIN: Preserve the historical quorum geometry solely so pre-migration
+// commitment payloads replay identically after the live BLS machinery is
+// removed.
+static constexpr Consensus::LegacyQuorumReplayParams legacy_quorum_test{
         .size = 3,
-        .minSize = 2,
-        .threshold = 2,
-
-        .dkgInterval = 24, // one DKG per hour
-        .dkgPhaseBlocks = 2,
-        .dkgMiningWindowStart = 10, // dkgPhaseBlocks * 5 = after finalization
-        .dkgMiningWindowEnd = 18,
-        .dkgBadVotesThreshold = 2,
-
-        .signingActiveQuorumCount = 4, // just a few ones to allow easier testing
-
-        .keepOldConnections = 5,
-        .recoveryMembers = 3,
+        .minimum_size = 2,
+        .session_interval = 24,
 };
 
-static Consensus::LLMQParams llmq400_60 = {
-        .type = Consensus::LLMQ_400_60,
-        .name = "llmq_400_60",
+static constexpr Consensus::LegacyQuorumReplayParams legacy_quorum_400_60{
         .size = 400,
-        .minSize = 300,
-        .threshold = 240,
-
-        .dkgInterval = 24 * 12, // one DKG every 12 hours
-        .dkgPhaseBlocks = 4,
-        .dkgMiningWindowStart = 20, // dkgPhaseBlocks * 5 = after finalization
-        .dkgMiningWindowEnd = 28,
-        .dkgBadVotesThreshold = 300,
-
-        .signingActiveQuorumCount = 4, // two days worth of LLMQs
-
-        .keepOldConnections = 5,
-        .recoveryMembers = 100,
+        .minimum_size = 300,
+        .session_interval = 24 * 12,
 };
 
 /**
@@ -197,6 +165,8 @@ public:
 
         // By default assume that the signatures in ancestors of this block are valid.
         consensus.defaultAssumeValid = uint256S("0x262e7dbd54af51b6bdaa65638d25ad266cd28fd5fd2e34204a6f051147ac06c0"); // 2198735
+        // SYSCOIN: Keep the height explicit for the BTCC receipt-anchor safety invariant.
+        consensus.nDefaultAssumeValidHeight = 2198735;
         consensus.fStrictChainId = true;
         consensus.nLegacyBlocksBefore = 1;
         consensus.nSYSXAsset = 123456;
@@ -209,8 +179,6 @@ public:
         // Activate canonical receipts with Bridge V2 so legacy parsing cannot
         // remain enabled after the vault-manager cutover.
         consensus.nCLReceiptStartBlock = 2292816;
-        // Deferred until the post-quantum BTCC format and validation path are defined.
-        consensus.nBTCCStartBlock = std::numeric_limits<int>::max();
         // NEVM F=975316 is committed one Core block earlier, making its roots
         // available when manager validation switches at H=2292816.
         consensus.nBridgeV2StartBlock = 2292816;
@@ -263,8 +231,8 @@ public:
         fRequireRoutableExternalIP = true;
         vSporkAddresses = {"sys1qx0zzzjag402apkw4kn8unr0qa0k3pv3258v4sr", "sys1qk2kq7hhp58ycaevzzu5hugh7flxs7qcg8rjjlh", "sys1qm4ka204x3mn46sk6ussrex8um87qkj0r5xakyg"};
         nMinSporkKeys = 2;
-        // long living quorum params
-        consensus.llmqTypeChainLocks = llmq400_60;
+        // SYSCOIN: Preserve the historical quorum replay shape across PQ migration.
+        consensus.legacyQuorumReplay = legacy_quorum_400_60;
         nLLMQConnectionRetryTimeout = 60;
         nFulfilledRequestExpireTime = 60*60; // fulfilled requests expire in 1 hour
         m_is_mockable_chain = false;
@@ -362,6 +330,8 @@ public:
 
         // By default assume that the signatures in ancestors of this block are valid.
         consensus.defaultAssumeValid = uint256S("0x0000000830ccbe479a35536fcc03f4face55205f5c1c53cbd43d51030c686a42"); // 1702505
+        // SYSCOIN: Keep the height explicit for the BTCC receipt-anchor safety invariant.
+        consensus.nDefaultAssumeValidHeight = 1702505;
         consensus.nAuxpowStartHeight = 1;
         consensus.nAuxpowChainId = 8;
         consensus.nAuxpowOldChainId = 4096;
@@ -376,8 +346,6 @@ public:
         consensus.nNEVMStartBlock = 840000;
         // Keep canonical receipt hardening active; do not couple manager switch to this.
         consensus.nCLReceiptStartBlock = 1746000;
-        // Deferred independently from canonical bridge receipt hardening.
-        consensus.nBTCCStartBlock = std::numeric_limits<int>::max();
         // Bridge V2 cutover H, paired with Tanenbaum NEVM F=947000.
         consensus.nBridgeV2StartBlock = 1786999;
         consensus.nNEVMStartTime = 1632775675;
@@ -424,8 +392,8 @@ public:
         // privKey: cU52TqHDWJg6HoL3keZHBvrJgsCLsduRvDFkPyZ5EmeMwoEHshiT
         vSporkAddresses = {"TCGpumHyMXC5BmfkaAQXwB7Bf4kbkhM9BX", "tsys1qgmafz3mqa7glqy92r549w8qmq5535uc2e8ahjm", "tsys1q68gu0fhcchr27w08sjdxwt3rtgwef0nyh9zwk0"};
         nMinSporkKeys = 2;
-        // long living quorum params
-        consensus.llmqTypeChainLocks = llmq400_60;
+        // SYSCOIN: Preserve the historical quorum replay shape across PQ migration.
+        consensus.legacyQuorumReplay = legacy_quorum_400_60;
         nLLMQConnectionRetryTimeout = 60;
         nFulfilledRequestExpireTime = 5*60; // fulfilled requests expire in 5 minutes
         m_is_mockable_chain = false;
@@ -475,6 +443,8 @@ public:
 
             consensus.nMinimumChainWork = uint256S("0x000000000000000000000000000000000000000000000000000001291fc22898");
             consensus.defaultAssumeValid = uint256S("0x000000d1a0e224fa4679d2fb2187ba55431c284fa1b74cbc8cfda866fd4d2c09"); // 105495
+            // SYSCOIN: Keep the height explicit for the BTCC receipt-anchor safety invariant.
+            consensus.nDefaultAssumeValidHeight = 105495;
             m_assumed_blockchain_size = 1;
             m_assumed_chain_state_size = 0;
             chainTxData = ChainTxData{
@@ -487,6 +457,8 @@ public:
             bin = *options.challenge;
             consensus.nMinimumChainWork = uint256{};
             consensus.defaultAssumeValid = uint256{};
+            // SYSCOIN: A custom signet has no compiled assume-valid boundary.
+            consensus.nDefaultAssumeValidHeight = -1;
             m_assumed_blockchain_size = 0;
             m_assumed_chain_state_size = 0;
             chainTxData = ChainTxData{
@@ -611,6 +583,8 @@ public:
 
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
+        // SYSCOIN: Regtest verifies scripts by default.
+        consensus.nDefaultAssumeValidHeight = -1;
         consensus.nAuxpowStartHeight = 0;
         consensus.nAuxpowChainId = 16;
         consensus.nAuxpowOldChainId = 4096;
@@ -625,8 +599,48 @@ public:
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nCLReceiptStartBlock = opts.clreceiptstartblock;
-        // Disabled by default; BTCC-specific tests opt in explicitly.
-        consensus.nBTCCStartBlock = opts.btccstartblock;
+        // SYSCOIN: begin regtest PQ migration and receipt-anchor configuration.
+        if (opts.pqlegacyanchor) {
+            consensus.nPQLegacyAnchorHeight = opts.pqlegacyanchor->height;
+            consensus.hashPQLegacyAnchorBlock =
+                opts.pqlegacyanchor->block_hash;
+            consensus.hashPQLegacyMNState =
+                opts.pqlegacyanchor->dmn_state_hash;
+            consensus.hashPQLegacyPQRegistryState =
+                opts.pqlegacyanchor->pq_registry_state_hash;
+        }
+        if (opts.pqchainlockanchor) {
+            consensus.nPQChainLockAnchorHeight =
+                opts.pqchainlockanchor->height;
+            consensus.hashPQChainLockAnchorBlock =
+                opts.pqchainlockanchor->block_hash;
+        }
+        consensus.nPQPreparationHeight = opts.pqpreparationheight;
+        consensus.nPQChainLockEpochOrigin = opts.pqchainlockepochorigin;
+        consensus.nPQRegistrationCutoffBlocks =
+            static_cast<uint32_t>(std::max(opts.pqregistrationcutoffblocks, 0));
+        // SYSCOIN: Snapshot the deterministic roster after root registration closes.
+        consensus.nPQRosterSnapshotLag = opts.pqrostersnapshotlag;
+        consensus.nPQFutureHorizonEpochs =
+            static_cast<uint32_t>(std::max(opts.pqfuturehorizonepochs, 0));
+        consensus.nPQBTCCCandidateOrigin = opts.pqbtcccandidateorigin;
+        consensus.nPQBTCCNEVMInjectionLag = opts.pqbtccnevminjectionlag;
+        // SYSCOIN: Keep the release-updatable receipt assumption independent
+        // from the immutable DMN/PQ-registry migration anchor.
+        if (opts.pqbtccreceiptanchor) {
+            consensus.nPQBTCCReceiptAnchorHeight =
+                opts.pqbtccreceiptanchor->height;
+            consensus.hashPQBTCCReceiptAnchorBlock =
+                opts.pqbtccreceiptanchor->block_hash;
+            consensus.nPQBTCCReceiptAnchorCursorHeight =
+                opts.pqbtccreceiptanchor->cursor_height;
+            consensus.hashPQBTCCReceiptAnchorCursorSysBlock =
+                opts.pqbtccreceiptanchor->cursor_sys_hash;
+            consensus.hashPQBTCCReceiptAnchorCursorBTCBlock =
+                opts.pqbtccreceiptanchor->cursor_btc_hash;
+            consensus.hashPQBTCCReceiptAnchorState =
+                opts.pqbtccreceiptanchor->receipt_state_hash;
+        }
         // Deferred by default; set via -bridgev2startheight for tests/private nets.
         consensus.nBridgeV2StartBlock = opts.bridgev2startblock;
         consensus.nNEVMStartTime = 0;
@@ -635,6 +649,17 @@ public:
         consensus.nV19StartBlock = opts.v19startblock;
         consensus.DIP0003Height = opts.dip3startblock;
         consensus.DIP0003EnforcementHeight = opts.dip3enforcement;
+        if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
+            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
+            throw std::runtime_error(
+                "Invalid regtest PQ legacy anchor configuration");
+        }
+        if (Consensus::CheckPQChainLockAnchorConfiguration(consensus) ==
+            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
+            throw std::runtime_error(
+                "Invalid regtest PQ ChainLock anchor configuration");
+        }
+        // SYSCOIN: end regtest PQ migration and receipt-anchor configuration.
 
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;
@@ -688,8 +713,8 @@ public:
         // privKey: cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW
         vSporkAddresses = {"mjTkW3DjgyZck4KbiRusZsqTgaYTxdSz6z"};
         nMinSporkKeys = 1;
-        // long living quorum params
-        consensus.llmqTypeChainLocks = llmq_test;
+        // SYSCOIN: Retain a deterministic legacy replay profile for regtest.
+        consensus.legacyQuorumReplay = legacy_quorum_test;
         nLLMQConnectionRetryTimeout = 1; // must be lower then the LLMQ signing session timeout so that tests have control over failing behavior
         nFulfilledRequestExpireTime = 5*60; // fulfilled requests expire in 5 minutes
 

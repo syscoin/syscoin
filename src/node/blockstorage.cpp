@@ -112,6 +112,16 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
         if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
             CDiskBlockIndex diskindex;
             if (pcursor->GetValue(diskindex)) {
+                // SYSCOIN: The final payment-audit cursor binds both the
+                // logical statement and the exact 801-report witness. A
+                // partial local record cannot be reconstructed safely.
+                if (diskindex.pqPaymentAuditReceiptCursorLogicalId.IsNull() !=
+                    diskindex.pqPaymentAuditReceiptCursorWitnessId.IsNull()) {
+                    return error(
+                        "%s: incomplete payment-audit block index; restart "
+                        "with -reindex",
+                        __func__);
+                }
                 // Construct block index object
                 CBlockIndex* pindexNew = insertBlockIndex(diskindex.ConstructBlockHash());
                 pindexNew->pprev          = insertBlockIndex(diskindex.hashPrev);
@@ -124,7 +134,30 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
+                // SYSCOIN: Restore the branch-bound BTC parent commitment and
+                // receipt accumulator before ChainLock import or NEVM replay
+                // can inspect the reconstructed block index.
                 pindexNew->btcpPrevCommitment = diskindex.btcpPrevCommitment;
+                pindexNew->pqBTCCReceiptCursorHeight = diskindex.pqBTCCReceiptCursorHeight;
+                pindexNew->pqBTCCReceiptCursorSysHash = diskindex.pqBTCCReceiptCursorSysHash;
+                pindexNew->pqBTCCReceiptCursorBTCHash = diskindex.pqBTCCReceiptCursorBTCHash;
+                pindexNew->pqBTCCReceiptStateHash = diskindex.pqBTCCReceiptStateHash;
+                pindexNew->pqBTCCReceiptLogicalId =
+                    diskindex.pqBTCCReceiptLogicalId;
+                pindexNew->pqPaymentAuditReceiptCursorHeight =
+                    diskindex.pqPaymentAuditReceiptCursorHeight;
+                pindexNew->pqPaymentAuditReceiptCursorEpoch =
+                    diskindex.pqPaymentAuditReceiptCursorEpoch;
+                pindexNew->pqPaymentAuditReceiptCursorSealHash =
+                    diskindex.pqPaymentAuditReceiptCursorSealHash;
+                pindexNew->pqPaymentAuditReceiptCursorLogicalId =
+                    diskindex.pqPaymentAuditReceiptCursorLogicalId;
+                pindexNew->pqPaymentAuditReceiptCursorWitnessId =
+                    diskindex.pqPaymentAuditReceiptCursorWitnessId;
+                pindexNew->pqPaymentAuditReceiptStateHash =
+                    diskindex.pqPaymentAuditReceiptStateHash;
+                pindexNew->pqPaymentProbationStateHash =
+                    diskindex.pqPaymentProbationStateHash;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
@@ -392,6 +425,30 @@ void BlockManager::UpdatePruneLock(const std::string& name, const PruneLockInfo&
     m_prune_locks[name] = lock_info;
 }
 
+// SYSCOIN: A marker refresh may only retain more history. In particular, a
+// deep reorg first rewinds every live lock to the fork height; replay metadata
+// must not subsequently raise that conservative rollback floor.
+int BlockManager::UpdatePruneLockLowerOnly(
+    const std::string& name,
+    const PruneLockInfo& lock_info)
+{
+    AssertLockHeld(::cs_main);
+    const auto [entry, inserted]{m_prune_locks.try_emplace(name, lock_info)};
+    if (!inserted) {
+        entry->second.height_first = std::min(
+            entry->second.height_first, lock_info.height_first);
+    }
+    return entry->second.height_first;
+}
+
+// SYSCOIN: Erasing is distinct from setting an unbounded height because reorg
+// handling deliberately rewinds every live prune lock.
+void BlockManager::RemovePruneLock(const std::string& name)
+{
+    AssertLockHeld(::cs_main);
+    m_prune_locks.erase(name);
+}
+
 CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
 {
     AssertLockHeld(cs_main);
@@ -497,20 +554,23 @@ bool BlockManager::WriteBlockIndexDB()
     AssertLockHeld(::cs_main);
     std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
     vFiles.reserve(m_dirty_fileinfo.size());
-    for (std::set<int>::iterator it = m_dirty_fileinfo.begin(); it != m_dirty_fileinfo.end();) {
-        vFiles.emplace_back(*it, &m_blockfile_info[*it]);
-        m_dirty_fileinfo.erase(it++);
+    for (const int file : m_dirty_fileinfo) {
+        vFiles.emplace_back(file, &m_blockfile_info[file]);
     }
     std::vector<const CBlockIndex*> vBlocks;
     vBlocks.reserve(m_dirty_blockindex.size());
-    for (std::set<CBlockIndex*>::iterator it = m_dirty_blockindex.begin(); it != m_dirty_blockindex.end();) {
-        vBlocks.push_back(*it);
-        m_dirty_blockindex.erase(it++);
+    for (const CBlockIndex* block : m_dirty_blockindex) {
+        vBlocks.push_back(block);
     }
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
     }
+    // SYSCOIN: A failed batch must remain retryable. This method holds
+    // cs_main, so no caller can add new dirty entries between the snapshots
+    // above and here.
+    m_dirty_fileinfo.clear();
+    m_dirty_blockindex.clear();
     return true;
 }
 
@@ -1298,3 +1358,25 @@ std::ostream& operator<<(std::ostream& os, const BlockfileCursor& cursor) {
     return os;
 }
 } // namespace node
+
+// SYSCOIN: AuxPoW header reconstruction is a block-storage operation. Keeping
+// it beside BlockManager prevents the generic chain index from importing the
+// validation/storage graph, which would make every PQ branch helper cyclic.
+CBlockHeader CBlockIndex::GetBlockHeader(
+    const node::BlockManager& blockman) const
+{
+    CBlockHeader block;
+    block.nVersion = nVersion;
+
+    if (block.IsAuxpow()) {
+        blockman.ReadBlockHeaderFromDisk(block, this);
+        return block;
+    }
+
+    if (pprev) block.hashPrevBlock = pprev->GetBlockHash();
+    block.hashMerkleRoot = hashMerkleRoot;
+    block.nTime = nTime;
+    block.nBits = nBits;
+    block.nNonce = nNonce;
+    return block;
+}

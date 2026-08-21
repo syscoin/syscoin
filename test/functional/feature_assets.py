@@ -47,7 +47,12 @@ class AssetTransactionTest(SyscoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 2
-        self.extra_args = [['-dip3params=0:0'] for _ in range(self.num_nodes)]
+        # SYSCOIN: Exercise the canonical empty DIP3 genesis base and sign the
+        # fixture's local superblock policy before its asset-only chain mines.
+        self.extra_args = [[
+            '-dip3params=0:0',
+            '-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW',
+        ] for _ in range(self.num_nodes)]
 
     def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None, nevm_address=None, spv_proof=None):
         tx_hex = create_transaction_with_selector(
@@ -126,6 +131,12 @@ class AssetTransactionTest(SyscoinTestFramework):
 
     def run_test(self):
         """Main test logic"""
+        # SYSCOIN: This asset-only chain has no PQ governance profile.
+        for node in self.nodes:
+            assert_equal(
+                node.spork("SPORK_9_SUPERBLOCKS_ENABLED", 4070908800),
+                "success",
+            )
         # Setup initial test assets
         self.setup_test_assets()
         self.test_allocation_send()

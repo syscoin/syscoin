@@ -50,6 +50,9 @@ from test_framework.messages import (
     msg_getcfheaders,
     msg_getcfilters,
     msg_getdata,
+    # SYSCOIN: post-quantum ChainLock retrieval.
+    msg_getclsig,
+    msg_getpqpose,
     msg_getheaders,
     msg_headers,
     msg_inv,
@@ -71,11 +74,12 @@ from test_framework.messages import (
     msg_wtxidrelay,
     NODE_NETWORK,
     NODE_WITNESS,
+    PQ_MNAUTH_PROTO_VERSION,  # SYSCOIN: transcript-bound MNAUTH version.
     sha256,
     # Syscoin Specific
-    msg_btccsig,
     msg_clsig,
-    msg_qsendrecsigs,
+    msg_pqclshare,
+    msg_pqposecert,
 )
 from test_framework.util import (
     MAX_NODES,
@@ -87,8 +91,8 @@ logger = logging.getLogger("TestFramework.p2p")
 # The minimum P2P version that this test framework supports
 MIN_P2P_VERSION_SUPPORTED = 60001
 # The P2P version that this test framework implements and sends in its `version` message
-# Version 70016 supports wtxid relay
-P2P_VERSION = 70016
+# SYSCOIN: Version 70018 binds MNAUTH to the complete connection transcript.
+P2P_VERSION = PQ_MNAUTH_PROTO_VERSION
 # The services that this test framework offers in its `version` message
 P2P_SERVICES = NODE_NETWORK | NODE_WITNESS
 # The P2P user agent string that this test framework sends in its `version` message
@@ -126,6 +130,9 @@ MESSAGEMAP = {
     b"getcfheaders": msg_getcfheaders,
     b"getcfilters": msg_getcfilters,
     b"getdata": msg_getdata,
+    # SYSCOIN: post-quantum ChainLock retrieval.
+    b"getclsig": msg_getclsig,
+    b"getpqpose": msg_getpqpose,
     b"getheaders": msg_getheaders,
     b"headers": msg_headers,
     b"inv": msg_inv,
@@ -143,12 +150,14 @@ MESSAGEMAP = {
     b"version": msg_version,
     b"wtxidrelay": msg_wtxidrelay,
     # Syscoin Specific
-    b"btccsig": msg_btccsig,
     b"clsig": msg_clsig,
+    # SYSCOIN: Generic test peers intentionally ignore bounded governance pages.
+    b"getgovpage": None,
     b"getsporks": None,
+    b"govpage": None,
     b"govsync": None,
-    b"qfcommit": None,
-    b"qsendrecsigs": msg_qsendrecsigs,
+    b"pqclshare": msg_pqclshare,
+    b"pqposecert": msg_pqposecert,
     b"spork": None,
 }
 
@@ -443,6 +452,9 @@ class P2PInterface(P2PConnection):
     def on_getblocks(self, message): pass
     def on_getblocktxn(self, message): pass
     def on_getdata(self, message): pass
+    # SYSCOIN: post-quantum ChainLock retrieval.
+    def on_getclsig(self, message): pass
+    def on_getpqpose(self, message): pass
     def on_getheaders(self, message): pass
     def on_headers(self, message): pass
     def on_mempool(self, message): pass
@@ -458,8 +470,8 @@ class P2PInterface(P2PConnection):
 
     # SYSCOIN
     def on_clsig(self, message): pass
-    def on_btccsig(self, message): pass
-    def on_qsendrecsigs(self, message): pass
+    def on_pqclshare(self, message): pass
+    def on_pqposecert(self, message): pass
     def on_inv(self, message):
         want = msg_getdata()
         for i in message.inv:

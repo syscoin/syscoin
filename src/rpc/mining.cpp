@@ -39,6 +39,7 @@
 #include <warnings.h>
 
 #include <memory>
+#include <optional> // SYSCOIN: explicit BTCPREV merge-mining input.
 #include <stdint.h>
 // SYSCOIN
 #include <governance/governanceclasses.h>
@@ -1164,6 +1165,7 @@ static RPCHelpMan submitheader()
     };
 }
 
+// SYSCOIN: begin AuxPoW merge-mining RPCs.
 /* ************************************************************************** */
 /* Merge mining.  */
 static RPCHelpMan createauxblock()
@@ -1173,7 +1175,7 @@ static RPCHelpMan createauxblock()
                 " merge-mine it.\n",
                 {
                     {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Payout address for the coinbase transaction"},
-                    {"btcprevhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional. BTC prev-block hash commitment for BTCC sign-offset blocks. When omitted on non-mine-blocks-on-demand chains, sourced from local BTC header backend."},
+                    {"btcprevhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "BTC parent-prev-block hash committed by candidate-height blocks. Auto-selected from -btcheadercmd when policy is enabled; an explicit value is independently policy-checked."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1186,7 +1188,7 @@ static RPCHelpMan createauxblock()
                         {RPCResult::Type::STR, "bits", "compressed target of the block"},
                         {RPCResult::Type::NUM, "height", "height of the block"},
                         {RPCResult::Type::STR_HEX, "_target", "target in reversed byte order, deprecated"},
-                        {RPCResult::Type::STR_HEX, "_btcprevhash", /*optional=*/true, "BTCPREV committed into the template when required for BTCC sign-offset blocks"},
+                        {RPCResult::Type::STR_HEX, "_btcprevhash", /*optional=*/true, "BTCPREV committed into the template at PQ BTCC candidate heights"},
                     }},
                 RPCExamples{
                   HelpExampleCli("createauxblock", "\"address\"")
@@ -1203,7 +1205,12 @@ static RPCHelpMan createauxblock()
     }
     const CScript scriptPubKey = GetScriptForDestination(coinbaseScript);
 
-    return AuxpowMiner::get ().createAuxBlock(request, scriptPubKey);
+    std::optional<uint256> btc_prev_hash;
+    if (request.params.size() > 1 && !request.params[1].isNull()) {
+        btc_prev_hash = ParseHashV(request.params[1], "btcprevhash");
+    }
+    return AuxpowMiner::get ().createAuxBlock(request, scriptPubKey,
+                                              btc_prev_hash);
 },
     };
 }
@@ -1231,6 +1238,8 @@ static RPCHelpMan submitauxblock()
 },
     };
 }
+// SYSCOIN: end AuxPoW merge-mining RPCs.
+
 void RegisterMiningRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{

@@ -23,12 +23,19 @@ UniValue VoteWithMasternodes(const std::map<uint256, CKeyID>& key_ids,
                              const uint256& hash, vote_signal_enum_t eVoteSignal,
                              vote_outcome_enum_t eVoteOutcome, const CWallet& wallet, CConnman& connman, PeerManager& peerman)
 {
+    int object_type{GOVERNANCE_OBJECT_UNKNOWN};
     {
         LOCK(governance->cs);
         CGovernanceObject *pGovObj = governance->FindGovernanceObject(hash);
         if (!pGovObj) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Governance object not found");
         }
+        object_type = pGovObj->GetObjectType();
+    }
+    if (GetGovernanceVoteAuthPurpose(object_type, eVoteSignal)) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "This vote signal requires the online masternode SLH operator key; the wallet voting key is authorized only for proposal funding");
     }
 
     int nSuccessful = 0;

@@ -6,7 +6,7 @@ index def3211ef4..58420ea898 100644
  #endif
      argsman.AddArg("-blockreconstructionextratxn=<n>", strprintf("Extra transactions to keep in memory for compact block reconstructions (default: %u)", DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
      argsman.AddArg("-blocksonly", strprintf("Whether to reject transactions from network peers. Disables automatic broadcast and rebroadcast of transactions, unless the source peer has the 'forcerelay' permission. RPC transactions are not affected. (default: %u)", DEFAULT_BLOCKSONLY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-+    argsman.AddArg("-headersonly", strprintf("Sync and maintain headers only (disables block body download and implies -blocksonly=1). (default: %u)", DEFAULT_HEADERSONLY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
++    argsman.AddArg("-headersonly", strprintf("Sync and maintain headers only (disables block body download and implies -blocksonly=1). (default: %u)", DEFAULT_HEADERSONLY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS); // SYSCOIN: Security-critical managed Bitcoin view mode.
      argsman.AddArg("-coinstatsindex", strprintf("Maintain coinstats index used by the gettxoutsetinfo RPC (default: %u)", DEFAULT_COINSTATSINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
      argsman.AddArg("-conf=<file>", strprintf("Specify path to read-only configuration file. Relative paths will be prefixed by datadir location (only useable from command line, not configuration file) (default: %s)", BITCOIN_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
      argsman.AddArg("-datadir=<dir>", "Specify data directory", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
@@ -14,10 +14,10 @@ index def3211ef4..58420ea898 100644
              LogInfo("parameter interaction: -externalip set -> setting -discover=0\n");
      }
  
-+    if (args.GetBoolArg("-headersonly", DEFAULT_HEADERSONLY)) {
-+        if (args.SoftSetBoolArg("-blocksonly", true)) {
-+            LogInfo("parameter interaction: -headersonly=1 -> setting -blocksonly=1\n");
-+        }
++    if (args.GetBoolArg("-headersonly", DEFAULT_HEADERSONLY)) { // SYSCOIN: Never permit transaction relay in the managed header view.
++        const bool overridden{!args.GetBoolArg("-blocksonly", DEFAULT_BLOCKSONLY)};
++        args.ForceSetArg("-blocksonly", "1");
++        LogInfo("parameter interaction: -headersonly=1 -> enforcing -blocksonly=1 (override=%d)\n", overridden);
 +    }
 +
      if (args.GetBoolArg("-blocksonly", DEFAULT_BLOCKSONLY)) {
@@ -28,7 +28,7 @@ index def3211ef4..58420ea898 100644
      // libbitcoinkernel.
      chainman.snapshot_download_completed = [&node]() {
 -        if (!node.chainman->m_blockman.IsPruneMode()) {
-+        const bool headers_only_mode = node.args != nullptr && node.args->GetBoolArg("-headersonly", DEFAULT_HEADERSONLY);
++        const bool headers_only_mode = node.args != nullptr && node.args->GetBoolArg("-headersonly", DEFAULT_HEADERSONLY); // SYSCOIN: A header view must not regain block-serving services.
 +        if (!headers_only_mode && !node.chainman->m_blockman.IsPruneMode()) {
              LogInfo("[snapshot] re-enabling NODE_NETWORK services");
              node.connman->AddLocalServices(NODE_NETWORK);
@@ -37,7 +37,7 @@ index def3211ef4..58420ea898 100644
  
      PeerManager::Options peerman_opts{};
      ApplyArgsManOptions(args, peerman_opts);
-+    const bool headers_only_mode{peerman_opts.headers_only};
++    const bool headers_only_mode{peerman_opts.headers_only}; // SYSCOIN: Advertise only services the managed helper actually provides.
 +    if (headers_only_mode) {
 +        g_local_services = ServiceFlags(g_local_services & ~(NODE_NETWORK | NODE_NETWORK_LIMITED | NODE_COMPACT_FILTERS));
 +        LogInfo("Running with -headersonly=1: disabling block-serving service flags");
@@ -49,7 +49,7 @@ index def3211ef4..58420ea898 100644
                  chainstate->PruneAndFlush();
              }
          }
-+    } else if (headers_only_mode) {
++    } else if (headers_only_mode) { // SYSCOIN: Header synchronization never authorizes block serving.
 +        LogInfo("Running node in headers-only mode; keeping NODE_NETWORK services disabled");
      } else {
          // Prior to setting NODE_NETWORK, check if we can provide historical blocks.
@@ -62,7 +62,7 @@ index 9287a67a04..0bf0c3fdbf 100644
  std::optional<std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const CBlockIndex& block_index)
  {
      if (m_chainman.m_blockman.LoadingBlocks()) return "Loading blocks ...";
-+    if (m_opts.headers_only) return "Node is running in -headersonly mode";
++    if (m_opts.headers_only) return "Node is running in -headersonly mode"; // SYSCOIN: Do not fetch bodies on operator demand.
  
      // Ensure this peer exists and hasn't been disconnected
      PeerRef peer = GetPeerRef(peer_id);
@@ -70,7 +70,7 @@ index 9287a67a04..0bf0c3fdbf 100644
   */
  void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
  {
-+    if (m_opts.headers_only) return;
++    if (m_opts.headers_only) return; // SYSCOIN: Header peers must never trigger direct block-body fetches.
 +
      LOCK(cs_main);
      CNodeState *nodestate = State(pfrom.GetId());
@@ -79,7 +79,7 @@ index 9287a67a04..0bf0c3fdbf 100644
              return;
          }
  
-+        if (m_opts.headers_only) {
++        if (m_opts.headers_only) { // SYSCOIN: Retain only the authenticated header from compact blocks.
 +            CBlockHeaderAndShortTxIDs cmpctblock;
 +            vRecv >> cmpctblock;
 +            return ProcessHeadersMessage(pfrom, *peer, std::vector<CBlockHeader>{cmpctblock.header}, /*via_compact_block=*/true);
@@ -92,7 +92,7 @@ index 9287a67a04..0bf0c3fdbf 100644
              return;
          }
  
-+        if (m_opts.headers_only) {
++        if (m_opts.headers_only) { // SYSCOIN: Ignore block-transaction payloads in the managed header view.
 +            return;
 +        }
 +
@@ -103,7 +103,7 @@ index 9287a67a04..0bf0c3fdbf 100644
              return;
          }
  
-+        if (m_opts.headers_only) {
++        if (m_opts.headers_only) { // SYSCOIN: Reduce unsolicited blocks to their PoW-validated header.
 +            CBlockHeader header;
 +            vRecv >> header;
 +            return ProcessHeadersMessage(pfrom, *peer, std::vector<CBlockHeader>{header}, /*via_compact_block=*/false);
@@ -117,7 +117,7 @@ index 9287a67a04..0bf0c3fdbf 100644
          //
          std::vector<CInv> vGetData;
 -        if (CanServeBlocks(*peer) && ((sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)) || !m_chainman.IsInitialBlockDownload()) && state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
-+        if (!m_opts.headers_only && CanServeBlocks(*peer) && ((sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)) || !m_chainman.IsInitialBlockDownload()) && state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
++        if (!m_opts.headers_only && CanServeBlocks(*peer) && ((sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)) || !m_chainman.IsInitialBlockDownload()) && state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) { // SYSCOIN: Never schedule block bodies for the managed header view.
              std::vector<const CBlockIndex*> vToDownload;
              NodeId staller = -1;
              auto get_inflight_budget = [&state]() {
@@ -129,7 +129,7 @@ index 8c140d98ad..5ed0968ba4 100644
  
  /** Whether transaction reconciliation protocol should be enabled by default. */
  static constexpr bool DEFAULT_TXRECONCILIATION_ENABLE{false};
-+/** Whether to run in headers-only mode (no block body download). */
++/** SYSCOIN: Whether the managed Bitcoin view suppresses all block-body download. */
 +static constexpr bool DEFAULT_HEADERSONLY{false};
  /** Default number of non-mempool transactions to keep around for block reconstruction. Includes
      orphan, replaced, and rejected transactions. */
@@ -138,7 +138,7 @@ index 8c140d98ad..5ed0968ba4 100644
          //! Number of headers sent in one getheaders message result (this is
          //! a test-only option).
          uint32_t max_headers_result{MAX_HEADERS_RESULTS};
-+        //! Whether this node should avoid downloading block bodies.
++        //! SYSCOIN: Whether this node should avoid downloading block bodies.
 +        bool headers_only{DEFAULT_HEADERSONLY};
      };
  
@@ -151,7 +151,7 @@ index 59dc592d66..cef5510784 100644
      if (auto value{argsman.GetBoolArg("-capturemessages")}) options.capture_messages = *value;
  
      if (auto value{argsman.GetBoolArg("-blocksonly")}) options.ignore_incoming_txs = *value;
-+    if (auto value{argsman.GetBoolArg("-headersonly")}) options.headers_only = *value;
++    if (auto value{argsman.GetBoolArg("-headersonly")}) options.headers_only = *value; // SYSCOIN: Bind launcher policy into peer behavior.
  }
  
  } // namespace node
@@ -163,7 +163,7 @@ index 4ef863a480..4680bda704 100644
  #include <util/check.h>
  #include <util/fs.h>
  #include <util/strencodings.h>
-+#include <util/time.h>
++#include <util/time.h> // SYSCOIN: Header-tip IBD/freshness derives from adjusted wall time.
  #include <util/syserror.h>
  #include <util/translation.h>
  #include <validation.h>
@@ -171,7 +171,7 @@ index 4ef863a480..4680bda704 100644
      return &blockindex == &tip ? 1 : -1;
  }
  
-+static bool IsHeadersOnlyMode(const JSONRPCRequest& request)
++static bool IsHeadersOnlyMode(const JSONRPCRequest& request) // SYSCOIN: RPCs must expose the PoW-selected header chain.
 +{
 +    const NodeContext& node = EnsureAnyNodeContext(request.context);
 +    return node.args != nullptr && node.args->GetBoolArg("-headersonly", DEFAULT_HEADERSONLY);
@@ -196,11 +196,35 @@ index 4ef863a480..4680bda704 100644
  static const CBlockIndex* ParseHashOrHeight(const UniValue& param, ChainstateManager& chainman)
  {
      LOCK(::cs_main);
-@@ -620,10 +643,11 @@ static RPCHelpMan getblockheader()
+@@ -602,14 +625,19 @@ static RPCHelpMan getblockhash()
+ {
+     ChainstateManager& chainman = EnsureAnyChainman(request.context);
++    const bool headers_only{IsHeadersOnlyMode(request)}; // SYSCOIN: Height lookup follows the canonical header ancestry.
+     LOCK(cs_main);
+     const CChain& active_chain = chainman.ActiveChain();
+-
++
+     int nHeight = request.params[0].getInt<int>();
+-    if (nHeight < 0 || nHeight > active_chain.Height())
++    const CBlockIndex* tip{GetRPCBestTip(chainman, headers_only)};
++    const int tip_height{tip != nullptr ? tip->nHeight : -1};
++    if (nHeight < 0 || nHeight > tip_height)
+         throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
+-
++
+-    const CBlockIndex* pblockindex = active_chain[nHeight];
++    const CBlockIndex* pblockindex{
++        headers_only ? tip->GetAncestor(nHeight) : active_chain[nHeight]};
++    CHECK_NONFATAL(pblockindex != nullptr);
+     return pblockindex->GetBlockHash().GetHex();
+ },
+     };
+ }
+@@ -620,10 +648,11 @@ static RPCHelpMan getblockheader()
      const CBlockIndex* pblockindex;
      const CBlockIndex* tip;
      ChainstateManager& chainman = EnsureAnyChainman(request.context);
-+    const bool headers_only{IsHeadersOnlyMode(request)};
++    const bool headers_only{IsHeadersOnlyMode(request)}; // SYSCOIN: Confirmations derive from the canonical header tip.
      {
          LOCK(cs_main);
          pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
@@ -209,11 +233,11 @@ index 4ef863a480..4680bda704 100644
      }
  
      if (!pblockindex) {
-@@ -1375,24 +1399,26 @@ RPCHelpMan getblockchaininfo()
+@@ -1375,24 +1404,27 @@ RPCHelpMan getblockchaininfo()
          [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
  {
      ChainstateManager& chainman = EnsureAnyChainman(request.context);
-+    const bool headers_only{IsHeadersOnlyMode(request)};
++    const bool headers_only{IsHeadersOnlyMode(request)}; // SYSCOIN: Policy readiness reports header-chain state, not body state.
      LOCK(cs_main);
      Chainstate& active_chainstate = chainman.ActiveChainstate();
  
@@ -226,6 +250,7 @@ index 4ef863a480..4680bda704 100644
      obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
      obj.pushKV("blocks", height);
      obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
++    obj.pushKV("headersonly", headers_only);
 -    obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
 -    obj.pushKV("bits", strprintf("%08x", tip.nBits));
 -    obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -247,11 +272,11 @@ index 4ef863a480..4680bda704 100644
      obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
      obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
      if (chainman.m_blockman.IsPruneMode()) {
-@@ -1544,35 +1570,56 @@ static RPCHelpMan getchaintips()
+@@ -1544,35 +1576,56 @@ static RPCHelpMan getchaintips()
          [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
  {
      ChainstateManager& chainman = EnsureAnyChainman(request.context);
-+    const bool headers_only{IsHeadersOnlyMode(request)};
++    const bool headers_only{IsHeadersOnlyMode(request)}; // SYSCOIN: Fork policy enumerates header-tree leaves.
      LOCK(cs_main);
      CChain& active_chain = chainman.ActiveChain();
 +    const CBlockIndex* reference_tip{headers_only ? CHECK_NONFATAL(GetRPCBestTip(chainman, /*headers_only=*/true)) : active_chain.Tip()};
@@ -324,7 +349,7 @@ index 4ef863a480..4680bda704 100644
  
      /* Construct the output array.  */
      UniValue res(UniValue::VARR);
-@@ -1581,13 +1628,22 @@ static RPCHelpMan getchaintips()
+@@ -1581,13 +1634,22 @@ static RPCHelpMan getchaintips()
          obj.pushKV("height", block->nHeight);
          obj.pushKV("hash", block->phashBlock->GetHex());
  
@@ -344,7 +369,7 @@ index 4ef863a480..4680bda704 100644
              // This block is part of the currently active chain.
              status = "active";
 +        } else if (headers_only && block == reference_tip) {
-+            // This block is part of the selected header-chain reference tip.
++            // SYSCOIN: This block is the selected header-chain reference tip.
 +            status = "active";
          } else if (block->nStatus & BLOCK_FAILED_MASK) {
              // This block or one of its ancestors is invalid.

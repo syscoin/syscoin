@@ -472,11 +472,13 @@ bool IsSyscoinTx(const int &nVersion) {
     return IsAssetAllocationTx(nVersion) || IsSyscoinMintTx(nVersion);
 }
 bool IsMasternodeTx(const int &nVersion) {
+    // SYSCOIN: PQ global-key registration is a masternode transaction.
     return 
      nVersion == SYSCOIN_TX_VERSION_MN_REGISTER ||
      nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
      nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
-     nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
+     nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
+     nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
 }
 
 int GetSyscoinDataOutput(const CTransaction& tx) {

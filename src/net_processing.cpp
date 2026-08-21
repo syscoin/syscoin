@@ -50,6 +50,7 @@
 #include <future>
 #include <memory>
 // SYSCOIN
+#include <limits>
 #include <spork.h>
 #include <governance/governance.h>
 #include <masternode/masternodepayments.h>
@@ -57,18 +58,2162 @@
 #include <masternode/masternodemeta.h>
 #include <evo/deterministicmns.h>
 #include <evo/mnauth.h>
-#include <llmq/quorums.h>
-#include <llmq/quorums_blockprocessor.h>
-#include <llmq/quorums_commitment.h>
-#include <llmq/quorums_dkgsessionmgr.h>
-#include <llmq/quorums_init.h>
-#include <llmq/quorums_signing.h>
-#include <llmq/quorums_signing_shares.h>
 #include <llmq/quorums_chainlocks.h>
-#include <llmq/quorums_btccheckpoints.h>
 #include <optional>
 #include <typeinfo>
 #include <common/args.h>
+
+// SYSCOIN: begin bounded PQ ChainLock and governance relay admission.
+static_assert(
+    ChainLockUploadTracker::MAX_UPLOAD_HISTORY >=
+        llmq::pq::DEFAULT_RECENT_CHAINLOCKS_SIZE + 1,
+    "upload history must cover every normally servable recent/unsealed CLSIG");
+
+bool IsActualTransactionInv(const CInv& inv) noexcept
+{
+    return inv.IsGenTxMsg(/*bJustTx=*/true);
+}
+
+bool SupportsPQChainLocks(int common_version) noexcept
+{
+    return common_version >= PQ_MNAUTH_PROTO_VERSION;
+}
+
+bool CanUseGovernancePageProtocol(const CNode& node)
+{
+    // A masternode may reach governance sync before its one-shot MNAUTH proof
+    // can be exchanged. Its VERSION claim must not remove the bounded page
+    // access an ordinary unauthenticated peer already has; until verification,
+    // all page work remains keyed to the connection's network group.
+    return SupportsGovernancePages(node.GetCommonVersion()) &&
+           !node.IsBlockOnlyConn() &&
+           !node.m_masternode_probe_connection &&
+           (node.CanRelay() ||
+            node.m_masternode_connection ||
+            !node.GetVerifiedProRegTxHash().IsNull());
+}
+
+bool IsValidGovernancePageResponse(
+    const CGovernancePageRequest& request,
+    const CGovernancePageResponse& response) noexcept
+{
+    if (request.nonce == 0 ||
+        request.cursor.IsNull() != request.view_id.IsNull() ||
+        response.scope_hash != request.scope_hash ||
+        response.cursor != request.cursor ||
+        response.request_view_id != request.view_id ||
+        response.nonce != request.nonce ||
+        response.status > GOVERNANCE_PAGE_SCOPE_TOO_LARGE ||
+        response.total_count > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS ||
+        response.inventory.size() > MAX_GOVERNANCE_PAGE_INVENTORY) {
+        return false;
+    }
+
+    if (response.status == GOVERNANCE_PAGE_VIEW_CHANGED) {
+        return !request.view_id.IsNull() && !response.view_id.IsNull() &&
+               response.view_id != request.view_id &&
+               response.inventory.empty() && !response.done &&
+               response.next_cursor == request.cursor;
+    }
+    if (response.status == GOVERNANCE_PAGE_RESTART_REQUIRED) {
+        return response.view_id.IsNull() && response.total_count == 0 &&
+               response.inventory.empty() && !response.done &&
+               response.next_cursor == request.cursor;
+    }
+    if (response.status == GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE ||
+        response.status == GOVERNANCE_PAGE_SCOPE_TOO_LARGE) {
+        return response.view_id.IsNull() && response.total_count == 0 &&
+               response.inventory.empty() && !response.done &&
+               response.next_cursor == request.cursor;
+    }
+    if (response.view_id.IsNull() ||
+        (!request.view_id.IsNull() && response.view_id != request.view_id)) {
+        return false;
+    }
+
+    const uint32_t expected_type{request.scope_hash.IsNull()
+        ? MSG_GOVERNANCE_OBJECT
+        : MSG_GOVERNANCE_OBJECT_VOTE};
+    uint256 previous{request.cursor};
+    for (const CInv& inv : response.inventory) {
+        if (inv.type != expected_type || inv.hash.IsNull() ||
+            !(previous < inv.hash)) {
+            return false;
+        }
+        previous = inv.hash;
+    }
+    if (response.inventory.empty()) {
+        return request.cursor.IsNull() && response.total_count == 0 &&
+               response.done && response.next_cursor.IsNull();
+    }
+    if (response.inventory.size() > response.total_count) return false;
+    if (response.next_cursor != response.inventory.back().hash) {
+        return false;
+    }
+    if (!response.done &&
+        response.inventory.size() != MAX_GOVERNANCE_PAGE_INVENTORY) {
+        return false;
+    }
+    if (request.cursor.IsNull() &&
+        response.done !=
+            (response.inventory.size() == response.total_count)) {
+        return false;
+    }
+    return true;
+}
+
+bool HasTooManyPQCertificateInvs(
+    const std::vector<CInv>& inventory) noexcept
+{
+    std::size_t chainlocks{0};
+    std::size_t payment_audits{0};
+    for (const CInv& inv : inventory) {
+        if (inv.type == MSG_CLSIG &&
+            ++chainlocks >
+                ChainLockRequestTracker::MAX_ANNOUNCEMENTS_PER_PEER) {
+            return true;
+        }
+        if (inv.type == MSG_PQPOSECERT &&
+            ++payment_audits >
+                ChainLockRequestTracker::MAX_ANNOUNCEMENTS_PER_PEER) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ShouldRequestPaymentAuditCertificate(
+    bool operational, bool required_dependency,
+    bool initial_block_download) noexcept
+{
+    return required_dependency ||
+           (operational && !initial_block_download);
+}
+
+bool ShouldProcessPQCertificateAnnouncement(
+    bool peer_already_knows, bool required_dependency) noexcept
+{
+    return !peer_already_knows || required_dependency;
+}
+
+void ChainLockUploadTracker::Announce(const uint256& logical_id)
+{
+    if (logical_id.IsNull()) return;
+    if (std::any_of(m_authorizations.begin(), m_authorizations.end(),
+                    [&](const Authorization& authorization) {
+                        return authorization.logical_id == logical_id;
+                    })) {
+        return;
+    }
+    if (m_authorizations.size() == MAX_ANNOUNCED) {
+        m_authorizations.erase(m_authorizations.begin());
+    }
+    const bool already_uploaded{std::any_of(
+        m_upload_history.begin(), m_upload_history.end(),
+        [&](const auto& upload) {
+            return upload.first == logical_id && upload.second != 0;
+        })};
+    m_authorizations.push_back(
+        Authorization{logical_id, already_uploaded});
+}
+
+bool ChainLockUploadTracker::Reauthorize(
+    const uint256& logical_id, bool upload_budget_reserved)
+{
+    if (logical_id.IsNull()) return false;
+    const auto history{std::find_if(
+        m_upload_history.begin(), m_upload_history.end(),
+        [&](const auto& upload) { return upload.first == logical_id; })};
+    if (history != m_upload_history.end() &&
+        history->second >= MAX_UPLOADS_PER_LOGICAL_ID) {
+        return false;
+    }
+    const auto it{std::find_if(
+        m_authorizations.begin(), m_authorizations.end(),
+        [&](const Authorization& authorization) {
+            return authorization.logical_id == logical_id;
+        })};
+    if (it != m_authorizations.end()) {
+        // An unconsumed targeted authorization is already sufficient for one
+        // GETDATA. Reissuing it would let repeated GETPQPOSE calls keep
+        // triggering archive reads without consuming an upload.
+        if (!it->consumed && it->targeted_request_active) return false;
+        it->consumed = false;
+        it->targeted_request_active = true;
+        it->upload_budget_reserved = upload_budget_reserved;
+        return true;
+    }
+    if (m_authorizations.size() == MAX_ANNOUNCED) {
+        m_authorizations.erase(m_authorizations.begin());
+    }
+    m_authorizations.push_back(Authorization{
+        logical_id, /*consumed=*/false,
+        /*targeted_request_active=*/true, upload_budget_reserved});
+    return true;
+}
+
+bool ChainLockUploadTracker::HasActiveTargetedAuthorization(
+    const uint256& logical_id) const
+{
+    return std::any_of(
+        m_authorizations.begin(), m_authorizations.end(),
+        [&](const Authorization& authorization) {
+            return authorization.logical_id == logical_id &&
+                   !authorization.consumed &&
+                   authorization.targeted_request_active;
+        });
+}
+
+void ChainLockUploadTracker::CancelTargetedAuthorization(
+    const uint256& logical_id)
+{
+    m_authorizations.erase(
+        std::remove_if(
+            m_authorizations.begin(), m_authorizations.end(),
+            [&](const Authorization& authorization) {
+                return authorization.logical_id == logical_id &&
+                       !authorization.consumed &&
+                       authorization.targeted_request_active;
+            }),
+        m_authorizations.end());
+}
+
+bool ChainLockUploadTracker::Consume(
+    const uint256& logical_id, bool* upload_budget_reserved)
+{
+    const auto it{std::find_if(
+        m_authorizations.begin(), m_authorizations.end(),
+        [&](const Authorization& authorization) {
+            return authorization.logical_id == logical_id;
+    })};
+    if (it == m_authorizations.end() || it->consumed) return false;
+    if (upload_budget_reserved != nullptr) {
+        *upload_budget_reserved = it->upload_budget_reserved;
+    }
+    it->consumed = true;
+    it->targeted_request_active = false;
+    it->upload_budget_reserved = false;
+    auto history{std::find_if(
+        m_upload_history.begin(), m_upload_history.end(),
+        [&](const auto& upload) { return upload.first == logical_id; })};
+    if (history == m_upload_history.end()) {
+        if (m_upload_history.size() == MAX_UPLOAD_HISTORY) {
+            m_upload_history.erase(m_upload_history.begin());
+        }
+        m_upload_history.emplace_back(logical_id, 1);
+    } else if (history->second < std::numeric_limits<uint8_t>::max()) {
+        ++history->second;
+    }
+    return true;
+}
+
+bool ChainLockUploadRateLimiter::Consume(
+    const uint256& authenticated_pro_tx, uint64_t keyed_net_group,
+    std::chrono::microseconds now)
+{
+    const SourceIdentity source{
+        authenticated_pro_tx,
+        authenticated_pro_tx.IsNull() ? keyed_net_group : 0};
+    if (source.authenticated_pro_tx.IsNull() &&
+        source.keyed_net_group == 0) {
+        return false;
+    }
+
+    auto bucket{m_buckets.find(source)};
+    if (bucket == m_buckets.end()) {
+        if (m_buckets.size() >= MAX_SOURCES) {
+            for (auto it{m_buckets.begin()}; it != m_buckets.end();) {
+                if (now >= it->second.last_seen &&
+                    now - it->second.last_seen >= SOURCE_EXPIRY) {
+                    it = m_buckets.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        if (m_buckets.size() >= MAX_SOURCES) return false;
+        bucket = m_buckets.emplace(
+            source, Bucket{BURST_UPLOADS, now, now}).first;
+    }
+
+    Bucket& state{bucket->second};
+    if (now > state.last_refill) {
+        const auto elapsed{now - state.last_refill};
+        const auto refills{elapsed / REFILL_INTERVAL};
+        if (refills > 0) {
+            const auto replenished{std::min<uint64_t>(
+                BURST_UPLOADS,
+                static_cast<uint64_t>(state.tokens) +
+                    static_cast<uint64_t>(refills))};
+            state.tokens = static_cast<uint8_t>(replenished);
+            state.last_refill += REFILL_INTERVAL * refills;
+        }
+    }
+    state.last_seen = std::max(state.last_seen, now);
+    if (state.tokens == 0) return false;
+    --state.tokens;
+    return true;
+}
+
+ChainLockRequestTracker::SourceIdentity
+ChainLockRequestTracker::IdentifySource(
+    NodeId peer, const uint256& authenticated_pro_tx,
+    uint64_t keyed_net_group)
+{
+    if (!authenticated_pro_tx.IsNull()) {
+        return SourceIdentity{authenticated_pro_tx, 0, -1};
+    }
+    if (keyed_net_group != 0) {
+        return SourceIdentity{{}, keyed_net_group, -1};
+    }
+    return SourceIdentity{{}, 0, peer};
+}
+
+bool ChainLockRequestTracker::Announce(
+    NodeId peer, const uint256& logical_id, SourcePriority priority,
+    bool required, const uint256& authenticated_pro_tx,
+    uint64_t keyed_net_group)
+{
+    if (peer < 0 || logical_id.IsNull()) return false;
+    const SourceIdentity source_identity{
+        IdentifySource(peer, authenticated_pro_tx, keyed_net_group)};
+
+    if (required && m_required_logical_id != logical_id) {
+        if (m_required_logical_id) ClearRequired(*m_required_logical_id);
+
+        // A block-activation dependency outranks speculative certificate
+        // sync. Cancel every generic lane before admitting the required ID;
+        // a bounded set of late payloads per displaced peer remains
+        // recognizable below.
+        std::vector<uint256> displaced;
+        for (const auto& request : m_in_flight) {
+            if (request.required) continue;
+            RememberCancelled(request.peer, request.logical_id,
+                                request.expiry);
+            displaced.push_back(request.logical_id);
+        }
+        m_in_flight.erase(
+            std::remove_if(
+                m_in_flight.begin(), m_in_flight.end(),
+                [](const InFlight& request) { return !request.required; }),
+            m_in_flight.end());
+        for (const auto& displaced_id : displaced) {
+            RequeueAnnouncement(displaced_id);
+        }
+        m_required_logical_id = logical_id;
+    }
+    if (required) {
+        for (auto& [_, announcements] : m_announcements) {
+            for (auto& announcement : announcements) {
+                if (announcement.logical_id == logical_id) {
+                    announcement.required = true;
+                }
+            }
+        }
+    }
+
+    if (const auto peer_it{m_announcements.find(peer)};
+        peer_it != m_announcements.end()) {
+        auto& announcements{peer_it->second};
+        const auto existing{std::find_if(
+            announcements.begin(), announcements.end(),
+            [&](const Announcement& announcement) {
+                return announcement.logical_id == logical_id;
+            })};
+        if (existing != announcements.end()) {
+            if (static_cast<uint8_t>(priority) >
+                static_cast<uint8_t>(existing->priority)) {
+                existing->priority = priority;
+            }
+            existing->source_identity = source_identity;
+            existing->required = existing->required || required;
+            return true;
+        }
+        if (announcements.size() >= MAX_ANNOUNCEMENTS_PER_PEER) {
+            if (!required) return false;
+
+            // A peer that already advertised generic IDs must still be able
+            // to offer the exact certificate selected by local validation.
+            // Never evict a request which is already consuming bandwidth.
+            auto replacement{announcements.end()};
+            for (auto candidate{announcements.begin()};
+                 candidate != announcements.end(); ++candidate) {
+                if (candidate->required ||
+                    std::any_of(
+                        m_in_flight.begin(), m_in_flight.end(),
+                        [&](const InFlight& request) {
+                            return request.peer == peer &&
+                                   request.logical_id == candidate->logical_id;
+                        })) {
+                    continue;
+                }
+                if (replacement == announcements.end() ||
+                    static_cast<uint8_t>(candidate->priority) <
+                        static_cast<uint8_t>(replacement->priority) ||
+                    (candidate->priority == replacement->priority &&
+                     candidate->sequence > replacement->sequence)) {
+                    replacement = candidate;
+                }
+            }
+            if (replacement == announcements.end()) return false;
+            const uint256 evicted_id{replacement->logical_id};
+            announcements.erase(replacement);
+            if (!HasAnnouncement(evicted_id)) m_attempted.erase(evicted_id);
+        }
+    }
+
+    struct Eviction {
+        NodeId peer{-1};
+        uint256 logical_id;
+        SourcePriority priority{SourcePriority::INBOUND};
+        bool required{false};
+        uint64_t sequence{0};
+    };
+    const auto find_lower_priority_eviction =
+        [&](bool same_logical_id) -> std::optional<Eviction> {
+        std::optional<Eviction> eviction;
+        for (const auto& announcement_entry : m_announcements) {
+            const NodeId candidate_peer{announcement_entry.first};
+            const auto& candidates{announcement_entry.second};
+            for (const auto& candidate : candidates) {
+                const bool lower_rank{
+                    candidate.required != required
+                        ? required && !candidate.required
+                        : static_cast<uint8_t>(candidate.priority) <
+                              static_cast<uint8_t>(priority)};
+                if ((same_logical_id &&
+                     candidate.logical_id != logical_id) ||
+                    !lower_rank ||
+                    std::any_of(
+                        m_in_flight.begin(), m_in_flight.end(),
+                        [&](const InFlight& request) {
+                            return request.peer == candidate_peer &&
+                                   request.logical_id == candidate.logical_id;
+                        })) {
+                    continue;
+                }
+                if (!eviction ||
+                    (candidate.required != eviction->required
+                         ? !candidate.required
+                         : static_cast<uint8_t>(candidate.priority) <
+                                   static_cast<uint8_t>(eviction->priority) ||
+                               (candidate.priority == eviction->priority &&
+                                candidate.sequence > eviction->sequence))) {
+                    eviction = Eviction{
+                        candidate_peer, candidate.logical_id,
+                        candidate.priority, candidate.required,
+                        candidate.sequence};
+                }
+            }
+        }
+        return eviction;
+    };
+    const auto erase_eviction = [&](const Eviction& eviction) {
+        EraseAnnouncement(eviction.peer, eviction.logical_id);
+        if (!HasAnnouncement(eviction.logical_id)) {
+            m_attempted.erase(eviction.logical_id);
+        }
+    };
+
+    std::size_t logical_id_advertisers{0};
+    for (const auto& [_, candidates] : m_announcements) {
+        logical_id_advertisers += static_cast<std::size_t>(std::count_if(
+            candidates.begin(), candidates.end(),
+            [&](const Announcement& candidate) {
+                return candidate.logical_id == logical_id;
+            }));
+    }
+    // The exact locally selected dependency is naturally bounded by live
+    // connections (one advertisement per peer). Capping it independently
+    // would let a full table of Byzantine identities exclude the honest
+    // provider. Generic IDs retain the strict eight-source cap.
+    if (!required &&
+        logical_id_advertisers >= MAX_ANNOUNCERS_PER_LOGICAL_ID) {
+        const auto eviction{find_lower_priority_eviction(
+            /*same_logical_id=*/true)};
+        if (!eviction) return false;
+        erase_eviction(*eviction);
+    }
+
+    std::size_t generic_entries{0};
+    for (const auto& [_, announcements] : m_announcements) {
+        generic_entries += static_cast<std::size_t>(std::count_if(
+            announcements.begin(), announcements.end(),
+            [](const Announcement& announcement) {
+                return !announcement.required;
+            }));
+    }
+    if (!required && generic_entries >= MAX_ANNOUNCEMENTS) {
+        const auto eviction{find_lower_priority_eviction(
+            /*same_logical_id=*/false)};
+        if (!eviction) return false;
+        erase_eviction(*eviction);
+    }
+
+    m_announcements[peer].push_back(
+        Announcement{logical_id, priority, source_identity, required,
+                     m_sequence++});
+    return true;
+}
+
+void ChainLockRequestTracker::EraseAnnouncement(NodeId peer,
+                                                const uint256& logical_id)
+{
+    const auto it{m_announcements.find(peer)};
+    if (it == m_announcements.end()) return;
+    auto& announcements{it->second};
+    announcements.erase(
+        std::remove_if(
+            announcements.begin(), announcements.end(),
+            [&](const Announcement& announcement) {
+                return announcement.logical_id == logical_id;
+            }),
+        announcements.end());
+    if (announcements.empty()) m_announcements.erase(it);
+}
+
+bool ChainLockRequestTracker::HasAnnouncement(
+    const uint256& logical_id) const
+{
+    return std::any_of(
+        m_announcements.begin(), m_announcements.end(),
+        [&](const auto& peer_announcements) {
+            return std::any_of(
+                peer_announcements.second.begin(),
+                peer_announcements.second.end(),
+                [&](const Announcement& announcement) {
+                    return announcement.logical_id == logical_id;
+                });
+        });
+}
+
+void ChainLockRequestTracker::RequeueAnnouncement(
+    const uint256& logical_id)
+{
+    bool found{false};
+    for (auto& [_, announcements] : m_announcements) {
+        for (auto& announcement : announcements) {
+            if (announcement.logical_id != logical_id) continue;
+            announcement.sequence = m_sequence++;
+            found = true;
+        }
+    }
+    if (found) {
+        m_attempted.insert(logical_id);
+    } else {
+        m_attempted.erase(logical_id);
+    }
+}
+
+void ChainLockRequestTracker::RememberCancelled(
+    NodeId peer, const uint256& logical_id,
+    std::chrono::microseconds expiry)
+{
+    auto& cancelled{m_cancelled[peer]};
+    const auto existing{std::find_if(
+        cancelled.begin(), cancelled.end(),
+        [&](const Cancelled& entry) {
+            return entry.logical_id == logical_id;
+        })};
+    if (existing != cancelled.end()) {
+        existing->expiry = std::max(existing->expiry, expiry);
+        return;
+    }
+    if (cancelled.size() == MAX_CANCELLED_PER_PEER) {
+        cancelled.erase(cancelled.begin());
+    }
+    cancelled.push_back(Cancelled{logical_id, expiry});
+}
+
+void ChainLockRequestTracker::Expire(
+    std::chrono::microseconds now,
+    std::vector<InFlight>* expired)
+{
+    if (expired != nullptr) expired->clear();
+    for (auto it{m_cancelled.begin()}; it != m_cancelled.end();) {
+        auto& cancelled{it->second};
+        cancelled.erase(
+            std::remove_if(
+                cancelled.begin(), cancelled.end(),
+                [&](const Cancelled& entry) {
+                    return entry.expiry <= now;
+                }),
+            cancelled.end());
+        if (cancelled.empty()) {
+            it = m_cancelled.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it{m_cooldowns.begin()}; it != m_cooldowns.end();) {
+        if (it->second <= now) {
+            it = m_cooldowns.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it{m_in_flight.begin()}; it != m_in_flight.end();) {
+        if (it->expiry > now) {
+            ++it;
+            continue;
+        }
+        const InFlight stale{*it};
+        EraseAnnouncement(stale.peer, stale.logical_id);
+        RequeueAnnouncement(stale.logical_id);
+        m_cooldowns[stale.source_identity] =
+            now + SOURCE_FAILURE_COOLDOWN;
+        if (expired != nullptr) expired->push_back(stale);
+        it = m_in_flight.erase(it);
+    }
+}
+
+std::optional<uint256> ChainLockRequestTracker::Request(
+    NodeId peer,
+    std::chrono::microseconds now,
+    std::chrono::microseconds expiry,
+    std::vector<InFlight>* expired)
+{
+    Expire(now, expired);
+    if (expiry <= now ||
+        std::any_of(m_in_flight.begin(), m_in_flight.end(),
+                    [&](const InFlight& request) {
+                        return request.peer == peer;
+                    })) {
+        return std::nullopt;
+    }
+
+    std::map<uint256, std::size_t> advertiser_counts;
+    for (const auto& announcement_entry : m_announcements) {
+        const NodeId candidate_peer{announcement_entry.first};
+        const auto& announcements{announcement_entry.second};
+        if (std::any_of(m_in_flight.begin(), m_in_flight.end(),
+                        [&](const InFlight& request) {
+                            return request.peer == candidate_peer;
+                        })) {
+            continue;
+        }
+        for (const auto& announcement : announcements) {
+            if (m_required_logical_id &&
+                (!announcement.required ||
+                 announcement.logical_id != *m_required_logical_id)) {
+                continue;
+            }
+            if (const auto cancelled{m_cancelled.find(candidate_peer)};
+                cancelled != m_cancelled.end() &&
+                (!announcement.required ||
+                 cancelled->second.size() >= MAX_CANCELLED_PER_PEER)) {
+                // A required dependency may immediately reuse a peer with a
+                // canceled response, but only while every outstanding late
+                // response remains identifiable. Refusing a fifth request is
+                // safer than evicting a token and later punishing an honest,
+                // protocol-valid response.
+                continue;
+            }
+            if (m_cooldowns.contains(announcement.source_identity)) {
+                continue;
+            }
+            if (std::any_of(
+                    m_in_flight.begin(), m_in_flight.end(),
+                    [&](const InFlight& request) {
+                        return request.source_identity ==
+                               announcement.source_identity;
+                    })) {
+                continue;
+            }
+            const std::size_t same_id_in_flight{
+                static_cast<std::size_t>(std::count_if(
+                    m_in_flight.begin(), m_in_flight.end(),
+                    [&](const InFlight& request) {
+                        return request.logical_id ==
+                               announcement.logical_id;
+                    }))};
+            const bool logical_lane_available{
+                announcement.required
+                    ? same_id_in_flight < MAX_IN_FLIGHT
+                    : same_id_in_flight == 0};
+            if (logical_lane_available) {
+                ++advertiser_counts[announcement.logical_id];
+            }
+        }
+    }
+
+    struct Candidate {
+        NodeId peer{-1};
+        const Announcement* announcement{nullptr};
+        std::size_t advertiser_count{0};
+        bool attempted{false};
+    };
+    std::optional<Candidate> best;
+    const auto higher_priority = [](SourcePriority lhs,
+                                    SourcePriority rhs) {
+        return static_cast<uint8_t>(lhs) > static_cast<uint8_t>(rhs);
+    };
+    const auto better_candidate = [&](const Candidate& lhs,
+                                      const Candidate& rhs) {
+        if (lhs.announcement->required != rhs.announcement->required) {
+            return lhs.announcement->required;
+        }
+        if (lhs.announcement->priority != rhs.announcement->priority) {
+            return higher_priority(lhs.announcement->priority,
+                                   rhs.announcement->priority);
+        }
+        if (lhs.attempted != rhs.attempted) return !lhs.attempted;
+        if (!lhs.attempted &&
+            lhs.advertiser_count != rhs.advertiser_count) {
+            return lhs.advertiser_count > rhs.advertiser_count;
+        }
+        if (lhs.announcement->sequence != rhs.announcement->sequence) {
+            return lhs.announcement->sequence < rhs.announcement->sequence;
+        }
+        return lhs.peer < rhs.peer;
+    };
+    for (const auto& announcement_entry : m_announcements) {
+        const NodeId candidate_peer{announcement_entry.first};
+        const auto& announcements{announcement_entry.second};
+        if (std::any_of(m_in_flight.begin(), m_in_flight.end(),
+                        [&](const InFlight& request) {
+                            return request.peer == candidate_peer;
+                        })) {
+            continue;
+        }
+        for (const auto& announcement : announcements) {
+            if (m_required_logical_id &&
+                (!announcement.required ||
+                 announcement.logical_id != *m_required_logical_id)) {
+                continue;
+            }
+            if (const auto cancelled{m_cancelled.find(candidate_peer)};
+                cancelled != m_cancelled.end() &&
+                (!announcement.required ||
+                 cancelled->second.size() >= MAX_CANCELLED_PER_PEER)) {
+                continue;
+            }
+            if (m_cooldowns.contains(announcement.source_identity)) {
+                continue;
+            }
+            if (std::any_of(
+                    m_in_flight.begin(), m_in_flight.end(),
+                    [&](const InFlight& request) {
+                        return request.source_identity ==
+                               announcement.source_identity;
+                    })) {
+                continue;
+            }
+            const auto count_it{advertiser_counts.find(
+                announcement.logical_id)};
+            if (count_it == advertiser_counts.end()) continue;
+
+            const std::size_t untrusted_in_flight{static_cast<std::size_t>(
+                std::count_if(
+                    m_in_flight.begin(), m_in_flight.end(),
+                    [](const InFlight& request) {
+                        return request.priority == SourcePriority::INBOUND;
+                    }))};
+            const bool lane_available{
+                m_in_flight.size() < MAX_IN_FLIGHT &&
+                (announcement.priority != SourcePriority::INBOUND ||
+                 untrusted_in_flight < MAX_UNTRUSTED_IN_FLIGHT)};
+            if (!lane_available) continue;
+
+            const Candidate candidate{
+                candidate_peer, &announcement, count_it->second,
+                m_attempted.contains(announcement.logical_id)};
+            if (!best || better_candidate(candidate, *best)) {
+                best = candidate;
+            }
+        }
+    }
+    if (!best || best->peer != peer) return std::nullopt;
+    m_in_flight.push_back(InFlight{
+        peer, best->announcement->logical_id, expiry,
+        best->announcement->priority,
+        best->announcement->source_identity,
+        best->announcement->required,
+        best->advertiser_count});
+    m_attempted.insert(best->announcement->logical_id);
+    return best->announcement->logical_id;
+}
+
+bool ChainLockRequestTracker::IsRequested(
+    NodeId peer, const uint256& logical_id) const
+{
+    return std::any_of(m_in_flight.begin(), m_in_flight.end(),
+                       [&](const InFlight& request) {
+                           return request.peer == peer &&
+                                  request.logical_id == logical_id;
+                       });
+}
+
+std::optional<uint256> ChainLockRequestTracker::RequestedBy(NodeId peer) const
+{
+    const auto it{std::find_if(
+        m_in_flight.begin(), m_in_flight.end(),
+        [&](const InFlight& request) { return request.peer == peer; })};
+    return it == m_in_flight.end()
+        ? std::nullopt
+        : std::optional<uint256>{it->logical_id};
+}
+
+std::optional<uint256> ChainLockRequestTracker::RequiredLogicalId() const
+{
+    return m_required_logical_id;
+}
+
+bool ChainLockRequestTracker::TakeCancelled(
+    NodeId peer, const uint256& logical_id,
+    std::chrono::microseconds now)
+{
+    const auto it{m_cancelled.find(peer)};
+    if (it == m_cancelled.end()) return false;
+    auto& cancelled{it->second};
+    cancelled.erase(
+        std::remove_if(
+            cancelled.begin(), cancelled.end(),
+            [&](const Cancelled& entry) { return entry.expiry <= now; }),
+        cancelled.end());
+    const auto match{std::find_if(
+        cancelled.begin(), cancelled.end(),
+        [&](const Cancelled& entry) {
+            return entry.logical_id == logical_id;
+        })};
+    const bool found{match != cancelled.end()};
+    if (found) cancelled.erase(match);
+    if (cancelled.empty()) m_cancelled.erase(it);
+    return found;
+}
+
+bool ChainLockRequestTracker::HasCancelled(
+    NodeId peer, std::chrono::microseconds now) const
+{
+    const auto it{m_cancelled.find(peer)};
+    if (it == m_cancelled.end()) return false;
+    return std::any_of(
+        it->second.begin(), it->second.end(),
+        [&](const Cancelled& entry) { return entry.expiry > now; });
+}
+
+void ChainLockRequestTracker::ClearRequired(const uint256& logical_id)
+{
+    if (logical_id.IsNull() || m_required_logical_id != logical_id) return;
+    Forget(logical_id);
+}
+
+void ChainLockRequestTracker::ReceivedResponse(
+    NodeId peer, const uint256& logical_id)
+{
+    if (!IsRequested(peer, logical_id)) return;
+
+    EraseAnnouncement(peer, logical_id);
+    m_in_flight.erase(
+        std::remove_if(
+            m_in_flight.begin(), m_in_flight.end(),
+            [&](const InFlight& request) {
+                return request.peer == peer &&
+                       request.logical_id == logical_id;
+        }),
+        m_in_flight.end());
+    RequeueAnnouncement(logical_id);
+}
+
+bool ChainLockRequestTracker::ReceivedFailure(
+    NodeId peer, const uint256& logical_id,
+    std::chrono::microseconds now)
+{
+    const auto request{std::find_if(
+        m_in_flight.begin(), m_in_flight.end(),
+        [&](const InFlight& candidate) {
+            return candidate.peer == peer &&
+                   candidate.logical_id == logical_id;
+        })};
+    if (request == m_in_flight.end()) return false;
+    const SourceIdentity source_identity{request->source_identity};
+
+    EraseAnnouncement(peer, logical_id);
+    m_in_flight.erase(
+        std::remove_if(
+            m_in_flight.begin(), m_in_flight.end(),
+            [&](const InFlight& request) {
+                return request.peer == peer &&
+                       request.logical_id == logical_id;
+            }),
+        m_in_flight.end());
+    m_cooldowns[source_identity] = now + SOURCE_FAILURE_COOLDOWN;
+    RequeueAnnouncement(logical_id);
+    return true;
+}
+
+void ChainLockRequestTracker::UpdateSourceIdentity(
+    NodeId peer, const uint256& authenticated_pro_tx,
+    uint64_t keyed_net_group, SourcePriority priority)
+{
+    if (peer < 0 || authenticated_pro_tx.IsNull()) return;
+    const SourceIdentity stable{
+        IdentifySource(peer, authenticated_pro_tx, keyed_net_group)};
+    const SourceIdentity previous_group{
+        IdentifySource(peer, {}, keyed_net_group)};
+
+    // Authentication can complete while a request is in flight. Carry any
+    // earlier netgroup suppression forward and update both queued and active
+    // records atomically so reconnecting under the stable proTx identity
+    // cannot shed the failure history.
+    if (const auto old{m_cooldowns.find(previous_group)};
+        old != m_cooldowns.end()) {
+        auto& stable_expiry{m_cooldowns[stable]};
+        stable_expiry = std::max(stable_expiry, old->second);
+    }
+    if (const auto it{m_announcements.find(peer)};
+        it != m_announcements.end()) {
+        for (auto& announcement : it->second) {
+            announcement.source_identity = stable;
+            if (static_cast<uint8_t>(priority) >
+                static_cast<uint8_t>(announcement.priority)) {
+                announcement.priority = priority;
+            }
+        }
+    }
+    for (auto& request : m_in_flight) {
+        if (request.peer != peer) continue;
+        request.source_identity = stable;
+        if (static_cast<uint8_t>(priority) >
+            static_cast<uint8_t>(request.priority)) {
+            request.priority = priority;
+        }
+    }
+
+    const auto updated{std::find_if(
+        m_in_flight.begin(), m_in_flight.end(),
+        [&](const InFlight& request) { return request.peer == peer; })};
+    if (updated == m_in_flight.end()) return;
+    const auto duplicate{std::find_if(
+        m_in_flight.begin(), m_in_flight.end(),
+        [&](const InFlight& request) {
+            return request.peer != peer &&
+                   request.source_identity == stable;
+        })};
+    if (duplicate == m_in_flight.end()) return;
+
+    const bool keep_updated{
+        static_cast<uint8_t>(updated->priority) >
+        static_cast<uint8_t>(duplicate->priority)};
+    const std::size_t cancel_index{static_cast<std::size_t>(
+        std::distance(m_in_flight.begin(),
+                      keep_updated ? duplicate : updated))};
+    const InFlight cancelled{m_in_flight[cancel_index]};
+    RememberCancelled(cancelled.peer, cancelled.logical_id,
+                        cancelled.expiry);
+    m_in_flight.erase(m_in_flight.begin() + cancel_index);
+    RequeueAnnouncement(cancelled.logical_id);
+}
+
+void ChainLockRequestTracker::Forget(const uint256& logical_id)
+{
+    for (auto it{m_announcements.begin()}; it != m_announcements.end();) {
+        auto& announcements{it->second};
+        announcements.erase(
+            std::remove_if(
+                announcements.begin(), announcements.end(),
+                [&](const Announcement& announcement) {
+                    return announcement.logical_id == logical_id;
+                }),
+            announcements.end());
+        if (announcements.empty()) {
+            it = m_announcements.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& request : m_in_flight) {
+        if (request.logical_id == logical_id) {
+            RememberCancelled(request.peer, logical_id, request.expiry);
+        }
+    }
+    m_in_flight.erase(
+        std::remove_if(
+            m_in_flight.begin(), m_in_flight.end(),
+            [&](const InFlight& request) {
+                return request.logical_id == logical_id;
+        }),
+        m_in_flight.end());
+    m_attempted.erase(logical_id);
+    if (m_required_logical_id == logical_id) {
+        m_required_logical_id.reset();
+    }
+}
+
+void ChainLockRequestTracker::DisconnectedPeer(
+    NodeId peer, std::chrono::microseconds now)
+{
+    std::vector<InFlight> interrupted;
+    for (const auto& request : m_in_flight) {
+        if (request.peer != peer) continue;
+        interrupted.push_back(request);
+        m_cooldowns[request.source_identity] =
+            now + SOURCE_FAILURE_COOLDOWN;
+    }
+    m_announcements.erase(peer);
+    m_cancelled.erase(peer);
+    m_in_flight.erase(
+        std::remove_if(
+            m_in_flight.begin(), m_in_flight.end(),
+            [&](const InFlight& request) { return request.peer == peer; }),
+        m_in_flight.end());
+    for (const auto& request : interrupted) {
+        RequeueAnnouncement(request.logical_id);
+    }
+}
+
+std::size_t ChainLockRequestTracker::Count(NodeId peer) const
+{
+    const auto it{m_announcements.find(peer)};
+    return it == m_announcements.end() ? 0 : it->second.size();
+}
+
+std::size_t ChainLockRequestTracker::Size() const
+{
+    std::size_t size{0};
+    for (const auto& [_, announcements] : m_announcements) {
+        size += announcements.size();
+    }
+    return size;
+}
+
+bool GovernanceRequestTracker::IsGovernanceInv(const CInv& inv) noexcept
+{
+    return inv.type == MSG_GOVERNANCE_OBJECT ||
+           inv.type == MSG_GOVERNANCE_OBJECT_VOTE;
+}
+
+bool GovernanceRequestTracker::SameInv(const CInv& lhs,
+                                       const CInv& rhs) noexcept
+{
+    return lhs.type == rhs.type && lhs.hash == rhs.hash;
+}
+
+bool GovernanceRequestTracker::IsDeferred(
+    const Announcements& announcements, const CInv& inv) noexcept
+{
+    return std::any_of(
+        announcements.deferred_invs.begin(),
+        announcements.deferred_invs.end(),
+        [&](const CInv& candidate) { return SameInv(candidate, inv); });
+}
+
+void GovernanceRequestTracker::ClearDeferred(
+    Announcements& announcements, const CInv& inv)
+{
+    announcements.deferred_invs.erase(
+        std::remove_if(
+            announcements.deferred_invs.begin(),
+            announcements.deferred_invs.end(),
+            [&](const CInv& candidate) { return SameInv(candidate, inv); }),
+        announcements.deferred_invs.end());
+}
+
+bool GovernanceRequestTracker::Announce(const Source& source,
+                                        const CInv& inv)
+{
+    if (source.peer < 0 || inv.hash.IsNull() || !IsGovernanceInv(inv)) {
+        return false;
+    }
+    auto it{m_announcements.find(source.peer)};
+    if (it != m_announcements.end() &&
+        (it->second.source.authenticated_pro_tx !=
+             source.authenticated_pro_tx ||
+         it->second.source.keyed_net_group != source.keyed_net_group ||
+         it->second.source.outbound != source.outbound)) {
+        return false;
+    }
+    if (it != m_announcements.end() &&
+        std::any_of(it->second.invs.begin(), it->second.invs.end(),
+                    [&](const CInv& candidate) {
+                        return SameInv(candidate, inv);
+                    })) {
+        return true;
+    }
+
+    const auto evict_first_matching =
+        [&](std::optional<NodeId> only_peer, const auto& matches) {
+            for (auto source_it{m_announcements.begin()};
+                 source_it != m_announcements.end(); ++source_it) {
+                if (only_peer && source_it->first != *only_peer) continue;
+                auto& queued{source_it->second.invs};
+                const auto victim{std::find_if(
+                    queued.begin(), queued.end(),
+                    [&](const CInv& candidate) {
+                        if (m_in_flight &&
+                            m_in_flight->source.peer == source_it->first &&
+                            SameInv(m_in_flight->inv, candidate)) {
+                            return false;
+                        }
+                        return matches(source_it->second, candidate);
+                    })};
+                if (victim == queued.end()) continue;
+                const CInv removed{*victim};
+                queued.erase(victim);
+                ClearDeferred(source_it->second, removed);
+                if (queued.empty()) m_announcements.erase(source_it);
+                return true;
+            }
+            return false;
+        };
+    // A parent object can make retained votes usable, while paging repairs a
+    // displaced vote. Never let a new vote displace an object merely because
+    // the bounded peer or global queue is full.
+    const auto evict_for = [&](std::optional<NodeId> only_peer) {
+        const auto deferred_vote =
+            [&](const Announcements& queued, const CInv& candidate) {
+                return candidate.type == MSG_GOVERNANCE_OBJECT_VOTE &&
+                       IsDeferred(queued, candidate);
+            };
+        if (evict_first_matching(only_peer, deferred_vote)) return true;
+        if (inv.type != MSG_GOVERNANCE_OBJECT) return false;
+        const auto vote = [](const Announcements&, const CInv& candidate) {
+            return candidate.type == MSG_GOVERNANCE_OBJECT_VOTE;
+        };
+        if (evict_first_matching(only_peer, vote)) return true;
+        const auto deferred =
+            [&](const Announcements& queued, const CInv& candidate) {
+                return IsDeferred(queued, candidate);
+            };
+        return evict_first_matching(only_peer, deferred);
+    };
+
+    if (it != m_announcements.end() &&
+        it->second.invs.size() >= MAX_ANNOUNCEMENTS_PER_PEER &&
+        !evict_for(source.peer)) {
+        return false;
+    }
+    const std::size_t capacity{
+        MAX_ANNOUNCEMENTS - MAX_GOVERNANCE_PAGE_INVENTORY};
+    if (AnnouncementSize() >= capacity && !evict_for(std::nullopt)) {
+        return false;
+    }
+
+    it = m_announcements.find(source.peer);
+    if (it == m_announcements.end()) {
+        it = m_announcements.emplace(
+            source.peer,
+            Announcements{source, {}, m_sequence++, {}}).first;
+    }
+    auto& announcements{it->second.invs};
+    if (inv.type == MSG_GOVERNANCE_OBJECT) {
+        const auto first_vote{std::find_if(
+            announcements.begin(), announcements.end(),
+            [](const CInv& candidate) {
+                return candidate.type == MSG_GOVERNANCE_OBJECT_VOTE;
+            })};
+        announcements.insert(first_vote, inv);
+    } else {
+        announcements.push_back(inv);
+    }
+    return true;
+}
+
+std::size_t GovernanceRequestTracker::AnnouncementSize() const
+{
+    std::size_t size{0};
+    for (const auto& [_, announcements] : m_announcements) {
+        size += announcements.invs.size();
+    }
+    return size;
+}
+
+bool GovernanceRequestTracker::ReservePageCapacity(const Source& source)
+{
+    const auto it{m_announcements.find(source.peer)};
+    if (it != m_announcements.end()) {
+        if (it->second.source.authenticated_pro_tx !=
+                source.authenticated_pro_tx ||
+            it->second.source.keyed_net_group != source.keyed_net_group ||
+            it->second.source.outbound != source.outbound ||
+            (m_in_flight && m_in_flight->source.peer == source.peer)) {
+            return false;
+        }
+        // The exact page traversal supersedes only this selected source's
+        // lossy announcements. Never discard another source's inventory.
+        m_announcements.erase(it);
+    }
+    return AnnouncementSize() <=
+               MAX_ANNOUNCEMENTS - MAX_GOVERNANCE_PAGE_INVENTORY &&
+           Count(source.peer) == 0;
+}
+
+bool GovernanceRequestTracker::BeginPageSession(
+    const Source& source, std::chrono::microseconds now)
+{
+    if (source.peer < 0 || m_page_session || m_page ||
+        IsSourceCoolingDown(source, now) || !ReservePageCapacity(source)) {
+        return false;
+    }
+    m_page_session = PageSession{source, true};
+    return true;
+}
+
+bool GovernanceRequestTracker::SetPageSessionSource(
+    const Source& source, std::chrono::microseconds now)
+{
+    if (!m_page_session || m_page || source.peer < 0) {
+        return false;
+    }
+    if (m_page_session->source.peer == source.peer) {
+        Source updated{source};
+        const Source& current{m_page_session->source};
+        if ((current.keyed_net_group != 0 &&
+             updated.keyed_net_group != current.keyed_net_group) ||
+            current.outbound != updated.outbound ||
+            (!current.authenticated_pro_tx.IsNull() &&
+             !updated.authenticated_pro_tx.IsNull() &&
+             current.authenticated_pro_tx !=
+                 updated.authenticated_pro_tx)) {
+            return false;
+        }
+        if (updated.authenticated_pro_tx.IsNull()) {
+            updated.authenticated_pro_tx =
+                current.authenticated_pro_tx;
+        }
+        if (IsSourceCoolingDown(updated, now)) return false;
+        m_page_session->source = updated;
+        m_page_session->source_connected = true;
+        return true;
+    }
+    if (IsSourceCoolingDown(source, now)) return false;
+    if (!ReservePageCapacity(source)) return false;
+    m_page_session->source = source;
+    m_page_session->source_connected = true;
+    return true;
+}
+
+void GovernanceRequestTracker::EndPageSession()
+{
+    if (m_in_flight && m_in_flight->page_required) {
+        m_in_flight.reset();
+    }
+    m_page.reset();
+    m_page_session.reset();
+}
+
+bool GovernanceRequestTracker::BeginPage(
+    const CGovernancePageRequest& request,
+    std::chrono::microseconds now, std::chrono::microseconds expiry)
+{
+    ExpirePage(now);
+    if (!m_page_session || !m_page_session->source_connected ||
+        request.nonce == 0 || expiry <= now || m_page || m_in_flight ||
+        request.cursor.IsNull() != request.view_id.IsNull() ||
+        request.nonce <= m_last_page_nonce ||
+        IsSourceCoolingDown(m_page_session->source, now) ||
+        now < m_next_page_time) {
+        return false;
+    }
+    m_page = PageState{
+        request,
+        expiry,
+        std::min(
+            expiry,
+            now + std::chrono::duration_cast<std::chrono::microseconds>(
+                      GOVERNANCE_PAGE_RESPONSE_TIMEOUT)),
+        false,
+        false,
+        std::nullopt,
+        {}};
+    m_page_session->ordinary_request_credit = true;
+    m_last_page_nonce = request.nonce;
+    return true;
+}
+
+bool GovernanceRequestTracker::IsPageRequested(
+    NodeId peer, const CGovernancePageResponse& response) const
+{
+    return m_page_session && m_page && !m_page->failed &&
+           !m_page->response_received &&
+           m_page_session->source.peer == peer &&
+           response.scope_hash == m_page->request.scope_hash &&
+           response.cursor == m_page->request.cursor &&
+           response.request_view_id == m_page->request.view_id &&
+           response.nonce == m_page->request.nonce;
+}
+
+bool GovernanceRequestTracker::ReceivedPage(
+    NodeId peer, const CGovernancePageResponse& response,
+    const std::vector<CInv>& missing, std::chrono::microseconds now)
+{
+    if (!IsPageRequested(peer, response)) return false;
+    if (!IsValidGovernancePageResponse(m_page->request, response)) {
+        RecordSourceFailure(m_page_session->source, now);
+        m_page->failed = true;
+        m_next_page_time = std::max(
+            m_next_page_time,
+            now + std::chrono::duration_cast<std::chrono::microseconds>(
+                      MIN_VERIFICATION_INTERVAL));
+        return false;
+    }
+    // `missing` is local bookkeeping supplied by the client state machine.
+    // Reject an inconsistent caller without attributing its bug or race to
+    // the transport peer.
+    if (missing.size() > MAX_GOVERNANCE_PAGE_INVENTORY ||
+        (response.status != GOVERNANCE_PAGE_OK && !missing.empty())) {
+        return false;
+    }
+    for (std::size_t i{0}; i < missing.size(); ++i) {
+        if (std::none_of(response.inventory.begin(), response.inventory.end(),
+                         [&](const CInv& inv) {
+                             return SameInv(inv, missing[i]);
+                         }) ||
+            std::any_of(missing.begin(), missing.begin() + i,
+                        [&](const CInv& inv) {
+                            return SameInv(inv, missing[i]);
+                        })) {
+            return false;
+        }
+    }
+    if (now >= m_page->response_deadline) {
+        // A canonical response proves that the peer did not stay silent. A
+        // local wall-clock jump can cross the metadata deadline before the
+        // message handler runs, so terminate this attempt without turning the
+        // timing discontinuity into a reconnect-resistant source penalty.
+        m_page->failed = true;
+        m_next_page_time = std::max(
+            m_next_page_time,
+            now + std::chrono::duration_cast<std::chrono::microseconds>(
+                      MIN_VERIFICATION_INTERVAL));
+        return false;
+    }
+
+    m_page->response_received = true;
+    m_page->response = response;
+    m_page->required.clear();
+    for (const CInv& inv : response.inventory) {
+        if (std::any_of(missing.begin(), missing.end(),
+                        [&](const CInv& candidate) {
+                            return SameInv(candidate, inv);
+                        })) {
+            m_page->required.push_back(inv);
+        }
+    }
+    m_next_page_time = std::max(
+        m_next_page_time,
+        now + std::chrono::duration_cast<std::chrono::microseconds>(
+                  MIN_VERIFICATION_INTERVAL));
+    return true;
+}
+
+std::optional<GovernanceRequestTracker::PageResult>
+GovernanceRequestTracker::TakePageResult(std::chrono::microseconds now)
+{
+    Expire(now, nullptr);
+    if (m_page && !m_page->failed && m_page->response_received &&
+        m_page->required.empty()) {
+        PageResult result{
+            m_page_session ? m_page_session->source : Source{},
+            m_page->request,
+            m_page->response,
+            true};
+        m_page.reset();
+        return result;
+    }
+    ExpirePage(now);
+    if (m_in_flight && m_in_flight->verifying) return std::nullopt;
+    if (!m_page ||
+        (!m_page->failed &&
+         (!m_page->response_received || !m_page->required.empty()))) {
+        return std::nullopt;
+    }
+    PageResult result{
+        m_page_session ? m_page_session->source : Source{},
+        m_page->request,
+        m_page->response,
+        !m_page->failed};
+    m_page.reset();
+    return result;
+}
+
+void GovernanceRequestTracker::EraseAnnouncement(NodeId peer,
+                                                 const CInv& inv)
+{
+    const auto it{m_announcements.find(peer)};
+    if (it == m_announcements.end()) return;
+    auto& announcements{it->second.invs};
+    announcements.erase(
+        std::remove_if(announcements.begin(), announcements.end(),
+                       [&](const CInv& candidate) {
+                           return SameInv(candidate, inv);
+                       }),
+        announcements.end());
+    ClearDeferred(it->second, inv);
+    if (announcements.empty()) m_announcements.erase(it);
+}
+
+void GovernanceRequestTracker::RotateAnnouncement(NodeId peer,
+                                                   const CInv& inv)
+{
+    const auto it{m_announcements.find(peer)};
+    if (it == m_announcements.end()) return;
+    auto& announcements{it->second.invs};
+    const auto retry{std::find_if(
+        announcements.begin(), announcements.end(),
+        [&](const CInv& candidate) { return SameInv(candidate, inv); })};
+    if (retry == announcements.end()) return;
+    if (!IsDeferred(it->second, inv)) {
+        it->second.deferred_invs.push_back(inv);
+    }
+    if (std::next(retry) == announcements.end()) return;
+    std::rotate(retry, std::next(retry), announcements.end());
+}
+
+void GovernanceRequestTracker::Expire(
+    std::chrono::microseconds now,
+    std::optional<InFlight>* expired)
+{
+    if (expired != nullptr) expired->reset();
+    if (!m_in_flight || m_in_flight->verifying ||
+        m_in_flight->expiry > now) {
+        return;
+    }
+    const InFlight stale{*m_in_flight};
+    // SYSCOIN: a stable source that withholds the global lane cannot reclaim
+    // it immediately through a reconnect or another fake announcement.
+    RecordSourceFailure(stale.source, now);
+    EraseAnnouncement(stale.source.peer, stale.inv);
+    m_in_flight.reset();
+    if (stale.page_required) {
+        m_page->failed = true;
+    }
+    if (expired != nullptr) *expired = stale;
+}
+
+void GovernanceRequestTracker::ExpirePage(std::chrono::microseconds now)
+{
+    if (!m_page || m_page->failed ||
+        (m_page->response_received ? m_page->deadline
+                                   : m_page->response_deadline) > now ||
+        (m_page->response_received && m_page->required.empty())) {
+        return;
+    }
+    if (!m_page->response_received) {
+        if (m_page_session) {
+            RecordMetadataFailure(m_page_session->source, now);
+        }
+    }
+    m_page->failed = true;
+    if (m_in_flight && m_in_flight->page_required &&
+        !m_in_flight->verifying) {
+        m_in_flight.reset();
+    }
+}
+
+void GovernanceRequestTracker::ResolvePageInv(const CInv& inv)
+{
+    if (!m_page) return;
+    m_page->required.erase(
+        std::remove_if(m_page->required.begin(), m_page->required.end(),
+                       [&](const CInv& candidate) {
+                           return SameInv(candidate, inv);
+                       }),
+        m_page->required.end());
+}
+
+std::optional<GovernanceRequestTracker::Source>
+GovernanceRequestTracker::SelectPageSource(
+    std::chrono::microseconds now) const
+{
+    if (!m_page || !m_page_session) return std::nullopt;
+    if (!m_page_session->source_connected ||
+        !CanConsumeSourceBudget(m_page_session->source, now)) {
+        return std::nullopt;
+    }
+    // A page is an exact claim by its responder. Trying an unrelated
+    // advertiser first would let a NOTFOUND blame or invalidate that claim.
+    return m_page_session->source;
+}
+
+std::optional<CInv> GovernanceRequestTracker::Request(
+    NodeId peer, std::chrono::microseconds now,
+    std::chrono::microseconds expiry,
+    std::optional<InFlight>* expired)
+{
+    Expire(now, expired);
+    ExpirePage(now);
+    if (m_in_flight || now < m_next_request_time || expiry <= now) {
+        return std::nullopt;
+    }
+    if (m_page_session) {
+        if (m_page && !m_page->failed && m_page->response_received &&
+            !m_page->required.empty()) {
+            const CInv inv{m_page->required.front()};
+            const auto source{SelectPageSource(now)};
+            if (!source || source->peer != peer ||
+                !ConsumeSourceBudget(*source, now)) {
+                return std::nullopt;
+            }
+            const auto page_expiry{std::min(
+                now + GOVERNANCE_PAGE_TRANSFER_TIMEOUT,
+                m_page->deadline)};
+            if (page_expiry <= now) {
+                m_page->failed = true;
+                return std::nullopt;
+            }
+            m_in_flight = InFlight{
+                *source, inv, page_expiry, NextRequestId(),
+                /*page_required=*/true, /*verifying=*/false};
+            return inv;
+        }
+        // A sent metadata request does not consume the semantic payload lane.
+        // One ordinary request may escape each begun page while metadata is
+        // outstanding or between continuations. The exact branch above stays
+        // exclusive whenever the page names a missing payload.
+        if (!m_page_session->ordinary_request_credit) {
+            return std::nullopt;
+        }
+    }
+    Announcements* preferred{nullptr};
+    for (auto& [_, announcements] : m_announcements) {
+        if (announcements.invs.empty() ||
+            !CanConsumeSourceBudget(announcements.source, now)) {
+            continue;
+        }
+        const bool candidate_deferred{
+            IsDeferred(announcements, announcements.invs.front())};
+        const bool preferred_deferred{preferred &&
+            IsDeferred(*preferred, preferred->invs.front())};
+        if (preferred == nullptr ||
+            (preferred_deferred && !candidate_deferred) ||
+            (preferred_deferred == candidate_deferred &&
+             (GetSourcePriority(announcements.source) >
+                  GetSourcePriority(preferred->source) ||
+              (GetSourcePriority(announcements.source) ==
+                   GetSourcePriority(preferred->source) &&
+               std::tie(announcements.sequence,
+                        announcements.source.peer) <
+                   std::tie(preferred->sequence,
+                            preferred->source.peer))))) {
+            preferred = &announcements;
+        }
+    }
+    Announcements* const best{preferred};
+    if (best == nullptr || best->source.peer != peer ||
+        !ConsumeSourceBudget(best->source, now)) {
+        return std::nullopt;
+    }
+    const CInv inv{best->invs.front()};
+    if (m_page_session) {
+        m_page_session->ordinary_request_credit = false;
+    }
+    m_in_flight = InFlight{
+        best->source, inv, expiry, NextRequestId(),
+        /*page_required=*/false, /*verifying=*/false};
+    // SYSCOIN: rotate equally trusted sources after every selection.
+    best->sequence = m_sequence++;
+    return inv;
+}
+
+bool GovernanceRequestTracker::IsRequested(NodeId peer,
+                                           const CInv& inv) const
+{
+    return m_in_flight && m_in_flight->source.peer == peer &&
+           SameInv(m_in_flight->inv, inv);
+}
+
+std::optional<GovernanceRequestTracker::ResponseAuthorization>
+GovernanceRequestTracker::BeginResponse(
+    NodeId peer, const CInv& inv, std::chrono::microseconds now)
+{
+    Expire(now, nullptr);
+    ExpirePage(now);
+    if (!IsRequested(peer, inv) || m_in_flight->verifying ||
+        (m_in_flight->page_required &&
+         (!m_page || m_page->failed || now >= m_page->deadline))) {
+        return std::nullopt;
+    }
+    m_in_flight->verifying = true;
+    const bool page_required{m_in_flight->page_required};
+    return ResponseAuthorization{
+        m_in_flight->request_id,
+        peer,
+        inv,
+        page_required,
+        page_required ? m_page->request.scope_hash : uint256{},
+        page_required && m_page_session
+            ? m_page_session->source
+            : Source{}};
+}
+
+bool GovernanceRequestTracker::CompleteResponse(
+    const ResponseAuthorization& authorization, ResponseOutcome outcome,
+    std::chrono::microseconds now)
+{
+    if (!m_in_flight || !m_in_flight->verifying ||
+        m_in_flight->request_id != authorization.request_id ||
+        m_in_flight->source.peer != authorization.peer ||
+        m_in_flight->page_required != authorization.page_required ||
+        !SameInv(m_in_flight->inv, authorization.inv)) {
+        return false;
+    }
+    const CInv inv{authorization.inv};
+    const NodeId peer{authorization.peer};
+    const bool page_required{m_in_flight->page_required};
+    const Source payload_source{m_in_flight->source};
+    const auto advance_cadence{[&] {
+        m_next_request_time = std::max(
+            m_next_request_time,
+            now + std::chrono::duration_cast<std::chrono::microseconds>(
+                      MIN_VERIFICATION_INTERVAL));
+    }};
+
+    if (page_required &&
+        (!m_page || m_page->failed || now >= m_page->deadline)) {
+        if (outcome == ResponseOutcome::NOT_FOUND ||
+            outcome == ResponseOutcome::PAYLOAD_INVALID) {
+            RecordSourceFailure(payload_source, now);
+        } else if (outcome == ResponseOutcome::PAGE_INVALID &&
+                   m_page_session) {
+            RecordSourceFailure(m_page_session->source, now);
+        }
+        m_in_flight.reset();
+        if (outcome != ResponseOutcome::NOT_FOUND) advance_cadence();
+        if (m_page) m_page->failed = true;
+        return true;
+    }
+
+    switch (outcome) {
+    case ResponseOutcome::VALID_OR_EXACT_KNOWN:
+    case ResponseOutcome::VALID_SUPERSEDED:
+        EraseAnnouncement(peer, inv);
+        m_in_flight.reset();
+        advance_cadence();
+        if (page_required) {
+            ResolvePageInv(inv);
+            if (m_page_session &&
+                !m_page_session->source_connected &&
+                !m_page->required.empty()) {
+                RecordSourceFailure(m_page_session->source, now);
+                m_page->failed = true;
+            }
+        }
+        return true;
+
+    case ResponseOutcome::VALID_ORPHAN_STORED:
+        m_in_flight.reset();
+        advance_cadence();
+        if (page_required) {
+            m_page->failed = true;
+        } else {
+            EraseAnnouncement(peer, inv);
+        }
+        return true;
+
+    case ResponseOutcome::NOT_FOUND:
+        // Ordinary INV promises can become stale after announcement when a
+        // newer vote supersedes the advertised entry or local governance
+        // eligibility changes. Exact pages retain immutable payloads, so a
+        // missing page item remains attributable to its transport source.
+        if (page_required) RecordSourceFailure(payload_source, now);
+        EraseAnnouncement(peer, inv);
+        m_in_flight.reset();
+        if (page_required) m_page->failed = true;
+        return true;
+
+    case ResponseOutcome::PAYLOAD_INVALID:
+        RecordSourceFailure(payload_source, now);
+        EraseAnnouncement(peer, inv);
+        m_in_flight.reset();
+        advance_cadence();
+        if (page_required) m_page->failed = true;
+        return true;
+
+    case ResponseOutcome::PAGE_INVALID:
+        if (!page_required || !m_page_session) return false;
+        RecordSourceFailure(m_page_session->source, now);
+        m_in_flight.reset();
+        advance_cadence();
+        m_page->failed = true;
+        return true;
+
+    case ResponseOutcome::LOCAL_CONTEXT_CHANGED:
+        if (!page_required) RotateAnnouncement(peer, inv);
+        m_in_flight.reset();
+        advance_cadence();
+        if (page_required) m_page->failed = true;
+        return true;
+    }
+    return false;
+}
+
+bool GovernanceRequestTracker::ReceivedResponse(
+    NodeId peer, const CInv& inv, std::chrono::microseconds now)
+{
+    // Legacy callers have no semantic admission result. They may consume
+    // ordinary relay requests, but an exact page item must use the explicit
+    // BeginResponse/CompleteResponse token path.
+    if (m_in_flight && m_in_flight->source.peer == peer &&
+        SameInv(m_in_flight->inv, inv) &&
+        m_in_flight->page_required) {
+        return false;
+    }
+    const auto authorization{BeginResponse(peer, inv, now)};
+    return authorization && CompleteResponse(
+        *authorization, ResponseOutcome::VALID_OR_EXACT_KNOWN, now);
+}
+
+bool GovernanceRequestTracker::ReceivedNotFound(
+    NodeId peer, const CInv& inv, std::chrono::microseconds now)
+{
+    const auto authorization{BeginResponse(peer, inv, now)};
+    return authorization && CompleteResponse(
+        *authorization, ResponseOutcome::NOT_FOUND, now);
+}
+
+bool GovernanceRequestTracker::ReceivedFailure(
+    NodeId peer, const CInv& inv, std::chrono::microseconds now)
+{
+    const auto authorization{BeginResponse(peer, inv, now)};
+    return authorization && CompleteResponse(
+        *authorization, ResponseOutcome::PAYLOAD_INVALID, now);
+}
+
+bool GovernanceRequestTracker::ReceivedLocalFailure(
+    NodeId peer, const CInv& inv, std::chrono::microseconds now)
+{
+    const auto authorization{BeginResponse(peer, inv, now)};
+    return authorization && CompleteResponse(
+        *authorization, ResponseOutcome::LOCAL_CONTEXT_CHANGED, now);
+}
+
+bool GovernanceRequestTracker::RejectPage(
+    NodeId peer, const CGovernancePageResponse& response,
+    std::chrono::microseconds now)
+{
+    if (!m_page_session || !m_page || m_page->failed ||
+        m_page->response_received ||
+        m_page_session->source.peer != peer ||
+        response.nonce != m_page->request.nonce) {
+        return false;
+    }
+    RecordSourceFailure(m_page_session->source, now);
+    m_page->failed = true;
+    m_next_page_time = std::max(
+        m_next_page_time,
+        now + std::chrono::duration_cast<std::chrono::microseconds>(
+                  MIN_VERIFICATION_INTERVAL));
+    return true;
+}
+
+bool GovernanceRequestTracker::FailPageSource(
+    NodeId expected_peer, std::chrono::microseconds now)
+{
+    if (!m_page_session || m_page_session->source.peer != expected_peer) {
+        return false;
+    }
+    RecordSourceFailure(m_page_session->source, now);
+    if (m_page) m_page->failed = true;
+    m_next_page_time = std::max(
+        m_next_page_time,
+        now + std::chrono::duration_cast<std::chrono::microseconds>(
+                  MIN_VERIFICATION_INTERVAL));
+    return true;
+}
+
+void GovernanceRequestTracker::UpdateSourceIdentity(
+    NodeId peer, const uint256& authenticated_pro_tx,
+    uint64_t keyed_net_group, bool outbound)
+{
+    if (peer < 0 || authenticated_pro_tx.IsNull()) return;
+
+    const Source previous{peer, keyed_net_group, {}, outbound};
+    const Source authenticated{
+        peer, keyed_net_group, authenticated_pro_tx, outbound};
+    const SourceKeys previous_keys{GetSourceKeys(previous)};
+    const SourceKeys authenticated_keys{GetSourceKeys(authenticated)};
+
+    std::chrono::microseconds pre_auth_cooldown{0};
+    if (const auto it{m_pre_auth_failures.find(peer)};
+        it != m_pre_auth_failures.end()) {
+        if (it->second.keyed_net_group == keyed_net_group) {
+            pre_auth_cooldown = it->second.cooldown_until;
+        }
+        m_pre_auth_failures.erase(it);
+    }
+
+    // Authentication must not mint a fresh request budget. Token state stays
+    // restrictive across both the ProTx and shared netgroup keys, while only
+    // a pre-authentication failure from this connection may seed the new
+    // ProTx cooldown. The netgroup cooldown can also contain a mirrored
+    // failure from an unrelated authenticated masternode behind the same NAT.
+    std::optional<SourceRate> merged;
+    std::chrono::microseconds authenticated_cooldown{pre_auth_cooldown};
+    std::chrono::microseconds netgroup_cooldown{0};
+    const auto merge_key{[&](const SourceKey& key) {
+        const auto it{m_source_rates.find(key)};
+        if (it == m_source_rates.end()) return;
+        if (!merged) {
+            merged = it->second;
+        } else {
+            merged->tokens = std::min(merged->tokens, it->second.tokens);
+            merged->last_refill = std::max(
+                merged->last_refill, it->second.last_refill);
+            merged->last_seen = std::max(
+                merged->last_seen, it->second.last_seen);
+        }
+        if (key.authenticated) {
+            authenticated_cooldown = std::max(
+                authenticated_cooldown,
+                it->second.failure_cooldown_until);
+        } else {
+            netgroup_cooldown = std::max(
+                netgroup_cooldown,
+                it->second.failure_cooldown_until);
+        }
+    }};
+    for (std::size_t i{0}; i < previous_keys.size; ++i) {
+        merge_key(previous_keys.keys[i]);
+    }
+    for (std::size_t i{0}; i < authenticated_keys.size; ++i) {
+        merge_key(authenticated_keys.keys[i]);
+    }
+    if (pre_auth_cooldown > std::chrono::microseconds{0}) {
+        const auto failure_time{
+            pre_auth_cooldown -
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                SOURCE_FAILURE_COOLDOWN)};
+        if (!merged) {
+            // A metadata request does not consume the ordinary source burst,
+            // but its exact-connection cooldown must survive later MNAUTH.
+            merged = SourceRate{
+                SOURCE_BURST, failure_time, failure_time,
+                std::chrono::microseconds{0}};
+        } else {
+            merged->last_seen = std::max(
+                merged->last_seen, failure_time);
+        }
+    }
+    if (merged) {
+        for (std::size_t i{0}; i < authenticated_keys.size; ++i) {
+            merged->failure_cooldown_until =
+                authenticated_keys.keys[i].authenticated
+                    ? authenticated_cooldown
+                    : netgroup_cooldown;
+            GetOrCreateSourceRate(
+                authenticated_keys.keys[i], authenticated_keys,
+                merged->last_seen) = *merged;
+        }
+    }
+
+    if (const auto it{m_announcements.find(peer)};
+        it != m_announcements.end()) {
+        it->second.source = authenticated;
+    }
+    if (m_in_flight && m_in_flight->source.peer == peer) {
+        m_in_flight->source = authenticated;
+    }
+    if (m_page_session && m_page_session->source.peer == peer) {
+        m_page_session->source = authenticated;
+    }
+}
+
+void GovernanceRequestTracker::Forget(const CInv& inv)
+{
+    for (auto it{m_announcements.begin()};
+         it != m_announcements.end();) {
+        auto& announcements{it->second.invs};
+        announcements.erase(
+            std::remove_if(announcements.begin(), announcements.end(),
+                           [&](const CInv& candidate) {
+                               return SameInv(candidate, inv);
+                           }),
+            announcements.end());
+        ClearDeferred(it->second, inv);
+        if (announcements.empty()) {
+            it = m_announcements.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (m_in_flight && SameInv(m_in_flight->inv, inv) &&
+        !m_in_flight->page_required) {
+        m_in_flight.reset();
+    }
+}
+
+void GovernanceRequestTracker::DisconnectedPeer(
+    NodeId peer, std::chrono::microseconds now)
+{
+    m_announcements.erase(peer);
+    if (m_in_flight && m_in_flight->source.peer == peer) {
+        const bool page_required{m_in_flight->page_required};
+        if (!m_in_flight->verifying) {
+            RecordSourceFailure(m_in_flight->source, now);
+            m_in_flight.reset();
+            if (page_required) m_page->failed = true;
+        }
+    }
+    if (m_page_session && m_page_session->source.peer == peer) {
+        m_page_session->source_connected = false;
+        const bool verifying_page_payload{
+            m_in_flight && m_in_flight->verifying &&
+            m_in_flight->page_required};
+        if (m_page && !verifying_page_payload &&
+            (!m_page->response_received || !m_page->required.empty())) {
+            if (m_page->response_received) {
+                RecordSourceFailure(m_page_session->source, now);
+            } else {
+                RecordMetadataFailure(m_page_session->source, now);
+            }
+            m_page->failed = true;
+        }
+    }
+    m_pre_auth_failures.erase(peer);
+}
+
+std::size_t GovernanceRequestTracker::Count(NodeId peer) const
+{
+    const auto it{m_announcements.find(peer)};
+    const std::size_t announced{
+        it == m_announcements.end() ? 0 : it->second.invs.size()};
+    const std::size_t reserved{
+        m_page_session && m_page_session->source_connected &&
+                m_page_session->source.peer == peer
+            ? MAX_GOVERNANCE_PAGE_INVENTORY
+            : 0};
+    return announced + reserved;
+}
+
+std::size_t GovernanceRequestTracker::CountInFlight(NodeId peer) const
+{
+    return m_in_flight && m_in_flight->source.peer == peer ? 1 : 0;
+}
+
+std::size_t GovernanceRequestTracker::Size() const
+{
+    return AnnouncementSize() +
+           (m_page_session && m_page_session->source_connected
+                ? MAX_GOVERNANCE_PAGE_INVENTORY
+                : 0);
+}
+
+bool GovernanceRequestTracker::CanUsePageSource(
+    const Source& source, std::chrono::microseconds now) const
+{
+    return !IsSourceCoolingDown(source, now);
+}
+
+GovernanceRequestTracker::SourceKeys GovernanceRequestTracker::GetSourceKeys(
+    const Source& source) noexcept
+{
+    SourceKeys result{};
+    if (!source.authenticated_pro_tx.IsNull()) {
+        result.keys[result.size++] =
+            SourceKey{true, source.authenticated_pro_tx, 0, -1};
+    }
+    if (source.keyed_net_group != 0) {
+        result.keys[result.size++] =
+            SourceKey{false, {}, source.keyed_net_group, -1};
+    } else if (result.size == 0) {
+        result.keys[result.size++] = SourceKey{false, {}, 0, source.peer};
+    }
+    return result;
+}
+
+int GovernanceRequestTracker::GetSourcePriority(const Source& source) noexcept
+{
+    if (!source.authenticated_pro_tx.IsNull() && source.outbound) return 3;
+    if (source.outbound) return 2;
+    if (!source.authenticated_pro_tx.IsNull()) return 1;
+    return 0;
+}
+
+bool GovernanceRequestTracker::CanConsumeSourceBudget(
+    const Source& source, std::chrono::microseconds now) const
+{
+    if (IsSourceCoolingDown(source, now)) return false;
+    const auto refill_interval{
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            SOURCE_REFILL_INTERVAL)};
+    const SourceKeys keys{GetSourceKeys(source)};
+    for (std::size_t i{0}; i < keys.size; ++i) {
+        const auto it{m_source_rates.find(keys.keys[i])};
+        if (it == m_source_rates.end()) continue;
+        const SourceRate& rate{it->second};
+        if (rate.tokens == 0 &&
+            (now < rate.last_refill ||
+             now - rate.last_refill < refill_interval)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GovernanceRequestTracker::ConsumeSourceBudget(
+    const Source& source, std::chrono::microseconds now)
+{
+    if (!CanConsumeSourceBudget(source, now)) return false;
+    const SourceKeys keys{GetSourceKeys(source)};
+    for (std::size_t i{0}; i < keys.size; ++i) {
+        SourceRate& rate{
+            GetOrCreateSourceRate(keys.keys[i], keys, now)};
+        RefillSourceRate(rate, now);
+        if (rate.tokens == 0) return false;
+        --rate.tokens;
+        rate.last_seen = now;
+    }
+    return true;
+}
+
+void GovernanceRequestTracker::RecordMetadataFailure(
+    const Source& source, std::chrono::microseconds now)
+{
+    const auto cooldown_until{
+        now + std::chrono::duration_cast<std::chrono::microseconds>(
+                  SOURCE_FAILURE_COOLDOWN)};
+    if (source.authenticated_pro_tx.IsNull()) {
+        auto& failure{m_pre_auth_failures[source.peer]};
+        if (failure.keyed_net_group != source.keyed_net_group) {
+            failure = PreAuthFailure{source.keyed_net_group, cooldown_until};
+        } else {
+            failure.cooldown_until = std::max(
+                failure.cooldown_until, cooldown_until);
+        }
+        return;
+    }
+
+    const SourceKeys keys{GetSourceKeys(source)};
+    for (std::size_t i{0}; i < keys.size; ++i) {
+        if (!keys.keys[i].authenticated) continue;
+        SourceRate& rate{
+            GetOrCreateSourceRate(keys.keys[i], keys, now)};
+        // Metadata silence is attributable to a verified identity, but it did
+        // not make a payload promise and must not drain a shared NAT's budget.
+        rate.last_seen = now;
+        rate.failure_cooldown_until = std::max(
+            rate.failure_cooldown_until, cooldown_until);
+        return;
+    }
+}
+
+void GovernanceRequestTracker::RecordSourceFailure(
+    const Source& source, std::chrono::microseconds now)
+{
+    const SourceKeys keys{GetSourceKeys(source)};
+    const auto cooldown_until{
+        now + std::chrono::duration_cast<std::chrono::microseconds>(
+                  SOURCE_FAILURE_COOLDOWN)};
+    const bool can_still_authenticate{
+        m_announcements.contains(source.peer) ||
+        (m_page_session && m_page_session->source.peer == source.peer &&
+         m_page_session->source_connected)};
+    // A verification callback may finish after DisconnectedPeer. Its stable
+    // netgroup cooldown still applies, but that dead connection can no longer
+    // migrate a pre-authentication failure into a ProTx identity.
+    if (source.authenticated_pro_tx.IsNull() && can_still_authenticate) {
+        auto& failure{m_pre_auth_failures[source.peer]};
+        if (failure.keyed_net_group != source.keyed_net_group) {
+            failure = PreAuthFailure{source.keyed_net_group, cooldown_until};
+        } else {
+            failure.cooldown_until = std::max(
+                failure.cooldown_until, cooldown_until);
+        }
+    }
+    for (std::size_t i{0}; i < keys.size; ++i) {
+        SourceRate& rate{
+            GetOrCreateSourceRate(keys.keys[i], keys, now)};
+        // An authenticated failure exhausts that ProTx identity, while the
+        // mirrored netgroup cooldown only prevents an unauthenticated
+        // reconnect from shedding it. Draining the shared netgroup burst here
+        // would transiently stall unrelated authenticated masternodes.
+        if (source.authenticated_pro_tx.IsNull() ||
+            keys.keys[i].authenticated) {
+            rate.tokens = 0;
+        }
+        rate.last_seen = now;
+        rate.failure_cooldown_until = std::max(
+            rate.failure_cooldown_until, cooldown_until);
+    }
+}
+
+bool GovernanceRequestTracker::IsSourceCoolingDown(
+    const Source& source, std::chrono::microseconds now) const
+{
+    if (source.authenticated_pro_tx.IsNull()) {
+        const auto it{m_pre_auth_failures.find(source.peer)};
+        if (it != m_pre_auth_failures.end() &&
+            it->second.keyed_net_group == source.keyed_net_group &&
+            now < it->second.cooldown_until) {
+            return true;
+        }
+    }
+    const SourceKeys keys{GetSourceKeys(source)};
+    for (std::size_t i{0}; i < keys.size; ++i) {
+        const auto it{m_source_rates.find(keys.keys[i])};
+        // Preserve the netgroup cooldown as an unauthenticated reconnect
+        // barrier, but never transfer one authenticated masternode's failure
+        // to another authenticated identity behind the same NAT.
+        const bool cooldown_applies{
+            source.authenticated_pro_tx.IsNull() ||
+            keys.keys[i].authenticated};
+        if (cooldown_applies && it != m_source_rates.end() &&
+            now < it->second.failure_cooldown_until) {
+            return true;
+        }
+    }
+    return false;
+}
+
+GovernanceRequestTracker::SourceRate&
+GovernanceRequestTracker::GetOrCreateSourceRate(
+    const SourceKey& key, const SourceKeys& protected_keys,
+    std::chrono::microseconds now)
+{
+    if (auto it{m_source_rates.find(key)}; it != m_source_rates.end()) {
+        return it->second;
+    }
+    if (m_source_rates.size() >= MAX_SOURCE_RECORDS) {
+        const auto is_protected{[&](const SourceKey& candidate) {
+            return std::any_of(
+                protected_keys.keys.begin(),
+                protected_keys.keys.begin() + protected_keys.size,
+                [&](const SourceKey& protected_key) {
+                    return candidate == protected_key;
+                });
+        }};
+        const auto oldest{std::min_element(
+            m_source_rates.begin(), m_source_rates.end(),
+            [&](const auto& lhs, const auto& rhs) {
+                if (is_protected(lhs.first)) return false;
+                if (is_protected(rhs.first)) return true;
+                return lhs.second.last_seen < rhs.second.last_seen;
+            })};
+        if (oldest != m_source_rates.end() &&
+            !is_protected(oldest->first)) {
+            m_source_rates.erase(oldest);
+        }
+    }
+    return m_source_rates.emplace(
+        key, SourceRate{SOURCE_BURST, now, now,
+                        std::chrono::microseconds{0}}).first->second;
+}
+
+void GovernanceRequestTracker::RefillSourceRate(
+    SourceRate& rate, std::chrono::microseconds now)
+{
+    if (now < rate.last_refill) rate.last_refill = now;
+    const auto refill_interval{
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            SOURCE_REFILL_INTERVAL)};
+    if (now - rate.last_refill < refill_interval) return;
+    const auto refill_count{
+        static_cast<std::size_t>((now - rate.last_refill) /
+                                 refill_interval)};
+    rate.tokens = std::min(SOURCE_BURST, rate.tokens + refill_count);
+    rate.last_refill += refill_interval * refill_count;
+}
+
+uint64_t GovernanceRequestTracker::NextRequestId() noexcept
+{
+    uint64_t result{m_next_request_id++};
+    if (result == 0) result = m_next_request_id++;
+    if (m_next_request_id == 0) ++m_next_request_id;
+    return result;
+}
+// SYSCOIN: end bounded PQ ChainLock and governance relay admission.
+
 /** Headers download timeout.
  *  Timeout = base + per_header * (expected number of headers) */
 static constexpr auto HEADERS_DOWNLOAD_TIMEOUT_BASE = 15min;
@@ -118,7 +2263,6 @@ static constexpr auto OVERLOADED_PEER_TX_DELAY{2s};
 /** How long to wait before downloading a transaction from an additional peer */
 static constexpr auto GETDATA_TX_INTERVAL{60s};
 // SYSCOIN
-static constexpr auto GETDATA_OTHER_INTERVAL{15s};
 /** Limit to avoid sending big packets. Not used in processing incoming GETDATA for compatibility */
 static const unsigned int MAX_GETDATA_SZ = 1000;
 /** Number of blocks that can be requested at any given time from a single peer. */
@@ -207,6 +2351,11 @@ static constexpr uint64_t CMPCTBLOCKS_VERSION{2};
 
 // Internal stuff
 namespace {
+
+// SYSCOIN: A canonical PQ ChainLock is 3,621,236 bytes. Sixty seconds permits
+// an honest peer near 0.5 Mbps to finish one response while the two-lane
+// tracker still rotates withholding sources promptly.
+static constexpr auto CLSIG_REQUEST_TIMEOUT{60s};
 /** Blocks that are in flight, and that are in the queue to be downloaded. */
 struct QueuedBlock {
     /** BlockIndex. We must have this since we only request blocks when we've already validated the header. */
@@ -292,6 +2441,14 @@ struct CNodeState {
     CNodeState(bool is_inbound) : m_is_inbound(is_inbound) {}
 };
 
+// SYSCOIN: Build the bounded PQ MNAUTH worker wake hook.
+CMNAuth::AsyncHooks MakeMNAuthAsyncHooks(CConnman& connman)
+{
+    CMNAuth::AsyncHooks hooks;
+    hooks.wake = [&connman] { connman.WakeMessageHandler(); };
+    return hooks;
+}
+
 class PeerManagerImpl final : public PeerManager
 {
 public:
@@ -306,6 +2463,10 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_recent_confirmed_transactions_mutex);
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    // SYSCOIN: Publish fork services and wake relay when public IBD ends
+    // without a later tip update.
+    void InitialBlockDownloadCompleted(
+        const CBlockIndex* tip, ChainstateManager& chainman) override;
     void BlockChecked(const CBlock& block, const BlockValidationState& state) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) override
@@ -314,8 +2475,12 @@ public:
     /** Implement NetEventsInterface */
     void InitializeNode(CNode& node, ServiceFlags our_services) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void FinalizeNode(const CNode& node) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex);
+    // SYSCOIN: Drain bounded PQ MNAUTH worker completions.
+    void ProcessAsyncCompletions() override
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    // SYSCOIN: PQ message handling can acquire cs_main downstream.
     bool ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_recent_confirmed_transactions_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main, !m_peer_mutex, !m_recent_confirmed_transactions_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex);
     bool SendMessages(CNode* pto) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_recent_confirmed_transactions_mutex, !m_most_recent_block_mutex, g_msgproc_mutex);
 
@@ -325,11 +2490,12 @@ public:
     std::optional<std::string> FetchBlock(NodeId peer_id, const CBlockIndex& block_index) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    // SYSCOIN: Expose bounded PQ MNAUTH worker statistics.
+    CMNAuthAsyncStats GetMNAuthAsyncStats() const override;
     bool IgnoresIncomingTxs() override { return m_opts.ignore_incoming_txs; }
     void SendPings() override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void RelayTransaction(const uint256& txid, const uint256& wtxid) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     // SYSCOIN
-    void RelayRecoveredSig(const uint256& sigHash) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void PushTxInventory(Peer& peer, const uint256& txid, const uint256& wtxid) override;
     void RelayInv(const CInv &inv) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void PushTxInventoryOther(Peer& peer, const CInv& inv) override;
@@ -337,12 +2503,78 @@ public:
     void UnitTestMisbehaving(NodeId peer_id, int howmuch) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), howmuch, ""); };
     // SYSCOIN
     void Misbehaving(Peer& peer, int howmuch, const std::string& message) override;
+    // SYSCOIN: PQ CLSIG/PQCLSHARE dispatch can acquire cs_main downstream.
     void ProcessMessage(CNode& pfrom, const std::string& msg_type, CDataStream& vRecv,
                         const std::chrono::microseconds time_received, const std::atomic<bool>& interruptMsgProc) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_recent_confirmed_transactions_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main, !m_peer_mutex, !m_recent_confirmed_transactions_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex);
     // SYSCOIN
     size_t GetRequestedCount(NodeId nodeId) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsRequested(NodeId nodeId, const uint256& hash) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::optional<uint256> GetRequestedChainLock(NodeId nodeId) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::optional<uint256> GetRequestedPaymentAudit(
+        NodeId nodeId) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool TakeCancelledChainLockResponse(
+        NodeId nodeId, const uint256& logical_id) override
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool HasCancelledPaymentAuditResponse(NodeId nodeId) const override
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool TakeCancelledPaymentAuditResponse(
+        NodeId nodeId, const uint256& witness_id) override
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::optional<GovernanceRequestTracker::ResponseAuthorization>
+    BeginGovernanceResponse(NodeId nodeId, const CInv& inv) override
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main, !m_peer_mutex);
+    bool CompleteGovernanceResponse(
+        const GovernanceRequestTracker::ResponseAuthorization& authorization,
+        GovernanceRequestTracker::ResponseOutcome outcome) override
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main);
+    std::optional<
+        std::shared_ptr<const GovernancePageImmutableSnapshot>>
+    PrepareGovernancePageRequest(
+        CNode& node, const CGovernancePageRequest& request) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    bool SendGovernancePage(
+        CNode& node, const GovernancePageBuildResult& page) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    bool BeginGovernancePageSession(CNode& node) override;
+    bool CanUseGovernancePageSource(const CNode& node) const override;
+    bool SetGovernancePageSessionSource(CNode& node) override;
+    void EndGovernancePageSession() override;
+    bool RequestGovernancePage(
+        CNode& node, const CGovernancePageRequest& request,
+        std::chrono::microseconds expiry) override;
+    bool IsGovernancePageRequested(
+        NodeId node_id,
+        const CGovernancePageResponse& response) const override;
+    bool ReceiveGovernancePage(
+        NodeId node_id, const CGovernancePageResponse& response,
+        const std::vector<CInv>& missing) override;
+    bool RejectGovernancePage(
+        NodeId node_id,
+        const CGovernancePageResponse& response) override;
+    bool FailGovernancePageSource(NodeId expected_peer) override;
+    std::optional<GovernanceRequestTracker::PageResult>
+    TakeGovernancePageResult() override;
     void ReceivedResponse(NodeId nodeId, const uint256& hash) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, ::cs_main);
+    void ReceivedChainLockFailure(NodeId nodeId,
+                                  const uint256& hash) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, ::cs_main);
+    void ReceivedPaymentAuditResponse(NodeId nodeId,
+                                      const uint256& hash) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, ::cs_main);
+    void ReceivedPaymentAuditFailure(NodeId nodeId,
+                                     const uint256& hash) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, ::cs_main);
+    void ForgetPaymentAudit(const uint256& hash) override
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void UpdateChainLockSourceIdentity(
+        NodeId nodeId, const uint256& authenticated_pro_tx,
+        uint64_t keyed_net_group, bool outbound) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    void UpdateGovernanceSourceIdentity(
+        NodeId nodeId, const uint256& authenticated_pro_tx,
+        uint64_t keyed_net_group, bool outbound) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void ForgetTxHash(NodeId nodeId, const uint256& hash) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, ::cs_main);
     // SYSCOIN
     bool IsBanned(NodeId nodeid) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -531,12 +2763,27 @@ private:
 
     const CChainParams& m_chainparams;
     CConnman& m_connman;
+    // SYSCOIN: Bounded asynchronous PQ MNAUTH execution.
+    CMNAuth::AsyncProcessor m_mnauth_async;
     AddrMan& m_addrman;
     /** Pointer to this node's banman. May be nullptr - check existence before dereferencing. */
     BanMan* const m_banman;
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     TxRequestTracker m_txrequest GUARDED_BY(::cs_main);
+    // SYSCOIN: Large PQ certificates and trigger votes use dedicated bounded
+    // request/rate state so they cannot monopolize Bitcoin's transaction
+    // request tracker or mint unbounded uploads across reconnects.
+    ChainLockRequestTracker m_clsig_requests GUARDED_BY(::cs_main);
+    ChainLockRequestTracker m_payment_audit_requests GUARDED_BY(::cs_main);
+    GovernanceRequestTracker m_governance_requests GUARDED_BY(::cs_main);
+    ChainLockUploadRateLimiter m_clsig_upload_rate
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    // A speculative payment-audit INV must not consume upload capacity, but
+    // it also must not cause an unbounded archive lookup before request-table
+    // admission. Keep its reconnect-resistant budget independent.
+    ChainLockUploadRateLimiter m_payment_audit_inv_probe_rate
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
     std::unique_ptr<TxReconciliationTracker> m_txreconciliation;
 
     /** The height of the best chain */
@@ -1297,17 +3544,17 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
         }
     }
 }
+// SYSCOIN: Fork inventories use transfer-aware retry timing.
 std::chrono::microseconds GetAdditionalTxRequestDelay(uint32_t invType)
 {
     // some messages need to be re-requested faster when the first announcing peer did not answer to GETDATA
     switch(invType)
     {
-        case MSG_QUORUM_RECOVERED_SIG:
-            return GETDATA_OTHER_INTERVAL;
         case MSG_CLSIG:
-            return std::chrono::milliseconds{100};
-        case MSG_BTCCSIG:
-            return std::chrono::milliseconds{100};
+        case MSG_PQPOSECERT:
+            // Allow one full PQ certificate to transfer and decode
+            // across ordinary internet links before requesting another peer.
+            return CLSIG_REQUEST_TIMEOUT;
         default:
             return GETDATA_TX_INTERVAL;
     }
@@ -1324,7 +3571,588 @@ unsigned int GetMaxInv() {
 }
 size_t PeerManagerImpl::GetRequestedCount(NodeId nodeId) const {
     AssertLockHeld(::cs_main); // For m_txrequest
-    return m_txrequest.CountInFlight(nodeId);
+    return m_txrequest.CountInFlight(nodeId) +
+           m_governance_requests.CountInFlight(nodeId) +
+           m_clsig_requests.Count(nodeId) +
+           m_payment_audit_requests.Count(nodeId);
+}
+bool PeerManagerImpl::IsRequested(NodeId nodeId, const uint256& hash) const {
+    AssertLockHeld(::cs_main);
+    return m_clsig_requests.IsRequested(nodeId, hash) ||
+           m_payment_audit_requests.IsRequested(nodeId, hash) ||
+           m_txrequest.IsRequested(nodeId, hash);
+}
+std::optional<uint256> PeerManagerImpl::GetRequestedChainLock(
+    NodeId nodeId) const
+{
+    AssertLockHeld(::cs_main);
+    return m_clsig_requests.RequestedBy(nodeId);
+}
+
+std::optional<uint256> PeerManagerImpl::GetRequestedPaymentAudit(
+    NodeId nodeId) const
+{
+    AssertLockHeld(::cs_main);
+    return m_payment_audit_requests.RequestedBy(nodeId);
+}
+
+bool PeerManagerImpl::TakeCancelledChainLockResponse(
+    NodeId nodeId, const uint256& logical_id)
+{
+    AssertLockHeld(::cs_main);
+    return m_clsig_requests.TakeCancelled(
+        nodeId, logical_id, GetTime<std::chrono::microseconds>());
+}
+
+bool PeerManagerImpl::HasCancelledPaymentAuditResponse(NodeId nodeId) const
+{
+    AssertLockHeld(::cs_main);
+    return m_payment_audit_requests.HasCancelled(
+        nodeId, GetTime<std::chrono::microseconds>());
+}
+
+bool PeerManagerImpl::TakeCancelledPaymentAuditResponse(
+    NodeId nodeId, const uint256& witness_id)
+{
+    AssertLockHeld(::cs_main);
+    return m_payment_audit_requests.TakeCancelled(
+        nodeId, witness_id, GetTime<std::chrono::microseconds>());
+}
+
+std::optional<GovernanceRequestTracker::ResponseAuthorization>
+PeerManagerImpl::BeginGovernanceResponse(NodeId nodeId, const CInv& inv)
+{
+    if (GetPeerRef(nodeId) == nullptr) return std::nullopt;
+    LOCK(::cs_main);
+    return m_governance_requests.BeginResponse(
+        nodeId, inv, GetTime<std::chrono::microseconds>());
+}
+
+bool PeerManagerImpl::CompleteGovernanceResponse(
+    const GovernanceRequestTracker::ResponseAuthorization& authorization,
+    GovernanceRequestTracker::ResponseOutcome outcome)
+{
+    LOCK(::cs_main);
+    return m_governance_requests.CompleteResponse(
+        authorization, outcome, GetTime<std::chrono::microseconds>());
+}
+
+namespace {
+
+void RetireExactGovernancePageUploads(
+    std::map<CInv, Peer::GovernancePageUpload>& active,
+    std::map<CInv, Peer::GovernancePageUpload>& retired)
+{
+    for (auto upload{active.begin()}; upload != active.end();) {
+        if (!upload->second.exact_page) {
+            ++upload;
+            continue;
+        }
+        auto exact{upload++};
+        retired.insert(active.extract(exact));
+    }
+}
+
+std::size_t CountOrdinaryGovernanceUploads(
+    const std::map<CInv, Peer::GovernancePageUpload>& uploads)
+{
+    return std::count_if(
+        uploads.begin(), uploads.end(),
+        [](const auto& upload) { return !upload.second.exact_page; });
+}
+
+void PurgeRetiredGovernanceOrdinaryUploads(
+    std::map<CInv, std::chrono::microseconds>& retired,
+    std::chrono::microseconds now)
+{
+    for (auto it{retired.begin()}; it != retired.end();) {
+        if (now >= it->second) {
+            it = retired.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void RetireGovernanceOrdinaryUpload(
+    std::map<CInv, std::chrono::microseconds>& retired,
+    const CInv& inv, std::chrono::microseconds active_expiry,
+    std::chrono::microseconds now)
+{
+    const auto final_expiry{
+        active_expiry + GOVERNANCE_PAGE_TRANSFER_TIMEOUT};
+    if (now >= final_expiry) return;
+    retired.try_emplace(inv, final_expiry);
+    while (retired.size() >
+           Peer::MAX_RETIRED_GOVERNANCE_ORDINARY_UPLOADS) {
+        const auto oldest{std::min_element(
+            retired.begin(), retired.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return std::tie(lhs.second, lhs.first) <
+                       std::tie(rhs.second, rhs.first);
+            })};
+        Assume(oldest != retired.end());
+        retired.erase(oldest);
+    }
+}
+
+void ExpireGovernanceUploads(
+    std::map<CInv, Peer::GovernancePageUpload>& active,
+    std::map<CInv, std::chrono::microseconds>& retired,
+    std::map<CInv, Peer::GovernancePageUpload>& released,
+    std::chrono::microseconds now)
+{
+    PurgeRetiredGovernanceOrdinaryUploads(retired, now);
+    for (auto upload{active.begin()}; upload != active.end();) {
+        if (now < upload->second.expiry) {
+            ++upload;
+            continue;
+        }
+        if (!upload->second.exact_page) {
+            RetireGovernanceOrdinaryUpload(
+                retired, upload->first, upload->second.expiry, now);
+        }
+        auto expired{upload++};
+        released.insert(active.extract(expired));
+    }
+}
+
+} // namespace
+
+std::optional<std::shared_ptr<
+    const GovernancePageImmutableSnapshot>>
+PeerManagerImpl::PrepareGovernancePageRequest(
+    CNode& node, const CGovernancePageRequest& request)
+{
+    using PreparationResult = std::optional<std::shared_ptr<
+        const GovernancePageImmutableSnapshot>>;
+    const auto reject{[&](const char* reason) -> PreparationResult {
+        LogPrint(BCLog::NET,
+                 "GETGOVPAGE prepare rejected peer=%d nonce=%u scope=%s "
+                 "cursor=%s reason=%s\n",
+                 node.GetId(), request.nonce,
+                 request.scope_hash.ToString(),
+                 request.cursor.IsNull() ? "absent" : "present",
+                 reason);
+        return std::nullopt;
+    }};
+    if (!CanUseGovernancePageProtocol(node)) {
+        return reject("protocol-unavailable");
+    }
+    const PeerRef peer{GetPeerRef(node.GetId())};
+    if (!peer) return reject("peer-state-missing");
+
+    std::map<CInv, Peer::GovernancePageUpload> retired_uploads;
+    std::optional<Peer::GovernancePageServeSession> retired_session;
+    std::shared_ptr<const GovernancePageImmutableSnapshot> snapshot;
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        const auto now{GetTime<std::chrono::microseconds>()};
+        auto& session{peer->m_governance_page_serve_session};
+        auto& phase{peer->m_governance_page_serve_phase};
+        if (request.nonce <=
+            peer->m_last_governance_page_serve_nonce) {
+            return reject("nonce-not-above-peer-high-water");
+        }
+        if (phase && now >= phase->expiry) phase.reset();
+        const bool expired{session &&
+            (now >= session->idle_expiry || now >= session->hard_expiry)};
+        if (expired) {
+            RetireExactGovernancePageUploads(
+                peer->m_governance_page_uploads, retired_uploads);
+            retired_session = std::move(session);
+            session.reset();
+            if (!request.cursor.IsNull()) return snapshot;
+        }
+        if (request.cursor.IsNull()) {
+            if (session && session->scope_hash != request.scope_hash) {
+                return reject("restart-scope-mismatch");
+            }
+            if (!request.scope_hash.IsNull()) {
+                if (!phase) {
+                    return reject("vote-scope-phase-missing");
+                }
+                if (!phase->object_done) {
+                    return reject("object-phase-incomplete");
+                }
+                if (!phase->last_vote_scope.IsNull() &&
+                    !(phase->last_vote_scope < request.scope_hash)) {
+                    return reject("vote-scope-not-monotonic");
+                }
+            }
+        }
+        if (request.cursor.IsNull() && session &&
+            session->scope_hash == request.scope_hash &&
+            session->cursor_zero_restarts < 2) {
+            RetireExactGovernancePageUploads(
+                peer->m_governance_page_uploads, retired_uploads);
+            snapshot = session->snapshot;
+            return snapshot;
+        }
+        if (request.cursor.IsNull()) {
+            RetireExactGovernancePageUploads(
+                peer->m_governance_page_uploads, retired_uploads);
+            retired_session = std::move(session);
+            session.reset();
+            return snapshot;
+        }
+        if (!session) return reject("continuation-session-missing");
+        if (session->scope_hash != request.scope_hash) {
+            return reject("continuation-scope-mismatch");
+        }
+        if (session->view_id != request.view_id) {
+            return reject("continuation-view-mismatch");
+        }
+        if (session->expected_cursor != request.cursor) {
+            return reject("continuation-cursor-unexpected");
+        }
+        if (request.nonce <= session->last_nonce) {
+            return reject("continuation-nonce-not-increasing");
+        }
+        // A valid continuation acknowledges the prior exact upload credits.
+        // Release them before the next page is installed, while retaining the
+        // independent live-relay credit and the immutable scope generation.
+        RetireExactGovernancePageUploads(
+            peer->m_governance_page_uploads, retired_uploads);
+        snapshot = session->snapshot;
+    }
+    return snapshot;
+}
+
+bool PeerManagerImpl::SendGovernancePage(
+    CNode& node, const GovernancePageBuildResult& page)
+{
+    const auto& response{page.response};
+    const auto reject{[&](const char* reason) {
+        LogPrint(BCLog::NET,
+                 "GOVPAGE send rejected peer=%d nonce=%u scope=%s "
+                 "cursor=%s reason=%s\n",
+                 node.GetId(), response.nonce,
+                 response.scope_hash.ToString(),
+                 response.cursor.IsNull() ? "absent" : "present",
+                 reason);
+        return false;
+    }};
+    if (!CanUseGovernancePageProtocol(node)) {
+        return reject("protocol-unavailable");
+    }
+    const PeerRef peer{GetPeerRef(node.GetId())};
+    if (!peer) return reject("peer-state-missing");
+    if (response.status == GOVERNANCE_PAGE_OK &&
+        response.inventory.size() != page.entry_indices.size()) {
+        return reject("inventory-index-count-mismatch");
+    }
+    if (response.status == GOVERNANCE_PAGE_OK &&
+        response.inventory.size() > MAX_GOVERNANCE_PAGE_INVENTORY) {
+        return reject("inventory-too-large");
+    }
+    if (response.status != GOVERNANCE_PAGE_OK &&
+        (!page.entry_indices.empty() || page.snapshot)) {
+        return reject("error-response-has-payload-state");
+    }
+    if (response.status == GOVERNANCE_PAGE_OK &&
+        !response.inventory.empty() && !page.snapshot) {
+        return reject("inventory-snapshot-missing");
+    }
+    if (page.snapshot &&
+        page.snapshot->ScopeHash() != response.scope_hash) {
+        return reject("snapshot-scope-mismatch");
+    }
+    if (page.snapshot && page.snapshot->ViewId() != response.view_id) {
+        return reject("snapshot-view-mismatch");
+    }
+    if (page.snapshot &&
+        page.snapshot->TotalCount() != response.total_count) {
+        return reject("snapshot-count-mismatch");
+    }
+    if (page.snapshot) {
+        const auto& entries{page.snapshot->Entries()};
+        for (std::size_t i{0}; i < page.entry_indices.size(); ++i) {
+            if (page.entry_indices[i] >= entries.size()) {
+                return reject("snapshot-entry-index-out-of-range");
+            }
+            if (entries[page.entry_indices[i]].inv !=
+                response.inventory[i]) {
+                return reject("snapshot-entry-inventory-mismatch");
+            }
+        }
+    }
+
+    std::map<CInv, Peer::GovernancePageUpload> retired_uploads;
+    std::optional<Peer::GovernancePageServeSession> retired_session;
+
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        const auto now{GetTime<std::chrono::microseconds>()};
+        auto& session{peer->m_governance_page_serve_session};
+        auto& phase{peer->m_governance_page_serve_phase};
+        if (response.nonce <=
+            peer->m_last_governance_page_serve_nonce) {
+            return reject("nonce-not-above-peer-high-water");
+        }
+        if (response.status == GOVERNANCE_PAGE_OK &&
+            !response.cursor.IsNull()) {
+            if (!session) {
+                return reject("continuation-session-missing");
+            }
+            if (!page.snapshot) {
+                return reject("continuation-snapshot-missing");
+            }
+            if (session->snapshot != page.snapshot) {
+                return reject("continuation-snapshot-mismatch");
+            }
+            if (session->scope_hash != response.scope_hash) {
+                return reject("continuation-scope-mismatch");
+            }
+            if (session->view_id != response.request_view_id) {
+                return reject("continuation-view-mismatch");
+            }
+            if (session->expected_cursor != response.cursor) {
+                return reject("continuation-cursor-unexpected");
+            }
+            if (response.nonce <= session->last_nonce) {
+                return reject("continuation-nonce-not-increasing");
+            }
+            if (now >= session->idle_expiry) {
+                return reject("continuation-session-idle-expired");
+            }
+            if (now >= session->hard_expiry) {
+                return reject("continuation-session-hard-expired");
+            }
+        } else if (response.status == GOVERNANCE_PAGE_OK && session) {
+            if (!page.snapshot) {
+                return reject("restart-snapshot-missing");
+            }
+            if (session->snapshot != page.snapshot) {
+                return reject("restart-snapshot-mismatch");
+            }
+            if (session->scope_hash != response.scope_hash) {
+                return reject("restart-scope-mismatch");
+            }
+            if (session->cursor_zero_restarts >= 2) {
+                return reject("restart-limit-reached");
+            }
+        }
+        if (response.status == GOVERNANCE_PAGE_OK) {
+            if (response.scope_hash.IsNull()) {
+                if (!response.cursor.IsNull() && !phase) {
+                    return reject("object-continuation-phase-missing");
+                }
+            } else {
+                if (!phase) {
+                    return reject("vote-scope-phase-missing");
+                }
+                if (!phase->object_done) {
+                    return reject("object-phase-incomplete");
+                }
+                if (!phase->last_vote_scope.IsNull() &&
+                    !(phase->last_vote_scope < response.scope_hash)) {
+                    return reject("vote-scope-not-monotonic");
+                }
+            }
+            if (!response.done && page.snapshot && !session &&
+                peer->m_next_governance_page_serve_generation == 0) {
+                return reject("serve-generation-invalid");
+            }
+            if (!response.done && page.snapshot && !session &&
+                peer->m_next_governance_page_serve_generation ==
+                    std::numeric_limits<uint64_t>::max()) {
+                return reject("serve-generation-exhausted");
+            }
+        }
+        RetireExactGovernancePageUploads(
+            peer->m_governance_page_uploads, retired_uploads);
+        peer->m_last_governance_page_serve_nonce = response.nonce;
+        if (response.status == GOVERNANCE_PAGE_OK) {
+            // The response itself can consume the metadata allowance in
+            // transit, so keep its exact payload credits alive for a full
+            // transfer interval after the client can receive it.
+            const auto expiry{now + GOVERNANCE_PAGE_RESPONSE_TIMEOUT +
+                              GOVERNANCE_PAGE_TRANSFER_TIMEOUT};
+            for (size_t i{0}; i < response.inventory.size(); ++i) {
+                const CInv& inv{response.inventory[i]};
+                peer->m_retired_governance_ordinary_uploads.erase(inv);
+                if (const auto ordinary{
+                        peer->m_governance_page_uploads.find(inv)};
+                    ordinary !=
+                    peer->m_governance_page_uploads.end()) {
+                    retired_uploads.insert(
+                        peer->m_governance_page_uploads.extract(
+                            ordinary));
+                }
+                const bool inserted{
+                    peer->m_governance_page_uploads.emplace(
+                        inv, Peer::GovernancePageUpload{
+                                 response.scope_hash, expiry,
+                                 /*exact_page=*/true, page.snapshot,
+                                 page.entry_indices[i]}).second};
+                Assume(inserted);
+            }
+            if (!response.done && page.snapshot) {
+                if (!session) {
+                    const uint64_t item_seconds{
+                        static_cast<uint64_t>(
+                            response.total_count) * 2};
+                    const auto minimum_lifetime{
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds>(
+                            GOVERNANCE_PAGE_RESPONSE_TIMEOUT +
+                            GOVERNANCE_PAGE_TRANSFER_TIMEOUT)};
+                    const auto lifetime{std::max(
+                        minimum_lifetime,
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds>(
+                            std::chrono::seconds{item_seconds}) +
+                            minimum_lifetime)};
+                    session = Peer::GovernancePageServeSession{
+                        peer->m_next_governance_page_serve_generation++,
+                        page.snapshot, response.scope_hash,
+                        response.view_id, response.next_cursor,
+                        response.nonce, /*cursor_zero_restarts=*/0,
+                        expiry, now + lifetime};
+                } else {
+                    session->expected_cursor = response.next_cursor;
+                    session->last_nonce = response.nonce;
+                    if (response.cursor.IsNull()) {
+                        ++session->cursor_zero_restarts;
+                    }
+                    session->idle_expiry = expiry;
+                }
+            } else if (session) {
+                retired_session = std::move(session);
+                session.reset();
+            }
+            constexpr auto PHASE_EXPIRY{std::chrono::hours{48}};
+            if (response.scope_hash.IsNull()) {
+                if (response.cursor.IsNull()) {
+                    phase = Peer::GovernancePageServePhase{
+                        response.done, {}, now + PHASE_EXPIRY};
+                } else {
+                    phase->object_done = response.done;
+                    phase->expiry = now + PHASE_EXPIRY;
+                }
+            } else {
+                phase->expiry = now + PHASE_EXPIRY;
+                if (response.done) {
+                    phase->last_vote_scope = response.scope_hash;
+                }
+            }
+        } else if (session) {
+            retired_session = std::move(session);
+            session.reset();
+        }
+    }
+
+    m_connman.PushMessage(
+        &node, CNetMsgMaker(node.GetCommonVersion()).Make(
+                   NetMsgType::GOVPAGE, response));
+    return true;
+}
+
+bool PeerManagerImpl::BeginGovernancePageSession(CNode& node)
+{
+    if (!CanUseGovernancePageProtocol(node)) {
+        return false;
+    }
+    LOCK(::cs_main);
+    return m_governance_requests.BeginPageSession(
+        GovernanceRequestTracker::Source{
+            node.GetId(), node.nKeyedNetGroup,
+            node.GetVerifiedProRegTxHash(),
+            node.IsOutboundOrBlockRelayConn()},
+        GetTime<std::chrono::microseconds>());
+}
+
+bool PeerManagerImpl::CanUseGovernancePageSource(const CNode& node) const
+{
+    if (!CanUseGovernancePageProtocol(node)) return false;
+    LOCK(::cs_main);
+    return m_governance_requests.CanUsePageSource(
+        GovernanceRequestTracker::Source{
+            node.GetId(), node.nKeyedNetGroup,
+            node.GetVerifiedProRegTxHash(),
+            node.IsOutboundOrBlockRelayConn()},
+        GetTime<std::chrono::microseconds>());
+}
+
+bool PeerManagerImpl::SetGovernancePageSessionSource(CNode& node)
+{
+    if (!CanUseGovernancePageProtocol(node)) {
+        return false;
+    }
+    LOCK(::cs_main);
+    return m_governance_requests.SetPageSessionSource(
+        GovernanceRequestTracker::Source{
+            node.GetId(), node.nKeyedNetGroup,
+            node.GetVerifiedProRegTxHash(),
+            node.IsOutboundOrBlockRelayConn()},
+        GetTime<std::chrono::microseconds>());
+}
+
+void PeerManagerImpl::EndGovernancePageSession()
+{
+    LOCK(::cs_main);
+    m_governance_requests.EndPageSession();
+}
+
+bool PeerManagerImpl::RequestGovernancePage(
+    CNode& node, const CGovernancePageRequest& request,
+    std::chrono::microseconds expiry)
+{
+    if (!CanUseGovernancePageProtocol(node)) {
+        return false;
+    }
+    {
+        LOCK(::cs_main);
+        if (!m_governance_requests.BeginPage(
+                request, GetTime<std::chrono::microseconds>(), expiry)) {
+            return false;
+        }
+    }
+    m_connman.PushMessage(
+        &node, CNetMsgMaker(node.GetCommonVersion()).Make(
+                   NetMsgType::GETGOVPAGE, request));
+    return true;
+}
+
+bool PeerManagerImpl::IsGovernancePageRequested(
+    NodeId node_id, const CGovernancePageResponse& response) const
+{
+    LOCK(::cs_main);
+    return m_governance_requests.IsPageRequested(node_id, response);
+}
+
+bool PeerManagerImpl::ReceiveGovernancePage(
+    NodeId node_id, const CGovernancePageResponse& response,
+    const std::vector<CInv>& missing)
+{
+    LOCK(::cs_main);
+    return m_governance_requests.ReceivedPage(
+        node_id, response, missing,
+        GetTime<std::chrono::microseconds>());
+}
+
+bool PeerManagerImpl::RejectGovernancePage(
+    NodeId node_id, const CGovernancePageResponse& response)
+{
+    LOCK(::cs_main);
+    return m_governance_requests.RejectPage(
+        node_id, response, GetTime<std::chrono::microseconds>());
+}
+
+bool PeerManagerImpl::FailGovernancePageSource(NodeId expected_peer)
+{
+    LOCK(::cs_main);
+    return m_governance_requests.FailPageSource(
+        expected_peer, GetTime<std::chrono::microseconds>());
+}
+
+std::optional<GovernanceRequestTracker::PageResult>
+PeerManagerImpl::TakeGovernancePageResult()
+{
+    LOCK(::cs_main);
+    return m_governance_requests.TakePageResult(
+        GetTime<std::chrono::microseconds>());
 }
 
 void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
@@ -1340,19 +4168,34 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
     uint64_t your_services{addr.nServices};
 
     // SYSCOIN push version and mn auth
-    uint256 mnauthChallenge;
-    GetRandBytes(mnauthChallenge);
-    pnode.SetSentMNAuthChallenge(mnauthChallenge);
+    uint256 mnauth_challenge;
+    do {
+        GetRandBytes(mnauth_challenge);
+    } while (mnauth_challenge.IsNull());
     int nProtocolVersion = PROTOCOL_VERSION;
     if (fRegTest && gArgs.IsArgSet("-pushversion")) {
         nProtocolVersion = gArgs.GetIntArg("-pushversion", PROTOCOL_VERSION);
+    }
+    const CMNAuthVersionData mnauth_version =
+        CMNAuth::MakeVersionData(pnode.m_masternode_connection.load());
+    if (nProtocolVersion <= 0 ||
+        !pnode.SetLocalMNAuthConnectionData(
+            mnauth_version, mnauth_challenge, nonce,
+            static_cast<uint32_t>(nProtocolVersion), my_services)) {
+        LogPrint(BCLog::NET,
+                 "failed to initialize local PQ MNAUTH transcript, peer=%d\n",
+                 nodeid);
+        pnode.fDisconnect = true;
+        return;
     }
     const bool tx_relay{!RejectIncomingTxs(pnode)};
     // SYSCOIN
     m_connman.PushMessage(&pnode, CNetMsgMaker(INIT_PROTO_VERSION).Make(NetMsgType::VERSION, nProtocolVersion, my_services, nTime,
             your_services, CNetAddr::V1(addr_you), // Together the pre-version-31402 serialization of CAddress "addrYou" (without nTime)
             my_services, CNetAddr::V1(CService{}), // Together the pre-version-31402 serialization of CAddress "addrMe" (without nTime)
-            nonce, strSubVersion, nNodeStartingHeight, tx_relay, mnauthChallenge, pnode.m_masternode_connection.load()));
+            nonce, strSubVersion, nNodeStartingHeight, tx_relay,
+            mnauth_challenge, mnauth_version.HasMasternodeIdentity(),
+            mnauth_version));
 
     if (fLogIPs) {
         LogPrint(BCLog::NET, "send version message: version %d, blocks=%d, them=%s, txrelay=%d, peer=%d\n", PROTOCOL_VERSION, nNodeStartingHeight, addr_you.ToStringAddrPort(), tx_relay, nodeid);
@@ -1412,9 +4255,27 @@ void PeerManagerImpl::InitializeNode(CNode& node, ServiceFlags our_services)
         LOCK(m_peer_mutex);
         m_peer_map.emplace_hint(m_peer_map.end(), nodeid, peer);
     }
+    // SYSCOIN: Bind queued PQ MNAUTH work to this peer generation.
+    if (!m_mnauth_async.RegisterPeer(nodeid)) {
+        node.fDisconnect = true;
+        return;
+    }
     if (!node.IsInboundConn()) {
         PushNodeVersion(node, *peer);
     }
+}
+
+// SYSCOIN: Apply PQ MNAUTH results only after main-thread revalidation.
+void PeerManagerImpl::ProcessAsyncCompletions()
+{
+    CMNAuth::ProcessAsyncCompletions(
+        m_mnauth_async, m_chainman, m_connman, *this);
+}
+
+// SYSCOIN: Snapshot bounded PQ MNAUTH executor counters.
+CMNAuthAsyncStats PeerManagerImpl::GetMNAuthAsyncStats() const
+{
+    return m_mnauth_async.GetStats();
 }
 
 void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
@@ -1440,6 +4301,8 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
     NodeId nodeid = node.GetId();
+    // SYSCOIN: Cancel queued PQ MNAUTH work before peer state is erased.
+    m_mnauth_async.CancelPeer(nodeid);
     int misbehavior{0};
     {
     LOCK(cs_main);
@@ -1473,6 +4336,13 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         }
     }
     m_orphanage.EraseForPeer(nodeid);
+    // SYSCOIN: Release bounded PQ request state owned by this peer.
+    m_clsig_requests.DisconnectedPeer(
+        nodeid, GetTime<std::chrono::microseconds>());
+    m_payment_audit_requests.DisconnectedPeer(
+        nodeid, GetTime<std::chrono::microseconds>());
+    m_governance_requests.DisconnectedPeer(
+        nodeid, GetTime<std::chrono::microseconds>());
     m_txrequest.DisconnectedPeer(nodeid);
     if (m_txreconciliation) m_txreconciliation->ForgetPeer(nodeid);
     m_num_preferred_download_peers -= state->fPreferredDownload;
@@ -1490,6 +4360,10 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         assert(m_peers_downloading_from == 0);
         assert(m_outbound_peers_with_protect_from_disconnect == 0);
         assert(m_wtxid_relay_peers == 0);
+        // SYSCOIN: Fork-specific request state must drain with the last peer.
+        assert(m_clsig_requests.Size() == 0);
+        assert(m_payment_audit_requests.Size() == 0);
+        assert(m_governance_requests.Size() == 0);
         assert(m_txrequest.Size() == 0);
         assert(m_orphanage.Size() == 0);
     }
@@ -1620,18 +4494,70 @@ void PeerManagerImpl::Misbehaving(Peer& peer, int howmuch, const std::string& me
     LogPrint(BCLog::NET, "Misbehaving: peer=%d (%d -> %d)%s%s\n",
              peer.m_id, score_before, score_now, warning, message_prefixed);
 }
+// SYSCOIN: begin fork request-response tracking.
 void PeerManagerImpl::ReceivedResponse(const NodeId pnode, const uint256& hash)
 {
     PeerRef peer = GetPeerRef(pnode);
     if (peer == nullptr) return;
+    m_clsig_requests.ReceivedResponse(pnode, hash);
     m_txrequest.ReceivedResponse(pnode, hash);
+}
+void PeerManagerImpl::ReceivedChainLockFailure(const NodeId pnode,
+                                               const uint256& hash)
+{
+    if (GetPeerRef(pnode) == nullptr) return;
+    (void)m_clsig_requests.ReceivedFailure(
+        pnode, hash, GetTime<std::chrono::microseconds>());
+}
+void PeerManagerImpl::ReceivedPaymentAuditResponse(
+    const NodeId pnode, const uint256& hash)
+{
+    if (GetPeerRef(pnode) == nullptr) return;
+    m_payment_audit_requests.ReceivedResponse(pnode, hash);
+}
+void PeerManagerImpl::ReceivedPaymentAuditFailure(
+    const NodeId pnode, const uint256& hash)
+{
+    if (GetPeerRef(pnode) == nullptr) return;
+    (void)m_payment_audit_requests.ReceivedFailure(
+        pnode, hash, GetTime<std::chrono::microseconds>());
+}
+void PeerManagerImpl::ForgetPaymentAudit(const uint256& hash)
+{
+    m_payment_audit_requests.Forget(hash);
+}
+void PeerManagerImpl::UpdateChainLockSourceIdentity(
+    const NodeId pnode, const uint256& authenticated_pro_tx,
+    uint64_t keyed_net_group, bool outbound)
+{
+    LOCK(cs_main);
+    m_clsig_requests.UpdateSourceIdentity(
+        pnode, authenticated_pro_tx, keyed_net_group,
+        outbound
+            ? ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND
+            : ChainLockRequestTracker::SourcePriority::AUTHENTICATED);
+    m_payment_audit_requests.UpdateSourceIdentity(
+        pnode, authenticated_pro_tx, keyed_net_group,
+        outbound
+            ? ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND
+            : ChainLockRequestTracker::SourcePriority::AUTHENTICATED);
+}
+void PeerManagerImpl::UpdateGovernanceSourceIdentity(
+    const NodeId pnode, const uint256& authenticated_pro_tx,
+    uint64_t keyed_net_group, bool outbound)
+{
+    LOCK(cs_main);
+    m_governance_requests.UpdateSourceIdentity(
+        pnode, authenticated_pro_tx, keyed_net_group, outbound);
 }
 void PeerManagerImpl::ForgetTxHash(const NodeId pnode, const uint256& hash)
 {
-    PeerRef peer = GetPeerRef(pnode);
-    if (peer == nullptr) return;
+    if (pnode != -1 && GetPeerRef(pnode) == nullptr) return;
+    m_clsig_requests.Forget(hash);
     m_txrequest.ForgetTxHash(hash);
 }
+// SYSCOIN: end fork request-response tracking.
+
 bool PeerManagerImpl::MaybePunishNodeForBlock(NodeId nodeid, const BlockValidationState& state,
                                               bool via_compact_block, const std::string& message)
 {
@@ -1776,6 +4702,9 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
       m_fee_filter_rounder{CFeeRate{DEFAULT_MIN_RELAY_TX_FEE}, m_rng},
       m_chainparams(chainman.GetParams()),
       m_connman(connman),
+      // SYSCOIN: The executor wakes this connection manager on completion.
+      m_mnauth_async{CMNAuth::AsyncConfig{},
+                     MakeMNAuthAsyncHooks(connman)},
       m_addrman(addrman),
       m_banman(banman),
       m_chainman(chainman),
@@ -1965,6 +4894,16 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
     m_connman.WakeMessageHandler();
 }
 
+// SYSCOIN: Public IBD can end after PQ-history or NEVM readiness changes,
+// without another block arriving to wake the message handler.
+void PeerManagerImpl::InitialBlockDownloadCompleted(
+    const CBlockIndex* tip, ChainstateManager&)
+{
+    if (tip != nullptr) SetBestHeight(tip->nHeight);
+    SetServiceFlagsIBDCache(true);
+    m_connman.WakeMessageHandler();
+}
+
 /**
  * Handle invalid block rejection and consequent peer discouragement, maintain which
  * peers announce compact blocks.
@@ -2026,23 +4965,16 @@ bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid)
         return sporkManager->GetSporkByHash(hash).has_value();
     }
     case MSG_GOVERNANCE_OBJECT:
+        return governance->HaveObjectForHash(hash);
     case MSG_GOVERNANCE_OBJECT_VOTE:
-        return !governance->ConfirmInventoryRequest(gtxid);
+        return governance->HaveVoteForHash(hash);
 
-    case MSG_QUORUM_FINAL_COMMITMENT:
-        return llmq::quorumBlockProcessor->HasMineableCommitment(hash);
-    case MSG_QUORUM_CONTRIB:
-    case MSG_QUORUM_COMPLAINT:
-    case MSG_QUORUM_JUSTIFICATION:
-    case MSG_QUORUM_PREMATURE_COMMITMENT:
-        return llmq::quorumDKGSessionManager->AlreadyHave(hash);
-    case MSG_QUORUM_RECOVERED_SIG:
-        return llmq::quorumSigningManager->AlreadyHave(hash);
     case MSG_CLSIG:
-        return llmq::chainLocksHandler->AlreadyHave(hash);
-    case MSG_BTCCSIG:
-        return !IsBTCCDeploymentConfigured(Params().GetConsensus()) ||
-               (llmq::btcCheckpointsHandler && llmq::btcCheckpointsHandler->AlreadyHave(hash));
+        return llmq::chainLocksHandler &&
+               llmq::chainLocksHandler->AlreadyHave(hash);
+    case MSG_PQPOSECERT:
+        return llmq::chainLocksHandler &&
+               llmq::chainLocksHandler->AlreadyHavePaymentAudit(hash);
     }
 
     if (m_orphanage.HaveTx(gtxid)) return true;
@@ -2108,17 +5040,21 @@ void PeerManagerImpl::PushTxInventory(Peer& peer, const uint256& txid, const uin
     }
 
 }
+// SYSCOIN: begin fork inventory relay.
 void PeerManagerImpl::RelayInv(const CInv& inv)
 {
     LOCK(m_peer_mutex);
     for (const auto& [_, peer] : m_peer_map) {
-        if (!peer->GetTxRelay()) continue;
         PushTxInventoryOther(*peer, inv);
     }
 }
 
 void PeerManagerImpl::PushTxInventoryOther(Peer& peer, const CInv& inv)
 {
+    if (inv.type == MSG_CLSIG || inv.type == MSG_PQPOSECERT) {
+        (void)QueuePQCertificateInventory(peer, inv);
+        return;
+    }
     auto tx_relay = peer.GetTxRelay();
     if (!tx_relay) return;
 
@@ -2129,16 +5065,38 @@ void PeerManagerImpl::PushTxInventoryOther(Peer& peer, const CInv& inv)
 
 }
 
-void PeerManagerImpl::RelayRecoveredSig(const uint256& sigHash)
+bool QueuePQCertificateInventory(Peer& peer, const CInv& inv)
 {
-    const CInv inv{MSG_QUORUM_RECOVERED_SIG, sigHash};
-    LOCK(m_peer_mutex);
-    for (const auto& [_, peer] : m_peer_map) {
-        if (peer->m_wants_recsigs) {
-            PushTxInventoryOther(*peer, inv);
-        }
+    if ((inv.type != MSG_CLSIG && inv.type != MSG_PQPOSECERT) ||
+        !SupportsPQChainLocks(peer.m_common_version.load())) {
+        return false;
     }
+    LOCK(peer.m_pq_certificate_mutex);
+    if (peer.m_pq_certificate_known_filter.contains(inv.hash) ||
+        std::any_of(peer.m_pq_certificates_to_send.begin(),
+                    peer.m_pq_certificates_to_send.end(),
+                    [&](const CInv& queued) {
+                        return queued.type == inv.type &&
+                               queued.hash == inv.hash;
+                    })) {
+        return false;
+    }
+    const std::size_t same_type{static_cast<std::size_t>(std::count_if(
+        peer.m_pq_certificates_to_send.begin(),
+        peer.m_pq_certificates_to_send.end(),
+        [&](const CInv& queued) { return queued.type == inv.type; }))};
+    if (same_type >= ChainLockUploadTracker::MAX_ANNOUNCED) {
+        const auto oldest{std::find_if(
+            peer.m_pq_certificates_to_send.begin(),
+            peer.m_pq_certificates_to_send.end(),
+            [&](const CInv& queued) { return queued.type == inv.type; })};
+        Assume(oldest != peer.m_pq_certificates_to_send.end());
+        peer.m_pq_certificates_to_send.erase(oldest);
+    }
+    peer.m_pq_certificates_to_send.push_back(inv);
+    return true;
 }
+// SYSCOIN: end fork inventory relay.
 
 void PeerManagerImpl::RelayAddress(NodeId originator,
                                    const CAddress& addr,
@@ -2370,6 +5328,8 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     std::deque<CInv>::iterator it = peer.m_getdata_requests.begin();
     std::vector<CInv> vNotFound;
     const CNetMsgMaker msgMaker(pfrom.GetCommonVersion());
+    // SYSCOIN: Permit only one large consensus-certificate upload per pass.
+    std::size_t clsig_upload_bytes{0};
 
     // Process as many TX items from the front of the getdata queue as
     // possible, since they're common and it's efficient to batch process
@@ -2382,10 +5342,36 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
 
         const CInv &inv = *it++;
 
-        if (tx_relay == nullptr) {
+        // SYSCOIN: Fork payloads retain bounded transport without TxRelay.
+        if ((inv.type == MSG_CLSIG || inv.type == MSG_PQPOSECERT) &&
+            !SupportsPQChainLocks(pfrom.GetCommonVersion())) {
+            continue;
+        }
+
+        const bool governance_transport{
+            inv.type == MSG_GOVERNANCE_OBJECT ||
+            inv.type == MSG_GOVERNANCE_OBJECT_VOTE};
+        const bool exact_governance_transport{
+            SupportsGovernancePages(pfrom.GetCommonVersion()) &&
+            governance_transport};
+        if (tx_relay == nullptr && inv.type != MSG_CLSIG &&
+            inv.type != MSG_PQPOSECERT &&
+            !exact_governance_transport) {
             // Ignore GETDATA requests for transactions from block-relay-only
             // peers and peers that asked us not to announce transactions.
             continue;
+        }
+        if (governance_transport &&
+            m_connman.OutboundTargetReached(false) &&
+            !pfrom.HasPermission(NetPermissionFlags::Download)) {
+            // The page was admitted against the byte bucket, but the node's
+            // broader upload target can change before GETDATA arrives. Do not
+            // consume the one-shot credit or allocate a large send message.
+            LogPrint(BCLog::NET,
+                     "governance page upload target reached, disconnect peer=%d\n",
+                     pfrom.GetId());
+            pfrom.fDisconnect = true;
+            break;
         }
         // SYSCOIN
         if(inv.IsGenTxMsg(true)) {
@@ -2401,6 +5387,34 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         } else if(inv.IsGenTxMsg(false)) {
             // SYSCOIN
             bool push = false;
+            std::optional<Peer::GovernancePageUpload> governance_upload;
+            std::map<CInv, Peer::GovernancePageUpload>
+                released_governance_uploads;
+            if (inv.type == MSG_GOVERNANCE_OBJECT ||
+                inv.type == MSG_GOVERNANCE_OBJECT_VOTE) {
+                LOCK(peer.m_governance_page_upload_mutex);
+                const auto now{GetTime<std::chrono::microseconds>()};
+                ExpireGovernanceUploads(
+                    peer.m_governance_page_uploads,
+                    peer.m_retired_governance_ordinary_uploads,
+                    released_governance_uploads, now);
+                const auto upload{
+                    peer.m_governance_page_uploads.find(inv)};
+                if (upload != peer.m_governance_page_uploads.end()) {
+                    governance_upload = std::move(upload->second);
+                    peer.m_governance_page_uploads.erase(upload);
+                } else if (const auto retired{
+                               peer.m_retired_governance_ordinary_uploads.find(
+                                   inv)};
+                           retired !=
+                           peer.m_retired_governance_ordinary_uploads.end()) {
+                    governance_upload.emplace(
+                        Peer::GovernancePageUpload{
+                            uint256{}, retired->second,
+                            /*exact_page=*/false, {}, 0});
+                    peer.m_retired_governance_ordinary_uploads.erase(retired);
+                }
+            }
             switch(inv.type) {
                 case(MSG_SPORK): {
                     if (auto opt_spork = sporkManager->GetSporkByHash(inv.hash)) {
@@ -2412,12 +5426,49 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 case(MSG_GOVERNANCE_OBJECT): {
                     CDataStream ss(SER_NETWORK, pfrom.GetCommonVersion());
                     bool topush = false;
-                    {
-                        if(governance->HaveObjectForHash(inv.hash)) {
-                            ss.reserve(1000);
-                            if(governance->SerializeObjectForHash(inv.hash, ss)) {
-                                topush = true;
-                            }
+                    if (governance_upload &&
+                        governance_upload->exact_page &&
+                        governance_upload->scope_hash.IsNull() &&
+                        governance_upload->snapshot &&
+                        governance_upload->entry_index <
+                            governance_upload->snapshot->Entries().size()) {
+                        const auto current_epoch{
+                            governance->GetPQGovernanceValidationContextEpoch()};
+                        if (!current_epoch ||
+                            *current_epoch != governance_upload->snapshot->ValidationContextEpoch()) {
+                            break;
+                        }
+                        const auto& entry{
+                            governance_upload->snapshot->Entries()[
+                                governance_upload->entry_index]};
+                        if (entry.inv != inv || entry.payload.empty()) break;
+                        if (!governance->ConsumeGovernancePayloadBytes(
+                                pfrom.GetId(),
+                                pfrom.GetVerifiedProRegTxHash(),
+                                pfrom.nKeyedNetGroup, entry.payload.size(),
+                                GetTime<std::chrono::microseconds>())) {
+                            break;
+                        }
+                        ss = CDataStream{
+                            Span<const uint8_t>{entry.payload}, SER_NETWORK,
+                            pfrom.GetCommonVersion()};
+                        topush = true;
+                    } else if (governance_upload) {
+                        const auto payload_size{
+                            governance->GetObjectSerializedSizeForHash(
+                                inv.hash, pfrom.GetCommonVersion())};
+                        if (!payload_size || *payload_size == 0 ||
+                            !governance->ConsumeGovernancePayloadBytes(
+                                pfrom.GetId(),
+                                pfrom.GetVerifiedProRegTxHash(),
+                                pfrom.nKeyedNetGroup, *payload_size,
+                                GetTime<std::chrono::microseconds>())) {
+                            break;
+                        }
+                        ss.reserve(*payload_size);
+                        if (governance->SerializeObjectForHash(inv.hash, ss) &&
+                            ss.size() <= *payload_size) {
+                            topush = true;
                         }
                     }
                     if(topush) {
@@ -2429,12 +5480,49 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 case(MSG_GOVERNANCE_OBJECT_VOTE): {
                     CDataStream ss(SER_NETWORK, pfrom.GetCommonVersion());
                     bool topush = false;
-                    {
-                        if(governance->HaveVoteForHash(inv.hash)) {
-                            ss.reserve(1000);
-                            if(governance->SerializeVoteForHash(inv.hash, ss)) {
-                                topush = true;
-                            }
+                    if (governance_upload &&
+                        governance_upload->exact_page &&
+                        !governance_upload->scope_hash.IsNull() &&
+                        governance_upload->snapshot &&
+                        governance_upload->entry_index <
+                            governance_upload->snapshot->Entries().size()) {
+                        const auto current_epoch{
+                            governance->GetPQGovernanceValidationContextEpoch()};
+                        if (!current_epoch ||
+                            *current_epoch != governance_upload->snapshot->ValidationContextEpoch()) {
+                            break;
+                        }
+                        const auto& entry{
+                            governance_upload->snapshot->Entries()[
+                                governance_upload->entry_index]};
+                        if (entry.inv != inv || entry.payload.empty()) break;
+                        if (!governance->ConsumeGovernancePayloadBytes(
+                                pfrom.GetId(),
+                                pfrom.GetVerifiedProRegTxHash(),
+                                pfrom.nKeyedNetGroup, entry.payload.size(),
+                                GetTime<std::chrono::microseconds>())) {
+                            break;
+                        }
+                        ss = CDataStream{
+                            Span<const uint8_t>{entry.payload}, SER_NETWORK,
+                            pfrom.GetCommonVersion()};
+                        topush = true;
+                    } else if (governance_upload) {
+                        const auto payload_size{
+                            governance->GetVoteSerializedSizeUpperBoundForHash(
+                                inv.hash, pfrom.GetCommonVersion())};
+                        if (!payload_size || *payload_size == 0 ||
+                            !governance->ConsumeGovernancePayloadBytes(
+                                pfrom.GetId(),
+                                pfrom.GetVerifiedProRegTxHash(),
+                                pfrom.nKeyedNetGroup, *payload_size,
+                                GetTime<std::chrono::microseconds>())) {
+                            break;
+                        }
+                        ss.reserve(*payload_size);
+                        if (governance->SerializeVoteForHash(inv.hash, ss) &&
+                            ss.size() <= *payload_size) {
+                            topush = true;
                         }
                     }
                     if(topush) {
@@ -2443,69 +5531,65 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                     }
                     break;
                 }
-                case(MSG_QUORUM_FINAL_COMMITMENT): {
-                    llmq::CFinalCommitment o;
-                    if (llmq::quorumBlockProcessor->GetMineableCommitmentByHash(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QFCOMMITMENT, o));
-                        push = true;
-                    }
-                    break;
-                }
-
-                case(MSG_QUORUM_CONTRIB): {
-                    llmq::CDKGContribution o;
-                    if (llmq::quorumDKGSessionManager->GetContribution(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QCONTRIB, o));
-                        push = true;
-                    }
-                    break;
-                }
-                case(MSG_QUORUM_COMPLAINT): {
-                    llmq::CDKGComplaint o;
-                    if (llmq::quorumDKGSessionManager->GetComplaint(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QCOMPLAINT, o));
-                        push = true;
-                    }
-                    break;
-                }
-                case(MSG_QUORUM_JUSTIFICATION): {
-                    llmq::CDKGJustification o;
-                    if (llmq::quorumDKGSessionManager->GetJustification(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QJUSTIFICATION, o));
-                        push = true;
-                    }
-                    break;
-                }
-                case(MSG_QUORUM_PREMATURE_COMMITMENT): {
-                    llmq::CDKGPrematureCommitment o;
-                    if (llmq::quorumDKGSessionManager->GetPrematureCommitment(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QPCOMMITMENT, o));
-                        push = true;
-                    }
-                    break;
-                }
-                case(MSG_QUORUM_RECOVERED_SIG): {
-                    llmq::CRecoveredSig o;
-                    if (llmq::quorumSigningManager->GetRecoveredSigForGetData(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QSIGREC, o));
-                        push = true;
-                    }
-                    break;
-                }
                 case(MSG_CLSIG): {
+                    if (m_connman.OutboundTargetReached(false) &&
+                        !pfrom.HasPermission(NetPermissionFlags::Download)) {
+                        LogPrint(BCLog::NET,
+                                 "PQ ChainLock upload target reached, "
+                                 "disconnect peer=%d\n",
+                                 pfrom.GetId());
+                        pfrom.fDisconnect = true;
+                        break;
+                    }
                     llmq::CChainLockSig o;
-                    if (llmq::chainLocksHandler->GetChainLockByHash(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::CLSIG, o));
+                    if (llmq::chainLocksHandler &&
+                        llmq::chainLocksHandler->GetChainLockByHash(inv.hash, o)) {
+                        auto response{msgMaker.Make(NetMsgType::CLSIG, o)};
+                        constexpr std::size_t MAX_CLSIG_UPLOAD_BYTES{
+                            llmq::pq::FinalChainLockSerializedSize()};
+                        if (response.data.size() != MAX_CLSIG_UPLOAD_BYTES ||
+                            clsig_upload_bytes != 0) {
+                            LogPrintf("PeerManagerImpl::%s -- refusing PQ "
+                                      "ChainLock upload outside the fixed "
+                                      "per-pass byte budget peer=%d\n",
+                                      __func__, pfrom.GetId());
+                            pfrom.fDisconnect = true;
+                            break;
+                        }
+                        clsig_upload_bytes = response.data.size();
+                        m_connman.PushMessage(&pfrom, std::move(response));
                         push = true;
                     }
                     break;
                 }
-                case(MSG_BTCCSIG): {
-                    llmq::CBTCCheckpointSig o;
-                    if (IsBTCCDeploymentConfigured(Params().GetConsensus()) &&
-                        llmq::btcCheckpointsHandler &&
-                        llmq::btcCheckpointsHandler->GetBTCCheckpointByHash(inv.hash, o)) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::BTCCSIG, o));
+                case(MSG_PQPOSECERT): {
+                    if (m_connman.OutboundTargetReached(false) &&
+                        !pfrom.HasPermission(NetPermissionFlags::Download)) {
+                        LogPrint(BCLog::NET,
+                                 "PQ payment-audit upload target reached, "
+                                 "disconnect peer=%d\n",
+                                 pfrom.GetId());
+                        pfrom.fDisconnect = true;
+                        break;
+                    }
+                    llmq::pq::FinalPaymentAudit audit;
+                    if (llmq::chainLocksHandler &&
+                        llmq::chainLocksHandler->GetPaymentAuditByHash(
+                            inv.hash, audit)) {
+                        auto response{
+                            msgMaker.Make(NetMsgType::PQPOSECERT, audit)};
+                        if (response.data.size() !=
+                                llmq::pq::FinalPaymentAudit::WIRE_SIZE ||
+                            clsig_upload_bytes != 0) {
+                            LogPrintf("PeerManagerImpl::%s -- refusing PQ "
+                                      "payment-audit upload outside the "
+                                      "fixed per-pass byte budget peer=%d\n",
+                                      __func__, pfrom.GetId());
+                            pfrom.fDisconnect = true;
+                            break;
+                        }
+                        clsig_upload_bytes = response.data.size();
+                        m_connman.PushMessage(&pfrom, std::move(response));
                         push = true;
                     }
                     break;
@@ -2515,11 +5599,14 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 vNotFound.push_back(inv);
             }
         }
+        // SYSCOIN: A large certificate consumes this pass before block service.
+        if (clsig_upload_bytes != 0) break;
     }
 
     // Only process one BLOCK item per call, since they're uncommon and can be
     // expensive to process.
-    if (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
+    if (clsig_upload_bytes == 0 && it != peer.m_getdata_requests.end() &&
+        !pfrom.fPauseSend) {
         const CInv &inv = *it++;
         if (inv.IsGenBlkMsg()) {
             ProcessGetBlockData(pfrom, peer, inv);
@@ -3505,6 +6592,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         std::string cleanSubVer;
         int starting_height = -1;
         bool fRelay = true;
+        // SYSCOIN: Retain the fork VERSION suffix for gated validation below.
+        uint256 received_mnauth_challenge;
+        bool has_mnauth_challenge{false};
+        bool legacy_masternode_claim{false};
+        bool has_legacy_masternode_claim{false};
 
         vRecv >> nVersion >> Using<CustomUintFormatter<8>>(nServices) >> nTime;
         if (nTime < 0) {
@@ -3550,19 +6642,49 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             vRecv >> fRelay;
         // SYSCOIN
         if (!vRecv.empty()) {
-            uint256 receivedMNAuthChallenge;
-            vRecv >> receivedMNAuthChallenge;
-            pfrom.SetReceivedMNAuthChallenge(receivedMNAuthChallenge);
+            vRecv >> received_mnauth_challenge;
+            has_mnauth_challenge = true;
         }
         if (!vRecv.empty()) {
-            bool fOtherMasternode = false;
-            vRecv >> fOtherMasternode;
+            vRecv >> legacy_masternode_claim;
+            has_legacy_masternode_claim = true;
+        }
+        if (nVersion >= PQ_MNAUTH_PROTO_VERSION) {
+            if (!has_mnauth_challenge || !has_legacy_masternode_claim ||
+                received_mnauth_challenge.IsNull() ||
+                vRecv.size() != CMNAuthVersionData::WIRE_SIZE) {
+                LogPrint(BCLog::NET,
+                         "peer=%d sent incomplete PQ MNAUTH VERSION data\n",
+                         pfrom.GetId());
+                pfrom.fDisconnect = true;
+                return;
+            }
+            CMNAuthVersionData mnauth_version;
+            vRecv >> mnauth_version;
+            if (!vRecv.empty() ||
+                legacy_masternode_claim !=
+                    mnauth_version.HasMasternodeIdentity() ||
+                !pfrom.SetRemoteMNAuthConnectionData(
+                    mnauth_version, received_mnauth_challenge, nNonce,
+                    static_cast<uint32_t>(nVersion),
+                    static_cast<uint64_t>(nServices))) {
+                LogPrint(BCLog::NET,
+                         "peer=%d sent inconsistent PQ MNAUTH VERSION data\n",
+                         pfrom.GetId());
+                pfrom.fDisconnect = true;
+                return;
+            }
             if (pfrom.IsInboundConn()) {
-                pfrom.m_masternode_connection = fOtherMasternode;
-                if (fOtherMasternode) {
-                    LogPrint(BCLog::NET_NETCONN, "peer=%d is an inbound masternode connection, not relaying anything to it\n", pfrom.GetId());
+                pfrom.m_masternode_connection =
+                    mnauth_version.HasMasternodeIdentity();
+                if (mnauth_version.HasMasternodeIdentity()) {
+                    LogPrint(BCLog::NET_NETCONN,
+                             "peer=%d claims an inbound PQ masternode connection\n",
+                             pfrom.GetId());
                     if (!fMasternodeMode) {
-                        LogPrint(BCLog::NET_NETCONN, "but we're not a masternode, disconnecting\n");
+                        LogPrint(BCLog::NET_NETCONN,
+                                 "local node is not a masternode; disconnecting peer=%d\n",
+                                 pfrom.GetId());
                         pfrom.fDisconnect = true;
                         return;
                     }
@@ -3592,6 +6714,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         const int greatest_common_version = std::min(nVersion, PROTOCOL_VERSION);
         pfrom.SetCommonVersion(greatest_common_version);
         pfrom.nVersion = nVersion;
+        // SYSCOIN: Fork inventory gates use the negotiated peer version.
+        peer->m_common_version = greatest_common_version;
 
         const CNetMsgMaker msg_maker(greatest_common_version);
 
@@ -3758,9 +6882,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                       (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
         }
         // SYSCOIN
-        int nHeight = WITH_LOCK(m_chainman.GetMutex(), return m_chainman.ActiveHeight());
-        if (fMasternodeMode && !pfrom.m_masternode_probe_connection) {
-            CMNAuth::PushMNAUTH(&pfrom, m_connman, nHeight);
+        if (fMasternodeMode) {
+            CMNAuth::BeginMNAUTH(
+                &pfrom, m_chainman, m_mnauth_async);
         }
 
         if (pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
@@ -3771,13 +6895,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // they may wish to request compact blocks from us
             m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::SENDCMPCT, /*high_bandwidth=*/false, /*version=*/CMPCTBLOCKS_VERSION));
         }
-        // SYSCOIN
-        if(!RejectIncomingTxs(pfrom)) {
-            if (llmq::CLLMQUtils::IsWatchQuorumsEnabled() && m_connman.IsMasternodeQuorumNode(&pfrom)) {
-                m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::QWATCH));
-            }
-        }
-
         if (m_txreconciliation) {
             if (!peer->m_wtxid_relay || !m_txreconciliation->IsPeerRegistered(pfrom.GetId())) {
                 // We could have optimistically pre-registered/registered the peer. In that case,
@@ -3924,17 +7041,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
     // SYSCOIN
+    if (msg_type == NetMsgType::MNAUTH) {
+        pfrom.fFirstMessageIsMNAUTH = true;
+    }
     if (pfrom.nTimeFirstMessageReceived.load() == 0s && msg_type != NetMsgType::WTXIDRELAY && msg_type != NetMsgType::SENDADDRV2) {
-        // First message after VERSION/VERACK it can be sendaddrv2 or wtxidrelay as well which happen in parallel
+        // The PQ responder waits for the initiator's proof before signing, so
+        // ordinary post-VERACK negotiation may precede its MNAUTH response.
         pfrom.nTimeFirstMessageReceived = GetTime<std::chrono::seconds>();
-        pfrom.fFirstMessageIsMNAUTH = msg_type == NetMsgType::MNAUTH;
-        // Note: do not break the flow here
-
-        if (pfrom.m_masternode_probe_connection && !pfrom.fFirstMessageIsMNAUTH) {
-            LogPrint(BCLog::NET, "connection is a masternode probe but first received message is not MNAUTH, peer=%d\n", pfrom.GetId());
-            pfrom.fDisconnect = true;
-            return;
-        }
     }
 
     if (msg_type == NetMsgType::ADDR || msg_type == NetMsgType::ADDRV2) {
@@ -4033,17 +7146,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         return;
     }
-    // SYSCOIN
-    if (msg_type == NetMsgType::QSENDRECSIGS) {
-        peer->m_wants_recsigs = true;
-        return;
-    }
     if (msg_type == NetMsgType::INV) {
         std::vector<CInv> vInv;
         vRecv >> vInv;
         if (vInv.size() > MAX_INV_SZ)
         {
             Misbehaving(*peer, 20, strprintf("inv message size = %u", vInv.size()));
+            return;
+        }
+        // SYSCOIN: begin bounded fork inventory admission.
+        if (SupportsPQChainLocks(pfrom.GetCommonVersion()) &&
+            HasTooManyPQCertificateInvs(vInv)) {
+            Misbehaving(*peer, 100, "excess-pq-certificate-inv");
             return;
         }
 
@@ -4056,6 +7170,106 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         for (CInv& inv : vInv) {
             if (interruptMsgProc) return;
+
+            if (inv.type == MSG_GOVERNANCE_OBJECT ||
+                inv.type == MSG_GOVERNANCE_OBJECT_VOTE) {
+                const bool already_have{AlreadyHaveTx(ToGenTxid(inv))};
+                LogPrint(BCLog::NET, "got governance inv: %s  %s peer=%d\n",
+                         inv.ToString(), already_have ? "have" : "new",
+                         pfrom.GetId());
+                AddKnownTx(*peer, inv.hash);
+                if (!already_have && !m_chainman.IsInitialBlockDownload()) {
+                    (void)m_governance_requests.Announce(
+                        GovernanceRequestTracker::Source{
+                            pfrom.GetId(), pfrom.nKeyedNetGroup,
+                            pfrom.GetVerifiedProRegTxHash(),
+                            pfrom.IsOutboundOrBlockRelayConn()},
+                        inv);
+                }
+                continue;
+            }
+
+            if (inv.type == MSG_CLSIG || inv.type == MSG_PQPOSECERT) {
+                if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) continue;
+                const bool required_chainlock{
+                    inv.type == MSG_CLSIG &&
+                    llmq::chainLocksHandler != nullptr &&
+                    llmq::chainLocksHandler
+                        ->IsPendingBTCCReceiptCertificate(inv.hash)};
+                const bool required_payment_audit{
+                    inv.type == MSG_PQPOSECERT &&
+                    llmq::chainLocksHandler != nullptr &&
+                    llmq::chainLocksHandler
+                        ->IsPendingPaymentAuditReceiptCertificate(inv.hash)};
+                if (inv.type == MSG_PQPOSECERT &&
+                    !ShouldRequestPaymentAuditCertificate(
+                        llmq::AreChainLocksEnabled(),
+                        required_payment_audit,
+                        m_chainman.IsInitialBlockDownload())) {
+                    continue;
+                }
+                bool peer_already_knows{false};
+                {
+                    LOCK(peer->m_pq_certificate_mutex);
+                    peer_already_knows =
+                        peer->m_pq_certificate_known_filter.contains(
+                            inv.hash);
+                    if (!peer_already_knows) {
+                        peer->m_pq_certificate_known_filter.insert(inv.hash);
+                    }
+                }
+                if (!ShouldProcessPQCertificateAnnouncement(
+                        peer_already_knows,
+                        required_chainlock || required_payment_audit)) {
+                    continue;
+                }
+                if (inv.type == MSG_PQPOSECERT &&
+                    !required_payment_audit &&
+                    !pfrom.HasPermission(NetPermissionFlags::Download) &&
+                    !m_payment_audit_inv_probe_rate.Consume(
+                        pfrom.GetVerifiedProRegTxHash(),
+                        pfrom.nKeyedNetGroup, current_time)) {
+                    LogPrint(BCLog::NET,
+                             "PQ payment-audit archive probe budget "
+                             "exhausted peer=%d\n",
+                             pfrom.GetId());
+                    continue;
+                }
+                const bool already_have{AlreadyHaveTx(ToGenTxid(inv))};
+                LogPrint(BCLog::NET, "got PQ certificate inv: %s  %s peer=%d\n",
+                         inv.ToString(), already_have ? "have" : "new",
+                         pfrom.GetId());
+                AddKnownTx(*peer, inv.hash);
+                if (!already_have) {
+                    const bool authenticated{
+                        !pfrom.GetVerifiedProRegTxHash().IsNull()};
+                    const bool outbound{
+                        pfrom.IsOutboundOrBlockRelayConn()};
+                    const auto source_priority{
+                        authenticated && outbound
+                            ? ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND
+                        : outbound
+                            ? ChainLockRequestTracker::SourcePriority::OUTBOUND
+                        : authenticated
+                            ? ChainLockRequestTracker::SourcePriority::AUTHENTICATED
+                            : ChainLockRequestTracker::SourcePriority::INBOUND};
+                    if (inv.type == MSG_CLSIG) {
+                        (void)m_clsig_requests.Announce(
+                            pfrom.GetId(), inv.hash, source_priority,
+                            required_chainlock,
+                            pfrom.GetVerifiedProRegTxHash(),
+                            pfrom.nKeyedNetGroup);
+                    } else {
+                        (void)m_payment_audit_requests.Announce(
+                            pfrom.GetId(), inv.hash, source_priority,
+                            required_payment_audit,
+                            pfrom.GetVerifiedProRegTxHash(),
+                            pfrom.nKeyedNetGroup);
+                    }
+                }
+                continue;
+            }
+            // SYSCOIN: end bounded fork inventory admission.
 
             // Ignore INVs that don't match wtxidrelay setting.
             // Note that orphan parent fetching always uses MSG_TX GETDATAs regardless of the wtxidrelay setting.
@@ -4081,7 +7295,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     best_block = &inv.hash;
                 }
             } else if (inv.IsGenTxMsg()) {
-                if (reject_tx_invs) {
+                // SYSCOIN: Fork inventory is not transaction relay.
+                if (reject_tx_invs && IsActualTransactionInv(inv)) {
                     LogPrint(BCLog::NET, "transaction (%s) inv sent in violation of protocol, disconnecting peer=%d\n", inv.hash.ToString(), pfrom.GetId());
                     pfrom.fDisconnect = true;
                     return;
@@ -4096,10 +7311,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 // SYSCOIN
                 } else if(!fAlreadyHave) {
                     static std::set<int> allowWhileInIBDObjs = {
-                        MSG_SPORK,
-                        // Allow explicit quorum finality/checkpoint fetches to complete at startup.
-                        MSG_CLSIG,
-                        MSG_BTCCSIG
+                        MSG_SPORK
                     };
                     bool allowWhileInIBD = allowWhileInIBDObjs.count(inv.type);
                     if (allowWhileInIBD) {
@@ -4150,6 +7362,71 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, 20, strprintf("getdata message size = %u", vInv.size()));
             return;
         }
+
+        // SYSCOIN: begin bounded large-certificate GETDATA admission.
+        if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) {
+            vInv.erase(std::remove_if(vInv.begin(), vInv.end(),
+                                      [](const CInv& inv) {
+                                          return inv.type == MSG_CLSIG ||
+                                                 inv.type == MSG_PQPOSECERT;
+                                      }),
+                       vInv.end());
+        }
+
+        const auto large_certificate{std::find_if(
+            vInv.begin(), vInv.end(),
+            [](const CInv& inv) {
+                return inv.type == MSG_CLSIG ||
+                       inv.type == MSG_PQPOSECERT;
+            })};
+        if (large_certificate != vInv.end()) {
+            const std::size_t certificate_count{static_cast<std::size_t>(
+                std::count_if(
+                    large_certificate, vInv.end(),
+                    [](const CInv& inv) {
+                        return inv.type == MSG_CLSIG ||
+                               inv.type == MSG_PQPOSECERT;
+                    }))};
+            if (certificate_count != 1) {
+                Misbehaving(*peer, 100,
+                            "duplicate-pq-certificate-getdata");
+                return;
+            }
+
+            bool authorized{false};
+            bool upload_budget_reserved{false};
+            {
+                LOCK(peer->m_pq_certificate_mutex);
+                authorized = large_certificate->type == MSG_CLSIG
+                    ? peer->m_clsig_uploads.Consume(
+                          large_certificate->hash,
+                          &upload_budget_reserved)
+                    : peer->m_payment_audit_uploads.Consume(
+                          large_certificate->hash,
+                          &upload_budget_reserved);
+            }
+            if (!authorized) {
+                // Five isolated violations discourage a peer; duplicates in a
+                // single message are rejected above immediately.
+                Misbehaving(*peer, 20,
+                            "unannounced-pq-certificate-getdata");
+                return;
+            }
+            if (!upload_budget_reserved &&
+                !pfrom.HasPermission(NetPermissionFlags::Download) &&
+                !m_clsig_upload_rate.Consume(
+                    pfrom.GetVerifiedProRegTxHash(),
+                    pfrom.nKeyedNetGroup,
+                    GetTime<std::chrono::microseconds>())) {
+                LogPrint(BCLog::NET,
+                         "PQ certificate source upload budget exhausted, "
+                         "disconnect peer=%d\n",
+                         pfrom.GetId());
+                pfrom.fDisconnect = true;
+                return;
+            }
+        }
+        // SYSCOIN: end bounded large-certificate GETDATA admission.
 
         LogPrint(BCLog::NET, "received getdata (%u invsz) peer=%d\n", vInv.size(), pfrom.GetId());
 
@@ -4341,14 +7618,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 pindex = m_chainman.ActiveChain().Next(pindex);
         }
 
-        // we must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end
+        // SYSCOIN: Reconstruct headers from block storage for fork header fields.
+        // We must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end.
         std::vector<CBlock> vHeaders;
         unsigned nCount = 0;
         unsigned nSize = 0;
         LogPrint(BCLog::NET, "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
         for (; pindex; pindex = m_chainman.ActiveChain().Next(pindex))
         {
-            const CBlockHeader &header = pindex->GetBlockHeader(m_chainman);
+            const CBlockHeader &header = pindex->GetBlockHeader(m_chainman.m_blockman);
             ++nCount;
             nSize += GetSerializeSize(header, PROTOCOL_VERSION);
             vHeaders.emplace_back(header);
@@ -4967,21 +8245,155 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         return;
     }
+    // SYSCOIN: begin targeted PQ certificate handlers.
     if (msg_type == NetMsgType::GETCLSIG) {
-        if (auto tx_relay = peer->GetTxRelay(); tx_relay != nullptr) {
-            LOCK(tx_relay->m_tx_inventory_mutex);
-            tx_relay->m_send_clsig = true;
+        if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) return;
+        std::optional<uint256> requested;
+        if (!vRecv.empty()) {
+            if (vRecv.size() != uint256::size()) {
+                Misbehaving(*peer, 100, "bad-getclsig-size");
+                return;
+            }
+            uint256 logical_id;
+            vRecv >> logical_id;
+            if (!vRecv.empty() || logical_id.IsNull()) {
+                Misbehaving(*peer, 100, "bad-getclsig-id");
+                return;
+            }
+            requested = logical_id;
+        }
+        if (!requested) {
+            const auto clsig{llmq::chainLocksHandler
+                ? llmq::chainLocksHandler->GetBestChainLock()
+                : nullptr};
+            if (clsig) {
+                (void)QueuePQCertificateInventory(
+                    *peer,
+                    CInv{MSG_CLSIG, clsig->GetLogicalId(
+                        Params().GetConsensus().hashGenesisBlock)});
+            }
+        } else {
+            const CInv inv{MSG_CLSIG, *requested};
+            if (!llmq::chainLocksHandler ||
+                !llmq::chainLocksHandler->AlreadyHave(inv.hash)) {
+                return;
+            }
+            bool upload_authorized{false};
+            {
+                LOCK(peer->m_pq_certificate_mutex);
+                // An explicit by-ID retry reissues exactly one upload
+                // authorization, capped at two full payloads per logical ID
+                // and connection. Repeating the targeted request before its
+                // GETDATA is consumed does not reopen the authorization.
+                upload_authorized =
+                    peer->m_clsig_uploads.Reauthorize(inv.hash);
+            }
+            if (!upload_authorized) {
+                Misbehaving(*peer, 20, "repeated-pq-clsig-retry");
+                return;
+            }
+            {
+                LOCK(peer->m_pq_certificate_mutex);
+                peer->m_pq_certificate_known_filter.insert(inv.hash);
+            }
+            if (auto tx_relay = peer->GetTxRelay();
+                tx_relay != nullptr) {
+                LOCK(tx_relay->m_tx_inventory_mutex);
+                tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
+            }
+            CNetMsgMaker maker{pfrom.GetCommonVersion()};
+            m_connman.PushMessage(
+                &pfrom, maker.Make(NetMsgType::INV,
+                                  std::vector<CInv>{inv}));
         }
         return;
     }
-    if (msg_type == NetMsgType::GETBTCCSIG) {
-        if (!IsBTCCDeploymentConfigured(Params().GetConsensus())) return;
-        if (auto tx_relay = peer->GetTxRelay(); tx_relay != nullptr) {
-            LOCK(tx_relay->m_tx_inventory_mutex);
-            tx_relay->m_send_btccsig = true;
+    if (msg_type == NetMsgType::GETPQPOSE) {
+        if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) return;
+        if (vRecv.size() != uint256::size()) {
+            Misbehaving(*peer, 100, "bad-getpqpose-size");
+            return;
+        }
+        uint256 witness_id;
+        vRecv >> witness_id;
+        if (!vRecv.empty() || witness_id.IsNull()) {
+            Misbehaving(*peer, 100, "bad-getpqpose-id");
+            return;
+        }
+
+        const CInv inv{MSG_PQPOSECERT, witness_id};
+        const auto push_inventory = [&] {
+            {
+                LOCK(peer->m_pq_certificate_mutex);
+                peer->m_pq_certificate_known_filter.insert(inv.hash);
+            }
+            if (auto tx_relay = peer->GetTxRelay();
+                tx_relay != nullptr) {
+                LOCK(tx_relay->m_tx_inventory_mutex);
+                tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
+            }
+            CNetMsgMaker maker{pfrom.GetCommonVersion()};
+            m_connman.PushMessage(
+                &pfrom, maker.Make(NetMsgType::INV,
+                                  std::vector<CInv>{inv}));
+        };
+
+        // A lost INV can be repeated without either resetting the one-shot
+        // upload authorization or reading the archive again.
+        bool active_targeted_authorization{false};
+        {
+            LOCK(peer->m_pq_certificate_mutex);
+            active_targeted_authorization =
+                peer->m_payment_audit_uploads
+                    .HasActiveTargetedAuthorization(inv.hash);
+        }
+        if (active_targeted_authorization) {
+            push_inventory();
+            return;
+        }
+
+        // Charge the reconnect-resistant source bucket before touching the
+        // exact-witness archive. The eventual GETDATA consumes the reservation
+        // instead of charging a second token. Exhaustion defers an honest
+        // five-second historical poll; it is not itself a protocol violation.
+        if (!pfrom.HasPermission(NetPermissionFlags::Download) &&
+            !m_clsig_upload_rate.Consume(
+                pfrom.GetVerifiedProRegTxHash(), pfrom.nKeyedNetGroup,
+                GetTime<std::chrono::microseconds>())) {
+            LogPrint(BCLog::NET,
+                     "PQ payment-audit lookup budget exhausted, "
+                     "deferring peer=%d\n",
+                     pfrom.GetId());
+            return;
+        }
+
+        bool upload_authorized{false};
+        {
+            LOCK(peer->m_pq_certificate_mutex);
+            upload_authorized =
+                peer->m_payment_audit_uploads.Reauthorize(
+                    inv.hash, /*upload_budget_reserved=*/true);
+        }
+        if (!upload_authorized) {
+            LogPrint(BCLog::NET,
+                     "PQ payment-audit upload cap reached for %s peer=%d\n",
+                     witness_id.ToString(), pfrom.GetId());
+            return;
+        }
+
+        llmq::pq::FinalPaymentAudit audit;
+        if (llmq::chainLocksHandler &&
+            llmq::chainLocksHandler->GetPaymentAuditByHash(
+                witness_id, audit)) {
+            push_inventory();
+        } else {
+            LOCK(peer->m_pq_certificate_mutex);
+            peer->m_payment_audit_uploads.CancelTargetedAuthorization(
+                inv.hash);
         }
         return;
     }
+    // SYSCOIN: end targeted PQ certificate handlers.
     if (msg_type == NetMsgType::MEMPOOL) {
         // Only process received mempool messages if we advertise NODE_BLOOM
         // or if the peer has mempool permissions.
@@ -5185,6 +8597,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         ProcessGetCFCheckPt(pfrom, *peer, vRecv);
         return;
     }
+    // SYSCOIN: Route fork payload failures to their bounded request lanes.
     if (msg_type == NetMsgType::NOTFOUND) {
         std::vector<CInv> vInv;
         vRecv >> vInv;
@@ -5194,61 +8607,77 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 if (inv.IsGenTxMsg()) {
                     // If we receive a NOTFOUND message for a tx we requested, mark the announcement for it as
                     // completed in TxRequestTracker.
-                    m_txrequest.ReceivedResponse(pfrom.GetId(), inv.hash);
+                    if (inv.type == MSG_CLSIG) {
+                        if (SupportsPQChainLocks(pfrom.GetCommonVersion())) {
+                            (void)m_clsig_requests.ReceivedFailure(
+                                pfrom.GetId(), inv.hash,
+                                GetTime<std::chrono::microseconds>());
+                        }
+                    } else if (inv.type == MSG_PQPOSECERT) {
+                        if (SupportsPQChainLocks(pfrom.GetCommonVersion())) {
+                            (void)m_payment_audit_requests.ReceivedFailure(
+                                pfrom.GetId(), inv.hash,
+                                GetTime<std::chrono::microseconds>());
+                        }
+                    } else if (inv.type == MSG_GOVERNANCE_OBJECT ||
+                               inv.type == MSG_GOVERNANCE_OBJECT_VOTE) {
+                        (void)m_governance_requests.ReceivedNotFound(
+                            pfrom.GetId(), inv,
+                            GetTime<std::chrono::microseconds>());
+                    } else {
+                        m_txrequest.ReceivedResponse(pfrom.GetId(), inv.hash);
+                    }
                 }
             }
         }
         return;
     }
 
-    //probably one the extensions
+    // SYSCOIN: begin fork-specific message dispatch.
     if(msg_type == NetMsgType::SPORK || msg_type == NetMsgType::GETSPORKS) {
         sporkManager->ProcessMessage(&pfrom, msg_type, vRecv, m_connman, *this);
         return;
     } else if(msg_type == NetMsgType::SYNCSTATUSCOUNT) {
         masternodeSync.ProcessMessage(&pfrom, msg_type, vRecv);
         return;
-    } else if(msg_type == NetMsgType::MNGOVERNANCESYNC ||
+    } else if (msg_type == NetMsgType::GOVPAGE) {
+        if (!CanUseGovernancePageProtocol(pfrom)) {
+            return;
+        }
+        CGovernancePageResponse response;
+        vRecv >> response;
+        masternodeSync.ProcessGovernancePage(
+            &pfrom, response, *this);
+        return;
+    } else if(msg_type == NetMsgType::GETGOVPAGE ||
+        msg_type == NetMsgType::MNGOVERNANCESYNC ||
         msg_type == NetMsgType::MNGOVERNANCEOBJECT ||
         msg_type == NetMsgType::MNGOVERNANCEOBJECTVOTE) {
         governance->ProcessMessage(&pfrom, msg_type, vRecv, m_connman, *this);
         return;
     } else if(msg_type == NetMsgType::MNAUTH) {
-        CMNAuth::ProcessMessage(&pfrom, msg_type, vRecv, m_chainman, m_connman, *this);
+        CMNAuth::ProcessMessage(
+            &pfrom, msg_type, vRecv, m_chainman,
+            m_mnauth_async, *this);
         return;
-    } else if(msg_type == NetMsgType::QFCOMMITMENT) {
-        llmq::quorumBlockProcessor->ProcessMessage(&pfrom, msg_type, vRecv);
-        return;
-    } else if(msg_type == NetMsgType::QSIGREC) {
-        llmq::quorumSigningManager->ProcessMessage(&pfrom, msg_type, vRecv);
-        return;
-    } else if(msg_type == NetMsgType::CLSIG) {
-        llmq::chainLocksHandler->ProcessMessage(&pfrom, msg_type, vRecv);
-        return;
-    } else if(msg_type == NetMsgType::BTCCSIG) {
-        if (IsBTCCDeploymentConfigured(Params().GetConsensus()) &&
-            llmq::btcCheckpointsHandler) {
-            llmq::btcCheckpointsHandler->ProcessMessage(&pfrom, msg_type, vRecv);
+    } else if(msg_type == NetMsgType::CLSIG ||
+              msg_type == NetMsgType::PQCLSHARE ||
+              msg_type == NetMsgType::PQPOSECERT ||
+              msg_type == NetMsgType::PQPOSEHAVE ||
+              msg_type == NetMsgType::PQPOSERESP ||
+              msg_type == NetMsgType::PQPOSESHARE) {
+        if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) {
+            return;
         }
-        return;
-    } else if(msg_type == NetMsgType::QCONTRIB ||
-            msg_type == NetMsgType::QCOMPLAINT ||
-            msg_type == NetMsgType::QJUSTIFICATION ||
-            msg_type == NetMsgType::QPCOMMITMENT ||
-            msg_type == NetMsgType::QWATCH) {
-        llmq::quorumDKGSessionManager->ProcessMessage(&pfrom, msg_type, vRecv);
-        return;
-    } else if(msg_type == NetMsgType::QSIGSHARE ||
-            msg_type == NetMsgType::QSIGSESANN ||
-            msg_type == NetMsgType::QSIGSHARESINV ||
-            msg_type == NetMsgType::QGETSIGSHARES ||
-            msg_type == NetMsgType::QBSIGSHARES) {
-        llmq::quorumSigSharesManager->ProcessMessage(&pfrom, msg_type, vRecv);
+        if (llmq::chainLocksHandler) {
+            llmq::chainLocksHandler->ProcessMessage(&pfrom, msg_type, vRecv);
+        }
         return;
     }
 
 
 
+    // SYSCOIN: end fork-specific message dispatch.
     // Ignore unknown commands for extensibility
     LogPrint(BCLog::NET, "Unknown command \"%s\" from peer=%d\n", SanitizeString(msg_type), pfrom.GetId());
     return;
@@ -5807,6 +9236,26 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
     const auto current_time{GetTime<std::chrono::microseconds>()};
 
+    // SYSCOIN: Expire bounded governance upload state on the send thread.
+    std::map<CInv, Peer::GovernancePageUpload> expired_uploads;
+    std::optional<Peer::GovernancePageServeSession> expired_session;
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        ExpireGovernanceUploads(
+            peer->m_governance_page_uploads,
+            peer->m_retired_governance_ordinary_uploads,
+            expired_uploads, current_time);
+        auto& session{peer->m_governance_page_serve_session};
+        if (session &&
+            (current_time >= session->idle_expiry ||
+             current_time >= session->hard_expiry)) {
+            expired_session = std::move(session);
+            session.reset();
+        }
+        auto& phase{peer->m_governance_page_serve_phase};
+        if (phase && current_time >= phase->expiry) phase.reset();
+    }
+
     if (pto->IsAddrFetchConn() && current_time - pto->m_connected > 10 * AVG_ADDRESS_BROADCAST_INTERVAL) {
         // SYSCOIN
         LogPrint(BCLog::NET_NETCONN, "addrfetch connection timeout; disconnecting peer=%d\n", pto->GetId());
@@ -5885,7 +9334,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         // Try sending block announcements via headers
         //
-        // SYSCOIN
+        // SYSCOIN: Fork header reconstruction and relay use block storage.
         if (pto->CanRelay()) {
             // If we have no more than MAX_BLOCKS_TO_ANNOUNCE in our
             // list of block hashes we're relaying, and our peer wants
@@ -5933,14 +9382,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     pBestIndex = pindex;
                     if (fFoundStartingHeader) {
                         // add this to the headers message
-                        vHeaders.emplace_back(pindex->GetBlockHeader(m_chainman));
+                        vHeaders.emplace_back(pindex->GetBlockHeader(m_chainman.m_blockman));
                     } else if (PeerHasHeader(&state, pindex)) {
                         continue; // keep looking for the first new block
                     } else if (pindex->pprev == nullptr || PeerHasHeader(&state, pindex->pprev)) {
                         // Peer doesn't have this header but they do have the prior one.
                         // Start sending headers.
                         fFoundStartingHeader = true;
-                        vHeaders.emplace_back(pindex->GetBlockHeader(m_chainman));
+                        vHeaders.emplace_back(pindex->GetBlockHeader(m_chainman.m_blockman));
                     } else {
                         // Peer doesn't have this header or the prior one -- nothing will
                         // connect, so bail out.
@@ -6037,6 +9486,30 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             peer->m_blocks_for_inv_relay.clear();
         }
 
+        // SYSCOIN: Finality and payment-audit certificates are consensus transport,
+        // not transaction relay. Drain their bounded queue even for
+        // block-relay-only peers which never allocate Peer::TxRelay.
+        if (pto->CanRelay() &&
+            SupportsPQChainLocks(pto->GetCommonVersion())) {
+            LOCK(peer->m_pq_certificate_mutex);
+            for (const CInv& inv : peer->m_pq_certificates_to_send) {
+                vInv.push_back(inv);
+                peer->m_pq_certificate_known_filter.insert(inv.hash);
+                if (inv.type == MSG_CLSIG) {
+                    peer->m_clsig_uploads.Announce(inv.hash);
+                } else {
+                    Assume(inv.type == MSG_PQPOSECERT);
+                    peer->m_payment_audit_uploads.Announce(inv.hash);
+                }
+                if (vInv.size() == MAX_INV_SZ) {
+                    m_connman.PushMessage(
+                        pto, msgMaker.Make(NetMsgType::INV, vInv));
+                    vInv.clear();
+                }
+            }
+            peer->m_pq_certificates_to_send.clear();
+        }
+
         if (auto tx_relay = peer->GetTxRelay(); tx_relay != nullptr) {
                 LOCK(tx_relay->m_tx_inventory_mutex);
                 // SYSCOIN Check whether periodic sends should happen
@@ -6089,36 +9562,6 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         }
                     }
 
-                }
-                if (fSendTrickle && tx_relay->m_send_clsig) {
-                    tx_relay->m_send_clsig = false;
-                    // SYSCOIN Send an inv for the best ChainLock we have
-                    const auto& clsig = llmq::chainLocksHandler->GetBestChainLock();
-                    if (!clsig.IsNull()) {
-                        CInv inv(MSG_CLSIG, ::SerializeHash(clsig));
-                        vInv.push_back(inv);
-                        tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
-                        if (vInv.size() == MAX_INV_SZ) {
-                            m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::INV, vInv));
-                            vInv.clear();
-                        }
-                    }
-                }
-                if (fSendTrickle && tx_relay->m_send_btccsig) {
-                    tx_relay->m_send_btccsig = false;
-                    // SYSCOIN Send an inv for the best BTC checkpoint we have
-                    if (llmq::btcCheckpointsHandler) {
-                        const auto& btccsig = llmq::btcCheckpointsHandler->GetBestBTCCheckpoint();
-                        if (!btccsig.IsNull()) {
-                            CInv inv(MSG_BTCCSIG, ::SerializeHash(btccsig));
-                            vInv.push_back(inv);
-                            tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
-                            if (vInv.size() == MAX_INV_SZ) {
-                                m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::INV, vInv));
-                                vInv.clear();
-                            }
-                        }
-                    }
                 }
                 // Determine transactions to relay
                 if (fSendTrickle) {
@@ -6176,8 +9619,43 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         // get inv's from other set to send
                         std::set<CInv>::const_iterator it = std::next(tx_relay->m_tx_inventory_to_send_other.end(), -1);
                         CInv inv = *it;
+                        const bool bounded_governance_inv{
+                            inv.type == MSG_GOVERNANCE_OBJECT ||
+                            inv.type == MSG_GOVERNANCE_OBJECT_VOTE};
+                        bool redundant_exact_governance{false};
+                        if (bounded_governance_inv) {
+                            LOCK(peer->m_governance_page_upload_mutex);
+                            ExpireGovernanceUploads(
+                                peer->m_governance_page_uploads,
+                                peer->m_retired_governance_ordinary_uploads,
+                                expired_uploads, current_time);
+                            const auto existing{
+                                peer->m_governance_page_uploads.find(inv)};
+                            redundant_exact_governance =
+                                existing !=
+                                    peer->m_governance_page_uploads.end() &&
+                                existing->second.exact_page;
+                            if (!redundant_exact_governance &&
+                                CountOrdinaryGovernanceUploads(
+                                    peer->m_governance_page_uploads) >=
+                                Peer::MAX_GOVERNANCE_ORDINARY_UPLOADS) {
+                                break;
+                            }
+                        }
+                        if (redundant_exact_governance) {
+                            // GOVPAGE already advertised this connection-bound
+                            // exact credit. Emitting a generic INV cannot add a
+                            // second authorization and could outlive the first.
+                            tx_relay->m_tx_inventory_to_send_other.erase(it);
+                            continue;
+                        }
                         // Remove it from the to-be-sent set
                         tx_relay->m_tx_inventory_to_send_other.erase(it);
+                        if ((inv.type == MSG_CLSIG ||
+                             inv.type == MSG_PQPOSECERT) &&
+                            !SupportsPQChainLocks(pto->GetCommonVersion())) {
+                            continue;
+                        }
                         // Check if not in the filter already
                         if (tx_relay->m_tx_inventory_known_filter.contains(inv.hash)) {
                             continue;
@@ -6186,6 +9664,30 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         vInv.emplace_back(inv);
                         nRelayedTransactions++;
                         tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
+                        if (bounded_governance_inv) {
+                            LOCK(peer->m_governance_page_upload_mutex);
+                            // A direct page commitment is stronger than a
+                            // generic relay credit for the same hash. Never
+                            // replace its parent-scoped authorization.
+                            peer->m_retired_governance_ordinary_uploads.erase(
+                                inv);
+                            peer->m_governance_page_uploads.try_emplace(
+                                inv, Peer::GovernancePageUpload{
+                                         {}, current_time +
+                                                 Peer::GOVERNANCE_ORDINARY_UPLOAD_LIFETIME,
+                                         /*exact_page=*/false, {}});
+                        }
+                        if (inv.type == MSG_CLSIG) {
+                            LOCK(peer->m_pq_certificate_mutex);
+                            peer->m_pq_certificate_known_filter.insert(
+                                inv.hash);
+                            peer->m_clsig_uploads.Announce(inv.hash);
+                        } else if (inv.type == MSG_PQPOSECERT) {
+                            LOCK(peer->m_pq_certificate_mutex);
+                            peer->m_pq_certificate_known_filter.insert(
+                                inv.hash);
+                            peer->m_payment_audit_uploads.Announce(inv.hash);
+                        }
                         if (vInv.size() == MAX_INV_SZ) {
                             m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::INV, vInv));
                             vInv.clear();
@@ -6309,6 +9811,162 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         // Message: getdata (transactions)
         //
+        // SYSCOIN: A branch replacement can retire a pending BTCC receipt
+        // without receiving its certificate. Remove every non-in-flight
+        // provider immediately so stale work cannot keep the priority path.
+        if (const auto required{m_clsig_requests.RequiredLogicalId()};
+            required &&
+            (llmq::chainLocksHandler == nullptr ||
+             !llmq::chainLocksHandler
+                  ->IsPendingBTCCReceiptCertificate(*required))) {
+            m_clsig_requests.ClearRequired(*required);
+        }
+        if (const auto required{
+                m_payment_audit_requests.RequiredLogicalId()};
+            required &&
+            (llmq::chainLocksHandler == nullptr ||
+             !llmq::chainLocksHandler
+                  ->IsPendingPaymentAuditReceiptCertificate(*required))) {
+            m_payment_audit_requests.ClearRequired(*required);
+        }
+        if (SupportsPQChainLocks(pto->GetCommonVersion())) {
+            std::vector<ChainLockRequestTracker::InFlight> expired_clsigs;
+            const auto clsig_request{m_clsig_requests.Request(
+                pto->GetId(), current_time, current_time + CLSIG_REQUEST_TIMEOUT,
+                &expired_clsigs)};
+            for (const auto& expired_clsig : expired_clsigs) {
+                LogPrint(BCLog::NET,
+                         "timeout of inflight PQ ChainLock %s from peer=%d\n",
+                         expired_clsig.logical_id.ToString(),
+                         expired_clsig.peer);
+                if (PeerRef stalled_peer{
+                        GetPeerRef(expired_clsig.peer)}) {
+                    Misbehaving(*stalled_peer, 10,
+                                "withheld-pq-chainlock");
+                }
+            }
+            if (clsig_request) {
+                const GenTxid gtxid{
+                    GenTxid::Txid(*clsig_request, MSG_CLSIG)};
+                if (!AlreadyHaveTx(gtxid)) {
+                    LogPrint(BCLog::NET,
+                             "Requesting PQ ChainLock %s peer=%d\n",
+                             clsig_request->ToString(), pto->GetId());
+                    vGetData.emplace_back(MSG_CLSIG, *clsig_request);
+                } else {
+                    m_clsig_requests.Forget(*clsig_request);
+                }
+            }
+
+            const bool large_certificate_already_requested{std::any_of(
+                vGetData.begin(), vGetData.end(), [](const CInv& inv) {
+                    return inv.type == MSG_CLSIG ||
+                           inv.type == MSG_PQPOSECERT;
+                })};
+            const auto required_payment_audit{
+                m_payment_audit_requests.RequiredLogicalId()};
+            const bool required_payment_audit_is_pending{
+                required_payment_audit &&
+                llmq::chainLocksHandler != nullptr &&
+                llmq::chainLocksHandler
+                    ->IsPendingPaymentAuditReceiptCertificate(
+                        *required_payment_audit)};
+            if (!large_certificate_already_requested &&
+                ShouldRequestPaymentAuditCertificate(
+                    llmq::AreChainLocksEnabled(),
+                    required_payment_audit_is_pending,
+                    m_chainman.IsInitialBlockDownload())) {
+                std::vector<ChainLockRequestTracker::InFlight>
+                    expired_payment_audits;
+                const auto payment_audit_request{
+                    m_payment_audit_requests.Request(
+                        pto->GetId(), current_time,
+                        current_time + CLSIG_REQUEST_TIMEOUT,
+                        &expired_payment_audits)};
+                for (const auto& expired : expired_payment_audits) {
+                    LogPrint(BCLog::NET,
+                             "timeout of inflight PQ payment audit %s "
+                             "from peer=%d\n",
+                             expired.logical_id.ToString(), expired.peer);
+                    if (PeerRef stalled_peer{GetPeerRef(expired.peer)}) {
+                        Misbehaving(*stalled_peer, 10,
+                                    "withheld-pq-payment-audit");
+                    }
+                }
+                if (payment_audit_request) {
+                    const GenTxid gtxid{GenTxid::Txid(
+                        *payment_audit_request, MSG_PQPOSECERT)};
+                    if (!AlreadyHaveTx(gtxid)) {
+                        LogPrint(BCLog::NET,
+                                 "Requesting PQ payment audit %s peer=%d\n",
+                                 payment_audit_request->ToString(),
+                                 pto->GetId());
+                        vGetData.emplace_back(MSG_PQPOSECERT,
+                                              *payment_audit_request);
+                    } else {
+                        m_payment_audit_requests.Forget(
+                            *payment_audit_request);
+                    }
+                }
+            }
+        }
+
+        std::optional<GovernanceRequestTracker::InFlight> expired_governance;
+        const auto governance_request{m_governance_requests.Request(
+            pto->GetId(), current_time,
+            current_time + std::chrono::seconds{30},
+            &expired_governance)};
+        if (expired_governance) {
+            LogPrint(BCLog::NET,
+                     "timeout of governance %s from peer=%d\n",
+                     expired_governance->inv.ToString(),
+                     expired_governance->source.peer);
+            if (PeerRef stalled_peer{
+                    GetPeerRef(expired_governance->source.peer)}) {
+                Misbehaving(*stalled_peer, 10, "withheld-governance");
+            }
+        }
+        if (governance_request) {
+            if (!AlreadyHaveTx(ToGenTxid(*governance_request))) {
+                LogPrint(BCLog::NET,
+                         "Requesting governance %s peer=%d\n",
+                         governance_request->ToString(), pto->GetId());
+                vGetData.push_back(*governance_request);
+            } else {
+                const auto authorization{
+                    m_governance_requests.BeginResponse(
+                        pto->GetId(), *governance_request, current_time)};
+                if (authorization && authorization->page_required) {
+                    const bool exact_known{
+                        governance_request->type ==
+                                MSG_GOVERNANCE_OBJECT
+                            ? authorization->page_scope.IsNull() &&
+                                  governance->HaveObjectForPage(
+                                      governance_request->hash)
+                            : governance_request->type ==
+                                      MSG_GOVERNANCE_OBJECT_VOTE &&
+                                  !authorization->page_scope.IsNull() &&
+                                  governance->HaveVoteForPage(
+                                      authorization->page_scope,
+                                      governance_request->hash)};
+                    (void)m_governance_requests.CompleteResponse(
+                        *authorization,
+                        exact_known
+                            ? GovernanceRequestTracker::ResponseOutcome::
+                                  VALID_OR_EXACT_KNOWN
+                            : GovernanceRequestTracker::ResponseOutcome::
+                                  LOCAL_CONTEXT_CHANGED,
+                        current_time);
+                } else if (authorization) {
+                    (void)m_governance_requests.CompleteResponse(
+                        *authorization,
+                        GovernanceRequestTracker::ResponseOutcome::
+                            VALID_OR_EXACT_KNOWN,
+                        current_time);
+                }
+            }
+        }
+
         std::vector<std::pair<NodeId, GenTxid>> expired;
         auto requestable = m_txrequest.GetRequestable(pto->GetId(), current_time, &expired);
         for (const auto& entry : expired) {

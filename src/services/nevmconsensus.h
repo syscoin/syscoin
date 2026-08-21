@@ -9,6 +9,8 @@
 #include <consensus/params.h>
 #include <util/hasher.h>
 #include <sync.h>
+
+#include <limits>
 class TxValidationState;
 class CCoinsViewCache;
 class CTxUndo;
@@ -25,6 +27,16 @@ enum class PoDAFlushSource {
     Mempool,
     Block,
 };
+
+[[nodiscard]] constexpr bool IsNEVMDataExpired(
+    int64_t active_tip_mtp, int64_t blob_mtp) noexcept
+{
+    if (blob_mtp > std::numeric_limits<int64_t>::max() -
+                       NEVM_DATA_EXPIRE_TIME) {
+        return false;
+    }
+    return active_tip_mtp > blob_mtp + NEVM_DATA_EXPIRE_TIME;
+}
     
 class CNEVMDataDB : public CDBWrapper {
 public:

@@ -33,6 +33,17 @@ struct ConnmanTestMsg : public CConnman {
         if (node.IsManualOrFullOutboundConn()) ++m_network_conn_counts[node.addr.GetNetwork()];
     }
 
+    // SYSCOIN: Expose endpoint reservations to fork-specific net tests.
+    bool ReserveTestOutboundAddress(const CService& addr)
+    {
+        return ReservePendingOutboundAddress(addr);
+    }
+
+    void ReleaseTestOutboundAddress(const CService& addr)
+    {
+        ReleasePendingOutboundAddress(addr);
+    }
+
     void ClearTestNodes()
     {
         LOCK(m_nodes_mutex);

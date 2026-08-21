@@ -16,10 +16,106 @@
 #include <util/string.h>
 
 #include <assert.h>
+#include <algorithm> // SYSCOIN: complete PQ anchor argument groups.
+#include <array> // SYSCOIN: fixed PQ anchor argument groups.
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <vector>
+
+// SYSCOIN: begin PQ activation-anchor argument parsing.
+namespace {
+
+constexpr std::array<const char*, 4> PQ_LEGACY_ANCHOR_ARGS{
+    "-pqlegacyanchorheight",
+    "-pqlegacyanchorblockhash",
+    "-pqlegacydmnstatehash",
+    "-pqlegacypqregistrystatehash",
+};
+
+constexpr std::array<const char*, 2> PQ_CHAINLOCK_ANCHOR_ARGS{
+    "-pqchainlockanchorheight",
+    "-pqchainlockanchorblockhash",
+};
+
+// SYSCOIN: This release-updatable receipt-crypto assumption must never be
+// inferred from or overwrite the immutable PQ migration anchor.
+constexpr std::array<const char*, 6> PQ_BTCC_RECEIPT_ANCHOR_ARGS{
+    "-pqbtccreceiptanchorheight",
+    "-pqbtccreceiptanchorblockhash",
+    "-pqbtccreceiptanchorcursorheight",
+    "-pqbtccreceiptanchorcursorsyshash",
+    "-pqbtccreceiptanchorcursorbtchash",
+    "-pqbtccreceiptanchorstatehash",
+};
+
+bool HasPQLegacyAnchorArg(const ArgsManager& args)
+{
+    return std::any_of(PQ_LEGACY_ANCHOR_ARGS.begin(),
+                       PQ_LEGACY_ANCHOR_ARGS.end(),
+                       [&](const char* name) { return args.IsArgSet(name); });
+}
+
+bool HasPQChainLockAnchorArg(const ArgsManager& args)
+{
+    return std::any_of(PQ_CHAINLOCK_ANCHOR_ARGS.begin(),
+                       PQ_CHAINLOCK_ANCHOR_ARGS.end(),
+                       [&](const char* name) { return args.IsArgSet(name); });
+}
+
+bool HasPQBTCCReceiptAnchorArg(const ArgsManager& args)
+{
+    return std::any_of(PQ_BTCC_RECEIPT_ANCHOR_ARGS.begin(),
+                       PQ_BTCC_RECEIPT_ANCHOR_ARGS.end(),
+                       [&](const char* name) { return args.IsArgSet(name); });
+}
+
+std::string GetSinglePQAnchorArg(const ArgsManager& args,
+                                 const char* name)
+{
+    const auto values = args.GetArgs(name);
+    if (values.size() != 1) {
+        throw std::runtime_error(strprintf(
+            "%s must be specified exactly once", name));
+    }
+    return values.front();
+}
+
+uint256 ParseNonNullPQAnchorHash(const ArgsManager& args,
+                                 const char* name)
+{
+    const std::string value = GetSinglePQAnchorArg(args, name);
+    if (value.size() != 64 || !IsHex(value)) {
+        throw std::runtime_error(strprintf(
+            "%s must be exactly 64 hexadecimal characters", name));
+    }
+    uint256 hash;
+    hash.SetHex(value);
+    if (hash.IsNull()) {
+        throw std::runtime_error(strprintf("%s must be non-zero", name));
+    }
+    return hash;
+}
+
+uint256 ParsePQBTCCReceiptAnchorHash(const ArgsManager& args,
+                                     const char* name,
+                                     bool require_nonzero)
+{
+    const std::string value = GetSinglePQAnchorArg(args, name);
+    if (value.size() != 64 || !IsHex(value)) {
+        throw std::runtime_error(strprintf(
+            "%s must be exactly 64 hexadecimal characters", name));
+    }
+    uint256 hash;
+    hash.SetHex(value);
+    if (require_nonzero && hash.IsNull()) {
+        throw std::runtime_error(strprintf("%s must be non-zero", name));
+    }
+    return hash;
+}
+
+} // namespace
+// SYSCOIN: end PQ activation-anchor argument parsing.
 
 void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& options)
 {
@@ -91,9 +187,121 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-clreceiptstartheight")) {
         options.clreceiptstartblock = args.GetIntArg("-clreceiptstartheight", std::numeric_limits<int>::max());
     }
-    if (args.IsArgSet("-btccstartheight")) {
-        options.btccstartblock = args.GetIntArg("-btccstartheight", std::numeric_limits<int>::max());
+    // SYSCOIN: begin regtest PQ activation and receipt policy.
+    if (HasPQLegacyAnchorArg(args)) {
+        if (!std::all_of(PQ_LEGACY_ANCHOR_ARGS.begin(),
+                         PQ_LEGACY_ANCHOR_ARGS.end(),
+                         [&](const char* name) { return args.IsArgSet(name); })) {
+            throw std::runtime_error(
+                "The four PQ legacy anchor arguments must be specified together");
+        }
+        const std::string height_value = GetSinglePQAnchorArg(
+            args, PQ_LEGACY_ANCHOR_ARGS[0]);
+        int32_t height;
+        if (!ParseInt32(height_value, &height) || height < 0 ||
+            height == std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(strprintf(
+                "%s must be a non-negative 32-bit height below INT_MAX",
+                PQ_LEGACY_ANCHOR_ARGS[0]));
+        }
+        options.pqlegacyanchor =
+            CChainParams::RegTestOptions::PQLegacyAnchorOptions{
+                height,
+                ParseNonNullPQAnchorHash(
+                    args, PQ_LEGACY_ANCHOR_ARGS[1]),
+                ParseNonNullPQAnchorHash(
+                    args, PQ_LEGACY_ANCHOR_ARGS[2]),
+                ParseNonNullPQAnchorHash(
+                    args, PQ_LEGACY_ANCHOR_ARGS[3]),
+            };
     }
+    if (HasPQChainLockAnchorArg(args)) {
+        if (!std::all_of(PQ_CHAINLOCK_ANCHOR_ARGS.begin(),
+                         PQ_CHAINLOCK_ANCHOR_ARGS.end(),
+                         [&](const char* name) { return args.IsArgSet(name); })) {
+            throw std::runtime_error(
+                "The two PQ ChainLock anchor arguments must be specified together");
+        }
+        const std::string height_value = GetSinglePQAnchorArg(
+            args, PQ_CHAINLOCK_ANCHOR_ARGS[0]);
+        int32_t height;
+        if (!ParseInt32(height_value, &height) || height < 0 ||
+            height == std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(strprintf(
+                "%s must be a non-negative 32-bit height below INT_MAX",
+                PQ_CHAINLOCK_ANCHOR_ARGS[0]));
+        }
+        options.pqchainlockanchor =
+            CChainParams::RegTestOptions::PQChainLockAnchorOptions{
+                height,
+                ParseNonNullPQAnchorHash(
+                    args, PQ_CHAINLOCK_ANCHOR_ARGS[1]),
+            };
+    }
+    // SYSCOIN: Regtest can exercise a release-pinned historical receipt
+    // boundary, but partial records are rejected rather than default-filled.
+    if (HasPQBTCCReceiptAnchorArg(args)) {
+        if (!std::all_of(PQ_BTCC_RECEIPT_ANCHOR_ARGS.begin(),
+                         PQ_BTCC_RECEIPT_ANCHOR_ARGS.end(),
+                         [&](const char* name) { return args.IsArgSet(name); })) {
+            throw std::runtime_error(
+                "The six PQ BTCC receipt anchor arguments must be specified together");
+        }
+        int32_t height;
+        const std::string height_value = GetSinglePQAnchorArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[0]);
+        if (!ParseInt32(height_value, &height) || height < 0 ||
+            height == std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(strprintf(
+                "%s must be a non-negative 32-bit height below INT_MAX",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[0]));
+        }
+        int32_t cursor_height;
+        const std::string cursor_height_value = GetSinglePQAnchorArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[2]);
+        if (!ParseInt32(cursor_height_value, &cursor_height) ||
+            cursor_height < -1 || cursor_height > height) {
+            throw std::runtime_error(strprintf(
+                "%s must be -1 or a height not above the receipt anchor",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[2]));
+        }
+        const bool has_cursor{cursor_height >= 0};
+        const uint256 cursor_sys_hash{ParsePQBTCCReceiptAnchorHash(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[3], has_cursor)};
+        const uint256 cursor_btc_hash{ParsePQBTCCReceiptAnchorHash(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[4], has_cursor)};
+        const uint256 receipt_state_hash{ParsePQBTCCReceiptAnchorHash(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[5], has_cursor)};
+        if (!has_cursor && (!cursor_sys_hash.IsNull() ||
+                            !cursor_btc_hash.IsNull() ||
+                            !receipt_state_hash.IsNull())) {
+            throw std::runtime_error(
+                "A null PQ BTCC receipt-anchor cursor requires three zero hashes");
+        }
+        options.pqbtccreceiptanchor =
+            CChainParams::RegTestOptions::PQBTCCReceiptAnchorOptions{
+                height,
+                ParsePQBTCCReceiptAnchorHash(
+                    args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[1], true),
+                cursor_height,
+                cursor_sys_hash,
+                cursor_btc_hash,
+                receipt_state_hash,
+            };
+    }
+    options.pqpreparationheight = args.GetIntArg(
+        "-pqpreparationheight", std::numeric_limits<int>::max());
+    options.pqchainlockepochorigin = args.GetIntArg(
+        "-pqchainlockepochorigin", std::numeric_limits<int>::max());
+    options.pqregistrationcutoffblocks = args.GetIntArg(
+        "-pqregistrationcutoffblocks", 0);
+    // SYSCOIN: PQ roster snapshot policy is independent of per-key registration.
+    options.pqrostersnapshotlag = args.GetIntArg("-pqrostersnapshotlag", 288);
+    options.pqfuturehorizonepochs = args.GetIntArg("-pqfuturehorizonepochs", 0);
+    options.pqbtcccandidateorigin = args.GetIntArg(
+        "-pqbtcccandidateorigin", std::numeric_limits<int>::max());
+    options.pqbtccnevminjectionlag = args.GetIntArg("-pqbtccnevminjectionlag", 10);
+    // SYSCOIN: end regtest PQ activation and receipt policy.
     if (args.IsArgSet("-bridgev2startheight")) {
         options.bridgev2startblock = args.GetIntArg("-bridgev2startheight", std::numeric_limits<int>::max());
     }
@@ -148,6 +356,14 @@ const CChainParams &Params() {
 
 std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, const ChainType chain)
 {
+    // SYSCOIN: Production networks may not override release-pinned PQ anchors.
+    if (chain != ChainType::REGTEST &&
+        (HasPQLegacyAnchorArg(args) || HasPQChainLockAnchorArg(args) ||
+         HasPQBTCCReceiptAnchorArg(args) ||
+         args.IsArgSet("-pqfinalitypreparation"))) {
+        throw std::runtime_error(
+            "PQ anchor overrides are valid only on regtest");
+    }
     switch (chain) {
     // SYSCOIN
     case ChainType::MAIN: {
@@ -175,9 +391,4 @@ void SelectParams(const ChainType chain)
 {
     SelectBaseParams(chain);
     globalChainParams = CreateChainParams(gArgs, chain);
-}
-void UpdateLLMQTestParams(int size, int threshold)
-{
-    auto* params = const_cast<CChainParams*> (globalChainParams.get ());
-    params->UpdateLLMQTestParams(size, threshold);
 }

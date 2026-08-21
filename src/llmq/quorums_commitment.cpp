@@ -1,161 +1,119 @@
-// Copyright (c) 2018-2019 The Dash Core developers
-// Distributed under the MIT/X11 software license, see the accompanying
+// Copyright (c) 2026 The Syscoin Core developers
+// Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/quorums_commitment.h>
+
+#include <chain.h>
+#include <chainparams.h>
+#include <evo/deterministicmns.h>
 #include <llmq/quorums_utils.h>
 
-#include <evo/deterministicmns.h>
-#include <evo/specialtx.h>
+namespace llmq {
 
-#include <chainparams.h>
-#include <validation.h>
-
-#include <logging.h>
-#include <node/blockstorage.h>
-namespace llmq
+CFinalCommitment::CFinalCommitment(const uint256& quorum_hash)
+    : quorumHash{quorum_hash}
 {
-
-CFinalCommitment::CFinalCommitment(const uint256& _quorumHash) :
-        quorumHash(_quorumHash),
-        signers(Params().GetConsensus().llmqTypeChainLocks.size),
-        validMembers(Params().GetConsensus().llmqTypeChainLocks.size)
-{
+    const int configured_size{
+        Params().GetConsensus().legacyQuorumReplay.size};
+    if (configured_size > 0 &&
+        configured_size <= static_cast<int>(legacy::MAX_QUORUM_MEMBERS)) {
+        const auto size{static_cast<std::size_t>(configured_size)};
+        signers.assign(size, false);
+        validMembers.assign(size, false);
+    }
 }
 
-bool CFinalCommitment::Verify(const CBlockIndex* pQuorumBaseBlockIndex, bool checkSigs) const
+bool CFinalCommitment::IsNull() const noexcept
 {
-    uint16_t expected_nversion{CFinalCommitment::LEGACY_BLS_NON_INDEXED_QUORUM_VERSION};
-    expected_nversion = CLLMQUtils::IsV19Active(pQuorumBaseBlockIndex->nHeight) ? CFinalCommitment::BASIC_BLS_NON_INDEXED_QUORUM_VERSION : CFinalCommitment::LEGACY_BLS_NON_INDEXED_QUORUM_VERSION;
-    
-    if (nVersion == 0 || nVersion != expected_nversion) {
-        LogPrint(BCLog::LLMQ, "q[%s] invalid nVersion=%d expectednVersion\n", quorumHash.ToString(), nVersion, expected_nversion);
-        return false;
-    }
-
-    if (pQuorumBaseBlockIndex->GetBlockHash() != quorumHash) {
-        LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid quorumHash\n", quorumHash.ToString());
-        return false;
-    }
-
-    const auto& llmq_params = Params().GetConsensus().llmqTypeChainLocks;
-
-    if (!VerifySizes()) {
-        return false;
-    }
-
-    if (CountValidMembers() < llmq_params.minSize) {
-        LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid validMembers count. validMembersCount=%d\n", quorumHash.ToString(), CountValidMembers());
-        return false;
-    }
-    if (CountSigners() < llmq_params.minSize) {
-        LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid signers count. signersCount=%d\n", quorumHash.ToString(), CountSigners());
-        return false;
-    }
-    if (!quorumPublicKey.IsValid()) {
-        LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid quorumPublicKey\n", quorumHash.ToString());
-        return false;
-    }
-    if (quorumVvecHash.IsNull()) {
-        LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid quorumVvecHash\n", quorumHash.ToString());
-        return false;
-    }
-    if (!membersSig.IsValid()) {
-        LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid membersSig\n", quorumHash.ToString());
-        return false;
-    }
-    if (!quorumSig.IsValid()) {
-        LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid vvecSig\n", quorumHash.ToString());
-        return false;
-    }
-    auto members = CLLMQUtils::GetAllQuorumMembers(pQuorumBaseBlockIndex);
-    if (LogAcceptCategory(BCLog::LLMQ, BCLog::Level::Debug)) {
-        std::stringstream ss;
-        std::stringstream ss2;
-        for (size_t i = 0; i < (size_t)llmq_params.size; i++) {
-            ss << "v[" << i << "]=" << validMembers[i];
-            ss2 << "s[" << i << "]=" << signers[i];
-        }
-        LogPrint(BCLog::LLMQ, "CFinalCommitment::%s mns[%d] validMembers[%s] signers[%s]\n", __func__, members.size(), ss.str(), ss2.str());
-    }
-
-    for (size_t i = members.size(); i < (size_t)llmq_params.size; i++) {
-        if (validMembers[i]) {
-            LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid validMembers bitset. bit %d should not be set\n", quorumHash.ToString(), i);
-            return false;
-        }
-        if (signers[i]) {
-            LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid signers bitset. bit %d should not be set\n", quorumHash.ToString(), i);
-            return false;
-        }
-    }
-
-    // sigs are only checked when the block is processed
-    if (checkSigs) {
-        uint256 commitmentHash = BuildCommitmentHash(quorumHash, validMembers, quorumPublicKey, quorumVvecHash);
-        if (LogAcceptCategory(BCLog::LLMQ, BCLog::Level::Debug)) {
-            std::stringstream ss3;
-            for (const auto &mn: members) {
-                ss3 << mn->proTxHash.ToString().substr(0, 4) << " | ";
-            }
-            LogPrint(BCLog::LLMQ, "CFinalCommitment::%s members[%s] quorumPublicKey[%s] commitmentHash[%s]\n",
-                                     __func__, ss3.str(), quorumPublicKey.ToString(), commitmentHash.ToString());
-        }
-        std::vector<CBLSPublicKey> memberPubKeys;
-        for (size_t i = 0; i < members.size(); i++) {
-            if (!signers[i]) {
-                continue;
-            }
-            memberPubKeys.emplace_back(members[i]->pdmnState->pubKeyOperator.Get());
-        }
-
-        if (!membersSig.VerifySecureAggregated(memberPubKeys, commitmentHash)) {
-            LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid aggregated members signature\n", quorumHash.ToString());
-            return false;
-        }
-
-        if (!quorumSig.VerifyInsecure(quorumPublicKey, commitmentHash)) {
-            LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] invalid quorum signature\n", quorumHash.ToString());
-            return false;
-        }
-    }
-
-    LogPrint(BCLog::LLMQ, "CFinalCommitment -- q[%s] VALID QUORUM\n", quorumHash.ToString());
-
-    return true;
+    return CountSigners() == 0 && CountValidMembers() == 0 &&
+           quorumPublicKey.IsNull() && quorumVvecHash.IsNull() &&
+           quorumSig.IsNull() && membersSig.IsNull();
 }
 
-bool CFinalCommitment::VerifyNull() const
+bool CFinalCommitment::VerifyNull() const noexcept
 {
-    if (!IsNull() || !VerifySizes()) {
-        return false;
-    }
-
-    return true;
+    return VerifySizes() && IsNull();
 }
 
-bool CFinalCommitment::VerifySizes() const
+bool CFinalCommitment::VerifySizes() const noexcept
 {
-    const Consensus::LLMQParams& params = Params().GetConsensus().llmqTypeChainLocks;
-    if (signers.size() != (size_t)params.size) {
-        LogPrint(BCLog::LLMQ, "invalid signers.size=%d\n", signers.size());
+    const int configured_size{
+        Params().GetConsensus().legacyQuorumReplay.size};
+    if (configured_size <= 0 ||
+        configured_size > static_cast<int>(legacy::MAX_QUORUM_MEMBERS)) {
         return false;
     }
-    if (validMembers.size() != (size_t)params.size) {
-        LogPrint(BCLog::LLMQ, "invalid signers.size=%d\n", signers.size());
-        return false;
-    }
-    return true;
+    const auto expected{static_cast<std::size_t>(configured_size)};
+    return signers.size() == expected && validMembers.size() == expected;
 }
 
-uint256 BuildCommitmentHash(const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash)
+bool CFinalCommitment::IsStructurallyValid(
+    std::size_t expected_size,
+    std::size_t actual_member_count,
+    std::size_t minimum_signers,
+    uint16_t expected_version) const
 {
-    CHashWriter hw(SER_GETHASH, 0);
-    hw << blockHash;
-    hw << DYNBITSET(validMembers, Consensus::MAX_LLMQ_SIZE);
-    hw << pubKey;
-    hw << vvecHash;
-    return hw.GetHash();
+    legacy::FinalCommitment opaque;
+    opaque.version = nVersion;
+    opaque.quorum_hash = quorumHash;
+    opaque.signers = signers;
+    opaque.valid_members = validMembers;
+    opaque.quorum_public_key = quorumPublicKey;
+    opaque.quorum_vvec_hash = quorumVvecHash;
+    opaque.quorum_signature = quorumSig;
+    opaque.members_signature = membersSig;
+    return opaque.IsStructurallyValid(expected_size, actual_member_count,
+                                      minimum_signers, expected_version);
+}
+
+bool CFinalCommitment::Verify(const CBlockIndex* quorum_base,
+                              bool) const
+{
+    if (quorum_base == nullptr || quorumHash != quorum_base->GetBlockHash()) {
+        return false;
+    }
+    const auto& params{Params().GetConsensus().legacyQuorumReplay};
+    const auto members{CLLMQUtils::GetAllQuorumMembers(quorum_base)};
+    return IsStructurallyValid(
+        static_cast<std::size_t>(params.size), members.size(),
+        static_cast<std::size_t>(params.minimum_size),
+        GetVersion(CLLMQUtils::IsV19Active(quorum_base->nHeight)));
+}
+
+void CFinalCommitment::ToJson(UniValue& object) const
+{
+    object.setObject();
+    object.pushKV("version", nVersion);
+    object.pushKV("quorumHash", quorumHash.ToString());
+    object.pushKV("signersCount", CountSigners());
+    object.pushKV("signers", CLLMQUtils::ToHexStr(signers));
+    object.pushKV("validMembersCount", CountValidMembers());
+    object.pushKV("validMembers", CLLMQUtils::ToHexStr(validMembers));
+    object.pushKV("quorumPublicKey", quorumPublicKey.ToString());
+    object.pushKV("quorumVvecHash", quorumVvecHash.ToString());
+    object.pushKV("quorumSig", quorumSig.ToString());
+    object.pushKV("membersSig", membersSig.ToString());
+}
+
+void CFinalCommitmentTxPayload::ToJson(UniValue& object) const
+{
+    object.setObject();
+    UniValue commitment_object;
+    commitment.ToJson(commitment_object);
+    object.pushKV("version", nVersion);
+    object.pushKV("height", nHeight);
+    object.pushKV("commitment", commitment_object);
+}
+
+uint256 BuildCommitmentHash(
+    const uint256& block_hash,
+    const std::vector<bool>& valid_members,
+    const CLegacyBLSPublicKey& public_key,
+    const uint256& vvec_hash)
+{
+    return legacy::BuildCommitmentHash(
+        block_hash, valid_members, public_key, vvec_hash);
 }
 
 } // namespace llmq
