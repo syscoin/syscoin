@@ -5094,7 +5094,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
         CBloomFilter filter;
-        vRecv >> filter;
+        try {
+            vRecv >> filter;
+        } catch (const CBloomFilterSizeError&) {
+            Misbehaving(*peer, 100, "too-large bloom filter");
+            return;
+        }
 
         if (!filter.IsWithinSizeConstraints())
         {
