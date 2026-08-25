@@ -134,7 +134,15 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
 
         vRecv >> nProp;
 
-        vRecv >> filter;
+        try {
+            vRecv >> filter;
+        } catch (const CBloomFilterSizeError&) {
+            const PeerRef peer{peerman.GetPeerRef(pfrom->GetId())};
+            if (peer) {
+                peerman.Misbehaving(*peer, 100, "too-large bloom filter");
+            }
+            return;
+        }
 
         if (!filter.IsWithinSizeConstraints()) {
             const PeerRef peer{peerman.GetPeerRef(pfrom->GetId())};

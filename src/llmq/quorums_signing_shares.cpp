@@ -267,17 +267,8 @@ void CSigSharesManager::ProcessMessage(const CNode* pfrom, const std::string& st
         }
     } else if (strCommand == NetMsgType::QBSIGSHARES) {
         std::vector<CBatchedSigShares> msgs;
-        if (!UnserializeVectorWithMaxSize(vRecv, msgs, MAX_MSGS_TOTAL_BATCHED_SIGS)) {
-            LogPrint(BCLog::LLMQ_SIGS, "CSigSharesManager::%s -- too many batches in QBSIGSHARES message. max=%d, node=%d\n", __func__, MAX_MSGS_TOTAL_BATCHED_SIGS, pfrom->GetId());
-            BanNode(pfrom->GetId());
-            return;
-        }
-        size_t totalSigsCount = 0;
-        for (const auto& bs : msgs) {
-            totalSigsCount += bs.sigShares.size();
-        }
-        if (totalSigsCount > MAX_MSGS_TOTAL_BATCHED_SIGS) {
-            LogPrint(BCLog::LLMQ_SIGS, "CSigSharesManager::%s -- too many sigs in QBSIGSHARES message. cnt=%d, max=%d, node=%d\n", __func__, msgs.size(), MAX_MSGS_TOTAL_BATCHED_SIGS, pfrom->GetId());
+        if (!UnserializeBatchedSigSharesWithLimits(vRecv, msgs, MAX_MSGS_TOTAL_BATCHED_SIGS, MAX_MSGS_TOTAL_BATCHED_SIGS)) {
+            LogPrint(BCLog::LLMQ_SIGS, "CSigSharesManager::%s -- too many batches or sigs in QBSIGSHARES message. max=%d, node=%d\n", __func__, MAX_MSGS_TOTAL_BATCHED_SIGS, pfrom->GetId());
             BanNode(pfrom->GetId());
             return;
         }

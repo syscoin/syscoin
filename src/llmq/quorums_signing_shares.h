@@ -11,6 +11,7 @@
 #include <serialize.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -139,20 +140,57 @@ public:
     std::vector<std::pair<uint16_t, CBLSLazySignature>> sigShares;
 
 public:
+    template<typename Stream>
+    [[nodiscard]] bool UnserializeWithMaxSize(Stream& s, size_t max_sig_shares)
+    {
+        s >> VARINT(sessionId);
+        const size_t limit = std::min(max_sig_shares, size_t{Consensus::MAX_LLMQ_SIZE});
+        return UnserializeVectorWithMaxSize(s, sigShares, limit);
+    }
+
     SERIALIZE_METHODS(CBatchedSigShares, obj)
     {
-        READWRITE(VARINT(obj.sessionId));
         if constexpr (Operation::ForRead()) {
-            if (!UnserializeVectorWithMaxSize(s, obj.sigShares, Consensus::MAX_LLMQ_SIZE)) {
+            if (!obj.UnserializeWithMaxSize(s, Consensus::MAX_LLMQ_SIZE)) {
                 throw std::ios_base::failure("batched sig shares size exceeds maximum quorum size");
             }
         } else {
-            READWRITE(obj.sigShares);
+            READWRITE(VARINT(obj.sessionId), obj.sigShares);
         }
     }
 
     [[nodiscard]] std::string ToInvString() const;
 };
+
+/**
+ * QBSIGSHARES nests share vectors inside a batch vector, so the aggregate limit
+ * must be checked before allocating each inner vector.
+ */
+template<typename Stream>
+[[nodiscard]] bool UnserializeBatchedSigSharesWithLimits(Stream& s,
+                                                         std::vector<CBatchedSigShares>& batches,
+                                                         size_t max_batches,
+                                                         size_t max_total_sig_shares)
+{
+    batches.clear();
+    const size_t batch_count = ReadCompactSize(s);
+    if (batch_count > max_batches) {
+        return false;
+    }
+
+    batches.reserve(batch_count);
+    size_t remaining_sig_shares = max_total_sig_shares;
+    for (size_t i = 0; i < batch_count; ++i) {
+        batches.emplace_back();
+        auto& batch = batches.back();
+        if (!batch.UnserializeWithMaxSize(s, remaining_sig_shares)) {
+            batches.clear();
+            return false;
+        }
+        remaining_sig_shares -= batch.sigShares.size();
+    }
+    return true;
+}
 
 template<typename T>
 class SigShareMap

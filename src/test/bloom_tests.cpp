@@ -51,6 +51,27 @@ BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize)
     BOOST_CHECK_MESSAGE( filter.contains(ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8")), "Bloom filter doesn't contain just-inserted object!");
 }
 
+BOOST_AUTO_TEST_CASE(bloom_deserialize_rejects_oversized_data_before_allocation)
+{
+    DataStream oversized{};
+    WriteCompactSize(oversized, MAX_VECTOR_ALLOCATE);
+
+    CBloomFilter filter;
+    BOOST_CHECK_THROW(oversized >> filter, CBloomFilterSizeError);
+    BOOST_CHECK(oversized.empty());
+
+    const auto key = ParseHex("99108ad8ed9bb6274d3980bab5a85c048f0950c8");
+    CBloomFilter valid_filter(3, 0.01, 0, BLOOM_UPDATE_ALL);
+    valid_filter.insert(key);
+    DataStream valid{};
+    valid << valid_filter;
+
+    BOOST_CHECK_NO_THROW(valid >> filter);
+    BOOST_CHECK(valid.empty());
+    BOOST_CHECK(filter.IsWithinSizeConstraints());
+    BOOST_CHECK(filter.contains(key));
+}
+
 BOOST_AUTO_TEST_CASE(bloom_create_insert_serialize_with_tweak)
 {
     // Same test as bloom_create_insert_serialize, but we add a nTweak of 100

@@ -81,6 +81,45 @@ BOOST_AUTO_TEST_CASE(batched_share_count_is_bounded_before_allocation)
     BOOST_CHECK_EQUAL(stream.size(), 3U);
 }
 
+BOOST_AUTO_TEST_CASE(batched_share_aggregate_is_bounded_before_inner_allocation)
+{
+    using BatchedSigShares = std::vector<llmq::CBatchedSigShares>;
+
+    BatchedSigShares accepted(2);
+    accepted[0].sessionId = 1;
+    accepted[0].sigShares.resize(200);
+    accepted[1].sessionId = 2;
+    accepted[1].sigShares.resize(Consensus::MAX_LLMQ_SIZE - accepted[0].sigShares.size());
+
+    CDataStream accepted_stream{SER_NETWORK, PROTOCOL_VERSION};
+    accepted_stream << accepted;
+    BatchedSigShares decoded;
+    BOOST_REQUIRE(llmq::UnserializeBatchedSigSharesWithLimits(
+        accepted_stream, decoded, Consensus::MAX_LLMQ_SIZE, Consensus::MAX_LLMQ_SIZE));
+    BOOST_CHECK(accepted_stream.empty());
+    BOOST_REQUIRE_EQUAL(decoded.size(), accepted.size());
+    BOOST_CHECK_EQUAL(decoded[0].sessionId, accepted[0].sessionId);
+    BOOST_CHECK_EQUAL(decoded[1].sessionId, accepted[1].sessionId);
+    BOOST_CHECK_EQUAL(decoded[0].sigShares.size() + decoded[1].sigShares.size(), Consensus::MAX_LLMQ_SIZE);
+
+    BatchedSigShares rejected(2);
+    rejected[0].sessionId = 1;
+    rejected[0].sigShares.resize(1);
+    rejected[1].sessionId = 2;
+    rejected[1].sigShares.resize(Consensus::MAX_LLMQ_SIZE);
+
+    CDataStream rejected_stream{SER_NETWORK, PROTOCOL_VERSION};
+    rejected_stream << rejected;
+    CDataStream rejected_inner{SER_NETWORK, PROTOCOL_VERSION};
+    rejected_inner << rejected[1].sigShares;
+    const size_t rejected_inner_payload_size = rejected_inner.size() - GetSizeOfCompactSize(rejected[1].sigShares.size());
+
+    BOOST_CHECK(!llmq::UnserializeBatchedSigSharesWithLimits(
+        rejected_stream, decoded, Consensus::MAX_LLMQ_SIZE, Consensus::MAX_LLMQ_SIZE));
+    BOOST_CHECK(decoded.empty());
+    BOOST_CHECK_EQUAL(rejected_stream.size(), rejected_inner_payload_size);
+}
+
 BOOST_AUTO_TEST_CASE(sparse_inventory_offsets_are_checked_before_indexing)
 {
     {
