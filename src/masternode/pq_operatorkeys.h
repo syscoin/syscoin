@@ -68,11 +68,6 @@ public:
         const ChildKeyTreeConfig& config,
         std::size_t worker_count) const;
 
-    /** Produce a witness only from an already built and validated cache. */
-    [[nodiscard]] std::optional<ChildKeyProof> GetCommittedChildKeyProof(
-        const ChildKeyTree& tree,
-        uint32_t epoch) const;
-
 private:
     slhdsa::SecretKey m_global_secret_key;
     GlobalPublicKey m_global_public_key{};

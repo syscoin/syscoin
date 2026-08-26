@@ -295,13 +295,4 @@ LocalOperatorKeyManager::BuildCommittedChildKeyTree(
     return ChildKeyTree::Build(m_chainlock_master_seed, config, worker_count);
 }
 
-std::optional<ChildKeyProof>
-LocalOperatorKeyManager::GetCommittedChildKeyProof(
-    const ChildKeyTree& tree,
-    uint32_t epoch) const
-{
-    if (!IsValid()) return std::nullopt;
-    return tree.GetConsensusProof(m_chainlock_master_seed, epoch);
-}
-
 } // namespace llmq::pq

@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstddef>
+#include <utility>
 
 BOOST_AUTO_TEST_SUITE(pq_crypto_tests)
 
@@ -47,8 +48,26 @@ BOOST_AUTO_TEST_CASE(sphincs_c11_sha_kat)
     auto secret_bytes = sphincs_c11::SerializeSecretKey(secret_key);
     sphincs_c11::SecretKey parsed_secret_key;
     BOOST_CHECK(sphincs_c11::ParseSecretKey(secret_bytes, parsed_secret_key));
+    sphincs_c11::Signature parsed_signature;
+    BOOST_REQUIRE(sphincs_c11::Sign(
+        parsed_secret_key, message, parsed_signature));
+    BOOST_CHECK(parsed_signature == signature);
+
+    sphincs_c11::SecretKey moved_secret_key{std::move(parsed_secret_key)};
+    BOOST_CHECK(!parsed_secret_key.IsInitialized());
+    BOOST_CHECK(!sphincs_c11::Sign(
+        parsed_secret_key, message, parsed_signature));
+    parsed_secret_key = std::move(moved_secret_key);
+    BOOST_CHECK(!moved_secret_key.IsInitialized());
+    BOOST_REQUIRE(sphincs_c11::Sign(
+        parsed_secret_key, message, parsed_signature));
+    BOOST_CHECK(parsed_signature == signature);
+
     secret_bytes.back() ^= 1;
     BOOST_CHECK(!sphincs_c11::ParseSecretKey(secret_bytes, parsed_secret_key));
+    BOOST_CHECK(!parsed_secret_key.IsInitialized());
+    BOOST_CHECK(!sphincs_c11::Sign(
+        parsed_secret_key, message, parsed_signature));
     BOOST_CHECK_EQUAL(
         HexStr(public_bytes),
         "a0a1a2a3a4a5a6a7a8a9aaabacadaeafa3d1b4ec763f8be45e4a56375774efe9");

@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace sphincs_c11 {
@@ -56,7 +57,7 @@ private:
 class SecretKey
 {
 public:
-    SecretKey() = default;
+    SecretKey() noexcept;
     ~SecretKey();
 
     SecretKey(const SecretKey&) = delete;
@@ -69,8 +70,13 @@ public:
     void Clear() noexcept;
 
 private:
+    class SigningCache;
+
     SerializedSecretKey m_bytes{};
     bool m_initialized{false};
+    // This immutable public tree reuses work already required to validate the
+    // key; it contains no secret material and is never serialized.
+    std::unique_ptr<SigningCache> m_signing_cache;
 
     friend bool GenerateKeyPair(const SecretSeed&, const PublicSeed&, PublicKey&, SecretKey&);
     friend bool ParseSecretKey(Span<const unsigned char>, SecretKey&);

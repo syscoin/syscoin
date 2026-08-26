@@ -294,22 +294,23 @@ std::optional<ChildKeyTree> ChildKeyTree::Build(
 }
 
 std::optional<ChildKeyTreeProof> ChildKeyTree::GetProof(
-    std::span<const uint8_t> chainlock_master_seed,
+    const ChildPublicKey& public_key,
     uint32_t epoch) const
 {
     const auto leaf_index{m_config.IndexForEpoch(epoch)};
     if (!leaf_index || m_nodes.size() != 2 * m_config.LeafCount() - 1) {
         return std::nullopt;
     }
-    const auto public_key{DeriveCommittedChildPublicKey(
-        chainlock_master_seed, m_config.genesis_hash, m_config.tree_id,
-        m_config.generation, epoch)};
-    if (!public_key) return std::nullopt;
+    const std::size_t leaf_node{m_config.LeafCount() - 1 + *leaf_index};
+    if (m_nodes[leaf_node] !=
+        GetChildKeyTreeLeafHash(m_config, epoch, public_key)) {
+        return std::nullopt;
+    }
 
     ChildKeyTreeProof proof;
-    proof.public_key = *public_key;
+    proof.public_key = public_key;
     proof.siblings.reserve(m_config.depth);
-    std::size_t node{m_config.LeafCount() - 1 + *leaf_index};
+    std::size_t node{leaf_node};
     for (uint16_t level{0}; level < m_config.depth; ++level) {
         const std::size_t sibling{(node & 1U) != 0 ? node + 1 : node - 1};
         proof.siblings.push_back(m_nodes[sibling]);
@@ -319,11 +320,11 @@ std::optional<ChildKeyTreeProof> ChildKeyTree::GetProof(
 }
 
 std::optional<ChildKeyProof> ChildKeyTree::GetConsensusProof(
-    std::span<const uint8_t> chainlock_master_seed,
+    const ChildPublicKey& public_key,
     uint32_t epoch) const
 {
     if (m_config.depth != CHILD_KEY_TREE_DEPTH) return std::nullopt;
-    auto variable{GetProof(chainlock_master_seed, epoch)};
+    auto variable{GetProof(public_key, epoch)};
     if (!variable || variable->siblings.size() != CHILD_KEY_TREE_DEPTH) {
         return std::nullopt;
     }

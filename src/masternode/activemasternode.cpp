@@ -118,7 +118,6 @@ public:
             return std::nullopt;
         }
 
-        std::optional<ChildKeyProof> proof;
         {
             std::lock_guard lock{m_mutex};
             if (m_genesis_hash != genesis_hash ||
@@ -130,21 +129,34 @@ public:
                     return entry.commitment == record.commitment;
                 })};
             if (it == m_ready.end()) return std::nullopt;
-            proof = m_key_manager.GetCommittedChildKeyProof(
-                it->tree, record.epoch);
-        }
-        if (!proof || !VerifyCommittedChildKeyProof(
-                          genesis_hash, record.commitment, record.epoch,
-                          *proof)) {
-            return std::nullopt;
         }
 
         auto secret_key{m_key_manager.DeriveCommittedChildKey(
             genesis_hash, record.commitment.tree_id,
             record.commitment.generation, record.epoch)};
-        if (!secret_key ||
-            sphincs_c11::SerializePublicKey(secret_key->GetPublicKey()) !=
-                proof->public_key) {
+        if (!secret_key) return std::nullopt;
+        const ChildPublicKey public_key{
+            sphincs_c11::SerializePublicKey(secret_key->GetPublicKey())};
+
+        std::optional<ChildKeyProof> proof;
+        {
+            // Key derivation is expensive, so keep it outside this lock and
+            // revalidate that Request() did not replace the ready tree.
+            std::lock_guard lock{m_mutex};
+            if (m_genesis_hash != genesis_hash ||
+                !ContainsCommitment(m_desired, record.commitment)) {
+                return std::nullopt;
+            }
+            const auto it{std::find_if(
+                m_ready.begin(), m_ready.end(), [&](const auto& entry) {
+                    return entry.commitment == record.commitment;
+                })};
+            if (it == m_ready.end()) return std::nullopt;
+            proof = it->tree.GetConsensusProof(public_key, record.epoch);
+        }
+        if (!proof || proof->public_key != public_key ||
+            !VerifyCommittedChildKeyProof(
+                genesis_hash, record.commitment, record.epoch, *proof)) {
             return std::nullopt;
         }
         return ActiveChildSigningMaterial{std::move(*secret_key), *proof};

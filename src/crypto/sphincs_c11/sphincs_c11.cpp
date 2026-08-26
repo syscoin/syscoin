@@ -436,11 +436,14 @@ void WriteNode(Signature& signature, std::size_t offset, const Node& node)
     std::copy(node.begin(), node.end(), signature.begin() + offset);
 }
 
-bool ComputeRoot(const PublicSeed& public_seed, const SecretSeed& secret_seed, Node& root)
+bool ComputeRoot(const PublicSeed& public_seed, const SecretSeed& secret_seed,
+                 Node& root, Tree& top_tree)
 {
-    Tree tree = BuildWotsTree(public_seed, secret_seed, 1, 0);
-    if (tree.size() != SUBTREE_H + 1 || tree.back().size() != 1) return false;
-    root = tree.back()[0];
+    top_tree = BuildWotsTree(public_seed, secret_seed, D - 1, 0);
+    if (top_tree.size() != SUBTREE_H + 1 || top_tree.back().size() != 1) {
+        return false;
+    }
+    root = top_tree.back()[0];
     return true;
 }
 
@@ -461,7 +464,8 @@ bool GrindRandomizer(const PublicSeed& public_seed, const SecretSeed& secret_see
 }
 
 bool SignImpl(const SecretSeed& secret_seed, const PublicSeed& public_seed,
-              const Node& public_root, const Message& message, Signature& signature)
+              const Node& public_root, const Tree& top_tree,
+              const Message& message, Signature& signature)
 {
     Node randomizer;
     Digest message_digest;
@@ -516,8 +520,16 @@ bool SignImpl(const SecretSeed& secret_seed, const PublicSeed& public_seed,
         path >>= SUBTREE_H;
         const uint64_t tree_index = path;
 
-        Tree tree = BuildWotsTree(public_seed, secret_seed, layer, tree_index);
-        if (tree.size() != SUBTREE_H + 1 || tree.back().size() != 1) return false;
+        Tree generated_tree;
+        const Tree* tree{&top_tree};
+        if (layer + 1 != D) {
+            generated_tree = BuildWotsTree(
+                public_seed, secret_seed, layer, tree_index);
+            tree = &generated_tree;
+        }
+        if (tree->size() != SUBTREE_H + 1 || tree->back().size() != 1) {
+            return false;
+        }
 
         uint32_t count = 0;
         if (!WotsSign(public_seed, secret_seed, layer, tree_index, leaf, current,
@@ -529,10 +541,10 @@ bool SignImpl(const SecretSeed& secret_seed, const PublicSeed& public_seed,
         uint32_t merkle_index = leaf;
         for (unsigned height = 0; height < SUBTREE_H; ++height) {
             WriteNode(signature, signature_offset + HT_AUTH_OFFSET + height * N,
-                      tree[height][merkle_index ^ 1]);
+                      (*tree)[height][merkle_index ^ 1]);
             merkle_index >>= 1;
         }
-        current = tree.back()[0];
+        current = tree->back()[0];
         signature_offset += HT_LAYER_SIZE;
     }
     return ConstantEquals(current.data(), public_root.data(), N);
@@ -629,13 +641,28 @@ bool VerifyImpl(const PublicSeed& public_seed, const Node& public_root,
 
 } // namespace
 
+class SecretKey::SigningCache final
+{
+public:
+    explicit SigningCache(Tree&& top_tree_in)
+        : top_tree{std::move(top_tree_in)}
+    {
+    }
+
+    const Tree top_tree;
+};
+
+SecretKey::SecretKey() noexcept = default;
+
 SecretKey::~SecretKey()
 {
     Clear();
 }
 
 SecretKey::SecretKey(SecretKey&& other) noexcept
-    : m_bytes(other.m_bytes), m_initialized(other.m_initialized)
+    : m_bytes(other.m_bytes),
+      m_initialized(other.m_initialized),
+      m_signing_cache(std::move(other.m_signing_cache))
 {
     other.Clear();
 }
@@ -646,6 +673,7 @@ SecretKey& SecretKey::operator=(SecretKey&& other) noexcept
         Clear();
         m_bytes = other.m_bytes;
         m_initialized = other.m_initialized;
+        m_signing_cache = std::move(other.m_signing_cache);
         other.Clear();
     }
     return *this;
@@ -663,6 +691,7 @@ PublicKey SecretKey::GetPublicKey() const noexcept
 
 void SecretKey::Clear() noexcept
 {
+    m_signing_cache.reset();
     memory_cleanse(m_bytes.data(), m_bytes.size());
     m_initialized = false;
 }
@@ -674,13 +703,17 @@ bool GenerateKeyPair(const SecretSeed& secret_seed, const PublicSeed& public_see
     public_key.m_bytes.fill(0);
     try {
         Node root;
-        if (!ComputeRoot(public_seed, secret_seed, root)) return false;
+        Tree top_tree;
+        if (!ComputeRoot(public_seed, secret_seed, root, top_tree)) return false;
+        auto signing_cache{std::make_unique<SecretKey::SigningCache>(
+            std::move(top_tree))};
 
         std::copy(secret_seed.begin(), secret_seed.end(), secret_key.m_bytes.begin());
         std::copy(public_seed.begin(), public_seed.end(),
                   secret_key.m_bytes.begin() + SECRET_SEED_SIZE);
         std::copy(root.begin(), root.end(),
                   secret_key.m_bytes.begin() + SECRET_SEED_SIZE + PUBLIC_SEED_SIZE);
+        secret_key.m_signing_cache = std::move(signing_cache);
         secret_key.m_initialized = true;
 
         std::copy(public_seed.begin(), public_seed.end(), public_key.m_bytes.begin());
@@ -720,11 +753,15 @@ bool ParseSecretKey(Span<const unsigned char> bytes, SecretKey& secret_key)
 
     try {
         Node root;
-        if (!ComputeRoot(public_seed, secret_seed, root) ||
+        Tree top_tree;
+        if (!ComputeRoot(public_seed, secret_seed, root, top_tree) ||
             !ConstantEquals(root.data(), candidate.data() + SECRET_SEED_SIZE + PUBLIC_SEED_SIZE, N)) {
             return false;
         }
+        auto signing_cache{std::make_unique<SecretKey::SigningCache>(
+            std::move(top_tree))};
         secret_key.m_bytes = candidate;
+        secret_key.m_signing_cache = std::move(signing_cache);
         secret_key.m_initialized = true;
         return true;
     } catch (...) {
@@ -746,7 +783,7 @@ SerializedSecretKey SerializeSecretKey(const SecretKey& secret_key)
 bool Sign(const SecretKey& secret_key, const Message& message, Signature& signature)
 {
     signature.fill(0);
-    if (!secret_key.m_initialized) return false;
+    if (!secret_key.m_initialized || !secret_key.m_signing_cache) return false;
 
     SecretSeed secret_seed;
     CleanseGuard seed_guard(secret_seed.data(), secret_seed.size());
@@ -759,7 +796,11 @@ bool Sign(const SecretKey& secret_key, const Message& message, Signature& signat
                 public_root.size(), public_root.begin());
 
     try {
-        if (SignImpl(secret_seed, public_seed, public_root, message, signature)) return true;
+        if (SignImpl(secret_seed, public_seed, public_root,
+                     secret_key.m_signing_cache->top_tree,
+                     message, signature)) {
+            return true;
+        }
     } catch (...) {
     }
     memory_cleanse(signature.data(), signature.size());

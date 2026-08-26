@@ -90,7 +90,11 @@ memory. Syscoin's contemplated ChainLock profile fixes this cap at exactly 256
 authorized absolute heights. That value follows the four-epoch lifetime and
 five-block cadence; it is an engineering bound, not a cryptographic result
 supplied by this code. The cold signer performs roughly 292,000 hash calls per
-upstream's C11 accounting.
+upstream's C11 accounting. Expected loop accounting for this implementation is
+about 299,000 calls for key derivation plus one signature. The owning secret
+key retains the immutable public top-layer tree computed during derivation, so
+`Sign` itself avoids repeating those 88,575 hash calls and averages about
+210,000 calls without changing the serialized key or signature.
 
 Reorganizations, restored backups, cloned nodes, and concurrent signers must
 not reset or fork the counter. Exhaustion must fail closed and affect liveness,

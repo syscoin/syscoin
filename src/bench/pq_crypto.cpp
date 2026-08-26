@@ -207,6 +207,7 @@ struct ChildTreeFixture {
     llmq::pq::ChildKeyTreeConfig config;
     llmq::pq::ChildKeyTree tree;
     uint32_t epoch{0};
+    llmq::pq::ChildPublicKey public_key{};
     llmq::pq::ChildKeyTreeProof proof;
 
     explicit ChildTreeFixture(uint16_t depth)
@@ -215,7 +216,13 @@ struct ChildTreeFixture {
           epoch{static_cast<uint32_t>(config.first_epoch +
                                       config.LeafCount() / 2)}
     {
-        auto generated{tree.GetProof(seed, epoch)};
+        const auto generated_public_key{
+            llmq::pq::DeriveCommittedChildPublicKey(
+                seed, config.genesis_hash, config.tree_id,
+                config.generation, epoch)};
+        Require(generated_public_key.has_value(), "child public key derivation");
+        public_key = *generated_public_key;
+        auto generated{tree.GetProof(public_key, epoch)};
         Require(generated.has_value(), "child tree proof generation");
         proof = std::move(*generated);
         Require(llmq::pq::VerifyChildKeyTreeProof(
@@ -240,7 +247,7 @@ void C11ChildTreeProofGeneration(benchmark::Bench& bench,
                                  ChildTreeFixture& fixture)
 {
     bench.batch(1).unit("proof").run([&] {
-        auto proof{fixture.tree.GetProof(fixture.seed, fixture.epoch)};
+        auto proof{fixture.tree.GetProof(fixture.public_key, fixture.epoch)};
         Require(proof.has_value(), "child tree proof generation");
         ankerl::nanobench::doNotOptimizeAway(proof->public_key);
         ankerl::nanobench::doNotOptimizeAway(proof->siblings);

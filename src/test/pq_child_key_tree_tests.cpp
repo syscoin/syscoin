@@ -2,8 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <llmq/pq_child_key_derivation.h>
 #include <llmq/pq_child_key_tree.h>
-#include <masternode/pq_operatorkeys.h>
 
 #include <clientversion.h>
 #include <hash.h>
@@ -172,7 +172,11 @@ BOOST_AUTO_TEST_CASE(serial_and_parallel_roots_match_and_all_paths_verify)
     for (std::size_t index{0}; index < config.LeafCount(); ++index) {
         const auto epoch{config.EpochAt(index)};
         BOOST_REQUIRE(epoch);
-        const auto proof{serial->GetProof(seed, *epoch)};
+        const auto public_key{DeriveCommittedChildPublicKey(
+            seed, config.genesis_hash, config.tree_id, config.generation,
+            *epoch)};
+        BOOST_REQUIRE(public_key);
+        const auto proof{serial->GetProof(*public_key, *epoch)};
         BOOST_REQUIRE(proof);
         BOOST_CHECK_EQUAL(proof->siblings.size(), config.depth);
         BOOST_CHECK(VerifyChildKeyTreeProof(
@@ -187,10 +191,19 @@ BOOST_AUTO_TEST_CASE(proofs_are_bound_to_every_tree_and_leaf_field)
     auto tree{ChildKeyTree::Build(seed, config, 2)};
     BOOST_REQUIRE(tree);
     const uint32_t epoch{107};
-    auto proof{tree->GetProof(seed, epoch)};
+    const auto public_key{DeriveCommittedChildPublicKey(
+        seed, config.genesis_hash, config.tree_id, config.generation, epoch)};
+    BOOST_REQUIRE(public_key);
+    auto proof{tree->GetProof(*public_key, epoch)};
     BOOST_REQUIRE(proof);
     BOOST_REQUIRE(VerifyChildKeyTreeProof(
         config, tree->GetRoot(), epoch, *proof));
+
+    auto wrong_public_key{*public_key};
+    wrong_public_key[0] ^= 1;
+    BOOST_CHECK(!tree->GetProof(wrong_public_key, epoch));
+    BOOST_CHECK(!tree->GetProof(*public_key, config.first_epoch - 1));
+    BOOST_CHECK(!tree->GetProof(*public_key, epoch + 1));
 
     auto changed_config{config};
     changed_config.tree_id = NonNullHash(9);
@@ -212,17 +225,17 @@ BOOST_AUTO_TEST_CASE(proofs_are_bound_to_every_tree_and_leaf_field)
     proof->public_key[0] ^= 1;
     BOOST_CHECK(!VerifyChildKeyTreeProof(
         config, tree->GetRoot(), epoch, *proof));
-    proof = tree->GetProof(seed, epoch);
+    proof = tree->GetProof(*public_key, epoch);
     BOOST_REQUIRE(proof);
     proof->siblings[0].begin()[0] ^= 1;
     BOOST_CHECK(!VerifyChildKeyTreeProof(
         config, tree->GetRoot(), epoch, *proof));
-    proof = tree->GetProof(seed, epoch);
+    proof = tree->GetProof(*public_key, epoch);
     BOOST_REQUIRE(proof);
     proof->siblings.pop_back();
     BOOST_CHECK(!VerifyChildKeyTreeProof(
         config, tree->GetRoot(), epoch, *proof));
-    proof = tree->GetProof(seed, epoch);
+    proof = tree->GetProof(*public_key, epoch);
     BOOST_REQUIRE(proof);
     proof->siblings.push_back(NonNullHash(7));
     BOOST_CHECK(!VerifyChildKeyTreeProof(
@@ -271,10 +284,14 @@ BOOST_AUTO_TEST_CASE(cache_rejects_rechecksummed_noncanonical_tree)
 
     auto loaded{ChildKeyTree::Load(path, config, tree->GetRoot())};
     BOOST_REQUIRE(loaded);
-    const auto proof{loaded->GetProof(seed, config.first_epoch + 7)};
+    const uint32_t epoch{config.first_epoch + 7};
+    const auto public_key{DeriveCommittedChildPublicKey(
+        seed, config.genesis_hash, config.tree_id, config.generation, epoch)};
+    BOOST_REQUIRE(public_key);
+    const auto proof{loaded->GetProof(*public_key, epoch)};
     BOOST_REQUIRE(proof);
     BOOST_CHECK(VerifyChildKeyTreeProof(
-        config, tree->GetRoot(), config.first_epoch + 7, *proof));
+        config, tree->GetRoot(), epoch, *proof));
 
     auto nodes{ReadCacheNodes(path)};
     BOOST_REQUIRE(nodes);

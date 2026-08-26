@@ -77,12 +77,12 @@ public:
     }
 
     [[nodiscard]] std::optional<ChildKeyTreeProof> GetProof(
-        std::span<const uint8_t> chainlock_master_seed,
+        const ChildPublicKey& public_key,
         uint32_t epoch) const;
 
     /** Fixed-width production witness; shallow benchmark trees are rejected. */
     [[nodiscard]] std::optional<ChildKeyProof> GetConsensusProof(
-        std::span<const uint8_t> chainlock_master_seed,
+        const ChildPublicKey& public_key,
         uint32_t epoch) const;
 
     /** Atomic, checksummed persistence for the public-only tree cache. */
