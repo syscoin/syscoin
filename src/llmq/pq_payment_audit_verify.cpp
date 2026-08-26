@@ -40,8 +40,9 @@ std::optional<std::size_t> FindQuorumSlot(
     return std::nullopt;
 }
 
-std::optional<C11SignatureCheck> PrepareSignatureCheck(
+std::optional<ScheduledWOTSCheck> PrepareSignatureCheck(
     const uint256& genesis_hash,
+    uint8_t leaf_index,
     const PaymentAuditShareTranscript& transcript,
     const AuthenticatedChildSignature& authenticated,
     const FrozenQuorumMember& member,
@@ -59,28 +60,25 @@ std::optional<C11SignatureCheck> PrepareSignatureCheck(
         SetError(error, PaymentAuditVerificationError::INVALID_CHILD_PROOF);
         return std::nullopt;
     }
-    sphincs_c11::PublicKey public_key;
-    if (!sphincs_c11::ParsePublicKey(authenticated.key_proof.public_key,
-                                     public_key)) {
-        SetError(error, PaymentAuditVerificationError::INVALID_PUBLIC_KEY);
-        return std::nullopt;
-    }
+    scheduled_wots::PublicKey public_key{
+        authenticated.key_proof.public_key};
     const uint256 share_hash{
         GetPaymentAuditShareHash(genesis_hash, transcript)};
-    sphincs_c11::Message message;
+    scheduled_wots::Message message;
     std::copy(share_hash.begin(), share_hash.end(), message.begin());
-    sphincs_c11::Signature signature;
+    scheduled_wots::Signature signature;
     std::copy(authenticated.signature.begin(), authenticated.signature.end(),
               signature.begin());
-    return C11SignatureCheck{std::move(public_key), std::move(message),
-                             std::move(signature)};
+    return ScheduledWOTSCheck{std::move(public_key), leaf_index,
+                              std::move(message), std::move(signature)};
 }
 
 } // namespace
 
-std::optional<C11SignatureCheck>
+std::optional<ScheduledWOTSCheck>
 PreparePaymentAuditResponseVerification(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const PaymentAuditResponse& response,
     const PaymentAuditHave& expected,
     const FrozenQuorumRosters& response_rosters,
@@ -114,7 +112,7 @@ PreparePaymentAuditResponseVerification(
     ChainLockVerificationError chainlock_error{
         ChainLockVerificationError::NONE};
     auto check{PrepareChainLockShareVerification(
-        genesis_hash, response.response, response_rosters,
+        genesis_hash, schedule, response.response, response_rosters,
         authorization_mask,
         &chainlock_error)};
     if (!check) {
@@ -137,13 +135,18 @@ PreparePaymentAuditResponseVerification(
 
 bool ValidatePaymentAuditContext(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const PaymentAuditStatement& statement,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
     PaymentAuditVerificationError* error)
 {
     SetError(error, PaymentAuditVerificationError::NONE);
-    if (genesis_hash.IsNull() || !statement.IsStructurallyValid()) {
+    const auto audit_schedule{BuildPaymentAuditEpochSchedule(
+        schedule, statement.commitment.subject_epoch)};
+    if (genesis_hash.IsNull() || !schedule.IsValid() ||
+        !statement.IsStructurallyValid() || !audit_schedule ||
+        audit_schedule->seal_height != statement.commitment.seal_height) {
         SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
         return false;
     }
@@ -188,8 +191,9 @@ PaymentAuditShareTranscript BuildPaymentAuditShareTranscript(
         descriptor.base_hash, member_index, member_pro_tx_hash};
 }
 
-std::optional<C11SignatureCheck> PreparePaymentAuditShareVerification(
+std::optional<ScheduledWOTSCheck> PreparePaymentAuditShareVerification(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const PaymentAuditShare& share,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
@@ -210,25 +214,33 @@ std::optional<C11SignatureCheck> PreparePaymentAuditShareVerification(
         SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
         return std::nullopt;
     }
-    if (!ValidatePaymentAuditContext(genesis_hash, share.transcript.statement,
-                                     rosters, authorization_mask, error)) {
+    if (!ValidatePaymentAuditContext(genesis_hash, schedule,
+                                     share.transcript.statement, rosters,
+                                     authorization_mask, error)) {
         return std::nullopt;
     }
     const auto& roster{rosters[*slot]};
+    const auto leaf_index{PaymentAuditLeafIndex(
+        schedule, share.transcript.statement.commitment.subject_epoch,
+        share.transcript.statement.commitment.seal_height,
+        roster.descriptor.epoch)};
     const std::size_t member_index{share.transcript.member_index};
     if (roster.descriptor.valid_count < QUORUM_MIN_VALID ||
-        !IsBitSet(roster.descriptor.valid_members, member_index)) {
+        !IsBitSet(roster.descriptor.valid_members, member_index) ||
+        !leaf_index) {
         SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
         return std::nullopt;
     }
     return PrepareSignatureCheck(
-        genesis_hash, share.transcript, share.authenticated_signature,
+        genesis_hash, *leaf_index, share.transcript,
+        share.authenticated_signature,
         roster.members[member_index], roster.descriptor.epoch, error);
 }
 
 std::optional<PreparedPaymentAuditVerification>
 PrepareFinalPaymentAuditVerification(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
@@ -243,7 +255,7 @@ PrepareFinalPaymentAuditVerification(
         SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
         return std::nullopt;
     }
-    if (!ValidatePaymentAuditContext(genesis_hash, audit.statement,
+    if (!ValidatePaymentAuditContext(genesis_hash, schedule, audit.statement,
                                      rosters, authorization_mask, error)) {
         return std::nullopt;
     }
@@ -254,7 +266,12 @@ PrepareFinalPaymentAuditVerification(
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         if (!IsSelected(audit.selected_quorum_mask, slot)) continue;
         const auto& roster{rosters[slot]};
-        if (roster.descriptor.valid_count < QUORUM_MIN_VALID) {
+        const auto leaf_index{PaymentAuditLeafIndex(
+            schedule, audit.statement.commitment.subject_epoch,
+            audit.statement.commitment.seal_height,
+            roster.descriptor.epoch)};
+        if (roster.descriptor.valid_count < QUORUM_MIN_VALID ||
+            !leaf_index) {
             SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
             return std::nullopt;
         }
@@ -273,7 +290,7 @@ PrepareFinalPaymentAuditVerification(
                 static_cast<uint16_t>(member_index),
                 roster.members[member_index].pro_tx_hash)};
             auto check{PrepareSignatureCheck(
-                genesis_hash, transcript,
+                genesis_hash, *leaf_index, transcript,
                 witness.authenticated_signature,
                 roster.members[member_index], roster.descriptor.epoch, error)};
             if (!check) return std::nullopt;
@@ -291,16 +308,17 @@ PrepareFinalPaymentAuditVerification(
 
 bool VerifyFinalPaymentAudit(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
-    C11SignatureCheckQueue* queue,
+    ScheduledWOTSCheckQueue* queue,
     PaymentAuditVerificationError* error)
 {
     auto prepared{PrepareFinalPaymentAuditVerification(
-        genesis_hash, audit, rosters, authorization_mask, error)};
+        genesis_hash, schedule, audit, rosters, authorization_mask, error)};
     if (!prepared) return false;
-    if (!VerifyC11SignatureChecks(std::move(prepared->checks), queue)) {
+    if (!VerifyScheduledWOTSChecks(std::move(prepared->checks), queue)) {
         SetError(error, PaymentAuditVerificationError::INVALID_SIGNATURE);
         return false;
     }

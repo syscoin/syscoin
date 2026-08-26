@@ -7,7 +7,7 @@
 The test derives private regtest migration-state and finality anchors at
 runtime. It never changes the production 400-member, 267-threshold, four-roster
 profile. A non-installed C++ helper derives four snapshots from the mined
-branch and signs 801 real C11 shares; syscoind receives them only through the
+branch and signs 801 real scheduled-WOTS shares; syscoind receives them only through the
 production P2P collector.
 """
 
@@ -58,7 +58,7 @@ QUORUM_THRESHOLD = 267
 QUORUM_MIN_VALID = 300
 ACTIVE_QUORUMS = 4
 REQUIRED_QUORUMS = 3
-CHILD_SIGNATURE_SIZE = 3976
+CHILD_SIGNATURE_SIZE = 704
 CHILD_KEY_TREE_DEPTH = 16
 CHILD_KEY_PROOF_SIZE = 32 + CHILD_KEY_TREE_DEPTH * 32
 AUTHENTICATED_CHILD_SIGNATURE_SIZE = CHILD_KEY_PROOF_SIZE + CHILD_SIGNATURE_SIZE
@@ -71,9 +71,9 @@ CHAINLOCK_STATEMENT_WIRE_SIZE = 513
 FINAL_CHAINLOCK_FIXED_WIRE_SIZE = (
     CHAINLOCK_STATEMENT_WIRE_SIZE + 1 + ACTIVE_QUORUMS * BITMAP_SIZE + 2
 )
-CHAINLOCK_SHARE_WIRE_SIZE = 5_103
-FINAL_CHAINLOCK_WIRE_SIZE = 3_621_236
-FINAL_PAYMENT_AUDIT_WIRE_SIZE = 3_661_635
+CHAINLOCK_SHARE_WIRE_SIZE = 1_831
+FINAL_CHAINLOCK_WIRE_SIZE = 1_000_364
+FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_040_763
 PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 257
 PAYMENT_AUDIT_RECEIPT_VERSION = 1
 PAYMENT_PROBATION_STATE_VERSION = 1

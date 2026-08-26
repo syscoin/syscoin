@@ -306,6 +306,37 @@ BuildPaymentAuditEpochSchedule(const PaymentAuditScheduleConfig& config,
     return schedule;
 }
 
+std::optional<uint8_t> PaymentAuditLeafIndex(
+    const PaymentAuditScheduleConfig& config,
+    uint32_t subject_epoch,
+    int32_t seal_height,
+    uint32_t child_epoch) noexcept
+{
+    const auto audit_schedule{
+        BuildPaymentAuditEpochSchedule(config, subject_epoch)};
+    const auto seal_epoch{EpochForHeight(config.chainlock, seal_height)};
+    const auto active_epochs{
+        ActiveEpochsAtHeight(config.chainlock, seal_height)};
+    if (!audit_schedule || audit_schedule->seal_height != seal_height ||
+        !seal_epoch || subject_epoch == std::numeric_limits<uint32_t>::max() ||
+        *seal_epoch != subject_epoch + 1 || !active_epochs) {
+        return std::nullopt;
+    }
+    for (std::size_t slot{0}; slot < active_epochs->size(); ++slot) {
+        if ((*active_epochs)[slot].epoch != child_epoch) continue;
+        if (child_epoch > *seal_epoch ||
+            *seal_epoch - child_epoch >= ACTIVE_QUORUMS) {
+            return std::nullopt;
+        }
+        const uint16_t leaf{
+            static_cast<uint16_t>(SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE +
+                                  (*seal_epoch - child_epoch))};
+        if (leaf >= SCHEDULED_WOTS_USAGE_CAP) return std::nullopt;
+        return static_cast<uint8_t>(leaf);
+    }
+    return std::nullopt;
+}
+
 bool PaymentAuditCarrierWindow::Contains(int32_t height) const noexcept
 {
     return start_height >= 0 && end_height_exclusive > start_height &&
@@ -439,7 +470,7 @@ std::optional<PaymentAuditRound> SelectPaymentAuditRound(
 bool PaymentAuditCommitment::IsStructurallyValid() const noexcept
 {
     if (version != PAYMENT_AUDIT_VERSION ||
-        child_profile != CHILD_C11_SHA_V1 ||
+        child_profile != CHILD_SCHEDULED_WOTS_SHAKE_128_V1 ||
         !seed.IsStructurallyValid() ||
         selected_row >= PAYMENT_AUDIT_ROW_COUNT || response_height < 0 ||
         deadline_height < 0 ||

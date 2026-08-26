@@ -379,7 +379,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/pq_governance_auth.cpp \
  test/fuzz/pq_providertx.cpp \
  test/fuzz/pq_slhdsa.cpp \
- test/fuzz/pq_sphincs_c11.cpp \
+ test/fuzz/pq_scheduled_wots.cpp \
  test/fuzz/primitives_transaction.cpp \
  test/fuzz/process_message.cpp \
  test/fuzz/process_messages.cpp \

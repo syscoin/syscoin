@@ -1047,12 +1047,12 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
 # SYSCOIN BEGIN: deterministic-masternode and PQ functional framework.
 class MasternodeInfo:
-    def __init__(self, proTxHash, ownerAddr, votingAddr, operatorKey, c11Seed, collateral_address, collateral_txid, collateral_vout):
+    def __init__(self, proTxHash, ownerAddr, votingAddr, operatorKey, chainlockSeed, collateral_address, collateral_txid, collateral_vout):
         self.proTxHash = proTxHash
         self.ownerAddr = ownerAddr
         self.votingAddr = votingAddr
         self.operatorKey = operatorKey
-        self.c11Seed = c11Seed
+        self.chainlockSeed = chainlockSeed
         self.collateral_address = collateral_address
         self.collateral_txid = collateral_txid
         self.collateral_vout = collateral_vout
@@ -1132,7 +1132,7 @@ class DashTestFramework(SyscoinTestFramework):
             "-pqfinalitypreparation=1",
             # SYSCOIN: Generic MN/governance tests need registry and global-key
             # authorization, not 65,536-leaf child signing trees. The focused
-            # PQ lifecycle test independently pins and verifies a real root.
+            # live PQ ChainLock test independently exercises real child keys.
             "-pqoperatorcommitmentteststub=1",
         ]
         for node_args in self.extra_args:
@@ -1197,13 +1197,13 @@ class DashTestFramework(SyscoinTestFramework):
             proTxHash = self.nodes[0].sendrawtransaction(protx_result)
 
         # A PQ ProReg starts inactive. One owner-authorized transaction binds
-        # the global key and its deterministic C11 tree root; no recurring
+        # the global key and its deterministic scheduled-WOTS tree root; no recurring
         # child-key registration transaction is required.
         self.generate(self.nodes[0], 1)
         registered_mn = self.nodes[0].protx_info(proTxHash)
         collateral_txid = registered_mn["collateralHash"]
         collateral_vout = registered_mn["collateralIndex"]
-        # SYSCOIN: constructing the fixed 65,536-leaf C11 commitment is the
+        # SYSCOIN: constructing the fixed 65,536-leaf scheduled-WOTS commitment is the
         # only setup RPC that can exceed the ordinary 60-second test budget on
         # low-core CI builders. Give this one call a bounded fresh connection
         # without weakening timeout detection for every other RPC.
@@ -1215,7 +1215,7 @@ class DashTestFramework(SyscoinTestFramework):
         )
         operator_registration_rpc.protx_register_operator_key(
             proTxHash, operator_keys["operatorKey"],
-            operator_keys["c11Seed"], address)
+            operator_keys["chainlockSeed"], address)
         self.generate(self.nodes[0], 1)
         operatorPayoutAddress = (
             self.nodes[0].getnewaddress() if operatorReward > 0 else "")
@@ -1226,7 +1226,7 @@ class DashTestFramework(SyscoinTestFramework):
 
         self.mninfo.append(MasternodeInfo(
             proTxHash, ownerAddr, votingAddr,
-            operator_keys["operatorKey"], operator_keys["c11Seed"],
+            operator_keys["operatorKey"], operator_keys["chainlockSeed"],
             address, collateral_txid, collateral_vout))
 
         self.log.info("Prepared masternode %d: collateral_txid=%s, collateral_vout=%d, protxHash=%s" % (idx, collateral_txid, collateral_vout, proTxHash))
@@ -1282,7 +1282,7 @@ class DashTestFramework(SyscoinTestFramework):
     def start_masternode(self, mninfo, extra_args=None):
         key_args = [
             '-masternodeslhprivkey=%s' % mninfo.operatorKey,
-            '-masternodec11seed=%s' % mninfo.c11Seed,
+            '-masternodechainlockseed=%s' % mninfo.chainlockSeed,
         ]
         for arg in key_args:
             if arg not in self.extra_args[mninfo.nodeIdx]:

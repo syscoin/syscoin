@@ -56,7 +56,7 @@ namespace llmq {
 [[nodiscard]] bool MustRetryPaymentAuditCertificateContext(
     bool historical_required, bool historical_resolved) noexcept;
 
-/** Retry one immutable local aggregate without turning scheduler ticks into C11 work. */
+/** Retry one immutable local aggregate without repeating scheduled-WOTS work. */
 [[nodiscard]] bool IsPaymentAuditFinalizationRetryDue(
     std::chrono::microseconds now,
     std::optional<std::chrono::microseconds> last_attempt) noexcept;
@@ -210,7 +210,7 @@ ExtractDeferredPaymentAuditReceipt(
     const pq::ChainLockShareTranscript& transcript) noexcept;
 
 /**
- * Live certificate and authenticated C11-share handler. There is no DKG,
+ * Live certificate and authenticated scheduled-WOTS-share handler. There is no DKG,
  * threshold-key ceremony, recovered-signature layer, or BLS state.
  */
 class CChainLocksHandler final : private pq::ChainLockFinalityContext {

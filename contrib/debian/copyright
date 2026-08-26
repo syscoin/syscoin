@@ -19,11 +19,6 @@ License: Apache-2.0 or ISC or Expat
 Comment: The exact upstream tri-license text is preserved in
          src/crypto/slhdsa/LICENSE.upstream.
 
-Files: src/crypto/sphincs_c11/*
-Copyright: 2026, Nicolas Consigny <nicolas@ethereum.org>
-           2026, The Syscoin Core developers
-License: Expat
-
 Files: contrib/btcheadernode/COPYING.bitcoin-core
 Copyright: 2009-2026, The Bitcoin Core developers
            2009-2026, Bitcoin Developers

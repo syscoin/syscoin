@@ -2352,7 +2352,7 @@ static constexpr uint64_t CMPCTBLOCKS_VERSION{2};
 // Internal stuff
 namespace {
 
-// SYSCOIN: A canonical PQ ChainLock is 3,621,236 bytes. Sixty seconds permits
+// SYSCOIN: A canonical PQ ChainLock is about one megabyte. Sixty seconds permits
 // an honest peer near 0.5 Mbps to finish one response while the two-lane
 // tracker still rotates withholding sources promptly.
 static constexpr auto CLSIG_REQUEST_TIMEOUT{60s};

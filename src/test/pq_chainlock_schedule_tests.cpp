@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_chainlock_schedule.h>
+#include <llmq/pq_payment_audit.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -180,7 +181,7 @@ BOOST_AUTO_TEST_CASE(exact_child_lifetime_usage_bound)
         BOOST_REQUIRE(span);
         observed_max = std::max(observed_max, span->count);
         BOOST_CHECK_LE(span->count, PQ_MAX_ELIGIBLE_TARGETS_PER_CHILD);
-        BOOST_CHECK_LE(span->count, C11_USAGE_CAP);
+        BOOST_CHECK_LE(span->count, SCHEDULED_WOTS_USAGE_CAP);
 
         uint16_t enumerated{0};
         for (int32_t height{span->first_height}; height <= span->last_height;
@@ -193,6 +194,78 @@ BOOST_AUTO_TEST_CASE(exact_child_lifetime_usage_bound)
         BOOST_CHECK(!IsEpochActiveForTarget(config, epoch, span->last_height + PQ_CL_PERIOD));
     }
     BOOST_CHECK_EQUAL(observed_max, 231U);
+}
+
+BOOST_AUTO_TEST_CASE(chainlock_leaf_mapping_has_exact_scheduled_boundaries)
+{
+    const ChainLockScheduleConfig config{.epoch_origin = 0};
+
+    const auto first{ChainLockLeafIndex(config, /*child_epoch=*/3,
+                                        /*target_height=*/865)};
+    const auto last{ChainLockLeafIndex(config, /*child_epoch=*/3,
+                                       /*target_height=*/2'015)};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(last);
+    BOOST_CHECK_EQUAL(static_cast<unsigned>(*first), 0U);
+    BOOST_CHECK_EQUAL(static_cast<unsigned>(*last), 230U);
+
+    BOOST_CHECK(!ChainLockLeafIndex(config, 3, 864));
+    BOOST_CHECK(!ChainLockLeafIndex(config, 3, 866));
+    BOOST_CHECK(!ChainLockLeafIndex(config, 3, 2'020));
+    BOOST_CHECK(!ChainLockLeafIndex(config, 2, 2'015));
+
+    auto invalid{config};
+    ++invalid.chainlock_period;
+    BOOST_CHECK(!ChainLockLeafIndex(invalid, 3, 865));
+    BOOST_CHECK(!ChainLockLeafIndex(
+        config, std::numeric_limits<uint32_t>::max(), 865));
+}
+
+BOOST_AUTO_TEST_CASE(payment_audit_leaf_mapping_uses_full_schedule_and_231_to_234)
+{
+    const auto chainlock{MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(chainlock);
+    const PaymentAuditScheduleConfig config{
+        *chainlock,
+        BTCCScheduleConfig{.candidate_origin = 865},
+    };
+    BOOST_REQUIRE(config.IsValid());
+    const auto audit{BuildPaymentAuditEpochSchedule(config, 3)};
+    BOOST_REQUIRE(audit);
+    BOOST_CHECK_EQUAL(audit->seal_height, 1'370);
+
+    // The seal is in epoch four. Newest-to-oldest active child epochs map to
+    // the four purpose-separated audit leaves.
+    for (uint32_t distance{0}; distance < ACTIVE_QUORUMS; ++distance) {
+        const auto leaf{PaymentAuditLeafIndex(
+            config, /*subject_epoch=*/3, audit->seal_height,
+            /*child_epoch=*/4 - distance)};
+        BOOST_REQUIRE(leaf);
+        BOOST_CHECK_EQUAL(
+            static_cast<unsigned>(*leaf),
+            static_cast<unsigned>(SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE +
+                                  distance));
+    }
+    BOOST_CHECK_EQUAL(SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE, 231U);
+    BOOST_CHECK_EQUAL(SCHEDULED_WOTS_USAGE_CAP - 1, 234U);
+
+    BOOST_CHECK(!PaymentAuditLeafIndex(config, 3, audit->seal_height, 0));
+    BOOST_CHECK(!PaymentAuditLeafIndex(config, 3, audit->seal_height, 5));
+    BOOST_CHECK(!PaymentAuditLeafIndex(config, 3, audit->seal_height + 5, 4));
+    BOOST_CHECK(!PaymentAuditLeafIndex(config, 2, audit->seal_height, 4));
+    BOOST_CHECK(!PaymentAuditLeafIndex(
+        config, std::numeric_limits<uint32_t>::max(), audit->seal_height, 4));
+
+    auto invalid{config};
+    ++invalid.btcc.candidate_origin;
+    BOOST_CHECK(!invalid.IsValid());
+    BOOST_CHECK(!PaymentAuditLeafIndex(
+        invalid, 3, audit->seal_height, 4));
+    invalid = config;
+    ++invalid.chainlock.active_epochs;
+    BOOST_CHECK(!invalid.IsValid());
+    BOOST_CHECK(!PaymentAuditLeafIndex(
+        invalid, 3, audit->seal_height, 4));
 }
 
 BOOST_AUTO_TEST_CASE(overflow_and_signed_height_edges_fail_closed)

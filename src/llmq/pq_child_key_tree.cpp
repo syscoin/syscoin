@@ -107,8 +107,8 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
 void WriteTreeMetadata(CHashWriter& writer, const ChildKeyTreeConfig& config)
 {
     writer << config.genesis_hash << config.tree_id << config.generation
-           << config.first_epoch << config.depth << CHILD_C11_SHA_V1
-           << C11_USAGE_CAP;
+           << config.first_epoch << config.depth << CHILD_SCHEDULED_WOTS_SHAKE_128_V1
+           << SCHEDULED_WOTS_USAGE_CAP;
 }
 
 uint256 GetCacheChecksum(const ChildKeyTreeConfig& config,

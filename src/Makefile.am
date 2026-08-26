@@ -747,7 +747,7 @@ crypto_libsyscoin_crypto_base_la_CPPFLAGS = $(AM_CPPFLAGS)
 crypto_libsyscoin_crypto_base_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -static
 crypto_libsyscoin_crypto_base_la_LDFLAGS = $(AM_LDFLAGS) -static
 
-# SYSCOIN: Fork-only SLH-DSA and SPHINCS/C11 sources are grouped at the tail
+# SYSCOIN: Fork-only SLH-DSA and scheduled-WOTS sources are grouped at the tail
 # of this contiguous list because the MSVC project generator consumes it whole.
 crypto_libsyscoin_crypto_base_la_SOURCES = \
   crypto/aes.cpp \
@@ -797,8 +797,9 @@ crypto_libsyscoin_crypto_base_la_SOURCES = \
   crypto/slhdsa/vendor/slh_shake.c \
   crypto/slhdsa/vendor/slh_sys.h \
   crypto/slhdsa/vendor/slh_var.h \
-  crypto/sphincs_c11/sphincs_c11.cpp \
-  crypto/sphincs_c11/sphincs_c11.h
+  crypto/slhdsa/vendor/slh_wots_internal.h \
+  crypto/scheduled_wots/scheduled_wots.cpp \
+  crypto/scheduled_wots/scheduled_wots.h
 
 if USE_ASM
 crypto_libsyscoin_crypto_base_la_SOURCES += crypto/sha256_sse4.cpp
@@ -1198,21 +1199,13 @@ CTAES_DIST += crypto/ctaes/ctaes.h
 CTAES_DIST += crypto/ctaes/README.md
 CTAES_DIST += crypto/ctaes/test.c
 
-# SYSCOIN: Keep the exact research-profile provenance, licenses, and independent
-# differential/KAT tooling in source distributions. These files are part of
-# the review boundary even though they are not linked into binaries.
+# SYSCOIN: Keep the exact vendored primitive provenance in source distributions.
 PQ_CRYPTO_DIST = \
-  crypto/slhdsa/README.md \
-  crypto/sphincs_c11/README.md \
-  crypto/sphincs_c11/tests/standalone_test.cpp \
-  crypto/sphincs_c11/tools/differential.py
+  crypto/slhdsa/README.md
 
-# SYSCOIN: Binary packages must carry the exact third-party notices for both linked PQ
-# implementations; the source-distribution list alone is insufficient.
+# SYSCOIN: Binary packages carry the exact third-party primitive notice.
 slhdsadocdir = $(docdir)/pq-crypto/slhdsa
 dist_slhdsadoc_DATA = crypto/slhdsa/LICENSE.upstream
-sphincsc11docdir = $(docdir)/pq-crypto/sphincs_c11
-dist_sphincsc11doc_DATA = crypto/sphincs_c11/LICENSE
 
 CLEANFILES = $(EXTRA_LIBRARIES)
 if ENABLE_BTCHEADERNODE_BUILD

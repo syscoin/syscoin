@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include <boost/test/unit_test.hpp>
 
@@ -72,9 +73,10 @@ ChildPublicKey FakeChildKey(std::size_t slot, std::size_t member)
 
 struct CollectorFixture {
     uint256 genesis_hash{NonNullHash(7001)};
+    ChainLockScheduleConfig schedule{.epoch_origin = 0};
     ChainLockStatement statement;
     std::array<FrozenQuorumRoster, ACTIVE_QUORUMS> rosters;
-    sphincs_c11::SecretKey member_secret_key;
+    std::optional<scheduled_wots::SecretKey> member_secret_key;
     ChildKeyProof member_key_proof;
 };
 
@@ -87,20 +89,22 @@ std::unique_ptr<CollectorFixture> MakeFixture()
     fixture->statement.previous_chainlock_hash = NonNullHash(7099);
     fixture->statement.payment_probation_state_hash = NonNullHash(7098);
 
-    sphincs_c11::SecretSeed secret_seed{};
-    sphincs_c11::PublicSeed public_seed{};
-    for (std::size_t i{0}; i < secret_seed.size(); ++i) secret_seed[i] = i + 1;
-    for (std::size_t i{0}; i < public_seed.size(); ++i) public_seed[i] = 0xa0 + i;
-    sphincs_c11::PublicKey member_public_key;
-    BOOST_REQUIRE(sphincs_c11::GenerateKeyPair(
-        secret_seed, public_seed, member_public_key,
-        fixture->member_secret_key));
+    scheduled_wots::KeyGenerationSeed seed{};
+    for (std::size_t i{0}; i < seed.size(); ++i) seed[i] = i + 1;
+    fixture->member_secret_key = scheduled_wots::GenerateSecretKey(seed);
+    BOOST_REQUIRE(fixture->member_secret_key);
+    scheduled_wots::PublicKey member_public_key{};
+    BOOST_REQUIRE(fixture->member_secret_key->GetPublicKey(member_public_key));
+
+    const auto active_epochs{
+        ActiveEpochsAtHeight(fixture->schedule, fixture->statement.height)};
+    BOOST_REQUIRE(active_epochs);
 
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         auto& roster{fixture->rosters[slot]};
         auto& descriptor{roster.descriptor};
-        descriptor.epoch = static_cast<uint32_t>(20 + slot);
-        descriptor.base_height = static_cast<int32_t>(500 + slot * 288);
+        descriptor.epoch = (*active_epochs)[slot].epoch;
+        descriptor.base_height = (*active_epochs)[slot].base_height;
         descriptor.base_hash = NonNullHash(7200 + slot);
         descriptor.snapshot_height = descriptor.base_height - 144;
         descriptor.snapshot_hash = NonNullHash(7300 + slot);
@@ -113,7 +117,7 @@ std::unique_ptr<CollectorFixture> MakeFixture()
 
             ChildPublicKey public_key{FakeChildKey(slot, member)};
             if (slot == 0 && member == 0) {
-                public_key = sphincs_c11::SerializePublicKey(member_public_key);
+                public_key = member_public_key;
             }
             const auto authorization{
                 test::MakeSyntheticChildAuthorization(
@@ -143,7 +147,8 @@ std::unique_ptr<CollectorFixture> MakeFixture()
     return fixture;
 }
 
-ChainLockShare SignFirstShare(const CollectorFixture& fixture)
+ChainLockShare SignFirstShare(const CollectorFixture& fixture,
+                              std::optional<uint8_t> leaf_override = std::nullopt)
 {
     FinalChainLock shell;
     shell.statement = fixture.statement;
@@ -153,10 +158,15 @@ ChainLockShare SignFirstShare(const CollectorFixture& fixture)
         fixture.rosters[0].members[0].pro_tx_hash);
     const uint256 share_hash{GetChainLockShareHash(
         fixture.genesis_hash, share.transcript)};
-    sphincs_c11::Message message;
+    scheduled_wots::Message message;
     std::copy(share_hash.begin(), share_hash.end(), message.begin());
-    BOOST_REQUIRE(sphincs_c11::Sign(
-        fixture.member_secret_key, message,
+    const auto scheduled_leaf{ChainLockLeafIndex(
+        fixture.schedule, fixture.rosters[0].descriptor.epoch,
+        fixture.statement.height)};
+    BOOST_REQUIRE(scheduled_leaf);
+    BOOST_REQUIRE(fixture.member_secret_key);
+    BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+        *fixture.member_secret_key, leaf_override.value_or(*scheduled_leaf), message,
         share.authenticated_signature.signature));
     share.authenticated_signature.key_proof = fixture.member_key_proof;
     return share;
@@ -177,7 +187,8 @@ BOOST_AUTO_TEST_CASE(cloned_signer_cannot_add_quorum_weight)
     BOOST_REQUIRE(fixture);
     ShareCollectionError error{ShareCollectionError::INVALID_ARGUMENT};
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        ShareRosters(*fixture),
         FULL_AUTHORIZATION_MASK,
         &error)};
     BOOST_REQUIRE(collector);
@@ -222,7 +233,8 @@ BOOST_AUTO_TEST_CASE(rejects_wrong_statement_member_and_signature)
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        ShareRosters(*fixture),
         FULL_AUTHORIZATION_MASK)};
     BOOST_REQUIRE(collector);
     const ChainLockShare valid{SignFirstShare(*fixture)};
@@ -245,6 +257,16 @@ BOOST_AUTO_TEST_CASE(rejects_wrong_statement_member_and_signature)
     BOOST_CHECK(collector->AddVerifiedShare(wrong_signature, &error) ==
                 ShareCollectionResult::REJECTED);
     BOOST_CHECK(error == ShareCollectionError::INVALID_SIGNATURE);
+
+    const auto scheduled_leaf{ChainLockLeafIndex(
+        fixture->schedule, fixture->rosters[0].descriptor.epoch,
+        fixture->statement.height)};
+    BOOST_REQUIRE(scheduled_leaf);
+    const ChainLockShare wrong_scheduled_leaf{
+        SignFirstShare(*fixture, static_cast<uint8_t>(*scheduled_leaf + 1))};
+    BOOST_CHECK(collector->AddVerifiedShare(wrong_scheduled_leaf, &error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(error == ShareCollectionError::INVALID_SIGNATURE);
 }
 
 BOOST_AUTO_TEST_CASE(invalid_impersonation_does_not_reserve_signer_slot)
@@ -252,7 +274,8 @@ BOOST_AUTO_TEST_CASE(invalid_impersonation_does_not_reserve_signer_slot)
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        ShareRosters(*fixture),
         FULL_AUTHORIZATION_MASK)};
     BOOST_REQUIRE(collector);
     const ChainLockShare valid{SignFirstShare(*fixture)};
@@ -276,7 +299,8 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        ShareRosters(*fixture),
         FULL_AUTHORIZATION_MASK)};
     BOOST_REQUIRE(collector);
 
@@ -310,7 +334,8 @@ BOOST_AUTO_TEST_CASE(one_transition_ignores_and_rejects_newest_roster)
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, ShareRosters(*fixture),
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        ShareRosters(*fixture),
         0b0111)};
     BOOST_REQUIRE(collector);
 

@@ -24,8 +24,6 @@ ChainLockSigningError MapJournalError(PQSignerJournalOutcome outcome)
         return ChainLockSigningError::JOURNAL_CONFLICT;
     case PQSignerJournalOutcome::CONSUMED:
         return ChainLockSigningError::JOURNAL_CONSUMED;
-    case PQSignerJournalOutcome::CAP_EXHAUSTED:
-        return ChainLockSigningError::USAGE_CAP_EXHAUSTED;
     case PQSignerJournalOutcome::BRANCH_CONFLICT:
         return ChainLockSigningError::JOURNAL_CONFLICT;
     case PQSignerJournalOutcome::INVALID_ARGUMENT:
@@ -62,14 +60,14 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
     uint8_t authorization_mask,
     uint8_t quorum_slot,
     uint16_t member_index,
-    const sphincs_c11::SecretKey& child_secret_key,
+    const scheduled_wots::SecretKey& child_secret_key,
     const ChildKeyProof& child_key_proof,
     const std::optional<PQSignerBranchLock>& expected_branch_lock,
     ChainLockSigningError* error)
 {
     SetError(error, ChainLockSigningError::NONE);
     if (m_genesis_hash.IsNull() || m_local_pro_tx_hash.IsNull() ||
-        !statement.IsStructurallyValid() || !child_secret_key.IsInitialized()) {
+        !statement.IsStructurallyValid() || !child_secret_key.IsValid()) {
         return Failure(error, ChainLockSigningError::INVALID_ARGUMENT);
     }
     if (!m_schedule.IsValid()) {
@@ -91,9 +89,11 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
         return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
     }
     const auto& roster{rosters[quorum_slot]};
+    const auto leaf_index{ChainLockLeafIndex(
+        m_schedule, roster.descriptor.epoch, statement.height)};
     if (!IsEpochActiveForTarget(m_schedule, roster.descriptor.epoch,
                                 statement.height) ||
-        roster.descriptor.valid_count < QUORUM_MIN_VALID) {
+        roster.descriptor.valid_count < QUORUM_MIN_VALID || !leaf_index) {
         return Failure(error, ChainLockSigningError::INACTIVE_QUORUM);
     }
     if (member_index >= QUORUM_SIZE ||
@@ -108,11 +108,12 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
     if (!member.eligible || !member.child_root) {
         return Failure(error, ChainLockSigningError::INVALID_MEMBER);
     }
-    if (!VerifyCommittedChildKeyProof(
+    ChildPublicKey derived_public_key{};
+    if (!child_secret_key.GetPublicKey(derived_public_key) ||
+        !VerifyCommittedChildKeyProof(
             m_genesis_hash, member.child_root->commitment,
             roster.descriptor.epoch, child_key_proof) ||
-        sphincs_c11::SerializePublicKey(child_secret_key.GetPublicKey()) !=
-            child_key_proof.public_key) {
+        derived_public_key != child_key_proof.public_key) {
         return Failure(error, ChainLockSigningError::SECRET_KEY_MISMATCH);
     }
 
@@ -133,6 +134,7 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
         .pro_tx_hash = m_local_pro_tx_hash,
         .quorum_epoch = roster.descriptor.epoch,
         .child_key_hash = ::Hash(child_key_proof.public_key),
+        .leaf_index = *leaf_index,
         .absolute_height = statement.height,
     };
     const PQSignerBranchLock candidate_branch_lock{
@@ -156,15 +158,15 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
         return Failure(error, MapJournalError(reservation.outcome));
     }
 
-    sphincs_c11::Message message;
+    scheduled_wots::Message message;
     std::copy(message_hash.begin(), message_hash.end(), message.begin());
-    if (!sphincs_c11::Sign(
-            child_secret_key, message,
+    if (!scheduled_wots::SignDeterministic(
+            child_secret_key, *leaf_index, message,
             share.authenticated_signature.signature)) {
         // The durable reservation intentionally remains consumed.
         return Failure(error, ChainLockSigningError::SIGNING_FAILURE);
     }
-    PQC11Signature journal_signature;
+    PQChildSignature journal_signature;
     std::copy(share.authenticated_signature.signature.begin(),
               share.authenticated_signature.signature.end(),
               journal_signature.begin());

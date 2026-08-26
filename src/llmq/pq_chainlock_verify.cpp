@@ -97,8 +97,8 @@ bool IsDescriptorHeaderValid(const QuorumDescriptor& descriptor, int32_t target_
            descriptor.snapshot_height >= 0 &&
            descriptor.snapshot_height < descriptor.base_height &&
            !descriptor.base_hash.IsNull() && !descriptor.snapshot_hash.IsNull() &&
-           descriptor.profile == CHILD_C11_SHA_V1 &&
-           descriptor.usage_cap == C11_USAGE_CAP &&
+           descriptor.profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 &&
+           descriptor.usage_cap == SCHEDULED_WOTS_USAGE_CAP &&
            descriptor.valid_count == CountSet(descriptor.valid_members) &&
            descriptor.valid_count <= QUORUM_SIZE && !descriptor.member_root.IsNull() &&
            !descriptor.child_key_root.IsNull();
@@ -237,31 +237,38 @@ bool ValidateFrozenQuorumContextInternal(
 
 } // namespace
 
-C11SignatureCheck::C11SignatureCheck(sphincs_c11::PublicKey public_key,
-                                     sphincs_c11::Message message,
-                                     sphincs_c11::Signature signature)
+ScheduledWOTSCheck::ScheduledWOTSCheck(
+    scheduled_wots::PublicKey public_key,
+    uint8_t leaf_index,
+    scheduled_wots::Message message,
+    scheduled_wots::Signature signature)
     : m_public_key(std::move(public_key)),
+      m_leaf_index(leaf_index),
       m_message(std::move(message)),
       m_signature(std::move(signature))
 {
 }
 
-bool C11SignatureCheck::operator()() const
+bool ScheduledWOTSCheck::operator()() const
 {
-    return sphincs_c11::Verify(m_public_key, m_message, m_signature);
+    return scheduled_wots::Verify(m_public_key, m_leaf_index, m_message,
+                                  m_signature);
 }
 
-const sphincs_c11::PublicKey& C11SignatureCheck::GetPublicKey() const noexcept
+const scheduled_wots::PublicKey&
+ScheduledWOTSCheck::GetPublicKey() const noexcept
 {
     return m_public_key;
 }
 
-const sphincs_c11::Message& C11SignatureCheck::GetMessageBytes() const noexcept
+const scheduled_wots::Message&
+ScheduledWOTSCheck::GetMessageBytes() const noexcept
 {
     return m_message;
 }
 
-const sphincs_c11::Signature& C11SignatureCheck::GetSignature() const noexcept
+const scheduled_wots::Signature&
+ScheduledWOTSCheck::GetSignature() const noexcept
 {
     return m_signature;
 }
@@ -341,8 +348,9 @@ bool ValidateFrozenQuorumContext(
         /*selected_quorum_mask=*/0, error);
 }
 
-std::optional<C11SignatureCheck> PrepareChainLockShareVerification(
+std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
@@ -366,7 +374,9 @@ std::optional<C11SignatureCheck> PrepareChainLockShareVerification(
     }
 
     const auto& roster{rosters[*quorum_slot]};
-    if (roster.descriptor.valid_count < QUORUM_MIN_VALID) {
+    const auto leaf_index{ChainLockLeafIndex(
+        schedule, roster.descriptor.epoch, share.transcript.height)};
+    if (roster.descriptor.valid_count < QUORUM_MIN_VALID || !leaf_index) {
         SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
         return std::nullopt;
     }
@@ -390,33 +400,30 @@ std::optional<C11SignatureCheck> PrepareChainLockShareVerification(
         SetError(error, ChainLockVerificationError::INVALID_CHILD_PROOF);
         return std::nullopt;
     }
-    sphincs_c11::PublicKey public_key;
-    if (!sphincs_c11::ParsePublicKey(
-            share.authenticated_signature.key_proof.public_key,
-            public_key)) {
-        SetError(error, ChainLockVerificationError::INVALID_PUBLIC_KEY);
-        return std::nullopt;
-    }
+    scheduled_wots::PublicKey public_key{
+        share.authenticated_signature.key_proof.public_key};
     const uint256 share_hash{GetChainLockShareHash(genesis_hash, share.transcript)};
-    sphincs_c11::Message message;
+    scheduled_wots::Message message;
     std::copy(share_hash.begin(), share_hash.end(), message.begin());
-    sphincs_c11::Signature signature;
+    scheduled_wots::Signature signature;
     std::copy(share.authenticated_signature.signature.begin(),
               share.authenticated_signature.signature.end(),
               signature.begin());
-    return C11SignatureCheck{
-        std::move(public_key), std::move(message), std::move(signature)};
+    return ScheduledWOTSCheck{
+        std::move(public_key), *leaf_index, std::move(message),
+        std::move(signature)};
 }
 
 bool VerifyChainLockShare(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
     auto check{PrepareChainLockShareVerification(
-        genesis_hash, share, rosters, authorization_mask, error)};
+        genesis_hash, schedule, share, rosters, authorization_mask, error)};
     if (!check) return false;
     if (!(*check)()) {
         SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
@@ -428,6 +435,7 @@ bool VerifyChainLockShare(
 
 std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
@@ -450,6 +458,12 @@ std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         if (!IsSelected(chainlock.selected_quorum_mask, slot)) continue;
         const auto& roster = rosters[slot];
+        const auto leaf_index{ChainLockLeafIndex(
+            schedule, roster.descriptor.epoch, chainlock.statement.height)};
+        if (!leaf_index) {
+            SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
+            return std::nullopt;
+        }
         for (std::size_t member_index{0}; member_index < QUORUM_SIZE; ++member_index) {
             if (!IsBitSet(chainlock.signer_bitmaps[slot], member_index)) continue;
             if (!IsBitSet(roster.descriptor.valid_members, member_index) ||
@@ -470,12 +484,8 @@ std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
                          ChainLockVerificationError::INVALID_CHILD_PROOF);
                 return std::nullopt;
             }
-            sphincs_c11::PublicKey public_key;
-            if (!sphincs_c11::ParsePublicKey(
-                    authenticated.key_proof.public_key, public_key)) {
-                SetError(error, ChainLockVerificationError::INVALID_PUBLIC_KEY);
-                return std::nullopt;
-            }
+            scheduled_wots::PublicKey public_key{
+                authenticated.key_proof.public_key};
 
             const auto transcript = BuildChainLockShareTranscript(
                 chainlock, roster.descriptor, static_cast<uint16_t>(member_index),
@@ -485,13 +495,14 @@ std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
                 return std::nullopt;
             }
             const uint256 share_hash = GetChainLockShareHash(genesis_hash, transcript);
-            sphincs_c11::Message message;
+            scheduled_wots::Message message;
             std::copy(share_hash.begin(), share_hash.end(), message.begin());
-            sphincs_c11::Signature signature;
+            scheduled_wots::Signature signature;
             std::copy(authenticated.signature.begin(),
                       authenticated.signature.end(), signature.begin());
-            prepared.checks.emplace_back(std::move(public_key), std::move(message),
-                                         std::move(signature));
+            prepared.checks.emplace_back(
+                std::move(public_key), *leaf_index, std::move(message),
+                std::move(signature));
             ++signature_index;
         }
     }
@@ -503,8 +514,8 @@ std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
     return prepared;
 }
 
-bool VerifyC11SignatureChecks(std::vector<C11SignatureCheck>&& checks,
-                              C11SignatureCheckQueue* queue)
+bool VerifyScheduledWOTSChecks(std::vector<ScheduledWOTSCheck>&& checks,
+                              ScheduledWOTSCheckQueue* queue)
 {
     if (queue == nullptr) {
         for (const auto& check : checks) {
@@ -512,23 +523,25 @@ bool VerifyC11SignatureChecks(std::vector<C11SignatureCheck>&& checks,
         }
         return true;
     }
-    CCheckQueueControl<C11SignatureCheck> control{queue};
+    CCheckQueueControl<ScheduledWOTSCheck> control{queue};
     control.Add(std::move(checks));
     return control.Wait();
 }
 
 bool VerifyFinalChainLock(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
-    C11SignatureCheckQueue* queue,
+    ScheduledWOTSCheckQueue* queue,
     ChainLockVerificationError* error)
 {
     auto prepared = PrepareFinalChainLockVerification(
-        genesis_hash, chainlock, rosters, authorization_mask, error);
+        genesis_hash, schedule, chainlock, rosters, authorization_mask,
+        error);
     if (!prepared) return false;
-    if (!VerifyC11SignatureChecks(std::move(prepared->checks), queue)) {
+    if (!VerifyScheduledWOTSChecks(std::move(prepared->checks), queue)) {
         SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
         return false;
     }
@@ -558,13 +571,15 @@ ChainLockVerifier::~ChainLockVerifier()
 
 bool ChainLockVerifier::Verify(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
     auto prepared = PrepareFinalChainLockVerification(
-        genesis_hash, chainlock, rosters, authorization_mask, error);
+        genesis_hash, schedule, chainlock, rosters, authorization_mask,
+        error);
     if (!prepared) return false;
     if (!VerifyChecks(std::move(prepared->checks))) {
         SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
@@ -574,9 +589,9 @@ bool ChainLockVerifier::Verify(
     return true;
 }
 
-bool ChainLockVerifier::VerifyChecks(std::vector<C11SignatureCheck>&& checks)
+bool ChainLockVerifier::VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
 {
-    // Random invalid bundles normally fail after one serial C11 check instead
+    // Random invalid bundles normally fail after one serial WOTS+ check instead
     // of occupying every worker. The process-secret RNG makes the sampled
     // member positions unpredictable to a remote sender. Every sampled job is
     // removed only after it succeeds, so valid certificates still execute all
@@ -597,7 +612,7 @@ bool ChainLockVerifier::VerifyChecks(std::vector<C11SignatureCheck>&& checks)
         checks.pop_back();
     }
     if (checks.empty()) return true;
-    return VerifyC11SignatureChecks(std::move(checks), &m_queue);
+    return VerifyScheduledWOTSChecks(std::move(checks), &m_queue);
 }
 
 } // namespace llmq::pq

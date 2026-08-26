@@ -149,18 +149,18 @@ static void ParseChainLockMasterSeed(
     llmq::pq::ChainLockMasterSeed& output)
 {
     if (!IsHex(hex_seed) ||
-        hex_seed.size() != sphincs_c11::SECRET_SEED_SIZE * 2) {
+        hex_seed.size() != llmq::pq::CHAINLOCK_MASTER_SEED_SIZE * 2) {
         throw JSONRPCError(
             RPC_INVALID_PARAMETER,
-            strprintf("c11Seed must be an exactly %u-byte independent ChainLock seed",
-                      sphincs_c11::SECRET_SEED_SIZE));
+            strprintf("chainlockSeed must be an exactly %u-byte independent ChainLock seed",
+                      llmq::pq::CHAINLOCK_MASTER_SEED_SIZE));
     }
     auto bytes = ParseHex(hex_seed);
     const bool valid = llmq::pq::ImportChainLockMasterSeed(bytes, output);
     memory_cleanse(bytes.data(), bytes.size());
     if (!valid) {
         throw JSONRPCError(RPC_INVALID_PARAMETER,
-                           "c11Seed must not be all zero");
+                           "chainlockSeed must not be all zero");
     }
 }
 
@@ -282,7 +282,7 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
         if (!tree) {
             throw JSONRPCError(
                 RPC_INTERNAL_ERROR,
-                "Failed to build the fixed-depth C11 public-key tree");
+                "Failed to build the fixed-depth scheduled-WOTS public-key tree");
         }
         if (verify_fixture && tree->GetRoot() != fixture_root) {
             throw JSONRPCError(
@@ -301,7 +301,7 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
     commitment.root = fixture_root.IsNull() ? tree->GetRoot() : fixture_root;
     if (!commitment.IsStructurallyValid()) {
         throw JSONRPCError(RPC_INTERNAL_ERROR,
-                           "Generated C11 child-key commitment is invalid");
+                           "Generated scheduled-WOTS child-key commitment is invalid");
     }
     return commitment;
 }
@@ -329,7 +329,7 @@ static UniValue protx_generate_operator_keys()
     }
     UniValue result{UniValue::VOBJ};
     result.pushKV("operatorKey", HexStr(encoded_global));
-    result.pushKV("c11Seed", HexStr(chainlock_seed));
+    result.pushKV("chainlockSeed", HexStr(chainlock_seed));
     memory_cleanse(encoded_global.data(), encoded_global.size());
     memory_cleanse(chainlock_seed.data(), chainlock_seed.size());
     return result;
@@ -1075,7 +1075,7 @@ static RPCHelpMan protx_register_operator_key()
              "The deterministic masternode ProRegTx hash."},
             {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
              "The exactly 64-byte SLH-DSA-SHAKE-128s secret key. Avoid exposing this argument through shell history."},
-            {"c11Seed", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+            {"chainlockSeed", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
              "The independent nonzero 32-byte ChainLock seed. It deterministically commits 65,536 epoch keys and is never placed on-chain."},
             {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""},
              "Wallet address used to fund the transaction; defaults to the masternode payout address."},
@@ -1085,7 +1085,7 @@ static RPCHelpMan protx_register_operator_key()
         RPCResult{RPCResult::Type::STR_HEX, "", "Transaction hash or signed transaction hex"},
         RPCExamples{HelpExampleCli(
             "protx_register_operator_key",
-            "<proTxHash> <64-byte-secret-key> <32-byte-c11-seed>")},
+            "<proTxHash> <64-byte-secret-key> <32-byte-chainlock-seed>")},
         [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
             auto pwallet = GetWalletForJSONRPCRequest(request);
             if (!pwallet) return NullUniValue;
@@ -1236,7 +1236,7 @@ static RPCHelpMan protx_generate_operator_keypair()
         RPCResult{RPCResult::Type::OBJ, "", "", {
             {RPCResult::Type::STR_HEX, "operatorKey",
              "Canonical 64-byte global SLH-DSA secret key"},
-            {RPCResult::Type::STR_HEX, "c11Seed",
+            {RPCResult::Type::STR_HEX, "chainlockSeed",
              "Independent 32-byte ChainLock child-key master seed"},
         }},
         RPCExamples{HelpExampleCli("protx_generate_operator_keypair", "")},
@@ -1263,7 +1263,7 @@ static RPCHelpMan protx_rotate_operator_key()
              "Wallet address used to fund the transaction; defaults to the masternode payout address."},
             {"submit", RPCArg::Type::BOOL, RPCArg::Default{true},
              "Broadcast when true; otherwise return the signed transaction hex."},
-            {"newC11Seed", RPCArg::Type::STR, RPCArg::Default{""},
+            {"newChainlockSeed", RPCArg::Type::STR, RPCArg::Default{""},
              "Optional independent nonzero 32-byte ChainLock seed for an exceptional child-root rotation. Empty preserves the existing 65,536-epoch commitment; consensus permits at most 15 replacements after generation 1."},
         },
         RPCResult{RPCResult::Type::STR_HEX, "", "Transaction hash or signed transaction hex"},

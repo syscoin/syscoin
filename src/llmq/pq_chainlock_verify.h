@@ -6,8 +6,9 @@
 #define SYSCOIN_LLMQ_PQ_CHAINLOCK_VERIFY_H
 
 #include <checkqueue.h>
-#include <crypto/sphincs_c11/sphincs_c11.h>
+#include <crypto/scheduled_wots/scheduled_wots.h>
 #include <llmq/pq_child_key_tree.h>
+#include <llmq/pq_chainlock_schedule.h>
 #include <llmq/pq_chainlock_types.h>
 #include <random.h>
 #include <sync.h>
@@ -62,29 +63,32 @@ enum class ChainLockVerificationError : uint8_t {
     INVALID_SIGNATURE,
 };
 
-/** One self-contained C11 verification job. It owns all of its input bytes. */
-class C11SignatureCheck {
+/** One self-contained scheduled-WOTS verification job. */
+class ScheduledWOTSCheck {
 public:
-    C11SignatureCheck(sphincs_c11::PublicKey public_key,
-                      sphincs_c11::Message message,
-                      sphincs_c11::Signature signature);
+    ScheduledWOTSCheck(scheduled_wots::PublicKey public_key,
+                       uint8_t leaf_index,
+                       scheduled_wots::Message message,
+                       scheduled_wots::Signature signature);
 
     [[nodiscard]] bool operator()() const;
 
-    [[nodiscard]] const sphincs_c11::PublicKey& GetPublicKey() const noexcept;
-    [[nodiscard]] const sphincs_c11::Message& GetMessageBytes() const noexcept;
-    [[nodiscard]] const sphincs_c11::Signature& GetSignature() const noexcept;
+    [[nodiscard]] const scheduled_wots::PublicKey& GetPublicKey() const noexcept;
+    [[nodiscard]] uint8_t GetLeafIndex() const noexcept { return m_leaf_index; }
+    [[nodiscard]] const scheduled_wots::Message& GetMessageBytes() const noexcept;
+    [[nodiscard]] const scheduled_wots::Signature& GetSignature() const noexcept;
 
 private:
-    sphincs_c11::PublicKey m_public_key;
-    sphincs_c11::Message m_message;
-    sphincs_c11::Signature m_signature;
+    scheduled_wots::PublicKey m_public_key;
+    uint8_t m_leaf_index{0};
+    scheduled_wots::Message m_message;
+    scheduled_wots::Signature m_signature;
 };
 
-using C11SignatureCheckQueue = CCheckQueue<C11SignatureCheck>;
+using ScheduledWOTSCheckQueue = CCheckQueue<ScheduledWOTSCheck>;
 
 struct PreparedChainLockVerification {
-    std::vector<C11SignatureCheck> checks;
+    std::vector<ScheduledWOTSCheck> checks;
 };
 
 /** Validate all four immutable rosters and their statement context. */
@@ -96,8 +100,9 @@ struct PreparedChainLockVerification {
     ChainLockVerificationError* error = nullptr);
 
 /** Cheap/contextual preparation for one private quorum share. */
-[[nodiscard]] std::optional<C11SignatureCheck> PrepareChainLockShareVerification(
+[[nodiscard]] std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
@@ -105,6 +110,7 @@ struct PreparedChainLockVerification {
 
 [[nodiscard]] bool VerifyChainLockShare(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
@@ -130,11 +136,12 @@ struct PreparedChainLockVerification {
 
 /**
  * Perform every bounded structural, roster, root, context, and signer mapping
- * check and produce exactly FINAL_SIGNATURE_COUNT independent C11 jobs.
- * No C11 hash computation is performed by this function.
+ * check and produce exactly FINAL_SIGNATURE_COUNT independent WOTS+ jobs.
+ * No WOTS+ hash computation is performed by this function.
  */
 [[nodiscard]] std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
@@ -145,15 +152,16 @@ struct PreparedChainLockVerification {
  * verification. A caller-supplied queue may have zero or more worker threads;
  * its start/stop lifetime must contain this call.
  */
-[[nodiscard]] bool VerifyC11SignatureChecks(std::vector<C11SignatureCheck>&& checks,
-                                            C11SignatureCheckQueue* queue = nullptr);
+[[nodiscard]] bool VerifyScheduledWOTSChecks(std::vector<ScheduledWOTSCheck>&& checks,
+                                            ScheduledWOTSCheckQueue* queue = nullptr);
 
 [[nodiscard]] bool VerifyFinalChainLock(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
-    C11SignatureCheckQueue* queue = nullptr,
+    ScheduledWOTSCheckQueue* queue = nullptr,
     ChainLockVerificationError* error = nullptr);
 
 /** RAII-owned queue. Destruction joins all workers; callers must not race it. */
@@ -169,19 +177,20 @@ public:
 
     [[nodiscard]] bool Verify(
         const uint256& genesis_hash,
+        const ChainLockScheduleConfig& schedule,
         const FinalChainLock& chainlock,
         const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
         uint8_t authorization_mask,
         ChainLockVerificationError* error = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_preflight_mutex);
 
-    [[nodiscard]] bool VerifyChecks(std::vector<C11SignatureCheck>&& checks)
+    [[nodiscard]] bool VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
         EXCLUSIVE_LOCKS_REQUIRED(!m_preflight_mutex);
 
 private:
     mutable Mutex m_preflight_mutex;
     FastRandomContext m_preflight_rng GUARDED_BY(m_preflight_mutex);
-    C11SignatureCheckQueue m_queue;
+    ScheduledWOTSCheckQueue m_queue;
 };
 
 } // namespace llmq::pq

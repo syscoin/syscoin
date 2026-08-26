@@ -20,7 +20,7 @@ class PaymentAuditShareSigner final {
 public:
     PaymentAuditShareSigner(uint256 genesis_hash,
                             uint256 local_pro_tx_hash,
-                            ChainLockScheduleConfig schedule,
+                            PaymentAuditScheduleConfig schedule,
                             CPQSignerJournal& journal);
 
     [[nodiscard]] PaymentAuditSigningResult Sign(
@@ -31,7 +31,7 @@ public:
         uint8_t authorization_mask,
         uint8_t quorum_slot,
         uint16_t member_index,
-        const sphincs_c11::SecretKey& child_secret_key,
+        const scheduled_wots::SecretKey& child_secret_key,
         const ChildKeyProof& child_key_proof,
         const std::optional<PQSignerBranchLock>& expected_branch_lock,
         ChainLockSigningError* error = nullptr);
@@ -39,7 +39,7 @@ public:
 private:
     uint256 m_genesis_hash;
     uint256 m_local_pro_tx_hash;
-    ChainLockScheduleConfig m_schedule;
+    PaymentAuditScheduleConfig m_schedule;
     CPQSignerJournal& m_journal;
 };
 

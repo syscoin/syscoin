@@ -147,17 +147,12 @@ OSX_APP_BUILT=$(OSX_APP)/Contents/PkgInfo $(OSX_APP)/Contents/Resources/empty.lp
 
 # SYSCOIN: Bundle linked PQ implementation notices in the macOS application.
 OSX_PQ_SLHDSA_LICENSE=$(OSX_APP)/Contents/Resources/licenses/pq-crypto/slhdsa/LICENSE.upstream
-OSX_PQ_SPHINCS_C11_LICENSE=$(OSX_APP)/Contents/Resources/licenses/pq-crypto/sphincs_c11/LICENSE
 
 $(OSX_PQ_SLHDSA_LICENSE): $(OSX_APP)/Contents/MacOS/Syscoin-Qt
 	$(MKDIR_P) $(@D)
 	$(INSTALL_DATA) $(top_srcdir)/src/crypto/slhdsa/LICENSE.upstream $@
 
-$(OSX_PQ_SPHINCS_C11_LICENSE): $(OSX_APP)/Contents/MacOS/Syscoin-Qt
-	$(MKDIR_P) $(@D)
-	$(INSTALL_DATA) $(top_srcdir)/src/crypto/sphincs_c11/LICENSE $@
-
-OSX_APP_BUILT += $(OSX_PQ_SLHDSA_LICENSE) $(OSX_PQ_SPHINCS_C11_LICENSE)
+OSX_APP_BUILT += $(OSX_PQ_SLHDSA_LICENSE)
 
 # SYSCOIN: Managed BTCC policy is the runtime default for miner/sentry roles.
 # Keep the pinned helper inside the app path ResolveManagedBTCHeaderBinaryPath

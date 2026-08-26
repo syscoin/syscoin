@@ -31,13 +31,15 @@ using namespace llmq::pq;
 
 namespace {
 
-constexpr int32_t TARGET_HEIGHT{2305};
-constexpr int32_t PREVIOUS_CHAINLOCK_HEIGHT{2300};
+constexpr int32_t TARGET_HEIGHT{2810};
+constexpr int32_t PREVIOUS_CHAINLOCK_HEIGHT{2805};
 constexpr int32_t EPOCH_ORIGIN{1440};
+constexpr int32_t BTCC_CANDIDATE_ORIGIN{2305};
 constexpr uint32_t SNAPSHOT_LAG{144};
 constexpr std::size_t MAX_TEST_WORKERS{8};
 constexpr uint8_t AUTHORIZATION_MASK{0b0111};
-constexpr std::size_t CHILD_KEY_COUNT{ACTIVE_QUORUMS * QUORUM_MIN_VALID};
+constexpr std::size_t CHILD_KEY_COUNT{
+    (ACTIVE_QUORUMS + 1) * QUORUM_MIN_VALID};
 
 uint256 NonNullHash(uint64_t value, uint64_t salt = 0)
 {
@@ -177,20 +179,14 @@ bool ParallelFor(std::size_t count, Function&& function)
     return success.load(std::memory_order_relaxed);
 }
 
-void FillKeySeeds(std::size_t key_index,
-                  sphincs_c11::SecretSeed& secret_seed,
-                  sphincs_c11::PublicSeed& public_seed)
+void FillKeySeed(std::size_t key_index,
+                 scheduled_wots::KeyGenerationSeed& seed)
 {
     const uint64_t seed_index{static_cast<uint64_t>(key_index) + 1};
-    for (std::size_t byte{0}; byte < secret_seed.size(); ++byte) {
+    for (std::size_t byte{0}; byte < seed.size(); ++byte) {
         const unsigned int shift{static_cast<unsigned int>((byte % 8) * 8)};
-        secret_seed[byte] = static_cast<unsigned char>(
+        seed[byte] = static_cast<unsigned char>(
             (seed_index >> shift) ^ (0x5dU + 37U * byte));
-    }
-    for (std::size_t byte{0}; byte < public_seed.size(); ++byte) {
-        const unsigned int shift{static_cast<unsigned int>((byte % 8) * 8)};
-        public_seed[byte] = static_cast<unsigned char>(
-            (seed_index >> shift) ^ (0xa7U + 19U * byte));
     }
 }
 
@@ -210,9 +206,9 @@ struct FullDimensionFixture {
     QuorumBuildConfig config{BuildConfig()};
     std::unique_ptr<IndexChain> chain{
         std::make_unique<IndexChain>(TARGET_HEIGHT)};
-    std::vector<sphincs_c11::PublicKey> public_keys{
+    std::vector<scheduled_wots::PublicKey> public_keys{
         CHILD_KEY_COUNT};
-    std::vector<sphincs_c11::SecretKey> secret_keys{
+    std::vector<std::optional<scheduled_wots::SecretKey>> secret_keys{
         CHILD_KEY_COUNT};
     std::map<uint256, std::size_t> member_indices;
     FrozenQuorumRostersPtr rosters;
@@ -223,7 +219,7 @@ struct FullDimensionFixture {
 std::optional<uint32_t> EpochForSnapshot(
     const FullDimensionFixture& fixture, int32_t snapshot_height)
 {
-    for (uint32_t epoch{0}; epoch < ACTIVE_QUORUMS; ++epoch) {
+    for (uint32_t epoch{0}; epoch <= ACTIVE_QUORUMS; ++epoch) {
         const auto expected{RegistrationCutoffHeight(
             fixture.config.schedule, epoch, SNAPSHOT_LAG)};
         if (expected && *expected == snapshot_height) return epoch;
@@ -238,7 +234,7 @@ test::SyntheticChildAuthorization MakeAuthorization(
     const std::size_t key_index{ChildKeyIndex(epoch, member_index)};
     return test::MakeSyntheticChildAuthorization(
         fixture.genesis_hash, pro_tx_hash, epoch,
-        sphincs_c11::SerializePublicKey(fixture.public_keys[key_index]),
+        fixture.public_keys[key_index],
         AuthorizationDiscriminator(epoch, member_index));
 }
 
@@ -280,15 +276,16 @@ bool GenerateMemberKeys(FullDimensionFixture& fixture)
         fixture.member_indices.emplace(NonNullHash(10'000 + member), member);
     }
     return ParallelFor(CHILD_KEY_COUNT, [&](std::size_t key_index) {
-        sphincs_c11::SecretSeed secret_seed{};
-        sphincs_c11::PublicSeed public_seed{};
-        FillKeySeeds(key_index, secret_seed, public_seed);
-        const bool generated{sphincs_c11::GenerateKeyPair(
-            secret_seed, public_seed, fixture.public_keys[key_index],
-            fixture.secret_keys[key_index])};
-        memory_cleanse(secret_seed.data(), secret_seed.size());
-        memory_cleanse(public_seed.data(), public_seed.size());
-        return generated;
+        scheduled_wots::KeyGenerationSeed seed{};
+        FillKeySeed(key_index, seed);
+        auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
+        memory_cleanse(seed.data(), seed.size());
+        if (!secret_key ||
+            !secret_key->GetPublicKey(fixture.public_keys[key_index])) {
+            return false;
+        }
+        fixture.secret_keys[key_index] = std::move(*secret_key);
+        return true;
     });
 }
 
@@ -420,10 +417,14 @@ bool BuildAndSignShares(FullDimensionFixture& fixture)
 
         const uint256 share_hash{GetChainLockShareHash(
             fixture.genesis_hash, share.transcript)};
-        sphincs_c11::Message message;
+        scheduled_wots::Message message;
         std::copy(share_hash.begin(), share_hash.end(), message.begin());
-        return sphincs_c11::Sign(
-            fixture.secret_keys[position.key_index], message,
+        const auto leaf_index{ChainLockLeafIndex(
+            fixture.config.schedule, roster.descriptor.epoch,
+            fixture.statement.height)};
+        return leaf_index && fixture.secret_keys[position.key_index] &&
+            scheduled_wots::SignDeterministic(
+            *fixture.secret_keys[position.key_index], *leaf_index, message,
             share.authenticated_signature.signature);
     });
 }
@@ -434,13 +435,21 @@ std::optional<PaymentAuditStatement> BuildPaymentAuditStatement(
     if (!fixture.rosters || !seal.IsStructurallyValid()) {
         return std::nullopt;
     }
-    const auto& subject{fixture.rosters->back().descriptor};
-    const int32_t seed_height{seal.statement.height - 30};
+    const auto& subject{
+        (*fixture.rosters)[REQUIRED_QUORUMS - 1].descriptor};
+    const PaymentAuditScheduleConfig schedule{
+        fixture.config.schedule,
+        BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}};
+    const auto audit_schedule{
+        BuildPaymentAuditEpochSchedule(schedule, subject.epoch)};
+    if (!audit_schedule || audit_schedule->seal_height != seal.statement.height) {
+        return std::nullopt;
+    }
     PaymentAuditCommitment commitment;
     commitment.seed.epoch = subject.epoch;
     commitment.seed.anchor = PaymentAuditSeedPoint{
-        seed_height, NonNullHash(91'001),
-        BTCCursor{seed_height, NonNullHash(91'002),
+        audit_schedule->anchor_height, NonNullHash(91'001),
+        BTCCursor{audit_schedule->anchor_height, NonNullHash(91'002),
                   NonNullHash(91'003)},
         BTCCAdvance::ADVANCE};
     commitment.seed.anchor_btc_height = 800'000;
@@ -448,8 +457,8 @@ std::optional<PaymentAuditStatement> BuildPaymentAuditStatement(
         800'000 + PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA;
     commitment.seed.future_btc_hash = NonNullHash(91'004);
     commitment.selected_row = 0;
-    commitment.response_height = seed_height - 30;
-    commitment.deadline_height = seed_height - 10;
+    commitment.response_height = audit_schedule->rows[0].response_height;
+    commitment.deadline_height = audit_schedule->rows[0].deadline_height;
     commitment.response_chainlock_logical_id = NonNullHash(91'004);
     commitment.response_advance = BTCCAdvance::ADVANCE;
     commitment.seal_height = seal.statement.height;
@@ -530,10 +539,17 @@ bool BuildAndSignPaymentAuditShares(
 
         const uint256 share_hash{GetPaymentAuditShareHash(
             fixture.genesis_hash, share.transcript)};
-        sphincs_c11::Message message;
+        scheduled_wots::Message message;
         std::copy(share_hash.begin(), share_hash.end(), message.begin());
-        return sphincs_c11::Sign(
-            fixture.secret_keys[position.key_index], message,
+        const PaymentAuditScheduleConfig schedule{
+            fixture.config.schedule,
+            BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}};
+        const auto leaf_index{PaymentAuditLeafIndex(
+            schedule, statement.commitment.subject_epoch,
+            statement.commitment.seal_height, roster.descriptor.epoch)};
+        return leaf_index && fixture.secret_keys[position.key_index] &&
+            scheduled_wots::SignDeterministic(
+            *fixture.secret_keys[position.key_index], *leaf_index, message,
             share.authenticated_signature.signature);
     });
 }
@@ -562,7 +578,8 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->statement, fixture->rosters,
+        fixture->genesis_hash, fixture->config.schedule,
+        fixture->statement, fixture->rosters,
         AUTHORIZATION_MASK,
         &collection_error)};
     BOOST_REQUIRE(collector);
@@ -621,11 +638,20 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{/*worker_threads=*/TestWorkerCount()};
     BOOST_CHECK(verifier.Verify(
-        fixture->genesis_hash, decoded, *fixture->rosters,
+        fixture->genesis_hash, fixture->config.schedule, decoded,
+        *fixture->rosters,
         AUTHORIZATION_MASK,
         &verification_error));
     BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
 
+    const auto expected_audit_schedule{BuildPaymentAuditEpochSchedule(
+        PaymentAuditScheduleConfig{
+            fixture->config.schedule,
+            BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}},
+        (*fixture->rosters)[REQUIRED_QUORUMS - 1].descriptor.epoch)};
+    BOOST_REQUIRE(expected_audit_schedule);
+    BOOST_REQUIRE_EQUAL(
+        expected_audit_schedule->seal_height, final->statement.height);
     const auto audit_statement{
         BuildPaymentAuditStatement(*fixture, *final)};
     BOOST_REQUIRE(audit_statement);
@@ -636,7 +662,11 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
                         PAYMENT_AUDIT_SIGNATURE_COUNT);
 
     auto audit_collector{PaymentAuditCollector::Create(
-        fixture->genesis_hash, *audit_statement, *final,
+        fixture->genesis_hash,
+        PaymentAuditScheduleConfig{
+            fixture->config.schedule,
+            BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}},
+        *audit_statement, *final,
         fixture->rosters, AUTHORIZATION_MASK, &collection_error)};
     BOOST_REQUIRE(audit_collector);
     BOOST_CHECK(collection_error == ShareCollectionError::NONE);
@@ -682,7 +712,11 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     PaymentAuditVerificationError audit_error{
         PaymentAuditVerificationError::INVALID_ARGUMENT};
     BOOST_CHECK(VerifyFinalPaymentAudit(
-        fixture->genesis_hash, decoded_audit, *fixture->rosters,
+        fixture->genesis_hash,
+        PaymentAuditScheduleConfig{
+            fixture->config.schedule,
+            BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}},
+        decoded_audit, *fixture->rosters,
         AUTHORIZATION_MASK, nullptr, &audit_error));
     BOOST_CHECK(audit_error == PaymentAuditVerificationError::NONE);
 }

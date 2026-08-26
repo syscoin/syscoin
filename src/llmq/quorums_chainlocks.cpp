@@ -2347,7 +2347,10 @@ bool CChainLocksHandler::VerifyPaymentAuditCertificateSignatures(
     pq::PaymentAuditVerificationError error{
         pq::PaymentAuditVerificationError::NONE};
     auto prepared{pq::PrepareFinalPaymentAuditVerification(
-        m_genesis_hash, audit, rosters, authorization_mask, &error)};
+        m_genesis_hash,
+        pq::PaymentAuditScheduleConfig{m_config->chainlock_schedule,
+                                       m_config->btcc_schedule},
+        audit, rosters, authorization_mask, &error)};
     if (!prepared) return false;
     LOCK(m_verification_mutex);
     return m_verifier.VerifyChecks(std::move(prepared->checks));
@@ -6467,7 +6470,8 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts()
         for (std::size_t i{0}; i < current->count; ++i) {
             pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
             m_collectors[i] = pq::ChainLockCollector::Create(
-                m_genesis_hash, current->statements[i], current->rosters,
+                m_genesis_hash, m_config->chainlock_schedule,
+                current->statements[i], current->rosters,
                 current->authorization_mask,
                 &error);
             if (!m_collectors[i]) {
@@ -7285,7 +7289,10 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         pq::ShareCollectionError collection_error{
             pq::ShareCollectionError::NONE};
         auto collector{pq::PaymentAuditCollector::Create(
-            m_genesis_hash, statement, *seal_chainlock,
+            m_genesis_hash,
+            pq::PaymentAuditScheduleConfig{m_config->chainlock_schedule,
+                                           m_config->btcc_schedule},
+            statement, *seal_chainlock,
             signing_rosters, authorization_mask, &collection_error)};
         if (!collector) continue;
 
@@ -8094,7 +8101,11 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
         pq::PaymentAuditVerificationError::NONE};
     auto prepared{
         rosters ? pq::PrepareFinalPaymentAuditVerification(
-                      m_genesis_hash, audit, *rosters,
+                      m_genesis_hash,
+                      pq::PaymentAuditScheduleConfig{
+                          m_config->chainlock_schedule,
+                          m_config->btcc_schedule},
+                      audit, *rosters,
                       authorization_mask,
                       &verification_error)
                 : std::nullopt};
@@ -8506,7 +8517,8 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
     pq::PaymentAuditVerificationError error{
         pq::PaymentAuditVerificationError::NONE};
     auto check{pq::PreparePaymentAuditResponseVerification(
-        m_genesis_hash, response, definition->row.expected,
+        m_genesis_hash, m_config->chainlock_schedule, response,
+        definition->row.expected,
         *definition->rosters, authorization_mask, &error)};
     if (!check || !(*check)()) {
         punish("bad-pq-payment-audit-response-signature");
@@ -8781,7 +8793,7 @@ bool CChainLocksHandler::ProcessNewChainLock(
             pq::ChainLockVerificationError verification_error{
                 pq::ChainLockVerificationError::NONE};
             auto signature_checks{pq::PrepareFinalChainLockVerification(
-                m_genesis_hash, chainlock,
+                m_genesis_hash, m_config->chainlock_schedule, chainlock,
                 *historical_preverification->rosters,
                 historical_preverification->authorization_mask,
                 &verification_error)};
@@ -8902,7 +8914,8 @@ bool CChainLocksHandler::ProcessNewChainLock(
             pq::ChainLockVerificationError verification_error{
                 pq::ChainLockVerificationError::NONE};
             auto signature_checks{pq::PrepareFinalChainLockVerification(
-                m_genesis_hash, chainlock, *verification_context->rosters,
+                m_genesis_hash, m_config->chainlock_schedule, chainlock,
+                *verification_context->rosters,
                 verification_context->authorization_mask,
                 &verification_error)};
             if (!signature_checks) {
@@ -9142,7 +9155,8 @@ CChainLocksHandler::TryImportPersistedChainLock()
     pq::ChainLockVerificationError verification_error{
         pq::ChainLockVerificationError::NONE};
     auto signature_checks{pq::PrepareFinalChainLockVerification(
-        m_genesis_hash, persisted, *verification_context->rosters,
+        m_genesis_hash, m_config->chainlock_schedule, persisted,
+        *verification_context->rosters,
         verification_context->authorization_mask,
         &verification_error)};
     bool signatures_valid{false};
@@ -9305,7 +9319,8 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
     pq::ChainLockVerificationError verification_error{
         pq::ChainLockVerificationError::NONE};
     auto signature_checks{pq::PrepareFinalChainLockVerification(
-        m_genesis_hash, persisted, *verification_context->rosters,
+        m_genesis_hash, m_config->chainlock_schedule, persisted,
+        *verification_context->rosters,
         verification_context->authorization_mask,
         &verification_error)};
     bool signatures_valid{false};
@@ -9595,12 +9610,12 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 m_genesis_hash, local_pro_tx_hash, *member.child_root)};
             if (!signing_material) {
                 LogPrint(BCLog::CHAINLOCKS,
-                         "CChainLocksHandler::%s -- committed C11 child "
+                         "CChainLocksHandler::%s -- committed scheduled-WOTS child "
                          "key cache is unavailable for epoch %u\n",
                          __func__, roster.descriptor.epoch);
                 continue;
             }
-            // Recheck for every roster slot: C11 signing itself is expensive,
+            // Recheck for every roster slot: child signing itself is expensive,
             // so the active branch can change between two local signatures.
             if (!IsCurrentSigningStatement(current->statement)) return;
             const auto expected_branch_lock{m_signer_journal->GetBranchLock(
@@ -9640,7 +9655,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 current->authorization_mask,
                 static_cast<uint8_t>(slot),
                 static_cast<uint16_t>(member_index),
-                signing_material->secret_key,
+                *signing_material->secret_key,
                 signing_material->key_proof,
                 expected_branch_lock,
                 &signing_error)};
@@ -9650,7 +9665,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                     signing_error !=
                         pq::ChainLockSigningError::JOURNAL_CONFLICT) {
                     LogPrint(BCLog::CHAINLOCKS,
-                             "CChainLocksHandler::%s -- C11 share signing "
+                             "CChainLocksHandler::%s -- scheduled-WOTS share signing "
                              "failed for epoch %u, error=%u\n",
                              __func__, roster.descriptor.epoch,
                              static_cast<uint8_t>(signing_error));
@@ -9804,7 +9819,9 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 
     pq::PaymentAuditShareSigner signer{
         m_genesis_hash, local_pro_tx_hash,
-        m_config->chainlock_schedule, *m_signer_journal};
+        pq::PaymentAuditScheduleConfig{m_config->chainlock_schedule,
+                                       m_config->btcc_schedule},
+        *m_signer_journal};
     bool signing_material_missing{false};
     for (std::size_t slot{0}; slot < rosters->size(); ++slot) {
         if ((authorization_mask & (uint8_t{1} << slot)) == 0) continue;
@@ -9821,14 +9838,14 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             if (!signing_material) {
                 signing_material_missing = true;
                 LogPrint(BCLog::CHAINLOCKS,
-                         "CChainLocksHandler::%s -- committed C11 child "
+                         "CChainLocksHandler::%s -- committed scheduled-WOTS child "
                          "key cache is unavailable for payment-audit epoch "
                          "%u\n",
                          __func__, roster.descriptor.epoch);
                 continue;
             }
             if (!IsCurrentPaymentAuditStatement(*statement)) return;
-            // Each C11 signature is expensive enough for Bitcoin to reorg
+            // Each child signature is expensive enough for Bitcoin to reorg
             // between local roster slots. Recheck the exact K/H+37 view
             // immediately before consuming every audit key use.
             if (!CheckPaymentAuditSeedSigningPolicy(*statement)) return;
@@ -9841,7 +9858,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 authorization_mask,
                 static_cast<uint8_t>(slot),
                 static_cast<uint16_t>(member_index),
-                signing_material->secret_key,
+                *signing_material->secret_key,
                 signing_material->key_proof,
                 expected_branch_lock, &signing_error)};
             if (!signed_share.share) {
@@ -9850,7 +9867,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                     signing_error !=
                         pq::ChainLockSigningError::JOURNAL_CONFLICT) {
                     LogPrint(BCLog::CHAINLOCKS,
-                             "CChainLocksHandler::%s -- payment-audit C11 "
+                             "CChainLocksHandler::%s -- payment-audit scheduled-WOTS "
                              "share signing failed for epoch %u, error=%u\n",
                              __func__, roster.descriptor.epoch,
                              static_cast<uint8_t>(signing_error));

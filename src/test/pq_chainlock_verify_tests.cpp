@@ -57,6 +57,7 @@ ChildPublicKey UniqueChildKey(std::size_t quorum_slot, std::size_t member_index)
 
 struct VerificationFixture {
     uint256 genesis_hash{NonNullHash(9001)};
+    ChainLockScheduleConfig schedule{.epoch_origin = 0};
     FinalChainLock chainlock;
     std::array<FrozenQuorumRoster, ACTIVE_QUORUMS> rosters;
 };
@@ -75,11 +76,15 @@ std::unique_ptr<VerificationFixture> MakeVerificationFixture()
     fixture.chainlock.selected_quorum_mask = 0b0111;
     fixture.chainlock.signatures.resize(FINAL_SIGNATURE_COUNT);
 
+    const auto active_epochs{ActiveEpochsAtHeight(
+        fixture.schedule, fixture.chainlock.statement.height)};
+    BOOST_REQUIRE(active_epochs);
+
     for (std::size_t quorum_slot{0}; quorum_slot < ACTIVE_QUORUMS; ++quorum_slot) {
         auto& roster = fixture.rosters[quorum_slot];
         auto& descriptor = roster.descriptor;
-        descriptor.epoch = static_cast<uint32_t>(10 + quorum_slot);
-        descriptor.base_height = static_cast<int32_t>(500 + 300 * quorum_slot);
+        descriptor.epoch = (*active_epochs)[quorum_slot].epoch;
+        descriptor.base_height = (*active_epochs)[quorum_slot].base_height;
         descriptor.base_hash = NonNullHash(9200 + quorum_slot);
         descriptor.snapshot_height = descriptor.base_height - 100;
         descriptor.snapshot_hash = NonNullHash(9300 + quorum_slot);
@@ -161,7 +166,8 @@ BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)
     const auto fixture = MakeVerificationFixture();
     ChainLockVerificationError error{ChainLockVerificationError::INVALID_ARGUMENT};
     auto prepared = PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
+        fixture->rosters,
         AUTHORIZATION_MASK, &error);
     BOOST_REQUIRE(prepared.has_value());
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
@@ -169,7 +175,7 @@ BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)
 
     // The serialized signature order crosses from the last threshold member
     // quorum slot 1/member 0 without an encoded index.
-    const auto signature_tag = [](const C11SignatureCheck& check) {
+    const auto signature_tag = [](const ScheduledWOTSCheck& check) {
         return static_cast<uint16_t>(check.GetSignature()[0]) |
                (static_cast<uint16_t>(check.GetSignature()[1]) << 8);
     };
@@ -189,9 +195,14 @@ BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)
         prepared->checks[QUORUM_THRESHOLD].GetMessageBytes().begin(),
         prepared->checks[QUORUM_THRESHOLD].GetMessageBytes().end(), expected_hash.begin(),
         expected_hash.end());
-    BOOST_CHECK(sphincs_c11::SerializePublicKey(
-                    prepared->checks[QUORUM_THRESHOLD].GetPublicKey()) ==
+    BOOST_CHECK(prepared->checks[QUORUM_THRESHOLD].GetPublicKey() ==
                 UniqueChildKey(1, 0));
+    const auto expected_leaf{ChainLockLeafIndex(
+        fixture->schedule, fixture->rosters[1].descriptor.epoch,
+        fixture->chainlock.statement.height)};
+    BOOST_REQUIRE(expected_leaf);
+    BOOST_CHECK_EQUAL(
+        prepared->checks[QUORUM_THRESHOLD].GetLeafIndex(), *expected_leaf);
 }
 
 BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruption)
@@ -202,7 +213,8 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         auto bad_member_root = MakeVerificationFixture();
         bad_member_root->rosters[0].descriptor.member_root.begin()[0] ^= 1;
         BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_member_root->genesis_hash, bad_member_root->chainlock,
+            bad_member_root->genesis_hash, bad_member_root->schedule,
+            bad_member_root->chainlock,
             bad_member_root->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
     }
@@ -211,7 +223,8 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         auto bad_child_root = MakeVerificationFixture();
         bad_child_root->rosters[0].descriptor.child_key_root.begin()[0] ^= 1;
         BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_child_root->genesis_hash, bad_child_root->chainlock,
+            bad_child_root->genesis_hash, bad_child_root->schedule,
+            bad_child_root->chainlock,
             bad_child_root->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::CHILD_KEY_ROOT_MISMATCH);
     }
@@ -220,7 +233,8 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         auto bad_context = MakeVerificationFixture();
         bad_context->chainlock.statement.quorum_context_hash.begin()[0] ^= 1;
         BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_context->genesis_hash, bad_context->chainlock,
+            bad_context->genesis_hash, bad_context->schedule,
+            bad_context->chainlock,
             bad_context->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
     }
@@ -232,7 +246,8 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         SetMember(bad_index->chainlock.signer_bitmaps[0], QUORUM_MIN_VALID);
         BOOST_REQUIRE(bad_index->chainlock.IsStructurallyValid());
         BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_index->genesis_hash, bad_index->chainlock, bad_index->rosters,
+            bad_index->genesis_hash, bad_index->schedule,
+            bad_index->chainlock, bad_index->rosters,
             AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::INVALID_SIGNER);
     }
@@ -242,7 +257,8 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         ClearMember(bad_bitmap->chainlock.signer_bitmaps[0],
                     QUORUM_THRESHOLD - 1);
         BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_bitmap->genesis_hash, bad_bitmap->chainlock,
+            bad_bitmap->genesis_hash, bad_bitmap->schedule,
+            bad_bitmap->chainlock,
             bad_bitmap->rosters, AUTHORIZATION_MASK, &error));
         BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHAINLOCK);
     }
@@ -255,14 +271,16 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_mutated_child_membership_witness)
     bad_sibling->chainlock.signatures[0].key_proof.siblings[0]
         .begin()[0] ^= 1;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
-        bad_sibling->genesis_hash, bad_sibling->chainlock,
+        bad_sibling->genesis_hash, bad_sibling->schedule,
+        bad_sibling->chainlock,
         bad_sibling->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHILD_PROOF);
 
     auto bad_public_key = MakeVerificationFixture();
     bad_public_key->chainlock.signatures[0].key_proof.public_key[0] ^= 1;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
-        bad_public_key->genesis_hash, bad_public_key->chainlock,
+        bad_public_key->genesis_hash, bad_public_key->schedule,
+        bad_public_key->chainlock,
         bad_public_key->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHILD_PROOF);
 }
@@ -274,7 +292,8 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_duplicate_members_and_child_keys)
     duplicate_member->rosters[0].members.back().pro_tx_hash =
         duplicate_member->rosters[0].members[QUORUM_SIZE - 2].pro_tx_hash;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
-        duplicate_member->genesis_hash, duplicate_member->chainlock,
+        duplicate_member->genesis_hash, duplicate_member->schedule,
+        duplicate_member->chainlock,
         duplicate_member->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_MEMBER);
 
@@ -284,47 +303,55 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_duplicate_members_and_child_keys)
         duplicate_key->rosters[0].members[0]
             .child_root->commitment.tree_id;
     BOOST_CHECK(!PrepareFinalChainLockVerification(
-        duplicate_key->genesis_hash, duplicate_key->chainlock,
+        duplicate_key->genesis_hash, duplicate_key->schedule,
+        duplicate_key->chainlock,
         duplicate_key->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_CHILD_KEY);
 }
 
 BOOST_AUTO_TEST_CASE(real_signature_check_and_owned_queue_lifecycle)
 {
-    sphincs_c11::SecretSeed secret_seed;
-    sphincs_c11::PublicSeed public_seed;
-    sphincs_c11::Message message;
-    for (std::size_t i{0}; i < secret_seed.size(); ++i) secret_seed[i] = i;
-    for (std::size_t i{0}; i < public_seed.size(); ++i) public_seed[i] = 0xa0 + i;
+    scheduled_wots::KeyGenerationSeed seed{};
+    scheduled_wots::Message message;
+    for (std::size_t i{0}; i < seed.size(); ++i) seed[i] = i;
     for (std::size_t i{0}; i < message.size(); ++i) message[i] = (3 + 7 * i) & 0xff;
 
-    sphincs_c11::PublicKey public_key;
-    sphincs_c11::SecretKey secret_key;
-    BOOST_REQUIRE(sphincs_c11::GenerateKeyPair(secret_seed, public_seed, public_key,
-                                               secret_key));
-    sphincs_c11::Signature signature;
-    BOOST_REQUIRE(sphincs_c11::Sign(secret_key, message, signature));
+    auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(secret_key);
+    scheduled_wots::PublicKey public_key{};
+    BOOST_REQUIRE(secret_key->GetPublicKey(public_key));
+    constexpr uint8_t LEAF_INDEX{17};
+    scheduled_wots::Signature signature;
+    BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+        *secret_key, LEAF_INDEX, message, signature));
 
     {
         ChainLockVerifier verifier{/*worker_threads=*/2, /*batch_size=*/1};
-        std::vector<C11SignatureCheck> checks;
-        checks.emplace_back(public_key, message, signature);
-        checks.emplace_back(public_key, message, signature);
+        std::vector<ScheduledWOTSCheck> checks;
+        checks.emplace_back(public_key, LEAF_INDEX, message, signature);
+        checks.emplace_back(public_key, LEAF_INDEX, message, signature);
         BOOST_CHECK(verifier.VerifyChecks(std::move(checks)));
 
         auto bad_signature = signature;
         bad_signature[0] ^= 1;
-        std::vector<C11SignatureCheck> bad_checks;
-        bad_checks.emplace_back(public_key, message, std::move(bad_signature));
+        std::vector<ScheduledWOTSCheck> bad_checks;
+        bad_checks.emplace_back(
+            public_key, LEAF_INDEX, message, std::move(bad_signature));
         BOOST_CHECK(!verifier.VerifyChecks(std::move(bad_checks)));
+
+        std::vector<ScheduledWOTSCheck> wrong_leaf_checks;
+        wrong_leaf_checks.emplace_back(
+            public_key, static_cast<uint8_t>(LEAF_INDEX + 1), message,
+            signature);
+        BOOST_CHECK(!verifier.VerifyChecks(std::move(wrong_leaf_checks)));
     }
 
     // A zero-worker queue is a supported lifecycle: the calling thread owns
     // all work, and an empty batch is a successful no-op for helper users.
     {
         ChainLockVerifier verifier{/*worker_threads=*/0};
-        std::vector<C11SignatureCheck> checks;
-        checks.emplace_back(public_key, message, signature);
+        std::vector<ScheduledWOTSCheck> checks;
+        checks.emplace_back(public_key, LEAF_INDEX, message, signature);
         BOOST_CHECK(verifier.VerifyChecks(std::move(checks)));
         BOOST_CHECK(verifier.VerifyChecks({}));
     }
@@ -332,7 +359,7 @@ BOOST_AUTO_TEST_CASE(real_signature_check_and_owned_queue_lifecycle)
     BOOST_CHECK_THROW(
         ChainLockVerifier(static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1),
         std::invalid_argument);
-    memory_cleanse(secret_seed.data(), secret_seed.size());
+    memory_cleanse(seed.data(), seed.size());
 }
 
 BOOST_AUTO_TEST_CASE(authorization_mask_allows_one_transition_and_rejects_wider_selection)
@@ -340,7 +367,8 @@ BOOST_AUTO_TEST_CASE(authorization_mask_allows_one_transition_and_rejects_wider_
     auto fixture = MakeVerificationFixture();
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
     BOOST_CHECK(PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
+        fixture->rosters,
         AUTHORIZATION_MASK, &error));
 
     auto future_snapshot = MakeVerificationFixture();
@@ -356,15 +384,18 @@ BOOST_AUTO_TEST_CASE(authorization_mask_allows_one_transition_and_rejects_wider_
             future_snapshot->chainlock.statement.height,
             future_snapshot->chainlock.statement.block_hash, descriptors);
     BOOST_CHECK(PrepareFinalChainLockVerification(
-        future_snapshot->genesis_hash, future_snapshot->chainlock,
+        future_snapshot->genesis_hash, future_snapshot->schedule,
+        future_snapshot->chainlock,
         future_snapshot->rosters, AUTHORIZATION_MASK, &error));
     BOOST_CHECK(!PrepareFinalChainLockVerification(
-        future_snapshot->genesis_hash, future_snapshot->chainlock,
+        future_snapshot->genesis_hash, future_snapshot->schedule,
+        future_snapshot->chainlock,
         future_snapshot->rosters, 0b1111, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_DESCRIPTOR);
 
     BOOST_CHECK(!PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
+        fixture->rosters,
         0b0011, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 
@@ -374,7 +405,8 @@ BOOST_AUTO_TEST_CASE(authorization_mask_allows_one_transition_and_rejects_wider_
     fixture->chainlock.signer_bitmaps[2].fill(0);
     BOOST_REQUIRE(fixture->chainlock.IsStructurallyValid());
     BOOST_CHECK(!PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
+        fixture->rosters,
         AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 }
@@ -384,7 +416,8 @@ BOOST_AUTO_TEST_CASE(full_verifier_reports_bad_signature_after_cheap_checks)
     const auto fixture = MakeVerificationFixture();
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
     BOOST_CHECK(!VerifyFinalChainLock(
-        fixture->genesis_hash, fixture->chainlock, fixture->rosters,
+        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
+        fixture->rosters,
         AUTHORIZATION_MASK, /*queue=*/nullptr, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_SIGNATURE);
 }

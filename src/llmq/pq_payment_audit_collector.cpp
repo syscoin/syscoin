@@ -48,11 +48,13 @@ ShareCollectionError MapVerificationError(
 
 PaymentAuditCollector::PaymentAuditCollector(
     uint256 genesis_hash,
+    PaymentAuditScheduleConfig schedule,
     PaymentAuditStatement statement,
     FinalChainLock seal_chainlock,
     FrozenQuorumRostersPtr rosters,
     uint8_t authorization_mask)
     : m_genesis_hash{std::move(genesis_hash)},
+      m_schedule{schedule},
       m_statement{std::move(statement)},
       m_seal_chainlock{std::move(seal_chainlock)},
       m_rosters{std::move(rosters)},
@@ -62,6 +64,7 @@ PaymentAuditCollector::PaymentAuditCollector(
 
 std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
     const uint256& genesis_hash,
+    PaymentAuditScheduleConfig schedule,
     PaymentAuditStatement statement,
     FinalChainLock seal_chainlock,
     FrozenQuorumRostersPtr rosters,
@@ -69,8 +72,8 @@ std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
     ShareCollectionError* error)
 {
     SetError(error, ShareCollectionError::NONE);
-    if (genesis_hash.IsNull() || !statement.IsStructurallyValid() ||
-        !rosters) {
+    if (genesis_hash.IsNull() || !schedule.IsValid() ||
+        !statement.IsStructurallyValid() || !rosters) {
         SetError(error, ShareCollectionError::INVALID_ARGUMENT);
         return nullptr;
     }
@@ -79,14 +82,15 @@ std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
     if (!ValidatePaymentAuditLiveSeal(genesis_hash, statement,
                                       seal_chainlock,
                                       &verification_error) ||
-        !ValidatePaymentAuditContext(genesis_hash, statement, *rosters,
-                                     authorization_mask,
+        !ValidatePaymentAuditContext(genesis_hash, schedule, statement,
+                                     *rosters, authorization_mask,
                                      &verification_error)) {
         SetError(error, MapVerificationError(verification_error));
         return nullptr;
     }
     return std::unique_ptr<PaymentAuditCollector>{new PaymentAuditCollector{
-        genesis_hash, std::move(statement), std::move(seal_chainlock),
+        genesis_hash, schedule, std::move(statement),
+        std::move(seal_chainlock),
         std::move(rosters), authorization_mask}};
 }
 
@@ -148,7 +152,8 @@ ShareCollectionResult PaymentAuditCollector::AddVerifiedShare(
     PaymentAuditVerificationError verification_error{
         PaymentAuditVerificationError::NONE};
     auto check{PreparePaymentAuditShareVerification(
-        m_genesis_hash, share, *m_rosters, m_authorization_mask,
+        m_genesis_hash, m_schedule, share, *m_rosters,
+        m_authorization_mask,
         &verification_error)};
     if (!check) {
         SetError(error, MapVerificationError(verification_error));

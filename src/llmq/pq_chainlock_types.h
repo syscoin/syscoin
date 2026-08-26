@@ -27,12 +27,12 @@ inline constexpr uint16_t QUORUM_DESCRIPTOR_VERSION{1};
 inline constexpr uint16_t CHAINLOCK_VERSION{1};
 
 inline constexpr uint16_t GLOBAL_SLH_DSA_SHAKE_128S_V1{1};
-inline constexpr uint16_t CHILD_C11_SHA_V1{1};
+inline constexpr uint16_t CHILD_SCHEDULED_WOTS_SHAKE_128_V1{1};
 
 inline constexpr std::size_t GLOBAL_PUBLIC_KEY_SIZE{32};
 inline constexpr std::size_t GLOBAL_SIGNATURE_SIZE{7856};
 inline constexpr std::size_t CHILD_PUBLIC_KEY_SIZE{32};
-inline constexpr std::size_t CHILD_SIGNATURE_SIZE{3976};
+inline constexpr std::size_t CHILD_SIGNATURE_SIZE{704};
 inline constexpr uint16_t CHILD_KEY_TREE_DEPTH{16};
 /** One initial tree plus at most fifteen exceptional root replacements. */
 inline constexpr uint32_t CHILD_KEY_TREE_MAX_GENERATION{16};
@@ -41,7 +41,18 @@ inline constexpr std::size_t CHILD_KEY_TREE_LEAF_COUNT{
 inline constexpr std::size_t CHILD_KEY_PROOF_SIZE{
     CHILD_PUBLIC_KEY_SIZE + CHILD_KEY_TREE_DEPTH * 32};
 
-inline constexpr uint16_t C11_USAGE_CAP{256};
+inline constexpr uint16_t SCHEDULED_WOTS_TREE_HEIGHT{8};
+inline constexpr uint16_t SCHEDULED_WOTS_TREE_LEAF_COUNT{256};
+inline constexpr uint16_t SCHEDULED_WOTS_CHAINLOCK_LEAF_COUNT{231};
+inline constexpr uint16_t SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE{
+    SCHEDULED_WOTS_CHAINLOCK_LEAF_COUNT};
+inline constexpr uint16_t SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_COUNT{4};
+inline constexpr uint16_t SCHEDULED_WOTS_USAGE_CAP{235};
+static_assert(SCHEDULED_WOTS_USAGE_CAP ==
+              SCHEDULED_WOTS_CHAINLOCK_LEAF_COUNT +
+                  SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_COUNT);
+static_assert(SCHEDULED_WOTS_USAGE_CAP <=
+              SCHEDULED_WOTS_TREE_LEAF_COUNT);
 inline constexpr std::size_t QUORUM_SIZE{400};
 inline constexpr uint16_t QUORUM_MIN_VALID{300};
 inline constexpr std::size_t QUORUM_MAX_BYZANTINE{
@@ -95,8 +106,8 @@ struct ChildKeyTreeCommitment {
         4 * sizeof(uint16_t) + 2 * sizeof(uint32_t) + 2 * 32};
 
     uint16_t version{CHILD_KEY_TREE_COMMITMENT_VERSION};
-    uint16_t profile{CHILD_C11_SHA_V1};
-    uint16_t usage_cap{C11_USAGE_CAP};
+    uint16_t profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
+    uint16_t usage_cap{SCHEDULED_WOTS_USAGE_CAP};
     uint16_t depth{CHILD_KEY_TREE_DEPTH};
     uint32_t generation{0};
     uint32_t first_epoch{0};
@@ -175,7 +186,7 @@ struct ChildKeyProof {
     friend bool operator==(const ChildKeyProof&, const ChildKeyProof&) = default;
 };
 
-/** A C11 signature plus the exact public-key authorization witness. */
+/** A scheduled WOTS+ signature plus its exact public-key authorization witness. */
 struct AuthenticatedChildSignature {
     static constexpr std::size_t WIRE_SIZE{
         ChildKeyProof::WIRE_SIZE + CHILD_SIGNATURE_SIZE};
@@ -216,7 +227,7 @@ struct BTCCursor {
 /**
  * Compact branch-local accumulator over accepted on-chain BTCC receipts.
  * Every ChainLock signs this state, so the first verified descendant seals
- * the exact ordered receipt history without retaining each 3,621,236-byte
+ * the exact ordered receipt history without retaining each full
  * witness.
  */
 struct BTCCReceiptState {
@@ -286,8 +297,8 @@ struct QuorumDescriptor {
     uint256 base_hash;
     int32_t snapshot_height{-1};
     uint256 snapshot_hash;
-    uint16_t profile{CHILD_C11_SHA_V1};
-    uint16_t usage_cap{C11_USAGE_CAP};
+    uint16_t profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
+    uint16_t usage_cap{SCHEDULED_WOTS_USAGE_CAP};
     QuorumBitmap valid_members{};
     uint256 member_root;
     uint256 child_key_root;
@@ -306,7 +317,7 @@ struct QuorumDescriptor {
 
 struct ChainLockShareTranscript {
     uint16_t chainlock_version{CHAINLOCK_VERSION};
-    uint16_t child_profile{CHILD_C11_SHA_V1};
+    uint16_t child_profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
     int32_t height{-1};
     uint256 block_hash;
     int32_t previous_chainlock_height{-1};
@@ -348,7 +359,7 @@ struct ChainLockStatement {
         BTCCReceiptState::WIRE_SIZE +
         PaymentAuditReceiptState::WIRE_SIZE + 32};
     uint16_t version{CHAINLOCK_VERSION};
-    uint16_t child_profile{CHILD_C11_SHA_V1};
+    uint16_t child_profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
     int32_t height{-1};
     uint256 block_hash;
     int32_t previous_chainlock_height{-1};
@@ -390,7 +401,7 @@ struct ChainLockShare {
         BTCCReceiptState::WIRE_SIZE +
         PaymentAuditReceiptState::WIRE_SIZE + 32 +
         AuthenticatedChildSignature::WIRE_SIZE};
-    static_assert(WIRE_SIZE == 5'103);
+    static_assert(WIRE_SIZE == 1'831);
 
     ChainLockShareTranscript transcript;
     AuthenticatedChildSignature authenticated_signature;
@@ -419,7 +430,7 @@ struct FinalChainLock {
         ACTIVE_QUORUMS * BITMAP_SIZE + sizeof(uint16_t) +
         FINAL_SIGNATURE_COUNT * AuthenticatedChildSignature::WIRE_SIZE};
     static_assert(WIRE_SIZE < MAX_CHAINLOCK_SIZE);
-    static_assert(WIRE_SIZE == 3'621'236);
+    static_assert(WIRE_SIZE == 1'000'364);
 
     ChainLockStatement statement;
     uint8_t selected_quorum_mask{0};
@@ -510,8 +521,8 @@ FinalChainLock ReadFinalChainLock(Stream& stream, std::size_t payload_size)
 }
 
 static_assert(FinalChainLockSerializedSize() < MAX_CHAINLOCK_SIZE);
-static_assert(ChainLockShare::WIRE_SIZE == 5'103);
-static_assert(FinalChainLockSerializedSize() == 3'621'236);
+static_assert(ChainLockShare::WIRE_SIZE == 1'831);
+static_assert(FinalChainLockSerializedSize() == 1'000'364);
 
 } // namespace llmq::pq
 

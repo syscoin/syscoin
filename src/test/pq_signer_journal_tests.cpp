@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace llmq::test {
 
@@ -38,17 +39,18 @@ llmq::PQSignerJournalKey MakeKey()
 {
     return {
         .genesis_hash = uint256{1},
-        .child_profile = 1,
+        .child_profile = llmq::pq::CHILD_SCHEDULED_WOTS_SHAKE_128_V1,
         .pro_tx_hash = uint256{2},
         .quorum_epoch = 17,
         .child_key_hash = uint256{3},
+        .leaf_index = 0,
         .absolute_height = 100,
     };
 }
 
-llmq::PQC11Signature MakeSignature(unsigned char salt)
+llmq::PQChildSignature MakeSignature(unsigned char salt)
 {
-    llmq::PQC11Signature signature;
+    llmq::PQChildSignature signature;
     for (std::size_t i = 0; i < signature.size(); ++i) {
         signature[i] = static_cast<unsigned char>((i * 29 + salt) & 0xff);
     }
@@ -142,6 +144,8 @@ void CheckOutcome(
 }
 
 } // namespace
+
+static_assert(llmq::CPQSignerJournal::DB_FORMAT_VERSION == 1);
 
 BOOST_FIXTURE_TEST_SUITE(pq_signer_journal_tests, BasicTestingSetup)
 
@@ -249,6 +253,7 @@ BOOST_AUTO_TEST_CASE(operator_branch_lock_is_atomic_monotonic_and_persistent)
 
         auto next_key = first_key;
         next_key.absolute_height += 5;
+        ++next_key.leaf_index;
         const auto next_lock = MakeBranchLock(next_key);
         CheckOutcome(
             journal.Reserve(next_key, uint256{73}, next_lock, std::nullopt),
@@ -339,6 +344,7 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
 
         auto descendant_key{fork_a_key};
         descendant_key.absolute_height += 5;
+        ++descendant_key.leaf_index;
         const llmq::PQSignerBranchLock descendant_lock{
             descendant_key.absolute_height,
             MakeHash(50'005),
@@ -426,43 +432,75 @@ BOOST_AUTO_TEST_CASE(lower_certificate_never_rewinds_a_higher_local_vote)
         key.genesis_hash, adjudicating_certificate));
 }
 
-BOOST_AUTO_TEST_CASE(cap_is_exactly_256_distinct_heights)
+BOOST_AUTO_TEST_CASE(authorized_leaf_domain_is_exact_without_usage_counter)
 {
-    const fs::path path = m_path_root / "pq_signer_journal_cap";
-    const auto base_key = MakeKey();
-    auto over_cap = base_key;
-    over_cap.absolute_height = 100 + 5 * llmq::PQ_C11_CHILD_USAGE_CAP;
+    const fs::path path = m_path_root / "pq_signer_journal_leaf_domain";
+    const auto first_key{MakeKey()};
+    auto last_chainlock_key{first_key};
+    last_chainlock_key.leaf_index =
+        llmq::pq::SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE - 1;
+    auto first_audit_key{first_key};
+    first_audit_key.purpose = llmq::PQSignerPurpose::PAYMENT_AUDIT;
+    first_audit_key.leaf_index =
+        llmq::pq::SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE;
+    auto last_audit_key{first_audit_key};
+    last_audit_key.leaf_index = llmq::PQ_CHILD_USAGE_CAP - 1;
+    auto invalid_key{first_key};
+    invalid_key.leaf_index = llmq::PQ_CHILD_USAGE_CAP;
 
     {
         llmq::CPQSignerJournal journal{path};
-        for (std::uint16_t i = 0; i < llmq::PQ_C11_CHILD_USAGE_CAP; ++i) {
-            auto key = base_key;
-            key.absolute_height = static_cast<std::int32_t>(100 + 5 * i);
-            CheckOutcome(
-                ReserveSlot(journal, key, uint256{static_cast<std::uint8_t>((i % 250) + 1)}),
-                llmq::PQSignerJournalOutcome::RESERVED);
-        }
-        CheckOutcome(
-            ReserveSlot(journal, over_cap, uint256{251}),
-            llmq::PQSignerJournalOutcome::CAP_EXHAUSTED);
+        CheckOutcome(ReserveSlot(journal, first_key, uint256{1}),
+                     llmq::PQSignerJournalOutcome::RESERVED);
+        CheckOutcome(ReserveSlot(journal, last_chainlock_key, uint256{2}),
+                     llmq::PQSignerJournalOutcome::RESERVED);
+        CheckOutcome(ReserveSlot(journal, first_audit_key, uint256{3}),
+                     llmq::PQSignerJournalOutcome::RESERVED);
+        CheckOutcome(ReserveSlot(journal, last_audit_key, uint256{4}),
+                     llmq::PQSignerJournalOutcome::RESERVED);
+
+        auto wrong_chainlock_leaf{first_key};
+        wrong_chainlock_leaf.leaf_index =
+            llmq::pq::SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE;
+        CheckOutcome(ReserveSlot(journal, wrong_chainlock_leaf, uint256{5}),
+                     llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
+        auto wrong_audit_leaf{first_key};
+        wrong_audit_leaf.purpose = llmq::PQSignerPurpose::PAYMENT_AUDIT;
+        CheckOutcome(ReserveSlot(journal, wrong_audit_leaf, uint256{6}),
+                     llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
+
+        invalid_key.purpose = llmq::PQSignerPurpose::PAYMENT_AUDIT;
+        CheckOutcome(ReserveSlot(journal, invalid_key, uint256{7}),
+                     llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
+        invalid_key.leaf_index = std::numeric_limits<uint8_t>::max();
+        CheckOutcome(ReserveSlot(journal, invalid_key, uint256{8}),
+                     llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
     }
 
     llmq::CPQSignerJournal restarted{path};
-    CheckOutcome(
-        ReserveSlot(restarted, over_cap, uint256{251}),
-        llmq::PQSignerJournalOutcome::CAP_EXHAUSTED);
+    CheckOutcome(ReserveSlot(restarted, first_key, uint256{1}),
+                 llmq::PQSignerJournalOutcome::CONSUMED);
+    CheckOutcome(ReserveSlot(restarted, last_chainlock_key, uint256{2}),
+                 llmq::PQSignerJournalOutcome::CONSUMED);
+    CheckOutcome(ReserveSlot(restarted, first_audit_key, uint256{3}),
+                 llmq::PQSignerJournalOutcome::CONSUMED);
+    CheckOutcome(ReserveSlot(restarted, last_audit_key, uint256{4}),
+                 llmq::PQSignerJournalOutcome::CONSUMED);
+}
 
-    // Existing slots retain their state even after the cap and restart.
-    CheckOutcome(ReserveSlot(restarted, base_key, uint256{1}),
-                 llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
-    CheckOutcome(ReserveSlot(restarted, base_key, uint256{252}),
-                 llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
-
-    // The cap is scoped to the complete child identity, not to the process.
-    auto other_child = over_cap;
-    other_child.child_key_hash = uint256{4};
-    CheckOutcome(ReserveSlot(restarted, other_child, uint256{251}),
+BOOST_AUTO_TEST_CASE(same_leaf_with_different_logical_metadata_conflicts)
+{
+    const fs::path path{m_path_root / "pq_signer_journal_leaf_conflict"};
+    llmq::CPQSignerJournal journal{path};
+    const auto key{MakeKey()};
+    const uint256 message{MakeHash(180)};
+    CheckOutcome(ReserveSlot(journal, key, message),
                  llmq::PQSignerJournalOutcome::RESERVED);
+
+    auto other_height{key};
+    other_height.absolute_height += 5;
+    CheckOutcome(ReserveSlot(journal, other_height, MakeHash(181)),
+                 llmq::PQSignerJournalOutcome::CONFLICT);
 }
 
 BOOST_AUTO_TEST_CASE(payment_audit_uses_distinct_slot_without_moving_branch_lock)
@@ -483,6 +521,8 @@ BOOST_AUTO_TEST_CASE(payment_audit_uses_distinct_slot_without_moving_branch_lock
 
     auto audit_key{chainlock_key};
     audit_key.purpose = llmq::PQSignerPurpose::PAYMENT_AUDIT;
+    audit_key.leaf_index =
+        llmq::pq::SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE;
     const uint256 audit_message{MakeHash(202)};
     CheckOutcome(journal.Reserve(audit_key, audit_message, *branch_lock,
                                  branch_lock),
@@ -522,7 +562,7 @@ BOOST_AUTO_TEST_CASE(all_key_dimensions_are_isolated)
     other = base;
     other.child_profile = 2;
     CheckOutcome(ReserveSlot(journal, other, message_hash),
-                 llmq::PQSignerJournalOutcome::RESERVED);
+                 llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
 
     other = base;
     other.pro_tx_hash = uint256{6};
@@ -536,6 +576,11 @@ BOOST_AUTO_TEST_CASE(all_key_dimensions_are_isolated)
 
     other = base;
     other.child_key_hash = uint256{7};
+    CheckOutcome(ReserveSlot(journal, other, message_hash),
+                 llmq::PQSignerJournalOutcome::RESERVED);
+
+    other = base;
+    ++other.leaf_index;
     CheckOutcome(ReserveSlot(journal, other, message_hash),
                  llmq::PQSignerJournalOutcome::RESERVED);
 

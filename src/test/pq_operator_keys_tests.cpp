@@ -53,6 +53,13 @@ LocalOperatorKeyManager DeterministicManager(uint8_t seed_offset = 0xa0)
     return LocalOperatorKeyManager{DeterministicGlobalKey(), std::move(seed)};
 }
 
+ChildPublicKey ChildPublicKeyOf(const scheduled_wots::SecretKey& key)
+{
+    ChildPublicKey public_key{};
+    BOOST_REQUIRE(key.GetPublicKey(public_key));
+    return public_key;
+}
+
 ChildKeyTreeCommitment Commitment(uint8_t tag)
 {
     ChildKeyTreeCommitment commitment;
@@ -100,6 +107,11 @@ private:
 static_assert(!std::is_copy_constructible_v<LocalOperatorKeyManager>);
 static_assert(!std::is_copy_assignable_v<LocalOperatorKeyManager>);
 static_assert(std::is_nothrow_move_constructible_v<LocalOperatorKeyManager>);
+static_assert(scheduled_wots::KEY_GENERATION_SEED_SIZE == 48);
+static_assert(!std::is_copy_constructible_v<scheduled_wots::SecretKey>);
+static_assert(!std::is_copy_assignable_v<scheduled_wots::SecretKey>);
+static_assert(std::is_nothrow_move_constructible_v<scheduled_wots::SecretKey>);
+static_assert(std::is_nothrow_move_assignable_v<scheduled_wots::SecretKey>);
 
 BOOST_AUTO_TEST_SUITE(pq_operator_keys_tests)
 
@@ -380,8 +392,7 @@ BOOST_AUTO_TEST_CASE(committed_child_kdf_is_deterministic_and_tree_bound)
         genesis, tree_id, /*generation=*/1, /*epoch=*/9);
     BOOST_REQUIRE(first);
     BOOST_REQUIRE(second);
-    BOOST_CHECK(sphincs_c11::SerializePublicKey(first->GetPublicKey()) ==
-                sphincs_c11::SerializePublicKey(second->GetPublicKey()));
+    BOOST_CHECK(ChildPublicKeyOf(*first) == ChildPublicKeyOf(*second));
 
     auto changed_genesis = first_manager.DeriveCommittedChildKey(
         NonNullHash(3), tree_id, 1, 9);
@@ -399,8 +410,7 @@ BOOST_AUTO_TEST_CASE(committed_child_kdf_is_deterministic_and_tree_bound)
     BOOST_REQUIRE(changed_generation);
     BOOST_REQUIRE(changed_epoch);
     BOOST_REQUIRE(changed_master_seed);
-    const auto expected =
-        sphincs_c11::SerializePublicKey(first->GetPublicKey());
+    const auto expected{ChildPublicKeyOf(*first)};
     ChainLockMasterSeed seed{};
     for (std::size_t i{0}; i < seed.size(); ++i) {
         seed[i] = static_cast<uint8_t>(0xa0 + i);
@@ -413,20 +423,15 @@ BOOST_AUTO_TEST_CASE(committed_child_kdf_is_deterministic_and_tree_bound)
     ChainLockMasterSeed imported{};
     BOOST_CHECK(ImportChainLockMasterSeed(seed, imported));
     BOOST_CHECK(imported == seed);
-    std::array<uint8_t, sphincs_c11::SECRET_SEED_SIZE> zero_seed{};
+    ChainLockMasterSeed zero_seed{};
     BOOST_CHECK(!ImportChainLockMasterSeed(zero_seed, imported));
     BOOST_CHECK(std::all_of(imported.begin(), imported.end(),
                             [](uint8_t byte) { return byte == 0; }));
-    BOOST_CHECK(expected != sphincs_c11::SerializePublicKey(
-                                changed_genesis->GetPublicKey()));
-    BOOST_CHECK(expected != sphincs_c11::SerializePublicKey(
-                                changed_identity->GetPublicKey()));
-    BOOST_CHECK(expected != sphincs_c11::SerializePublicKey(
-                                changed_generation->GetPublicKey()));
-    BOOST_CHECK(expected != sphincs_c11::SerializePublicKey(
-                                changed_epoch->GetPublicKey()));
-    BOOST_CHECK(expected != sphincs_c11::SerializePublicKey(
-                                changed_master_seed->GetPublicKey()));
+    BOOST_CHECK(expected != ChildPublicKeyOf(*changed_genesis));
+    BOOST_CHECK(expected != ChildPublicKeyOf(*changed_identity));
+    BOOST_CHECK(expected != ChildPublicKeyOf(*changed_generation));
+    BOOST_CHECK(expected != ChildPublicKeyOf(*changed_epoch));
+    BOOST_CHECK(expected != ChildPublicKeyOf(*changed_master_seed));
 
     uint256 null_hash;
     BOOST_CHECK(!first_manager.DeriveCommittedChildKey(

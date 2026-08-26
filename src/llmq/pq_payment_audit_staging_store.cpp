@@ -109,6 +109,10 @@ struct DiskSchema {
     uint32_t guard{SCHEMA_GUARD};
     uint256 genesis_hash;
     uint16_t audit_version{PAYMENT_AUDIT_VERSION};
+    uint16_t child_profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
+    uint16_t child_usage_cap{SCHEDULED_WOTS_USAGE_CAP};
+    uint32_t child_signature_size{CHILD_SIGNATURE_SIZE};
+    uint32_t response_wire_size{PaymentAuditResponse::WIRE_SIZE};
     uint8_t row_count{PAYMENT_AUDIT_ROW_COUNT};
     uint8_t max_open_rows{PaymentAuditStagingStore::MAX_OPEN_ROWS};
     uint256 checksum;
@@ -116,8 +120,10 @@ struct DiskSchema {
     SERIALIZE_METHODS(DiskSchema, obj)
     {
         READWRITE(obj.format_version, obj.guard, obj.genesis_hash,
-                  obj.audit_version, obj.row_count, obj.max_open_rows,
-                  obj.checksum);
+                  obj.audit_version, obj.child_profile,
+                  obj.child_usage_cap, obj.child_signature_size,
+                  obj.response_wire_size, obj.row_count,
+                  obj.max_open_rows, obj.checksum);
     }
 
     friend bool operator==(const DiskSchema&, const DiskSchema&) = default;

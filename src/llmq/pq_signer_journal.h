@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_LLMQ_PQ_SIGNER_JOURNAL_H
 #define SYSCOIN_LLMQ_PQ_SIGNER_JOURNAL_H
 
+#include <crypto/scheduled_wots/scheduled_wots.h>
 #include <dbwrapper.h>
 #include <serialize.h>
 #include <sync.h>
@@ -27,10 +28,12 @@ namespace test {
 class PQSignerJournalTestAccess;
 }
 
-inline constexpr std::size_t PQ_C11_SIGNATURE_SIZE{3976};
-inline constexpr std::uint16_t PQ_C11_CHILD_USAGE_CAP{256};
+inline constexpr std::size_t PQ_CHILD_SIGNATURE_SIZE{
+    scheduled_wots::SIGNATURE_SIZE};
+inline constexpr std::uint16_t PQ_CHILD_USAGE_CAP{
+    scheduled_wots::AUTHORIZED_LEAF_COUNT};
 
-using PQC11Signature = std::array<unsigned char, PQ_C11_SIGNATURE_SIZE>;
+using PQChildSignature = std::array<unsigned char, PQ_CHILD_SIGNATURE_SIZE>;
 
 enum class PQSignerPurpose : std::uint8_t {
     CHAINLOCK = 1,
@@ -51,6 +54,7 @@ struct PQSignerJournalKey
     uint256 pro_tx_hash;
     std::uint32_t quorum_epoch{0};
     uint256 child_key_hash;
+    std::uint8_t leaf_index{0xff};
     PQSignerPurpose purpose{PQSignerPurpose::CHAINLOCK};
     std::int32_t absolute_height{-1};
 
@@ -65,9 +69,40 @@ struct PQSignerJournalKey
                   obj.pro_tx_hash,
                   obj.quorum_epoch,
                   obj.child_key_hash,
+                  obj.leaf_index,
                   purpose,
                   obj.absolute_height);
         SER_READ(obj, obj.purpose = static_cast<PQSignerPurpose>(purpose));
+    }
+};
+
+/** Physical one-time leaf identity; purpose and height are stored metadata. */
+struct PQSignerJournalLeafKey
+{
+    uint256 genesis_hash;
+    std::uint16_t child_profile{0};
+    uint256 pro_tx_hash;
+    std::uint32_t quorum_epoch{0};
+    uint256 child_key_hash;
+    std::uint8_t leaf_index{0xff};
+
+    explicit PQSignerJournalLeafKey(const PQSignerJournalKey& key)
+        : genesis_hash{key.genesis_hash},
+          child_profile{key.child_profile},
+          pro_tx_hash{key.pro_tx_hash},
+          quorum_epoch{key.quorum_epoch},
+          child_key_hash{key.child_key_hash},
+          leaf_index{key.leaf_index}
+    {
+    }
+
+    bool operator==(const PQSignerJournalLeafKey&) const = default;
+    bool operator<(const PQSignerJournalLeafKey& other) const;
+
+    SERIALIZE_METHODS(PQSignerJournalLeafKey, obj)
+    {
+        READWRITE(obj.genesis_hash, obj.child_profile, obj.pro_tx_hash,
+                  obj.quorum_epoch, obj.child_key_hash, obj.leaf_index);
     }
 };
 
@@ -111,8 +146,6 @@ enum class PQSignerJournalOutcome : std::uint8_t {
     CONSUMED,
     /** No reservation exists for a requested signature commit. */
     NOT_RESERVED,
-    /** The child key has already consumed its 256 authorized heights. */
-    CAP_EXHAUSTED,
     /** The candidate does not extend the exact durable operator branch lock. */
     BRANCH_CONFLICT,
     /** A durable accepted certificate replaced or initialized the branch lock. */
@@ -132,11 +165,11 @@ enum class PQSignerJournalOutcome : std::uint8_t {
 struct PQSignerJournalResult
 {
     PQSignerJournalOutcome outcome{PQSignerJournalOutcome::DATABASE_ERROR};
-    std::optional<PQC11Signature> signature;
+    std::optional<PQChildSignature> signature;
 };
 
 /**
- * Durable burn-before-sign state for C11 ChainLock child keys.
+ * Durable burn-before-sign state for scheduled WOTS+ child keys.
  *
  * This database must live outside chainstate/EvoDB and must never be restored,
  * rewound, or erased during a reorg. A RESERVED entry is intentionally not
@@ -177,7 +210,7 @@ public:
     [[nodiscard]] PQSignerJournalResult StoreSignature(
         const PQSignerJournalKey& key,
         const uint256& message_hash,
-        const PQC11Signature& signature) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        const PQChildSignature& signature) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool IsHealthy() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
@@ -200,7 +233,7 @@ private:
 
     CDBWrapper m_db;
     mutable Mutex m_mutex;
-    std::map<PQSignerJournalKey, PendingReservation> m_pending GUARDED_BY(m_mutex);
+    std::map<PQSignerJournalLeafKey, PendingReservation> m_pending GUARDED_BY(m_mutex);
     std::optional<PQSignerJournalOutcome> m_failure GUARDED_BY(m_mutex);
 
     void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -211,7 +244,7 @@ private:
      *
      * Only CChainLocksHandler can supply this authority, after finality-store
      * acceptance has completed its certificate fsync. The test friend exists
-     * solely to exercise the crash and monotonicity invariants. Usage and slot
+     * solely to exercise the crash and monotonicity invariants. Leaf-slot
      * records are deliberately outside the batch and can never be refunded.
      */
     [[nodiscard]] PQSignerJournalResult ReconcileDurableAcceptedChainLock(

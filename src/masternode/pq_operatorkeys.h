@@ -6,7 +6,7 @@
 #define SYSCOIN_MASTERNODE_PQ_OPERATORKEYS_H
 
 #include <crypto/slhdsa/slhdsa.h>
-#include <crypto/sphincs_c11/sphincs_c11.h>
+#include <crypto/scheduled_wots/scheduled_wots.h>
 #include <llmq/pq_child_key_derivation.h>
 #include <llmq/pq_child_key_tree.h>
 
@@ -56,7 +56,7 @@ public:
         const uint256& authorization_hash,
         GlobalSignature& signature) const noexcept;
 
-    [[nodiscard]] std::optional<sphincs_c11::SecretKey>
+    [[nodiscard]] std::optional<scheduled_wots::SecretKey>
     DeriveCommittedChildKey(const uint256& genesis_hash,
                             const uint256& tree_id,
                             uint32_t generation,

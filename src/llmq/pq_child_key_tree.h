@@ -56,7 +56,7 @@ struct ChildKeyTreeProof {
 };
 
 /**
- * Complete public Merkle cache for one deterministic C11 child-key range.
+ * Complete public Merkle cache for one deterministic scheduled-WOTS range.
  * Secret keys are derived only transiently and are never retained here.
  */
 class ChildKeyTree final {

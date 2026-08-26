@@ -27,10 +27,13 @@ that parameter set, remove unused SHA-2 state, prefix externally visible C
 symbols, make byte-order handling explicit and fail closed when it is unknown,
 preserve canonical SHAKE lane bytes on big-endian targets, and cleanse
 transient key-derived buffers. SHA-2, prehash, experimental parameters, test
-drivers, and upstream build files are intentionally not vendored.
+drivers, and upstream build files are intentionally not vendored. A private
+Syscoin adapter exposes only the pinned SHAKE-128s WOTS+ and tree-hash
+primitives to the separately specified scheduled child profile; it does not
+expand the public SLH-DSA API or alter global signatures.
 
-The C++ wrapper and local self-test are Syscoin code under the repository's
-MIT license.
+The C++ wrappers, private adapter header, and local self-test are Syscoin code
+under the repository's MIT license.
 
 ## API and invariants
 

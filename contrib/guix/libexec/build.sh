@@ -313,8 +313,6 @@ mkdir -p "$DISTSRC"
                 "${INSTALLPATH}/share/doc/syscoin/btcheadernode/COPYING.bitcoin-core"
             cmp src/crypto/slhdsa/LICENSE.upstream \
                 "${INSTALLPATH}/share/doc/syscoin/pq-crypto/slhdsa/LICENSE.upstream"
-            cmp src/crypto/sphincs_c11/LICENSE \
-                "${INSTALLPATH}/share/doc/syscoin/pq-crypto/sphincs_c11/LICENSE"
             ;;
     esac
 
@@ -329,8 +327,6 @@ mkdir -p "$DISTSRC"
                 "dist/Syscoin-Qt.app/Contents/Resources/btcheadernode/COPYING.bitcoin-core"
             cmp src/crypto/slhdsa/LICENSE.upstream \
                 "dist/Syscoin-Qt.app/Contents/Resources/licenses/pq-crypto/slhdsa/LICENSE.upstream"
-            cmp src/crypto/sphincs_c11/LICENSE \
-                "dist/Syscoin-Qt.app/Contents/Resources/licenses/pq-crypto/sphincs_c11/LICENSE"
             mkdir -p "unsigned-app-${HOST}"
             cp  --target-directory="unsigned-app-${HOST}" \
                 contrib/macdeploy/detached-sig-create.sh

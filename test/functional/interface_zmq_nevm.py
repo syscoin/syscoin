@@ -621,7 +621,7 @@ class ZMQTest(SyscoinTestFramework):
         mn.ownerAddr = node.getnewaddress()
         mn.votingAddr = mn.ownerAddr
         mn.operatorKey = operator_keys['operatorKey']
-        mn.c11Seed = operator_keys['c11Seed']
+        mn.chainlockSeed = operator_keys['chainlockSeed']
         return mn
 
     def create_mn_with_nevm(self, index, alias, nevm_address = None):
@@ -645,7 +645,7 @@ class ZMQTest(SyscoinTestFramework):
         mn.collateral_height = self.nodes[0].getblockcount() + 1
         self.mn_count = self.mn_count + 1
         self.generate(self.nodes[0], 1)
-        # SYSCOIN: Building and signing the fixed C11 root can exceed the
+        # SYSCOIN: Building and signing the fixed scheduled-WOTS root can exceed the
         # ordinary RPC timeout on reference SLH-DSA builds. Scope the larger
         # budget to this cryptographic setup call only.
         operator_registration_rpc = get_rpc_proxy(
@@ -655,7 +655,7 @@ class ZMQTest(SyscoinTestFramework):
             coveragedir=self.nodes[0].coverage_dir,
         )
         operator_registration_rpc.protx_register_operator_key(
-            mn.protx_hash, mn.operatorKey, mn.c11Seed, mn.fundsAddr)
+            mn.protx_hash, mn.operatorKey, mn.chainlockSeed, mn.fundsAddr)
         self.generate(self.nodes[0], 1)
         self.nodes[0].protx_update_service(
             mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,

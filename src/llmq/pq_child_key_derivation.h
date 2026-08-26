@@ -5,7 +5,6 @@
 #ifndef SYSCOIN_LLMQ_PQ_CHILD_KEY_DERIVATION_H
 #define SYSCOIN_LLMQ_PQ_CHILD_KEY_DERIVATION_H
 
-#include <crypto/sphincs_c11/sphincs_c11.h>
 #include <llmq/pq_chainlock_types.h>
 
 #include <array>
@@ -15,10 +14,11 @@
 
 namespace llmq::pq {
 
+inline constexpr std::size_t CHAINLOCK_MASTER_SEED_SIZE{32};
 using ChainLockMasterSeed =
-    std::array<unsigned char, sphincs_c11::SECRET_SEED_SIZE>;
+    std::array<unsigned char, CHAINLOCK_MASTER_SEED_SIZE>;
 
-/** Parse an exact, nonzero independent C11 master seed. */
+/** Parse an exact, nonzero independent child-key master seed. */
 [[nodiscard]] bool ImportChainLockMasterSeed(
     std::span<const uint8_t> encoded,
     ChainLockMasterSeed& output) noexcept;

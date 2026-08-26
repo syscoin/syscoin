@@ -51,6 +51,7 @@ class ChainLockCollector final {
 public:
     static std::unique_ptr<ChainLockCollector> Create(
         const uint256& genesis_hash,
+        ChainLockScheduleConfig schedule,
         ChainLockStatement statement,
         FrozenQuorumRostersPtr rosters,
         uint8_t authorization_mask,
@@ -77,6 +78,7 @@ public:
 private:
     ChainLockCollector(
         uint256 genesis_hash,
+        ChainLockScheduleConfig schedule,
         ChainLockStatement statement,
         FrozenQuorumRostersPtr rosters,
         uint8_t authorization_mask);
@@ -85,6 +87,7 @@ private:
         const ChainLockShareTranscript& transcript) const;
 
     uint256 m_genesis_hash;
+    ChainLockScheduleConfig m_schedule;
     ChainLockStatement m_statement;
     FrozenQuorumRostersPtr m_rosters;
     uint8_t m_authorization_mask{0};

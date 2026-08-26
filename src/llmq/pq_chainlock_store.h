@@ -26,7 +26,7 @@ namespace llmq::pq {
 inline constexpr std::size_t DEFAULT_SEEN_LOGICAL_CACHE_SIZE{4096};
 inline constexpr std::size_t DEFAULT_SEEN_WITNESS_CACHE_SIZE{4096};
 inline constexpr std::size_t DEFAULT_REJECTED_WITNESS_CACHE_SIZE{4096};
-// A certificate is exactly 3,621,236 bytes, so retaining eight is
+// A certificate is about one megabyte, so retaining eight is
 // intentionally unlike the legacy BLS cache of 256 tiny certificates.
 inline constexpr std::size_t DEFAULT_RECENT_CHAINLOCKS_SIZE{8};
 inline constexpr std::size_t MAX_FINALITY_ID_CACHE_SIZE{65536};
@@ -283,7 +283,7 @@ using ChainLockPreDurableCatchup = std::function<bool()>;
 using ChainLockDurableAuthorization = std::function<bool(
     const std::function<bool()>&, ChainLockFinalityError*)>;
 
-/** Small immutable token retained while the 801 independent C11 checks run. */
+/** Small immutable token retained while the 801 WOTS+ checks run. */
 struct PreparedFinalChainLockCandidate {
     uint256 logical_id;
     uint256 witness_id;
@@ -351,7 +351,7 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
-     * Commit a candidate only after the caller has completed every C11 check.
+     * Commit a candidate only after the caller has completed every WOTS+ check.
      * Passing false records the witness as rejected. A successful path repeats
      * all mutable predecessor and branch checks before first-winner acceptance.
      */

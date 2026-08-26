@@ -97,8 +97,8 @@ struct DiskSchema {
     uint32_t recent_chainlocks_capacity{0};
 
     uint16_t chainlock_version{CHAINLOCK_VERSION};
-    uint16_t child_profile{CHILD_C11_SHA_V1};
-    uint16_t child_usage_cap{C11_USAGE_CAP};
+    uint16_t child_profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
+    uint16_t child_usage_cap{SCHEDULED_WOTS_USAGE_CAP};
     uint32_t child_signature_size{CHILD_SIGNATURE_SIZE};
     uint16_t quorum_size{QUORUM_SIZE};
     uint16_t quorum_threshold{QUORUM_THRESHOLD};

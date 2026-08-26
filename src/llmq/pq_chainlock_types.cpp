@@ -67,7 +67,7 @@ bool IsReceiptStateCompatible(const BTCCursor& accepted,
 bool ChildKeyTreeCommitment::IsStructurallyValid() const noexcept
 {
     if (version != CHILD_KEY_TREE_COMMITMENT_VERSION ||
-        profile != CHILD_C11_SHA_V1 || usage_cap != C11_USAGE_CAP ||
+        profile != CHILD_SCHEDULED_WOTS_SHAKE_128_V1 || usage_cap != SCHEDULED_WOTS_USAGE_CAP ||
         depth != CHILD_KEY_TREE_DEPTH ||
         !IsValidChildKeyTreeGeneration(generation) || tree_id.IsNull() ||
         root.IsNull()) {
@@ -154,15 +154,15 @@ bool QuorumDescriptor::IsStructurallyValid() const
 {
     return version == QUORUM_DESCRIPTOR_VERSION && base_height >= 0 &&
            snapshot_height >= 0 && snapshot_height < base_height && !base_hash.IsNull() &&
-           !snapshot_hash.IsNull() && profile == CHILD_C11_SHA_V1 &&
-           usage_cap == C11_USAGE_CAP && valid_count == CountSet(valid_members) &&
+           !snapshot_hash.IsNull() && profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 &&
+           usage_cap == SCHEDULED_WOTS_USAGE_CAP && valid_count == CountSet(valid_members) &&
            valid_count >= QUORUM_MIN_VALID && valid_count <= QUORUM_SIZE &&
            !member_root.IsNull() && !child_key_root.IsNull();
 }
 
 bool ChainLockShareTranscript::IsStructurallyValid() const
 {
-    return chainlock_version == CHAINLOCK_VERSION && child_profile == CHILD_C11_SHA_V1 &&
+    return chainlock_version == CHAINLOCK_VERSION && child_profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 &&
            height >= 0 && !block_hash.IsNull() && previous_chainlock_height < height &&
            (previous_chainlock_height >= 0 || previous_chainlock_hash.IsNull()) &&
            (previous_chainlock_height < 0 || !previous_chainlock_hash.IsNull()) &&
@@ -179,7 +179,7 @@ bool ChainLockShareTranscript::IsStructurallyValid() const
 
 bool ChainLockStatement::IsStructurallyValid() const
 {
-    return version == CHAINLOCK_VERSION && child_profile == CHILD_C11_SHA_V1 && height >= 0 &&
+    return version == CHAINLOCK_VERSION && child_profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 && height >= 0 &&
            !block_hash.IsNull() && previous_chainlock_height < height &&
            (previous_chainlock_height >= 0 || previous_chainlock_hash.IsNull()) &&
            (previous_chainlock_height < 0 || !previous_chainlock_hash.IsNull()) &&

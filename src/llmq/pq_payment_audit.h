@@ -71,7 +71,9 @@ static_assert(PAYMENT_AUDIT_RECEIPT_DELAY == PQ_BTCC_CANDIDATE_PERIOD);
 // which it is active. Audit uses are purpose-separated from ordinary CL uses.
 static_assert(PQ_MAX_ELIGIBLE_TARGETS_PER_CHILD +
                   PAYMENT_AUDIT_MAX_USES_PER_CHILD <=
-              C11_USAGE_CAP);
+              SCHEDULED_WOTS_USAGE_CAP);
+static_assert(PAYMENT_AUDIT_MAX_USES_PER_CHILD ==
+              SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_COUNT);
 static_assert(PAYMENT_AUDIT_REPORT_ONLINE_THRESHOLD == 134);
 static_assert(QUORUM_MIN_VALID == 300);
 static_assert(PAYMENT_AUDIT_REPORT_ONLINE_THRESHOLD * 2 >
@@ -138,7 +140,7 @@ struct PaymentAuditResponse {
                            const PaymentAuditResponse&) = default;
 };
 
-static_assert(PaymentAuditResponse::WIRE_SIZE == 5'142);
+static_assert(PaymentAuditResponse::WIRE_SIZE == 1'870);
 
 struct PaymentAuditScheduleConfig {
     ChainLockScheduleConfig chainlock;
@@ -185,6 +187,13 @@ struct PaymentAuditEpochSchedule {
 [[nodiscard]] std::optional<PaymentAuditEpochSchedule>
 BuildPaymentAuditEpochSchedule(const PaymentAuditScheduleConfig& config,
                                uint32_t epoch) noexcept;
+
+/** Canonical one-time WOTS+ audit leaf for a child active at the seal. */
+[[nodiscard]] std::optional<uint8_t> PaymentAuditLeafIndex(
+    const PaymentAuditScheduleConfig& config,
+    uint32_t subject_epoch,
+    int32_t seal_height,
+    uint32_t child_epoch) noexcept;
 
 [[nodiscard]] std::optional<PaymentAuditCarrierWindow>
 BuildPaymentAuditCarrierWindow(const PaymentAuditScheduleConfig& config,
@@ -295,7 +304,7 @@ struct PaymentAuditCommitment {
         sizeof(uint32_t) + 2 * 32 + BITMAP_SIZE + 32};
 
     uint16_t version{PAYMENT_AUDIT_VERSION};
-    uint16_t child_profile{CHILD_C11_SHA_V1};
+    uint16_t child_profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
     PaymentAuditSeed seed;
     uint8_t selected_row{0};
     int32_t response_height{-1};
@@ -342,7 +351,7 @@ struct PaymentAuditStatement {
 
     PaymentAuditCommitment commitment;
     // The compact ordinary-B statement makes an archived audit certificate
-    // independently verifiable without retaining B's second 3.6 MiB witness.
+    // independently verifiable without retaining B's second full witness.
     // Live signers still require that exact ordinary ChainLock before signing.
     ChainLockStatement seal_statement;
 
@@ -415,7 +424,7 @@ struct PaymentAuditShare {
                            const PaymentAuditShare&) = default;
 };
 
-static_assert(PaymentAuditShare::WIRE_SIZE == 5'502);
+static_assert(PaymentAuditShare::WIRE_SIZE == 2'230);
 
 /** One signer-bound report, aligned with signer_bitmaps canonical order. */
 struct PaymentAuditReportWitness {
@@ -436,7 +445,7 @@ struct PaymentAuditReportWitness {
                            const PaymentAuditReportWitness&) = default;
 };
 
-static_assert(PaymentAuditReportWitness::WIRE_SIZE == 4'570);
+static_assert(PaymentAuditReportWitness::WIRE_SIZE == 1'298);
 
 struct FinalPaymentAudit {
     static constexpr std::size_t WIRE_SIZE{
@@ -488,7 +497,7 @@ struct FinalPaymentAudit {
                            const FinalPaymentAudit&) = default;
 };
 
-static_assert(FinalPaymentAudit::WIRE_SIZE == 3'661'635);
+static_assert(FinalPaymentAudit::WIRE_SIZE == 1'040'763);
 static_assert(FinalPaymentAudit::WIRE_SIZE <
               MAX_PAYMENT_AUDIT_CERTIFICATE_SIZE);
 

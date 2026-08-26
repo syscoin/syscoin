@@ -214,20 +214,14 @@ bool ParallelFor(std::size_t count, Function&& function)
     return success.load(std::memory_order_relaxed);
 }
 
-void FillKeySeeds(std::size_t key_index,
-                  sphincs_c11::SecretSeed& secret_seed,
-                  sphincs_c11::PublicSeed& public_seed)
+void FillKeySeed(std::size_t key_index,
+                 scheduled_wots::KeyGenerationSeed& seed)
 {
     const uint64_t seed_index{static_cast<uint64_t>(key_index) + 1};
-    for (std::size_t byte{0}; byte < secret_seed.size(); ++byte) {
+    for (std::size_t byte{0}; byte < seed.size(); ++byte) {
         const unsigned int shift{static_cast<unsigned int>((byte % 8) * 8)};
-        secret_seed[byte] = static_cast<unsigned char>(
+        seed[byte] = static_cast<unsigned char>(
             (seed_index >> shift) ^ (0x5dU + 37U * byte));
-    }
-    for (std::size_t byte{0}; byte < public_seed.size(); ++byte) {
-        const unsigned int shift{static_cast<unsigned int>((byte % 8) * 8)};
-        public_seed[byte] = static_cast<unsigned char>(
-            (seed_index >> shift) ^ (0xa7U + 19U * byte));
     }
 }
 
@@ -282,8 +276,8 @@ struct FullDimensionFixture {
 
     GeneratorArguments args;
     IndexChain chain;
-    std::vector<sphincs_c11::PublicKey> public_keys;
-    std::vector<sphincs_c11::SecretKey> secret_keys;
+    std::vector<scheduled_wots::PublicKey> public_keys;
+    std::vector<std::optional<scheduled_wots::SecretKey>> secret_keys;
     std::map<uint256, std::size_t> member_indices;
     test::QuorumSnapshotFixture snapshot_fixture;
     FrozenQuorumRostersPtr rosters;
@@ -335,8 +329,8 @@ struct PaymentAuditFixture {
 
     PaymentAuditArguments args;
     IndexChain chain;
-    std::vector<sphincs_c11::PublicKey> public_keys;
-    std::vector<sphincs_c11::SecretKey> secret_keys;
+    std::vector<scheduled_wots::PublicKey> public_keys;
+    std::vector<std::optional<scheduled_wots::SecretKey>> secret_keys;
     std::map<uint256, std::size_t> member_indices;
     test::QuorumSnapshotFixture snapshot_fixture;
 };
@@ -360,7 +354,7 @@ struct PaymentAuditPostArguments {
 
 test::SyntheticChildAuthorization MakeAuthorization(
     const uint256& genesis_hash,
-    const std::vector<sphincs_c11::PublicKey>& public_keys,
+    const std::vector<scheduled_wots::PublicKey>& public_keys,
     const uint256& pro_tx_hash,
     uint32_t epoch,
     std::size_t member_index)
@@ -368,14 +362,14 @@ test::SyntheticChildAuthorization MakeAuthorization(
     const std::size_t key_index{ChildKeyIndex(epoch, member_index)};
     return test::MakeSyntheticChildAuthorization(
         genesis_hash, pro_tx_hash, epoch,
-        sphincs_c11::SerializePublicKey(public_keys.at(key_index)),
+        public_keys.at(key_index),
         AuthorizationDiscriminator(epoch, member_index));
 }
 
 OperatorKeyState MakeOperatorState(
     const uint256& genesis_hash,
     const QuorumBuildConfig& build_config,
-    const std::vector<sphincs_c11::PublicKey>& public_keys,
+    const std::vector<scheduled_wots::PublicKey>& public_keys,
     const uint256& pro_tx_hash,
     uint32_t epoch,
     int32_t snapshot_height,
@@ -410,8 +404,8 @@ OperatorKeyState MakeOperatorState(
 }
 
 bool GenerateMemberKeys(
-    std::vector<sphincs_c11::PublicKey>& public_keys,
-    std::vector<sphincs_c11::SecretKey>& secret_keys,
+    std::vector<scheduled_wots::PublicKey>& public_keys,
+    std::vector<std::optional<scheduled_wots::SecretKey>>& secret_keys,
     std::map<uint256, std::size_t>& member_indices)
 {
     if (public_keys.size() != CHILD_KEY_COUNT ||
@@ -422,15 +416,16 @@ bool GenerateMemberKeys(
         member_indices.emplace(NonNullHash(10'000 + member), member);
     }
     return ParallelFor(CHILD_KEY_COUNT, [&](std::size_t key_index) {
-        sphincs_c11::SecretSeed secret_seed{};
-        sphincs_c11::PublicSeed public_seed{};
-        FillKeySeeds(key_index, secret_seed, public_seed);
-        const bool generated{sphincs_c11::GenerateKeyPair(
-            secret_seed, public_seed, public_keys[key_index],
-            secret_keys[key_index])};
-        memory_cleanse(secret_seed.data(), secret_seed.size());
-        memory_cleanse(public_seed.data(), public_seed.size());
-        return generated;
+        scheduled_wots::KeyGenerationSeed seed{};
+        FillKeySeed(key_index, seed);
+        auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
+        memory_cleanse(seed.data(), seed.size());
+        if (!secret_key ||
+            !secret_key->GetPublicKey(public_keys[key_index])) {
+            return false;
+        }
+        secret_keys[key_index] = std::move(*secret_key);
+        return true;
     });
 }
 
@@ -651,10 +646,14 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
                 std::move(authorization.proof);
             const uint256 share_hash{GetChainLockShareHash(
                 fixture.args.genesis_hash, share.transcript)};
-            sphincs_c11::Message message;
+            scheduled_wots::Message message;
             std::copy(share_hash.begin(), share_hash.end(), message.begin());
-            return sphincs_c11::Sign(
-                fixture.secret_keys[position.key_index], message,
+            const auto leaf_index{ChainLockLeafIndex(
+                fixture.args.build_config.schedule,
+                roster.descriptor.epoch, statement.height)};
+            return leaf_index && fixture.secret_keys[position.key_index] &&
+                scheduled_wots::SignDeterministic(
+                *fixture.secret_keys[position.key_index], *leaf_index, message,
                 share.authenticated_signature.signature);
         })) {
         return std::nullopt;
@@ -662,7 +661,8 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{ChainLockCollector::Create(
-        fixture.args.genesis_hash, statement, rosters,
+        fixture.args.genesis_hash, fixture.args.build_config.schedule,
+        statement, rosters,
         AUTHORIZATION_MASK, &collection_error)};
     if (!collector) return std::nullopt;
     for (const auto& share : shares) {
@@ -677,7 +677,9 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{WorkerCount()};
     if (!final ||
-        !verifier.Verify(fixture.args.genesis_hash, *final, *rosters,
+        !verifier.Verify(fixture.args.genesis_hash,
+                         fixture.args.build_config.schedule,
+                         *final, *rosters,
                          AUTHORIZATION_MASK,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {
@@ -722,10 +724,16 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
             std::move(authorization.proof);
         const uint256 share_hash{GetPaymentAuditShareHash(
             fixture.args.genesis_hash, share.transcript)};
-        sphincs_c11::Message message;
+        scheduled_wots::Message message;
         std::copy(share_hash.begin(), share_hash.end(), message.begin());
-        return sphincs_c11::Sign(
-            fixture.secret_keys[position.key_index], message,
+        const PaymentAuditScheduleConfig schedule{
+            fixture.args.build_config.schedule, fixture.args.btcc_config};
+        const auto leaf_index{PaymentAuditLeafIndex(
+            schedule, statement.commitment.subject_epoch,
+            statement.commitment.seal_height, roster.descriptor.epoch)};
+        return leaf_index && fixture.secret_keys[position.key_index] &&
+            scheduled_wots::SignDeterministic(
+            *fixture.secret_keys[position.key_index], *leaf_index, message,
             share.authenticated_signature.signature);
     })) {
         return std::nullopt;
@@ -733,7 +741,10 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{PaymentAuditCollector::Create(
-        fixture.args.genesis_hash, statement, seal_chainlock, rosters,
+        fixture.args.genesis_hash,
+        PaymentAuditScheduleConfig{
+            fixture.args.build_config.schedule, fixture.args.btcc_config},
+        statement, seal_chainlock, rosters,
         AUTHORIZATION_MASK,
         &collection_error)};
     if (!collector) return std::nullopt;
@@ -748,7 +759,11 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
     PaymentAuditVerificationError verification_error{
         PaymentAuditVerificationError::NONE};
     auto prepared{final ? PrepareFinalPaymentAuditVerification(
-                              fixture.args.genesis_hash, *final, *rosters,
+                              fixture.args.genesis_hash,
+                              PaymentAuditScheduleConfig{
+                                  fixture.args.build_config.schedule,
+                                  fixture.args.btcc_config},
+                              *final, *rosters,
                               AUTHORIZATION_MASK,
                               &verification_error)
                         : std::nullopt};
@@ -781,7 +796,7 @@ bool ValidatePlannedChildUsage(
             return false;
         }
         const auto key{std::make_pair(epoch, operator_index)};
-        return ++totals[key] <= C11_USAGE_CAP;
+        return ++totals[key] <= SCHEDULED_WOTS_USAGE_CAP;
     };
 
     for (const auto& [height, rosters] : chainlocks) {
@@ -1006,10 +1021,14 @@ bool BuildAndSignShares(FullDimensionFixture& fixture)
 
         const uint256 share_hash{GetChainLockShareHash(
             fixture.args.genesis_hash, share.transcript)};
-        sphincs_c11::Message message;
+        scheduled_wots::Message message;
         std::copy(share_hash.begin(), share_hash.end(), message.begin());
-        return sphincs_c11::Sign(
-            fixture.secret_keys[position.key_index], message,
+        const auto leaf_index{ChainLockLeafIndex(
+            fixture.args.build_config.schedule,
+            roster.descriptor.epoch, fixture.statement.height)};
+        return leaf_index && fixture.secret_keys[position.key_index] &&
+            scheduled_wots::SignDeterministic(
+            *fixture.secret_keys[position.key_index], *leaf_index, message,
             share.authenticated_signature.signature);
     });
 }
@@ -2220,7 +2239,8 @@ int Generate(const GeneratorArguments& args)
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
     auto collector{ChainLockCollector::Create(
-        args.genesis_hash, fixture->statement, fixture->rosters,
+        args.genesis_hash, args.build_config.schedule,
+        fixture->statement, fixture->rosters,
         AUTHORIZATION_MASK,
         &collection_error)};
     if (!collector) {
@@ -2242,7 +2262,8 @@ int Generate(const GeneratorArguments& args)
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{WorkerCount()};
-    if (!verifier.Verify(args.genesis_hash, *final, *fixture->rosters,
+    if (!verifier.Verify(args.genesis_hash, args.build_config.schedule,
+                         *final, *fixture->rosters,
                          AUTHORIZATION_MASK,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {

@@ -282,7 +282,7 @@ class DIP3Test(SyscoinTestFramework):
         mn.ownerAddr = node.getnewaddress()
         mn.votingAddr = mn.ownerAddr
         mn.operatorKey = operator_keys['operatorKey']
-        mn.c11Seed = operator_keys['c11Seed']
+        mn.chainlockSeed = operator_keys['chainlockSeed']
 
         return mn
 
@@ -329,7 +329,7 @@ class DIP3Test(SyscoinTestFramework):
         # The migration bootstrap verifier occupying node 1 is deliberately
         # stopped until start_mn() reuses that slot.
         self.generate(node, 1, sync_fun=self.no_op)
-        # Building the fixed 65,536-leaf C11 commitment can exceed the
+        # Building the fixed 65,536-leaf scheduled-WOTS commitment can exceed the
         # ordinary RPC timeout on low-core test hosts. The focused operator
         # lifecycle test owns rotation and mempool-auth coverage; this broad
         # test builds exactly one root solely to retain payment enforcement.
@@ -337,7 +337,7 @@ class DIP3Test(SyscoinTestFramework):
             node.url, node.index, timeout=600,
             coveragedir=node.coverage_dir)
         registration_rpc.protx_register_operator_key(
-            mn.protx_hash, mn.operatorKey, mn.c11Seed, mn.fundsAddr)
+            mn.protx_hash, mn.operatorKey, mn.chainlockSeed, mn.fundsAddr)
         self.generate(node, 1, sync_fun=self.no_op)
         node.protx_update_service(
             mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,
@@ -352,7 +352,7 @@ class DIP3Test(SyscoinTestFramework):
 
         extra_args = [
             '-masternodeslhprivkey=%s' % mn.operatorKey,
-            '-masternodec11seed=%s' % mn.c11Seed,
+            '-masternodechainlockseed=%s' % mn.chainlockSeed,
         ]
         self.start_node(mn.idx, extra_args = self.extra_args + extra_args)
         force_finish_mnsync(self.nodes[mn.idx])

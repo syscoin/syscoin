@@ -5,8 +5,8 @@ and independent security review
 
 This document specifies the intended replacement for Syscoin's BLS/DKG
 ChainLock stack. It is implementation guidance for the consensus, wire, state,
-and migration work. It does not claim that the proposed C11-SHA child signature
-profile is standardized, audited, or ready for mainnet.
+and migration work. It does not claim that the scheduled Merkle-WOTS+ child
+signature profile is standardized, audited, or ready for mainnet.
 
 The final activated implementation has no BLS cryptography and no DKG. It keeps
 only byte-exact, non-cryptographic legacy decoders needed to replay the chain up
@@ -27,9 +27,10 @@ The design fixes the following decisions:
 - The global key authenticates long-lived operator duties, direct MNAUTH, and
   one fixed-depth Merkle commitment to automatically derived short-lived
   ChainLock keys.
-- Each member has a distinct **C11-SHA** child key for each quorum epoch. The
-  child profile is usage-limited and is never used for MNAUTH, provider updates,
-  governance, or another epoch.
+- Each member has a distinct **scheduled Merkle-WOTS+** child key for each
+  quorum epoch. The child profile has an explicit protocol-assigned leaf for
+  every authorized signing purpose and is never used for MNAUTH, provider
+  updates, governance, or another epoch.
 - Quorums are selected deterministically from chain state. There is no shared
   secret, contribution phase, complaint phase, justification phase,
   verification vector, threshold-key recovery, or mined DKG commitment.
@@ -68,7 +69,7 @@ The design does not attempt to:
 - make ECDSA-protected coins, collateral, or governance post-quantum;
 - provide encrypted or channel-bound transport through MNAUTH;
 - prove historical Bitcoin best-chain membership from AuxPoW alone;
-- make C11-SHA production-ready by specification fiat; or
+- make the scheduled child profile production-ready by specification fiat; or
 - preserve any post-activation BLS/DKG RPC or P2P compatibility.
 
 ## 2. Consensus constants
@@ -85,7 +86,12 @@ The current quorum geometry remains the starting point:
 | `PQ_EPOCH_BLOCKS` | 288 | Blocks between quorum epochs |
 | `PQ_CL_PERIOD` | 5 | Absolute eligible ChainLock-height cadence |
 | `PQ_CL_SIGN_LAG` | 5 | Local generation delay; not part of certificate validity |
-| `C11_USAGE_CAP` | 256 | Maximum authorized heights per member/epoch child key |
+| `SCHEDULED_WOTS_TREE_HEIGHT` | 8 | Height of each child key's 256-leaf WOTS+ Merkle tree |
+| `SCHEDULED_WOTS_TREE_LEAF_COUNT` | 256 | Complete physical leaf domain |
+| `SCHEDULED_WOTS_CHAINLOCK_LEAF_COUNT` | 231 | Leaves 0 through 230 reserved for ordinary ChainLocks |
+| `SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE` | 231 | First of four payment-audit leaves |
+| `SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_COUNT` | 4 | Leaves 231 through 234 reserved for audits |
+| `SCHEDULED_WOTS_USAGE_CAP` | 235 | Exact authorized leaf domain; leaves 235 through 255 are invalid |
 | `CHILD_KEY_TREE_DEPTH` | 16 | One commitment covers 65,536 consecutive epochs |
 | `CHILD_KEY_TREE_MAX_GENERATION` | 16 | One initial root plus at most 15 exceptional replacements per operator |
 | `MAX_PQ_USED_TREE_IDS` | 1,000,000 | Branch-local append-only tree-ID safety bound |
@@ -102,7 +108,7 @@ base(e)  = PQ_EPOCH_ORIGIN + e * PQ_EPOCH_BLOCKS
 An epoch is a fixed time interval. It advances even if too few members publish
 keys or sign. A failed epoch is not extended and an older quorum is not kept
 alive to preserve liveness. This fixed expiry is required for the child-key
-usage bound.
+leaf schedule.
 
 `PQ_EPOCH_ORIGIN` should be aligned to both the 288-block rotation and the
 five-block ChainLock cadence. Their least common multiple is 1,440 blocks.
@@ -115,7 +121,7 @@ The roster snapshot lag used for deterministic selection is a
 different consensus constant and must not be reused as the registration
 cutoff.
 
-### 2.1 Why the cap is 256
+### 2.1 Scheduled leaf allocation
 
 A quorum remains in a four-quorum active window for at most:
 
@@ -130,18 +136,34 @@ contains at most:
 ceil(1,152 / 5) = 231 eligible heights
 ```
 
-The rule is one generated share per `(childKeyId, absoluteHeight)`, regardless
-of reorgs, retries, peer requests, or competing blocks. Therefore a cap of 256
-leaves 25 slots of arithmetic margin while remaining close to the intended
-usage. A cap of 512 is not safer cryptographically; it only hides an accidental
-lifetime/cadence extension and doubles the authorized use. The recommendation
-is 256.
+For an ordinary ChainLock, `EligibleTargetsForEpoch(config, childEpoch)`
+defines the child's complete eligible span. The leaf is the zero-based ordinal
+of `targetHeight` within that span:
 
-If a future protocol changes the active lifetime or makes ChainLocks more
-frequent, it must introduce a new child-profile ID and usage cap. It must not
-silently reuse `C11_SHA_V1` with a higher effective budget. If implementation
-testing shows that a deployed rule can extend an epoch, 512 would be the safer
-liveness setting, but that extension must first be made explicit in consensus.
+```text
+chainLockLeaf = (targetHeight - firstEligibleHeight) / PQ_CL_PERIOD
+```
+
+The result must be an exact cadence point in the span and in `0..230`. Thus the
+first eligible target uses leaf 0 and the maximum 231st target uses leaf 230.
+The leaf is derived independently by signer and verifier; it is not selected by
+the signer and is not serialized in the signature.
+
+Payment audits use the four remaining authorized leaves. With the full
+payment-audit schedule validated and `sealEpoch = epoch(sealHeight)`:
+
+```text
+paymentAuditLeaf = 231 + (sealEpoch - childEpoch)
+```
+
+Only the four active child epochs at the exact audit seal are accepted, so the
+result is exactly 231 through 234. Leaves 235 through 255 are always invalid.
+There is no runtime usage tally: protocol scheduling assigns a physical leaf,
+and the burn-before-sign journal prevents that leaf from being reused.
+
+If a future protocol changes the active lifetime, cadence, or audit purposes,
+it must introduce a new child-profile ID and leaf schedule. It must not silently
+reuse `CHILD_SCHEDULED_WOTS_SHAKE_128_V1` with a wider authorized domain.
 
 ## 3. Cryptographic key hierarchy
 
@@ -205,51 +227,39 @@ deterministic option; selecting the available hedged API instead would be a
 deliberate profile change, not a runtime deployment choice. Verification
 follows FIPS 205 exactly.
 
-### 3.3 C11-SHA child key
+### 3.3 Scheduled Merkle-WOTS+ child key
 
-`C11_SHA_V1` is a short-lived per-member/per-epoch ChainLock-only profile. The
-intended parameter tuple is:
+`CHILD_SCHEDULED_WOTS_SHAKE_128_V1` is a short-lived,
+per-member/per-epoch profile with algorithm identifier
+`SYS-SCHEDULED-WOTS+-SHAKE-N16-W16-H8-V1`. Its fixed parameters and encodings
+are:
 
 ```text
-n = 16, h = 16, d = 2, a = 11, k = 13, w = 8
-fixed signature bytes = 3,976
-authorized uses       = 256
-serialized WOTS count = uint32 big-endian, canonically < 10,000,000
+n = 16, w = 16, len = 35, h = 8
+public key           = PK.seed[16] || PK.root[16]              = 32 bytes
+secret-key encoding  = SK.seed[16] || SK.prf[16] || public key = 64 bytes
+key-generation seed  = SK.seed[16] || SK.prf[16] || PK.seed[16] = 48 bytes
+signature            = R[16] || WOTS[560] || auth[128]         = 704 bytes
+authorized leaves    = 0..234                                 = 235 leaves
 ```
 
-The in-tree research profile uses the same exclusive `10,000,000` search
-bound for deterministic `R` grinding and WOTS+C counter grinding. Verification
-can enforce the bound only for the two serialized WOTS counters and rejects
-larger values. The private `R` nonce is not serialized; the resulting 16-byte
-`R` is checked through the ordinary message-digest constraint.
+The leaf index is implicit protocol state. It is supplied to the vendored
+FIPS 205 SHAKE WOTS+ and tree-hash primitives, bound into deterministic `R` and
+the message digest, and omitted from the 704-byte signature. Verification
+rejects a message or public key of the wrong length, a signature not exactly
+704 bytes, and every leaf outside `0..234`.
 
-The nickname `C11-SHA` is not a sufficient consensus specification. Before a
-profile ID can be activated, a normative document and two independent
-implementations must pin all of the following:
+Each child key owns an immutable height-8 public tree. Its warm signing cache
+contains all 511 16-byte nodes, exactly 8,176 bytes per child, is public data,
+and is rebuilt when a 64-byte secret-key encoding is imported. The secret-key
+owner is move-only and signing is deterministic for one `(leaf, message)`.
 
-- the exact SPHINCS-/SPHINCS+C construction and security claim;
-- every hash and PRF invocation, padding rule, address format, and endianness;
-- public/private key and signature encodings and exact byte lengths;
-- signature generation randomness/determinism;
-- rejection and canonicality rules;
-- domain-separation inputs;
-- the maximum-use security analysis at 256 signatures; and
-- KAT files plus hashes of the normative source revision.
-
-The projected CLSIG size below assumes the fixed 3,976-byte encoding. If the
-normative C11-SHA profile does not produce that encoding, the profile cannot be
-activated under this wire plan without revisiting the 4 MB envelope.
-
-C11-SHA is not FIPS 205. It is research cryptography and is an activation
-blocker until independently reviewed. The standardized SHAKE global key does
-not confer standardization or security on the child construction.
-
-Syscoin's zkSYS/Pali verifier work is useful implementation prior art for
-strict parsing, fixed-cost verification, mutation vectors, and differential
-testing. It implements the distinct draft `SLH-DSA-SHA2-128-24` profile with a
-3,856-byte signature. Neither its wire format nor its security argument is
-reused implicitly here: C11-SHA has a 3,976-byte signature and must retain a
-separate profile ID, KAT set, implementation, and review record.
+This scheduled construction is not itself a FIPS 205 parameter set. It reuses
+the vendored FIPS 205 SHAKE primitives but still requires independent review of
+the composition, explicit-leaf schedule, multi-user bounded-use argument, and
+domain separation before public activation. The superseded draft child
+implementation and its wire decoder are absent; no compatibility path selects
+an earlier child algorithm.
 
 ### 3.4 Separation requirements
 
@@ -265,18 +275,20 @@ never sign:
 - a provider/governance transaction; or
 - a BTCC-only message outside the ChainLock transcript.
 
-The reference signer imports an independent 32-byte ChainLock master seed. It
-derives each C11 secret under `SYS_PQ_CHAINLOCK_CHILD_KDF_V1`, binding the
-network genesis hash, a nonzero random 256-bit `treeId`, tree generation,
-absolute epoch, and child profile. The actual `proTxHash` is independently
-bound by every frozen roster leaf and share transcript; `treeId` is never a
-substitute for operator identity. This pre-transaction identity lets a public
-tree be built before a new transaction hash exists without creating a
-transferable signing authority.
+The reference signer imports an independent 32-byte `chainlockSeed`. It hashes
+the network genesis hash, a nonzero random 256-bit `treeId`, tree generation,
+absolute epoch, and child profile under `SYS_PQ_SWOTS_CHILD_ID_V1`. Three
+label-separated HMAC-SHA256 derivations under `SYS_PQ_SWOTS_CHILD_KDF_V1`
+produce `SK.seed`, `SK.prf`, and `PK.seed`; the first 16 bytes of each form the
+exact 48-byte child key-generation seed. The actual `proTxHash` is
+independently bound by every frozen roster leaf and share transcript; `treeId`
+is never a substitute for operator identity. This pre-transaction identity
+lets a public tree be built before a new transaction hash exists without
+creating a transferable signing authority.
 
-The C11 seed is never derived from the global SLH secret, so a key-only global
-rotation preserves the current child commitment and cannot strand frozen
-quorums. A root rotation requires current-PQ authorization, increments the
+The ChainLock seed is never derived from the global SLH secret, so a key-only
+global rotation preserves the current child commitment and cannot strand
+frozen quorums. A root rotation requires current-PQ authorization, increments the
 generation, uses a fresh `treeId` and root, and begins exactly at the first
 mutable epoch. Owner recovery has the same fresh-root rules after its delay.
 Consensus keeps an exact, branch-local append-only set of every accepted
@@ -307,7 +319,8 @@ SYS_PQ_PROVIDER_SERVICE_V1
 SYS_PQ_PROVIDER_REVOKE_V1
 SYS_PQ_GOV_TRIGGER_V1
 SYS_PQ_GOV_VOTE_V1
-SYS_PQ_CHAINLOCK_CHILD_KDF_V1
+SYS_PQ_SWOTS_CHILD_ID_V1
+SYS_PQ_SWOTS_CHILD_KDF_V1
 SYS_PQ_CHILD_TREE_LEAF_V1
 SYS_PQ_CHILD_TREE_NODE_V1
 SYS_PQ_CHILD_ROOT_LEAF_V1
@@ -334,6 +347,12 @@ The final implementation must define one helper for each transcript and publish
 cross-language test vectors. Domains are independent even when the same global
 key is used.
 
+All child-profile, message, record, and journal format numbers remain version
+1. This is an in-place correction of an unreleased protocol: no public network
+or supported datadir contains the superseded draft encoding, and the old child
+implementation is absent. A version bump or migration reader would therefore
+create a compatibility state that never existed.
+
 ## 5. On-chain PQ key state
 
 ### 5.1 Global key record
@@ -352,8 +371,8 @@ PQGlobalKeyRecord {
 
 ChildKeyTreeCommitment {
     uint16  version;             // exactly 1
-    uint16  profile;             // C11_SHA_V1
-    uint16  usageCap;            // exactly 256
+    uint16  profile;             // CHILD_SCHEDULED_WOTS_SHAKE_128_V1
+    uint16  usageCap;            // exactly 235
     uint16  depth;               // exactly 16
     uint32  generation;          // 1..16, increments on root change
     uint32  firstEpoch;          // first covered absolute epoch
@@ -396,12 +415,12 @@ rotation must be a generation successor with a fresh tree ID/root and starts at
 the schedule's first mutable epoch. It never changes a root frozen into an
 active or already selected quorum.
 
-`protx_rotate_operator_key` therefore preserves the root by default. Its
-optional trailing `newC11Seed` performs an exceptional root-changing rotation;
-the seed is wiped after the successor commitment is built and must also replace
-the sentry's configured C11 seed when the new global key is installed. The RPC
-refuses `newC11Seed` once generation 16 is active; ordinary key-only rotation
-remains available.
+`protx_rotate_operator_key` therefore preserves the root by default. An
+optional replacement 32-byte ChainLock seed performs an exceptional
+root-changing rotation; the seed is wiped after the successor commitment is
+built and must also replace the sentry's configured ChainLock seed when the new
+global key is installed. The RPC refuses another seed-driven root replacement
+once generation 16 is active; ordinary key-only rotation remains available.
 
 ### 5.2 Fixed-depth child-key commitment
 
@@ -414,16 +433,19 @@ For leaf index `i`:
 
 ```text
 epoch = firstEpoch + i
-publicKey = C11.PublicKey(KDF(masterSeed, genesisHash, treeId,
-                             generation, epoch, C11_SHA_V1))
+childSeed[48] = SWOTS_KDF(chainlockSeed[32], genesisHash, treeId,
+                         generation, epoch,
+                         CHILD_SCHEDULED_WOTS_SHAKE_128_V1)
+publicKey = ScheduledWOTS.PublicKey(childSeed)
 leaf = Hash(SYS_PQ_CHILD_TREE_LEAF_V1,
             genesisHash, treeId, generation, epoch,
-            C11_SHA_V1, usageCap, publicKey)
+            CHILD_SCHEDULED_WOTS_SHAKE_128_V1, 235, publicKey)
 ```
 
 The complete binary tree has 65,536 leaves and uses a distinct tagged internal
-node hash. Its serialized public cache is approximately 4 MiB. The cache is not
-consensus state and contains no secret material; the 80-byte commitment is.
+node hash. Its serialized outer public cache is approximately 4 MiB, separate
+from each child's 8,176-byte height-8 signing cache. Neither cache is consensus
+state or contains secret material; the 80-byte commitment is.
 Every sentry derives the same leaf secret and proof automatically from its
 independent seed, without a wallet on the sentry and without an external call
 per epoch.
@@ -500,8 +522,8 @@ PQQuorumDescriptor {
     uint256 baseHash;
     int32   snapshotHeight;
     uint256 snapshotHash;
-    uint16  profile;              // C11_SHA_V1
-    uint16  usageCap;             // 256
+    uint16  profile;              // CHILD_SCHEDULED_WOTS_SHAKE_128_V1
+    uint16  usageCap;             // 235
     bitset400 validMembers;
     uint256 memberRoot;           // ordered proTxHash leaves
     uint256 childKeyRoot;         // ordered child-root authorization leaves
@@ -531,7 +553,7 @@ defines such punishment.
 
 The four active quorum slots at target height are the four fixed epochs selected
 by the consensus epoch function, not "the last four successful quorums." This
-property makes lifetime and usage bounds deterministic.
+property makes lifetime and leaf assignment deterministic.
 
 The quorum-context hash is:
 
@@ -591,6 +613,9 @@ to the latest target `H` with active immediate scheduled predecessor
 `P = H - chainlock_period`; `S` remains the state and ancestry floor for the
 recovery statement.
 
+The canonical `PQChainLockShare`, including its member identity, outer
+depth-16 child-key proof, and scheduled signature, is exactly 1,831 bytes.
+
 ### 7.2 Final raw CLSIG
 
 Every selected signature carries the exact 32-byte child public key and its
@@ -613,13 +638,13 @@ PQChainLock {
     BTCCReceiptState btccReceiptState;
     uint8   selectedQuorumMask;       // exactly three of four bits
     bitset400 signerBitmap[4];        // 50 bytes each
-    AuthenticatedC11 signatures[801]; // canonical order described below
+    AuthenticatedChildSignature signatures[801]; // canonical order below
 }
 
-AuthenticatedC11 {
+AuthenticatedChildSignature {
     bytes32 childPublicKey;
     bytes32 merkleSibling[16];
-    bytes3976 signature;
+    bytes704 signature;               // R[16] || WOTS[560] || auth[128]
 }
 ```
 
@@ -632,9 +657,9 @@ Authenticated-signature and complete wire sizes are:
 
 ```text
 proof bytes per signer = 32 + 16 * 32 = 544
-authenticated signer   = 544 + 3,976 = 4,520 bytes
-3 * 267 * 4,520        = 3,620,520 bytes
-complete fixed wire    = 3,621,236 bytes
+authenticated signer   = 544 + 704 = 1,248 bytes
+3 * 267 * 1,248        = 999,648 bytes
+complete fixed wire    = 1,000,364 bytes
 ```
 
 The fixed header and four 50-byte bitmaps keep the complete canonical encoding
@@ -659,7 +684,7 @@ witness for the same statement.
 
 ### 7.3 Verification order
 
-A verifier performs cheap checks before any C11 work:
+A verifier performs cheap checks before any scheduled-WOTS+ work:
 
 1. Enforce the 4,000,000-byte message limit and exact fixed encoding.
 2. Check version/profile, eligible height, known fully validated block, previous
@@ -675,7 +700,8 @@ A verifier performs cheap checks before any C11 work:
    canonical child-key proof against the frozen root, and reconstruct the exact
    share transcript.
 6. Validate BTCC cursor structure and chain ancestry.
-7. Verify the 801 C11-SHA signatures in a bounded parallel worker pool.
+7. Derive each implicit schedule leaf and verify the 801 scheduled-WOTS+
+   signatures in a bounded parallel worker pool.
 8. Recheck the target-branch/context snapshot before publishing the result.
 9. Atomically accept the first valid logical statement for the height and apply
    existing ChainLock fork/finality semantics.
@@ -715,8 +741,8 @@ The authenticated P2P sender is a transport relay, not necessarily the member
 that created the share. Admission requires the relay to be an eligible
 child-key member in the active union; the transcript independently names the
 original roster, slot, and signer. The collector verifies that original
-identity and its C11 signature against frozen state before relaying the share
-once. After one witness verifies, any later witness for that member slot is
+identity and its scheduled-WOTS+ signature against frozen state before relaying
+the share once. After one witness verifies, any later witness for that member slot is
 discarded before cryptography, and an invalid first witness never reserves the
 slot.
 
@@ -839,64 +865,71 @@ certificate record, so a crash cannot publish a winner whose branch metadata
 was never made durable. After restoration or catch-up, exact `LIVE`
 predecessor chaining resumes.
 
-The exact 3,621,236-byte certificate every five blocks is a material bandwidth
+The exact 1,000,364-byte certificate every five blocks is a material bandwidth
 and verification cost. It must be benchmarked under adversarial load. Its size
 being below a protocol cap is not evidence of production viability.
 
-## 8. Crash-safe signer usage journal
+## 8. Crash-safe signer leaf journal
 
-Consensus limits authorized heights; it cannot observe signatures a compromised
-signer generated privately. Every sentry therefore enforces a persistent
-burn-before-sign journal for each child key.
+Consensus assigns an explicit leaf but cannot observe signatures a compromised
+signer generated privately. Every sentry therefore enforces a persistent,
+leaf-keyed burn-before-sign journal for each child key.
 
-The key is:
+The physical one-time slot key is:
 
 ```text
 (genesisHash, childProfile, proTxHash, quorumEpoch, childPublicKeyHash,
- absoluteEligibleHeight)
+ leafIndex)
 ```
 
-The durable value contains:
+The durable value also stores the logical purpose and absolute height:
 
 ```text
-EMPTY -> RESERVED(messageHash) -> SIGNED(messageHash, signatureBytes)
+EMPTY -> RESERVED(purpose, absoluteHeight, messageHash)
+      -> SIGNED(purpose, absoluteHeight, messageHash, signatureBytes)
 ```
 
 Required behavior:
 
-- Reserve and fsync the height before invoking the signer.
+- Validate the complete schedule and require `leafIndex < 235` before any
+  mutation. Leaves 235 through 255 never reserve a slot.
+- Reserve and fsync the physical leaf before invoking the signer.
 - After signing, atomically persist and fsync the message hash and exact
   signature bytes before announcing the share.
-- A repeated request for the same message returns the stored signature without
-  generating another.
-- A different message at the same absolute height is refused permanently.
-- A reorg never deletes, rolls back, or refunds a reserved/signed height.
+- A repeated request with the same leaf, logical metadata, and message returns
+  the stored signature without generating another.
+- The same physical leaf presented with a different purpose, absolute height,
+  or message conflicts permanently, even if the alternate logical metadata
+  would otherwise look valid.
+- A reorg never deletes, rolls back, or refunds a reserved or signed leaf.
 - Restoring an old chainstate, wallet backup, or EvoDB snapshot must not restore
-  an older journal. The local journal therefore lives outside those databases
-  under a separately versioned schema.
+  an older journal. The local journal therefore lives outside those databases.
 - `RESERVED` after a crash is treated as consumed unless the signer can prove
-  that no signature operation occurred. Safety takes precedence over one slot
+  that no signature operation occurred. Safety takes precedence over one leaf
   of liveness.
-- Network input, an invalid block, an ineligible height, and generic RPC calls
-  cannot reserve a slot.
-- A child refuses signing after 256 distinct reserved heights even if consensus
-  would still accept a signature.
+- Network input, an invalid block, an ineligible height, an invalid audit seal,
+  and generic RPC calls cannot reserve a leaf.
 
-There is no generic post-activation `quorum sign` RPC for C11 child keys. The
-only signing entry point accepts a fully constructed, internally validated
-ChainLock candidate.
+The journal has no per-child usage tally and no reservation migration. The 235
+authorized physical keys are the bound. Its database format remains version 1
+because this schema is unreleased; a nonempty schema-less or mismatched database
+fails closed rather than being interpreted as an older layout.
 
-Journal corruption, cap exhaustion, or uncertain rollback status makes that
-member fail closed for the epoch. It can reduce ChainLock liveness but never
-invalidates base-chain blocks.
+There is no generic post-activation `quorum sign` RPC for child keys. The only
+signing entry points accept fully constructed, internally validated ChainLock
+or payment-audit candidates and their derived leaf.
+
+Journal corruption, an unauthorized leaf, or uncertain rollback status makes
+that member fail closed for the epoch. It can reduce ChainLock liveness but
+never invalidates base-chain blocks.
 
 The local LevelDB implementation provides atomic synchronous writes and crash
 recovery, but cannot prove that its complete directory was not rolled back or
 cloned. Before public activation, the signing deployment must bind every
 reservation to an external rollback-resistant generation and a single-active
-fence, such as an HSM/TPM monotonic counter or a remote signer lease. Starting
-two sentries from the same journal snapshot must fail closed. This is an
-activation requirement, not a property inferred from `fsync`.
+fence, such as an HSM/TPM monotonic generation register or a remote signer
+lease. Starting two sentries from the same journal snapshot must fail closed.
+This is an activation requirement, not a property inferred from `fsync`.
 
 That operational fence is not part of quorum counting. Shares are keyed by the
 frozen quorum slot, member index, and proTxHash, and a collector retains at most
@@ -910,8 +943,8 @@ Accepted-certificate reconciliation pins a live journal to the latest durable
 PQ ChainLock and prevents an older local vote from reopening an adjudicated
 branch. It cannot detect a snapshot that rolls back the certificate database,
 the journal, and the process together. The external fence exists to preserve
-the research profile's 256-use assumption and to keep an otherwise honest
-operator from becoming a split-brain equivocator; it is not a claim that
+the scheduled profile's one-signature-per-authorized-leaf assumption and to
+keep an otherwise honest operator from becoming a split-brain equivocator; it is not a claim that
 consensus can detect copied secret material.
 
 ## 9. Direct global-SLH MNAUTH
@@ -1117,7 +1150,7 @@ BTCCReceiptState {
 The hash commits the prior state, carrier height/hash, and exact receipt. Every
 ChainLock statement signs the indexed state at its target. Once a fully
 verified descendant ChainLock covers the carrier, that threshold statement
-seals the ordered prefix. A non-null outcome makes the original 3,621,236-byte
+seals the ordered prefix. A non-null outcome makes the original 1,000,364-byte
 receipt certificate prunable; a canonical null outcome objectively retires the
 unreceipted cursor. Until the carrier outcome is covered, a locally accepted
 exact `ADVANCE` remains durably retained and servable. The block index retains
@@ -1273,7 +1306,7 @@ only for the exact epoch, row, frozen descriptor, member slot, ordinary
 ChainLock statement, and child-key proof.
 
 Authenticated roster peers reconcile each open row with a fixed 125-byte
-`PQPOSEHAVE` bitmap and 5,142-byte `PQPOSERESP` objects. A response is written
+`PQPOSEHAVE` bitmap and 1,870-byte `PQPOSERESP` objects. A response is written
 to the staging WAL before relay. At the deadline the store issues a real fsync
 barrier, replaces raw shares with a checksummed local 400-bit summary, and
 refuses later mutation. At most two raw rows are open and 24 summaries are
@@ -1295,16 +1328,21 @@ Bitcoin hash, receipt-bound K, the network genesis, and the subject descriptor
 select one already frozen row. An operator cannot wait for row selection and
 then back-sign the selected old response.
 
-The audit uses a separate purpose-domain C11 certificate. Its common statement
+The audit uses a separate purpose-domain scheduled-WOTS+ certificate. For each
+reporter child, signer and verifier validate the full payment-audit schedule and
+derive `231 + (sealEpoch - childEpoch)` at the exact seal B; the four active
+reporter epochs therefore use leaves 231 through 234. Its common statement
 binds the exact K+10 receipt projection, the selected row and deadline, the
 ordinary B statement, the subject descriptor and valid-member bitmap, and the
 previous payment-state root.
 Observation is deliberately not a common bitmap: every one of the 801 audit
 signers carries its own frozen 400-bit report. This avoids fragmenting the
 one-time audit slot when honest signers observed slightly different response
-sets. Each audit share is 5,502 bytes. The final `PQPOSECERT` is 3,661,635
-bytes: exactly 267 reporter/signature witnesses from each of three selected
-active rosters, announced and requested by exact witness ID.
+sets. Each audit share is 2,230 bytes. Each final report witness is exactly
+1,298 bytes: one 50-byte report bitmap plus one 1,248-byte authenticated child
+signature. The final `PQPOSECERT` is 1,040,763 bytes: exactly 267
+reporter/signature witnesses from each of three selected active rosters,
+announced and requested by exact witness ID.
 
 Reporter-roster authorization is portable with the audit statement: it is
 derived from `B`'s declared previous ChainLock on `B`'s branch, using the same
@@ -1372,7 +1410,7 @@ defers only the dependent branch. Store or database corruption is a local error
 and is never converted into peer misbehavior or permanent block invalidity.
 
 Historical IBD and marker-bound replay do not require an already pruned
-3,661,635-byte certificate. If the full witness is absent, the node rederives
+1,040,763-byte certificate. If the full witness is absent, the node rederives
 the subject roster from the historical snapshot, applies the committed
 `online_members` bitmap, and requires both
 the resulting probation root and cumulative receipt state to match the block
@@ -1596,7 +1634,8 @@ The future preparatory release contains no BLS or DKG implementation. It keeps
 only opaque compatibility replay for accepted legacy chain data and adds:
 
 - global SLH-DSA registration/rotation state;
-- fixed-depth C11 child-root commitments and automatic sentry caches;
+- fixed-depth scheduled-WOTS+ child-root commitments and automatic sentry
+  caches;
 - deterministic PQ quorum descriptors;
 - signer journals and shadow share/certificate generation;
 - PQ MNAUTH negotiation in non-authoritative test/shadow mode;
@@ -1672,9 +1711,9 @@ The implementation must preserve these invariants:
    network-chosen quorum commitment.
 2. Epochs and child-key expiry advance on schedule even when finality stalls.
 3. Active quorum membership and keys are frozen at their cutoff/snapshot.
-4. A child key is authorized for one epoch, one profile, and at most 256
-   absolute eligible heights.
-5. A sentry never generates two child signatures at the same absolute height.
+4. A child key is authorized for one epoch, one profile, and exactly the
+   scheduled leaf domain 0 through 234; leaves 235 through 255 are invalid.
+5. A sentry never generates two child signatures from the same physical leaf.
 6. A reorg cannot refund a journal entry or cross an accepted ChainLock or
    conflict with either immutable block anchor.
 7. A final CLSIG proves exactly 267 valid distinct slots in each of exactly
@@ -1729,8 +1768,8 @@ Expected failures are fail-closed:
 | Fewer than 267 shares | That quorum cannot contribute; with exactly 300 valid roots only 33 may be offline |
 | Fewer than three usable active quorums | ChainLock finality and bridge pause; base chain continues |
 | Journal uncertainty/corruption | Affected signer stops for the child epoch |
-| Conflicting same-height signing request | Return cached original only, otherwise refuse |
-| Child cap exhausted | Refuse; never borrow a global or future child key |
+| Same physical leaf with changed logical metadata or message | Return the exact cached original only; otherwise refuse |
+| Unauthorized or mismapped child leaf | Refuse without reserving; never borrow a global or future child key |
 | Child-root generation 16 reached | Preserve the root for key-only rotation; reject another root rotation or recovery |
 | Missing scheduled BTCPREV candidate | Use `KEEP`; do not search older candidates |
 | Malformed/oversize CLSIG | Reject before expensive verification/allocation |
@@ -1764,12 +1803,15 @@ Expected failures are fail-closed:
 - Official FIPS 205 SLH-DSA-SHAKE-128s ACVP/KAT vectors for key generation,
   signature generation, and signature verification against the exact pinned,
   minimized implementation.
-- Two independent C11-SHA implementations with identical KATs and negative
-  vectors for every field, length, padding, endianness, and address rule.
+- Scheduled-WOTS+ KATs and differential vectors for key generation, public-key
+  derivation, deterministic signing, and verification at every authorized
+  leaf; mutate `R`, WOTS elements, authentication nodes, message, public key,
+  and implicit leaf independently.
 - Golden bytes for global registration, rotation, child commitments/proofs,
   MNAUTH, quorum descriptors, share transcripts, and final CLSIG.
-- Exact size test demonstrating the complete maximum CLSIG is below 4,000,000
-  bytes; reject one-byte-over, truncated, and length-confusion encodings.
+- Exact size tests for the 704-byte child signature, 1,248-byte authenticated
+  signer, 1,831-byte share, and 1,000,364-byte final CLSIG; reject
+  one-byte-over, truncated, and length-confusion encodings.
 - Bitmap tests for 266/267/268 bits, including non-byte-aligned residual bits,
   duplicate/reordered slots, selected masks with 2/3/4 bits, and non-zero
   unselected bitmaps.
@@ -1817,15 +1859,20 @@ Expected failures are fail-closed:
 - Reorg, reindex, chainstate rollback, restored datadir, and restored wallet do
   not roll the journal back.
 - Heights that are ineligible, too early, too late, or not fully validated
-  consume no slot.
-- Exact 231-lifetime maximum, 256-cap boundary, and refusal at 257.
+  consume no leaf.
+- Ordinary leaf mapping at ordinals 0 and 230, audit mapping at leaves 231
+  through 234, refusal of leaves 235 through 255, and invalid schedule cases
+  that consume no leaf.
+- Same physical leaf with different logical purpose, height, or message
+  conflicts; restart keeps both reserved and signed leaves consumed. Exercise
+  the unreleased version-1 schema directly, with no usage tally or migration.
 - Generic RPC and unauthenticated P2P input cannot invoke the child signer.
 
 ### ChainLock/finality tests
 
 - Default CI P2P coverage must negotiate protocol 70018, enforce authenticated
   share admission, exercise CLSIG inventory/request tracking, and decode an
-  exact 3,621,236-byte certificate with 801 authenticated signature slots
+  exact 1,000,364-byte certificate with 801 authenticated signature slots
   without changing the 400/267/3-of-4 consensus geometry.
 - Exactly 267 valid signatures in each of any three active quorums.
 - Parallel verification produces identical results at every thread count.
@@ -1862,7 +1909,8 @@ Expected failures are fail-closed:
   with 801 valid signatures and adversarial invalid bundles.
 - `pq_chainlock_integration_tests` deterministically constructs all four
   400-member rosters and completes production collector/verifier acceptance
-  with 801 real C11 signatures and the exact 3,621,236-byte wire object.
+  with 801 real scheduled-WOTS+ signatures and the exact 1,000,364-byte wire
+  object.
   `feature_pq_chainlocks.py` separately loads a checksummed, exact-branch
   regtest roster fixture, forwards real shares between authenticated peers,
   proves that 800 shares cannot publish a winner, and accepts only the 801st
@@ -1891,6 +1939,9 @@ Expected failures are fail-closed:
   `K`, the exact non-null K+10 BTCC receipt projection, exact active Bitcoin
   `H(K)+37`, the non-BTCC `B`, the bounded carrier window,
   `KEEP`/null-receipt/stale-Bitcoin-hash skips, and every epoch edge.
+- Full-schedule audit mapping at `231 + (sealEpoch - childEpoch)` for leaves
+  231 through 234, with wrong subject, seal, child epoch, candidate origin, and
+  active-epoch count rejected before reservation.
 - Capture valid row responses before their ordinary certificates exist,
   reconcile HAVE/RESP sets, fsync each local bitmap at its height deadline
   rather than local wall time, select only after all 24 rows are frozen, and
@@ -1913,7 +1964,8 @@ Expected failures are fail-closed:
 - Exactly 267 audit signatures in each of exactly three active rosters, with
   one common base statement, 801 signer-bound report bitmaps, exact 134-of-267
   per-roster classification, and no common-bitmap convergence requirement.
-- Exact 5,502-byte share and 3,661,635-byte final audit bounds, exact-witness-ID
+- Exact 1,870-byte response, 2,230-byte share, 1,298-byte report witness, and
+  1,040,763-byte final audit bounds; exact-witness-ID
   requested retrieval, at most four live unapplied witness candidates (one per
   three-of-four reporter mask), one-large-object-per-pass upload accounting,
   timeout, and wrong-ID handling.
@@ -2072,9 +2124,10 @@ The following must be resolved in code and release artifacts before activation:
 - official FIPS 205 SLH-DSA-SHAKE-128s ACVP/KAT evidence for key generation,
   signature generation, and signature verification using the exact pinned,
   minimized implementation on every supported platform;
-- the exact normative C11-SHA document, public-key length, fixed 3,976-byte
-  encoding confirmation, profile ID, KAT hashes, source revision, independent
-  implementation, cryptanalysis, and audit results;
+- independent review of the exact scheduled-WOTS+ construction, its vendored
+  FIPS 205 SHAKE primitive boundary, 32-byte public key, 704-byte encoding,
+  explicit 235-leaf schedule, KAT hashes, source revision, bounded-use argument,
+  and audit results;
 - canonical activation-state-root serialization and independent tree/root test
   vectors;
 - production resource targets for the fixed protocol-70018 share/CLSIG relay,
@@ -2083,7 +2136,7 @@ The following must be resolved in code and release artifacts before activation:
   compact-replay, active/prospective pre-seal, covering-CLSIG checkpoint, and
   atomic pruning lifecycle, including proof that normal multi-year operation
   retains only a live/uncovered certificate suffix rather than accumulating
-  3,661,635 bytes every epoch;
+  1,040,763 bytes every epoch;
 - operational sizing, alerts, and recovery tests for synchronous replay-snapshot
   writes and the intentionally unbounded block/DMN/PQ retention during a
   prolonged certificate or Geth outage;
@@ -2125,50 +2178,29 @@ The following must be resolved in code and release artifacts before activation:
   finality authority, completes four usable shadow epochs, and selects `H` only
   after its exact block, hash, and state roots exist; and
 - the rollback-resistant signer fence and operational recovery procedure that
-  prevents datadir/VM clones from sharing one C11 child-key budget.
+  prevents datadir/VM clones from sharing one scheduled child-key leaf domain.
 
-Depth 16 was selected after the M5-class benchmark measured approximately
-34.6 seconds and 4 MiB for the one-time parallel public-tree setup; the extra
-46,080 bytes per certificate over depth 14 buys a roughly 89.7-year epoch
-horizon at the fixed cadence. These measurements are engineering inputs, not a
-security review.
+The depth-16 outer commitment provides the fixed epoch horizon described above.
+Separately, each derived child key owns an 8,176-byte public height-8 warm
+cache. These are engineering properties, not a security review.
 
 Activation remains disabled until the complete Section 14 matrix passes on all
 supported platforms, the payment-audit replay/checkpoint rules receive
-independent consensus/security review, C11-SHA receives
-independent cryptographic review, and the 801-signature/proof verifier and
-3,621,236-byte relay path meet explicit resource targets. Shadow success alone
-is not cryptographic validation.
+independent consensus/security review, the scheduled-WOTS+ construction
+receives independent cryptographic review, and the 801-signature/proof verifier
+and 1,000,364-byte relay path meet explicit resource targets. Shadow success
+alone is not cryptographic validation.
 
 ## 16. References and security caveat
 
 - NIST, [FIPS 205: Stateless Hash-Based Digital Signature Standard](https://doi.org/10.6028/NIST.FIPS.205), August 2024.
 - NIST, [FIPS 202: SHA-3 Standard](https://doi.org/10.6028/NIST.FIPS.202).
-- M. Kudinov, A. Hülsing, E. Ronen, and E. Yogev,
-  [SPHINCS+C: Compressing SPHINCS+ With (Almost) No Cost](https://eprint.iacr.org/2022/778).
-- R. Perlner, J. Kelsey, and D. Cooper,
-  [Breaking Category Five SPHINCS+ with SHA-256](https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=935143).
-- NIST PQC Forum,
-  [discussion of the SHA-256 attack at truncated output lengths](https://groups.google.com/a/list.nist.gov/g/pqc-forum/c/FVItvyRea28/m/mGaRi5iZBwAJ).
-- SPHINCS+ team, [reference specification and implementation](https://github.com/sphincs/sphincsplus).
-- Experimental SPHINCS- work,
-  [implementation repository](https://github.com/nconsigny/SPHINCs-) and
-  [C-series design discussion](https://ethresear.ch/t/sphincs-minus-efficient-stateless-post-quantum-signature-verification-on-the-evm/25165).
 - Dash, [DIP-0008: ChainLocks](https://github.com/dashpay/dips/blob/master/dip-0008.md), for the ancestry-finality model from which the existing Syscoin flow derives.
 
-The Perlner-Kelsey-Cooper result concerns submitted category-5 SHA-256
-SPHINCS+ parameter sets and reports an approximately 40-bit concrete-security
-reduction for those targets. It is not an automatic result about the FIPS 205
-SLH-DSA-SHAKE-128s global profile. In the linked NIST forum analysis, the
-attack authors and SPHINCS+ team explain that its internal-state collision
-advantage disappears for a 16-byte hash output because the SHA-256 internal
-state is twice as wide as that output. That removes this specific claimed
-category-5 reduction from the C11-SHA threat model; it does not establish the
-security of C11-SHA. Custom parameters and modified WOTS+C/FORS+C
-constructions still require independent multi-user, multi-target, quantum,
-and bounded-use analysis.
-
-FIPS 205 standardizes the global profile only. The C11-SHA child profile and
-this raw multi-quorum composition remain research proposals. This document is
-an engineering design to make assumptions, state, wire behavior, and failure
-modes reviewable; it is not a production-readiness claim.
+FIPS 205 standardizes the global SLH-DSA-SHAKE-128s profile. The scheduled
+Merkle-WOTS+ child construction reuses vendored FIPS 205 SHAKE primitives but
+is not itself a standardized FIPS 205 parameter set; its explicit-index,
+bounded-use composition and this raw multi-quorum protocol still require
+independent review. This document is an engineering design to make assumptions,
+state, wire behavior, and failure modes reviewable; it is not a
+production-readiness claim.

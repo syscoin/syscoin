@@ -33,7 +33,8 @@ static_assert(PQ_WARMUP_BLOCKS == 864);
 static_assert(PQ_FIRST_ELIGIBLE_TARGET_OFFSET == 865);
 static_assert(PQ_ACTIVE_LIFETIME_BLOCKS == 1152);
 static_assert(PQ_MAX_ELIGIBLE_TARGETS_PER_CHILD == 231);
-static_assert(PQ_MAX_ELIGIBLE_TARGETS_PER_CHILD <= C11_USAGE_CAP);
+static_assert(PQ_MAX_ELIGIBLE_TARGETS_PER_CHILD ==
+              SCHEDULED_WOTS_CHAINLOCK_LEAF_COUNT);
 
 /**
  * The profile fixes every field except the deployment-specific epoch origin.
@@ -168,6 +169,12 @@ CurrentChainLockSigningWindow(
  */
 [[nodiscard]] std::optional<EligibleTargetSpan> EligibleTargetsForEpoch(
     const ChainLockScheduleConfig& config, uint32_t epoch) noexcept;
+
+/** Canonical one-time WOTS+ leaf for one child epoch and ChainLock target. */
+[[nodiscard]] std::optional<uint8_t> ChainLockLeafIndex(
+    const ChainLockScheduleConfig& config,
+    uint32_t child_epoch,
+    int32_t target_height) noexcept;
 
 [[nodiscard]] bool IsEpochActiveForTarget(
     const ChainLockScheduleConfig& config,

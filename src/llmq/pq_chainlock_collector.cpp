@@ -47,10 +47,12 @@ bool IsBitSet(const QuorumBitmap& bitmap, uint16_t member_index)
 
 ChainLockCollector::ChainLockCollector(
     uint256 genesis_hash,
+    ChainLockScheduleConfig schedule,
     ChainLockStatement statement,
     FrozenQuorumRostersPtr rosters,
     uint8_t authorization_mask)
     : m_genesis_hash{std::move(genesis_hash)},
+      m_schedule{schedule},
       m_statement{std::move(statement)},
       m_rosters{std::move(rosters)},
       m_authorization_mask{authorization_mask}
@@ -59,13 +61,15 @@ ChainLockCollector::ChainLockCollector(
 
 std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
     const uint256& genesis_hash,
+    ChainLockScheduleConfig schedule,
     ChainLockStatement statement,
     FrozenQuorumRostersPtr rosters,
     uint8_t authorization_mask,
     ShareCollectionError* error)
 {
     SetError(error, ShareCollectionError::NONE);
-    if (genesis_hash.IsNull() || !statement.IsStructurallyValid() || !rosters) {
+    if (genesis_hash.IsNull() || !schedule.IsValid() ||
+        !statement.IsStructurallyValid() || !rosters) {
         SetError(error, ShareCollectionError::INVALID_ARGUMENT);
         return nullptr;
     }
@@ -77,7 +81,7 @@ std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
         return nullptr;
     }
     return std::unique_ptr<ChainLockCollector>{new ChainLockCollector{
-        genesis_hash, std::move(statement), std::move(rosters),
+        genesis_hash, schedule, std::move(statement), std::move(rosters),
         authorization_mask}};
 }
 
@@ -147,7 +151,8 @@ ShareCollectionResult ChainLockCollector::AddVerifiedShare(
 
     ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
     auto check{PrepareChainLockShareVerification(
-        m_genesis_hash, share, *m_rosters, m_authorization_mask,
+        m_genesis_hash, m_schedule, share, *m_rosters,
+        m_authorization_mask,
         &verification_error)};
     if (!check) {
         SetError(error, MapVerificationError(verification_error));

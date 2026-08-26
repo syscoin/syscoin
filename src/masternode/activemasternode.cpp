@@ -20,12 +20,15 @@
 #include <cassert>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <utility>
 
 namespace llmq::pq {
 namespace {
+
+constexpr std::size_t MAX_CACHED_ACTIVE_CHILD_KEYS{8};
 
 bool ContainsCommitment(
     const std::vector<ChildKeyTreeCommitment>& commitments,
@@ -118,6 +121,7 @@ public:
             return std::nullopt;
         }
 
+        std::shared_ptr<const scheduled_wots::SecretKey> secret_key;
         {
             std::lock_guard lock{m_mutex};
             if (m_genesis_hash != genesis_hash ||
@@ -129,14 +133,37 @@ public:
                     return entry.commitment == record.commitment;
                 })};
             if (it == m_ready.end()) return std::nullopt;
+            const auto cached{it->child_keys.find(record.epoch)};
+            if (cached != it->child_keys.end()) secret_key = cached->second;
         }
 
-        auto secret_key{m_key_manager.DeriveCommittedChildKey(
-            genesis_hash, record.commitment.tree_id,
-            record.commitment.generation, record.epoch)};
-        if (!secret_key) return std::nullopt;
-        const ChildPublicKey public_key{
-            sphincs_c11::SerializePublicKey(secret_key->GetPublicKey())};
+        if (!secret_key) {
+            auto derived{m_key_manager.DeriveCommittedChildKey(
+                genesis_hash, record.commitment.tree_id,
+                record.commitment.generation, record.epoch)};
+            if (!derived) return std::nullopt;
+            auto candidate{
+                std::make_shared<scheduled_wots::SecretKey>(
+                    std::move(*derived))};
+            std::lock_guard lock{m_mutex};
+            if (m_genesis_hash != genesis_hash ||
+                !ContainsCommitment(m_desired, record.commitment)) {
+                return std::nullopt;
+            }
+            const auto it{std::find_if(
+                m_ready.begin(), m_ready.end(), [&](const auto& entry) {
+                    return entry.commitment == record.commitment;
+                })};
+            if (it == m_ready.end()) return std::nullopt;
+            const auto [cached, inserted]{
+                it->child_keys.emplace(record.epoch, std::move(candidate))};
+            secret_key = cached->second;
+            while (it->child_keys.size() > MAX_CACHED_ACTIVE_CHILD_KEYS) {
+                it->child_keys.erase(it->child_keys.begin());
+            }
+        }
+        ChildPublicKey public_key{};
+        if (!secret_key->GetPublicKey(public_key)) return std::nullopt;
 
         std::optional<ChildKeyProof> proof;
         {
@@ -159,13 +186,15 @@ public:
                 genesis_hash, record.commitment, record.epoch, *proof)) {
             return std::nullopt;
         }
-        return ActiveChildSigningMaterial{std::move(*secret_key), *proof};
+        return ActiveChildSigningMaterial{std::move(secret_key), *proof};
     }
 
 private:
     struct ReadyTree {
         ChildKeyTreeCommitment commitment;
         ChildKeyTree tree;
+        std::map<uint32_t,
+                 std::shared_ptr<const scheduled_wots::SecretKey>> child_keys;
     };
 
     void Run()
@@ -230,7 +259,7 @@ private:
                             }),
                         m_ready.end());
                     m_ready.push_back(
-                        ReadyTree{commitment, std::move(*tree)});
+                        ReadyTree{commitment, std::move(*tree), {}});
                 }
             }
         }
@@ -245,7 +274,7 @@ private:
     std::vector<ChildKeyTreeCommitment> m_desired;
     std::deque<ChildKeyTreeCommitment> m_pending;
     std::optional<ChildKeyTreeCommitment> m_building;
-    std::vector<ReadyTree> m_ready;
+    mutable std::vector<ReadyTree> m_ready;
     std::thread m_worker;
 };
 

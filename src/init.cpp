@@ -605,7 +605,7 @@ void SetupServerArgs(ArgsManager& argsman)
     // SYSCOIN: Keep decoded masternode PQ secret inputs out of ordinary help.
     // Hidden Options
     std::vector<std::string> hidden_args = {
-        "-masternodeslhprivkey", "-masternodec11seed", "-dbcrashratio",
+        "-masternodeslhprivkey", "-masternodechainlockseed", "-dbcrashratio",
         "-forcecompactdb",
         // GUI args. These will be overwritten by SetupUIArgs for the GUI
         "-choosedatadir", "-lang=<lang>", "-min", "-resetguisettings", "-splash", "-uiplatform"};
@@ -658,7 +658,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-mnconf=<file>", strprintf("Specify masternode configuration file (default: %s)", "masternode.conf"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mnconflock=<n>", strprintf("Lock masternodes from masternode configuration file (default: %u)", 1), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-masternodeslhprivkey=<hex>", "Set the canonical 64-byte SLH-DSA-SHAKE-128s masternode global secret key", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
-    argsman.AddArg("-masternodec11seed=<hex>", "Set the independent 32-byte master seed for bounded-use ChainLock C11 child keys", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
+    argsman.AddArg("-masternodechainlockseed=<hex>", "Set the independent 32-byte master seed for scheduled-WOTS ChainLock child keys", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
     argsman.AddArg("-minsporkkeys=<n>", "Overrides minimum spork signers to change spork value. Only useful for regtest. Using this on mainnet or testnet will ban you.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-assetindex=<n>", strprintf("Wallet is Asset aware, won't spend assets when sending only Syscoin (0-1, default: 0)"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dip3params=<n:m>", "DIP3 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -679,7 +679,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqrostersnapshotlag=<n>", "PQ deterministic-roster snapshot lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS); // SYSCOIN: Expose the branch-bound PQ roster lag only to regtest fixtures.
     argsman.AddArg("-pqfuturehorizonepochs=<n>", "PQ child-key future registration horizon used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqchainlocktestfixture=<path>", "Load a bounded branch-bound quorum snapshot fixture for full-dimension ChainLock functional tests; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
-    argsman.AddArg("-pqoperatorcommitmenttestfixture=<genesis>:<c11seedhash>:<treeid>:<generation>:<firstepoch>:<root>", "Use an exact precomputed depth-16 operator commitment; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep low-core lifecycle tests on real signatures without rebuilding 65,536 child keys.
+    argsman.AddArg("-pqoperatorcommitmenttestfixture=<genesis>:<chainlockseedhash>:<treeid>:<generation>:<firstepoch>:<root>", "Use an exact precomputed depth-16 operator commitment; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep low-core lifecycle tests on real signatures without rebuilding 65,536 child keys.
     argsman.AddArg("-pqoperatorcommitmenttestfixtureverify", "Rebuild and verify the configured PQ operator commitment test fixture", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-pqoperatorcommitmentteststub", "Use synthetic child roots and disable child-tree cache construction in PQ preparation-only functional tests", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep unrelated regtest suites from multiplying the production 65,536-leaf build.
     argsman.AddArg("-pqbtcccandidateorigin=<n>", "PQ BTCC candidate origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
@@ -1327,11 +1327,11 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     // SYSCOIN: Global identity and ChainLock child keys are independent.
-    if (args.IsArgSet("-masternodec11seed") !=
+    if (args.IsArgSet("-masternodechainlockseed") !=
         args.IsArgSet("-masternodeslhprivkey")) {
         return InitError(Untranslated(
             "Masternodes require both -masternodeslhprivkey and "
-            "-masternodec11seed; the independent ChainLock seed must not be "
+            "-masternodechainlockseed; the independent ChainLock seed must not be "
             "derived from the global SLH-DSA key"));
     }
     if (args.IsArgSet("-masternodeslhprivkey")) {
@@ -1605,7 +1605,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     std::string encoded_operator_key =
         args.GetArg("-masternodeslhprivkey", "");
     std::string encoded_chainlock_seed =
-        args.GetArg("-masternodec11seed", "");
+        args.GetArg("-masternodechainlockseed", "");
     SensitiveBytesGuard encoded_operator_key_guard{
         encoded_operator_key.data(), encoded_operator_key.size()};
     SensitiveBytesGuard encoded_chainlock_seed_guard{
@@ -1628,7 +1628,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                chainlock_seed_bytes->size());
             }
             return InitError(_(
-                "Invalid masternodec11seed: expected a nonzero 32-byte "
+                "Invalid masternodechainlockseed: expected a nonzero 32-byte "
                 "independent ChainLock master seed."));
         }
         llmq::pq::ChainLockMasterSeed chainlock_seed{};

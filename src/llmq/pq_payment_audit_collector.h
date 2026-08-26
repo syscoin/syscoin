@@ -20,6 +20,7 @@ class PaymentAuditCollector final {
 public:
     static std::unique_ptr<PaymentAuditCollector> Create(
         const uint256& genesis_hash,
+        PaymentAuditScheduleConfig schedule,
         PaymentAuditStatement statement,
         FinalChainLock seal_chainlock,
         FrozenQuorumRostersPtr rosters,
@@ -39,6 +40,7 @@ public:
 
 private:
     PaymentAuditCollector(uint256 genesis_hash,
+                          PaymentAuditScheduleConfig schedule,
                           PaymentAuditStatement statement,
                           FinalChainLock seal_chainlock,
                           FrozenQuorumRostersPtr rosters,
@@ -48,6 +50,7 @@ private:
         const PaymentAuditShareTranscript& transcript) const;
 
     uint256 m_genesis_hash;
+    PaymentAuditScheduleConfig m_schedule;
     PaymentAuditStatement m_statement;
     FinalChainLock m_seal_chainlock;
     FrozenQuorumRostersPtr m_rosters;

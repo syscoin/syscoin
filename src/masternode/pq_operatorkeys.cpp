@@ -19,10 +19,13 @@
 namespace llmq::pq {
 namespace {
 
+constexpr std::string_view COMMITTED_CHILD_ID_DOMAIN{
+    "SYS_PQ_SWOTS_CHILD_ID_V1"};
 constexpr std::string_view COMMITTED_CHILD_KDF_DOMAIN{
-    "SYS_PQ_CHAINLOCK_CHILD_KDF_V1"};
+    "SYS_PQ_SWOTS_CHILD_KDF_V1"};
 constexpr uint8_t SECRET_SEED_LABEL{0};
-constexpr uint8_t PUBLIC_SEED_LABEL{1};
+constexpr uint8_t SECRET_PRF_LABEL{1};
+constexpr uint8_t PUBLIC_SEED_LABEL{2};
 
 class CleanseGuard final {
 public:
@@ -43,10 +46,10 @@ uint256 GetCommittedChildKDFIdentity(const uint256& genesis_hash,
                                      uint32_t epoch)
 {
     CHashWriter writer{SER_GETHASH, 0};
-    writer.write(AsBytes(Span{COMMITTED_CHILD_KDF_DOMAIN.data(),
-                              COMMITTED_CHILD_KDF_DOMAIN.size()}));
+    writer.write(AsBytes(Span{COMMITTED_CHILD_ID_DOMAIN.data(),
+                              COMMITTED_CHILD_ID_DOMAIN.size()}));
     writer << genesis_hash << tree_id << generation << epoch
-           << CHILD_C11_SHA_V1;
+           << CHILD_SCHEDULED_WOTS_SHAKE_128_V1;
     return writer.GetHash();
 }
 
@@ -68,12 +71,12 @@ std::array<uint8_t, CHMAC_SHA256::OUTPUT_SIZE> DeriveSeed(
     return output;
 }
 
-std::optional<sphincs_c11::SecretKey> DeriveChildSecretKey(
+std::optional<scheduled_wots::SecretKey> DeriveChildSecretKey(
     std::span<const uint8_t> chainlock_master_seed,
     const uint256& identity,
     std::string_view domain) noexcept
 {
-    if (chainlock_master_seed.size() != sphincs_c11::SECRET_SEED_SIZE ||
+    if (chainlock_master_seed.size() != CHAINLOCK_MASTER_SEED_SIZE ||
         std::all_of(chainlock_master_seed.begin(),
                     chainlock_master_seed.end(),
                     [](uint8_t byte) { return byte == 0; }) ||
@@ -84,28 +87,26 @@ std::optional<sphincs_c11::SecretKey> DeriveChildSecretKey(
                                     SECRET_SEED_LABEL)};
     CleanseGuard secret_material_guard{secret_material.data(),
                                        secret_material.size()};
+    auto prf_material{DeriveSeed(chainlock_master_seed, identity, domain,
+                                 SECRET_PRF_LABEL)};
+    CleanseGuard prf_material_guard{prf_material.data(),
+                                    prf_material.size()};
     auto public_material{DeriveSeed(chainlock_master_seed, identity, domain,
                                     PUBLIC_SEED_LABEL)};
     CleanseGuard public_material_guard{public_material.data(),
                                        public_material.size()};
 
-    sphincs_c11::SecretSeed secret_seed{};
-    CleanseGuard secret_seed_guard{secret_seed.data(), secret_seed.size()};
-    std::copy(secret_material.begin(), secret_material.end(),
-              secret_seed.begin());
-    sphincs_c11::PublicSeed public_seed{};
-    std::copy_n(public_material.begin(), public_seed.size(),
-                public_seed.begin());
-    sphincs_c11::PublicKey public_key;
-    sphincs_c11::SecretKey secret_key;
-    if (!sphincs_c11::GenerateKeyPair(secret_seed, public_seed, public_key,
-                                      secret_key)) {
-        return std::nullopt;
-    }
-    return secret_key;
+    scheduled_wots::KeyGenerationSeed seed{};
+    CleanseGuard seed_guard{seed.data(), seed.size()};
+    std::copy_n(secret_material.begin(), scheduled_wots::N, seed.begin());
+    std::copy_n(prf_material.begin(), scheduled_wots::N,
+                seed.begin() + scheduled_wots::N);
+    std::copy_n(public_material.begin(), scheduled_wots::N,
+                seed.begin() + 2 * scheduled_wots::N);
+    return scheduled_wots::GenerateSecretKey(seed);
 }
 
-std::optional<sphincs_c11::SecretKey> DeriveCommittedChildSecretKey(
+std::optional<scheduled_wots::SecretKey> DeriveCommittedChildSecretKey(
     std::span<const uint8_t> chainlock_master_seed,
     const uint256& genesis_hash,
     const uint256& tree_id,
@@ -129,7 +130,7 @@ bool ImportChainLockMasterSeed(std::span<const uint8_t> encoded,
                                ChainLockMasterSeed& output) noexcept
 {
     output.fill(0);
-    if (encoded.size() != sphincs_c11::SECRET_SEED_SIZE ||
+    if (encoded.size() != CHAINLOCK_MASTER_SEED_SIZE ||
         std::all_of(encoded.begin(), encoded.end(),
                     [](uint8_t byte) { return byte == 0; })) {
         return false;
@@ -148,7 +149,9 @@ std::optional<ChildPublicKey> DeriveCommittedChildPublicKey(
     auto secret_key{DeriveCommittedChildSecretKey(
         chainlock_master_seed, genesis_hash, tree_id, generation, epoch)};
     if (!secret_key) return std::nullopt;
-    return sphincs_c11::SerializePublicKey(secret_key->GetPublicKey());
+    ChildPublicKey public_key{};
+    if (!secret_key->GetPublicKey(public_key)) return std::nullopt;
+    return public_key;
 }
 
 LocalOperatorKeyManager::LocalOperatorKeyManager(
@@ -274,7 +277,7 @@ bool LocalOperatorKeyManager::SignGovernanceProposalVote(
         signature);
 }
 
-std::optional<sphincs_c11::SecretKey>
+std::optional<scheduled_wots::SecretKey>
 LocalOperatorKeyManager::DeriveCommittedChildKey(
     const uint256& genesis_hash,
     const uint256& tree_id,

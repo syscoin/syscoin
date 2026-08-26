@@ -297,6 +297,28 @@ std::optional<EligibleTargetSpan> EligibleTargetsForEpoch(
     return EligibleTargetSpan{*first_height, *last_height, static_cast<uint16_t>(count)};
 }
 
+std::optional<uint8_t> ChainLockLeafIndex(
+    const ChainLockScheduleConfig& config,
+    uint32_t child_epoch,
+    int32_t target_height) noexcept
+{
+    const auto span{EligibleTargetsForEpoch(config, child_epoch)};
+    if (!span || target_height < span->first_height ||
+        target_height > span->last_height) {
+        return std::nullopt;
+    }
+    const int64_t offset{
+        static_cast<int64_t>(target_height) - span->first_height};
+    if (offset % config.chainlock_period != 0) return std::nullopt;
+    const uint64_t ordinal{
+        static_cast<uint64_t>(offset / config.chainlock_period)};
+    if (ordinal >= span->count ||
+        ordinal >= SCHEDULED_WOTS_CHAINLOCK_LEAF_COUNT) {
+        return std::nullopt;
+    }
+    return static_cast<uint8_t>(ordinal);
+}
+
 bool IsEpochActiveForTarget(const ChainLockScheduleConfig& config,
                             uint32_t epoch,
                             int32_t target_height) noexcept

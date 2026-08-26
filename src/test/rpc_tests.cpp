@@ -200,8 +200,8 @@ BOOST_AUTO_TEST_CASE(rpc_pq_client_parameter_conversion)
         "protx_rotate_operator_key", {"submit=false"})};
     BOOST_CHECK(named.find_value("submit").isBool());
     const UniValue named_root_rotation{RPCConvertNamedValues(
-        "protx_rotate_operator_key", {"newC11Seed=04"})};
-    BOOST_CHECK(named_root_rotation.find_value("newC11Seed").isStr());
+        "protx_rotate_operator_key", {"newChainlockSeed=04"})};
+    BOOST_CHECK(named_root_rotation.find_value("newChainlockSeed").isStr());
 
     const UniValue named_register{RPCConvertNamedValues(
         "protx_register_operator_key", {"submit=true"})};

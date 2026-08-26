@@ -26,12 +26,13 @@ enum class PaymentAuditVerificationError : uint8_t {
 };
 
 struct PreparedPaymentAuditVerification {
-    std::vector<C11SignatureCheck> checks;
+    std::vector<ScheduledWOTSCheck> checks;
 };
 
-[[nodiscard]] std::optional<C11SignatureCheck>
+[[nodiscard]] std::optional<ScheduledWOTSCheck>
 PreparePaymentAuditResponseVerification(
     const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
     const PaymentAuditResponse& response,
     const PaymentAuditHave& expected,
     const FrozenQuorumRosters& response_rosters,
@@ -40,6 +41,7 @@ PreparePaymentAuditResponseVerification(
 
 [[nodiscard]] bool ValidatePaymentAuditContext(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const PaymentAuditStatement& statement,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
@@ -59,9 +61,10 @@ PreparePaymentAuditResponseVerification(
     uint16_t member_index,
     const uint256& member_pro_tx_hash);
 
-[[nodiscard]] std::optional<C11SignatureCheck>
+[[nodiscard]] std::optional<ScheduledWOTSCheck>
 PreparePaymentAuditShareVerification(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const PaymentAuditShare& share,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
@@ -70,6 +73,7 @@ PreparePaymentAuditShareVerification(
 [[nodiscard]] std::optional<PreparedPaymentAuditVerification>
 PrepareFinalPaymentAuditVerification(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
@@ -77,10 +81,11 @@ PrepareFinalPaymentAuditVerification(
 
 [[nodiscard]] bool VerifyFinalPaymentAudit(
     const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
-    C11SignatureCheckQueue* queue = nullptr,
+    ScheduledWOTSCheckQueue* queue = nullptr,
     PaymentAuditVerificationError* error = nullptr);
 
 } // namespace llmq::pq

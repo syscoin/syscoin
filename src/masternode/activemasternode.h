@@ -23,12 +23,13 @@ class ChainstateManager;
 namespace llmq::pq {
 
 struct ActiveChildSigningMaterial {
-    sphincs_c11::SecretKey secret_key;
+    std::shared_ptr<const scheduled_wots::SecretKey> secret_key;
     ChildKeyProof key_proof;
 };
 
 /**
- * Asynchronous owner of validated public child-key trees.
+ * Asynchronous owner of validated outer child-key trees and the bounded set
+ * of active inner scheduled-WOTS signing caches.
  *
  * Request() only schedules cache work. GetSigningMaterial() never builds a
  * tree, so consensus and P2P callers cannot be stalled by the expensive

@@ -38,11 +38,17 @@ struct SchemaValue {
     uint256 genesis_hash;
     uint16_t audit_version{PAYMENT_AUDIT_VERSION};
     uint16_t receipt_version{PAYMENT_AUDIT_RECEIPT_VERSION};
+    uint16_t child_profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
+    uint16_t child_usage_cap{SCHEDULED_WOTS_USAGE_CAP};
+    uint32_t child_signature_size{CHILD_SIGNATURE_SIZE};
+    uint32_t final_audit_wire_size{FinalPaymentAudit::WIRE_SIZE};
 
     SERIALIZE_METHODS(SchemaValue, obj)
     {
         READWRITE(obj.version, obj.guard, obj.genesis_hash,
-                  obj.audit_version, obj.receipt_version);
+                  obj.audit_version, obj.receipt_version,
+                  obj.child_profile, obj.child_usage_cap,
+                  obj.child_signature_size, obj.final_audit_wire_size);
     }
 
     friend bool operator==(const SchemaValue&,
@@ -382,7 +388,11 @@ void PaymentAuditStore::Initialize()
         const SchemaValue expected_schema{
             DB_FORMAT_VERSION, SCHEMA_GUARD, m_genesis_hash,
             PAYMENT_AUDIT_VERSION,
-            PAYMENT_AUDIT_RECEIPT_VERSION};
+            PAYMENT_AUDIT_RECEIPT_VERSION,
+            CHILD_SCHEDULED_WOTS_SHAKE_128_V1,
+            SCHEDULED_WOTS_USAGE_CAP,
+            CHILD_SIGNATURE_SIZE,
+            FinalPaymentAudit::WIRE_SIZE};
         if (!m_db.Exists(DB_SCHEMA_KEY)) {
             if (!m_db.IsEmpty()) {
                 m_failure = PaymentAuditStoreResult::CORRUPT;

@@ -10,7 +10,6 @@ from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
     Decimal,
     assert_equal,
-    assert_raises_rpc_error,
     force_finish_mnsync,
     get_rpc_proxy,
     p2p_port,
@@ -18,18 +17,14 @@ from test_framework.util import (
 
 
 class PQOperatorLifecycleTest(SyscoinTestFramework):
-    REGTEST_GENESIS = "28a2c2d251f46fac05ade79085cbcb2ae4ec67ea24f1f1c7b40a348c00521194"
-    FIXTURE_C11_SEED = "11" * 32
-    FIXTURE_C11_SEED_HASH = "3fd852825ad83c1d655939d69cbe8afbbfc94c46ca22585aed5303b8360d4259"
-    FIXTURE_TREE_ID = "2ed3eab46dd542daf231ad8519f0e81c9d45aeec9904ade4272befd99c9b0b18"
-    FIXTURE_ROOT = "1d3d53cbe19874206c1d24e2585b74d67699a5ebdd398a2f0d6cde35079cefe3"
+    CHAINLOCK_SEED = "11" * 32
 
     def add_options(self, parser):
         self.add_wallet_options(parser, descriptors=True, legacy=False)
         parser.add_argument(
             "--real-pq-tree",
             action="store_true",
-            help="regenerate the full 65,536-leaf C11 operator tree",
+            help="build the full scheduled-WOTS operator tree instead of the lifecycle-only stub",
         )
 
     def set_test_params(self):
@@ -40,18 +35,6 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             "-mncollateral=100",
             "-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW",
         ]
-        # The commitment was generated once by the production builder for this
-        # exact regtest genesis, seed, tree ID, generation, and first epoch.
-        self.extra_args.append(
-            "-pqoperatorcommitmenttestfixture=%s:%s:%s:1:0:%s" % (
-                self.REGTEST_GENESIS,
-                self.FIXTURE_C11_SEED_HASH,
-                self.FIXTURE_TREE_ID,
-                self.FIXTURE_ROOT,
-            )
-        )
-        if self.options.real_pq_tree:
-            self.extra_args.append("-pqoperatorcommitmenttestfixtureverify=1")
 
     def skip_test_if_missing_module(self):
         if self.options.descriptors is not True:
@@ -107,6 +90,10 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             "-pqfuturehorizonepochs=8",
             "-pqfinalitypreparation=1",
         ]
+        if not self.options.real_pq_tree:
+            # This test exercises global-key authorization and lifecycle state;
+            # the live ChainLock test separately uses real child signatures.
+            self.extra_args.append("-pqoperatorcommitmentteststub=1")
         self.stop_node(0)
         node.extra_args = list(self.extra_args)
         self.start_node(0, extra_args=self.extra_args + ["-reindex"])
@@ -120,9 +107,9 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
     def create_masternode(self):
         node = self.nodes[0]
         operator_keys = node.protx_generate_operator_keypair()
-        # Keep the precomputed commitment bound to a known independent seed;
-        # --real-pq-tree regenerates the same configuration from scratch.
-        operator_keys["c11Seed"] = self.FIXTURE_C11_SEED
+        # Keep operator setup deterministic; --real-pq-tree exercises the
+        # production commitment builder with this same independent seed.
+        operator_keys["chainlockSeed"] = self.CHAINLOCK_SEED
         funds_address = node.getnewaddress()
         owner_address = node.getnewaddress()
         payout_address = node.getnewaddress()
@@ -151,7 +138,7 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             "protx_hash": protx_hash,
             "funds_address": funds_address,
             "operator_key": operator_keys["operatorKey"],
-            "c11_seed": operator_keys["c11Seed"],
+            "chainlock_seed": operator_keys["chainlockSeed"],
             "service": "127.0.0.1:%d" % p2p_port(2),
         }
 
@@ -244,7 +231,7 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
 
     def register_initial_root(self, masternode, independent_tx):
         node = self.nodes[0]
-        # Rotation deliberately omits newC11Seed so it preserves this
+        # Rotation deliberately omits newChainlockSeed so it preserves this
         # commitment. --real-pq-tree is the production builder oracle.
         operator_rpc = get_rpc_proxy(
             node.url,
@@ -252,21 +239,10 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             timeout=1200 if self.options.real_pq_tree else 120,
             coveragedir=node.coverage_dir,
         )
-        if not self.options.real_pq_tree:
-            assert_raises_rpc_error(
-                -8,
-                "test fixture does not match the requested seed or schedule",
-                operator_rpc.protx_register_operator_key,
-                masternode["protx_hash"],
-                masternode["operator_key"],
-                "22" * 32,
-                masternode["funds_address"],
-                False,
-            )
         raw_registration = operator_rpc.protx_register_operator_key(
             masternode["protx_hash"],
             masternode["operator_key"],
-            masternode["c11_seed"],
+            masternode["chainlock_seed"],
             masternode["funds_address"],
             False,
         )

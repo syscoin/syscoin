@@ -2,14 +2,16 @@
  * Copyright (c) The slhdsa-c project authors
  * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
  *
- * Modified by the Syscoin project: cleanse transient key-derived buffers and
- * perform byte-size arithmetic in size_t.
+ * Modified by the Syscoin project: cleanse transient key-derived buffers,
+ * perform byte-size arithmetic in size_t, and expose narrow private adapters
+ * for the separately specified scheduled-WOTS child profile.
  */
 
 /* === FIPS 205 Stateless Hash-Based Digital Signature Standard */
 
 #include "slh_dsa.h"
 #include "slh_adrs.h"
+#include "slh_wots_internal.h" /* SYSCOIN: private scheduled-WOTS adapters */
 #include "slh_var.h"
 #include "slh_sys.h"
 #include "../secure.h"
@@ -669,4 +671,175 @@ int slh_verify(const uint8_t *m, size_t m_sz, const uint8_t *sig, size_t sig_sz,
     syscoin_slhdsa_secure_zero(&var, sizeof(var));
     return result;
   }
+}
+
+/*
+ * SYSCOIN: Narrow adapters that reuse the pinned SHAKE-128s WOTS+ primitives
+ * for the separately versioned scheduled-WOTS construction. Keep these in this
+ * translation unit so the upstream-derived helpers remain static and the
+ * public SLH-DSA API and parameter surface do not expand.
+ */
+
+static int scheduled_wots_parameters_match(void)
+{
+  const slh_param_t *prm = &slh_dsa_shake_128s;
+
+  return prm->n == SYSCOIN_SLH_WOTS_N && prm->lg_w == 4 &&
+         get_len(prm) == SYSCOIN_SLH_WOTS_LEN;
+}
+
+static void scheduled_wots_mk_secret_var(
+  slh_var_t *var, const uint8_t sk_seed[SYSCOIN_SLH_WOTS_N],
+  const uint8_t pk_seed[SYSCOIN_SLH_WOTS_N])
+{
+  uint8_t sk[4 * SYSCOIN_SLH_WOTS_N] = {0};
+
+  memcpy(sk, sk_seed, SYSCOIN_SLH_WOTS_N);
+  memcpy(sk + 2 * SYSCOIN_SLH_WOTS_N, pk_seed, SYSCOIN_SLH_WOTS_N);
+  slh_dsa_shake_128s.mk_var(var, NULL, sk, &slh_dsa_shake_128s);
+  syscoin_slhdsa_secure_zero(sk, sizeof(sk));
+}
+
+static void scheduled_wots_mk_public_var(
+  slh_var_t *var, const uint8_t pk_seed[SYSCOIN_SLH_WOTS_N])
+{
+  uint8_t pk[2 * SYSCOIN_SLH_WOTS_N] = {0};
+
+  memcpy(pk, pk_seed, SYSCOIN_SLH_WOTS_N);
+  slh_dsa_shake_128s.mk_var(var, pk, NULL, &slh_dsa_shake_128s);
+  syscoin_slhdsa_secure_zero(pk, sizeof(pk));
+}
+
+int syscoin_slhdsa_vendor_wots_128s_pkgen(
+  uint8_t out[SYSCOIN_SLH_WOTS_N],
+  const uint8_t sk_seed[SYSCOIN_SLH_WOTS_N],
+  const uint8_t pk_seed[SYSCOIN_SLH_WOTS_N], uint32_t keypair)
+{
+  slh_var_t var;
+
+  if (out == NULL || sk_seed == NULL || pk_seed == NULL ||
+      keypair >= SYSCOIN_SLH_WOTS_TREE_LEAVES ||
+      !scheduled_wots_parameters_match())
+  {
+    if (out != NULL)
+    {
+      memset(out, 0, SYSCOIN_SLH_WOTS_N);
+    }
+    return 0;
+  }
+
+  scheduled_wots_mk_secret_var(&var, sk_seed, pk_seed);
+  adrs_zero(&var);
+  adrs_set_layer_address(&var, 0);
+  adrs_set_tree_address(&var, 0);
+  xmss_node(&var, out, keypair, 0);
+  syscoin_slhdsa_secure_zero(&var, sizeof(var));
+  return 1;
+}
+
+int syscoin_slhdsa_vendor_wots_128s_sign(
+  uint8_t out[SYSCOIN_SLH_WOTS_SIGNATURE_SIZE],
+  const uint8_t digest[SYSCOIN_SLH_WOTS_N],
+  const uint8_t sk_seed[SYSCOIN_SLH_WOTS_N],
+  const uint8_t pk_seed[SYSCOIN_SLH_WOTS_N], uint32_t keypair)
+{
+  slh_var_t var;
+  size_t written;
+
+  if (out == NULL || digest == NULL || sk_seed == NULL || pk_seed == NULL ||
+      keypair >= SYSCOIN_SLH_WOTS_TREE_LEAVES ||
+      !scheduled_wots_parameters_match())
+  {
+    if (out != NULL)
+    {
+      memset(out, 0, SYSCOIN_SLH_WOTS_SIGNATURE_SIZE);
+    }
+    return 0;
+  }
+
+  scheduled_wots_mk_secret_var(&var, sk_seed, pk_seed);
+  adrs_zero(&var);
+  adrs_set_layer_address(&var, 0);
+  adrs_set_tree_address(&var, 0);
+  adrs_set_type_and_clear_not_kp(&var, ADRS_WOTS_HASH);
+  adrs_set_key_pair_address(&var, keypair);
+  written = wots_sign(&var, out, digest);
+  syscoin_slhdsa_secure_zero(&var, sizeof(var));
+  if (written != SYSCOIN_SLH_WOTS_SIGNATURE_SIZE)
+  {
+    memset(out, 0, SYSCOIN_SLH_WOTS_SIGNATURE_SIZE);
+    return 0;
+  }
+  return 1;
+}
+
+int syscoin_slhdsa_vendor_wots_128s_pk_from_sig(
+  uint8_t out[SYSCOIN_SLH_WOTS_N],
+  const uint8_t signature[SYSCOIN_SLH_WOTS_SIGNATURE_SIZE],
+  const uint8_t digest[SYSCOIN_SLH_WOTS_N],
+  const uint8_t pk_seed[SYSCOIN_SLH_WOTS_N], uint32_t keypair)
+{
+  slh_var_t var;
+
+  if (out == NULL || signature == NULL || digest == NULL || pk_seed == NULL ||
+      keypair >= SYSCOIN_SLH_WOTS_TREE_LEAVES ||
+      !scheduled_wots_parameters_match())
+  {
+    if (out != NULL)
+    {
+      memset(out, 0, SYSCOIN_SLH_WOTS_N);
+    }
+    return 0;
+  }
+
+  scheduled_wots_mk_public_var(&var, pk_seed);
+  adrs_zero(&var);
+  adrs_set_layer_address(&var, 0);
+  adrs_set_tree_address(&var, 0);
+  adrs_set_type_and_clear_not_kp(&var, ADRS_WOTS_HASH);
+  adrs_set_key_pair_address(&var, keypair);
+  wots_pk_from_sig(&var, out, signature, digest);
+  syscoin_slhdsa_secure_zero(&var, sizeof(var));
+  return 1;
+}
+
+int syscoin_slhdsa_vendor_wots_128s_tree_hash(
+  uint8_t out[SYSCOIN_SLH_WOTS_N],
+  const uint8_t pk_seed[SYSCOIN_SLH_WOTS_N], uint32_t height,
+  uint32_t index, const uint8_t left[SYSCOIN_SLH_WOTS_N],
+  const uint8_t right[SYSCOIN_SLH_WOTS_N])
+{
+  slh_var_t var;
+  uint32_t level_nodes;
+
+  if (height > 0 && height <= SYSCOIN_SLH_WOTS_TREE_HEIGHT)
+  {
+    level_nodes = UINT32_C(1) <<
+                  (SYSCOIN_SLH_WOTS_TREE_HEIGHT - height);
+  }
+  else
+  {
+    level_nodes = 0;
+  }
+  if (out == NULL || pk_seed == NULL || left == NULL || right == NULL ||
+      level_nodes == 0 || index >= level_nodes ||
+      !scheduled_wots_parameters_match())
+  {
+    if (out != NULL)
+    {
+      memset(out, 0, SYSCOIN_SLH_WOTS_N);
+    }
+    return 0;
+  }
+
+  scheduled_wots_mk_public_var(&var, pk_seed);
+  adrs_zero(&var);
+  adrs_set_layer_address(&var, 0);
+  adrs_set_tree_address(&var, 0);
+  adrs_set_type_and_clear(&var, ADRS_TREE);
+  adrs_set_tree_height(&var, height);
+  adrs_set_tree_index(&var, index);
+  slh_dsa_shake_128s.h_h(&var, out, left, right);
+  syscoin_slhdsa_secure_zero(&var, sizeof(var));
+  return 1;
 }
