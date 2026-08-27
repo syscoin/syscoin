@@ -22,6 +22,8 @@
 
 namespace llmq::pq {
 
+class FrozenQuorumRosterCache;
+
 /**
  * Deterministic state for one roster slot at the epoch snapshot.
  *
@@ -64,8 +66,10 @@ enum class ChainLockVerificationError : uint8_t {
 };
 
 /**
- * Immutable capability proving one exact roster set passed all intrinsic
- * descriptor, membership, uniqueness, bitmap, and Merkle-root checks.
+ * Immutable capability proving one exact roster set satisfies all intrinsic
+ * descriptor, membership, uniqueness, bitmap, and Merkle-root checks. Raw
+ * bytes are detached and validated; the canonical builder may instead
+ * transfer its exclusively owned result through a private boundary.
  * Statement height, authorization, and context-hash checks remain per use.
  */
 class VerifiedRosterSet final {
@@ -89,12 +93,25 @@ public:
     }
 
 private:
+    class BuildProvenance;
+    using BuildProvenancePtr = std::shared_ptr<const BuildProvenance>;
+
     VerifiedRosterSet(uint256 genesis_hash,
-                      FrozenQuorumRostersPtr rosters);
+                      FrozenQuorumRostersPtr rosters,
+                      BuildProvenancePtr build_provenance = nullptr);
+
+    [[nodiscard]] static BuildProvenancePtr NewBuildProvenance();
+    [[nodiscard]] static std::shared_ptr<const VerifiedRosterSet>
+    MintCanonicalBuild(std::unique_ptr<FrozenQuorumRosters> rosters,
+                       const FrozenQuorumRosterCache& cache);
+    [[nodiscard]] bool WasBuiltBy(
+        const FrozenQuorumRosterCache& cache) const noexcept;
 
     uint256 m_genesis_hash;
     FrozenQuorumRostersPtr m_rosters;
+    BuildProvenancePtr m_build_provenance;
 
+    friend class FrozenQuorumRosterCache;
     friend class PreparedChainLockContext;
 };
 

@@ -353,12 +353,22 @@ bool ValidateFrozenQuorumContextInternal(
 
 } // namespace
 
+class VerifiedRosterSet::BuildProvenance final {};
+
 VerifiedRosterSet::VerifiedRosterSet(
     uint256 genesis_hash,
-    FrozenQuorumRostersPtr rosters)
+    FrozenQuorumRostersPtr rosters,
+    BuildProvenancePtr build_provenance)
     : m_genesis_hash{std::move(genesis_hash)},
-      m_rosters{std::move(rosters)}
+      m_rosters{std::move(rosters)},
+      m_build_provenance{std::move(build_provenance)}
 {
+}
+
+VerifiedRosterSet::BuildProvenancePtr
+VerifiedRosterSet::NewBuildProvenance()
+{
+    return std::make_shared<const BuildProvenance>();
 }
 
 std::shared_ptr<const VerifiedRosterSet>

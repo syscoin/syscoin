@@ -242,6 +242,24 @@ bool ContainsMember(const FrozenQuorumRoster& roster,
     return FindMember(roster, pro_tx_hash) != QUORUM_SIZE;
 }
 
+bool SameRosterSet(const FrozenQuorumRosters& first,
+                   const FrozenQuorumRosters& second)
+{
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        if (first[slot].descriptor != second[slot].descriptor) return false;
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            const auto& lhs{first[slot].members[member]};
+            const auto& rhs{second[slot].members[member]};
+            if (lhs.pro_tx_hash != rhs.pro_tx_hash ||
+                lhs.eligible != rhs.eligible ||
+                lhs.child_root != rhs.child_root) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 struct IndexChain {
     std::vector<uint256> hashes;
     std::vector<CBlockIndex> indices;
@@ -645,7 +663,6 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
     constexpr int32_t ROTATED_TARGET{2595};
     constexpr int32_t NEW_BASE_HEIGHT{2592};
     constexpr uint64_t ROOT_HASHES_PER_ROSTER{2'046};
-    constexpr uint64_t VERIFIED_SET_ROOT_HASHES{8'184};
     const uint256 genesis{NonNullHash(24)};
     IndexChain canonical(ROTATED_TARGET, ROTATED_TARGET + 1, 0);
     IndexChain fork_at_new_base(
@@ -671,8 +688,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
                           first_hashes_before,
-                      ACTIVE_QUORUMS * ROOT_HASHES_PER_ROSTER +
-                          VERIFIED_SET_ROOT_HASHES);
+                      ACTIVE_QUORUMS * ROOT_HASHES_PER_ROSTER);
 
     const uint64_t rotation_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
@@ -683,8 +699,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
                           rotation_hashes_before,
-                      ROOT_HASHES_PER_ROSTER +
-                          VERIFIED_SET_ROOT_HASHES);
+                      ROOT_HASHES_PER_ROSTER);
     for (std::size_t slot{0}; slot + 1 < ACTIVE_QUORUMS; ++slot) {
         BOOST_CHECK(rotated->Rosters()[slot].descriptor ==
                     first->Rosters()[slot + 1].descriptor);
@@ -705,8 +720,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
                 rotated->Rosters().back().descriptor.base_hash);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
                           fork_hashes_before,
-                      ROOT_HASHES_PER_ROSTER +
-                          VERIFIED_SET_ROOT_HASHES);
+                      ROOT_HASHES_PER_ROSTER);
     const uint64_t hit_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
     BOOST_CHECK(cache->GetVerifiedActive(
@@ -714,6 +728,121 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
                       hit_hashes_before);
+}
+
+BOOST_AUTO_TEST_CASE(active_roster_cache_mint_matches_public_validation)
+{
+    constexpr int32_t TARGET_HEIGHT{2305};
+    constexpr uint32_t SNAPSHOT_LAG{144};
+    constexpr uint64_t ROOT_HASHES_PER_ROSTER{2'046};
+    constexpr uint64_t ROOT_HASHES_PER_SET{
+        ACTIVE_QUORUMS * ROOT_HASHES_PER_ROSTER};
+    const uint256 genesis{NonNullHash(28)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    std::vector<std::shared_ptr<std::vector<OperatorKeyState>>>
+        source_aliases;
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        const auto epoch{EpochForHeight(
+            Schedule(), index.nHeight + static_cast<int32_t>(SNAPSHOT_LAG))};
+        if (!epoch) return std::optional<QuorumSnapshotState>{};
+        auto states{std::make_shared<std::vector<OperatorKeyState>>(
+            KeyStates(QUORUM_SIZE, *epoch, index.nHeight))};
+        source_aliases.push_back(states);
+
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = states;
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(SNAPSHOT_LAG), lookup)};
+    BOOST_REQUIRE(cache);
+
+    const uint64_t build_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    const auto cached{cache->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip())};
+    BOOST_REQUIRE(cached);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          build_hashes_before,
+                      ROOT_HASHES_PER_SET);
+    BOOST_REQUIRE_EQUAL(source_aliases.size(), ACTIVE_QUORUMS);
+
+    const uint256 source_member{source_aliases.front()->front().pro_tx_hash};
+    const std::size_t source_slot{FindMember(
+        cached->Rosters().front(), source_member)};
+    BOOST_REQUIRE_LT(source_slot, QUORUM_SIZE);
+    BOOST_REQUIRE(cached->Rosters().front()
+                      .members[source_slot]
+                      .child_root);
+    const auto cached_child{
+        *cached->Rosters().front().members[source_slot].child_root};
+    source_aliases.front()->front()
+        .frozen_child_roots.front()
+        .commitment.root = NonNullHash(280'001);
+    BOOST_CHECK(cached->Rosters().front()
+                    .members[source_slot]
+                    .child_root == cached_child);
+
+    ChainLockVerificationError verification_error{
+        ChainLockVerificationError::INVALID_ARGUMENT};
+    const uint64_t validation_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    const auto fully_validated{VerifiedRosterSet::Create(
+        genesis, cached->RostersPtr(), &verification_error)};
+    BOOST_REQUIRE(fully_validated);
+    BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
+    BOOST_CHECK(SameRosterSet(
+        cached->Rosters(), fully_validated->Rosters()));
+    BOOST_CHECK(cached->RostersPtr() != fully_validated->RostersPtr());
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          validation_hashes_before,
+                      ROOT_HASHES_PER_SET);
+
+    auto mutable_input{
+        std::make_shared<FrozenQuorumRosters>(cached->Rosters())};
+    FrozenQuorumRostersPtr aliased_input{mutable_input};
+    const auto alias_safe{VerifiedRosterSet::Create(
+        genesis, aliased_input, &verification_error)};
+    BOOST_REQUIRE(alias_safe);
+    const uint256 isolated_root{
+        alias_safe->Rosters().front().descriptor.member_root};
+    mutable_input->front().descriptor.member_root = NonNullHash(280'002);
+    mutable_input->front().members.front().pro_tx_hash =
+        NonNullHash(280'003);
+    BOOST_CHECK(alias_safe->Rosters().front().descriptor.member_root ==
+                isolated_root);
+    BOOST_CHECK(alias_safe->Rosters().front().members.front().pro_tx_hash !=
+                mutable_input->front().members.front().pro_tx_hash);
+
+    auto invalid{
+        std::make_shared<FrozenQuorumRosters>(cached->Rosters())};
+    invalid->front().members[1].pro_tx_hash =
+        invalid->front().members[0].pro_tx_hash;
+    verification_error = ChainLockVerificationError::NONE;
+    FrozenQuorumRostersPtr invalid_input{invalid};
+    BOOST_CHECK(!VerifiedRosterSet::Create(
+        genesis, invalid_input, &verification_error));
+    BOOST_CHECK(verification_error ==
+                ChainLockVerificationError::DUPLICATE_MEMBER);
+    const uint64_t hit_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    BOOST_CHECK(cache->GetVerifiedActive(
+                    TARGET_HEIGHT, chain.Tip()) == cached);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      hit_hashes_before);
+
+    const auto independent_cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(SNAPSHOT_LAG), lookup)};
+    BOOST_REQUIRE(independent_cache);
+    const auto independently_minted{independent_cache->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip())};
+    BOOST_REQUIRE(independently_minted);
+    BOOST_CHECK(independently_minted != cached);
+    BOOST_CHECK(independently_minted->RostersPtr() != cached->RostersPtr());
+    BOOST_CHECK(SameRosterSet(
+        independently_minted->Rosters(), cached->Rosters()));
 }
 
 BOOST_AUTO_TEST_CASE(active_roster_cache_rechecks_cross_roster_child_keys)
@@ -759,10 +888,15 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_rechecks_cross_roster_child_keys)
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
     QuorumBuildError error{QuorumBuildError::NONE};
+    const uint64_t failure_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
     BOOST_CHECK(!cache->GetVerifiedActive(
         ROTATED_TARGET, chain.Tip(), &error));
     BOOST_CHECK(error == QuorumBuildError::DUPLICATE_CHILD_KEY);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          failure_hashes_before,
+                      2'046U);
     BOOST_REQUIRE(cache->GetVerifiedActive(FIRST_TARGET, chain.Tip()));
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
 }
@@ -816,6 +950,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
         genesis, BuildConfig(), uncached_lookup,
         /*cache_results=*/false)};
     BOOST_REQUIRE(uncached);
+    const uint64_t uncached_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
     const auto uncached_first{
         uncached->GetActive(TARGET_HEIGHT, chain.Tip())};
     const auto uncached_second{
@@ -824,6 +960,9 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
     BOOST_REQUIRE(uncached_second);
     BOOST_CHECK(uncached_first != uncached_second);
     BOOST_CHECK_EQUAL(uncached_lookups, 2 * ACTIVE_QUORUMS);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          uncached_hashes_before,
+                      2 * ACTIVE_QUORUMS * 2'046U);
 
     BOOST_CHECK(!FrozenQuorumRosterCache::Create(
         uint256{}, BuildConfig(), uncached_lookup));
@@ -879,7 +1018,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_does_not_cache_rotation_failures)
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
                           retry_hashes_before,
-                      10'230U);
+                      2'046U);
     const uint64_t hit_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
     BOOST_CHECK(cache->GetVerifiedActive(
@@ -921,6 +1060,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
         genesis, BuildConfig(), lookup)};
     BOOST_REQUIRE(cache);
 
+    const uint64_t build_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
     std::array<VerifiedRosterSetPtr, 2> results;
     std::thread first{[&] {
         results[0] = cache->GetVerifiedActive(
@@ -940,6 +1081,9 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
                 results[0]->RostersPtr());
     BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
                       2 * ACTIVE_QUORUMS);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          build_hashes_before,
+                      2 * ACTIVE_QUORUMS * 2'046U);
 }
 
 BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_rotations)
@@ -978,6 +1122,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_rotations)
     BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
                       ACTIVE_QUORUMS);
 
+    const uint64_t rotation_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
     std::array<VerifiedRosterSetPtr, 2> results;
     std::thread first{[&] {
         results[0] = cache->GetVerifiedActive(
@@ -997,6 +1143,9 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_rotations)
                     ROTATED_TARGET, chain.Tip()) == results[0]);
     BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
                       ACTIVE_QUORUMS + 2);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          rotation_hashes_before,
+                      2 * 2'046U);
 }
 
 BOOST_AUTO_TEST_CASE(active_roster_cache_eviction_preserves_reader_lifetime)

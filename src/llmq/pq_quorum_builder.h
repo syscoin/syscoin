@@ -143,11 +143,16 @@ private:
     const QuorumBuildConfig m_config;
     const QuorumSnapshotLookup m_snapshot_lookup;
     const bool m_cache_results;
+    // A verified set may seed unchecked roster reuse only for the immutable
+    // builder configuration and snapshot source that created it.
+    const VerifiedRosterSet::BuildProvenancePtr m_build_provenance;
 
     mutable Mutex m_mutex;
     mutable std::array<Entry, FROZEN_QUORUM_ROSTER_CACHE_CAPACITY>
         m_entries GUARDED_BY(m_mutex);
     mutable std::size_t m_clock_hand GUARDED_BY(m_mutex){0};
+
+    friend class VerifiedRosterSet;
 };
 
 using FrozenQuorumRosterCachePtr =

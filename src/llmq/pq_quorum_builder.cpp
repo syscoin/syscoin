@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <set>
 #include <utility>
 
 namespace llmq::pq {
@@ -248,10 +249,16 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     roster->descriptor.snapshot_height = snapshot.GetHeight();
     roster->descriptor.snapshot_hash = snapshot.GetBlockHash();
 
+    std::set<uint256> selected_members;
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
     for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
         auto& member = roster->members[slot];
         member.pro_tx_hash = (*selected)[slot].dmn->proTxHash;
+        if (member.pro_tx_hash.IsNull() ||
+            !selected_members.insert(member.pro_tx_hash).second) {
+            SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
+            return nullptr;
+        }
         member.eligible = true;
         if (!(*selected)[slot].child_root) continue;
         if (!tree_owners.emplace(
@@ -271,6 +278,11 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
         ComputeQuorumMemberRoot(genesis_hash, *roster);
     roster->descriptor.child_key_root =
         ComputeQuorumChildKeyRoot(genesis_hash, *roster);
+    if (roster->descriptor.member_root.IsNull() ||
+        roster->descriptor.child_key_root.IsNull()) {
+        SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
+        return nullptr;
+    }
     return roster;
 }
 
@@ -302,7 +314,7 @@ const FrozenQuorumRoster* FindReusableRoster(
     return nullptr;
 }
 
-FrozenQuorumRostersPtr BuildActiveFrozenQuorumRostersImpl(
+std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     const uint256& genesis_hash,
     const QuorumBuildConfig& config,
     int32_t target_height,
@@ -335,7 +347,7 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRostersImpl(
         return nullptr;
     }
 
-    auto rosters{std::make_shared<FrozenQuorumRosters>()};
+    auto rosters{std::make_unique<FrozenQuorumRosters>()};
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         const auto& identity{(*active_epochs)[slot]};
@@ -403,9 +415,11 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
     const QuorumSnapshotLookup& snapshot_lookup,
     QuorumBuildError* error)
 {
-    return BuildActiveFrozenQuorumRostersImpl(
+    auto rosters{BuildActiveFrozenQuorumRostersImpl(
         genesis_hash, config, target_height, branch_tip, snapshot_lookup,
-        /*reusable_sets=*/{}, error);
+        /*reusable_sets=*/{}, error)};
+    if (!rosters) return nullptr;
+    return FrozenQuorumRostersPtr{std::move(rosters)};
 }
 
 FrozenQuorumRosterCache::FrozenQuorumRosterCache(
@@ -416,8 +430,31 @@ FrozenQuorumRosterCache::FrozenQuorumRosterCache(
     : m_genesis_hash{std::move(genesis_hash)},
       m_config{config},
       m_snapshot_lookup{std::move(snapshot_lookup)},
-      m_cache_results{cache_results}
+      m_cache_results{cache_results},
+      m_build_provenance{VerifiedRosterSet::NewBuildProvenance()}
 {
+}
+
+std::shared_ptr<const VerifiedRosterSet>
+VerifiedRosterSet::MintCanonicalBuild(
+    std::unique_ptr<FrozenQuorumRosters> rosters,
+    const FrozenQuorumRosterCache& cache)
+{
+    if (!rosters || !cache.m_build_provenance) return nullptr;
+    // Exclusive transfer prevents a producer alias from changing the bytes
+    // whose roots were established during canonical construction.
+    FrozenQuorumRostersPtr immutable_rosters{std::move(rosters)};
+    return std::shared_ptr<const VerifiedRosterSet>{
+        new VerifiedRosterSet{
+            cache.m_genesis_hash, std::move(immutable_rosters),
+            cache.m_build_provenance}};
+}
+
+bool VerifiedRosterSet::WasBuiltBy(
+    const FrozenQuorumRosterCache& cache) const noexcept
+{
+    return m_build_provenance &&
+           m_build_provenance == cache.m_build_provenance;
 }
 
 std::shared_ptr<const FrozenQuorumRosterCache>
@@ -453,14 +490,12 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
 {
     SetError(error, QuorumBuildError::NONE);
     if (!m_cache_results) {
-        auto built{BuildActiveFrozenQuorumRosters(
+        auto built{BuildActiveFrozenQuorumRostersImpl(
             m_genesis_hash, m_config, target_height, branch_tip,
-            m_snapshot_lookup, error)};
+            m_snapshot_lookup, /*reusable_sets=*/{}, error)};
         if (!built) return nullptr;
-        ChainLockVerificationError verification_error{
-            ChainLockVerificationError::NONE};
-        auto roster_set{VerifiedRosterSet::Create(
-            m_genesis_hash, std::move(built), &verification_error)};
+        auto roster_set{VerifiedRosterSet::MintCanonicalBuild(
+            std::move(built), *this)};
         if (!roster_set) {
             SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
         }
@@ -502,13 +537,17 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
     {
         LOCK(m_mutex);
         for (auto& entry : m_entries) {
-            if (entry.roster_set && entry.key == key) {
+            if (entry.roster_set && entry.key == key &&
+                entry.roster_set->WasBuiltBy(*this)) {
                 entry.recently_used = true;
                 return entry.roster_set;
             }
         }
         for (std::size_t slot{0}; slot < m_entries.size(); ++slot) {
-            reusable_sets[slot] = m_entries[slot].roster_set;
+            if (m_entries[slot].roster_set &&
+                m_entries[slot].roster_set->WasBuiltBy(*this)) {
+                reusable_sets[slot] = m_entries[slot].roster_set;
+            }
         }
     }
 
@@ -516,10 +555,8 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
         m_genesis_hash, m_config, target_height, branch_tip,
         m_snapshot_lookup, reusable_sets, error)};
     if (!built) return nullptr;
-    ChainLockVerificationError verification_error{
-        ChainLockVerificationError::NONE};
-    auto verified{VerifiedRosterSet::Create(
-        m_genesis_hash, std::move(built), &verification_error)};
+    auto verified{VerifiedRosterSet::MintCanonicalBuild(
+        std::move(built), *this)};
     if (!verified) {
         SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
         return nullptr;
@@ -530,7 +567,8 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
     {
         LOCK(m_mutex);
         for (auto& entry : m_entries) {
-            if (entry.roster_set && entry.key == key) {
+            if (entry.roster_set && entry.key == key &&
+                entry.roster_set->WasBuiltBy(*this)) {
                 entry.recently_used = true;
                 result = entry.roster_set;
                 break;
