@@ -39,6 +39,8 @@ void InitLLMQSystem(CConnman& connman,
             "cannot recreate PQ finality after public IBD completed");
     }
 
+    const auto quorum_build_config{
+        MakePQQuorumBuildConfig(chainman.GetConsensus())};
     pq::QuorumSnapshotLookup snapshot_lookup{
         [](const CBlockIndex& index)
             -> std::optional<pq::QuorumSnapshotState> {
@@ -62,7 +64,9 @@ void InitLLMQSystem(CConnman& connman,
             return state;
         }};
 
-    if (gArgs.IsArgSet("-pqchainlocktestfixture")) {
+    const bool fixture_enabled{
+        gArgs.IsArgSet("-pqchainlocktestfixture")};
+    if (fixture_enabled) {
         if (chainman.GetParams().GetChainType() != ChainType::REGTEST ||
             !chainman.GetParams().MineBlocksOnDemand()) {
             throw std::runtime_error(
@@ -75,22 +79,32 @@ void InitLLMQSystem(CConnman& connman,
             throw std::runtime_error(
                 "-pqchainlocktestfixture requires an absolute path");
         }
-        const auto build_config{
-            MakePQQuorumBuildConfig(chainman.GetConsensus())};
-        if (!build_config) {
+        if (!quorum_build_config) {
             throw std::runtime_error(
                 "-pqchainlocktestfixture requires a complete PQ deployment");
         }
         std::string error;
         auto fixture_lookup{pq::test::LoadQuorumSnapshotFixture(
             fixture_path, chainman.GetConsensus().hashGenesisBlock,
-            *build_config, chainman, error)};
+            *quorum_build_config, chainman, error)};
         if (!fixture_lookup) {
             throw std::runtime_error(
                 "invalid PQ ChainLock test fixture: " + error);
         }
         snapshot_lookup = std::move(*fixture_lookup);
         LogPrintf("Loaded branch-bound PQ ChainLock regtest fixture\n");
+    }
+
+    pq::FrozenQuorumRosterCachePtr roster_cache;
+    if (quorum_build_config) {
+        roster_cache = pq::FrozenQuorumRosterCache::Create(
+            chainman.GetConsensus().hashGenesisBlock,
+            *quorum_build_config, std::move(snapshot_lookup),
+            /*cache_results=*/!fixture_enabled);
+        if (!roster_cache) {
+            throw std::runtime_error(
+                "cannot initialize PQ quorum roster cache");
+        }
     }
 
     // SYSCOIN: This processor structurally replays legacy commitments for
@@ -104,7 +118,7 @@ void InitLLMQSystem(CConnman& connman,
         chainman.GetConsensus().nPQChainLockAnchorHeight};
     pqQuorumConnectionOverlay = new CPQQuorumConnectionOverlay(
         connman, chainman.GetConsensus().hashGenesisBlock,
-        MakePQQuorumBuildConfig(chainman.GetConsensus()),
+        quorum_build_config,
         [initial_predecessor_height]() -> std::optional<int32_t> {
             const auto best{chainLocksHandler
                                 ? chainLocksHandler->GetBestChainLock()
@@ -112,7 +126,7 @@ void InitLLMQSystem(CConnman& connman,
             return best ? best->statement.height
                         : initial_predecessor_height;
         });
-    chainLocksHandler->SetQuorumSnapshotLookup(std::move(snapshot_lookup));
+    chainLocksHandler->SetQuorumRosterCache(std::move(roster_cache));
 }
 
 void DestroyLLMQSystem()

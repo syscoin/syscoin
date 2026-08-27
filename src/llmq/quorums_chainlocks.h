@@ -262,11 +262,11 @@ public:
                                  !m_pending_payment_audit_receipt_mutex);
 
     /**
-     * Install the exact branch snapshot lookup backed by deterministic-MN and
-     * PQ-registry snapshots. An absent lookup makes incoming certificates
-     * transiently unverifiable rather than trusted.
+     * Install the immutable branch-bound roster service. An absent service
+     * makes incoming certificates transiently unverifiable rather than
+     * trusted.
      */
-    void SetQuorumSnapshotLookup(pq::QuorumSnapshotLookup lookup)
+    void SetQuorumRosterCache(pq::FrozenQuorumRosterCachePtr cache)
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
 
     [[nodiscard]] bool AlreadyHave(const uint256& logical_id) const;
@@ -595,6 +595,8 @@ private:
                                  !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] bool IsConfiguredForVerification() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    [[nodiscard]] pq::FrozenQuorumRosterCachePtr GetQuorumRosterCache() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     [[nodiscard]] bool IsChainLockVerificationAvailable() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
@@ -951,7 +953,8 @@ private:
     mutable pq::CatchupHistoricalProofCache m_catchup_proof_cache;
 
     mutable Mutex m_lookup_mutex;
-    pq::QuorumSnapshotLookup m_quorum_snapshot_lookup GUARDED_BY(m_lookup_mutex);
+    pq::FrozenQuorumRosterCachePtr m_quorum_roster_cache
+        GUARDED_BY(m_lookup_mutex);
     // ChainLock admission may rebuild branch context and therefore acquire
     // cs_main. Keep that serialization independent from the crypto-only mutex
     // so ConnectBlock can verify an archived audit while holding cs_main.

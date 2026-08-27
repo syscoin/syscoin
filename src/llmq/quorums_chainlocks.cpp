@@ -1843,17 +1843,29 @@ CChainLocksHandler::CurrentSigningContexts::Find(
     return std::nullopt;
 }
 
-void CChainLocksHandler::SetQuorumSnapshotLookup(pq::QuorumSnapshotLookup lookup)
+void CChainLocksHandler::SetQuorumRosterCache(
+    pq::FrozenQuorumRosterCachePtr cache)
+{
+    if (cache &&
+        (!m_quorum_build_config || cache->GenesisHash() != m_genesis_hash ||
+         cache->Config() != *m_quorum_build_config)) {
+        throw std::invalid_argument{"mismatched PQ quorum roster cache"};
+    }
+    LOCK(m_lookup_mutex);
+    m_quorum_roster_cache = std::move(cache);
+}
+
+pq::FrozenQuorumRosterCachePtr
+CChainLocksHandler::GetQuorumRosterCache() const
 {
     LOCK(m_lookup_mutex);
-    m_quorum_snapshot_lookup = std::move(lookup);
+    return m_quorum_roster_cache;
 }
 
 bool CChainLocksHandler::IsConfiguredForVerification() const
 {
     if (!m_store || !m_config || !m_quorum_build_config) return false;
-    LOCK(m_lookup_mutex);
-    return static_cast<bool>(m_quorum_snapshot_lookup);
+    return static_cast<bool>(GetQuorumRosterCache());
 }
 
 bool CChainLocksHandler::IsChainLockVerificationAvailable() const
@@ -2968,15 +2980,11 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
         return PaymentAuditContextStatus::LOCAL_ERROR;
     }
 
-    pq::QuorumSnapshotLookup lookup;
-    {
-        LOCK(m_lookup_mutex);
-        lookup = m_quorum_snapshot_lookup;
-    }
-    if (!lookup) return PaymentAuditContextStatus::LOCAL_ERROR;
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return PaymentAuditContextStatus::LOCAL_ERROR;
     std::optional<pq::QuorumSnapshotState> snapshot_state;
     try {
-        snapshot_state = lookup(*snapshot);
+        snapshot_state = roster_cache->LookupSnapshot(*snapshot);
     } catch (const std::exception&) {
         return PaymentAuditContextStatus::LOCAL_ERROR;
     }
@@ -5965,12 +5973,8 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
 {
     if (definitively_invalid != nullptr) *definitively_invalid = false;
     if (!m_config || !m_quorum_build_config) return std::nullopt;
-    pq::QuorumSnapshotLookup lookup;
-    {
-        LOCK(m_lookup_mutex);
-        lookup = m_quorum_snapshot_lookup;
-    }
-    if (!lookup) return std::nullopt;
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return std::nullopt;
 
     const CBlockIndex* candidate{nullptr};
     const pq::ChainLockCandidateContextRequest request{
@@ -5985,9 +5989,8 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
     }
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    const auto rosters{pq::BuildActiveFrozenQuorumRosters(
-        m_genesis_hash, *m_quorum_build_config, prepared.statement.height,
-        *candidate, lookup, &build_error)};
+    const auto rosters{roster_cache->GetActive(
+        prepared.statement.height, *candidate, &build_error)};
     if (!rosters) {
         if (definitively_invalid != nullptr) {
             *definitively_invalid =
@@ -6042,12 +6045,8 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         expected.admission == HistoricalAdmission::NONE) {
         return std::nullopt;
     }
-    pq::QuorumSnapshotLookup lookup;
-    {
-        LOCK(m_lookup_mutex);
-        lookup = m_quorum_snapshot_lookup;
-    }
-    if (!lookup) return std::nullopt;
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return std::nullopt;
 
     LOCK(cs_main);
     if (GetHistoricalAdmissionLocked(
@@ -6085,9 +6084,8 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
     }
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    const auto rosters{pq::BuildActiveFrozenQuorumRosters(
-        m_genesis_hash, *m_quorum_build_config,
-        chainlock.statement.height, *candidate, lookup, &build_error)};
+    const auto rosters{roster_cache->GetActive(
+        chainlock.statement.height, *candidate, &build_error)};
     if (!rosters) {
         if (definitively_invalid != nullptr) {
             *definitively_invalid =
@@ -6126,12 +6124,8 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
             return std::nullopt;
         }
     }
-    pq::QuorumSnapshotLookup lookup;
-    {
-        LOCK(m_lookup_mutex);
-        lookup = m_quorum_snapshot_lookup;
-    }
-    if (!lookup) return std::nullopt;
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return std::nullopt;
 
     const auto best{m_store->GetBest()};
     const pq::ChainLockPredecessor durable_predecessor{
@@ -6244,9 +6238,8 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
         payment_audit_receipt_state = *indexed_payment_audit_state;
         payment_probation_state_hash =
             indexed_target->pqPaymentProbationStateHash;
-        rosters = pq::BuildActiveFrozenQuorumRosters(
-            m_genesis_hash, *m_quorum_build_config, indexed_target->nHeight,
-            *indexed_target, lookup, &build_error);
+        rosters = roster_cache->GetActive(
+            indexed_target->nHeight, *indexed_target, &build_error);
         if (rosters) {
             authorization_mask = DeriveSigningRosterAuthorizationMask(
                 *rosters, *indexed_target, declared_predecessor_height,
@@ -6683,12 +6676,8 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
         epoch, row_index)};
     if (!row) return std::nullopt;
 
-    pq::QuorumSnapshotLookup lookup;
-    {
-        LOCK(m_lookup_mutex);
-        lookup = m_quorum_snapshot_lookup;
-    }
-    if (!lookup) return std::nullopt;
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return std::nullopt;
 
     pq::FrozenQuorumRostersPtr rosters;
     {
@@ -6709,10 +6698,8 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
             return std::nullopt;
         }
         pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-        rosters = pq::BuildActiveFrozenQuorumRosters(
-            m_genesis_hash, *m_quorum_build_config,
-            response_index->nHeight, *response_index, lookup,
-            &build_error);
+        rosters = roster_cache->GetActive(
+            response_index->nHeight, *response_index, &build_error);
     }
     if (!rosters || rosters->back().descriptor.epoch != epoch ||
         rosters->back().descriptor.valid_members !=
@@ -6825,12 +6812,8 @@ bool CChainLocksHandler::RefreshPaymentAuditStaging()
         if (IsPaymentAuditPresealActive()) return false;
     }
 
-    pq::QuorumSnapshotLookup lookup;
-    {
-        LOCK(m_lookup_mutex);
-        lookup = m_quorum_snapshot_lookup;
-    }
-    if (!lookup) return false;
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return false;
 
     int32_t tip_height{-1};
     uint256 tip_hash;
@@ -6971,10 +6954,8 @@ bool CChainLocksHandler::RefreshPaymentAuditStaging()
             }
             response_block_hash = response_index->GetBlockHash();
             pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-            rosters = pq::BuildActiveFrozenQuorumRosters(
-                m_genesis_hash, *m_quorum_build_config,
-                response_index->nHeight, *response_index, lookup,
-                &build_error);
+            rosters = roster_cache->GetActive(
+                response_index->nHeight, *response_index, &build_error);
         }
         if (!rosters || rosters->back().descriptor.epoch != *epoch) {
             continue;
@@ -7213,6 +7194,8 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         !pq::IsBTCHeaderPolicyEnabled()) {
         return false;
     }
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return false;
 
     std::optional<pq::PaymentAuditStatement> cached_statement;
     {
@@ -7407,12 +7390,6 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         // or snapshot discontinuity before an audit key can be consumed.
         pq::FrozenQuorumRostersPtr response_rosters;
         {
-            pq::QuorumSnapshotLookup lookup;
-            {
-                LOCK(m_lookup_mutex);
-                lookup = m_quorum_snapshot_lookup;
-            }
-            if (!lookup) continue;
             LOCK(cs_main);
             const CBlockIndex* tip{m_chainman.ActiveTip()};
             const CBlockIndex* response{
@@ -7425,9 +7402,8 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             }
             pq::QuorumBuildError build_error{
                 pq::QuorumBuildError::NONE};
-            response_rosters = pq::BuildActiveFrozenQuorumRosters(
-                m_genesis_hash, *m_quorum_build_config,
-                response->nHeight, *response, lookup, &build_error);
+            response_rosters = roster_cache->GetActive(
+                response->nHeight, *response, &build_error);
         }
         if (!response_rosters ||
             response_rosters->back().descriptor.epoch != epoch ||
@@ -7799,12 +7775,8 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
                               *expected_seal) {
         return nullptr;
     }
-    pq::QuorumSnapshotLookup lookup;
-    {
-        LOCK(m_lookup_mutex);
-        lookup = m_quorum_snapshot_lookup;
-    }
-    if (!lookup) {
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
         }
@@ -7948,9 +7920,8 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
     pq::FrozenQuorumRostersPtr seal_rosters;
     try {
-        seal_rosters = pq::BuildActiveFrozenQuorumRosters(
-            m_genesis_hash, *m_quorum_build_config, seal->nHeight, *seal,
-            lookup, &build_error);
+        seal_rosters = roster_cache->GetActive(
+            seal->nHeight, *seal, &build_error);
     } catch (const std::exception&) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
@@ -7974,9 +7945,8 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     }
     pq::FrozenQuorumRostersPtr response_rosters;
     try {
-        response_rosters = pq::BuildActiveFrozenQuorumRosters(
-            m_genesis_hash, *m_quorum_build_config, response->nHeight,
-            *response, lookup, &build_error);
+        response_rosters = roster_cache->GetActive(
+            response->nHeight, *response, &build_error);
     } catch (const std::exception&) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
@@ -8016,7 +7986,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     }
     std::optional<pq::QuorumSnapshotState> snapshot_state;
     try {
-        snapshot_state = lookup(*snapshot_index);
+        snapshot_state = roster_cache->LookupSnapshot(*snapshot_index);
     } catch (const std::exception&) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
