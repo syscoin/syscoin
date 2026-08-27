@@ -743,6 +743,12 @@ BOOST_AUTO_TEST_CASE(pq_payment_eligibility_follows_consensus_ban_state)
 
 BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
 {
+    llmq::pq::PQPaymentProbationManager probation_manager{DBParams{
+        .path = "testdb_dmn_payment_probation_view",
+        .cache_bytes = static_cast<std::size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    }};
     std::array<CDeterministicMNCPtr, 3> members{
         MakeLegacyReplayMN(30, 10), MakeLegacyReplayMN(31, 11),
         MakeLegacyReplayMN(32, 12)};
@@ -757,10 +763,18 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
     std::sort(partial.entries.begin(), partial.entries.end(),
               [](const auto& left, const auto& right) {
                   return left.pro_tx_hash < right.pro_tx_hash;
-              });
+    });
     BOOST_REQUIRE(partial.IsStructurallyValid());
+    const auto partial_hash{
+        llmq::pq::GetPQPaymentProbationStateHash(partial)};
+    BOOST_REQUIRE(partial_hash);
+    BOOST_REQUIRE(probation_manager.CommitState(
+        partial, *partial_hash, /*fJustCheck=*/false));
+    llmq::pq::PQPaymentProbationStateView partial_view;
+    BOOST_REQUIRE(probation_manager.GetStateView(*partial_hash,
+                                                 partial_view));
     const auto projected{list.GetProjectedMNPayees(
-        std::numeric_limits<int>::max(), &partial)};
+        std::numeric_limits<int>::max(), &partial_view)};
     BOOST_REQUIRE_EQUAL(projected.size(), 1U);
     BOOST_CHECK(projected.front()->proTxHash == members[1]->proTxHash);
 
@@ -771,10 +785,16 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
     std::sort(all.entries.begin(), all.entries.end(),
               [](const auto& left, const auto& right) {
                   return left.pro_tx_hash < right.pro_tx_hash;
-              });
+    });
     BOOST_REQUIRE(all.IsStructurallyValid());
+    const auto all_hash{llmq::pq::GetPQPaymentProbationStateHash(all)};
+    BOOST_REQUIRE(all_hash);
+    BOOST_REQUIRE(probation_manager.CommitState(
+        all, *all_hash, /*fJustCheck=*/false));
+    llmq::pq::PQPaymentProbationStateView all_view;
+    BOOST_REQUIRE(probation_manager.GetStateView(*all_hash, all_view));
     const auto fallback{list.GetProjectedMNPayees(
-        std::numeric_limits<int>::max(), &all)};
+        std::numeric_limits<int>::max(), &all_view)};
     const auto ordinary{list.GetProjectedMNPayees()};
     BOOST_CHECK(fallback == ordinary);
 
@@ -788,11 +808,12 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
     }};
     const auto pq_payment_eligible{sorted_hashes(
         {members[1]->proTxHash, members[2]->proTxHash})};
-    BOOST_REQUIRE(list.GetMNPayee(&all, &pq_payment_eligible));
-    BOOST_CHECK(list.GetMNPayee(&all, &pq_payment_eligible)->proTxHash ==
+    BOOST_REQUIRE(list.GetMNPayee(&all_view, &pq_payment_eligible));
+    BOOST_CHECK(list.GetMNPayee(&all_view, &pq_payment_eligible)->proTxHash ==
                 members[1]->proTxHash);
     const auto filtered_fallback{list.GetProjectedMNPayees(
-        std::numeric_limits<int>::max(), &all, &pq_payment_eligible)};
+        std::numeric_limits<int>::max(), &all_view,
+        &pq_payment_eligible)};
     const auto filtered_ordinary{list.GetProjectedMNPayees(
         std::numeric_limits<int>::max(), nullptr, &pq_payment_eligible)};
     BOOST_CHECK(filtered_fallback == filtered_ordinary);
@@ -804,9 +825,9 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
         }));
 
     const std::vector<uint256> no_pq_payment_eligible;
-    BOOST_CHECK(!list.GetMNPayee(&all, &no_pq_payment_eligible));
+    BOOST_CHECK(!list.GetMNPayee(&all_view, &no_pq_payment_eligible));
     BOOST_CHECK(list.GetProjectedMNPayees(
-                         std::numeric_limits<int>::max(), &all,
+                         std::numeric_limits<int>::max(), &all_view,
                          &no_pq_payment_eligible)
                     .empty());
 
@@ -912,6 +933,30 @@ BOOST_AUTO_TEST_CASE(exact_parent_payee_cache_is_branch_bounded)
     stats = manager.GetMNPayeeCacheStatsForTesting();
     BOOST_CHECK_EQUAL(stats.builds, 3U);
     BOOST_CHECK_EQUAL(stats.hits, 3U);
+
+    // The exact-parent hot reader shares one authenticated indexed state
+    // across consumers; changing only that root creates one payee-cache key.
+    llmq::pq::PQPaymentProbationState probation;
+    probation.entries.push_back({member_a->proTxHash, 1, -1});
+    const auto probation_hash{
+        llmq::pq::GetPQPaymentProbationStateHash(probation)};
+    BOOST_REQUIRE(probation_hash);
+    BOOST_REQUIRE(manager.CommitPaymentProbationState(
+        probation, *probation_hash, /*fJustCheck=*/false));
+    index_a.pqPaymentProbationStateHash = *probation_hash;
+    llmq::pq::PQPaymentProbationStateView view_a;
+    llmq::pq::PQPaymentProbationStateView view_b;
+    BOOST_REQUIRE(manager.GetPaymentProbationStateView(&index_a, view_a));
+    BOOST_REQUIRE(manager.GetPaymentProbationStateView(&index_a, view_b));
+    BOOST_CHECK(view_a.SharesStateWith(view_b));
+    BOOST_CHECK_EQUAL(view_a.MissCount(member_a->proTxHash), 1U);
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.builds, 4U);
+    BOOST_CHECK_EQUAL(stats.hits, 4U);
 }
 
 // SYSCOIN: A legacy projection ends where root eligibility begins.

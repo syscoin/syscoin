@@ -59,12 +59,12 @@ bool VerifyActivePQAnchors(const Chainstate& chainstate)
     const auto finality_configuration =
         Consensus::CheckPQChainLockAnchorConfiguration(consensus);
     const CBlockIndex* tip = chainstate.m_chain.Tip();
-    llmq::pq::PQPaymentProbationState probation_state;
+    llmq::pq::PQPaymentProbationStateView probation_state;
     if (tip != nullptr && tip->nHeight >= consensus.DIP0003Height &&
         (deterministicMNManager == nullptr ||
          !deterministicMNManager->VerifyPersistedSnapshot(tip) ||
          !deterministicMNManager->VerifyInverseJournalTipSeal(tip) ||
-         !deterministicMNManager->GetPaymentProbationState(
+         !deterministicMNManager->GetPaymentProbationStateView(
              tip, probation_state))) {
         // The inverse DB is intentionally versioned and not backfilled from a
         // bounded snapshot window. Fresh sync or reindex inductively publishes

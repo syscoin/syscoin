@@ -2381,9 +2381,10 @@ static bool ConnectPaymentAuditReceiptState(
                 }
                 compact_replay = true;
                 start_preseal = !prefix_authenticated;
-                llmq::pq::PQPaymentProbationState previous_probation;
-                if (!deterministicMNManager->GetPaymentProbationState(
-                        index.pprev, previous_probation)) {
+                llmq::pq::PQPaymentProbationStateView previous_probation;
+                if (!deterministicMNManager->GetPaymentProbationStateView(
+                        index.pprev, previous_probation) ||
+                    previous_probation.State() == nullptr) {
                     return state.Error(
                         "pq-payment-audit-probation-state-unavailable");
                 }
@@ -2391,7 +2392,8 @@ static bool ConnectPaymentAuditReceiptState(
                     llmq::pq::PQPaymentProbationError::NONE};
                 compact_transition =
                     llmq::pq::ApplyPQPaymentProbationTransition(
-                        previous_probation, input, &transition_error);
+                        *previous_probation.State(), input,
+                        &transition_error);
                 if (!compact_transition ||
                     compact_transition->undo.applied_state_hash !=
                         receipt.next_probation_state_hash) {

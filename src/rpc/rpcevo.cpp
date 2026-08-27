@@ -23,7 +23,7 @@ UniValue BuildDMNListEntry(
     const node::NodeContext& node,
     const CDeterministicMN& dmn,
     bool detailed,
-    const llmq::pq::PQPaymentProbationState* payment_state = nullptr)
+    const llmq::pq::PQPaymentProbationStateView* payment_state = nullptr)
 {
     if (!detailed) {
         return dmn.proTxHash.ToString();
@@ -93,7 +93,7 @@ static RPCHelpMan protx_list()
     }
     if (type == "valid" || type == "registered") {
         CDeterministicMNList mnList;
-        llmq::pq::PQPaymentProbationState payment_state;
+        llmq::pq::PQPaymentProbationStateView payment_state;
         bool detailed = !request.params[1].isNull() ? request.params[1].get_bool() : false;
         {
             LOCK(cs_main);
@@ -104,7 +104,7 @@ static RPCHelpMan protx_list()
             const CBlockIndex* index{node.chainman->ActiveChain()[height]};
             mnList = deterministicMNManager->GetListForBlock(index);
             if (detailed &&
-                !deterministicMNManager->GetPaymentProbationState(
+                !deterministicMNManager->GetPaymentProbationStateView(
                     index, payment_state)) {
                 throw JSONRPCError(
                     RPC_INTERNAL_ERROR,
@@ -148,12 +148,12 @@ static RPCHelpMan protx_info()
     const node::NodeContext& node = EnsureAnyNodeContext(request.context);
     uint256 proTxHash = ParseHashV(request.params[0], "proTxHash");
     CDeterministicMNList mnList;
-    llmq::pq::PQPaymentProbationState payment_state;
+    llmq::pq::PQPaymentProbationStateView payment_state;
     {
         LOCK(cs_main);
         const CBlockIndex* tip{node.chainman->ActiveTip()};
         if (tip == nullptr ||
-            !deterministicMNManager->GetPaymentProbationState(
+            !deterministicMNManager->GetPaymentProbationStateView(
                 tip, payment_state)) {
             throw JSONRPCError(RPC_INTERNAL_ERROR,
                                "payment audit state is unavailable");

@@ -33,7 +33,7 @@ constexpr int COLUMN_NEVM_ADDRESS{11};
 constexpr int COLUMN_PAYMENT_AUDIT_MISSES{12};
 constexpr int COLUMN_PROTX_HASH{13};
 
-std::optional<llmq::pq::PQPaymentProbationState>
+std::optional<llmq::pq::PQPaymentProbationStateView>
 GetPaymentAuditState(const ClientModel& client_model,
                      const CDeterministicMNList& mn_list)
 {
@@ -47,9 +47,10 @@ GetPaymentAuditState(const ClientModel& client_model,
     const CBlockIndex* index{
         context->chainman->m_blockman.LookupBlockIndex(
             mn_list.GetBlockHash())};
-    llmq::pq::PQPaymentProbationState state;
+    llmq::pq::PQPaymentProbationStateView state;
     if (index == nullptr ||
-        !deterministicMNManager->GetPaymentProbationState(index, state)) {
+        !deterministicMNManager->GetPaymentProbationStateView(index,
+                                                              state)) {
         return std::nullopt;
     }
     return state;

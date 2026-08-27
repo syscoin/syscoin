@@ -9,12 +9,21 @@
 
 #include <algorithm>
 #include <ios>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 namespace llmq::pq {
+
+struct PQPaymentProbationStateViewData {
+    uint256 state_hash;
+    PQPaymentProbationState state;
+    std::unordered_map<uint256, std::size_t, StaticSaltedHasher>
+        entry_index;
+};
+
 namespace {
 
 constexpr uint32_t PAYMENT_PROBATION_GC_VERSION{1};
@@ -162,16 +171,71 @@ struct ExactPaymentProbationStateValue {
 
 } // namespace
 
+PQPaymentProbationStateView::PQPaymentProbationStateView(
+    std::shared_ptr<const PQPaymentProbationStateViewData> state)
+    : m_state{std::move(state)}
+{
+}
+
+bool PQPaymentProbationStateView::IsValid() const noexcept
+{
+    return m_state != nullptr;
+}
+
+uint256 PQPaymentProbationStateView::StateHash() const noexcept
+{
+    return IsValid() ? m_state->state_hash : uint256{};
+}
+
+const PQPaymentProbationState*
+PQPaymentProbationStateView::State() const noexcept
+{
+    return IsValid() ? &m_state->state : nullptr;
+}
+
+uint8_t PQPaymentProbationStateView::MissCount(
+    const uint256& pro_tx_hash) const noexcept
+{
+    if (!IsValid() || pro_tx_hash.IsNull()) return 0;
+    const auto position{m_state->entry_index.find(pro_tx_hash)};
+    return position == m_state->entry_index.end()
+        ? 0
+        : m_state->state.entries[position->second].consecutive_misses;
+}
+
+bool PQPaymentProbationStateView::IsPaymentWithheld(
+    const uint256& pro_tx_hash) const noexcept
+{
+    return MissCount(pro_tx_hash) == PQ_PAYMENT_PROBATION_MAX_MISSES;
+}
+
+int32_t PQPaymentProbationStateView::PaymentEligibleSinceHeight(
+    const uint256& pro_tx_hash) const noexcept
+{
+    if (!IsValid() || pro_tx_hash.IsNull()) return -1;
+    const auto position{m_state->entry_index.find(pro_tx_hash)};
+    return position == m_state->entry_index.end()
+        ? -1
+        : m_state->state.entries[position->second]
+              .payment_eligible_since_height;
+}
+
+bool PQPaymentProbationStateView::SharesStateWith(
+    const PQPaymentProbationStateView& other) const noexcept
+{
+    return IsValid() && other.IsValid() && m_state == other.m_state;
+}
+
 PQPaymentProbationManager::PQPaymentProbationManager(
     const DBParams& db_params)
     : m_state_db(std::make_unique<CEvoDB<
           uint256, PQPaymentProbationState, StaticSaltedHasher>>(
           PaymentProbationDBParams(db_params),
           /*maxCacheSizeIn=*/0,
-          /*maxReadCacheSizeIn=*/64))
+          /*maxReadCacheSizeIn=*/0))
 {
-    const auto empty_hash{
-        GetPQPaymentProbationStateHash(PQPaymentProbationState{})};
+    PQPaymentProbationState empty_state;
+    const auto empty_hash{GetPQPaymentProbationStateHash(empty_state)};
     if (!empty_hash) {
         throw std::runtime_error{
             "failed to derive empty payment probation state"};
@@ -181,26 +245,130 @@ PQPaymentProbationManager::PQPaymentProbationManager(
         throw std::runtime_error{
             "payment probation empty-state hash collides with metadata key"};
     }
+    auto empty_view{std::make_shared<PQPaymentProbationStateViewData>()};
+    empty_view->state_hash = m_empty_state_hash;
+    empty_view->state = std::move(empty_state);
+    m_empty_state_view = std::move(empty_view);
+}
+
+PQPaymentProbationManager::StateViewDataPtr
+PQPaymentProbationManager::BuildValidatedStateView(
+    const uint256& state_hash,
+    PQPaymentProbationState state) const
+{
+    if (state_hash.IsNull() || state_hash == PaymentProbationGCKey()) {
+        return nullptr;
+    }
+    auto view{std::make_shared<PQPaymentProbationStateViewData>()};
+    view->state_hash = state_hash;
+    view->state = std::move(state);
+    view->entry_index.reserve(view->state.entries.size());
+    for (std::size_t index{0}; index < view->state.entries.size(); ++index) {
+        if (!view->entry_index
+                 .emplace(view->state.entries[index].pro_tx_hash, index)
+                 .second) {
+            return nullptr;
+        }
+    }
+    ++m_state_view_builds;
+    return view;
+}
+
+bool PQPaymentProbationManager::PublishStateView(
+    StateViewDataPtr state,
+    StateViewDataPtr* published) const
+{
+    if (!state || state->state_hash.IsNull() ||
+        state->state_hash == PaymentProbationGCKey() ||
+        state->state_hash == m_empty_state_hash) {
+        return false;
+    }
+
+    const auto existing{m_state_view_cache_index.find(state->state_hash)};
+    if (existing != m_state_view_cache_index.end()) {
+        m_state_view_cache.splice(m_state_view_cache.end(),
+                                  m_state_view_cache, existing->second);
+        if (published != nullptr) *published = existing->second->second;
+        return true;
+    }
+
+    m_state_view_cache.emplace_back(state->state_hash, std::move(state));
+    const auto inserted{std::prev(m_state_view_cache.end())};
+    try {
+        if (!m_state_view_cache_index.emplace(inserted->first, inserted)
+                 .second) {
+            m_state_view_cache.pop_back();
+            return false;
+        }
+    } catch (...) {
+        m_state_view_cache.pop_back();
+        throw;
+    }
+    if (published != nullptr) *published = inserted->second;
+
+    while (m_state_view_cache.size() > STATE_VIEW_CACHE_SIZE) {
+        m_state_view_cache_index.erase(m_state_view_cache.front().first);
+        m_state_view_cache.pop_front();
+    }
+    return true;
+}
+
+void PQPaymentProbationManager::EvictStateView(
+    const uint256& state_hash)
+{
+    const auto position{m_state_view_cache_index.find(state_hash)};
+    if (position == m_state_view_cache_index.end()) return;
+    m_state_view_cache.erase(position->second);
+    m_state_view_cache_index.erase(position);
+}
+
+bool PQPaymentProbationManager::GetStateView(
+    const uint256& state_hash,
+    PQPaymentProbationStateView& view) const
+{
+    view = PQPaymentProbationStateView{};
+    LOCK(m_mutex);
+    if (state_hash.IsNull() || state_hash == PaymentProbationGCKey()) {
+        return false;
+    }
+    if (state_hash == m_empty_state_hash) {
+        ++m_state_view_cache_hits;
+        view = PQPaymentProbationStateView{m_empty_state_view};
+        return true;
+    }
+
+    const auto cached{m_state_view_cache_index.find(state_hash)};
+    if (cached != m_state_view_cache_index.end()) {
+        m_state_view_cache.splice(m_state_view_cache.end(),
+                                  m_state_view_cache, cached->second);
+        ++m_state_view_cache_hits;
+        view = PQPaymentProbationStateView{cached->second->second};
+        return true;
+    }
+
+    ++m_state_view_cache_misses;
+    PQPaymentProbationState state;
+    if (!m_state_db->ReadCache(state_hash, state)) return false;
+    const auto actual_hash{GetPQPaymentProbationStateHash(state)};
+    if (!actual_hash || *actual_hash != state_hash) return false;
+    auto built{BuildValidatedStateView(state_hash, std::move(state))};
+    if (!built) return false;
+    StateViewDataPtr published;
+    if (!PublishStateView(std::move(built), &published)) return false;
+    view = PQPaymentProbationStateView{std::move(published)};
+    return true;
 }
 
 bool PQPaymentProbationManager::GetState(
     const uint256& state_hash,
     PQPaymentProbationState& state) const
 {
-    LOCK(m_mutex);
-    if (state_hash.IsNull() || state_hash == PaymentProbationGCKey()) {
+    PQPaymentProbationStateView view;
+    if (!GetStateView(state_hash, view) || view.State() == nullptr) {
         return false;
     }
-    if (state_hash == m_empty_state_hash) {
-        state = PQPaymentProbationState{};
-        return true;
-    }
-    if (!m_state_db->ReadCache(state_hash, state) ||
-        !state.IsStructurallyValid()) {
-        return false;
-    }
-    const auto actual_hash{GetPQPaymentProbationStateHash(state)};
-    return actual_hash && *actual_hash == state_hash;
+    state = *view.State();
+    return true;
 }
 
 bool PQPaymentProbationManager::CommitState(
@@ -218,9 +386,20 @@ bool PQPaymentProbationManager::CommitState(
 
     PQPaymentProbationState existing;
     if (m_state_db->ReadCache(expected_hash, existing)) {
-        return existing == state;
+        if (existing != state) return false;
+    } else if (!m_state_db->WriteThrough(expected_hash, state,
+                                         /*fSync=*/false)) {
+        return false;
     }
-    return m_state_db->WriteThrough(expected_hash, state, /*fSync=*/false);
+
+    const auto cached{m_state_view_cache_index.find(expected_hash)};
+    if (cached != m_state_view_cache_index.end()) {
+        m_state_view_cache.splice(m_state_view_cache.end(),
+                                  m_state_view_cache, cached->second);
+        return true;
+    }
+    auto built{BuildValidatedStateView(expected_hash, state)};
+    return built && PublishStateView(std::move(built));
 }
 
 bool PQPaymentProbationManager::Flush(bool fSync)
@@ -369,6 +548,9 @@ bool PQPaymentProbationManager::PruneStatesThroughCheckpoint(
     }
 
     for (const uint256& state_hash : prune_keys) {
+        // Future root resolution must fail after pruning, while a reader that
+        // already owns this immutable state may safely finish its operation.
+        EvictStateView(state_hash);
         // EraseCache removes both dirty and read-cache copies before staging a
         // tombstone, so a later lookup cannot resurrect the deleted state.
         m_state_db->EraseCache(state_hash);

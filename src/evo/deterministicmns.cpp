@@ -698,6 +698,17 @@ bool CDeterministicMNManager::EnsureRetainedSnapshotWindow(
     return EnsureRetainedSnapshotWindow(tip, tip_list);
 }
 
+bool CDeterministicMNManager::GetPaymentProbationStateView(
+    const CBlockIndex* pindex,
+    llmq::pq::PQPaymentProbationStateView& view) const
+{
+    const uint256 state_hash{
+        pindex == nullptr || pindex->pqPaymentProbationStateHash.IsNull()
+            ? m_payment_probation->EmptyStateHash()
+            : pindex->pqPaymentProbationStateHash};
+    return m_payment_probation->GetStateView(state_hash, view);
+}
+
 bool CDeterministicMNManager::GetPaymentProbationState(
     const CBlockIndex* pindex,
     llmq::pq::PQPaymentProbationState& state) const
@@ -810,8 +821,8 @@ bool CDeterministicMNManager::GetMNPayeeForBlock(
         return true;
     }
 
-    llmq::pq::PQPaymentProbationState payment_state;
-    if (!GetPaymentProbationState(pindex, payment_state)) return false;
+    llmq::pq::PQPaymentProbationStateView payment_state;
+    if (!GetPaymentProbationStateView(pindex, payment_state)) return false;
     llmq::pq::PQPaymentEligibleProTxHashesPtr pq_payment_eligible;
     if (!GetPQPaymentEligibleProTxHashes(pindex, pq_payment_eligible)) {
         return false;
@@ -891,8 +902,8 @@ bool CDeterministicMNManager::GetProjectedMNPayeesForBlock(
         return false;
     }
 
-    llmq::pq::PQPaymentProbationState payment_state;
-    if (!GetPaymentProbationState(pindex, payment_state)) return false;
+    llmq::pq::PQPaymentProbationStateView payment_state;
+    if (!GetPaymentProbationStateView(pindex, payment_state)) return false;
     llmq::pq::PQPaymentEligibleProTxHashesPtr pq_payment_eligible;
     if (!GetPQPaymentEligibleProTxHashes(pindex, pq_payment_eligible)) {
         return false;
@@ -1148,7 +1159,7 @@ CDeterministicMNCPtr CDeterministicMNList::GetMNByInternalId(uint64_t internalId
 
 static int CompareByLastPaid_GetHeight(
     const CDeterministicMN& dmn,
-    const llmq::pq::PQPaymentProbationState* payment_state = nullptr)
+    const llmq::pq::PQPaymentProbationStateView* payment_state = nullptr)
 {
     int height = dmn.pdmnState->nLastPaidHeight;
     if (dmn.pdmnState->nPoSeRevivedHeight != -1 && dmn.pdmnState->nPoSeRevivedHeight > height) {
@@ -1167,7 +1178,7 @@ static int CompareByLastPaid_GetHeight(
 static bool CompareByLastPaid(
     const CDeterministicMN& _a,
     const CDeterministicMN& _b,
-    const llmq::pq::PQPaymentProbationState* payment_state = nullptr)
+    const llmq::pq::PQPaymentProbationStateView* payment_state = nullptr)
 {
     int ah = CompareByLastPaid_GetHeight(_a, payment_state);
     int bh = CompareByLastPaid_GetHeight(_b, payment_state);
@@ -1184,7 +1195,7 @@ static bool CompareByLastPaid(const CDeterministicMN* _a,
 }
 
 CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
-    const llmq::pq::PQPaymentProbationState* payment_state,
+    const llmq::pq::PQPaymentProbationStateView* payment_state,
     const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible) const
 {
     if (mnMap.size() == 0) {
@@ -1225,7 +1236,7 @@ CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
 std::vector<CDeterministicMNCPtr>
 CDeterministicMNList::GetProjectedMNPayees(
     int nCount,
-    const llmq::pq::PQPaymentProbationState* payment_state,
+    const llmq::pq::PQPaymentProbationStateView* payment_state,
     const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible) const
 {
     if (nCount < 0 ) {

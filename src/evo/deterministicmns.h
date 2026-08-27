@@ -272,7 +272,7 @@ public:
     [[nodiscard]] CDeterministicMNCPtr GetMNByService(const CService& service) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByInternalId(uint64_t internalId) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNPayee(
-        const llmq::pq::PQPaymentProbationState* payment_state = nullptr,
+        const llmq::pq::PQPaymentProbationStateView* payment_state = nullptr,
         const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible =
             nullptr) const;
 
@@ -286,7 +286,7 @@ public:
      */
     [[nodiscard]] std::vector<CDeterministicMNCPtr> GetProjectedMNPayees(
         int nCount = std::numeric_limits<int>::max(),
-        const llmq::pq::PQPaymentProbationState* payment_state = nullptr,
+        const llmq::pq::PQPaymentProbationStateView* payment_state = nullptr,
         const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible =
             nullptr) const;
 
@@ -782,7 +782,13 @@ public:
                                llmq::pq::PQRegistryReadView& view,
                                std::string& error) const;
 
-    /** Resolve the exact branch-local payment-only probation state. */
+    /** Resolve an immutable exact branch-local payment-only state view. */
+    bool GetPaymentProbationStateView(
+        const CBlockIndex* pindex,
+        llmq::pq::PQPaymentProbationStateView& view) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Compatibility copying API retained for tests. */
     bool GetPaymentProbationState(
         const CBlockIndex* pindex,
         llmq::pq::PQPaymentProbationState& state) const

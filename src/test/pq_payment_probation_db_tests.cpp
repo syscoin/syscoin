@@ -13,6 +13,43 @@
 
 using namespace llmq::pq;
 
+namespace llmq::pq::test {
+
+struct PQPaymentProbationViewCacheStats {
+    std::size_t entries{0};
+    uint64_t hits{0};
+    uint64_t misses{0};
+    uint64_t builds{0};
+};
+
+class PQPaymentProbationManagerTestAccess {
+public:
+    static PQPaymentProbationViewCacheStats Stats(
+        const PQPaymentProbationManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        return {
+            manager.m_state_view_cache.size(),
+            manager.m_state_view_cache_hits,
+            manager.m_state_view_cache_misses,
+            manager.m_state_view_builds};
+    }
+
+    static bool IsCached(const PQPaymentProbationManager& manager,
+                         const uint256& state_hash)
+    {
+        LOCK(manager.m_mutex);
+        return manager.m_state_view_cache_index.count(state_hash) != 0;
+    }
+
+    static constexpr std::size_t Capacity()
+    {
+        return PQPaymentProbationManager::STATE_VIEW_CACHE_SIZE;
+    }
+};
+
+} // namespace llmq::pq::test
+
 namespace {
 
 uint256 NonNullHash(uint8_t value)
@@ -90,6 +127,7 @@ BOOST_FIXTURE_TEST_SUITE(pq_payment_probation_db_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(hash_addressed_commit_read_and_barrier)
 {
+    using Access = test::PQPaymentProbationManagerTestAccess;
     PQPaymentProbationManager manager{MemoryDB()};
     PQPaymentProbationState empty;
     BOOST_CHECK(manager.GetState(manager.EmptyStateHash(), empty));
@@ -104,9 +142,15 @@ BOOST_AUTO_TEST_CASE(hash_addressed_commit_read_and_barrier)
                                     /*fJustCheck=*/true));
     PQPaymentProbationState loaded;
     BOOST_CHECK(!manager.GetState(*state_hash, loaded));
+    auto stats{Access::Stats(manager)};
+    BOOST_CHECK_EQUAL(stats.entries, 0U);
+    BOOST_CHECK_EQUAL(stats.builds, 0U);
 
     BOOST_CHECK(manager.CommitState(state, *state_hash,
                                     /*fJustCheck=*/false));
+    stats = Access::Stats(manager);
+    BOOST_CHECK_EQUAL(stats.entries, 1U);
+    BOOST_CHECK_EQUAL(stats.builds, 1U);
     BOOST_CHECK(manager.GetState(*state_hash, loaded));
     BOOST_CHECK(loaded == state);
 
@@ -116,6 +160,66 @@ BOOST_AUTO_TEST_CASE(hash_addressed_commit_read_and_barrier)
     BOOST_CHECK(manager.Flush(/*fSync=*/true));
 
     BOOST_CHECK(!manager.CommitState(state, NonNullHash(9), false));
+}
+
+BOOST_AUTO_TEST_CASE(shared_views_are_authenticated_indexed_and_bounded)
+{
+    using Access = test::PQPaymentProbationManagerTestAccess;
+    PQPaymentProbationManager manager{MemoryDB()};
+    BOOST_CHECK_EQUAL(manager.StateDatabaseForTesting().GetReadCacheSize(),
+                      0U);
+
+    PQPaymentProbationStateView empty_a;
+    PQPaymentProbationStateView empty_b;
+    BOOST_REQUIRE(manager.GetStateView(manager.EmptyStateHash(), empty_a));
+    BOOST_REQUIRE(manager.GetStateView(manager.EmptyStateHash(), empty_b));
+    BOOST_CHECK(empty_a.IsValid());
+    BOOST_CHECK(empty_a.SharesStateWith(empty_b));
+    BOOST_CHECK(empty_a.StateHash() == manager.EmptyStateHash());
+    BOOST_REQUIRE(empty_a.State() != nullptr);
+    BOOST_CHECK(*empty_a.State() == PQPaymentProbationState{});
+    BOOST_CHECK_EQUAL(Access::Stats(manager).entries, 0U);
+
+    PQPaymentProbationState first;
+    first.entries = {
+        {NonNullHash(20), 1, 9},
+        {NonNullHash(21), 2, 10},
+    };
+    const uint256 first_hash{Commit(manager, first)};
+    PQPaymentProbationStateView first_a;
+    PQPaymentProbationStateView first_b;
+    BOOST_REQUIRE(manager.GetStateView(first_hash, first_a));
+    BOOST_REQUIRE(manager.GetStateView(first_hash, first_b));
+    BOOST_CHECK(first_a.SharesStateWith(first_b));
+    BOOST_CHECK_EQUAL(first_a.MissCount(NonNullHash(20)), 1U);
+    BOOST_CHECK_EQUAL(first_a.MissCount(NonNullHash(21)), 2U);
+    BOOST_CHECK(first_a.IsPaymentWithheld(NonNullHash(21)));
+    BOOST_CHECK_EQUAL(first_a.PaymentEligibleSinceHeight(NonNullHash(20)),
+                      9);
+    BOOST_CHECK_EQUAL(first_a.MissCount(NonNullHash(22)), 0U);
+    BOOST_CHECK_EQUAL(first_a.PaymentEligibleSinceHeight(NonNullHash(22)),
+                      -1);
+
+    for (std::size_t offset{1}; offset <= Access::Capacity(); ++offset) {
+        Commit(manager,
+               StateAtEpoch(static_cast<uint32_t>(100 + offset),
+                            static_cast<uint8_t>(30 + offset)));
+    }
+    auto stats{Access::Stats(manager)};
+    BOOST_CHECK_EQUAL(stats.entries, Access::Capacity());
+    BOOST_CHECK(!Access::IsCached(manager, first_hash));
+
+    PQPaymentProbationStateView rebuilt;
+    BOOST_REQUIRE(manager.GetStateView(first_hash, rebuilt));
+    BOOST_CHECK(!rebuilt.SharesStateWith(first_a));
+    BOOST_CHECK_EQUAL(rebuilt.MissCount(NonNullHash(21)), 2U);
+    stats = Access::Stats(manager);
+    BOOST_CHECK_EQUAL(stats.entries, Access::Capacity());
+    BOOST_CHECK_GE(stats.hits, 4U);
+    BOOST_CHECK_GE(stats.misses, 1U);
+    BOOST_CHECK_GE(stats.builds, Access::Capacity() + 2);
+    BOOST_CHECK_EQUAL(manager.StateDatabaseForTesting().GetReadCacheSize(),
+                      0U);
 }
 
 BOOST_AUTO_TEST_CASE(probation_survives_process_restart)
@@ -137,10 +241,12 @@ BOOST_AUTO_TEST_CASE(probation_survives_process_restart)
     }
 
     PQPaymentProbationManager restarted{DiskDB(path, /*wipe=*/false)};
-    PQPaymentProbationState restored;
-    BOOST_REQUIRE(restarted.GetState(state_hash, restored));
+    PQPaymentProbationStateView restored;
+    BOOST_REQUIRE(restarted.GetStateView(state_hash, restored));
     BOOST_CHECK_EQUAL(restored.MissCount(pro_tx_hash), 2U);
     BOOST_CHECK(restored.IsPaymentWithheld(pro_tx_hash));
+    BOOST_CHECK_EQUAL(restarted.StateDatabaseForTesting().GetReadCacheSize(),
+                      0U);
 }
 
 BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
@@ -164,10 +270,12 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         cursorless_hash = Commit(manager, cursorless);
         empty_hash = manager.EmptyStateHash();
 
-        // Warm the read cache before pruning. The tombstone path must evict
-        // this copy as well as deleting the persisted record.
-        PQPaymentProbationState loaded;
-        BOOST_REQUIRE(manager.GetState(pruned_hash, loaded));
+        // Warm the immutable view cache before pruning. The tombstone path
+        // drops manager ownership while existing readers finish safely.
+        PQPaymentProbationStateView pruned_view;
+        PQPaymentProbationStateView retained_view;
+        BOOST_REQUIRE(manager.GetStateView(pruned_hash, pruned_view));
+        BOOST_REQUIRE(manager.GetStateView(retained_hash, retained_view));
 
         const std::array<uint256, 1> retained{retained_hash};
         BOOST_CHECK(!manager.IsGCCompleteForCheckpoint(checkpoint));
@@ -175,7 +283,17 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
             checkpoint, retained));
         BOOST_CHECK(manager.IsGCCompleteForCheckpoint(checkpoint));
 
-        BOOST_CHECK(!manager.GetState(pruned_hash, loaded));
+        PQPaymentProbationStateView loaded_view;
+        BOOST_CHECK(!manager.GetStateView(pruned_hash, loaded_view));
+        BOOST_CHECK(!loaded_view.IsValid());
+        BOOST_CHECK(!test::PQPaymentProbationManagerTestAccess::IsCached(
+            manager, pruned_hash));
+        BOOST_CHECK(pruned_view.IsValid());
+        BOOST_CHECK_EQUAL(pruned_view.MissCount(NonNullHash(101)), 1U);
+        BOOST_REQUIRE(manager.GetStateView(retained_hash, loaded_view));
+        BOOST_CHECK(loaded_view.SharesStateWith(retained_view));
+
+        PQPaymentProbationState loaded;
         BOOST_CHECK(manager.GetState(retained_hash, loaded));
         BOOST_CHECK(manager.GetState(newer_hash, loaded));
         BOOST_CHECK(manager.GetState(cursorless_hash, loaded));
@@ -211,6 +329,11 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_validates_every_record_before_erasing)
     BOOST_REQUIRE(GetPQPaymentProbationStateHash(corrupt) != wrong_hash);
     BOOST_REQUIRE(manager.StateDatabaseForTesting().WriteThrough(
         wrong_hash, corrupt, /*fSync=*/false));
+    PQPaymentProbationStateView corrupt_view;
+    BOOST_CHECK(!manager.GetStateView(wrong_hash, corrupt_view));
+    BOOST_CHECK(!corrupt_view.IsValid());
+    BOOST_CHECK(!test::PQPaymentProbationManagerTestAccess::IsCached(
+        manager, wrong_hash));
 
     BOOST_CHECK(!manager.PruneStatesThroughCheckpoint(
         Checkpoint(/*epoch=*/10, /*tag=*/50),

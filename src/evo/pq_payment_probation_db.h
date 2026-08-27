@@ -11,10 +11,52 @@
 #include <saltedhasher.h>
 #include <sync.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <list>
 #include <memory>
 #include <span>
+#include <unordered_map>
+#include <utility>
 
 namespace llmq::pq {
+
+struct PQPaymentProbationStateViewData;
+class PQPaymentProbationManager;
+
+namespace test {
+class PQPaymentProbationManagerTestAccess;
+}
+
+/**
+ * Immutable ownership handle for one hash-authenticated probation state.
+ * The backing state and its lookup index are shared by all readers of the
+ * same root without exposing mutable cache or database ownership.
+ */
+class PQPaymentProbationStateView {
+public:
+    PQPaymentProbationStateView() = default;
+
+    [[nodiscard]] bool IsValid() const noexcept;
+    [[nodiscard]] uint256 StateHash() const noexcept;
+    [[nodiscard]] const PQPaymentProbationState* State() const noexcept;
+    [[nodiscard]] uint8_t MissCount(
+        const uint256& pro_tx_hash) const noexcept;
+    [[nodiscard]] bool IsPaymentWithheld(
+        const uint256& pro_tx_hash) const noexcept;
+    [[nodiscard]] int32_t PaymentEligibleSinceHeight(
+        const uint256& pro_tx_hash) const noexcept;
+    [[nodiscard]] bool SharesStateWith(
+        const PQPaymentProbationStateView& other) const noexcept;
+
+private:
+    explicit PQPaymentProbationStateView(
+        std::shared_ptr<const PQPaymentProbationStateViewData> state);
+
+    std::shared_ptr<const PQPaymentProbationStateViewData> m_state;
+
+    friend class PQPaymentProbationManager;
+};
 
 /**
  * Hash-addressed branch state for payment probation. Only receipt transitions
@@ -22,10 +64,36 @@ namespace llmq::pq {
  */
 class PQPaymentProbationManager {
 private:
+    static constexpr std::size_t STATE_VIEW_CACHE_SIZE{8};
+    using StateViewDataPtr =
+        std::shared_ptr<const PQPaymentProbationStateViewData>;
+    using StateViewCacheList =
+        std::list<std::pair<uint256, StateViewDataPtr>>;
+    using StateViewCacheMap = std::unordered_map<
+        uint256, StateViewCacheList::iterator, StaticSaltedHasher>;
+
     mutable Mutex m_mutex;
     std::unique_ptr<CEvoDB<uint256, PQPaymentProbationState,
                            StaticSaltedHasher>> m_state_db;
     uint256 m_empty_state_hash;
+    StateViewDataPtr m_empty_state_view;
+    mutable StateViewCacheList m_state_view_cache GUARDED_BY(m_mutex);
+    mutable StateViewCacheMap m_state_view_cache_index GUARDED_BY(m_mutex);
+    mutable uint64_t m_state_view_cache_hits GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_state_view_cache_misses GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_state_view_builds GUARDED_BY(m_mutex){0};
+
+    /** Build the index only after the caller authenticated the exact root. */
+    [[nodiscard]] StateViewDataPtr BuildValidatedStateView(
+        const uint256& state_hash,
+        PQPaymentProbationState state) const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool PublishStateView(
+        StateViewDataPtr state,
+        StateViewDataPtr* published = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void EvictStateView(const uint256& state_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
 
 public:
     explicit PQPaymentProbationManager(const DBParams& db_params);
@@ -35,6 +103,13 @@ public:
         return m_empty_state_hash;
     }
 
+    /** Resolve one authenticated shared state without copying its entries. */
+    [[nodiscard]] bool GetStateView(
+        const uint256& state_hash,
+        PQPaymentProbationStateView& view) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Compatibility copying API retained for tests. */
     [[nodiscard]] bool GetState(const uint256& state_hash,
                                 PQPaymentProbationState& state) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -74,6 +149,8 @@ public:
     {
         return *m_state_db;
     }
+
+    friend class test::PQPaymentProbationManagerTestAccess;
 };
 
 } // namespace llmq::pq

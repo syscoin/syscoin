@@ -145,9 +145,9 @@ DerivePaymentAuditProbationTransition(
             commitment.previous_probation_state_hash) {
         return std::nullopt;
     }
-    pq::PQPaymentProbationState previous;
-    if (!deterministicMNManager->GetPaymentProbationState(
-            &carrier_parent, previous)) {
+    pq::PQPaymentProbationStateView previous;
+    if (!deterministicMNManager->GetPaymentProbationStateView(
+            &carrier_parent, previous) || previous.State() == nullptr) {
         if (local_error != nullptr) *local_error = true;
         return std::nullopt;
     }
@@ -179,7 +179,7 @@ DerivePaymentAuditProbationTransition(
               input.existing_pro_tx_hashes.end());
     std::sort(input.current_valid_pro_tx_hashes.begin(),
               input.current_valid_pro_tx_hashes.end());
-    return pq::ApplyPQPaymentProbationTransition(previous, input);
+    return pq::ApplyPQPaymentProbationTransition(*previous.State(), input);
 }
 
 class ScopedFinalitySnapshotVerificationRetention final
