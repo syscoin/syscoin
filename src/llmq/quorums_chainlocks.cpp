@@ -804,6 +804,85 @@ const char* FinalityErrorString(pq::ChainLockFinalityError error)
 
 CChainLocksHandler* chainLocksHandler{nullptr};
 
+std::optional<pq::PaymentAuditReceipt> PaymentAuditReceiptCache::Get(
+    const Key& key) const
+{
+    LOCK(m_mutex);
+    for (auto& entry : m_entries) {
+        if (entry.occupied && entry.key == key) {
+            entry.recently_used = true;
+            ++m_hits;
+            return entry.receipt;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<pq::PaymentAuditReceipt> PaymentAuditReceiptCache::Publish(
+    const Key& key, const pq::PaymentAuditReceipt& receipt)
+{
+    if (receipt.IsNull() || !receipt.IsStructurallyValid()) {
+        return std::nullopt;
+    }
+
+    LOCK(m_mutex);
+    ++m_builds;
+    for (auto& entry : m_entries) {
+        if (!entry.occupied || entry.key != key) continue;
+        entry.recently_used = true;
+        if (entry.receipt != receipt) {
+            ++m_conflicts;
+            return std::nullopt;
+        }
+        return entry.receipt;
+    }
+
+    std::optional<std::size_t> victim;
+    for (std::size_t index{0}; index < m_entries.size(); ++index) {
+        if (!m_entries[index].occupied) {
+            victim = index;
+            break;
+        }
+    }
+    while (!victim) {
+        const std::size_t index{m_clock};
+        m_clock = (m_clock + 1) % m_entries.size();
+        auto& candidate{m_entries[index]};
+        if (!candidate.recently_used) {
+            victim = index;
+        } else {
+            candidate.recently_used = false;
+        }
+    }
+
+    auto& entry{m_entries[*victim]};
+    entry.key = key;
+    entry.receipt = receipt;
+    entry.occupied = true;
+    entry.recently_used = true;
+    return entry.receipt;
+}
+
+void PaymentAuditReceiptCache::Clear()
+{
+    LOCK(m_mutex);
+    m_entries = {};
+    m_clock = 0;
+}
+
+PaymentAuditReceiptCache::Stats
+PaymentAuditReceiptCache::StatsForTesting() const
+{
+    LOCK(m_mutex);
+    return Stats{
+        static_cast<std::size_t>(std::count_if(
+            m_entries.begin(), m_entries.end(),
+            [](const Entry& entry) { return entry.occupied; })),
+        m_hits,
+        m_builds,
+        m_conflicts};
+}
+
 bool IsCurrentChainLockCatchupCandidateAdmissible(
     const pq::ChainLockScheduleConfig& schedule,
     const CBlockIndex& active_tip,
@@ -1794,6 +1873,7 @@ void CChainLocksHandler::Stop()
             LOCK(m_share_lifecycle_mutex);
             m_share_admission_gate.SetReady(false);
         }
+        m_payment_audit_receipt_cache.Clear();
         if (!m_started) return;
         m_started = false;
         scheduler = std::move(m_scheduler);
@@ -1850,8 +1930,11 @@ void CChainLocksHandler::SetQuorumRosterCache(
          cache->Config() != *m_quorum_build_config)) {
         throw std::invalid_argument{"mismatched PQ quorum roster cache"};
     }
-    LOCK(m_lookup_mutex);
-    m_quorum_roster_cache = std::move(cache);
+    {
+        LOCK(m_lookup_mutex);
+        m_quorum_roster_cache = std::move(cache);
+    }
+    m_payment_audit_receipt_cache.Clear();
 }
 
 pq::FrozenQuorumRosterCachePtr
@@ -2505,8 +2588,42 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
     if (!window || !window->Contains(carrier_height)) {
         return null_receipt;
     }
-    for (const auto& audit :
-         m_payment_audit_store->GetEpochCandidates(*epoch)) {
+
+    const auto make_cache_key = [&](uint64_t archive_revision) {
+        return PaymentAuditReceiptCache::Key{
+            carrier_parent.GetBlockHash(), carrier_parent.nHeight,
+            carrier_parent.pqPaymentProbationStateHash, carrier_height,
+            *epoch, archive_revision};
+    };
+    const auto observed_revision{
+        m_payment_audit_store->ObserveCandidateRevision()};
+    if (!observed_revision) return null_receipt;
+    auto cache_key{make_cache_key(*observed_revision)};
+    if (const auto cached{
+            m_payment_audit_receipt_cache.Get(cache_key)}) {
+        return m_payment_audit_store->IsCandidateRevisionCurrent(
+                   *observed_revision)
+            ? *cached
+            : null_receipt;
+    }
+
+    auto snapshot{
+        m_payment_audit_store->GetEpochCandidateSnapshot(*epoch)};
+    if (!snapshot || snapshot->epoch != *epoch ||
+        snapshot->revision == 0) {
+        return null_receipt;
+    }
+    cache_key.archive_revision = snapshot->revision;
+    if (const auto cached{
+            m_payment_audit_receipt_cache.Get(cache_key)}) {
+        return m_payment_audit_store->IsCandidateRevisionCurrent(
+                   snapshot->revision)
+            ? *cached
+            : null_receipt;
+    }
+
+    for (const auto& candidate : snapshot->ordered_candidates) {
+        const auto& audit{candidate.audit};
         if (audit.statement.commitment.seed.epoch != *epoch) continue;
         const CBlockIndex* seal{carrier_parent.GetAncestor(
             audit.statement.commitment.seal_height)};
@@ -2517,15 +2634,13 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
                 carrier_parent.pqPaymentProbationStateHash) {
             continue;
         }
-        const uint256 logical_id{audit.GetLogicalId(m_genesis_hash)};
-        const uint256 witness_id{audit.GetWitnessId(m_genesis_hash)};
         const uint256 commitment_hash{pq::GetPaymentAuditCommitmentHash(
             m_genesis_hash, audit.statement.commitment)};
         const auto classification{pq::ClassifyPaymentAuditReports(audit)};
         if (!classification) continue;
         const uint256 result_hash{pq::GetPaymentAuditResultHash(
             m_genesis_hash, audit, *classification)};
-        if (logical_id.IsNull() || witness_id.IsNull() ||
+        if (candidate.logical_id.IsNull() || candidate.witness_id.IsNull() ||
             commitment_hash.IsNull() || result_hash.IsNull()) {
             continue;
         }
@@ -2539,19 +2654,31 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
             carrier_height, result_hash,
             classification->online_members)};
         if (!transition) continue;
-        return pq::PaymentAuditReceipt{
+        const pq::PaymentAuditReceipt receipt{
             pq::PAYMENT_AUDIT_RECEIPT_VERSION,
             1,
             *epoch,
             audit.statement.commitment.seal_height,
             audit.statement.seal_statement.block_hash,
             carrier_height,
-            logical_id,
-            witness_id,
+            candidate.logical_id,
+            candidate.witness_id,
             commitment_hash,
             result_hash,
             transition->undo.applied_state_hash,
             classification->online_members};
+        if (!m_payment_audit_store->IsCandidateRevisionCurrent(
+                snapshot->revision)) {
+            return null_receipt;
+        }
+        const auto published{
+            m_payment_audit_receipt_cache.Publish(cache_key, receipt)};
+        if (!published ||
+            !m_payment_audit_store->IsCandidateRevisionCurrent(
+                snapshot->revision)) {
+            return null_receipt;
+        }
+        return *published;
     }
     return null_receipt;
 }

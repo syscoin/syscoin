@@ -21,6 +21,7 @@
 #include <protocol.h>
 #include <saltedhasher.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -169,6 +170,61 @@ private:
     }
 
     std::atomic<uint64_t> m_state{0};
+};
+
+/**
+ * Bounded memoization for miner-only payment-audit receipt construction.
+ * Null results are deliberately excluded because missing local context can
+ * become available without changing the archive candidate revision.
+ */
+class PaymentAuditReceiptCache final {
+public:
+    static constexpr std::size_t CAPACITY{64};
+
+    struct Key {
+        uint256 carrier_parent_hash;
+        int32_t carrier_parent_height{-1};
+        uint256 parent_probation_state_hash;
+        int32_t carrier_height{-1};
+        uint32_t epoch{0};
+        uint64_t archive_revision{0};
+
+        friend bool operator==(const Key&, const Key&) = default;
+    };
+
+    struct Stats {
+        std::size_t entries{0};
+        uint64_t hits{0};
+        uint64_t builds{0};
+        uint64_t conflicts{0};
+    };
+
+    [[nodiscard]] std::optional<pq::PaymentAuditReceipt> Get(
+        const Key& key) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Reject a conflicting publication while retaining the established value.
+     */
+    [[nodiscard]] std::optional<pq::PaymentAuditReceipt> Publish(
+        const Key& key, const pq::PaymentAuditReceipt& receipt)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void Clear() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] Stats StatsForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    struct Entry {
+        Key key;
+        pq::PaymentAuditReceipt receipt;
+        bool occupied{false};
+        bool recently_used{false};
+    };
+
+    mutable Mutex m_mutex;
+    mutable std::array<Entry, CAPACITY> m_entries GUARDED_BY(m_mutex);
+    mutable std::size_t m_clock GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_hits GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_builds GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_conflicts GUARDED_BY(m_mutex){0};
 };
 
 /** Live production may stop while an exact requested historical witness heals. */
@@ -1143,6 +1199,7 @@ private:
     std::unique_ptr<pq::PaymentAuditStore> m_payment_audit_store;
     std::unique_ptr<pq::PaymentAuditStagingStore>
         m_payment_audit_staging_store;
+    mutable PaymentAuditReceiptCache m_payment_audit_receipt_cache;
     mutable pq::ChainLockVerifier m_verifier;
     mutable pq::CatchupHistoricalProofCache m_catchup_proof_cache;
 

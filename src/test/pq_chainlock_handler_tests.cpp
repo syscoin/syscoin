@@ -34,6 +34,37 @@ uint256 NonNullHash(uint64_t value)
     return hash;
 }
 
+llmq::pq::PaymentAuditReceipt NonNullPaymentAuditReceipt(uint64_t salt)
+{
+    llmq::pq::PaymentAuditReceipt receipt;
+    receipt.has_audit = 1;
+    receipt.epoch = static_cast<uint32_t>(100 + salt);
+    receipt.seal_height = static_cast<int32_t>(1'000 + salt);
+    receipt.seal_block_hash = NonNullHash(10'000 + salt);
+    receipt.carrier_height = receipt.seal_height +
+                             llmq::pq::PAYMENT_AUDIT_RECEIPT_DELAY;
+    receipt.audit_logical_id = NonNullHash(20'000 + salt);
+    receipt.audit_witness_id = NonNullHash(30'000 + salt);
+    receipt.commitment_hash = NonNullHash(40'000 + salt);
+    receipt.result_hash = NonNullHash(50'000 + salt);
+    receipt.next_probation_state_hash = NonNullHash(60'000 + salt);
+    receipt.online_members[0] = 1;
+    BOOST_REQUIRE(receipt.IsStructurallyValid());
+    return receipt;
+}
+
+llmq::PaymentAuditReceiptCache::Key PaymentAuditReceiptCacheKey(
+    uint64_t salt)
+{
+    return llmq::PaymentAuditReceiptCache::Key{
+        NonNullHash(70'000 + salt),
+        static_cast<int32_t>(2'000 + salt),
+        NonNullHash(80'000 + salt),
+        static_cast<int32_t>(2'001 + salt),
+        static_cast<uint32_t>(100 + salt),
+        1 + salt};
+}
+
 CBlock PaymentAuditCarrierBlock(
     const llmq::pq::PaymentAuditReceipt& receipt)
 {
@@ -234,6 +265,86 @@ BOOST_AUTO_TEST_CASE(share_admission_gate_terminal_failure_is_sticky)
     open_gate.SetReady(true);
     BOOST_CHECK(!open_gate.IsCurrent(open_token));
     BOOST_CHECK_EQUAL(open_gate.Acquire(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(payment_audit_receipt_cache_is_exact_context_bound)
+{
+    llmq::PaymentAuditReceiptCache cache;
+    const auto key{PaymentAuditReceiptCacheKey(1)};
+    const auto receipt{NonNullPaymentAuditReceipt(1)};
+
+    const auto published{cache.Publish(key, receipt)};
+    BOOST_REQUIRE(published);
+    BOOST_CHECK(*published == receipt);
+    const auto cached{cache.Get(key)};
+    BOOST_REQUIRE(cached);
+    BOOST_CHECK(*cached == receipt);
+
+    const auto expect_miss = [&](auto mutate) {
+        auto different{key};
+        mutate(different);
+        BOOST_CHECK(!cache.Get(different));
+    };
+    expect_miss([](auto& different) {
+        different.carrier_parent_hash = NonNullHash(90'001);
+    });
+    expect_miss([](auto& different) {
+        ++different.carrier_parent_height;
+    });
+    expect_miss([](auto& different) {
+        different.parent_probation_state_hash = NonNullHash(90'002);
+    });
+    expect_miss([](auto& different) { ++different.carrier_height; });
+    expect_miss([](auto& different) { ++different.epoch; });
+    expect_miss([](auto& different) { ++different.archive_revision; });
+
+    const auto duplicate{cache.Publish(key, receipt)};
+    BOOST_REQUIRE(duplicate);
+    BOOST_CHECK(*duplicate == receipt);
+
+    auto conflicting{receipt};
+    conflicting.result_hash = NonNullHash(90'003);
+    BOOST_REQUIRE(conflicting.IsStructurallyValid());
+    BOOST_CHECK(!cache.Publish(key, conflicting));
+    const auto retained{cache.Get(key)};
+    BOOST_REQUIRE(retained);
+    BOOST_CHECK(*retained == receipt);
+
+    const auto before_null{cache.StatsForTesting()};
+    BOOST_CHECK(!cache.Publish(PaymentAuditReceiptCacheKey(2), {}));
+    const auto after_null{cache.StatsForTesting()};
+    BOOST_CHECK_EQUAL(after_null.entries, before_null.entries);
+    BOOST_CHECK_EQUAL(after_null.builds, before_null.builds);
+    BOOST_CHECK_EQUAL(after_null.conflicts, before_null.conflicts);
+
+    BOOST_CHECK_EQUAL(after_null.entries, 1U);
+    BOOST_CHECK_EQUAL(after_null.hits, 2U);
+    BOOST_CHECK_EQUAL(after_null.builds, 3U);
+    BOOST_CHECK_EQUAL(after_null.conflicts, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(payment_audit_receipt_cache_is_bounded_and_clearable)
+{
+    llmq::PaymentAuditReceiptCache cache;
+    std::array<llmq::PaymentAuditReceiptCache::Key,
+               llmq::PaymentAuditReceiptCache::CAPACITY + 1> keys;
+    const auto receipt{NonNullPaymentAuditReceipt(3)};
+    for (std::size_t index{0}; index < keys.size(); ++index) {
+        keys[index] = PaymentAuditReceiptCacheKey(100 + index);
+        BOOST_REQUIRE(cache.Publish(keys[index], receipt));
+    }
+
+    auto stats{cache.StatsForTesting()};
+    BOOST_CHECK_EQUAL(stats.entries,
+                      llmq::PaymentAuditReceiptCache::CAPACITY);
+    BOOST_CHECK_EQUAL(stats.builds, keys.size());
+    BOOST_CHECK(!cache.Get(keys.front()));
+    BOOST_REQUIRE(cache.Get(keys.back()));
+
+    cache.Clear();
+    stats = cache.StatsForTesting();
+    BOOST_CHECK_EQUAL(stats.entries, 0U);
+    BOOST_CHECK(!cache.Get(keys.back()));
 }
 
 BOOST_AUTO_TEST_CASE(share_admission_gate_rejects_competing_observations)
