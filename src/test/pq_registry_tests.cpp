@@ -2001,6 +2001,150 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
     check_disk_delta(ascending);
 }
 
+BOOST_AUTO_TEST_CASE(membership_reconciliation_is_checkpoint_only)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(551)};
+    const uint256 first{NonNullHash(552)};
+    const uint256 target{NonNullHash(553)};
+    const uint256 removed{NonNullHash(554)};
+    auto first_key{DeterministicKey(141)};
+    auto target_key{DeterministicKey(142)};
+    auto removed_key{DeterministicKey(143)};
+    auto replacement_key{DeterministicKey(144)};
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
+    std::vector<uint256> all_operators{first, target, removed};
+    std::sort(all_operators.begin(), all_operators.end());
+
+    const auto registration{Block(
+        NonNullHash(555), 551,
+        {GlobalRegistration(
+             genesis, first, first_key, owner_key,
+             CommitmentAt(config, config.preparation_height, 1, 551), 552),
+         GlobalRegistration(
+             genesis, target, target_key, owner_key,
+             CommitmentAt(config, config.preparation_height, 1, 552), 553),
+         GlobalRegistration(
+             genesis, removed, removed_key, owner_key,
+             CommitmentAt(config, config.preparation_height, 1, 553),
+             554)})};
+    PQRegistryManager manager(MemoryDB(551), genesis, config);
+    PQRegistryError error;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        registration, config.preparation_height,
+        Members(genesis, all_operators, all_operators, owner_key_id), {},
+        /*fJustCheck=*/false, error));
+
+    std::vector<uint256> before_members{all_operators};
+    std::vector<uint256> after_members{all_operators};
+    std::vector<uint256> before_calls;
+    std::vector<uint256> after_calls;
+    const auto contains = [](const std::vector<uint256>& members,
+                             const uint256& hash) {
+        return std::binary_search(members.begin(), members.end(), hash);
+    };
+    PQRegistryCallbacks callbacks{
+        [&](const uint256& hash) {
+            before_calls.push_back(hash);
+            return contains(before_members, hash);
+        },
+        [&](const uint256& hash) {
+            after_calls.push_back(hash);
+            return contains(after_members, hash);
+        },
+        {}};
+
+    uint32_t block_id{555};
+    int32_t height{config.preparation_height + 1};
+    const uint32_t ordinary_id{block_id++};
+    auto ordinary{Block(registration.GetHash(), ordinary_id,
+                        {OrdinaryTransaction(ordinary_id)})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        ordinary, height++, callbacks, {}, /*fJustCheck=*/false, error));
+    BOOST_CHECK(before_calls.empty());
+    BOOST_CHECK(after_calls.empty());
+
+    PQRegistrySnapshot parent;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        ordinary.GetHash(), registration.GetHash(), height - 1, parent,
+        error));
+    const auto rotation{GlobalRotation(
+        genesis, target, RequiredOperator(parent, target).global_key,
+        target_key, replacement_key,
+        CommitmentAt(config, height, 2, 554), block_id++)};
+    auto rotated{Block(ordinary.GetHash(), block_id++, {rotation})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        rotated, height++, callbacks, {}, /*fJustCheck=*/false, error));
+    BOOST_REQUIRE_EQUAL(before_calls.size(), 1U);
+    BOOST_REQUIRE_EQUAL(after_calls.size(), 1U);
+    BOOST_CHECK(before_calls.front() == target);
+    BOOST_CHECK(after_calls.front() == target);
+
+    before_calls.clear();
+    after_calls.clear();
+    before_members = all_operators;
+    after_members = all_operators;
+    const auto removed_member{std::lower_bound(
+        after_members.begin(), after_members.end(), removed)};
+    BOOST_REQUIRE(removed_member != after_members.end());
+    BOOST_REQUIRE(*removed_member == removed);
+    after_members.erase(removed_member);
+    const std::vector<uint256> removals{removed};
+    const uint32_t removal_id{block_id++};
+    auto removal{Block(rotated.GetHash(), removal_id,
+                       {OrdinaryTransaction(removal_id)})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        removal, height++, callbacks, removals,
+        /*fJustCheck=*/false, error));
+    BOOST_CHECK(before_calls.empty());
+    BOOST_CHECK(after_calls.empty());
+
+    before_members = after_members;
+    uint256 cursor{removal.GetHash()};
+    const int32_t checkpoint_height{
+        config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    while (height < checkpoint_height) {
+        const uint32_t next_id{block_id++};
+        auto next{Block(cursor, next_id, {OrdinaryTransaction(next_id)})};
+        BOOST_REQUIRE(manager.ProcessBlock(
+            next, height++, callbacks, {}, /*fJustCheck=*/false, error));
+        BOOST_CHECK(before_calls.empty());
+        BOOST_CHECK(after_calls.empty());
+        cursor = next.GetHash();
+    }
+
+    const uint32_t checkpoint_id{block_id++};
+    auto checkpoint{Block(cursor, checkpoint_id,
+                          {OrdinaryTransaction(checkpoint_id)})};
+    const uint256 missing{before_members.front()};
+    PQRegistryCallbacks mismatched{
+        [&](const uint256& hash) {
+            before_calls.push_back(hash);
+            return hash != missing && contains(before_members, hash);
+        },
+        callbacks.dmn_exists_after,
+        {}};
+    BOOST_CHECK(!manager.ProcessBlock(
+        checkpoint, checkpoint_height, mismatched, {},
+        /*fJustCheck=*/true, error));
+    BOOST_REQUIRE_EQUAL(before_calls.size(), 1U);
+    BOOST_CHECK(before_calls.front() == missing);
+    BOOST_CHECK(after_calls.empty());
+    BOOST_CHECK(error.result == PQRegistryResult::PARENT_DMN_MISMATCH);
+    BOOST_CHECK(error.pro_tx_hash == missing);
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(
+        checkpoint.GetHash()));
+
+    before_calls.clear();
+    BOOST_REQUIRE(manager.ProcessBlock(
+        checkpoint, checkpoint_height, callbacks, {},
+        /*fJustCheck=*/false, error));
+    BOOST_CHECK(before_calls == before_members);
+    BOOST_CHECK(after_calls.empty());
+}
+
 BOOST_AUTO_TEST_CASE(direct_validation_matches_single_transaction_block_checks)
 {
     const auto config{FastConfig()};

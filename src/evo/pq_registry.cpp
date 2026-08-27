@@ -1554,23 +1554,30 @@ bool PQRegistryManager::PrepareBlockInternal(
         }
     }
 
-    const std::span<const OperatorKeyState> parent_states{
-        parent_view
-            ? std::span<const OperatorKeyState>{
-                  parent_view->state->operator_states->data(),
-                  parent_view->state->operator_states->size()}
-            : std::span<const OperatorKeyState>{parent.operator_states.data(),
-                                                parent.operator_states.size()}};
-    for (const auto& state : parent_states) {
-        bool exists{false};
-        if (!CallMembership(callbacks.dmn_exists_before, state.pro_tx_hash,
-                            exists, error)) {
-            return false;
-        }
-        if (!exists) {
-            return SetError(error, PQRegistryResult::PARENT_DMN_MISMATCH,
-                            std::numeric_limits<std::size_t>::max(),
-                            state.pro_tx_hash);
+    if (IsRegistryCheckpoint(m_config, height)) {
+        // SYSCOIN: Exact deterministic-MN removals maintain membership on
+        // ordinary blocks. Reconcile the complete invariant periodically so
+        // the hot path only queries operators explicitly changed by a block.
+        const std::span<const OperatorKeyState> parent_states{
+            parent_view
+                ? std::span<const OperatorKeyState>{
+                      parent_view->state->operator_states->data(),
+                      parent_view->state->operator_states->size()}
+                : std::span<const OperatorKeyState>{
+                      parent.operator_states.data(),
+                      parent.operator_states.size()}};
+        for (const auto& state : parent_states) {
+            bool exists{false};
+            if (!CallMembership(callbacks.dmn_exists_before,
+                                state.pro_tx_hash, exists, error)) {
+                return false;
+            }
+            if (!exists) {
+                return SetError(
+                    error, PQRegistryResult::PARENT_DMN_MISMATCH,
+                    std::numeric_limits<std::size_t>::max(),
+                    state.pro_tx_hash);
+            }
         }
     }
 
@@ -1958,10 +1965,10 @@ bool PQRegistryManager::ValidateTransaction(
                         decoded->transaction_index, decoded->pro_tx_hash);
     }
 
-    // SYSCOIN: Accepted parents were reconciled against their complete DMN
-    // view during block validation, and policy passes that exact parent list
-    // as both membership views. Rechecking unrelated operators here would turn
-    // every mempool admission into an O(N) block replay.
+    // SYSCOIN: Exact block-removal deltas preserve parent membership, with a
+    // complete reconciliation at registry checkpoints. Policy passes the exact
+    // accepted parent list as both views, so walking unrelated operators here
+    // would turn every mempool admission into an O(N) block replay.
     if (!candidate_state) {
         candidate_state =
             OperatorKeyState::ForOperator(decoded->pro_tx_hash);
