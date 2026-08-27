@@ -924,14 +924,15 @@ that member fail closed for the epoch. It can reduce ChainLock liveness but
 never invalidates base-chain blocks.
 
 The local LevelDB implementation provides atomic synchronous writes and crash
-recovery, but cannot prove that its complete directory was not rolled back or
-cloned. Before public activation, the signing deployment must bind every
-reservation to an external rollback-resistant generation and a single-active
-fence, such as an HSM/TPM monotonic generation register or a remote signer
-lease. Starting two sentries from the same journal snapshot must fail closed.
-This is an activation requirement, not a property inferred from `fsync`.
+recovery, while the ordinary datadir lock prevents two node processes from
+using one live datadir. Supported operation uses one active signer datadir and
+does not clone it or restore its journal behind signing history. A signer whose
+journal history was lost remains offline until a fresh child-tree generation
+is registered and active. An HSM/TPM monotonic register or remote signer lease
+is optional hardening for clustered or snapshot-heavy deployments; it is not a
+consensus rule or an activation prerequisite.
 
-That operational fence is not part of quorum counting. Shares are keyed by the
+That operational constraint is not part of quorum counting. Shares are keyed by the
 frozen quorum slot, member index, and proTxHash, and a collector retains at most
 one share for that slot. Cloning one sentry therefore cannot manufacture extra
 weight: same-message deterministic signatures are exact duplicates, while
@@ -942,10 +943,9 @@ apply without multiplying that identity.
 Accepted-certificate reconciliation pins a live journal to the latest durable
 PQ ChainLock and prevents an older local vote from reopening an adjudicated
 branch. It cannot detect a snapshot that rolls back the certificate database,
-the journal, and the process together. The external fence exists to preserve
-the scheduled profile's one-signature-per-authorized-leaf assumption and to
-keep an otherwise honest operator from becoming a split-brain equivocator; it is not a claim that
-consensus can detect copied secret material.
+the journal, and the process together. Such unsupported cloning can violate the
+scheduled profile's one-signature-per-authorized-leaf assumption for that one
+identity, but cannot create another roster slot or additional quorum weight.
 
 ## 9. Direct global-SLH MNAUTH
 
@@ -1291,9 +1291,13 @@ The payment audit discourages registered operators from collecting rewards
 while remaining unavailable to the PQ finality network. It is deliberately not
 PoSe: its state never changes `nPoSePenalty`, `nPoSeBanHeight`, deterministic
 masternode validity, MNAUTH eligibility, quorum thresholds, or collateral
-validity. It filters only the deterministic payment queue. If every otherwise
-valid payee is withheld, selection falls back to the unfiltered queue so an
-audit outage cannot make a valid block impossible to construct.
+validity. Beginning at `F+1`, the exact parent registry must give a payee an
+active global key and a `FROZEN_PRESENT` child root for the payment's target
+epoch. Preparation and legacy payments through `F` are unchanged. Payment
+probation then filters only that root-capable deterministic queue. If every
+root-capable payee is withheld, selection falls back to the same root-capable
+queue so an audit outage cannot remove its last payee. A post-`F` state with no
+root-capable valid payee is rejected rather than paying a rootless operator.
 
 One audit is attempted per 288-block epoch, about twelve hours at the nominal
 2.5-minute spacing. Its subject is the newest frozen 400-member roster, not
@@ -1457,7 +1461,7 @@ fsync cannot clear the obligation or expose provisional state as authenticated.
 
 Consequently, a fresh node replays the on-chain receipt chain, obtains one
 later covering CLSIG through the ordinary P2P path, and discards covered audit
-certificates; it does not download or retain a permanent 3.66 MB-per-epoch
+certificates; it does not download or retain a permanent 1,040,763-byte-per-epoch
 audit archive. Full certificates are stored and served only while live or not
 yet covered. Null or inconclusive audits remain fail-open no-ops for new misses.
 
@@ -1752,8 +1756,9 @@ The implementation must preserve these invariants:
     erase a miss, while an authenticated later positive may clear it.
 17. Payment-audit results never mutate PoSe, deterministic-masternode validity,
     collateral validity, MNAUTH, or finality membership/order. Roster selection
-    never consults probation state; if every valid payee is withheld, the
-    ordinary deterministic payee remains the consensus fallback.
+    never consults probation state; after `F`, payment selection first requires
+    the target epoch's frozen PQ child root, and an all-withheld fallback remains
+    confined to that root-capable queue.
 18. Compact payment-audit replay is provisional until one fully verified,
     durable descendant CLSIG authenticates its cumulative receipt state and
     probation root. A marker or checkpoint is never quorum authority, and no
@@ -1791,7 +1796,8 @@ Expected failures are fail-closed:
 | Covered payment-audit certificate is absent during historical IBD/replay | Recompute the bitmap transition, fsync an active/prospective marker before provisional use, continue base sync, and gate signing/readiness until a covering CLSIG is durable |
 | Covering payment-audit CLSIG is absent, off-branch, below-terminal, or invalid | Keep requesting a valid descendant; the marker grants no authority and no covered certificate may be pruned |
 | Payment-audit state, pre-seal, checkpoint, certificate, or prune-batch fsync fails | Keep the obligation and gates active; never publish provisional state, clear a marker, advance a checkpoint, or infer an empty audit |
-| All valid payees are payment-withheld | Use the ordinary deterministic payee as the explicit liveness fallback |
+| All root-capable valid payees are payment-withheld | Use the ordinary root-capable deterministic payee as the explicit liveness fallback |
+| No root-capable valid payee exists after `F` | Reject the block; never redirect the masternode reward to a rootless operator or the miner |
 | Regtest preparation profile supplies `F`, candidate, or receipt fields | Fail startup; preparation has registry/quorum history only and no finality state |
 | Partial public or full regtest deployment profile | Fail startup; never infer missing anchors, cursor state, or schedule values |
 | `H` block/state-root or `F` block mismatch | Reject the incompatible branch and halt synchronization if no compatible branch remains |
@@ -2177,8 +2183,8 @@ The following must be resolved in code and release artifacts before activation:
   reproducible evidence that it begins from already-known chain data, has no
   finality authority, completes four usable shadow epochs, and selects `H` only
   after its exact block, hash, and state roots exist; and
-- the rollback-resistant signer fence and operational recovery procedure that
-  prevents datadir/VM clones from sharing one scheduled child-key leaf domain.
+- the single-signer backup and recovery procedure for scheduled child-key
+  journals, including rotation to a fresh child-tree generation after loss.
 
 The depth-16 outer commitment provides the fixed epoch horizon described above.
 Separately, each derived child key owns an 8,176-byte public height-8 warm

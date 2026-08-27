@@ -2154,7 +2154,7 @@ static bool ConnectBTCCReceiptState(ChainstateManager& chainman,
                             "pq-btcc-chainlock-handler-unavailable");
                     }
                     // SYSCOIN: IBD can validate base/registry history without
-                    // every historical 3.62 MB CLSIG. Persist the branch-local
+                    // every historical 1,000,364-byte CLSIG. Persist the branch-local
                     // defer boundary before continuing; NEVM and signing stay
                     // disabled until a current catch-up seal authenticates the
                     // recomputed receipt accumulator.

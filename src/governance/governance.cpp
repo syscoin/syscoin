@@ -2853,18 +2853,16 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
         // Nobody submitted a trigger we'd like to see, so let's do it but only if we are the payee
         validation_mn_list =
             deterministicMNManager->GetListForBlock(validation_tip);
-        llmq::pq::PQPaymentProbationState payment_state;
-        if (!deterministicMNManager->GetPaymentProbationState(
-                validation_tip, payment_state)) {
+        CDeterministicMNCPtr next_payee;
+        if (!deterministicMNManager->GetMNPayeeForBlock(
+                validation_tip, next_payee)) {
             LogPrint(BCLog::GOBJECT,
-                     "CGovernanceManager::%s payment probation state is unavailable\n",
+                     "CGovernanceManager::%s payment eligibility state is unavailable\n",
                      __func__);
             return std::nullopt;
         }
-        const auto mn_payees = validation_mn_list.GetProjectedMNPayees(
-            std::numeric_limits<int>::max(), &payment_state);
 
-        if (mn_payees.empty()) {
+        if (!next_payee) {
             LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s payee list is empty\n", __func__);
             return std::nullopt;
         }
@@ -2873,7 +2871,7 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
         CService local_service;
         if (!GetActiveMasternodeIdentity(local_pro_tx_hash, global_key_version,
                                          global_public_key, local_service) ||
-            mn_payees.front()->proTxHash != local_pro_tx_hash) {
+            next_payee->proTxHash != local_pro_tx_hash) {
             LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s we are not the payee, skipping\n", __func__);
             return std::nullopt;
         }

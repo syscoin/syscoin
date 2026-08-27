@@ -744,8 +744,65 @@ bool CDeterministicMNManager::GetMNPayeeForBlock(
     if (pindex == nullptr) return false;
     llmq::pq::PQPaymentProbationState payment_state;
     if (!GetPaymentProbationState(pindex, payment_state)) return false;
+    std::optional<std::set<uint256>> pq_payment_eligible;
+    if (!GetPQPaymentEligibleProTxHashes(pindex, pq_payment_eligible)) {
+        return false;
+    }
     const auto list{GetListForBlock(pindex)};
-    payee = list.GetMNPayee(&payment_state);
+    payee = list.GetMNPayee(
+        &payment_state,
+        pq_payment_eligible ? &*pq_payment_eligible : nullptr);
+    return true;
+}
+
+bool CDeterministicMNManager::GetPQPaymentEligibleProTxHashes(
+    const CBlockIndex* pindex,
+    std::optional<std::set<uint256>>& eligible) const
+{
+    eligible.reset();
+    if (pindex == nullptr ||
+        pindex->nHeight == std::numeric_limits<int>::max()) {
+        return false;
+    }
+    const auto& consensus{Params().GetConsensus()};
+    const int payment_height{pindex->nHeight + 1};
+    const auto eligibility{
+        Consensus::CheckPQPaymentEligibility(consensus, payment_height)};
+    if (eligibility == Consensus::PQPaymentEligibilityResult::LEGACY) {
+        return true;
+    }
+    if (eligibility !=
+        Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED) {
+        return false;
+    }
+
+    llmq::pq::PQRegistryConfig config;
+    if (llmq::pq::GetPQRegistryConfig(consensus, config) !=
+        llmq::pq::PQRegistryDeploymentResult::VALID) {
+        return false;
+    }
+    const auto epoch{
+        llmq::pq::EpochForHeight(config.schedule, payment_height)};
+    if (!epoch) return false;
+
+    llmq::pq::PQRegistrySnapshot snapshot;
+    std::string error;
+    if (!GetPQRegistrySnapshot(pindex, snapshot, error)) {
+        LogPrintf("%s -- %s\n", __func__, error);
+        return false;
+    }
+
+    eligible.emplace();
+    for (const auto& state : snapshot.operator_states) {
+        const auto root{state.ResolveChildRoot(*epoch)};
+        if (root.status !=
+                llmq::pq::ChildRootResolutionStatus::FROZEN_PRESENT ||
+            !root.record || root.record->pro_tx_hash != state.pro_tx_hash ||
+            root.record->epoch != *epoch) {
+            continue;
+        }
+        eligible->insert(state.pro_tx_hash);
+    }
     return true;
 }
 
@@ -974,7 +1031,8 @@ static bool CompareByLastPaid(const CDeterministicMN* _a,
 }
 
 CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
-    const llmq::pq::PQPaymentProbationState* payment_state) const
+    const llmq::pq::PQPaymentProbationState* payment_state,
+    const std::set<uint256>* pq_payment_eligible) const
 {
     if (mnMap.size() == 0) {
         return nullptr;
@@ -983,6 +1041,10 @@ CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
     CDeterministicMNCPtr best;
     CDeterministicMNCPtr ordinary_best;
     ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
+        if (pq_payment_eligible != nullptr &&
+            !pq_payment_eligible->count(dmn->proTxHash)) {
+            return;
+        }
         if (!ordinary_best ||
             CompareByLastPaid(dmn.get(), ordinary_best.get())) {
             ordinary_best = dmn;
@@ -1832,11 +1894,23 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
     } else {
         decreasePoSE = true;
     }
-    llmq::pq::PQPaymentProbationState payment_state;
-    if (!GetPaymentProbationState(pindexPrev, payment_state)) {
-        return _state.Error("failed-pq-payment-probation-state");
+    const auto payment_eligibility{Consensus::CheckPQPaymentEligibility(
+        Params().GetConsensus(), nHeight)};
+    if (payment_eligibility ==
+        Consensus::PQPaymentEligibilityResult::INVALID_CONFIGURATION) {
+        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                              "bad-pq-payment-eligibility-configuration");
     }
-    auto payee = oldList.GetMNPayee(&payment_state);
+    CDeterministicMNCPtr payee;
+    if (!GetMNPayeeForBlock(pindexPrev, payee)) {
+        return _state.Error("failed-pq-payment-eligibility-state");
+    }
+    if (payment_eligibility ==
+            Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED &&
+        !payee) {
+        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                              "bad-pq-no-payment-eligible-mn");
+    }
     // at least 2 rounds of payments before registered MN's gets put in list
     const size_t mnCountThreshold = oldList.GetValidMNsCount()*2;
     // we iterate the oldList here and update the newList

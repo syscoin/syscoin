@@ -178,8 +178,9 @@ struct PQSignerJournalResult
  * detect rollback or cloning of its entire storage. A clone cannot gain extra
  * quorum weight because collectors count one frozen roster slot, but it can
  * make that identity equivocate and exceed this profile's per-key usage bound.
- * Public-network operation therefore requires an external monotonic,
- * single-active fence in addition to this crash-safety layer.
+ * Supported operation therefore keeps one active signer datadir and never
+ * restores this journal behind its signing history. External monotonic leases
+ * are optional hardening for clustered deployments, not a consensus rule.
  */
 class CPQSignerJournal final
 {

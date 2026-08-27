@@ -49,6 +49,8 @@ BOOST_AUTO_TEST_CASE(configuration_is_fail_closed)
                 Consensus::PQAnchorResult::DISABLED);
     BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
                 Consensus::PQLegacyReplayResult::ALLOWED);
+    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 10) ==
+                Consensus::PQPaymentEligibilityResult::LEGACY);
     BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 0, uint256::ZEROV, nullptr) ==
                 Consensus::PQAnchorResult::DISABLED);
 
@@ -57,6 +59,8 @@ BOOST_AUTO_TEST_CASE(configuration_is_fail_closed)
                 Consensus::PQAnchorResult::INVALID_CONFIGURATION);
     BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
                 Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION);
+    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 10) ==
+                Consensus::PQPaymentEligibilityResult::INVALID_CONFIGURATION);
     BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 0, uint256::ZEROV, nullptr) ==
                 Consensus::PQAnchorResult::INVALID_CONFIGURATION);
 
@@ -83,13 +87,23 @@ BOOST_AUTO_TEST_CASE(configuration_is_fail_closed)
 
     BOOST_CHECK(Consensus::CheckPQChainLockAnchorConfiguration(params) ==
                 Consensus::PQAnchorResult::DISABLED);
+    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 100) ==
+                Consensus::PQPaymentEligibilityResult::LEGACY);
     params.nPQChainLockAnchorHeight = 9;
     params.hashPQChainLockAnchorBlock = uint256S("4");
     BOOST_CHECK(Consensus::CheckPQChainLockAnchorConfiguration(params) ==
                 Consensus::PQAnchorResult::INVALID_CONFIGURATION);
+    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 10) ==
+                Consensus::PQPaymentEligibilityResult::INVALID_CONFIGURATION);
     params.nPQChainLockAnchorHeight = 12;
     BOOST_CHECK(Consensus::CheckPQChainLockAnchorConfiguration(params) ==
                 Consensus::PQAnchorResult::VALID);
+    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 11) ==
+                Consensus::PQPaymentEligibilityResult::LEGACY);
+    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 12) ==
+                Consensus::PQPaymentEligibilityResult::LEGACY);
+    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 13) ==
+                Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED);
     BOOST_CHECK(Consensus::CheckPQChainLockAnchor(
                     params, 12, uint256S("5"), nullptr) ==
                 Consensus::PQAnchorResult::BLOCK_HASH_MISMATCH);

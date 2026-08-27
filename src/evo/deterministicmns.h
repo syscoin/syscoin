@@ -271,7 +271,8 @@ public:
     [[nodiscard]] CDeterministicMNCPtr GetMNByService(const CService& service) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByInternalId(uint64_t internalId) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNPayee(
-        const llmq::pq::PQPaymentProbationState* payment_state = nullptr) const;
+        const llmq::pq::PQPaymentProbationState* payment_state = nullptr,
+        const std::set<uint256>* pq_payment_eligible = nullptr) const;
 
     /**
      * Calculates the projected MN payees for the next *count* blocks. The result is not guaranteed to be correct
@@ -677,6 +678,9 @@ private:
     bool EnsureRetainedSnapshotWindow(
         const CBlockIndex* tip,
         const CDeterministicMNList& tip_list);
+    bool GetPQPaymentEligibleProTxHashes(
+        const CBlockIndex* pindex,
+        std::optional<std::set<uint256>>& eligible) const;
 public:
     struct EvoDBStats {
         int64_t approxPersistedEntries{0};

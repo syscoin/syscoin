@@ -166,7 +166,7 @@ private:
  * Admission state for multi-megabyte PQ ChainLock certificates.
  *
  * Keeping this separate from TxRequestTracker prevents one peer from turning
- * thousands of cheap inventory announcements into concurrent 3.62 MB
+ * thousands of cheap inventory announcements into concurrent 1,000,364-byte
  * downloads. Callers serialize access with cs_main.
  */
 class ChainLockRequestTracker final {

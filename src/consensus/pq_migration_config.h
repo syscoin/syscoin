@@ -26,6 +26,12 @@ enum class PQLegacyReplayResult {
     INVALID_CONFIGURATION,
 };
 
+enum class PQPaymentEligibilityResult {
+    LEGACY,
+    ROOT_REQUIRED,
+    INVALID_CONFIGURATION,
+};
+
 // SYSCOIN: Configuration validation is chain-independent so parameter
 // construction cannot import branch-navigation dependencies.
 inline PQAnchorResult CheckPQLegacyAnchorConfiguration(
@@ -87,6 +93,27 @@ inline PQAnchorResult CheckPQChainLockAnchorConfiguration(
         return PQAnchorResult::INVALID_CONFIGURATION;
     }
     return PQAnchorResult::VALID;
+}
+
+/** Root-bearing payment eligibility starts after the immutable PQ-finality predecessor. */
+inline PQPaymentEligibilityResult CheckPQPaymentEligibility(
+    const Params& params,
+    int height)
+{
+    if (CheckPQLegacyAnchorConfiguration(params) ==
+        PQAnchorResult::INVALID_CONFIGURATION) {
+        return PQPaymentEligibilityResult::INVALID_CONFIGURATION;
+    }
+    const auto configuration{CheckPQChainLockAnchorConfiguration(params)};
+    if (configuration == PQAnchorResult::DISABLED) {
+        return PQPaymentEligibilityResult::LEGACY;
+    }
+    if (configuration != PQAnchorResult::VALID) {
+        return PQPaymentEligibilityResult::INVALID_CONFIGURATION;
+    }
+    return height <= params.nPQChainLockAnchorHeight
+        ? PQPaymentEligibilityResult::LEGACY
+        : PQPaymentEligibilityResult::ROOT_REQUIRED;
 }
 
 } // namespace Consensus

@@ -595,6 +595,151 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
         std::numeric_limits<int>::max(), &all)};
     const auto ordinary{list.GetProjectedMNPayees()};
     BOOST_CHECK(fallback == ordinary);
+
+    // Once PQ payment eligibility is active, the audit liveness fallback is
+    // confined to root-bearing operators and cannot reintroduce a rootless
+    // payee.
+    const std::set<uint256> pq_payment_eligible{
+        members[1]->proTxHash, members[2]->proTxHash};
+    BOOST_REQUIRE(list.GetMNPayee(&all, &pq_payment_eligible));
+    BOOST_CHECK(list.GetMNPayee(&all, &pq_payment_eligible)->proTxHash ==
+                members[1]->proTxHash);
+
+    const std::set<uint256> no_pq_payment_eligible;
+    BOOST_CHECK(!list.GetMNPayee(&all, &no_pq_payment_eligible));
+}
+
+BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_after_finality_anchor)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int legacy_anchor_height{consensus.nPQLegacyAnchorHeight};
+        uint256 legacy_anchor_block{consensus.hashPQLegacyAnchorBlock};
+        uint256 legacy_mn_state{consensus.hashPQLegacyMNState};
+        uint256 legacy_pq_state{consensus.hashPQLegacyPQRegistryState};
+        int finality_anchor_height{consensus.nPQChainLockAnchorHeight};
+        uint256 finality_anchor_block{consensus.hashPQChainLockAnchorBlock};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQLegacyAnchorHeight = legacy_anchor_height;
+            consensus.hashPQLegacyAnchorBlock = legacy_anchor_block;
+            consensus.hashPQLegacyMNState = legacy_mn_state;
+            consensus.hashPQLegacyPQRegistryState = legacy_pq_state;
+            consensus.nPQChainLockAnchorHeight = finality_anchor_height;
+            consensus.hashPQChainLockAnchorBlock = finality_anchor_block;
+        }
+    } restore{consensus};
+
+    constexpr int preparation_height{1295};
+    constexpr int epoch_origin{1440};
+    constexpr int finality_anchor_height{1440};
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = epoch_origin;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
+    consensus.hashPQLegacyAnchorBlock.SetNull();
+    consensus.hashPQLegacyMNState.SetNull();
+    consensus.hashPQLegacyPQRegistryState.SetNull();
+    consensus.nPQChainLockAnchorHeight = std::numeric_limits<int>::max();
+    consensus.hashPQChainLockAnchorBlock.SetNull();
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_pq_payment_root_gate",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const uint256 base_hash{MakeSnapshotKey(preparation_height - 1)};
+    CDeterministicMNList base_list{
+        base_hash, preparation_height - 1, 1};
+    base_list.AddMN(MakeLegacyReplayMN(0, 20),
+                    /*fBumpTotalCount=*/false);
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        base_hash, base_list, /*fSync=*/true));
+
+    constexpr int block_count{
+        finality_anchor_height - preparation_height + 1};
+    std::vector<CBlock> blocks(static_cast<size_t>(block_count));
+    std::vector<uint256> hashes(static_cast<size_t>(block_count));
+    std::vector<CBlockIndex> indices(static_cast<size_t>(block_count));
+    CBlockIndex base_index;
+    base_index.nHeight = preparation_height - 1;
+    base_index.phashBlock = &base_hash;
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+    for (int offset{0}; offset < block_count; ++offset) {
+        const int height{preparation_height + offset};
+        auto& block{blocks[static_cast<size_t>(offset)]};
+        block = MakeProviderMutationBlock({});
+        block.hashPrevBlock = offset == 0
+            ? base_hash
+            : hashes[static_cast<size_t>(offset - 1)];
+        block.nTime = static_cast<uint32_t>(height);
+        block.nNonce = static_cast<uint32_t>(height);
+        hashes[static_cast<size_t>(offset)] = block.GetHash();
+
+        auto& index{indices[static_cast<size_t>(offset)]};
+        index.nHeight = height;
+        index.pprev = offset == 0
+            ? &base_index
+            : &indices[static_cast<size_t>(offset - 1)];
+        index.phashBlock = &hashes[static_cast<size_t>(offset)];
+
+        BlockValidationState state;
+        CDeterministicMNListNEVMAddressDiff diff;
+        BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+            block, &index, state, view, no_legacy_commitment, diff,
+            /*fJustCheck=*/false, /*ibd=*/true), state.ToString());
+    }
+
+    consensus.nPQLegacyAnchorHeight = preparation_height;
+    consensus.hashPQLegacyAnchorBlock = MakeSnapshotKey(70'000);
+    consensus.hashPQLegacyMNState = MakeSnapshotKey(70'001);
+    consensus.hashPQLegacyPQRegistryState = MakeSnapshotKey(70'002);
+    consensus.nPQChainLockAnchorHeight = finality_anchor_height;
+    consensus.hashPQChainLockAnchorBlock = hashes.back();
+
+    CDeterministicMNList current;
+    CDeterministicMNList previous;
+    BlockValidationState at_anchor_state;
+    BOOST_REQUIRE(manager.BuildNewListFromBlock(
+        blocks.back(), indices.back().pprev, at_anchor_state, view,
+        current, previous, no_legacy_commitment));
+
+    CBlock post_anchor_block{MakeProviderMutationBlock({})};
+    post_anchor_block.hashPrevBlock = hashes.back();
+    post_anchor_block.nTime = finality_anchor_height + 1;
+    post_anchor_block.nNonce = finality_anchor_height + 1;
+    BlockValidationState post_anchor_state;
+    BOOST_CHECK(!manager.BuildNewListFromBlock(
+        post_anchor_block, &indices.back(), post_anchor_state, view,
+        current, previous, no_legacy_commitment));
+    BOOST_CHECK(post_anchor_state.IsInvalid());
+    BOOST_CHECK_EQUAL(post_anchor_state.GetRejectReason(),
+                      "bad-pq-no-payment-eligible-mn");
 }
 
 BOOST_AUTO_TEST_CASE(outbound_probe_failures_do_not_mutate_pose_or_payments)
