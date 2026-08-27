@@ -187,6 +187,15 @@ bool MergeNewTreeIds(std::span<const uint256> current,
     return true;
 }
 
+bool IsRegistryCheckpoint(const PQRegistryConfig& config,
+                          int32_t height) noexcept
+{
+    return height >= config.preparation_height &&
+           (height - config.preparation_height) %
+                   PQ_REGISTRY_CHECKPOINT_INTERVAL ==
+               0;
+}
+
 std::optional<OperatorKeyScheduleState> ScheduleStateAtHeight(
     const PQRegistryConfig& config,
     int32_t height)
@@ -993,13 +1002,30 @@ bool PQRegistryManager::CacheSnapshot(
     view->block_tree_ids =
         std::make_shared<const std::vector<uint256>>(snapshot.block_tree_ids);
 
-    auto existing{m_snapshot_cache_index.find(snapshot.block_hash)};
+    return CacheSnapshotView(std::move(view), cached);
+}
+
+bool PQRegistryManager::CacheSnapshotView(
+    std::shared_ptr<const PQRegistrySnapshotView> snapshot,
+    std::shared_ptr<const PQRegistrySnapshotView>* cached) const
+{
+    if (!snapshot || !snapshot->state ||
+        !snapshot->state->operator_states ||
+        !snapshot->state->used_tree_ids || !snapshot->state->indexes ||
+        !snapshot->block_tree_ids || snapshot->height < 0 ||
+        snapshot->block_hash.IsNull() ||
+        (snapshot->height != 0 && snapshot->previous_block_hash.IsNull()) ||
+        snapshot->state->consensus_state_root.IsNull()) {
+        return false;
+    }
+
+    auto existing{m_snapshot_cache_index.find(snapshot->block_hash)};
     if (existing != m_snapshot_cache_index.end()) {
         m_snapshot_cache.erase(existing->second);
         m_snapshot_cache_index.erase(existing);
     }
-    m_snapshot_cache.emplace_back(snapshot.block_hash, std::move(view));
-    m_snapshot_cache_index[snapshot.block_hash] =
+    m_snapshot_cache.emplace_back(snapshot->block_hash, std::move(snapshot));
+    m_snapshot_cache_index[m_snapshot_cache.back().first] =
         std::prev(m_snapshot_cache.end());
     if (cached != nullptr) {
         *cached = m_snapshot_cache.back().second;
@@ -1017,6 +1043,61 @@ bool PQRegistryManager::CacheSnapshot(
         m_snapshot_cache.pop_front();
     }
     return true;
+}
+
+bool PQRegistryManager::CommitUnchangedSnapshot(
+    const std::shared_ptr<const PQRegistrySnapshotView>& parent,
+    const uint256& block_hash,
+    int32_t height,
+    PQRegistryError& error)
+{
+    if (!parent || !parent->state || !parent->state->operator_states ||
+        !parent->state->used_tree_ids || !parent->state->indexes ||
+        block_hash.IsNull() || block_hash == parent->block_hash ||
+        height != parent->height + 1 ||
+        parent->state->consensus_state_root.IsNull()) {
+        return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+    }
+
+    PQRegistryDiskSnapshot disk;
+    disk.is_checkpoint =
+        static_cast<uint8_t>(IsRegistryCheckpoint(m_config, height));
+    disk.height = height;
+    disk.block_hash = block_hash;
+    disk.previous_block_hash = parent->block_hash;
+    disk.previous_consensus_state_root =
+        parent->state->consensus_state_root;
+    disk.consensus_state_root = parent->state->consensus_state_root;
+    if (disk.is_checkpoint != 0) {
+        disk.operator_states = *parent->state->operator_states;
+        disk.tree_ids = *parent->state->used_tree_ids;
+    }
+    if (!disk.IsStructurallyValid()) {
+        return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+    }
+
+    PQRegistryDiskSnapshot existing;
+    if (m_snapshot_db->ReadCache(block_hash, existing)) {
+        if (!existing.IsStructurallyValid() || existing != disk) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CONFLICT);
+        }
+    } else if (m_snapshot_db->ExistsCache(block_hash)) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    } else if (!m_snapshot_db->WriteThrough(
+                   block_hash, disk, /*fSync=*/false)) {
+        return SetError(error, PQRegistryResult::PERSISTENCE_FAILED);
+    }
+
+    auto next{std::make_shared<PQRegistrySnapshotView>()};
+    next->height = height;
+    next->block_hash = block_hash;
+    next->previous_block_hash = parent->block_hash;
+    next->state = parent->state;
+    next->block_tree_ids =
+        std::make_shared<const std::vector<uint256>>();
+    return CacheSnapshotView(std::move(next))
+        ? true
+        : SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
 }
 
 bool PQRegistryManager::ReadDiskSnapshot(
@@ -1398,6 +1479,7 @@ bool PQRegistryManager::ProcessBlockInternal(
     }
 
     PQRegistrySnapshot parent;
+    std::shared_ptr<const PQRegistrySnapshotView> parent_view;
     if (height == m_config.preparation_height) {
         if (!MakePrePreparationSnapshot(
                 m_genesis_hash, block.hashPrevBlock, uint256{}, height - 1,
@@ -1406,8 +1488,8 @@ bool PQRegistryManager::ProcessBlockInternal(
         }
     } else {
         LOCK(m_mutex);
-        if (!ReconstructPersistentSnapshot(block.hashPrevBlock, height - 1,
-                                           parent, error)) {
+        if (!ReconstructPersistentSnapshotView(
+                block.hashPrevBlock, height - 1, parent_view, error)) {
             if (error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND) {
                 error.result = PQRegistryResult::MISSING_PARENT_SNAPSHOT;
             }
@@ -1415,7 +1497,14 @@ bool PQRegistryManager::ProcessBlockInternal(
         }
     }
 
-    for (const auto& state : parent.operator_states) {
+    const std::span<const OperatorKeyState> parent_states{
+        parent_view
+            ? std::span<const OperatorKeyState>{
+                  parent_view->state->operator_states->data(),
+                  parent_view->state->operator_states->size()}
+            : std::span<const OperatorKeyState>{parent.operator_states.data(),
+                                                parent.operator_states.size()}};
+    for (const auto& state : parent_states) {
         bool exists{false};
         if (!CallMembership(callbacks.dmn_exists_before, state.pro_tx_hash,
                             exists, error)) {
@@ -1426,6 +1515,28 @@ bool PQRegistryManager::ProcessBlockInternal(
                             std::numeric_limits<std::size_t>::max(),
                             state.pro_tx_hash);
         }
+    }
+
+    const auto next_schedule{
+        OperatorKeyScheduleState::FromView(*schedule_view)};
+    const bool unchanged_state{
+        parent_view && parent_view->state && parent_view->state->schedule &&
+        *parent_view->state->schedule == next_schedule && updates.empty() &&
+        net_removed_pro_tx_hashes.empty()};
+    if (unchanged_state) {
+        if (resulting_state_root != nullptr) {
+            *resulting_state_root =
+                parent_view->state->consensus_state_root;
+        }
+        if (fJustCheck) return true;
+
+        LOCK(m_mutex);
+        return CommitUnchangedSnapshot(parent_view, block_hash, height,
+                                       error);
+    }
+
+    if (parent_view) {
+        parent = MaterializeSnapshot(*parent_view);
     }
 
     PQRegistrySnapshot next{parent};

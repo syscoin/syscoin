@@ -766,8 +766,15 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
         registration, 1295, callbacks, {}, false, error));
     BOOST_REQUIRE(manager.ProcessBlock(cutoff, 1296, callbacks, {}, false,
                                        error));
-    BOOST_REQUIRE(manager.ProcessBlock(steady, 1297, callbacks, {}, false,
-                                       error));
+    uint256 checked_steady_root;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        steady, 1297, callbacks, {}, true, error, &checked_steady_root));
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(steady.GetHash()));
+
+    uint256 steady_root;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        steady, 1297, callbacks, {}, false, error, &steady_root));
+    BOOST_CHECK(steady_root == checked_steady_root);
 
     PQPaymentEligibleProTxHashesPtr first;
     PQPaymentEligibleProTxHashesPtr repeated;
@@ -795,7 +802,20 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
     BOOST_REQUIRE(manager.GetReadView(
         steady.GetHash(), cutoff.GetHash(), 1297, steady_view, error));
     BOOST_CHECK(cutoff_view.SharesStateWith(steady_view));
+    BOOST_CHECK(cutoff_view.SharesTreeHistoryWith(steady_view));
+    BOOST_CHECK(steady_root == cutoff_view.ConsensusStateRoot());
     BOOST_CHECK_EQUAL(cutoff_view.OperatorCount(), 1U);
+
+    PQRegistryDiskSnapshot steady_delta;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        steady.GetHash(), steady_delta));
+    BOOST_CHECK_EQUAL(steady_delta.is_checkpoint, 0U);
+    BOOST_CHECK(steady_delta.operator_states.empty());
+    BOOST_CHECK(steady_delta.removed_operators.empty());
+    BOOST_CHECK(steady_delta.tree_ids.empty());
+    BOOST_CHECK(steady_delta.block_tree_ids.empty());
+    BOOST_CHECK(steady_delta.consensus_state_root ==
+                cutoff_view.ConsensusStateRoot());
 
     PQPaymentEligibleProTxHashesPtr next_epoch;
     BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
@@ -1111,6 +1131,10 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
     db.memory_only = false;
     uint256 registration_hash;
     uint256 cutoff_hash;
+    uint256 steady_hash;
+    uint256 checkpoint_grandparent_hash;
+    uint256 checkpoint_previous_hash;
+    uint256 checkpoint_hash;
 
     {
         PQRegistryManager manager(db, genesis, config);
@@ -1130,23 +1154,117 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
             cutoff, 1296, Member(genesis, pro_tx_hash, owner_key_id), {}, false,
             error));
         cutoff_hash = cutoff.GetHash();
+        const auto steady{Block(cutoff_hash, 74,
+                                {OrdinaryTransaction(74)})};
+        BOOST_REQUIRE(manager.ProcessBlock(
+            steady, 1297, Member(genesis, pro_tx_hash, owner_key_id), {}, false,
+            error));
+        BOOST_REQUIRE(manager.ProcessBlock(
+            steady, 1297, Member(genesis, pro_tx_hash, owner_key_id), {}, false,
+            error));
+        steady_hash = steady.GetHash();
         BOOST_REQUIRE(manager.Flush(/*fSync=*/true));
     }
 
     db.wipe_data = false;
-    PQRegistryManager restarted(db, genesis, config);
+    {
+        PQRegistryManager restarted(db, genesis, config);
+        PQRegistryError error;
+        PQRegistrySnapshot snapshot;
+        BOOST_REQUIRE(restarted.GetSnapshot(
+            steady_hash, cutoff_hash, 1297, snapshot, error));
+        BOOST_CHECK(snapshot.HasUsedTreeId(commitment.tree_id));
+        const auto frozen{OnlyOperator(snapshot).ResolveChildRoot(0)};
+        BOOST_REQUIRE(frozen.record);
+        BOOST_CHECK(frozen.status ==
+                    ChildRootResolutionStatus::FROZEN_PRESENT);
+        BOOST_CHECK(frozen.record->commitment == commitment);
+        BOOST_CHECK(snapshot.RecomputeConsensusStateRoot(genesis) ==
+                    snapshot.consensus_state_root);
+
+        uint256 cursor{steady_hash};
+        uint32_t block_id{75};
+        CBlock checkpoint;
+        for (int32_t height{1298};
+             height <= config.preparation_height +
+                           PQ_REGISTRY_CHECKPOINT_INTERVAL;
+             ++height) {
+            auto next{Block(cursor, block_id,
+                            {OrdinaryTransaction(block_id)})};
+            ++block_id;
+            BOOST_REQUIRE(restarted.ProcessBlock(
+                next, height,
+                Member(genesis, pro_tx_hash, owner_key_id), {}, false,
+                error));
+            cursor = next.GetHash();
+            if (height == config.preparation_height +
+                              PQ_REGISTRY_CHECKPOINT_INTERVAL - 1) {
+                checkpoint_grandparent_hash = next.hashPrevBlock;
+                checkpoint_previous_hash = cursor;
+            } else if (height == config.preparation_height +
+                                     PQ_REGISTRY_CHECKPOINT_INTERVAL) {
+                checkpoint = std::move(next);
+                checkpoint_hash = cursor;
+            }
+        }
+
+        const auto before_checkpoint_schedule{
+            DeriveOperatorKeyScheduleView(
+                config.schedule,
+                config.preparation_height +
+                    PQ_REGISTRY_CHECKPOINT_INTERVAL - 1,
+                config.registration_cutoff_blocks,
+                config.future_horizon_epochs)};
+        const auto checkpoint_schedule{DeriveOperatorKeyScheduleView(
+            config.schedule,
+            config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL,
+            config.registration_cutoff_blocks,
+            config.future_horizon_epochs)};
+        BOOST_REQUIRE(before_checkpoint_schedule);
+        BOOST_REQUIRE(checkpoint_schedule);
+        BOOST_REQUIRE(OperatorKeyScheduleState::FromView(
+                          *before_checkpoint_schedule) ==
+                      OperatorKeyScheduleState::FromView(
+                          *checkpoint_schedule));
+
+        PQRegistryReadView before_checkpoint_view;
+        PQRegistryReadView checkpoint_view;
+        BOOST_REQUIRE(restarted.GetReadView(
+            checkpoint_previous_hash, checkpoint_grandparent_hash,
+            config.preparation_height +
+                PQ_REGISTRY_CHECKPOINT_INTERVAL - 1,
+            before_checkpoint_view, error));
+        BOOST_REQUIRE(restarted.GetReadView(
+            checkpoint_hash, checkpoint_previous_hash,
+            config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL,
+            checkpoint_view, error));
+        BOOST_CHECK(before_checkpoint_view.SharesStateWith(checkpoint_view));
+
+        PQRegistryDiskSnapshot checkpoint_disk;
+        BOOST_REQUIRE(restarted.SnapshotDatabase().ReadCache(
+            checkpoint_hash, checkpoint_disk));
+        BOOST_CHECK_EQUAL(checkpoint_disk.is_checkpoint, 1U);
+        BOOST_REQUIRE_EQUAL(checkpoint_disk.operator_states.size(), 1U);
+        BOOST_REQUIRE_EQUAL(checkpoint_disk.tree_ids.size(), 1U);
+        BOOST_CHECK(checkpoint_disk.block_tree_ids.empty());
+
+        BOOST_REQUIRE(restarted.ProcessBlock(
+            checkpoint,
+            config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL,
+            Member(genesis, pro_tx_hash, owner_key_id), {}, false, error));
+        BOOST_REQUIRE(restarted.Flush(/*fSync=*/true));
+    }
+
+    PQRegistryManager checkpoint_restarted(db, genesis, config);
     PQRegistryError error;
-    PQRegistrySnapshot snapshot;
-    BOOST_REQUIRE(restarted.GetSnapshot(
-        cutoff_hash, registration_hash, 1296, snapshot, error));
-    BOOST_CHECK(snapshot.HasUsedTreeId(commitment.tree_id));
-    const auto frozen{OnlyOperator(snapshot).ResolveChildRoot(0)};
-    BOOST_REQUIRE(frozen.record);
-    BOOST_CHECK(frozen.status ==
-                ChildRootResolutionStatus::FROZEN_PRESENT);
-    BOOST_CHECK(frozen.record->commitment == commitment);
-    BOOST_CHECK(snapshot.RecomputeConsensusStateRoot(genesis) ==
-                snapshot.consensus_state_root);
+    PQRegistrySnapshot checkpoint_snapshot;
+    BOOST_REQUIRE(checkpoint_restarted.GetSnapshot(
+        checkpoint_hash, checkpoint_previous_hash,
+        config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL,
+        checkpoint_snapshot, error));
+    BOOST_CHECK(checkpoint_snapshot.HasUsedTreeId(commitment.tree_id));
+    BOOST_CHECK(checkpoint_snapshot.RecomputeConsensusStateRoot(genesis) ==
+                checkpoint_snapshot.consensus_state_root);
 }
 
 BOOST_AUTO_TEST_CASE(reconstruction_rejects_broken_root_link)
