@@ -29,6 +29,19 @@ public:
         return journal.ReconcileDurableAcceptedChainLock(
             genesis_hash, pro_tx_hash, chainlock);
     }
+
+    static bool ConsumeIfAbsent(CPQSignerJournal& journal,
+                                const PQSignerJournalKey& key)
+    {
+        return journal.ConsumeIfAbsent({key});
+    }
+
+    static bool ConsumeIfAbsent(
+        CPQSignerJournal& journal,
+        const std::vector<PQSignerJournalKey>& keys)
+    {
+        return journal.ConsumeIfAbsent(keys);
+    }
 };
 
 } // namespace llmq::test
@@ -140,7 +153,10 @@ void CheckOutcome(
     const llmq::PQSignerJournalResult& result,
     llmq::PQSignerJournalOutcome expected)
 {
-    BOOST_CHECK(result.outcome == expected);
+    BOOST_CHECK_MESSAGE(
+        result.outcome == expected,
+        "journal outcome " << static_cast<int>(result.outcome)
+                           << " != expected " << static_cast<int>(expected));
 }
 
 } // namespace
@@ -200,11 +216,106 @@ BOOST_AUTO_TEST_CASE(reserved_after_restart_is_permanently_consumed)
     }
 
     llmq::CPQSignerJournal restarted{path};
+    BOOST_REQUIRE(
+        llmq::test::PQSignerJournalTestAccess::ConsumeIfAbsent(restarted,
+                                                               key));
     CheckOutcome(ReserveSlot(restarted, key, message_hash), llmq::PQSignerJournalOutcome::CONSUMED);
     CheckOutcome(
         restarted.StoreSignature(key, message_hash, MakeSignature(1)),
         llmq::PQSignerJournalOutcome::CONSUMED);
     CheckOutcome(ReserveSlot(restarted, key, uint256{22}), llmq::PQSignerJournalOutcome::CONFLICT);
+}
+
+BOOST_AUTO_TEST_CASE(startup_consumption_burns_only_an_absent_physical_slot)
+{
+    const fs::path path = m_path_root / "pq_signer_journal_startup_burn";
+    const auto key{MakeKey()};
+
+    {
+        llmq::CPQSignerJournal journal{path};
+        BOOST_REQUIRE(
+            llmq::test::PQSignerJournalTestAccess::ConsumeIfAbsent(journal,
+                                                                   key));
+        // Every scheduler pass, including a same-height replacement context,
+        // may repeat this without turning quarantine into live ownership.
+        BOOST_REQUIRE(
+            llmq::test::PQSignerJournalTestAccess::ConsumeIfAbsent(journal,
+                                                                   key));
+        BOOST_CHECK(!journal.GetBranchLock(key.genesis_hash, key.pro_tx_hash));
+        CheckOutcome(ReserveSlot(journal, key, MakeHash(23)),
+                     llmq::PQSignerJournalOutcome::CONSUMED);
+
+        auto wrong_height{key};
+        wrong_height.absolute_height += 5;
+        CheckOutcome(ReserveSlot(journal, wrong_height, MakeHash(24)),
+                     llmq::PQSignerJournalOutcome::CONFLICT);
+
+        // A replacement context at the same height may introduce a different
+        // physical child key after an earlier scheduler pass.
+        auto replacement_context{key};
+        replacement_context.child_key_hash = MakeHash(30);
+        BOOST_REQUIRE(
+            llmq::test::PQSignerJournalTestAccess::ConsumeIfAbsent(
+                journal, replacement_context));
+        CheckOutcome(ReserveSlot(journal, replacement_context, MakeHash(31)),
+                     llmq::PQSignerJournalOutcome::CONSUMED);
+    }
+
+    llmq::CPQSignerJournal restarted{path};
+    CheckOutcome(ReserveSlot(restarted, key, MakeHash(23)),
+                 llmq::PQSignerJournalOutcome::CONSUMED);
+
+    auto next_leaf{key};
+    ++next_leaf.leaf_index;
+    next_leaf.absolute_height += 5;
+    CheckOutcome(ReserveSlot(restarted, next_leaf, MakeHash(25)),
+                 llmq::PQSignerJournalOutcome::RESERVED);
+}
+
+BOOST_AUTO_TEST_CASE(startup_consumption_preserves_existing_signed_replay)
+{
+    const fs::path path = m_path_root / "pq_signer_journal_startup_replay";
+    const auto key{MakeKey()};
+    const uint256 message{MakeHash(26)};
+    const auto signature{MakeSignature(12)};
+    llmq::CPQSignerJournal journal{path};
+    CheckOutcome(ReserveSlot(journal, key, message),
+                 llmq::PQSignerJournalOutcome::RESERVED);
+    CheckOutcome(journal.StoreSignature(key, message, signature),
+                 llmq::PQSignerJournalOutcome::STORED);
+
+    BOOST_REQUIRE(
+        llmq::test::PQSignerJournalTestAccess::ConsumeIfAbsent(journal, key));
+    const auto replay{ReserveSlot(journal, key, message)};
+    CheckOutcome(replay, llmq::PQSignerJournalOutcome::REPLAY);
+    BOOST_REQUIRE(replay.signature);
+    BOOST_CHECK(*replay.signature == signature);
+    CheckOutcome(ReserveSlot(journal, key, MakeHash(27)),
+                 llmq::PQSignerJournalOutcome::CONFLICT);
+}
+
+BOOST_AUTO_TEST_CASE(startup_consumption_preserves_existing_live_reservation)
+{
+    const fs::path path = m_path_root / "pq_signer_journal_startup_reserved";
+    const auto key{MakeKey()};
+    const uint256 message{MakeHash(28)};
+    const auto signature{MakeSignature(13)};
+    llmq::CPQSignerJournal journal{path};
+    CheckOutcome(ReserveSlot(journal, key, message),
+                 llmq::PQSignerJournalOutcome::RESERVED);
+
+    BOOST_REQUIRE(
+        llmq::test::PQSignerJournalTestAccess::ConsumeIfAbsent(journal, key));
+    CheckOutcome(ReserveSlot(journal, key, message),
+                 llmq::PQSignerJournalOutcome::CONSUMED);
+    CheckOutcome(ReserveSlot(journal, key, MakeHash(29)),
+                 llmq::PQSignerJournalOutcome::CONFLICT);
+    CheckOutcome(journal.StoreSignature(key, message, signature),
+                 llmq::PQSignerJournalOutcome::STORED);
+    const auto replay{ReserveSlot(journal, key, message)};
+    CheckOutcome(replay, llmq::PQSignerJournalOutcome::REPLAY);
+    BOOST_REQUIRE(replay.signature);
+    BOOST_CHECK(*replay.signature == signature);
 }
 
 BOOST_AUTO_TEST_CASE(competing_message_never_replaces_live_reservation)

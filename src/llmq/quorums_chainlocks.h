@@ -67,6 +67,24 @@ namespace llmq {
     const pq::ChainLockStatement& collector,
     const pq::ChainLockStatement& winner) noexcept;
 
+/** A prior process could only have consumed targets signable at this tip. */
+[[nodiscard]] bool ShouldConsumeChainLockStartupSlot(
+    const pq::ChainLockScheduleConfig& schedule,
+    int32_t startup_tip_height,
+    int32_t target_height) noexcept;
+
+/** The live audit-signing interval starts after the seal and ends exclusively. */
+[[nodiscard]] bool IsPaymentAuditSigningHeightLive(
+    const pq::PaymentAuditScheduleConfig& schedule,
+    uint32_t subject_epoch,
+    int32_t tip_height) noexcept;
+
+/** A prior process could have signed once the audit window opened. */
+[[nodiscard]] bool ShouldConsumePaymentAuditStartupSlot(
+    const pq::PaymentAuditScheduleConfig& schedule,
+    uint32_t subject_epoch,
+    int32_t startup_tip_height) noexcept;
+
 /** Prevent delayed partition signatures from finalizing a stale or deep fork. */
 [[nodiscard]] bool IsLiveChainLockCandidateAdmissible(
     const pq::ChainLockScheduleConfig& schedule,
@@ -234,6 +252,7 @@ public:
                                  !m_payment_audit_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex,
+                                 !m_share_signing_mutex,
                                  !m_btcc_preseal_mutex);
     void Stop()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lifecycle_mutex,
@@ -582,6 +601,19 @@ private:
                                  !m_lookup_mutex);
     [[nodiscard]] bool ReconcileSignerJournal(const uint256& pro_tx_hash)
         EXCLUSIVE_LOCKS_REQUIRED(!m_signer_reconcile_mutex);
+    [[nodiscard]] bool InitializeSignerStartupTip(
+        const uint256& local_pro_tx_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex, !cs_main);
+    [[nodiscard]] bool ConsumeStartupChainLockSlots(
+        const CurrentSigningContext& current,
+        const uint256& local_pro_tx_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex);
+    [[nodiscard]] bool ConsumeStartupPaymentAuditSlots(
+        const pq::PaymentAuditStatement& statement,
+        const pq::FrozenQuorumRosters& rosters,
+        uint8_t authorization_mask,
+        const uint256& local_pro_tx_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex);
     void MaybeCreateAndSignChainLock()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_share_signing_mutex,
@@ -956,6 +988,9 @@ private:
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;
     Mutex m_share_signing_mutex;
+    uint256 m_signer_startup_pro_tx_hash GUARDED_BY(m_share_signing_mutex);
+    std::optional<int32_t> m_signer_startup_tip_height
+        GUARDED_BY(m_share_signing_mutex);
     mutable Mutex m_payment_audit_mutex;
     std::optional<PaymentAuditResponseRuntime> m_payment_audit_runtime
         GUARDED_BY(m_payment_audit_mutex);

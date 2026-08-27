@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <vector>
 
 namespace llmq {
 
@@ -178,6 +179,13 @@ struct PQSignerJournalResult
  * detect rollback or cloning of its entire storage. A clone cannot gain extra
  * quorum weight because collectors count one frozen roster slot, but it can
  * make that identity equivocate and exceed this profile's per-key usage bound.
+ * After synchronized startup, the handler therefore fsyncs tombstones for
+ * absent physical slots that were already live at the captured startup tip.
+ * Existing reservations and signatures remain authoritative, while future and
+ * expired schedule slots are not rewritten. A coordinated restart can make
+ * many operators miss the current ChainLock or audit opportunity; this bounded
+ * liveness cost protects sequential restore recovery without pretending that
+ * local state detects a concurrent clone.
  * Supported operation therefore keeps one active signer datadir and never
  * restores this journal behind its signing history. External monotonic leases
  * are optional hardening for clustered deployments, not a consensus rule.
@@ -252,6 +260,18 @@ private:
         const uint256& genesis_hash,
         const uint256& pro_tx_hash,
         const pq::FinalChainLock& chainlock)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Fsync explicit tombstones only for physical leaves with no record.
+     * Existing reservations and signatures are left untouched so their normal
+     * consumed, replay, and conflict behavior remains authoritative.
+     *
+     * This is private because only the local startup signing gate may retire a
+     * live schedule slot without a message or branch vote.
+     */
+    [[nodiscard]] bool ConsumeIfAbsent(
+        const std::vector<PQSignerJournalKey>& keys)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 };
 

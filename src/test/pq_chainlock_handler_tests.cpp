@@ -172,6 +172,49 @@ private:
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(startup_slot_consumption_is_limited_to_live_rounds)
+{
+    const llmq::pq::ChainLockScheduleConfig chainlock{.epoch_origin = 0};
+    BOOST_REQUIRE(chainlock.IsValid());
+    BOOST_CHECK(llmq::ShouldConsumeChainLockStartupSlot(
+        chainlock, /*startup_tip_height=*/885, /*target_height=*/880));
+    BOOST_CHECK(!llmq::ShouldConsumeChainLockStartupSlot(
+        chainlock, /*startup_tip_height=*/885, /*target_height=*/885));
+}
+
+BOOST_AUTO_TEST_CASE(payment_audit_signing_height_is_exactly_window_bounded)
+{
+    const llmq::pq::ChainLockScheduleConfig chainlock{.epoch_origin = 0};
+    BOOST_REQUIRE(chainlock.IsValid());
+    const llmq::pq::PaymentAuditScheduleConfig audit{
+        chainlock,
+        llmq::pq::BTCCScheduleConfig{.candidate_origin = 865},
+    };
+    BOOST_REQUIRE(audit.IsValid());
+    const auto round{llmq::pq::BuildPaymentAuditEpochSchedule(
+        audit, /*epoch=*/3)};
+    BOOST_REQUIRE(round);
+    const auto first_signing{llmq::pq::SigningHeightForTarget(
+        chainlock, round->seal_height)};
+    BOOST_REQUIRE(first_signing);
+    BOOST_CHECK(!llmq::IsPaymentAuditSigningHeightLive(
+        audit, 3, *first_signing - 1));
+    BOOST_CHECK(llmq::IsPaymentAuditSigningHeightLive(
+        audit, 3, *first_signing));
+    BOOST_CHECK(llmq::IsPaymentAuditSigningHeightLive(
+        audit, 3, round->carrier_end_height_exclusive - 1));
+    BOOST_CHECK(!llmq::IsPaymentAuditSigningHeightLive(
+        audit, 3, round->carrier_end_height_exclusive));
+    BOOST_CHECK(!llmq::ShouldConsumePaymentAuditStartupSlot(
+        audit, 3, *first_signing - 1));
+    BOOST_CHECK(llmq::ShouldConsumePaymentAuditStartupSlot(
+        audit, 3, *first_signing));
+    // SYSCOIN: A deep reorg can revive an old carrier window, so a startup
+    // floor beyond that window must still retire an absent old leaf.
+    BOOST_CHECK(llmq::ShouldConsumePaymentAuditStartupSlot(
+        audit, 3, round->carrier_end_height_exclusive));
+}
+
 BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
 {
     auto consensus{ValidConsensus()};

@@ -907,6 +907,20 @@ Required behavior:
 - `RESERVED` after a crash is treated as consumed unless the signer can prove
   that no signature operation occurred. Safety takes precedence over one leaf
   of liveness.
+- Once the node is synchronized, each journal process captures one startup tip
+  per active `proTxHash`. Before the corresponding local signer can run, it
+  fsyncs a batch of tombstones for absent physical slots in the ChainLock
+  target or audit seal context whose signing opportunity had opened by that
+  tip. Existing `SIGNED` entries retain exact replay, and existing `RESERVED`
+  or conflicting entries remain untouched. This idempotent check runs for
+  every eligible signing context, including a replacement context introduced
+  by a same-height or deeper reorg.
+- The startup quarantine does not proactively fill historical leaves: it only
+  checks a signing context that is live now and was no later than the captured
+  floor. It does not chase targets that become signable later in the same
+  process. Under the supported sequential-signer model those later leaves could
+  not have been used by the prior process; treating every new tip as another
+  recovery floor would consume fresh leaves indefinitely.
 - Network input, an invalid block, an ineligible height, an invalid audit seal,
   and generic RPC calls cannot reserve a leaf.
 
@@ -926,11 +940,13 @@ never invalidates base-chain blocks.
 The local LevelDB implementation provides atomic synchronous writes and crash
 recovery, while the ordinary datadir lock prevents two node processes from
 using one live datadir. Supported operation uses one active signer datadir and
-does not clone it or restore its journal behind signing history. A signer whose
-journal history was lost remains offline until a fresh child-tree generation
-is registered and active. An HSM/TPM monotonic register or remote signer lease
-is optional hardening for clustered or snapshot-heavy deployments; it is not a
-consensus rule or an activation prerequisite.
+does not clone it. After an honestly synchronized sequential restore, the
+startup quarantine may sacrifice that operator's current ChainLock and audit
+shares before later schedule slots resume. A coordinated restart can therefore
+make the network miss one current ChainLock round or audit opportunity. An
+HSM/TPM monotonic register or remote signer lease remains necessary to detect
+concurrent clones or rollback behind a stale/eclipsed tip, and is optional
+hardening rather than a consensus rule or activation prerequisite.
 
 That operational constraint is not part of quorum counting. Shares are keyed by the
 frozen quorum slot, member index, and proTxHash, and a collector retains at most

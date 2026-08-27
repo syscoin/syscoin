@@ -6,8 +6,11 @@
 
 #include <llmq/pq_chainlock_types.h>
 
+#include <hash.h>
+
 #include <algorithm>
 #include <exception>
+#include <string_view>
 #include <tuple>
 
 namespace llmq {
@@ -23,6 +26,8 @@ constexpr std::uint32_t BRANCH_LOCK_GUARD{0x42524c31}; // "BRL1"
 constexpr std::uint32_t ACCEPTED_CERTIFICATE_GUARD{0x41434331}; // "ACC1"
 constexpr std::uint8_t SLOT_RESERVED{1};
 constexpr std::uint8_t SLOT_SIGNED{2};
+constexpr std::string_view STARTUP_CONSUMED_DOMAIN{
+    "SYS_PQ_SIGNER_STARTUP_CONSUMED_V1"};
 
 struct SchemaValue
 {
@@ -160,6 +165,21 @@ bool IsValidKey(const PQSignerJournalKey& key)
            !key.child_key_hash.IsNull() &&
            leaf_matches_purpose &&
            key.absolute_height >= 0;
+}
+
+uint256 StartupConsumedMessageHash(const PQSignerJournalKey& key)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    writer.write(AsBytes(Span{STARTUP_CONSUMED_DOMAIN.data(),
+                              STARTUP_CONSUMED_DOMAIN.size()}));
+    writer << key;
+    return writer.GetHash();
+}
+
+bool IsStartupConsumed(const SlotValue& slot)
+{
+    return slot.state == SLOT_RESERVED &&
+           slot.message_hash == StartupConsumedMessageHash(slot.logical_key);
 }
 
 bool IsValidSlot(const SlotValue& slot)
@@ -325,7 +345,13 @@ PQSignerJournalResult CPQSignerJournal::Reserve(
                 m_pending.clear();
                 return Result(*m_failure);
             }
-            if (slot.logical_key != key || slot.message_hash != message_hash) {
+            if (slot.logical_key != key) {
+                return Result(PQSignerJournalOutcome::CONFLICT);
+            }
+            if (IsStartupConsumed(slot)) {
+                return Result(PQSignerJournalOutcome::CONSUMED);
+            }
+            if (slot.message_hash != message_hash) {
                 return Result(PQSignerJournalOutcome::CONFLICT);
             }
             if (slot.state == SLOT_SIGNED) return Replay(slot.signature);
@@ -366,6 +392,60 @@ PQSignerJournalResult CPQSignerJournal::Reserve(
         m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
         m_pending.clear();
         return Result(*m_failure);
+    }
+}
+
+bool CPQSignerJournal::ConsumeIfAbsent(
+    const std::vector<PQSignerJournalKey>& keys)
+{
+    LOCK(m_mutex);
+    if (m_failure) return false;
+
+    try {
+        std::map<PQSignerJournalLeafKey, PQSignerJournalKey> unique;
+        for (const auto& key : keys) {
+            if (!IsValidKey(key)) return false;
+            const PQSignerJournalLeafKey leaf_key{key};
+            const auto [it, inserted]{unique.emplace(leaf_key, key)};
+            if (!inserted && it->second != key) return false;
+        }
+
+        CDBBatch batch{m_db};
+        bool has_writes{false};
+        for (const auto& [leaf_key, key] : unique) {
+            const SlotDatabaseKey slot_key{key};
+            if (m_db.Exists(slot_key)) {
+                SlotValue slot;
+                if (!m_db.Read(slot_key, slot) || !IsValidSlot(slot) ||
+                    PQSignerJournalLeafKey{slot.logical_key} != leaf_key) {
+                    m_failure = PQSignerJournalOutcome::CORRUPT;
+                    m_pending.clear();
+                    return false;
+                }
+                continue;
+            }
+            if (m_pending.find(leaf_key) != m_pending.end()) {
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                m_pending.clear();
+                return false;
+            }
+
+            SlotValue consumed;
+            consumed.logical_key = key;
+            consumed.message_hash = StartupConsumedMessageHash(key);
+            batch.Write(slot_key, consumed);
+            has_writes = true;
+        }
+        if (has_writes && !m_db.WriteBatch(batch, /*fSync=*/true)) {
+            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            m_pending.clear();
+            return false;
+        }
+        return true;
+    } catch (const std::exception&) {
+        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+        m_pending.clear();
+        return false;
     }
 }
 
@@ -522,7 +602,13 @@ PQSignerJournalResult CPQSignerJournal::StoreSignature(
             m_pending.clear();
             return Result(*m_failure);
         }
-        if (slot.logical_key != key || slot.message_hash != message_hash) {
+        if (slot.logical_key != key) {
+            return Result(PQSignerJournalOutcome::CONFLICT);
+        }
+        if (IsStartupConsumed(slot)) {
+            return Result(PQSignerJournalOutcome::CONSUMED);
+        }
+        if (slot.message_hash != message_hash) {
             return Result(PQSignerJournalOutcome::CONFLICT);
         }
         if (slot.state == SLOT_SIGNED) return Replay(slot.signature);

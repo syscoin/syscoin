@@ -1500,6 +1500,47 @@ bool IsChainLockCollectorOnAcceptedSuccessorView(
            collector.previous_btcc_cursor == winner.accepted_btcc_cursor;
 }
 
+bool ShouldConsumeChainLockStartupSlot(
+    const pq::ChainLockScheduleConfig& schedule,
+    int32_t startup_tip_height,
+    int32_t target_height) noexcept
+{
+    const auto latest{pq::LatestEligibleChainLockTargetHeight(
+        schedule, startup_tip_height)};
+    return latest && target_height <= *latest;
+}
+
+bool IsPaymentAuditSigningHeightLive(
+    const pq::PaymentAuditScheduleConfig& schedule,
+    uint32_t subject_epoch,
+    int32_t tip_height) noexcept
+{
+    const auto audit{pq::BuildPaymentAuditEpochSchedule(schedule,
+                                                        subject_epoch)};
+    const auto first_signing_height{
+        audit ? pq::SigningHeightForTarget(schedule.chainlock,
+                                           audit->seal_height)
+              : std::nullopt};
+    return audit && first_signing_height &&
+           tip_height >= *first_signing_height &&
+           tip_height < audit->carrier_end_height_exclusive;
+}
+
+bool ShouldConsumePaymentAuditStartupSlot(
+    const pq::PaymentAuditScheduleConfig& schedule,
+    uint32_t subject_epoch,
+    int32_t startup_tip_height) noexcept
+{
+    const auto audit{pq::BuildPaymentAuditEpochSchedule(schedule,
+                                                        subject_epoch)};
+    const auto first_signing_height{
+        audit ? pq::SigningHeightForTarget(schedule.chainlock,
+                                           audit->seal_height)
+              : std::nullopt};
+    return first_signing_height &&
+           startup_tip_height >= *first_signing_height;
+}
+
 CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                                        PeerManager& peerman,
                                        ChainstateManager& chainman)
@@ -1707,6 +1748,11 @@ void CChainLocksHandler::Start()
     {
         LOCK(m_lifecycle_mutex);
         if (m_started) return;
+        {
+            LOCK(m_share_signing_mutex);
+            m_signer_startup_pro_tx_hash.SetNull();
+            m_signer_startup_tip_height.reset();
+        }
         if (fMasternodeMode && m_config && m_quorum_build_config) {
             try {
                 m_signer_journal = std::make_unique<CPQSignerJournal>(
@@ -1844,6 +1890,139 @@ bool CChainLocksHandler::ReconcileSignerJournal(const uint256& pro_tx_hash)
                   __func__, static_cast<uint8_t>(result.outcome));
         return false;
     }
+}
+
+bool CChainLocksHandler::InitializeSignerStartupTip(
+    const uint256& local_pro_tx_hash)
+{
+    AssertLockHeld(m_share_signing_mutex);
+    if (local_pro_tx_hash.IsNull()) return false;
+    if (m_signer_startup_pro_tx_hash == local_pro_tx_hash &&
+        m_signer_startup_tip_height) {
+        return true;
+    }
+    LOCK(cs_main);
+    const CBlockIndex* tip{m_chainman.ActiveTip()};
+    if (tip == nullptr) return false;
+    // Under the supported sequential-signer model, a target that first becomes
+    // signable after this synchronized snapshot cannot have been used by the
+    // prior process. Chasing later tips would burn fresh leaves indefinitely;
+    // concurrent clones and rollback behind a stale/eclipsed tip still require
+    // an external single-active fence.
+    m_signer_startup_pro_tx_hash = local_pro_tx_hash;
+    m_signer_startup_tip_height = tip->nHeight;
+    return true;
+}
+
+bool CChainLocksHandler::ConsumeStartupChainLockSlots(
+    const CurrentSigningContext& current,
+    const uint256& local_pro_tx_hash)
+{
+    AssertLockHeld(m_share_signing_mutex);
+    if (!m_signer_journal || !m_signer_startup_tip_height ||
+        !current.rosters) {
+        return false;
+    }
+    if (!ShouldConsumeChainLockStartupSlot(
+            m_config->chainlock_schedule, *m_signer_startup_tip_height,
+            current.statement.height)) {
+        return true;
+    }
+
+    std::vector<PQSignerJournalKey> keys;
+    keys.reserve(current.rosters->size());
+    for (std::size_t slot{0}; slot < current.rosters->size(); ++slot) {
+        if ((current.authorization_mask & (uint8_t{1} << slot)) == 0) {
+            continue;
+        }
+        const auto& roster{(*current.rosters)[slot]};
+        const auto leaf_index{pq::ChainLockLeafIndex(
+            m_config->chainlock_schedule, roster.descriptor.epoch,
+            current.statement.height)};
+        if (!leaf_index) return false;
+        for (const auto& member : roster.members) {
+            if (member.pro_tx_hash != local_pro_tx_hash || !member.eligible ||
+                !member.child_root) {
+                continue;
+            }
+            auto signing_material{GetActiveMasternodeChildSigningMaterial(
+                m_genesis_hash, local_pro_tx_hash, *member.child_root)};
+            if (!signing_material) return false;
+            keys.push_back(PQSignerJournalKey{
+                .genesis_hash = m_genesis_hash,
+                .child_profile = current.statement.child_profile,
+                .pro_tx_hash = local_pro_tx_hash,
+                .quorum_epoch = roster.descriptor.epoch,
+                .child_key_hash =
+                    ::Hash(signing_material->key_proof.public_key),
+                .leaf_index = *leaf_index,
+                .purpose = PQSignerPurpose::CHAINLOCK,
+                .absolute_height = current.statement.height,
+            });
+        }
+    }
+    if (!m_signer_journal->ConsumeIfAbsent(keys)) return false;
+    // Repeat this for every startup-eligible context. A same-height reorg can
+    // introduce a different local roster key after an earlier context had no
+    // key to consume. Idempotent consumption closes that gap while allowing an
+    // intact SIGNED record to replay in this scheduler pass.
+    return true;
+}
+
+bool CChainLocksHandler::ConsumeStartupPaymentAuditSlots(
+    const pq::PaymentAuditStatement& statement,
+    const pq::FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
+    const uint256& local_pro_tx_hash)
+{
+    AssertLockHeld(m_share_signing_mutex);
+    if (!m_signer_journal || !m_signer_startup_tip_height) return false;
+
+    const pq::PaymentAuditScheduleConfig config{
+        m_config->chainlock_schedule, m_config->btcc_schedule};
+    const auto schedule{pq::BuildPaymentAuditEpochSchedule(
+        config, statement.commitment.subject_epoch)};
+    if (!schedule) return false;
+    if (!ShouldConsumePaymentAuditStartupSlot(
+            config, statement.commitment.subject_epoch,
+            *m_signer_startup_tip_height)) {
+        return true;
+    }
+
+    std::vector<PQSignerJournalKey> keys;
+    keys.reserve(rosters.size());
+    for (std::size_t slot{0}; slot < rosters.size(); ++slot) {
+        if ((authorization_mask & (uint8_t{1} << slot)) == 0) continue;
+        const auto& roster{rosters[slot]};
+        const auto leaf_index{pq::PaymentAuditLeafIndex(
+            config, statement.commitment.subject_epoch,
+            statement.commitment.seal_height, roster.descriptor.epoch)};
+        if (!leaf_index) return false;
+        for (const auto& member : roster.members) {
+            if (member.pro_tx_hash != local_pro_tx_hash || !member.eligible ||
+                !member.child_root) {
+                continue;
+            }
+            auto signing_material{GetActiveMasternodeChildSigningMaterial(
+                m_genesis_hash, local_pro_tx_hash, *member.child_root)};
+            if (!signing_material) return false;
+            keys.push_back(PQSignerJournalKey{
+                .genesis_hash = m_genesis_hash,
+                .child_profile = statement.commitment.child_profile,
+                .pro_tx_hash = local_pro_tx_hash,
+                .quorum_epoch = roster.descriptor.epoch,
+                .child_key_hash =
+                    ::Hash(signing_material->key_proof.public_key),
+                .leaf_index = *leaf_index,
+                .purpose = PQSignerPurpose::PAYMENT_AUDIT,
+                .absolute_height = statement.commitment.seal_height,
+            });
+        }
+    }
+    if (!m_signer_journal->ConsumeIfAbsent(keys)) return false;
+    // Audit roster context can likewise change without advancing the schedule;
+    // do not cache successful consumption across signing candidates.
+    return true;
 }
 
 bool CChainLocksHandler::IsPersistedChainLockPending() const
@@ -7334,6 +7513,17 @@ bool CChainLocksHandler::IsCurrentPaymentAuditStatement(
         !m_chainman.IsSnapshotValidated()) {
         return false;
     }
+    const CBlockIndex* tip{m_chainman.ActiveTip()};
+    const pq::PaymentAuditScheduleConfig schedule_config{
+        m_config->chainlock_schedule, m_config->btcc_schedule};
+    const auto schedule{pq::BuildPaymentAuditEpochSchedule(
+        schedule_config, statement.commitment.subject_epoch)};
+    if (tip == nullptr || !schedule ||
+        !IsPaymentAuditSigningHeightLive(
+            schedule_config, statement.commitment.subject_epoch,
+            tip->nHeight)) {
+        return false;
+    }
     const CBlockIndex* active{
         m_chainman.ActiveChain()[statement.commitment.seal_height]};
     if (active == nullptr ||
@@ -7348,16 +7538,9 @@ bool CChainLocksHandler::IsCurrentPaymentAuditStatement(
     }
     const auto indexed_btcc{IndexedBTCCReceiptState(*active)};
     const auto indexed_audit{IndexedPaymentAuditReceiptState(*active)};
-    const pq::PaymentAuditScheduleConfig schedule_config{
-        m_config->chainlock_schedule, m_config->btcc_schedule};
-    const auto schedule{pq::BuildPaymentAuditEpochSchedule(
-        schedule_config, statement.commitment.seed.epoch)};
     const auto seed_context{
-        schedule
-            ? GetPaymentAuditSeedReceiptContext(
-                  m_genesis_hash, schedule_config, *schedule, *active)
-            : PaymentAuditSeedReceiptContext{
-                  PaymentAuditContextStatus::INVALID, std::nullopt}};
+        GetPaymentAuditSeedReceiptContext(
+            m_genesis_hash, schedule_config, *schedule, *active)};
     pq::BTCCValidationError btcc_error{pq::BTCCValidationError::NONE};
     return indexed_btcc &&
            *indexed_btcc == statement.seal_statement.btcc_receipt_state &&
@@ -9519,7 +9702,10 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
     // Identity initialization can lag persisted-certificate restoration. No
     // signing is possible until the current durable winner has reconciled the
     // operator lock, closing the fsync-before-journal-rebase crash window.
-    if (!ReconcileSignerJournal(local_pro_tx_hash)) return;
+    if (!ReconcileSignerJournal(local_pro_tx_hash) ||
+        !InitializeSignerStartupTip(local_pro_tx_hash)) {
+        return;
+    }
 
     auto contexts{GetOrCreateCurrentSigningContexts()};
     if (!contexts) return;
@@ -9570,6 +9756,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
     // several bounded RPC calls. A concurrent Syscoin reorg invalidates both
     // approval and fallback; never let either path reserve a stale key slot.
     if (!IsCurrentSigningStatement(current->statement)) return;
+    if (!ConsumeStartupChainLockSlots(*current, local_pro_tx_hash)) return;
 
     bool local_member{false};
     for (std::size_t slot{0}; slot < current->rosters->size(); ++slot) {
@@ -9724,6 +9911,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
     if (!GetActiveMasternodeIdentity(local_pro_tx_hash, global_key_version,
                                      global_public_key, service) ||
         !ReconcileSignerJournal(local_pro_tx_hash) ||
+        !InitializeSignerStartupTip(local_pro_tx_hash) ||
         !PreparePaymentAuditSigningRuntime()) {
         return;
     }
@@ -9814,6 +10002,10 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         m_genesis_hash, local_pro_tx_hash)};
     if (!m_signer_journal->IsHealthy() || !expected_branch_lock ||
         *expected_branch_lock != seal_lock) {
+        return;
+    }
+    if (!ConsumeStartupPaymentAuditSlots(
+            *statement, *rosters, authorization_mask, local_pro_tx_hash)) {
         return;
     }
 
