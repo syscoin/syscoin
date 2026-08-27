@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <stdexcept>
 
 namespace {
 constexpr std::string_view PQ_LEGACY_STATE_DOMAIN{"SYS_PQ_LEGACY_DMN_STATE_V1"};
@@ -1722,7 +1723,12 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
 
         newList.SetBlockHash(pindex->GetBlockHash());
 
+        // SYSCOIN: Anchor validation must observe the exact prepared PQ root,
+        // while rejected and check-only blocks must publish no registry state.
         uint256 pq_registry_state_root;
+        llmq::pq::PQRegistryManager* pq_registry{nullptr};
+        llmq::pq::PQRegistryPreparedBlock pq_registry_prepared;
+        llmq::pq::PQRegistryError pq_registry_error;
         llmq::pq::PQRegistryConfig pq_config;
         const auto pq_deployment = llmq::pq::GetPQRegistryConfig(
             consensusParams, pq_config);
@@ -1733,8 +1739,8 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         }
         if (pq_deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
             std::string registry_open_error;
-            auto* registry = GetOrCreatePQRegistry(registry_open_error);
-            if (registry == nullptr) {
+            pq_registry = GetOrCreatePQRegistry(registry_open_error);
+            if (pq_registry == nullptr) {
                 LogPrintf("%s -- %s\n", __func__, registry_open_error);
                 return _state.Error("failed-pq-registry-open");
             }
@@ -1742,23 +1748,24 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                 oldList, newList, consensusParams.hashGenesisBlock);
             const auto net_removed_pro_tx_hashes{
                 newList.BuildTrackedNetRemovedProTxHashes(oldList)};
-            llmq::pq::PQRegistryError registry_error;
-            if (!registry->ProcessBlock(
+            if (!pq_registry->PrepareBlock(
                     block, nHeight, callbacks, net_removed_pro_tx_hashes,
-                    fJustCheck, registry_error, &pq_registry_state_root)) {
+                    pq_registry_prepared, pq_registry_error)) {
                 LogPrintf("%s -- PQ registry rejected height=%d tx=%u protx=%s result=%s state_result=%u\n",
                           __func__, nHeight,
-                          static_cast<unsigned>(registry_error.transaction_index),
-                          registry_error.pro_tx_hash.ToString(),
+                          static_cast<unsigned>(pq_registry_error.transaction_index),
+                          pq_registry_error.pro_tx_hash.ToString(),
                           std::string{llmq::pq::PQRegistryResultString(
-                              registry_error.result)},
-                          static_cast<unsigned>(registry_error.state_result));
+                              pq_registry_error.result)},
+                          static_cast<unsigned>(pq_registry_error.state_result));
                 return _state.Invalid(
                     BlockValidationResult::BLOCK_CONSENSUS,
                     strprintf("bad-pq-%s",
                               std::string{llmq::pq::PQRegistryResultString(
-                                  registry_error.result)}));
+                              pq_registry_error.result)}));
             }
+            pq_registry_state_root =
+                pq_registry_prepared.ConsensusStateRoot();
         } else {
             for (const auto& transaction : block.vtx) {
                 if (transaction &&
@@ -1787,6 +1794,35 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
 
         if (fJustCheck) {
             return true;
+        }
+
+        if (pq_registry != nullptr) {
+            bool committed{false};
+            try {
+                committed = pq_registry->CommitPreparedBlock(
+                    pq_registry_prepared, pq_registry_error);
+            } catch (const std::exception& exception) {
+                LogPrintf("%s -- PQ registry commit exception height=%d block=%s: %s\n",
+                          __func__, nHeight,
+                          pindex->GetBlockHash().ToString(), exception.what());
+                return _state.Error("failed-pq-registry-commit");
+            } catch (...) {
+                LogPrintf("%s -- PQ registry commit exception height=%d block=%s\n",
+                          __func__, nHeight,
+                          pindex->GetBlockHash().ToString());
+                return _state.Error("failed-pq-registry-commit");
+            }
+            if (!committed) {
+                LogPrintf("%s -- PQ registry commit failed height=%d block=%s result=%s\n",
+                          __func__, nHeight,
+                          pindex->GetBlockHash().ToString(),
+                          std::string{llmq::pq::PQRegistryResultString(
+                              pq_registry_error.result)});
+                return _state.Error(strprintf(
+                    "failed-pq-registry-commit-%s",
+                    std::string{llmq::pq::PQRegistryResultString(
+                        pq_registry_error.result)}));
+            }
         }
 
         if (pindex->pprev != nullptr &&
@@ -2720,6 +2756,16 @@ bool CDeterministicMNManager::EraseInverseJournalEntryForTesting(
 void CDeterministicMNManager::FailNextInverseJournalFlushForTesting()
 {
     m_inverse_journal->FailNextFlushBatchForTesting();
+}
+
+void CDeterministicMNManager::FailNextPQRegistryWriteThroughForTesting()
+{
+    std::string error;
+    auto* registry{GetOrCreatePQRegistry(error)};
+    if (registry == nullptr) {
+        throw std::runtime_error(error);
+    }
+    registry->SnapshotDatabase().FailNextWriteThroughForTesting();
 }
 
 void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {

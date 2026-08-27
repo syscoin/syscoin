@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <ios>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -456,7 +457,31 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
     BOOST_CHECK(genesis_view.BlockHash() == genesis_block);
 }
 
-BOOST_AUTO_TEST_CASE(initial_root_registration_is_branch_keyed_and_check_only_is_pure)
+BOOST_AUTO_TEST_CASE(preparation_token_before_registry_activation_never_persists)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(191)};
+    const auto block{Block(
+        NonNullHash(192), 193, {OrdinaryTransaction(193)})};
+    PQRegistryManager manager(MemoryDB(191), genesis, config);
+    PQRegistryError error;
+    PQRegistryPreparedBlock prepared;
+
+    BOOST_REQUIRE(manager.PrepareBlock(
+        block, config.preparation_height - 1, {}, {}, prepared, error));
+    BOOST_CHECK(prepared.IsValid());
+    BOOST_CHECK(!prepared.ConsensusStateRoot().IsNull());
+    BOOST_CHECK_EQUAL(manager.SnapshotDatabase().CountPersistedEntries(), 0);
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(block.GetHash()));
+
+    BOOST_REQUIRE(manager.CommitPreparedBlock(prepared, error));
+    BOOST_CHECK(!prepared.IsValid());
+    BOOST_CHECK(prepared.ConsensusStateRoot().IsNull());
+    BOOST_CHECK_EQUAL(manager.SnapshotDatabase().CountPersistedEntries(), 0);
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(block.GetHash()));
+}
+
+BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exactly)
 {
     const auto config{FastConfig()};
     const uint256 genesis{NonNullHash(1)};
@@ -474,24 +499,37 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_is_branch_keyed_and_check_only_is
 
     PQRegistryManager manager(MemoryDB(1), genesis, config);
     PQRegistryError error;
+    const auto callbacks{Member(genesis, pro_tx_hash, owner_key_id)};
     BOOST_REQUIRE(manager.ValidateTransaction(
-        *registration, parent, 1295,
-        Member(genesis, pro_tx_hash, owner_key_id),
+        *registration, parent, 1295, callbacks,
         /*check_sigs=*/true, error));
-    BOOST_REQUIRE(manager.ProcessBlock(
-        block, 1295, Member(genesis, pro_tx_hash, owner_key_id), {},
-        /*fJustCheck=*/true, error));
+
+    PQRegistryPreparedBlock prepared;
+    BOOST_REQUIRE(manager.PrepareBlock(
+        block, 1295, callbacks, {}, prepared, error));
+    BOOST_CHECK(prepared.IsValid());
+    const uint256 prepared_root{prepared.ConsensusStateRoot()};
+    BOOST_CHECK(!prepared_root.IsNull());
+    BOOST_CHECK_EQUAL(manager.SnapshotDatabase().CountPersistedEntries(), 0);
     PQRegistrySnapshot missing;
     BOOST_CHECK(!manager.GetSnapshot(
         block.GetHash(), parent, 1295, missing, error));
     BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
 
-    BOOST_REQUIRE(manager.ProcessBlock(
-        block, 1295, Member(genesis, pro_tx_hash, owner_key_id), {},
-        /*fJustCheck=*/false, error));
+    PQRegistryPreparedBlock moved{std::move(prepared)};
+    BOOST_CHECK(!prepared.IsValid());
+    BOOST_CHECK(!manager.CommitPreparedBlock(prepared, error));
+    BOOST_CHECK(error.result == PQRegistryResult::INTERNAL_ERROR);
+    BOOST_CHECK(moved.IsValid());
+    BOOST_REQUIRE(manager.CommitPreparedBlock(moved, error));
+    BOOST_CHECK(!moved.IsValid());
+    BOOST_CHECK(!manager.CommitPreparedBlock(moved, error));
+    BOOST_CHECK(error.result == PQRegistryResult::INTERNAL_ERROR);
+
     PQRegistrySnapshot snapshot;
     BOOST_REQUIRE(manager.GetSnapshot(
         block.GetHash(), parent, 1295, snapshot, error));
+    BOOST_CHECK(snapshot.consensus_state_root == prepared_root);
     const auto& state{OnlyOperator(snapshot)};
     BOOST_CHECK(state.pro_tx_hash == pro_tx_hash);
     BOOST_CHECK(state.HasActiveGlobalKey());
@@ -503,6 +541,23 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_is_branch_keyed_and_check_only_is
     BOOST_CHECK(snapshot.block_tree_ids.front() == commitment.tree_id);
     BOOST_CHECK(state.ResolveChildRoot(0).status ==
                 ChildRootResolutionStatus::MUTABLE_PRESENT);
+
+    PQRegistryDiskSnapshot first_disk;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        block.GetHash(), first_disk));
+    const auto persisted_entries{
+        manager.SnapshotDatabase().CountPersistedEntries()};
+    PQRegistryPreparedBlock replay;
+    BOOST_REQUIRE(manager.PrepareBlock(
+        block, 1295, callbacks, {}, replay, error));
+    BOOST_CHECK(replay.ConsensusStateRoot() == prepared_root);
+    BOOST_REQUIRE(manager.CommitPreparedBlock(replay, error));
+    BOOST_CHECK_EQUAL(manager.SnapshotDatabase().CountPersistedEntries(),
+                      persisted_entries);
+    PQRegistryDiskSnapshot replay_disk;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        block.GetHash(), replay_disk));
+    BOOST_CHECK(replay_disk == first_disk);
 
     std::vector<uint256> requested{
         pro_tx_hash, NonNullHash(4)};
@@ -564,6 +619,111 @@ BOOST_AUTO_TEST_CASE(per_block_journal_is_async_and_sync_flush_is_a_barrier)
     BOOST_REQUIRE(manager.Flush(/*fSync=*/false));
     BOOST_CHECK_THROW((void)manager.Flush(/*fSync=*/true), dbwrapper_error);
     BOOST_REQUIRE(manager.Flush(/*fSync=*/true));
+}
+
+BOOST_AUTO_TEST_CASE(prepared_block_is_manager_bound)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(171)};
+    const auto block{Block(
+        NonNullHash(172), 173, {OrdinaryTransaction(173)})};
+    const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+    PQRegistryManager first(MemoryDB(171), genesis, config);
+    PQRegistryManager second(MemoryDB(172), genesis, config);
+    PQRegistryError error;
+    PQRegistryPreparedBlock prepared;
+    BOOST_REQUIRE(first.PrepareBlock(
+        block, config.preparation_height, callbacks, {}, prepared, error));
+    BOOST_CHECK(prepared.IsValid());
+
+    BOOST_CHECK(!second.CommitPreparedBlock(prepared, error));
+    BOOST_CHECK(error.result == PQRegistryResult::INTERNAL_ERROR);
+    BOOST_CHECK(prepared.IsValid());
+    PQRegistrySnapshot missing;
+    BOOST_CHECK(!second.GetSnapshot(
+        block.GetHash(), block.hashPrevBlock, config.preparation_height,
+        missing, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
+
+    BOOST_REQUIRE(first.CommitPreparedBlock(prepared, error));
+    BOOST_CHECK(!prepared.IsValid());
+    PQRegistrySnapshot committed;
+    BOOST_REQUIRE(first.GetSnapshot(
+        block.GetHash(), block.hashPrevBlock, config.preparation_height,
+        committed, error));
+}
+
+BOOST_AUTO_TEST_CASE(prepared_block_rejects_recreated_manager_incarnation)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(174)};
+    const auto block{Block(
+        NonNullHash(175), 176, {OrdinaryTransaction(176)})};
+    const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+    std::optional<PQRegistryManager> manager;
+    manager.emplace(MemoryDB(174), genesis, config);
+    const void* const manager_address{static_cast<const void*>(&*manager)};
+    PQRegistryPreparedBlock prepared;
+    PQRegistryError error;
+    BOOST_REQUIRE(manager->PrepareBlock(
+        block, config.preparation_height, callbacks, {}, prepared, error));
+
+    manager.reset();
+    manager.emplace(MemoryDB(175), genesis, config);
+    BOOST_CHECK(static_cast<const void*>(&*manager) == manager_address);
+    BOOST_CHECK(!manager->CommitPreparedBlock(prepared, error));
+    BOOST_CHECK(error.result == PQRegistryResult::INTERNAL_ERROR);
+    BOOST_CHECK(prepared.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(prepared_write_failure_does_not_publish_and_can_retry)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(181)};
+    const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+    PQRegistryManager manager(MemoryDB(181), genesis, config);
+    PQRegistryError error;
+    PQRegistrySnapshot missing;
+
+    const auto preparation{Block(
+        NonNullHash(182), 183, {OrdinaryTransaction(183)})};
+    PQRegistryPreparedBlock prepared;
+    BOOST_REQUIRE(manager.PrepareBlock(
+        preparation, config.preparation_height, callbacks, {}, prepared,
+        error));
+    manager.SnapshotDatabase().FailNextWriteThroughForTesting();
+    BOOST_CHECK_THROW((void)manager.CommitPreparedBlock(prepared, error),
+                      dbwrapper_error);
+    BOOST_CHECK(prepared.IsValid());
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(
+        preparation.GetHash()));
+    BOOST_CHECK(!manager.GetSnapshot(
+        preparation.GetHash(), preparation.hashPrevBlock,
+        config.preparation_height, missing, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
+    BOOST_REQUIRE(manager.CommitPreparedBlock(prepared, error));
+
+    const auto cutoff{Block(
+        preparation.GetHash(), 184, {OrdinaryTransaction(184)})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        cutoff, config.preparation_height + 1, callbacks, {}, false,
+        error));
+    const auto steady{Block(
+        cutoff.GetHash(), 185, {OrdinaryTransaction(185)})};
+    PQRegistryPreparedBlock unchanged;
+    BOOST_REQUIRE(manager.PrepareBlock(
+        steady, config.preparation_height + 2, callbacks, {}, unchanged,
+        error));
+    manager.SnapshotDatabase().FailNextWriteThroughForTesting();
+    BOOST_CHECK_THROW((void)manager.CommitPreparedBlock(unchanged, error),
+                      dbwrapper_error);
+    BOOST_CHECK(unchanged.IsValid());
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(steady.GetHash()));
+    BOOST_CHECK(!manager.GetSnapshot(
+        steady.GetHash(), steady.hashPrevBlock,
+        config.preparation_height + 2, missing, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
+    BOOST_REQUIRE(manager.CommitPreparedBlock(unchanged, error));
 }
 
 BOOST_AUTO_TEST_CASE(mempool_prepass_defers_owner_and_slh_authorization)

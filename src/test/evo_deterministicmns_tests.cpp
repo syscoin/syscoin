@@ -513,6 +513,188 @@ BOOST_AUTO_TEST_CASE(first_dip3_just_check_validates_pq_without_persisting)
     BOOST_CHECK(!manager.m_evoDb->ReadCache(accepted_hash, snapshot));
 }
 
+BOOST_AUTO_TEST_CASE(pq_legacy_anchor_rejection_precedes_registry_commit)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestorePQDeployment {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t registration_cutoff{
+            consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future_horizon{consensus.nPQFutureHorizonEpochs};
+        int legacy_anchor_height{consensus.nPQLegacyAnchorHeight};
+        uint256 legacy_anchor_block{consensus.hashPQLegacyAnchorBlock};
+        uint256 legacy_mn_state{consensus.hashPQLegacyMNState};
+        uint256 legacy_pq_state{consensus.hashPQLegacyPQRegistryState};
+        int finality_anchor_height{consensus.nPQChainLockAnchorHeight};
+        uint256 finality_anchor_block{consensus.hashPQChainLockAnchorBlock};
+        ~RestorePQDeployment()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = registration_cutoff;
+            consensus.nPQFutureHorizonEpochs = future_horizon;
+            consensus.nPQLegacyAnchorHeight = legacy_anchor_height;
+            consensus.hashPQLegacyAnchorBlock = legacy_anchor_block;
+            consensus.hashPQLegacyMNState = legacy_mn_state;
+            consensus.hashPQLegacyPQRegistryState = legacy_pq_state;
+            consensus.nPQChainLockAnchorHeight = finality_anchor_height;
+            consensus.hashPQChainLockAnchorBlock = finality_anchor_block;
+        }
+    } restore{consensus};
+
+    constexpr int preparation_height{1295};
+    constexpr int epoch_origin{1440};
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = epoch_origin;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQLegacyAnchorHeight = preparation_height;
+    consensus.nPQChainLockAnchorHeight = std::numeric_limits<int>::max();
+    consensus.hashPQChainLockAnchorBlock.SetNull();
+
+    const uint256 parent_hash{MakeSnapshotKey(preparation_height - 1)};
+    CBlockIndex parent_index;
+    parent_index.nHeight = preparation_height - 1;
+    parent_index.phashBlock = &parent_hash;
+
+    CBlock anchor_block{MakeProviderMutationBlock({})};
+    anchor_block.hashPrevBlock = parent_hash;
+    anchor_block.nTime = preparation_height;
+    anchor_block.nNonce = preparation_height;
+    const uint256 anchor_hash{anchor_block.GetHash()};
+    CBlockIndex anchor_index;
+    anchor_index.nHeight = preparation_height;
+    anchor_index.pprev = &parent_index;
+    anchor_index.phashBlock = &anchor_hash;
+
+    consensus.hashPQLegacyAnchorBlock = anchor_hash;
+    consensus.hashPQLegacyMNState = MakeSnapshotKey(95'000);
+    consensus.hashPQLegacyPQRegistryState = MakeSnapshotKey(95'001);
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_pq_anchor_commit_order",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        parent_hash,
+        CDeterministicMNList{parent_hash, preparation_height - 1, 0},
+        /*fSync=*/true));
+
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+    CDeterministicMNList expected_list;
+    CDeterministicMNList old_list;
+    BlockValidationState build_state;
+    BOOST_REQUIRE(manager.BuildNewListFromBlock(
+        anchor_block, &parent_index, build_state, view, expected_list,
+        old_list, no_legacy_commitment));
+    expected_list.SetBlockHash(anchor_hash);
+    consensus.hashPQLegacyMNState =
+        expected_list.GetOrComputePQLegacyStateHash(
+            consensus.hashGenesisBlock);
+
+    llmq::pq::PQRegistryManager root_oracle{
+        DBParams{
+            .path = "testdb_dmn_pq_anchor_root_oracle",
+            .cache_bytes = static_cast<size_t>(1 << 20),
+            .memory_only = true,
+            .wipe_data = true,
+        },
+        consensus.hashGenesisBlock, registry_config};
+    llmq::pq::PQRegistryCallbacks empty_membership;
+    empty_membership.dmn_exists_before = [](const uint256&) { return false; };
+    empty_membership.dmn_exists_after = [](const uint256&) { return false; };
+    llmq::pq::PQRegistryError registry_error;
+    uint256 correct_pq_root;
+    BOOST_REQUIRE(root_oracle.ProcessBlock(
+        anchor_block, preparation_height, empty_membership, {},
+        /*fJustCheck=*/true, registry_error, &correct_pq_root));
+    BOOST_REQUIRE(!correct_pq_root.IsNull());
+    consensus.hashPQLegacyPQRegistryState = correct_pq_root;
+    consensus.hashPQLegacyPQRegistryState.begin()[0] ^= 1;
+    BOOST_REQUIRE(!consensus.hashPQLegacyPQRegistryState.IsNull());
+
+    manager.FailNextPQRegistryWriteThroughForTesting();
+    BlockValidationState rejected_state;
+    CDeterministicMNListNEVMAddressDiff rejected_diff;
+    BOOST_CHECK(!manager.ProcessBlock(
+        anchor_block, &anchor_index, rejected_state, view,
+        no_legacy_commitment, rejected_diff,
+        /*fJustCheck=*/false, /*ibd=*/true));
+    BOOST_CHECK(rejected_state.IsInvalid());
+    BOOST_CHECK_EQUAL(rejected_state.GetRejectReason(),
+                      "bad-pq-legacy-state");
+
+    CDeterministicMNList dmn_snapshot;
+    BOOST_CHECK(!manager.m_evoDb->ReadCache(anchor_hash, dmn_snapshot));
+    CDeterministicMNManager::InverseJournalEntryStatsForTesting inverse_stats;
+    BOOST_CHECK(!manager.GetInverseJournalEntryStatsForTesting(
+        anchor_hash, inverse_stats));
+    llmq::pq::PQRegistrySnapshot pq_snapshot;
+    std::string snapshot_error;
+    BOOST_CHECK(!manager.GetPQRegistrySnapshot(
+        &anchor_index, pq_snapshot, snapshot_error));
+
+    // Neither an invalid anchor nor check-only validation may consume the
+    // armed journal failure. Only publication of the corrected block reaches
+    // the injected local failure.
+    consensus.hashPQLegacyPQRegistryState = correct_pq_root;
+    BlockValidationState check_state;
+    CDeterministicMNListNEVMAddressDiff check_diff;
+    BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+        anchor_block, &anchor_index, check_state, view,
+        no_legacy_commitment, check_diff,
+        /*fJustCheck=*/true, /*ibd=*/true), check_state.ToString());
+    BOOST_CHECK(!manager.m_evoDb->ReadCache(anchor_hash, dmn_snapshot));
+    BOOST_CHECK(!manager.GetInverseJournalEntryStatsForTesting(
+        anchor_hash, inverse_stats));
+    BOOST_CHECK(!manager.GetPQRegistrySnapshot(
+        &anchor_index, pq_snapshot, snapshot_error));
+
+    BlockValidationState failed_commit_state;
+    CDeterministicMNListNEVMAddressDiff failed_commit_diff;
+    BOOST_CHECK(!manager.ProcessBlock(
+        anchor_block, &anchor_index, failed_commit_state, view,
+        no_legacy_commitment, failed_commit_diff,
+        /*fJustCheck=*/false, /*ibd=*/true));
+    BOOST_CHECK(failed_commit_state.IsError());
+    BOOST_CHECK(!failed_commit_state.IsInvalid());
+    BOOST_CHECK_EQUAL(failed_commit_state.GetRejectReason(),
+                      "failed-pq-registry-commit");
+    BOOST_CHECK(!manager.m_evoDb->ReadCache(anchor_hash, dmn_snapshot));
+    BOOST_CHECK(!manager.GetPQRegistrySnapshot(
+        &anchor_index, pq_snapshot, snapshot_error));
+
+    BlockValidationState accepted_state;
+    CDeterministicMNListNEVMAddressDiff accepted_diff;
+    BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+        anchor_block, &anchor_index, accepted_state, view,
+        no_legacy_commitment, accepted_diff,
+        /*fJustCheck=*/false, /*ibd=*/true), accepted_state.ToString());
+    BOOST_REQUIRE(manager.m_evoDb->ReadCache(anchor_hash, dmn_snapshot));
+    BOOST_CHECK(dmn_snapshot.GetBlockHash() == anchor_hash);
+    BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+        anchor_hash, inverse_stats));
+    BOOST_REQUIRE(manager.GetPQRegistrySnapshot(
+        &anchor_index, pq_snapshot, snapshot_error));
+    BOOST_CHECK(pq_snapshot.consensus_state_root == correct_pq_root);
+}
+
 BOOST_AUTO_TEST_CASE(pq_payment_eligibility_follows_consensus_ban_state)
 {
     const auto clone_with_state = [](const CDeterministicMNCPtr& source,

@@ -272,6 +272,7 @@ struct PQRegistryMempoolView {
 };
 
 struct PQRegistrySnapshotView;
+class PQRegistryManager;
 
 /**
  * Immutable ownership handle for one exact branch-local registry snapshot.
@@ -313,6 +314,51 @@ private:
     friend class PQRegistryManager;
 };
 
+/**
+ * Move-only result of complete, signature-checked block preparation. A failed
+ * commit may be retried, but one token must never be committed concurrently.
+ */
+class PQRegistryPreparedBlock {
+public:
+    PQRegistryPreparedBlock() = default;
+    PQRegistryPreparedBlock(const PQRegistryPreparedBlock&) = delete;
+    PQRegistryPreparedBlock& operator=(const PQRegistryPreparedBlock&) =
+        delete;
+    PQRegistryPreparedBlock(PQRegistryPreparedBlock&& other) noexcept;
+    PQRegistryPreparedBlock& operator=(
+        PQRegistryPreparedBlock&& other) noexcept;
+
+    [[nodiscard]] bool IsValid() const noexcept
+    {
+        return m_incarnation != nullptr && m_kind != Kind::INVALID &&
+               !m_consensus_state_root.IsNull();
+    }
+
+    [[nodiscard]] uint256 ConsensusStateRoot() const noexcept
+    {
+        return IsValid() ? m_consensus_state_root : uint256{};
+    }
+
+private:
+    enum class Kind : uint8_t {
+        INVALID = 0,
+        NO_COMMIT,
+        UNCHANGED,
+        MATERIALIZED,
+    };
+
+    std::shared_ptr<const uint8_t> m_incarnation;
+    Kind m_kind{Kind::INVALID};
+    uint256 m_block_hash;
+    uint256 m_consensus_state_root;
+    int32_t m_height{-1};
+    std::shared_ptr<const PQRegistrySnapshotView> m_unchanged_parent;
+    std::optional<PQRegistrySnapshot> m_parent;
+    std::optional<PQRegistrySnapshot> m_result;
+
+    friend class PQRegistryManager;
+};
+
 class PQRegistryManager {
 private:
     using CacheList = std::list<std::pair<
@@ -327,6 +373,8 @@ private:
 
     const uint256 m_genesis_hash;
     const PQRegistryConfig m_config;
+    const std::shared_ptr<const uint8_t> m_incarnation{
+        std::make_shared<const uint8_t>(0)};
     mutable Mutex m_mutex;
     std::unique_ptr<CEvoDB<uint256, PQRegistryDiskSnapshot,
                            StaticSaltedHasher>> m_snapshot_db;
@@ -368,15 +416,13 @@ private:
         const PQRegistrySnapshot& snapshot,
         const PQRegistrySnapshot& parent,
         PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    [[nodiscard]] bool ProcessBlockInternal(
+    [[nodiscard]] bool PrepareBlockInternal(
         const CBlock& block,
         int32_t height,
         const PQRegistryCallbacks& callbacks,
         std::span<const uint256> net_removed_pro_tx_hashes,
-        bool fJustCheck,
-        bool check_sigs,
-        PQRegistryError& error,
-        uint256* resulting_state_root)
+        PQRegistryPreparedBlock& prepared,
+        PQRegistryError& error)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 public:
@@ -399,6 +445,19 @@ public:
         PQRegistryError& error,
         uint256* resulting_state_root = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] bool PrepareBlock(
+        const CBlock& block,
+        int32_t height,
+        const PQRegistryCallbacks& callbacks,
+        std::span<const uint256> net_removed_pro_tx_hashes,
+        PQRegistryPreparedBlock& prepared,
+        PQRegistryError& error)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] bool CommitPreparedBlock(
+        PQRegistryPreparedBlock& prepared,
+        PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool ValidateTransaction(
         const CTransaction& transaction,

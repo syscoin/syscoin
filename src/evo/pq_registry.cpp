@@ -575,6 +575,33 @@ bool MakePrePreparationSnapshot(const uint256& genesis_hash,
 
 } // namespace
 
+PQRegistryPreparedBlock::PQRegistryPreparedBlock(
+    PQRegistryPreparedBlock&& other) noexcept
+{
+    *this = std::move(other);
+}
+
+PQRegistryPreparedBlock& PQRegistryPreparedBlock::operator=(
+    PQRegistryPreparedBlock&& other) noexcept
+{
+    if (this == &other) return *this;
+    m_incarnation = std::move(other.m_incarnation);
+    m_kind = std::exchange(other.m_kind, Kind::INVALID);
+    m_block_hash = std::move(other.m_block_hash);
+    m_consensus_state_root = std::move(other.m_consensus_state_root);
+    m_height = std::exchange(other.m_height, -1);
+    m_unchanged_parent = std::move(other.m_unchanged_parent);
+    m_parent = std::move(other.m_parent);
+    m_result = std::move(other.m_result);
+    other.m_incarnation.reset();
+    other.m_block_hash.SetNull();
+    other.m_consensus_state_root.SetNull();
+    other.m_unchanged_parent.reset();
+    other.m_parent.reset();
+    other.m_result.reset();
+    return *this;
+}
+
 PQRegistryReadView::PQRegistryReadView(
     std::shared_ptr<const PQRegistrySnapshotView> snapshot)
     : m_snapshot{std::move(snapshot)}
@@ -1020,15 +1047,29 @@ bool PQRegistryManager::CacheSnapshotView(
     }
 
     auto existing{m_snapshot_cache_index.find(snapshot->block_hash)};
-    if (existing != m_snapshot_cache_index.end()) {
-        m_snapshot_cache.erase(existing->second);
-        m_snapshot_cache_index.erase(existing);
-    }
     m_snapshot_cache.emplace_back(snapshot->block_hash, std::move(snapshot));
-    m_snapshot_cache_index[m_snapshot_cache.back().first] =
-        std::prev(m_snapshot_cache.end());
+    const auto inserted{std::prev(m_snapshot_cache.end())};
+    if (existing != m_snapshot_cache_index.end()) {
+        const auto replaced{existing->second};
+        existing->second = inserted;
+        m_snapshot_cache.erase(replaced);
+    } else {
+        try {
+            const auto insertion{m_snapshot_cache_index.emplace(
+                inserted->first, inserted)};
+            if (!insertion.second) {
+                m_snapshot_cache.pop_back();
+                return false;
+            }
+        } catch (...) {
+            // A prepared transition must remain safely retryable after an
+            // allocation failure; never leave a list node without its index.
+            m_snapshot_cache.pop_back();
+            throw;
+        }
+    }
     if (cached != nullptr) {
-        *cached = m_snapshot_cache.back().second;
+        *cached = inserted->second;
     }
     // The newest state is the unavoidable live baseline. Bound only additional
     // historical ownership so a large baseline can still retain cheap no-op
@@ -1389,25 +1430,40 @@ bool PQRegistryManager::ProcessBlock(
     PQRegistryError& error,
     uint256* resulting_state_root)
 {
-    return ProcessBlockInternal(
-        block, height, callbacks, net_removed_pro_tx_hashes, fJustCheck,
-        /*check_sigs=*/true, error, resulting_state_root);
+    PQRegistryPreparedBlock prepared;
+    if (!PrepareBlock(block, height, callbacks,
+                      net_removed_pro_tx_hashes, prepared, error)) {
+        return false;
+    }
+    if (resulting_state_root != nullptr) {
+        *resulting_state_root = prepared.ConsensusStateRoot();
+    }
+    return fJustCheck || CommitPreparedBlock(prepared, error);
 }
 
-bool PQRegistryManager::ProcessBlockInternal(
+bool PQRegistryManager::PrepareBlock(
     const CBlock& block,
     int32_t height,
     const PQRegistryCallbacks& callbacks,
     std::span<const uint256> net_removed_pro_tx_hashes,
-    bool fJustCheck,
-    bool check_sigs,
-    PQRegistryError& error,
-    uint256* resulting_state_root)
+    PQRegistryPreparedBlock& prepared,
+    PQRegistryError& error)
 {
+    return PrepareBlockInternal(
+        block, height, callbacks, net_removed_pro_tx_hashes, prepared,
+        error);
+}
+
+bool PQRegistryManager::PrepareBlockInternal(
+    const CBlock& block,
+    int32_t height,
+    const PQRegistryCallbacks& callbacks,
+    std::span<const uint256> net_removed_pro_tx_hashes,
+    PQRegistryPreparedBlock& prepared,
+    PQRegistryError& error)
+{
+    prepared = {};
     error.Clear();
-    if (!check_sigs && !fJustCheck) {
-        return SetError(error, PQRegistryResult::INTERNAL_ERROR);
-    }
     if (!IsEnabled()) {
         return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
     }
@@ -1428,15 +1484,17 @@ bool PQRegistryManager::ProcessBlockInternal(
                                 index);
             }
         }
-        if (resulting_state_root != nullptr) {
-            PQRegistrySnapshot empty;
-            if (!MakePrePreparationSnapshot(
-                    m_genesis_hash, block_hash, block.hashPrevBlock, height,
-                    empty, error)) {
-                return false;
-            }
-            *resulting_state_root = empty.consensus_state_root;
+        PQRegistrySnapshot empty;
+        if (!MakePrePreparationSnapshot(
+                m_genesis_hash, block_hash, block.hashPrevBlock, height,
+                empty, error)) {
+            return false;
         }
+        prepared.m_incarnation = m_incarnation;
+        prepared.m_kind = PQRegistryPreparedBlock::Kind::NO_COMMIT;
+        prepared.m_block_hash = block_hash;
+        prepared.m_consensus_state_root = empty.consensus_state_root;
+        prepared.m_height = height;
         return true;
     }
     if (!net_removed_pro_tx_hashes.empty() &&
@@ -1524,15 +1582,14 @@ bool PQRegistryManager::ProcessBlockInternal(
         *parent_view->state->schedule == next_schedule && updates.empty() &&
         net_removed_pro_tx_hashes.empty()};
     if (unchanged_state) {
-        if (resulting_state_root != nullptr) {
-            *resulting_state_root =
-                parent_view->state->consensus_state_root;
-        }
-        if (fJustCheck) return true;
-
-        LOCK(m_mutex);
-        return CommitUnchangedSnapshot(parent_view, block_hash, height,
-                                       error);
+        prepared.m_incarnation = m_incarnation;
+        prepared.m_kind = PQRegistryPreparedBlock::Kind::UNCHANGED;
+        prepared.m_block_hash = block_hash;
+        prepared.m_consensus_state_root =
+            parent_view->state->consensus_state_root;
+        prepared.m_height = height;
+        prepared.m_unchanged_parent = std::move(parent_view);
+        return true;
     }
 
     if (parent_view) {
@@ -1610,7 +1667,7 @@ bool PQRegistryManager::ProcessBlockInternal(
             }};
         if (!ApplyDecodedUpdate(
                 *state, update, *schedule_view, m_genesis_hash, callbacks,
-                check_sigs, find_global_key_owner,
+                /*check_sigs=*/true, find_global_key_owner,
                 [&](const uint256& tree_id) {
                     return next.HasUsedTreeId(tree_id);
                 },
@@ -1662,13 +1719,69 @@ bool PQRegistryManager::ProcessBlockInternal(
     if (!next.IsStructurallyValid()) {
         return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
-    if (resulting_state_root != nullptr) {
-        *resulting_state_root = next.consensus_state_root;
-    }
-    if (fJustCheck) return true;
+    prepared.m_incarnation = m_incarnation;
+    prepared.m_kind = PQRegistryPreparedBlock::Kind::MATERIALIZED;
+    prepared.m_block_hash = block_hash;
+    prepared.m_consensus_state_root = next.consensus_state_root;
+    prepared.m_height = height;
+    prepared.m_parent.emplace(std::move(parent));
+    prepared.m_result.emplace(std::move(next));
+    return true;
+}
 
-    LOCK(m_mutex);
-    return CommitSnapshot(next, parent, error);
+bool PQRegistryManager::CommitPreparedBlock(
+    PQRegistryPreparedBlock& prepared,
+    PQRegistryError& error)
+{
+    error.Clear();
+    if (!prepared.IsValid() || prepared.m_incarnation != m_incarnation ||
+        prepared.m_block_hash.IsNull() || prepared.m_height <= 0) {
+        return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+    }
+
+    bool committed{false};
+    switch (prepared.m_kind) {
+    case PQRegistryPreparedBlock::Kind::NO_COMMIT:
+        if (prepared.m_unchanged_parent || prepared.m_parent ||
+            prepared.m_result) {
+            return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+        }
+        committed = true;
+        break;
+    case PQRegistryPreparedBlock::Kind::UNCHANGED:
+        if (!prepared.m_unchanged_parent || prepared.m_parent ||
+            prepared.m_result || !prepared.m_unchanged_parent->state ||
+            prepared.m_unchanged_parent->state->consensus_state_root !=
+                prepared.m_consensus_state_root) {
+            return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+        }
+        {
+            LOCK(m_mutex);
+            committed = CommitUnchangedSnapshot(
+                prepared.m_unchanged_parent, prepared.m_block_hash,
+                prepared.m_height, error);
+        }
+        break;
+    case PQRegistryPreparedBlock::Kind::MATERIALIZED:
+        if (prepared.m_unchanged_parent || !prepared.m_parent ||
+            !prepared.m_result ||
+            prepared.m_result->block_hash != prepared.m_block_hash ||
+            prepared.m_result->height != prepared.m_height ||
+            prepared.m_result->consensus_state_root !=
+                prepared.m_consensus_state_root) {
+            return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+        }
+        {
+            LOCK(m_mutex);
+            committed = CommitSnapshot(*prepared.m_result,
+                                       *prepared.m_parent, error);
+        }
+        break;
+    case PQRegistryPreparedBlock::Kind::INVALID:
+        return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+    }
+    if (committed) prepared = {};
+    return committed;
 }
 
 bool PQRegistryManager::ValidateTransaction(

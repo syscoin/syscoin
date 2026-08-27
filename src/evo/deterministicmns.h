@@ -830,6 +830,8 @@ public:
         InverseJournalEntryStatsForTesting& stats);
     bool EraseInverseJournalEntryForTesting(const uint256& child_hash);
     void FailNextInverseJournalFlushForTesting();
+    /** SYSCOIN: Verify rejected and check-only blocks never reach PQ publication. */
+    void FailNextPQRegistryWriteThroughForTesting();
     /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
     int UpdateReplaySnapshotRetentionFloor(
         std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
