@@ -987,6 +987,7 @@ private:
     pq::FrozenQuorumRostersPtr m_collector_rosters
         GUARDED_BY(m_collector_mutex);
     uint8_t m_collector_authorization_mask GUARDED_BY(m_collector_mutex){0};
+    uint64_t m_collector_generation GUARDED_BY(m_collector_mutex){0};
     Mutex m_context_build_mutex;
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;

@@ -6629,31 +6629,47 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts()
     LOCK(m_context_build_mutex);
     cached = cached_context();
     if (cached && is_current(*cached)) return cached;
-    if (cached) {
+    uint64_t build_generation{0};
+    {
         LOCK(m_collector_mutex);
         ResetCollectors();
+        build_generation = m_collector_generation;
     }
 
     auto current{BuildCurrentSigningContexts()};
     if (!current) return std::nullopt;
+    if (!is_current(*current)) return std::nullopt;
+
+    std::array<std::unique_ptr<pq::ChainLockCollector>,
+               CurrentSigningContexts::MAX_VARIANTS> collectors;
+    for (std::size_t i{0}; i < current->count; ++i) {
+        pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
+        collectors[i] = pq::ChainLockCollector::Create(
+            m_genesis_hash, m_config->chainlock_schedule,
+            current->statements[i], current->rosters,
+            current->authorization_mask, &error);
+        if (!collectors[i]) return std::nullopt;
+    }
+
+    uint64_t published_generation{0};
     {
         LOCK(m_collector_mutex);
-        ResetCollectors();
-        for (std::size_t i{0}; i < current->count; ++i) {
-            pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
-            m_collectors[i] = pq::ChainLockCollector::Create(
-                m_genesis_hash, m_config->chainlock_schedule,
-                current->statements[i], current->rosters,
-                current->authorization_mask,
-                &error);
-            if (!m_collectors[i]) {
-                ResetCollectors();
-                return std::nullopt;
-            }
-            ++m_collector_count;
-        }
+        if (m_collector_generation != build_generation) return std::nullopt;
+        m_collectors = std::move(collectors);
+        m_collector_count = current->count;
         m_collector_rosters = current->rosters;
         m_collector_authorization_mask = current->authorization_mask;
+        published_generation = ++m_collector_generation;
+    }
+    // Tip and durable-predecessor state are not serialized by the collector
+    // mutex. Recheck after publication and invalidate only the generation
+    // built here, never a replacement installed by a later caller.
+    if (!is_current(*current)) {
+        LOCK(m_collector_mutex);
+        if (m_collector_generation == published_generation) {
+            ResetCollectors();
+        }
+        return std::nullopt;
     }
     return current;
 }
@@ -9240,7 +9256,7 @@ bool CChainLocksHandler::ProcessNewChainLock(
             IsChainLockCollectorOnAcceptedSuccessorView(
                 m_config->chainlock_schedule,
                 m_collectors[0]->GetStatement(), chainlock.statement)};
-        if (m_collector_count != 0 && !collector_follows_winner) {
+        if (!collector_follows_winner) {
             // AcceptVerified is the atomic first-winner boundary. Discard the
             // losing KEEP/ADVANCE view together with the winner so late shares
             // cannot revive it. Preserve only a next-view collector that a
@@ -9392,7 +9408,7 @@ CChainLocksHandler::TryImportPersistedChainLock()
             IsChainLockCollectorOnAcceptedSuccessorView(
                 m_config->chainlock_schedule,
                 m_collectors[0]->GetStatement(), persisted.statement)};
-        if (m_collector_count != 0 && !collector_follows_winner) {
+        if (!collector_follows_winner) {
             ResetCollectors();
         }
     }
@@ -9605,6 +9621,7 @@ void CChainLocksHandler::ResetCollectors()
     m_collector_count = 0;
     m_collector_rosters.reset();
     m_collector_authorization_mask = 0;
+    ++m_collector_generation;
 }
 
 void CChainLocksHandler::RelayChainLockShare(
