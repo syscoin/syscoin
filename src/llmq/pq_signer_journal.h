@@ -240,10 +240,21 @@ private:
         uint256 message_hash;
     };
 
+    struct ReconciliationMemo {
+        uint256 genesis_hash;
+        uint256 pro_tx_hash;
+        PQSignerBranchLock lock;
+        uint256 logical_id;
+        uint256 witness_id;
+    };
+
     CDBWrapper m_db;
     mutable Mutex m_mutex;
     std::map<PQSignerJournalLeafKey, PendingReservation> m_pending GUARDED_BY(m_mutex);
     std::optional<PQSignerJournalOutcome> m_failure GUARDED_BY(m_mutex);
+    std::optional<ReconciliationMemo> m_last_successful_reconciliation
+        GUARDED_BY(m_mutex);
+    std::size_t m_reconciliation_memo_hits GUARDED_BY(m_mutex){0};
 
     void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 

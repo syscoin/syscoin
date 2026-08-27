@@ -497,6 +497,19 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
         return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
     }
 
+    const auto memo_matches = [&](const ReconciliationMemo& memo) {
+        return memo.genesis_hash == genesis_hash &&
+               memo.pro_tx_hash == pro_tx_hash &&
+               memo.lock == accepted.lock &&
+               memo.logical_id == accepted.logical_id &&
+               memo.witness_id == accepted.witness_id;
+    };
+    if (m_last_successful_reconciliation &&
+        memo_matches(*m_last_successful_reconciliation)) {
+        ++m_reconciliation_memo_hits;
+        return Result(PQSignerJournalOutcome::CERTIFICATE_REPLAY);
+    }
+
     try {
         const AcceptedCertificateDatabaseKey certificate_key{genesis_hash,
                                                              pro_tx_hash};
@@ -544,6 +557,9 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
                     m_pending.clear();
                     return Result(*m_failure);
                 }
+                m_last_successful_reconciliation = ReconciliationMemo{
+                    genesis_hash, pro_tx_hash, accepted.lock,
+                    accepted.logical_id, accepted.witness_id};
                 return Result(PQSignerJournalOutcome::CERTIFICATE_REPLAY);
             }
         }
@@ -560,6 +576,9 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
             m_pending.clear();
             return Result(*m_failure);
         }
+        m_last_successful_reconciliation = ReconciliationMemo{
+            genesis_hash, pro_tx_hash, accepted.lock,
+            accepted.logical_id, accepted.witness_id};
         return Result(rebase_branch
                           ? PQSignerJournalOutcome::CERTIFICATE_RECONCILED
                           : PQSignerJournalOutcome::CERTIFICATE_RECORDED);

@@ -60,6 +60,12 @@ public:
     {
         return journal.ConsumeIfAbsent(keys);
     }
+
+    static std::size_t ReconciliationMemoHits(CPQSignerJournal& journal)
+    {
+        LOCK(journal.m_mutex);
+        return journal.m_reconciliation_memo_hits;
+    }
 };
 
 } // namespace llmq::test
@@ -476,6 +482,30 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
             fork_a_key.genesis_hash, fork_a_key.pro_tx_hash)};
         BOOST_REQUIRE(rebased);
         BOOST_CHECK(*rebased == fork_b_lock);
+        BOOST_CHECK_EQUAL(
+            llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
+                restarted),
+            0U);
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                restarted, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+                fork_b_certificate),
+            llmq::PQSignerJournalOutcome::CERTIFICATE_REPLAY);
+        BOOST_CHECK_EQUAL(
+            llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
+                restarted),
+            1U);
+
+        const llmq::pq::FinalChainLock invalid_certificate;
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                restarted, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+                invalid_certificate),
+            llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
+        BOOST_CHECK_EQUAL(
+            llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
+                restarted),
+            1U);
 
         // Reconciliation changes only the operator branch authority. The old
         // child slot and exact signature remain permanently consumed.
@@ -501,6 +531,15 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
             restarted.Reserve(descendant_key, uint256{83}, descendant_lock,
                               fork_b_lock),
             llmq::PQSignerJournalOutcome::RESERVED);
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                restarted, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+                fork_b_certificate),
+            llmq::PQSignerJournalOutcome::CERTIFICATE_REPLAY);
+        BOOST_CHECK_EQUAL(
+            llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
+                restarted),
+            2U);
     }
 
     llmq::CPQSignerJournal restarted_again{path};
@@ -509,6 +548,19 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
             restarted_again, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
             fork_b_certificate),
         llmq::PQSignerJournalOutcome::CERTIFICATE_REPLAY);
+    BOOST_CHECK_EQUAL(
+        llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
+            restarted_again),
+        0U);
+    CheckOutcome(
+        llmq::test::PQSignerJournalTestAccess::Reconcile(
+            restarted_again, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+            fork_b_certificate),
+        llmq::PQSignerJournalOutcome::CERTIFICATE_REPLAY);
+    BOOST_CHECK_EQUAL(
+        llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
+            restarted_again),
+        1U);
     const auto durable{restarted_again.GetBranchLock(
         fork_a_key.genesis_hash, fork_a_key.pro_tx_hash)};
     BOOST_REQUIRE(durable);
@@ -535,6 +587,16 @@ BOOST_AUTO_TEST_CASE(certificate_marker_detects_conflicting_durable_restore)
             journal, key.genesis_hash, key.pro_tx_hash,
             conflicting_witness),
         llmq::PQSignerJournalOutcome::CORRUPT);
+    BOOST_CHECK_EQUAL(
+        llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(journal),
+        0U);
+    CheckOutcome(
+        llmq::test::PQSignerJournalTestAccess::Reconcile(
+            journal, key.genesis_hash, key.pro_tx_hash, certificate),
+        llmq::PQSignerJournalOutcome::CORRUPT);
+    BOOST_CHECK_EQUAL(
+        llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(journal),
+        0U);
     BOOST_CHECK(!journal.IsHealthy());
 }
 
@@ -577,6 +639,16 @@ BOOST_AUTO_TEST_CASE(lower_certificate_never_rewinds_a_higher_local_vote)
     BOOST_REQUIRE(reconciled);
     BOOST_CHECK(*reconciled == CertificateLock(
         key.genesis_hash, adjudicating_certificate));
+    BOOST_CHECK_EQUAL(
+        llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(journal),
+        1U);
+    CheckOutcome(
+        llmq::test::PQSignerJournalTestAccess::Reconcile(
+            journal, key.genesis_hash, key.pro_tx_hash, lower_certificate),
+        llmq::PQSignerJournalOutcome::CORRUPT);
+    BOOST_CHECK_EQUAL(
+        llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(journal),
+        1U);
 }
 
 BOOST_AUTO_TEST_CASE(authorized_leaf_domain_is_exact_without_usage_counter)
