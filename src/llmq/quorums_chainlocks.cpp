@@ -7762,6 +7762,106 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
     }
 }
 
+CChainLocksHandler::ChainLockShareCollectionOutcome
+CChainLocksHandler::CollectChainLockShare(
+    const pq::ChainLockShare& share,
+    const pq::ChainLockStatement& statement,
+    uint64_t admission_generation)
+{
+    ChainLockShareCollectionOutcome outcome;
+    uint64_t collector_generation{0};
+    std::optional<
+        pq::ChainLockCollector::ShareVerificationReservation> reservation;
+    {
+        LOCK(m_collector_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+            outcome.stale = true;
+            return outcome;
+        }
+        pq::ChainLockCollector* collector{FindCollector(statement)};
+        if (collector == nullptr) {
+            outcome.stale = true;
+            return outcome;
+        }
+        collector_generation = m_collector_generation;
+        auto pending{collector->ReserveShareVerification(
+            share, &outcome.error)};
+        if (pending) {
+            reservation.emplace(std::move(*pending));
+        } else {
+            outcome.result = outcome.error ==
+                    pq::ShareCollectionError::DUPLICATE
+                ? pq::ShareCollectionResult::DUPLICATE
+                : pq::ShareCollectionResult::REJECTED;
+        }
+    }
+
+    const auto retire_if_exact = [&]() {
+        LOCK(m_collector_mutex);
+        if (m_collector_generation == collector_generation) {
+            ResetCollectors();
+        }
+    };
+    const auto is_current = [&]() {
+        return IsShareAdmissionGenerationCurrent(admission_generation) &&
+               IsCurrentSigningStatement(statement);
+    };
+
+    if (!reservation) {
+        if (outcome.result == pq::ShareCollectionResult::DUPLICATE) {
+            return outcome;
+        }
+        if (!is_current()) {
+            retire_if_exact();
+            outcome.stale = true;
+        }
+        return outcome;
+    }
+
+    try {
+        pq::ChainLockCollector::VerifyReservedShare(*reservation);
+    } catch (const std::exception&) {
+        // Completion below classifies an unverified reservation as local and
+        // releases its exact pending slot.
+    }
+
+    if (!is_current()) {
+        retire_if_exact();
+        outcome.stale = true;
+        return outcome;
+    }
+
+    {
+        LOCK(m_collector_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            m_collector_generation != collector_generation) {
+            if (m_collector_generation == collector_generation) {
+                ResetCollectors();
+            }
+            outcome.stale = true;
+            return outcome;
+        }
+        pq::ChainLockCollector* collector{FindCollector(statement)};
+        if (collector == nullptr) {
+            ResetCollectors();
+            outcome.stale = true;
+            return outcome;
+        }
+        outcome.result = collector->CompleteShareVerification(
+            std::move(*reservation), &outcome.error);
+        if (outcome.result == pq::ShareCollectionResult::ACCEPTED) {
+            outcome.finalized = collector->Finalize();
+        }
+    }
+
+    if (!is_current()) {
+        retire_if_exact();
+        outcome.finalized.reset();
+        outcome.stale = true;
+    }
+    return outcome;
+}
+
 void CChainLocksHandler::ProcessChainLockShare(CNode* from,
                                                CDataStream& payload)
 {
@@ -7810,39 +7910,22 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         return;
     }
 
-    std::optional<pq::FinalChainLock> finalized;
-    pq::ShareCollectionError collection_error{
-        pq::ShareCollectionError::NONE};
-    pq::ShareCollectionResult collection_result{
-        pq::ShareCollectionResult::REJECTED};
-    uint64_t collector_generation{0};
-    {
-        LOCK(m_collector_mutex);
-        if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
-        pq::ChainLockCollector* collector{FindCollector(current->statement)};
-        if (collector == nullptr) return;
-        collector_generation = m_collector_generation;
-        collection_result =
-            collector->AddVerifiedShare(share, &collection_error);
-        if (collection_result == pq::ShareCollectionResult::ACCEPTED) {
-            finalized = collector->Finalize();
-        }
-    }
-
-    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
-
-    if (collection_result != pq::ShareCollectionResult::ACCEPTED) {
-        if (collection_error == pq::ShareCollectionError::INVALID_SIGNATURE) {
-            punish(100, "bad-pq-clshare-signature");
-        } else if (collection_result == pq::ShareCollectionResult::REJECTED) {
-            punish(100, "bad-pq-clshare-context");
-        }
+    auto collection{CollectChainLockShare(
+        share, current->statement, admission_generation)};
+    if (collection.stale ||
+        !IsShareAdmissionGenerationCurrent(admission_generation)) {
         return;
     }
-    if (!IsCurrentSigningStatement(current->statement)) {
-        LOCK(m_collector_mutex);
-        if (m_collector_generation == collector_generation) {
-            ResetCollectors();
+    if (collection.result != pq::ShareCollectionResult::ACCEPTED) {
+        if (collection.error == pq::ShareCollectionError::LOCAL_ERROR) {
+            return;
+        }
+        if (collection.error ==
+            pq::ShareCollectionError::INVALID_SIGNATURE) {
+            punish(100, "bad-pq-clshare-signature");
+        } else if (collection.result ==
+                   pq::ShareCollectionResult::REJECTED) {
+            punish(100, "bad-pq-clshare-context");
         }
         return;
     }
@@ -7851,11 +7934,11 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
     RelayChainLockShare(share, admission_generation, node_id);
 
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
-    if (finalized) {
+    if (collection.finalized) {
         LOCK(m_share_lifecycle_mutex);
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         BlockValidationState state;
-        CChainLockSig chainlock{std::move(*finalized)};
+        CChainLockSig chainlock{std::move(*collection.finalized)};
         if (!ProcessNewChainLock(-1, chainlock, state)) {
             LogPrint(BCLog::CHAINLOCKS,
                      "CChainLocksHandler::%s -- locally collected PQ "
@@ -9970,23 +10053,13 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             // are never refunded, but stale signatures are never announced.
             if (!IsCurrentSigningStatement(current->statement)) return;
 
-            std::optional<pq::FinalChainLock> finalized;
-            {
-                LOCK(m_collector_mutex);
-                if (!IsShareAdmissionGenerationCurrent(
-                        admission_generation)) {
-                    return;
-                }
-                pq::ChainLockCollector* collector{
-                    FindCollector(current->statement)};
-                if (collector == nullptr) return;
-                pq::ShareCollectionError error{
-                    pq::ShareCollectionError::NONE};
-                if (collector->AddVerifiedShare(*signed_share.share, &error) !=
-                    pq::ShareCollectionResult::ACCEPTED) {
-                    continue;
-                }
-                finalized = collector->Finalize();
+            auto collection{CollectChainLockShare(
+                *signed_share.share, current->statement,
+                admission_generation)};
+            if (collection.stale) return;
+            if (collection.result !=
+                pq::ShareCollectionResult::ACCEPTED) {
+                continue;
             }
             MaybeCapturePaymentAuditResponse(
                 *signed_share.share, current->rosters,
@@ -9996,14 +10069,15 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
                 return;
             }
-            if (finalized) {
+            if (collection.finalized) {
                 LOCK(m_share_lifecycle_mutex);
                 if (!IsShareAdmissionGenerationCurrent(
                         admission_generation)) {
                     return;
                 }
                 BlockValidationState state;
-                CChainLockSig chainlock{std::move(*finalized)};
+                CChainLockSig chainlock{
+                    std::move(*collection.finalized)};
                 (void)ProcessNewChainLock(-1, chainlock, state);
                 return;
             }

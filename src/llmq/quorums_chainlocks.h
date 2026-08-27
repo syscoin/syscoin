@@ -638,6 +638,22 @@ private:
                                  !m_btc_header_policy_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex);
+    struct ChainLockShareCollectionOutcome {
+        pq::ShareCollectionResult result{
+            pq::ShareCollectionResult::REJECTED};
+        pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
+        std::optional<pq::FinalChainLock> finalized;
+        bool stale{false};
+    };
+    [[nodiscard]] ChainLockShareCollectionOutcome CollectChainLockShare(
+        const pq::ChainLockShare& share,
+        const pq::ChainLockStatement& statement,
+        uint64_t admission_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_collector_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_pending_btcc_receipt_mutex);
     void ProcessChainLockShare(CNode* from, CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_share_lifecycle_mutex,
