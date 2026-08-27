@@ -1387,22 +1387,6 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     return true;
 }
 
-bool PQRegistryManager::ReconstructPersistentSnapshot(
-    const uint256& block_hash,
-    int32_t expected_height,
-    PQRegistrySnapshot& snapshot,
-    PQRegistryError& error) const
-{
-    std::shared_ptr<const PQRegistrySnapshotView> view;
-    if (!ReconstructPersistentSnapshotView(block_hash, expected_height, view,
-                                           error) ||
-        !view) {
-        return false;
-    }
-    snapshot = MaterializeSnapshot(*view);
-    return true;
-}
-
 bool PQRegistryManager::ProcessBlock(
     const CBlock& block,
     int32_t height,
@@ -2287,27 +2271,34 @@ bool PQRegistryManager::GetMempoolView(
 
 bool PQRegistryManager::UndoBlock(
     const uint256& block_hash,
+    const uint256& expected_parent_block_hash,
     int32_t height,
-    PQRegistrySnapshot& parent_snapshot,
     PQRegistryError& error) const
 {
     error.Clear();
     if (!IsEnabled() || height < m_config.preparation_height ||
-        block_hash.IsNull()) {
+        block_hash.IsNull() || expected_parent_block_hash.IsNull()) {
         return SetError(error, PQRegistryResult::UNDO_MISMATCH);
     }
     LOCK(m_mutex);
-    PQRegistrySnapshot current;
-    if (!ReconstructPersistentSnapshot(block_hash, height, current, error)) {
+    std::shared_ptr<const PQRegistrySnapshotView> current;
+    if (!ReconstructPersistentSnapshotView(block_hash, height, current,
+                                           error)) {
         return false;
     }
-    if (height == m_config.preparation_height) {
-        return MakePrePreparationSnapshot(
-            m_genesis_hash, current.previous_block_hash, uint256{}, height - 1,
-            parent_snapshot, error);
+    if (!current ||
+        current->previous_block_hash != expected_parent_block_hash) {
+        return SetError(error, PQRegistryResult::UNDO_MISMATCH);
     }
-    return ReconstructPersistentSnapshot(current.previous_block_hash,
-                                         height - 1, parent_snapshot, error);
+    if (height == m_config.preparation_height) {
+        PQRegistrySnapshot parent;
+        return MakePrePreparationSnapshot(
+            m_genesis_hash, expected_parent_block_hash, uint256{}, height - 1,
+            parent, error);
+    }
+    std::shared_ptr<const PQRegistrySnapshotView> parent;
+    return ReconstructPersistentSnapshotView(
+        expected_parent_block_hash, height - 1, parent, error);
 }
 
 bool PQRegistryManager::Flush(bool fSync)

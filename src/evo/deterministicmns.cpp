@@ -2085,10 +2085,10 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
         std::string registry_open_error;
         auto* registry = GetOrCreatePQRegistry(registry_open_error);
         if (registry == nullptr) return false;
-        llmq::pq::PQRegistrySnapshot parent_snapshot;
         llmq::pq::PQRegistryError registry_error;
-        if (!registry->UndoBlock(pindex->GetBlockHash(), pindex->nHeight,
-                                 parent_snapshot, registry_error)) {
+        if (!registry->UndoBlock(
+                pindex->GetBlockHash(), pindex->pprev->GetBlockHash(),
+                pindex->nHeight, registry_error)) {
             LogPrintf("%s -- PQ registry undo failed at height=%d block=%s result=%s\n",
                       __func__, pindex->nHeight,
                       pindex->GetBlockHash().ToString(),

@@ -1000,12 +1000,10 @@ BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
                 ChildRootResolutionStatus::MUTABLE_PRESENT);
     BOOST_CHECK(future.record->commitment == commitment_a);
 
-    PQRegistrySnapshot undone;
     BOOST_REQUIRE(manager.UndoBlock(
-        branch_a.GetHash(), 1296, undone, error));
-    BOOST_CHECK(undone.block_hash == registration.GetHash());
-    BOOST_REQUIRE_EQUAL(undone.used_tree_ids.size(), 1U);
-    BOOST_CHECK(undone.used_tree_ids.front() == old_commitment.tree_id);
+        registration.GetHash(), registration.hashPrevBlock, 1295, error));
+    BOOST_REQUIRE(manager.UndoBlock(
+        branch_a.GetHash(), registration.GetHash(), 1296, error));
 }
 
 BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
@@ -1305,15 +1303,14 @@ BOOST_AUTO_TEST_CASE(removal_merge_is_exact_check_only_is_pure_and_forks_reconst
     BOOST_CHECK(rootless_disk.consensus_state_root ==
                 rootless_view.ConsensusStateRoot());
 
-    PQRegistrySnapshot rootless_undone;
+    BOOST_CHECK(!manager.UndoBlock(
+        rootless_removal.GetHash(), removed.GetHash(), 1297, error));
+    BOOST_CHECK(error.result == PQRegistryResult::UNDO_MISMATCH);
     BOOST_REQUIRE(manager.UndoBlock(
-        rootless_removal.GetHash(), 1297, rootless_undone, error));
-    BOOST_CHECK(rootless_undone == sibling_snapshot);
+        rootless_removal.GetHash(), sibling.GetHash(), 1297, error));
 
-    PQRegistrySnapshot undone;
     BOOST_REQUIRE(manager.UndoBlock(
-        removed.GetHash(), 1296, undone, error));
-    BOOST_CHECK(undone == parent);
+        removed.GetHash(), registration.GetHash(), 1296, error));
 }
 
 BOOST_AUTO_TEST_CASE(malformed_removal_spans_are_rejected)
@@ -1566,6 +1563,10 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
 
     PQRegistryManager checkpoint_restarted(db, genesis, config);
     PQRegistryError error;
+    BOOST_REQUIRE(checkpoint_restarted.UndoBlock(
+        checkpoint_hash, checkpoint_previous_hash,
+        config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL,
+        error));
     PQRegistrySnapshot checkpoint_snapshot;
     BOOST_REQUIRE(checkpoint_restarted.GetSnapshot(
         checkpoint_hash, checkpoint_previous_hash,

@@ -393,11 +393,6 @@ private:
         int32_t expected_height,
         std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    [[nodiscard]] bool ReconstructPersistentSnapshot(
-        const uint256& block_hash,
-        int32_t expected_height,
-        PQRegistrySnapshot& snapshot,
-        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool CacheSnapshot(
         const PQRegistrySnapshot& snapshot,
         std::shared_ptr<const PQRegistrySnapshotView>* cached = nullptr) const
@@ -497,8 +492,8 @@ public:
 
     [[nodiscard]] bool UndoBlock(
         const uint256& block_hash,
+        const uint256& expected_parent_block_hash,
         int32_t height,
-        PQRegistrySnapshot& parent_snapshot,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool Flush(bool fSync = true)
