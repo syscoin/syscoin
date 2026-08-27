@@ -737,12 +737,79 @@ bool CDeterministicMNManager::PrunePaymentProbationStatesThroughCheckpoint(
         checkpoint, retained_state_hashes);
 }
 
+std::optional<CDeterministicMNCPtr>
+CDeterministicMNManager::MNPayeeCache::Get(
+    const MNPayeeCacheKey& key)
+{
+    LOCK(m_mutex);
+    for (auto& entry : m_entries) {
+        if (entry.occupied && entry.key == key) {
+            entry.recently_used = true;
+            ++m_hits;
+            return entry.payee;
+        }
+    }
+    return std::nullopt;
+}
+
+CDeterministicMNCPtr CDeterministicMNManager::MNPayeeCache::Publish(
+    const MNPayeeCacheKey& key,
+    CDeterministicMNCPtr payee)
+{
+    LOCK(m_mutex);
+    ++m_builds;
+    for (auto& entry : m_entries) {
+        if (entry.occupied && entry.key == key) {
+            entry.recently_used = true;
+            return entry.payee;
+        }
+    }
+
+    std::optional<std::size_t> victim;
+    for (std::size_t index{0}; index < m_entries.size(); ++index) {
+        if (!m_entries[index].occupied) {
+            victim = index;
+            break;
+        }
+    }
+    while (!victim) {
+        const std::size_t index{m_clock};
+        m_clock = (m_clock + 1) % m_entries.size();
+        auto& candidate{m_entries[index]};
+        if (!candidate.recently_used) {
+            victim = index;
+        } else {
+            candidate.recently_used = false;
+        }
+    }
+
+    auto& entry{m_entries[*victim]};
+    entry.key = key;
+    entry.payee = std::move(payee);
+    entry.occupied = true;
+    entry.recently_used = true;
+    return entry.payee;
+}
+
 bool CDeterministicMNManager::GetMNPayeeForBlock(
     const CBlockIndex* pindex,
     CDeterministicMNCPtr& payee)
 {
     payee.reset();
     if (pindex == nullptr) return false;
+    // SYSCOIN: The block hash pins the DMN and PQ-registry views. The
+    // probation root is indexed separately and must be part of the cache key.
+    const uint256 payment_state_hash{
+        pindex->pqPaymentProbationStateHash.IsNull()
+            ? m_payment_probation->EmptyStateHash()
+            : pindex->pqPaymentProbationStateHash};
+    const MNPayeeCacheKey cache_key{
+        pindex->GetBlockHash(), pindex->nHeight, payment_state_hash};
+    if (auto cached{m_mn_payee_cache.Get(cache_key)}) {
+        payee = std::move(*cached);
+        return true;
+    }
+
     llmq::pq::PQPaymentProbationState payment_state;
     if (!GetPaymentProbationState(pindex, payment_state)) return false;
     llmq::pq::PQPaymentEligibleProTxHashesPtr pq_payment_eligible;
@@ -750,10 +817,29 @@ bool CDeterministicMNManager::GetMNPayeeForBlock(
         return false;
     }
     const auto list{GetListForBlock(pindex)};
-    payee = list.GetMNPayee(
-        &payment_state,
-        pq_payment_eligible.get());
+    payee = m_mn_payee_cache.Publish(
+        cache_key,
+        list.GetMNPayee(&payment_state, pq_payment_eligible.get()));
     return true;
+}
+
+CDeterministicMNManager::MNPayeeCacheStatsForTesting
+CDeterministicMNManager::MNPayeeCache::Stats()
+{
+    LOCK(m_mutex);
+    MNPayeeCacheStatsForTesting stats;
+    stats.hits = m_hits;
+    stats.builds = m_builds;
+    stats.entries = static_cast<std::size_t>(std::count_if(
+        m_entries.begin(), m_entries.end(),
+        [](const MNPayeeCacheEntry& entry) { return entry.occupied; }));
+    return stats;
+}
+
+CDeterministicMNManager::MNPayeeCacheStatsForTesting
+CDeterministicMNManager::GetMNPayeeCacheStatsForTesting()
+{
+    return m_mn_payee_cache.Stats();
 }
 
 bool CDeterministicMNManager::GetProjectedMNPayeesForBlock(

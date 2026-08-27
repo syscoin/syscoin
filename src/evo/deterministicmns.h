@@ -21,6 +21,7 @@
 #include <immer/map.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <ios>
 #include <limits>
@@ -634,7 +635,50 @@ public:
     // and must never be inferred from this cache size.
     static constexpr int LIST_CACHE_SIZE = DISK_SNAPSHOT_PERIOD * DISK_SNAPSHOTS;
     static constexpr int HOT_LIST_CACHE_SIZE = 128;
+    // SYSCOIN: Exact-parent payment selection is shared by consensus,
+    // templates, governance, and RPC without retaining an unbounded branch
+    // history.
+    static constexpr std::size_t MN_PAYEE_CACHE_SIZE{64};
+
+    struct MNPayeeCacheStatsForTesting {
+        std::size_t entries{0};
+        uint64_t hits{0};
+        uint64_t builds{0};
+    };
 private:
+    struct MNPayeeCacheKey {
+        uint256 block_hash;
+        int32_t height{-1};
+        uint256 payment_probation_state_hash;
+
+        friend bool operator==(const MNPayeeCacheKey&,
+                               const MNPayeeCacheKey&) = default;
+    };
+    struct MNPayeeCacheEntry {
+        MNPayeeCacheKey key;
+        CDeterministicMNCPtr payee;
+        bool occupied{false};
+        bool recently_used{false};
+    };
+    class MNPayeeCache final {
+    public:
+        [[nodiscard]] std::optional<CDeterministicMNCPtr> Get(
+            const MNPayeeCacheKey& key) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        [[nodiscard]] CDeterministicMNCPtr Publish(
+            const MNPayeeCacheKey& key,
+            CDeterministicMNCPtr payee) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        [[nodiscard]] MNPayeeCacheStatsForTesting Stats()
+            EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    private:
+        Mutex m_mutex;
+        std::array<MNPayeeCacheEntry, MN_PAYEE_CACHE_SIZE> m_entries
+            GUARDED_BY(m_mutex);
+        std::size_t m_clock GUARDED_BY(m_mutex){0};
+        uint64_t m_hits GUARDED_BY(m_mutex){0};
+        uint64_t m_builds GUARDED_BY(m_mutex){0};
+    };
+
     Mutex cs;
     // Main thread has indicated we should perform cleanup up to this height
     std::atomic<int> to_cleanup {0};
@@ -670,6 +714,10 @@ private:
         m_payment_probation;
     std::unique_ptr<CEvoDB<uint256, CDeterministicMNListInverse,
                           StaticSaltedHasher>> m_inverse_journal;
+    // SYSCOIN: The key includes every branch-local input not already
+    // committed by the parent block hash. Miss derivation stays outside this
+    // mutex; publication is double-checked.
+    MNPayeeCache m_mn_payee_cache;
 
     llmq::pq::PQRegistryManager* GetOrCreatePQRegistry(
         std::string& error) const;
@@ -768,6 +816,10 @@ public:
     bool GetMNPayeeForBlock(const CBlockIndex* pindex,
                             CDeterministicMNCPtr& payee)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** SYSCOIN: Deterministic counters for cache regression tests. */
+    [[nodiscard]] MNPayeeCacheStatsForTesting
+    GetMNPayeeCacheStatsForTesting();
 
     /** SYSCOIN:
      * Project payees only through the currently knowable payment-root epoch.

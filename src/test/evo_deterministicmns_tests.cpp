@@ -828,6 +828,92 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
                 members[0]->proTxHash);
 }
 
+// SYSCOIN: Consensus validation, templates, governance, and RPC must share
+// one branch-exact payee derivation without allowing a fork or indexed
+// probation root to reuse another entry.
+BOOST_AUTO_TEST_CASE(exact_parent_payee_cache_is_branch_bounded)
+{
+    SelectParams(ChainType::REGTEST);
+    auto db_params = DBParams{
+        .path = "testdb_dmn_exact_parent_payee_cache",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+
+    constexpr int height{520};
+    const uint256 hash_a{MakeSnapshotKey(height)};
+    const uint256 hash_b{MakeSnapshotKey(height + 10'000)};
+    const uint256 hash_empty{MakeSnapshotKey(height + 20'000)};
+    const auto member_a{MakeLegacyReplayMN(40, 20)};
+    const auto member_b{MakeLegacyReplayMN(41, 21)};
+
+    CDeterministicMNList list_a{hash_a, height, 1};
+    list_a.AddMN(member_a, /*fBumpTotalCount=*/false);
+    CDeterministicMNList list_b{hash_b, height, 1};
+    list_b.AddMN(member_b, /*fBumpTotalCount=*/false);
+    const CDeterministicMNList empty_list{hash_empty, height, 0};
+    manager.m_evoDb->WriteCache(hash_a, list_a);
+    manager.m_evoDb->WriteCache(hash_b, list_b);
+    manager.m_evoDb->WriteCache(hash_empty, empty_list);
+
+    CBlockIndex index_a;
+    index_a.nHeight = height;
+    index_a.phashBlock = &hash_a;
+    CBlockIndex index_b;
+    index_b.nHeight = height;
+    index_b.phashBlock = &hash_b;
+    CBlockIndex index_empty;
+    index_empty.nHeight = height;
+    index_empty.phashBlock = &hash_empty;
+
+    CDeterministicMNCPtr payee;
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    auto stats{manager.GetMNPayeeCacheStatsForTesting()};
+    BOOST_CHECK_EQUAL(stats.entries, 1U);
+    BOOST_CHECK_EQUAL(stats.builds, 1U);
+    BOOST_CHECK_EQUAL(stats.hits, 0U);
+
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.builds, 1U);
+    BOOST_CHECK_EQUAL(stats.hits, 1U);
+
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_b, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_b->proTxHash);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.entries, 2U);
+    BOOST_CHECK_EQUAL(stats.builds, 2U);
+    BOOST_CHECK_EQUAL(stats.hits, 1U);
+
+    // An empty list is a successful null result and must be cacheable too.
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_empty, payee));
+    BOOST_CHECK(!payee);
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_empty, payee));
+    BOOST_CHECK(!payee);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.entries, 3U);
+    BOOST_CHECK_EQUAL(stats.builds, 3U);
+    BOOST_CHECK_EQUAL(stats.hits, 2U);
+
+    // The payment-only root is not committed by block_hash and therefore
+    // participates independently in the exact-parent key.
+    index_a.pqPaymentProbationStateHash = uint256::ONEV;
+    BOOST_CHECK(!manager.GetMNPayeeForBlock(&index_a, payee));
+    index_a.pqPaymentProbationStateHash.SetNull();
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.builds, 3U);
+    BOOST_CHECK_EQUAL(stats.hits, 3U);
+}
+
 // SYSCOIN: A legacy projection ends where root eligibility begins.
 BOOST_AUTO_TEST_CASE(payment_projection_stops_at_root_gate)
 {
