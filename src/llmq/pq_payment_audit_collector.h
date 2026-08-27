@@ -22,9 +22,13 @@ public:
         const uint256& genesis_hash,
         PaymentAuditScheduleConfig schedule,
         PaymentAuditStatement statement,
-        FinalChainLock seal_chainlock,
+        const FinalChainLock& seal_chainlock,
         FrozenQuorumRostersPtr rosters,
         uint8_t authorization_mask,
+        ShareCollectionError* error = nullptr);
+
+    static std::unique_ptr<PaymentAuditCollector> Create(
+        PreparedPaymentAuditContextPtr context,
         ShareCollectionError* error = nullptr);
 
     PaymentAuditCollector(const PaymentAuditCollector&) = delete;
@@ -39,22 +43,9 @@ public:
     [[nodiscard]] std::optional<FinalPaymentAudit> Finalize() const;
 
 private:
-    PaymentAuditCollector(uint256 genesis_hash,
-                          PaymentAuditScheduleConfig schedule,
-                          PaymentAuditStatement statement,
-                          FinalChainLock seal_chainlock,
-                          FrozenQuorumRostersPtr rosters,
-                          uint8_t authorization_mask);
+    explicit PaymentAuditCollector(PreparedPaymentAuditContextPtr context);
 
-    [[nodiscard]] std::optional<std::size_t> FindQuorumSlot(
-        const PaymentAuditShareTranscript& transcript) const;
-
-    uint256 m_genesis_hash;
-    PaymentAuditScheduleConfig m_schedule;
-    PaymentAuditStatement m_statement;
-    FinalChainLock m_seal_chainlock;
-    FrozenQuorumRostersPtr m_rosters;
-    uint8_t m_authorization_mask{0};
+    PreparedPaymentAuditContextPtr m_context;
     std::array<std::map<uint16_t, PaymentAuditReportWitness>,
                ACTIVE_QUORUMS> m_shares;
 };

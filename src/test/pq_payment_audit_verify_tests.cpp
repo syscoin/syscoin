@@ -234,12 +234,31 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)
         wrong_seal->seal, &error));
     BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_SEAL);
 
+    auto wrong_seal_and_context{MakeFixture()};
+    wrong_seal_and_context->seal.statement.block_hash = NonNullHash(501);
+    wrong_seal_and_context->rosters[0].descriptor.member_root.begin()[0] ^= 1;
+    BOOST_CHECK(!PreparedPaymentAuditContext::Create(
+        wrong_seal_and_context->genesis_hash,
+        wrong_seal_and_context->schedule,
+        wrong_seal_and_context->audit.statement,
+        wrong_seal_and_context->seal,
+        std::make_shared<const FrozenQuorumRosters>(
+            wrong_seal_and_context->rosters),
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_SEAL);
+
     auto wrong_context{MakeFixture()};
     wrong_context->rosters[0].descriptor.member_root.begin()[0] ^= 1;
     BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
         wrong_context->genesis_hash, wrong_context->schedule,
         wrong_context->audit,
         wrong_context->rosters, AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
+    BOOST_CHECK(!PreparedPaymentAuditContext::Create(
+        wrong_context->genesis_hash, wrong_context->schedule,
+        wrong_context->audit.statement, wrong_context->seal,
+        std::make_shared<const FrozenQuorumRosters>(wrong_context->rosters),
+        AUTHORIZATION_MASK, &error));
     BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
 
     auto wrong_proof{MakeFixture()};
@@ -387,6 +406,113 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     BOOST_CHECK_EQUAL(check->GetLeafIndex(), *leaf_index);
     BOOST_CHECK((*check)());
 
+    const auto rosters{
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters)};
+    auto prepared_context{PreparedPaymentAuditContext::Create(
+        fixture->genesis_hash, fixture->schedule, fixture->audit.statement,
+        fixture->seal, rosters, AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(prepared_context);
+    BOOST_CHECK(prepared_context->RostersPtr() != rosters);
+    auto prepared_check{PreparePaymentAuditShareVerification(
+        share, *prepared_context, &verification_error)};
+    BOOST_REQUIRE(prepared_check);
+    BOOST_CHECK(prepared_check->GetPublicKey() == check->GetPublicKey());
+    BOOST_CHECK_EQUAL(prepared_check->GetLeafIndex(), check->GetLeafIndex());
+    BOOST_CHECK(prepared_check->GetMessageBytes() == check->GetMessageBytes());
+    BOOST_CHECK(prepared_check->GetSignature() == check->GetSignature());
+    BOOST_CHECK((*prepared_check)());
+
+    auto bad_proof{share};
+    bad_proof.authenticated_signature.key_proof.siblings[0].begin()[0] ^= 1;
+    PaymentAuditVerificationError raw_error{
+        PaymentAuditVerificationError::NONE};
+    PaymentAuditVerificationError prepared_error{
+        PaymentAuditVerificationError::NONE};
+    BOOST_CHECK(!PreparePaymentAuditShareVerification(
+        fixture->genesis_hash, fixture->schedule, bad_proof,
+        fixture->rosters, AUTHORIZATION_MASK, &raw_error));
+    BOOST_CHECK(!PreparePaymentAuditShareVerification(
+        bad_proof, *prepared_context, &prepared_error));
+    BOOST_CHECK(raw_error == PaymentAuditVerificationError::INVALID_CHILD_PROOF);
+    BOOST_CHECK(prepared_error == raw_error);
+
+    auto unknown_quorum{share};
+    unknown_quorum.transcript.quorum_base_hash = NonNullHash(91'002);
+    BOOST_CHECK(!PreparePaymentAuditShareVerification(
+        fixture->genesis_hash, fixture->schedule, unknown_quorum,
+        fixture->rosters, AUTHORIZATION_MASK, &raw_error));
+    BOOST_CHECK(!PreparePaymentAuditShareVerification(
+        unknown_quorum, *prepared_context, &prepared_error));
+    BOOST_CHECK(raw_error == PaymentAuditVerificationError::INVALID_CONTEXT);
+    BOOST_CHECK(prepared_error == raw_error);
+
+    auto unauthorized_context_share{share};
+    unauthorized_context_share.transcript.quorum_epoch =
+        fixture->rosters.back().descriptor.epoch;
+    unauthorized_context_share.transcript.quorum_base_hash =
+        fixture->rosters.back().descriptor.base_hash;
+    BOOST_CHECK(!PreparePaymentAuditShareVerification(
+        fixture->genesis_hash, fixture->schedule,
+        unauthorized_context_share, fixture->rosters, AUTHORIZATION_MASK,
+        &raw_error));
+    BOOST_CHECK(!PreparePaymentAuditShareVerification(
+        unauthorized_context_share, *prepared_context, &prepared_error));
+    BOOST_CHECK(raw_error == PaymentAuditVerificationError::INVALID_CONTEXT);
+    BOOST_CHECK(prepared_error == raw_error);
+
+    auto alternate_report{share};
+    alternate_report.transcript.reporter_observed_members[0] &=
+        static_cast<uint8_t>(~uint8_t{1});
+    const uint256 alternate_report_hash{GetPaymentAuditShareHash(
+        fixture->genesis_hash, alternate_report.transcript)};
+    std::copy(alternate_report_hash.begin(), alternate_report_hash.end(),
+              message.begin());
+    BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+        *secret_key, *leaf_index, message,
+        alternate_report.authenticated_signature.signature));
+    auto alternate_report_check{PreparePaymentAuditShareVerification(
+        alternate_report, *prepared_context, &verification_error)};
+    BOOST_REQUIRE(alternate_report_check);
+    BOOST_CHECK((*alternate_report_check)());
+
+    auto alternate_share{share};
+    alternate_share.transcript.statement.commitment.subject_descriptor_hash
+        .begin()[0] ^= 1;
+    const uint256 alternate_hash{GetPaymentAuditShareHash(
+        fixture->genesis_hash, alternate_share.transcript)};
+    std::copy(alternate_hash.begin(), alternate_hash.end(), message.begin());
+    BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+        *secret_key, *leaf_index, message,
+        alternate_share.authenticated_signature.signature));
+    auto alternate_raw_check{PreparePaymentAuditShareVerification(
+        fixture->genesis_hash, fixture->schedule, alternate_share,
+        fixture->rosters, AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(alternate_raw_check);
+    BOOST_CHECK((*alternate_raw_check)());
+    BOOST_CHECK(!PreparePaymentAuditShareVerification(
+        alternate_share, *prepared_context, &verification_error));
+    BOOST_CHECK(verification_error ==
+                PaymentAuditVerificationError::INVALID_CONTEXT);
+
+    auto mutable_rosters{
+        std::make_shared<FrozenQuorumRosters>(fixture->rosters)};
+    FrozenQuorumRostersPtr aliased_rosters{mutable_rosters};
+    auto alias_safe_context{PreparedPaymentAuditContext::Create(
+        fixture->genesis_hash, fixture->schedule, fixture->audit.statement,
+        fixture->seal, aliased_rosters, AUTHORIZATION_MASK,
+        &verification_error)};
+    BOOST_REQUIRE(alias_safe_context);
+    const auto alias_slot{alias_safe_context->FindQuorumSlot(share.transcript)};
+    BOOST_REQUIRE(alias_slot);
+    mutable_rosters->at(*alias_slot)
+        .members.at(share.transcript.member_index)
+        .pro_tx_hash = NonNullHash(91'001);
+    auto alias_safe_check{PreparePaymentAuditShareVerification(
+        share, *alias_safe_context, &verification_error)};
+    BOOST_REQUIRE(alias_safe_check);
+    BOOST_CHECK((*alias_safe_check)());
+
+    std::copy(share_hash.begin(), share_hash.end(), message.begin());
     auto wrong_scheduled_leaf{share};
     BOOST_REQUIRE(scheduled_wots::SignDeterministic(
         *secret_key, static_cast<uint8_t>(*leaf_index - 1), message,
@@ -397,8 +523,26 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     BOOST_REQUIRE(wrong_leaf_check);
     BOOST_CHECK(!(*wrong_leaf_check)());
 
-    const auto rosters{
-        std::make_shared<const FrozenQuorumRosters>(fixture->rosters)};
+    std::weak_ptr<const PreparedPaymentAuditContext> retained_context{
+        prepared_context};
+    auto prepared_collector{PaymentAuditCollector::Create(prepared_context)};
+    BOOST_REQUIRE(prepared_collector);
+    prepared_context.reset();
+    BOOST_CHECK(!retained_context.expired());
+    ShareCollectionError prepared_collection_error{
+        ShareCollectionError::NONE};
+    BOOST_CHECK(prepared_collector->AddVerifiedShare(
+                    wrong_scheduled_leaf, &prepared_collection_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(prepared_collection_error ==
+                ShareCollectionError::INVALID_SIGNATURE);
+    BOOST_CHECK_EQUAL(prepared_collector->ShareCounts()[0], 0U);
+    BOOST_CHECK(prepared_collector->AddVerifiedShare(
+                    share, &prepared_collection_error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(prepared_collection_error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(prepared_collector->ShareCounts()[0], 1U);
+
     ShareCollectionError collection_error{
         ShareCollectionError::INVALID_ARGUMENT};
     auto collector{PaymentAuditCollector::Create(

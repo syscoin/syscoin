@@ -8,6 +8,8 @@
 #include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_payment_audit.h>
 
+#include <array>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -24,6 +26,68 @@ enum class PaymentAuditVerificationError : uint8_t {
     INVALID_PUBLIC_KEY,
     INVALID_SIGNATURE,
 };
+
+/** Immutable proof that one exact live audit context passed full validation. */
+class PreparedPaymentAuditContext final {
+public:
+    [[nodiscard]] static std::shared_ptr<const PreparedPaymentAuditContext>
+    Create(const uint256& genesis_hash,
+           PaymentAuditScheduleConfig schedule,
+           PaymentAuditStatement statement,
+           const FinalChainLock& seal_chainlock,
+           FrozenQuorumRostersPtr rosters,
+           uint8_t authorization_mask,
+           PaymentAuditVerificationError* error = nullptr);
+
+    [[nodiscard]] const uint256& GenesisHash() const noexcept
+    {
+        return m_seal_context->GenesisHash();
+    }
+    [[nodiscard]] const PaymentAuditScheduleConfig& Schedule() const noexcept
+    {
+        return m_schedule;
+    }
+    [[nodiscard]] const PaymentAuditStatement& Statement() const noexcept
+    {
+        return m_statement;
+    }
+    [[nodiscard]] const FrozenQuorumRosters& Rosters() const noexcept
+    {
+        return m_seal_context->Rosters();
+    }
+    [[nodiscard]] const FrozenQuorumRostersPtr& RostersPtr() const noexcept
+    {
+        return m_seal_context->RostersPtr();
+    }
+    [[nodiscard]] uint8_t AuthorizationMask() const noexcept
+    {
+        return m_seal_context->AuthorizationMask();
+    }
+    [[nodiscard]] std::optional<std::size_t> FindQuorumSlot(
+        const PaymentAuditShareTranscript& transcript) const noexcept;
+    [[nodiscard]] std::optional<uint8_t> LeafIndex(
+        std::size_t quorum_slot) const noexcept
+    {
+        return quorum_slot < m_leaf_indices.size()
+            ? m_leaf_indices[quorum_slot]
+            : std::nullopt;
+    }
+
+private:
+    PreparedPaymentAuditContext(
+        PaymentAuditScheduleConfig schedule,
+        PaymentAuditStatement statement,
+        PreparedChainLockContextPtr seal_context,
+        std::array<std::optional<uint8_t>, ACTIVE_QUORUMS> leaf_indices);
+
+    PaymentAuditScheduleConfig m_schedule;
+    PaymentAuditStatement m_statement;
+    PreparedChainLockContextPtr m_seal_context;
+    std::array<std::optional<uint8_t>, ACTIVE_QUORUMS> m_leaf_indices;
+};
+
+using PreparedPaymentAuditContextPtr =
+    std::shared_ptr<const PreparedPaymentAuditContext>;
 
 struct PreparedPaymentAuditVerification {
     std::vector<ScheduledWOTSCheck> checks;
@@ -68,6 +132,13 @@ PreparePaymentAuditShareVerification(
     const PaymentAuditShare& share,
     const FrozenQuorumRosters& rosters,
     uint8_t authorization_mask,
+    PaymentAuditVerificationError* error = nullptr);
+
+/** Prepare one share against an already validated exact live audit context. */
+[[nodiscard]] std::optional<ScheduledWOTSCheck>
+PreparePaymentAuditShareVerification(
+    const PaymentAuditShare& share,
+    const PreparedPaymentAuditContext& context,
     PaymentAuditVerificationError* error = nullptr);
 
 [[nodiscard]] std::optional<PreparedPaymentAuditVerification>

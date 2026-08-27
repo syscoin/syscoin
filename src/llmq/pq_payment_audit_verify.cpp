@@ -75,6 +75,74 @@ std::optional<ScheduledWOTSCheck> PrepareSignatureCheck(
 
 } // namespace
 
+PreparedPaymentAuditContext::PreparedPaymentAuditContext(
+    PaymentAuditScheduleConfig schedule,
+    PaymentAuditStatement statement,
+    PreparedChainLockContextPtr seal_context,
+    std::array<std::optional<uint8_t>, ACTIVE_QUORUMS> leaf_indices)
+    : m_schedule{schedule},
+      m_statement{std::move(statement)},
+      m_seal_context{std::move(seal_context)},
+      m_leaf_indices{std::move(leaf_indices)}
+{
+}
+
+std::shared_ptr<const PreparedPaymentAuditContext>
+PreparedPaymentAuditContext::Create(
+    const uint256& genesis_hash,
+    PaymentAuditScheduleConfig schedule,
+    PaymentAuditStatement statement,
+    const FinalChainLock& seal_chainlock,
+    FrozenQuorumRostersPtr rosters,
+    uint8_t authorization_mask,
+    PaymentAuditVerificationError* error)
+{
+    SetError(error, PaymentAuditVerificationError::NONE);
+    if (genesis_hash.IsNull() || !schedule.IsValid() ||
+        !statement.IsStructurallyValid() || !rosters) {
+        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!ValidatePaymentAuditLiveSeal(
+            genesis_hash, statement, seal_chainlock, error)) {
+        return nullptr;
+    }
+    const auto audit_schedule{BuildPaymentAuditEpochSchedule(
+        schedule, statement.commitment.subject_epoch)};
+    if (!audit_schedule ||
+        audit_schedule->seal_height != statement.commitment.seal_height) {
+        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+
+    ChainLockVerificationError chainlock_error{
+        ChainLockVerificationError::NONE};
+    auto seal_context{PreparedChainLockContext::Create(
+        genesis_hash, schedule.chainlock, statement.seal_statement,
+        std::move(rosters), authorization_mask, &chainlock_error)};
+    if (!seal_context) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return nullptr;
+    }
+    std::array<std::optional<uint8_t>, ACTIVE_QUORUMS> leaf_indices;
+    for (std::size_t slot{0}; slot < leaf_indices.size(); ++slot) {
+        leaf_indices[slot] = PaymentAuditLeafIndex(
+            schedule, statement.commitment.subject_epoch,
+            statement.commitment.seal_height,
+            seal_context->Rosters()[slot].descriptor.epoch);
+    }
+    return std::shared_ptr<const PreparedPaymentAuditContext>{
+        new PreparedPaymentAuditContext{
+            schedule, std::move(statement), std::move(seal_context),
+            std::move(leaf_indices)}};
+}
+
+std::optional<std::size_t> PreparedPaymentAuditContext::FindQuorumSlot(
+    const PaymentAuditShareTranscript& transcript) const noexcept
+{
+    return llmq::pq::FindQuorumSlot(transcript, Rosters());
+}
+
 std::optional<ScheduledWOTSCheck>
 PreparePaymentAuditResponseVerification(
     const uint256& genesis_hash,
@@ -191,6 +259,63 @@ PaymentAuditShareTranscript BuildPaymentAuditShareTranscript(
         descriptor.base_hash, member_index, member_pro_tx_hash};
 }
 
+namespace {
+
+std::optional<ScheduledWOTSCheck>
+PreparePaymentAuditShareVerificationInternal(
+    const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
+    const PaymentAuditShare& share,
+    const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
+    std::optional<std::size_t> prepared_quorum_slot,
+    std::optional<uint8_t> prepared_leaf_index,
+    bool context_prepared,
+    PaymentAuditVerificationError* error)
+{
+    SetError(error, PaymentAuditVerificationError::NONE);
+    const auto slot{context_prepared
+        ? prepared_quorum_slot
+        : FindQuorumSlot(share.transcript, rosters)};
+    if (!slot ||
+        (authorization_mask & (uint8_t{1} << *slot)) == 0) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return std::nullopt;
+    }
+    if (share.transcript.member_index >= QUORUM_SIZE) {
+        SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
+        return std::nullopt;
+    }
+    if (!context_prepared) {
+        if (!ValidatePaymentAuditContext(
+                genesis_hash, schedule, share.transcript.statement, rosters,
+                authorization_mask, error)) {
+            return std::nullopt;
+        }
+    }
+    const auto& roster{rosters[*slot]};
+    const auto leaf_index{context_prepared
+        ? prepared_leaf_index
+        : PaymentAuditLeafIndex(
+              schedule,
+              share.transcript.statement.commitment.subject_epoch,
+              share.transcript.statement.commitment.seal_height,
+              roster.descriptor.epoch)};
+    const std::size_t member_index{share.transcript.member_index};
+    if (roster.descriptor.valid_count < QUORUM_MIN_VALID ||
+        !IsBitSet(roster.descriptor.valid_members, member_index) ||
+        !leaf_index) {
+        SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
+        return std::nullopt;
+    }
+    return PrepareSignatureCheck(
+        genesis_hash, *leaf_index, share.transcript,
+        share.authenticated_signature,
+        roster.members[member_index], roster.descriptor.epoch, error);
+}
+
+} // namespace
+
 std::optional<ScheduledWOTSCheck> PreparePaymentAuditShareVerification(
     const uint256& genesis_hash,
     const PaymentAuditScheduleConfig& schedule,
@@ -204,37 +329,33 @@ std::optional<ScheduledWOTSCheck> PreparePaymentAuditShareVerification(
         SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
         return std::nullopt;
     }
-    const auto slot{FindQuorumSlot(share.transcript, rosters)};
-    if (!slot ||
-        (authorization_mask & (uint8_t{1} << *slot)) == 0) {
+    return PreparePaymentAuditShareVerificationInternal(
+        genesis_hash, schedule, share, rosters, authorization_mask,
+        /*prepared_quorum_slot=*/std::nullopt,
+        /*prepared_leaf_index=*/std::nullopt,
+        /*context_prepared=*/false, error);
+}
+
+std::optional<ScheduledWOTSCheck> PreparePaymentAuditShareVerification(
+    const PaymentAuditShare& share,
+    const PreparedPaymentAuditContext& context,
+    PaymentAuditVerificationError* error)
+{
+    SetError(error, PaymentAuditVerificationError::NONE);
+    if (!share.IsStructurallyValid()) {
+        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
+        return std::nullopt;
+    }
+    if (share.transcript.statement != context.Statement()) {
         SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
         return std::nullopt;
     }
-    if (share.transcript.member_index >= QUORUM_SIZE) {
-        SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
-        return std::nullopt;
-    }
-    if (!ValidatePaymentAuditContext(genesis_hash, schedule,
-                                     share.transcript.statement, rosters,
-                                     authorization_mask, error)) {
-        return std::nullopt;
-    }
-    const auto& roster{rosters[*slot]};
-    const auto leaf_index{PaymentAuditLeafIndex(
-        schedule, share.transcript.statement.commitment.subject_epoch,
-        share.transcript.statement.commitment.seal_height,
-        roster.descriptor.epoch)};
-    const std::size_t member_index{share.transcript.member_index};
-    if (roster.descriptor.valid_count < QUORUM_MIN_VALID ||
-        !IsBitSet(roster.descriptor.valid_members, member_index) ||
-        !leaf_index) {
-        SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
-        return std::nullopt;
-    }
-    return PrepareSignatureCheck(
-        genesis_hash, *leaf_index, share.transcript,
-        share.authenticated_signature,
-        roster.members[member_index], roster.descriptor.epoch, error);
+    const auto quorum_slot{context.FindQuorumSlot(share.transcript)};
+    return PreparePaymentAuditShareVerificationInternal(
+        context.GenesisHash(), context.Schedule(), share, context.Rosters(),
+        context.AuthorizationMask(), quorum_slot,
+        quorum_slot ? context.LeafIndex(*quorum_slot) : std::nullopt,
+        /*context_prepared=*/true, error);
 }
 
 std::optional<PreparedPaymentAuditVerification>
