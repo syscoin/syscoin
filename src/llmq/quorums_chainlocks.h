@@ -262,6 +262,25 @@ SelectFinalChainLockVerificationPath(
     bool admission_generation_current,
     bool collector_generation_current) noexcept;
 
+enum class FinalPaymentAuditVerificationPath : uint8_t {
+    FULL = 0,
+    COLLECTED,
+};
+
+/** Only an exact live collector proof may bypass final audit WOTS checks. */
+[[nodiscard]] FinalPaymentAuditVerificationPath
+SelectFinalPaymentAuditVerificationPath(
+    const pq::CollectedPaymentAuditFinalization* collected,
+    const pq::FinalPaymentAudit* certificate,
+    const uint256& genesis_hash,
+    const pq::PaymentAuditScheduleConfig& schedule,
+    const pq::VerifiedRosterSetPtr& roster_set,
+    uint8_t authorization_mask,
+    bool local_live_admission,
+    bool admission_generation_current,
+    bool runtime_generation_current,
+    bool roster_source_generation_current) noexcept;
+
 /** Retry one immutable local aggregate without repeating scheduled-WOTS work. */
 [[nodiscard]] bool IsPaymentAuditFinalizationRetryDue(
     std::chrono::microseconds now,
@@ -942,14 +961,50 @@ private:
                                  !m_signer_reconcile_mutex);
     void ProcessPaymentAuditCertificate(CNode* from, CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_payment_audit_mutex,
+                                 !m_lookup_mutex,
+                                 !m_verification_mutex,
+                                 !m_pending_payment_audit_receipt_mutex);
+    struct LocalPaymentAuditFinalization {
+        pq::CollectedPaymentAuditFinalizationPtr proof;
+        uint64_t admission_generation{0};
+        uint64_t runtime_generation{0};
+        uint64_t roster_source_generation{0};
+    };
+    struct PaymentAuditRemoteRequestContext {
+        std::optional<uint256> requested;
+        bool may_be_cancelled_response{false};
+        bool required_response{false};
+    };
+    void ProcessCollectedPaymentAudit(
+        const LocalPaymentAuditFinalization& finalized)
+        EXCLUSIVE_LOCKS_REQUIRED(m_share_lifecycle_mutex,
+                                 !cs_main,
+                                 !m_payment_audit_mutex,
+                                 !m_lookup_mutex,
+                                 !m_verification_mutex,
+                                 !m_pending_payment_audit_receipt_mutex);
+    void ProcessPaymentAuditCertificateInternal(
+        CNode* from,
+        const pq::FinalPaymentAudit& audit,
+        const PaymentAuditRemoteRequestContext& remote,
+        const LocalPaymentAuditFinalization* local_finalization)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
                                  !m_pending_payment_audit_receipt_mutex);
     void FinishPaymentAuditFinalizationAttempt(
-        const std::shared_ptr<const pq::FinalPaymentAudit>& certificate,
-        uint64_t runtime_generation,
-        bool submit)
+        const LocalPaymentAuditFinalization& finalized)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_payment_audit_mutex,
+                                 !m_lookup_mutex,
+                                 !m_verification_mutex,
+                                 !m_pending_payment_audit_receipt_mutex);
+    void SubmitPaymentAuditFinalizationAttempt(
+        const LocalPaymentAuditFinalization& finalized)
+        EXCLUSIVE_LOCKS_REQUIRED(m_share_lifecycle_mutex,
+                                 !cs_main,
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
@@ -1004,8 +1059,7 @@ private:
         pq::ShareCollectionResult result{
             pq::ShareCollectionResult::REJECTED};
         pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
-        std::shared_ptr<const pq::FinalPaymentAudit> finalized;
-        uint64_t runtime_generation{0};
+        std::optional<LocalPaymentAuditFinalization> finalized;
         bool stale{false};
         bool closed{false};
         bool accepted_duplicate{false};
@@ -1089,8 +1143,9 @@ private:
         pq::FrozenQuorumRostersPtr signing_rosters;
         std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
         uint8_t authorization_mask{0};
+        uint64_t roster_source_generation{0};
         std::unique_ptr<pq::PaymentAuditCollector> collector;
-        std::shared_ptr<const pq::FinalPaymentAudit> finalized_certificate;
+        std::optional<LocalPaymentAuditFinalization> finalized;
         std::optional<std::chrono::microseconds> finalization_last_attempt;
         bool finalization_attempt_in_flight{false};
         bool local_signing_complete{false};

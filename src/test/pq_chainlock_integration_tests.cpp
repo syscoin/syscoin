@@ -805,6 +805,19 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_REQUIRE(collected_audit);
     BOOST_CHECK(collected_audit->ContextPtr() == audit_collector_context);
     BOOST_CHECK(collected_audit->Certificate() == *final_audit);
+    const PaymentAuditScheduleConfig audit_schedule{
+        fixture->config.schedule,
+        BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}};
+    BOOST_CHECK(
+        llmq::SelectFinalPaymentAuditVerificationPath(
+            collected_audit.get(), &collected_audit->Certificate(),
+            fixture->genesis_hash, audit_schedule,
+            audit_collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+            /*local_live_admission=*/true,
+            /*admission_generation_current=*/true,
+            /*runtime_generation_current=*/true,
+            /*roster_source_generation_current=*/true) ==
+        llmq::FinalPaymentAuditVerificationPath::COLLECTED);
     BOOST_REQUIRE(final_audit->IsStructurallyValid());
     BOOST_CHECK_EQUAL(final_audit->selected_quorum_mask, 0b0111);
     BOOST_CHECK_EQUAL(final_audit->report_witnesses.size(),
@@ -819,16 +832,94 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_CHECK(encoded_audit.empty());
     BOOST_CHECK(decoded_audit == *final_audit);
 
+    const auto full_audit_path = [&](
+                                     const FinalPaymentAudit* certificate,
+                                     const uint256& genesis_hash,
+                                     const PaymentAuditScheduleConfig& schedule,
+                                     const VerifiedRosterSetPtr& roster_set,
+                                     uint8_t authorization_mask,
+                                     bool local_live_admission,
+                                     bool admission_generation_current,
+                                     bool runtime_generation_current,
+                                     bool roster_source_generation_current) {
+        return llmq::SelectFinalPaymentAuditVerificationPath(
+                   collected_audit.get(), certificate, genesis_hash,
+                   schedule, roster_set, authorization_mask,
+                   local_live_admission, admission_generation_current,
+                   runtime_generation_current,
+                   roster_source_generation_current) ==
+               llmq::FinalPaymentAuditVerificationPath::FULL;
+    };
+    BOOST_CHECK(full_audit_path(
+        &decoded_audit, fixture->genesis_hash, audit_schedule,
+        audit_collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+        true, true, true, true));
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), NonNullHash(900'002),
+        audit_schedule, audit_collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, true, true, true));
+    auto different_audit_schedule{audit_schedule};
+    ++different_audit_schedule.btcc.candidate_origin;
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), fixture->genesis_hash,
+        different_audit_schedule,
+        audit_collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+        true, true, true, true));
+    ChainLockVerificationError detached_audit_error{
+        ChainLockVerificationError::NONE};
+    const auto detached_audit_roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, audit_collector_context->RostersPtr(),
+        &detached_audit_error)};
+    BOOST_REQUIRE(detached_audit_roster_set);
+    BOOST_CHECK(detached_audit_error ==
+                ChainLockVerificationError::NONE);
+    BOOST_CHECK(detached_audit_roster_set !=
+                audit_collector_context->RosterSetPtr());
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), fixture->genesis_hash,
+        audit_schedule, detached_audit_roster_set, AUTHORIZATION_MASK,
+        true, true, true, true));
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), fixture->genesis_hash,
+        audit_schedule, audit_collector_context->RosterSetPtr(), 0b1111,
+        true, true, true, true));
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), fixture->genesis_hash,
+        audit_schedule, audit_collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, false, true, true, true));
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), fixture->genesis_hash,
+        audit_schedule, audit_collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, false, true, true));
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), fixture->genesis_hash,
+        audit_schedule, audit_collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, true, false, true));
+    BOOST_CHECK(full_audit_path(
+        &collected_audit->Certificate(), fixture->genesis_hash,
+        audit_schedule, audit_collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, true, true, false));
+
     PaymentAuditVerificationError audit_error{
         PaymentAuditVerificationError::INVALID_ARGUMENT};
     BOOST_CHECK(VerifyFinalPaymentAudit(
-        fixture->genesis_hash,
-        PaymentAuditScheduleConfig{
-            fixture->config.schedule,
-            BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}},
+        fixture->genesis_hash, audit_schedule,
         decoded_audit, *fixture->rosters,
         AUTHORIZATION_MASK, nullptr, &audit_error));
     BOOST_CHECK(audit_error == PaymentAuditVerificationError::NONE);
+    auto corrupted_audit{decoded_audit};
+    corrupted_audit.report_witnesses.front()
+        .authenticated_signature.signature.front() ^= uint8_t{1};
+    BOOST_CHECK(full_audit_path(
+        &corrupted_audit, fixture->genesis_hash, audit_schedule,
+        audit_collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+        true, true, true, true));
+    audit_error = PaymentAuditVerificationError::NONE;
+    BOOST_CHECK(!VerifyFinalPaymentAudit(
+        fixture->genesis_hash, audit_schedule, corrupted_audit,
+        *fixture->rosters, AUTHORIZATION_MASK, nullptr, &audit_error));
+    BOOST_CHECK(audit_error ==
+                PaymentAuditVerificationError::INVALID_SIGNATURE);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
