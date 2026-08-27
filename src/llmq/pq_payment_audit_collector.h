@@ -13,7 +13,48 @@
 #include <memory>
 #include <optional>
 
+namespace llmq_tests {
+class PaymentAuditCollectorTestAccess;
+}
+
 namespace llmq::pq {
+
+class PaymentAuditCollector;
+
+/**
+ * Process-local proof that one exact audit was assembled exclusively from
+ * shares verified against one exact prepared context. This does not prove that
+ * the context is still live or authorize durable archive publication.
+ */
+class CollectedPaymentAuditFinalization final {
+public:
+    CollectedPaymentAuditFinalization(
+        const CollectedPaymentAuditFinalization&) = delete;
+    CollectedPaymentAuditFinalization& operator=(
+        const CollectedPaymentAuditFinalization&) = delete;
+
+    [[nodiscard]] const FinalPaymentAudit& Certificate() const noexcept
+    {
+        return m_certificate;
+    }
+    [[nodiscard]] const PreparedPaymentAuditContextPtr& ContextPtr() const noexcept
+    {
+        return m_context;
+    }
+
+private:
+    CollectedPaymentAuditFinalization(
+        FinalPaymentAudit certificate,
+        PreparedPaymentAuditContextPtr context);
+
+    const FinalPaymentAudit m_certificate;
+    const PreparedPaymentAuditContextPtr m_context;
+
+    friend class PaymentAuditCollector;
+};
+
+using CollectedPaymentAuditFinalizationPtr =
+    std::shared_ptr<const CollectedPaymentAuditFinalization>;
 
 /** Bounded collector for one common audit statement with signer-specific reports. */
 class PaymentAuditCollector final {
@@ -97,6 +138,8 @@ public:
         const PaymentAuditShareTranscript& transcript) const noexcept;
     [[nodiscard]] bool IsComplete() const;
     [[nodiscard]] std::optional<FinalPaymentAudit> Finalize() const;
+    [[nodiscard]] CollectedPaymentAuditFinalizationPtr
+    FinalizeCollection() const;
     [[nodiscard]] PreparedPaymentAuditContextPtr
     GetPreparedContext() const noexcept
     {
@@ -106,11 +149,16 @@ public:
 private:
     explicit PaymentAuditCollector(PreparedPaymentAuditContextPtr context);
 
+    [[nodiscard]] std::optional<FinalPaymentAudit>
+    BuildFinalCertificate() const;
+
     PreparedPaymentAuditContextPtr m_context;
     std::shared_ptr<const uint8_t> m_instance_token;
     std::array<QuorumBitmap, ACTIVE_QUORUMS> m_pending_shares{};
     std::array<std::map<uint16_t, PaymentAuditReportWitness>,
                ACTIVE_QUORUMS> m_shares;
+
+    friend class ::llmq_tests::PaymentAuditCollectorTestAccess;
 };
 
 } // namespace llmq::pq

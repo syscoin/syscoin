@@ -69,6 +69,14 @@ void ClearBit(QuorumBitmap& bitmap, std::size_t member)
 
 } // namespace
 
+CollectedPaymentAuditFinalization::CollectedPaymentAuditFinalization(
+    FinalPaymentAudit certificate,
+    PreparedPaymentAuditContextPtr context)
+    : m_certificate{std::move(certificate)},
+      m_context{std::move(context)}
+{
+}
+
 PaymentAuditCollector::ShareVerificationReservation::
     ShareVerificationReservation(
         PreparedPaymentAuditContextPtr context,
@@ -309,6 +317,25 @@ bool PaymentAuditCollector::IsComplete() const
 }
 
 std::optional<FinalPaymentAudit> PaymentAuditCollector::Finalize() const
+{
+    return BuildFinalCertificate();
+}
+
+CollectedPaymentAuditFinalizationPtr
+PaymentAuditCollector::FinalizeCollection() const
+{
+    auto certificate{BuildFinalCertificate()};
+    if (!certificate || !m_context ||
+        certificate->statement != m_context->Statement()) {
+        return nullptr;
+    }
+    return CollectedPaymentAuditFinalizationPtr{
+        new CollectedPaymentAuditFinalization{
+            std::move(*certificate), m_context}};
+}
+
+std::optional<FinalPaymentAudit>
+PaymentAuditCollector::BuildFinalCertificate() const
 {
     if (!IsComplete()) return std::nullopt;
     FinalPaymentAudit result;

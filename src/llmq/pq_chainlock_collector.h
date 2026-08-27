@@ -20,6 +20,43 @@ class ChainLockCollectorTestAccess;
 
 namespace llmq::pq {
 
+class ChainLockCollector;
+
+/**
+ * Process-local proof that one exact certificate was assembled exclusively
+ * from shares verified against one exact prepared context. This does not prove
+ * that the context is still live or authorize durable finality publication.
+ */
+class CollectedChainLockFinalization final {
+public:
+    CollectedChainLockFinalization(
+        const CollectedChainLockFinalization&) = delete;
+    CollectedChainLockFinalization& operator=(
+        const CollectedChainLockFinalization&) = delete;
+
+    [[nodiscard]] const FinalChainLock& Certificate() const noexcept
+    {
+        return m_certificate;
+    }
+    [[nodiscard]] const PreparedChainLockContextPtr& ContextPtr() const noexcept
+    {
+        return m_context;
+    }
+
+private:
+    CollectedChainLockFinalization(
+        FinalChainLock certificate,
+        PreparedChainLockContextPtr context);
+
+    const FinalChainLock m_certificate;
+    const PreparedChainLockContextPtr m_context;
+
+    friend class ChainLockCollector;
+};
+
+using CollectedChainLockFinalizationPtr =
+    std::shared_ptr<const CollectedChainLockFinalization>;
+
 enum class ShareCollectionError : uint8_t {
     NONE = 0,
     INVALID_ARGUMENT,
@@ -130,6 +167,13 @@ public:
     /** Select the lowest three ready quorum slots and first 267 member indices. */
     [[nodiscard]] std::optional<FinalChainLock> Finalize() const;
 
+    /**
+     * Mint an opaque process-local proof for the exact finalized bytes and the
+     * exact immutable context used by every accepted share.
+     */
+    [[nodiscard]] CollectedChainLockFinalizationPtr
+    FinalizeCollection() const;
+
     [[nodiscard]] const ChainLockStatement& GetStatement() const noexcept
     {
         return m_context->Statement();
@@ -142,6 +186,9 @@ public:
 
 private:
     explicit ChainLockCollector(PreparedChainLockContextPtr context);
+
+    [[nodiscard]] std::optional<FinalChainLock>
+    BuildFinalCertificate() const;
 
     PreparedChainLockContextPtr m_context;
     std::shared_ptr<const uint8_t> m_instance_token;

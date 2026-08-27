@@ -68,6 +68,14 @@ void ClearBit(QuorumBitmap& bitmap, uint16_t member_index)
 
 } // namespace
 
+CollectedChainLockFinalization::CollectedChainLockFinalization(
+    FinalChainLock certificate,
+    PreparedChainLockContextPtr context)
+    : m_certificate{std::move(certificate)},
+      m_context{std::move(context)}
+{
+}
+
 ChainLockCollector::ShareVerificationReservation::
     ShareVerificationReservation(
         PreparedChainLockContextPtr context,
@@ -303,6 +311,25 @@ bool ChainLockCollector::IsComplete() const
 }
 
 std::optional<FinalChainLock> ChainLockCollector::Finalize() const
+{
+    return BuildFinalCertificate();
+}
+
+CollectedChainLockFinalizationPtr
+ChainLockCollector::FinalizeCollection() const
+{
+    auto certificate{BuildFinalCertificate()};
+    if (!certificate || !m_context ||
+        certificate->statement != m_context->Statement()) {
+        return nullptr;
+    }
+    return CollectedChainLockFinalizationPtr{
+        new CollectedChainLockFinalization{
+            std::move(*certificate), m_context}};
+}
+
+std::optional<FinalChainLock>
+ChainLockCollector::BuildFinalCertificate() const
 {
     if (!IsComplete()) return std::nullopt;
 

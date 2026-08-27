@@ -15,10 +15,56 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
+#include <utility>
 
 #include <boost/test/unit_test.hpp>
 
 using namespace llmq::pq;
+
+static_assert(!std::is_default_constructible_v<
+              CollectedPaymentAuditFinalization>);
+static_assert(!std::is_copy_constructible_v<
+              CollectedPaymentAuditFinalization>);
+static_assert(!std::is_constructible_v<
+              CollectedPaymentAuditFinalization,
+              FinalPaymentAudit,
+              PreparedPaymentAuditContextPtr>);
+static_assert(std::is_same_v<
+              decltype(std::declval<const CollectedPaymentAuditFinalization&>()
+                           .Certificate()),
+              const FinalPaymentAudit&>);
+
+namespace llmq_tests {
+
+class PaymentAuditCollectorTestAccess {
+public:
+    static bool InsertFinalizedWitnesses(
+        PaymentAuditCollector& collector,
+        const FinalPaymentAudit& audit)
+    {
+        if (!audit.IsStructurallyValid() ||
+            audit.statement != collector.m_context->Statement()) {
+            return false;
+        }
+        std::size_t offset{0};
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+                const bool selected{
+                    (audit.signer_bitmaps[slot][member / 8] &
+                     static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0};
+                if (!selected) continue;
+                if (offset >= audit.report_witnesses.size()) return false;
+                collector.m_shares[slot].emplace(
+                    static_cast<uint16_t>(member),
+                    audit.report_witnesses[offset++]);
+            }
+        }
+        return offset == audit.report_witnesses.size();
+    }
+};
+
+} // namespace llmq_tests
 
 namespace {
 
@@ -471,6 +517,52 @@ BOOST_AUTO_TEST_CASE(final_preparation_reuses_verified_seal_rosters)
     BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
                       underfilled_hashes_before);
+}
+
+BOOST_AUTO_TEST_CASE(collected_finalization_binds_exact_bytes_and_context)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    const auto rosters{
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters)};
+    ChainLockVerificationError roster_error{
+        ChainLockVerificationError::INVALID_ARGUMENT};
+    auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, rosters, &roster_error)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
+    PaymentAuditVerificationError audit_error{
+        PaymentAuditVerificationError::INVALID_ARGUMENT};
+    auto prepared_context{PreparedPaymentAuditContext::Create(
+        fixture->schedule, fixture->audit.statement, fixture->seal,
+        roster_set, AUTHORIZATION_MASK, &audit_error)};
+    BOOST_REQUIRE(prepared_context);
+    BOOST_CHECK(audit_error == PaymentAuditVerificationError::NONE);
+    std::weak_ptr<const PreparedPaymentAuditContext> retained_context{
+        prepared_context};
+    auto collector{PaymentAuditCollector::Create(prepared_context)};
+    BOOST_REQUIRE(collector);
+    prepared_context.reset();
+
+    BOOST_CHECK(!collector->FinalizeCollection());
+    BOOST_REQUIRE(
+        llmq_tests::PaymentAuditCollectorTestAccess::
+            InsertFinalizedWitnesses(*collector, fixture->audit));
+    BOOST_REQUIRE(collector->IsComplete());
+    const auto legacy{collector->Finalize()};
+    const auto collected{collector->FinalizeCollection()};
+    BOOST_REQUIRE(legacy);
+    BOOST_REQUIRE(collected);
+    BOOST_CHECK(collected->ContextPtr() == retained_context.lock());
+    BOOST_CHECK(collected->Certificate() == *legacy);
+    BOOST_CHECK(collected->Certificate() == fixture->audit);
+
+    auto detached_copy{*legacy};
+    detached_copy.report_witnesses[0].observed_members[0] ^= 1;
+    BOOST_CHECK(collected->Certificate() != detached_copy);
+    collector.reset();
+    BOOST_CHECK(!retained_context.expired());
+    BOOST_CHECK(collected->ContextPtr() == retained_context.lock());
 }
 
 BOOST_AUTO_TEST_CASE(verified_response_rosters_bind_subject_without_rebuild)

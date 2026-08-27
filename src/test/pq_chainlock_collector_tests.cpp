@@ -13,10 +13,25 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <type_traits>
+#include <utility>
 
 #include <boost/test/unit_test.hpp>
 
 using namespace llmq::pq;
+
+static_assert(!std::is_default_constructible_v<
+              CollectedChainLockFinalization>);
+static_assert(!std::is_copy_constructible_v<
+              CollectedChainLockFinalization>);
+static_assert(!std::is_constructible_v<
+              CollectedChainLockFinalization,
+              FinalChainLock,
+              PreparedChainLockContextPtr>);
+static_assert(std::is_same_v<
+              decltype(std::declval<const CollectedChainLockFinalization&>()
+                           .Certificate()),
+              const FinalChainLock&>);
 
 namespace llmq_tests {
 
@@ -651,11 +666,13 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
 {
     auto fixture{MakeFixture()};
     BOOST_REQUIRE(fixture);
-    auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->schedule, fixture->statement,
-        ShareRosters(*fixture),
-        FULL_AUTHORIZATION_MASK)};
+    auto prepared_context{PrepareContext(*fixture)};
+    BOOST_REQUIRE(prepared_context);
+    std::weak_ptr<const PreparedChainLockContext> retained_context{
+        prepared_context};
+    auto collector{ChainLockCollector::Create(prepared_context)};
     BOOST_REQUIRE(collector);
+    prepared_context.reset();
 
     llmq_tests::ChainLockCollectorTestAccess::Insert(
         *collector, 0, QUORUM_THRESHOLD - 1, 0xa0);
@@ -663,12 +680,18 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
         *collector, 1, QUORUM_THRESHOLD, 0xb1);
     llmq_tests::ChainLockCollectorTestAccess::Insert(
         *collector, 2, QUORUM_THRESHOLD, 0xc2);
+    BOOST_CHECK(!collector->IsComplete());
+    BOOST_CHECK(!collector->FinalizeCollection());
     llmq_tests::ChainLockCollectorTestAccess::Insert(
         *collector, 3, QUORUM_THRESHOLD, 0xd3);
     BOOST_CHECK(collector->IsComplete());
 
     const auto final{collector->Finalize()};
+    const auto collected{collector->FinalizeCollection()};
     BOOST_REQUIRE(final);
+    BOOST_REQUIRE(collected);
+    BOOST_CHECK(collected->ContextPtr() == retained_context.lock());
+    BOOST_CHECK(collected->Certificate() == *final);
     BOOST_CHECK(final->IsStructurallyValid());
     BOOST_CHECK_EQUAL(final->selected_quorum_mask, 0b1110);
     BOOST_CHECK_EQUAL(final->signatures.size(), FINAL_SIGNATURE_COUNT);
@@ -680,6 +703,14 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
     BOOST_CHECK(!final->SignatureOffset(0, 0));
     BOOST_CHECK_EQUAL(*final->SignatureOffset(3, QUORUM_THRESHOLD - 1),
                       FINAL_SIGNATURE_COUNT - 1);
+
+    auto detached_copy{*final};
+    detached_copy.statement.block_hash = NonNullHash(7994);
+    BOOST_CHECK(collected->Certificate().statement.block_hash !=
+                detached_copy.statement.block_hash);
+    collector.reset();
+    BOOST_CHECK(!retained_context.expired());
+    BOOST_CHECK(collected->ContextPtr() == retained_context.lock());
 }
 
 BOOST_AUTO_TEST_CASE(one_transition_ignores_and_rejects_newest_roster)
