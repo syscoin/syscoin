@@ -292,6 +292,8 @@ public:
     [[nodiscard]] bool HasUsedTreeId(const uint256& tree_id) const noexcept;
     [[nodiscard]] const OperatorKeyState* FindOperator(
         const uint256& pro_tx_hash) const noexcept;
+    [[nodiscard]] std::optional<uint256> FindRetainedGlobalKeyOwner(
+        const GlobalPublicKey& public_key) const noexcept;
     [[nodiscard]] std::optional<uint256> FindActiveOperatorByGlobalKey(
         const GlobalPublicKey& public_key) const noexcept;
     [[nodiscard]] std::span<const OperatorKeyState> Operators() const noexcept;

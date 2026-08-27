@@ -353,6 +353,72 @@ bool IsPQProviderRevocation(const CTransaction& transaction)
            payload.nVersion == CProUpRevTx::PQ_VERSION;
 }
 
+bool DecodeRegistryUpdate(const CTransaction& transaction,
+                          std::size_t transaction_index,
+                          std::optional<DecodedUpdate>& decoded,
+                          PQRegistryError& error)
+{
+    decoded.reset();
+    const bool global{transaction.nVersion == PQ_GLOBAL_KEY_TX_VERSION};
+    const bool provider_revoke{
+        transaction.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE};
+    if (!global && !provider_revoke) return true;
+
+    if (provider_revoke) {
+        CProUpRevTx provider_payload;
+        if (!GetTxPayload(transaction, provider_payload)) {
+            return SetError(
+                error,
+                PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
+                transaction_index);
+        }
+        if (provider_payload.nVersion <= CProUpRevTx::BASIC_BLS_VERSION) {
+            return true;
+        }
+        if (provider_payload.nVersion != CProUpRevTx::PQ_VERSION) {
+            return SetError(
+                error,
+                PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
+                transaction_index);
+        }
+    }
+
+    std::vector<unsigned char> encoded;
+    if (!ExtractCanonicalPQPayload(transaction, encoded)) {
+        return SetError(
+            error,
+            global ? PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD
+                   : PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
+            transaction_index);
+    }
+
+    DecodedUpdate update;
+    update.transaction_index = transaction_index;
+    update.transaction = &transaction;
+    if (global) {
+        GlobalKeyTxPayload payload;
+        if (!DecodeGlobalKeyTxPayload(encoded, payload)) {
+            return SetError(error,
+                            PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD,
+                            transaction_index);
+        }
+        update.pro_tx_hash = payload.pro_tx_hash;
+        update.payload = std::move(payload);
+    } else {
+        DecodedProviderRevocation revocation;
+        if (!DecodeProviderRevocation(transaction, encoded, revocation)) {
+            return SetError(
+                error,
+                PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
+                transaction_index);
+        }
+        update.pro_tx_hash = revocation.authorization.pro_tx_hash;
+        update.payload = std::move(revocation);
+    }
+    decoded = std::move(update);
+    return true;
+}
+
 bool CallMembership(const std::function<bool(const uint256&)>& callback,
                     const uint256& pro_tx_hash,
                     bool& exists,
@@ -367,6 +433,114 @@ bool CallMembership(const std::function<bool(const uint256&)>& callback,
         return SetError(error, PQRegistryResult::CALLBACK_FAILED,
                         transaction_index, pro_tx_hash);
     }
+}
+
+template <typename FindGlobalKeyOwner, typename HasUsedTreeId>
+bool ApplyDecodedUpdate(
+    OperatorKeyState& state,
+    const DecodedUpdate& update,
+    const OperatorKeyScheduleView& schedule_view,
+    const uint256& genesis_hash,
+    const PQRegistryCallbacks& callbacks,
+    bool check_sigs,
+    FindGlobalKeyOwner&& find_global_key_owner,
+    HasUsedTreeId&& has_used_tree_id,
+    std::optional<uint256>& introduced_tree_id,
+    PQRegistryError& error)
+{
+    introduced_tree_id.reset();
+    OperatorKeyStateResult transition{OperatorKeyStateResult::INVALID_STATE};
+    if (const auto* global{
+            std::get_if<GlobalKeyTxPayload>(&update.payload)}) {
+        if (global->transaction_inputs_hash !=
+            CalcTxInputsHash(*update.transaction)) {
+            return SetError(
+                error, PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH,
+                update.transaction_index, update.pro_tx_hash);
+        }
+        const auto key_owner{find_global_key_owner(
+            global->candidate.public_key)};
+        if (key_owner && *key_owner != update.pro_tx_hash) {
+            return SetError(error, PQRegistryResult::DUPLICATE_GLOBAL_KEY,
+                            update.transaction_index, update.pro_tx_hash);
+        }
+        const bool introduces_tree{
+            state.has_global_key == 0 ||
+            state.global_key.child_key_commitment !=
+                global->candidate.child_key_commitment};
+        if (introduces_tree) {
+            const uint256& tree_id{
+                global->candidate.child_key_commitment.tree_id};
+            if (has_used_tree_id(tree_id)) {
+                return SetError(
+                    error, PQRegistryResult::DUPLICATE_CHILD_TREE_ID,
+                    update.transaction_index, update.pro_tx_hash);
+            }
+            introduced_tree_id = tree_id;
+        }
+
+        if (global->operation == GlobalKeyOperation::INITIAL) {
+            if (check_sigs &&
+                !callbacks.verify_initial_owner_authorization) {
+                return SetError(error, PQRegistryResult::CALLBACK_MISSING,
+                                update.transaction_index,
+                                update.pro_tx_hash);
+            }
+            const auto owner_hash{
+                GetGlobalOwnerRegistrationAuthorizationHash(
+                    genesis_hash, *global)};
+            if (!owner_hash) {
+                return SetError(
+                    error, PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD,
+                    update.transaction_index, update.pro_tx_hash);
+            }
+            if (check_sigs) {
+                bool authorized{false};
+                try {
+                    authorized =
+                        callbacks.verify_initial_owner_authorization(
+                            *global, *owner_hash);
+                } catch (...) {
+                    return SetError(error, PQRegistryResult::CALLBACK_FAILED,
+                                    update.transaction_index,
+                                    update.pro_tx_hash);
+                }
+                if (!authorized) {
+                    return SetError(
+                        error,
+                        PQRegistryResult::OWNER_AUTHORIZATION_FAILED,
+                        update.transaction_index, update.pro_tx_hash);
+                }
+            }
+            transition = state.ApplyInitialGlobalKey(
+                schedule_view, genesis_hash, global->candidate,
+                global->transaction_inputs_hash, global->authorization,
+                /*owner_authorization_verified=*/true, check_sigs);
+        } else {
+            transition = state.ApplyGlobalKeyRotation(
+                schedule_view, genesis_hash, global->candidate,
+                global->transaction_inputs_hash, global->authorization,
+                check_sigs);
+        }
+    } else {
+        const auto& revocation{
+            std::get<DecodedProviderRevocation>(update.payload)};
+        if (revocation.authorization.transaction_inputs_hash !=
+            CalcTxInputsHash(*update.transaction)) {
+            return SetError(
+                error, PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH,
+                update.transaction_index, update.pro_tx_hash);
+        }
+        transition = state.ApplyProviderRevocation(
+            schedule_view, genesis_hash, revocation.authorization,
+            revocation.signature, check_sigs);
+    }
+    if (transition != OperatorKeyStateResult::OK) {
+        return SetError(
+            error, PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
+            update.transaction_index, update.pro_tx_hash, transition);
+    }
+    return true;
 }
 
 bool MakePrePreparationSnapshot(const uint256& genesis_hash,
@@ -454,7 +628,7 @@ const OperatorKeyState* PQRegistryReadView::FindOperator(
         : nullptr;
 }
 
-std::optional<uint256> PQRegistryReadView::FindActiveOperatorByGlobalKey(
+std::optional<uint256> PQRegistryReadView::FindRetainedGlobalKeyOwner(
     const GlobalPublicKey& public_key) const noexcept
 {
     if (!IsValid()) return std::nullopt;
@@ -463,9 +637,17 @@ std::optional<uint256> PQRegistryReadView::FindActiveOperatorByGlobalKey(
     if (owner == m_snapshot->state->indexes->global_key_owner.end()) {
         return std::nullopt;
     }
-    const auto* state{FindOperator(owner->second)};
+    return owner->second;
+}
+
+std::optional<uint256> PQRegistryReadView::FindActiveOperatorByGlobalKey(
+    const GlobalPublicKey& public_key) const noexcept
+{
+    const auto owner{FindRetainedGlobalKeyOwner(public_key)};
+    if (!owner) return std::nullopt;
+    const auto* state{FindOperator(*owner)};
     return state != nullptr && state->HasActiveGlobalKey()
-        ? std::optional<uint256>{owner->second}
+        ? owner
         : std::nullopt;
 }
 
@@ -1194,62 +1376,12 @@ bool PQRegistryManager::ProcessBlockInternal(
             return SetError(error, PQRegistryResult::INVALID_BLOCK, index);
         }
         const CTransaction& transaction{*block.vtx[index]};
-        const bool global{
-            transaction.nVersion == PQ_GLOBAL_KEY_TX_VERSION};
-        const bool provider_revoke{
-            transaction.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE};
-        if (!global && !provider_revoke) continue;
-        if (provider_revoke) {
-            CProUpRevTx provider_payload;
-            if (!GetTxPayload(transaction, provider_payload)) {
-                return SetError(
-                    error,
-                    PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
-                    index);
-            }
-            if (provider_payload.nVersion <=
-                CProUpRevTx::BASIC_BLS_VERSION) {
-                continue;
-            }
-            if (provider_payload.nVersion != CProUpRevTx::PQ_VERSION) {
-                return SetError(
-                    error,
-                    PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
-                    index);
-            }
+        std::optional<DecodedUpdate> decoded;
+        if (!DecodeRegistryUpdate(transaction, index, decoded, error)) {
+            return false;
         }
-
-        std::vector<unsigned char> encoded;
-        if (!ExtractCanonicalPQPayload(transaction, encoded)) {
-            return SetError(
-                error,
-                global ? PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD
-                       : PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
-                index);
-        }
-        DecodedUpdate update;
-        update.transaction_index = index;
-        update.transaction = &transaction;
-        if (global) {
-            GlobalKeyTxPayload payload;
-            if (!DecodeGlobalKeyTxPayload(encoded, payload)) {
-                return SetError(error,
-                                PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD,
-                                index);
-            }
-            update.pro_tx_hash = payload.pro_tx_hash;
-            update.payload = std::move(payload);
-        } else {
-            DecodedProviderRevocation revocation;
-            if (!DecodeProviderRevocation(transaction, encoded, revocation)) {
-                return SetError(
-                    error,
-                    PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
-                    index);
-            }
-            update.pro_tx_hash = revocation.authorization.pro_tx_hash;
-            update.payload = std::move(revocation);
-        }
+        if (!decoded) continue;
+        auto& update{*decoded};
         if (std::find(updated_operators.begin(), updated_operators.end(),
                       update.pro_tx_hash) != updated_operators.end()) {
             return SetError(error,
@@ -1344,109 +1476,30 @@ bool PQRegistryManager::ProcessBlockInternal(
             state = next.operator_states.insert(state, std::move(fresh));
         }
 
-        OperatorKeyStateResult transition{
-            OperatorKeyStateResult::INVALID_STATE};
         std::optional<uint256> introduced_tree_id;
-        if (const auto* global{
-                std::get_if<GlobalKeyTxPayload>(&update.payload)}) {
-            if (global->transaction_inputs_hash !=
-                CalcTxInputsHash(*update.transaction)) {
-                return SetError(
-                    error,
-                    PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH,
-                    update.transaction_index, update.pro_tx_hash);
-            }
-            const auto duplicate_key{std::find_if(
-                next.operator_states.begin(), next.operator_states.end(),
-                [&](const OperatorKeyState& existing) {
-                    return existing.pro_tx_hash != update.pro_tx_hash &&
-                           existing.has_global_key != 0 &&
-                           existing.global_key.public_key ==
-                               global->candidate.public_key;
-                })};
-            if (duplicate_key != next.operator_states.end()) {
-                return SetError(error,
-                                PQRegistryResult::DUPLICATE_GLOBAL_KEY,
-                                update.transaction_index,
-                                update.pro_tx_hash);
-            }
-            const bool introduces_tree{
-                state->has_global_key == 0 ||
-                state->global_key.child_key_commitment !=
-                    global->candidate.child_key_commitment};
-            if (introduces_tree) {
-                const uint256& tree_id{
-                    global->candidate.child_key_commitment.tree_id};
-                if (next.HasUsedTreeId(tree_id)) {
-                    return SetError(
-                        error, PQRegistryResult::DUPLICATE_CHILD_TREE_ID,
-                        update.transaction_index, update.pro_tx_hash);
-                }
-                introduced_tree_id = tree_id;
-            }
-
-            if (global->operation == GlobalKeyOperation::INITIAL) {
-                if (check_sigs &&
-                    !callbacks.verify_initial_owner_authorization) {
-                    return SetError(error, PQRegistryResult::CALLBACK_MISSING,
-                                    update.transaction_index,
-                                    update.pro_tx_hash);
-                }
-                const auto owner_hash{
-                    GetGlobalOwnerRegistrationAuthorizationHash(
-                        m_genesis_hash, *global)};
-                if (!owner_hash) {
-                    return SetError(
-                        error,
-                        PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD,
-                        update.transaction_index, update.pro_tx_hash);
-                }
-                if (check_sigs) {
-                    bool authorized{false};
-                    try {
-                        authorized =
-                            callbacks.verify_initial_owner_authorization(
-                                *global, *owner_hash);
-                    } catch (...) {
-                        return SetError(
-                            error, PQRegistryResult::CALLBACK_FAILED,
-                            update.transaction_index, update.pro_tx_hash);
-                    }
-                    if (!authorized) {
-                        return SetError(
-                            error,
-                            PQRegistryResult::OWNER_AUTHORIZATION_FAILED,
-                            update.transaction_index, update.pro_tx_hash);
-                    }
-                }
-                transition = state->ApplyInitialGlobalKey(
-                    *schedule_view, m_genesis_hash, global->candidate,
-                    global->transaction_inputs_hash, global->authorization,
-                    /*owner_authorization_verified=*/true, check_sigs);
-            } else {
-                transition = state->ApplyGlobalKeyRotation(
-                    *schedule_view, m_genesis_hash, global->candidate,
-                    global->transaction_inputs_hash, global->authorization,
-                    check_sigs);
-            }
-        } else {
-            const auto& revocation{
-                std::get<DecodedProviderRevocation>(update.payload)};
-            if (revocation.authorization.transaction_inputs_hash !=
-                CalcTxInputsHash(*update.transaction)) {
-                return SetError(
-                    error,
-                    PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH,
-                    update.transaction_index, update.pro_tx_hash);
-            }
-            transition = state->ApplyProviderRevocation(
-                *schedule_view, m_genesis_hash, revocation.authorization,
-                revocation.signature, check_sigs);
-        }
-        if (transition != OperatorKeyStateResult::OK) {
-            return SetError(
-                error, PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
-                update.transaction_index, update.pro_tx_hash, transition);
+        const auto find_global_key_owner{
+            [&](const GlobalPublicKey& public_key)
+                -> std::optional<uint256> {
+                const auto owner{std::find_if(
+                    next.operator_states.begin(),
+                    next.operator_states.end(),
+                    [&](const OperatorKeyState& existing) {
+                        return existing.pro_tx_hash != update.pro_tx_hash &&
+                               existing.has_global_key != 0 &&
+                               existing.global_key.public_key == public_key;
+                    })};
+                return owner == next.operator_states.end()
+                    ? std::nullopt
+                    : std::optional<uint256>{owner->pro_tx_hash};
+            }};
+        if (!ApplyDecodedUpdate(
+                *state, update, *schedule_view, m_genesis_hash, callbacks,
+                check_sigs, find_global_key_owner,
+                [&](const uint256& tree_id) {
+                    return next.HasUsedTreeId(tree_id);
+                },
+                introduced_tree_id, error)) {
+            return false;
         }
         if (introduced_tree_id) {
             next.block_tree_ids.push_back(*introduced_tree_id);
@@ -1501,21 +1554,155 @@ bool PQRegistryManager::ValidateTransaction(
     bool check_sigs,
     PQRegistryError& error)
 {
+    error.Clear();
     if (transaction.nVersion != PQ_GLOBAL_KEY_TX_VERSION ||
         parent_block_hash.IsNull() || height <= 0) {
-        error.Clear();
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
-    CBlock candidate;
-    candidate.nVersion = 1;
-    candidate.hashPrevBlock = parent_block_hash;
-    candidate.hashMerkleRoot = transaction.GetHash();
-    candidate.nTime = static_cast<uint32_t>(height);
-    candidate.nBits = 1;
-    candidate.vtx.emplace_back(MakeTransactionRef(transaction));
-    return ProcessBlockInternal(candidate, height, callbacks,
-                                /*fJustCheck=*/true, check_sigs, error,
-                                /*resulting_state_root=*/nullptr);
+    if (!IsEnabled()) {
+        return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
+    }
+    if (height < m_config.preparation_height) {
+        return SetError(error, PQRegistryResult::PQ_TX_BEFORE_PREPARATION,
+                        /*transaction_index=*/0);
+    }
+    if (!callbacks.HasMembershipCallbacks()) {
+        return SetError(error, PQRegistryResult::CALLBACK_MISSING);
+    }
+    const auto schedule_view{DeriveOperatorKeyScheduleView(
+        m_config.schedule, height, m_config.registration_cutoff_blocks,
+        m_config.future_horizon_epochs)};
+    if (!schedule_view) {
+        return SetError(error, PQRegistryResult::INVALID_SCHEDULE);
+    }
+
+    std::optional<DecodedUpdate> decoded;
+    if (!DecodeRegistryUpdate(transaction, /*transaction_index=*/0,
+                              decoded, error)) {
+        return false;
+    }
+    if (!decoded) {
+        return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+    }
+
+    const bool logical_empty_parent{
+        height == m_config.preparation_height};
+    PQRegistryReadView parent;
+    if (logical_empty_parent) {
+        PQRegistrySnapshot empty;
+        if (!MakePrePreparationSnapshot(
+                m_genesis_hash, parent_block_hash, uint256{}, height - 1,
+                empty, error)) {
+            return false;
+        }
+    } else {
+        std::shared_ptr<const PQRegistrySnapshotView> snapshot;
+        {
+            LOCK(m_mutex);
+            if (!ReconstructPersistentSnapshotView(
+                    parent_block_hash, height - 1, snapshot, error)) {
+                if (error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND) {
+                    error.result = PQRegistryResult::MISSING_PARENT_SNAPSHOT;
+                }
+                return false;
+            }
+        }
+        parent = PQRegistryReadView{std::move(snapshot)};
+        if (!parent.IsValid()) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+    }
+
+    const auto* inherited{logical_empty_parent
+        ? nullptr
+        : parent.FindOperator(decoded->pro_tx_hash)};
+    std::optional<OperatorKeyState> candidate_state;
+    if (inherited != nullptr) {
+        bool parent_contains_target{false};
+        if (!CallMembership(callbacks.dmn_exists_before,
+                            decoded->pro_tx_hash, parent_contains_target,
+                            error)) {
+            return false;
+        }
+        if (!parent_contains_target) {
+            return SetError(error, PQRegistryResult::PARENT_DMN_MISMATCH,
+                            std::numeric_limits<std::size_t>::max(),
+                            decoded->pro_tx_hash);
+        }
+        candidate_state = *inherited;
+        const auto advance{candidate_state->Advance(*schedule_view)};
+        if (advance != OperatorKeyStateResult::OK) {
+            return SetError(
+                error, PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
+                std::numeric_limits<std::size_t>::max(),
+                decoded->pro_tx_hash, advance);
+        }
+    }
+
+    bool exists_before{false};
+    if (!CallMembership(callbacks.dmn_exists_before,
+                        decoded->pro_tx_hash, exists_before, error,
+                        decoded->transaction_index)) {
+        return false;
+    }
+    if (!exists_before) {
+        return SetError(error, PQRegistryResult::DMN_MISSING_AT_PARENT,
+                        decoded->transaction_index, decoded->pro_tx_hash);
+    }
+    bool exists_after{false};
+    if (!CallMembership(callbacks.dmn_exists_after, decoded->pro_tx_hash,
+                        exists_after, error,
+                        decoded->transaction_index)) {
+        return false;
+    }
+    if (!exists_after) {
+        return SetError(error, PQRegistryResult::DMN_REMOVED_IN_BLOCK,
+                        decoded->transaction_index, decoded->pro_tx_hash);
+    }
+
+    // SYSCOIN: Accepted parents were reconciled against their complete DMN
+    // view during block validation, and policy passes that exact parent list
+    // as both membership views. Rechecking unrelated operators here would turn
+    // every mempool admission into an O(N) block replay.
+    if (!candidate_state) {
+        candidate_state =
+            OperatorKeyState::ForOperator(decoded->pro_tx_hash);
+        const auto advance{candidate_state->Advance(*schedule_view)};
+        if (advance != OperatorKeyStateResult::OK) {
+            return SetError(
+                error, PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
+                decoded->transaction_index, decoded->pro_tx_hash, advance);
+        }
+    }
+    auto& state{*candidate_state};
+
+    std::optional<uint256> introduced_tree_id;
+    if (!ApplyDecodedUpdate(
+            state, *decoded, *schedule_view, m_genesis_hash, callbacks,
+            check_sigs,
+            [&](const GlobalPublicKey& public_key) {
+                return logical_empty_parent
+                    ? std::nullopt
+                    : parent.FindRetainedGlobalKeyOwner(public_key);
+            },
+            [&](const uint256& tree_id) {
+                return !logical_empty_parent &&
+                       parent.HasUsedTreeId(tree_id);
+            },
+            introduced_tree_id, error)) {
+        return false;
+    }
+
+    if ((inherited == nullptr &&
+         !logical_empty_parent &&
+         parent.OperatorCount() >= MAX_PQ_OPERATOR_STATES) ||
+        (introduced_tree_id &&
+         !logical_empty_parent &&
+         parent.UsedTreeIdCount() >= MAX_PQ_USED_TREE_IDS) ||
+        !state.IsStructurallyValid()) {
+        return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+    }
+    return true;
 }
 
 bool PQRegistryManager::GetSnapshot(
