@@ -20,7 +20,9 @@
 #include <memory>
 #include <mutex>
 #include <ostream>
+#include <set>
 #include <span>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -61,11 +63,15 @@ CKeyID KeyId(uint64_t value)
 CDeterministicMNCPtr Member(uint32_t tag,
                             bool banned = false,
                             bool confirmed = true,
-                            uint256 cached_score_seed = uint256{})
+                            uint256 cached_score_seed = uint256{},
+                            uint256 collateral_hash = uint256{})
 {
     auto dmn = std::make_shared<CDeterministicMN>(tag + 1);
     dmn->proTxHash = NonNullHash(10'000 + tag);
-    dmn->collateralOutpoint = COutPoint(NonNullHash(20'000 + tag), tag + 1);
+    dmn->collateralOutpoint = COutPoint(
+        collateral_hash.IsNull() ? NonNullHash(20'000 + tag)
+                                 : collateral_hash,
+        tag + 1);
 
     auto state = std::make_shared<CDeterministicMNState>();
     state->keyIDOwner = KeyId(30'000 + tag);
@@ -102,6 +108,19 @@ CDeterministicMNList Snapshot(int32_t height,
         members.push_back(Member(static_cast<uint32_t>(count + 1), false, false));
     }
     if (reverse) std::reverse(members.begin(), members.end());
+    for (const auto& member : members) {
+        snapshot.AddMN(member, /*fBumpTotalCount=*/false);
+    }
+    return snapshot;
+}
+
+CDeterministicMNList SnapshotFromMembers(
+    int32_t height,
+    const uint256& block_hash,
+    std::span<const CDeterministicMNCPtr> members)
+{
+    CDeterministicMNList snapshot(
+        block_hash, height, static_cast<uint32_t>(members.size()));
     for (const auto& member : members) {
         snapshot.AddMN(member, /*fBumpTotalCount=*/false);
     }
@@ -207,6 +226,51 @@ std::vector<uint256> ScoreOrderedMembers(uint32_t count,
     }
     std::sort(scored.begin(), scored.end(),
               [](const Scored& lhs, const Scored& rhs) {
+                  if (lhs.score != rhs.score) return lhs.score > rhs.score;
+                  return rhs.dmn->collateralOutpoint <
+                         lhs.dmn->collateralOutpoint;
+              });
+
+    std::vector<uint256> ordered;
+    ordered.reserve(scored.size());
+    for (const auto& candidate : scored) {
+        ordered.push_back(candidate.dmn->proTxHash);
+    }
+    return ordered;
+}
+
+std::vector<uint256> FullSortRosterOracle(
+    std::span<const CDeterministicMNCPtr> members,
+    const uint256& modifier,
+    const std::set<uint256>& root_capable)
+{
+    struct Scored {
+        arith_uint256 score;
+        CDeterministicMNCPtr dmn;
+        bool root_capable{false};
+    };
+
+    std::vector<Scored> scored;
+    scored.reserve(members.size());
+    for (const auto& dmn : members) {
+        if (!CDeterministicMNList::IsMNValid(*dmn) ||
+            dmn->pdmnState->confirmedHash.IsNull()) {
+            continue;
+        }
+        uint256 score_hash;
+        CSHA256 hasher;
+        hasher.Write(dmn->pdmnState->confirmedHashWithProRegTxHash.begin(),
+                     dmn->pdmnState->confirmedHashWithProRegTxHash.size());
+        hasher.Write(modifier.begin(), modifier.size());
+        hasher.Finalize(score_hash.begin());
+        scored.push_back({UintToArith256(score_hash), dmn,
+                          root_capable.contains(dmn->proTxHash)});
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const Scored& lhs, const Scored& rhs) {
+                  if (lhs.root_capable != rhs.root_capable) {
+                      return lhs.root_capable;
+                  }
                   if (lhs.score != rhs.score) return lhs.score > rhs.score;
                   return rhs.dmn->collateralOutpoint <
                          lhs.dmn->collateralOutpoint;
@@ -422,6 +486,139 @@ BOOST_AUTO_TEST_CASE(more_than_400_candidates_select_top_scores_deterministicall
     for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
         BOOST_CHECK(reversed->members[slot].pro_tx_hash == expected[slot]);
     }
+}
+
+BOOST_AUTO_TEST_CASE(partial_sort_matches_full_sort_oracle_at_cutoff)
+{
+    constexpr uint32_t EPOCH{4};
+    constexpr int32_t SNAPSHOT_HEIGHT{2448};
+    struct Scenario {
+        uint32_t candidates;
+        uint32_t root_capable;
+        uint32_t score_buckets;
+    };
+    constexpr std::array<Scenario, 4> scenarios{{
+        {401, 0, 0},
+        {517, 173, 23},
+        {803, 403, 1},
+        {1'009, 617, 97},
+    }};
+
+    for (std::size_t scenario_index{0};
+         scenario_index < scenarios.size(); ++scenario_index) {
+        const auto& scenario{scenarios[scenario_index]};
+        const bool tied_cutoff{scenario_index == 2};
+        const uint256 shared_collateral_hash{
+            tied_cutoff ? NonNullHash(700'000 + scenario_index) : uint256{}};
+        std::vector<CDeterministicMNCPtr> members;
+        members.reserve(scenario.candidates);
+        for (uint32_t tag{0}; tag < scenario.candidates; ++tag) {
+            const uint256 score_seed{
+                scenario.score_buckets == 0
+                    ? uint256{}
+                    : NonNullHash(710'000 + scenario_index * 1'000 +
+                                  tag % scenario.score_buckets)};
+            members.push_back(Member(tag, false, true, score_seed,
+                                     shared_collateral_hash));
+        }
+
+        std::set<uint256> root_capable;
+        std::vector<OperatorKeyState> states;
+        states.reserve(scenario.root_capable);
+        const uint32_t root_shift{
+            tied_cutoff
+                ? 0U
+                : static_cast<uint32_t>((scenario_index * 137) %
+                                        scenario.candidates)};
+        for (uint32_t tag{0}; tag < scenario.candidates; ++tag) {
+            const bool has_root{
+                (tag + scenario.candidates - root_shift) %
+                    scenario.candidates <
+                scenario.root_capable};
+            if (!has_root) continue;
+            const uint256 pro_tx_hash{NonNullHash(10'000 + tag)};
+            root_capable.insert(pro_tx_hash);
+            states.push_back(KeyState(
+                Schedule(), pro_tx_hash, EPOCH, SNAPSHOT_HEIGHT,
+                static_cast<uint32_t>(scenario_index * 2'000 + tag + 1)));
+        }
+        BOOST_REQUIRE_EQUAL(root_capable.size(), scenario.root_capable);
+
+        const uint256 genesis{NonNullHash(720'000 + scenario_index)};
+        const uint256 base_hash{NonNullHash(730'000 + scenario_index)};
+        const uint256 snapshot_hash{NonNullHash(740'000 + scenario_index)};
+        const auto modifier{
+            GetPQQuorumModifier(genesis, EPOCH, base_hash)};
+        BOOST_REQUIRE(modifier);
+        const auto expected{
+            FullSortRosterOracle(members, *modifier, root_capable)};
+        BOOST_REQUIRE_EQUAL(expected.size(), scenario.candidates);
+        BOOST_REQUIRE_GT(expected.size(), QUORUM_SIZE);
+
+        std::vector<std::vector<CDeterministicMNCPtr>> permutations;
+        permutations.push_back(members);
+        permutations.push_back(members);
+        std::reverse(permutations.back().begin(), permutations.back().end());
+        permutations.push_back(members);
+        std::rotate(permutations.back().begin(),
+                    permutations.back().begin() +
+                        scenario.candidates / 3,
+                    permutations.back().end());
+        permutations.emplace_back();
+        permutations.back().reserve(members.size());
+        for (std::size_t index{0}; index < members.size(); index += 2) {
+            permutations.back().push_back(members[index]);
+        }
+        for (std::size_t index{1}; index < members.size(); index += 2) {
+            permutations.back().push_back(members[index]);
+        }
+
+        for (std::size_t permutation{0}; permutation < permutations.size();
+             ++permutation) {
+            const auto snapshot{SnapshotFromMembers(
+                SNAPSHOT_HEIGHT, snapshot_hash, permutations[permutation])};
+            auto ordered_states{states};
+            if ((permutation & 1U) != 0) {
+                std::reverse(ordered_states.begin(), ordered_states.end());
+            }
+            const auto roster{BuildFrozenQuorumRoster(
+                genesis, BuildConfig(), EPOCH, base_hash, snapshot,
+                ordered_states)};
+            BOOST_REQUIRE(roster);
+            BOOST_CHECK_EQUAL(
+                roster->descriptor.valid_count,
+                std::min<std::size_t>(scenario.root_capable, QUORUM_SIZE));
+            for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
+                BOOST_CHECK(roster->members[slot].pro_tx_hash ==
+                            expected[slot]);
+                BOOST_CHECK_EQUAL(
+                    roster->members[slot].child_root.has_value(),
+                    root_capable.contains(expected[slot]));
+            }
+            BOOST_CHECK(ContainsMember(*roster, expected[QUORUM_SIZE - 1]));
+            BOOST_CHECK(!ContainsMember(*roster, expected[QUORUM_SIZE]));
+        }
+
+        if (tied_cutoff) {
+            // All 403 root-capable candidates have the same score. The last
+            // selected and first rejected candidates are therefore fixed only
+            // by their unique collateral indices.
+            BOOST_CHECK(expected[QUORUM_SIZE - 1] == NonNullHash(10'003));
+            BOOST_CHECK(expected[QUORUM_SIZE] == NonNullHash(10'002));
+        }
+    }
+
+    // The final comparator key cannot tie for a valid deterministic-MN list.
+    // Duplicate collateral outpoints are rejected while constructing it.
+    const auto first{Member(50'000, false, true, NonNullHash(750'000))};
+    auto duplicate{
+        std::make_shared<CDeterministicMN>(*Member(
+            50'001, false, true, NonNullHash(750'000)))};
+    duplicate->collateralOutpoint = first->collateralOutpoint;
+    CDeterministicMNList duplicate_snapshot(
+        NonNullHash(750'001), SNAPSHOT_HEIGHT, 2);
+    duplicate_snapshot.AddMN(first);
+    BOOST_CHECK_THROW(duplicate_snapshot.AddMN(duplicate), std::runtime_error);
 }
 
 BOOST_AUTO_TEST_CASE(root_capable_members_rank_ahead_when_they_fit)

@@ -114,11 +114,15 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
         }
         if (lhs.score != rhs.score) return lhs.score > rhs.score;
         // This is the direct form of the legacy reverse-iterator tie break,
-        // which places the larger outpoint first.
+        // which places the larger outpoint first. Deterministic-MN lists
+        // enforce unique collateral outpoints, so valid candidates form a
+        // total order even when their scores are equal.
         return rhs.dmn->collateralOutpoint < lhs.dmn->collateralOutpoint;
     };
 
-    std::sort(candidates.begin(), candidates.end(), score_less);
+    std::partial_sort(candidates.begin(),
+                      candidates.begin() + QUORUM_SIZE,
+                      candidates.end(), score_less);
     candidates.resize(QUORUM_SIZE);
     return candidates;
 }
