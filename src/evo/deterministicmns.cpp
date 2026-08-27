@@ -1437,6 +1437,19 @@ void CDeterministicMNList::BuildTrackedInverseDiff(
               });
 }
 
+std::vector<uint256>
+CDeterministicMNList::BuildTrackedNetRemovedProTxHashes(
+    const CDeterministicMNList& parent) const
+{
+    std::vector<uint256> removed;
+    for (const uint256& pro_tx_hash : m_tracked_changes) {
+        if (parent.HasMN(pro_tx_hash) && !HasMN(pro_tx_hash)) {
+            removed.emplace_back(pro_tx_hash);
+        }
+    }
+    return removed;
+}
+
 CDeterministicMNList CDeterministicMNList::ApplyDiff(
     const CBlockIndex* pindex,
     const CDeterministicMNListDiff& diff,

@@ -334,6 +334,8 @@ public:
     void BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const;
     void BuildTrackedInverseDiff(const CDeterministicMNList& parent,
                                  CDeterministicMNListDiff& inverse) const;
+    [[nodiscard]] std::vector<uint256> BuildTrackedNetRemovedProTxHashes(
+        const CDeterministicMNList& parent) const;
     void ResetTrackedChanges() { m_tracked_changes.clear(); }
     [[nodiscard]] size_t TrackedChangeCountForTesting() const
     {

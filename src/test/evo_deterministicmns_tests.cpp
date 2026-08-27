@@ -1210,6 +1210,103 @@ BOOST_AUTO_TEST_CASE(inverse_diff_round_trip_restores_all_mutation_kinds)
     BOOST_CHECK(!recovered.HasMN(added->proTxHash));
 }
 
+BOOST_AUTO_TEST_CASE(tracked_net_removals_follow_final_membership)
+{
+    const auto member{MakeAnchorMN(1, 1)};
+    CDeterministicMNList parent{MakeSnapshotKey(60'010), 4'330, 1};
+    parent.AddMN(member, /*fBumpTotalCount=*/false);
+
+    auto update_only{parent};
+    update_only.ResetTrackedChanges();
+    auto updated_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    ++updated_state->nLastPaidHeight;
+    update_only.UpdateMN(member->proTxHash, updated_state);
+    BOOST_CHECK(
+        update_only.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto failed_mutation{parent};
+    failed_mutation.ResetTrackedChanges();
+    BOOST_CHECK_THROW(
+        failed_mutation.RemoveMN(MakeSnapshotKey(60'099)),
+        std::runtime_error);
+    BOOST_CHECK_EQUAL(failed_mutation.TrackedChangeCountForTesting(), 0U);
+    BOOST_CHECK(
+        failed_mutation.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto removed{parent};
+    removed.ResetTrackedChanges();
+    removed.RemoveMN(member->proTxHash);
+    const auto parent_removal{
+        removed.BuildTrackedNetRemovedProTxHashes(parent)};
+    BOOST_REQUIRE_EQUAL(parent_removal.size(), 1U);
+    BOOST_CHECK(parent_removal.front() == member->proTxHash);
+
+    auto transient_add{parent};
+    transient_add.ResetTrackedChanges();
+    const auto transient{MakeAnchorMN(2, 2)};
+    transient_add.AddMN(transient, /*fBumpTotalCount=*/false);
+    transient_add.RemoveMN(transient->proTxHash);
+    BOOST_CHECK(
+        transient_add.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto restored{parent};
+    restored.ResetTrackedChanges();
+    restored.RemoveMN(member->proTxHash);
+    restored.AddMN(member, /*fBumpTotalCount=*/false);
+    BOOST_CHECK(restored.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto updated_then_removed{parent};
+    updated_then_removed.ResetTrackedChanges();
+    updated_then_removed.UpdateMN(member->proTxHash, updated_state);
+    updated_then_removed.RemoveMN(member->proTxHash);
+    const auto updated_removal{
+        updated_then_removed.BuildTrackedNetRemovedProTxHashes(parent)};
+    BOOST_REQUIRE_EQUAL(updated_removal.size(), 1U);
+    BOOST_CHECK(updated_removal.front() == member->proTxHash);
+}
+
+BOOST_AUTO_TEST_CASE(tracked_net_removals_are_sorted_unique_and_cover_collateral_replacement)
+{
+    const auto first{MakeAnchorMN(3, 3)};
+    const auto second{MakeAnchorMN(4, 20)};
+    const auto replaced{MakeAnchorMN(5, 11)};
+    CDeterministicMNList parent{MakeSnapshotKey(60'011), 4'331, 3};
+    parent.AddMN(first, /*fBumpTotalCount=*/false);
+    parent.AddMN(second, /*fBumpTotalCount=*/false);
+    parent.AddMN(replaced, /*fBumpTotalCount=*/false);
+
+    auto child{parent};
+    child.ResetTrackedChanges();
+    child.RemoveMN(second->proTxHash);
+    child.RemoveMN(replaced->proTxHash);
+    auto first_state{
+        std::make_shared<CDeterministicMNState>(*first->pdmnState)};
+    ++first_state->nPoSePenalty;
+    child.UpdateMN(first->proTxHash, first_state);
+    child.RemoveMN(first->proTxHash);
+
+    const auto replacement_source{MakeAnchorMN(6, 12)};
+    auto replacement{std::make_shared<CDeterministicMN>(
+        replacement_source->GetInternalId())};
+    replacement->proTxHash = replacement_source->proTxHash;
+    replacement->collateralOutpoint = replaced->collateralOutpoint;
+    replacement->nOperatorReward = replacement_source->nOperatorReward;
+    replacement->pdmnState = replacement_source->pdmnState;
+    child.AddMN(replacement, /*fBumpTotalCount=*/false);
+
+    std::vector<uint256> expected{
+        first->proTxHash, second->proTxHash, replaced->proTxHash};
+    std::sort(expected.begin(), expected.end());
+    const auto removals{child.BuildTrackedNetRemovedProTxHashes(parent)};
+    BOOST_CHECK(removals == expected);
+    BOOST_CHECK(std::adjacent_find(removals.begin(), removals.end()) ==
+                removals.end());
+    BOOST_REQUIRE(child.HasMN(replacement->proTxHash));
+    BOOST_CHECK(child.GetMN(replacement->proTxHash)->collateralOutpoint ==
+                replaced->collateralOutpoint);
+}
+
 BOOST_AUTO_TEST_CASE(pq_anchor_write_through_survives_dirty_cache_eviction)
 {
     SelectParams(ChainType::MAIN);
