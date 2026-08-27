@@ -919,6 +919,7 @@ struct PQChainLockPersistence::Impl {
         highest_payment_audit_preseal_revision =
             HighestPaymentAuditPresealRevision(
                 payment_audit_preseal_state);
+        if (best || unsealed) certificate_revision = 1;
     }
 
     bool PersistBest(const FinalChainLock& chainlock,
@@ -1040,6 +1041,7 @@ struct PQChainLockPersistence::Impl {
         best = std::move(candidate);
         unsealed = std::move(next_unsealed);
         catchup_used = catchup_used || catchup;
+        ++certificate_revision;
         return true;
     }
 
@@ -1085,6 +1087,7 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
         unsealed = std::move(candidate);
+        ++certificate_revision;
         return true;
     }
 
@@ -1230,6 +1233,7 @@ struct PQChainLockPersistence::Impl {
     mutable Mutex mutex;
     std::optional<DiskRecord> best GUARDED_BY(mutex);
     std::optional<DiskRecord> unsealed GUARDED_BY(mutex);
+    uint64_t certificate_revision GUARDED_BY(mutex){0};
     BTCCPresealState btcc_preseal_state GUARDED_BY(mutex);
     uint64_t highest_btcc_preseal_revision GUARDED_BY(mutex){0};
     PaymentAuditPresealState payment_audit_preseal_state
@@ -1255,6 +1259,23 @@ bool PQChainLockPersistence::HasBest() const
 {
     LOCK(m_impl->mutex);
     return m_impl->best.has_value();
+}
+
+DurableFinalityStateView PQChainLockPersistence::GetFinalityState() const
+{
+    LOCK(m_impl->mutex);
+    const auto metadata = [](const DiskRecord& record) {
+        return FinalChainLockRecordMetadata{
+            record.logical_id, record.witness_id,
+            record.chainlock.statement};
+    };
+    DurableFinalityStateView view;
+    view.certificate_revision = m_impl->certificate_revision;
+    if (m_impl->best) view.best = metadata(*m_impl->best);
+    if (m_impl->unsealed) {
+        view.unsealed_btcc = metadata(*m_impl->unsealed);
+    }
+    return view;
 }
 
 std::optional<FinalChainLock> PQChainLockPersistence::LoadBest() const

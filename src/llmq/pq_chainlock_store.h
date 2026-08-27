@@ -296,6 +296,30 @@ struct PreparedFinalChainLockCandidate {
     uint64_t store_revision{0};
 };
 
+/** Precomputed identity and statement for an already validated certificate. */
+struct FinalChainLockRecordMetadata {
+    uint256 logical_id;
+    uint256 witness_id;
+    ChainLockStatement statement;
+
+    friend bool operator==(const FinalChainLockRecordMetadata&,
+                           const FinalChainLockRecordMetadata&) = default;
+};
+
+/**
+ * Immutable view of the accepted winner at one in-memory store revision.
+ *
+ * The revision is process-local and changes after every successful accepted
+ * record mutation, including an archive-only acceptance which leaves the best
+ * certificate unchanged. The shared certificate remains valid after a later
+ * mutation and lets callers opt into the large witness only when needed.
+ */
+struct AcceptedFinalChainLockView {
+    uint64_t state_revision{0};
+    FinalChainLockRecordMetadata metadata;
+    std::shared_ptr<const FinalChainLock> certificate;
+};
+
 class ChainLockFinalityStore final {
 public:
     ChainLockFinalityStore(uint256 genesis_hash,
@@ -413,6 +437,8 @@ public:
                                                bool unknown_is_conflict = true) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetBest() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetBestRecord() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetUnsealedBTCC() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

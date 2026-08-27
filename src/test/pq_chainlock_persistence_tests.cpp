@@ -356,6 +356,10 @@ BOOST_AUTO_TEST_CASE(empty_database_initializes_fixed_schema)
         MakeConfig()};
     BOOST_CHECK(!persistence.HasBest());
     BOOST_CHECK(!persistence.LoadBest());
+    const auto state{persistence.GetFinalityState()};
+    BOOST_CHECK_EQUAL(state.certificate_revision, 0U);
+    BOOST_CHECK(!state.best);
+    BOOST_CHECK(!state.unsealed_btcc);
 }
 
 BOOST_AUTO_TEST_CASE(roundtrip_survives_restart)
@@ -365,20 +369,177 @@ BOOST_AUTO_TEST_CASE(roundtrip_survives_restart)
     const auto config{MakeConfig()};
     const auto chainlock{
         MakeChainLock(865, config.anchor.height, config.anchor.block_hash, 1)};
+    const auto next{MakeChainLock(
+        870, chainlock.statement.height, chainlock.statement.block_hash, 2)};
 
     {
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
         BOOST_REQUIRE(persistence.PersistBest(chainlock));
+        BOOST_REQUIRE(persistence.PersistBest(next));
         BOOST_REQUIRE(persistence.HasBest());
+        const auto state{persistence.GetFinalityState()};
+        BOOST_REQUIRE(state.best);
+        BOOST_CHECK_EQUAL(state.certificate_revision, 2U);
+        BOOST_CHECK(state.best->statement == next.statement);
     }
     {
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
         const auto loaded{persistence.LoadBest()};
         BOOST_REQUIRE(loaded);
-        BOOST_CHECK(*loaded == chainlock);
+        BOOST_CHECK(*loaded == next);
+        const auto state{persistence.GetFinalityState()};
+        BOOST_REQUIRE(state.best);
+        BOOST_CHECK_EQUAL(state.certificate_revision, 1U);
+        BOOST_CHECK(state.best->logical_id == next.GetLogicalId(genesis));
+        BOOST_CHECK(state.best->witness_id == next.GetWitnessId(genesis));
+        BOOST_CHECK(state.best->statement == next.statement);
     }
+}
+
+BOOST_AUTO_TEST_CASE(durable_record_view_is_coherent_and_idempotence_is_stable)
+{
+    const uint256 genesis{NonNullHash(61)};
+    const auto config{MakeConfig()};
+    PQChainLockPersistence persistence{
+        MemoryParams(m_path_root / "pqcl_finality_view"), genesis, config};
+
+    const auto first{MakeChainLock(
+        865, config.anchor.height, config.anchor.block_hash, 61)};
+    BOOST_REQUIRE(persistence.PersistBest(first));
+    const auto first_state{persistence.GetFinalityState()};
+    BOOST_REQUIRE(first_state.best);
+    BOOST_CHECK_EQUAL(first_state.certificate_revision, 1U);
+    BOOST_CHECK(!first_state.unsealed_btcc);
+    BOOST_CHECK(first_state.best->logical_id == first.GetLogicalId(genesis));
+    BOOST_CHECK(first_state.best->witness_id == first.GetWitnessId(genesis));
+    BOOST_CHECK(first_state.best->statement == first.statement);
+
+    BOOST_REQUIRE(persistence.PersistBest(first));
+    BOOST_CHECK(persistence.GetFinalityState() == first_state);
+    auto conflict{first};
+    conflict.statement.block_hash = NonNullHash(6100);
+    BOOST_CHECK(!persistence.PersistBest(conflict));
+    BOOST_CHECK(persistence.GetFinalityState() == first_state);
+
+    auto advance{MakeChainLock(
+        870, first.statement.height, first.statement.block_hash, 62)};
+    advance.statement.accepted_btcc_cursor = BTCCursor{
+        advance.statement.height, advance.statement.block_hash,
+        NonNullHash(6200)};
+    advance.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    BOOST_REQUIRE(persistence.PersistBest(advance));
+    const auto advance_state{persistence.GetFinalityState()};
+    BOOST_REQUIRE(advance_state.best);
+    BOOST_REQUIRE(advance_state.unsealed_btcc);
+    BOOST_CHECK_EQUAL(advance_state.certificate_revision, 2U);
+    BOOST_CHECK(*advance_state.best == *advance_state.unsealed_btcc);
+    BOOST_CHECK(advance_state.best->logical_id ==
+                advance.GetLogicalId(genesis));
+    BOOST_CHECK(advance_state.best->witness_id ==
+                advance.GetWitnessId(genesis));
+    BOOST_CHECK(advance_state.best->statement == advance.statement);
+}
+
+BOOST_AUTO_TEST_CASE(unsealed_record_mutation_advances_certificate_revision)
+{
+    const fs::path path{m_path_root / "pqcl_unsealed_view"};
+    const uint256 genesis{NonNullHash(63)};
+    const auto config{MakeConfig()};
+    auto archived{MakeChainLock(870, 865, NonNullHash(865), 63)};
+    archived.statement.accepted_btcc_cursor = BTCCursor{
+        archived.statement.height, archived.statement.block_hash,
+        NonNullHash(6300)};
+    archived.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistUnsealedBTCC(archived));
+
+        const auto state{persistence.GetFinalityState()};
+        BOOST_CHECK_EQUAL(state.certificate_revision, 1U);
+        BOOST_CHECK(!state.best);
+        BOOST_REQUIRE(state.unsealed_btcc);
+        BOOST_CHECK(state.unsealed_btcc->logical_id ==
+                    archived.GetLogicalId(genesis));
+        BOOST_CHECK(state.unsealed_btcc->witness_id ==
+                    archived.GetWitnessId(genesis));
+        BOOST_CHECK(state.unsealed_btcc->statement == archived.statement);
+
+        BOOST_REQUIRE(persistence.PersistUnsealedBTCC(archived));
+        BOOST_CHECK(persistence.GetFinalityState() == state);
+        auto conflict{archived};
+        conflict.statement.block_hash = NonNullHash(6301);
+        BOOST_CHECK(!persistence.PersistUnsealedBTCC(conflict));
+        BOOST_CHECK(persistence.GetFinalityState() == state);
+    }
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        const auto restarted{persistence.GetFinalityState()};
+        BOOST_CHECK_EQUAL(restarted.certificate_revision, 1U);
+        BOOST_CHECK(!restarted.best);
+        BOOST_REQUIRE(restarted.unsealed_btcc);
+        BOOST_CHECK(restarted.unsealed_btcc->logical_id ==
+                    archived.GetLogicalId(genesis));
+        BOOST_CHECK(restarted.unsealed_btcc->witness_id ==
+                    archived.GetWitnessId(genesis));
+        BOOST_CHECK(restarted.unsealed_btcc->statement ==
+                    archived.statement);
+
+        auto seal{MakeChainLock(880, 875, NonNullHash(875), 64)};
+        seal.statement.previous_btcc_cursor =
+            archived.statement.accepted_btcc_cursor;
+        seal.statement.accepted_btcc_cursor =
+            archived.statement.accepted_btcc_cursor;
+        seal.statement.btcc_receipt_state = BTCCReceiptState{
+            archived.statement.accepted_btcc_cursor, NonNullHash(6302)};
+        BOOST_REQUIRE(persistence.PersistBest(seal));
+
+        const auto sealed{persistence.GetFinalityState()};
+        BOOST_CHECK_EQUAL(sealed.certificate_revision, 2U);
+        BOOST_REQUIRE(sealed.best);
+        BOOST_CHECK(sealed.best->logical_id == seal.GetLogicalId(genesis));
+        BOOST_CHECK(sealed.best->witness_id == seal.GetWitnessId(genesis));
+        BOOST_CHECK(sealed.best->statement == seal.statement);
+        BOOST_CHECK(!sealed.unsealed_btcc);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(marker_only_mutations_do_not_advance_certificate_revision)
+{
+    auto btcc_config{MakeConfig()};
+    btcc_config.btcc_receipt_assumption_anchor =
+        BTCCReceiptAssumptionAnchor{
+            860, NonNullHash(860), BTCCReceiptState{}};
+    BOOST_REQUIRE(btcc_config.IsValid());
+    PQChainLockPersistence btcc_persistence{
+        MemoryParams(m_path_root / "pqcl_btcc_marker_only"),
+        NonNullHash(64), btcc_config};
+    const auto empty_btcc_state{btcc_persistence.GetFinalityState()};
+    BOOST_REQUIRE(btcc_persistence.PersistBTCCPresealState(
+        BTCCPresealState{
+            MakePresealMarker(880, 880, 1, 64), std::nullopt}));
+    BOOST_CHECK(btcc_persistence.GetFinalityState() == empty_btcc_state);
+    BOOST_REQUIRE(btcc_persistence.ClearBTCCPresealState());
+    BOOST_CHECK(btcc_persistence.GetFinalityState() == empty_btcc_state);
+
+    const auto payment_config{MakePaymentAuditConfig()};
+    BOOST_REQUIRE(payment_config.IsValid());
+    PQChainLockPersistence payment_persistence{
+        MemoryParams(m_path_root / "pqcl_payment_marker_only"),
+        NonNullHash(65), payment_config};
+    const auto empty_payment_state{payment_persistence.GetFinalityState()};
+    BOOST_REQUIRE(payment_persistence.PersistPaymentAuditPresealState(
+        PaymentAuditPresealState{
+            MakePaymentAuditPresealMarker(
+                payment_config, /*epoch=*/3, /*revision=*/1, /*salt=*/65),
+            std::nullopt}));
+    BOOST_CHECK(payment_persistence.GetFinalityState() ==
+                empty_payment_state);
+    BOOST_REQUIRE(payment_persistence.ClearPaymentAuditPresealState());
+    BOOST_CHECK(payment_persistence.GetFinalityState() ==
+                empty_payment_state);
 }
 
 BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)

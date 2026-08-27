@@ -160,6 +160,22 @@ enum class ChainLockPersistenceError : uint8_t {
 };
 
 /**
+ * Coherent small snapshot of the validated durable certificate records.
+ *
+ * The revision is process-local: an empty database starts at zero, a restart
+ * with either record starts at one, and each successful non-idempotent
+ * certificate mutation advances it once. Marker-only writes do not affect it.
+ */
+struct DurableFinalityStateView {
+    uint64_t certificate_revision{0};
+    std::optional<FinalChainLockRecordMetadata> best;
+    std::optional<FinalChainLockRecordMetadata> unsealed_btcc;
+
+    friend bool operator==(const DurableFinalityStateView&,
+                           const DurableFinalityStateView&) = default;
+};
+
+/**
  * Durable storage for the single best post-quantum ChainLock certificate.
  *
  * The database schema binds the record to the network genesis, complete
@@ -179,6 +195,7 @@ public:
     PQChainLockPersistence& operator=(const PQChainLockPersistence&) = delete;
 
     [[nodiscard]] bool HasBest() const;
+    [[nodiscard]] DurableFinalityStateView GetFinalityState() const;
     [[nodiscard]] std::optional<FinalChainLock> LoadBest() const;
     [[nodiscard]] std::optional<FinalChainLock> LoadUnsealedBTCC() const;
     [[nodiscard]] bool HasCatchupMarker() const;

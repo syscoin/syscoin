@@ -1043,6 +1043,20 @@ std::shared_ptr<const FinalChainLock> ChainLockFinalityStore::GetBest() const
     return m_best ? m_best->chainlock : nullptr;
 }
 
+std::optional<AcceptedFinalChainLockView>
+ChainLockFinalityStore::GetBestRecord() const
+{
+    LOCK(m_mutex);
+    if (!m_best) return std::nullopt;
+    return AcceptedFinalChainLockView{
+        m_revision,
+        FinalChainLockRecordMetadata{
+            m_best->logical_id,
+            m_best->witness_id,
+            m_best->chainlock->statement},
+        m_best->chainlock};
+}
+
 std::shared_ptr<const FinalChainLock>
 ChainLockFinalityStore::GetUnsealedBTCC() const
 {

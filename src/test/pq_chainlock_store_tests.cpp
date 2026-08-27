@@ -273,6 +273,44 @@ BOOST_AUTO_TEST_CASE(first_verified_statement_wins_and_queries_are_branch_aware)
     BOOST_CHECK(store.GetBest()->statement.block_hash == first.statement.block_hash);
 }
 
+BOOST_AUTO_TEST_CASE(best_record_view_shares_witness_and_tracks_store_revision)
+{
+    const uint256 genesis{NonNullHash(101)};
+    TestFinalityContext context;
+    ChainLockFinalityStore store{genesis, MakeConfig(), context};
+    BOOST_CHECK(!store.GetBestRecord());
+
+    const auto first{MakeChainLock(865, 864, NonNullHash(864), 101)};
+    auto prepared{store.PrepareCandidate(first)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptVerified(*prepared, first, true));
+
+    const auto certificate{store.GetBest()};
+    const auto first_view{store.GetBestRecord()};
+    BOOST_REQUIRE(certificate);
+    BOOST_REQUIRE(first_view);
+    BOOST_CHECK_EQUAL(first_view->state_revision, 1U);
+    BOOST_CHECK(first_view->metadata.logical_id ==
+                first.GetLogicalId(genesis));
+    BOOST_CHECK(first_view->metadata.witness_id ==
+                first.GetWitnessId(genesis));
+    BOOST_CHECK(first_view->metadata.statement == first.statement);
+    BOOST_CHECK(first_view->certificate == certificate);
+
+    const auto second{MakeChainLock(
+        870, first.statement.height, first.statement.block_hash, 102)};
+    prepared = store.PrepareCandidate(second);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptVerified(*prepared, second, true));
+
+    const auto second_view{store.GetBestRecord()};
+    BOOST_REQUIRE(second_view);
+    BOOST_CHECK_EQUAL(second_view->state_revision, 2U);
+    BOOST_CHECK(second_view->metadata.statement == second.statement);
+    BOOST_CHECK(first_view->certificate == certificate);
+    BOOST_CHECK(*first_view->certificate == first);
+}
+
 BOOST_AUTO_TEST_CASE(local_import_defers_only_unknown_anchor_ancestry)
 {
     TestFinalityContext context;
@@ -357,6 +395,7 @@ BOOST_AUTO_TEST_CASE(durable_accept_failure_leaves_store_unchanged)
     BOOST_CHECK(!store.AcceptVerified(*prepared, chainlock, true, &error));
     BOOST_CHECK(error == ChainLockFinalityError::PERSISTENCE_FAILURE);
     BOOST_CHECK(!store.GetBest());
+    BOOST_CHECK(!store.GetBestRecord());
     BOOST_CHECK_EQUAL(store.RecentSizeForTesting(), 0U);
     BOOST_CHECK_EQUAL(callback_count, 1U);
 
@@ -366,6 +405,8 @@ BOOST_AUTO_TEST_CASE(durable_accept_failure_leaves_store_unchanged)
     BOOST_REQUIRE(prepared);
     BOOST_CHECK(store.AcceptVerified(*prepared, chainlock, true, &error));
     BOOST_CHECK(store.GetBest() && *store.GetBest() == chainlock);
+    BOOST_REQUIRE(store.GetBestRecord());
+    BOOST_CHECK_EQUAL(store.GetBestRecord()->state_revision, 1U);
     BOOST_CHECK_EQUAL(callback_count, 2U);
 }
 
@@ -946,6 +987,9 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
     BOOST_REQUIRE(latest_prepared);
     BOOST_REQUIRE(store.AcceptPersistedVerified(
         *latest_prepared, latest, true));
+    const auto best_before_archive{store.GetBestRecord()};
+    BOOST_REQUIRE(best_before_archive);
+    BOOST_CHECK_EQUAL(best_before_archive->state_revision, 1U);
 
     auto archive_prepared{store.PrepareReceiptArchiveCandidate(archived)};
     BOOST_REQUIRE(archive_prepared);
@@ -956,6 +1000,13 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
     BOOST_CHECK_EQUAL(archive_writes, 1U);
     BOOST_REQUIRE(store.GetBest());
     BOOST_CHECK(*store.GetBest() == latest);
+    const auto best_after_archive{store.GetBestRecord()};
+    BOOST_REQUIRE(best_after_archive);
+    BOOST_CHECK_EQUAL(best_after_archive->state_revision, 2U);
+    BOOST_CHECK(best_after_archive->metadata ==
+                best_before_archive->metadata);
+    BOOST_CHECK(best_after_archive->certificate ==
+                best_before_archive->certificate);
     BOOST_REQUIRE(store.GetByLogicalId(archived.GetLogicalId(genesis)));
 }
 
