@@ -45,6 +45,13 @@ void SetFirstMembers(QuorumBitmap& bitmap, std::size_t count)
     }
 }
 
+void ClearMember(QuorumBitmap& bitmap, std::size_t member)
+{
+    bitmap[member / 8] &=
+        static_cast<uint8_t>(~static_cast<uint8_t>(
+            uint8_t{1} << (member % 8)));
+}
+
 ChildPublicKey UniqueChildKey(std::size_t slot, std::size_t member)
 {
     ChildPublicKey key{};
@@ -352,6 +359,118 @@ BOOST_AUTO_TEST_CASE(fresh_archive_preflight_needs_no_old_chainlock_store)
     BOOST_REQUIRE(expected_leaf);
     BOOST_CHECK_EQUAL(
         prepared->checks[QUORUM_THRESHOLD].GetLeafIndex(), *expected_leaf);
+}
+
+BOOST_AUTO_TEST_CASE(final_preparation_reuses_verified_seal_rosters)
+{
+    const auto fixture{MakeFixture()};
+    const auto rosters{
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters)};
+    ChainLockVerificationError roster_error{
+        ChainLockVerificationError::INVALID_ARGUMENT};
+    const uint64_t capability_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, rosters, &roster_error)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          capability_hashes_before,
+                      8'184U);
+
+    PaymentAuditVerificationError error{
+        PaymentAuditVerificationError::INVALID_ARGUMENT};
+    const uint64_t prepared_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    auto prepared{PrepareFinalPaymentAuditVerification(
+        fixture->schedule, fixture->audit, roster_set,
+        AUTHORIZATION_MASK, &error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(error == PaymentAuditVerificationError::NONE);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      prepared_hashes_before);
+
+    const uint64_t raw_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    auto raw{PrepareFinalPaymentAuditVerification(
+        fixture->genesis_hash, fixture->schedule, fixture->audit,
+        fixture->rosters, AUTHORIZATION_MASK, &error)};
+    BOOST_REQUIRE(raw);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          raw_hashes_before,
+                      8'184U);
+    BOOST_REQUIRE_EQUAL(prepared->checks.size(), raw->checks.size());
+    for (std::size_t i{0}; i < prepared->checks.size(); ++i) {
+        BOOST_CHECK(prepared->checks[i].GetPublicKey() ==
+                    raw->checks[i].GetPublicKey());
+        BOOST_CHECK_EQUAL(prepared->checks[i].GetLeafIndex(),
+                          raw->checks[i].GetLeafIndex());
+        BOOST_CHECK(prepared->checks[i].GetMessageBytes() ==
+                    raw->checks[i].GetMessageBytes());
+        BOOST_CHECK(prepared->checks[i].GetSignature() ==
+                    raw->checks[i].GetSignature());
+    }
+
+    const uint64_t rejection_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    auto bad_context{fixture->audit};
+    bad_context.statement.seal_statement.quorum_context_hash.begin()[0] ^= 1;
+    BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
+        fixture->schedule, bad_context, roster_set,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
+
+    auto bad_selection{fixture->audit};
+    bad_selection.selected_quorum_mask = 0b1011;
+    bad_selection.signer_bitmaps[3] = bad_selection.signer_bitmaps[2];
+    bad_selection.signer_bitmaps[2].fill(0);
+    BOOST_REQUIRE(bad_selection.IsStructurallyValid());
+    BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
+        fixture->schedule, bad_selection, roster_set,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
+
+    auto bad_proof{fixture->audit};
+    bad_proof.report_witnesses[0]
+        .authenticated_signature.key_proof.siblings[0]
+        .begin()[0] ^= 1;
+    BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
+        fixture->schedule, bad_proof, roster_set,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CHILD_PROOF);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      rejection_hashes_before);
+
+    auto underfilled{MakeFixture()};
+    auto& underfilled_roster{underfilled->rosters[0]};
+    constexpr std::size_t LAST_VALID_MEMBER{QUORUM_MIN_VALID - 1};
+    underfilled_roster.members[LAST_VALID_MEMBER].eligible = false;
+    ClearMember(underfilled_roster.descriptor.valid_members,
+                LAST_VALID_MEMBER);
+    underfilled_roster.descriptor.valid_count = QUORUM_MIN_VALID - 1;
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = underfilled->rosters[slot].descriptor;
+    }
+    underfilled->audit.statement.seal_statement.quorum_context_hash =
+        GetQuorumContextHash(
+            underfilled->genesis_hash,
+            underfilled->audit.statement.seal_statement.height,
+            underfilled->audit.statement.seal_statement.block_hash,
+            descriptors);
+    const auto underfilled_rosters{
+        std::make_shared<const FrozenQuorumRosters>(underfilled->rosters)};
+    const auto underfilled_set{VerifiedRosterSet::Create(
+        underfilled->genesis_hash, underfilled_rosters, &roster_error)};
+    BOOST_REQUIRE(underfilled_set);
+    const uint64_t underfilled_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
+        underfilled->schedule, underfilled->audit,
+        underfilled_set, AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_CONTEXT);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      underfilled_hashes_before);
 }
 
 BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)

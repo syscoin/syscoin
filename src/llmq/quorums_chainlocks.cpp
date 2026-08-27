@@ -2561,16 +2561,15 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
 
 bool CChainLocksHandler::VerifyPaymentAuditCertificateSignatures(
     const pq::FinalPaymentAudit& audit,
-    const pq::FrozenQuorumRosters& rosters,
+    const pq::VerifiedRosterSetPtr& roster_set,
     uint8_t authorization_mask) const
 {
     pq::PaymentAuditVerificationError error{
         pq::PaymentAuditVerificationError::NONE};
     auto prepared{pq::PrepareFinalPaymentAuditVerification(
-        m_genesis_hash,
         pq::PaymentAuditScheduleConfig{m_config->chainlock_schedule,
                                        m_config->btcc_schedule},
-        audit, rosters, authorization_mask, &error)};
+        audit, roster_set, authorization_mask, &error)};
     if (!prepared) return false;
     LOCK(m_verification_mutex);
     return m_verifier.VerifyChecks(std::move(prepared->checks));
@@ -2657,7 +2656,7 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
             : PaymentAuditReceiptCertificateStatus::INVALID;
     }
     if (!VerifyPaymentAuditCertificateSignatures(
-            *audit, rosters->Rosters(), authorization_mask)) {
+            *audit, rosters, authorization_mask)) {
         return PaymentAuditReceiptCertificateStatus::INVALID;
     }
     bool transition_local_error{false};
@@ -8739,12 +8738,10 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
         pq::PaymentAuditVerificationError::NONE};
     auto prepared{
         rosters ? pq::PrepareFinalPaymentAuditVerification(
-                      m_genesis_hash,
                       pq::PaymentAuditScheduleConfig{
                           m_config->chainlock_schedule,
                           m_config->btcc_schedule},
-                      audit, rosters->Rosters(),
-                      authorization_mask,
+                      audit, rosters, authorization_mask,
                       &verification_error)
                 : std::nullopt};
     if (!prepared) {

@@ -478,29 +478,16 @@ std::optional<ScheduledWOTSCheck> PreparePaymentAuditShareVerification(
         /*context_prepared=*/true, error);
 }
 
+namespace {
+
 std::optional<PreparedPaymentAuditVerification>
-PrepareFinalPaymentAuditVerification(
+PrepareFinalPaymentAuditVerificationInternal(
     const uint256& genesis_hash,
     const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
-    uint8_t authorization_mask,
     PaymentAuditVerificationError* error)
 {
-    SetError(error, PaymentAuditVerificationError::NONE);
-    if (!audit.IsStructurallyValid()) {
-        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
-        return std::nullopt;
-    }
-    if ((audit.selected_quorum_mask & ~authorization_mask) != 0) {
-        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
-        return std::nullopt;
-    }
-    if (!ValidatePaymentAuditContext(genesis_hash, schedule, audit.statement,
-                                     rosters, authorization_mask, error)) {
-        return std::nullopt;
-    }
-
     PreparedPaymentAuditVerification prepared;
     prepared.checks.reserve(PAYMENT_AUDIT_SIGNATURE_COUNT);
     std::size_t report_index{0};
@@ -545,6 +532,74 @@ PrepareFinalPaymentAuditVerification(
         return std::nullopt;
     }
     return prepared;
+}
+
+} // namespace
+
+std::optional<PreparedPaymentAuditVerification>
+PrepareFinalPaymentAuditVerification(
+    const uint256& genesis_hash,
+    const PaymentAuditScheduleConfig& schedule,
+    const FinalPaymentAudit& audit,
+    const FrozenQuorumRosters& rosters,
+    uint8_t authorization_mask,
+    PaymentAuditVerificationError* error)
+{
+    SetError(error, PaymentAuditVerificationError::NONE);
+    if (!audit.IsStructurallyValid()) {
+        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
+        return std::nullopt;
+    }
+    if ((audit.selected_quorum_mask & ~authorization_mask) != 0) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return std::nullopt;
+    }
+    if (!ValidatePaymentAuditContext(genesis_hash, schedule, audit.statement,
+                                     rosters, authorization_mask, error)) {
+        return std::nullopt;
+    }
+    return PrepareFinalPaymentAuditVerificationInternal(
+        genesis_hash, schedule, audit, rosters, error);
+}
+
+std::optional<PreparedPaymentAuditVerification>
+PrepareFinalPaymentAuditVerification(
+    const PaymentAuditScheduleConfig& schedule,
+    const FinalPaymentAudit& audit,
+    VerifiedRosterSetPtr roster_set,
+    uint8_t authorization_mask,
+    PaymentAuditVerificationError* error)
+{
+    SetError(error, PaymentAuditVerificationError::NONE);
+    if (!audit.IsStructurallyValid()) {
+        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
+        return std::nullopt;
+    }
+    if ((audit.selected_quorum_mask & ~authorization_mask) != 0) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return std::nullopt;
+    }
+    const auto audit_schedule{BuildPaymentAuditEpochSchedule(
+        schedule, audit.statement.commitment.subject_epoch)};
+    if (!roster_set || !schedule.IsValid() ||
+        !audit.statement.IsStructurallyValid() || !audit_schedule ||
+        audit_schedule->seal_height !=
+            audit.statement.commitment.seal_height) {
+        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
+        return std::nullopt;
+    }
+    ChainLockVerificationError context_error{
+        ChainLockVerificationError::NONE};
+    const auto seal_context{PreparedChainLockContext::Create(
+        schedule.chainlock, audit.statement.seal_statement, roster_set,
+        authorization_mask, &context_error)};
+    if (!seal_context) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return std::nullopt;
+    }
+    return PrepareFinalPaymentAuditVerificationInternal(
+        seal_context->GenesisHash(), schedule, audit,
+        seal_context->Rosters(), error);
 }
 
 bool VerifyFinalPaymentAudit(

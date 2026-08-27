@@ -176,6 +176,15 @@ PrepareFinalPaymentAuditVerification(
     uint8_t authorization_mask,
     PaymentAuditVerificationError* error = nullptr);
 
+/** Prepare a final audit against an intrinsically verified seal roster set. */
+[[nodiscard]] std::optional<PreparedPaymentAuditVerification>
+PrepareFinalPaymentAuditVerification(
+    const PaymentAuditScheduleConfig& schedule,
+    const FinalPaymentAudit& audit,
+    VerifiedRosterSetPtr roster_set,
+    uint8_t authorization_mask,
+    PaymentAuditVerificationError* error = nullptr);
+
 [[nodiscard]] bool VerifyFinalPaymentAudit(
     const uint256& genesis_hash,
     const PaymentAuditScheduleConfig& schedule,

@@ -836,7 +836,7 @@ private:
             !cs_main, !m_pending_payment_audit_receipt_mutex);
     [[nodiscard]] bool VerifyPaymentAuditCertificateSignatures(
         const pq::FinalPaymentAudit& audit,
-        const pq::FrozenQuorumRosters& rosters,
+        const pq::VerifiedRosterSetPtr& roster_set,
         uint8_t authorization_mask) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_verification_mutex);
     void ProcessPaymentAuditHave(CNode* from, CDataStream& payload)
