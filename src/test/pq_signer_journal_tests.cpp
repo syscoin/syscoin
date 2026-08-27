@@ -4,6 +4,7 @@
 
 #include <llmq/pq_signer_journal.h>
 
+#include <llmq/pq_chainlock_store.h>
 #include <llmq/pq_chainlock_types.h>
 
 #include <dbwrapper.h>
@@ -26,8 +27,25 @@ public:
         const uint256& pro_tx_hash,
         const pq::FinalChainLock& chainlock)
     {
+        if (!chainlock.IsStructurallyValid()) {
+            return journal.ReconcileDurableAcceptedChainLock(
+                genesis_hash, pro_tx_hash, {});
+        }
+        const pq::FinalChainLockRecordMetadata metadata{
+            chainlock.GetLogicalId(genesis_hash),
+            chainlock.GetWitnessId(genesis_hash), chainlock.statement};
         return journal.ReconcileDurableAcceptedChainLock(
-            genesis_hash, pro_tx_hash, chainlock);
+            genesis_hash, pro_tx_hash, metadata);
+    }
+
+    static PQSignerJournalResult Reconcile(
+        CPQSignerJournal& journal,
+        const uint256& genesis_hash,
+        const uint256& pro_tx_hash,
+        const pq::FinalChainLockRecordMetadata& metadata)
+    {
+        return journal.ReconcileDurableAcceptedChainLock(
+            genesis_hash, pro_tx_hash, metadata);
     }
 
     static bool ConsumeIfAbsent(CPQSignerJournal& journal,
@@ -418,6 +436,24 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
             llmq::test::PQSignerJournalTestAccess::Reconcile(
                 journal, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
                 invalid_certificate),
+            llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
+        auto invalid_metadata{llmq::pq::FinalChainLockRecordMetadata{
+            fork_b_certificate.GetLogicalId(fork_a_key.genesis_hash),
+            fork_b_certificate.GetWitnessId(fork_a_key.genesis_hash),
+            fork_b_certificate.statement}};
+        invalid_metadata.logical_id = MakeHash(50'001);
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                journal, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+                invalid_metadata),
+            llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
+        invalid_metadata.logical_id =
+            fork_b_certificate.GetLogicalId(fork_a_key.genesis_hash);
+        invalid_metadata.witness_id.SetNull();
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                journal, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+                invalid_metadata),
             llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
         BOOST_REQUIRE(journal.GetBranchLock(
             fork_a_key.genesis_hash, fork_a_key.pro_tx_hash));

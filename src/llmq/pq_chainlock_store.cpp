@@ -1043,6 +1043,14 @@ std::shared_ptr<const FinalChainLock> ChainLockFinalityStore::GetBest() const
     return m_best ? m_best->chainlock : nullptr;
 }
 
+bool FinalChainLockRecordMetadata::IsInternallyConsistent(
+    const uint256& genesis_hash) const
+{
+    return !genesis_hash.IsNull() && !logical_id.IsNull() &&
+           !witness_id.IsNull() && statement.IsStructurallyValid() &&
+           logical_id == GetLogicalChainLockId(genesis_hash, statement);
+}
+
 std::optional<AcceptedFinalChainLockView>
 ChainLockFinalityStore::GetBestRecord() const
 {

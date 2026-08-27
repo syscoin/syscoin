@@ -302,6 +302,14 @@ struct FinalChainLockRecordMetadata {
     uint256 witness_id;
     ChainLockStatement statement;
 
+    /**
+     * Check the identity available without the large witness. The witness ID
+     * is authoritative only on records produced by the validated store or
+     * persistence views; non-null alone is not proof for arbitrary instances.
+     */
+    [[nodiscard]] bool IsInternallyConsistent(
+        const uint256& genesis_hash) const;
+
     friend bool operator==(const FinalChainLockRecordMetadata&,
                            const FinalChainLockRecordMetadata&) = default;
 };

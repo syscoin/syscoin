@@ -638,9 +638,12 @@ BOOST_AUTO_TEST_CASE(
         source.nHeight, source.GetBlockHash(), source.btcpPrevCommitment};
     advance.statement.btcc_advance = llmq::pq::BTCCAdvance::ADVANCE;
     BOOST_REQUIRE(advance.IsStructurallyValid());
+    const llmq::pq::FinalChainLockRecordMetadata advance_metadata{
+        advance.GetLogicalId(genesis), advance.GetWitnessId(genesis),
+        advance.statement};
 
     const auto before_carrier{llmq::SelectCurrentChainLockBTCC(
-        genesis, config, pre_carrier_target, &advance)};
+        genesis, config, pre_carrier_target, &advance_metadata)};
     BOOST_REQUIRE(before_carrier);
     BOOST_CHECK(before_carrier->previous_cursor ==
                 advance.statement.accepted_btcc_cursor);
@@ -649,9 +652,13 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(before_carrier->selected.advance ==
                 llmq::pq::BTCCAdvance::KEEP);
     BOOST_CHECK(!before_carrier->cursor_reconciliation);
+    auto inconsistent_metadata{advance_metadata};
+    inconsistent_metadata.logical_id = NonNullHash(54'302);
+    BOOST_CHECK(!llmq::SelectCurrentChainLockBTCC(
+        genesis, config, pre_carrier_target, &inconsistent_metadata));
 
     const auto at_null_carrier{llmq::SelectCurrentChainLockBTCC(
-        genesis, config, carrier_target, &advance)};
+        genesis, config, carrier_target, &advance_metadata)};
     BOOST_REQUIRE(at_null_carrier);
     BOOST_CHECK(at_null_carrier->previous_cursor.IsNull());
     BOOST_CHECK(at_null_carrier->selected.advance ==
@@ -670,9 +677,11 @@ BOOST_AUTO_TEST_CASE(
         advance.statement.accepted_btcc_cursor;
     keep.statement.accepted_btcc_cursor =
         advance.statement.accepted_btcc_cursor;
+    const llmq::pq::FinalChainLockRecordMetadata keep_metadata{
+        keep.GetLogicalId(genesis), keep.GetWitnessId(genesis), keep.statement};
     const auto caught_up_at_null_carrier{
         llmq::SelectCurrentChainLockBTCC(
-            genesis, config, carrier_target, &keep)};
+            genesis, config, carrier_target, &keep_metadata)};
     BOOST_REQUIRE(caught_up_at_null_carrier);
     BOOST_REQUIRE(caught_up_at_null_carrier->cursor_reconciliation);
     BOOST_CHECK(caught_up_at_null_carrier->previous_cursor.IsNull());
@@ -694,7 +703,7 @@ BOOST_AUTO_TEST_CASE(
     carrier_target.pqBTCCReceiptStateHash = applied->cumulative_hash;
     carrier_target.pqBTCCReceiptLogicalId = receipt.chainlock_logical_id;
     const auto at_nonnull_carrier{llmq::SelectCurrentChainLockBTCC(
-        genesis, config, carrier_target, &keep)};
+        genesis, config, carrier_target, &keep_metadata)};
     BOOST_REQUIRE(at_nonnull_carrier);
     BOOST_CHECK(at_nonnull_carrier->previous_cursor ==
                 advance.statement.accepted_btcc_cursor);
@@ -703,7 +712,7 @@ BOOST_AUTO_TEST_CASE(
     // Equal heights with a different cursor identity are never ordered.
     carrier_target.pqBTCCReceiptCursorSysHash = NonNullHash(54'999);
     BOOST_CHECK(!llmq::SelectCurrentChainLockBTCC(
-        genesis, config, carrier_target, &keep));
+        genesis, config, carrier_target, &keep_metadata));
 }
 
 BOOST_AUTO_TEST_CASE(

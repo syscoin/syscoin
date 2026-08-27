@@ -1010,6 +1010,28 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
     BOOST_REQUIRE(store.GetByLogicalId(archived.GetLogicalId(genesis)));
 }
 
+BOOST_AUTO_TEST_CASE(validated_record_metadata_checks_precomputed_identity)
+{
+    const uint256 genesis{NonNullHash(43)};
+    const auto chainlock{
+        MakeChainLock(865, 864, NonNullHash(864), 43)};
+    const FinalChainLockRecordMetadata metadata{
+        chainlock.GetLogicalId(genesis), chainlock.GetWitnessId(genesis),
+        chainlock.statement};
+    BOOST_CHECK(metadata.IsInternallyConsistent(genesis));
+
+    auto malformed{metadata};
+    malformed.logical_id = NonNullHash(44);
+    BOOST_CHECK(!malformed.IsInternallyConsistent(genesis));
+    malformed = metadata;
+    malformed.witness_id.SetNull();
+    BOOST_CHECK(!malformed.IsInternallyConsistent(genesis));
+    malformed = metadata;
+    malformed.statement.block_hash.SetNull();
+    BOOST_CHECK(!malformed.IsInternallyConsistent(genesis));
+    BOOST_CHECK(!metadata.IsInternallyConsistent(uint256{}));
+}
+
 BOOST_AUTO_TEST_CASE(live_predecessor_binds_the_exact_btcc_cursor)
 {
     TestFinalityContext context;

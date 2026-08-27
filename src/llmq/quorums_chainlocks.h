@@ -303,7 +303,7 @@ SelectCurrentChainLockBTCC(
     const uint256& genesis_hash,
     const pq::ChainLockFinalityStoreConfig& config,
     const CBlockIndex& target,
-    const pq::FinalChainLock* durable_best)
+    const pq::FinalChainLockRecordMetadata* durable_best)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 // Compatibility names retain the narrow integration surface while the wire
@@ -1150,7 +1150,7 @@ private:
         const pq::PaymentAuditPresealState& payment_audit_state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void MaybeCheckpointPaymentAuditPreseal(
-        const pq::FinalChainLock& durable_winner)
+        const pq::FinalChainLockRecordMetadata& durable_winner)
         EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
     void UpdateDurableChainLockAuxiliaryRetention();
     [[nodiscard]] bool FlushChainLockAuxiliarySnapshotsForDurability();

@@ -23,7 +23,7 @@ namespace llmq {
 
 class CChainLocksHandler;
 namespace pq {
-struct FinalChainLock;
+struct FinalChainLockRecordMetadata;
 }
 namespace test {
 class PQSignerJournalTestAccess;
@@ -259,7 +259,7 @@ private:
     [[nodiscard]] PQSignerJournalResult ReconcileDurableAcceptedChainLock(
         const uint256& genesis_hash,
         const uint256& pro_tx_hash,
-        const pq::FinalChainLock& chainlock)
+        const pq::FinalChainLockRecordMetadata& chainlock)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**

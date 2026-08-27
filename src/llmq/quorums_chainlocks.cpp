@@ -1103,12 +1103,12 @@ BuildCandidateBoundNullCarrierReconciliation(
     const pq::ChainLockFinalityStoreConfig& config,
     const CBlockIndex& target,
     const pq::BTCCReceiptState& target_receipt_state,
-    const pq::FinalChainLock& durable_best)
+    const pq::FinalChainLockRecordMetadata& durable_best)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     AssertLockHeld(cs_main);
-    if (genesis_hash.IsNull() || !config.IsValid() ||
-        !durable_best.IsStructurallyValid()) {
+    if (!config.IsValid() ||
+        !durable_best.IsInternallyConsistent(genesis_hash)) {
         return std::nullopt;
     }
     const auto& durable{durable_best.statement};
@@ -1231,7 +1231,7 @@ SelectCurrentChainLockBTCC(
     const uint256& genesis_hash,
     const pq::ChainLockFinalityStoreConfig& config,
     const CBlockIndex& target,
-    const pq::FinalChainLock* durable_best)
+    const pq::FinalChainLockRecordMetadata* durable_best)
 {
     AssertLockHeld(cs_main);
     const pq::BTCCursor durable_cursor{
@@ -1244,7 +1244,9 @@ SelectCurrentChainLockBTCC(
     if (!indexed_receipt_state) return std::nullopt;
 
     if (durable_best != nullptr) {
-        if (!durable_best->IsStructurallyValid()) return std::nullopt;
+        if (!durable_best->IsInternallyConsistent(genesis_hash)) {
+            return std::nullopt;
+        }
         const CBlockIndex* best_index{
             target.GetAncestor(durable_best->statement.height)};
         const auto best_state{best_index == nullptr
@@ -2168,11 +2170,11 @@ bool CChainLocksHandler::ReconcileSignerJournal(const uint256& pro_tx_hash)
 {
     if (!m_signer_journal || !m_store) return true;
     LOCK(m_signer_reconcile_mutex);
-    const auto chainlock{m_store->GetBest()};
+    const auto chainlock{m_store->GetBestRecord()};
     if (!chainlock) return true;
     const PQSignerJournalResult result{
         m_signer_journal->ReconcileDurableAcceptedChainLock(
-            m_genesis_hash, pro_tx_hash, *chainlock)};
+            m_genesis_hash, pro_tx_hash, chainlock->metadata)};
     switch (result.outcome) {
     case PQSignerJournalOutcome::CERTIFICATE_RECONCILED:
     case PQSignerJournalOutcome::CERTIFICATE_REPLAY:
@@ -2364,13 +2366,13 @@ bool CChainLocksHandler::HasPendingPQHistoryAuthentication() const
     // installed winner must connect to the current active history; a valid
     // nonconnecting certificate stays pending and is never used here to
     // authorize a side-branch transition.
-    const auto accepted_best{m_store->GetBest()};
+    const auto accepted_best{m_store->GetBestRecord()};
     const CBlockIndex* active_tip{m_chainman.ActiveTip()};
     if (accepted_best) {
         const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(
-            accepted_best->statement.block_hash)};
+            accepted_best->metadata.statement.block_hash)};
         if (target == nullptr ||
-            target->nHeight != accepted_best->statement.height ||
+            target->nHeight != accepted_best->metadata.statement.height ||
             active_tip == nullptr || active_tip->nHeight < target->nHeight ||
             active_tip->GetAncestor(target->nHeight) != target) {
             return true;
@@ -2517,12 +2519,16 @@ CChainLockSigCPtr CChainLocksHandler::GetBestChainLock() const
 
 const CBlockIndex* CChainLocksHandler::GetBestChainLockIndex() const
 {
-    const auto best{GetBestChainLock()};
+    const auto best{m_store ? m_store->GetBestRecord() : std::nullopt};
     if (!best) return nullptr;
     LOCK(cs_main);
     const CBlockIndex* index{
-        m_chainman.m_blockman.LookupBlockIndex(best->statement.block_hash)};
-    return index != nullptr && index->nHeight == best->statement.height ? index : nullptr;
+        m_chainman.m_blockman.LookupBlockIndex(
+            best->metadata.statement.block_hash)};
+    return index != nullptr &&
+            index->nHeight == best->metadata.statement.height
+        ? index
+        : nullptr;
 }
 
 bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
@@ -2547,8 +2553,9 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
                     "durable finality recovery floor";
             return false;
         }
-        const auto durable{m_persistence ? m_persistence->LoadBest()
-                                         : std::nullopt};
+        const auto durable{m_persistence
+                               ? m_persistence->GetFinalityState().best
+                               : std::nullopt};
         const auto checkpoint{m_payment_audit_store
                                   ? m_payment_audit_store->GetPruneCheckpoint()
                                   : std::nullopt};
@@ -2566,7 +2573,7 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
             }
             return true;
         }
-        if (!durable->IsStructurallyValid()) {
+        if (!durable->IsInternallyConsistent(m_genesis_hash)) {
             error = "durable ChainLock recovery floor is malformed";
             return false;
         }
@@ -2635,9 +2642,9 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
                 resolved_active_floor->GetAncestor(authorizer->nHeight) !=
                     authorizer ||
                 (durable_is_authorizer &&
-                 (durable->GetLogicalId(m_genesis_hash) !=
+                 (durable->logical_id !=
                       checkpoint->authorizing_chainlock_logical_id ||
-                  durable->GetWitnessId(m_genesis_hash) !=
+                  durable->witness_id !=
                       checkpoint->authorizing_chainlock_witness_id))) {
                 error = "payment-audit checkpoint is not authorized by the "
                         "durable winner's active-chain ancestry";
@@ -4066,10 +4073,10 @@ bool CChainLocksHandler::IsBTCCPresealActive() const
     if (active_tip == nullptr || !m_store) {
         return !durable.IsEmpty();
     }
-    const auto best{m_store->GetBest()};
+    const auto best{m_store->GetBestRecord()};
     const CBlockIndex* winner{
         best ? m_chainman.m_blockman.LookupBlockIndex(
-                   best->statement.block_hash)
+                   best->metadata.statement.block_hash)
              : nullptr};
     const auto unsealed_on_active = [&](const auto& durable)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
@@ -4088,7 +4095,7 @@ bool CChainLocksHandler::IsBTCCPresealActive() const
         }
         const bool winner_descends{
             winner != nullptr && best &&
-            winner->nHeight == best->statement.height &&
+            winner->nHeight == best->metadata.statement.height &&
             winner->nHeight >= terminal->nHeight &&
             active_tip->GetAncestor(winner->nHeight) == winner &&
             winner->GetAncestor(terminal->nHeight) == terminal};
@@ -4151,12 +4158,13 @@ bool CChainLocksHandler::IsBTCCPrefixAuthenticated(
     // cumulative receipt state it signs. Catch-up is only an admission mode;
     // it is not a separate cryptographic property of the accepted winner.
     if (!m_store) return false;
-    const auto best{m_store->GetBest()};
-    if (!best || index.nHeight > best->statement.height) return false;
+    const auto best{m_store->GetBestRecord()};
+    if (!best || index.nHeight > best->metadata.statement.height) return false;
     const CBlockIndex* target{
         m_chainman.m_blockman.LookupBlockIndex(
-            best->statement.block_hash)};
-    return target != nullptr && target->nHeight == best->statement.height &&
+            best->metadata.statement.block_hash)};
+    return target != nullptr &&
+           target->nHeight == best->metadata.statement.height &&
            target->GetAncestor(index.nHeight) == &index;
 }
 
@@ -4169,19 +4177,19 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
         return false;
     }
     const auto checkpoint{m_payment_audit_store->GetPruneCheckpoint()};
-    const auto accepted{m_store->GetBest()};
-    const auto durable{m_persistence->LoadBest()};
+    const auto accepted{m_store->GetBestRecord()};
+    const auto durable{m_persistence->GetFinalityState().best};
     if (!checkpoint || !checkpoint->IsStructurallyValid() || !accepted ||
-        !durable || *accepted != *durable) {
+        !durable || accepted->metadata != *durable) {
         return false;
     }
     const CBlockIndex* authorizer{m_chainman.m_blockman.LookupBlockIndex(
         checkpoint->authorizing_target_hash)};
     const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(
-        accepted->statement.block_hash)};
+        accepted->metadata.statement.block_hash)};
     if (authorizer == nullptr || target == nullptr ||
         authorizer->nHeight != checkpoint->authorizing_target_height ||
-        target->nHeight != accepted->statement.height ||
+        target->nHeight != accepted->metadata.statement.height ||
         target->nHeight < authorizer->nHeight ||
         target->GetAncestor(authorizer->nHeight) != authorizer ||
         (authorizer->nStatus & BLOCK_FAILED_MASK) ||
@@ -4214,28 +4222,28 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
             checkpoint->authenticated_probation_state_hash ||
         !indexed_target ||
         *indexed_target !=
-            accepted->statement.payment_audit_receipt_state ||
+            accepted->metadata.statement.payment_audit_receipt_state ||
         target->pqPaymentProbationStateHash !=
-            accepted->statement.payment_probation_state_hash) {
+            accepted->metadata.statement.payment_probation_state_hash) {
         return false;
     }
     const bool same_authorizer_target{
-        accepted->statement.height ==
+        accepted->metadata.statement.height ==
             checkpoint->authorizing_target_height &&
-        accepted->statement.block_hash ==
+        accepted->metadata.statement.block_hash ==
             checkpoint->authorizing_target_hash};
     const bool exact_authorizer{
         same_authorizer_target &&
-        accepted->GetLogicalId(m_genesis_hash) ==
+        accepted->metadata.logical_id ==
             checkpoint->authorizing_chainlock_logical_id &&
-        accepted->GetWitnessId(m_genesis_hash) ==
+        accepted->metadata.witness_id ==
             checkpoint->authorizing_chainlock_witness_id};
     if (same_authorizer_target && !exact_authorizer) return false;
     if (!exact_authorizer) {
         const auto& previous{
             checkpoint->authenticated_receipt_state.cursor};
         const auto& current{
-            accepted->statement.payment_audit_receipt_state.cursor};
+            accepted->metadata.statement.payment_audit_receipt_state.cursor};
         if ((!previous.IsNull() && current.IsNull()) ||
             (!previous.IsNull() &&
              (current.epoch < previous.epoch ||
@@ -4247,9 +4255,9 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
             return false;
         }
         if (current == previous &&
-            (accepted->statement.payment_audit_receipt_state !=
+            (accepted->metadata.statement.payment_audit_receipt_state !=
                  checkpoint->authenticated_receipt_state ||
-             accepted->statement.payment_probation_state_hash !=
+             accepted->metadata.statement.payment_probation_state_hash !=
                  checkpoint->authenticated_probation_state_hash)) {
             return false;
         }
@@ -4603,8 +4611,9 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
                       : *candidate_floor;
     };
     if (m_persistence) {
-        inspect(m_persistence->LoadBest());
-        inspect(m_persistence->LoadUnsealedBTCC());
+        const auto durable{m_persistence->GetFinalityState()};
+        inspect(durable.best);
+        inspect(durable.unsealed_btcc);
     }
     if (!found_durable && m_config) {
         // SYSCOIN: Before the first winner, retain every validated branch at
@@ -4647,11 +4656,10 @@ void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
         return;
     }
 
-    const auto durable_best{m_persistence->LoadBest()};
-    const auto accepted_best{m_store->GetBest()};
+    const auto durable_best{m_persistence->GetFinalityState().best};
+    const auto accepted_best{m_store->GetBestRecord()};
     if (!durable_best || !accepted_best ||
-        durable_best->GetWitnessId(m_genesis_hash) !=
-            accepted_best->GetWitnessId(m_genesis_hash)) {
+        *durable_best != accepted_best->metadata) {
         return;
     }
 
@@ -4871,11 +4879,12 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
         return {};
     }
 
-    const auto best{m_store->GetBest()};
+    const auto best{m_store->GetBestRecord()};
     const pq::ChainLockPredecessor local{
         best ? pq::ChainLockPredecessor{
-                   best->statement.height, best->statement.block_hash,
-                   best->statement.accepted_btcc_cursor}
+                   best->metadata.statement.height,
+                   best->metadata.statement.block_hash,
+                   best->metadata.statement.accepted_btcc_cursor}
              : pq::ChainLockPredecessor{
                    m_config->anchor.height, m_config->anchor.block_hash,
                    m_config->anchor.btcc_cursor}};
@@ -4939,11 +4948,11 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
         }
 
         const bool winner_covers{
-            best && best->statement.height >= terminal->nHeight &&
-            tip->GetAncestor(best->statement.height) != nullptr &&
-            tip->GetAncestor(best->statement.height)->GetBlockHash() ==
-                best->statement.block_hash &&
-            tip->GetAncestor(best->statement.height)
+            best && best->metadata.statement.height >= terminal->nHeight &&
+            tip->GetAncestor(best->metadata.statement.height) != nullptr &&
+            tip->GetAncestor(best->metadata.statement.height)->GetBlockHash() ==
+                best->metadata.statement.block_hash &&
+            tip->GetAncestor(best->metadata.statement.height)
                     ->GetAncestor(terminal->nHeight) == terminal};
         const auto& receipt{marker->terminal_receipt};
         const bool exact_receipt_verified{
@@ -5065,15 +5074,15 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
         };
 
         const CBlockIndex* winner_target{
-            best ? tip->GetAncestor(best->statement.height) : nullptr};
+            best ? tip->GetAncestor(best->metadata.statement.height) : nullptr};
         const bool winner_covers{
             best && winner_target != nullptr &&
             winner_target->GetBlockHash() ==
-                best->statement.block_hash &&
+                best->metadata.statement.block_hash &&
             signed_target_covers(
                 winner_target,
-                best->statement.payment_audit_receipt_state,
-                best->statement.payment_probation_state_hash)};
+                best->metadata.statement.payment_audit_receipt_state,
+                best->metadata.statement.payment_probation_state_hash)};
         if (winner_covers) return;
 
         const bool candidate_covers{
@@ -5159,9 +5168,9 @@ void CChainLocksHandler::RequestCatchupChainLock()
                               : pq::LatestEligibleChainLockTargetHeight(
                                     m_config->chainlock_schedule,
                                     tip->nHeight)};
-        const auto best{m_store->GetBest()};
+        const auto best{m_store->GetBestRecord()};
         const int32_t local_height{
-            best ? best->statement.height : m_config->anchor.height};
+            best ? best->metadata.statement.height : m_config->anchor.height};
         if (!latest || *latest <= local_height) return;
     }
     const auto now{GetTime<std::chrono::microseconds>()};
@@ -5547,14 +5556,14 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
         marker = durable.active;
         if (!marker || !marker_on_active(marker)) return;
 
-        const auto best{m_store->GetBest()};
+        const auto best{m_store->GetBestRecord()};
         const CBlockIndex* authenticated{
             best ? m_chainman.m_blockman.LookupBlockIndex(
-                       best->statement.block_hash)
+                   best->metadata.statement.block_hash)
                  : nullptr};
         int32_t authenticated_through{-1};
         if (authenticated != nullptr &&
-            authenticated->nHeight == best->statement.height &&
+            authenticated->nHeight == best->metadata.statement.height &&
             authenticated->nHeight >= marker->terminal_carrier_height &&
             active_tip->GetAncestor(authenticated->nHeight) ==
                 authenticated &&
@@ -6101,14 +6110,15 @@ CChainLocksHandler::BuildCandidateContext(
     const auto indexed_receipt_state{IndexedBTCCReceiptState(*candidate)};
     const auto indexed_payment_audit_state{
         IndexedPaymentAuditReceiptState(*candidate)};
-    const auto durable_best{m_store ? m_store->GetBest() : nullptr};
+    const auto durable_best{m_store ? m_store->GetBestRecord()
+                                    : std::nullopt};
     const bool durable_snapshot_matches{
         request.has_local_chainlock
             ? (durable_best &&
-               durable_best->statement.height == request.local_best.height &&
-               durable_best->statement.block_hash ==
+               durable_best->metadata.statement.height == request.local_best.height &&
+               durable_best->metadata.statement.block_hash ==
                    request.local_best.block_hash &&
-               durable_best->statement.accepted_btcc_cursor ==
+               durable_best->metadata.statement.accepted_btcc_cursor ==
                    request.local_best.btcc_cursor)
             : !durable_best};
     std::optional<pq::BTCCCursorReconciliationProof>
@@ -6118,7 +6128,7 @@ CChainLocksHandler::BuildCandidateContext(
         const auto canonical{durable_snapshot_matches
             ? SelectCurrentChainLockBTCC(
                   m_genesis_hash, *m_config, *candidate,
-                  durable_best.get())
+                  durable_best ? &durable_best->metadata : nullptr)
             : std::optional<CurrentChainLockBTCCSelection>{}};
         current_btcc_valid = canonical &&
             MatchesCurrentChainLockBTCCSelection(
@@ -6211,16 +6221,16 @@ bool CChainLocksHandler::FlushBTCCIndexStateForDurableAcceptance(
 }
 
 void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
-    const pq::FinalChainLock& durable_winner)
+    const pq::FinalChainLockRecordMetadata& durable_winner)
 {
     if (!m_store || !m_persistence || !m_payment_audit_store ||
         !m_config || m_persistence_failed.load() ||
-        !durable_winner.IsStructurallyValid()) {
+        !durable_winner.IsInternallyConsistent(m_genesis_hash)) {
         return;
     }
-    const auto accepted{m_store->GetBest()};
-    const auto persisted{m_persistence->LoadBest()};
-    if (!accepted || !persisted || *accepted != durable_winner ||
+    const auto accepted{m_store->GetBestRecord()};
+    const auto persisted{m_persistence->GetFinalityState().best};
+    if (!accepted || !persisted || accepted->metadata != durable_winner ||
         *persisted != durable_winner) {
         return;
     }
@@ -6297,9 +6307,9 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
     checkpoint.authorizing_target_hash =
         durable_winner.statement.block_hash;
     checkpoint.authorizing_chainlock_logical_id =
-        durable_winner.GetLogicalId(m_genesis_hash);
+        durable_winner.logical_id;
     checkpoint.authorizing_chainlock_witness_id =
-        durable_winner.GetWitnessId(m_genesis_hash);
+        durable_winner.witness_id;
     if (!checkpoint.IsStructurallyValid()) return;
 
     // A later durable descendant already authenticates an unchanged archive
@@ -6359,8 +6369,9 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
                 // A later enforced winner can win the checkpoint race. Accept it
                 // only when the current durable winner cryptographically matches
                 // the observed authorizer and extends this exact active target.
-                const auto accepted_now{m_store->GetBest()};
-                const auto persisted_now{m_persistence->LoadBest()};
+                const auto accepted_now{m_store->GetBestRecord()};
+                const auto persisted_now{
+                    m_persistence->GetFinalityState().best};
                 const CBlockIndex* observed_authorizer{
                     m_chainman.m_blockman.LookupBlockIndex(
                         observed->authorizing_target_hash)};
@@ -6394,7 +6405,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
                         observed->covered_through_height};
                 const bool durable_dominates{
                     accepted_now && persisted_now &&
-                    *accepted_now == *persisted_now &&
+                    accepted_now->metadata == *persisted_now &&
                     observed_authorizer != nullptr &&
                     observed_covered != nullptr && observed_state &&
                     observed_authorizer->nHeight ==
@@ -6417,17 +6428,17 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
                         observed->authenticated_receipt_state &&
                     observed_authorizer->pqPaymentProbationStateHash ==
                         observed->authenticated_probation_state_hash &&
-                    accepted_now->statement.height ==
+                    accepted_now->metadata.statement.height ==
                         observed->authorizing_target_height &&
-                    accepted_now->statement.block_hash ==
+                    accepted_now->metadata.statement.block_hash ==
                         observed->authorizing_target_hash &&
-                    accepted_now->GetLogicalId(m_genesis_hash) ==
+                    accepted_now->metadata.logical_id ==
                         observed->authorizing_chainlock_logical_id &&
-                    accepted_now->GetWitnessId(m_genesis_hash) ==
+                    accepted_now->metadata.witness_id ==
                         observed->authorizing_chainlock_witness_id &&
-                    accepted_now->statement.payment_audit_receipt_state ==
+                    accepted_now->metadata.statement.payment_audit_receipt_state ==
                         *observed_state &&
-                    accepted_now->statement.payment_probation_state_hash ==
+                    accepted_now->metadata.statement.payment_probation_state_hash ==
                         observed_authorizer->pqPaymentProbationStateHash &&
                     (observed_authorizer->nHeight == target->nHeight ||
                      ClassifyHistoricalReceiptIndexRange(
@@ -6750,11 +6761,12 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
     const auto roster_cache{GetQuorumRosterCache()};
     if (!roster_cache) return std::nullopt;
 
-    const auto best{m_store->GetBest()};
+    const auto best{m_store->GetBestRecord()};
     const pq::ChainLockPredecessor durable_predecessor{
         best ? pq::ChainLockPredecessor{
-                   best->statement.height, best->statement.block_hash,
-                   best->statement.accepted_btcc_cursor}
+                   best->metadata.statement.height,
+                   best->metadata.statement.block_hash,
+                   best->metadata.statement.accepted_btcc_cursor}
              : pq::ChainLockPredecessor{
                    m_config->anchor.height, m_config->anchor.block_hash,
                    m_config->anchor.btcc_cursor}};
@@ -6846,7 +6858,8 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
             return std::nullopt;
         }
         const auto selected{SelectCurrentChainLockBTCC(
-            m_genesis_hash, *m_config, *indexed_target, best.get())};
+            m_genesis_hash, *m_config, *indexed_target,
+            best ? &best->metadata : nullptr)};
         if (!selected) return std::nullopt;
         btcc = *selected;
         const auto indexed_receipt_state{
@@ -6932,11 +6945,12 @@ bool CChainLocksHandler::IsCurrentSigningStatement(
         if (IsPaymentAuditPresealActive()) return false;
     }
 
-    const auto best{m_store->GetBest()};
+    const auto best{m_store->GetBestRecord()};
     const pq::ChainLockPredecessor durable_predecessor{
         best ? pq::ChainLockPredecessor{
-                   best->statement.height, best->statement.block_hash,
-                   best->statement.accepted_btcc_cursor}
+                   best->metadata.statement.height,
+                   best->metadata.statement.block_hash,
+                   best->metadata.statement.accepted_btcc_cursor}
              : pq::ChainLockPredecessor{
                    m_config->anchor.height, m_config->anchor.block_hash,
                    m_config->anchor.btcc_cursor}};
@@ -6988,7 +7002,8 @@ bool CChainLocksHandler::IsCurrentSigningStatement(
         return false;
     }
     const auto selected{SelectCurrentChainLockBTCC(
-        m_genesis_hash, *m_config, *target, best.get())};
+        m_genesis_hash, *m_config, *target,
+        best ? &best->metadata : nullptr)};
     const auto receipt_state{IndexedBTCCReceiptState(*target)};
     const auto payment_audit_state{
         IndexedPaymentAuditReceiptState(*target)};
@@ -9990,13 +10005,13 @@ bool CChainLocksHandler::ProcessNewChainLock(
         }
     }
 
-    const auto current_best{m_store->GetBest()};
+    const auto current_best{m_store->GetBestRecord()};
     const auto historical{
         GetHistoricalAdmission(chainlock.statement, logical_id)};
     const bool preseal_receipt{
         historical.admission == HistoricalAdmission::PRESEAL_RECEIPT};
     const int32_t local_finality_height{
-        current_best ? current_best->statement.height
+        current_best ? current_best->metadata.statement.height
                      : m_config->anchor.height};
     const bool preseal_receipt_rebase{
         ShouldRouteBTCCPresealReceiptToCatchup(
@@ -10005,7 +10020,8 @@ bool CChainLocksHandler::ProcessNewChainLock(
     const bool archive_only{
         (preseal_receipt && !preseal_receipt_rebase) ||
         (IsPendingBTCCReceiptCertificate(logical_id) && current_best &&
-         chainlock.statement.height < current_best->statement.height)};
+         chainlock.statement.height <
+             current_best->metadata.statement.height)};
     const bool catchup{
         historical.admission == HistoricalAdmission::CURRENT_CATCHUP ||
         historical.admission == HistoricalAdmission::PRESEAL_CATCHUP ||
@@ -10324,9 +10340,9 @@ bool CChainLocksHandler::ProcessNewChainLock(
 
     {
         LOCK(m_persisted_mutex);
-        const auto accepted_best{m_store->GetBest()};
+        const auto accepted_best{m_store->GetBestRecord()};
         if (accepted_best &&
-            accepted_best->GetWitnessId(m_genesis_hash) == witness_id) {
+            accepted_best->metadata.witness_id == witness_id) {
             m_threshold_attested_enforcement_witness =
                 historical_admission ? witness_id : uint256{};
         }
@@ -10498,9 +10514,9 @@ CChainLocksHandler::TryImportPersistedChainLock()
         LOCK(m_persisted_mutex);
         const uint256 persisted_witness{
             persisted.GetWitnessId(m_genesis_hash)};
-        const auto accepted_best{m_store->GetBest()};
+        const auto accepted_best{m_store->GetBestRecord()};
         if (accepted_best &&
-            accepted_best->GetWitnessId(m_genesis_hash) ==
+            accepted_best->metadata.witness_id ==
                 persisted_witness) {
             m_threshold_attested_enforcement_witness =
                 persisted_requires_historical_enforcement
@@ -11317,8 +11333,9 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 void CChainLocksHandler::EnforceBestChainLock()
 {
     if (!m_enforced.load()) return;
-    const auto certificate{GetBestChainLock()};
-    if (!certificate || !m_store || !m_config) return;
+    if (!m_store || !m_config) return;
+    const auto record{m_store->GetBestRecord()};
+    if (!record) return;
     uint256 threshold_attested_witness;
     {
         LOCK(m_persisted_mutex);
@@ -11330,7 +11347,7 @@ void CChainLocksHandler::EnforceBestChainLock()
         ChainLockEnforcementProvenance::EXACT_LOCAL};
     {
         LOCK(cs_main);
-        const auto& statement{certificate->statement};
+        const auto& statement{record->metadata.statement};
         best = m_chainman.m_blockman.LookupBlockIndex(statement.block_hash);
         if (best == nullptr || best->nHeight != statement.height) return;
         if (m_chainman.IsSnapshotActive() &&
@@ -11339,8 +11356,7 @@ void CChainLocksHandler::EnforceBestChainLock()
         }
         if (!HasFullChainLockTargetValidation(
                 *best, statement.previous_chainlock_height)) {
-            const uint256 witness_id{
-                certificate->GetWitnessId(m_genesis_hash)};
+            const uint256 witness_id{record->metadata.witness_id};
             if (witness_id.IsNull() ||
                 threshold_attested_witness != witness_id ||
                 !m_chainman.IsBaseBlockSyncComplete() ||
@@ -11403,7 +11419,7 @@ void CChainLocksHandler::EnforceBestChainLock()
         return;
     }
     MaybeReleaseFinalitySnapshotPublicationRetention();
-    MaybeCheckpointPaymentAuditPreseal(*certificate);
+    MaybeCheckpointPaymentAuditPreseal(record->metadata);
     const bool enforced_on_active{WITH_LOCK(cs_main, {
         const CBlockIndex* tip{m_chainman.ActiveTip()};
         return tip != nullptr && tip->nHeight >= best->nHeight &&
@@ -11486,7 +11502,7 @@ bool CChainLocksHandler::HasConflictingChainLock(
     int32_t height, const uint256& block_hash) const
 {
     bool unknown_is_conflict{true};
-    if (m_store && m_config && !m_store->GetBest()) {
+    if (m_store && m_config && !m_store->GetBestRecord()) {
         AssertLockHeld(cs_main);
         const CBlockIndex* const anchor{
             m_chainman.m_blockman.LookupBlockIndex(

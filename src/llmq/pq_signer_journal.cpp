@@ -4,7 +4,7 @@
 
 #include <llmq/pq_signer_journal.h>
 
-#include <llmq/pq_chainlock_types.h>
+#include <llmq/pq_chainlock_store.h>
 
 #include <hash.h>
 
@@ -477,24 +477,22 @@ std::optional<PQSignerBranchLock> CPQSignerJournal::GetBranchLock(
 PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
     const uint256& genesis_hash,
     const uint256& pro_tx_hash,
-    const pq::FinalChainLock& chainlock)
+    const pq::FinalChainLockRecordMetadata& chainlock)
 {
     LOCK(m_mutex);
     if (m_failure) return Result(*m_failure);
     if (!IsValidBranchIdentity(genesis_hash, pro_tx_hash) ||
-        !chainlock.IsStructurallyValid()) {
+        !chainlock.IsInternallyConsistent(genesis_hash)) {
         return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
     }
 
-    const uint256 logical_id{chainlock.GetLogicalId(genesis_hash)};
-    const uint256 witness_id{chainlock.GetWitnessId(genesis_hash)};
     const AcceptedCertificateValue accepted{
         .lock = PQSignerBranchLock{
             chainlock.statement.height,
             chainlock.statement.block_hash,
-            logical_id},
-        .logical_id = logical_id,
-        .witness_id = witness_id};
+            chainlock.logical_id},
+        .logical_id = chainlock.logical_id,
+        .witness_id = chainlock.witness_id};
     if (!IsValidAcceptedCertificate(accepted)) {
         return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
     }
