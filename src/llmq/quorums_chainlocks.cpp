@@ -1778,7 +1778,8 @@ void CChainLocksHandler::Start()
             &util::TraceThread, "pqcl-schdlr",
             [scheduler] { scheduler->serviceQueue(); });
         scheduler->scheduleEvery([this]() EXCLUSIVE_LOCKS_REQUIRED(
-            !cs_main, !m_chainlock_admission_mutex) {
+            !cs_main, !m_chainlock_admission_mutex,
+            !m_share_lifecycle_mutex) {
             (void)TryImportPersistedChainLock();
             (void)TryImportPersistedUnsealedBTCC();
             CheckActiveState();
@@ -1793,6 +1794,10 @@ void CChainLocksHandler::Start()
             MaybeCreateAndSignChainLock();
             MaybeCreateAndSignPaymentAudit();
         }, std::chrono::seconds{5});
+        {
+            LOCK(m_share_lifecycle_mutex);
+            m_share_admission_generation.fetch_add(1);
+        }
     }
     RefreshPQHistoryAuthState();
 }
@@ -1803,30 +1808,45 @@ void CChainLocksHandler::Stop()
     std::unique_ptr<CScheduler> scheduler;
     {
         LOCK(m_lifecycle_mutex);
+        {
+            LOCK(m_share_lifecycle_mutex);
+            const uint64_t admission_generation{
+                m_share_admission_generation.load()};
+            if ((admission_generation & uint64_t{1}) != 0) {
+                m_share_admission_generation.fetch_add(1);
+            }
+        }
         if (!m_started) return;
         m_started = false;
         scheduler = std::move(m_scheduler);
         thread = std::move(m_scheduler_thread);
+        // Keep lifecycle serialization through cleanup. Otherwise a
+        // concurrent Start could publish a new scheduler and journal before
+        // this Stop resets the old generation's state.
+        if (scheduler) scheduler->stop();
+        if (thread && thread->joinable()) thread->join();
+        {
+            LOCK(m_collector_mutex);
+            ResetCollectors();
+        }
+        {
+            LOCK(m_payment_audit_mutex);
+            m_payment_audit_runtime.reset();
+        }
+        m_signer_journal.reset();
+        {
+            LOCK(m_pending_btcc_receipt_mutex);
+            m_pending_btcc_receipt.reset();
+            m_pending_btcc_last_request = std::chrono::microseconds{0};
+        }
+        {
+            LOCK(m_pending_payment_audit_receipt_mutex);
+            m_pending_payment_audit_receipt.reset();
+            m_pending_payment_audit_last_request =
+                std::chrono::microseconds{0};
+        }
+        m_retry_pending_btcc_block.store(false);
     }
-    if (scheduler) scheduler->stop();
-    if (thread && thread->joinable()) thread->join();
-    {
-        LOCK(m_collector_mutex);
-        ResetCollectors();
-    }
-    m_signer_journal.reset();
-    {
-        LOCK(m_pending_btcc_receipt_mutex);
-        m_pending_btcc_receipt.reset();
-        m_pending_btcc_last_request = std::chrono::microseconds{0};
-    }
-    {
-        LOCK(m_pending_payment_audit_receipt_mutex);
-        m_pending_payment_audit_receipt.reset();
-        m_pending_payment_audit_last_request =
-            std::chrono::microseconds{0};
-    }
-    m_retry_pending_btcc_block.store(false);
 }
 
 std::optional<CChainLocksHandler::CurrentSigningContext>
@@ -1860,6 +1880,21 @@ CChainLocksHandler::GetQuorumRosterCache() const
 {
     LOCK(m_lookup_mutex);
     return m_quorum_roster_cache;
+}
+
+uint64_t CChainLocksHandler::GetShareAdmissionGeneration() const noexcept
+{
+    const uint64_t generation{m_share_admission_generation.load()};
+    return (generation & uint64_t{1}) != 0 && m_enabled.load()
+               ? generation
+               : 0;
+}
+
+bool CChainLocksHandler::IsShareAdmissionGenerationCurrent(
+    uint64_t generation) const noexcept
+{
+    return generation != 0 && m_enabled.load() &&
+           m_share_admission_generation.load() == generation;
 }
 
 bool CChainLocksHandler::IsConfiguredForVerification() const
@@ -6584,8 +6619,12 @@ bool CChainLocksHandler::CheckPaymentAuditSeedSigningPolicy(
 }
 
 std::optional<CChainLocksHandler::CurrentSigningContexts>
-CChainLocksHandler::GetOrCreateCurrentSigningContexts()
+CChainLocksHandler::GetOrCreateCurrentSigningContexts(
+    uint64_t admission_generation)
 {
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+        return std::nullopt;
+    }
     {
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return std::nullopt;
@@ -6624,14 +6663,28 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts()
     };
 
     auto cached{cached_context()};
-    if (cached && is_current(*cached)) return cached;
+    if (cached &&
+        IsShareAdmissionGenerationCurrent(admission_generation) &&
+        is_current(*cached)) {
+        return cached;
+    }
 
     LOCK(m_context_build_mutex);
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+        return std::nullopt;
+    }
     cached = cached_context();
-    if (cached && is_current(*cached)) return cached;
+    if (cached &&
+        IsShareAdmissionGenerationCurrent(admission_generation) &&
+        is_current(*cached)) {
+        return cached;
+    }
     uint64_t build_generation{0};
     {
         LOCK(m_collector_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+            return std::nullopt;
+        }
         ResetCollectors();
         build_generation = m_collector_generation;
     }
@@ -6654,7 +6707,10 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts()
     uint64_t published_generation{0};
     {
         LOCK(m_collector_mutex);
-        if (m_collector_generation != build_generation) return std::nullopt;
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            m_collector_generation != build_generation) {
+            return std::nullopt;
+        }
         m_collectors = std::move(collectors);
         m_collector_count = current->count;
         m_collector_rosters = current->rosters;
@@ -6664,7 +6720,8 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts()
     // Tip and durable-predecessor state are not serialized by the collector
     // mutex. Recheck after publication and invalidate only the generation
     // built here, never a replacement installed by a later caller.
-    if (!is_current(*current)) {
+    if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+        !is_current(*current)) {
         LOCK(m_collector_mutex);
         if (m_collector_generation == published_generation) {
             ResetCollectors();
@@ -7026,8 +7083,11 @@ bool CChainLocksHandler::RefreshPaymentAuditStaging()
 
 void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
     const pq::ChainLockShare& share,
-    const pq::FrozenQuorumRostersPtr& rosters)
+    const pq::FrozenQuorumRostersPtr& rosters,
+    uint64_t admission_generation)
 {
+    LOCK(m_share_lifecycle_mutex);
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     {
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
@@ -7110,6 +7170,7 @@ void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
     if (!row.IsStructurallyValid(m_genesis_hash)) return;
 
     const auto active_epoch{m_payment_audit_staging_store->ActiveEpoch()};
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     if (!active_epoch || *active_epoch != *epoch) {
         const auto activated{
             m_payment_audit_staging_store->ActivateEpoch(*epoch)};
@@ -7118,6 +7179,7 @@ void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
             return;
         }
     }
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     auto ensured{m_payment_audit_staging_store->EnsureRow(row)};
     if (ensured == pq::PaymentAuditStagingResult::BRANCH_CONFLICT) {
         ensured = m_payment_audit_staging_store->ReplaceRowBranch(row);
@@ -7126,10 +7188,13 @@ void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
         ensured != pq::PaymentAuditStagingResult::DUPLICATE) {
         return;
     }
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     if (m_payment_audit_staging_store->AddVerifiedResponse(
             *epoch, *row_index, tip_height, response) ==
         pq::PaymentAuditStagingResult::ACCEPTED) {
-        RelayPaymentAuditResponse(response);
+        if (IsShareAdmissionGenerationCurrent(admission_generation)) {
+            RelayPaymentAuditResponse(response);
+        }
     }
 }
 
@@ -7556,14 +7621,18 @@ bool CChainLocksHandler::IsCurrentPaymentAuditStatement(
 void CChainLocksHandler::RelayPaymentAuditShare(
     const pq::PaymentAuditShare& share,
     const pq::FrozenQuorumRostersPtr& rosters,
+    uint64_t admission_generation,
     NodeId except_peer)
 {
+    LOCK(m_share_lifecycle_mutex);
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     {
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
     }
     if (!rosters) return;
     m_connman.ForEachNode([&](CNode* node) {
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         if (node == nullptr || node->GetId() == except_peer ||
             node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION ||
             !IsActivePaymentAuditRelay(
@@ -7579,6 +7648,8 @@ void CChainLocksHandler::RelayPaymentAuditShare(
 void CChainLocksHandler::ProcessPaymentAuditShare(
     CNode* from, CDataStream& payload)
 {
+    const uint64_t admission_generation{GetShareAdmissionGeneration()};
+    if (admission_generation == 0) return;
     if (from == nullptr ||
         from->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
         if (from != nullptr) from->fDisconnect = true;
@@ -7620,6 +7691,7 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         // Runtime construction belongs to the scheduler. This lock admits a
         // share only to an already-authenticated, generation-bound collector.
         LOCK(m_payment_audit_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         if (!m_payment_audit_runtime ||
             !m_payment_audit_runtime->collector ||
             !m_payment_audit_runtime->statement ||
@@ -7649,6 +7721,13 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
             }
         }
     }
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+        if (finalized) {
+            FinishPaymentAuditFinalizationAttempt(
+                finalized, /*submit=*/false);
+        }
+        return;
+    }
     if (result != pq::ShareCollectionResult::ACCEPTED) {
         if (collection_error ==
             pq::ShareCollectionError::INVALID_SIGNATURE) {
@@ -7663,8 +7742,22 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         }
         return;
     }
-    RelayPaymentAuditShare(share, rosters, node_id);
+    RelayPaymentAuditShare(
+        share, rosters, admission_generation, node_id);
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+        if (finalized) {
+            FinishPaymentAuditFinalizationAttempt(
+                finalized, /*submit=*/false);
+        }
+        return;
+    }
     if (finalized) {
+        LOCK(m_share_lifecycle_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+            FinishPaymentAuditFinalizationAttempt(
+                finalized, /*submit=*/false);
+            return;
+        }
         FinishPaymentAuditFinalizationAttempt(finalized, /*submit=*/true);
     }
 }
@@ -7672,6 +7765,8 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
 void CChainLocksHandler::ProcessChainLockShare(CNode* from,
                                                CDataStream& payload)
 {
+    const uint64_t admission_generation{GetShareAdmissionGeneration()};
+    if (admission_generation == 0) return;
     if (from == nullptr || from->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
         if (from != nullptr) from->fDisconnect = true;
         return;
@@ -7702,7 +7797,7 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         punish(100, "bad-pq-clshare-encoding");
         return;
     }
-    auto contexts{GetOrCreateCurrentSigningContexts()};
+    auto contexts{GetOrCreateCurrentSigningContexts(admission_generation)};
     const auto current{contexts ? contexts->Find(share.GetStatement())
                                 : std::nullopt};
     if (!current || !current->rosters ||
@@ -7720,16 +7815,21 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         pq::ShareCollectionError::NONE};
     pq::ShareCollectionResult collection_result{
         pq::ShareCollectionResult::REJECTED};
+    uint64_t collector_generation{0};
     {
         LOCK(m_collector_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         pq::ChainLockCollector* collector{FindCollector(current->statement)};
         if (collector == nullptr) return;
+        collector_generation = m_collector_generation;
         collection_result =
             collector->AddVerifiedShare(share, &collection_error);
         if (collection_result == pq::ShareCollectionResult::ACCEPTED) {
             finalized = collector->Finalize();
         }
     }
+
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
 
     if (collection_result != pq::ShareCollectionResult::ACCEPTED) {
         if (collection_error == pq::ShareCollectionError::INVALID_SIGNATURE) {
@@ -7741,13 +7841,19 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
     }
     if (!IsCurrentSigningStatement(current->statement)) {
         LOCK(m_collector_mutex);
-        ResetCollectors();
+        if (m_collector_generation == collector_generation) {
+            ResetCollectors();
+        }
         return;
     }
-    MaybeCapturePaymentAuditResponse(share, current->rosters);
-    RelayChainLockShare(share, node_id);
+    MaybeCapturePaymentAuditResponse(
+        share, current->rosters, admission_generation);
+    RelayChainLockShare(share, admission_generation, node_id);
 
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     if (finalized) {
+        LOCK(m_share_lifecycle_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         BlockValidationState state;
         CChainLockSig chainlock{std::move(*finalized)};
         if (!ProcessNewChainLock(-1, chainlock, state)) {
@@ -9625,8 +9731,12 @@ void CChainLocksHandler::ResetCollectors()
 }
 
 void CChainLocksHandler::RelayChainLockShare(
-    const pq::ChainLockShare& share, NodeId except_peer)
+    const pq::ChainLockShare& share,
+    uint64_t admission_generation,
+    NodeId except_peer)
 {
+    LOCK(m_share_lifecycle_mutex);
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     {
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
@@ -9648,6 +9758,7 @@ void CChainLocksHandler::RelayChainLockShare(
     }
 
     m_connman.ForEachNode([&](CNode* node) {
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         if (node == nullptr || node->GetId() == except_peer ||
             node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
             return;
@@ -9662,7 +9773,9 @@ void CChainLocksHandler::RelayChainLockShare(
 
 void CChainLocksHandler::MaybeCreateAndSignChainLock()
 {
-    if (!fMasternodeMode || !m_signer_journal ||
+    const uint64_t admission_generation{GetShareAdmissionGeneration()};
+    if (admission_generation == 0 || !fMasternodeMode ||
+        !m_signer_journal ||
         !m_signer_journal->IsHealthy() || !masternodeSync.IsSynced()) {
         return;
     }
@@ -9694,7 +9807,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
         return;
     }
 
-    auto contexts{GetOrCreateCurrentSigningContexts()};
+    auto contexts{GetOrCreateCurrentSigningContexts(admission_generation)};
     if (!contexts) return;
 
     std::optional<CurrentSigningContext> current;
@@ -9742,7 +9855,10 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
     // Bitcoin policy checks deliberately run without cs_main and can span
     // several bounded RPC calls. A concurrent Syscoin reorg invalidates both
     // approval and fallback; never let either path reserve a stale key slot.
-    if (!IsCurrentSigningStatement(current->statement)) return;
+    if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+        !IsCurrentSigningStatement(current->statement)) {
+        return;
+    }
     if (!ConsumeStartupChainLockSlots(*current, local_pro_tx_hash)) return;
 
     bool local_member{false};
@@ -9824,6 +9940,9 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             }
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
+            if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+                return;
+            }
             auto signed_share{signer.Sign(
                 current->statement, *current->rosters,
                 current->authorization_mask,
@@ -9854,6 +9973,10 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             std::optional<pq::FinalChainLock> finalized;
             {
                 LOCK(m_collector_mutex);
+                if (!IsShareAdmissionGenerationCurrent(
+                        admission_generation)) {
+                    return;
+                }
                 pq::ChainLockCollector* collector{
                     FindCollector(current->statement)};
                 if (collector == nullptr) return;
@@ -9865,10 +9988,20 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 }
                 finalized = collector->Finalize();
             }
-            MaybeCapturePaymentAuditResponse(*signed_share.share,
-                                             current->rosters);
-            RelayChainLockShare(*signed_share.share);
+            MaybeCapturePaymentAuditResponse(
+                *signed_share.share, current->rosters,
+                admission_generation);
+            RelayChainLockShare(
+                *signed_share.share, admission_generation);
+            if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+                return;
+            }
             if (finalized) {
+                LOCK(m_share_lifecycle_mutex);
+                if (!IsShareAdmissionGenerationCurrent(
+                        admission_generation)) {
+                    return;
+                }
                 BlockValidationState state;
                 CChainLockSig chainlock{std::move(*finalized)};
                 (void)ProcessNewChainLock(-1, chainlock, state);
@@ -9880,7 +10013,9 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
 
 void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 {
-    if (!fMasternodeMode || !m_signer_journal ||
+    const uint64_t admission_generation{GetShareAdmissionGeneration()};
+    if (admission_generation == 0 || !fMasternodeMode ||
+        !m_signer_journal ||
         !m_signer_journal->IsHealthy() || !masternodeSync.IsSynced()) {
         return;
     }
@@ -9944,6 +10079,12 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         }
     }
     if (certificate_to_process) {
+        LOCK(m_share_lifecycle_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+            FinishPaymentAuditFinalizationAttempt(
+                certificate_to_process, /*submit=*/false);
+            return;
+        }
         if (!IsCurrentPaymentAuditStatement(
                 certificate_to_process->statement)) {
             FinishPaymentAuditFinalizationAttempt(
@@ -9991,7 +10132,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         *expected_branch_lock != seal_lock) {
         return;
     }
-    if (!ConsumeStartupPaymentAuditSlots(
+    if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+        !ConsumeStartupPaymentAuditSlots(
             *statement, *rosters, authorization_mask, local_pro_tx_hash)) {
         return;
     }
@@ -10031,6 +10173,9 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
+            if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+                return;
+            }
             auto signed_share{signer.Sign(
                 *statement, reporter_observed_members,
                 *seal_chainlock, *rosters,
@@ -10058,6 +10203,10 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             std::shared_ptr<const pq::FinalPaymentAudit> finalized;
             {
                 LOCK(m_payment_audit_mutex);
+                if (!IsShareAdmissionGenerationCurrent(
+                        admission_generation)) {
+                    return;
+                }
                 if (!m_payment_audit_runtime ||
                     !m_payment_audit_runtime->collector ||
                     !m_payment_audit_runtime->statement ||
@@ -10086,8 +10235,23 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                         ->finalization_attempt_in_flight = true;
                 }
             }
-            RelayPaymentAuditShare(*signed_share.share, rosters);
+            RelayPaymentAuditShare(
+                *signed_share.share, rosters, admission_generation);
+            if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+                if (finalized) {
+                    FinishPaymentAuditFinalizationAttempt(
+                        finalized, /*submit=*/false);
+                }
+                return;
+            }
             if (finalized) {
+                LOCK(m_share_lifecycle_mutex);
+                if (!IsShareAdmissionGenerationCurrent(
+                        admission_generation)) {
+                    FinishPaymentAuditFinalizationAttempt(
+                        finalized, /*submit=*/false);
+                    return;
+                }
                 FinishPaymentAuditFinalizationAttempt(
                     finalized, /*submit=*/true);
                 return;

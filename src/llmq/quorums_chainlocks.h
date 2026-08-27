@@ -244,6 +244,7 @@ public:
 
     void Start()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lifecycle_mutex,
+                                 !m_share_lifecycle_mutex,
                                  !m_persisted_mutex,
                                  !m_lookup_mutex,
                                  !m_chainlock_admission_mutex,
@@ -256,6 +257,7 @@ public:
                                  !m_btcc_preseal_mutex);
     void Stop()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lifecycle_mutex,
+                                 !m_share_lifecycle_mutex,
                                  !m_collector_mutex,
                                  !m_payment_audit_mutex,
                                  !m_pending_btcc_receipt_mutex,
@@ -424,6 +426,7 @@ public:
                         const std::string& command,
                         CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_share_lifecycle_mutex,
                                  !m_context_build_mutex,
                                  !m_collector_mutex,
                                  !m_payment_audit_mutex,
@@ -598,6 +601,9 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     [[nodiscard]] pq::FrozenQuorumRosterCachePtr GetQuorumRosterCache() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    [[nodiscard]] uint64_t GetShareAdmissionGeneration() const noexcept;
+    [[nodiscard]] bool IsShareAdmissionGenerationCurrent(
+        uint64_t generation) const noexcept;
     [[nodiscard]] bool IsChainLockVerificationAvailable() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
                                  !m_lookup_mutex);
@@ -618,6 +624,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex);
     void MaybeCreateAndSignChainLock()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_share_lifecycle_mutex,
                                  !m_share_signing_mutex,
                                  !m_context_build_mutex,
                                  !m_collector_mutex,
@@ -633,6 +640,7 @@ private:
                                  !m_pending_btcc_receipt_mutex);
     void ProcessChainLockShare(CNode* from, CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_share_lifecycle_mutex,
                                  !m_context_build_mutex,
                                  !m_collector_mutex,
                                  !m_payment_audit_mutex,
@@ -696,6 +704,7 @@ private:
                                  !m_btcc_preseal_mutex);
     void ProcessPaymentAuditShare(CNode* from, CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_share_lifecycle_mutex,
                                  !m_lookup_mutex,
                                  !m_payment_audit_mutex,
                                  !m_verification_mutex,
@@ -703,8 +712,10 @@ private:
                                  !m_btcc_preseal_mutex);
     void MaybeCapturePaymentAuditResponse(
         const pq::ChainLockShare& share,
-        const pq::FrozenQuorumRostersPtr& rosters)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
+        const pq::FrozenQuorumRostersPtr& rosters,
+        uint64_t admission_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
+                                 !m_lookup_mutex,
                                  !m_payment_audit_mutex,
                                  !m_btcc_preseal_mutex);
     void RelayPaymentAuditResponse(
@@ -722,8 +733,10 @@ private:
     void RelayPaymentAuditShare(
         const pq::PaymentAuditShare& share,
         const pq::FrozenQuorumRostersPtr& rosters,
+        uint64_t admission_generation,
         NodeId except_peer = -1)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
+                                 !m_btcc_preseal_mutex);
     [[nodiscard]] bool PreparePaymentAuditSigningRuntime()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_payment_audit_mutex,
@@ -733,6 +746,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
     void MaybeCreateAndSignPaymentAudit()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_share_lifecycle_mutex,
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
@@ -790,7 +804,7 @@ private:
                                  !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] std::optional<CurrentSigningContexts>
-    GetOrCreateCurrentSigningContexts()
+    GetOrCreateCurrentSigningContexts(uint64_t admission_generation)
         EXCLUSIVE_LOCKS_REQUIRED(!m_context_build_mutex,
                                  !m_collector_mutex,
                                  !m_lookup_mutex,
@@ -888,8 +902,10 @@ private:
     [[nodiscard]] bool FlushBTCCIndexStateForDurableAcceptance(
         const pq::FinalChainLock& chainlock) const LOCKS_EXCLUDED(cs_main);
     void RelayChainLockShare(const pq::ChainLockShare& share,
+                             uint64_t admission_generation,
                              NodeId except_peer = -1)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_collector_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
+                                 !m_collector_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] pq::ChainLockCollector* FindCollector(
         const pq::ChainLockStatement& statement)
@@ -1049,6 +1065,12 @@ private:
     std::unique_ptr<CScheduler> m_scheduler GUARDED_BY(m_lifecycle_mutex);
     std::unique_ptr<std::thread> m_scheduler_thread GUARDED_BY(m_lifecycle_mutex);
     bool m_started GUARDED_BY(m_lifecycle_mutex){false};
+    // Linearize lifecycle transitions with staging, relay, and local
+    // certificate submission; expensive verification uses the generation.
+    mutable Mutex m_share_lifecycle_mutex;
+    // Stop closes the odd generation before joining the scheduler and before
+    // connman drains, so pre-stop share work cannot revive after a restart.
+    std::atomic<uint64_t> m_share_admission_generation{0};
     std::atomic_bool m_persistence_failed{false};
     std::atomic_bool m_enabled{false};
     std::atomic_bool m_enforced{false};
