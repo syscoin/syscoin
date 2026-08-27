@@ -1813,6 +1813,7 @@ void CChainLocksHandler::Stop()
         {
             LOCK(m_payment_audit_mutex);
             ResetPaymentAuditRuntime();
+            m_payment_audit_network_context.reset();
         }
         m_signer_journal.reset();
         {
@@ -6742,7 +6743,29 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
     const auto roster_cache{GetQuorumRosterCache()};
     if (!roster_cache) return std::nullopt;
 
+    const auto finalized{
+        m_store->GetByHeight(row->expected.response_height)};
+    std::optional<pq::ChainLockStatement> response_statement;
+    if (finalized) {
+        response_statement = finalized->statement;
+    } else {
+        response_statement =
+            m_payment_audit_staging_store->GetVerifiedResponseStatement(
+                row->expected);
+    }
+    if (!response_statement ||
+        response_statement->height != row->expected.response_height ||
+        response_statement->block_hash != row->response_block_hash ||
+        response_statement->btcc_advance != row->response_advance ||
+        response_statement->accepted_btcc_cursor.sys_height !=
+            row->expected.response_height ||
+        pq::GetLogicalChainLockId(m_genesis_hash, *response_statement) !=
+            row->expected.response_chainlock_logical_id) {
+        return std::nullopt;
+    }
+
     pq::FrozenQuorumRostersPtr rosters;
+    uint8_t authorization_mask{0};
     {
         LOCK(cs_main);
         const CBlockIndex* tip{m_chainman.ActiveTip()};
@@ -6763,26 +6786,41 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
         pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
         rosters = roster_cache->GetActive(
             response_index->nHeight, *response_index, &build_error);
+        if (rosters) {
+            authorization_mask = DeriveSigningRosterAuthorizationMask(
+                *rosters, *response_index,
+                response_statement->previous_chainlock_height,
+                response_statement->previous_chainlock_hash);
+        }
     }
     if (!rosters || rosters->back().descriptor.epoch != epoch ||
         rosters->back().descriptor.valid_members !=
             row->subject_valid_members ||
         pq::GetPaymentAuditDescriptorHash(
             m_genesis_hash, rosters->back().descriptor) !=
-            row->expected.subject_descriptor_hash) {
+            row->expected.subject_descriptor_hash ||
+        !pq::IsSigningRosterAuthorizationMask(authorization_mask) ||
+        (authorization_mask &
+         (uint8_t{1} << (pq::ACTIVE_QUORUMS - 1))) == 0) {
         return std::nullopt;
     }
-    if (const auto finalized{m_store->GetByHeight(
-            row->expected.response_height)};
-        finalized &&
-        (finalized->statement.block_hash != row->response_block_hash ||
-         finalized->GetLogicalId(m_genesis_hash) !=
-             row->expected.response_chainlock_logical_id)) {
+    auto response_context{pq::PreparedChainLockContext::Create(
+        m_genesis_hash, m_config->chainlock_schedule,
+        std::move(*response_statement), std::move(rosters),
+        authorization_mask)};
+    if (!response_context) {
+        return std::nullopt;
+    }
+    const auto current{m_payment_audit_staging_store->GetOpenRowMetadata(
+        row->expected.epoch, row->expected.row_index)};
+    if (!current || !SamePaymentAuditOpenRowIdentity(*current, *row) ||
+        !IsCurrentPaymentAuditNetworkRow(*row)) {
         return std::nullopt;
     }
     std::vector<uint256> active_relays;
-    active_relays.reserve(rosters->size() * pq::QUORUM_SIZE);
-    for (const auto& roster : *rosters) {
+    active_relays.reserve(
+        response_context->Rosters().size() * pq::QUORUM_SIZE);
+    for (const auto& roster : response_context->Rosters()) {
         for (const auto& member : roster.members) {
             if (member.eligible && member.child_root) {
                 active_relays.push_back(member.pro_tx_hash);
@@ -6794,7 +6832,19 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
         std::unique(active_relays.begin(), active_relays.end()),
         active_relays.end());
     return PaymentAuditResponseDefinition{
-        *row, std::move(rosters), std::move(active_relays)};
+        *row, std::move(response_context), std::move(active_relays)};
+}
+
+bool CChainLocksHandler::IsPaymentAuditResponseDefinitionSourceCurrent(
+    const PaymentAuditResponseDefinition& definition) const
+{
+    if (!m_store || !definition.response_context) return false;
+    const auto finalized{m_store->GetByHeight(
+        definition.row.expected.response_height)};
+    if (!finalized) return true;
+    return pq::MatchesPaymentAuditResponseContext(
+        definition.row.expected, *definition.response_context,
+        finalized->statement);
 }
 
 std::shared_ptr<const CChainLocksHandler::PaymentAuditNetworkContext>
@@ -6843,24 +6893,68 @@ bool CChainLocksHandler::RefreshPaymentAuditNetworkContext()
     }
 
     // Only the scheduler builds branch/roster context. Network messages may
-    // consume this immutable generation but never trigger a rebuild.
-    auto next{std::make_shared<PaymentAuditNetworkContext>()};
-    next->rows.reserve(pq::PaymentAuditStagingStore::MAX_OPEN_ROWS);
+    // consume this immutable snapshot but never trigger a rebuild.
+    std::vector<pq::PaymentAuditOpenRowMetadata> rows;
     const auto epoch{m_payment_audit_staging_store->ActiveEpoch()};
     if (epoch) {
-        for (const auto& row :
-             m_payment_audit_staging_store->GetOpenRowsMetadata(*epoch)) {
-            auto definition{BuildPaymentAuditResponseDefinition(
-                row.expected.epoch, row.expected.row_index)};
-            if (definition &&
-                SamePaymentAuditOpenRowIdentity(definition->row, row)) {
-                next->rows.push_back(std::move(*definition));
-            }
+        rows = m_payment_audit_staging_store->GetOpenRowsMetadata(*epoch);
+    }
+    const auto current{GetPaymentAuditNetworkContext()};
+    const auto find_current = [&](const auto& row)
+        -> const PaymentAuditResponseDefinition* {
+        if (!current) return nullptr;
+        const auto found{std::find_if(
+            current->rows.begin(), current->rows.end(),
+            [&](const auto& definition) {
+                return SamePaymentAuditOpenRowIdentity(
+                           definition.row, row) &&
+                       IsPaymentAuditResponseDefinitionSourceCurrent(
+                           definition);
+            })};
+        return found != current->rows.end() ? &*found : nullptr;
+    };
+    const bool removed{current && std::any_of(
+        current->rows.begin(), current->rows.end(),
+        [&](const auto& definition) {
+            return !IsPaymentAuditResponseDefinitionSourceCurrent(
+                       definition) ||
+                   std::none_of(rows.begin(), rows.end(),
+                                [&](const auto& row) {
+                       return SamePaymentAuditOpenRowIdentity(
+                           definition.row, row);
+                   });
+        })};
+    std::vector<PaymentAuditResponseDefinition> built;
+    built.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (find_current(row) != nullptr) continue;
+        auto definition{BuildPaymentAuditResponseDefinition(
+            row.expected.epoch, row.expected.row_index)};
+        if (definition &&
+            SamePaymentAuditOpenRowIdentity(definition->row, row)) {
+            built.push_back(std::move(*definition));
+        }
+    }
+    if (current && !removed && built.empty()) return true;
+
+    auto next{std::make_shared<PaymentAuditNetworkContext>()};
+    next->rows.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (const auto* existing{find_current(row)}) {
+            next->rows.push_back(*existing);
+            continue;
+        }
+        const auto created{std::find_if(
+            built.begin(), built.end(), [&](const auto& definition) {
+                return SamePaymentAuditOpenRowIdentity(
+                    definition.row, row);
+            })};
+        if (created != built.end()) {
+            next->rows.push_back(std::move(*created));
         }
     }
     {
         LOCK(m_payment_audit_mutex);
-        next->generation = ++m_payment_audit_network_generation;
         m_payment_audit_network_context = std::move(next);
     }
     return true;
@@ -7208,6 +7302,7 @@ void CChainLocksHandler::RelayPaymentAuditResponse(
     if (definition == nullptr ||
         definition->row.expected.subject_descriptor_hash !=
             response.subject_descriptor_hash ||
+        !IsPaymentAuditResponseDefinitionSourceCurrent(*definition) ||
         !IsCurrentPaymentAuditNetworkRow(definition->row)) {
         return;
     }
@@ -7240,6 +7335,7 @@ void CChainLocksHandler::MaybeRelayPaymentAuditHave()
             definition.row.expected.row_index)};
         if (!row ||
             !SamePaymentAuditOpenRowIdentity(*row, definition.row) ||
+            !IsPaymentAuditResponseDefinitionSourceCurrent(definition) ||
             !IsCurrentPaymentAuditNetworkRow(definition.row)) {
             continue;
         }
@@ -8826,6 +8922,7 @@ void CChainLocksHandler::ProcessPaymentAuditHave(
         }
     }
     if (definition == nullptr ||
+        !IsPaymentAuditResponseDefinitionSourceCurrent(*definition) ||
         !std::binary_search(definition->active_relays.begin(),
                             definition->active_relays.end(),
                             peer_identity) ||
@@ -8883,6 +8980,7 @@ void CChainLocksHandler::ProcessPaymentAuditHave(
     const auto responses{m_payment_audit_staging_store->GetVerifiedResponses(
         definition->row.expected, claimed)};
     if (!responses ||
+        !IsPaymentAuditResponseDefinitionSourceCurrent(*definition) ||
         !IsCurrentPaymentAuditNetworkRow(definition->row)) {
         LOCK(m_payment_audit_mutex);
         const auto peer{m_payment_audit_supplied_to_peer.find(
@@ -8943,8 +9041,8 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
         punish("bad-pq-payment-audit-response-encoding");
         return;
     }
-    if (!m_share_admission_gate.IsOpen() ||
-        !m_payment_audit_staging_store) {
+    const uint64_t admission_generation{GetShareAdmissionGeneration()};
+    if (admission_generation == 0 || !m_payment_audit_staging_store) {
         return;
     }
     const auto context{GetPaymentAuditNetworkContext()};
@@ -8958,6 +9056,7 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
         }
     }
     if (definition == nullptr ||
+        !IsPaymentAuditResponseDefinitionSourceCurrent(*definition) ||
         !std::binary_search(definition->active_relays.begin(),
                             definition->active_relays.end(),
                             peer_identity) ||
@@ -8983,7 +9082,7 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
             definition->row.expected.response_chainlock_logical_id) {
         return;
     }
-    const auto& subject{definition->rosters->back()};
+    const auto& subject{definition->response_context->Rosters().back()};
     const std::size_t member{response.response.transcript.member_index};
     if (response.response.transcript.quorum_epoch !=
             subject.descriptor.epoch ||
@@ -9001,64 +9100,89 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
         !IsCurrentPaymentAuditNetworkRow(definition->row)) {
         return;
     }
-    uint8_t authorization_mask{0};
-    {
-        LOCK(cs_main);
-        const CBlockIndex* tip{m_chainman.ActiveTip()};
-        const CBlockIndex* response_index{
-            tip != nullptr &&
-                    tip->nHeight >= response.response.transcript.height
-                ? tip->GetAncestor(response.response.transcript.height)
-                : nullptr};
-        if (response_index == nullptr ||
-            response_index->GetBlockHash() != statement.block_hash) {
-            return;
-        }
-        authorization_mask = DeriveSigningRosterAuthorizationMask(
-            *definition->rosters, *response_index,
-            statement.previous_chainlock_height,
-            statement.previous_chainlock_hash);
-    }
-    if (!pq::IsSigningRosterAuthorizationMask(authorization_mask)) {
-        punish("bad-pq-payment-audit-response-authorization");
-        return;
-    }
     pq::PaymentAuditVerificationError error{
         pq::PaymentAuditVerificationError::NONE};
     auto check{pq::PreparePaymentAuditResponseVerification(
-        m_genesis_hash, m_config->chainlock_schedule, response,
-        definition->row.expected,
-        *definition->rosters, authorization_mask, &error)};
-    if (!check || !(*check)()) {
-        punish("bad-pq-payment-audit-response-signature");
-        return;
-    }
+        response, definition->row.expected,
+        *definition->response_context, &error)};
+    const bool verified{check && (*check)()};
+    const bool peer_fault{
+        (!check &&
+         (error == pq::PaymentAuditVerificationError::INVALID_SIGNER ||
+          error ==
+              pq::PaymentAuditVerificationError::INVALID_CHILD_PROOF ||
+          error == pq::PaymentAuditVerificationError::INVALID_PUBLIC_KEY)) ||
+        (check && !verified)};
+    if (!check && !peer_fault) return;
 
-    int32_t observed_tip_height{-1};
+    bool punish_response{false};
     {
-        LOCK(cs_main);
-        const CBlockIndex* tip{m_chainman.ActiveTip()};
-        const CBlockIndex* response_index{
-            tip != nullptr &&
-                    tip->nHeight >= definition->row.expected.response_height
-                ? tip->GetAncestor(
-                      definition->row.expected.response_height)
-                : nullptr};
-        if (tip == nullptr || response_index == nullptr ||
-            response_index->GetBlockHash() !=
-                definition->row.response_block_hash) {
+        LOCK(m_share_lifecycle_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
             return;
         }
-        observed_tip_height = tip->nHeight;
+        const auto latest_context{GetPaymentAuditNetworkContext()};
+        const PaymentAuditResponseDefinition* latest_definition{nullptr};
+        if (latest_context) {
+            for (const auto& candidate : latest_context->rows) {
+                if (candidate.row.expected.epoch == response.epoch &&
+                    candidate.row.expected.row_index == response.row_index) {
+                    latest_definition = &candidate;
+                    break;
+                }
+            }
+        }
+        if (latest_definition == nullptr ||
+            !IsPaymentAuditResponseDefinitionSourceCurrent(
+                *latest_definition) ||
+            latest_definition->response_context !=
+                definition->response_context ||
+            !SamePaymentAuditOpenRowIdentity(
+                latest_definition->row, definition->row)) {
+            return;
+        }
+        const auto latest{
+            m_payment_audit_staging_store->GetOpenRowMetadata(
+                response.epoch, response.row_index)};
+        if (!latest ||
+            !SamePaymentAuditOpenRowIdentity(*latest, definition->row) ||
+            !IsCurrentPaymentAuditNetworkRow(definition->row)) {
+            return;
+        }
+        if (peer_fault) {
+            punish_response = true;
+        } else {
+            if (IsBitmapBitSet(latest->available_members, member)) return;
+            pq::PaymentAuditStagingResult result{
+                pq::PaymentAuditStagingResult::NOT_FOUND};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip{m_chainman.ActiveTip()};
+                const CBlockIndex* response_index{
+                    tip != nullptr &&
+                            tip->nHeight >=
+                                definition->row.expected.response_height
+                        ? tip->GetAncestor(
+                              definition->row.expected.response_height)
+                        : nullptr};
+                if (tip == nullptr || response_index == nullptr ||
+                    response_index->GetBlockHash() !=
+                        definition->row.response_block_hash) {
+                    return;
+                }
+                result = m_payment_audit_staging_store->AddVerifiedResponse(
+                    response.epoch, response.row_index, tip->nHeight,
+                    response);
+            }
+            if (result == pq::PaymentAuditStagingResult::ACCEPTED) {
+                // The WAL append precedes fan-out, while the lifecycle fence
+                // prevents Stop from splitting those two publications.
+                RelayPaymentAuditResponse(response, node_id);
+            }
+        }
     }
-    const auto result{
-        m_payment_audit_staging_store->AddVerifiedResponse(
-            response.epoch, response.row_index, observed_tip_height,
-            response)};
-    if (result == pq::PaymentAuditStagingResult::ACCEPTED) {
-        // Acceptance appended to the WAL before this potentially expensive
-        // fan-out. A crash can lose only an unsealed row, never a summary.
-        RelayPaymentAuditResponse(response, node_id);
+    if (punish_response) {
+        punish("bad-pq-payment-audit-response-signature");
     }
 }
 

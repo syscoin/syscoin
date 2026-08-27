@@ -5,6 +5,7 @@
 #include <llmq/pq_payment_audit_collector.h>
 #include <llmq/pq_payment_audit_signer.h>
 #include <llmq/pq_payment_audit_store.h>
+#include <llmq/pq_payment_audit_verify.h>
 
 #include <crypto/scheduled_wots/scheduled_wots.h>
 #include <test/pq_test_util.h>
@@ -183,6 +184,135 @@ std::unique_ptr<AuditVerificationFixture> MakeFixture()
     return fixture;
 }
 
+struct ResponseVerificationFixture {
+    uint256 genesis_hash{NonNullHash(40'001)};
+    PaymentAuditScheduleConfig schedule{
+        ChainLockScheduleConfig{.epoch_origin = 0},
+        BTCCScheduleConfig{.candidate_origin = 865}};
+    ChainLockStatement statement;
+    FrozenQuorumRosters rosters;
+    PaymentAuditResponse response;
+    PaymentAuditHave expected;
+    PreparedChainLockContextPtr context;
+};
+
+std::unique_ptr<ResponseVerificationFixture> MakeResponseFixture()
+{
+    auto fixture{std::make_unique<ResponseVerificationFixture>()};
+    const auto audit_schedule{
+        BuildPaymentAuditEpochSchedule(fixture->schedule, SUBJECT_EPOCH)};
+    BOOST_REQUIRE(audit_schedule);
+    fixture->statement.height = audit_schedule->rows[0].response_height;
+    fixture->statement.block_hash = NonNullHash(40'002);
+    fixture->statement.previous_chainlock_height =
+        fixture->statement.height - PQ_CL_PERIOD;
+    fixture->statement.previous_chainlock_hash = NonNullHash(40'003);
+    fixture->statement.accepted_btcc_cursor = BTCCursor{
+        fixture->statement.height, NonNullHash(40'004),
+        NonNullHash(40'005)};
+    fixture->statement.btcc_advance = BTCCAdvance::ADVANCE;
+    fixture->statement.payment_probation_state_hash = NonNullHash(40'006);
+
+    scheduled_wots::KeyGenerationSeed seed{};
+    for (std::size_t byte{0}; byte < seed.size(); ++byte) {
+        seed[byte] = static_cast<uint8_t>(byte + 9);
+    }
+    auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(secret_key);
+    scheduled_wots::PublicKey public_key{};
+    BOOST_REQUIRE(secret_key->GetPublicKey(public_key));
+
+    const auto active_epochs{ActiveEpochsAtHeight(
+        fixture->schedule.chainlock, fixture->statement.height)};
+    BOOST_REQUIRE(active_epochs);
+    BOOST_REQUIRE_EQUAL(active_epochs->back().epoch, SUBJECT_EPOCH);
+    ChildKeyProof subject_key_proof;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto& roster{fixture->rosters[slot]};
+        auto& descriptor{roster.descriptor};
+        descriptor.epoch = (*active_epochs)[slot].epoch;
+        descriptor.base_height = (*active_epochs)[slot].base_height;
+        descriptor.base_hash = NonNullHash(40'100 + slot);
+        descriptor.snapshot_height = descriptor.base_height - 100;
+        descriptor.snapshot_hash = NonNullHash(40'200 + slot);
+        SetFirstMembers(descriptor.valid_members, QUORUM_MIN_VALID);
+        descriptor.valid_count = QUORUM_MIN_VALID;
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            auto& frozen{roster.members[member]};
+            frozen.pro_tx_hash =
+                NonNullHash(41'000 + slot * QUORUM_SIZE + member);
+            frozen.eligible = member < QUORUM_MIN_VALID;
+            if (!frozen.eligible) continue;
+            ChildPublicKey child_key{UniqueChildKey(slot, member)};
+            if (slot == ACTIVE_QUORUMS - 1 && member == 0) {
+                child_key = public_key;
+            }
+            const auto authorization{test::MakeSyntheticChildAuthorization(
+                fixture->genesis_hash, frozen.pro_tx_hash,
+                descriptor.epoch, child_key,
+                1 + slot * QUORUM_SIZE + member)};
+            frozen.child_root = authorization.record;
+            if (slot == ACTIVE_QUORUMS - 1 && member == 0) {
+                subject_key_proof = authorization.proof;
+            }
+        }
+        descriptor.member_root =
+            ComputeQuorumMemberRoot(fixture->genesis_hash, roster);
+        descriptor.child_key_root =
+            ComputeQuorumChildKeyRoot(fixture->genesis_hash, roster);
+    }
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = fixture->rosters[slot].descriptor;
+    }
+    fixture->statement.quorum_context_hash = GetQuorumContextHash(
+        fixture->genesis_hash, fixture->statement.height,
+        fixture->statement.block_hash, descriptors);
+    BOOST_REQUIRE(fixture->statement.IsStructurallyValid());
+
+    const auto& subject{fixture->rosters.back()};
+    FinalChainLock shell;
+    shell.statement = fixture->statement;
+    fixture->response.epoch = SUBJECT_EPOCH;
+    fixture->response.row_index = 0;
+    fixture->response.subject_descriptor_hash =
+        GetPaymentAuditDescriptorHash(fixture->genesis_hash,
+                                      subject.descriptor);
+    fixture->response.response.transcript = BuildChainLockShareTranscript(
+        shell, subject.descriptor, 0,
+        subject.members[0].pro_tx_hash);
+    fixture->response.response.authenticated_signature.key_proof =
+        subject_key_proof;
+    const uint256 share_hash{GetChainLockShareHash(
+        fixture->genesis_hash, fixture->response.response.transcript)};
+    scheduled_wots::Message message;
+    std::copy(share_hash.begin(), share_hash.end(), message.begin());
+    const auto leaf_index{ChainLockLeafIndex(
+        fixture->schedule.chainlock, subject.descriptor.epoch,
+        fixture->statement.height)};
+    BOOST_REQUIRE(leaf_index);
+    BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+        *secret_key, *leaf_index, message,
+        fixture->response.response.authenticated_signature.signature));
+    BOOST_REQUIRE(fixture->response.IsStructurallyValid());
+
+    fixture->expected.epoch = fixture->response.epoch;
+    fixture->expected.row_index = fixture->response.row_index;
+    fixture->expected.response_height = fixture->statement.height;
+    fixture->expected.response_chainlock_logical_id =
+        GetLogicalChainLockId(fixture->genesis_hash, fixture->statement);
+    fixture->expected.subject_descriptor_hash =
+        fixture->response.subject_descriptor_hash;
+    BOOST_REQUIRE(fixture->expected.IsStructurallyValid());
+    fixture->context = PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule.chainlock,
+        fixture->statement,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        0b1111);
+    BOOST_REQUIRE(fixture->context);
+    return fixture;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_payment_audit_verify_tests, BasicTestingSetup)
@@ -281,6 +411,92 @@ BOOST_AUTO_TEST_CASE(full_verifier_reports_invalid_signature_after_preflight)
         fixture->rosters,
         AUTHORIZATION_MASK, nullptr, &error));
     BOOST_CHECK(error == PaymentAuditVerificationError::INVALID_SIGNATURE);
+}
+
+BOOST_AUTO_TEST_CASE(response_prepared_context_matches_raw_and_is_exact)
+{
+    const auto fixture{MakeResponseFixture()};
+    PaymentAuditVerificationError raw_error{
+        PaymentAuditVerificationError::INVALID_ARGUMENT};
+    PaymentAuditVerificationError prepared_error{
+        PaymentAuditVerificationError::INVALID_ARGUMENT};
+    const auto raw_check{PreparePaymentAuditResponseVerification(
+        fixture->genesis_hash, fixture->schedule.chainlock,
+        fixture->response, fixture->expected, fixture->rosters, 0b1111,
+        &raw_error)};
+    const auto prepared_check{PreparePaymentAuditResponseVerification(
+        fixture->response, fixture->expected, *fixture->context,
+        &prepared_error)};
+    BOOST_REQUIRE(raw_check);
+    BOOST_REQUIRE(prepared_check);
+    BOOST_CHECK(raw_error == PaymentAuditVerificationError::NONE);
+    BOOST_CHECK(prepared_error == raw_error);
+    BOOST_CHECK(raw_check->GetPublicKey() ==
+                prepared_check->GetPublicKey());
+    BOOST_CHECK_EQUAL(raw_check->GetLeafIndex(),
+                      prepared_check->GetLeafIndex());
+    BOOST_CHECK(raw_check->GetMessageBytes() ==
+                prepared_check->GetMessageBytes());
+    BOOST_CHECK(raw_check->GetSignature() ==
+                prepared_check->GetSignature());
+    BOOST_CHECK((*raw_check)());
+    BOOST_CHECK((*prepared_check)());
+    BOOST_CHECK(MatchesPaymentAuditResponseContext(
+        fixture->expected, *fixture->context, fixture->statement));
+
+    auto finalized_keep{fixture->statement};
+    finalized_keep.accepted_btcc_cursor =
+        finalized_keep.previous_btcc_cursor;
+    finalized_keep.btcc_advance = BTCCAdvance::KEEP;
+    BOOST_REQUIRE(finalized_keep.IsStructurallyValid());
+    BOOST_CHECK(!MatchesPaymentAuditResponseContext(
+        fixture->expected, *fixture->context, finalized_keep));
+    auto mismatched_final{fixture->statement};
+    mismatched_final.payment_probation_state_hash = NonNullHash(49'000);
+    BOOST_REQUIRE(mismatched_final.IsStructurallyValid());
+    BOOST_CHECK(!MatchesPaymentAuditResponseContext(
+        fixture->expected, *fixture->context, mismatched_final));
+
+    auto bad_proof{fixture->response};
+    bad_proof.response.authenticated_signature.key_proof.siblings[0]
+        .begin()[0] ^= 1;
+    BOOST_CHECK(!PreparePaymentAuditResponseVerification(
+        fixture->genesis_hash, fixture->schedule.chainlock, bad_proof,
+        fixture->expected, fixture->rosters, 0b1111, &raw_error));
+    BOOST_CHECK(!PreparePaymentAuditResponseVerification(
+        bad_proof, fixture->expected, *fixture->context,
+        &prepared_error));
+    BOOST_CHECK(raw_error ==
+                PaymentAuditVerificationError::INVALID_CHILD_PROOF);
+    BOOST_CHECK(prepared_error == raw_error);
+
+    auto alternate_statement{fixture->statement};
+    alternate_statement.payment_probation_state_hash = NonNullHash(49'001);
+    auto alternate_context{PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule.chainlock,
+        alternate_statement,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        0b1111)};
+    BOOST_REQUIRE(alternate_context);
+    BOOST_CHECK(!PreparePaymentAuditResponseVerification(
+        fixture->response, fixture->expected, *alternate_context,
+        &prepared_error));
+    BOOST_CHECK(prepared_error ==
+                PaymentAuditVerificationError::INVALID_CONTEXT);
+
+    auto mutable_rosters{
+        std::make_shared<FrozenQuorumRosters>(fixture->rosters)};
+    FrozenQuorumRostersPtr aliased_rosters{mutable_rosters};
+    auto alias_safe_context{PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule.chainlock,
+        fixture->statement, aliased_rosters, 0b1111)};
+    BOOST_REQUIRE(alias_safe_context);
+    mutable_rosters->back().members[0].pro_tx_hash = NonNullHash(49'002);
+    const auto alias_safe_check{PreparePaymentAuditResponseVerification(
+        fixture->response, fixture->expected, *alias_safe_context,
+        &prepared_error)};
+    BOOST_REQUIRE(alias_safe_check);
+    BOOST_CHECK((*alias_safe_check)());
 }
 
 BOOST_AUTO_TEST_CASE(preserved_archive_is_reverified_after_restart_and_reindex)

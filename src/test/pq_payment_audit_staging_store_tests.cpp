@@ -194,6 +194,11 @@ BOOST_AUTO_TEST_CASE(branch_replacement_drops_old_evidence)
                       6, 3, old_row.deadline_height - 1,
                       Response(old_row, 0, 2'000)) ==
                   PaymentAuditStagingResult::ACCEPTED);
+    const auto old_statement{
+        store.GetVerifiedResponseStatement(old_row.expected)};
+    BOOST_REQUIRE(old_statement);
+    BOOST_CHECK(*old_statement ==
+                Response(old_row, 0, 2'000).response.GetStatement());
     BOOST_CHECK(store.EnsureRow(replacement) ==
                 PaymentAuditStagingResult::BRANCH_CONFLICT);
     BOOST_REQUIRE(store.ReplaceRowBranch(replacement) ==
@@ -205,6 +210,7 @@ BOOST_AUTO_TEST_CASE(branch_replacement_drops_old_evidence)
     const auto metadata{store.GetOpenRowMetadata(6, 3)};
     BOOST_REQUIRE(metadata);
     BOOST_CHECK(!CountSet(metadata->available_members));
+    BOOST_CHECK(!store.GetVerifiedResponseStatement(replacement.expected));
 }
 
 BOOST_AUTO_TEST_CASE(compact_inventory_preserves_full_quorum_burst)
@@ -228,6 +234,7 @@ BOOST_AUTO_TEST_CASE(compact_inventory_preserves_full_quorum_burst)
                   PaymentAuditStagingResult::ACCEPTED);
     BOOST_REQUIRE(store.EnsureRow(row) ==
                   PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(!store.GetVerifiedResponseStatement(row.expected));
     for (uint16_t member{0}; member < QUORUM_SIZE; ++member) {
         BOOST_REQUIRE(store.AddVerifiedResponse(
                           12, 0, row.deadline_height - 1,
@@ -238,6 +245,9 @@ BOOST_AUTO_TEST_CASE(compact_inventory_preserves_full_quorum_burst)
     const auto metadata{store.GetOpenRowMetadata(12, 0)};
     BOOST_REQUIRE(metadata);
     BOOST_CHECK_EQUAL(CountSet(metadata->available_members), QUORUM_SIZE);
+    const auto statement{store.GetVerifiedResponseStatement(row.expected)};
+    BOOST_REQUIRE(statement);
+    BOOST_CHECK(*statement == Response(row, 0).response.GetStatement());
     const auto rows{store.GetOpenRowsMetadata(12)};
     BOOST_REQUIRE_EQUAL(rows.size(), 1U);
     BOOST_CHECK(rows.front() == *metadata);
@@ -261,6 +271,7 @@ BOOST_AUTO_TEST_CASE(compact_inventory_preserves_full_quorum_burst)
 
     auto stale_identity{row.expected};
     stale_identity.response_chainlock_logical_id = NonNullHash(16);
+    BOOST_CHECK(!store.GetVerifiedResponseStatement(stale_identity));
     BOOST_CHECK(!store.GetVerifiedResponses(stale_identity, requested));
     BOOST_CHECK_EQUAL(sync_barriers, 0U);
 
@@ -268,6 +279,7 @@ BOOST_AUTO_TEST_CASE(compact_inventory_preserves_full_quorum_burst)
                       12, 0, row.response_block_hash,
                       NonNullHash(17)) ==
                   PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(!store.GetVerifiedResponseStatement(row.expected));
     BOOST_CHECK_EQUAL(sync_barriers, 1U);
     const auto summary{store.GetSummary(12, 0)};
     BOOST_REQUIRE(summary);

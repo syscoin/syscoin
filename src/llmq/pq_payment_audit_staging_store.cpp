@@ -995,6 +995,24 @@ PaymentAuditStagingStore::GetOpenRowsMetadata(uint32_t epoch) const
     return result;
 }
 
+std::optional<ChainLockStatement>
+PaymentAuditStagingStore::GetVerifiedResponseStatement(
+    const PaymentAuditHave& expected) const
+{
+    LOCK(m_mutex);
+    if (m_impl->failure || !IsExpectedIdentity(expected)) {
+        return std::nullopt;
+    }
+    const auto found{m_impl->open_rows.find(
+        RowKey{expected.epoch, expected.row_index})};
+    if (found == m_impl->open_rows.end() ||
+        found->second.row.expected != expected ||
+        found->second.row.responses.empty()) {
+        return std::nullopt;
+    }
+    return found->second.row.responses.begin()->second.response.GetStatement();
+}
+
 std::optional<std::vector<PaymentAuditResponse>>
 PaymentAuditStagingStore::GetVerifiedResponses(
     const PaymentAuditHave& expected,

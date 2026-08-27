@@ -73,6 +73,67 @@ std::optional<ScheduledWOTSCheck> PrepareSignatureCheck(
                               std::move(message), std::move(signature)};
 }
 
+bool ValidatePaymentAuditResponseEnvelope(
+    const uint256& genesis_hash,
+    const PaymentAuditResponse& response,
+    const PaymentAuditHave& expected,
+    const FrozenQuorumRosters& response_rosters,
+    PaymentAuditVerificationError* error)
+{
+    if (genesis_hash.IsNull() || !response.IsStructurallyValid() ||
+        !expected.IsStructurallyValid() || response.epoch != expected.epoch ||
+        response.row_index != expected.row_index ||
+        response.subject_descriptor_hash !=
+            expected.subject_descriptor_hash ||
+        response.response.transcript.height != expected.response_height ||
+        GetLogicalChainLockId(genesis_hash,
+                              response.response.GetStatement()) !=
+            expected.response_chainlock_logical_id) {
+        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
+        return false;
+    }
+    const auto& subject{response_rosters.back()};
+    if (subject.descriptor.epoch != response.epoch ||
+        GetPaymentAuditDescriptorHash(genesis_hash, subject.descriptor) !=
+            response.subject_descriptor_hash ||
+        response.response.transcript.quorum_epoch !=
+            subject.descriptor.epoch ||
+        response.response.transcript.quorum_base_hash !=
+            subject.descriptor.base_hash) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return false;
+    }
+    return true;
+}
+
+void SetPaymentAuditResponseChainLockError(
+    ChainLockVerificationError chainlock_error,
+    PaymentAuditVerificationError* error)
+{
+    switch (chainlock_error) {
+    case ChainLockVerificationError::INVALID_CHAINLOCK:
+    case ChainLockVerificationError::INVALID_ARGUMENT:
+        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
+        break;
+    case ChainLockVerificationError::INVALID_PUBLIC_KEY:
+        SetError(error, PaymentAuditVerificationError::INVALID_PUBLIC_KEY);
+        break;
+    case ChainLockVerificationError::INVALID_CHILD_PROOF:
+        SetError(error,
+                 PaymentAuditVerificationError::INVALID_CHILD_PROOF);
+        break;
+    case ChainLockVerificationError::INVALID_SIGNER:
+        SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
+        break;
+    case ChainLockVerificationError::INVALID_SIGNATURE:
+        SetError(error, PaymentAuditVerificationError::INVALID_SIGNATURE);
+        break;
+    default:
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        break;
+    }
+}
+
 } // namespace
 
 PreparedPaymentAuditContext::PreparedPaymentAuditContext(
@@ -154,27 +215,8 @@ PreparePaymentAuditResponseVerification(
     PaymentAuditVerificationError* error)
 {
     SetError(error, PaymentAuditVerificationError::NONE);
-    if (genesis_hash.IsNull() || !response.IsStructurallyValid() ||
-        !expected.IsStructurallyValid() || response.epoch != expected.epoch ||
-        response.row_index != expected.row_index ||
-        response.subject_descriptor_hash !=
-            expected.subject_descriptor_hash ||
-        response.response.transcript.height != expected.response_height ||
-        GetLogicalChainLockId(genesis_hash,
-                              response.response.GetStatement()) !=
-            expected.response_chainlock_logical_id) {
-        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
-        return std::nullopt;
-    }
-    const auto& subject{response_rosters.back()};
-    if (subject.descriptor.epoch != response.epoch ||
-        GetPaymentAuditDescriptorHash(genesis_hash, subject.descriptor) !=
-            response.subject_descriptor_hash ||
-        response.response.transcript.quorum_epoch !=
-            subject.descriptor.epoch ||
-        response.response.transcript.quorum_base_hash !=
-            subject.descriptor.base_hash) {
-        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+    if (!ValidatePaymentAuditResponseEnvelope(
+            genesis_hash, response, expected, response_rosters, error)) {
         return std::nullopt;
     }
     ChainLockVerificationError chainlock_error{
@@ -184,21 +226,50 @@ PreparePaymentAuditResponseVerification(
         authorization_mask,
         &chainlock_error)};
     if (!check) {
-        switch (chainlock_error) {
-        case ChainLockVerificationError::INVALID_PUBLIC_KEY:
-            SetError(error, PaymentAuditVerificationError::INVALID_PUBLIC_KEY);
-            break;
-        case ChainLockVerificationError::INVALID_CHILD_PROOF:
-            SetError(error,
-                     PaymentAuditVerificationError::INVALID_CHILD_PROOF);
-            break;
-        default:
-            SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
-            break;
-        }
+        SetPaymentAuditResponseChainLockError(chainlock_error, error);
         return std::nullopt;
     }
     return check;
+}
+
+std::optional<ScheduledWOTSCheck>
+PreparePaymentAuditResponseVerification(
+    const PaymentAuditResponse& response,
+    const PaymentAuditHave& expected,
+    const PreparedChainLockContext& response_context,
+    PaymentAuditVerificationError* error)
+{
+    SetError(error, PaymentAuditVerificationError::NONE);
+    if (!ValidatePaymentAuditResponseEnvelope(
+            response_context.GenesisHash(), response, expected,
+            response_context.Rosters(), error)) {
+        return std::nullopt;
+    }
+    ChainLockVerificationError chainlock_error{
+        ChainLockVerificationError::NONE};
+    auto check{PrepareChainLockShareVerification(
+        response.response, response_context, &chainlock_error)};
+    if (!check) {
+        SetPaymentAuditResponseChainLockError(chainlock_error, error);
+        return std::nullopt;
+    }
+    return check;
+}
+
+bool MatchesPaymentAuditResponseContext(
+    const PaymentAuditHave& expected,
+    const PreparedChainLockContext& response_context,
+    const ChainLockStatement& finalized_statement)
+{
+    return expected.IsStructurallyValid() &&
+           finalized_statement == response_context.Statement() &&
+           finalized_statement.height == expected.response_height &&
+           finalized_statement.btcc_advance == BTCCAdvance::ADVANCE &&
+           finalized_statement.accepted_btcc_cursor.sys_height ==
+               expected.response_height &&
+           GetLogicalChainLockId(response_context.GenesisHash(),
+                                 finalized_statement) ==
+               expected.response_chainlock_logical_id;
 }
 
 bool ValidatePaymentAuditContext(

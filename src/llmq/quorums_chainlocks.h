@@ -850,7 +850,8 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_lookup_mutex,
                                  !m_payment_audit_mutex,
-                                 !m_btcc_preseal_mutex);
+                                 !m_btcc_preseal_mutex,
+                                 !m_share_lifecycle_mutex);
     struct PaymentAuditShareCollectionOutcome {
         pq::ShareCollectionResult result{
             pq::ShareCollectionResult::REJECTED};
@@ -926,11 +927,10 @@ private:
 
     struct PaymentAuditResponseDefinition {
         pq::PaymentAuditOpenRowMetadata row;
-        pq::FrozenQuorumRostersPtr rosters;
+        pq::PreparedChainLockContextPtr response_context;
         std::vector<uint256> active_relays;
     };
     struct PaymentAuditNetworkContext {
-        uint64_t generation{0};
         std::vector<PaymentAuditResponseDefinition> rows;
     };
     struct PaymentAuditResponseRuntime {
@@ -957,6 +957,8 @@ private:
                                         uint8_t row_index) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_btcc_preseal_mutex);
+    [[nodiscard]] bool IsPaymentAuditResponseDefinitionSourceCurrent(
+        const PaymentAuditResponseDefinition& definition) const;
     [[nodiscard]] bool RefreshPaymentAuditNetworkContext()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_payment_audit_mutex,
@@ -1194,8 +1196,6 @@ private:
         GUARDED_BY(m_payment_audit_mutex){0};
     std::shared_ptr<const PaymentAuditNetworkContext>
         m_payment_audit_network_context GUARDED_BY(m_payment_audit_mutex);
-    uint64_t m_payment_audit_network_generation
-        GUARDED_BY(m_payment_audit_mutex){0};
     std::map<uint256, std::map<uint256, pq::QuorumBitmap>>
         m_payment_audit_supplied_to_peer GUARDED_BY(m_payment_audit_mutex);
     Mutex m_btc_header_policy_mutex;

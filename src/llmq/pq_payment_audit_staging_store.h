@@ -160,6 +160,10 @@ public:
     [[nodiscard]] std::vector<PaymentAuditOpenRowMetadata>
     GetOpenRowsMetadata(uint32_t epoch) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Return one verified exact-row statement without copying its responses. */
+    [[nodiscard]] std::optional<ChainLockStatement>
+    GetVerifiedResponseStatement(const PaymentAuditHave& expected) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Copy only requested responses from the exact open-row identity. */
     [[nodiscard]] std::optional<std::vector<PaymentAuditResponse>>
     GetVerifiedResponses(

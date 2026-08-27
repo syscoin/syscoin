@@ -103,6 +103,20 @@ PreparePaymentAuditResponseVerification(
     uint8_t authorization_mask,
     PaymentAuditVerificationError* error = nullptr);
 
+/** Prepare one response against its exact prevalidated ordinary ChainLock. */
+[[nodiscard]] std::optional<ScheduledWOTSCheck>
+PreparePaymentAuditResponseVerification(
+    const PaymentAuditResponse& response,
+    const PaymentAuditHave& expected,
+    const PreparedChainLockContext& response_context,
+    PaymentAuditVerificationError* error = nullptr);
+
+/** Whether a newly authoritative final statement is the prepared A context. */
+[[nodiscard]] bool MatchesPaymentAuditResponseContext(
+    const PaymentAuditHave& expected,
+    const PreparedChainLockContext& response_context,
+    const ChainLockStatement& finalized_statement);
+
 [[nodiscard]] bool ValidatePaymentAuditContext(
     const uint256& genesis_hash,
     const PaymentAuditScheduleConfig& schedule,
