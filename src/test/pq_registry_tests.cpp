@@ -447,11 +447,19 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
     BOOST_CHECK(!preparation_view.SharesStateWith(cutoff_view));
     BOOST_CHECK(cutoff_view.SharesStateWith(steady_a_view));
     BOOST_CHECK(steady_a_view.SharesStateWith(steady_b_view));
+    const auto retained_operators{cutoff_view.ShareOperatorStates()};
+    BOOST_REQUIRE(retained_operators);
+    BOOST_CHECK(retained_operators == steady_a_view.ShareOperatorStates());
+    BOOST_CHECK(retained_operators == steady_b_view.ShareOperatorStates());
     BOOST_CHECK(steady_a_view.BlockHash() != steady_b_view.BlockHash());
     BOOST_CHECK(steady_a_view.PreviousBlockHash() == cutoff.GetHash());
     BOOST_CHECK(steady_b_view.PreviousBlockHash() == cutoff.GetHash());
     BOOST_CHECK(steady_a_view.ConsensusStateRoot() ==
                 steady_b_view.ConsensusStateRoot());
+    const std::size_t retained_operator_count{cutoff_view.OperatorCount()};
+    cutoff_view = {};
+    steady_a_view = {};
+    steady_b_view = {};
 
     for (int32_t height{1};
          height <= static_cast<int32_t>(PQ_REGISTRY_SNAPSHOT_CACHE_SIZE + 1);
@@ -463,6 +471,8 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
     }
     BOOST_CHECK(genesis_view.IsValid());
     BOOST_CHECK(genesis_view.BlockHash() == genesis_block);
+    // Evicting snapshot views cannot invalidate a quorum-owned operator view.
+    BOOST_CHECK_EQUAL(retained_operators->size(), retained_operator_count);
 }
 
 BOOST_AUTO_TEST_CASE(preparation_token_before_registry_activation_never_persists)

@@ -65,12 +65,13 @@ enum class QuorumBuildError : uint8_t {
 
 /**
  * State looked up at an exact block on the branch supplied by the caller.
- * Values are owned so roster construction never retains aliases into a
- * mutable cache or a reorg-sensitive manager view.
+ * The deterministic list is structurally shared internally; registry
+ * operators retain the exact immutable registry allocation without also
+ * pinning its potentially much larger tree-ID history.
  */
 struct QuorumSnapshotState {
     CDeterministicMNList deterministic_mns;
-    std::vector<OperatorKeyState> operator_key_states;
+    std::shared_ptr<const std::vector<OperatorKeyState>> operator_key_states;
 };
 
 using QuorumSnapshotLookup =

@@ -332,7 +332,8 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
         if (snapshot_state->deterministic_mns.IsNull() ||
             snapshot_state->deterministic_mns.GetHeight() != *snapshot_height ||
             snapshot_state->deterministic_mns.GetBlockHash() !=
-                snapshot_index->GetBlockHash()) {
+                snapshot_index->GetBlockHash() ||
+            !snapshot_state->operator_key_states) {
             SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
             return nullptr;
         }
@@ -340,8 +341,8 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
             genesis_hash, config, identity.epoch, base_index->GetBlockHash(),
             snapshot_state->deterministic_mns,
             std::span<const OperatorKeyState>{
-                snapshot_state->operator_key_states.data(),
-                snapshot_state->operator_key_states.size()}, error)};
+                snapshot_state->operator_key_states->data(),
+                snapshot_state->operator_key_states->size()}, error)};
         if (!roster) return nullptr;
         if (!AddActiveChildRootsToSet(*roster, tree_owners)) {
             SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);

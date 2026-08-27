@@ -138,10 +138,16 @@ void SerializeFixtureBody(DataStream& stream,
     stream << static_cast<uint8_t>(fixture.snapshots.size());
     for (const auto& snapshot : fixture.snapshots) {
         SerializeBranchPoint(stream, snapshot.branch_point);
+        if (!snapshot.state.operator_key_states) {
+            throw std::ios_base::failure(
+                "missing PQ ChainLock fixture operator states");
+        }
+        const auto& operator_states{
+            *snapshot.state.operator_key_states};
         const auto operator_count{
-            static_cast<uint16_t>(snapshot.state.operator_key_states.size())};
+            static_cast<uint16_t>(operator_states.size())};
         stream << operator_count;
-        for (const auto& state : snapshot.state.operator_key_states) {
+        for (const auto& state : operator_states) {
             stream << state;
         }
     }
@@ -203,10 +209,13 @@ bool UnserializeFixtureBody(DataStream& stream,
                      "PQ ChainLock fixture operator count is out of bounds");
             return false;
         }
-        snapshot.state.operator_key_states.resize(operator_count);
-        for (auto& state : snapshot.state.operator_key_states) {
+        auto operator_states{
+            std::make_shared<std::vector<OperatorKeyState>>()};
+        operator_states->resize(operator_count);
+        for (auto& state : *operator_states) {
             stream >> state;
         }
+        snapshot.state.operator_key_states = std::move(operator_states);
     }
     if (!stream.empty()) {
         SetError(error, "PQ ChainLock fixture has trailing bytes");
@@ -342,8 +351,9 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
             snapshot.state.deterministic_mns.GetPQLegacyStateHash(
                 fixture.genesis_hash) !=
                 expected_mns.GetPQLegacyStateHash(fixture.genesis_hash) ||
-            snapshot.state.operator_key_states.size() < QUORUM_MIN_VALID ||
-            snapshot.state.operator_key_states.size() > QUORUM_SIZE) {
+            !snapshot.state.operator_key_states ||
+            snapshot.state.operator_key_states->size() < QUORUM_MIN_VALID ||
+            snapshot.state.operator_key_states->size() > QUORUM_SIZE) {
             SetError(error, "PQ ChainLock fixture snapshot state mismatch");
             return false;
         }
@@ -357,7 +367,7 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
             return false;
         }
         std::set<uint256> operators;
-        for (const auto& state : snapshot.state.operator_key_states) {
+        for (const auto& state : *snapshot.state.operator_key_states) {
             if (!state.IsStructurallyValid() ||
                 !state.IsAdvancedTo(*schedule_view) ||
                 !operators.insert(state.pro_tx_hash).second ||

@@ -50,17 +50,24 @@ void InitLLMQSystem(CConnman& connman,
             state.deterministic_mns =
                 deterministicMNManager->GetListForBlock(&index);
 
-            pq::PQRegistrySnapshot registry_snapshot;
+            // SYSCOIN: Quorum selection needs operators only. Retain their
+            // immutable backing allocation instead of materializing and then
+            // discarding the registry's potentially million-entry tree history.
+            pq::PQRegistryReadView registry_view;
             std::string error;
-            if (!deterministicMNManager->GetPQRegistrySnapshot(
-                    &index, registry_snapshot, error)) {
+            if (!deterministicMNManager->GetPQRegistryReadView(
+                    &index, registry_view, error) ||
+                !registry_view.IsValid() ||
+                registry_view.Height() != index.nHeight ||
+                registry_view.BlockHash() != index.GetBlockHash()) {
                 LogPrint(BCLog::CHAINLOCKS,
                          "PQ quorum snapshot unavailable at height=%d block=%s: %s\n",
                          index.nHeight, index.GetBlockHash().ToString(), error);
                 return std::nullopt;
             }
             state.operator_key_states =
-                std::move(registry_snapshot.operator_states);
+                registry_view.ShareOperatorStates();
+            if (!state.operator_key_states) return std::nullopt;
             return state;
         }};
 

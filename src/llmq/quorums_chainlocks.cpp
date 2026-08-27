@@ -3009,7 +3009,8 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
     if (!snapshot_state || snapshot_state->deterministic_mns.IsNull() ||
         snapshot_state->deterministic_mns.GetHeight() != *snapshot_height ||
         snapshot_state->deterministic_mns.GetBlockHash() !=
-            snapshot->GetBlockHash()) {
+            snapshot->GetBlockHash() ||
+        !snapshot_state->operator_key_states) {
         return PaymentAuditContextStatus::LOCAL_ERROR;
     }
 
@@ -3020,8 +3021,8 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
             m_genesis_hash, *m_quorum_build_config, receipt.epoch,
             base->GetBlockHash(), snapshot_state->deterministic_mns,
             std::span<const pq::OperatorKeyState>{
-                snapshot_state->operator_key_states.data(),
-                snapshot_state->operator_key_states.size()},
+                snapshot_state->operator_key_states->data(),
+                snapshot_state->operator_key_states->size()},
             &build_error);
     } catch (const std::exception&) {
         return PaymentAuditContextStatus::LOCAL_ERROR;
@@ -8437,7 +8438,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         }
         return nullptr;
     }
-    if (!snapshot_state) {
+    if (!snapshot_state || !snapshot_state->operator_key_states) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
         }
@@ -8459,8 +8460,8 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
             m_genesis_hash, *m_quorum_build_config, subject.epoch,
             subject.base_hash, snapshot_state->deterministic_mns,
             std::span<const pq::OperatorKeyState>{
-                snapshot_state->operator_key_states.data(),
-                snapshot_state->operator_key_states.size()},
+                snapshot_state->operator_key_states->data(),
+                snapshot_state->operator_key_states->size()},
             &build_error);
     } catch (const std::exception&) {
         if (status != nullptr) {

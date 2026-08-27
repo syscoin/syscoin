@@ -304,16 +304,19 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
             QuorumSnapshotState snapshot_state;
             snapshot_state.deterministic_mns = Snapshot(
                 snapshot_index.nHeight, snapshot_index.GetBlockHash());
-            snapshot_state.operator_key_states.reserve(QUORUM_MIN_VALID);
+            auto operator_states{
+                std::make_shared<std::vector<OperatorKeyState>>()};
+            operator_states->reserve(QUORUM_MIN_VALID);
             for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
                 const uint256 pro_tx_hash{NonNullHash(10'000 + member)};
                 auto state{MakeOperatorState(
                     fixture, pro_tx_hash, *epoch, snapshot_index.nHeight,
                     member)};
                 if (!state.IsStructurallyValid()) return std::nullopt;
-                snapshot_state.operator_key_states.push_back(
-                    std::move(state));
+                operator_states->push_back(std::move(state));
             }
+            snapshot_state.operator_key_states =
+                std::move(operator_states);
             return snapshot_state;
         },
         &build_error);

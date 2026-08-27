@@ -481,7 +481,9 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
             *snapshot_height, fixture.args.snapshot_hashes[epoch]};
         snapshot.state.deterministic_mns = Snapshot(
             *snapshot_height, fixture.args.snapshot_hashes[epoch]);
-        snapshot.state.operator_key_states.reserve(QUORUM_MIN_VALID);
+        auto operator_states{
+            std::make_shared<std::vector<OperatorKeyState>>()};
+        operator_states->reserve(QUORUM_MIN_VALID);
         for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
             const uint256 pro_tx_hash{NonNullHash(10'000 + member)};
             auto state{MakeOperatorState(
@@ -489,8 +491,9 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
                 fixture.public_keys, pro_tx_hash, epoch,
                 *snapshot_height, member)};
             if (!state.IsStructurallyValid()) return false;
-            snapshot.state.operator_key_states.push_back(std::move(state));
+            operator_states->push_back(std::move(state));
         }
+        snapshot.state.operator_key_states = std::move(operator_states);
     }
     return true;
 }
@@ -887,7 +890,9 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
             {*snapshot_height, fixture.args.snapshot_hashes[slot]};
         output.state.deterministic_mns =
             Snapshot(*snapshot_height, fixture.args.snapshot_hashes[slot]);
-        output.state.operator_key_states.reserve(QUORUM_MIN_VALID);
+        auto operator_states{
+            std::make_shared<std::vector<OperatorKeyState>>()};
+        operator_states->reserve(QUORUM_MIN_VALID);
         for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
             const uint256 pro_tx_hash{NonNullHash(10'000 + member)};
             auto state{MakeOperatorState(
@@ -895,8 +900,9 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
                 fixture.public_keys, pro_tx_hash, identity.epoch,
                 *snapshot_height, member)};
             if (!state.IsStructurallyValid()) return false;
-            output.state.operator_key_states.push_back(std::move(state));
+            operator_states->push_back(std::move(state));
         }
+        output.state.operator_key_states = std::move(operator_states);
     }
 
     QuorumBuildError build_error{QuorumBuildError::NONE};

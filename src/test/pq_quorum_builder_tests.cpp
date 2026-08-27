@@ -178,6 +178,13 @@ std::vector<OperatorKeyState> KeyStates(uint32_t count,
     return states;
 }
 
+std::shared_ptr<const std::vector<OperatorKeyState>> SharedOperatorStates(
+    std::vector<OperatorKeyState> states = {})
+{
+    return std::make_shared<const std::vector<OperatorKeyState>>(
+        std::move(states));
+}
+
 std::vector<uint256> ScoreOrderedMembers(uint32_t count,
                                          const uint256& modifier)
 {
@@ -496,6 +503,7 @@ BOOST_AUTO_TEST_CASE(active_builder_uses_canonical_branch_bases_and_snapshots)
         QuorumSnapshotState result;
         result.deterministic_mns = Snapshot(
             index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
 
@@ -531,6 +539,7 @@ BOOST_AUTO_TEST_CASE(active_builder_uses_canonical_branch_bases_and_snapshots)
         QuorumSnapshotState result;
         result.deterministic_mns = Snapshot(
             index.nHeight, chain_a.At(index.nHeight).GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
     BOOST_CHECK(!BuildActiveFrozenQuorumRosters(
@@ -566,6 +575,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
         QuorumSnapshotState result;
         result.deterministic_mns = Snapshot(
             index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
     const auto cache{FrozenQuorumRosterCache::Create(
@@ -629,6 +639,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
         QuorumSnapshotState result;
         result.deterministic_mns = Snapshot(
             index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
     const auto cache{FrozenQuorumRosterCache::Create(
@@ -654,6 +665,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
             QuorumSnapshotState result;
             result.deterministic_mns = Snapshot(
                 index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+            result.operator_key_states = SharedOperatorStates();
             return std::optional<QuorumSnapshotState>{std::move(result)};
         };
     const auto uncached{FrozenQuorumRosterCache::Create(
@@ -702,6 +714,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
         QuorumSnapshotState result;
         result.deterministic_mns = Snapshot(
             index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
     const auto cache{FrozenQuorumRosterCache::Create(
@@ -743,6 +756,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_eviction_preserves_reader_lifetime)
         QuorumSnapshotState result;
         result.deterministic_mns = Snapshot(
             index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
     const auto cache{FrozenQuorumRosterCache::Create(
@@ -785,8 +799,8 @@ BOOST_AUTO_TEST_CASE(probation_checkpoint_roots_do_not_select_validators)
             Schedule(), index.nHeight +
                             static_cast<int32_t>(SNAPSHOT_LAG))};
         if (!epoch) return std::optional<QuorumSnapshotState>{};
-        result.operator_key_states =
-            KeyStates(420, *epoch, index.nHeight);
+        result.operator_key_states = SharedOperatorStates(
+            KeyStates(420, *epoch, index.nHeight));
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
 
@@ -826,6 +840,7 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
         QuorumSnapshotState result;
         result.deterministic_mns = Snapshot(
             index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
 
