@@ -788,6 +788,14 @@ public:
         llmq::pq::PQPaymentProbationStateView& view) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** Derive one manager-authenticated immutable probation transition. */
+    std::optional<llmq::pq::PQPaymentProbationTransitionView>
+    ApplyPaymentProbationTransition(
+        const llmq::pq::PQPaymentProbationStateView& previous,
+        const llmq::pq::PQPaymentProbationTransitionInput& input,
+        llmq::pq::PQPaymentProbationError* error = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     /** Compatibility copying API retained for tests. */
     bool GetPaymentProbationState(
         const CBlockIndex* pindex,
@@ -800,7 +808,16 @@ public:
         const uint256& expected_hash,
         bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** Persist and publish an exact manager-authenticated transition result. */
+    bool CommitPaymentProbationTransition(
+        const llmq::pq::PQPaymentProbationTransitionView& transition,
+        bool fJustCheck,
+        llmq::pq::PQPaymentProbationStateView* published = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     [[nodiscard]] uint256 EmptyPaymentProbationStateHash() const;
+
+    [[nodiscard]] uint64_t PaymentProbationStateViewGeneration() const;
 
     /** Whether state GC completed for the same authenticated deletion boundary. */
     bool IsPaymentProbationGCCompleteForCheckpoint(

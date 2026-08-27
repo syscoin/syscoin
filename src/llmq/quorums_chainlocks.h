@@ -51,6 +51,10 @@ struct Params;
 
 namespace llmq {
 
+namespace pq {
+class PQPaymentProbationTransitionView;
+}
+
 /**
  * Linearizable admission fence for work that completes outside handler locks.
  * The complete open state is the token, so no reader can observe a partially
@@ -425,7 +429,7 @@ class VerifiedPaymentAuditReceiptTransitionCache;
  */
 using VerifiedPaymentAuditReceiptTransitionPtr =
     std::shared_ptr<const VerifiedPaymentAuditReceiptTransition>;
-[[nodiscard]] const pq::PQPaymentProbationTransitionResult*
+[[nodiscard]] const pq::PQPaymentProbationTransitionView*
 GetVerifiedPaymentAuditReceiptTransition(
     const VerifiedPaymentAuditReceiptTransitionPtr& verified) noexcept;
 

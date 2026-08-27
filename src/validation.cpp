@@ -2335,9 +2335,9 @@ static bool ConnectPaymentAuditReceiptState(
             }
             llmq::VerifiedPaymentAuditReceiptTransitionPtr
                 verified_transition;
-            std::optional<llmq::pq::PQPaymentProbationTransitionResult>
+            std::optional<llmq::pq::PQPaymentProbationTransitionView>
                 compact_transition;
-            const llmq::pq::PQPaymentProbationTransitionResult*
+            const llmq::pq::PQPaymentProbationTransitionView*
                 transition{nullptr};
             bool compact_replay{false};
             bool start_preseal{false};
@@ -2390,12 +2390,11 @@ static bool ConnectPaymentAuditReceiptState(
                 }
                 llmq::pq::PQPaymentProbationError transition_error{
                     llmq::pq::PQPaymentProbationError::NONE};
-                compact_transition =
-                    llmq::pq::ApplyPQPaymentProbationTransition(
-                        *previous_probation.State(), input,
-                        &transition_error);
+                compact_transition = deterministicMNManager
+                    ->ApplyPaymentProbationTransition(
+                        previous_probation, input, &transition_error);
                 if (!compact_transition ||
-                    compact_transition->undo.applied_state_hash !=
+                    compact_transition->Result().StateHash() !=
                         receipt.next_probation_state_hash) {
                     return state.Invalid(
                         BlockValidationResult::BLOCK_CONSENSUS,
@@ -2429,11 +2428,11 @@ static bool ConnectPaymentAuditReceiptState(
                     return state.Error(
                         "pq-payment-audit-prepared-transition-missing");
                 }
-                if (transition->undo.previous_state_hash !=
+                if (transition->PreviousStateHash() !=
                         previous_probation_hash ||
-                    transition->undo.applied_receipt !=
+                    transition->AppliedReceipt() !=
                         expected_transition_receipt ||
-                    transition->undo.applied_state_hash !=
+                    transition->Result().StateHash() !=
                         receipt.next_probation_state_hash) {
                     return state.Error(
                         "pq-payment-audit-prepared-transition-mismatch");
@@ -2444,7 +2443,7 @@ static bool ConnectPaymentAuditReceiptState(
                 return state.Error(
                     "pq-payment-audit-transition-missing");
             }
-            next_probation_hash = transition->undo.applied_state_hash;
+            next_probation_hash = transition->Result().StateHash();
             if (start_preseal && !fJustCheck &&
                 !llmq::chainLocksHandler->BeginPaymentAuditPreseal(
                     index, receipt, previous_receipt,
@@ -2452,8 +2451,8 @@ static bool ConnectPaymentAuditReceiptState(
                 return state.Error(
                     "failed-pq-payment-audit-preseal-persist");
             }
-            if (!deterministicMNManager->CommitPaymentProbationState(
-                    transition->state, next_probation_hash, fJustCheck)) {
+            if (!deterministicMNManager->CommitPaymentProbationTransition(
+                    *transition, fJustCheck)) {
                 return state.Error(
                     "failed-pq-payment-audit-state-persist");
             }

@@ -720,6 +720,15 @@ bool CDeterministicMNManager::GetPaymentProbationState(
     return m_payment_probation->GetState(state_hash, state);
 }
 
+std::optional<llmq::pq::PQPaymentProbationTransitionView>
+CDeterministicMNManager::ApplyPaymentProbationTransition(
+    const llmq::pq::PQPaymentProbationStateView& previous,
+    const llmq::pq::PQPaymentProbationTransitionInput& input,
+    llmq::pq::PQPaymentProbationError* error) const
+{
+    return m_payment_probation->ApplyTransition(previous, input, error);
+}
+
 bool CDeterministicMNManager::CommitPaymentProbationState(
     const llmq::pq::PQPaymentProbationState& state,
     const uint256& expected_hash,
@@ -729,9 +738,23 @@ bool CDeterministicMNManager::CommitPaymentProbationState(
                                             fJustCheck);
 }
 
+bool CDeterministicMNManager::CommitPaymentProbationTransition(
+    const llmq::pq::PQPaymentProbationTransitionView& transition,
+    bool fJustCheck,
+    llmq::pq::PQPaymentProbationStateView* published)
+{
+    return m_payment_probation->CommitTransition(
+        transition, fJustCheck, published);
+}
+
 uint256 CDeterministicMNManager::EmptyPaymentProbationStateHash() const
 {
     return m_payment_probation->EmptyStateHash();
+}
+
+uint64_t CDeterministicMNManager::PaymentProbationStateViewGeneration() const
+{
+    return m_payment_probation->StateViewGeneration();
 }
 
 bool CDeterministicMNManager::IsPaymentProbationGCCompleteForCheckpoint(
