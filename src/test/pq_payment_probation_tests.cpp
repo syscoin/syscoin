@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -87,6 +88,211 @@ PQPaymentProbationState State(
 bool Contains(std::span<const uint256> values, const uint256& value)
 {
     return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+bool IsBitSet(const QuorumBitmap& bitmap, std::size_t member)
+{
+    return (bitmap[member / 8] &
+            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
+}
+
+bool ReferenceContains(std::span<const uint256> values,
+                       const uint256& value)
+{
+    return std::binary_search(values.begin(), values.end(), value);
+}
+
+auto ReferenceFind(std::vector<PQPaymentProbationEntry>& entries,
+                   const uint256& value)
+{
+    return std::lower_bound(
+        entries.begin(), entries.end(), value,
+        [](const auto& entry, const uint256& sought) {
+            return entry.pro_tx_hash < sought;
+        });
+}
+
+void ReferenceSetEntry(std::vector<PQPaymentProbationEntry>& entries,
+                       const uint256& pro_tx_hash, uint8_t misses,
+                       int32_t payment_eligible_since_height)
+{
+    auto position{ReferenceFind(entries, pro_tx_hash)};
+    const bool empty{misses == 0 && payment_eligible_since_height == -1};
+    if (position != entries.end() &&
+        position->pro_tx_hash == pro_tx_hash) {
+        if (empty) {
+            entries.erase(position);
+        } else {
+            position->consecutive_misses = misses;
+            position->payment_eligible_since_height =
+                payment_eligible_since_height;
+        }
+    } else if (!empty) {
+        entries.insert(position, PQPaymentProbationEntry{
+                                     pro_tx_hash, misses,
+                                     payment_eligible_since_height});
+    }
+}
+
+PQPaymentProbationEntry ReferenceEntryValue(
+    std::vector<PQPaymentProbationEntry>& entries,
+    const uint256& pro_tx_hash)
+{
+    const auto position{ReferenceFind(entries, pro_tx_hash)};
+    return position != entries.end() &&
+                   position->pro_tx_hash == pro_tx_hash
+               ? *position
+               : PQPaymentProbationEntry{pro_tx_hash, 0, -1};
+}
+
+std::vector<PQPaymentProbationChange> ReferenceBuildChanges(
+    std::span<const PQPaymentProbationEntry> before,
+    std::span<const PQPaymentProbationEntry> after)
+{
+    std::vector<PQPaymentProbationChange> changes;
+    std::size_t old_index{0};
+    std::size_t new_index{0};
+    while (old_index < before.size() || new_index < after.size()) {
+        if (new_index == after.size() ||
+            (old_index < before.size() &&
+             before[old_index].pro_tx_hash <
+                 after[new_index].pro_tx_hash)) {
+            changes.push_back({
+                before[old_index].pro_tx_hash,
+                before[old_index].consecutive_misses, 0,
+                before[old_index].payment_eligible_since_height, -1});
+            ++old_index;
+        } else if (old_index == before.size() ||
+                   after[new_index].pro_tx_hash <
+                       before[old_index].pro_tx_hash) {
+            changes.push_back({
+                after[new_index].pro_tx_hash, 0,
+                after[new_index].consecutive_misses, -1,
+                after[new_index].payment_eligible_since_height});
+            ++new_index;
+        } else {
+            if (before[old_index].consecutive_misses !=
+                    after[new_index].consecutive_misses ||
+                before[old_index].payment_eligible_since_height !=
+                    after[new_index].payment_eligible_since_height) {
+                changes.push_back({
+                    before[old_index].pro_tx_hash,
+                    before[old_index].consecutive_misses,
+                    after[new_index].consecutive_misses,
+                    before[old_index].payment_eligible_since_height,
+                    after[new_index].payment_eligible_since_height});
+            }
+            ++old_index;
+            ++new_index;
+        }
+    }
+    return changes;
+}
+
+PQPaymentProbationTransitionResult ReferenceApplyTransition(
+    const PQPaymentProbationState& previous,
+    const PQPaymentProbationTransitionInput& input)
+{
+    PQPaymentProbationTransitionResult result;
+    result.state = previous;
+    result.undo.previous_cursor = previous.cursor;
+    result.undo.applied_receipt = input.receipt;
+    result.undo.previous_state_hash =
+        *GetPQPaymentProbationStateHash(previous);
+
+    for (const auto& entry : previous.entries) {
+        if (!ReferenceContains(input.existing_pro_tx_hashes,
+                               entry.pro_tx_hash)) {
+            result.pruned_pro_tx_hashes.push_back(entry.pro_tx_hash);
+        }
+    }
+    std::erase_if(result.state.entries, [&](const auto& entry) {
+        return !ReferenceContains(input.existing_pro_tx_hashes,
+                                  entry.pro_tx_hash);
+    });
+
+    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+        if (!IsBitSet(input.roster_valid_members, member) ||
+            !IsBitSet(input.observed_members, member)) {
+            continue;
+        }
+        const auto& pro_tx_hash{input.frozen_roster[member]};
+        if (ReferenceContains(input.current_valid_pro_tx_hashes,
+                              pro_tx_hash)) {
+            ++result.effective_observed_count;
+        }
+        if (!ReferenceContains(input.existing_pro_tx_hashes,
+                               pro_tx_hash)) {
+            continue;
+        }
+        const auto previous_entry{
+            ReferenceEntryValue(result.state.entries, pro_tx_hash)};
+        if (previous_entry.consecutive_misses ==
+            PQ_PAYMENT_PROBATION_MAX_MISSES) {
+            result.recovered_pro_tx_hashes.push_back(pro_tx_hash);
+        }
+        if (previous_entry.consecutive_misses != 0) {
+            ReferenceSetEntry(
+                result.state.entries, pro_tx_hash, 0,
+                previous_entry.consecutive_misses ==
+                        PQ_PAYMENT_PROBATION_MAX_MISSES
+                    ? input.receipt.carrier_height
+                    : previous_entry.payment_eligible_since_height);
+        }
+    }
+    std::sort(result.recovered_pro_tx_hashes.begin(),
+              result.recovered_pro_tx_hashes.end());
+    result.recovered_pro_tx_hashes.erase(
+        std::unique(result.recovered_pro_tx_hashes.begin(),
+                    result.recovered_pro_tx_hashes.end()),
+        result.recovered_pro_tx_hashes.end());
+
+    result.conclusive = result.effective_observed_count >=
+                        PQ_PAYMENT_AUDIT_CONCLUSIVE_MEMBERS;
+    if (result.conclusive) {
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            if (!IsBitSet(input.roster_valid_members, member) ||
+                IsBitSet(input.observed_members, member)) {
+                continue;
+            }
+            const auto& pro_tx_hash{input.frozen_roster[member]};
+            if (!ReferenceContains(input.current_valid_pro_tx_hashes,
+                                   pro_tx_hash)) {
+                continue;
+            }
+            const auto previous_entry{
+                ReferenceEntryValue(result.state.entries, pro_tx_hash)};
+            ReferenceSetEntry(
+                result.state.entries, pro_tx_hash,
+                std::min<uint8_t>(
+                    PQ_PAYMENT_PROBATION_MAX_MISSES,
+                    static_cast<uint8_t>(
+                        previous_entry.consecutive_misses + 1)),
+                previous_entry.payment_eligible_since_height);
+        }
+    }
+
+    result.state.cursor = {1, input.receipt};
+    result.undo.changes = ReferenceBuildChanges(
+        previous.entries, result.state.entries);
+    result.undo.applied_state_hash =
+        *GetPQPaymentProbationStateHash(result.state);
+    return result;
+}
+
+void CheckSameTransition(
+    const PQPaymentProbationTransitionResult& actual,
+    const PQPaymentProbationTransitionResult& expected)
+{
+    BOOST_CHECK(actual.state == expected.state);
+    BOOST_CHECK(actual.undo == expected.undo);
+    BOOST_CHECK_EQUAL(actual.effective_observed_count,
+                      expected.effective_observed_count);
+    BOOST_CHECK_EQUAL(actual.conclusive, expected.conclusive);
+    BOOST_CHECK(actual.recovered_pro_tx_hashes ==
+                expected.recovered_pro_tx_hashes);
+    BOOST_CHECK(actual.pruned_pro_tx_hashes ==
+                expected.pruned_pro_tx_hashes);
 }
 
 } // namespace
@@ -391,6 +597,9 @@ BOOST_AUTO_TEST_CASE(rejects_malformed_rosters_bitmaps_and_membership_sets)
         ClearBit(too_few_valid.observed_members, member);
     }
     BOOST_CHECK(!too_few_valid.IsStructurallyValid());
+    BOOST_CHECK(!ApplyPQPaymentProbationTransition(
+        PQPaymentProbationState{}, too_few_valid, &error));
+    BOOST_CHECK(error == PQPaymentProbationError::INVALID_BITMAP);
 
     auto unsorted_existing{input};
     std::swap(unsorted_existing.existing_pro_tx_hashes[0],
@@ -417,6 +626,12 @@ BOOST_AUTO_TEST_CASE(rejects_malformed_rosters_bitmaps_and_membership_sets)
     BOOST_CHECK(!ApplyPQPaymentProbationTransition(
         PQPaymentProbationState{}, null_receipt, &error));
     BOOST_CHECK(error == PQPaymentProbationError::INVALID_RECEIPT);
+
+    auto invalid_state{State({{NonNullHash(71'000), 1}})};
+    invalid_state.version = PQ_PAYMENT_PROBATION_STATE_VERSION - 1;
+    BOOST_CHECK(!ApplyPQPaymentProbationTransition(
+        invalid_state, input, &error));
+    BOOST_CHECK(error == PQPaymentProbationError::INVALID_STATE);
 }
 
 BOOST_AUTO_TEST_CASE(payee_selection_filters_probation_but_never_all_to_none)
@@ -464,6 +679,97 @@ BOOST_AUTO_TEST_CASE(recovery_output_is_sorted_for_queue_reentry)
     for (std::size_t member{0}; member < 3; ++member) {
         BOOST_CHECK(Contains(result->recovered_pro_tx_hashes,
                              input.frozen_roster[member]));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(sorted_merge_matches_legacy_transition_corpus)
+{
+    std::mt19937_64 random{0x5a17d3c4ULL};
+    for (uint32_t trial{0}; trial < 128; ++trial) {
+        std::vector<uint256> identities;
+        identities.reserve(900);
+        for (uint64_t index{0}; index < 900; ++index) {
+            identities.push_back(
+                NonNullHash(1'000'000 + 1'000 * trial + index));
+        }
+
+        std::vector<uint256> shuffled{identities};
+        std::shuffle(shuffled.begin(), shuffled.end(), random);
+        PQPaymentProbationTransitionInput input;
+        input.receipt = Receipt(trial + 2, 10'000 + trial);
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            input.frozen_roster[member] = shuffled[member];
+        }
+
+        const bool complete_collateral{trial % 4 == 0 || trial % 4 == 2};
+        for (const auto& identity : identities) {
+            if (complete_collateral || random() % 10 < 7) {
+                input.existing_pro_tx_hashes.push_back(identity);
+            }
+        }
+        std::sort(input.existing_pro_tx_hashes.begin(),
+                  input.existing_pro_tx_hashes.end());
+        for (const auto& identity : input.existing_pro_tx_hashes) {
+            if (complete_collateral || random() % 10 < 8) {
+                input.current_valid_pro_tx_hashes.push_back(identity);
+            }
+        }
+
+        std::array<std::size_t, QUORUM_SIZE> member_order{};
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            member_order[member] = member;
+        }
+        std::shuffle(member_order.begin(), member_order.end(), random);
+        const std::size_t valid_count{
+            QUORUM_MIN_VALID + random() %
+                (QUORUM_SIZE - QUORUM_MIN_VALID + 1)};
+        for (std::size_t offset{0}; offset < valid_count; ++offset) {
+            const std::size_t member{member_order[offset]};
+            SetBit(input.roster_valid_members, member);
+            const bool observed{
+                trial % 4 == 2 ||
+                (trial % 4 == 0 && offset <
+                                       PQ_PAYMENT_AUDIT_CONCLUSIVE_MEMBERS) ||
+                ((trial % 4 == 1 || trial % 4 == 3) &&
+                 random() % 2 == 0)};
+            if (observed) SetBit(input.observed_members, member);
+        }
+        BOOST_REQUIRE(input.IsStructurallyValid());
+
+        PQPaymentProbationState previous;
+        previous.cursor = {1, Receipt(trial + 1, 20'000 + trial)};
+        for (const auto& identity : identities) {
+            if (random() % 3 != 0) continue;
+            const uint8_t misses{static_cast<uint8_t>(random() % 3)};
+            const int32_t eligible_height{
+                misses == 0 || random() % 2 == 0
+                    ? static_cast<int32_t>(100 + random() % 10'000)
+                    : -1};
+            previous.entries.push_back(
+                {identity, misses, eligible_height});
+        }
+        for (uint64_t removed{0}; removed < 24; ++removed) {
+            previous.entries.push_back({
+                NonNullHash(9'000'000 + 1'000 * trial + removed),
+                static_cast<uint8_t>(1 + random() % 2), -1});
+        }
+        std::sort(previous.entries.begin(), previous.entries.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.pro_tx_hash < rhs.pro_tx_hash;
+                  });
+        BOOST_REQUIRE(previous.IsStructurallyValid());
+
+        const auto expected{ReferenceApplyTransition(previous, input)};
+        PQPaymentProbationError error{PQPaymentProbationError::INVALID_STATE};
+        const auto actual{ApplyPQPaymentProbationTransition(
+            previous, input, &error)};
+        BOOST_REQUIRE_MESSAGE(actual, "trial=" << trial);
+        BOOST_CHECK(error == PQPaymentProbationError::NONE);
+        CheckSameTransition(*actual, expected);
+        const auto restored{UndoPQPaymentProbationTransition(
+            actual->state, actual->undo)};
+        BOOST_REQUIRE(restored);
+        BOOST_CHECK(*restored == previous);
     }
 }
 
