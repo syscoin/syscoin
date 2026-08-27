@@ -60,11 +60,8 @@ PaymentAuditShareSigner::PaymentAuditShareSigner(
 }
 
 PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
-    const PaymentAuditStatement& statement,
+    const PreparedPaymentAuditContext& context,
     const QuorumBitmap& reporter_observed_members,
-    const FinalChainLock& seal_chainlock,
-    const FrozenQuorumRosters& rosters,
-    uint8_t authorization_mask,
     uint8_t quorum_slot,
     uint16_t member_index,
     const scheduled_wots::SecretKey& child_secret_key,
@@ -74,12 +71,21 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
 {
     SetError(error, ChainLockSigningError::NONE);
     if (m_genesis_hash.IsNull() || m_local_pro_tx_hash.IsNull() ||
-        !statement.IsStructurallyValid() ||
         !child_secret_key.IsValid()) {
         return Failure(error, ChainLockSigningError::INVALID_ARGUMENT);
     }
     if (!m_schedule.IsValid()) {
         return Failure(error, ChainLockSigningError::INVALID_SCHEDULE);
+    }
+    if (context.GenesisHash() != m_genesis_hash ||
+        context.Schedule() != m_schedule) {
+        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
+    }
+    const auto& statement{context.Statement()};
+    const auto& rosters{context.Rosters()};
+    const uint8_t authorization_mask{context.AuthorizationMask()};
+    if (!statement.IsStructurallyValid()) {
+        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
     }
     if (!IsEligibleChainLockTarget(m_schedule.chainlock,
                                    statement.commitment.seal_height)) {
@@ -98,19 +104,8 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
     if ((authorization_mask & (uint8_t{1} << quorum_slot)) == 0) {
         return Failure(error, ChainLockSigningError::INACTIVE_QUORUM);
     }
-    PaymentAuditVerificationError context_error{
-        PaymentAuditVerificationError::NONE};
-    if (!ValidatePaymentAuditLiveSeal(m_genesis_hash, statement,
-                                      seal_chainlock, &context_error) ||
-        !ValidatePaymentAuditContext(m_genesis_hash, m_schedule, statement,
-                                     rosters, authorization_mask,
-                                     &context_error)) {
-        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
-    }
     const auto& roster{rosters[quorum_slot]};
-    const auto leaf_index{PaymentAuditLeafIndex(
-        m_schedule, statement.commitment.subject_epoch,
-        statement.commitment.seal_height, roster.descriptor.epoch)};
+    const auto leaf_index{context.LeafIndex(quorum_slot)};
     if (!IsEpochActiveForTarget(m_schedule.chainlock, roster.descriptor.epoch,
                                 statement.commitment.seal_height) ||
         roster.descriptor.valid_count < QUORUM_MIN_VALID || !leaf_index) {
@@ -153,10 +148,11 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
         .purpose = PQSignerPurpose::PAYMENT_AUDIT,
         .absolute_height = statement.commitment.seal_height,
     };
+    const auto& seal_statement{statement.seal_statement};
     const PQSignerBranchLock seal_lock{
-        seal_chainlock.statement.height,
-        seal_chainlock.statement.block_hash,
-        seal_chainlock.GetLogicalId(m_genesis_hash)};
+        seal_statement.height,
+        seal_statement.block_hash,
+        GetLogicalChainLockId(m_genesis_hash, seal_statement)};
     if (!expected_branch_lock || *expected_branch_lock != seal_lock) {
         return Failure(error, ChainLockSigningError::JOURNAL_CONFLICT);
     }

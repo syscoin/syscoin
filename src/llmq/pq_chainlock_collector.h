@@ -134,6 +134,11 @@ public:
     {
         return m_context->Statement();
     }
+    [[nodiscard]] PreparedChainLockContextPtr
+    GetPreparedContext() const noexcept
+    {
+        return m_context;
+    }
 
 private:
     explicit ChainLockCollector(PreparedChainLockContextPtr context);

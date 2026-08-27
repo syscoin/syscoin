@@ -308,6 +308,7 @@ BOOST_AUTO_TEST_CASE(prepared_context_is_exact_reusable_and_owned)
         ShareCollectionError::NONE};
     auto exact_collector{ChainLockCollector::Create(context)};
     BOOST_REQUIRE(exact_collector);
+    BOOST_CHECK(exact_collector->GetPreparedContext() == context);
     BOOST_CHECK(exact_collector->AddVerifiedShare(
                     alternate_share, &alternate_collection_error) ==
                 ShareCollectionResult::REJECTED);
@@ -351,6 +352,7 @@ BOOST_AUTO_TEST_CASE(prepared_context_is_exact_reusable_and_owned)
     std::weak_ptr<const PreparedChainLockContext> retained{context};
     auto collector{ChainLockCollector::Create(context)};
     BOOST_REQUIRE(collector);
+    BOOST_CHECK(collector->GetPreparedContext() == context);
     context.reset();
     rosters.reset();
     BOOST_CHECK(!retained.expired());

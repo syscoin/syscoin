@@ -15,7 +15,10 @@ struct PaymentAuditSigningResult {
     bool replayed{false};
 };
 
-/** Purpose-separated signer which can run only after ordinary B finality. */
+/**
+ * Purpose-separated signer consuming an exact prepared live-seal context.
+ * Runtime generation and current-chain authorization remain caller-owned.
+ */
 class PaymentAuditShareSigner final {
 public:
     PaymentAuditShareSigner(uint256 genesis_hash,
@@ -24,11 +27,8 @@ public:
                             CPQSignerJournal& journal);
 
     [[nodiscard]] PaymentAuditSigningResult Sign(
-        const PaymentAuditStatement& statement,
+        const PreparedPaymentAuditContext& context,
         const QuorumBitmap& reporter_observed_members,
-        const FinalChainLock& seal_chainlock,
-        const FrozenQuorumRosters& rosters,
-        uint8_t authorization_mask,
         uint8_t quorum_slot,
         uint16_t member_index,
         const scheduled_wots::SecretKey& child_secret_key,

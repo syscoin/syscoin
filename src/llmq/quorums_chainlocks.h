@@ -745,13 +745,11 @@ private:
         const uint256& local_pro_tx_hash)
         EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex, !cs_main);
     [[nodiscard]] bool ConsumeStartupChainLockSlots(
-        const CurrentSigningContext& current,
+        const pq::PreparedChainLockContext& context,
         const uint256& local_pro_tx_hash)
         EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex);
     [[nodiscard]] bool ConsumeStartupPaymentAuditSlots(
-        const pq::PaymentAuditStatement& statement,
-        const pq::FrozenQuorumRosters& rosters,
-        uint8_t authorization_mask,
+        const pq::PreparedPaymentAuditContext& context,
         const uint256& local_pro_tx_hash)
         EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex);
     void MaybeCreateAndSignChainLock()

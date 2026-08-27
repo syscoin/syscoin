@@ -655,6 +655,7 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     ShareCollectionError staged_error{ShareCollectionError::NONE};
     auto staged_collector{PaymentAuditCollector::Create(prepared_context)};
     BOOST_REQUIRE(staged_collector);
+    BOOST_CHECK(staged_collector->GetPreparedContext() == prepared_context);
     auto pending_reservation{
         staged_collector->ReserveShareVerification(share, &staged_error)};
     BOOST_REQUIRE(pending_reservation);
@@ -913,16 +914,88 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
                 ShareCollectionResult::REJECTED);
     BOOST_CHECK(collection_error == ShareCollectionError::INVALID_CONTEXT);
 
+    auto signer_context{PreparedPaymentAuditContext::Create(
+        fixture->genesis_hash, fixture->schedule,
+        fixture->audit.statement, fixture->seal, rosters,
+        AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(signer_context);
+
+    llmq::CPQSignerJournal success_journal{
+        m_path_root / "pq_payment_audit_signer_success"};
+    ChainLockShareSigner seal_signer{
+        fixture->genesis_hash, member.pro_tx_hash,
+        fixture->schedule.chainlock, success_journal};
+    ChainLockVerificationError seal_context_error{
+        ChainLockVerificationError::NONE};
+    auto seal_context{PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule.chainlock,
+        fixture->seal.statement, rosters, AUTHORIZATION_MASK,
+        &seal_context_error)};
+    BOOST_REQUIRE(seal_context);
+    BOOST_CHECK(seal_context_error == ChainLockVerificationError::NONE);
+    BOOST_REQUIRE(seal_signer.Sign(
+        *seal_context, 0, 0, *secret_key, authorization.proof,
+        std::nullopt).share);
+    const auto seal_lock{success_journal.GetBranchLock(
+        fixture->genesis_hash, member.pro_tx_hash)};
+    BOOST_REQUIRE(seal_lock);
+
+    PaymentAuditShareSigner success_signer{
+        fixture->genesis_hash, member.pro_tx_hash,
+        fixture->schedule, success_journal};
+    ChainLockSigningError signing_error{ChainLockSigningError::NONE};
+    BOOST_CHECK(!success_signer.Sign(
+        *signer_context,
+        fixture->audit.report_witnesses[0].observed_members,
+        0, 0, *secret_key, authorization.proof, std::nullopt,
+        &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::JOURNAL_CONFLICT);
+    auto wrong_seal_lock{*seal_lock};
+    wrong_seal_lock.statement_hash.begin()[0] ^= 1;
+    BOOST_CHECK(!success_signer.Sign(
+        *signer_context,
+        fixture->audit.report_witnesses[0].observed_members,
+        0, 0, *secret_key, authorization.proof, wrong_seal_lock,
+        &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::JOURNAL_CONFLICT);
+
+    const auto signed_audit{success_signer.Sign(
+        *signer_context,
+        fixture->audit.report_witnesses[0].observed_members,
+        0, 0, *secret_key, authorization.proof, seal_lock,
+        &signing_error)};
+    BOOST_REQUIRE(signed_audit.share);
+    BOOST_CHECK(!signed_audit.replayed);
+    BOOST_CHECK(signing_error == ChainLockSigningError::NONE);
+    BOOST_CHECK(signed_audit.share->transcript == share.transcript);
+    BOOST_CHECK(signed_audit.share->authenticated_signature ==
+                share.authenticated_signature);
+    const auto signed_replay{success_signer.Sign(
+        *signer_context,
+        fixture->audit.report_witnesses[0].observed_members,
+        0, 0, *secret_key, authorization.proof, seal_lock,
+        &signing_error)};
+    BOOST_REQUIRE(signed_replay.share);
+    BOOST_CHECK(signed_replay.replayed);
+    BOOST_CHECK(*signed_replay.share == *signed_audit.share);
+
+    auto competing_report_bitmap{
+        fixture->audit.report_witnesses[0].observed_members};
+    competing_report_bitmap[0] ^= 1;
+    BOOST_CHECK(!success_signer.Sign(
+        *signer_context, competing_report_bitmap, 0, 0, *secret_key,
+        authorization.proof, seal_lock, &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::JOURNAL_CONFLICT);
+
     llmq::CPQSignerJournal journal{
         m_path_root / "pq_payment_audit_signer_unauthorized"};
     PaymentAuditShareSigner signer{
         fixture->genesis_hash, member.pro_tx_hash,
         fixture->schedule, journal};
-    ChainLockSigningError signing_error{ChainLockSigningError::NONE};
     BOOST_CHECK(!signer.Sign(
-        fixture->audit.statement,
+        *signer_context,
         fixture->audit.report_witnesses[0].observed_members,
-        fixture->seal, fixture->rosters, AUTHORIZATION_MASK, 3, 0,
+        3, 0,
         *secret_key, authorization.proof, std::nullopt,
         &signing_error).share);
     BOOST_CHECK(signing_error == ChainLockSigningError::INACTIVE_QUORUM);
@@ -935,13 +1008,44 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     skipped_seal.statement = skipped_statement.seal_statement;
     BOOST_REQUIRE(skipped_statement.IsStructurallyValid());
     BOOST_REQUIRE(skipped_seal.IsStructurallyValid());
+    auto skipped_context{PreparedPaymentAuditContext::Create(
+        fixture->genesis_hash, fixture->schedule, skipped_statement,
+        skipped_seal, rosters, AUTHORIZATION_MASK,
+        &verification_error)};
+    BOOST_REQUIRE(skipped_context);
     BOOST_CHECK(!signer.Sign(
-        skipped_statement,
+        *skipped_context,
         fixture->audit.report_witnesses[0].observed_members,
-        skipped_seal, fixture->rosters, AUTHORIZATION_MASK, 0, 0,
+        0, 0,
         *secret_key, authorization.proof, std::nullopt,
         &signing_error).share);
     BOOST_CHECK(signing_error == ChainLockSigningError::INELIGIBLE_HEIGHT);
+    BOOST_CHECK(!journal.GetBranchLock(
+        fixture->genesis_hash, member.pro_tx_hash));
+
+    PaymentAuditShareSigner wrong_genesis_signer{
+        NonNullHash(92'001), member.pro_tx_hash,
+        fixture->schedule, journal};
+    BOOST_CHECK(!wrong_genesis_signer.Sign(
+        *signer_context,
+        fixture->audit.report_witnesses[0].observed_members,
+        0, 0, *secret_key, authorization.proof, std::nullopt,
+        &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::INVALID_CONTEXT);
+
+    auto other_schedule{fixture->schedule};
+    other_schedule.chainlock.epoch_origin = 1440;
+    other_schedule.btcc.candidate_origin += 1440;
+    BOOST_REQUIRE(other_schedule.IsValid());
+    PaymentAuditShareSigner wrong_schedule_signer{
+        fixture->genesis_hash, member.pro_tx_hash,
+        other_schedule, journal};
+    BOOST_CHECK(!wrong_schedule_signer.Sign(
+        *signer_context,
+        fixture->audit.report_witnesses[0].observed_members,
+        0, 0, *secret_key, authorization.proof, std::nullopt,
+        &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::INVALID_CONTEXT);
     BOOST_CHECK(!journal.GetBranchLock(
         fixture->genesis_hash, member.pro_tx_hash));
 }

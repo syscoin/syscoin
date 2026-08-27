@@ -97,6 +97,11 @@ public:
         const PaymentAuditShareTranscript& transcript) const noexcept;
     [[nodiscard]] bool IsComplete() const;
     [[nodiscard]] std::optional<FinalPaymentAudit> Finalize() const;
+    [[nodiscard]] PreparedPaymentAuditContextPtr
+    GetPreparedContext() const noexcept
+    {
+        return m_context;
+    }
 
 private:
     explicit PaymentAuditCollector(PreparedPaymentAuditContextPtr context);

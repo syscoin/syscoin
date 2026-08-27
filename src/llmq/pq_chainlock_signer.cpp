@@ -55,9 +55,7 @@ ChainLockShareSigner::ChainLockShareSigner(
 }
 
 ChainLockSigningResult ChainLockShareSigner::Sign(
-    const ChainLockStatement& statement,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    uint8_t authorization_mask,
+    const PreparedChainLockContext& context,
     uint8_t quorum_slot,
     uint16_t member_index,
     const scheduled_wots::SecretKey& child_secret_key,
@@ -67,11 +65,21 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
 {
     SetError(error, ChainLockSigningError::NONE);
     if (m_genesis_hash.IsNull() || m_local_pro_tx_hash.IsNull() ||
-        !statement.IsStructurallyValid() || !child_secret_key.IsValid()) {
+        !child_secret_key.IsValid()) {
         return Failure(error, ChainLockSigningError::INVALID_ARGUMENT);
     }
     if (!m_schedule.IsValid()) {
         return Failure(error, ChainLockSigningError::INVALID_SCHEDULE);
+    }
+    if (context.GenesisHash() != m_genesis_hash ||
+        context.Schedule() != m_schedule) {
+        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
+    }
+    const auto& statement{context.Statement()};
+    const auto& rosters{context.Rosters()};
+    const uint8_t authorization_mask{context.AuthorizationMask()};
+    if (!statement.IsStructurallyValid()) {
+        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
     }
     if (!IsEligibleChainLockTarget(m_schedule, statement.height)) {
         return Failure(error, ChainLockSigningError::INELIGIBLE_HEIGHT);
@@ -81,12 +89,6 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
     }
     if ((authorization_mask & (uint8_t{1} << quorum_slot)) == 0) {
         return Failure(error, ChainLockSigningError::INACTIVE_QUORUM);
-    }
-    ChainLockVerificationError context_error{ChainLockVerificationError::NONE};
-    if (!ValidateFrozenQuorumContext(m_genesis_hash, statement, rosters,
-                                     authorization_mask,
-                                     &context_error)) {
-        return Failure(error, ChainLockSigningError::INVALID_CONTEXT);
     }
     const auto& roster{rosters[quorum_slot]};
     const auto leaf_index{ChainLockLeafIndex(

@@ -9,7 +9,6 @@
 #include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_signer_journal.h>
 
-#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -38,9 +37,11 @@ struct ChainLockSigningResult {
 };
 
 /**
- * The sole child-key signing entry point. Callers must first fully validate the
- * candidate block and previous ChainLock; this class independently enforces
- * schedule, roster, key identity, transcript, and burn-before-sign rules.
+ * The sole child-key signing entry point. The prepared capability fixes the
+ * validated statement and roster; this class still enforces schedule, member,
+ * key identity, transcript, and burn-before-sign rules for every share.
+ * Prepared ownership does not make a stale branch current; callers retain the
+ * admission-generation and active-chain checks around each invocation.
  */
 class ChainLockShareSigner final {
 public:
@@ -50,9 +51,7 @@ public:
                          CPQSignerJournal& journal);
 
     [[nodiscard]] ChainLockSigningResult Sign(
-        const ChainLockStatement& statement,
-        const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-        uint8_t authorization_mask,
+        const PreparedChainLockContext& context,
         uint8_t quorum_slot,
         uint16_t member_index,
         const scheduled_wots::SecretKey& child_secret_key,

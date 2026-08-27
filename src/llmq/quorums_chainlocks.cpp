@@ -1945,30 +1945,33 @@ bool CChainLocksHandler::InitializeSignerStartupTip(
 }
 
 bool CChainLocksHandler::ConsumeStartupChainLockSlots(
-    const CurrentSigningContext& current,
+    const pq::PreparedChainLockContext& context,
     const uint256& local_pro_tx_hash)
 {
     AssertLockHeld(m_share_signing_mutex);
-    if (!m_signer_journal || !m_signer_startup_tip_height ||
-        !current.rosters) {
+    if (!m_signer_journal || !m_signer_startup_tip_height || !m_config ||
+        context.GenesisHash() != m_genesis_hash ||
+        context.Schedule() != m_config->chainlock_schedule) {
         return false;
     }
+    const auto& statement{context.Statement()};
+    const auto& rosters{context.Rosters()};
     if (!ShouldConsumeChainLockStartupSlot(
             m_config->chainlock_schedule, *m_signer_startup_tip_height,
-            current.statement.height)) {
+            statement.height)) {
         return true;
     }
 
     std::vector<PQSignerJournalKey> keys;
-    keys.reserve(current.rosters->size());
-    for (std::size_t slot{0}; slot < current.rosters->size(); ++slot) {
-        if ((current.authorization_mask & (uint8_t{1} << slot)) == 0) {
+    keys.reserve(rosters.size());
+    for (std::size_t slot{0}; slot < rosters.size(); ++slot) {
+        if ((context.AuthorizationMask() & (uint8_t{1} << slot)) == 0) {
             continue;
         }
-        const auto& roster{(*current.rosters)[slot]};
+        const auto& roster{rosters[slot]};
         const auto leaf_index{pq::ChainLockLeafIndex(
-            m_config->chainlock_schedule, roster.descriptor.epoch,
-            current.statement.height)};
+            context.Schedule(), roster.descriptor.epoch,
+            statement.height)};
         if (!leaf_index) return false;
         for (const auto& member : roster.members) {
             if (member.pro_tx_hash != local_pro_tx_hash || !member.eligible ||
@@ -1980,14 +1983,14 @@ bool CChainLocksHandler::ConsumeStartupChainLockSlots(
             if (!signing_material) return false;
             keys.push_back(PQSignerJournalKey{
                 .genesis_hash = m_genesis_hash,
-                .child_profile = current.statement.child_profile,
+                .child_profile = statement.child_profile,
                 .pro_tx_hash = local_pro_tx_hash,
                 .quorum_epoch = roster.descriptor.epoch,
                 .child_key_hash =
                     ::Hash(signing_material->key_proof.public_key),
                 .leaf_index = *leaf_index,
                 .purpose = PQSignerPurpose::CHAINLOCK,
-                .absolute_height = current.statement.height,
+                .absolute_height = statement.height,
             });
         }
     }
@@ -2000,16 +2003,23 @@ bool CChainLocksHandler::ConsumeStartupChainLockSlots(
 }
 
 bool CChainLocksHandler::ConsumeStartupPaymentAuditSlots(
-    const pq::PaymentAuditStatement& statement,
-    const pq::FrozenQuorumRosters& rosters,
-    uint8_t authorization_mask,
+    const pq::PreparedPaymentAuditContext& context,
     const uint256& local_pro_tx_hash)
 {
     AssertLockHeld(m_share_signing_mutex);
-    if (!m_signer_journal || !m_signer_startup_tip_height) return false;
+    if (!m_signer_journal || !m_signer_startup_tip_height || !m_config) {
+        return false;
+    }
 
-    const pq::PaymentAuditScheduleConfig config{
+    const pq::PaymentAuditScheduleConfig expected_config{
         m_config->chainlock_schedule, m_config->btcc_schedule};
+    if (context.GenesisHash() != m_genesis_hash ||
+        context.Schedule() != expected_config) {
+        return false;
+    }
+    const auto& config{context.Schedule()};
+    const auto& statement{context.Statement()};
+    const auto& rosters{context.Rosters()};
     const auto schedule{pq::BuildPaymentAuditEpochSchedule(
         config, statement.commitment.subject_epoch)};
     if (!schedule) return false;
@@ -2022,11 +2032,11 @@ bool CChainLocksHandler::ConsumeStartupPaymentAuditSlots(
     std::vector<PQSignerJournalKey> keys;
     keys.reserve(rosters.size());
     for (std::size_t slot{0}; slot < rosters.size(); ++slot) {
-        if ((authorization_mask & (uint8_t{1} << slot)) == 0) continue;
+        if ((context.AuthorizationMask() & (uint8_t{1} << slot)) == 0) {
+            continue;
+        }
         const auto& roster{rosters[slot]};
-        const auto leaf_index{pq::PaymentAuditLeafIndex(
-            config, statement.commitment.subject_epoch,
-            statement.commitment.seal_height, roster.descriptor.epoch)};
+        const auto leaf_index{context.LeafIndex(slot)};
         if (!leaf_index) return false;
         for (const auto& member : roster.members) {
             if (member.pro_tx_hash != local_pro_tx_hash || !member.eligible ||
@@ -10216,25 +10226,53 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
         }
     }
     if (!current) return;
-    if (!current->rosters) return;
+
+    pq::PreparedChainLockContextPtr signing_context;
+    uint64_t collector_generation{0};
+    {
+        LOCK(m_collector_mutex);
+        pq::ChainLockCollector* collector{FindCollector(current->statement)};
+        if (collector == nullptr) return;
+        signing_context = collector->GetPreparedContext();
+        collector_generation = m_collector_generation;
+    }
+    if (!signing_context ||
+        signing_context->Statement() != current->statement) {
+        return;
+    }
+    const auto& statement{signing_context->Statement()};
+    const auto& rosters{signing_context->Rosters()};
+    const uint8_t authorization_mask{
+        signing_context->AuthorizationMask()};
+    const auto has_exact_collector = [&]() {
+        LOCK(m_collector_mutex);
+        pq::ChainLockCollector* collector{FindCollector(statement)};
+        return m_collector_generation == collector_generation &&
+               collector != nullptr &&
+               collector->GetPreparedContext() == signing_context;
+    };
 
     // Bitcoin policy checks deliberately run without cs_main and can span
     // several bounded RPC calls. A concurrent Syscoin reorg invalidates both
     // approval and fallback; never let either path reserve a stale key slot.
     if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
-        !IsCurrentSigningStatement(current->statement)) {
+        !has_exact_collector() ||
+        !IsCurrentSigningStatement(statement)) {
         return;
     }
-    if (!ConsumeStartupChainLockSlots(*current, local_pro_tx_hash)) return;
+    if (!ConsumeStartupChainLockSlots(
+            *signing_context, local_pro_tx_hash)) {
+        return;
+    }
 
     bool local_member{false};
-    for (std::size_t slot{0}; slot < current->rosters->size(); ++slot) {
-        if ((current->authorization_mask & (uint8_t{1} << slot)) == 0) {
+    for (std::size_t slot{0}; slot < rosters.size(); ++slot) {
+        if ((authorization_mask & (uint8_t{1} << slot)) == 0) {
             continue;
         }
         local_member = std::any_of(
-            (*current->rosters)[slot].members.begin(),
-            (*current->rosters)[slot].members.end(),
+            rosters[slot].members.begin(),
+            rosters[slot].members.end(),
             [&](const pq::FrozenQuorumMember& member) {
                 return member.pro_tx_hash == local_pro_tx_hash &&
                        member.eligible && member.child_root.has_value();
@@ -10247,14 +10285,14 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
         m_genesis_hash, local_pro_tx_hash,
         m_config->chainlock_schedule, *m_signer_journal};
     const PQSignerBranchLock candidate_branch_lock{
-        current->statement.height,
-        current->statement.block_hash,
-        pq::GetLogicalChainLockId(m_genesis_hash, current->statement)};
-    for (std::size_t slot{0}; slot < current->rosters->size(); ++slot) {
-        if ((current->authorization_mask & (uint8_t{1} << slot)) == 0) {
+        statement.height,
+        statement.block_hash,
+        pq::GetLogicalChainLockId(m_genesis_hash, statement)};
+    for (std::size_t slot{0}; slot < rosters.size(); ++slot) {
+        if ((authorization_mask & (uint8_t{1} << slot)) == 0) {
             continue;
         }
-        const auto& roster{(*current->rosters)[slot]};
+        const auto& roster{rosters[slot]};
         for (std::size_t member_index{0};
              member_index < roster.members.size(); ++member_index) {
             const auto& member{roster.members[member_index]};
@@ -10273,7 +10311,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             }
             // Recheck for every roster slot: child signing itself is expensive,
             // so the active branch can change between two local signatures.
-            if (!IsCurrentSigningStatement(current->statement)) return;
+            if (!IsCurrentSigningStatement(statement)) return;
             const auto expected_branch_lock{m_signer_journal->GetBranchLock(
                 m_genesis_hash, local_pro_tx_hash)};
             if (!m_signer_journal->IsHealthy()) return;
@@ -10306,12 +10344,12 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             }
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
-            if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+            if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+                !has_exact_collector()) {
                 return;
             }
             auto signed_share{signer.Sign(
-                current->statement, *current->rosters,
-                current->authorization_mask,
+                *signing_context,
                 static_cast<uint8_t>(slot),
                 static_cast<uint16_t>(member_index),
                 *signing_material->secret_key,
@@ -10334,10 +10372,10 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
 
             // The expensive signing operation may span a reorg. Burned slots
             // are never refunded, but stale signatures are never announced.
-            if (!IsCurrentSigningStatement(current->statement)) return;
+            if (!IsCurrentSigningStatement(statement)) return;
 
             auto collection{CollectChainLockShare(
-                *signed_share.share, current->statement,
+                *signed_share.share, statement,
                 admission_generation)};
             if (collection.stale) return;
             if (collection.result !=
@@ -10345,7 +10383,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 continue;
             }
             MaybeCapturePaymentAuditResponse(
-                *signed_share.share, current->rosters,
+                *signed_share.share, signing_context->RostersPtr(),
                 admission_generation);
             RelayChainLockShare(
                 *signed_share.share, admission_generation);
@@ -10396,7 +10434,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
     }
 
     std::optional<pq::PaymentAuditStatement> statement;
-    std::optional<pq::FinalChainLock> seal_chainlock;
+    pq::PreparedPaymentAuditContextPtr signing_context;
     pq::QuorumBitmap reporter_observed_members{};
     pq::FrozenQuorumRostersPtr rosters;
     std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
@@ -10429,16 +10467,18 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 m_payment_audit_runtime->finalized_certificate;
         } else {
             if (m_payment_audit_runtime->local_signing_complete) return;
-            statement = m_payment_audit_runtime->statement;
-            seal_chainlock = m_payment_audit_runtime->seal_chainlock;
+            signing_context = m_payment_audit_runtime->collector
+                                  ->GetPreparedContext();
+            if (!signing_context) return;
+            statement = signing_context->Statement();
             reporter_observed_members =
                 m_payment_audit_runtime->selected_row
                     .locally_observed_members;
-            rosters = m_payment_audit_runtime->signing_rosters;
+            rosters = signing_context->RostersPtr();
             relay_recipients =
                 m_payment_audit_runtime->relay_recipients;
             authorization_mask =
-                m_payment_audit_runtime->authorization_mask;
+                signing_context->AuthorizationMask();
         }
     }
     if (certificate_to_process) {
@@ -10461,7 +10501,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             /*submit=*/true);
         return;
     }
-    if (!statement || !seal_chainlock || !rosters || !relay_recipients ||
+    if (!statement || !signing_context || !rosters || !relay_recipients ||
         !pq::IsSigningRosterAuthorizationMask(authorization_mask) ||
         !IsCurrentPaymentAuditStatement(*statement)) {
         return;
@@ -10483,16 +10523,20 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         LOCK(m_payment_audit_mutex);
         if (m_payment_audit_runtime_generation == runtime_generation &&
             m_payment_audit_runtime &&
+            m_payment_audit_runtime->collector &&
+            m_payment_audit_runtime->collector->GetPreparedContext() ==
+                signing_context &&
             m_payment_audit_runtime->statement == statement) {
             m_payment_audit_runtime->local_signing_complete = true;
         }
         return;
     }
 
+    const auto& seal_statement{statement->seal_statement};
     const PQSignerBranchLock seal_lock{
-        seal_chainlock->statement.height,
-        seal_chainlock->statement.block_hash,
-        seal_chainlock->GetLogicalId(m_genesis_hash)};
+        seal_statement.height,
+        seal_statement.block_hash,
+        pq::GetLogicalChainLockId(m_genesis_hash, seal_statement)};
     const auto expected_branch_lock{m_signer_journal->GetBranchLock(
         m_genesis_hash, local_pro_tx_hash)};
     if (!m_signer_journal->IsHealthy() || !expected_branch_lock ||
@@ -10504,13 +10548,15 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         return m_payment_audit_runtime_generation == runtime_generation &&
                m_payment_audit_runtime &&
                m_payment_audit_runtime->collector &&
+               m_payment_audit_runtime->collector->GetPreparedContext() ==
+                   signing_context &&
                m_payment_audit_runtime->statement == statement &&
                !m_payment_audit_runtime->finalized_certificate;
     };
     if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
         !has_exact_open_runtime() ||
         !ConsumeStartupPaymentAuditSlots(
-            *statement, *rosters, authorization_mask, local_pro_tx_hash)) {
+            *signing_context, local_pro_tx_hash)) {
         return;
     }
 
@@ -10555,9 +10601,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 return;
             }
             auto signed_share{signer.Sign(
-                *statement, reporter_observed_members,
-                *seal_chainlock, *rosters,
-                authorization_mask,
+                *signing_context, reporter_observed_members,
                 static_cast<uint8_t>(slot),
                 static_cast<uint16_t>(member_index),
                 *signing_material->secret_key,
@@ -10624,6 +10668,9 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         LOCK(m_payment_audit_mutex);
         if (m_payment_audit_runtime_generation == runtime_generation &&
             m_payment_audit_runtime &&
+            m_payment_audit_runtime->collector &&
+            m_payment_audit_runtime->collector->GetPreparedContext() ==
+                signing_context &&
             m_payment_audit_runtime->statement == statement) {
             m_payment_audit_runtime->local_signing_complete = true;
         }
