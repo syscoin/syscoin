@@ -105,22 +105,6 @@ bool SamePaymentAuditOpenRowIdentity(
            first.response_advance == second.response_advance;
 }
 
-bool IsActivePaymentAuditRelay(
-    const pq::FrozenQuorumRosters& rosters,
-    const uint256& pro_tx_hash) noexcept
-{
-    if (pro_tx_hash.IsNull()) return false;
-    for (const auto& roster : rosters) {
-        for (const auto& member : roster.members) {
-            if (member.pro_tx_hash == pro_tx_hash && member.eligible &&
-                member.child_root) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 bool SameFrozenQuorumRoster(const pq::FrozenQuorumRoster& first,
                             const pq::FrozenQuorumRoster& second)
 {
@@ -7306,6 +7290,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             m_payment_audit_runtime->statement &&
             m_payment_audit_runtime->seal_chainlock &&
             m_payment_audit_runtime->signing_rosters &&
+            m_payment_audit_runtime->relay_recipients &&
             pq::IsSigningRosterAuthorizationMask(
                 m_payment_audit_runtime->authorization_mask)) {
             cached_statement = m_payment_audit_runtime->statement;
@@ -7559,11 +7544,14 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             !IsCurrentPaymentAuditStatement(statement)) {
             continue;
         }
+        auto relay_recipients{
+            std::make_shared<const ChainLockRelayRecipients>(
+                BuildChainLockRelayRecipients(*signing_rosters))};
 
         LOCK(m_payment_audit_mutex);
         (void)PublishPaymentAuditRuntime(PaymentAuditResponseRuntime{
             *round, selected, statement, *seal_chainlock, signing_rosters,
-            authorization_mask,
+            relay_recipients, authorization_mask,
             std::move(collector), nullptr, std::nullopt, false, false});
         return true;
     }
@@ -7640,7 +7628,7 @@ bool CChainLocksHandler::IsCurrentPaymentAuditStatement(
 
 void CChainLocksHandler::RelayPaymentAuditShare(
     const pq::PaymentAuditShare& share,
-    const pq::FrozenQuorumRostersPtr& rosters,
+    const std::shared_ptr<const ChainLockRelayRecipients>& recipients,
     uint64_t admission_generation,
     NodeId except_peer)
 {
@@ -7650,15 +7638,15 @@ void CChainLocksHandler::RelayPaymentAuditShare(
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
     }
-    if (!rosters) return;
+    if (!recipients) return;
     m_connman.ForEachNode([&](CNode* node) {
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         if (node == nullptr || node->GetId() == except_peer ||
-            node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION ||
-            !IsActivePaymentAuditRelay(
-                *rosters, node->GetVerifiedProRegTxHash())) {
+            node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
             return;
         }
+        const uint256 identity{node->GetVerifiedProRegTxHash()};
+        if (identity.IsNull() || !recipients->contains(identity)) return;
         m_connman.PushMessage(
             node, CNetMsgMaker(node->GetCommonVersion())
                       .Make(NetMsgType::PQPOSESHARE, share));
@@ -7837,7 +7825,7 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         punish("bad-pq-payment-audit-share-encoding");
         return;
     }
-    pq::FrozenQuorumRostersPtr rosters;
+    std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
     uint64_t runtime_generation{0};
     {
         // Runtime construction belongs to the scheduler. This lock admits a
@@ -7847,11 +7835,12 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         if (!m_payment_audit_runtime ||
             !m_payment_audit_runtime->collector ||
             !m_payment_audit_runtime->statement ||
-            !m_payment_audit_runtime->signing_rosters) {
+            !m_payment_audit_runtime->signing_rosters ||
+            !m_payment_audit_runtime->relay_recipients) {
             return;
         }
-        rosters = m_payment_audit_runtime->signing_rosters;
-        if (!IsActivePaymentAuditRelay(*rosters, peer_identity) ||
+        relay_recipients = m_payment_audit_runtime->relay_recipients;
+        if (!relay_recipients->contains(peer_identity) ||
             share.transcript.statement !=
                 *m_payment_audit_runtime->statement) {
             return;
@@ -7888,7 +7877,7 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         return;
     }
     RelayPaymentAuditShare(
-        share, rosters, admission_generation, node_id);
+        share, relay_recipients, admission_generation, node_id);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
         if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
@@ -9909,7 +9898,8 @@ ChainLockRelayRecipients BuildChainLockRelayRecipients(
     recipients.reserve(pq::ACTIVE_QUORUMS * pq::QUORUM_SIZE);
     for (const auto& roster : rosters) {
         for (const auto& member : roster.members) {
-            if (member.eligible && member.child_root) {
+            if (!member.pro_tx_hash.IsNull() && member.eligible &&
+                member.child_root) {
                 recipients.insert(member.pro_tx_hash);
             }
         }
@@ -10274,6 +10264,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
     std::optional<pq::FinalChainLock> seal_chainlock;
     pq::QuorumBitmap reporter_observed_members{};
     pq::FrozenQuorumRostersPtr rosters;
+    std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
     std::shared_ptr<const pq::FinalPaymentAudit> certificate_to_process;
     uint64_t runtime_generation{0};
     uint8_t authorization_mask{0};
@@ -10284,7 +10275,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             !m_payment_audit_runtime->collector ||
             !m_payment_audit_runtime->statement ||
             !m_payment_audit_runtime->seal_chainlock ||
-            !m_payment_audit_runtime->signing_rosters) {
+            !m_payment_audit_runtime->signing_rosters ||
+            !m_payment_audit_runtime->relay_recipients) {
             return;
         }
         runtime_generation = m_payment_audit_runtime_generation;
@@ -10308,6 +10300,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 m_payment_audit_runtime->selected_row
                     .locally_observed_members;
             rosters = m_payment_audit_runtime->signing_rosters;
+            relay_recipients =
+                m_payment_audit_runtime->relay_recipients;
             authorization_mask =
                 m_payment_audit_runtime->authorization_mask;
         }
@@ -10332,7 +10326,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             /*submit=*/true);
         return;
     }
-    if (!statement || !seal_chainlock || !rosters ||
+    if (!statement || !seal_chainlock || !rosters || !relay_recipients ||
         !pq::IsSigningRosterAuthorizationMask(authorization_mask) ||
         !IsCurrentPaymentAuditStatement(*statement)) {
         return;
@@ -10461,7 +10455,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 continue;
             }
             RelayPaymentAuditShare(
-                *signed_share.share, rosters, admission_generation);
+                *signed_share.share, relay_recipients,
+                admission_generation);
             if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
                 if (collection.finalized) {
                     FinishPaymentAuditFinalizationAttempt(

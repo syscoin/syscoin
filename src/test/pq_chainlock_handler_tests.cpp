@@ -1331,6 +1331,9 @@ BOOST_AUTO_TEST_CASE(share_relay_identity_is_independent_from_original_signer)
     auto& rootless_member{rosters[3].members[11]};
     rootless_member.eligible = true;
     rootless_member.pro_tx_hash = rootless_relay;
+    auto& null_member{rosters[3].members[12]};
+    null_member.eligible = true;
+    null_member.child_root.emplace();
 
     llmq::pq::ChainLockShareTranscript transcript;
     transcript.quorum_epoch = roster.descriptor.epoch;
@@ -1339,6 +1342,7 @@ BOOST_AUTO_TEST_CASE(share_relay_identity_is_independent_from_original_signer)
     transcript.member_pro_tx_hash = original_signer;
     const auto relay_recipients{
         llmq::BuildChainLockRelayRecipients(rosters)};
+    BOOST_CHECK(!relay_recipients.contains(uint256{}));
 
     BOOST_CHECK(original_signer != authenticated_relay);
     BOOST_CHECK(llmq::IsAuthorizedChainLockShareRelay(

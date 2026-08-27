@@ -778,7 +778,7 @@ private:
                                  !m_btcc_preseal_mutex);
     void RelayPaymentAuditShare(
         const pq::PaymentAuditShare& share,
-        const pq::FrozenQuorumRostersPtr& rosters,
+        const std::shared_ptr<const ChainLockRelayRecipients>& recipients,
         uint64_t admission_generation,
         NodeId except_peer = -1)
         EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
@@ -817,6 +817,7 @@ private:
         std::optional<pq::PaymentAuditStatement> statement;
         std::optional<pq::FinalChainLock> seal_chainlock;
         pq::FrozenQuorumRostersPtr signing_rosters;
+        std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
         uint8_t authorization_mask{0};
         std::unique_ptr<pq::PaymentAuditCollector> collector;
         std::shared_ptr<const pq::FinalPaymentAudit> finalized_certificate;
