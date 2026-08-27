@@ -12,11 +12,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <ostream>
 #include <span>
+#include <thread>
 #include <vector>
 
 using namespace llmq::pq;
@@ -545,6 +550,222 @@ BOOST_AUTO_TEST_CASE(active_builder_uses_canonical_branch_bases_and_snapshots)
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain_a.Tip(),
         unavailable, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::SNAPSHOT_MISMATCH);
+}
+
+BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
+{
+    constexpr int32_t FIRST_TARGET{2305};
+    constexpr int32_t SECOND_TARGET{2310};
+    const uint256 genesis{NonNullHash(20)};
+    IndexChain canonical(SECOND_TARGET, SECOND_TARGET + 1, 0);
+    IndexChain fork_after_base(SECOND_TARGET, 2306, 0xa11ce);
+    IndexChain fork_at_base(SECOND_TARGET, 2304, 0x51de);
+    std::size_t lookups{0};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        ++lookups;
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), lookup)};
+    BOOST_REQUIRE(cache);
+    BOOST_CHECK(cache->GenesisHash() == genesis);
+    BOOST_CHECK(cache->Config() == BuildConfig());
+
+    QuorumBuildError error{QuorumBuildError::INVALID_ARGUMENT};
+    const auto first{cache->GetActive(
+        FIRST_TARGET, canonical.Tip(), &error)};
+    BOOST_REQUIRE(first);
+    BOOST_CHECK(error == QuorumBuildError::NONE);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
+
+    const auto same_set{cache->GetActive(
+        SECOND_TARGET, canonical.Tip(), &error)};
+    BOOST_REQUIRE(same_set);
+    BOOST_CHECK(first == same_set);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
+
+    const auto post_base_fork{cache->GetActive(
+        SECOND_TARGET, fork_after_base.Tip(), &error)};
+    BOOST_REQUIRE(post_base_fork);
+    BOOST_CHECK(post_base_fork == first);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
+
+    const auto base_fork{cache->GetActive(
+        FIRST_TARGET, fork_at_base.Tip(), &error)};
+    BOOST_REQUIRE(base_fork);
+    BOOST_CHECK(base_fork != first);
+    BOOST_CHECK_EQUAL(lookups, 2 * ACTIVE_QUORUMS);
+
+    BOOST_CHECK(!cache->GetActive(
+        FIRST_TARGET + 1, canonical.Tip(), &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_TARGET_HEIGHT);
+    BOOST_CHECK_EQUAL(lookups, 2 * ACTIVE_QUORUMS);
+    BOOST_CHECK(!cache->GetActive(
+        FIRST_TARGET, canonical.At(FIRST_TARGET - 1), &error));
+    BOOST_CHECK(error == QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+    BOOST_CHECK_EQUAL(lookups, 2 * ACTIVE_QUORUMS);
+
+    BOOST_REQUIRE(cache->LookupSnapshot(canonical.At(1296)));
+    BOOST_REQUIRE(cache->LookupSnapshot(canonical.At(1296)));
+    BOOST_CHECK_EQUAL(lookups, 2 * ACTIVE_QUORUMS + 2);
+}
+
+BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
+{
+    constexpr int32_t TARGET_HEIGHT{2305};
+    const uint256 genesis{NonNullHash(21)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    std::size_t lookups{0};
+    bool fail_next{true};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        ++lookups;
+        if (fail_next) {
+            fail_next = false;
+            return std::optional<QuorumSnapshotState>{};
+        }
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), lookup)};
+    BOOST_REQUIRE(cache);
+    QuorumBuildError error{QuorumBuildError::NONE};
+    BOOST_CHECK(!cache->GetActive(
+        TARGET_HEIGHT, chain.Tip(), &error));
+    BOOST_CHECK(error == QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
+    BOOST_CHECK_EQUAL(lookups, 1U);
+
+    const auto retry{cache->GetActive(TARGET_HEIGHT, chain.Tip(), &error)};
+    BOOST_REQUIRE(retry);
+    BOOST_CHECK(error == QuorumBuildError::NONE);
+    BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
+    BOOST_CHECK(cache->GetActive(TARGET_HEIGHT, chain.Tip()) == retry);
+    BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
+
+    std::size_t uncached_lookups{0};
+    const QuorumSnapshotLookup uncached_lookup =
+        [&](const CBlockIndex& index) {
+            ++uncached_lookups;
+            QuorumSnapshotState result;
+            result.deterministic_mns = Snapshot(
+                index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+            return std::optional<QuorumSnapshotState>{std::move(result)};
+        };
+    const auto uncached{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), uncached_lookup,
+        /*cache_results=*/false)};
+    BOOST_REQUIRE(uncached);
+    const auto uncached_first{
+        uncached->GetActive(TARGET_HEIGHT, chain.Tip())};
+    const auto uncached_second{
+        uncached->GetActive(TARGET_HEIGHT, chain.Tip())};
+    BOOST_REQUIRE(uncached_first);
+    BOOST_REQUIRE(uncached_second);
+    BOOST_CHECK(uncached_first != uncached_second);
+    BOOST_CHECK_EQUAL(uncached_lookups, 2 * ACTIVE_QUORUMS);
+
+    BOOST_CHECK(!FrozenQuorumRosterCache::Create(
+        uint256{}, BuildConfig(), uncached_lookup));
+    BOOST_CHECK(!FrozenQuorumRosterCache::Create(
+        genesis, QuorumBuildConfig{}, uncached_lookup));
+    BOOST_CHECK(!FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), QuorumSnapshotLookup{}));
+}
+
+BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
+{
+    constexpr int32_t TARGET_HEIGHT{2305};
+    constexpr int32_t FIRST_SNAPSHOT_HEIGHT{1296};
+    const uint256 genesis{NonNullHash(23)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    std::atomic<std::size_t> lookups{0};
+    std::mutex barrier_mutex;
+    std::condition_variable barrier_cv;
+    std::size_t arrivals{0};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        lookups.fetch_add(1, std::memory_order_relaxed);
+        if (index.nHeight == FIRST_SNAPSHOT_HEIGHT) {
+            std::unique_lock lock{barrier_mutex};
+            ++arrivals;
+            barrier_cv.notify_all();
+            if (!barrier_cv.wait_for(
+                    lock, std::chrono::seconds{30},
+                    [&] { return arrivals == 2; })) {
+                return std::optional<QuorumSnapshotState>{};
+            }
+        }
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), lookup)};
+    BOOST_REQUIRE(cache);
+
+    std::array<FrozenQuorumRostersPtr, 2> results;
+    std::thread first{[&] {
+        results[0] = cache->GetActive(TARGET_HEIGHT, chain.Tip());
+    }};
+    std::thread second{[&] {
+        results[1] = cache->GetActive(TARGET_HEIGHT, chain.Tip());
+    }};
+    first.join();
+    second.join();
+
+    BOOST_REQUIRE(results[0]);
+    BOOST_REQUIRE(results[1]);
+    BOOST_CHECK(results[0] == results[1]);
+    BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
+                      2 * ACTIVE_QUORUMS);
+}
+
+BOOST_AUTO_TEST_CASE(active_roster_cache_eviction_preserves_reader_lifetime)
+{
+    constexpr int32_t FIRST_TARGET{2305};
+    constexpr int32_t CONTEXT_STRIDE{
+        static_cast<int32_t>(PQ_EPOCH_ALIGNMENT)};
+    constexpr std::size_t CONTEXTS{
+        FROZEN_QUORUM_ROSTER_CACHE_CAPACITY + 1};
+    constexpr int32_t LAST_TARGET{
+        FIRST_TARGET +
+        static_cast<int32_t>(CONTEXTS - 1) * CONTEXT_STRIDE};
+    const uint256 genesis{NonNullHash(22)};
+    IndexChain chain(LAST_TARGET, LAST_TARGET + 1, 0);
+    std::size_t lookups{0};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        ++lookups;
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), lookup)};
+    BOOST_REQUIRE(cache);
+
+    const auto retained{cache->GetActive(
+        FIRST_TARGET, chain.Tip())};
+    BOOST_REQUIRE(retained);
+    const auto retained_descriptor{retained->front().descriptor};
+    for (std::size_t context{1}; context < CONTEXTS; ++context) {
+        const int32_t target{
+            FIRST_TARGET + static_cast<int32_t>(context) * CONTEXT_STRIDE};
+        BOOST_REQUIRE(cache->GetActive(target, chain.Tip()));
+    }
+    BOOST_CHECK_EQUAL(lookups, CONTEXTS * ACTIVE_QUORUMS);
+
+    const auto rebuilt{cache->GetActive(FIRST_TARGET, chain.Tip())};
+    BOOST_REQUIRE(rebuilt);
+    BOOST_CHECK(rebuilt != retained);
+    BOOST_CHECK(rebuilt->front().descriptor == retained_descriptor);
+    BOOST_CHECK(retained->front().descriptor == retained_descriptor);
+    BOOST_CHECK_EQUAL(lookups, (CONTEXTS + 1) * ACTIVE_QUORUMS);
 }
 
 BOOST_AUTO_TEST_CASE(probation_checkpoint_roots_do_not_select_validators)

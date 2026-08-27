@@ -352,6 +352,136 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
     return rosters;
 }
 
+FrozenQuorumRosterCache::FrozenQuorumRosterCache(
+    uint256 genesis_hash,
+    QuorumBuildConfig config,
+    QuorumSnapshotLookup snapshot_lookup,
+    bool cache_results)
+    : m_genesis_hash{std::move(genesis_hash)},
+      m_config{config},
+      m_snapshot_lookup{std::move(snapshot_lookup)},
+      m_cache_results{cache_results}
+{
+}
+
+std::shared_ptr<const FrozenQuorumRosterCache>
+FrozenQuorumRosterCache::Create(
+    uint256 genesis_hash,
+    QuorumBuildConfig config,
+    QuorumSnapshotLookup snapshot_lookup,
+    bool cache_results)
+{
+    if (genesis_hash.IsNull() || !config.IsValid() || !snapshot_lookup) {
+        return nullptr;
+    }
+    return std::shared_ptr<const FrozenQuorumRosterCache>{
+        new FrozenQuorumRosterCache{
+            std::move(genesis_hash), config, std::move(snapshot_lookup),
+            cache_results}};
+}
+
+FrozenQuorumRostersPtr FrozenQuorumRosterCache::GetActive(
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    QuorumBuildError* error) const
+{
+    SetError(error, QuorumBuildError::NONE);
+    if (!m_cache_results) {
+        return BuildActiveFrozenQuorumRosters(
+            m_genesis_hash, m_config, target_height, branch_tip,
+            m_snapshot_lookup, error);
+    }
+    if (!IsEligibleChainLockTarget(m_config.schedule, target_height)) {
+        SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
+        return nullptr;
+    }
+    if (branch_tip.nHeight < target_height) {
+        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+        return nullptr;
+    }
+    const CBlockIndex* target{branch_tip.GetAncestor(target_height)};
+    if (target == nullptr) {
+        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+        return nullptr;
+    }
+    const auto active_epochs{
+        ActiveEpochsAtHeight(m_config.schedule, target_height)};
+    if (!active_epochs) {
+        SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
+        return nullptr;
+    }
+    const auto& newest{active_epochs->back()};
+    const CBlockIndex* newest_base{
+        target->GetAncestor(newest.base_height)};
+    if (newest_base == nullptr) {
+        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+        return nullptr;
+    }
+    // A block hash commits its complete ancestry. Every other active base and
+    // snapshot is an ancestor of this newest base, so this key distinguishes
+    // forks exactly while allowing descendants after the base to share state.
+    const Key key{newest.epoch, newest_base->GetBlockHash()};
+
+    {
+        LOCK(m_mutex);
+        for (auto& entry : m_entries) {
+            if (entry.rosters && entry.key == key) {
+                entry.recently_used = true;
+                return entry.rosters;
+            }
+        }
+    }
+
+    auto built{BuildActiveFrozenQuorumRosters(
+        m_genesis_hash, m_config, target_height, branch_tip,
+        m_snapshot_lookup, error)};
+    if (!built) return nullptr;
+
+    FrozenQuorumRostersPtr displaced;
+    FrozenQuorumRostersPtr result;
+    {
+        LOCK(m_mutex);
+        for (auto& entry : m_entries) {
+            if (entry.rosters && entry.key == key) {
+                entry.recently_used = true;
+                result = entry.rosters;
+                break;
+            }
+        }
+        if (!result) {
+            std::optional<std::size_t> victim;
+            for (std::size_t slot{0}; slot < m_entries.size(); ++slot) {
+                if (!m_entries[slot].rosters) {
+                    victim = slot;
+                    break;
+                }
+            }
+            while (!victim) {
+                auto& candidate{m_entries[m_clock_hand]};
+                if (!candidate.recently_used) {
+                    victim = m_clock_hand;
+                } else {
+                    candidate.recently_used = false;
+                }
+                m_clock_hand = (m_clock_hand + 1) % m_entries.size();
+            }
+            auto& entry{m_entries[*victim]};
+            displaced = std::move(entry.rosters);
+            entry.key = key;
+            entry.rosters = std::move(built);
+            entry.recently_used = true;
+            result = entry.rosters;
+        }
+    }
+    return result;
+}
+
+std::optional<QuorumSnapshotState>
+FrozenQuorumRosterCache::LookupSnapshot(const CBlockIndex& index) const
+{
+    return m_snapshot_lookup(index);
+}
+
 uint8_t GetSigningRosterAuthorizationMask(
     const FrozenQuorumRosters& rosters,
     const AuthorizationBoundaryLookup& is_boundary_ancestor)

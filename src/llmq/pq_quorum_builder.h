@@ -9,8 +9,10 @@
 #include <llmq/pq_chainlock_schedule.h>
 #include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_operator_key_state.h>
+#include <sync.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -76,6 +78,69 @@ using QuorumSnapshotLookup =
 
 using AuthorizationBoundaryLookup =
     std::function<bool(int32_t, const uint256&)>;
+
+inline constexpr std::size_t FROZEN_QUORUM_ROSTER_CACHE_CAPACITY{16};
+
+/** Bounded success-only cache for complete branch-pinned active roster sets. */
+class FrozenQuorumRosterCache final {
+public:
+    [[nodiscard]] static std::shared_ptr<const FrozenQuorumRosterCache> Create(
+        uint256 genesis_hash,
+        QuorumBuildConfig config,
+        QuorumSnapshotLookup snapshot_lookup,
+        bool cache_results = true);
+
+    [[nodiscard]] FrozenQuorumRostersPtr GetActive(
+        int32_t target_height,
+        const CBlockIndex& branch_tip,
+        QuorumBuildError* error = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Always invoke the source; independent reconstruction must not self-hit. */
+    [[nodiscard]] std::optional<QuorumSnapshotState> LookupSnapshot(
+        const CBlockIndex& index) const;
+
+    [[nodiscard]] const uint256& GenesisHash() const noexcept
+    {
+        return m_genesis_hash;
+    }
+    [[nodiscard]] const QuorumBuildConfig& Config() const noexcept
+    {
+        return m_config;
+    }
+
+private:
+    struct Key {
+        uint32_t newest_epoch{0};
+        uint256 newest_base_hash;
+
+        friend bool operator==(const Key&, const Key&) = default;
+    };
+
+    struct Entry {
+        Key key;
+        FrozenQuorumRostersPtr rosters;
+        bool recently_used{false};
+    };
+
+    FrozenQuorumRosterCache(uint256 genesis_hash,
+                            QuorumBuildConfig config,
+                            QuorumSnapshotLookup snapshot_lookup,
+                            bool cache_results);
+
+    const uint256 m_genesis_hash;
+    const QuorumBuildConfig m_config;
+    const QuorumSnapshotLookup m_snapshot_lookup;
+    const bool m_cache_results;
+
+    mutable Mutex m_mutex;
+    mutable std::array<Entry, FROZEN_QUORUM_ROSTER_CACHE_CAPACITY>
+        m_entries GUARDED_BY(m_mutex);
+    mutable std::size_t m_clock_hand GUARDED_BY(m_mutex){0};
+};
+
+using FrozenQuorumRosterCachePtr =
+    std::shared_ptr<const FrozenQuorumRosterCache>;
 
 /** Domain-separated replacement for the legacy opaque DKG/base modifier. */
 [[nodiscard]] std::optional<uint256> GetPQQuorumModifier(
