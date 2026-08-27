@@ -599,14 +599,343 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
     // Once PQ payment eligibility is active, the audit liveness fallback is
     // confined to root-bearing operators and cannot reintroduce a rootless
     // payee.
-    const std::set<uint256> pq_payment_eligible{
-        members[1]->proTxHash, members[2]->proTxHash};
+    const auto sorted_hashes{[](std::initializer_list<uint256> hashes) {
+        std::vector<uint256> result{hashes};
+        std::sort(result.begin(), result.end());
+        return result;
+    }};
+    const auto pq_payment_eligible{sorted_hashes(
+        {members[1]->proTxHash, members[2]->proTxHash})};
     BOOST_REQUIRE(list.GetMNPayee(&all, &pq_payment_eligible));
     BOOST_CHECK(list.GetMNPayee(&all, &pq_payment_eligible)->proTxHash ==
                 members[1]->proTxHash);
+    const auto filtered_fallback{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), &all, &pq_payment_eligible)};
+    const auto filtered_ordinary{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), nullptr, &pq_payment_eligible)};
+    BOOST_CHECK(filtered_fallback == filtered_ordinary);
+    BOOST_REQUIRE_EQUAL(filtered_fallback.size(), 2U);
+    BOOST_CHECK(std::none_of(
+        filtered_fallback.begin(), filtered_fallback.end(),
+        [&](const auto& payee) {
+            return payee->proTxHash == members[0]->proTxHash;
+        }));
 
-    const std::set<uint256> no_pq_payment_eligible;
+    const std::vector<uint256> no_pq_payment_eligible;
     BOOST_CHECK(!list.GetMNPayee(&all, &no_pq_payment_eligible));
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                         std::numeric_limits<int>::max(), &all,
+                         &no_pq_payment_eligible)
+                    .empty());
+
+    // SYSCOIN: Root capability gates admission only. Restoring it preserves
+    // queue age, and the ordinary payment update moves the selected node back.
+    const auto only_newer{sorted_hashes({members[1]->proTxHash})};
+    BOOST_REQUIRE(list.GetMNPayee(nullptr, &only_newer));
+    BOOST_CHECK(list.GetMNPayee(nullptr, &only_newer)->proTxHash ==
+                members[1]->proTxHash);
+    const auto restored{sorted_hashes(
+        {members[0]->proTxHash, members[1]->proTxHash})};
+    BOOST_REQUIRE(list.GetMNPayee(nullptr, &restored));
+    BOOST_CHECK(list.GetMNPayee(nullptr, &restored)->proTxHash ==
+                members[0]->proTxHash);
+    const auto restored_projection{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), nullptr, &restored)};
+    BOOST_REQUIRE(!restored_projection.empty());
+    BOOST_CHECK(restored_projection.front()->proTxHash ==
+                members[0]->proTxHash);
+}
+
+// SYSCOIN: A legacy projection ends where root eligibility begins.
+BOOST_AUTO_TEST_CASE(payment_projection_stops_at_root_gate)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int legacy_anchor_height{consensus.nPQLegacyAnchorHeight};
+        uint256 legacy_anchor_block{consensus.hashPQLegacyAnchorBlock};
+        uint256 legacy_mn_state{consensus.hashPQLegacyMNState};
+        uint256 legacy_pq_state{consensus.hashPQLegacyPQRegistryState};
+        int finality_anchor_height{consensus.nPQChainLockAnchorHeight};
+        uint256 finality_anchor_block{consensus.hashPQChainLockAnchorBlock};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQLegacyAnchorHeight = legacy_anchor_height;
+            consensus.hashPQLegacyAnchorBlock = legacy_anchor_block;
+            consensus.hashPQLegacyMNState = legacy_mn_state;
+            consensus.hashPQLegacyPQRegistryState = legacy_pq_state;
+            consensus.nPQChainLockAnchorHeight = finality_anchor_height;
+            consensus.hashPQChainLockAnchorBlock = finality_anchor_block;
+        }
+    } restore{consensus};
+
+    constexpr int legacy_anchor_height{1300};
+    constexpr int finality_anchor_height{1440};
+    constexpr int parent_height{finality_anchor_height - 2};
+    consensus.DIP0003Height = legacy_anchor_height - 1;
+    consensus.nPQLegacyAnchorHeight = legacy_anchor_height;
+    consensus.hashPQLegacyAnchorBlock = MakeSnapshotKey(80'000);
+    consensus.hashPQLegacyMNState = MakeSnapshotKey(80'001);
+    consensus.hashPQLegacyPQRegistryState = MakeSnapshotKey(80'002);
+    consensus.nPQChainLockAnchorHeight = finality_anchor_height;
+    consensus.hashPQChainLockAnchorBlock = MakeSnapshotKey(80'003);
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_pq_payment_projection_boundary",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    const uint256 parent_hash{MakeSnapshotKey(parent_height)};
+    CDeterministicMNList list{parent_hash, parent_height, 3};
+    for (uint32_t member{0}; member < 3; ++member) {
+        list.AddMN(MakeLegacyReplayMN(40 + member, 20 + member),
+                   /*fBumpTotalCount=*/false);
+    }
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        parent_hash, list, /*fSync=*/true));
+
+    CBlockIndex parent;
+    parent.nHeight = parent_height;
+    parent.phashBlock = &parent_hash;
+    std::vector<CDeterministicMNCPtr> projection;
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &parent, 10, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 2U);
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &parent, 1, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 1U);
+}
+
+// SYSCOIN: A root-required projection cannot reuse one epoch's frozen set for
+// the following epoch.
+BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int legacy_anchor_height{consensus.nPQLegacyAnchorHeight};
+        uint256 legacy_anchor_block{consensus.hashPQLegacyAnchorBlock};
+        uint256 legacy_mn_state{consensus.hashPQLegacyMNState};
+        uint256 legacy_pq_state{consensus.hashPQLegacyPQRegistryState};
+        int finality_anchor_height{consensus.nPQChainLockAnchorHeight};
+        uint256 finality_anchor_block{consensus.hashPQChainLockAnchorBlock};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQLegacyAnchorHeight = legacy_anchor_height;
+            consensus.hashPQLegacyAnchorBlock = legacy_anchor_block;
+            consensus.hashPQLegacyMNState = legacy_mn_state;
+            consensus.hashPQLegacyPQRegistryState = legacy_pq_state;
+            consensus.nPQChainLockAnchorHeight = finality_anchor_height;
+            consensus.hashPQChainLockAnchorBlock = finality_anchor_block;
+        }
+    } restore{consensus};
+
+    constexpr int preparation_height{1295};
+    constexpr int epoch_origin{1440};
+    constexpr int checkpoint_height{1583};
+    constexpr int finality_anchor_height{1440};
+    constexpr int first_parent_height{1725};
+    constexpr int second_parent_height{1726};
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = epoch_origin;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQLegacyAnchorHeight = preparation_height;
+    consensus.hashPQLegacyAnchorBlock = MakeSnapshotKey(90'000);
+    consensus.hashPQLegacyMNState = MakeSnapshotKey(90'001);
+    consensus.hashPQLegacyPQRegistryState = MakeSnapshotKey(90'002);
+    consensus.nPQChainLockAnchorHeight = finality_anchor_height;
+    consensus.hashPQChainLockAnchorBlock = MakeSnapshotKey(90'003);
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    const auto preparation_view{llmq::pq::DeriveOperatorKeyScheduleView(
+        registry_config.schedule, preparation_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    const auto checkpoint_view{llmq::pq::DeriveOperatorKeyScheduleView(
+        registry_config.schedule, checkpoint_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    BOOST_REQUIRE(preparation_view);
+    BOOST_REQUIRE(checkpoint_view);
+
+    std::array<CDeterministicMNCPtr, 3> members{
+        MakeLegacyReplayMN(50, 30), MakeLegacyReplayMN(51, 31),
+        MakeLegacyReplayMN(52, 32)};
+    std::vector<llmq::pq::OperatorKeyState> operator_states;
+    std::vector<uint256> tree_ids;
+    for (std::size_t index{0}; index < members.size(); ++index) {
+        llmq::pq::GlobalKeyRecord key;
+        key.key_version = 1;
+        key.public_key[0] = static_cast<uint8_t>(index + 1);
+        key.child_key_commitment.generation = 1;
+        key.child_key_commitment.first_epoch = 0;
+        key.child_key_commitment.tree_id =
+            MakeSnapshotKey(91'000 + static_cast<int>(index));
+        key.child_key_commitment.root =
+            MakeSnapshotKey(92'000 + static_cast<int>(index));
+        llmq::pq::GlobalSignature proof{};
+        proof[0] = 1;
+        auto state{llmq::pq::OperatorKeyState::ForOperator(
+            members[index]->proTxHash)};
+        BOOST_REQUIRE(state.Advance(*preparation_view) ==
+                      llmq::pq::OperatorKeyStateResult::OK);
+        BOOST_REQUIRE(state.ApplyInitialGlobalKey(
+                          *preparation_view, consensus.hashGenesisBlock, key,
+                          MakeSnapshotKey(93'000 + static_cast<int>(index)),
+                          proof, /*owner_authorization_verified=*/true,
+                          /*check_sigs=*/false) ==
+                      llmq::pq::OperatorKeyStateResult::OK);
+        BOOST_REQUIRE(state.Advance(*checkpoint_view) ==
+                      llmq::pq::OperatorKeyStateResult::OK);
+        BOOST_REQUIRE(state.ResolveChildRoot(0).status ==
+                      llmq::pq::ChildRootResolutionStatus::FROZEN_PRESENT);
+        tree_ids.push_back(key.child_key_commitment.tree_id);
+        operator_states.push_back(std::move(state));
+    }
+    std::sort(operator_states.begin(), operator_states.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+    std::sort(tree_ids.begin(), tree_ids.end());
+
+    ScopedDiskDBPath db_path;
+    DBParams manager_db{
+        .path = db_path.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    DBParams registry_db{manager_db};
+    registry_db.path = SiblingDBPath(manager_db.path, "_pq_registry");
+    registry_db.cache_bytes =
+        std::max<std::size_t>(1, registry_db.cache_bytes / 2);
+
+    const uint256 checkpoint_parent_hash{
+        MakeSnapshotKey(checkpoint_height - 1)};
+    const uint256 checkpoint_hash{MakeSnapshotKey(checkpoint_height)};
+    std::vector<uint256> branch_hashes{
+        checkpoint_hash};
+    {
+        llmq::pq::PQRegistryManager registry{
+            registry_db, consensus.hashGenesisBlock, registry_config};
+        const uint256 checkpoint_parent_root{MakeSnapshotKey(94'000)};
+        llmq::pq::PQRegistryDiskSnapshot checkpoint_parent;
+        checkpoint_parent.height = checkpoint_height - 1;
+        checkpoint_parent.block_hash = checkpoint_parent_hash;
+        checkpoint_parent.previous_block_hash =
+            MakeSnapshotKey(checkpoint_height - 2);
+        checkpoint_parent.previous_consensus_state_root =
+            MakeSnapshotKey(94'001);
+        checkpoint_parent.consensus_state_root = checkpoint_parent_root;
+        BOOST_REQUIRE(checkpoint_parent.IsStructurallyValid());
+        BOOST_REQUIRE(registry.SnapshotDatabase().WriteThrough(
+            checkpoint_parent_hash, checkpoint_parent, /*fSync=*/true));
+
+        llmq::pq::PQRegistrySnapshot checkpoint;
+        checkpoint.height = checkpoint_height;
+        checkpoint.block_hash = checkpoint_hash;
+        checkpoint.previous_block_hash = checkpoint_parent_hash;
+        checkpoint.operator_states = operator_states;
+        checkpoint.used_tree_ids = tree_ids;
+        const auto checkpoint_root{checkpoint.RecomputeConsensusStateRoot(
+            consensus.hashGenesisBlock)};
+        BOOST_REQUIRE(checkpoint_root);
+        checkpoint.consensus_state_root = *checkpoint_root;
+        BOOST_REQUIRE(checkpoint.IsStructurallyValid());
+
+        llmq::pq::PQRegistryDiskSnapshot checkpoint_disk;
+        checkpoint_disk.is_checkpoint = 1;
+        checkpoint_disk.height = checkpoint_height;
+        checkpoint_disk.block_hash = checkpoint_hash;
+        checkpoint_disk.previous_block_hash = checkpoint_parent_hash;
+        checkpoint_disk.previous_consensus_state_root =
+            checkpoint_parent_root;
+        checkpoint_disk.operator_states = operator_states;
+        checkpoint_disk.tree_ids = tree_ids;
+        checkpoint_disk.consensus_state_root = *checkpoint_root;
+        BOOST_REQUIRE(checkpoint_disk.IsStructurallyValid());
+        BOOST_REQUIRE(registry.SnapshotDatabase().WriteThrough(
+            checkpoint_hash, checkpoint_disk, /*fSync=*/true));
+
+        llmq::pq::PQRegistryCallbacks membership;
+        membership.dmn_exists_before = [](const uint256&) { return true; };
+        membership.dmn_exists_after = [](const uint256&) { return true; };
+        uint256 previous_hash{checkpoint_hash};
+        for (int height{checkpoint_height + 1};
+             height <= second_parent_height; ++height) {
+            CBlock block{MakeProviderMutationBlock({})};
+            block.hashPrevBlock = previous_hash;
+            block.nTime = static_cast<uint32_t>(height);
+            block.nNonce = static_cast<uint32_t>(height);
+            llmq::pq::PQRegistryError error;
+            BOOST_REQUIRE_MESSAGE(registry.ProcessBlock(
+                block, height, membership, /*fJustCheck=*/false, error),
+                llmq::pq::PQRegistryResultString(error.result));
+            previous_hash = block.GetHash();
+            branch_hashes.push_back(previous_hash);
+        }
+        BOOST_REQUIRE(registry.Flush(/*fSync=*/true));
+    }
+
+    manager_db.wipe_data = false;
+    CDeterministicMNManager manager{manager_db};
+    const auto branch_hash_at = [&](int height) -> const uint256& {
+        return branch_hashes.at(
+            static_cast<std::size_t>(height - checkpoint_height));
+    };
+    for (int height{first_parent_height};
+         height <= second_parent_height; ++height) {
+        CDeterministicMNList list{
+            branch_hash_at(height), height,
+            static_cast<uint32_t>(members.size())};
+        for (const auto& member : members) {
+            list.AddMN(member, /*fBumpTotalCount=*/false);
+        }
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            branch_hash_at(height), list, /*fSync=*/true));
+    }
+
+    CBlockIndex previous;
+    previous.nHeight = first_parent_height - 1;
+    previous.phashBlock = &branch_hash_at(first_parent_height - 1);
+    CBlockIndex first_parent;
+    first_parent.nHeight = first_parent_height;
+    first_parent.pprev = &previous;
+    first_parent.phashBlock = &branch_hash_at(first_parent_height);
+    CBlockIndex second_parent;
+    second_parent.nHeight = second_parent_height;
+    second_parent.pprev = &first_parent;
+    second_parent.phashBlock = &branch_hash_at(second_parent_height);
+
+    std::vector<CDeterministicMNCPtr> projection;
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &first_parent, 20, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 2U);
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &second_parent, 20, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_after_finality_anchor)
@@ -721,6 +1050,13 @@ BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_after_finality_anchor)
     consensus.hashPQLegacyPQRegistryState = MakeSnapshotKey(70'002);
     consensus.nPQChainLockAnchorHeight = finality_anchor_height;
     consensus.hashPQChainLockAnchorBlock = hashes.back();
+
+    // SYSCOIN: The projection path must apply the same empty root-capable set
+    // as exact consensus selection instead of falling back to rootless MNs.
+    std::vector<CDeterministicMNCPtr> projected_payees;
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &indices.back(), 20, projected_payees));
+    BOOST_CHECK(projected_payees.empty());
 
     CDeterministicMNList current;
     CDeterministicMNList previous;

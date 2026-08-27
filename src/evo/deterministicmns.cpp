@@ -744,20 +744,82 @@ bool CDeterministicMNManager::GetMNPayeeForBlock(
     if (pindex == nullptr) return false;
     llmq::pq::PQPaymentProbationState payment_state;
     if (!GetPaymentProbationState(pindex, payment_state)) return false;
-    std::optional<std::set<uint256>> pq_payment_eligible;
+    llmq::pq::PQPaymentEligibleProTxHashesPtr pq_payment_eligible;
     if (!GetPQPaymentEligibleProTxHashes(pindex, pq_payment_eligible)) {
         return false;
     }
     const auto list{GetListForBlock(pindex)};
     payee = list.GetMNPayee(
         &payment_state,
-        pq_payment_eligible ? &*pq_payment_eligible : nullptr);
+        pq_payment_eligible.get());
+    return true;
+}
+
+bool CDeterministicMNManager::GetProjectedMNPayeesForBlock(
+    const CBlockIndex* pindex,
+    int count,
+    std::vector<CDeterministicMNCPtr>& payees)
+{
+    // SYSCOIN: A projection owns the same branch-local eligibility inputs as
+    // exact consensus selection and cannot cross into an unknown frozen set.
+    payees.clear();
+    if (pindex == nullptr || count < 0 ||
+        pindex->nHeight == std::numeric_limits<int>::max()) {
+        return false;
+    }
+    if (count == 0) return true;
+
+    const auto& consensus{Params().GetConsensus()};
+    const int first_payment_height{pindex->nHeight + 1};
+    const auto eligibility{
+        Consensus::CheckPQPaymentEligibility(consensus,
+                                             first_payment_height)};
+    int known_count{count};
+    if (eligibility == Consensus::PQPaymentEligibilityResult::LEGACY) {
+        if (Consensus::CheckPQChainLockAnchorConfiguration(consensus) ==
+            Consensus::PQAnchorResult::VALID) {
+            const int64_t available{
+                static_cast<int64_t>(consensus.nPQChainLockAnchorHeight) -
+                first_payment_height + 1};
+            if (available <= 0) return false;
+            known_count = static_cast<int>(std::min<int64_t>(
+                known_count, available));
+        }
+    } else if (eligibility ==
+               Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED) {
+        llmq::pq::PQRegistryConfig config;
+        if (llmq::pq::GetPQRegistryConfig(consensus, config) !=
+            llmq::pq::PQRegistryDeploymentResult::VALID) {
+            return false;
+        }
+        const auto epoch{llmq::pq::EpochForHeight(
+            config.schedule, first_payment_height)};
+        const auto epoch_end{epoch ? llmq::pq::EpochEndHeightExclusive(
+                                         config.schedule, *epoch)
+                                   : std::nullopt};
+        if (!epoch_end || *epoch_end <= first_payment_height) return false;
+        known_count = std::min(known_count,
+                               *epoch_end - first_payment_height);
+    } else {
+        return false;
+    }
+
+    llmq::pq::PQPaymentProbationState payment_state;
+    if (!GetPaymentProbationState(pindex, payment_state)) return false;
+    llmq::pq::PQPaymentEligibleProTxHashesPtr pq_payment_eligible;
+    if (!GetPQPaymentEligibleProTxHashes(pindex, pq_payment_eligible)) {
+        return false;
+    }
+    const auto list{GetListForBlock(pindex)};
+    payees = list.GetProjectedMNPayees(
+        known_count, &payment_state,
+        pq_payment_eligible.get());
     return true;
 }
 
 bool CDeterministicMNManager::GetPQPaymentEligibleProTxHashes(
     const CBlockIndex* pindex,
-    std::optional<std::set<uint256>>& eligible) const
+    llmq::pq::PQPaymentEligibleProTxHashesPtr& eligible) const
 {
     eligible.reset();
     if (pindex == nullptr ||
@@ -785,23 +847,27 @@ bool CDeterministicMNManager::GetPQPaymentEligibleProTxHashes(
         llmq::pq::EpochForHeight(config.schedule, payment_height)};
     if (!epoch) return false;
 
-    llmq::pq::PQRegistrySnapshot snapshot;
-    std::string error;
-    if (!GetPQRegistrySnapshot(pindex, snapshot, error)) {
-        LogPrintf("%s -- %s\n", __func__, error);
+    // SYSCOIN: Payment selection is a per-block hot path. Reuse the immutable
+    // branch/root/epoch-derived view instead of copying, re-hashing, and
+    // rescanning the complete PQ registry for every caller.
+    std::string open_error;
+    auto* registry{GetOrCreatePQRegistry(open_error)};
+    if (registry == nullptr) {
+        LogPrintf("%s -- %s\n", __func__, open_error);
         return false;
     }
-
-    eligible.emplace();
-    for (const auto& state : snapshot.operator_states) {
-        const auto root{state.ResolveChildRoot(*epoch)};
-        if (root.status !=
-                llmq::pq::ChildRootResolutionStatus::FROZEN_PRESENT ||
-            !root.record || root.record->pro_tx_hash != state.pro_tx_hash ||
-            root.record->epoch != *epoch) {
-            continue;
-        }
-        eligible->insert(state.pro_tx_hash);
+    llmq::pq::PQRegistryError registry_error;
+    const uint256 previous_hash{
+        pindex->pprev == nullptr ? uint256{}
+                                 : pindex->pprev->GetBlockHash()};
+    if (!registry->GetPaymentEligibleProTxHashes(
+            pindex->GetBlockHash(), previous_hash, pindex->nHeight, *epoch,
+            eligible, registry_error)) {
+        LogPrintf("%s -- %s at height=%d block=%s\n", __func__,
+                  std::string{llmq::pq::PQRegistryResultString(
+                      registry_error.result)},
+                  pindex->nHeight, pindex->GetBlockHash().ToString());
+        return false;
     }
     return true;
 }
@@ -1032,7 +1098,7 @@ static bool CompareByLastPaid(const CDeterministicMN* _a,
 
 CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
     const llmq::pq::PQPaymentProbationState* payment_state,
-    const std::set<uint256>* pq_payment_eligible) const
+    const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible) const
 {
     if (mnMap.size() == 0) {
         return nullptr;
@@ -1041,8 +1107,13 @@ CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
     CDeterministicMNCPtr best;
     CDeterministicMNCPtr ordinary_best;
     ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
+        // SYSCOIN: Root capability is an admission gate, not another queue-age
+        // penalty. A restored operator keeps its accrued age and one payment
+        // moves it to the back through the ordinary nLastPaidHeight update.
         if (pq_payment_eligible != nullptr &&
-            !pq_payment_eligible->count(dmn->proTxHash)) {
+            !std::binary_search(pq_payment_eligible->begin(),
+                                pq_payment_eligible->end(),
+                                dmn->proTxHash)) {
             return;
         }
         if (!ordinary_best ||
@@ -1067,7 +1138,8 @@ CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
 std::vector<CDeterministicMNCPtr>
 CDeterministicMNList::GetProjectedMNPayees(
     int nCount,
-    const llmq::pq::PQPaymentProbationState* payment_state) const
+    const llmq::pq::PQPaymentProbationState* payment_state,
+    const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible) const
 {
     if (nCount < 0 ) {
         return {};
@@ -1079,6 +1151,14 @@ CDeterministicMNList::GetProjectedMNPayees(
     ordinary_fallback.reserve(GetValidMNsCount());
 
     ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
+        // SYSCOIN: The fail-open withheld fallback remains inside the same
+        // frozen-root admission set as the ordinary projected queue.
+        if (pq_payment_eligible != nullptr &&
+            !std::binary_search(pq_payment_eligible->begin(),
+                                pq_payment_eligible->end(),
+                                dmn->proTxHash)) {
+            return;
+        }
         ordinary_fallback.emplace_back(dmn);
         if (payment_state == nullptr ||
             !payment_state->IsPaymentWithheld(dmn->proTxHash)) {

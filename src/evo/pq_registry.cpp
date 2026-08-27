@@ -1209,6 +1209,93 @@ bool PQRegistryManager::GetSnapshot(
         : SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
 }
 
+bool PQRegistryManager::GetPaymentEligibleProTxHashes(
+    const uint256& block_hash,
+    const uint256& previous_block_hash,
+    int32_t height,
+    uint32_t epoch,
+    PQPaymentEligibleProTxHashesPtr& eligible,
+    PQRegistryError& error) const
+{
+    error.Clear();
+    eligible.reset();
+    if (!IsEnabled() || height < 0 || block_hash.IsNull() ||
+        (height != 0 && previous_block_hash.IsNull())) {
+        return SetError(error, PQRegistryResult::INVALID_BLOCK);
+    }
+    if (height < m_config.preparation_height) {
+        eligible =
+            std::make_shared<const PQPaymentEligibleProTxHashes>();
+        return true;
+    }
+
+    LOCK(m_mutex);
+    std::shared_ptr<const PQRegistrySnapshot> snapshot;
+    const auto cached{m_snapshot_cache_index.find(block_hash)};
+    if (cached != m_snapshot_cache_index.end()) {
+        // Cache entries were fully verified before publication. Holding shared
+        // ownership avoids copying and re-hashing the complete registry merely
+        // to derive a payment admission view.
+        snapshot = cached->second->second;
+        m_snapshot_cache.splice(m_snapshot_cache.end(), m_snapshot_cache,
+                                cached->second);
+        cached->second = std::prev(m_snapshot_cache.end());
+    } else {
+        PQRegistrySnapshot reconstructed;
+        if (!ReconstructPersistentSnapshot(block_hash, height, reconstructed,
+                                           error)) {
+            return false;
+        }
+        const auto inserted{m_snapshot_cache_index.find(block_hash)};
+        if (inserted == m_snapshot_cache_index.end()) {
+            return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+        }
+        snapshot = inserted->second->second;
+    }
+    if (!snapshot || snapshot->height != height ||
+        snapshot->block_hash != block_hash ||
+        snapshot->previous_block_hash != previous_block_hash) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+
+    const PaymentEligibilityCacheKey key{snapshot->consensus_state_root,
+                                         epoch};
+    const auto eligibility_cached{
+        m_payment_eligibility_cache_index.find(key)};
+    if (eligibility_cached != m_payment_eligibility_cache_index.end()) {
+        eligible = eligibility_cached->second->second;
+        m_payment_eligibility_cache.splice(
+            m_payment_eligibility_cache.end(), m_payment_eligibility_cache,
+            eligibility_cached->second);
+        eligibility_cached->second =
+            std::prev(m_payment_eligibility_cache.end());
+        return true;
+    }
+
+    auto derived{std::make_shared<PQPaymentEligibleProTxHashes>()};
+    derived->reserve(snapshot->operator_states.size());
+    for (const auto& state : snapshot->operator_states) {
+        const auto root{state.ResolveChildRoot(epoch)};
+        if (root.status != ChildRootResolutionStatus::FROZEN_PRESENT ||
+            !root.record || root.record->pro_tx_hash != state.pro_tx_hash ||
+            root.record->epoch != epoch) {
+            continue;
+        }
+        derived->push_back(state.pro_tx_hash);
+    }
+    eligible = derived;
+    m_payment_eligibility_cache.emplace_back(key, std::move(derived));
+    m_payment_eligibility_cache_index[key] =
+        std::prev(m_payment_eligibility_cache.end());
+    while (m_payment_eligibility_cache.size() >
+           PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE) {
+        m_payment_eligibility_cache_index.erase(
+            m_payment_eligibility_cache.front().first);
+        m_payment_eligibility_cache.pop_front();
+    }
+    return true;
+}
+
 bool PQRegistryManager::GetMempoolView(
     const uint256& block_hash,
     int32_t height,

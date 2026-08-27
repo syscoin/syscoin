@@ -25,6 +25,7 @@
 
 #include <limits>
 #include <optional>
+#include <vector>
 
 namespace {
 
@@ -52,6 +53,31 @@ GetPaymentAuditState(const ClientModel& client_model,
         return std::nullopt;
     }
     return state;
+}
+
+std::optional<std::vector<CDeterministicMNCPtr>>
+GetKnownProjectedPayees(const ClientModel& client_model,
+                        const CDeterministicMNList& mn_list)
+{
+    // SYSCOIN: Keep displayed payees on the manager's exact root-eligibility
+    // view and stop before the next frozen-set boundary.
+    const auto* context{client_model.node().context()};
+    if (context == nullptr || context->chainman == nullptr ||
+        deterministicMNManager == nullptr) {
+        return std::nullopt;
+    }
+
+    LOCK(cs_main);
+    const CBlockIndex* index{
+        context->chainman->m_blockman.LookupBlockIndex(
+            mn_list.GetBlockHash())};
+    std::vector<CDeterministicMNCPtr> payees;
+    if (index == nullptr ||
+        !deterministicMNManager->GetProjectedMNPayeesForBlock(
+            index, std::numeric_limits<int>::max(), payees)) {
+        return std::nullopt;
+    }
+    return payees;
 }
 
 } // namespace
@@ -193,32 +219,39 @@ void MasternodeList::handleMasternodeListChanged()
 
 void MasternodeList::updateDIP3ListScheduled()
 {
-    TRY_LOCK(cs_dip3list, fLockAcquired);
-    if (!fLockAcquired) return;
+    bool should_update{false};
+    {
+        TRY_LOCK(cs_dip3list, fLockAcquired);
+        if (!fLockAcquired) return;
 
-    if (!clientModel || clientModel->node().shutdownRequested()) {
-        return;
+        if (!clientModel || clientModel->node().shutdownRequested()) {
+            return;
+        }
+
+        // To prevent high cpu usage update only once in MASTERNODELIST_FILTER_COOLDOWN_SECONDS seconds
+        // after filter was last changed unless we want to force the update.
+        if (fFilterUpdatedDIP3) {
+            int64_t nSecondsToWait = nTimeFilterUpdatedDIP3 - GetTime() + MASTERNODELIST_FILTER_COOLDOWN_SECONDS;
+            ui->countLabelDIP3->setText(QString::fromStdString(strprintf("Please wait... %d", nSecondsToWait)));
+
+            if (nSecondsToWait <= 0) {
+                fFilterUpdatedDIP3 = false;
+                should_update = true;
+            }
+        } else if (mnListChanged) {
+            int64_t nMnListUpdateSecods = clientModel->masternodeSync().isBlockchainSynced() ? MASTERNODELIST_UPDATE_SECONDS : MASTERNODELIST_UPDATE_SECONDS*10;
+            int64_t nSecondsToWait = nTimeUpdatedDIP3 - GetTime() + nMnListUpdateSecods;
+
+            if (nSecondsToWait <= 0) {
+                mnListChanged = false;
+                should_update = true;
+            }
+        }
     }
 
-    // To prevent high cpu usage update only once in MASTERNODELIST_FILTER_COOLDOWN_SECONDS seconds
-    // after filter was last changed unless we want to force the update.
-    if (fFilterUpdatedDIP3) {
-        int64_t nSecondsToWait = nTimeFilterUpdatedDIP3 - GetTime() + MASTERNODELIST_FILTER_COOLDOWN_SECONDS;
-        ui->countLabelDIP3->setText(QString::fromStdString(strprintf("Please wait... %d", nSecondsToWait)));
-
-        if (nSecondsToWait <= 0) {
-            updateDIP3List();
-            fFilterUpdatedDIP3 = false;
-        }
-    } else if (mnListChanged) {
-        int64_t nMnListUpdateSecods = clientModel->masternodeSync().isBlockchainSynced() ? MASTERNODELIST_UPDATE_SECONDS : MASTERNODELIST_UPDATE_SECONDS*10;
-        int64_t nSecondsToWait = nTimeUpdatedDIP3 - GetTime() + nMnListUpdateSecods;
-
-        if (nSecondsToWait <= 0) {
-            updateDIP3List();
-            mnListChanged = false;
-        }
-    }
+    // SYSCOIN: Projection lookup takes cs_main, so never call it while the UI
+    // list mutex is held. A concurrent change simply schedules another pass.
+    if (should_update) updateDIP3List();
 }
 
 void MasternodeList::updateDIP3List()
@@ -229,6 +262,8 @@ void MasternodeList::updateDIP3List()
 
     auto mnList = clientModel->getMasternodeList();
     const auto paymentAuditState{GetPaymentAuditState(*clientModel, mnList)};
+    const auto knownProjectedPayees{
+        GetKnownProjectedPayees(*clientModel, mnList)};
     std::map<uint256, CTxDestination> mapCollateralDests;
 
     {
@@ -253,13 +288,10 @@ void MasternodeList::updateDIP3List()
 
     nTimeUpdatedDIP3 = GetTime();
 
-    auto projectedPayees = mnList.GetProjectedMNPayees(
-        std::numeric_limits<int>::max(),
-        paymentAuditState ? &*paymentAuditState : nullptr);
     std::map<uint256, int> nextPayments;
-    if (!mnList.IsNull()) {
-        for (size_t i = 0; i < projectedPayees.size(); i++) {
-            const auto& dmn = projectedPayees[i];
+    if (!mnList.IsNull() && knownProjectedPayees) {
+        for (size_t i = 0; i < knownProjectedPayees->size(); i++) {
+            const auto& dmn = (*knownProjectedPayees)[i];
             nextPayments.emplace(
                 dmn->proTxHash, mnList.GetHeight() + (int)i + 1);
         }

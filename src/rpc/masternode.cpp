@@ -17,6 +17,10 @@
 #include <llmq/quorums_chainlocks.h>
 #include <index/txindex.h>
 #include <llmq/quorums_utils.h>
+
+#include <limits>
+#include <vector>
+
 using node::GetTransaction;
 RPCHelpMan masternodelist();
 
@@ -138,26 +142,39 @@ static RPCHelpMan masternode_count()
 UniValue GetNextMasternodeForPayment(const node::NodeContext& node,
                                      size_t heightShift)
 {
-    CDeterministicMNList mnList;
-    llmq::pq::PQPaymentProbationState payment_state;
+    // SYSCOIN: Current selection must use the exact consensus path, while a
+    // future result is exposed only while its frozen eligibility set is known.
+    CDeterministicMNCPtr payee;
+    int target_height{-1};
     {
         LOCK(cs_main);
         const CBlockIndex* tip{node.chainman->ActiveTip()};
-        if (tip == nullptr ||
-            !deterministicMNManager->GetPaymentProbationState(
-                tip, payment_state)) {
-            throw JSONRPCError(
-                RPC_INTERNAL_ERROR,
-                "payment audit state is unavailable at the active tip");
+        if (tip == nullptr || heightShift == 0 ||
+            heightShift > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+            tip->nHeight > std::numeric_limits<int>::max() -
+                               static_cast<int>(heightShift)) {
+            return "unknown";
         }
-        mnList = deterministicMNManager->GetListForBlock(tip);
+        target_height = tip->nHeight + static_cast<int>(heightShift);
+        if (heightShift == 1) {
+            if (!deterministicMNManager->GetMNPayeeForBlock(tip, payee)) {
+                throw JSONRPCError(
+                    RPC_INTERNAL_ERROR,
+                    "payment eligibility state is unavailable at the active tip");
+            }
+        } else {
+            std::vector<CDeterministicMNCPtr> projection;
+            if (!deterministicMNManager->GetProjectedMNPayeesForBlock(
+                    tip, static_cast<int>(heightShift), projection)) {
+                throw JSONRPCError(
+                    RPC_INTERNAL_ERROR,
+                    "payment projection state is unavailable at the active tip");
+            }
+            if (projection.size() < heightShift) return "unknown";
+            payee = projection.back();
+        }
+        if (!payee) return "unknown";
     }
-    if (mnList.IsNull()) return "unknown";
-    auto payees = mnList.GetProjectedMNPayees(
-        static_cast<int>(heightShift), &payment_state);
-    if (payees.empty())
-        return "unknown";
-    auto payee = payees.back();
     CScript payeeScript = payee->pdmnState->scriptPayout;
 
     CTxDestination payeeDest;
@@ -165,7 +182,7 @@ UniValue GetNextMasternodeForPayment(const node::NodeContext& node,
 
     UniValue obj(UniValue::VOBJ);
 
-    obj.pushKV("height",        (int)(mnList.GetHeight() + heightShift));
+    obj.pushKV("height",        target_height);
     obj.pushKV("IP:port",       payee->pdmnState->addr.ToStringAddrPort());
     obj.pushKV("proTxHash",     payee->proTxHash.ToString());
     obj.pushKV("outpoint",      payee->collateralOutpoint.ToStringShort());
@@ -388,15 +405,17 @@ static RPCHelpMan masternode_winners()
         if (strFilter != "" && strPayments.find(strFilter) == std::string::npos) continue;
         obj.pushKV(strprintf("%d", h), strPayments);
     }
-    llmq::pq::PQPaymentProbationState payment_state;
-    if (!deterministicMNManager->GetPaymentProbationState(
-            pindexTip, payment_state)) {
-        throw JSONRPCError(
-            RPC_INTERNAL_ERROR,
-            "payment audit state is unavailable at the active tip");
+    // SYSCOIN: Do not manufacture future winners across a frozen-set boundary.
+    std::vector<CDeterministicMNCPtr> projection;
+    {
+        LOCK(cs_main);
+        if (!deterministicMNManager->GetProjectedMNPayeesForBlock(
+                pindexTip, 20, projection)) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "payment projection state is unavailable at the active tip");
+        }
     }
-    auto projection = deterministicMNManager->GetListForBlock(pindexTip)
-                          .GetProjectedMNPayees(20, &payment_state);
     for (size_t i = 0; i < projection.size(); i++) {
         int h = nChainTipHeight + 1 + i;
         std::string strPayments = GetRequiredPaymentsString(h, projection[i]);

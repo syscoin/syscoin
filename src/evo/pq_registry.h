@@ -21,6 +21,7 @@
 #include <ios>
 #include <list>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -35,10 +36,15 @@ struct Params;
 
 namespace llmq::pq {
 
+using PQPaymentEligibleProTxHashes = std::vector<uint256>;
+using PQPaymentEligibleProTxHashesPtr =
+    std::shared_ptr<const PQPaymentEligibleProTxHashes>;
+
 inline constexpr uint16_t PQ_REGISTRY_SNAPSHOT_VERSION{1};
 inline constexpr uint16_t PQ_REGISTRY_DISK_VERSION{1};
 inline constexpr int32_t PQ_REGISTRY_CHECKPOINT_INTERVAL{288};
 inline constexpr std::size_t PQ_REGISTRY_SNAPSHOT_CACHE_SIZE{64};
+inline constexpr std::size_t PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE{8};
 inline constexpr std::size_t MAX_PQ_OPERATOR_STATES{65'535};
 inline constexpr std::size_t MAX_PQ_TREE_IDS_PER_BLOCK{65'535};
 inline constexpr std::size_t MAX_PQ_USED_TREE_IDS{1'000'000};
@@ -268,6 +274,11 @@ private:
         uint256, std::shared_ptr<const PQRegistrySnapshot>>>;
     using CacheMap = std::unordered_map<
         uint256, CacheList::iterator, StaticSaltedHasher>;
+    using PaymentEligibilityCacheKey = std::pair<uint256, uint32_t>;
+    using PaymentEligibilityCacheList = std::list<std::pair<
+        PaymentEligibilityCacheKey, PQPaymentEligibleProTxHashesPtr>>;
+    using PaymentEligibilityCacheMap = std::map<
+        PaymentEligibilityCacheKey, PaymentEligibilityCacheList::iterator>;
 
     const uint256 m_genesis_hash;
     const PQRegistryConfig m_config;
@@ -276,6 +287,10 @@ private:
                            StaticSaltedHasher>> m_snapshot_db;
     mutable CacheList m_snapshot_cache GUARDED_BY(m_mutex);
     mutable CacheMap m_snapshot_cache_index GUARDED_BY(m_mutex);
+    mutable PaymentEligibilityCacheList m_payment_eligibility_cache
+        GUARDED_BY(m_mutex);
+    mutable PaymentEligibilityCacheMap m_payment_eligibility_cache_index
+        GUARDED_BY(m_mutex);
 
     [[nodiscard]] bool ReadDiskSnapshot(
         const uint256& block_hash,
@@ -335,6 +350,19 @@ public:
         const uint256& previous_block_hash,
         int32_t height,
         PQRegistrySnapshot& snapshot,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Return a shared, branch-exact frozen-root eligibility view. Identical
+     * registry roots reuse the derived set across ordinary blocks, while the
+     * epoch key forces one rebuild when the payment schedule advances.
+     */
+    [[nodiscard]] bool GetPaymentEligibleProTxHashes(
+        const uint256& block_hash,
+        const uint256& previous_block_hash,
+        int32_t height,
+        uint32_t epoch,
+        PQPaymentEligibleProTxHashesPtr& eligible,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool GetMempoolView(

@@ -666,6 +666,61 @@ BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
     BOOST_CHECK(undone.used_tree_ids.front() == old_commitment.tree_id);
 }
 
+BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(161)};
+    const uint256 pro_tx_hash{NonNullHash(162)};
+    auto key{DeterministicKey(84)};
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
+    const auto callbacks{Member(genesis, pro_tx_hash, owner_key_id)};
+    const auto registration{Block(
+        NonNullHash(163), 164,
+        {OrdinaryTransaction(164),
+         GlobalRegistration(
+             genesis, pro_tx_hash, key, owner_key,
+             CommitmentAt(config, 1295, 1, 165), 165)})};
+    const auto cutoff{Block(
+        registration.GetHash(), 166, {OrdinaryTransaction(166)})};
+    const auto steady{Block(
+        cutoff.GetHash(), 167, {OrdinaryTransaction(167)})};
+
+    PQRegistryManager manager(MemoryDB(161), genesis, config);
+    PQRegistryError error;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        registration, 1295, callbacks, false, error));
+    BOOST_REQUIRE(manager.ProcessBlock(cutoff, 1296, callbacks, false,
+                                       error));
+    BOOST_REQUIRE(manager.ProcessBlock(steady, 1297, callbacks, false,
+                                       error));
+
+    PQPaymentEligibleProTxHashesPtr first;
+    PQPaymentEligibleProTxHashesPtr repeated;
+    PQPaymentEligibleProTxHashesPtr next_block;
+    BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
+        cutoff.GetHash(), registration.GetHash(), 1296, 0, first, error));
+    BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
+        cutoff.GetHash(), registration.GetHash(), 1296, 0, repeated,
+        error));
+    BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
+        steady.GetHash(), cutoff.GetHash(), 1297, 0, next_block, error));
+    BOOST_REQUIRE(first);
+    BOOST_CHECK(std::binary_search(first->begin(), first->end(),
+                                   pro_tx_hash));
+    BOOST_CHECK(first == repeated);
+    // SYSCOIN: The block hash changes, but an unchanged registry root and
+    // payment epoch must retain the same derived admission view.
+    BOOST_CHECK(first == next_block);
+
+    PQPaymentEligibleProTxHashesPtr next_epoch;
+    BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
+        steady.GetHash(), cutoff.GetHash(), 1297, 1, next_epoch, error));
+    BOOST_REQUIRE(next_epoch);
+    BOOST_CHECK(next_epoch != first);
+}
+
 BOOST_AUTO_TEST_CASE(removal_drops_operator_but_retains_tree_id)
 {
     const auto config{FastConfig()};

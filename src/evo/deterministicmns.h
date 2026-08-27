@@ -272,17 +272,22 @@ public:
     [[nodiscard]] CDeterministicMNCPtr GetMNByInternalId(uint64_t internalId) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNPayee(
         const llmq::pq::PQPaymentProbationState* payment_state = nullptr,
-        const std::set<uint256>* pq_payment_eligible = nullptr) const;
+        const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible =
+            nullptr) const;
 
-    /**
+    /** SYSCOIN:
      * Calculates the projected MN payees for the next *count* blocks. The result is not guaranteed to be correct
      * as PoSe banning might occur later
      * @param nCount the number of payees to return. "nCount = max()"" means "all", use it to avoid calling GetValidMNsCount twice.
+     * @param payment_state exact parent payment-probation state, when active
+     * @param pq_payment_eligible exact frozen root-capable set, when required
      * @return
      */
     [[nodiscard]] std::vector<CDeterministicMNCPtr> GetProjectedMNPayees(
         int nCount = std::numeric_limits<int>::max(),
-        const llmq::pq::PQPaymentProbationState* payment_state = nullptr) const;
+        const llmq::pq::PQPaymentProbationState* payment_state = nullptr,
+        const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible =
+            nullptr) const;
 
     /**
      * Calculate a quorum based on the modifier. The resulting list is deterministically sorted by score
@@ -680,7 +685,7 @@ private:
         const CDeterministicMNList& tip_list);
     bool GetPQPaymentEligibleProTxHashes(
         const CBlockIndex* pindex,
-        std::optional<std::set<uint256>>& eligible) const;
+        llmq::pq::PQPaymentEligibleProTxHashesPtr& eligible) const;
 public:
     struct EvoDBStats {
         int64_t approxPersistedEntries{0};
@@ -755,6 +760,18 @@ public:
     /** Select the deterministic payee after applying payment-only probation. */
     bool GetMNPayeeForBlock(const CBlockIndex* pindex,
                             CDeterministicMNCPtr& payee)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** SYSCOIN:
+     * Project payees only through the currently knowable payment-root epoch.
+     * Future PQ epochs may have a different frozen root-capable set, so a
+     * shorter successful result means the remaining requested heights are
+     * not yet knowable from this parent state.
+     */
+    bool GetProjectedMNPayeesForBlock(
+        const CBlockIndex* pindex,
+        int count,
+        std::vector<CDeterministicMNCPtr>& payees)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /** SYSCOIN: Bounded exact-parent registry view for mempool reservations. */
