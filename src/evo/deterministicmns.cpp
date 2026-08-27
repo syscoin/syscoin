@@ -2230,9 +2230,9 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     if (proTx.nVersion <= CProUpServTx::UPDATE_NEVM_VERSION) {
                         has_active_operator_key = newState->pubKeyOperator.IsValid();
                     } else {
-                        llmq::pq::PQRegistrySnapshot parent_snapshot;
+                        llmq::pq::PQRegistryReadView parent_snapshot;
                         std::string registry_error;
-                        if (!GetPQRegistrySnapshot(pindexPrev, parent_snapshot, registry_error)) {
+                        if (!GetPQRegistryReadView(pindexPrev, parent_snapshot, registry_error)) {
                             LogPrintf("%s -- failed to load parent PQ registry for %s: %s\n",
                                       __func__, proTx.proTxHash.ToString(), registry_error);
                             return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
@@ -2461,6 +2461,36 @@ bool CDeterministicMNManager::GetPQRegistrySnapshot(
         pindex->pprev == nullptr ? uint256{} : pindex->pprev->GetBlockHash();
     if (!registry->GetSnapshot(pindex->GetBlockHash(), previous_hash,
                                pindex->nHeight, snapshot, registry_error)) {
+        error = strprintf("%s at height=%d block=%s",
+                          std::string{llmq::pq::PQRegistryResultString(
+                              registry_error.result)},
+                          pindex->nHeight,
+                          pindex->GetBlockHash().ToString());
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool CDeterministicMNManager::GetPQRegistryReadView(
+    const CBlockIndex* pindex,
+    llmq::pq::PQRegistryReadView& view,
+    std::string& error) const
+{
+    view = {};
+    if (pindex == nullptr) {
+        error = "pq-registry-null-block-index";
+        return false;
+    }
+    auto* registry = GetOrCreatePQRegistry(error);
+    if (registry == nullptr) return false;
+
+    llmq::pq::PQRegistryError registry_error;
+    const uint256 previous_hash{
+        pindex->pprev == nullptr ? uint256{}
+                                 : pindex->pprev->GetBlockHash()};
+    if (!registry->GetReadView(pindex->GetBlockHash(), previous_hash,
+                               pindex->nHeight, view, registry_error)) {
         error = strprintf("%s at height=%d block=%s",
                           std::string{llmq::pq::PQRegistryResultString(
                               registry_error.result)},

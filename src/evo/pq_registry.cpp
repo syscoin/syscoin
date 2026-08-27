@@ -9,6 +9,7 @@
 #include <evo/specialtx_payload.h>
 #include <hash.h>
 #include <llmq/pq_global_auth.h>
+#include <memusage.h>
 #include <span.h>
 #include <streams.h>
 
@@ -19,6 +20,32 @@
 #include <variant>
 
 namespace llmq::pq {
+
+struct PQRegistryIndexes {
+    // Retained inactive/revoked records continue to own their global key until
+    // a later rotation or deterministic-MN removal changes consensus state.
+    std::map<GlobalPublicKey, uint256> global_key_owner;
+};
+
+struct PQRegistryStateData {
+    std::shared_ptr<const std::vector<OperatorKeyState>> operator_states;
+    std::shared_ptr<const std::vector<uint256>> used_tree_ids;
+    std::shared_ptr<const PQRegistryIndexes> indexes;
+    std::optional<OperatorKeyScheduleState> schedule;
+    uint256 used_tree_ids_hash;
+    uint256 consensus_state_root;
+    std::size_t owned_dynamic_memory_usage{0};
+    std::size_t used_tree_ids_dynamic_memory_usage{0};
+};
+
+struct PQRegistrySnapshotView {
+    int32_t height{-1};
+    uint256 block_hash;
+    uint256 previous_block_hash;
+    std::shared_ptr<const PQRegistryStateData> state;
+    std::shared_ptr<const std::vector<uint256>> block_tree_ids;
+};
+
 namespace {
 
 struct DecodedProviderRevocation {
@@ -160,6 +187,115 @@ bool MergeNewTreeIds(std::span<const uint256> current,
     return true;
 }
 
+std::optional<OperatorKeyScheduleState> ScheduleStateAtHeight(
+    const PQRegistryConfig& config,
+    int32_t height)
+{
+    const auto view{DeriveOperatorKeyScheduleView(
+        config.schedule, height, config.registration_cutoff_blocks,
+        config.future_horizon_epochs)};
+    if (!view) return std::nullopt;
+    return OperatorKeyScheduleState::FromView(*view);
+}
+
+std::shared_ptr<const PQRegistryIndexes> BuildRegistryIndexes(
+    std::span<const OperatorKeyState> states)
+{
+    auto indexes{std::make_shared<PQRegistryIndexes>()};
+    for (const auto& state : states) {
+        if (state.has_global_key == 0) continue;
+        if (!indexes->global_key_owner
+                 .emplace(state.global_key.public_key, state.pro_tx_hash)
+                 .second) {
+            return nullptr;
+        }
+    }
+    return indexes;
+}
+
+std::size_t RegistryStateOwnedDynamicMemoryUsage(
+    const PQRegistryStateData& state) noexcept
+{
+    std::size_t usage{sizeof(PQRegistryStateData)};
+    if (state.operator_states) {
+        usage += sizeof(std::vector<OperatorKeyState>) +
+                 memusage::DynamicUsage(*state.operator_states);
+        for (const auto& key_state : *state.operator_states) {
+            usage += memusage::DynamicUsage(key_state.frozen_child_roots);
+        }
+    }
+    if (state.indexes) {
+        usage += sizeof(PQRegistryIndexes) +
+                 memusage::DynamicUsage(state.indexes->global_key_owner);
+    }
+    return usage;
+}
+
+std::size_t SnapshotCacheDynamicMemoryUsage(
+    const std::list<std::pair<
+        uint256, std::shared_ptr<const PQRegistrySnapshotView>>>& cache,
+    const PQRegistryStateData* baseline)
+{
+    std::vector<const PQRegistryStateData*> counted_states;
+    std::vector<const std::vector<uint256>*> counted_tree_sets;
+    counted_states.reserve(cache.size());
+    counted_tree_sets.reserve(cache.size());
+    if (baseline != nullptr) {
+        counted_states.push_back(baseline);
+        if (baseline->used_tree_ids) {
+            counted_tree_sets.push_back(baseline->used_tree_ids.get());
+        }
+    }
+    std::size_t usage{0};
+    for (const auto& [block_hash, snapshot] : cache) {
+        (void)block_hash;
+        if (!snapshot) continue;
+        usage += sizeof(PQRegistrySnapshotView);
+        if (snapshot->block_tree_ids) {
+            usage += sizeof(std::vector<uint256>) +
+                     memusage::DynamicUsage(*snapshot->block_tree_ids);
+        }
+        const auto* state{snapshot->state.get()};
+        if (state != nullptr &&
+            std::find(counted_states.begin(), counted_states.end(), state) ==
+                counted_states.end()) {
+            counted_states.push_back(state);
+            usage += state->owned_dynamic_memory_usage;
+        }
+        const auto* tree_set{
+            state != nullptr ? state->used_tree_ids.get() : nullptr};
+        if (tree_set != nullptr &&
+            std::find(counted_tree_sets.begin(), counted_tree_sets.end(),
+                      tree_set) == counted_tree_sets.end()) {
+            counted_tree_sets.push_back(tree_set);
+            usage += state->used_tree_ids_dynamic_memory_usage;
+        }
+    }
+    return usage;
+}
+
+PQRegistrySnapshot MaterializeSnapshot(
+    const PQRegistrySnapshotView& snapshot)
+{
+    PQRegistrySnapshot result;
+    result.height = snapshot.height;
+    result.block_hash = snapshot.block_hash;
+    result.previous_block_hash = snapshot.previous_block_hash;
+    if (snapshot.state) {
+        if (snapshot.state->operator_states) {
+            result.operator_states = *snapshot.state->operator_states;
+        }
+        if (snapshot.state->used_tree_ids) {
+            result.used_tree_ids = *snapshot.state->used_tree_ids;
+        }
+        result.consensus_state_root = snapshot.state->consensus_state_root;
+    }
+    if (snapshot.block_tree_ids) {
+        result.block_tree_ids = *snapshot.block_tree_ids;
+    }
+    return result;
+}
+
 bool ExtractCanonicalPQPayload(const CTransaction& transaction,
                                std::vector<unsigned char>& encoded)
 {
@@ -255,6 +391,110 @@ bool MakePrePreparationSnapshot(const uint256& genesis_hash,
 }
 
 } // namespace
+
+PQRegistryReadView::PQRegistryReadView(
+    std::shared_ptr<const PQRegistrySnapshotView> snapshot)
+    : m_snapshot{std::move(snapshot)}
+{
+}
+
+bool PQRegistryReadView::IsValid() const noexcept
+{
+    return m_snapshot && m_snapshot->state &&
+           m_snapshot->state->operator_states &&
+           m_snapshot->state->used_tree_ids && m_snapshot->state->indexes &&
+           m_snapshot->block_tree_ids;
+}
+
+int32_t PQRegistryReadView::Height() const noexcept
+{
+    return IsValid() ? m_snapshot->height : -1;
+}
+
+uint256 PQRegistryReadView::BlockHash() const noexcept
+{
+    return IsValid() ? m_snapshot->block_hash : uint256{};
+}
+
+uint256 PQRegistryReadView::PreviousBlockHash() const noexcept
+{
+    return IsValid() ? m_snapshot->previous_block_hash : uint256{};
+}
+
+uint256 PQRegistryReadView::ConsensusStateRoot() const noexcept
+{
+    return IsValid() ? m_snapshot->state->consensus_state_root : uint256{};
+}
+
+std::size_t PQRegistryReadView::OperatorCount() const noexcept
+{
+    return IsValid() ? m_snapshot->state->operator_states->size() : 0;
+}
+
+std::size_t PQRegistryReadView::UsedTreeIdCount() const noexcept
+{
+    return IsValid() ? m_snapshot->state->used_tree_ids->size() : 0;
+}
+
+bool PQRegistryReadView::HasUsedTreeId(const uint256& tree_id) const noexcept
+{
+    if (!IsValid() || tree_id.IsNull()) return false;
+    const auto& ids{*m_snapshot->state->used_tree_ids};
+    return std::binary_search(ids.begin(), ids.end(), tree_id);
+}
+
+const OperatorKeyState* PQRegistryReadView::FindOperator(
+    const uint256& pro_tx_hash) const noexcept
+{
+    if (!IsValid() || pro_tx_hash.IsNull()) return nullptr;
+    const auto& states{*m_snapshot->state->operator_states};
+    const auto position{FindOperatorPosition(states, pro_tx_hash)};
+    return position != states.end() && position->pro_tx_hash == pro_tx_hash
+        ? &*position
+        : nullptr;
+}
+
+std::optional<uint256> PQRegistryReadView::FindActiveOperatorByGlobalKey(
+    const GlobalPublicKey& public_key) const noexcept
+{
+    if (!IsValid()) return std::nullopt;
+    const auto owner{
+        m_snapshot->state->indexes->global_key_owner.find(public_key)};
+    if (owner == m_snapshot->state->indexes->global_key_owner.end()) {
+        return std::nullopt;
+    }
+    const auto* state{FindOperator(owner->second)};
+    return state != nullptr && state->HasActiveGlobalKey()
+        ? std::optional<uint256>{owner->second}
+        : std::nullopt;
+}
+
+std::span<const OperatorKeyState> PQRegistryReadView::Operators() const noexcept
+{
+    if (!IsValid()) return {};
+    return *m_snapshot->state->operator_states;
+}
+
+std::shared_ptr<const std::vector<OperatorKeyState>>
+PQRegistryReadView::ShareOperatorStates() const noexcept
+{
+    return IsValid() ? m_snapshot->state->operator_states : nullptr;
+}
+
+bool PQRegistryReadView::SharesStateWith(
+    const PQRegistryReadView& other) const noexcept
+{
+    return IsValid() && other.IsValid() &&
+           m_snapshot->state == other.m_snapshot->state;
+}
+
+bool PQRegistryReadView::SharesTreeHistoryWith(
+    const PQRegistryReadView& other) const noexcept
+{
+    return IsValid() && other.IsValid() &&
+           m_snapshot->state->used_tree_ids ==
+               other.m_snapshot->state->used_tree_ids;
+}
 
 bool PQRegistryConfig::IsValid() const noexcept
 {
@@ -499,22 +739,102 @@ bool PQRegistryManager::IsEnabled() const noexcept
     return !m_genesis_hash.IsNull() && m_config.IsValid();
 }
 
-void PQRegistryManager::CacheSnapshot(const PQRegistrySnapshot& snapshot) const
+bool PQRegistryManager::CacheSnapshot(
+    const PQRegistrySnapshot& snapshot,
+    std::shared_ptr<const PQRegistrySnapshotView>* cached) const
 {
+    std::optional<OperatorKeyScheduleState> schedule;
+    if (snapshot.height > 0) {
+        schedule = ScheduleStateAtHeight(m_config, snapshot.height);
+        if (!schedule) return false;
+    }
+
+    std::shared_ptr<const PQRegistryStateData> state;
+    for (auto entry{m_snapshot_cache.rbegin()};
+         entry != m_snapshot_cache.rend(); ++entry) {
+        const auto& candidate{entry->second};
+        if (candidate && candidate->state &&
+            candidate->state->consensus_state_root ==
+                snapshot.consensus_state_root &&
+            candidate->state->schedule == schedule) {
+            state = candidate->state;
+            break;
+        }
+    }
+    if (!state) {
+        const auto tree_hash{
+            GetUsedTreeIdSetHash(m_genesis_hash, snapshot.used_tree_ids)};
+        const auto indexes{BuildRegistryIndexes(snapshot.operator_states)};
+        if (!tree_hash || !indexes) return false;
+
+        std::shared_ptr<const std::vector<uint256>> used_tree_ids;
+        for (auto entry{m_snapshot_cache.rbegin()};
+             entry != m_snapshot_cache.rend(); ++entry) {
+            const auto& candidate{entry->second};
+            if (candidate && candidate->state &&
+                candidate->state->used_tree_ids_hash == *tree_hash &&
+                candidate->state->used_tree_ids &&
+                candidate->state->used_tree_ids->size() ==
+                    snapshot.used_tree_ids.size()) {
+                used_tree_ids = candidate->state->used_tree_ids;
+                break;
+            }
+        }
+        if (!used_tree_ids) {
+            used_tree_ids =
+                std::make_shared<const std::vector<uint256>>(
+                    snapshot.used_tree_ids);
+        }
+
+        auto next{std::make_shared<PQRegistryStateData>()};
+        next->operator_states =
+            std::make_shared<const std::vector<OperatorKeyState>>(
+                snapshot.operator_states);
+        next->used_tree_ids = std::move(used_tree_ids);
+        next->indexes = std::move(indexes);
+        next->schedule = schedule;
+        next->used_tree_ids_hash = *tree_hash;
+        next->consensus_state_root = snapshot.consensus_state_root;
+        next->owned_dynamic_memory_usage =
+            RegistryStateOwnedDynamicMemoryUsage(*next);
+        next->used_tree_ids_dynamic_memory_usage =
+            sizeof(std::vector<uint256>) +
+            memusage::DynamicUsage(*next->used_tree_ids);
+        state = std::move(next);
+    }
+
+    auto view{std::make_shared<PQRegistrySnapshotView>()};
+    view->height = snapshot.height;
+    view->block_hash = snapshot.block_hash;
+    view->previous_block_hash = snapshot.previous_block_hash;
+    view->state = std::move(state);
+    view->block_tree_ids =
+        std::make_shared<const std::vector<uint256>>(snapshot.block_tree_ids);
+
     auto existing{m_snapshot_cache_index.find(snapshot.block_hash)};
     if (existing != m_snapshot_cache_index.end()) {
         m_snapshot_cache.erase(existing->second);
         m_snapshot_cache_index.erase(existing);
     }
-    m_snapshot_cache.emplace_back(
-        snapshot.block_hash,
-        std::make_shared<const PQRegistrySnapshot>(snapshot));
+    m_snapshot_cache.emplace_back(snapshot.block_hash, std::move(view));
     m_snapshot_cache_index[snapshot.block_hash] =
         std::prev(m_snapshot_cache.end());
-    while (m_snapshot_cache.size() > PQ_REGISTRY_SNAPSHOT_CACHE_SIZE) {
+    if (cached != nullptr) {
+        *cached = m_snapshot_cache.back().second;
+    }
+    // The newest state is the unavoidable live baseline. Bound only additional
+    // historical ownership so a large baseline can still retain cheap no-op
+    // block views without making the cache itself unbounded.
+    while (m_snapshot_cache.size() > 1 &&
+           (m_snapshot_cache.size() > PQ_REGISTRY_SNAPSHOT_CACHE_SIZE ||
+            SnapshotCacheDynamicMemoryUsage(
+                m_snapshot_cache,
+                m_snapshot_cache.back().second->state.get()) >
+                PQ_REGISTRY_SNAPSHOT_CACHE_MAX_INCREMENTAL_BYTES)) {
         m_snapshot_cache_index.erase(m_snapshot_cache.front().first);
         m_snapshot_cache.pop_front();
     }
+    return true;
 }
 
 bool PQRegistryManager::ReadDiskSnapshot(
@@ -537,19 +857,19 @@ bool PQRegistryManager::ReadDiskSnapshot(
     return true;
 }
 
-bool PQRegistryManager::ReconstructPersistentSnapshot(
+bool PQRegistryManager::ReconstructPersistentSnapshotView(
     const uint256& block_hash,
     int32_t expected_height,
-    PQRegistrySnapshot& snapshot,
+    std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
     PQRegistryError& error) const
 {
+    snapshot.reset();
     const auto cached{m_snapshot_cache_index.find(block_hash)};
     if (cached != m_snapshot_cache_index.end()) {
-        const auto& candidate{*cached->second->second};
-        const auto root{candidate.RecomputeConsensusStateRoot(m_genesis_hash)};
-        if (candidate.height != expected_height ||
-            !candidate.IsStructurallyValid() || !root ||
-            *root != candidate.consensus_state_root) {
+        const auto& candidate{cached->second->second};
+        if (!candidate || !candidate->state ||
+            candidate->height != expected_height ||
+            candidate->block_hash != block_hash) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
         snapshot = candidate;
@@ -692,8 +1012,25 @@ bool PQRegistryManager::ReconstructPersistentSnapshot(
         *root != rebuilt.consensus_state_root) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
-    CacheSnapshot(rebuilt);
-    snapshot = std::move(rebuilt);
+    if (!CacheSnapshot(rebuilt, &snapshot) || !snapshot) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+    return true;
+}
+
+bool PQRegistryManager::ReconstructPersistentSnapshot(
+    const uint256& block_hash,
+    int32_t expected_height,
+    PQRegistrySnapshot& snapshot,
+    PQRegistryError& error) const
+{
+    std::shared_ptr<const PQRegistrySnapshotView> view;
+    if (!ReconstructPersistentSnapshotView(block_hash, expected_height, view,
+                                           error) ||
+        !view) {
+        return false;
+    }
+    snapshot = MaterializeSnapshot(*view);
     return true;
 }
 
@@ -775,8 +1112,9 @@ bool PQRegistryManager::CommitSnapshot(
         // synchronous PQ-registry barrier before committing CoinsTip.
         return SetError(error, PQRegistryResult::PERSISTENCE_FAILED);
     }
-    CacheSnapshot(snapshot);
-    return true;
+    return CacheSnapshot(snapshot)
+        ? true
+        : SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
 }
 
 bool PQRegistryManager::ProcessBlock(
@@ -1187,7 +1525,24 @@ bool PQRegistryManager::GetSnapshot(
     PQRegistrySnapshot& snapshot,
     PQRegistryError& error) const
 {
+    PQRegistryReadView view;
+    if (!GetReadView(block_hash, previous_block_hash, height, view, error) ||
+        !view.m_snapshot) {
+        return false;
+    }
+    snapshot = MaterializeSnapshot(*view.m_snapshot);
+    return true;
+}
+
+bool PQRegistryManager::GetReadView(
+    const uint256& block_hash,
+    const uint256& previous_block_hash,
+    int32_t height,
+    PQRegistryReadView& view,
+    PQRegistryError& error) const
+{
     error.Clear();
+    view = {};
     if (!IsEnabled()) {
         return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
     }
@@ -1195,18 +1550,29 @@ bool PQRegistryManager::GetSnapshot(
         (height != 0 && previous_block_hash.IsNull())) {
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
-    if (height < m_config.preparation_height) {
-        return MakePrePreparationSnapshot(m_genesis_hash, block_hash,
-                                          previous_block_hash, height,
-                                          snapshot, error);
-    }
+
     LOCK(m_mutex);
-    if (!ReconstructPersistentSnapshot(block_hash, height, snapshot, error)) {
+    std::shared_ptr<const PQRegistrySnapshotView> snapshot;
+    if (height < m_config.preparation_height) {
+        PQRegistrySnapshot materialized;
+        if (!MakePrePreparationSnapshot(
+                m_genesis_hash, block_hash, previous_block_hash, height,
+                materialized, error) ||
+            !CacheSnapshot(materialized, &snapshot)) {
+            if (error.result == PQRegistryResult::OK) {
+                SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            return false;
+        }
+    } else if (!ReconstructPersistentSnapshotView(
+                   block_hash, height, snapshot, error)) {
         return false;
     }
-    return snapshot.previous_block_hash == previous_block_hash
-        ? true
-        : SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    if (!snapshot || snapshot->previous_block_hash != previous_block_hash) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+    view = PQRegistryReadView{std::move(snapshot)};
+    return true;
 }
 
 bool PQRegistryManager::GetPaymentEligibleProTxHashes(
@@ -1229,52 +1595,31 @@ bool PQRegistryManager::GetPaymentEligibleProTxHashes(
         return true;
     }
 
-    LOCK(m_mutex);
-    std::shared_ptr<const PQRegistrySnapshot> snapshot;
-    const auto cached{m_snapshot_cache_index.find(block_hash)};
-    if (cached != m_snapshot_cache_index.end()) {
-        // Cache entries were fully verified before publication. Holding shared
-        // ownership avoids copying and re-hashing the complete registry merely
-        // to derive a payment admission view.
-        snapshot = cached->second->second;
-        m_snapshot_cache.splice(m_snapshot_cache.end(), m_snapshot_cache,
-                                cached->second);
-        cached->second = std::prev(m_snapshot_cache.end());
-    } else {
-        PQRegistrySnapshot reconstructed;
-        if (!ReconstructPersistentSnapshot(block_hash, height, reconstructed,
-                                           error)) {
-            return false;
-        }
-        const auto inserted{m_snapshot_cache_index.find(block_hash)};
-        if (inserted == m_snapshot_cache_index.end()) {
-            return SetError(error, PQRegistryResult::INTERNAL_ERROR);
-        }
-        snapshot = inserted->second->second;
-    }
-    if (!snapshot || snapshot->height != height ||
-        snapshot->block_hash != block_hash ||
-        snapshot->previous_block_hash != previous_block_hash) {
-        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    PQRegistryReadView snapshot;
+    if (!GetReadView(block_hash, previous_block_hash, height, snapshot,
+                     error)) {
+        return false;
     }
 
-    const PaymentEligibilityCacheKey key{snapshot->consensus_state_root,
-                                         epoch};
-    const auto eligibility_cached{
-        m_payment_eligibility_cache_index.find(key)};
-    if (eligibility_cached != m_payment_eligibility_cache_index.end()) {
-        eligible = eligibility_cached->second->second;
-        m_payment_eligibility_cache.splice(
-            m_payment_eligibility_cache.end(), m_payment_eligibility_cache,
-            eligibility_cached->second);
-        eligibility_cached->second =
-            std::prev(m_payment_eligibility_cache.end());
-        return true;
+    const PaymentEligibilityCacheKey key{snapshot.ConsensusStateRoot(), epoch};
+    {
+        LOCK(m_mutex);
+        const auto eligibility_cached{
+            m_payment_eligibility_cache_index.find(key)};
+        if (eligibility_cached != m_payment_eligibility_cache_index.end()) {
+            eligible = eligibility_cached->second->second;
+            m_payment_eligibility_cache.splice(
+                m_payment_eligibility_cache.end(),
+                m_payment_eligibility_cache, eligibility_cached->second);
+            eligibility_cached->second =
+                std::prev(m_payment_eligibility_cache.end());
+            return true;
+        }
     }
 
     auto derived{std::make_shared<PQPaymentEligibleProTxHashes>()};
-    derived->reserve(snapshot->operator_states.size());
-    for (const auto& state : snapshot->operator_states) {
+    derived->reserve(snapshot.OperatorCount());
+    for (const auto& state : snapshot.Operators()) {
         const auto root{state.ResolveChildRoot(epoch)};
         if (root.status != ChildRootResolutionStatus::FROZEN_PRESENT ||
             !root.record || root.record->pro_tx_hash != state.pro_tx_hash ||
@@ -1283,15 +1628,27 @@ bool PQRegistryManager::GetPaymentEligibleProTxHashes(
         }
         derived->push_back(state.pro_tx_hash);
     }
-    eligible = derived;
-    m_payment_eligibility_cache.emplace_back(key, std::move(derived));
-    m_payment_eligibility_cache_index[key] =
-        std::prev(m_payment_eligibility_cache.end());
-    while (m_payment_eligibility_cache.size() >
-           PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE) {
-        m_payment_eligibility_cache_index.erase(
-            m_payment_eligibility_cache.front().first);
-        m_payment_eligibility_cache.pop_front();
+    {
+        LOCK(m_mutex);
+        const auto winner{m_payment_eligibility_cache_index.find(key)};
+        if (winner != m_payment_eligibility_cache_index.end()) {
+            eligible = winner->second->second;
+            m_payment_eligibility_cache.splice(
+                m_payment_eligibility_cache.end(),
+                m_payment_eligibility_cache, winner->second);
+            winner->second = std::prev(m_payment_eligibility_cache.end());
+            return true;
+        }
+        eligible = derived;
+        m_payment_eligibility_cache.emplace_back(key, std::move(derived));
+        m_payment_eligibility_cache_index[key] =
+            std::prev(m_payment_eligibility_cache.end());
+        while (m_payment_eligibility_cache.size() >
+               PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE) {
+            m_payment_eligibility_cache_index.erase(
+                m_payment_eligibility_cache.front().first);
+            m_payment_eligibility_cache.pop_front();
+        }
     }
     return true;
 }
@@ -1337,36 +1694,26 @@ bool PQRegistryManager::GetMempoolView(
     view.has_next_block_schedule = 1;
     view.next_first_mutable_epoch = next_schedule->first_mutable_epoch;
 
-    LOCK(m_mutex);
-    const PQRegistrySnapshot* snapshot{nullptr};
-    PQRegistrySnapshot reconstructed;
-    const auto cached{m_snapshot_cache_index.find(block_hash)};
-    if (cached != m_snapshot_cache_index.end()) {
-        // Cache entries are immutable and were fully validated before
-        // publication. Keep the lock while copying the bounded view so the
-        // underlying shared entry cannot be evicted beneath this reference.
-        snapshot = cached->second->second.get();
-        m_snapshot_cache.splice(m_snapshot_cache.end(), m_snapshot_cache,
-                                cached->second);
-        cached->second = std::prev(m_snapshot_cache.end());
-    } else {
-        if (!ReconstructPersistentSnapshot(block_hash, height, reconstructed,
-                                           error)) {
+    std::shared_ptr<const PQRegistrySnapshotView> snapshot;
+    {
+        LOCK(m_mutex);
+        if (!ReconstructPersistentSnapshotView(block_hash, height, snapshot,
+                                               error)) {
             return false;
         }
-        snapshot = &reconstructed;
     }
-    if (snapshot == nullptr || snapshot->height != height ||
+    if (!snapshot || !snapshot->state || snapshot->height != height ||
         snapshot->block_hash != block_hash) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
 
-    view.operator_state_count = snapshot->operator_states.size();
-    view.used_tree_id_count = snapshot->used_tree_ids.size();
+    const PQRegistryReadView read_view{snapshot};
+    view.operator_state_count = read_view.OperatorCount();
+    view.used_tree_id_count = read_view.UsedTreeIdCount();
     for (const auto& pro_tx_hash : requested_operators) {
         PQRegistryMempoolOperatorState state;
         state.pro_tx_hash = pro_tx_hash;
-        if (const auto* current{snapshot->FindOperator(pro_tx_hash)}) {
+        if (const auto* current{read_view.FindOperator(pro_tx_hash)}) {
             state.state_exists = 1;
             state.has_global_key = current->has_global_key;
             if (current->has_global_key != 0) {

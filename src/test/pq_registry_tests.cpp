@@ -374,6 +374,78 @@ BOOST_AUTO_TEST_CASE(configuration_requires_real_preparation_window)
                 PQRegistryDeploymentResult::INVALID_CONFIGURATION);
 }
 
+BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(301)};
+    PQRegistryManager manager(MemoryDB(301), genesis, config);
+    PQRegistryError error;
+
+    PQRegistryReadView genesis_view;
+    const uint256 genesis_block{NonNullHash(302)};
+    BOOST_REQUIRE(manager.GetReadView(
+        genesis_block, uint256{}, 0, genesis_view, error));
+    BOOST_CHECK(genesis_view.IsValid());
+    BOOST_CHECK_EQUAL(genesis_view.Height(), 0);
+    BOOST_CHECK(genesis_view.BlockHash() == genesis_block);
+    BOOST_CHECK(genesis_view.PreviousBlockHash().IsNull());
+
+    const auto preparation{Block(
+        NonNullHash(303), 304, {OrdinaryTransaction(304)})};
+    const auto cutoff{Block(
+        preparation.GetHash(), 305, {OrdinaryTransaction(305)})};
+    const auto steady_a{Block(
+        cutoff.GetHash(), 306, {OrdinaryTransaction(306)})};
+    const auto steady_b{Block(
+        cutoff.GetHash(), 307, {OrdinaryTransaction(307)})};
+    const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        preparation, config.preparation_height, callbacks, false, error));
+    BOOST_REQUIRE(manager.ProcessBlock(
+        cutoff, config.preparation_height + 1, callbacks, false, error));
+    BOOST_REQUIRE(manager.ProcessBlock(
+        steady_a, config.preparation_height + 2, callbacks, false, error));
+    BOOST_REQUIRE(manager.ProcessBlock(
+        steady_b, config.preparation_height + 2, callbacks, false, error));
+
+    PQRegistryReadView preparation_view;
+    PQRegistryReadView cutoff_view;
+    PQRegistryReadView steady_a_view;
+    PQRegistryReadView steady_b_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        preparation.GetHash(), preparation.hashPrevBlock,
+        config.preparation_height, preparation_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        cutoff.GetHash(), preparation.GetHash(),
+        config.preparation_height + 1, cutoff_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        steady_a.GetHash(), cutoff.GetHash(),
+        config.preparation_height + 2, steady_a_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        steady_b.GetHash(), cutoff.GetHash(),
+        config.preparation_height + 2, steady_b_view, error));
+
+    BOOST_CHECK(!preparation_view.SharesStateWith(cutoff_view));
+    BOOST_CHECK(cutoff_view.SharesStateWith(steady_a_view));
+    BOOST_CHECK(steady_a_view.SharesStateWith(steady_b_view));
+    BOOST_CHECK(steady_a_view.BlockHash() != steady_b_view.BlockHash());
+    BOOST_CHECK(steady_a_view.PreviousBlockHash() == cutoff.GetHash());
+    BOOST_CHECK(steady_b_view.PreviousBlockHash() == cutoff.GetHash());
+    BOOST_CHECK(steady_a_view.ConsensusStateRoot() ==
+                steady_b_view.ConsensusStateRoot());
+
+    for (int32_t height{1};
+         height <= static_cast<int32_t>(PQ_REGISTRY_SNAPSHOT_CACHE_SIZE + 1);
+         ++height) {
+        PQRegistryReadView historical;
+        BOOST_REQUIRE(manager.GetReadView(
+            NonNullHash(400 + height), NonNullHash(399 + height), height,
+            historical, error));
+    }
+    BOOST_CHECK(genesis_view.IsValid());
+    BOOST_CHECK(genesis_view.BlockHash() == genesis_block);
+}
+
 BOOST_AUTO_TEST_CASE(initial_root_registration_is_branch_keyed_and_check_only_is_pure)
 {
     const auto config{FastConfig()};
@@ -714,6 +786,16 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
     // payment epoch must retain the same derived admission view.
     BOOST_CHECK(first == next_block);
 
+    PQRegistryReadView cutoff_view;
+    PQRegistryReadView steady_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        cutoff.GetHash(), registration.GetHash(), 1296, cutoff_view,
+        error));
+    BOOST_REQUIRE(manager.GetReadView(
+        steady.GetHash(), cutoff.GetHash(), 1297, steady_view, error));
+    BOOST_CHECK(cutoff_view.SharesStateWith(steady_view));
+    BOOST_CHECK_EQUAL(cutoff_view.OperatorCount(), 1U);
+
     PQPaymentEligibleProTxHashesPtr next_epoch;
     BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
         steady.GetHash(), cutoff.GetHash(), 1297, 1, next_epoch, error));
@@ -748,6 +830,17 @@ BOOST_AUTO_TEST_CASE(removal_drops_operator_but_retains_tree_id)
         Member(genesis, pro_tx_hash, owner_key_id,
                /*exists_after=*/false),
         false, error));
+
+    PQRegistryReadView registered_view;
+    PQRegistryReadView removed_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        registration.GetHash(), registration.hashPrevBlock, 1295,
+        registered_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        removed.GetHash(), registration.GetHash(), 1296, removed_view,
+        error));
+    BOOST_CHECK(!registered_view.SharesStateWith(removed_view));
+    BOOST_CHECK(registered_view.SharesTreeHistoryWith(removed_view));
 
     PQRegistryDiskSnapshot delta;
     BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
@@ -809,6 +902,21 @@ BOOST_AUTO_TEST_CASE(revocation_requires_delayed_fresh_owner_recovery)
     BOOST_CHECK(!OnlyOperator(revoked).HasActiveGlobalKey());
     BOOST_CHECK(OnlyOperator(revoked).frozen_child_roots.empty());
     BOOST_CHECK(revoked.HasUsedTreeId(first_tree.tree_id));
+
+    PQRegistryReadView historical_view;
+    PQRegistryReadView revoked_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        registration.GetHash(), registration.hashPrevBlock, 1295,
+        historical_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        revoke.GetHash(), registration.GetHash(), 1296, revoked_view,
+        error));
+    const auto active_owner{historical_view.FindActiveOperatorByGlobalKey(
+        OnlyOperator(historical).global_key.public_key)};
+    BOOST_REQUIRE(active_owner);
+    BOOST_CHECK(*active_owner == pro_tx_hash);
+    BOOST_CHECK(!revoked_view.FindActiveOperatorByGlobalKey(
+        OnlyOperator(revoked).global_key.public_key));
 
     const auto recovery_tree{CommitmentAt(config, 1297, 2, 112)};
     const auto recovery{Block(

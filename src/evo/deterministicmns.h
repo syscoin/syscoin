@@ -727,6 +727,11 @@ public:
                                llmq::pq::PQRegistrySnapshot& snapshot,
                                std::string& error) const;
 
+    /** Immutable exact-branch handle for hot registry readers. */
+    bool GetPQRegistryReadView(const CBlockIndex* pindex,
+                               llmq::pq::PQRegistryReadView& view,
+                               std::string& error) const;
+
     /** Resolve the exact branch-local payment-only probation state. */
     bool GetPaymentProbationState(
         const CBlockIndex* pindex,

@@ -44,6 +44,9 @@ inline constexpr uint16_t PQ_REGISTRY_SNAPSHOT_VERSION{1};
 inline constexpr uint16_t PQ_REGISTRY_DISK_VERSION{1};
 inline constexpr int32_t PQ_REGISTRY_CHECKPOINT_INTERVAL{288};
 inline constexpr std::size_t PQ_REGISTRY_SNAPSHOT_CACHE_SIZE{64};
+inline constexpr std::size_t
+    PQ_REGISTRY_SNAPSHOT_CACHE_MAX_INCREMENTAL_BYTES{
+    256U * 1024U * 1024U};
 inline constexpr std::size_t PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE{8};
 inline constexpr std::size_t MAX_PQ_OPERATOR_STATES{65'535};
 inline constexpr std::size_t MAX_PQ_TREE_IDS_PER_BLOCK{65'535};
@@ -268,10 +271,50 @@ struct PQRegistryMempoolView {
         const uint256& pro_tx_hash) const noexcept;
 };
 
+struct PQRegistrySnapshotView;
+
+/**
+ * Immutable ownership handle for one exact branch-local registry snapshot.
+ * Hot readers retain the backing state and perform indexed lookups without
+ * materializing the disk/RPC transfer object.
+ */
+class PQRegistryReadView {
+public:
+    PQRegistryReadView() = default;
+
+    [[nodiscard]] bool IsValid() const noexcept;
+    [[nodiscard]] int32_t Height() const noexcept;
+    [[nodiscard]] uint256 BlockHash() const noexcept;
+    [[nodiscard]] uint256 PreviousBlockHash() const noexcept;
+    [[nodiscard]] uint256 ConsensusStateRoot() const noexcept;
+    [[nodiscard]] std::size_t OperatorCount() const noexcept;
+    [[nodiscard]] std::size_t UsedTreeIdCount() const noexcept;
+    [[nodiscard]] bool HasUsedTreeId(const uint256& tree_id) const noexcept;
+    [[nodiscard]] const OperatorKeyState* FindOperator(
+        const uint256& pro_tx_hash) const noexcept;
+    [[nodiscard]] std::optional<uint256> FindActiveOperatorByGlobalKey(
+        const GlobalPublicKey& public_key) const noexcept;
+    [[nodiscard]] std::span<const OperatorKeyState> Operators() const noexcept;
+    [[nodiscard]] std::shared_ptr<const std::vector<OperatorKeyState>>
+    ShareOperatorStates() const noexcept;
+    [[nodiscard]] bool SharesStateWith(
+        const PQRegistryReadView& other) const noexcept;
+    [[nodiscard]] bool SharesTreeHistoryWith(
+        const PQRegistryReadView& other) const noexcept;
+
+private:
+    explicit PQRegistryReadView(
+        std::shared_ptr<const PQRegistrySnapshotView> snapshot);
+
+    std::shared_ptr<const PQRegistrySnapshotView> m_snapshot;
+
+    friend class PQRegistryManager;
+};
+
 class PQRegistryManager {
 private:
     using CacheList = std::list<std::pair<
-        uint256, std::shared_ptr<const PQRegistrySnapshot>>>;
+        uint256, std::shared_ptr<const PQRegistrySnapshotView>>>;
     using CacheMap = std::unordered_map<
         uint256, CacheList::iterator, StaticSaltedHasher>;
     using PaymentEligibilityCacheKey = std::pair<uint256, uint32_t>;
@@ -296,12 +339,19 @@ private:
         const uint256& block_hash,
         PQRegistryDiskSnapshot& snapshot,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool ReconstructPersistentSnapshotView(
+        const uint256& block_hash,
+        int32_t expected_height,
+        std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool ReconstructPersistentSnapshot(
         const uint256& block_hash,
         int32_t expected_height,
         PQRegistrySnapshot& snapshot,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    void CacheSnapshot(const PQRegistrySnapshot& snapshot) const
+    [[nodiscard]] bool CacheSnapshot(
+        const PQRegistrySnapshot& snapshot,
+        std::shared_ptr<const PQRegistrySnapshotView>* cached = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool CommitSnapshot(
         const PQRegistrySnapshot& snapshot,
@@ -350,6 +400,13 @@ public:
         const uint256& previous_block_hash,
         int32_t height,
         PQRegistrySnapshot& snapshot,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] bool GetReadView(
+        const uint256& block_hash,
+        const uint256& previous_block_hash,
+        int32_t height,
+        PQRegistryReadView& view,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
