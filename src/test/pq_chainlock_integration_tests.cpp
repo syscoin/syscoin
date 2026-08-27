@@ -6,6 +6,7 @@
 #include <llmq/pq_payment_audit_collector.h>
 #include <llmq/pq_payment_audit_verify.h>
 #include <llmq/pq_quorum_builder.h>
+#include <llmq/quorums_chainlocks.h>
 
 #include <chain.h>
 #include <streams.h>
@@ -623,6 +624,15 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_REQUIRE(collected_final);
     BOOST_CHECK(collected_final->ContextPtr() == collector_context);
     BOOST_CHECK(collected_final->Certificate() == *final);
+    BOOST_CHECK(
+        llmq::SelectFinalChainLockVerificationPath(
+            collected_final.get(), &collected_final->Certificate(),
+            fixture->genesis_hash, fixture->config.schedule,
+            collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+            /*local_live_admission=*/true,
+            /*admission_generation_current=*/true,
+            /*collector_generation_current=*/true) ==
+        llmq::FinalChainLockVerificationPath::COLLECTED);
     BOOST_REQUIRE(final->IsStructurallyValid());
     BOOST_CHECK_EQUAL(final->selected_quorum_mask, 0b0111);
     BOOST_CHECK_EQUAL(final->signatures.size(), FINAL_SIGNATURE_COUNT);
@@ -644,6 +654,64 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_CHECK(encoded.empty());
     BOOST_CHECK(decoded == *final);
 
+    const auto full_path = [&](const FinalChainLock* certificate,
+                               const uint256& genesis_hash,
+                               const ChainLockScheduleConfig& schedule,
+                               const VerifiedRosterSetPtr& roster_set,
+                               uint8_t authorization_mask,
+                               bool local_live_admission,
+                               bool admission_generation_current,
+                               bool collector_generation_current) {
+        return llmq::SelectFinalChainLockVerificationPath(
+                   collected_final.get(), certificate, genesis_hash,
+                   schedule, roster_set, authorization_mask,
+                   local_live_admission, admission_generation_current,
+                   collector_generation_current) ==
+            llmq::FinalChainLockVerificationPath::FULL;
+    };
+    BOOST_CHECK(full_path(
+        &decoded, fixture->genesis_hash, fixture->config.schedule,
+        collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+        true, true, true));
+    BOOST_CHECK(full_path(
+        &collected_final->Certificate(), NonNullHash(900'001),
+        fixture->config.schedule, collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, true, true));
+    auto different_schedule{fixture->config.schedule};
+    ++different_schedule.epoch_origin;
+    BOOST_CHECK(full_path(
+        &collected_final->Certificate(), fixture->genesis_hash,
+        different_schedule, collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, true, true));
+    ChainLockVerificationError detached_error{
+        ChainLockVerificationError::NONE};
+    const auto detached_roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, collector_context->RostersPtr(),
+        &detached_error)};
+    BOOST_REQUIRE(detached_roster_set);
+    BOOST_CHECK(detached_error == ChainLockVerificationError::NONE);
+    BOOST_CHECK(detached_roster_set != collector_context->RosterSetPtr());
+    BOOST_CHECK(full_path(
+        &collected_final->Certificate(), fixture->genesis_hash,
+        fixture->config.schedule, detached_roster_set,
+        AUTHORIZATION_MASK, true, true, true));
+    BOOST_CHECK(full_path(
+        &collected_final->Certificate(), fixture->genesis_hash,
+        fixture->config.schedule, collector_context->RosterSetPtr(),
+        0b1111, true, true, true));
+    BOOST_CHECK(full_path(
+        &collected_final->Certificate(), fixture->genesis_hash,
+        fixture->config.schedule, collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, false, true, true));
+    BOOST_CHECK(full_path(
+        &collected_final->Certificate(), fixture->genesis_hash,
+        fixture->config.schedule, collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, false, true));
+    BOOST_CHECK(full_path(
+        &collected_final->Certificate(), fixture->genesis_hash,
+        fixture->config.schedule, collector_context->RosterSetPtr(),
+        AUTHORIZATION_MASK, true, true, false));
+
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{/*worker_threads=*/TestWorkerCount()};
@@ -653,6 +721,18 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         AUTHORIZATION_MASK,
         &verification_error));
     BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
+    auto corrupted{decoded};
+    corrupted.signatures.front().signature.front() ^= uint8_t{1};
+    BOOST_CHECK(full_path(
+        &corrupted, fixture->genesis_hash, fixture->config.schedule,
+        collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+        true, true, true));
+    verification_error = ChainLockVerificationError::NONE;
+    BOOST_CHECK(!verifier.Verify(
+        fixture->genesis_hash, fixture->config.schedule, corrupted,
+        *fixture->rosters, AUTHORIZATION_MASK, &verification_error));
+    BOOST_CHECK(verification_error ==
+                ChainLockVerificationError::INVALID_SIGNATURE);
 
     const auto expected_audit_schedule{BuildPaymentAuditEpochSchedule(
         PaymentAuditScheduleConfig{

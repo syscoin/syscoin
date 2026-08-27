@@ -240,6 +240,28 @@ private:
 [[nodiscard]] bool MustRetryPaymentAuditCertificateContext(
     bool historical_required, bool historical_resolved) noexcept;
 
+enum class FinalChainLockVerificationPath : uint8_t {
+    FULL = 0,
+    COLLECTED,
+};
+
+/**
+ * Reuse share-level verification only for the exact process-local certificate
+ * and immutable live context that produced it. Every mismatch must take the
+ * ordinary full-certificate verification path.
+ */
+[[nodiscard]] FinalChainLockVerificationPath
+SelectFinalChainLockVerificationPath(
+    const pq::CollectedChainLockFinalization* collected,
+    const pq::FinalChainLock* certificate,
+    const uint256& genesis_hash,
+    const pq::ChainLockScheduleConfig& schedule,
+    const pq::VerifiedRosterSetPtr& roster_set,
+    uint8_t authorization_mask,
+    bool local_live_admission,
+    bool admission_generation_current,
+    bool collector_generation_current) noexcept;
+
 /** Retry one immutable local aggregate without repeating scheduled-WOTS work. */
 [[nodiscard]] bool IsPaymentAuditFinalizationRetryDue(
     std::chrono::microseconds now,
@@ -438,6 +460,8 @@ GetVerifiedPaymentAuditReceiptTransition(
  * threshold-key ceremony, recovered-signature layer, or BLS state.
  */
 class CChainLocksHandler final : private pq::ChainLockFinalityContext {
+    struct LocalChainLockFinalization;
+
 public:
     CChainLocksHandler(CConnman& connman,
                        PeerManager& peerman,
@@ -851,13 +875,48 @@ private:
                                  !m_btc_header_policy_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex);
+    struct LocalChainLockFinalization {
+        pq::CollectedChainLockFinalizationPtr proof;
+        uint64_t admission_generation{0};
+        uint64_t collector_generation{0};
+    };
     struct ChainLockShareCollectionOutcome {
         pq::ShareCollectionResult result{
             pq::ShareCollectionResult::REJECTED};
         pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
-        std::optional<pq::FinalChainLock> finalized;
+        std::optional<LocalChainLockFinalization> finalized;
         bool stale{false};
     };
+    [[nodiscard]] bool ProcessCollectedChainLock(
+        const LocalChainLockFinalization& finalized,
+        BlockValidationState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(m_share_lifecycle_mutex,
+                                 !cs_main,
+                                 !m_chainlock_admission_mutex,
+                                 !m_verification_mutex,
+                                 !m_collector_mutex,
+                                 !m_lookup_mutex,
+                                 !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_signer_reconcile_mutex);
+    [[nodiscard]] bool ProcessNewChainLockInternal(
+        NodeId from,
+        const pq::FinalChainLock& chainlock,
+        BlockValidationState& state,
+        bool* peer_fault,
+        const LocalChainLockFinalization* local_finalization)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_chainlock_admission_mutex,
+                                 !m_verification_mutex,
+                                 !m_collector_mutex,
+                                 !m_lookup_mutex,
+                                 !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_signer_reconcile_mutex);
     [[nodiscard]] ChainLockShareCollectionOutcome CollectChainLockShare(
         const pq::ChainLockShare& share,
         const pq::ChainLockStatement& statement,

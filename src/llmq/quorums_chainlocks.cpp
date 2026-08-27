@@ -1712,6 +1712,33 @@ bool MustRetryPaymentAuditCertificateContext(
     return historical_required && !historical_resolved;
 }
 
+FinalChainLockVerificationPath SelectFinalChainLockVerificationPath(
+    const pq::CollectedChainLockFinalization* collected,
+    const pq::FinalChainLock* certificate,
+    const uint256& genesis_hash,
+    const pq::ChainLockScheduleConfig& schedule,
+    const pq::VerifiedRosterSetPtr& roster_set,
+    uint8_t authorization_mask,
+    bool local_live_admission,
+    bool admission_generation_current,
+    bool collector_generation_current) noexcept
+{
+    if (!collected || !certificate || !local_live_admission ||
+        !admission_generation_current || !collector_generation_current ||
+        certificate != &collected->Certificate()) {
+        return FinalChainLockVerificationPath::FULL;
+    }
+    const auto& context{collected->ContextPtr()};
+    if (!context || !roster_set || context->GenesisHash() != genesis_hash ||
+        context->Schedule() != schedule ||
+        context->Statement() != certificate->statement ||
+        context->RosterSetPtr() != roster_set ||
+        context->AuthorizationMask() != authorization_mask) {
+        return FinalChainLockVerificationPath::FULL;
+    }
+    return FinalChainLockVerificationPath::COLLECTED;
+}
+
 bool IsPaymentAuditFinalizationRetryDue(
     std::chrono::microseconds now,
     std::optional<std::chrono::microseconds> last_attempt) noexcept
@@ -8769,7 +8796,12 @@ CChainLocksHandler::CollectChainLockShare(
         outcome.result = collector->CompleteShareVerification(
             std::move(*reservation), &outcome.error);
         if (outcome.result == pq::ShareCollectionResult::ACCEPTED) {
-            outcome.finalized = collector->Finalize();
+            auto proof{collector->FinalizeCollection()};
+            if (proof) {
+                outcome.finalized.emplace(LocalChainLockFinalization{
+                    std::move(proof), admission_generation,
+                    collector_generation});
+            }
         }
     }
 
@@ -8858,8 +8890,7 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         LOCK(m_share_lifecycle_mutex);
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         BlockValidationState state;
-        CChainLockSig chainlock{std::move(*collection.finalized)};
-        if (!ProcessNewChainLock(-1, chainlock, state)) {
+        if (!ProcessCollectedChainLock(*collection.finalized, state)) {
             LogPrint(BCLog::CHAINLOCKS,
                      "CChainLocksHandler::%s -- locally collected PQ "
                      "ChainLock was rejected: %s\n",
@@ -9977,6 +10008,30 @@ bool CChainLocksHandler::ProcessNewChainLock(
     BlockValidationState& state,
     bool* peer_fault)
 {
+    return ProcessNewChainLockInternal(
+        from, chainlock, state, peer_fault,
+        /*local_finalization=*/nullptr);
+}
+
+bool CChainLocksHandler::ProcessCollectedChainLock(
+    const LocalChainLockFinalization& finalized,
+    BlockValidationState& state)
+{
+    if (!finalized.proof) {
+        return state.Error("missing collected ChainLock finalization proof");
+    }
+    return ProcessNewChainLockInternal(
+        /*from=*/-1, finalized.proof->Certificate(), state,
+        /*peer_fault=*/nullptr, &finalized);
+}
+
+bool CChainLocksHandler::ProcessNewChainLockInternal(
+    NodeId from,
+    const pq::FinalChainLock& chainlock,
+    BlockValidationState& state,
+    bool* peer_fault,
+    const LocalChainLockFinalization* local_finalization)
+{
     if (peer_fault != nullptr) *peer_fault = false;
     if (!IsChainLockVerificationAvailable()) {
         return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
@@ -10194,40 +10249,75 @@ bool CChainLocksHandler::ProcessNewChainLock(
                                      "pq-clsig-context-unavailable");
             }
 
-            pq::ChainLockVerificationError verification_error{
-                pq::ChainLockVerificationError::NONE};
-            auto signature_checks{pq::PrepareFinalChainLockVerification(
-                m_config->chainlock_schedule, chainlock,
-                *verification_context->roster_set,
-                verification_context->authorization_mask,
-                &verification_error)};
-            if (!signature_checks) {
-                m_store->RejectPrepared(*prepared);
-                if (peer_fault != nullptr) *peer_fault = true;
-                FailPeerResponse(from, logical_id);
-                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
-                                     "pq-clsig-invalid-context");
+            bool collector_generation_current{false};
+            if (local_finalization && local_finalization->proof) {
+                LOCK(m_collector_mutex);
+                const pq::ChainLockCollector* collector{
+                    FindCollector(chainlock.statement)};
+                collector_generation_current =
+                    m_collector_generation ==
+                        local_finalization->collector_generation &&
+                    collector != nullptr &&
+                    collector->GetPreparedContext() ==
+                        local_finalization->proof->ContextPtr();
             }
-            if (peer_fault != nullptr) *peer_fault = true;
-            bool signatures_valid{false};
-            {
-                LOCK(m_verification_mutex);
-                signatures_valid = m_verifier.VerifyChecks(
-                    std::move(signature_checks->checks));
-            }
-            if (!signatures_valid) {
-                if (archive_only) {
-                    (void)m_store->AcceptReceiptArchiveVerified(
-                        *prepared, chainlock, /*signatures_valid=*/false,
-                        &finality_error);
-                } else {
-                    (void)m_store->AcceptVerified(
-                        *prepared, chainlock, /*signatures_valid=*/false,
-                        &finality_error);
+            const bool local_live_admission{
+                local_finalization != nullptr && from == -1 &&
+                !historical_admission && !archive_only &&
+                prepared->admission == pq::ChainLockCandidateAdmission::LIVE};
+            const auto verification_path{
+                SelectFinalChainLockVerificationPath(
+                    local_finalization && local_finalization->proof
+                        ? local_finalization->proof.get()
+                        : nullptr,
+                    &chainlock, m_genesis_hash,
+                    m_config->chainlock_schedule,
+                    verification_context->roster_set,
+                    verification_context->authorization_mask,
+                    local_live_admission,
+                    local_finalization &&
+                        IsShareAdmissionGenerationCurrent(
+                            local_finalization->admission_generation),
+                    collector_generation_current)};
+            if (verification_path ==
+                FinalChainLockVerificationPath::FULL) {
+                pq::ChainLockVerificationError verification_error{
+                    pq::ChainLockVerificationError::NONE};
+                auto signature_checks{pq::PrepareFinalChainLockVerification(
+                    m_config->chainlock_schedule, chainlock,
+                    *verification_context->roster_set,
+                    verification_context->authorization_mask,
+                    &verification_error)};
+                if (!signature_checks) {
+                    m_store->RejectPrepared(*prepared);
+                    if (peer_fault != nullptr) *peer_fault = true;
+                    FailPeerResponse(from, logical_id);
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CHAINLOCK,
+                        "pq-clsig-invalid-context");
                 }
-                FailPeerResponse(from, logical_id);
-                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
-                                     "pq-clsig-invalid-signatures");
+                if (peer_fault != nullptr) *peer_fault = true;
+                bool signatures_valid{false};
+                {
+                    LOCK(m_verification_mutex);
+                    signatures_valid = m_verifier.VerifyChecks(
+                        std::move(signature_checks->checks));
+                }
+                if (!signatures_valid) {
+                    if (archive_only) {
+                        (void)m_store->AcceptReceiptArchiveVerified(
+                            *prepared, chainlock,
+                            /*signatures_valid=*/false, &finality_error);
+                    } else {
+                        (void)m_store->AcceptVerified(
+                            *prepared, chainlock,
+                            /*signatures_valid=*/false, &finality_error);
+                    }
+                    FailPeerResponse(from, logical_id);
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CHAINLOCK,
+                        "pq-clsig-invalid-signatures");
+                }
             }
             if (peer_fault != nullptr) *peer_fault = false;
         }
@@ -11036,9 +11126,8 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                     return;
                 }
                 BlockValidationState state;
-                CChainLockSig chainlock{
-                    std::move(*collection.finalized)};
-                (void)ProcessNewChainLock(-1, chainlock, state);
+                (void)ProcessCollectedChainLock(
+                    *collection.finalized, state);
                 return;
             }
         }
