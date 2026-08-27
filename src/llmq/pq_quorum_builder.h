@@ -61,6 +61,7 @@ enum class QuorumBuildError : uint8_t {
     MISSING_BRANCH_ANCESTOR,
     SNAPSHOT_LOOKUP_FAILED,
     SNAPSHOT_MISMATCH,
+    INVALID_FROZEN_ROSTER,
 };
 
 /**
@@ -97,6 +98,12 @@ public:
         QuorumBuildError* error = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    [[nodiscard]] VerifiedRosterSetPtr GetVerifiedActive(
+        int32_t target_height,
+        const CBlockIndex& branch_tip,
+        QuorumBuildError* error = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** Always invoke the source; independent reconstruction must not self-hit. */
     [[nodiscard]] std::optional<QuorumSnapshotState> LookupSnapshot(
         const CBlockIndex& index) const;
@@ -120,7 +127,7 @@ private:
 
     struct Entry {
         Key key;
-        FrozenQuorumRostersPtr rosters;
+        VerifiedRosterSetPtr roster_set;
         bool recently_used{false};
     };
 

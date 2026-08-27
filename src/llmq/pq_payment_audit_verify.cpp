@@ -198,6 +198,55 @@ PreparedPaymentAuditContext::Create(
             std::move(leaf_indices)}};
 }
 
+std::shared_ptr<const PreparedPaymentAuditContext>
+PreparedPaymentAuditContext::Create(
+    PaymentAuditScheduleConfig schedule,
+    PaymentAuditStatement statement,
+    const FinalChainLock& seal_chainlock,
+    VerifiedRosterSetPtr roster_set,
+    uint8_t authorization_mask,
+    PaymentAuditVerificationError* error)
+{
+    SetError(error, PaymentAuditVerificationError::NONE);
+    if (!schedule.IsValid() || !statement.IsStructurallyValid() ||
+        !roster_set) {
+        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!ValidatePaymentAuditLiveSeal(
+            roster_set->GenesisHash(), statement, seal_chainlock, error)) {
+        return nullptr;
+    }
+    const auto audit_schedule{BuildPaymentAuditEpochSchedule(
+        schedule, statement.commitment.subject_epoch)};
+    if (!audit_schedule ||
+        audit_schedule->seal_height != statement.commitment.seal_height) {
+        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+
+    ChainLockVerificationError chainlock_error{
+        ChainLockVerificationError::NONE};
+    auto seal_context{PreparedChainLockContext::Create(
+        schedule.chainlock, statement.seal_statement,
+        std::move(roster_set), authorization_mask, &chainlock_error)};
+    if (!seal_context) {
+        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
+        return nullptr;
+    }
+    std::array<std::optional<uint8_t>, ACTIVE_QUORUMS> leaf_indices;
+    for (std::size_t slot{0}; slot < leaf_indices.size(); ++slot) {
+        leaf_indices[slot] = PaymentAuditLeafIndex(
+            schedule, statement.commitment.subject_epoch,
+            statement.commitment.seal_height,
+            seal_context->Rosters()[slot].descriptor.epoch);
+    }
+    return std::shared_ptr<const PreparedPaymentAuditContext>{
+        new PreparedPaymentAuditContext{
+            schedule, std::move(statement), std::move(seal_context),
+            std::move(leaf_indices)}};
+}
+
 std::optional<std::size_t> PreparedPaymentAuditContext::FindQuorumSlot(
     const PaymentAuditShareTranscript& transcript) const noexcept
 {

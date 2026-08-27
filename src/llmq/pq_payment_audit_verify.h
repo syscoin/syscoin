@@ -39,6 +39,14 @@ public:
            uint8_t authorization_mask,
            PaymentAuditVerificationError* error = nullptr);
 
+    [[nodiscard]] static std::shared_ptr<const PreparedPaymentAuditContext>
+    Create(PaymentAuditScheduleConfig schedule,
+           PaymentAuditStatement statement,
+           const FinalChainLock& seal_chainlock,
+           VerifiedRosterSetPtr roster_set,
+           uint8_t authorization_mask,
+           PaymentAuditVerificationError* error = nullptr);
+
     [[nodiscard]] const uint256& GenesisHash() const noexcept
     {
         return m_seal_context->GenesisHash();
@@ -58,6 +66,10 @@ public:
     [[nodiscard]] const FrozenQuorumRostersPtr& RostersPtr() const noexcept
     {
         return m_seal_context->RostersPtr();
+    }
+    [[nodiscard]] const VerifiedRosterSetPtr& RosterSetPtr() const noexcept
+    {
+        return m_seal_context->RosterSetPtr();
     }
     [[nodiscard]] uint8_t AuthorizationMask() const noexcept
     {

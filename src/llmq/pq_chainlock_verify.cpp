@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <limits>
 #include <map>
 #include <set>
@@ -19,6 +20,8 @@ namespace llmq::pq {
 namespace {
 
 constexpr std::size_t MERKLE_LEAF_COUNT{512};
+constexpr uint64_t TAGGED_HASHES_PER_FIXED_ROOT{
+    2 * MERKLE_LEAF_COUNT - 1};
 constexpr std::size_t SERIAL_PREFLIGHT_CHECKS{4};
 constexpr std::string_view MEMBER_LEAF_DOMAIN{"SYS_PQ_QUORUM_MEMBER_LEAF_V1"};
 constexpr std::string_view MEMBER_PAD_DOMAIN{"SYS_PQ_QUORUM_MEMBER_PAD_V1"};
@@ -26,6 +29,7 @@ constexpr std::string_view MEMBER_NODE_DOMAIN{"SYS_PQ_QUORUM_MEMBER_NODE_V1"};
 constexpr std::string_view CHILD_ABSENT_DOMAIN{"SYS_PQ_QUORUM_CHILD_ABSENT_V1"};
 constexpr std::string_view CHILD_PAD_DOMAIN{"SYS_PQ_QUORUM_CHILD_PAD_V1"};
 constexpr std::string_view CHILD_NODE_DOMAIN{"SYS_PQ_QUORUM_CHILD_NODE_V1"};
+std::atomic<uint64_t> g_quorum_root_tagged_hashes{0};
 static_assert(MERKLE_LEAF_COUNT >= QUORUM_SIZE);
 static_assert((MERKLE_LEAF_COUNT & (MERKLE_LEAF_COUNT - 1)) == 0);
 static_assert(MERKLE_LEAF_COUNT <= std::numeric_limits<uint16_t>::max());
@@ -72,6 +76,8 @@ uint256 ComputeFixedMerkleRoot(const uint256& genesis_hash,
         width /= 2;
         ++level;
     }
+    g_quorum_root_tagged_hashes.fetch_add(
+        TAGGED_HASHES_PER_FIXED_ROOT, std::memory_order_relaxed);
     return hashes[0];
 }
 
@@ -86,13 +92,13 @@ void SetBit(QuorumBitmap& bitmap, std::size_t member)
     bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
-bool IsDescriptorHeaderValid(const QuorumDescriptor& descriptor, int32_t target_height)
+bool IsDescriptorStructureValid(const QuorumDescriptor& descriptor)
 {
     // Unselected, unusable descriptors with fewer than QUORUM_MIN_VALID keys
     // still participate in the context. The threshold is enforced separately
     // only for selected quorums.
     return descriptor.version == QUORUM_DESCRIPTOR_VERSION &&
-           descriptor.base_height >= 0 && descriptor.base_height <= target_height &&
+           descriptor.base_height >= 0 &&
            descriptor.snapshot_height >= 0 &&
            descriptor.snapshot_height < descriptor.base_height &&
            !descriptor.base_hash.IsNull() && !descriptor.snapshot_hash.IsNull() &&
@@ -122,6 +128,156 @@ std::optional<std::size_t> FindQuorumSlot(
     return std::nullopt;
 }
 
+bool ValidateRosterMembersAndRoots(
+    const uint256& genesis_hash,
+    const FrozenQuorumRoster& roster,
+    std::map<uint256, std::pair<uint256, uint32_t>>& tree_owners,
+    ChainLockVerificationError* error)
+{
+    const auto& descriptor{roster.descriptor};
+    std::set<uint256> members;
+    QuorumBitmap expected_valid_members{};
+    for (std::size_t member_index{0}; member_index < QUORUM_SIZE;
+         ++member_index) {
+        const auto& member{roster.members[member_index]};
+        if (member.pro_tx_hash.IsNull()) {
+            SetError(error, ChainLockVerificationError::INVALID_ROSTER);
+            return false;
+        }
+        if (!members.insert(member.pro_tx_hash).second) {
+            SetError(error, ChainLockVerificationError::DUPLICATE_MEMBER);
+            return false;
+        }
+
+        if (member.child_root) {
+            const auto& child{*member.child_root};
+            if (!child.IsStructurallyValid() ||
+                child.pro_tx_hash != member.pro_tx_hash ||
+                child.epoch != descriptor.epoch) {
+                SetError(error, ChainLockVerificationError::INVALID_ROSTER);
+                return false;
+            }
+            const auto [owner, inserted]{tree_owners.emplace(
+                child.commitment.tree_id,
+                std::pair{member.pro_tx_hash,
+                          child.commitment.generation})};
+            if (!inserted &&
+                owner->second != std::pair{member.pro_tx_hash,
+                                           child.commitment.generation}) {
+                SetError(error,
+                         ChainLockVerificationError::DUPLICATE_CHILD_KEY);
+                return false;
+            }
+            if (member.eligible) SetBit(expected_valid_members, member_index);
+        }
+    }
+    if (expected_valid_members != descriptor.valid_members) {
+        SetError(error, ChainLockVerificationError::INVALID_ROSTER);
+        return false;
+    }
+    if (ComputeQuorumMemberRoot(genesis_hash, roster) !=
+        descriptor.member_root) {
+        SetError(error, ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
+        return false;
+    }
+    if (ComputeQuorumChildKeyRoot(genesis_hash, roster) !=
+        descriptor.child_key_root) {
+        SetError(error,
+                 ChainLockVerificationError::CHILD_KEY_ROOT_MISMATCH);
+        return false;
+    }
+    return true;
+}
+
+bool ValidateRosterSetInternal(
+    const uint256& genesis_hash,
+    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    ChainLockVerificationError* error)
+{
+    if (genesis_hash.IsNull()) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return false;
+    }
+
+    std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
+    std::set<std::pair<uint32_t, uint256>> quorum_identities;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        const auto& roster = rosters[slot];
+        const auto& descriptor = roster.descriptor;
+        if (!IsDescriptorStructureValid(descriptor) ||
+            !quorum_identities.emplace(descriptor.epoch, descriptor.base_hash).second ||
+            (slot != 0 &&
+             (descriptor.epoch <= rosters[slot - 1].descriptor.epoch ||
+              descriptor.base_height <= rosters[slot - 1].descriptor.base_height))) {
+            SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
+            return false;
+        }
+
+        if (!ValidateRosterMembersAndRoots(
+                genesis_hash, roster, tree_owners, error)) {
+            return false;
+        }
+    }
+
+    SetError(error, ChainLockVerificationError::NONE);
+    return true;
+}
+
+bool ValidateStatementBindingInternal(
+    const uint256& genesis_hash,
+    const ChainLockStatement& statement,
+    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
+    uint8_t selected_quorum_mask,
+    ChainLockVerificationError* error)
+{
+    if (genesis_hash.IsNull()) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return false;
+    }
+    if (!statement.IsStructurallyValid()) {
+        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
+        return false;
+    }
+    if (!IsSigningRosterAuthorizationMask(authorization_mask) ||
+        (selected_quorum_mask & ~authorization_mask) != 0) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return false;
+    }
+
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        const auto& descriptor{rosters[slot].descriptor};
+        // The predecessor-derived mask is the transition evidence. A newest
+        // unselected roster may already be context-bound before its snapshot
+        // is authorized, but no authorized descriptor may cross the boundary.
+        const int32_t authorization_height{
+            descriptor.epoch < ACTIVE_QUORUMS
+                ? descriptor.base_height
+                : descriptor.snapshot_height};
+        if (descriptor.base_height > statement.height ||
+            (IsSelected(authorization_mask, slot) &&
+             authorization_height > statement.previous_chainlock_height) ||
+            (IsSelected(selected_quorum_mask, slot) &&
+             descriptor.valid_count < QUORUM_MIN_VALID)) {
+            SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
+            return false;
+        }
+    }
+
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = rosters[slot].descriptor;
+    }
+    if (GetQuorumContextHash(genesis_hash, statement.height,
+                             statement.block_hash, descriptors) !=
+        statement.quorum_context_hash) {
+        SetError(error, ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
+        return false;
+    }
+    SetError(error, ChainLockVerificationError::NONE);
+    return true;
+}
+
 bool ValidateFrozenQuorumContextInternal(
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
@@ -144,25 +300,28 @@ bool ValidateFrozenQuorumContextInternal(
         return false;
     }
 
+    // Preserve the raw validator's historical per-slot error ordering while
+    // the prevalidated capability is free to split intrinsic and contextual
+    // checks across two explicit construction boundaries.
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
     std::set<std::pair<uint32_t, uint256>> quorum_identities;
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        const auto& roster = rosters[slot];
-        const auto& descriptor = roster.descriptor;
-        // The predecessor-derived mask is the transition evidence. A newest
-        // unselected roster may already be context-bound before its snapshot
-        // is authorized, but no authorized descriptor may cross the boundary.
+        const auto& roster{rosters[slot]};
+        const auto& descriptor{roster.descriptor};
         const int32_t authorization_height{
             descriptor.epoch < ACTIVE_QUORUMS
                 ? descriptor.base_height
                 : descriptor.snapshot_height};
-        if (!IsDescriptorHeaderValid(descriptor, statement.height) ||
-            !quorum_identities.emplace(descriptor.epoch, descriptor.base_hash).second ||
+        if (!IsDescriptorStructureValid(descriptor) ||
+            descriptor.base_height > statement.height ||
+            !quorum_identities.emplace(descriptor.epoch,
+                                       descriptor.base_hash).second ||
             (IsSelected(authorization_mask, slot) &&
              authorization_height > statement.previous_chainlock_height) ||
             (slot != 0 &&
              (descriptor.epoch <= rosters[slot - 1].descriptor.epoch ||
-              descriptor.base_height <= rosters[slot - 1].descriptor.base_height))) {
+              descriptor.base_height <=
+                  rosters[slot - 1].descriptor.base_height))) {
             SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
             return false;
         }
@@ -171,51 +330,8 @@ bool ValidateFrozenQuorumContextInternal(
             SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
             return false;
         }
-
-        std::set<uint256> members;
-        QuorumBitmap expected_valid_members{};
-        for (std::size_t member_index{0}; member_index < QUORUM_SIZE; ++member_index) {
-            const auto& member = roster.members[member_index];
-            if (member.pro_tx_hash.IsNull()) {
-                SetError(error, ChainLockVerificationError::INVALID_ROSTER);
-                return false;
-            }
-            if (!members.insert(member.pro_tx_hash).second) {
-                SetError(error, ChainLockVerificationError::DUPLICATE_MEMBER);
-                return false;
-            }
-
-            if (member.child_root) {
-                const auto& child = *member.child_root;
-                if (!child.IsStructurallyValid() ||
-                    child.pro_tx_hash != member.pro_tx_hash ||
-                    child.epoch != descriptor.epoch) {
-                    SetError(error, ChainLockVerificationError::INVALID_ROSTER);
-                    return false;
-                }
-                const auto [owner, inserted]{tree_owners.emplace(
-                    child.commitment.tree_id,
-                    std::pair{member.pro_tx_hash,
-                              child.commitment.generation})};
-                if (!inserted &&
-                    owner->second != std::pair{member.pro_tx_hash,
-                                               child.commitment.generation}) {
-                    SetError(error, ChainLockVerificationError::DUPLICATE_CHILD_KEY);
-                    return false;
-                }
-                if (member.eligible) SetBit(expected_valid_members, member_index);
-            }
-        }
-        if (expected_valid_members != descriptor.valid_members) {
-            SetError(error, ChainLockVerificationError::INVALID_ROSTER);
-            return false;
-        }
-        if (ComputeQuorumMemberRoot(genesis_hash, roster) != descriptor.member_root) {
-            SetError(error, ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
-            return false;
-        }
-        if (ComputeQuorumChildKeyRoot(genesis_hash, roster) != descriptor.child_key_root) {
-            SetError(error, ChainLockVerificationError::CHILD_KEY_ROOT_MISMATCH);
+        if (!ValidateRosterMembersAndRoots(
+                genesis_hash, roster, tree_owners, error)) {
             return false;
         }
     }
@@ -227,7 +343,8 @@ bool ValidateFrozenQuorumContextInternal(
     if (GetQuorumContextHash(genesis_hash, statement.height,
                              statement.block_hash, descriptors) !=
         statement.quorum_context_hash) {
-        SetError(error, ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
+        SetError(error,
+                 ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
         return false;
     }
     SetError(error, ChainLockVerificationError::NONE);
@@ -236,16 +353,43 @@ bool ValidateFrozenQuorumContextInternal(
 
 } // namespace
 
-PreparedChainLockContext::PreparedChainLockContext(
+VerifiedRosterSet::VerifiedRosterSet(
     uint256 genesis_hash,
+    FrozenQuorumRostersPtr rosters)
+    : m_genesis_hash{std::move(genesis_hash)},
+      m_rosters{std::move(rosters)}
+{
+}
+
+std::shared_ptr<const VerifiedRosterSet>
+VerifiedRosterSet::Create(
+    const uint256& genesis_hash,
+    FrozenQuorumRostersPtr rosters,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (genesis_hash.IsNull() || !rosters) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+    // shared_ptr<const T> is shallowly const if its producer retained a
+    // mutable alias. The capability must own the bytes whose roots it proves.
+    rosters = std::make_shared<const FrozenQuorumRosters>(*rosters);
+    if (!ValidateRosterSetInternal(genesis_hash, *rosters, error)) {
+        return nullptr;
+    }
+    return std::shared_ptr<const VerifiedRosterSet>{
+        new VerifiedRosterSet{genesis_hash, std::move(rosters)}};
+}
+
+PreparedChainLockContext::PreparedChainLockContext(
     ChainLockScheduleConfig schedule,
     ChainLockStatement statement,
-    FrozenQuorumRostersPtr rosters,
+    VerifiedRosterSetPtr roster_set,
     uint8_t authorization_mask)
-    : m_genesis_hash{std::move(genesis_hash)},
-      m_schedule{schedule},
+    : m_schedule{schedule},
       m_statement{std::move(statement)},
-      m_rosters{std::move(rosters)},
+      m_roster_set{std::move(roster_set)},
       m_authorization_mask{authorization_mask}
 {
 }
@@ -276,24 +420,48 @@ PreparedChainLockContext::Create(
         SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
         return nullptr;
     }
-    // shared_ptr<const T> is only shallowly const when the caller retains a
-    // mutable alias. Copy before validation so the capability owns state that
-    // cannot change after its roots and statement binding are checked.
+    // Retain the legacy raw factory's exact validation and error order. The
+    // capability factory is the optimized boundary for already separated
+    // intrinsic/contextual validation.
     rosters = std::make_shared<const FrozenQuorumRosters>(*rosters);
     if (!ValidateFrozenQuorumContext(
             genesis_hash, statement, *rosters, authorization_mask, error)) {
         return nullptr;
     }
+    VerifiedRosterSetPtr roster_set{new VerifiedRosterSet{
+        genesis_hash, std::move(rosters)}};
+    return Create(schedule, std::move(statement), std::move(roster_set),
+                  authorization_mask, error);
+}
+
+std::shared_ptr<const PreparedChainLockContext>
+PreparedChainLockContext::Create(
+    ChainLockScheduleConfig schedule,
+    ChainLockStatement statement,
+    VerifiedRosterSetPtr roster_set,
+    uint8_t authorization_mask,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (!schedule.IsValid() || !roster_set) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!ValidateStatementBindingInternal(
+            roster_set->GenesisHash(), statement, roster_set->Rosters(),
+            authorization_mask, /*selected_quorum_mask=*/0, error)) {
+        return nullptr;
+    }
     return std::shared_ptr<const PreparedChainLockContext>{
         new PreparedChainLockContext{
-            genesis_hash, schedule, std::move(statement), std::move(rosters),
+            schedule, std::move(statement), std::move(roster_set),
             authorization_mask}};
 }
 
 std::optional<std::size_t> PreparedChainLockContext::FindQuorumSlot(
     const ChainLockShareTranscript& transcript) const noexcept
 {
-    return llmq::pq::FindQuorumSlot(transcript, *m_rosters);
+    return llmq::pq::FindQuorumSlot(transcript, Rosters());
 }
 
 ScheduledWOTSCheck::ScheduledWOTSCheck(
@@ -363,6 +531,11 @@ uint256 ComputeQuorumChildKeyRoot(const uint256& genesis_hash,
             return GetChildRootLeafHash(genesis_hash, slot,
                                         *member.child_root);
         });
+}
+
+uint64_t GetQuorumRootTaggedHashCountForTesting() noexcept
+{
+    return g_quorum_root_tagged_hashes.load(std::memory_order_relaxed);
 }
 
 ChainLockShareTranscript BuildChainLockShareTranscript(

@@ -624,14 +624,34 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
 
     const auto rosters{
         std::make_shared<const FrozenQuorumRosters>(fixture->rosters)};
+    ChainLockVerificationError roster_error{
+        ChainLockVerificationError::INVALID_ARGUMENT};
+    const uint64_t root_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, rosters, &roster_error)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          root_hashes_before,
+                      8'184U);
+    const uint64_t prepared_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
     auto prepared_context{PreparedPaymentAuditContext::Create(
-        fixture->genesis_hash, fixture->schedule, fixture->audit.statement,
-        fixture->seal, rosters, AUTHORIZATION_MASK, &verification_error)};
+        fixture->schedule, fixture->audit.statement, fixture->seal,
+        roster_set, AUTHORIZATION_MASK, &verification_error)};
     BOOST_REQUIRE(prepared_context);
-    BOOST_CHECK(prepared_context->RostersPtr() != rosters);
+    BOOST_CHECK(prepared_context->RosterSetPtr() == roster_set);
+    BOOST_CHECK(prepared_context->RostersPtr() == roster_set->RostersPtr());
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      prepared_hashes_before);
+    const uint64_t prepared_share_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
     auto prepared_check{PreparePaymentAuditShareVerification(
         share, *prepared_context, &verification_error)};
     BOOST_REQUIRE(prepared_check);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      prepared_share_hashes_before);
     BOOST_CHECK(prepared_check->GetPublicKey() == check->GetPublicKey());
     BOOST_CHECK_EQUAL(prepared_check->GetLeafIndex(), check->GetLeafIndex());
     BOOST_CHECK(prepared_check->GetMessageBytes() == check->GetMessageBytes());
@@ -914,11 +934,14 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
                 ShareCollectionResult::REJECTED);
     BOOST_CHECK(collection_error == ShareCollectionError::INVALID_CONTEXT);
 
+    const uint64_t shared_context_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
     auto signer_context{PreparedPaymentAuditContext::Create(
-        fixture->genesis_hash, fixture->schedule,
-        fixture->audit.statement, fixture->seal, rosters,
+        fixture->schedule, fixture->audit.statement, fixture->seal,
+        roster_set,
         AUTHORIZATION_MASK, &verification_error)};
     BOOST_REQUIRE(signer_context);
+    BOOST_CHECK(signer_context->RosterSetPtr() == roster_set);
 
     llmq::CPQSignerJournal success_journal{
         m_path_root / "pq_payment_audit_signer_success"};
@@ -928,11 +951,14 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     ChainLockVerificationError seal_context_error{
         ChainLockVerificationError::NONE};
     auto seal_context{PreparedChainLockContext::Create(
-        fixture->genesis_hash, fixture->schedule.chainlock,
-        fixture->seal.statement, rosters, AUTHORIZATION_MASK,
+        fixture->schedule.chainlock, fixture->seal.statement, roster_set,
+        AUTHORIZATION_MASK,
         &seal_context_error)};
     BOOST_REQUIRE(seal_context);
     BOOST_CHECK(seal_context_error == ChainLockVerificationError::NONE);
+    BOOST_CHECK(seal_context->RosterSetPtr() == roster_set);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      shared_context_hashes_before);
     BOOST_REQUIRE(seal_signer.Sign(
         *seal_context, 0, 0, *secret_key, authorization.proof,
         std::nullopt).share);

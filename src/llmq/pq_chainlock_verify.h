@@ -64,9 +64,47 @@ enum class ChainLockVerificationError : uint8_t {
 };
 
 /**
+ * Immutable capability proving one exact roster set passed all intrinsic
+ * descriptor, membership, uniqueness, bitmap, and Merkle-root checks.
+ * Statement height, authorization, and context-hash checks remain per use.
+ */
+class VerifiedRosterSet final {
+public:
+    [[nodiscard]] static std::shared_ptr<const VerifiedRosterSet>
+    Create(const uint256& genesis_hash,
+           FrozenQuorumRostersPtr rosters,
+           ChainLockVerificationError* error = nullptr);
+
+    [[nodiscard]] const uint256& GenesisHash() const noexcept
+    {
+        return m_genesis_hash;
+    }
+    [[nodiscard]] const FrozenQuorumRosters& Rosters() const noexcept
+    {
+        return *m_rosters;
+    }
+    [[nodiscard]] const FrozenQuorumRostersPtr& RostersPtr() const noexcept
+    {
+        return m_rosters;
+    }
+
+private:
+    VerifiedRosterSet(uint256 genesis_hash,
+                      FrozenQuorumRostersPtr rosters);
+
+    uint256 m_genesis_hash;
+    FrozenQuorumRostersPtr m_rosters;
+
+    friend class PreparedChainLockContext;
+};
+
+using VerifiedRosterSetPtr = std::shared_ptr<const VerifiedRosterSet>;
+
+/**
  * Immutable capability proving that one exact statement/roster binding passed
- * full descriptor, membership, root, uniqueness, and authorization checks.
- * Share hot paths consume this token instead of repeating those checks.
+ * statement, authorization, and context-hash checks against an intrinsically
+ * verified roster set. Share hot paths consume this token instead of repeating
+ * either validation layer.
  */
 class PreparedChainLockContext final {
 public:
@@ -78,9 +116,16 @@ public:
            uint8_t authorization_mask,
            ChainLockVerificationError* error = nullptr);
 
+    [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
+    Create(ChainLockScheduleConfig schedule,
+           ChainLockStatement statement,
+           VerifiedRosterSetPtr roster_set,
+           uint8_t authorization_mask,
+           ChainLockVerificationError* error = nullptr);
+
     [[nodiscard]] const uint256& GenesisHash() const noexcept
     {
-        return m_genesis_hash;
+        return m_roster_set->GenesisHash();
     }
     [[nodiscard]] const ChainLockScheduleConfig& Schedule() const noexcept
     {
@@ -92,11 +137,15 @@ public:
     }
     [[nodiscard]] const FrozenQuorumRosters& Rosters() const noexcept
     {
-        return *m_rosters;
+        return m_roster_set->Rosters();
     }
     [[nodiscard]] const FrozenQuorumRostersPtr& RostersPtr() const noexcept
     {
-        return m_rosters;
+        return m_roster_set->RostersPtr();
+    }
+    [[nodiscard]] const VerifiedRosterSetPtr& RosterSetPtr() const noexcept
+    {
+        return m_roster_set;
     }
     [[nodiscard]] uint8_t AuthorizationMask() const noexcept
     {
@@ -107,16 +156,14 @@ public:
 
 private:
     PreparedChainLockContext(
-        uint256 genesis_hash,
         ChainLockScheduleConfig schedule,
         ChainLockStatement statement,
-        FrozenQuorumRostersPtr rosters,
+        VerifiedRosterSetPtr roster_set,
         uint8_t authorization_mask);
 
-    uint256 m_genesis_hash;
     ChainLockScheduleConfig m_schedule;
     ChainLockStatement m_statement;
-    FrozenQuorumRostersPtr m_rosters;
+    VerifiedRosterSetPtr m_roster_set;
     uint8_t m_authorization_mask{0};
 };
 
@@ -194,6 +241,9 @@ PrepareChainLockShareVerification(
                                               const FrozenQuorumRoster& roster);
 [[nodiscard]] uint256 ComputeQuorumChildKeyRoot(const uint256& genesis_hash,
                                                 const FrozenQuorumRoster& roster);
+
+/** Monotonic operation count used by deterministic performance regressions. */
+[[nodiscard]] uint64_t GetQuorumRootTaggedHashCountForTesting() noexcept;
 
 [[nodiscard]] ChainLockShareTranscript BuildChainLockShareTranscript(
     const FinalChainLock& chainlock,

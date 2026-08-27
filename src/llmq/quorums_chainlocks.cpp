@@ -1835,11 +1835,11 @@ std::optional<CChainLocksHandler::CurrentSigningContext>
 CChainLocksHandler::CurrentSigningContexts::Find(
     const pq::ChainLockStatement& statement) const
 {
-    if (!rosters) return std::nullopt;
+    if (!roster_set) return std::nullopt;
     for (std::size_t i{0}; i < count; ++i) {
         if (statements[i] == statement) {
             return CurrentSigningContext{
-                statement, rosters, authorization_mask};
+                statement, roster_set->RostersPtr(), authorization_mask};
         }
     }
     return std::nullopt;
@@ -2461,6 +2461,7 @@ bool CChainLocksHandler::IsPaymentAuditLocalRosterBuildError(
     case pq::QuorumBuildError::SNAPSHOT_LOOKUP_FAILED:
     case pq::QuorumBuildError::SNAPSHOT_MISMATCH:
     case pq::QuorumBuildError::MISSING_BRANCH_ANCESTOR:
+    case pq::QuorumBuildError::INVALID_FROZEN_ROSTER:
         return true;
     default:
         return false;
@@ -2656,7 +2657,7 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
             : PaymentAuditReceiptCertificateStatus::INVALID;
     }
     if (!VerifyPaymentAuditCertificateSignatures(
-            *audit, *rosters, authorization_mask)) {
+            *audit, rosters->Rosters(), authorization_mask)) {
         return PaymentAuditReceiptCertificateStatus::INVALID;
     }
     bool transition_local_error{false};
@@ -6024,7 +6025,8 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
         if (definitively_invalid != nullptr) {
             *definitively_invalid =
                 build_error != pq::QuorumBuildError::MISSING_BRANCH_ANCESTOR &&
-                build_error != pq::QuorumBuildError::SNAPSHOT_LOOKUP_FAILED;
+                build_error != pq::QuorumBuildError::SNAPSHOT_LOOKUP_FAILED &&
+                build_error != pq::QuorumBuildError::INVALID_FROZEN_ROSTER;
         }
         return std::nullopt;
     }
@@ -6119,7 +6121,8 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         if (definitively_invalid != nullptr) {
             *definitively_invalid =
                 build_error != pq::QuorumBuildError::MISSING_BRANCH_ANCESTOR &&
-                build_error != pq::QuorumBuildError::SNAPSHOT_LOOKUP_FAILED;
+                build_error != pq::QuorumBuildError::SNAPSHOT_LOOKUP_FAILED &&
+                build_error != pq::QuorumBuildError::INVALID_FROZEN_ROSTER;
         }
         return std::nullopt;
     }
@@ -6210,6 +6213,7 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
     }
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
+    pq::VerifiedRosterSetPtr roster_set;
     pq::FrozenQuorumRostersPtr rosters;
     CurrentChainLockBTCCSelection btcc;
     pq::BTCCReceiptState receipt_state;
@@ -6268,9 +6272,10 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
         payment_audit_receipt_state = *indexed_payment_audit_state;
         payment_probation_state_hash =
             indexed_target->pqPaymentProbationStateHash;
-        rosters = roster_cache->GetActive(
+        roster_set = roster_cache->GetVerifiedActive(
             indexed_target->nHeight, *indexed_target, &build_error);
-        if (rosters) {
+        if (roster_set) {
+            rosters = roster_set->RostersPtr();
             authorization_mask = DeriveSigningRosterAuthorizationMask(
                 *rosters, *indexed_target, declared_predecessor_height,
                 declared_predecessor_hash);
@@ -6316,7 +6321,7 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
         keep.btcc_advance = pq::BTCCAdvance::KEEP;
         if (!keep.IsStructurallyValid()) return std::nullopt;
     }
-    contexts.rosters = std::move(rosters);
+    contexts.roster_set = std::move(roster_set);
     contexts.authorization_mask = authorization_mask;
     for (std::size_t i{0}; i < contexts.count; ++i) {
         if (!IsCurrentSigningStatement(contexts.statements[i])) return std::nullopt;
@@ -6633,18 +6638,27 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts(
         }
         CurrentSigningContexts contexts;
         contexts.count = m_collector_count;
-        contexts.rosters = m_collector_rosters;
+        contexts.roster_set =
+            m_collectors[0]->GetPreparedContext()->RosterSetPtr();
+        if (!contexts.roster_set ||
+            contexts.roster_set->RostersPtr() != m_collector_rosters) {
+            return std::nullopt;
+        }
         contexts.relay_recipients = m_collector_relay_recipients;
         contexts.authorization_mask = m_collector_authorization_mask;
         for (std::size_t i{0}; i < contexts.count; ++i) {
-            if (!m_collectors[i]) return std::nullopt;
+            if (!m_collectors[i] ||
+                m_collectors[i]->GetPreparedContext()->RosterSetPtr() !=
+                    contexts.roster_set) {
+                return std::nullopt;
+            }
             contexts.statements[i] = m_collectors[i]->GetStatement();
         }
         return contexts;
     };
 
     const auto is_current = [this](const CurrentSigningContexts& contexts) {
-        if (!contexts.rosters || contexts.count == 0 ||
+        if (!contexts.roster_set || contexts.count == 0 ||
             contexts.count > CurrentSigningContexts::MAX_VARIANTS ||
             !pq::IsSigningRosterAuthorizationMask(
                 contexts.authorization_mask)) {
@@ -6690,17 +6704,22 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts(
     if (!is_current(*current)) return std::nullopt;
 
     auto relay_recipients{std::make_shared<const ChainLockRelayRecipients>(
-        BuildChainLockRelayRecipients(*current->rosters))};
+        BuildChainLockRelayRecipients(current->roster_set->Rosters()))};
     current->relay_recipients = relay_recipients;
 
+    pq::ChainLockVerificationError verification_error{
+        pq::ChainLockVerificationError::NONE};
     std::array<std::unique_ptr<pq::ChainLockCollector>,
                CurrentSigningContexts::MAX_VARIANTS> collectors;
     for (std::size_t i{0}; i < current->count; ++i) {
+        auto prepared{pq::PreparedChainLockContext::Create(
+            m_config->chainlock_schedule, current->statements[i],
+            current->roster_set, current->authorization_mask,
+            &verification_error)};
+        if (!prepared) return std::nullopt;
         pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
         collectors[i] = pq::ChainLockCollector::Create(
-            m_genesis_hash, m_config->chainlock_schedule,
-            current->statements[i], current->rosters,
-            current->authorization_mask, &error);
+            std::move(prepared), &error);
         if (!collectors[i]) return std::nullopt;
     }
 
@@ -6713,7 +6732,7 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts(
         }
         m_collectors = std::move(collectors);
         m_collector_count = current->count;
-        m_collector_rosters = current->rosters;
+        m_collector_rosters = current->roster_set->RostersPtr();
         m_collector_relay_recipients = relay_recipients;
         m_collector_authorization_mask = current->authorization_mask;
         published_generation = ++m_collector_generation;
@@ -6775,7 +6794,7 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
         return std::nullopt;
     }
 
-    pq::FrozenQuorumRostersPtr rosters;
+    pq::VerifiedRosterSetPtr roster_set;
     uint8_t authorization_mask{0};
     {
         LOCK(cs_main);
@@ -6795,20 +6814,20 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
             return std::nullopt;
         }
         pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-        rosters = roster_cache->GetActive(
+        roster_set = roster_cache->GetVerifiedActive(
             response_index->nHeight, *response_index, &build_error);
-        if (rosters) {
+        if (roster_set) {
             authorization_mask = DeriveSigningRosterAuthorizationMask(
-                *rosters, *response_index,
+                roster_set->Rosters(), *response_index,
                 response_statement->previous_chainlock_height,
                 response_statement->previous_chainlock_hash);
         }
     }
-    if (!rosters || rosters->back().descriptor.epoch != epoch ||
-        rosters->back().descriptor.valid_members !=
+    if (!roster_set || roster_set->Rosters().back().descriptor.epoch != epoch ||
+        roster_set->Rosters().back().descriptor.valid_members !=
             row->subject_valid_members ||
         pq::GetPaymentAuditDescriptorHash(
-            m_genesis_hash, rosters->back().descriptor) !=
+            m_genesis_hash, roster_set->Rosters().back().descriptor) !=
             row->expected.subject_descriptor_hash ||
         !pq::IsSigningRosterAuthorizationMask(authorization_mask) ||
         (authorization_mask &
@@ -6816,8 +6835,8 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
         return std::nullopt;
     }
     auto response_context{pq::PreparedChainLockContext::Create(
-        m_genesis_hash, m_config->chainlock_schedule,
-        std::move(*response_statement), std::move(rosters),
+        m_config->chainlock_schedule, std::move(*response_statement),
+        std::move(roster_set),
         authorization_mask)};
     if (!response_context) {
         return std::nullopt;
@@ -7640,13 +7659,19 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         }
         pq::ShareCollectionError collection_error{
             pq::ShareCollectionError::NONE};
-        auto collector{pq::PaymentAuditCollector::Create(
-            m_genesis_hash,
+        pq::PaymentAuditVerificationError audit_error{
+            pq::PaymentAuditVerificationError::NONE};
+        auto prepared_context{pq::PreparedPaymentAuditContext::Create(
             pq::PaymentAuditScheduleConfig{m_config->chainlock_schedule,
                                            m_config->btcc_schedule},
-            statement, *seal_chainlock,
-            signing_rosters, authorization_mask, &collection_error)};
+            statement, *seal_chainlock, signing_rosters,
+            authorization_mask,
+            &audit_error)};
+        if (!prepared_context) continue;
+        auto collector{pq::PaymentAuditCollector::Create(
+            std::move(prepared_context), &collection_error)};
         if (!collector) continue;
+        const auto signing_rosters_ptr{signing_rosters->RostersPtr()};
 
         const auto durable_selected{
             m_payment_audit_staging_store->GetSummary(
@@ -7657,11 +7682,12 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         }
         auto relay_recipients{
             std::make_shared<const ChainLockRelayRecipients>(
-                BuildChainLockRelayRecipients(*signing_rosters))};
+                BuildChainLockRelayRecipients(*signing_rosters_ptr))};
 
         LOCK(m_payment_audit_mutex);
         (void)PublishPaymentAuditRuntime(PaymentAuditResponseRuntime{
-            *round, selected, statement, *seal_chainlock, signing_rosters,
+            *round, selected, statement, *seal_chainlock,
+            signing_rosters_ptr,
             relay_recipients, authorization_mask,
             std::move(collector), nullptr, std::nullopt, false, false});
         return true;
@@ -8198,7 +8224,7 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
     }
 }
 
-pq::FrozenQuorumRostersPtr
+pq::VerifiedRosterSetPtr
 CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     const pq::PaymentAuditStatement& statement,
     pq::FrozenQuorumRoster* subject_out,
@@ -8373,9 +8399,9 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     }
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    pq::FrozenQuorumRostersPtr seal_rosters;
+    pq::VerifiedRosterSetPtr seal_rosters;
     try {
-        seal_rosters = roster_cache->GetActive(
+        seal_rosters = roster_cache->GetVerifiedActive(
             seal->nHeight, *seal, &build_error);
     } catch (const std::exception&) {
         if (status != nullptr) {
@@ -8392,15 +8418,15 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     }
     const uint8_t authorization_mask{
         DeriveSigningRosterAuthorizationMask(
-            *seal_rosters, *seal,
+            seal_rosters->Rosters(), *seal,
             statement.seal_statement.previous_chainlock_height,
             statement.seal_statement.previous_chainlock_hash)};
     if (!pq::IsSigningRosterAuthorizationMask(authorization_mask)) {
         return nullptr;
     }
-    pq::FrozenQuorumRostersPtr response_rosters;
+    pq::VerifiedRosterSetPtr response_rosters;
     try {
-        response_rosters = roster_cache->GetActive(
+        response_rosters = roster_cache->GetVerifiedActive(
             response->nHeight, *response, &build_error);
     } catch (const std::exception&) {
         if (status != nullptr) {
@@ -8415,7 +8441,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         }
         return nullptr;
     }
-    const auto& subject{response_rosters->back().descriptor};
+    const auto& subject{response_rosters->Rosters().back().descriptor};
     if (subject.epoch != statement.commitment.subject_epoch ||
         subject.base_hash !=
             statement.commitment.subject_quorum_base_hash ||
@@ -8481,7 +8507,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     }
     if (!rebuilt_subject || !SameFrozenQuorumRoster(
                                 *rebuilt_subject,
-                                response_rosters->back())) {
+                                response_rosters->Rosters().back())) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
         }
@@ -8497,8 +8523,8 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
                     roster.descriptor.snapshot_height);
             }
         };
-        include_snapshots(*seal_rosters);
-        include_snapshots(*response_rosters);
+        include_snapshots(seal_rosters->Rosters());
+        include_snapshots(response_rosters->Rosters());
         const auto provenance_status{ClassifyHistoricalReceiptIndexRange(
             *historical_carrier->pprev, reconstruction_floor)};
         if (provenance_status != PaymentAuditContextStatus::READY) {
@@ -8510,7 +8536,9 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
             return nullptr;
         }
     }
-    if (subject_out != nullptr) *subject_out = response_rosters->back();
+    if (subject_out != nullptr) {
+        *subject_out = response_rosters->Rosters().back();
+    }
     if (authorization_mask_out != nullptr) {
         *authorization_mask_out = authorization_mask;
     }
@@ -8713,7 +8741,7 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
                       pq::PaymentAuditScheduleConfig{
                           m_config->chainlock_schedule,
                           m_config->btcc_schedule},
-                      audit, *rosters,
+                      audit, rosters->Rosters(),
                       authorization_mask,
                       &verification_error)
                 : std::nullopt};
@@ -8777,9 +8805,11 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
                 current_authorization_mask != authorization_mask) {
                 return false;
             }
-            for (std::size_t slot{0}; slot < current_rosters->size(); ++slot) {
-                if (!SameFrozenQuorumRoster((*current_rosters)[slot],
-                                            (*rosters)[slot])) {
+            for (std::size_t slot{0};
+                 slot < current_rosters->Rosters().size(); ++slot) {
+                if (!SameFrozenQuorumRoster(
+                        current_rosters->Rosters()[slot],
+                        rosters->Rosters()[slot])) {
                     return false;
                 }
             }

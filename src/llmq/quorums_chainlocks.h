@@ -672,7 +672,7 @@ private:
 
         std::array<pq::ChainLockStatement, MAX_VARIANTS> statements{};
         std::size_t count{0};
-        pq::FrozenQuorumRostersPtr rosters;
+        pq::VerifiedRosterSetPtr roster_set;
         std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
         uint8_t authorization_mask{0};
 
@@ -817,7 +817,7 @@ private:
         INVALID,
         LOCAL_ERROR,
     };
-    [[nodiscard]] pq::FrozenQuorumRostersPtr
+    [[nodiscard]] pq::VerifiedRosterSetPtr
     BuildPaymentAuditVerificationRosters(
         const pq::PaymentAuditStatement& statement,
         pq::FrozenQuorumRoster* subject = nullptr,

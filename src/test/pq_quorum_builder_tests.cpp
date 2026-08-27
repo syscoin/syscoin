@@ -585,16 +585,21 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
     BOOST_CHECK(cache->Config() == BuildConfig());
 
     QuorumBuildError error{QuorumBuildError::INVALID_ARGUMENT};
+    const auto first_verified{cache->GetVerifiedActive(
+        FIRST_TARGET, canonical.Tip(), &error)};
+    BOOST_REQUIRE(first_verified);
+    BOOST_CHECK(error == QuorumBuildError::NONE);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
     const auto first{cache->GetActive(
         FIRST_TARGET, canonical.Tip(), &error)};
     BOOST_REQUIRE(first);
-    BOOST_CHECK(error == QuorumBuildError::NONE);
+    BOOST_CHECK(first == first_verified->RostersPtr());
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
-    const auto same_set{cache->GetActive(
+    const auto same_verified{cache->GetVerifiedActive(
         SECOND_TARGET, canonical.Tip(), &error)};
-    BOOST_REQUIRE(same_set);
-    BOOST_CHECK(first == same_set);
+    BOOST_REQUIRE(same_verified);
+    BOOST_CHECK(first_verified == same_verified);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
     const auto post_base_fork{cache->GetActive(
@@ -607,6 +612,11 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
         FIRST_TARGET, fork_at_base.Tip(), &error)};
     BOOST_REQUIRE(base_fork);
     BOOST_CHECK(base_fork != first);
+    const auto base_fork_verified{cache->GetVerifiedActive(
+        FIRST_TARGET, fork_at_base.Tip(), &error)};
+    BOOST_REQUIRE(base_fork_verified);
+    BOOST_CHECK(base_fork_verified != first_verified);
+    BOOST_CHECK(base_fork == base_fork_verified->RostersPtr());
     BOOST_CHECK_EQUAL(lookups, 2 * ACTIVE_QUORUMS);
 
     BOOST_CHECK(!cache->GetActive(
@@ -721,12 +731,14 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
         genesis, BuildConfig(), lookup)};
     BOOST_REQUIRE(cache);
 
-    std::array<FrozenQuorumRostersPtr, 2> results;
+    std::array<VerifiedRosterSetPtr, 2> results;
     std::thread first{[&] {
-        results[0] = cache->GetActive(TARGET_HEIGHT, chain.Tip());
+        results[0] = cache->GetVerifiedActive(
+            TARGET_HEIGHT, chain.Tip());
     }};
     std::thread second{[&] {
-        results[1] = cache->GetActive(TARGET_HEIGHT, chain.Tip());
+        results[1] = cache->GetVerifiedActive(
+            TARGET_HEIGHT, chain.Tip());
     }};
     first.join();
     second.join();
@@ -734,6 +746,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
     BOOST_REQUIRE(results[0]);
     BOOST_REQUIRE(results[1]);
     BOOST_CHECK(results[0] == results[1]);
+    BOOST_CHECK(cache->GetActive(TARGET_HEIGHT, chain.Tip()) ==
+                results[0]->RostersPtr());
     BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
                       2 * ACTIVE_QUORUMS);
 }
@@ -865,6 +879,23 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
         genesis, statement, *rosters, 0b0111));
     BOOST_CHECK(!ValidateFrozenQuorumContext(
         genesis, statement, *rosters, 0b1111));
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    const auto roster_set{VerifiedRosterSet::Create(
+        genesis, rosters, &error)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    BOOST_REQUIRE(PreparedChainLockContext::Create(
+        Schedule(), statement, roster_set, 0b0111, &error));
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        Schedule(), statement, roster_set, 0b1111, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_DESCRIPTOR);
+
+    auto wrong_branch{statement};
+    wrong_branch.block_hash = active.At(TARGET_HEIGHT).GetBlockHash();
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        Schedule(), wrong_branch, roster_set, 0b0111, &error));
+    BOOST_CHECK(error ==
+                ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
     BOOST_CHECK(statement.quorum_context_hash != GetQuorumContextHash(
         genesis, TARGET_HEIGHT, active.At(TARGET_HEIGHT).GetBlockHash(),
         descriptors));

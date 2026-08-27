@@ -386,11 +386,30 @@ FrozenQuorumRostersPtr FrozenQuorumRosterCache::GetActive(
     const CBlockIndex& branch_tip,
     QuorumBuildError* error) const
 {
+    const auto roster_set{GetVerifiedActive(
+        target_height, branch_tip, error)};
+    return roster_set ? roster_set->RostersPtr() : nullptr;
+}
+
+VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    QuorumBuildError* error) const
+{
     SetError(error, QuorumBuildError::NONE);
     if (!m_cache_results) {
-        return BuildActiveFrozenQuorumRosters(
+        auto built{BuildActiveFrozenQuorumRosters(
             m_genesis_hash, m_config, target_height, branch_tip,
-            m_snapshot_lookup, error);
+            m_snapshot_lookup, error)};
+        if (!built) return nullptr;
+        ChainLockVerificationError verification_error{
+            ChainLockVerificationError::NONE};
+        auto roster_set{VerifiedRosterSet::Create(
+            m_genesis_hash, std::move(built), &verification_error)};
+        if (!roster_set) {
+            SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
+        }
+        return roster_set;
     }
     if (!IsEligibleChainLockTarget(m_config.schedule, target_height)) {
         SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
@@ -426,9 +445,9 @@ FrozenQuorumRostersPtr FrozenQuorumRosterCache::GetActive(
     {
         LOCK(m_mutex);
         for (auto& entry : m_entries) {
-            if (entry.rosters && entry.key == key) {
+            if (entry.roster_set && entry.key == key) {
                 entry.recently_used = true;
-                return entry.rosters;
+                return entry.roster_set;
             }
         }
     }
@@ -437,22 +456,30 @@ FrozenQuorumRostersPtr FrozenQuorumRosterCache::GetActive(
         m_genesis_hash, m_config, target_height, branch_tip,
         m_snapshot_lookup, error)};
     if (!built) return nullptr;
+    ChainLockVerificationError verification_error{
+        ChainLockVerificationError::NONE};
+    auto verified{VerifiedRosterSet::Create(
+        m_genesis_hash, std::move(built), &verification_error)};
+    if (!verified) {
+        SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
+        return nullptr;
+    }
 
-    FrozenQuorumRostersPtr displaced;
-    FrozenQuorumRostersPtr result;
+    VerifiedRosterSetPtr displaced;
+    VerifiedRosterSetPtr result;
     {
         LOCK(m_mutex);
         for (auto& entry : m_entries) {
-            if (entry.rosters && entry.key == key) {
+            if (entry.roster_set && entry.key == key) {
                 entry.recently_used = true;
-                result = entry.rosters;
+                result = entry.roster_set;
                 break;
             }
         }
         if (!result) {
             std::optional<std::size_t> victim;
             for (std::size_t slot{0}; slot < m_entries.size(); ++slot) {
-                if (!m_entries[slot].rosters) {
+                if (!m_entries[slot].roster_set) {
                     victim = slot;
                     break;
                 }
@@ -467,11 +494,11 @@ FrozenQuorumRostersPtr FrozenQuorumRosterCache::GetActive(
                 m_clock_hand = (m_clock_hand + 1) % m_entries.size();
             }
             auto& entry{m_entries[*victim]};
-            displaced = std::move(entry.rosters);
+            displaced = std::move(entry.roster_set);
             entry.key = key;
-            entry.rosters = std::move(built);
+            entry.roster_set = std::move(verified);
             entry.recently_used = true;
-            result = entry.rosters;
+            result = entry.roster_set;
         }
     }
     return result;
