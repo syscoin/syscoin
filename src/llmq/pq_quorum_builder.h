@@ -83,7 +83,10 @@ using AuthorizationBoundaryLookup =
 
 inline constexpr std::size_t FROZEN_QUORUM_ROSTER_CACHE_CAPACITY{16};
 
-/** Bounded success-only cache for complete branch-pinned active roster sets. */
+/**
+ * Bounded success-only cache for complete branch-pinned active roster sets.
+ * Retained verified sets also seed overlapping roster epochs after rotation.
+ */
 class FrozenQuorumRosterCache final {
 public:
     [[nodiscard]] static std::shared_ptr<const FrozenQuorumRosterCache> Create(

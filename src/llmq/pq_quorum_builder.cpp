@@ -274,12 +274,41 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     return roster;
 }
 
-FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
+namespace {
+
+// An exact base hash commits the branch through its snapshot. Matching both
+// descriptor heights and hashes lets rotations reuse already verified bytes
+// without trusting a roster built for another fork or cutoff.
+const FrozenQuorumRoster* FindReusableRoster(
+    const uint256& genesis_hash,
+    const EpochIdentity& identity,
+    const CBlockIndex& base_index,
+    const CBlockIndex& snapshot_index,
+    std::span<const VerifiedRosterSetPtr> reusable_sets)
+{
+    for (const auto& roster_set : reusable_sets) {
+        if (!roster_set || roster_set->GenesisHash() != genesis_hash) continue;
+        for (const auto& roster : roster_set->Rosters()) {
+            const auto& descriptor{roster.descriptor};
+            if (descriptor.epoch == identity.epoch &&
+                descriptor.base_height == identity.base_height &&
+                descriptor.base_hash == base_index.GetBlockHash() &&
+                descriptor.snapshot_height == snapshot_index.nHeight &&
+                descriptor.snapshot_hash == snapshot_index.GetBlockHash()) {
+                return &roster;
+            }
+        }
+    }
+    return nullptr;
+}
+
+FrozenQuorumRostersPtr BuildActiveFrozenQuorumRostersImpl(
     const uint256& genesis_hash,
     const QuorumBuildConfig& config,
     int32_t target_height,
     const CBlockIndex& branch_tip,
     const QuorumSnapshotLookup& snapshot_lookup,
+    std::span<const VerifiedRosterSetPtr> reusable_sets,
     QuorumBuildError* error)
 {
     SetError(error, QuorumBuildError::NONE);
@@ -324,6 +353,17 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
             SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
             return nullptr;
         }
+        const FrozenQuorumRoster* reusable{FindReusableRoster(
+            genesis_hash, identity, *base_index, *snapshot_index,
+            reusable_sets)};
+        if (reusable != nullptr) {
+            if (!AddActiveChildRootsToSet(*reusable, tree_owners)) {
+                SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
+                return nullptr;
+            }
+            (*rosters)[slot] = *reusable;
+            continue;
+        }
         auto snapshot_state{snapshot_lookup(*snapshot_index)};
         if (!snapshot_state) {
             SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
@@ -351,6 +391,21 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
         (*rosters)[slot] = std::move(*roster);
     }
     return rosters;
+}
+
+} // namespace
+
+FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
+    const uint256& genesis_hash,
+    const QuorumBuildConfig& config,
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    const QuorumSnapshotLookup& snapshot_lookup,
+    QuorumBuildError* error)
+{
+    return BuildActiveFrozenQuorumRostersImpl(
+        genesis_hash, config, target_height, branch_tip, snapshot_lookup,
+        /*reusable_sets=*/{}, error);
 }
 
 FrozenQuorumRosterCache::FrozenQuorumRosterCache(
@@ -442,6 +497,8 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
     // forks exactly while allowing descendants after the base to share state.
     const Key key{newest.epoch, newest_base->GetBlockHash()};
 
+    std::array<VerifiedRosterSetPtr,
+               FROZEN_QUORUM_ROSTER_CACHE_CAPACITY> reusable_sets;
     {
         LOCK(m_mutex);
         for (auto& entry : m_entries) {
@@ -450,11 +507,14 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
                 return entry.roster_set;
             }
         }
+        for (std::size_t slot{0}; slot < m_entries.size(); ++slot) {
+            reusable_sets[slot] = m_entries[slot].roster_set;
+        }
     }
 
-    auto built{BuildActiveFrozenQuorumRosters(
+    auto built{BuildActiveFrozenQuorumRostersImpl(
         m_genesis_hash, m_config, target_height, branch_tip,
-        m_snapshot_lookup, error)};
+        m_snapshot_lookup, reusable_sets, error)};
     if (!built) return nullptr;
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
