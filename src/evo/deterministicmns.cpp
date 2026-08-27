@@ -1748,9 +1748,26 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                 oldList, newList, consensusParams.hashGenesisBlock);
             const auto net_removed_pro_tx_hashes{
                 newList.BuildTrackedNetRemovedProTxHashes(oldList)};
-            if (!pq_registry->PrepareBlock(
+            bool prepared{false};
+            try {
+                prepared = pq_registry->PrepareBlock(
                     block, nHeight, callbacks, net_removed_pro_tx_hashes,
-                    pq_registry_prepared, pq_registry_error)) {
+                    pq_registry_prepared, pq_registry_error);
+            } catch (const std::exception& exception) {
+                // SYSCOIN: Preparation reconstructs local registry state and
+                // may allocate cache-ready views. Local resource or database
+                // failures are not evidence that the block is invalid.
+                LogPrintf("%s -- PQ registry preparation exception height=%d block=%s: %s\n",
+                          __func__, nHeight,
+                          pindex->GetBlockHash().ToString(), exception.what());
+                return _state.Error("failed-pq-registry-prepare");
+            } catch (...) {
+                LogPrintf("%s -- PQ registry preparation exception height=%d block=%s\n",
+                          __func__, nHeight,
+                          pindex->GetBlockHash().ToString());
+                return _state.Error("failed-pq-registry-prepare");
+            }
+            if (!prepared) {
                 LogPrintf("%s -- PQ registry rejected height=%d tx=%u protx=%s result=%s state_result=%u\n",
                           __func__, nHeight,
                           static_cast<unsigned>(pq_registry_error.transaction_index),
