@@ -1586,6 +1586,9 @@ bool PQRegistryManager::PrepareBlockInternal(
         OperatorKeyScheduleState::FromView(*schedule_view)};
     const auto& parent_operator_states{
         *parent_view->state->operator_states};
+    const bool schedule_changed{
+        !parent_view->state->schedule ||
+        *parent_view->state->schedule != next_schedule};
     const bool removes_registry_operator{std::any_of(
         net_removed_pro_tx_hashes.begin(),
         net_removed_pro_tx_hashes.end(), [&](const uint256& pro_tx_hash) {
@@ -1595,8 +1598,7 @@ bool PQRegistryManager::PrepareBlockInternal(
                    position->pro_tx_hash == pro_tx_hash;
         })};
     const bool unchanged_state{
-        parent_view->state->schedule &&
-        *parent_view->state->schedule == next_schedule && updates.empty() &&
+        !schedule_changed && updates.empty() &&
         !removes_registry_operator};
     if (unchanged_state) {
         auto result{std::make_shared<PQRegistrySnapshotView>()};
@@ -1621,13 +1623,16 @@ bool PQRegistryManager::PrepareBlockInternal(
         parent_operator_states};
     std::vector<uint256> block_tree_ids;
     block_tree_ids.reserve(updates.size());
-    for (auto& state : next_operator_states) {
-        const auto result{state.Advance(*schedule_view)};
-        if (result != OperatorKeyStateResult::OK) {
-            return SetError(
-                error, PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
-                std::numeric_limits<std::size_t>::max(), state.pro_tx_hash,
-                result);
+    if (schedule_changed) {
+        for (auto& state : next_operator_states) {
+            const auto result{state.Advance(*schedule_view)};
+            if (result != OperatorKeyStateResult::OK) {
+                return SetError(
+                    error,
+                    PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
+                    std::numeric_limits<std::size_t>::max(),
+                    state.pro_tx_hash, result);
+            }
         }
     }
 
