@@ -93,6 +93,8 @@ public:
         ShareCollectionError* error = nullptr);
     [[nodiscard]] std::array<std::size_t, ACTIVE_QUORUMS>
     ShareCounts() const;
+    [[nodiscard]] bool HasAcceptedShare(
+        const PaymentAuditShareTranscript& transcript) const noexcept;
     [[nodiscard]] bool IsComplete() const;
     [[nodiscard]] std::optional<FinalPaymentAudit> Finalize() const;
 

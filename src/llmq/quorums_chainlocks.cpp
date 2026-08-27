@@ -1831,7 +1831,7 @@ void CChainLocksHandler::Stop()
         }
         {
             LOCK(m_payment_audit_mutex);
-            m_payment_audit_runtime.reset();
+            ResetPaymentAuditRuntime();
         }
         m_signer_journal.reset();
         {
@@ -7273,6 +7273,20 @@ void CChainLocksHandler::MaybeRelayPaymentAuditHave()
     }
 }
 
+void CChainLocksHandler::ResetPaymentAuditRuntime()
+{
+    m_payment_audit_runtime.reset();
+    ++m_payment_audit_runtime_generation;
+}
+
+uint64_t CChainLocksHandler::PublishPaymentAuditRuntime(
+    PaymentAuditResponseRuntime runtime)
+{
+    ++m_payment_audit_runtime_generation;
+    m_payment_audit_runtime.emplace(std::move(runtime));
+    return m_payment_audit_runtime_generation;
+}
+
 bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
 {
     if (!RefreshPaymentAuditStaging() || !m_store ||
@@ -7547,7 +7561,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         }
 
         LOCK(m_payment_audit_mutex);
-        m_payment_audit_runtime.emplace(PaymentAuditResponseRuntime{
+        (void)PublishPaymentAuditRuntime(PaymentAuditResponseRuntime{
             *round, selected, statement, *seal_chainlock, signing_rosters,
             authorization_mask,
             std::move(collector), nullptr, std::nullopt, false, false});
@@ -7555,7 +7569,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
     }
 
     LOCK(m_payment_audit_mutex);
-    m_payment_audit_runtime.reset();
+    ResetPaymentAuditRuntime();
     return false;
 }
 
@@ -7651,6 +7665,142 @@ void CChainLocksHandler::RelayPaymentAuditShare(
     });
 }
 
+CChainLocksHandler::PaymentAuditShareCollectionOutcome
+CChainLocksHandler::CollectPaymentAuditShare(
+    const pq::PaymentAuditShare& share,
+    const pq::PaymentAuditStatement& statement,
+    uint64_t admission_generation,
+    uint64_t expected_runtime_generation)
+{
+    PaymentAuditShareCollectionOutcome outcome;
+    std::optional<
+        pq::PaymentAuditCollector::ShareVerificationReservation> reservation;
+    {
+        LOCK(m_payment_audit_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            m_payment_audit_runtime_generation !=
+                expected_runtime_generation ||
+            !m_payment_audit_runtime ||
+            !m_payment_audit_runtime->collector ||
+            !m_payment_audit_runtime->statement ||
+            *m_payment_audit_runtime->statement != statement) {
+            if (m_payment_audit_runtime_generation ==
+                expected_runtime_generation) {
+                ResetPaymentAuditRuntime();
+            }
+            outcome.stale = true;
+            return outcome;
+        }
+        outcome.runtime_generation = m_payment_audit_runtime_generation;
+        if (m_payment_audit_runtime->finalized_certificate) {
+            outcome.closed = true;
+            return outcome;
+        }
+        auto pending{
+            m_payment_audit_runtime->collector->ReserveShareVerification(
+                share, &outcome.error)};
+        if (pending) {
+            reservation.emplace(std::move(*pending));
+        } else {
+            outcome.result = outcome.error ==
+                    pq::ShareCollectionError::DUPLICATE
+                ? pq::ShareCollectionResult::DUPLICATE
+                : pq::ShareCollectionResult::REJECTED;
+            outcome.accepted_duplicate =
+                outcome.result == pq::ShareCollectionResult::DUPLICATE &&
+                m_payment_audit_runtime->collector->HasAcceptedShare(
+                    share.transcript);
+        }
+    }
+
+    const auto retire_if_exact = [&]() {
+        LOCK(m_payment_audit_mutex);
+        if (m_payment_audit_runtime_generation ==
+            expected_runtime_generation) {
+            ResetPaymentAuditRuntime();
+        }
+    };
+    const auto is_current = [&]() {
+        return IsShareAdmissionGenerationCurrent(admission_generation) &&
+               IsCurrentPaymentAuditStatement(statement);
+    };
+
+    if (!reservation) {
+        if (outcome.result == pq::ShareCollectionResult::DUPLICATE) {
+            return outcome;
+        }
+        if (!is_current()) {
+            retire_if_exact();
+            outcome.stale = true;
+        }
+        return outcome;
+    }
+
+    if (!is_current()) {
+        retire_if_exact();
+        outcome.stale = true;
+        return outcome;
+    }
+
+    try {
+        pq::PaymentAuditCollector::VerifyReservedShare(*reservation);
+    } catch (const std::exception&) {
+        // Completion below releases the exact pending slot as a local error.
+    }
+
+    if (!is_current()) {
+        retire_if_exact();
+        outcome.stale = true;
+        return outcome;
+    }
+
+    {
+        LOCK(m_payment_audit_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            m_payment_audit_runtime_generation !=
+                expected_runtime_generation ||
+            !m_payment_audit_runtime ||
+            !m_payment_audit_runtime->collector ||
+            !m_payment_audit_runtime->statement ||
+            *m_payment_audit_runtime->statement != statement) {
+            if (m_payment_audit_runtime_generation ==
+                expected_runtime_generation) {
+                ResetPaymentAuditRuntime();
+            }
+            outcome.stale = true;
+            return outcome;
+        }
+        outcome.closed = static_cast<bool>(
+            m_payment_audit_runtime->finalized_certificate);
+        outcome.result =
+            m_payment_audit_runtime->collector->CompleteShareVerification(
+                std::move(*reservation), &outcome.error);
+        if (!outcome.closed &&
+            outcome.result == pq::ShareCollectionResult::ACCEPTED) {
+            auto aggregate{
+                m_payment_audit_runtime->collector->Finalize()};
+            if (aggregate) {
+                outcome.finalized =
+                    std::make_shared<const pq::FinalPaymentAudit>(
+                        std::move(*aggregate));
+                m_payment_audit_runtime->finalized_certificate =
+                    outcome.finalized;
+                m_payment_audit_runtime->finalization_last_attempt =
+                    GetTime<std::chrono::microseconds>();
+                m_payment_audit_runtime->finalization_attempt_in_flight =
+                    true;
+            }
+        }
+    }
+
+    if (!is_current()) {
+        retire_if_exact();
+        outcome.finalized.reset();
+        outcome.stale = true;
+    }
+    return outcome;
+}
+
 void CChainLocksHandler::ProcessPaymentAuditShare(
     CNode* from, CDataStream& payload)
 {
@@ -7688,11 +7838,7 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         return;
     }
     pq::FrozenQuorumRostersPtr rosters;
-    std::shared_ptr<const pq::FinalPaymentAudit> finalized;
-    pq::ShareCollectionError collection_error{
-        pq::ShareCollectionError::NONE};
-    pq::ShareCollectionResult result{
-        pq::ShareCollectionResult::REJECTED};
+    uint64_t runtime_generation{0};
     {
         // Runtime construction belongs to the scheduler. This lock admits a
         // share only to an already-authenticated, generation-bound collector.
@@ -7711,60 +7857,57 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
             return;
         }
         if (m_payment_audit_runtime->finalized_certificate) return;
-        result = m_payment_audit_runtime->collector
-                     ->AddVerifiedShare(share, &collection_error);
-        if (result == pq::ShareCollectionResult::ACCEPTED) {
-            auto aggregate{
-                m_payment_audit_runtime->collector->Finalize()};
-            if (aggregate) {
-                finalized =
-                    std::make_shared<const pq::FinalPaymentAudit>(
-                        std::move(*aggregate));
-                m_payment_audit_runtime->finalized_certificate = finalized;
-                m_payment_audit_runtime->finalization_last_attempt =
-                    GetTime<std::chrono::microseconds>();
-                m_payment_audit_runtime->finalization_attempt_in_flight = true;
-            }
-        }
+        runtime_generation = m_payment_audit_runtime_generation;
     }
+
+    auto collection{CollectPaymentAuditShare(
+        share, share.transcript.statement, admission_generation,
+        runtime_generation)};
+    if (collection.stale || collection.closed) return;
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
-        if (finalized) {
+        if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
-                finalized, /*submit=*/false);
+                collection.finalized, collection.runtime_generation,
+                /*submit=*/false);
         }
         return;
     }
-    if (result != pq::ShareCollectionResult::ACCEPTED) {
-        if (collection_error ==
+    if (collection.result != pq::ShareCollectionResult::ACCEPTED) {
+        if (collection.error ==
             pq::ShareCollectionError::INVALID_SIGNATURE) {
             punish("bad-pq-payment-audit-share-signature");
         }
         return;
     }
     if (!IsCurrentPaymentAuditStatement(share.transcript.statement)) {
-        if (finalized) {
+        if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
-                finalized, /*submit=*/false);
+                collection.finalized, collection.runtime_generation,
+                /*submit=*/false);
         }
         return;
     }
     RelayPaymentAuditShare(
         share, rosters, admission_generation, node_id);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
-        if (finalized) {
+        if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
-                finalized, /*submit=*/false);
+                collection.finalized, collection.runtime_generation,
+                /*submit=*/false);
         }
         return;
     }
-    if (finalized) {
+    if (collection.finalized) {
         LOCK(m_share_lifecycle_mutex);
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
             FinishPaymentAuditFinalizationAttempt(
-                finalized, /*submit=*/false);
+                collection.finalized, collection.runtime_generation,
+                /*submit=*/false);
             return;
         }
-        FinishPaymentAuditFinalizationAttempt(finalized, /*submit=*/true);
+        FinishPaymentAuditFinalizationAttempt(
+            collection.finalized, collection.runtime_generation,
+            /*submit=*/true);
     }
 }
 
@@ -8625,6 +8768,7 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
 
 void CChainLocksHandler::FinishPaymentAuditFinalizationAttempt(
     const std::shared_ptr<const pq::FinalPaymentAudit>& certificate,
+    uint64_t runtime_generation,
     bool submit)
 {
     if (submit) {
@@ -8633,7 +8777,8 @@ void CChainLocksHandler::FinishPaymentAuditFinalizationAttempt(
         ProcessPaymentAuditCertificate(nullptr, encoded);
     }
     LOCK(m_payment_audit_mutex);
-    if (m_payment_audit_runtime &&
+    if (m_payment_audit_runtime_generation == runtime_generation &&
+        m_payment_audit_runtime &&
         m_payment_audit_runtime->finalized_certificate == certificate) {
         m_payment_audit_runtime->finalization_attempt_in_flight = false;
     }
@@ -10130,6 +10275,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
     pq::QuorumBitmap reporter_observed_members{};
     pq::FrozenQuorumRostersPtr rosters;
     std::shared_ptr<const pq::FinalPaymentAudit> certificate_to_process;
+    uint64_t runtime_generation{0};
     uint8_t authorization_mask{0};
     const auto now{GetTime<std::chrono::microseconds>()};
     {
@@ -10141,6 +10287,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             !m_payment_audit_runtime->signing_rosters) {
             return;
         }
+        runtime_generation = m_payment_audit_runtime_generation;
         if (m_payment_audit_runtime->finalized_certificate) {
             if (m_payment_audit_runtime
                     ->finalization_attempt_in_flight ||
@@ -10169,17 +10316,20 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         LOCK(m_share_lifecycle_mutex);
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
             FinishPaymentAuditFinalizationAttempt(
-                certificate_to_process, /*submit=*/false);
+                certificate_to_process, runtime_generation,
+                /*submit=*/false);
             return;
         }
         if (!IsCurrentPaymentAuditStatement(
                 certificate_to_process->statement)) {
             FinishPaymentAuditFinalizationAttempt(
-                certificate_to_process, /*submit=*/false);
+                certificate_to_process, runtime_generation,
+                /*submit=*/false);
             return;
         }
         FinishPaymentAuditFinalizationAttempt(
-            certificate_to_process, /*submit=*/true);
+            certificate_to_process, runtime_generation,
+            /*submit=*/true);
         return;
     }
     if (!statement || !seal_chainlock || !rosters ||
@@ -10202,7 +10352,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
     }
     if (!local_member) {
         LOCK(m_payment_audit_mutex);
-        if (m_payment_audit_runtime &&
+        if (m_payment_audit_runtime_generation == runtime_generation &&
+            m_payment_audit_runtime &&
             m_payment_audit_runtime->statement == statement) {
             m_payment_audit_runtime->local_signing_complete = true;
         }
@@ -10219,7 +10370,16 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         *expected_branch_lock != seal_lock) {
         return;
     }
+    const auto has_exact_open_runtime = [&]() {
+        LOCK(m_payment_audit_mutex);
+        return m_payment_audit_runtime_generation == runtime_generation &&
+               m_payment_audit_runtime &&
+               m_payment_audit_runtime->collector &&
+               m_payment_audit_runtime->statement == statement &&
+               !m_payment_audit_runtime->finalized_certificate;
+    };
     if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+        !has_exact_open_runtime() ||
         !ConsumeStartupPaymentAuditSlots(
             *statement, *rosters, authorization_mask, local_pro_tx_hash)) {
         return;
@@ -10231,6 +10391,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                                        m_config->btcc_schedule},
         *m_signer_journal};
     bool signing_material_missing{false};
+    bool collection_incomplete{false};
     for (std::size_t slot{0}; slot < rosters->size(); ++slot) {
         if ((authorization_mask & (uint8_t{1} << slot)) == 0) continue;
         const auto& roster{(*rosters)[slot]};
@@ -10260,7 +10421,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
-            if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+            if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+                !has_exact_open_runtime()) {
                 return;
             }
             auto signed_share{signer.Sign(
@@ -10287,68 +10449,51 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             }
             if (!IsCurrentPaymentAuditStatement(*statement)) return;
 
-            std::shared_ptr<const pq::FinalPaymentAudit> finalized;
-            {
-                LOCK(m_payment_audit_mutex);
-                if (!IsShareAdmissionGenerationCurrent(
-                        admission_generation)) {
-                    return;
-                }
-                if (!m_payment_audit_runtime ||
-                    !m_payment_audit_runtime->collector ||
-                    !m_payment_audit_runtime->statement ||
-                    *m_payment_audit_runtime->statement != *statement) {
-                    return;
-                }
-                if (m_payment_audit_runtime->finalized_certificate) return;
-                pq::ShareCollectionError collection_error{
-                    pq::ShareCollectionError::NONE};
-                if (m_payment_audit_runtime->collector->AddVerifiedShare(
-                        *signed_share.share, &collection_error) !=
-                    pq::ShareCollectionResult::ACCEPTED) {
-                    continue;
-                }
-                auto aggregate{
-                    m_payment_audit_runtime->collector->Finalize()};
-                if (aggregate) {
-                    finalized =
-                        std::make_shared<const pq::FinalPaymentAudit>(
-                            std::move(*aggregate));
-                    m_payment_audit_runtime->finalized_certificate =
-                        finalized;
-                    m_payment_audit_runtime->finalization_last_attempt =
-                        GetTime<std::chrono::microseconds>();
-                    m_payment_audit_runtime
-                        ->finalization_attempt_in_flight = true;
-                }
+            auto collection{CollectPaymentAuditShare(
+                *signed_share.share, *statement, admission_generation,
+                runtime_generation)};
+            if (collection.stale || collection.closed) return;
+            if (collection.result !=
+                pq::ShareCollectionResult::ACCEPTED) {
+                collection_incomplete =
+                    collection_incomplete ||
+                    !collection.accepted_duplicate;
+                continue;
             }
             RelayPaymentAuditShare(
                 *signed_share.share, rosters, admission_generation);
             if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
-                if (finalized) {
+                if (collection.finalized) {
                     FinishPaymentAuditFinalizationAttempt(
-                        finalized, /*submit=*/false);
+                        collection.finalized,
+                        collection.runtime_generation,
+                        /*submit=*/false);
                 }
                 return;
             }
-            if (finalized) {
+            if (collection.finalized) {
                 LOCK(m_share_lifecycle_mutex);
                 if (!IsShareAdmissionGenerationCurrent(
                         admission_generation)) {
                     FinishPaymentAuditFinalizationAttempt(
-                        finalized, /*submit=*/false);
+                        collection.finalized,
+                        collection.runtime_generation,
+                        /*submit=*/false);
                     return;
                 }
                 FinishPaymentAuditFinalizationAttempt(
-                    finalized, /*submit=*/true);
+                    collection.finalized,
+                    collection.runtime_generation,
+                    /*submit=*/true);
                 return;
             }
         }
     }
 
-    if (!signing_material_missing) {
+    if (!signing_material_missing && !collection_incomplete) {
         LOCK(m_payment_audit_mutex);
-        if (m_payment_audit_runtime &&
+        if (m_payment_audit_runtime_generation == runtime_generation &&
+            m_payment_audit_runtime &&
             m_payment_audit_runtime->statement == statement) {
             m_payment_audit_runtime->local_signing_complete = true;
         }

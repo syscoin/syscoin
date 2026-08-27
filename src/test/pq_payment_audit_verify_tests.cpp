@@ -443,6 +443,7 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
         staged_collector->ReserveShareVerification(share, &staged_error)};
     BOOST_REQUIRE(pending_reservation);
     BOOST_CHECK(staged_error == ShareCollectionError::NONE);
+    BOOST_CHECK(!staged_collector->HasAcceptedShare(share.transcript));
     BOOST_CHECK(!staged_collector->ReserveShareVerification(
         bad_proof, &staged_error));
     BOOST_CHECK(staged_error == ShareCollectionError::DUPLICATE);
@@ -452,6 +453,7 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
                 ShareCollectionResult::ACCEPTED);
     BOOST_CHECK(staged_error == ShareCollectionError::NONE);
     BOOST_CHECK_EQUAL(staged_collector->ShareCounts()[0], 1U);
+    BOOST_CHECK(staged_collector->HasAcceptedShare(share.transcript));
     auto competing_report{share};
     competing_report.transcript.reporter_observed_members[0] ^= 1;
     BOOST_CHECK(!staged_collector->ReserveShareVerification(

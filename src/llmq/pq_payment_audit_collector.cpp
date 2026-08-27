@@ -288,6 +288,14 @@ PaymentAuditCollector::ShareCounts() const
     return counts;
 }
 
+bool PaymentAuditCollector::HasAcceptedShare(
+    const PaymentAuditShareTranscript& transcript) const noexcept
+{
+    const auto slot{m_context->FindQuorumSlot(transcript)};
+    return slot && transcript.member_index < QUORUM_SIZE &&
+           m_shares[*slot].contains(transcript.member_index);
+}
+
 bool PaymentAuditCollector::IsComplete() const
 {
     std::size_t ready{0};

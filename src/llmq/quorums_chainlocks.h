@@ -685,6 +685,7 @@ private:
                                  !m_pending_payment_audit_receipt_mutex);
     void FinishPaymentAuditFinalizationAttempt(
         const std::shared_ptr<const pq::FinalPaymentAudit>& certificate,
+        uint64_t runtime_generation,
         bool submit)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_payment_audit_mutex,
@@ -726,6 +727,25 @@ private:
     void ProcessPaymentAuditResponse(CNode* from, CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_lookup_mutex,
+                                 !m_payment_audit_mutex,
+                                 !m_btcc_preseal_mutex);
+    struct PaymentAuditShareCollectionOutcome {
+        pq::ShareCollectionResult result{
+            pq::ShareCollectionResult::REJECTED};
+        pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
+        std::shared_ptr<const pq::FinalPaymentAudit> finalized;
+        uint64_t runtime_generation{0};
+        bool stale{false};
+        bool closed{false};
+        bool accepted_duplicate{false};
+    };
+    [[nodiscard]] PaymentAuditShareCollectionOutcome
+    CollectPaymentAuditShare(
+        const pq::PaymentAuditShare& share,
+        const pq::PaymentAuditStatement& statement,
+        uint64_t admission_generation,
+        uint64_t expected_runtime_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_payment_audit_mutex,
                                  !m_btcc_preseal_mutex);
     void ProcessPaymentAuditShare(CNode* from, CDataStream& payload)
@@ -804,6 +824,11 @@ private:
         bool finalization_attempt_in_flight{false};
         bool local_signing_complete{false};
     };
+    void ResetPaymentAuditRuntime()
+        EXCLUSIVE_LOCKS_REQUIRED(m_payment_audit_mutex);
+    [[nodiscard]] uint64_t PublishPaymentAuditRuntime(
+        PaymentAuditResponseRuntime runtime)
+        EXCLUSIVE_LOCKS_REQUIRED(m_payment_audit_mutex);
     [[nodiscard]] std::optional<PaymentAuditResponseDefinition>
     BuildPaymentAuditResponseDefinition(uint32_t epoch,
                                         uint8_t row_index) const
@@ -1042,6 +1067,8 @@ private:
     mutable Mutex m_payment_audit_mutex;
     std::optional<PaymentAuditResponseRuntime> m_payment_audit_runtime
         GUARDED_BY(m_payment_audit_mutex);
+    uint64_t m_payment_audit_runtime_generation
+        GUARDED_BY(m_payment_audit_mutex){0};
     std::shared_ptr<const PaymentAuditNetworkContext>
         m_payment_audit_network_context GUARDED_BY(m_payment_audit_mutex);
     uint64_t m_payment_audit_network_generation
