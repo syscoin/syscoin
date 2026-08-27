@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <exception>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -1513,7 +1514,7 @@ bool PQRegistryManager::PrepareBlockInternal(
 
     std::vector<DecodedUpdate> updates;
     updates.reserve(block.vtx.size());
-    std::vector<uint256> updated_operators;
+    std::unordered_set<uint256, StaticSaltedHasher> updated_operators;
     updated_operators.reserve(block.vtx.size());
     for (std::size_t index{0}; index < block.vtx.size(); ++index) {
         if (!block.vtx[index]) {
@@ -1526,13 +1527,11 @@ bool PQRegistryManager::PrepareBlockInternal(
         }
         if (!decoded) continue;
         auto& update{*decoded};
-        if (std::find(updated_operators.begin(), updated_operators.end(),
-                      update.pro_tx_hash) != updated_operators.end()) {
+        if (!updated_operators.emplace(update.pro_tx_hash).second) {
             return SetError(error,
                             PQRegistryResult::DUPLICATE_OPERATOR_UPDATE,
                             index, update.pro_tx_hash);
         }
-        updated_operators.push_back(update.pro_tx_hash);
         updates.push_back(std::move(update));
     }
 
@@ -1611,6 +1610,14 @@ bool PQRegistryManager::PrepareBlockInternal(
         }
     }
 
+    std::vector<OperatorKeyState> replacements;
+    replacements.reserve(updates.size());
+    // Ownership and tree reuse are sequential consensus checks: later
+    // transactions see successful earlier updates, while removals remain a
+    // final-state operation and cannot release either namespace mid-block.
+    std::map<GlobalPublicKey, std::optional<uint256>> key_owner_overlay;
+    std::unordered_set<uint256, StaticSaltedHasher> new_tree_id_set;
+    new_tree_id_set.reserve(updates.size());
     for (const auto& update : updates) {
         bool exists_before{false};
         if (!CallMembership(callbacks.dmn_exists_before, update.pro_tx_hash,
@@ -1633,54 +1640,103 @@ bool PQRegistryManager::PrepareBlockInternal(
                             update.transaction_index, update.pro_tx_hash);
         }
 
-        auto state{FindOperatorPosition(next.operator_states,
-                                        update.pro_tx_hash)};
-        if (state == next.operator_states.end() ||
-            state->pro_tx_hash != update.pro_tx_hash) {
-            OperatorKeyState fresh{
-                OperatorKeyState::ForOperator(update.pro_tx_hash)};
-            const auto result{fresh.Advance(*schedule_view)};
+        const auto inherited{FindOperatorPosition(next.operator_states,
+                                                  update.pro_tx_hash)};
+        OperatorKeyState candidate{
+            inherited != next.operator_states.end() &&
+                    inherited->pro_tx_hash == update.pro_tx_hash
+                ? *inherited
+                : OperatorKeyState::ForOperator(update.pro_tx_hash)};
+        if (inherited == next.operator_states.end() ||
+            inherited->pro_tx_hash != update.pro_tx_hash) {
+            const auto result{candidate.Advance(*schedule_view)};
             if (result != OperatorKeyStateResult::OK) {
                 return SetError(
                     error,
                     PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
                     update.transaction_index, update.pro_tx_hash, result);
             }
-            state = next.operator_states.insert(state, std::move(fresh));
         }
 
+        std::optional<GlobalPublicKey> previous_global_key;
+        if (candidate.has_global_key != 0) {
+            previous_global_key = candidate.global_key.public_key;
+        }
         std::optional<uint256> introduced_tree_id;
         const auto find_global_key_owner{
             [&](const GlobalPublicKey& public_key)
                 -> std::optional<uint256> {
-                const auto owner{std::find_if(
-                    next.operator_states.begin(),
-                    next.operator_states.end(),
-                    [&](const OperatorKeyState& existing) {
-                        return existing.pro_tx_hash != update.pro_tx_hash &&
-                               existing.has_global_key != 0 &&
-                               existing.global_key.public_key == public_key;
-                    })};
-                return owner == next.operator_states.end()
+                const auto changed{key_owner_overlay.find(public_key)};
+                if (changed != key_owner_overlay.end()) {
+                    return changed->second;
+                }
+                if (!parent_view || !parent_view->state ||
+                    !parent_view->state->indexes) {
+                    return std::nullopt;
+                }
+                const auto owner{
+                    parent_view->state->indexes->global_key_owner.find(
+                        public_key)};
+                return owner ==
+                        parent_view->state->indexes->global_key_owner.end()
                     ? std::nullopt
-                    : std::optional<uint256>{owner->pro_tx_hash};
+                    : std::optional<uint256>{owner->second};
             }};
         if (!ApplyDecodedUpdate(
-                *state, update, *schedule_view, m_genesis_hash, callbacks,
+                candidate, update, *schedule_view, m_genesis_hash, callbacks,
                 /*check_sigs=*/true, find_global_key_owner,
                 [&](const uint256& tree_id) {
-                    return next.HasUsedTreeId(tree_id);
+                    return parent.HasUsedTreeId(tree_id) ||
+                           new_tree_id_set.contains(tree_id);
                 },
                 introduced_tree_id, error)) {
             return false;
         }
+        if (previous_global_key &&
+            (candidate.has_global_key == 0 ||
+             candidate.global_key.public_key != *previous_global_key)) {
+            key_owner_overlay[*previous_global_key] = std::nullopt;
+        }
+        if (candidate.has_global_key != 0) {
+            key_owner_overlay[candidate.global_key.public_key] =
+                update.pro_tx_hash;
+        }
         if (introduced_tree_id) {
             next.block_tree_ids.push_back(*introduced_tree_id);
-            auto position{std::lower_bound(next.used_tree_ids.begin(),
-                                           next.used_tree_ids.end(),
-                                           *introduced_tree_id)};
-            next.used_tree_ids.insert(position, *introduced_tree_id);
+            if (!new_tree_id_set.emplace(*introduced_tree_id).second) {
+                return SetError(error, PQRegistryResult::INTERNAL_ERROR,
+                                update.transaction_index,
+                                update.pro_tx_hash);
+            }
         }
+        replacements.push_back(std::move(candidate));
+    }
+
+    if (!replacements.empty()) {
+        std::sort(replacements.begin(), replacements.end(),
+                  [](const OperatorKeyState& left,
+                     const OperatorKeyState& right) {
+                      return left.pro_tx_hash < right.pro_tx_hash;
+                  });
+        std::vector<OperatorKeyState> merged;
+        merged.reserve(next.operator_states.size() + replacements.size());
+        auto current{next.operator_states.begin()};
+        auto replacement{replacements.begin()};
+        while (current != next.operator_states.end() ||
+               replacement != replacements.end()) {
+            if (replacement == replacements.end() ||
+                (current != next.operator_states.end() &&
+                 current->pro_tx_hash < replacement->pro_tx_hash)) {
+                merged.push_back(std::move(*current++));
+            } else if (current == next.operator_states.end() ||
+                       replacement->pro_tx_hash < current->pro_tx_hash) {
+                merged.push_back(std::move(*replacement++));
+            } else {
+                merged.push_back(std::move(*replacement++));
+                ++current;
+            }
+        }
+        next.operator_states = std::move(merged);
     }
 
     if (!net_removed_pro_tx_hashes.empty()) {
@@ -1706,10 +1762,14 @@ bool PQRegistryManager::PrepareBlockInternal(
         next.operator_states.resize(write_index);
     }
     std::sort(next.block_tree_ids.begin(), next.block_tree_ids.end());
-    if ((!next.block_tree_ids.empty() &&
-         !IsStrictlySortedUnique(next.block_tree_ids)) ||
-        next.used_tree_ids.size() > MAX_PQ_USED_TREE_IDS) {
-        return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+    if (!next.block_tree_ids.empty()) {
+        std::vector<uint256> merged_tree_ids;
+        if (!MergeNewTreeIds(parent.used_tree_ids, next.block_tree_ids,
+                             merged_tree_ids)) {
+            return SetError(error,
+                            PQRegistryResult::INVALID_RESULTING_STATE);
+        }
+        next.used_tree_ids = std::move(merged_tree_ids);
     }
     const auto state_root{next.RecomputeConsensusStateRoot(m_genesis_hash)};
     if (!state_root) {
