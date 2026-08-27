@@ -688,10 +688,20 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
                       QUORUM_THRESHOLD - 1);
     BOOST_CHECK_EQUAL(incomplete_audit_counts[3], 0U);
 
-    BOOST_REQUIRE(
-        audit_collector->AddVerifiedShare(
-            audit_shares.back(), &collection_error) ==
-        ShareCollectionResult::ACCEPTED);
+    auto final_audit_reservation{
+        audit_collector->ReserveShareVerification(
+            audit_shares.back(), &collection_error)};
+    BOOST_REQUIRE(final_audit_reservation);
+    BOOST_REQUIRE(collection_error == ShareCollectionError::NONE);
+    BOOST_CHECK(!audit_collector->IsComplete());
+    BOOST_CHECK(!audit_collector->Finalize());
+    PaymentAuditCollector::VerifyReservedShare(*final_audit_reservation);
+    BOOST_CHECK(!audit_collector->IsComplete());
+    BOOST_CHECK(!audit_collector->Finalize());
+    BOOST_REQUIRE(audit_collector->CompleteShareVerification(
+                      std::move(*final_audit_reservation),
+                      &collection_error) ==
+                  ShareCollectionResult::ACCEPTED);
     BOOST_REQUIRE(collection_error == ShareCollectionError::NONE);
     const auto final_audit{audit_collector->Finalize()};
     BOOST_REQUIRE(final_audit);

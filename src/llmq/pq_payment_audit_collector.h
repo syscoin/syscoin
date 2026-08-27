@@ -18,6 +18,42 @@ namespace llmq::pq {
 /** Bounded collector for one common audit statement with signer-specific reports. */
 class PaymentAuditCollector final {
 public:
+    class ShareVerificationReservation final {
+    public:
+        ShareVerificationReservation(
+            ShareVerificationReservation&&) noexcept = default;
+        ShareVerificationReservation& operator=(
+            ShareVerificationReservation&&) = delete;
+        ShareVerificationReservation(
+            const ShareVerificationReservation&) = delete;
+        ShareVerificationReservation& operator=(
+            const ShareVerificationReservation&) = delete;
+
+    private:
+        enum class VerificationState : uint8_t {
+            PENDING = 0,
+            VALID,
+            INVALID,
+        };
+
+        ShareVerificationReservation(
+            PreparedPaymentAuditContextPtr context,
+            std::shared_ptr<const uint8_t> collector_token,
+            PaymentAuditShare share,
+            std::size_t quorum_slot,
+            uint16_t member_index);
+
+        PreparedPaymentAuditContextPtr m_context;
+        std::shared_ptr<const uint8_t> m_collector_token;
+        PaymentAuditShare m_share;
+        std::size_t m_quorum_slot{0};
+        uint16_t m_member_index{0};
+        VerificationState m_verification_state{VerificationState::PENDING};
+        ShareCollectionError m_verification_error{ShareCollectionError::NONE};
+
+        friend class PaymentAuditCollector;
+    };
+
     static std::unique_ptr<PaymentAuditCollector> Create(
         const uint256& genesis_hash,
         PaymentAuditScheduleConfig schedule,
@@ -34,6 +70,24 @@ public:
     PaymentAuditCollector(const PaymentAuditCollector&) = delete;
     PaymentAuditCollector& operator=(const PaymentAuditCollector&) = delete;
 
+    /**
+     * Claim one signer slot before expensive crypto. The caller must complete
+     * the reservation or retire this exact collector instance.
+     */
+    [[nodiscard]] std::optional<ShareVerificationReservation>
+    ReserveShareVerification(
+        const PaymentAuditShare& share,
+        ShareCollectionError* error = nullptr);
+
+    /** Execute child-proof and WOTS verification without collector access. */
+    static void VerifyReservedShare(
+        ShareVerificationReservation& reservation);
+
+    /** Consume one exact claim and either insert its witness or release it. */
+    [[nodiscard]] ShareCollectionResult CompleteShareVerification(
+        ShareVerificationReservation reservation,
+        ShareCollectionError* error = nullptr);
+
     [[nodiscard]] ShareCollectionResult AddVerifiedShare(
         const PaymentAuditShare& share,
         ShareCollectionError* error = nullptr);
@@ -46,6 +100,8 @@ private:
     explicit PaymentAuditCollector(PreparedPaymentAuditContextPtr context);
 
     PreparedPaymentAuditContextPtr m_context;
+    std::shared_ptr<const uint8_t> m_instance_token;
+    std::array<QuorumBitmap, ACTIVE_QUORUMS> m_pending_shares{};
     std::array<std::map<uint16_t, PaymentAuditReportWitness>,
                ACTIVE_QUORUMS> m_shares;
 };

@@ -436,6 +436,133 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     BOOST_CHECK(raw_error == PaymentAuditVerificationError::INVALID_CHILD_PROOF);
     BOOST_CHECK(prepared_error == raw_error);
 
+    ShareCollectionError staged_error{ShareCollectionError::NONE};
+    auto staged_collector{PaymentAuditCollector::Create(prepared_context)};
+    BOOST_REQUIRE(staged_collector);
+    auto pending_reservation{
+        staged_collector->ReserveShareVerification(share, &staged_error)};
+    BOOST_REQUIRE(pending_reservation);
+    BOOST_CHECK(staged_error == ShareCollectionError::NONE);
+    BOOST_CHECK(!staged_collector->ReserveShareVerification(
+        bad_proof, &staged_error));
+    BOOST_CHECK(staged_error == ShareCollectionError::DUPLICATE);
+    PaymentAuditCollector::VerifyReservedShare(*pending_reservation);
+    BOOST_CHECK(staged_collector->CompleteShareVerification(
+                    std::move(*pending_reservation), &staged_error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(staged_error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(staged_collector->ShareCounts()[0], 1U);
+    auto competing_report{share};
+    competing_report.transcript.reporter_observed_members[0] ^= 1;
+    BOOST_CHECK(!staged_collector->ReserveShareVerification(
+        competing_report, &staged_error));
+    BOOST_CHECK(staged_error == ShareCollectionError::DUPLICATE);
+    BOOST_CHECK_EQUAL(staged_collector->ShareCounts()[0], 1U);
+
+    auto unverified_collector{
+        PaymentAuditCollector::Create(prepared_context)};
+    BOOST_REQUIRE(unverified_collector);
+    auto unverified_reservation{
+        unverified_collector->ReserveShareVerification(
+            share, &staged_error)};
+    BOOST_REQUIRE(unverified_reservation);
+    BOOST_CHECK(unverified_collector->CompleteShareVerification(
+                    std::move(*unverified_reservation), &staged_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(staged_error == ShareCollectionError::LOCAL_ERROR);
+    auto released_reservation{
+        unverified_collector->ReserveShareVerification(
+            share, &staged_error)};
+    BOOST_REQUIRE(released_reservation);
+    PaymentAuditCollector::VerifyReservedShare(*released_reservation);
+    BOOST_CHECK(unverified_collector->CompleteShareVerification(
+                    std::move(*released_reservation), &staged_error) ==
+                ShareCollectionResult::ACCEPTED);
+
+    auto retry_collector{PaymentAuditCollector::Create(prepared_context)};
+    BOOST_REQUIRE(retry_collector);
+    auto invalid_signature{share};
+    invalid_signature.authenticated_signature.signature.back() ^= 1;
+    auto invalid_reservation{retry_collector->ReserveShareVerification(
+        invalid_signature, &staged_error)};
+    BOOST_REQUIRE(invalid_reservation);
+    PaymentAuditCollector::VerifyReservedShare(*invalid_reservation);
+    BOOST_CHECK(retry_collector->CompleteShareVerification(
+                    std::move(*invalid_reservation), &staged_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(staged_error == ShareCollectionError::INVALID_SIGNATURE);
+
+    auto proof_reservation{retry_collector->ReserveShareVerification(
+        bad_proof, &staged_error)};
+    BOOST_REQUIRE(proof_reservation);
+    BOOST_CHECK(retry_collector->CompleteShareVerification(
+                    std::move(*invalid_reservation), &staged_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(staged_error == ShareCollectionError::LOCAL_ERROR);
+    BOOST_CHECK(!retry_collector->ReserveShareVerification(
+        share, &staged_error));
+    BOOST_CHECK(staged_error == ShareCollectionError::DUPLICATE);
+    PaymentAuditCollector::VerifyReservedShare(*proof_reservation);
+    BOOST_CHECK(retry_collector->CompleteShareVerification(
+                    std::move(*proof_reservation), &staged_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(staged_error == ShareCollectionError::INVALID_CHILD_PROOF);
+    BOOST_CHECK_EQUAL(retry_collector->ShareCounts()[0], 0U);
+
+    auto valid_reservation{retry_collector->ReserveShareVerification(
+        share, &staged_error)};
+    BOOST_REQUIRE(valid_reservation);
+    PaymentAuditCollector::VerifyReservedShare(*valid_reservation);
+    BOOST_CHECK(retry_collector->CompleteShareVerification(
+                    std::move(*valid_reservation), &staged_error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(staged_error == ShareCollectionError::NONE);
+
+    auto old_collector{PaymentAuditCollector::Create(prepared_context)};
+    auto replacement_collector{
+        PaymentAuditCollector::Create(prepared_context)};
+    BOOST_REQUIRE(old_collector);
+    BOOST_REQUIRE(replacement_collector);
+    auto old_reservation{old_collector->ReserveShareVerification(
+        share, &staged_error)};
+    BOOST_REQUIRE(old_reservation);
+    old_collector.reset();
+    auto replacement_reservation{
+        replacement_collector->ReserveShareVerification(
+            share, &staged_error)};
+    BOOST_REQUIRE(replacement_reservation);
+    PaymentAuditCollector::VerifyReservedShare(*old_reservation);
+    BOOST_CHECK(replacement_collector->CompleteShareVerification(
+                    std::move(*old_reservation), &staged_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(staged_error == ShareCollectionError::LOCAL_ERROR);
+    BOOST_CHECK(!replacement_collector->ReserveShareVerification(
+        share, &staged_error));
+    BOOST_CHECK(staged_error == ShareCollectionError::DUPLICATE);
+    PaymentAuditCollector::VerifyReservedShare(*replacement_reservation);
+    BOOST_CHECK(replacement_collector->CompleteShareVerification(
+                    std::move(*replacement_reservation), &staged_error) ==
+                ShareCollectionResult::ACCEPTED);
+
+    auto lifetime_context{PreparedPaymentAuditContext::Create(
+        fixture->genesis_hash, fixture->schedule, fixture->audit.statement,
+        fixture->seal, rosters, AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(lifetime_context);
+    std::weak_ptr<const PreparedPaymentAuditContext> retained_reservation{
+        lifetime_context};
+    auto lifetime_collector{
+        PaymentAuditCollector::Create(lifetime_context)};
+    BOOST_REQUIRE(lifetime_collector);
+    auto lifetime_reservation{
+        lifetime_collector->ReserveShareVerification(share, &staged_error)};
+    BOOST_REQUIRE(lifetime_reservation);
+    lifetime_context.reset();
+    lifetime_collector.reset();
+    BOOST_CHECK(!retained_reservation.expired());
+    PaymentAuditCollector::VerifyReservedShare(*lifetime_reservation);
+    lifetime_reservation.reset();
+    BOOST_CHECK(retained_reservation.expired());
+
     auto unknown_quorum{share};
     unknown_quorum.transcript.quorum_base_hash = NonNullHash(91'002);
     BOOST_CHECK(!PreparePaymentAuditShareVerification(
