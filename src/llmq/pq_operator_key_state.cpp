@@ -76,6 +76,36 @@ bool StartsAtMutableCutoff(
            commitment.first_epoch == view.first_mutable_epoch;
 }
 
+template <typename StateAt>
+std::optional<uint256> HashCanonicalOperatorKeyStates(
+    const uint256& genesis_hash,
+    std::size_t state_count,
+    const uint256& used_tree_id_set_hash,
+    StateAt&& state_at)
+{
+    if (genesis_hash.IsNull() || used_tree_id_set_hash.IsNull()) {
+        return std::nullopt;
+    }
+    for (std::size_t index{0}; index < state_count; ++index) {
+        const auto& state{state_at(index)};
+        if (!state.IsStructurallyValid() ||
+            (index != 0 &&
+             !(state_at(index - 1).pro_tx_hash < state.pro_tx_hash))) {
+            return std::nullopt;
+        }
+    }
+
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, PQ_KEY_CONSENSUS_STATE_DOMAIN);
+    writer << genesis_hash << PQ_KEY_CONSENSUS_STATE_VERSION
+           << static_cast<uint64_t>(state_count);
+    for (std::size_t index{0}; index < state_count; ++index) {
+        writer << state_at(index);
+    }
+    writer << used_tree_id_set_hash;
+    return writer.GetHash();
+}
+
 } // namespace
 
 bool OperatorKeyScheduleView::IsStructurallyValid() const noexcept
@@ -535,19 +565,23 @@ std::optional<uint256> GetPQKeyConsensusStateHash(
         [](const auto* lhs, const auto* rhs) {
             return lhs->pro_tx_hash < rhs->pro_tx_hash;
         });
-    for (std::size_t i{1}; i < ordered.size(); ++i) {
-        if (ordered[i - 1]->pro_tx_hash == ordered[i]->pro_tx_hash) {
-            return std::nullopt;
-        }
-    }
+    return HashCanonicalOperatorKeyStates(
+        genesis_hash, ordered.size(), used_tree_id_set_hash,
+        [&](std::size_t index) -> const OperatorKeyState& {
+            return *ordered[index];
+        });
+}
 
-    CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, PQ_KEY_CONSENSUS_STATE_DOMAIN);
-    writer << genesis_hash << PQ_KEY_CONSENSUS_STATE_VERSION
-           << static_cast<uint64_t>(ordered.size());
-    for (const auto* state : ordered) writer << *state;
-    writer << used_tree_id_set_hash;
-    return writer.GetHash();
+std::optional<uint256> GetCanonicalPQKeyConsensusStateHash(
+    const uint256& genesis_hash,
+    std::span<const OperatorKeyState> operator_states,
+    const uint256& used_tree_id_set_hash)
+{
+    return HashCanonicalOperatorKeyStates(
+        genesis_hash, operator_states.size(), used_tree_id_set_hash,
+        [&](std::size_t index) -> const OperatorKeyState& {
+            return operator_states[index];
+        });
 }
 
 } // namespace llmq::pq

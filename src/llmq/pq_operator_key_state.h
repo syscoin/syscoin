@@ -220,6 +220,15 @@ struct OperatorKeyState {
     std::span<const OperatorKeyState> operator_states,
     const uint256& used_tree_id_set_hash);
 
+/**
+ * Hash states already strictly ordered and unique by proTxHash without
+ * allocating or sorting.
+ */
+[[nodiscard]] std::optional<uint256> GetCanonicalPQKeyConsensusStateHash(
+    const uint256& genesis_hash,
+    std::span<const OperatorKeyState> operator_states,
+    const uint256& used_tree_id_set_hash);
+
 } // namespace llmq::pq
 
 #endif // SYSCOIN_LLMQ_PQ_OPERATOR_KEY_STATE_H

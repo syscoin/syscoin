@@ -338,6 +338,15 @@ const OperatorKeyState& OnlyOperator(const PQRegistrySnapshot& snapshot)
 
 BOOST_FIXTURE_TEST_SUITE(pq_registry_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(empty_registry_consensus_root_is_frozen)
+{
+    PQRegistrySnapshot empty;
+    const auto root{empty.RecomputeConsensusStateRoot(NonNullHash(3))};
+    BOOST_REQUIRE(root);
+    BOOST_CHECK(*root == uint256S(
+        "30baf90ece972a64ce79c3661c960928329f13f802a66a7e2fb906eb8b2e5728"));
+}
+
 BOOST_AUTO_TEST_CASE(configuration_requires_real_preparation_window)
 {
     auto config{Config()};

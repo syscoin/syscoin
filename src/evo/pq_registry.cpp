@@ -804,7 +804,7 @@ std::optional<uint256> PQRegistrySnapshot::RecomputeConsensusStateRoot(
         !StateTreeIdsAreRecorded(operator_states, used_tree_ids)) {
         return std::nullopt;
     }
-    return GetPQKeyConsensusStateHash(
+    return GetCanonicalPQKeyConsensusStateHash(
         genesis_hash,
         std::span<const OperatorKeyState>{operator_states.data(),
                                           operator_states.size()},
@@ -1252,7 +1252,7 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
                         })) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
-        const auto root{GetPQKeyConsensusStateHash(
+        const auto root{GetCanonicalPQKeyConsensusStateHash(
             m_genesis_hash,
             std::span<const OperatorKeyState>{states.data(), states.size()},
             *tree_set_hash)};

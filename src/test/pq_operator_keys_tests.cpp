@@ -7,6 +7,7 @@
 
 #include <evo/deterministicmns.h>
 #include <llmq/pq_global_auth.h>
+#include <llmq/pq_operator_key_state.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -21,6 +22,7 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 using namespace llmq::pq;
 
@@ -114,6 +116,66 @@ static_assert(std::is_nothrow_move_constructible_v<scheduled_wots::SecretKey>);
 static_assert(std::is_nothrow_move_assignable_v<scheduled_wots::SecretKey>);
 
 BOOST_AUTO_TEST_SUITE(pq_operator_keys_tests)
+
+BOOST_AUTO_TEST_CASE(canonical_registry_hash_matches_generic_hash)
+{
+    OperatorKeyScheduleView schedule;
+    schedule.block_height = 100;
+    schedule.first_mutable_epoch = 0;
+    schedule.last_admissible_epoch = 7;
+    BOOST_REQUIRE(schedule.IsStructurallyValid());
+
+    std::vector<OperatorKeyState> states{
+        OperatorKeyState::ForOperator(NonNullHash(2)),
+        OperatorKeyState::ForOperator(NonNullHash(1)),
+    };
+    for (auto& state : states) {
+        BOOST_REQUIRE(state.Advance(schedule) ==
+                      OperatorKeyStateResult::OK);
+    }
+    std::sort(states.begin(), states.end(), [](const auto& lhs,
+                                               const auto& rhs) {
+        return lhs.pro_tx_hash < rhs.pro_tx_hash;
+    });
+
+    const uint256 genesis{NonNullHash(3)};
+    const uint256 tree_set_hash{NonNullHash(4)};
+    const auto canonical{GetCanonicalPQKeyConsensusStateHash(
+        genesis, states, tree_set_hash)};
+    const auto generic{
+        GetPQKeyConsensusStateHash(genesis, states, tree_set_hash)};
+    BOOST_REQUIRE(canonical);
+    BOOST_CHECK(*canonical == uint256S(
+        "1d28a6d663a0bf27878d13411dd08ebb1ab16b87230dd765ad133902477b57af"));
+    BOOST_CHECK(canonical == generic);
+
+    const std::vector<OperatorKeyState> empty;
+    const auto canonical_empty{GetCanonicalPQKeyConsensusStateHash(
+        genesis, empty, tree_set_hash)};
+    BOOST_REQUIRE(canonical_empty);
+    BOOST_CHECK(*canonical_empty == uint256S(
+        "173231d09337676e7cb9f9ee23a8a1b9d38da9eccb1d93edaab059a689d9af33"));
+    BOOST_CHECK(canonical_empty == GetPQKeyConsensusStateHash(
+                                       genesis, empty, tree_set_hash));
+
+    std::reverse(states.begin(), states.end());
+    BOOST_CHECK(!GetCanonicalPQKeyConsensusStateHash(
+        genesis, states, tree_set_hash));
+    BOOST_CHECK(GetPQKeyConsensusStateHash(
+                    genesis, states, tree_set_hash) == canonical);
+
+    states[1] = states[0];
+    BOOST_CHECK(!GetCanonicalPQKeyConsensusStateHash(
+        genesis, states, tree_set_hash));
+    BOOST_CHECK(!GetPQKeyConsensusStateHash(
+        genesis, states, tree_set_hash));
+
+    std::vector<OperatorKeyState> invalid(1);
+    BOOST_CHECK(!GetCanonicalPQKeyConsensusStateHash(
+        genesis, invalid, tree_set_hash));
+    BOOST_CHECK(!GetPQKeyConsensusStateHash(
+        genesis, invalid, tree_set_hash));
+}
 
 BOOST_AUTO_TEST_CASE(global_key_is_private_and_signing_is_purpose_scoped)
 {
