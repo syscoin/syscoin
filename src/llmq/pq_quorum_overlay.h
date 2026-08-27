@@ -96,8 +96,7 @@ class CPQQuorumConnectionOverlay final {
 public:
     CPQQuorumConnectionOverlay(
         CConnman& connman,
-        const uint256& genesis_hash,
-        std::optional<pq::QuorumBuildConfig> quorum_config,
+        pq::FrozenQuorumRosterCachePtr roster_cache,
         PQChainLockPredecessorHeight predecessor_height);
     ~CPQQuorumConnectionOverlay();
 
@@ -118,8 +117,7 @@ private:
         friend bool operator==(const Context&, const Context&) = default;
     };
 
-    const uint256 m_genesis_hash;
-    const std::optional<pq::QuorumBuildConfig> m_quorum_config;
+    const pq::FrozenQuorumRosterCachePtr m_roster_cache;
     const PQChainLockPredecessorHeight m_predecessor_height;
     Mutex m_mutex;
     void ClearLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);

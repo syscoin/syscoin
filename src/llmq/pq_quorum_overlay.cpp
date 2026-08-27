@@ -43,27 +43,6 @@ std::optional<pq::GlobalPublicKey> GetLocalGlobalPublicKey()
     return activeMasternodeInfo.operatorKeyManager->GetGlobalPublicKey();
 }
 
-std::optional<pq::QuorumSnapshotState> GetQuorumSnapshot(
-    const CBlockIndex& index)
-{
-    if (!deterministicMNManager) return std::nullopt;
-
-    pq::QuorumSnapshotState state;
-    state.deterministic_mns = deterministicMNManager->GetListForBlock(&index);
-
-    pq::PQRegistrySnapshot registry;
-    std::string error;
-    if (!deterministicMNManager->GetPQRegistrySnapshot(
-            &index, registry, error)) {
-        LogPrint(BCLog::NET_NETCONN,
-                 "PQ overlay snapshot unavailable at height=%d block=%s: %s\n",
-                 index.nHeight, index.GetBlockHash().ToString(), error);
-        return std::nullopt;
-    }
-    state.operator_key_states = std::move(registry.operator_states);
-    return state;
-}
-
 PQQuorumConnectionSet GetRelayConnections(
     const std::vector<uint256>& participants,
     const uint256& local_pro_tx_hash)
@@ -189,11 +168,9 @@ void PQQuorumOverlayReconciler::Clear()
 
 CPQQuorumConnectionOverlay::CPQQuorumConnectionOverlay(
     CConnman& connman,
-    const uint256& genesis_hash,
-    std::optional<pq::QuorumBuildConfig> quorum_config,
+    pq::FrozenQuorumRosterCachePtr roster_cache,
     PQChainLockPredecessorHeight predecessor_height)
-    : m_genesis_hash{genesis_hash},
-      m_quorum_config{std::move(quorum_config)},
+    : m_roster_cache{std::move(roster_cache)},
       m_predecessor_height{std::move(predecessor_height)},
       m_reconciler{
           [&connman](const uint256& group,
@@ -236,21 +213,22 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     LOCK(cs_main);
     LOCK(m_mutex);
 
-    if (initial_download || new_tip == nullptr || !m_quorum_config ||
-        !m_quorum_config->IsValid() || m_genesis_hash.IsNull() ||
+    if (initial_download || new_tip == nullptr || !m_roster_cache ||
         !deterministicMNManager || !predecessor_height) {
         ClearLocked();
         return;
     }
+    const auto& quorum_config{m_roster_cache->Config()};
+    const auto& genesis_hash{m_roster_cache->GenesisHash()};
 
     const auto target_height{GetPQQuorumOverlayTargetHeight(
-        m_quorum_config->schedule, *predecessor_height,
+        quorum_config.schedule, *predecessor_height,
         new_tip->nHeight)};
     const CBlockIndex* target{
         target_height ? new_tip->GetAncestor(*target_height) : nullptr};
     const auto active_epochs{
         target_height
-            ? pq::ActiveEpochsAtHeight(m_quorum_config->schedule,
+            ? pq::ActiveEpochsAtHeight(quorum_config.schedule,
                                        *target_height)
             : std::nullopt};
     if (target == nullptr || !active_epochs) {
@@ -303,9 +281,8 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     if (m_context && *m_context == context) return;
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    const auto rosters{pq::BuildActiveFrozenQuorumRosters(
-        m_genesis_hash, *m_quorum_config, *target_height, *target,
-        GetQuorumSnapshot, &build_error)};
+    const auto rosters{m_roster_cache->GetActive(
+        *target_height, *target, &build_error)};
     if (!rosters) {
         // Consensus validation and share verification remain fail-closed. A
         // stale bounded connection set is harmless and can help recovery.
@@ -317,7 +294,7 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     }
 
     const auto plan{BuildPQQuorumOverlayPlan(
-        m_genesis_hash, *target_height, target->GetBlockHash(), *rosters,
+        genesis_hash, *target_height, target->GetBlockHash(), *rosters,
         *local_operator)};
     m_reconciler.Apply(plan);
     m_context = context;

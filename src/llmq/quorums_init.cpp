@@ -117,8 +117,7 @@ void InitLLMQSystem(CConnman& connman,
     const int32_t initial_predecessor_height{
         chainman.GetConsensus().nPQChainLockAnchorHeight};
     pqQuorumConnectionOverlay = new CPQQuorumConnectionOverlay(
-        connman, chainman.GetConsensus().hashGenesisBlock,
-        quorum_build_config,
+        connman, roster_cache,
         [initial_predecessor_height]() -> std::optional<int32_t> {
             const auto best{chainLocksHandler
                                 ? chainLocksHandler->GetBestChainLock()
