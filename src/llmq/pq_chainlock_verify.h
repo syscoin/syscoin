@@ -264,6 +264,15 @@ PrepareChainLockShareVerification(
     uint8_t authorization_mask,
     ChainLockVerificationError* error = nullptr);
 
+/** Prepare a final certificate against an intrinsically verified roster set. */
+[[nodiscard]] std::optional<PreparedChainLockVerification>
+PrepareFinalChainLockVerification(
+    const ChainLockScheduleConfig& schedule,
+    const FinalChainLock& chainlock,
+    const VerifiedRosterSet& roster_set,
+    uint8_t authorization_mask,
+    ChainLockVerificationError* error = nullptr);
+
 /**
  * Execute independent signature jobs. A null queue selects fail-fast serial
  * verification. A caller-supplied queue may have zero or more worker threads;

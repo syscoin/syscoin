@@ -656,7 +656,7 @@ private:
     };
 
     struct RuntimeVerificationContext {
-        pq::FrozenQuorumRostersPtr rosters;
+        pq::VerifiedRosterSetPtr roster_set;
         uint8_t authorization_mask{0};
         HistoricalAdmissionContext historical;
     };

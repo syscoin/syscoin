@@ -205,6 +205,108 @@ BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)
         prepared->checks[QUORUM_THRESHOLD].GetLeafIndex(), *expected_leaf);
 }
 
+BOOST_AUTO_TEST_CASE(verified_roster_preparation_reuses_intrinsic_validation)
+{
+    const auto fixture{MakeVerificationFixture()};
+    const auto rosters{
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters)};
+    ChainLockVerificationError error{
+        ChainLockVerificationError::INVALID_ARGUMENT};
+    const uint64_t capability_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, rosters, &error)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
+                          capability_hashes_before,
+                      8'184U);
+
+    const uint64_t prepared_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    auto prepared{PrepareFinalChainLockVerification(
+        fixture->schedule, fixture->chainlock, *roster_set,
+        AUTHORIZATION_MASK, &error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      prepared_hashes_before);
+
+    auto raw{PrepareFinalChainLockVerification(
+        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
+        fixture->rosters, AUTHORIZATION_MASK, &error)};
+    BOOST_REQUIRE(raw);
+    BOOST_REQUIRE_EQUAL(prepared->checks.size(), raw->checks.size());
+    for (std::size_t i{0}; i < prepared->checks.size(); ++i) {
+        BOOST_CHECK(prepared->checks[i].GetPublicKey() ==
+                    raw->checks[i].GetPublicKey());
+        BOOST_CHECK_EQUAL(prepared->checks[i].GetLeafIndex(),
+                          raw->checks[i].GetLeafIndex());
+        BOOST_CHECK(prepared->checks[i].GetMessageBytes() ==
+                    raw->checks[i].GetMessageBytes());
+        BOOST_CHECK(prepared->checks[i].GetSignature() ==
+                    raw->checks[i].GetSignature());
+    }
+
+    auto bad_context{fixture->chainlock};
+    bad_context.statement.quorum_context_hash.begin()[0] ^= 1;
+    const uint64_t rejection_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    BOOST_CHECK(!PrepareFinalChainLockVerification(
+        fixture->schedule, bad_context, *roster_set,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
+
+    auto bad_selection{fixture->chainlock};
+    bad_selection.selected_quorum_mask = 0b1011;
+    bad_selection.signer_bitmaps[3] = bad_selection.signer_bitmaps[2];
+    bad_selection.signer_bitmaps[2].fill(0);
+    BOOST_REQUIRE(bad_selection.IsStructurallyValid());
+    BOOST_CHECK(!PrepareFinalChainLockVerification(
+        fixture->schedule, bad_selection, *roster_set,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto bad_proof{fixture->chainlock};
+    bad_proof.signatures[0].key_proof.siblings[0].begin()[0] ^= 1;
+    BOOST_CHECK(!PrepareFinalChainLockVerification(
+        fixture->schedule, bad_proof, *roster_set,
+        AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHILD_PROOF);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      rejection_hashes_before);
+
+    auto underfilled{MakeVerificationFixture()};
+    auto& underfilled_roster{underfilled->rosters[0]};
+    constexpr std::size_t LAST_VALID_MEMBER{QUORUM_MIN_VALID - 1};
+    underfilled_roster.members[LAST_VALID_MEMBER].eligible = false;
+    ClearMember(underfilled_roster.descriptor.valid_members,
+                LAST_VALID_MEMBER);
+    underfilled_roster.descriptor.valid_count = QUORUM_MIN_VALID - 1;
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = underfilled->rosters[slot].descriptor;
+    }
+    underfilled->chainlock.statement.quorum_context_hash =
+        GetQuorumContextHash(
+            underfilled->genesis_hash,
+            underfilled->chainlock.statement.height,
+            underfilled->chainlock.statement.block_hash, descriptors);
+    const auto underfilled_rosters{
+        std::make_shared<const FrozenQuorumRosters>(underfilled->rosters)};
+    const auto underfilled_set{VerifiedRosterSet::Create(
+        underfilled->genesis_hash, underfilled_rosters, &error)};
+    BOOST_REQUIRE(underfilled_set);
+    const uint64_t underfilled_hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    BOOST_CHECK(!PrepareFinalChainLockVerification(
+        underfilled->schedule, underfilled->chainlock,
+        *underfilled_set, AUTHORIZATION_MASK, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_DESCRIPTOR);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      underfilled_hashes_before);
+}
+
 BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruption)
 {
     ChainLockVerificationError error{ChainLockVerificationError::NONE};

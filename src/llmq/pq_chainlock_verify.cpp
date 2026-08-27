@@ -712,25 +712,16 @@ bool VerifyChainLockShare(
     return true;
 }
 
-std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
+namespace {
+
+std::optional<PreparedChainLockVerification>
+PrepareFinalChainLockVerificationInternal(
     const uint256& genesis_hash,
     const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    uint8_t authorization_mask,
     ChainLockVerificationError* error)
 {
-    SetError(error, ChainLockVerificationError::NONE);
-    if (!chainlock.IsStructurallyValid()) {
-        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
-        return std::nullopt;
-    }
-    if (!ValidateFrozenQuorumContextInternal(
-            genesis_hash, chainlock.statement, rosters, authorization_mask,
-            chainlock.selected_quorum_mask, error)) {
-        return std::nullopt;
-    }
-
     PreparedChainLockVerification prepared;
     prepared.checks.reserve(FINAL_SIGNATURE_COUNT);
     std::size_t signature_index{0};
@@ -791,6 +782,54 @@ std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
         return std::nullopt;
     }
     return prepared;
+}
+
+} // namespace
+
+std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
+    const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
+    const FinalChainLock& chainlock,
+    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (!chainlock.IsStructurallyValid()) {
+        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
+        return std::nullopt;
+    }
+    if (!ValidateFrozenQuorumContextInternal(
+            genesis_hash, chainlock.statement, rosters, authorization_mask,
+            chainlock.selected_quorum_mask, error)) {
+        return std::nullopt;
+    }
+    return PrepareFinalChainLockVerificationInternal(
+        genesis_hash, schedule, chainlock, rosters, error);
+}
+
+std::optional<PreparedChainLockVerification>
+PrepareFinalChainLockVerification(
+    const ChainLockScheduleConfig& schedule,
+    const FinalChainLock& chainlock,
+    const VerifiedRosterSet& roster_set,
+    uint8_t authorization_mask,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (!chainlock.IsStructurallyValid()) {
+        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
+        return std::nullopt;
+    }
+    if (!ValidateStatementBindingInternal(
+            roster_set.GenesisHash(), chainlock.statement,
+            roster_set.Rosters(), authorization_mask,
+            chainlock.selected_quorum_mask, error)) {
+        return std::nullopt;
+    }
+    return PrepareFinalChainLockVerificationInternal(
+        roster_set.GenesisHash(), schedule, chainlock,
+        roster_set.Rosters(), error);
 }
 
 bool VerifyScheduledWOTSChecks(std::vector<ScheduledWOTSCheck>&& checks,

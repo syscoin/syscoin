@@ -6019,9 +6019,9 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
     }
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    const auto rosters{roster_cache->GetActive(
+    const auto roster_set{roster_cache->GetVerifiedActive(
         prepared.statement.height, *candidate, &build_error)};
-    if (!rosters) {
+    if (!roster_set) {
         if (definitively_invalid != nullptr) {
             *definitively_invalid =
                 build_error != pq::QuorumBuildError::MISSING_BRANCH_ANCESTOR &&
@@ -6030,9 +6030,10 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
         }
         return std::nullopt;
     }
+    const auto& rosters{roster_set->Rosters()};
     const uint8_t authorization_mask{
         DeriveSigningRosterAuthorizationMask(
-            *rosters, *candidate,
+            rosters, *candidate,
             prepared.statement.previous_chainlock_height,
             prepared.statement.previous_chainlock_hash)};
     if (!pq::IsSigningRosterAuthorizationMask(authorization_mask)) {
@@ -6062,7 +6063,7 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
         if (!expected_catchup && !expected_receipt) return std::nullopt;
     }
     return RuntimeVerificationContext{
-        rosters, authorization_mask, historical};
+        roster_set, authorization_mask, historical};
 }
 
 std::optional<CChainLocksHandler::RuntimeVerificationContext>
@@ -6115,9 +6116,9 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
     }
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    const auto rosters{roster_cache->GetActive(
+    const auto roster_set{roster_cache->GetVerifiedActive(
         chainlock.statement.height, *candidate, &build_error)};
-    if (!rosters) {
+    if (!roster_set) {
         if (definitively_invalid != nullptr) {
             *definitively_invalid =
                 build_error != pq::QuorumBuildError::MISSING_BRANCH_ANCESTOR &&
@@ -6126,9 +6127,10 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         }
         return std::nullopt;
     }
+    const auto& rosters{roster_set->Rosters()};
     const uint8_t authorization_mask{
         DeriveSigningRosterAuthorizationMask(
-            *rosters, *candidate,
+            rosters, *candidate,
             chainlock.statement.previous_chainlock_height,
             chainlock.statement.previous_chainlock_hash)};
     if (!pq::IsSigningRosterAuthorizationMask(authorization_mask)) {
@@ -6138,7 +6140,7 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         return std::nullopt;
     }
     return RuntimeVerificationContext{
-        rosters, authorization_mask, expected};
+        roster_set, authorization_mask, expected};
 }
 
 std::optional<CChainLocksHandler::CurrentSigningContexts>
@@ -9467,8 +9469,8 @@ bool CChainLocksHandler::ProcessNewChainLock(
             pq::ChainLockVerificationError verification_error{
                 pq::ChainLockVerificationError::NONE};
             auto signature_checks{pq::PrepareFinalChainLockVerification(
-                m_genesis_hash, m_config->chainlock_schedule, chainlock,
-                *historical_preverification->rosters,
+                m_config->chainlock_schedule, chainlock,
+                *historical_preverification->roster_set,
                 historical_preverification->authorization_mask,
                 &verification_error)};
             if (!signature_checks) {
@@ -9520,8 +9522,10 @@ bool CChainLocksHandler::ProcessNewChainLock(
                     verification_context =
                         BuildRuntimeVerificationContext(*prepared);
                     if (!verification_context ||
-                        Descriptors(*verification_context->rosters) !=
-                            Descriptors(*historical_preverification->rosters) ||
+                        Descriptors(
+                            verification_context->roster_set->Rosters()) !=
+                            Descriptors(historical_preverification
+                                            ->roster_set->Rosters()) ||
                         verification_context->authorization_mask !=
                             historical_preverification->authorization_mask ||
                         verification_context->historical != historical) {
@@ -9588,8 +9592,8 @@ bool CChainLocksHandler::ProcessNewChainLock(
             pq::ChainLockVerificationError verification_error{
                 pq::ChainLockVerificationError::NONE};
             auto signature_checks{pq::PrepareFinalChainLockVerification(
-                m_genesis_hash, m_config->chainlock_schedule, chainlock,
-                *verification_context->rosters,
+                m_config->chainlock_schedule, chainlock,
+                *verification_context->roster_set,
                 verification_context->authorization_mask,
                 &verification_error)};
             if (!signature_checks) {
@@ -9631,8 +9635,8 @@ bool CChainLocksHandler::ProcessNewChainLock(
         if (!verification_context || !publication_context ||
             publication_context->authorization_mask !=
                 verification_context->authorization_mask ||
-            Descriptors(*publication_context->rosters) !=
-                Descriptors(*verification_context->rosters)) {
+            Descriptors(publication_context->roster_set->Rosters()) !=
+                Descriptors(verification_context->roster_set->Rosters())) {
             finality_error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
             return false;
         }
@@ -9829,8 +9833,8 @@ CChainLocksHandler::TryImportPersistedChainLock()
     pq::ChainLockVerificationError verification_error{
         pq::ChainLockVerificationError::NONE};
     auto signature_checks{pq::PrepareFinalChainLockVerification(
-        m_genesis_hash, m_config->chainlock_schedule, persisted,
-        *verification_context->rosters,
+        m_config->chainlock_schedule, persisted,
+        *verification_context->roster_set,
         verification_context->authorization_mask,
         &verification_error)};
     bool signatures_valid{false};
@@ -9993,8 +9997,8 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
     pq::ChainLockVerificationError verification_error{
         pq::ChainLockVerificationError::NONE};
     auto signature_checks{pq::PrepareFinalChainLockVerification(
-        m_genesis_hash, m_config->chainlock_schedule, persisted,
-        *verification_context->rosters,
+        m_config->chainlock_schedule, persisted,
+        *verification_context->roster_set,
         verification_context->authorization_mask,
         &verification_error)};
     bool signatures_valid{false};
