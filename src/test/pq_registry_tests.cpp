@@ -461,6 +461,7 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
     steady_a_view = {};
     steady_b_view = {};
 
+    PQRegistryReadView previous_historical;
     for (int32_t height{1};
          height <= static_cast<int32_t>(PQ_REGISTRY_SNAPSHOT_CACHE_SIZE + 1);
          ++height) {
@@ -468,6 +469,10 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
         BOOST_REQUIRE(manager.GetReadView(
             NonNullHash(400 + height), NonNullHash(399 + height), height,
             historical, error));
+        if (previous_historical.IsValid()) {
+            BOOST_CHECK(previous_historical.SharesStateWith(historical));
+        }
+        previous_historical = std::move(historical);
     }
     BOOST_CHECK(genesis_view.IsValid());
     BOOST_CHECK(genesis_view.BlockHash() == genesis_block);

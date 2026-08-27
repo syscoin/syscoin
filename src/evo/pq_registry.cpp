@@ -331,9 +331,112 @@ std::shared_ptr<const PQRegistryStateData> MakeRegistryStateData(
     return state;
 }
 
+std::optional<uint256> EmptyRegistryConsensusStateRoot(
+    const uint256& genesis_hash)
+{
+    const auto tree_hash{GetUsedTreeIdSetHash(
+        genesis_hash, std::span<const uint256>{})};
+    return tree_hash
+        ? GetCanonicalPQKeyConsensusStateHash(
+              genesis_hash, std::span<const OperatorKeyState>{}, *tree_hash)
+        : std::nullopt;
+}
+
+using SnapshotViewCache = std::list<std::pair<
+    uint256, std::shared_ptr<const PQRegistrySnapshotView>>>;
+
+std::shared_ptr<const PQRegistrySnapshotView>
+MakeAuthenticatedSnapshotView(
+    const SnapshotViewCache& cache,
+    int32_t height,
+    const uint256& block_hash,
+    const uint256& previous_block_hash,
+    std::vector<OperatorKeyState> operator_states,
+    std::vector<uint256> used_tree_ids,
+    std::vector<uint256> block_tree_ids,
+    std::optional<OperatorKeyScheduleState> schedule,
+    const uint256& used_tree_ids_hash,
+    const uint256& consensus_state_root)
+{
+    std::shared_ptr<const PQRegistryStateData> state;
+    std::shared_ptr<const std::vector<uint256>> shared_tree_ids;
+    for (auto entry{cache.rbegin()}; entry != cache.rend(); ++entry) {
+        const auto& candidate{entry->second};
+        if (!candidate || !candidate->state) continue;
+        if (candidate->state->consensus_state_root == consensus_state_root &&
+            candidate->state->schedule == schedule) {
+            state = candidate->state;
+            break;
+        }
+        if (!shared_tree_ids &&
+            candidate->state->used_tree_ids_hash == used_tree_ids_hash &&
+            candidate->state->used_tree_ids &&
+            candidate->state->used_tree_ids->size() == used_tree_ids.size()) {
+            shared_tree_ids = candidate->state->used_tree_ids;
+        }
+    }
+    if (!state) {
+        auto indexes{BuildRegistryIndexes(operator_states)};
+        if (!indexes) return nullptr;
+        if (!shared_tree_ids) {
+            shared_tree_ids =
+                std::make_shared<const std::vector<uint256>>(
+                    std::move(used_tree_ids));
+        }
+        state = MakeRegistryStateData(
+            std::make_shared<const std::vector<OperatorKeyState>>(
+                std::move(operator_states)),
+            std::move(shared_tree_ids), std::move(indexes),
+            std::move(schedule), used_tree_ids_hash, consensus_state_root);
+        if (!state) return nullptr;
+    }
+
+    auto snapshot{std::make_shared<PQRegistrySnapshotView>()};
+    snapshot->height = height;
+    snapshot->block_hash = block_hash;
+    snapshot->previous_block_hash = previous_block_hash;
+    snapshot->state = std::move(state);
+    snapshot->block_tree_ids =
+        std::make_shared<const std::vector<uint256>>(
+            std::move(block_tree_ids));
+    return snapshot;
+}
+
+std::shared_ptr<const PQRegistrySnapshotView>
+MakePrePreparationSnapshotView(
+    const SnapshotViewCache& cache,
+    const uint256& genesis_hash,
+    const PQRegistryConfig& config,
+    const uint256& block_hash,
+    const uint256& previous_block_hash,
+    int32_t height,
+    PQRegistryError& error)
+{
+    const auto tree_hash{GetUsedTreeIdSetHash(
+        genesis_hash, std::span<const uint256>{})};
+    const auto root{tree_hash
+        ? GetCanonicalPQKeyConsensusStateHash(
+              genesis_hash, std::span<const OperatorKeyState>{}, *tree_hash)
+        : std::nullopt};
+    const auto schedule{height > 0
+        ? ScheduleStateAtHeight(config, height)
+        : std::optional<OperatorKeyScheduleState>{}};
+    if (height < 0 || block_hash.IsNull() || !tree_hash || !root ||
+        (height > 0 && !schedule)) {
+        SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+        return nullptr;
+    }
+    auto snapshot{MakeAuthenticatedSnapshotView(
+        cache, height, block_hash, previous_block_hash, {}, {}, {}, schedule,
+        *tree_hash, *root)};
+    if (!snapshot) {
+        SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+    }
+    return snapshot;
+}
+
 std::size_t SnapshotCacheDynamicMemoryUsage(
-    const std::list<std::pair<
-        uint256, std::shared_ptr<const PQRegistrySnapshotView>>>& cache,
+    const SnapshotViewCache& cache,
     const PQRegistryStateData* baseline)
 {
     std::vector<const PQRegistryStateData*> counted_states;
@@ -641,27 +744,6 @@ bool ApplyDecodedUpdate(
             update.transaction_index, update.pro_tx_hash, transition);
     }
     return true;
-}
-
-bool MakePrePreparationSnapshot(const uint256& genesis_hash,
-                                const uint256& block_hash,
-                                const uint256& previous_block_hash,
-                                int32_t height,
-                                PQRegistrySnapshot& snapshot,
-                                PQRegistryError& error)
-{
-    snapshot = {};
-    snapshot.height = height;
-    snapshot.block_hash = block_hash;
-    snapshot.previous_block_hash = previous_block_hash;
-    const auto root{snapshot.RecomputeConsensusStateRoot(genesis_hash)};
-    if (!root) {
-        return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
-    }
-    snapshot.consensus_state_root = *root;
-    return snapshot.IsStructurallyValid()
-        ? true
-        : SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
 }
 
 } // namespace
@@ -1048,72 +1130,6 @@ bool PQRegistryManager::IsEnabled() const noexcept
     return !m_genesis_hash.IsNull() && m_config.IsValid();
 }
 
-bool PQRegistryManager::CacheSnapshot(
-    const PQRegistrySnapshot& snapshot,
-    std::shared_ptr<const PQRegistrySnapshotView>* cached) const
-{
-    std::optional<OperatorKeyScheduleState> schedule;
-    if (snapshot.height > 0) {
-        schedule = ScheduleStateAtHeight(m_config, snapshot.height);
-        if (!schedule) return false;
-    }
-
-    std::shared_ptr<const PQRegistryStateData> state;
-    for (auto entry{m_snapshot_cache.rbegin()};
-         entry != m_snapshot_cache.rend(); ++entry) {
-        const auto& candidate{entry->second};
-        if (candidate && candidate->state &&
-            candidate->state->consensus_state_root ==
-                snapshot.consensus_state_root &&
-            candidate->state->schedule == schedule) {
-            state = candidate->state;
-            break;
-        }
-    }
-    if (!state) {
-        const auto tree_hash{
-            GetUsedTreeIdSetHash(m_genesis_hash, snapshot.used_tree_ids)};
-        const auto indexes{BuildRegistryIndexes(snapshot.operator_states)};
-        if (!tree_hash || !indexes) return false;
-
-        std::shared_ptr<const std::vector<uint256>> used_tree_ids;
-        for (auto entry{m_snapshot_cache.rbegin()};
-             entry != m_snapshot_cache.rend(); ++entry) {
-            const auto& candidate{entry->second};
-            if (candidate && candidate->state &&
-                candidate->state->used_tree_ids_hash == *tree_hash &&
-                candidate->state->used_tree_ids &&
-                candidate->state->used_tree_ids->size() ==
-                    snapshot.used_tree_ids.size()) {
-                used_tree_ids = candidate->state->used_tree_ids;
-                break;
-            }
-        }
-        if (!used_tree_ids) {
-            used_tree_ids =
-                std::make_shared<const std::vector<uint256>>(
-                    snapshot.used_tree_ids);
-        }
-
-        state = MakeRegistryStateData(
-            std::make_shared<const std::vector<OperatorKeyState>>(
-                snapshot.operator_states),
-            std::move(used_tree_ids), std::move(indexes), schedule,
-            *tree_hash, snapshot.consensus_state_root);
-        if (!state) return false;
-    }
-
-    auto view{std::make_shared<PQRegistrySnapshotView>()};
-    view->height = snapshot.height;
-    view->block_hash = snapshot.block_hash;
-    view->previous_block_hash = snapshot.previous_block_hash;
-    view->state = std::move(state);
-    view->block_tree_ids =
-        std::make_shared<const std::vector<uint256>>(snapshot.block_tree_ids);
-
-    return CacheSnapshotView(std::move(view), cached);
-}
-
 bool PQRegistryManager::CacheSnapshotView(
     std::shared_ptr<const PQRegistrySnapshotView> snapshot,
     std::shared_ptr<const PQRegistrySnapshotView>* cached) const
@@ -1288,12 +1304,10 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
 
     const auto& checkpoint{reverse_journal.back()};
     if (checkpoint.height == m_config.preparation_height) {
-        PQRegistrySnapshot parent;
-        if (!MakePrePreparationSnapshot(
-                m_genesis_hash, checkpoint.previous_block_hash, uint256{},
-                checkpoint.height - 1, parent, error) ||
-            checkpoint.previous_consensus_state_root !=
-                parent.consensus_state_root) {
+        const auto parent_root{
+            EmptyRegistryConsensusStateRoot(m_genesis_hash)};
+        if (!parent_root || checkpoint.previous_consensus_state_root !=
+                                *parent_root) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
     } else {
@@ -1308,6 +1322,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
 
     std::vector<OperatorKeyState> states;
     std::vector<uint256> used_tree_ids;
+    std::optional<OperatorKeyScheduleState> final_schedule;
+    uint256 final_tree_set_hash;
     for (auto record{reverse_journal.rbegin()};
          record != reverse_journal.rend(); ++record) {
         if (record->is_checkpoint != 0) {
@@ -1351,6 +1367,7 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
         const auto tree_set_hash{
             GetUsedTreeIdSetHash(m_genesis_hash, used_tree_ids)};
         if (!schedule_view || !tree_set_hash ||
+            states.size() > MAX_PQ_OPERATOR_STATES ||
             !StateTreeIdsAreRecorded(states, used_tree_ids) ||
             std::any_of(states.begin(), states.end(),
                         [&](const OperatorKeyState& state) {
@@ -1365,23 +1382,22 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
         if (!root || *root != record->consensus_state_root) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
+        final_schedule = OperatorKeyScheduleState::FromView(*schedule_view);
+        final_tree_set_hash = *tree_set_hash;
     }
 
-    const auto& disk{reverse_journal.front()};
-    PQRegistrySnapshot rebuilt;
-    rebuilt.height = disk.height;
-    rebuilt.block_hash = disk.block_hash;
-    rebuilt.previous_block_hash = disk.previous_block_hash;
-    rebuilt.operator_states = std::move(states);
-    rebuilt.used_tree_ids = std::move(used_tree_ids);
-    rebuilt.block_tree_ids = disk.block_tree_ids;
-    rebuilt.consensus_state_root = disk.consensus_state_root;
-    const auto root{rebuilt.RecomputeConsensusStateRoot(m_genesis_hash)};
-    if (!rebuilt.IsStructurallyValid() || !root ||
-        *root != rebuilt.consensus_state_root) {
+    auto disk{std::move(reverse_journal.front())};
+    if (!final_schedule || final_tree_set_hash.IsNull()) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
-    if (!CacheSnapshot(rebuilt, &snapshot) || !snapshot) {
+
+    auto rebuilt{MakeAuthenticatedSnapshotView(
+        m_snapshot_cache, disk.height, disk.block_hash,
+        disk.previous_block_hash,
+        std::move(states), std::move(used_tree_ids),
+        std::move(disk.block_tree_ids), final_schedule, final_tree_set_hash,
+        disk.consensus_state_root)};
+    if (!CacheSnapshotView(std::move(rebuilt), &snapshot) || !snapshot) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
     return true;
@@ -1450,16 +1466,15 @@ bool PQRegistryManager::PrepareBlockInternal(
                                 index);
             }
         }
-        PQRegistrySnapshot empty;
-        if (!MakePrePreparationSnapshot(
-                m_genesis_hash, block_hash, block.hashPrevBlock, height,
-                empty, error)) {
+        const auto root{EmptyRegistryConsensusStateRoot(m_genesis_hash)};
+        if (!root) {
+            SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
             return false;
         }
         prepared.m_incarnation = m_incarnation;
         prepared.m_kind = PQRegistryPreparedBlock::Kind::NO_COMMIT;
         prepared.m_block_hash = block_hash;
-        prepared.m_consensus_state_root = empty.consensus_state_root;
+        prepared.m_consensus_state_root = *root;
         prepared.m_height = height;
         return true;
     }
@@ -1502,38 +1517,11 @@ bool PQRegistryManager::PrepareBlockInternal(
 
     std::shared_ptr<const PQRegistrySnapshotView> parent_view;
     if (height == m_config.preparation_height) {
-        PQRegistrySnapshot parent;
-        if (!MakePrePreparationSnapshot(
-                m_genesis_hash, block.hashPrevBlock, uint256{}, height - 1,
-                parent, error)) {
-            return false;
-        }
-        const auto tree_hash{
-            GetUsedTreeIdSetHash(m_genesis_hash, parent.used_tree_ids)};
-        const auto indexes{BuildRegistryIndexes(parent.operator_states)};
-        std::optional<OperatorKeyScheduleState> parent_schedule;
-        if (parent.height > 0) {
-            parent_schedule = ScheduleStateAtHeight(m_config, parent.height);
-        }
-        auto parent_state{tree_hash && indexes &&
-                                  (parent.height == 0 || parent_schedule)
-            ? MakeRegistryStateData(
-                  std::make_shared<const std::vector<OperatorKeyState>>(),
-                  std::make_shared<const std::vector<uint256>>(), indexes,
-                  parent_schedule, *tree_hash, parent.consensus_state_root)
-            : nullptr};
-        if (!parent_state) {
-            return SetError(error,
-                            PQRegistryResult::INVALID_RESULTING_STATE);
-        }
-        auto transient_parent{std::make_shared<PQRegistrySnapshotView>()};
-        transient_parent->height = parent.height;
-        transient_parent->block_hash = parent.block_hash;
-        transient_parent->previous_block_hash = parent.previous_block_hash;
-        transient_parent->state = std::move(parent_state);
-        transient_parent->block_tree_ids =
-            std::make_shared<const std::vector<uint256>>();
-        parent_view = std::move(transient_parent);
+        LOCK(m_mutex);
+        parent_view = MakePrePreparationSnapshotView(
+            m_snapshot_cache, m_genesis_hash, m_config,
+            block.hashPrevBlock, uint256{}, height - 1, error);
+        if (!parent_view) return false;
     } else {
         LOCK(m_mutex);
         if (!ReconstructPersistentSnapshotView(
@@ -1945,10 +1933,8 @@ bool PQRegistryManager::ValidateTransaction(
         height == m_config.preparation_height};
     PQRegistryReadView parent;
     if (logical_empty_parent) {
-        PQRegistrySnapshot empty;
-        if (!MakePrePreparationSnapshot(
-                m_genesis_hash, parent_block_hash, uint256{}, height - 1,
-                empty, error)) {
+        if (!EmptyRegistryConsensusStateRoot(m_genesis_hash)) {
+            SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
             return false;
         }
     } else {
@@ -2097,11 +2083,10 @@ bool PQRegistryManager::GetReadView(
     LOCK(m_mutex);
     std::shared_ptr<const PQRegistrySnapshotView> snapshot;
     if (height < m_config.preparation_height) {
-        PQRegistrySnapshot materialized;
-        if (!MakePrePreparationSnapshot(
-                m_genesis_hash, block_hash, previous_block_hash, height,
-                materialized, error) ||
-            !CacheSnapshot(materialized, &snapshot)) {
+        auto empty{MakePrePreparationSnapshotView(
+            m_snapshot_cache, m_genesis_hash, m_config, block_hash,
+            previous_block_hash, height, error)};
+        if (!empty || !CacheSnapshotView(std::move(empty), &snapshot)) {
             if (error.result == PQRegistryResult::OK) {
                 SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
@@ -2291,10 +2276,11 @@ bool PQRegistryManager::UndoBlock(
         return SetError(error, PQRegistryResult::UNDO_MISMATCH);
     }
     if (height == m_config.preparation_height) {
-        PQRegistrySnapshot parent;
-        return MakePrePreparationSnapshot(
-            m_genesis_hash, expected_parent_block_hash, uint256{}, height - 1,
-            parent, error);
+        if (!EmptyRegistryConsensusStateRoot(m_genesis_hash)) {
+            return SetError(error,
+                            PQRegistryResult::INVALID_RESULTING_STATE);
+        }
+        return true;
     }
     std::shared_ptr<const PQRegistrySnapshotView> parent;
     return ReconstructPersistentSnapshotView(

@@ -393,10 +393,6 @@ private:
         int32_t expected_height,
         std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    [[nodiscard]] bool CacheSnapshot(
-        const PQRegistrySnapshot& snapshot,
-        std::shared_ptr<const PQRegistrySnapshotView>* cached = nullptr) const
-        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool CacheSnapshotView(
         std::shared_ptr<const PQRegistrySnapshotView> snapshot,
         std::shared_ptr<const PQRegistrySnapshotView>* cached = nullptr) const
