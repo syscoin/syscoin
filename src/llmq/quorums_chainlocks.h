@@ -18,6 +18,7 @@
 #include <llmq/pq_payment_audit_verify.h>
 #include <llmq/pq_quorum_builder.h>
 #include <protocol.h>
+#include <saltedhasher.h>
 
 #include <atomic>
 #include <chrono>
@@ -28,6 +29,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 class BlockValidationState;
@@ -217,6 +219,12 @@ ExtractDeferredPaymentAuditReceipt(
     const CBlockIndex& best_candidate)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+using ChainLockRelayRecipients =
+    std::unordered_set<uint256, StaticSaltedHasher>;
+
+[[nodiscard]] ChainLockRelayRecipients BuildChainLockRelayRecipients(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters);
+
 /**
  * Authenticate the transport relay independently from the share's original
  * signer. Both must be in the frozen context, but multi-hop gossip means they
@@ -224,6 +232,7 @@ ExtractDeferredPaymentAuditReceipt(
  */
 [[nodiscard]] bool IsAuthorizedChainLockShareRelay(
     const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
+    const ChainLockRelayRecipients& relay_recipients,
     const uint256& relay_pro_tx_hash,
     const pq::ChainLockShareTranscript& transcript) noexcept;
 
@@ -543,6 +552,7 @@ private:
         std::array<pq::ChainLockStatement, MAX_VARIANTS> statements{};
         std::size_t count{0};
         pq::FrozenQuorumRostersPtr rosters;
+        std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
         uint8_t authorization_mask{0};
 
         [[nodiscard]] std::optional<CurrentSigningContext> Find(
@@ -1018,6 +1028,8 @@ private:
     std::size_t m_collector_count GUARDED_BY(m_collector_mutex){0};
     pq::FrozenQuorumRostersPtr m_collector_rosters
         GUARDED_BY(m_collector_mutex);
+    std::shared_ptr<const ChainLockRelayRecipients>
+        m_collector_relay_recipients GUARDED_BY(m_collector_mutex);
     uint8_t m_collector_authorization_mask GUARDED_BY(m_collector_mutex){0};
     uint64_t m_collector_generation GUARDED_BY(m_collector_mutex){0};
     Mutex m_context_build_mutex;

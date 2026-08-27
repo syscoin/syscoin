@@ -1319,26 +1319,41 @@ BOOST_AUTO_TEST_CASE(share_relay_identity_is_independent_from_original_signer)
     roster.members[3].eligible = true;
     roster.members[3].pro_tx_hash = original_signer;
     roster.members[3].child_root.emplace();
-    roster.members[9].eligible = true;
-    roster.members[9].pro_tx_hash = authenticated_relay;
-    roster.members[9].child_root.emplace();
+    auto& relay_member{rosters[1].members[9]};
+    relay_member.eligible = true;
+    relay_member.pro_tx_hash = authenticated_relay;
+    relay_member.child_root.emplace();
+    const uint256 ineligible_relay{NonNullHash(24)};
+    auto& ineligible_member{rosters[2].members[10]};
+    ineligible_member.pro_tx_hash = ineligible_relay;
+    ineligible_member.child_root.emplace();
+    const uint256 rootless_relay{NonNullHash(25)};
+    auto& rootless_member{rosters[3].members[11]};
+    rootless_member.eligible = true;
+    rootless_member.pro_tx_hash = rootless_relay;
 
     llmq::pq::ChainLockShareTranscript transcript;
     transcript.quorum_epoch = roster.descriptor.epoch;
     transcript.quorum_base_hash = roster.descriptor.base_hash;
     transcript.member_index = 3;
     transcript.member_pro_tx_hash = original_signer;
+    const auto relay_recipients{
+        llmq::BuildChainLockRelayRecipients(rosters)};
 
     BOOST_CHECK(original_signer != authenticated_relay);
     BOOST_CHECK(llmq::IsAuthorizedChainLockShareRelay(
-        rosters, authenticated_relay, transcript));
+        rosters, relay_recipients, authenticated_relay, transcript));
 
     transcript.member_pro_tx_hash = NonNullHash(23);
     BOOST_CHECK(!llmq::IsAuthorizedChainLockShareRelay(
-        rosters, authenticated_relay, transcript));
+        rosters, relay_recipients, authenticated_relay, transcript));
     transcript.member_pro_tx_hash = original_signer;
     BOOST_CHECK(!llmq::IsAuthorizedChainLockShareRelay(
-        rosters, NonNullHash(24), transcript));
+        rosters, relay_recipients, NonNullHash(26), transcript));
+    BOOST_CHECK(!llmq::IsAuthorizedChainLockShareRelay(
+        rosters, relay_recipients, ineligible_relay, transcript));
+    BOOST_CHECK(!llmq::IsAuthorizedChainLockShareRelay(
+        rosters, relay_recipients, rootless_relay, transcript));
 }
 
 BOOST_FIXTURE_TEST_CASE(

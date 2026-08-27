@@ -6633,12 +6633,13 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts(
         -> std::optional<CurrentSigningContexts> {
         LOCK(m_collector_mutex);
         if (m_collector_count == 0 || !m_collectors[0] ||
-            !m_collector_rosters) {
+            !m_collector_rosters || !m_collector_relay_recipients) {
             return std::nullopt;
         }
         CurrentSigningContexts contexts;
         contexts.count = m_collector_count;
         contexts.rosters = m_collector_rosters;
+        contexts.relay_recipients = m_collector_relay_recipients;
         contexts.authorization_mask = m_collector_authorization_mask;
         for (std::size_t i{0}; i < contexts.count; ++i) {
             if (!m_collectors[i]) return std::nullopt;
@@ -6693,6 +6694,10 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts(
     if (!current) return std::nullopt;
     if (!is_current(*current)) return std::nullopt;
 
+    auto relay_recipients{std::make_shared<const ChainLockRelayRecipients>(
+        BuildChainLockRelayRecipients(*current->rosters))};
+    current->relay_recipients = relay_recipients;
+
     std::array<std::unique_ptr<pq::ChainLockCollector>,
                CurrentSigningContexts::MAX_VARIANTS> collectors;
     for (std::size_t i{0}; i < current->count; ++i) {
@@ -6714,6 +6719,7 @@ CChainLocksHandler::GetOrCreateCurrentSigningContexts(
         m_collectors = std::move(collectors);
         m_collector_count = current->count;
         m_collector_rosters = current->rosters;
+        m_collector_relay_recipients = relay_recipients;
         m_collector_authorization_mask = current->authorization_mask;
         published_generation = ++m_collector_generation;
     }
@@ -7900,9 +7906,10 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
     auto contexts{GetOrCreateCurrentSigningContexts(admission_generation)};
     const auto current{contexts ? contexts->Find(share.GetStatement())
                                 : std::nullopt};
-    if (!current || !current->rosters ||
+    if (!current || !current->rosters || !contexts->relay_recipients ||
         !IsAuthorizedChainLockShareRelay(
-            *current->rosters, peer_identity, share.transcript)) {
+            *current->rosters, *contexts->relay_recipients,
+            peer_identity, share.transcript)) {
         // Shares are multi-hop gossip. The authenticated transport peer must
         // belong to an active roster, while the signed transcript identifies
         // the original member and is checked by the collector below. A share
@@ -9750,8 +9757,24 @@ void CChainLocksHandler::ForgetAllRequests(const uint256& logical_id)
     m_peerman.ForgetTxHash(-1, logical_id);
 }
 
+ChainLockRelayRecipients BuildChainLockRelayRecipients(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters)
+{
+    ChainLockRelayRecipients recipients;
+    recipients.reserve(pq::ACTIVE_QUORUMS * pq::QUORUM_SIZE);
+    for (const auto& roster : rosters) {
+        for (const auto& member : roster.members) {
+            if (member.eligible && member.child_root) {
+                recipients.insert(member.pro_tx_hash);
+            }
+        }
+    }
+    return recipients;
+}
+
 bool IsAuthorizedChainLockShareRelay(
     const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
+    const ChainLockRelayRecipients& relay_recipients,
     const uint256& relay_pro_tx_hash,
     const pq::ChainLockShareTranscript& transcript) noexcept
 {
@@ -9760,15 +9783,10 @@ bool IsAuthorizedChainLockShareRelay(
         transcript.member_pro_tx_hash.IsNull()) {
         return false;
     }
-    bool relay_is_active{false};
+    if (!relay_recipients.contains(relay_pro_tx_hash)) return false;
+
     bool signer_matches_transcript{false};
     for (const auto& roster : rosters) {
-        for (const auto& member : roster.members) {
-            if (member.eligible && member.child_root &&
-                member.pro_tx_hash == relay_pro_tx_hash) {
-                relay_is_active = true;
-            }
-        }
         if (roster.descriptor.epoch == transcript.quorum_epoch &&
             roster.descriptor.base_hash == transcript.quorum_base_hash) {
             const auto& signer{roster.members[transcript.member_index]};
@@ -9777,7 +9795,7 @@ bool IsAuthorizedChainLockShareRelay(
                 signer.pro_tx_hash == transcript.member_pro_tx_hash;
         }
     }
-    return relay_is_active && signer_matches_transcript;
+    return signer_matches_transcript;
 }
 
 pq::ChainLockCollector* CChainLocksHandler::FindCollector(
@@ -9809,6 +9827,7 @@ void CChainLocksHandler::ResetCollectors()
     for (auto& collector : m_collectors) collector.reset();
     m_collector_count = 0;
     m_collector_rosters.reset();
+    m_collector_relay_recipients.reset();
     m_collector_authorization_mask = 0;
     ++m_collector_generation;
 }
@@ -9824,21 +9843,15 @@ void CChainLocksHandler::RelayChainLockShare(
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
     }
-    std::set<uint256> recipients;
+    std::shared_ptr<const ChainLockRelayRecipients> recipients;
     {
         LOCK(m_collector_mutex);
         if (FindCollector(share.GetStatement()) == nullptr) {
             return;
         }
-        if (!m_collector_rosters) return;
-        for (const auto& roster : *m_collector_rosters) {
-            for (const auto& member : roster.members) {
-                if (member.eligible && member.child_root) {
-                    recipients.insert(member.pro_tx_hash);
-                }
-            }
-        }
+        recipients = m_collector_relay_recipients;
     }
+    if (!recipients) return;
 
     m_connman.ForEachNode([&](CNode* node) {
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
@@ -9847,7 +9860,7 @@ void CChainLocksHandler::RelayChainLockShare(
             return;
         }
         const uint256 identity{node->GetVerifiedProRegTxHash()};
-        if (identity.IsNull() || recipients.count(identity) == 0) return;
+        if (identity.IsNull() || !recipients->contains(identity)) return;
         m_connman.PushMessage(
             node, CNetMsgMaker(node->GetCommonVersion())
                       .Make(NetMsgType::PQCLSHARE, share));
