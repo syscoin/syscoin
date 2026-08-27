@@ -31,6 +31,7 @@ class ChainstateManager;
 
 namespace llmq::pq {
 struct PQRegistrySnapshot;
+class PQRegistryReadView;
 }
 
 
@@ -104,6 +105,15 @@ public: // Types
     using vote_m_t = std::map<COutPoint, vote_rec_t>;
 
 private:
+    template <typename RegistrySnapshot>
+    std::set<uint256> RemoveInvalidPQVotesImpl(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const RegistrySnapshot& current_snapshot,
+        const std::optional<COutPoint>& masternode_filter,
+        std::size_t* checked_votes,
+        std::set<COutPoint>* removed_operators);
+
     /// critical section to protect the inner data structures
     mutable RecursiveMutex cs;
 
@@ -273,6 +283,11 @@ public:
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& current_snapshot,
         std::string& error) const;
+    bool CheckPQAuthorizationContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistryReadView& current_snapshot,
+        std::string& error) const;
 
     uint256 GetSignatureHash() const;
 
@@ -367,6 +382,13 @@ public:
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& current_snapshot,
+        const std::optional<COutPoint>& masternode_filter = std::nullopt,
+        std::size_t* checked_votes = nullptr,
+        std::set<COutPoint>* removed_operators = nullptr);
+    std::set<uint256> RemoveInvalidPQVotes(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistryReadView& current_snapshot,
         const std::optional<COutPoint>& masternode_filter = std::nullopt,
         std::size_t* checked_votes = nullptr,
         std::set<COutPoint>* removed_operators = nullptr);

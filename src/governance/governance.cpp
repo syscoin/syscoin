@@ -61,6 +61,26 @@ bool IsDelegatedProposalFundingVote(
         signal == VOTE_SIGNAL_FUNDING;
 }
 
+int32_t RegistryHeight(const llmq::pq::PQRegistrySnapshot& snapshot)
+{
+    return snapshot.height;
+}
+
+int32_t RegistryHeight(const llmq::pq::PQRegistryReadView& snapshot)
+{
+    return snapshot.Height();
+}
+
+uint256 RegistryBlockHash(const llmq::pq::PQRegistrySnapshot& snapshot)
+{
+    return snapshot.block_hash;
+}
+
+uint256 RegistryBlockHash(const llmq::pq::PQRegistryReadView& snapshot)
+{
+    return snapshot.BlockHash();
+}
+
 class ScopedGovernanceResponse final
 {
 public:
@@ -4356,10 +4376,11 @@ bool CGovernanceManager::IsPQInactiveTrigger(
     return m_pq_inactive_triggers.contains(object_hash);
 }
 
-bool CGovernanceManager::RebuildPQTriggerState(
+template <typename RegistrySnapshot>
+bool CGovernanceManager::RebuildPQTriggerStateImpl(
     const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
-    const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+    const RegistrySnapshot& registry_snapshot,
     bool recompute_cached_flags,
     std::set<uint256>* reactivated_triggers)
 {
@@ -4461,6 +4482,30 @@ bool CGovernanceManager::RebuildPQTriggerState(
     InvalidateObjectPageCache();
     m_pq_trigger_state_initialized = true;
     return true;
+}
+
+bool CGovernanceManager::RebuildPQTriggerState(
+    const CBlockIndex& validation_tip,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+    bool recompute_cached_flags,
+    std::set<uint256>* reactivated_triggers)
+{
+    return RebuildPQTriggerStateImpl(
+        validation_tip, validation_mn_list, registry_snapshot,
+        recompute_cached_flags, reactivated_triggers);
+}
+
+bool CGovernanceManager::RebuildPQTriggerState(
+    const CBlockIndex& validation_tip,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistryReadView& registry_snapshot,
+    bool recompute_cached_flags,
+    std::set<uint256>* reactivated_triggers)
+{
+    return RebuildPQTriggerStateImpl(
+        validation_tip, validation_mn_list, registry_snapshot,
+        recompute_cached_flags, reactivated_triggers);
 }
 
 bool CGovernanceManager::InitOnLoad()
@@ -4580,10 +4625,11 @@ UniValue CGovernanceManager::ToJson() const
     return jsonObj;
 }
 
-bool CGovernanceManager::BuildPQGovernanceAuthorityMap(
+template <typename RegistrySnapshot>
+bool CGovernanceManager::BuildPQGovernanceAuthorityMapImpl(
     const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
-    const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+    const RegistrySnapshot& registry_snapshot,
     pq_authority_map_t& authorities,
     std::string& error)
 {
@@ -4592,8 +4638,9 @@ bool CGovernanceManager::BuildPQGovernanceAuthorityMap(
         validation_mn_list.GetHeight() != validation_tip.nHeight ||
         validation_mn_list.GetBlockHash() !=
             validation_tip.GetBlockHash() ||
-        registry_snapshot.height != validation_tip.nHeight ||
-        registry_snapshot.block_hash != validation_tip.GetBlockHash()) {
+        RegistryHeight(registry_snapshot) != validation_tip.nHeight ||
+        RegistryBlockHash(registry_snapshot) !=
+            validation_tip.GetBlockHash()) {
         error = "governance authority inputs do not match the exact tip";
         return false;
     }
@@ -4617,6 +4664,30 @@ bool CGovernanceManager::BuildPQGovernanceAuthorityMap(
     }
     error.clear();
     return true;
+}
+
+bool CGovernanceManager::BuildPQGovernanceAuthorityMap(
+    const CBlockIndex& validation_tip,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+    pq_authority_map_t& authorities,
+    std::string& error)
+{
+    return BuildPQGovernanceAuthorityMapImpl(
+        validation_tip, validation_mn_list, registry_snapshot, authorities,
+        error);
+}
+
+bool CGovernanceManager::BuildPQGovernanceAuthorityMap(
+    const CBlockIndex& validation_tip,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistryReadView& registry_snapshot,
+    pq_authority_map_t& authorities,
+    std::string& error)
+{
+    return BuildPQGovernanceAuthorityMapImpl(
+        validation_tip, validation_mn_list, registry_snapshot, authorities,
+        error);
 }
 
 bool CGovernanceManager::BuildDelegatedGovernanceAuthorityMap(
@@ -4711,10 +4782,11 @@ CGovernanceManager::FindChangedDelegatedGovernanceAuthorities(
     return changed;
 }
 
-bool CGovernanceManager::ReconcileGovernanceVotes(
+template <typename RegistrySnapshot>
+bool CGovernanceManager::ReconcileGovernanceVotesImpl(
     const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
-    const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+    const RegistrySnapshot& registry_snapshot,
     bool full_revalidation,
     const std::set<COutPoint>& changed_pq_operators,
     const std::set<COutPoint>& changed_delegated_operators,
@@ -4893,6 +4965,44 @@ bool CGovernanceManager::ReconcileGovernanceVotes(
     return true;
 }
 
+bool CGovernanceManager::ReconcileGovernanceVotes(
+    const CBlockIndex& validation_tip,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+    bool full_revalidation,
+    const std::set<COutPoint>& changed_pq_operators,
+    const std::set<COutPoint>& changed_delegated_operators,
+    const std::set<uint256>& reactivated_triggers,
+    std::set<uint256>& flags_to_refresh,
+    std::size_t& checked_pq_votes,
+    std::size_t& checked_delegated_votes)
+{
+    return ReconcileGovernanceVotesImpl(
+        validation_tip, validation_mn_list, registry_snapshot,
+        full_revalidation, changed_pq_operators,
+        changed_delegated_operators, reactivated_triggers, flags_to_refresh,
+        checked_pq_votes, checked_delegated_votes);
+}
+
+bool CGovernanceManager::ReconcileGovernanceVotes(
+    const CBlockIndex& validation_tip,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistryReadView& registry_snapshot,
+    bool full_revalidation,
+    const std::set<COutPoint>& changed_pq_operators,
+    const std::set<COutPoint>& changed_delegated_operators,
+    const std::set<uint256>& reactivated_triggers,
+    std::set<uint256>& flags_to_refresh,
+    std::size_t& checked_pq_votes,
+    std::size_t& checked_delegated_votes)
+{
+    return ReconcileGovernanceVotesImpl(
+        validation_tip, validation_mn_list, registry_snapshot,
+        full_revalidation, changed_pq_operators,
+        changed_delegated_operators, reactivated_triggers, flags_to_refresh,
+        checked_pq_votes, checked_delegated_votes);
+}
+
 bool CGovernanceManager::RevalidatePQGovernance(
     const CBlockIndex& validation_tip)
 {
@@ -4929,9 +5039,9 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
                  __func__, e.what());
         return false;
     }
-    llmq::pq::PQRegistrySnapshot registry_snapshot;
+    llmq::pq::PQRegistryReadView registry_snapshot;
     std::string registry_error;
-    if (!deterministicMNManager->GetPQRegistrySnapshot(
+    if (!deterministicMNManager->GetPQRegistryReadView(
             &validation_tip, registry_snapshot, registry_error)) {
         RememberFailedPQGovernanceTip(validation_tip);
         LogPrint(BCLog::GOBJECT,

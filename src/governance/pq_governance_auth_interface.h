@@ -17,6 +17,7 @@ class COutPoint;
 namespace llmq::pq {
 
 struct PQRegistrySnapshot;
+class PQRegistryReadView;
 
 [[nodiscard]] bool IsGovernanceAuthorizationOnBranch(
     const CBlockIndex& validation_branch,
@@ -43,6 +44,15 @@ struct PQRegistrySnapshot;
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const PQRegistrySnapshot& current_snapshot,
+    const COutPoint& masternode_outpoint,
+    std::span<const unsigned char> encoded,
+    GovernanceAuthorization& authorization,
+    std::string& error);
+
+[[nodiscard]] bool CheckGovernanceAuthorizationContext(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const PQRegistryReadView& current_snapshot,
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,

@@ -351,10 +351,11 @@ CGovernanceObject::RemoveInvalidDelegatedFundingVotes(
     return removed_votes;
 }
 
-std::set<uint256> CGovernanceObject::RemoveInvalidPQVotes(
+template <typename RegistrySnapshot>
+std::set<uint256> CGovernanceObject::RemoveInvalidPQVotesImpl(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
-    const llmq::pq::PQRegistrySnapshot& current_snapshot,
+    const RegistrySnapshot& current_snapshot,
     const std::optional<COutPoint>& masternode_filter,
     std::size_t* checked_votes,
     std::set<COutPoint>* removed_operators)
@@ -416,6 +417,32 @@ std::set<uint256> CGovernanceObject::RemoveInvalidPQVotes(
     }
     fDirtyCache = true;
     return removed_votes;
+}
+
+std::set<uint256> CGovernanceObject::RemoveInvalidPQVotes(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistrySnapshot& current_snapshot,
+    const std::optional<COutPoint>& masternode_filter,
+    std::size_t* checked_votes,
+    std::set<COutPoint>* removed_operators)
+{
+    return RemoveInvalidPQVotesImpl(
+        validation_branch, validation_mn_list, current_snapshot,
+        masternode_filter, checked_votes, removed_operators);
+}
+
+std::set<uint256> CGovernanceObject::RemoveInvalidPQVotes(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistryReadView& current_snapshot,
+    const std::optional<COutPoint>& masternode_filter,
+    std::size_t* checked_votes,
+    std::set<COutPoint>* removed_operators)
+{
+    return RemoveInvalidPQVotesImpl(
+        validation_branch, validation_mn_list, current_snapshot,
+        masternode_filter, checked_votes, removed_operators);
 }
 
 bool CGovernanceObject::HasPQVoteFromMasternode(
@@ -572,6 +599,18 @@ bool CGovernanceObject::CheckPQAuthorizationContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const llmq::pq::PQRegistrySnapshot& current_snapshot,
+    std::string& error) const
+{
+    llmq::pq::GovernanceAuthorization authorization;
+    return llmq::pq::CheckGovernanceAuthorizationContext(
+        validation_branch, validation_mn_list, current_snapshot,
+        m_obj.masternodeOutpoint, m_obj.vchSig, authorization, error);
+}
+
+bool CGovernanceObject::CheckPQAuthorizationContext(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistryReadView& current_snapshot,
     std::string& error) const
 {
     llmq::pq::GovernanceAuthorization authorization;

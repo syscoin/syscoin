@@ -722,9 +722,9 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
         return;
     }
 
-    llmq::pq::PQRegistrySnapshot pq_snapshot;
+    llmq::pq::PQRegistryReadView pq_snapshot;
     std::string registry_error;
-    if (!deterministicMNManager->GetPQRegistrySnapshot(
+    if (!deterministicMNManager->GetPQRegistryReadView(
             pindex, pq_snapshot, registry_error)) {
         state = MASTERNODE_ERROR;
         strError = "Unable to load the active PQ operator registry: " +
@@ -732,21 +732,16 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
         return;
     }
 
-    const llmq::pq::OperatorKeyState* local_operator{nullptr};
-    for (const auto& operator_state : pq_snapshot.operator_states) {
-        if (!operator_state.HasActiveGlobalKey() ||
-            !activeMasternodeInfo.operatorKeyManager->Matches(
-                operator_state.global_key)) {
-            continue;
-        }
-        if (local_operator != nullptr) {
-            state = MASTERNODE_ERROR;
-            strError = "Local SLH-DSA key is registered to multiple masternodes";
-            return;
-        }
-        local_operator = &operator_state;
+    const auto local_pro_tx_hash{pq_snapshot.FindActiveOperatorByGlobalKey(
+        activeMasternodeInfo.operatorKeyManager->GetGlobalPublicKey())};
+    const llmq::pq::OperatorKeyState* local_operator{
+        local_pro_tx_hash ? pq_snapshot.FindOperator(*local_pro_tx_hash)
+                          : nullptr};
+    if (local_operator == nullptr ||
+        !activeMasternodeInfo.operatorKeyManager->Matches(
+            local_operator->global_key)) {
+        return;
     }
-    if (local_operator == nullptr) return;
 
     CDeterministicMNCPtr dmn = mnList.GetMN(local_operator->pro_tx_hash);
     if (!dmn) {
@@ -826,10 +821,10 @@ void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, con
         }
 
         auto newDmn = newMNList.GetMN(activeMasternodeInfo.proTxHash);
-        llmq::pq::PQRegistrySnapshot pq_snapshot;
+        llmq::pq::PQRegistryReadView pq_snapshot;
         std::string registry_error;
         const auto* operator_state =
-            deterministicMNManager->GetPQRegistrySnapshot(
+            deterministicMNManager->GetPQRegistryReadView(
                 pindexNew, pq_snapshot, registry_error)
                 ? pq_snapshot.FindOperator(activeMasternodeInfo.proTxHash)
                 : nullptr;

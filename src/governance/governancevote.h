@@ -26,6 +26,7 @@ class PeerManager;
 namespace llmq::pq {
 enum class GovernanceAuthPurpose : uint8_t;
 struct PQRegistrySnapshot;
+class PQRegistryReadView;
 }
 
 // INTENTION OF MASTERNODES REGARDING ITEM
@@ -144,6 +145,11 @@ public:
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& current_snapshot,
+        std::string& error) const;
+    bool CheckPQAuthorizationContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistryReadView& current_snapshot,
         std::string& error) const;
     bool IsValid(const CDeterministicMNList& tip_mn_list) const;
     bool IsValidPQ(const CBlockIndex& validation_branch,

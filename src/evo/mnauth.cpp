@@ -89,12 +89,12 @@ bool LoadRegistryConnectionContext(
         return false;
     }
 
-    llmq::pq::PQRegistrySnapshot snapshot;
-    if (!deterministicMNManager->GetPQRegistrySnapshot(
+    llmq::pq::PQRegistryReadView snapshot;
+    if (!deterministicMNManager->GetPQRegistryReadView(
             context.tip, snapshot, error)) {
         return false;
     }
-    if (snapshot.block_hash != context.tip_hash) {
+    if (snapshot.BlockHash() != context.tip_hash) {
         error = "PQ registry snapshot does not match the active tip";
         return false;
     }
@@ -1604,12 +1604,12 @@ void CMNAuth::UpdatedBlockTip(const CBlockIndex* pindex_new,
 {
     if (pindex_new == nullptr || deterministicMNManager == nullptr) return;
 
-    llmq::pq::PQRegistrySnapshot snapshot;
+    llmq::pq::PQRegistryReadView snapshot;
     std::string error;
     const bool have_snapshot =
-        deterministicMNManager->GetPQRegistrySnapshot(
+        deterministicMNManager->GetPQRegistryReadView(
             pindex_new, snapshot, error) &&
-        snapshot.block_hash == pindex_new->GetBlockHash();
+        snapshot.BlockHash() == pindex_new->GetBlockHash();
     const CDeterministicMNList mn_list =
         deterministicMNManager->GetListForBlock(pindex_new);
 

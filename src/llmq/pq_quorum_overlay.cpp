@@ -43,25 +43,6 @@ std::optional<pq::GlobalPublicKey> GetLocalGlobalPublicKey()
     return activeMasternodeInfo.operatorKeyManager->GetGlobalPublicKey();
 }
 
-std::optional<uint256> FindLocalOperator(
-    const pq::PQRegistrySnapshot& registry,
-    const pq::GlobalPublicKey& public_key)
-{
-    std::optional<uint256> result;
-    for (const auto& state : registry.operator_states) {
-        if (!state.HasActiveGlobalKey() ||
-            state.global_key.public_key != public_key) {
-            continue;
-        }
-        // A duplicated global key is never a usable local identity. This
-        // mirrors active-masternode initialization and avoids topology
-        // selection from an ambiguous registration.
-        if (result) return std::nullopt;
-        result = state.pro_tx_hash;
-    }
-    return result;
-}
-
 std::optional<pq::QuorumSnapshotState> GetQuorumSnapshot(
     const CBlockIndex& index)
 {
@@ -283,9 +264,9 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
         return;
     }
 
-    pq::PQRegistrySnapshot current_registry;
+    pq::PQRegistryReadView current_registry;
     std::string registry_error;
-    if (!deterministicMNManager->GetPQRegistrySnapshot(
+    if (!deterministicMNManager->GetPQRegistryReadView(
             new_tip, current_registry, registry_error)) {
         // Snapshot recovery may be transient during a reorg. Keeping the old
         // bounded overlay cannot authorize a share and avoids needless
@@ -295,15 +276,16 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
                  new_tip->nHeight, registry_error);
         return;
     }
-    if (current_registry.height != new_tip->nHeight ||
-        current_registry.block_hash != new_tip->GetBlockHash()) {
+    if (current_registry.Height() != new_tip->nHeight ||
+        current_registry.BlockHash() != new_tip->GetBlockHash()) {
         LogPrint(BCLog::NET_NETCONN,
                  "PQ overlay retaining previous topology; active registry "
                  "snapshot mismatch at height=%d\n",
                  new_tip->nHeight);
         return;
     }
-    const auto local_operator{FindLocalOperator(current_registry, *public_key)};
+    const auto local_operator{
+        current_registry.FindActiveOperatorByGlobalKey(*public_key)};
     if (!local_operator) {
         ClearLocked();
         return;

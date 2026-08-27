@@ -39,81 +39,13 @@ bool CheckPostAnchorBranch(const CBlockIndex& block, std::string& error)
     return true;
 }
 
-} // namespace
-
-bool IsGovernanceAuthorizationOnBranch(
-    const CBlockIndex& validation_branch,
-    const GovernanceAuthorization& authorization) noexcept
-{
-    if (!authorization.IsHeaderStructurallyValid() ||
-        authorization.signed_height > validation_branch.nHeight) {
-        return false;
-    }
-    const CBlockIndex* signing_block{
-        validation_branch.GetAncestor(authorization.signed_height)};
-    return signing_block != nullptr &&
-           signing_block->GetBlockHash() == authorization.signed_block_hash;
-}
-
-bool GetGovernanceSigningKey(const CBlockIndex& signing_block,
-                             const uint256& pro_tx_hash,
-                             uint32_t global_key_version,
-                             GlobalKeyRecord& key,
-                             std::string& error)
-{
-    if (pro_tx_hash.IsNull() || global_key_version == 0 ||
-        !CheckPostAnchorBranch(signing_block, error)) {
-        if (error.empty()) error = "invalid governance signer identity";
-        return false;
-    }
-    if (deterministicMNManager == nullptr) {
-        error = "deterministic masternode manager is unavailable";
-        return false;
-    }
-
-    PQRegistrySnapshot snapshot;
-    if (!deterministicMNManager->GetPQRegistrySnapshot(
-            &signing_block, snapshot, error)) {
-        error = "unable to reconstruct governance signing registry: " + error;
-        return false;
-    }
-    const OperatorKeyState* state{snapshot.FindOperator(pro_tx_hash)};
-    if (state == nullptr || !state->HasActiveGlobalKey() ||
-        state->global_key.key_version != global_key_version ||
-        state->global_key.activated_height >
-            static_cast<uint32_t>(signing_block.nHeight)) {
-        error = "governance signer key is not active at the signed block";
-        return false;
-    }
-    key = state->global_key;
-    error.clear();
-    return true;
-}
-
-bool CheckGovernanceAuthorizationContextForBranch(
+template <typename FindOperator>
+bool CheckGovernanceAuthorizationContextImpl(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
-    const COutPoint& masternode_outpoint,
-    std::span<const unsigned char> encoded,
-    GovernanceAuthorization& authorization,
-    std::string& error)
-{
-    PQRegistrySnapshot current_snapshot;
-    if (deterministicMNManager == nullptr ||
-        !deterministicMNManager->GetPQRegistrySnapshot(
-            &validation_branch, current_snapshot, error)) {
-        error = "unable to reconstruct current governance registry: " + error;
-        return false;
-    }
-    return CheckGovernanceAuthorizationContext(
-        validation_branch, validation_mn_list, current_snapshot,
-        masternode_outpoint, encoded, authorization, error);
-}
-
-bool CheckGovernanceAuthorizationContext(
-    const CBlockIndex& validation_branch,
-    const CDeterministicMNList& validation_mn_list,
-    const PQRegistrySnapshot& current_snapshot,
+    int32_t registry_height,
+    const uint256& registry_block_hash,
+    FindOperator&& find_operator,
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
@@ -153,14 +85,13 @@ bool CheckGovernanceAuthorizationContext(
         error = "governance signer is not a current valid deterministic masternode";
         return false;
     }
-
-    if (current_snapshot.height != validation_branch.nHeight ||
-        current_snapshot.block_hash != validation_branch.GetBlockHash()) {
+    if (registry_height != validation_branch.nHeight ||
+        registry_block_hash != validation_branch.GetBlockHash()) {
         error = "current governance registry does not match the branch";
         return false;
     }
     const OperatorKeyState* current_state{
-        current_snapshot.FindOperator(authorization.pro_tx_hash)};
+        find_operator(authorization.pro_tx_hash)};
     if (current_state == nullptr || !current_state->HasActiveGlobalKey() ||
         !GovernanceAuthorizationMatchesCurrentKey(
             authorization, current_state->global_key)) {
@@ -170,6 +101,113 @@ bool CheckGovernanceAuthorizationContext(
 
     error.clear();
     return true;
+}
+
+} // namespace
+
+bool IsGovernanceAuthorizationOnBranch(
+    const CBlockIndex& validation_branch,
+    const GovernanceAuthorization& authorization) noexcept
+{
+    if (!authorization.IsHeaderStructurallyValid() ||
+        authorization.signed_height > validation_branch.nHeight) {
+        return false;
+    }
+    const CBlockIndex* signing_block{
+        validation_branch.GetAncestor(authorization.signed_height)};
+    return signing_block != nullptr &&
+           signing_block->GetBlockHash() == authorization.signed_block_hash;
+}
+
+bool GetGovernanceSigningKey(const CBlockIndex& signing_block,
+                             const uint256& pro_tx_hash,
+                             uint32_t global_key_version,
+                             GlobalKeyRecord& key,
+                             std::string& error)
+{
+    if (pro_tx_hash.IsNull() || global_key_version == 0 ||
+        !CheckPostAnchorBranch(signing_block, error)) {
+        if (error.empty()) error = "invalid governance signer identity";
+        return false;
+    }
+    if (deterministicMNManager == nullptr) {
+        error = "deterministic masternode manager is unavailable";
+        return false;
+    }
+
+    PQRegistryReadView snapshot;
+    if (!deterministicMNManager->GetPQRegistryReadView(
+            &signing_block, snapshot, error)) {
+        error = "unable to reconstruct governance signing registry: " + error;
+        return false;
+    }
+    const OperatorKeyState* state{snapshot.FindOperator(pro_tx_hash)};
+    if (state == nullptr || !state->HasActiveGlobalKey() ||
+        state->global_key.key_version != global_key_version ||
+        state->global_key.activated_height >
+            static_cast<uint32_t>(signing_block.nHeight)) {
+        error = "governance signer key is not active at the signed block";
+        return false;
+    }
+    key = state->global_key;
+    error.clear();
+    return true;
+}
+
+bool CheckGovernanceAuthorizationContextForBranch(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const COutPoint& masternode_outpoint,
+    std::span<const unsigned char> encoded,
+    GovernanceAuthorization& authorization,
+    std::string& error)
+{
+    PQRegistryReadView current_snapshot;
+    if (deterministicMNManager == nullptr ||
+        !deterministicMNManager->GetPQRegistryReadView(
+            &validation_branch, current_snapshot, error)) {
+        error = "unable to reconstruct current governance registry: " + error;
+        return false;
+    }
+    return CheckGovernanceAuthorizationContext(
+        validation_branch, validation_mn_list, current_snapshot,
+        masternode_outpoint, encoded, authorization, error);
+}
+
+bool CheckGovernanceAuthorizationContext(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const PQRegistrySnapshot& current_snapshot,
+    const COutPoint& masternode_outpoint,
+    std::span<const unsigned char> encoded,
+    GovernanceAuthorization& authorization,
+    std::string& error)
+{
+    return CheckGovernanceAuthorizationContextImpl(
+        validation_branch, validation_mn_list, current_snapshot.height,
+        current_snapshot.block_hash,
+        [&](const uint256& pro_tx_hash) {
+            return current_snapshot.FindOperator(pro_tx_hash);
+        },
+        masternode_outpoint, encoded, authorization, error);
+}
+
+bool CheckGovernanceAuthorizationContext(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const PQRegistryReadView& current_snapshot,
+    const COutPoint& masternode_outpoint,
+    std::span<const unsigned char> encoded,
+    GovernanceAuthorization& authorization,
+    std::string& error)
+{
+    return CheckGovernanceAuthorizationContextImpl(
+        validation_branch, validation_mn_list, current_snapshot.Height(),
+        current_snapshot.BlockHash(),
+        [&](const uint256& pro_tx_hash) {
+            return current_snapshot.FindOperator(pro_tx_hash);
+        },
+        masternode_outpoint, encoded, authorization, error);
 }
 
 bool VerifyGovernanceAuthorizationForBranch(

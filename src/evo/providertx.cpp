@@ -54,11 +54,12 @@ bool HasNonZeroByte(const Range& range)
 bool GetParentOperatorKey(const CBlockIndex* pindex_prev,
                           const uint256& pro_tx_hash,
                           const llmq::pq::OperatorKeyState*& operator_state,
-                          llmq::pq::PQRegistrySnapshot& snapshot)
+                          llmq::pq::PQRegistryReadView& snapshot)
 {
     if (pindex_prev == nullptr || deterministicMNManager == nullptr) return false;
     std::string error;
-    if (!deterministicMNManager->GetPQRegistrySnapshot(pindex_prev, snapshot, error)) {
+    if (!deterministicMNManager->GetPQRegistryReadView(
+            pindex_prev, snapshot, error)) {
         return false;
     }
     operator_state = snapshot.FindOperator(pro_tx_hash);
@@ -449,7 +450,7 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
         if (ShouldCheckProviderAuthorization(
                 auth_era, check_sigs, validation_context)) {
             if (auth_era == ProviderAuthEra::POST_QUANTUM) {
-                llmq::pq::PQRegistrySnapshot registry_snapshot;
+                llmq::pq::PQRegistryReadView registry_snapshot;
                 const llmq::pq::OperatorKeyState* operator_state{nullptr};
                 if (!GetParentOperatorKey(pindexPrev, ptx.proTxHash,
                                           operator_state, registry_snapshot) ||
@@ -606,7 +607,7 @@ bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
             ShouldCheckProviderAuthorization(
                 auth_era, check_sigs, validation_context)) {
             if (auth_era == ProviderAuthEra::POST_QUANTUM) {
-                llmq::pq::PQRegistrySnapshot registry_snapshot;
+                llmq::pq::PQRegistryReadView registry_snapshot;
                 const llmq::pq::OperatorKeyState* operator_state{nullptr};
                 if (!GetParentOperatorKey(pindexPrev, ptx.proTxHash,
                                           operator_state, registry_snapshot) ||

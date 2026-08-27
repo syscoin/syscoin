@@ -309,6 +309,18 @@ bool CGovernanceVote::CheckPQAuthorizationContext(
         masternodeOutpoint, vchSig, authorization, error);
 }
 
+bool CGovernanceVote::CheckPQAuthorizationContext(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const llmq::pq::PQRegistryReadView& current_snapshot,
+    std::string& error) const
+{
+    llmq::pq::GovernanceAuthorization authorization;
+    return llmq::pq::CheckGovernanceAuthorizationContext(
+        validation_branch, validation_mn_list, current_snapshot,
+        masternodeOutpoint, vchSig, authorization, error);
+}
+
 bool CGovernanceVote::IsValidBasic(
     const CDeterministicMNList& validation_mn_list) const
 {

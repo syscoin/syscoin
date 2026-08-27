@@ -786,10 +786,25 @@ private:
     [[nodiscard]] bool RevalidatePQGovernanceImpl(
         const CBlockIndex& validation_tip);
 
+    template <typename RegistrySnapshot>
+    [[nodiscard]] static bool BuildPQGovernanceAuthorityMapImpl(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const RegistrySnapshot& registry_snapshot,
+        pq_authority_map_t& authorities,
+        std::string& error);
+
     [[nodiscard]] static bool BuildPQGovernanceAuthorityMap(
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+        pq_authority_map_t& authorities,
+        std::string& error);
+
+    [[nodiscard]] static bool BuildPQGovernanceAuthorityMap(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistryReadView& registry_snapshot,
         pq_authority_map_t& authorities,
         std::string& error);
 
@@ -823,10 +838,38 @@ private:
     void RemoveObjectFromGovernanceVoteIndexes(
         const uint256& object_hash, const CGovernanceObject& object)
         EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    template <typename RegistrySnapshot>
+    [[nodiscard]] bool ReconcileGovernanceVotesImpl(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const RegistrySnapshot& registry_snapshot,
+        bool full_revalidation,
+        const std::set<COutPoint>& changed_pq_operators,
+        const std::set<COutPoint>& changed_delegated_operators,
+        const std::set<uint256>& reactivated_triggers,
+        std::set<uint256>& flags_to_refresh,
+        std::size_t& checked_pq_votes,
+        std::size_t& checked_delegated_votes)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     [[nodiscard]] bool ReconcileGovernanceVotes(
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+        bool full_revalidation,
+        const std::set<COutPoint>& changed_pq_operators,
+        const std::set<COutPoint>& changed_delegated_operators,
+        const std::set<uint256>& reactivated_triggers,
+        std::set<uint256>& flags_to_refresh,
+        std::size_t& checked_pq_votes,
+        std::size_t& checked_delegated_votes)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    [[nodiscard]] bool ReconcileGovernanceVotes(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistryReadView& registry_snapshot,
         bool full_revalidation,
         const std::set<COutPoint>& changed_pq_operators,
         const std::set<COutPoint>& changed_delegated_operators,
@@ -846,10 +889,27 @@ private:
         const CBlockIndex& validation_tip,
         bool advance_validation_context = false);
 
+    template <typename RegistrySnapshot>
+    [[nodiscard]] bool RebuildPQTriggerStateImpl(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const RegistrySnapshot& registry_snapshot,
+        bool recompute_cached_flags,
+        std::set<uint256>* reactivated_triggers)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     [[nodiscard]] bool RebuildPQTriggerState(
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& registry_snapshot,
+        bool recompute_cached_flags,
+        std::set<uint256>* reactivated_triggers = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    [[nodiscard]] bool RebuildPQTriggerState(
+        const CBlockIndex& validation_tip,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistryReadView& registry_snapshot,
         bool recompute_cached_flags,
         std::set<uint256>* reactivated_triggers = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(cs);
