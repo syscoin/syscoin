@@ -172,6 +172,100 @@ private:
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(share_admission_gate_linearizes_lifecycle_and_health)
+{
+    llmq::ShareAdmissionGate gate;
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), true));
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+    gate.SetReady(true);
+    const uint64_t first_token{gate.Acquire()};
+    BOOST_REQUIRE_NE(first_token, 0U);
+    BOOST_CHECK(gate.IsCurrent(first_token));
+
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), false));
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+    BOOST_CHECK(!gate.IsCurrent(first_token));
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), true));
+    const uint64_t second_token{gate.Acquire()};
+    BOOST_REQUIRE_NE(second_token, 0U);
+    BOOST_CHECK_NE(second_token, first_token);
+
+    gate.SetReady(false);
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), true));
+    gate.SetReady(true);
+    const uint64_t restarted_token{gate.Acquire()};
+    BOOST_REQUIRE_NE(restarted_token, 0U);
+    BOOST_CHECK_NE(restarted_token, second_token);
+    BOOST_CHECK(!gate.IsCurrent(second_token));
+}
+
+BOOST_AUTO_TEST_CASE(share_admission_gate_terminal_failure_is_sticky)
+{
+    llmq::ShareAdmissionGate gate;
+    gate.SetReady(true);
+    const auto stale_enable{gate.Observe()};
+    const auto before_failure{gate.Observe()};
+    gate.Fail();
+    BOOST_CHECK_NE(gate.Observe().state, before_failure.state);
+    BOOST_CHECK(gate.IsTerminal());
+    BOOST_CHECK(!gate.TryPublishEnabled(stale_enable, true));
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+
+    const auto closed_failure{gate.Observe()};
+    gate.Fail();
+    BOOST_CHECK_NE(gate.Observe().state, closed_failure.state);
+    gate.SetReady(false);
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), true));
+    gate.SetReady(true);
+    BOOST_CHECK(gate.IsTerminal());
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+
+    llmq::ShareAdmissionGate open_gate;
+    open_gate.SetReady(true);
+    BOOST_CHECK(open_gate.TryPublishEnabled(open_gate.Observe(), true));
+    const uint64_t open_token{open_gate.Acquire()};
+    BOOST_REQUIRE_NE(open_token, 0U);
+    open_gate.Fail();
+    open_gate.SetReady(false);
+    BOOST_CHECK(open_gate.TryPublishEnabled(open_gate.Observe(), true));
+    open_gate.SetReady(true);
+    BOOST_CHECK(!open_gate.IsCurrent(open_token));
+    BOOST_CHECK_EQUAL(open_gate.Acquire(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(share_admission_gate_rejects_competing_observations)
+{
+    llmq::ShareAdmissionGate gate;
+    gate.SetReady(true);
+    const auto stale_enable{gate.Observe()};
+    const auto newer_disable{stale_enable};
+    BOOST_CHECK(gate.TryPublishEnabled(newer_disable, false));
+    BOOST_CHECK(!gate.TryPublishEnabled(stale_enable, true));
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+
+    const auto enable{gate.Observe()};
+    const auto stale_disable{enable};
+    BOOST_CHECK(gate.TryPublishEnabled(enable, true));
+    const uint64_t token{gate.Acquire()};
+    BOOST_REQUIRE_NE(token, 0U);
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), true));
+    BOOST_CHECK_EQUAL(gate.Acquire(), token);
+    BOOST_CHECK(!gate.TryPublishEnabled(stale_disable, false));
+    BOOST_CHECK(gate.IsCurrent(token));
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), false));
+    BOOST_CHECK(!gate.IsCurrent(token));
+
+    gate.SetReady(false);
+    const auto stopped_enable{gate.Observe()};
+    BOOST_CHECK(gate.TryPublishEnabled(gate.Observe(), false));
+    BOOST_CHECK(!gate.TryPublishEnabled(stopped_enable, true));
+    gate.SetReady(true);
+    BOOST_CHECK_EQUAL(gate.Acquire(), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(startup_slot_consumption_is_limited_to_live_rounds)
 {
     const llmq::pq::ChainLockScheduleConfig chainlock{.epoch_origin = 0};

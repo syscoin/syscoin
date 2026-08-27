@@ -49,6 +49,127 @@ struct Params;
 
 namespace llmq {
 
+/**
+ * Linearizable admission fence for work that completes outside handler locks.
+ * The complete open state is the token, so no reader can observe a partially
+ * published lifecycle, health, or failure transition.
+ */
+class ShareAdmissionGate {
+public:
+    struct Observation {
+        uint64_t state;
+
+        [[nodiscard]] bool operator==(const Observation& other) const noexcept
+        {
+            return state == other.state;
+        }
+    };
+
+    [[nodiscard]] Observation Observe() const noexcept
+    {
+        return Observation{m_state.load()};
+    }
+
+    /** Publish one state evaluation only if nothing changed while it ran. */
+    [[nodiscard]] bool TryPublishEnabled(
+        Observation observation, bool enabled) noexcept
+    {
+        uint64_t expected{observation.state};
+        uint64_t flags{expected & FLAGS_MASK};
+        flags = enabled ? flags | ENABLED : flags & ~ENABLED;
+        flags = Normalize(flags);
+        if (flags == (expected & FLAGS_MASK) &&
+            ((flags & OPEN) != 0 || (flags & TERMINAL) != 0)) {
+            return m_state.load() == expected;
+        }
+        return m_state.compare_exchange_strong(
+            expected, Advance(expected, flags));
+    }
+
+    /** Lifecycle transitions invalidate every observation and work token. */
+    void SetReady(bool ready) noexcept
+    {
+        uint64_t state{m_state.load()};
+        while (true) {
+            uint64_t flags{state & FLAGS_MASK};
+            flags = ready ? flags | READY : flags & ~READY;
+            if (m_state.compare_exchange_weak(
+                    state, Advance(state, flags))) {
+                return;
+            }
+        }
+    }
+
+    /** Terminal failures are sticky and invalidate work even when closed. */
+    void Fail() noexcept
+    {
+        uint64_t state{m_state.load()};
+        while (true) {
+            uint64_t flags{state & FLAGS_MASK};
+            flags = (flags | TERMINAL) & ~ENABLED;
+            if (m_state.compare_exchange_weak(
+                    state, Advance(state, flags))) {
+                return;
+            }
+        }
+    }
+
+    [[nodiscard]] uint64_t Acquire() const noexcept
+    {
+        const uint64_t state{m_state.load()};
+        return (state & OPEN) != 0 ? state : 0;
+    }
+
+    [[nodiscard]] bool IsCurrent(uint64_t token) const noexcept
+    {
+        return token != 0 && (token & OPEN) != 0 &&
+               m_state.load() == token;
+    }
+
+    [[nodiscard]] bool IsOpen() const noexcept
+    {
+        return (m_state.load() & OPEN) != 0;
+    }
+
+    [[nodiscard]] bool IsTerminal() const noexcept
+    {
+        return (m_state.load() & TERMINAL) != 0;
+    }
+
+private:
+    static constexpr uint64_t OPEN{uint64_t{1} << 0};
+    static constexpr uint64_t READY{uint64_t{1} << 1};
+    static constexpr uint64_t ENABLED{uint64_t{1} << 2};
+    static constexpr uint64_t TERMINAL{uint64_t{1} << 3};
+    static constexpr uint64_t REVISION_STEP{uint64_t{1} << 4};
+    static constexpr uint64_t FLAGS_MASK{REVISION_STEP - 1};
+    static constexpr uint64_t REVISION_MASK{~FLAGS_MASK};
+
+    [[nodiscard]] static uint64_t Normalize(uint64_t flags) noexcept
+    {
+        flags &= FLAGS_MASK;
+        if ((flags & TERMINAL) != 0) flags &= ~ENABLED;
+        if ((flags & READY) != 0 && (flags & ENABLED) != 0 &&
+            (flags & TERMINAL) == 0) {
+            return flags | OPEN;
+        }
+        return flags & ~OPEN;
+    }
+
+    [[nodiscard]] static uint64_t Advance(
+        uint64_t state, uint64_t flags) noexcept
+    {
+        flags = Normalize(flags);
+        const uint64_t revision{state & REVISION_MASK};
+        // Saturation is unreachable in practice, but wrapping could revive an
+        // ancient token, so exhaustion permanently fails closed.
+        if (revision == REVISION_MASK) return TERMINAL;
+        return revision + REVISION_STEP + flags;
+    }
+
+    std::atomic<uint64_t> m_state{0};
+};
+
 /** Live production may stop while an exact requested historical witness heals. */
 [[nodiscard]] bool IsPaymentAuditCertificateIngressAllowed(
     bool operational, bool local_certificate,
@@ -611,6 +732,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     [[nodiscard]] pq::FrozenQuorumRosterCachePtr GetQuorumRosterCache() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    void DisableShareAdmission() noexcept;
     [[nodiscard]] uint64_t GetShareAdmissionGeneration() const noexcept;
     [[nodiscard]] bool IsShareAdmissionGenerationCurrent(
         uint64_t generation) const noexcept;
@@ -1124,11 +1246,10 @@ private:
     // Linearize lifecycle transitions with staging, relay, and local
     // certificate submission; expensive verification uses the generation.
     mutable Mutex m_share_lifecycle_mutex;
-    // Stop closes the odd generation before joining the scheduler and before
-    // connman drains, so pre-stop share work cannot revive after a restart.
-    std::atomic<uint64_t> m_share_admission_generation{0};
+    // Lifecycle, operational state, and terminal faults publish atomically so
+    // no false->true interval can revive work from an older handler state.
+    ShareAdmissionGate m_share_admission_gate;
     std::atomic_bool m_persistence_failed{false};
-    std::atomic_bool m_enabled{false};
     std::atomic_bool m_enforced{false};
 };
 

@@ -1604,7 +1604,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     // Stop all new signing/admission immediately. A previously
                     // durable winner, if any, remains safe to enforce.
                     m_persistence_failed.store(true);
-                    m_enabled.store(false);
+                    DisableShareAdmission();
                 } else {
                     UpdateDurableChainLockAuxiliaryRetention();
                 }
@@ -1617,7 +1617,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     m_persistence->PersistUnsealedBTCC(chainlock)};
                 if (!persisted) {
                     m_persistence_failed.store(true);
-                    m_enabled.store(false);
+                    DisableShareAdmission();
                 } else {
                     UpdateDurableChainLockAuxiliaryRetention();
                 }
@@ -1634,7 +1634,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                         btcc_cursor_reconciliation)};
                 if (!persisted) {
                     m_persistence_failed.store(true);
-                    m_enabled.store(false);
+                    DisableShareAdmission();
                 } else {
                     m_catchup_used.store(true);
                     UpdateDurableChainLockAuxiliaryRetention();
@@ -1664,7 +1664,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
             m_payment_audit_store.reset();
             m_payment_audit_staging_store.reset();
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
         }
     }
     // SYSCOIN: InitLLMQSystem runs under cs_main before startup pruning, and it
@@ -1732,6 +1732,7 @@ void CChainLocksHandler::Start()
     {
         LOCK(m_lifecycle_mutex);
         if (m_started) return;
+        m_share_admission_gate.SetReady(false);
         {
             LOCK(m_share_signing_mutex);
             m_signer_startup_pro_tx_hash.SetNull();
@@ -1780,7 +1781,7 @@ void CChainLocksHandler::Start()
         }, std::chrono::seconds{5});
         {
             LOCK(m_share_lifecycle_mutex);
-            m_share_admission_generation.fetch_add(1);
+            m_share_admission_gate.SetReady(true);
         }
     }
     RefreshPQHistoryAuthState();
@@ -1794,11 +1795,7 @@ void CChainLocksHandler::Stop()
         LOCK(m_lifecycle_mutex);
         {
             LOCK(m_share_lifecycle_mutex);
-            const uint64_t admission_generation{
-                m_share_admission_generation.load()};
-            if ((admission_generation & uint64_t{1}) != 0) {
-                m_share_admission_generation.fetch_add(1);
-            }
+            m_share_admission_gate.SetReady(false);
         }
         if (!m_started) return;
         m_started = false;
@@ -1866,19 +1863,20 @@ CChainLocksHandler::GetQuorumRosterCache() const
     return m_quorum_roster_cache;
 }
 
+void CChainLocksHandler::DisableShareAdmission() noexcept
+{
+    m_share_admission_gate.Fail();
+}
+
 uint64_t CChainLocksHandler::GetShareAdmissionGeneration() const noexcept
 {
-    const uint64_t generation{m_share_admission_generation.load()};
-    return (generation & uint64_t{1}) != 0 && m_enabled.load()
-               ? generation
-               : 0;
+    return m_share_admission_gate.Acquire();
 }
 
 bool CChainLocksHandler::IsShareAdmissionGenerationCurrent(
     uint64_t generation) const noexcept
 {
-    return generation != 0 && m_enabled.load() &&
-           m_share_admission_generation.load() == generation;
+    return m_share_admission_gate.IsCurrent(generation);
 }
 
 bool CChainLocksHandler::IsConfiguredForVerification() const
@@ -2174,7 +2172,7 @@ void CChainLocksHandler::RefreshPQHistoryAuthState()
         if (!m_chainman.PublishPQHistoryAuthState(
                 pending ? PQHistoryAuthState::PENDING
                         : PQHistoryAuthState::READY)) {
-            m_enabled.store(false);
+            DisableShareAdmission();
             m_enforced.store(false);
             m_chainman.GetNotifications().fatalError(
                 "PQ history authentication appeared after public IBD "
@@ -2203,7 +2201,7 @@ void CChainLocksHandler::QuarantineInvalidPersistedChainLock(
             notify = true;
         }
     }
-    m_enabled.store(false);
+    DisableShareAdmission();
     m_enforced.store(false);
     if (!notify) return;
 
@@ -3738,7 +3736,7 @@ bool CChainLocksHandler::PersistBTCCPresealStateLocked(
     if (durable != m_btcc_preseal_state && !durable.IsEmpty()) {
         if (next_revision == std::numeric_limits<uint64_t>::max()) {
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
             return false;
         }
         ++next_revision;
@@ -3749,7 +3747,7 @@ bool CChainLocksHandler::PersistBTCCPresealStateLocked(
     }
     if (!m_persistence || !durable.IsStructurallyValid()) {
         m_persistence_failed.store(true);
-        m_enabled.store(false);
+        DisableShareAdmission();
         return false;
     }
     if (!durable.IsEmpty()) {
@@ -3761,13 +3759,13 @@ bool CChainLocksHandler::PersistBTCCPresealStateLocked(
             !deterministicMNManager->FlushPendingSnapshotsToDisk(
                 /*fSync=*/true)) {
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
             return false;
         }
     }
     if (!m_persistence->PersistBTCCPresealState(durable)) {
         m_persistence_failed.store(true);
-        m_enabled.store(false);
+        DisableShareAdmission();
         return false;
     }
     m_btcc_preseal_state = durable;
@@ -3788,7 +3786,7 @@ bool CChainLocksHandler::PersistPaymentAuditPresealStateLocked(
     if (durable != m_payment_audit_preseal_state && !durable.IsEmpty()) {
         if (next_revision == std::numeric_limits<uint64_t>::max()) {
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
             return false;
         }
         ++next_revision;
@@ -3799,7 +3797,7 @@ bool CChainLocksHandler::PersistPaymentAuditPresealStateLocked(
     }
     if (!m_persistence || !durable.IsStructurallyValid()) {
         m_persistence_failed.store(true);
-        m_enabled.store(false);
+        DisableShareAdmission();
         return false;
     }
     if (!durable.IsEmpty()) {
@@ -3819,13 +3817,13 @@ bool CChainLocksHandler::PersistPaymentAuditPresealStateLocked(
             !FlushPaymentAuditPresealBlockFilesForDurability(durable) ||
             !m_chainman.m_blockman.WriteBlockIndexDB()) {
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
             return false;
         }
     }
     if (!m_persistence->PersistPaymentAuditPresealState(durable)) {
         m_persistence_failed.store(true);
-        m_enabled.store(false);
+        DisableShareAdmission();
         return false;
     }
     m_payment_audit_preseal_state = durable;
@@ -3939,7 +3937,7 @@ void CChainLocksHandler::UpdatePresealAuxiliaryRetention(
     if (!deterministicMNManager) {
         if (!btcc_state.IsEmpty() || !payment_audit_state.IsEmpty()) {
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
         }
         return;
     }
@@ -3966,7 +3964,7 @@ void CChainLocksHandler::UpdatePresealAuxiliaryRetention(
         // verification remains disabled until the profile is repaired.
         floor = 0;
         m_persistence_failed.store(true);
-        m_enabled.store(false);
+        DisableShareAdmission();
     }
     const int effective{
         deterministicMNManager->UpdateReplaySnapshotRetentionFloor(floor)};
@@ -4020,7 +4018,7 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         // finality until the configured profile is repaired.
         floor = 0;
         m_persistence_failed.store(true);
-        m_enabled.store(false);
+        DisableShareAdmission();
     }
     deterministicMNManager->UpdateFinalitySnapshotRetentionFloor(floor);
 }
@@ -5738,7 +5736,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
                       "payment-audit GC failed: %s\n",
                       __func__, flush_state.ToString());
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
             return;
         }
 
@@ -5753,7 +5751,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
             if (!m_payment_audit_store->IsHealthy() || !observed ||
                 !observed->IsStructurallyValid()) {
                 m_persistence_failed.store(true);
-                m_enabled.store(false);
+                DisableShareAdmission();
                 return;
             }
             if (*observed != checkpoint) {
@@ -5837,7 +5835,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
                     (same_boundary_refresh || boundary_advance)};
                 if (!durable_dominates) {
                     m_persistence_failed.store(true);
-                    m_enabled.store(false);
+                    DisableShareAdmission();
                     return;
                 }
                 committed_checkpoint = *observed;
@@ -5867,7 +5865,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
             CollectChainstatePaymentProbationRoots(m_chainman)};
         if (!chainstate_probation_roots) {
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
             return;
         }
         for (const uint256& root : *chainstate_probation_roots) {
@@ -5898,7 +5896,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
         }
         if (!probation_gc_succeeded) {
             m_persistence_failed.store(true);
-            m_enabled.store(false);
+            DisableShareAdmission();
             return;
         }
     }
@@ -6131,7 +6129,8 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
 std::optional<CChainLocksHandler::CurrentSigningContexts>
 CChainLocksHandler::BuildCurrentSigningContexts() const
 {
-    if (!m_enabled.load() || !m_config || !m_quorum_build_config ||
+    if (!m_share_admission_gate.IsOpen() || !m_config ||
+        !m_quorum_build_config ||
         !m_store) {
         return std::nullopt;
     }
@@ -6316,7 +6315,7 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
 bool CChainLocksHandler::IsCurrentSigningStatement(
     const pq::ChainLockStatement& statement) const
 {
-    if (!m_enabled.load() || !m_config || !m_store ||
+    if (!m_share_admission_gate.IsOpen() || !m_config || !m_store ||
         !statement.IsStructurallyValid()) {
         return false;
     }
@@ -6726,7 +6725,8 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
     uint32_t epoch,
     uint8_t row_index) const
 {
-    if (!m_enabled.load() || !m_config || !m_quorum_build_config ||
+    if (!m_share_admission_gate.IsOpen() || !m_config ||
+        !m_quorum_build_config ||
         !m_store || !m_payment_audit_staging_store ||
         row_index >= pq::PAYMENT_AUDIT_ROW_COUNT) {
         return std::nullopt;
@@ -6807,7 +6807,10 @@ CChainLocksHandler::GetPaymentAuditNetworkContext() const
 bool CChainLocksHandler::IsCurrentPaymentAuditNetworkRow(
     const pq::PaymentAuditOpenRowMetadata& row) const
 {
-    if (!m_enabled.load() || !m_payment_audit_staging_store) return false;
+    if (!m_share_admission_gate.IsOpen() ||
+        !m_payment_audit_staging_store) {
+        return false;
+    }
     const auto current{
         m_payment_audit_staging_store->GetOpenRowMetadata(
             row.expected.epoch, row.expected.row_index)};
@@ -6865,7 +6868,8 @@ bool CChainLocksHandler::RefreshPaymentAuditNetworkContext()
 
 bool CChainLocksHandler::RefreshPaymentAuditStaging()
 {
-    if (!m_enabled.load() || !m_config || !m_quorum_build_config ||
+    if (!m_share_admission_gate.IsOpen() || !m_config ||
+        !m_quorum_build_config ||
         !m_store || !m_payment_audit_staging_store ||
         !m_payment_audit_staging_store->IsHealthy()) {
         return false;
@@ -8444,7 +8448,7 @@ void CChainLocksHandler::ProcessPaymentAuditCertificate(
         from != nullptr && requested &&
         IsPendingPaymentAuditReceiptCertificate(*requested)};
     const auto payment_audit_operational = [&] {
-        if (!m_enabled.load()) return false;
+        if (!m_share_admission_gate.IsOpen()) return false;
         LOCK(cs_main);
         return !IsPaymentAuditPresealActive();
     };
@@ -8807,7 +8811,10 @@ void CChainLocksHandler::ProcessPaymentAuditHave(
         punish("bad-pq-payment-audit-have-encoding");
         return;
     }
-    if (!m_enabled.load() || !m_payment_audit_staging_store) return;
+    if (!m_share_admission_gate.IsOpen() ||
+        !m_payment_audit_staging_store) {
+        return;
+    }
     const auto context{GetPaymentAuditNetworkContext()};
     if (!context) return;
     const PaymentAuditResponseDefinition* definition{nullptr};
@@ -8936,7 +8943,10 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
         punish("bad-pq-payment-audit-response-encoding");
         return;
     }
-    if (!m_enabled.load() || !m_payment_audit_staging_store) return;
+    if (!m_share_admission_gate.IsOpen() ||
+        !m_payment_audit_staging_store) {
+        return;
+    }
     const auto context{GetPaymentAuditNetworkContext()};
     if (!context) return;
     const PaymentAuditResponseDefinition* definition{nullptr};
@@ -9068,7 +9078,7 @@ void CChainLocksHandler::ProcessMessage(CNode* from,
         return;
     }
     if (command == NetMsgType::PQCLSHARE) {
-        if (!m_enabled.load()) return;
+        if (!m_share_admission_gate.IsOpen()) return;
         ProcessChainLockShare(from, payload);
         return;
     }
@@ -9085,7 +9095,7 @@ void CChainLocksHandler::ProcessMessage(CNode* from,
         return;
     }
     if (command == NetMsgType::PQPOSESHARE) {
-        if (!m_enabled.load()) return;
+        if (!m_share_admission_gate.IsOpen()) return;
         ProcessPaymentAuditShare(from, payload);
         return;
     }
@@ -9486,7 +9496,7 @@ bool CChainLocksHandler::ProcessNewChainLock(
         if (prepared) m_store->AbandonPrepared(*prepared);
         CompletePeerResponse(from, logical_id);
         m_persistence_failed.store(true);
-        m_enabled.store(false);
+        DisableShareAdmission();
         return state.Error("pq-clsig-btcc-index-persistence-failed");
     }
     if (!accepted) {
@@ -10616,17 +10626,25 @@ void CChainLocksHandler::UpdatedBlockTip(const CBlockIndex*, bool)
 
 void CChainLocksHandler::CheckActiveState()
 {
-    const bool configured{
-        m_store != nullptr && m_payment_audit_store != nullptr &&
-        m_payment_audit_staging_store != nullptr &&
-        m_payment_audit_store->IsHealthy() &&
-        m_payment_audit_staging_store->IsHealthy()};
-    const bool operational{AreChainLocksEnabled()};
-    const bool pending{IsPersistedChainLockPending()};
-    const bool verification_available{
-        IsChainLockVerificationAvailable()};
-    const bool enabled{verification_available && operational};
-    m_enabled.store(enabled);
+    bool configured{false};
+    bool pending{false};
+    while (true) {
+        const ShareAdmissionGate::Observation observation{
+            m_share_admission_gate.Observe()};
+        configured =
+            m_store != nullptr && m_payment_audit_store != nullptr &&
+            m_payment_audit_staging_store != nullptr &&
+            m_payment_audit_store->IsHealthy() &&
+            m_payment_audit_staging_store->IsHealthy();
+        const bool operational{AreChainLocksEnabled()};
+        pending = IsPersistedChainLockPending();
+        const bool verification_available{
+            IsChainLockVerificationAvailable()};
+        if (m_share_admission_gate.TryPublishEnabled(
+                observation, verification_available && operational)) {
+            break;
+        }
+    }
 
     // A kill switch or deferred NEVM replay may stop producing new finality,
     // but neither may make an already durable Syscoin decision reversible.
